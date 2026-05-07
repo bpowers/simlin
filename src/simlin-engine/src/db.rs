@@ -29,10 +29,11 @@ pub(crate) use db_analysis::reconstruct_model_variables;
 use db_analysis::*;
 pub use db_analysis::{
     CausalEdgesResult, CyclePartitionsResult, DetectedLoop, DetectedLoopPolarity,
-    DetectedLoopsResult, EdgeShapesResult, ElementCausalEdgesResult, LoopCircuitsResult,
-    compute_link_polarities, model_causal_edges, model_cycle_partitions, model_detected_loops,
-    model_edge_shapes, model_element_causal_edges, model_element_cycle_partitions,
-    model_element_loop_circuits, model_loop_circuits,
+    DetectedLoopsResult, EdgeShapesResult, ElementCausalEdgesResult, FastPathCircuit,
+    LoopCircuitsResult, TieredCircuitsResult, compute_link_polarities, model_causal_edges,
+    model_cycle_partitions, model_detected_loops, model_edge_shapes, model_element_causal_edges,
+    model_element_cycle_partitions, model_element_loop_circuits, model_loop_circuits,
+    model_loop_circuits_tiered,
 };
 
 #[path = "db_implicit_deps.rs"]

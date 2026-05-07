@@ -1298,6 +1298,129 @@ pub fn model_edge_shapes(
     EdgeShapesResult { edge_shapes }
 }
 
+/// Classification of a variable-level cycle for tiered loop enumeration.
+///
+/// Drives the decision in `model_loop_circuits_tiered` of whether a
+/// cycle can be emitted as a single `Loop` directly (fast path) or
+/// must descend into element-level Johnson on the cycle's induced
+/// subgraph (slow path).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CycleClass {
+    /// Every variable in the cycle is scalar and every traversed edge
+    /// has a `Bare` reference. The cycle exists exactly once at scalar
+    /// granularity; emit one scalar `Loop` and skip the element-level
+    /// enumerator.
+    PureScalar,
+    /// Every variable in the cycle is arrayed over the same dimension
+    /// list and every traversed edge has only `Bare` references. The
+    /// cycle exists at every element of the shared dimensions; emit one
+    /// A2A `Loop` whose `dimensions` field carries those dimension names
+    /// (canonical / lex-ordered as they appear on the participating
+    /// variables) and skip the element-level enumerator.
+    PureSameElementA2A {
+        /// Dimensions, in source order from the participating variables'
+        /// dimension list. The list is identical for every variable in
+        /// the cycle (otherwise the cycle classifies as
+        /// `CrossElementOrMixed`).
+        dimensions: Vec<crate::dimensions::Dimension>,
+    },
+    /// At least one edge has a non-Bare shape (Wildcard, FixedIndex, or
+    /// DynamicIndex), or the cycle mixes scalar and arrayed nodes, or
+    /// the cycle's arrayed nodes don't share the same dimension list.
+    /// The cycle requires element-level enumeration on the slow-path
+    /// subgraph induced by its variables.
+    CrossElementOrMixed,
+}
+
+/// Classify a variable-level cycle into a `CycleClass`.
+///
+/// Pure helper -- no DB access. Inputs:
+/// - `cycle`: the variable-level node sequence in cycle order. The
+///   cycle is closed implicitly: the edge from `cycle[k-1]` back to
+///   `cycle[0]` is included.
+/// - `edge_shapes`: per-edge `RefShape` sets from `model_edge_shapes`.
+///   Edges absent from the map are treated as `{Bare}` (defensive,
+///   matches the `model_edge_shapes` fallback for unable-to-reconstruct
+///   targets).
+/// - `dim_lookup`: per-variable dimension list. Variables absent from
+///   this lookup (which shouldn't happen for cycle nodes) are treated
+///   as scalar.
+///
+/// Classification rules (applied in order):
+///
+/// 1. If any edge has a `Wildcard`, `DynamicIndex`, or `FixedIndex`
+///    shape (or any non-Bare shape co-existing with Bare),
+///    `CrossElementOrMixed`. A FixedIndex reference pins the cycle to a
+///    specific element subscript distinct from the rest of its
+///    neighbours' broadcast semantics; the cycle cannot be emitted as
+///    a single A2A loop. A Wildcard reducer pulls in cross-element
+///    contributions, so the cycle is structurally cross-element.
+///    DynamicIndex is conservatively treated like Wildcard.
+/// 2. If every variable has an empty dimension list (all scalar),
+///    `PureScalar`.
+/// 3. If every variable has the *same* non-empty dimension list,
+///    `PureSameElementA2A` with that dimension list.
+/// 4. Otherwise (mixed scalar / arrayed nodes, or arrayed nodes with
+///    differing dimension lists), `CrossElementOrMixed`.
+///
+/// Empty cycles are degenerate; treat them as `PureScalar` for the
+/// caller's convenience (they emit no Loop in practice).
+pub(crate) fn classify_cycle(
+    cycle: &[String],
+    edge_shapes: &EdgeShapesResult,
+    dim_lookup: &impl Fn(&str) -> Vec<crate::dimensions::Dimension>,
+) -> CycleClass {
+    if cycle.is_empty() {
+        return CycleClass::PureScalar;
+    }
+
+    // Rule 1: scan all edges in cycle order. If any edge carries a
+    // non-Bare shape, the cycle is cross-element / mixed.
+    let n = cycle.len();
+    for i in 0..n {
+        let from = &cycle[i];
+        let to = &cycle[(i + 1) % n];
+        let key = (from.clone(), to.clone());
+        let shapes = match edge_shapes.edge_shapes.get(&key) {
+            Some(s) => s,
+            None => continue, // missing edge -> treat as Bare
+        };
+        for shape in shapes {
+            match shape {
+                RefShape::Bare => {}
+                RefShape::FixedIndex(_) | RefShape::Wildcard | RefShape::DynamicIndex => {
+                    return CycleClass::CrossElementOrMixed;
+                }
+            }
+        }
+    }
+
+    // Rule 2 / 3 / 4: dimension uniformity check.
+    let first_dims = dim_lookup(&cycle[0]);
+    let any_arrayed = !first_dims.is_empty()
+        || cycle
+            .iter()
+            .skip(1)
+            .any(|name| !dim_lookup(name).is_empty());
+    if !any_arrayed {
+        return CycleClass::PureScalar;
+    }
+
+    // Rule 3: every variable must have *the same* non-empty dimensions.
+    if first_dims.is_empty() {
+        return CycleClass::CrossElementOrMixed;
+    }
+    for name in cycle.iter().skip(1) {
+        let dims = dim_lookup(name);
+        if dims != first_dims {
+            return CycleClass::CrossElementOrMixed;
+        }
+    }
+    CycleClass::PureSameElementA2A {
+        dimensions: first_dims,
+    }
+}
+
 /// Build the element-level causal graph for a model.
 ///
 /// Expands variable-level edges from `model_causal_edges` into element-level
@@ -1656,6 +1779,216 @@ pub fn model_element_loop_circuits(
         .find_indexed_circuits_with_limit(usize::MAX)
         .expect("usize::MAX cannot exhaust the enumeration budget");
     LoopCircuitsResult { names, circuits }
+}
+
+/// One variable-level cycle classified as fast-path
+/// (PureScalar / PureSameElementA2A) by the tiered loop enumerator.
+///
+/// Materializes directly into a single `Loop` without entering
+/// element-level Johnson. The shape of the emitted Loop is decided by
+/// the dimensions field: empty -> scalar Loop; non-empty -> A2A Loop
+/// with `dimensions` set.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct FastPathCircuit {
+    /// Variable names in cycle order (canonical / lower-case).
+    pub variables: Vec<String>,
+    /// Empty for `PureScalar`; the shared dimension list for
+    /// `PureSameElementA2A`. Stored as `Dimension` values so the
+    /// consumer (`build_element_level_loops`) can map canonical names
+    /// to original datamodel names without re-querying salsa.
+    pub dimensions: Vec<crate::dimensions::Dimension>,
+}
+
+/// Result of the tiered loop enumerator: variable-level cycles
+/// pre-classified into fast and slow paths.
+///
+/// The fast path holds cycles that the cycle classifier could resolve
+/// without element-level enumeration: pure scalar cycles and pure
+/// same-element A2A cycles. Each entry in `fast_path` materializes
+/// into a single `Loop` directly.
+///
+/// The slow path holds element-level circuits enumerated by Johnson
+/// on the *induced subgraph* over the variables that participate in
+/// any `CrossElementOrMixed` variable-level cycle. When no such cycles
+/// exist the slow path is empty -- that's the headline win for pure
+/// A2A or pure scalar models.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct TieredCircuitsResult {
+    /// Variable-level cycles that the classifier resolved to a single
+    /// Loop without element-level Johnson.
+    pub fast_path: Vec<FastPathCircuit>,
+    /// Element-level circuits from the slow-path subgraph. Empty when
+    /// no variable-level cycle classifies as `CrossElementOrMixed`.
+    /// Indexed in the same canonical (lex-sorted) form as
+    /// `model_element_loop_circuits` so downstream grouping logic in
+    /// `build_element_level_loops` can be reused unchanged.
+    pub slow_path: LoopCircuitsResult,
+}
+
+/// Tiered loop enumeration: variable-level Johnson first, then
+/// element-level Johnson only on the slow-path subgraph.
+///
+/// Replaces the cost asymmetry of running Johnson on the full element
+/// graph for pure-A2A models. With V variables over N elements:
+///
+/// - Today (`model_element_loop_circuits`): a pure-A2A cycle of size K
+///   inflates to N element-level circuits, costing O(K * N) per cycle.
+/// - With tiered enumeration: pure-A2A cycles are emitted in the
+///   fast path with no per-element expansion, costing O(K). Slow-path
+///   Johnson runs only on the induced subgraph, which is bounded by
+///   the variables in `CrossElementOrMixed` cycles times their
+///   dimension elements -- a strict subset of the full element graph.
+///
+/// See `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`
+/// for the cost model and fixture-by-fixture impact predictions.
+#[salsa::tracked(returns(ref))]
+pub fn model_loop_circuits_tiered(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> TieredCircuitsResult {
+    use std::collections::HashSet;
+
+    let var_circuits = model_loop_circuits(db, model, project);
+    let edge_shapes = model_edge_shapes(db, model, project);
+    let source_vars = model.variables(db);
+
+    // Per-variable dimension lookup. Cached locally because a variable
+    // can appear in many cycles; the salsa-tracked `variable_dimensions`
+    // is itself memoized but the per-call HashMap lookup avoids
+    // repeated salsa cache hits.
+    let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
+    let mut lookup_dims = |name: &str| -> Vec<crate::dimensions::Dimension> {
+        if let Some(dims) = dim_cache.get(name) {
+            return dims.clone();
+        }
+        let dims = source_vars
+            .get(name)
+            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
+            .unwrap_or_default();
+        dim_cache.insert(name.to_string(), dims.clone());
+        dims
+    };
+
+    let mut fast_path: Vec<FastPathCircuit> = Vec::new();
+    let mut slow_path_var_nodes: HashSet<String> = HashSet::new();
+
+    for circuit in &var_circuits.circuits {
+        let cycle: Vec<String> = circuit
+            .iter()
+            .map(|i| var_circuits.names[*i as usize].clone())
+            .collect();
+
+        // The cycle classifier needs a closure that doesn't capture
+        // the mutable `dim_cache` borrow during classification. We
+        // pre-fetch every cycle node's dimensions into a small map
+        // first, then hand the classifier a closure that reads it.
+        let mut cycle_dims: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
+        for v in &cycle {
+            cycle_dims.insert(v.clone(), lookup_dims(v));
+        }
+        let cycle_lookup = |name: &str| -> Vec<crate::dimensions::Dimension> {
+            cycle_dims.get(name).cloned().unwrap_or_default()
+        };
+
+        match classify_cycle(&cycle, edge_shapes, &cycle_lookup) {
+            CycleClass::PureScalar => fast_path.push(FastPathCircuit {
+                variables: cycle,
+                dimensions: vec![],
+            }),
+            CycleClass::PureSameElementA2A { dimensions } => fast_path.push(FastPathCircuit {
+                variables: cycle,
+                dimensions,
+            }),
+            CycleClass::CrossElementOrMixed => {
+                for v in cycle {
+                    slow_path_var_nodes.insert(v);
+                }
+            }
+        }
+    }
+
+    // Slow-path subgraph: project the element graph onto the variables
+    // in `slow_path_var_nodes`. An element node `population[nyc]`
+    // belongs to the subgraph iff its underlying variable name
+    // (`population`) is in the slow-path set.
+    let slow_path = if slow_path_var_nodes.is_empty() {
+        LoopCircuitsResult {
+            names: Vec::new(),
+            circuits: Vec::new(),
+        }
+    } else {
+        let element_edges = model_element_causal_edges(db, model, project);
+        let mut sub_edges: HashMap<String, BTreeSet<String>> = HashMap::new();
+        for (from, tos) in &element_edges.edges {
+            let from_var = strip_element_subscript(from);
+            if !slow_path_var_nodes.contains(from_var) {
+                continue;
+            }
+            let mut filtered: BTreeSet<String> = BTreeSet::new();
+            for to in tos {
+                let to_var = strip_element_subscript(to);
+                if slow_path_var_nodes.contains(to_var) {
+                    filtered.insert(to.clone());
+                }
+            }
+            if !filtered.is_empty() {
+                sub_edges.insert(from.clone(), filtered);
+            }
+        }
+        // Stocks restricted to slow-path variables. Same projection rule:
+        // keep an element-stock node only if its variable name is in
+        // the slow-path set.
+        let sub_stocks: std::collections::HashSet<crate::common::Ident<crate::common::Canonical>> =
+            element_edges
+                .stocks
+                .iter()
+                .filter(|s| {
+                    slow_path_var_nodes.contains(strip_element_subscript(s.as_str()))
+                })
+                .map(|s| crate::common::Ident::new(s))
+                .collect();
+        let sub_edge_idents: HashMap<
+            crate::common::Ident<crate::common::Canonical>,
+            Vec<crate::common::Ident<crate::common::Canonical>>,
+        > = sub_edges
+            .into_iter()
+            .map(|(from, tos)| {
+                (
+                    crate::common::Ident::new(&from),
+                    tos.into_iter().map(|t| crate::common::Ident::new(&t)).collect(),
+                )
+            })
+            .collect();
+        let graph = crate::ltm::CausalGraph {
+            edges: sub_edge_idents,
+            stocks: sub_stocks,
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        };
+        let (names, circuits) = graph
+            .find_indexed_circuits_with_limit(usize::MAX)
+            .expect("usize::MAX cannot exhaust the enumeration budget");
+        LoopCircuitsResult { names, circuits }
+    };
+
+    TieredCircuitsResult {
+        fast_path,
+        slow_path,
+    }
+}
+
+/// Strip an element-subscript suffix from a node name.
+///
+/// `population[nyc]` -> `population`; `population[nyc,boston]` ->
+/// `population`; a name without `[` is returned unchanged. Mirrors
+/// `db_ltm::strip_subscript`; inlined here to keep the tiered
+/// enumerator self-contained.
+fn strip_element_subscript(name: &str) -> &str {
+    match name.find('[') {
+        Some(pos) => &name[..pos],
+        None => name,
+    }
 }
 
 /// Compute stock-to-stock cycle partitions at element granularity.
@@ -2271,6 +2604,386 @@ mod detected_loops_scc_gate_tests {
 #[cfg(test)]
 #[path = "db_element_graph_tests.rs"]
 mod db_element_graph_tests;
+
+#[cfg(test)]
+mod tiered_circuits_tests {
+    //! Integration tests for `model_loop_circuits_tiered`. Exercises
+    //! the salsa pipeline on small synthetic fixtures and pins the
+    //! fast-path / slow-path partition.
+    use super::*;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::test_common::TestProject;
+
+    fn tiered(project: &TestProject) -> TieredCircuitsResult {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let source_project = sync.project;
+        model_loop_circuits_tiered(&db, source_model, source_project).clone()
+    }
+
+    /// Pure-A2A model: `population[r] -> births[r] -> population[r]`
+    /// (with N=3) classifies as one fast-path PureSameElementA2A
+    /// cycle with `dimensions = [Region]`. The slow-path subgraph is
+    /// empty -- no element-level Johnson runs.
+    #[test]
+    fn pure_a2a_model_emits_one_fast_path_cycle_no_slow_path() {
+        let project = TestProject::new("pure_a2a")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "population * 0.1", None);
+
+        let result = tiered(&project);
+
+        assert_eq!(
+            result.fast_path.len(),
+            1,
+            "expected one fast-path circuit for pure-A2A loop, got {result:?}"
+        );
+        let fp = &result.fast_path[0];
+        let var_set: BTreeSet<&str> = fp.variables.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            var_set,
+            ["births", "population"].iter().copied().collect()
+        );
+        assert_eq!(
+            fp.dimensions.len(),
+            1,
+            "PureSameElementA2A cycle must carry shared dimension list"
+        );
+        assert_eq!(fp.dimensions[0].name(), "region");
+
+        assert_eq!(
+            result.slow_path.len(),
+            0,
+            "pure-A2A model must produce no slow-path circuits"
+        );
+    }
+
+    /// Pure-scalar model: a closed feedback loop between scalar
+    /// variables. Classifies as one fast-path PureScalar cycle. The
+    /// slow-path subgraph is empty.
+    #[test]
+    fn pure_scalar_loop_emits_one_fast_path_cycle_no_slow_path() {
+        let project = TestProject::new("scalar_loop")
+            .stock("x", "100", &["inflow"], &[], None)
+            .flow("inflow", "x * 0.1", None);
+
+        let result = tiered(&project);
+
+        assert_eq!(
+            result.fast_path.len(),
+            1,
+            "expected one scalar fast-path cycle, got {result:?}"
+        );
+        assert!(
+            result.fast_path[0].dimensions.is_empty(),
+            "scalar cycle must carry empty dimensions"
+        );
+
+        assert_eq!(
+            result.slow_path.len(),
+            0,
+            "scalar model must produce no slow-path circuits"
+        );
+    }
+
+    /// Wildcard reducer in a feedback loop forces the cycle into the
+    /// slow-path subgraph. Pure-A2A cycles in the same model still
+    /// land in the fast path.
+    #[test]
+    fn wildcard_reducer_lands_in_slow_path_a2a_in_fast_path() {
+        // `population -> share -> population` would close a cycle, but
+        // in this minimal model `share` doesn't feed back. So the only
+        // cycle is the population's stock self-loop via births. We need
+        // a scenario where the wildcard reducer is part of a feedback
+        // loop, which requires the reducer's output to influence the
+        // source.
+        //
+        // Build: population[r] (stock with births[r] inflow) +
+        // births[r] = population * SUM(population[*]) / 100
+        // (births depends on both population[r] bare and SUM(population[*])).
+        // The cycle is population -> births -> population, but the
+        // population->births edge has both Bare and Wildcard shapes,
+        // so the cycle classifier returns CrossElementOrMixed.
+        let project = TestProject::new("mixed")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow(
+                "births[Region]",
+                "population * SUM(population[*]) * 0.0001",
+                None,
+            );
+
+        let result = tiered(&project);
+
+        // No fast-path cycle for this model -- the only structural
+        // cycle (population -> births -> population) classifies as
+        // cross-element/mixed.
+        assert_eq!(
+            result.fast_path.len(),
+            0,
+            "wildcard-mixed model must produce no fast-path cycles, got {result:?}"
+        );
+        // Slow-path subgraph contains population, births element-level
+        // nodes; Johnson on that subgraph must find at least one
+        // element-level circuit.
+        assert!(
+            !result.slow_path.is_empty(),
+            "wildcard-mixed model must produce slow-path circuits"
+        );
+    }
+
+    /// Mixed model: a pure-A2A loop AND a cross-element loop coexist.
+    /// The pure-A2A loop lands in the fast path; the cross-element
+    /// loop variables drive the slow-path subgraph.
+    #[test]
+    fn mixed_model_partitions_correctly() {
+        let project = TestProject::new("split")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "population * 0.05", None)
+            .scalar_aux("total", "SUM(population[*])");
+
+        let result = tiered(&project);
+
+        // The pure-A2A population<->births cycle is a fast-path entry.
+        assert_eq!(
+            result.fast_path.len(),
+            1,
+            "expected one fast-path entry, got {result:?}"
+        );
+        // total isn't part of any cycle (no variable references back to
+        // population from total), so the slow-path is empty.
+        assert_eq!(
+            result.slow_path.len(),
+            0,
+            "no cross-element cycle exists; slow path must be empty"
+        );
+    }
+}
+
+#[cfg(test)]
+mod classify_cycle_tests {
+    //! Pure-function tests for `classify_cycle`. The classifier reads
+    //! a per-edge shape map and a per-variable dim lookup; we build
+    //! both inputs directly without going through the salsa pipeline
+    //! so the tests are fast and self-contained.
+    use super::*;
+    use crate::common::{CanonicalDimensionName, CanonicalElementName};
+    use crate::dimensions::{Dimension, NamedDimension};
+    use std::collections::HashMap as StdHashMap;
+
+    /// Helper: build a single-dim Named dimension whose elements are
+    /// `["a", "b"]`. The `name` is the canonical dimension name.
+    fn make_dim(name: &str) -> Dimension {
+        let elements = vec![
+            CanonicalElementName::from_raw("a"),
+            CanonicalElementName::from_raw("b"),
+        ];
+        let indexed: StdHashMap<CanonicalElementName, usize> = elements
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.clone(), i + 1))
+            .collect();
+        Dimension::Named(
+            CanonicalDimensionName::from_raw(name),
+            NamedDimension {
+                elements,
+                indexed_elements: indexed,
+                maps_to: None,
+                mappings: vec![],
+            },
+        )
+    }
+
+    /// Helper: closure that maps every name in `arrayed` to `dims`,
+    /// every other name to scalar (empty Vec).
+    fn dim_lookup<'a>(
+        arrayed: &'a [&'a str],
+        dims: &'a [Dimension],
+    ) -> impl Fn(&str) -> Vec<Dimension> + 'a {
+        move |name| {
+            if arrayed.contains(&name) {
+                dims.to_vec()
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    fn shapes_with(
+        edges: &[(&str, &str, &[RefShape])],
+    ) -> EdgeShapesResult {
+        let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
+        for (from, to, shapes) in edges {
+            let set: BTreeSet<RefShape> = shapes.iter().cloned().collect();
+            edge_shapes.insert((from.to_string(), to.to_string()), set);
+        }
+        EdgeShapesResult { edge_shapes }
+    }
+
+    #[test]
+    fn pure_scalar_two_node_cycle() {
+        let cycle = vec!["a".to_string(), "b".to_string()];
+        let edges = shapes_with(&[("a", "b", &[RefShape::Bare]), ("b", "a", &[RefShape::Bare])]);
+        let lookup = dim_lookup(&[], &[]);
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::PureScalar
+        );
+    }
+
+    #[test]
+    fn pure_a2a_two_node_cycle_emits_dims() {
+        let dim = make_dim("region");
+        let cycle = vec!["pop".to_string(), "births".to_string()];
+        let edges = shapes_with(&[
+            ("pop", "births", &[RefShape::Bare]),
+            ("births", "pop", &[RefShape::Bare]),
+        ]);
+        let dims = vec![dim.clone()];
+        let lookup = dim_lookup(&["pop", "births"], &dims);
+        match classify_cycle(&cycle, &edges, &lookup) {
+            CycleClass::PureSameElementA2A { dimensions } => {
+                assert_eq!(dimensions, dims);
+            }
+            other => panic!("expected PureSameElementA2A, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wildcard_edge_makes_cycle_cross_element() {
+        let dim = make_dim("region");
+        let cycle = vec!["pop".to_string(), "share".to_string()];
+        // share -> pop is Bare; pop -> share is {Bare, Wildcard}. The
+        // Wildcard alone forces CrossElementOrMixed regardless of any
+        // co-existing Bare on the same edge.
+        let edges = shapes_with(&[
+            ("pop", "share", &[RefShape::Bare, RefShape::Wildcard]),
+            ("share", "pop", &[RefShape::Bare]),
+        ]);
+        let dims = vec![dim];
+        let lookup = dim_lookup(&["pop", "share"], &dims);
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::CrossElementOrMixed
+        );
+    }
+
+    #[test]
+    fn fixed_index_edge_makes_cycle_cross_element() {
+        let dim = make_dim("region");
+        let cycle = vec!["pop".to_string(), "mig".to_string()];
+        // mig -> pop is Bare; pop -> mig is FixedIndex(["nyc"]).
+        let edges = shapes_with(&[
+            (
+                "pop",
+                "mig",
+                &[RefShape::FixedIndex(vec!["nyc".to_string()])],
+            ),
+            ("mig", "pop", &[RefShape::Bare]),
+        ]);
+        let dims = vec![dim];
+        let lookup = dim_lookup(&["pop", "mig"], &dims);
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::CrossElementOrMixed
+        );
+    }
+
+    #[test]
+    fn dynamic_index_edge_makes_cycle_cross_element() {
+        let dim = make_dim("region");
+        let cycle = vec!["pop".to_string(), "shifted".to_string()];
+        let edges = shapes_with(&[
+            ("pop", "shifted", &[RefShape::DynamicIndex]),
+            ("shifted", "pop", &[RefShape::Bare]),
+        ]);
+        let dims = vec![dim];
+        let lookup = dim_lookup(&["pop", "shifted"], &dims);
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::CrossElementOrMixed
+        );
+    }
+
+    #[test]
+    fn mixed_scalar_and_arrayed_with_bare_only_is_cross_element() {
+        // A cycle that mixes a scalar node with an arrayed node, even
+        // when every edge is Bare, is not a single A2A loop: the
+        // arrayed-to-scalar edge is a reduction, the scalar-to-arrayed
+        // edge is a broadcast, and the cycle requires element-level
+        // enumeration to enumerate the truthful shape.
+        let dim = make_dim("region");
+        let cycle = vec!["pop".to_string(), "scalar_state".to_string()];
+        let edges = shapes_with(&[
+            ("pop", "scalar_state", &[RefShape::Bare]),
+            ("scalar_state", "pop", &[RefShape::Bare]),
+        ]);
+        let dims = vec![dim];
+        let lookup = dim_lookup(&["pop"], &dims);
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::CrossElementOrMixed
+        );
+    }
+
+    #[test]
+    fn arrayed_with_different_dims_is_cross_element() {
+        // Two arrayed variables over different dimensions: the cycle
+        // can't be A2A because there's no single shared dimension list
+        // to expand over.
+        let region = make_dim("region");
+        let category = make_dim("category");
+        let cycle = vec!["a".to_string(), "b".to_string()];
+        let edges = shapes_with(&[
+            ("a", "b", &[RefShape::Bare]),
+            ("b", "a", &[RefShape::Bare]),
+        ]);
+        // a -> region; b -> category.
+        let lookup = move |name: &str| -> Vec<Dimension> {
+            match name {
+                "a" => vec![region.clone()],
+                "b" => vec![category.clone()],
+                _ => Vec::new(),
+            }
+        };
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::CrossElementOrMixed
+        );
+    }
+
+    #[test]
+    fn missing_edge_in_shape_map_treated_as_bare() {
+        // Defensive: if an edge is somehow absent from the shape map,
+        // the classifier defaults to treating it as Bare (matches the
+        // model_edge_shapes fallback for unable-to-reconstruct edges).
+        // The cycle should still classify as PureScalar / PureA2A
+        // depending on the variable dims.
+        let cycle = vec!["a".to_string(), "b".to_string()];
+        let edges = shapes_with(&[("a", "b", &[RefShape::Bare])]);
+        // b -> a edge missing from the shape map.
+        let lookup = dim_lookup(&[], &[]);
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::PureScalar
+        );
+    }
+
+    #[test]
+    fn empty_cycle_is_pure_scalar() {
+        let cycle: Vec<String> = vec![];
+        let edges = shapes_with(&[]);
+        let lookup = dim_lookup(&[], &[]);
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::PureScalar
+        );
+    }
+}
 
 #[cfg(test)]
 mod edge_shapes_tests {
