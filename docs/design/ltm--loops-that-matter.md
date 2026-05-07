@@ -90,8 +90,12 @@ and average absolute score for ranking.
 ### Exhaustive Mode (`ltm_discovery_mode = false`)
 
 1. `model_causal_edges` (salsa tracked, `db_analysis.rs`) builds the causal graph
-2. `model_loop_circuits` uses Johnson's algorithm to enumerate all
-   elementary circuits via DFS (`find_circuits_from` / `dfs_circuits`)
+2. `model_loop_circuits_tiered` runs Johnson's algorithm on the variable
+   graph and partitions cycles by `RefShape` composition:
+   - Pure-scalar / pure-A2A cycles emit a single `Loop` directly (fast path).
+   - Cross-element / mixed cycles drive an element-level Johnson run on
+     the slow-path subgraph (the element graph restricted to the
+     variables in those cycles).
 3. Module nodes appear as regular vertices in the parent graph; loops through
    modules are found naturally by the same algorithm
 4. After circuit detection, `enrich_with_module_stocks()` post-processes each
