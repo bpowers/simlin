@@ -1767,6 +1767,32 @@ pub fn causal_graph_from_element_edges(
 /// (e.g., `population[NYC] -> births[NYC] -> population[NYC]`) and
 /// cross-element loops (e.g., `population[NYC] -> migration -> population[Boston]`).
 /// For scalar models, results are identical to `model_loop_circuits`.
+///
+/// **Legacy.** Pre-#482 LTM compilation ran Johnson on the full element
+/// graph here, which inflated pure-A2A cycles to N circuits per cycle.
+/// The LTM pipeline now uses [`model_loop_circuits_tiered`] instead,
+/// which short-circuits pure-A2A and pure-scalar cycles in the fast path
+/// and runs Johnson only on the cross-element / mixed slice. This
+/// function is retained for diagnostic / measurement-postscript tests
+/// and external consumers that still want the unfiltered element-level
+/// circuit list. New LTM callers must use `model_loop_circuits_tiered`;
+/// any new direct call to `model_element_loop_circuits` should be
+/// reviewed against the bug recap in
+/// `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `model_loop_circuits_tiered` for LTM compilation; this \
+            full-element Johnson run is retained for measurement and \
+            external diagnostic callers only."
+)]
+// `#[salsa::tracked]` expands to internal generated code that calls back
+// into this function by name, which would re-trigger the `deprecated`
+// warning inside the macro expansion. `#[allow(deprecated)]` on the
+// outer item suppresses both the macro-internal callsite and any
+// deprecation lint applied to the salsa-generated companion items, so
+// the lint still fires for real external callers (re-exports in
+// `db.rs`, test/example code) -- which is exactly what we want.
+#[allow(deprecated)]
 #[salsa::tracked(returns(ref))]
 pub fn model_element_loop_circuits(
     db: &dyn Db,
@@ -2904,6 +2930,12 @@ mod tiered_circuits_tests {
     /// N independent SCCs of size 2 each (one per element); the new
     /// win is that we no longer pay for Johnson on each of those
     /// N SCCs.
+    ///
+    /// Calls the legacy `model_element_loop_circuits` (now
+    /// `#[deprecated]` for new LTM callers) to compare the legacy
+    /// circuit count against the tiered enumerator's fast-path output;
+    /// that's the load-bearing comparison this test exists to pin.
+    #[allow(deprecated)]
     #[test]
     fn pure_a2a_eliminates_per_element_circuit_redundancy() {
         const N: usize = 30;

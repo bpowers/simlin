@@ -9,14 +9,20 @@ use std::io::BufReader;
 use std::result::Result as StdResult;
 
 use simlin_engine::common::{Canonical, Ident};
+// `model_element_loop_circuits` is `#[deprecated]` for new LTM callers;
+// the integration tests below drive it directly to compare the legacy
+// element-Johnson surface against the tiered enumerator's output. The
+// allow keeps the deprecation lint clean for tests pinning the legacy
+// contract while preserving the warning for accidental new uses.
+#[allow(deprecated)]
+use simlin_engine::db::model_element_loop_circuits;
 use simlin_engine::db::{
     DetectedLoop, DetectedLoopPolarity, SimlinDb, causal_graph_from_edges,
     causal_graph_from_element_edges, compile_project_incremental, model_causal_edges,
     model_cycle_partitions, model_detected_loops, model_element_causal_edges,
-    model_element_cycle_partitions, model_element_loop_circuits, model_loop_circuits,
-    model_loop_circuits_tiered, model_ltm_variables, project_datamodel_dims,
-    set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel,
-    sync_from_datamodel_incremental,
+    model_element_cycle_partitions, model_loop_circuits, model_loop_circuits_tiered,
+    model_ltm_variables, project_datamodel_dims, set_project_ltm_discovery_mode,
+    set_project_ltm_enabled, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use simlin_engine::xmile;
 use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm_finding, ltm_post};
@@ -3634,9 +3640,11 @@ fn test_discovery_element_specific_loops() {
 /// arrayed model. Both modes should find the same element-level loops.
 ///
 /// Uses the same population/birth_rate/births model as test 1. The
-/// exhaustive mode (via `model_element_loop_circuits`) finds all
-/// element-level circuits structurally, and discovery mode should find
-/// the same loops post-simulation.
+/// exhaustive mode (via the legacy `model_element_loop_circuits`) finds
+/// all element-level circuits structurally, and discovery mode should
+/// find the same loops post-simulation. The legacy element-Johnson
+/// surface is retained for this measurement.
+#[allow(deprecated)]
 #[test]
 fn test_discovery_cross_validates_with_exhaustive_arrayed() {
     use simlin_engine::test_common::TestProject;
@@ -3866,6 +3874,10 @@ struct TieredMeasurements {
     slow_path_scc: usize,
 }
 
+// Drives the legacy `model_element_loop_circuits` (deprecated for new
+// LTM compilation) to compare its circuit count against the tiered
+// enumerator's fast/slow split for the design-plan postscript table.
+#[allow(deprecated)]
 fn measure_tiered(path: &str) -> TieredMeasurements {
     let dm = load_xmile_model(path);
     let db = SimlinDb::default();
@@ -4258,7 +4270,9 @@ fn test_arrayed_population_ltm_exhaustive() {
 ///
 /// Same model as test_arrayed_population_ltm_exhaustive but with discovery mode.
 /// Verifies that discovery mode finds the same structural loops as exhaustive
-/// mode and per-element loop rankings are consistent.
+/// mode and per-element loop rankings are consistent. Drives the legacy
+/// element-Johnson surface (`model_element_loop_circuits`) to compare counts.
+#[allow(deprecated)]
 #[test]
 fn test_arrayed_population_ltm_discovery() {
     let datamodel_project =
