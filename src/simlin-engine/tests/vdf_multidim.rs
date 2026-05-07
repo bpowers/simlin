@@ -52,12 +52,12 @@ fn ref_vdf_record_results_prune_descriptor_overlaps() {
     let vdf_data = ref_vdf.extract_data().unwrap();
 
     for (name, ot) in [
-        ("C in Mixed Layer[0]", 137),
-        ("C in Mixed Layer[1]", 138),
-        ("C in Mixed Layer[2]", 139),
-        ("Cum CO2 at start[0]", 146),
-        ("Cum CO2eq at start[0]", 153),
-        ("Cumulative CO2[0]", 160),
+        ("C in Mixed Layer[Deterministic]", 137),
+        ("C in Mixed Layer[Low 2xCO2 sensitivity]", 138),
+        ("C in Mixed Layer[High 2xCO2 sensitivity]", 139),
+        ("Cum CO2 at start[OECD US]", 146),
+        ("Cum CO2eq at start[OECD US]", 153),
+        ("Cumulative CO2[OECD US]", 160),
     ] {
         assert_result_column_matches_ot(&results, &vdf_data, name, ot);
     }
@@ -82,6 +82,73 @@ fn ref_vdf_record_results_prune_descriptor_overlaps() {
             "Ref.vdf descriptor overlap should not be emitted: {descriptor_name}"
         );
     }
+}
+
+#[test]
+fn ref_vdf_record_results_use_section3_axis_refs_for_array_labels() {
+    let ref_vdf = load_ref_vdf();
+    let results = ref_vdf
+        .to_results_via_records()
+        .expect("record-based mapping should produce Ref.vdf columns");
+    let vdf_data = ref_vdf.extract_data().unwrap();
+
+    for (name, ot) in [
+        ("C AF Sequestered[Deterministic]", 113),
+        ("C AF Sequestered[Low 2xCO2 sensitivity]", 114),
+        ("C AF Sequestered[High 2xCO2 sensitivity]", 115),
+        ("C in Deep Ocean[Deterministic,layer1]", 122),
+        ("C in Deep Ocean[High 2xCO2 sensitivity,layer4]", 133),
+        ("Aggregated Definition[OECD US,Developed Countries]", 778),
+        (
+            "Aggregated Definition[COP Developing B,Developing B Countries]",
+            798,
+        ),
+        ("Intensity RS target[OECD US,t1]", 2115),
+        ("Intensity RS target[COP Developing B,t3]", 2135),
+    ] {
+        assert_result_column_matches_ot(&results, &vdf_data, name, ot);
+    }
+
+    for numeric_fallback in [
+        "C AF Sequestered[0]",
+        "C in Deep Ocean[0]",
+        "Aggregated Definition[0]",
+        "Intensity RS target[0]",
+    ] {
+        assert!(
+            !results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new(numeric_fallback)),
+            "array result should use decoded labels, not numeric fallback: {numeric_fallback}"
+        );
+    }
+}
+
+#[test]
+fn ref_vdf_record_results_do_not_emit_numeric_array_fallbacks() {
+    let ref_vdf = load_ref_vdf();
+    let results = ref_vdf
+        .to_results_via_records()
+        .expect("record-based mapping should produce Ref.vdf columns");
+
+    let numeric_labels: Vec<String> = results
+        .offsets
+        .keys()
+        .filter_map(|ident| {
+            let name = ident.as_str();
+            let start = name.rfind('[')?;
+            let subscript = name.get(start + 1..name.len().saturating_sub(1))?;
+            (name.ends_with(']')
+                && !subscript.is_empty()
+                && subscript.chars().all(|ch| ch.is_ascii_digit()))
+            .then(|| name.to_string())
+        })
+        .collect();
+
+    assert!(
+        numeric_labels.is_empty(),
+        "Ref.vdf should use decoded element labels, not numeric fallbacks: {numeric_labels:?}"
+    );
 }
 
 #[test]
@@ -279,6 +346,28 @@ fn ref_vdf_section6_ref_stream_contains_direct_dimension_refs() {
     assert_eq!(names_for(700), vec!["COP Developing A", "Initial N2O conc"]);
 }
 
+#[test]
+fn section3_axis_refs_point_to_dimension_anchor_field9_words() {
+    let ref_vdf = load_ref_vdf();
+    let refs = ref_vdf.section3_axis_ref_dimension_names();
+
+    for (axis_ref, expected_name) in [
+        (540, "scenario"),
+        (636, "COP"),
+        (1852, "HFC type"),
+        (2412, "Aggregated Regions"),
+        (3436, "layers"),
+        (4508, "Semi Agg"),
+        (7036, "Target"),
+    ] {
+        assert_eq!(
+            refs.get(&axis_ref).map(String::as_str),
+            Some(expected_name),
+            "section-3 axis ref {axis_ref}"
+        );
+    }
+}
+
 /// Dimension anchor decoded directly from the record-field[8] grouping.
 ///
 /// Mirrors the shape of `decoded_record_dimension_anchors` in
@@ -459,6 +548,37 @@ fn parse_sec5(vdf: &VdfFile) -> Vec<VdfSection5SetEntry> {
     vdf.parse_section5_set_stream()
         .map(|(_, entries, _)| entries)
         .unwrap_or_default()
+}
+
+#[test]
+fn section5_stream_starts_at_data_offset_and_field1_frames_region() {
+    let fixtures: [&str; 5] = [
+        "../../test/bobby/vdf/subscripts/subscripts.vdf",
+        "../../test/bobby/vdf/model_editing/run_7.vdf",
+        "../../test/bobby/vdf/model_editing/run_8.vdf",
+        "../../test/bobby/vdf/model_editing/run_9.vdf",
+        "../../test/bobby/vdf/model_editing/run_10.vdf",
+    ];
+
+    for path in fixtures {
+        let data = std::fs::read(path).expect("read section-5 fixture");
+        let vdf = VdfFile::parse(data).expect("parse section-5 fixture");
+        let sec5 = vdf.sections.get(5).expect("section 5");
+        let (skip_words, entries, _stop) = vdf
+            .parse_section5_set_stream()
+            .expect("parse section-5 stream");
+        assert_eq!(skip_words, 0, "{path}: section-5 stream skip");
+        assert_eq!(
+            entries.first().map(|entry| entry.file_offset),
+            Some(sec5.data_offset()),
+            "{path}: first section-5 set starts at data offset",
+        );
+        assert_eq!(
+            vdf.section5_region_last_word_from_field1(),
+            Some(sec5.region_end - 4),
+            "{path}: section-5 field1 points at final region word",
+        );
+    }
 }
 
 /// Payload refs carried by a section-5 entry: the first `n` of `entry.refs`
@@ -661,6 +781,14 @@ fn test_recover_dimension_sets_via_sec5_matches_xray_on_ref_vdf() {
         ),
         ("layers", vec!["layer1", "layer2", "layer3", "layer4"]),
         (
+            "scenario",
+            vec![
+                "Deterministic",
+                "Low 2xCO2 sensitivity",
+                "High 2xCO2 sensitivity",
+            ],
+        ),
+        (
             "Semi Agg",
             vec![
                 "US",
@@ -705,5 +833,62 @@ fn test_recover_dimension_sets_via_sec5_matches_xray_on_ref_vdf() {
             .unwrap_or_else(|| panic!("recovered sets missing dim {name}"));
         let want_vec: Vec<String> = want.iter().map(|s| s.to_string()).collect();
         assert_eq!(got, &want_vec, "dim {name} element list");
+    }
+}
+
+#[test]
+fn ref_vdf_record_results_use_ref_style_predecessor_shape_codes() {
+    let ref_vdf = load_ref_vdf();
+    let results = ref_vdf
+        .to_results_via_records()
+        .expect("record-based mapping should produce Ref.vdf columns");
+    let vdf_data = ref_vdf.extract_data().unwrap();
+
+    for (name, ot) in [
+        ("GWP of HFC[HFC4310mee]", 1672),
+        ("Layer Depth[layer4]", 2202),
+        (
+            "Proportion of COP to global HFC134a eq[COP Developing B,HFC4310mee]",
+            2801,
+        ),
+        (
+            "Semi Agg Definition[COP Developing B,Other Developing]",
+            3353,
+        ),
+    ] {
+        assert_result_column_matches_ot(&results, &vdf_data, name, ot);
+    }
+
+    assert!(
+        !results
+            .offsets
+            .contains_key(&Ident::<Canonical>::new("Layer Depth[4]")),
+        "Layer Depth is a 4-element layers array, not a 63-element COP x HFC block"
+    );
+}
+
+#[test]
+fn model_editing_runs_label_array_owners_from_dimension_sets() {
+    for (label, path) in [
+        ("run_9", "../../test/bobby/vdf/model_editing/run_9.vdf"),
+        ("run_10", "../../test/bobby/vdf/model_editing/run_10.vdf"),
+    ] {
+        let data = std::fs::read(path).unwrap_or_else(|e| panic!("{label}: read {path}: {e}"));
+        let vdf = VdfFile::parse(data).unwrap_or_else(|e| panic!("{label}: parse {path}: {e}"));
+        let results = vdf
+            .to_results_via_records()
+            .unwrap_or_else(|e| panic!("{label}: record-based mapping should succeed: {e}"));
+        let vdf_data = vdf.extract_data().unwrap();
+
+        for (name, ot) in [
+            ("stock[i]", 2),
+            ("stock[j]", 3),
+            ("constant", 4),
+            ("flow[i]", 6),
+            ("flow[j]", 7),
+            ("v", 11),
+        ] {
+            assert_result_column_matches_ot(&results, &vdf_data, name, ot);
+        }
     }
 }

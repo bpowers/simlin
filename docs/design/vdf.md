@@ -128,7 +128,8 @@ facts are called out where the Rust parser has not caught up yet.
   zero-based element records share a compact group id. `Ref.vdf`'s
   `scenario` root also uses a compact late-record element layout where
   `field[12]` is the group id, `field[15]` is the zero-based element index,
-  and `field[6]` is the direct name key. This is currently xray-only.
+  and `field[6]` is the direct name key. Xray and Rust both consume this
+  layout for dimension recovery.
 - Attached dimension-anchor records can bind a recovered element catalog to a
   reusable section-3 shape template. When that binding is unique, sibling
   owners using the same template inherit the same element labels.
@@ -919,13 +920,14 @@ Pinned examples:
 | `Ref.vdf` | 100 | `Target` | `0:t1`, `1:t2`, `2:t3` |
 | `Ref.vdf` | 79 | `scenario` | `0:Deterministic`, `1:Low 2xCO2 sensitivity`, `2:High 2xCO2 sensitivity` |
 
-The current `tools/vdf_xray.py` extractor uses this path to recover dimension
-element lists from complete catalogs. `scenario` is a mixed catalog: element
-0 uses the ordinary field[8]/field[11] shape, while elements 1 and 2 use the
-compact late-record layout (`field[12]` group id, `field[15]` element index,
-`field[6]` name key). Xray also reports incomplete anchors through
-`--record-facts`; examples from `Ref.vdf` include `COP Developed`, `lower`,
-`upper`, and other subrange anchors with no direct element records.
+The current `tools/vdf_xray.py` extractor and Rust `VdfFile` decoder use this
+path to recover dimension element lists from complete catalogs. `scenario` is
+a mixed catalog: element 0 uses the ordinary field[8]/field[11] shape, while
+elements 1 and 2 use the compact late-record layout (`field[12]` group id,
+`field[15]` element index, `field[6]` name key). Xray also reports incomplete
+anchors through `--record-facts`; examples from `Ref.vdf` include
+`COP Developed`, `lower`, `upper`, and other subrange anchors with no direct
+element records.
 
 The extractor labels one-dimensional blocks when the block length matches
 exactly one recovered complete dimension, or when an attached dimension-anchor
@@ -934,12 +936,12 @@ shape template. The latter is what distinguishes `sub2=[i,j]` from
 `sub3=[x,y]` in `run_8.vdf`: the stock owner carries the anchor, and the
 same-template `flow` owner inherits `flow[i]` / `flow[j]`.
 
-For multi-axis shapes, xray uses section-3 axis refs to bind each axis to a
-dimension anchor and then labels elements from the recovered catalog. This
+For multi-axis shapes, xray and Rust use section-3 axis refs to bind each axis
+to a dimension anchor and then label elements from the recovered catalog. This
 disambiguates same-cardinality axes in `Ref.vdf`, such as `scenario` vs
-`Target` vs `Aggregated Regions`. Recovered dimension anchors and element
-names are excluded from the visible series-owner candidate set; they describe
-array structure, not independent time-series owners.
+`Target` vs `Aggregated Regions`. Recovered dimension anchors and element names
+are excluded from the visible series-owner candidate set; they describe array
+structure, not independent time-series owners.
 
 
 ## Section 6: OT metadata

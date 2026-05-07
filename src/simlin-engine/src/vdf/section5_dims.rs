@@ -25,7 +25,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{VDF_SENTINEL, VdfDimensionSet, VdfFile, VdfSection5SetEntry, read_u16};
+use super::{
+    STDLIB_PARTICIPANT_HELPERS, VDF_SENTINEL, VENSIM_BUILTINS, VdfDimensionSet, VdfFile,
+    VdfSection5SetEntry, is_vdf_metadata_entry, read_u16,
+};
 
 /// Anchor-level dimension facts decoded from the record stream.
 ///
@@ -39,6 +42,8 @@ use super::{VDF_SENTINEL, VdfDimensionSet, VdfFile, VdfSection5SetEntry, read_u1
 struct Anchor {
     /// Anchor record's name as recovered from the section-2 name table.
     name: String,
+    /// Index into `VdfFile::records` for the anchor record.
+    record_index: usize,
     /// `f[8]` group id shared by the anchor and its element records.
     group_id: u32,
     /// Zero-based element records sorted by `f[11]` ascending. Empty for
@@ -93,6 +98,26 @@ fn build_name_key_to_name(vdf: &VdfFile) -> HashMap<u32, String> {
     out
 }
 
+fn is_visible_model_name(name: &str) -> bool {
+    if name.is_empty() || is_vdf_metadata_entry(name) {
+        return false;
+    }
+    if STDLIB_PARTICIPANT_HELPERS.contains(&name) {
+        return false;
+    }
+    if VENSIM_BUILTINS
+        .iter()
+        .any(|builtin| builtin.eq_ignore_ascii_case(name))
+    {
+        return false;
+    }
+    true
+}
+
+fn valid_dimension_group_id(group_id: u32) -> bool {
+    group_id != 0 && group_id != VDF_SENTINEL
+}
+
 /// Recover dimension anchors from the record stream.
 ///
 /// Returns one anchor per `(group_id, anchor-name)` pair whose group has
@@ -104,37 +129,58 @@ fn recover_anchors(vdf: &VdfFile) -> Vec<Anchor> {
         return Vec::new();
     }
 
-    let mut candidate_anchors: HashMap<u32, Vec<String>> = HashMap::new();
+    let mut candidate_anchors: HashMap<u32, Vec<(usize, String)>> = HashMap::new();
     let mut element_groups: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
 
-    for rec in &vdf.records {
-        if rec.fields[6] != 0 {
+    for (rec_idx, rec) in vdf.records.iter().enumerate() {
+        if rec.fields[6] == 0 {
+            let group_id = rec.fields[8];
+            if !valid_dimension_group_id(group_id) {
+                continue;
+            }
+            let Some(name) = key_to_name.get(&rec.fields[2]) else {
+                continue;
+            };
+            if !is_visible_model_name(name) {
+                continue;
+            }
+
+            if rec.fields[12] == 124
+                && rec.fields[10] == 0
+                && rec.fields[14] != VDF_SENTINEL
+                && rec.fields[11] < 4096
+            {
+                element_groups
+                    .entry(group_id)
+                    .or_default()
+                    .push((rec.fields[11], name.clone()));
+                continue;
+            }
+            if rec.fields[14] == VDF_SENTINEL {
+                candidate_anchors
+                    .entry(group_id)
+                    .or_default()
+                    .push((rec_idx, name.clone()));
+            }
             continue;
         }
-        let group_id = rec.fields[8];
-        if group_id == 0 || group_id == VDF_SENTINEL {
-            continue;
-        }
-        let Some(name) = key_to_name.get(&rec.fields[2]) else {
+
+        let alt_group_id = rec.fields[12];
+        let Some(name) = key_to_name.get(&rec.fields[6]) else {
             continue;
         };
-
-        if rec.fields[12] == 124
+        if valid_dimension_group_id(alt_group_id)
             && rec.fields[10] == 0
+            && rec.fields[11] == 0
+            && rec.fields[13] == VDF_SENTINEL
             && rec.fields[14] != VDF_SENTINEL
-            && rec.fields[11] < 4096
+            && rec.fields[15] < 4096
+            && is_visible_model_name(name)
         {
             element_groups
-                .entry(group_id)
+                .entry(alt_group_id)
                 .or_default()
-                .push((rec.fields[11], name.clone()));
-            continue;
-        }
-        if rec.fields[14] == VDF_SENTINEL {
-            candidate_anchors
-                .entry(group_id)
-                .or_default()
-                .push(name.clone());
+                .push((rec.fields[15], name.clone()));
         }
     }
 
@@ -173,14 +219,15 @@ fn recover_anchors(vdf: &VdfFile) -> Vec<Anchor> {
         // same elements list via the sec5-subseq binding.
         let mut seen_names: HashSet<String> = HashSet::new();
         let mut sorted_candidates = candidates.clone();
-        sorted_candidates.sort();
-        for name in &sorted_candidates {
+        sorted_candidates.sort_by_key(|(rec_idx, name)| (*rec_idx, name.clone()));
+        for (record_index, name) in &sorted_candidates {
             let key = name.to_lowercase();
             if !seen_names.insert(key) {
                 continue;
             }
             anchors.push(Anchor {
                 name: name.clone(),
+                record_index: *record_index,
                 group_id,
                 elements: elements.clone(),
                 complete,
@@ -194,6 +241,29 @@ fn recover_anchors(vdf: &VdfFile) -> Vec<Anchor> {
             .then_with(|| a.name.cmp(&b.name))
     });
     anchors
+}
+
+pub(super) fn section3_axis_ref_to_dimension_name(vdf: &VdfFile) -> HashMap<u32, String> {
+    let Some(sec1) = vdf.sections.get(1) else {
+        return HashMap::new();
+    };
+    let sec1_data_offset = sec1.data_offset();
+    let mut out = HashMap::new();
+
+    for anchor in recover_anchors(vdf) {
+        let Some(record) = vdf.records.get(anchor.record_index) else {
+            continue;
+        };
+        let field9_offset = record.file_offset + 9 * 4;
+        let Some(rel) = field9_offset.checked_sub(sec1_data_offset) else {
+            continue;
+        };
+        if rel.is_multiple_of(4) {
+            out.entry((rel / 4) as u32).or_insert(anchor.name);
+        }
+    }
+
+    out
 }
 
 fn sec5_payload(entry: &VdfSection5SetEntry) -> &[u32] {

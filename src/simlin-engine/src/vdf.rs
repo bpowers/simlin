@@ -31,7 +31,10 @@ mod signatures;
 mod stdlib_call;
 mod view_blocks;
 
-use record_results::{RecordResultCandidate, select_non_overlapping_record_candidates};
+use record_results::{
+    RecordResultCandidate, array_element_labels_for_record_candidate,
+    select_non_overlapping_record_candidates,
+};
 pub use section3::{VdfSection3Directory, VdfSection3DirectoryEntry};
 
 // Stdlib call analysis used by the model-guided OT mapping lives in
@@ -370,6 +373,20 @@ impl VdfSection5SetEntry {
         self.refs.len()
     }
 
+    /// Number of non-trailing refs stored in the entry payload.
+    ///
+    /// The trailing one or two refs are structural axis anchors, not element
+    /// payload refs. In observed files this equals `n`, but deriving it from
+    /// the stored refs keeps malformed entries bounded.
+    pub fn payload_ref_count(&self) -> usize {
+        let overhead = match self.marker {
+            0 => 1,
+            1 => 2,
+            _ => 1,
+        };
+        self.set_size().saturating_sub(overhead)
+    }
+
     /// Candidate dimension size implied by this set.
     ///
     /// For marker=0 entries, dimension_size = refs.len() - 1 (one trailing
@@ -377,12 +394,7 @@ impl VdfSection5SetEntry {
     /// dimension_size = refs.len() - 2 (two axis-anchor refs are structural,
     /// not dimension elements).
     pub fn dimension_size(&self) -> usize {
-        let overhead = match self.marker {
-            0 => 1,
-            1 => 2,
-            _ => 1,
-        };
-        self.set_size().saturating_sub(overhead)
+        self.payload_ref_count()
     }
 }
 
@@ -1290,25 +1302,27 @@ impl VdfFile {
     /// On-disk layout: `u32 n; u32 marker; u32 refs[refs_len]`, where
     /// marker=0 yields refs_len=n+1, marker=1 yields refs_len=n+2.
     ///
-    /// Returns `(skip_words, entries, stop_offset)` for the best alignment.
+    /// Returns `(0, entries, stop_offset)`. Earlier parser revisions scanned
+    /// for a best skip, but the model-edit fixtures prove the stream begins
+    /// immediately at section 5's data offset.
     pub fn parse_section5_set_stream(&self) -> Option<(usize, Vec<VdfSection5SetEntry>, usize)> {
         if self.sections.len() <= 5 {
             return None;
         }
-        let mut best_skip = 0usize;
-        let mut best_entries = Vec::new();
-        let mut best_stop = 0usize;
-        for skip in 0..=8usize {
-            let (entries, stop) = self.section5_set_stream_with_skip(skip, 4096);
-            if entries.len() > best_entries.len()
-                || (entries.len() == best_entries.len() && stop > best_stop)
-            {
-                best_skip = skip;
-                best_entries = entries;
-                best_stop = stop;
-            }
-        }
-        Some((best_skip, best_entries, best_stop))
+        let (entries, stop) = self.section5_set_stream_with_skip(0, 4096);
+        Some((0, entries, stop))
+    }
+
+    /// Decode the section-5 region-end pointer from header field1.
+    ///
+    /// Field1 is a 1-based word index from section 5's magic word to the
+    /// final word before the next section header. This is a framing checksum:
+    /// `sec5.file_offset + 4 * (field1 - 1)` should equal
+    /// `sec5.region_end - 4` on observed simulation-result VDFs.
+    pub fn section5_region_last_word_from_field1(&self) -> Option<usize> {
+        let sec = self.sections.get(5)?;
+        let field1 = sec.field1.checked_sub(1)? as usize;
+        Some(sec.file_offset + field1 * 4)
     }
 
     /// Axis slot refs shared between section-3 directory entries and
@@ -1446,6 +1460,15 @@ impl VdfFile {
     /// Recover dim names + elements via the section-5 payload-subsequence rule (see [`section5_dims`]).
     pub fn recover_dimension_sets_via_sec5(&self) -> Vec<VdfDimensionSet> {
         section5_dims::recover_dimension_sets_via_sec5(self)
+    }
+
+    /// Map section-3 axis refs to decoded dimension names.
+    ///
+    /// Section-3 axis words are section-1 word pointers to `field[9]` of a
+    /// dimension-anchor record. This exposes that decoded bridge without
+    /// leaking the rest of the anchor catalog.
+    pub fn section3_axis_ref_dimension_names(&self) -> HashMap<u32, String> {
+        section5_dims::section3_axis_ref_to_dimension_name(self)
     }
 
     /// Build contiguous OT ranges from in-range record start indices (field[11]).
@@ -2310,6 +2333,12 @@ impl VdfFile {
         // is fine because scalar records have field[6] == 5 and never hit
         // the directory.
         let section3_directory = self.parse_section3_directory();
+        let dimension_elements_by_name: HashMap<String, Vec<String>> = self
+            .recover_dimension_sets_via_sec5()
+            .into_iter()
+            .map(|dim| (dim.name.to_lowercase(), dim.elements))
+            .collect();
+        let axis_ref_to_dim_name = self.section3_axis_ref_dimension_names();
 
         // Precompute a set of active section-3 flat sizes for the field[6] == 32
         // generic-arrayed case. When exactly one distinct non-zero flat size is
@@ -2447,13 +2476,23 @@ impl VdfFile {
             // non-canonicalizable characters) use `from_str_unchecked`
             // so the raw name is preserved as the result column key;
             // otherwise they would collapse into an empty Ident.
+            let element_labels = array_element_labels_for_record_candidate(
+                self,
+                &candidate,
+                section3_directory.as_ref(),
+                &dimension_elements_by_name,
+                &axis_ref_to_dim_name,
+            );
             for elem in 0..candidate.span {
                 let ot = candidate.start + elem;
                 if !claimed_ot.insert(ot) {
                     continue;
                 }
                 let display = if candidate.span > 1 {
-                    format!("{name}[{elem}]")
+                    match element_labels.as_ref().and_then(|labels| labels.get(elem)) {
+                        Some(label) => format!("{name}[{label}]"),
+                        None => format!("{name}[{elem}]"),
+                    }
                 } else {
                     name.clone()
                 };
@@ -5524,38 +5563,6 @@ mod tests {
     }
 
     #[test]
-    fn test_to_results_via_records_uses_ref_style_predecessor_shape_codes() {
-        let vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
-        let results = vdf
-            .to_results_via_records()
-            .expect("record-based mapping should produce Ref.vdf columns");
-        let vdf_data = vdf.extract_data().unwrap();
-
-        assert_result_column_matches_ot("Ref.vdf", &results, &vdf_data, "GWP of HFC[8]", 1672);
-        assert_result_column_matches_ot("Ref.vdf", &results, &vdf_data, "Layer Depth[3]", 2202);
-        assert_result_column_matches_ot(
-            "Ref.vdf",
-            &results,
-            &vdf_data,
-            "Proportion of COP to global HFC134a eq[62]",
-            2801,
-        );
-        assert_result_column_matches_ot(
-            "Ref.vdf",
-            &results,
-            &vdf_data,
-            "Semi Agg Definition[41]",
-            3353,
-        );
-        assert!(
-            !results
-                .offsets
-                .contains_key(&Ident::<Canonical>::new("Layer Depth[4]")),
-            "Layer Depth is a 4-element layers array, not a 63-element COP x HFC block"
-        );
-    }
-
-    #[test]
     fn test_to_results_via_records_edited_run_5_recovers_visible_variables() {
         // model_editing/run_5.vdf: an incrementally edited fixture where
         // the original conservative `to_results` returns an ambiguity
@@ -5634,31 +5641,6 @@ mod tests {
                 .contains_key(&Ident::<Canonical>::new("time")),
             "Time must always be present"
         );
-    }
-
-    #[test]
-    fn test_to_results_via_records_edited_run_9_and_run_10_use_direct_name_keys_for_array_owners() {
-        for (label, path) in [
-            ("run_9", "../../test/bobby/vdf/model_editing/run_9.vdf"),
-            ("run_10", "../../test/bobby/vdf/model_editing/run_10.vdf"),
-        ] {
-            let vdf = vdf_file(path);
-            let results = vdf
-                .to_results_via_records()
-                .unwrap_or_else(|e| panic!("{label}: record-based mapping should succeed: {e}"));
-            let vdf_data = vdf.extract_data().unwrap();
-
-            for (name, ot) in [
-                ("stock[0]", 2),
-                ("stock[1]", 3),
-                ("constant", 4),
-                ("flow[0]", 6),
-                ("flow[1]", 7),
-                ("v", 11),
-            ] {
-                assert_result_column_matches_ot(label, &results, &vdf_data, name, ot);
-            }
-        }
     }
 
     #[test]
