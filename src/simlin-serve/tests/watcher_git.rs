@@ -38,10 +38,24 @@ fn git_available() -> bool {
 }
 
 /// Run `git` in `cwd`; assert success. Echoes stderr in the panic.
+///
+/// Strips every `GIT_*` env var inherited from the parent so the inner
+/// git always operates on the temp repo at `cwd`. Without this, when
+/// the workspace test suite runs from inside an outer `git commit` (the
+/// project pre-commit hook invokes `cargo test --workspace`), `GIT_DIR`,
+/// `GIT_WORK_TREE`, and `GIT_INDEX_FILE` propagate down to the inner
+/// `git` and cause it to operate on the OUTER repository instead of
+/// the freshly-`git init`'d temp dir, masking the watcher behavior the
+/// test exercises.
 fn must_git(cwd: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd).args(args);
+    for (key, _) in std::env::vars() {
+        if key.starts_with("GIT_") {
+            cmd.env_remove(&key);
+        }
+    }
+    let out = cmd
         .output()
         .unwrap_or_else(|e| panic!("spawn git {args:?}: {e}"));
     if !out.status.success() {
