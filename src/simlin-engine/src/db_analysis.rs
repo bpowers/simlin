@@ -73,7 +73,7 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// (e.g., `x[NYC]`), and dynamic-index references (e.g., `x[i+1]` where
 /// `i` is a position iterator). The shape determines element-edge
 /// emission and per-reference partial-equation construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
     /// context with an arrayed source, this is same-element. In a scalar
@@ -1147,6 +1147,157 @@ pub fn model_causal_edges(
     }
 }
 
+/// Per-edge classification: the set of `RefShape`s observed at any AST
+/// reference site of `from` in `to`'s equation.
+///
+/// Keyed at variable level (not element level). For each variable-level
+/// edge `(from, to)` from `model_causal_edges`, this records the multiset
+/// of distinct shapes the source takes on at every reference site -- one
+/// entry per `(from, to)` pair, value is a `BTreeSet` (deduplicated and
+/// canonically ordered) so consumers can iterate deterministically.
+///
+/// Used by tiered loop enumeration in `model_loop_circuits_tiered` to
+/// classify each variable-level cycle as `PureScalar`,
+/// `PureSameElementA2A`, or `CrossElementOrMixed` without re-walking
+/// every target's AST. The cycle classifier needs only the *set* of
+/// shapes per edge; per-site duplicates contribute the same answer.
+///
+/// Edges that have no AST reference -- structural flow->stock edges
+/// where the stock equation is just the initial value -- map to
+/// `{Bare}`. The flow is structurally a same-element diagonal into
+/// the stock; treating it as Bare matches what
+/// `model_element_causal_edges` does for the same case.
+///
+/// Module input edges (a `to` whose kind is `Module`) and edges into
+/// implicit module-instance variables also map to `{Bare}`: modules are
+/// scalar nodes in the causal graph, so per-shape distinctions don't
+/// apply. Unable-to-reconstruct edges (a defensive fallback that
+/// shouldn't happen for well-formed models) likewise map to `{Bare}`.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct EdgeShapesResult {
+    /// Map from variable-level edge `(from, to)` to the set of
+    /// `RefShape`s observed at any reference site of `from` in `to`'s
+    /// AST. Keys mirror the `(from, to)` pairs from
+    /// `model_causal_edges`.
+    pub edge_shapes: HashMap<(String, String), BTreeSet<RefShape>>,
+}
+
+/// Tag every variable-level edge with the set of `RefShape`s observed
+/// at any AST reference site of the edge's source in the edge's target.
+///
+/// This is the per-edge classification that drives tiered loop
+/// enumeration: cycles can be classified as pure-A2A, pure-scalar, or
+/// cross-element/mixed by inspecting the shape set on each cycle edge.
+///
+/// Salsa-tracked separately from `model_element_causal_edges` so that
+/// callers that only want the cycle classifier (not the element graph)
+/// don't pay for the element-edge expansion. Both functions reuse the
+/// same `collect_reference_sites` / `collect_reference_shapes` walker;
+/// the per-target AST parse results are already cached by salsa, so
+/// the duplicated walks are cheap.
+#[salsa::tracked(returns(ref))]
+pub fn model_edge_shapes(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> EdgeShapesResult {
+    let variable_edges = model_causal_edges(db, model, project);
+    let source_vars = model.variables(db);
+
+    // Build a set of structural flow->stock edges so we can label them
+    // `{Bare}` directly without an AST walk: stock equations contain
+    // only the initial value, so the flow name never appears in the
+    // stock's AST and `collect_reference_shapes` would return an empty
+    // vec. The structural edge is semantically a same-element diagonal,
+    // matching the Bare classification used by
+    // `model_element_causal_edges` for the same case.
+    let mut structural_flow_to_stock: BTreeSet<(String, String)> = BTreeSet::new();
+    for (stock_name, source_var) in source_vars.iter() {
+        if source_var.kind(db) == super::SourceVariableKind::Stock {
+            for flow in source_var
+                .inflows(db)
+                .iter()
+                .chain(source_var.outflows(db).iter())
+            {
+                let canonical_flow = canonicalize(flow).into_owned();
+                structural_flow_to_stock.insert((canonical_flow, stock_name.clone()));
+            }
+        }
+    }
+
+    // Cache dimension lookups -- a variable's dimension list is needed
+    // both as the source for shape resolution and (cheaply) reused
+    // across multiple edges that share the same source.
+    let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
+    let mut lookup_dims = |name: &str| -> Vec<crate::dimensions::Dimension> {
+        if let Some(dims) = dim_cache.get(name) {
+            return dims.clone();
+        }
+        let dims = source_vars
+            .get(name)
+            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
+            .unwrap_or_default();
+        dim_cache.insert(name.to_string(), dims.clone());
+        dims
+    };
+
+    let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
+    for (from_name, to_set) in &variable_edges.edges {
+        let from_dims = lookup_dims(from_name);
+        let source_is_arrayed = !from_dims.is_empty();
+
+        for to_name in to_set {
+            // Module edges and structural flow->stock edges short-circuit
+            // to {Bare}. Module targets are scalar nodes in the causal
+            // graph; structural stock edges have no AST reference.
+            let to_is_module = source_vars
+                .get(to_name)
+                .map(|sv| sv.kind(db) == super::SourceVariableKind::Module)
+                .unwrap_or(false);
+            if to_is_module
+                || structural_flow_to_stock.contains(&(from_name.clone(), to_name.clone()))
+            {
+                let mut set = BTreeSet::new();
+                set.insert(RefShape::Bare);
+                edge_shapes.insert((from_name.clone(), to_name.clone()), set);
+                continue;
+            }
+
+            // AST-walk path: reconstruct the target and collect distinct
+            // reference shapes.
+            let target_var = match reconstruct_single_variable(db, model, project, to_name) {
+                Some(v) => v,
+                None => {
+                    // Defensive fallback: edge exists in the variable
+                    // graph but the target isn't reconstructable. Treat
+                    // as Bare so the cycle classifier still has a
+                    // shape to inspect. (Same fallback as
+                    // `model_element_causal_edges`.)
+                    let mut set = BTreeSet::new();
+                    set.insert(RefShape::Bare);
+                    edge_shapes.insert((from_name.clone(), to_name.clone()), set);
+                    continue;
+                }
+            };
+
+            let shapes =
+                collect_reference_shapes(&target_var, from_name, source_is_arrayed, &from_dims);
+            let mut set: BTreeSet<RefShape> = shapes.into_iter().collect();
+            if set.is_empty() {
+                // Edge exists in the variable graph but no AST reference
+                // of `from` survives in `to`'s equation. This can happen
+                // with synthesized references; default to Bare so the
+                // classifier sees a same-element shape rather than an
+                // empty set (which would be ambiguous).
+                set.insert(RefShape::Bare);
+            }
+            edge_shapes.insert((from_name.clone(), to_name.clone()), set);
+        }
+    }
+
+    EdgeShapesResult { edge_shapes }
+}
+
 /// Build the element-level causal graph for a model.
 ///
 /// Expands variable-level edges from `model_causal_edges` into element-level
@@ -2120,3 +2271,178 @@ mod detected_loops_scc_gate_tests {
 #[cfg(test)]
 #[path = "db_element_graph_tests.rs"]
 mod db_element_graph_tests;
+
+#[cfg(test)]
+mod edge_shapes_tests {
+    //! Tests for `model_edge_shapes`: per-edge `RefShape` classification
+    //! used as input to tiered loop enumeration. Verifies that the
+    //! salsa-tracked function produces a deterministic
+    //! `BTreeSet<RefShape>` per `(from, to)` variable-level edge.
+    use super::*;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::test_common::TestProject;
+
+    fn edge_shapes(project: &TestProject) -> EdgeShapesResult {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let source_project = sync.project;
+        model_edge_shapes(&db, source_model, source_project).clone()
+    }
+
+    /// Helper: assert that the edge `(from, to)` has exactly the given
+    /// shape set in the result.
+    fn assert_shapes(
+        result: &EdgeShapesResult,
+        from: &str,
+        to: &str,
+        expected: &[RefShape],
+    ) {
+        let key = (from.to_string(), to.to_string());
+        let actual = result
+            .edge_shapes
+            .get(&key)
+            .unwrap_or_else(|| panic!("missing edge {from} -> {to}"));
+        let expected_set: BTreeSet<RefShape> = expected.iter().cloned().collect();
+        assert_eq!(
+            actual, &expected_set,
+            "edge {from} -> {to}: expected {expected_set:?}, got {actual:?}"
+        );
+    }
+
+    /// Pure-A2A model: `births[r] = population * 0.1` produces a single
+    /// Bare reference. The structural flow->stock edge `births -> population`
+    /// also classifies as Bare.
+    #[test]
+    fn pure_a2a_edges_are_all_bare() {
+        let project = TestProject::new("pure_a2a")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "population * 0.1", None);
+
+        let result = edge_shapes(&project);
+        assert_shapes(&result, "population", "births", &[RefShape::Bare]);
+        assert_shapes(&result, "births", "population", &[RefShape::Bare]);
+    }
+
+    /// Wildcard reducer in target produces `{Wildcard}` on the edge.
+    #[test]
+    fn wildcard_reducer_edge_is_wildcard() {
+        let project = TestProject::new("wild")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("population[Region]", "100")
+            .scalar_aux("total", "SUM(population[*])");
+
+        let result = edge_shapes(&project);
+        assert_shapes(&result, "population", "total", &[RefShape::Wildcard]);
+    }
+
+    /// Mixed Bare + Wildcard target: `share[r] = pop / SUM(pop[*])` gives
+    /// the edge `{Bare, Wildcard}`. The cycle classifier reads exactly
+    /// this set to decide that any cycle through this edge cannot be
+    /// pure-A2A (both shapes have different broadcast semantics).
+    #[test]
+    fn mixed_bare_and_wildcard_target() {
+        let project = TestProject::new("mixed")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("population[Region]", "100")
+            .array_aux("share[Region]", "population / SUM(population[*])");
+
+        let result = edge_shapes(&project);
+        assert_shapes(
+            &result,
+            "population",
+            "share",
+            &[RefShape::Bare, RefShape::Wildcard],
+        );
+    }
+
+    /// Fixed-index reference: `mig[NYC] = pop[NYC]`-style targets pin
+    /// the source to a literal element. The shape set carries a
+    /// `FixedIndex` entry with the resolved canonical element.
+    #[test]
+    fn fixed_index_target_records_resolved_element() {
+        let project = TestProject::new("fixed")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("population[Region]", "100")
+            .scalar_aux("nyc_pop", "population[NYC]");
+
+        let result = edge_shapes(&project);
+        assert_shapes(
+            &result,
+            "population",
+            "nyc_pop",
+            &[RefShape::FixedIndex(vec!["nyc".to_string()])],
+        );
+    }
+
+    /// Multiple shape kinds on one edge: `denom[r] = pop[NYC] + SUM(pop[*])`
+    /// yields `{FixedIndex([nyc]), Wildcard}` (no bare ref to `pop`).
+    #[test]
+    fn fixed_index_plus_wildcard_no_bare() {
+        let project = TestProject::new("fxw")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("population[Region]", "100")
+            .array_aux("denom[Region]", "population[NYC] + SUM(population[*])");
+
+        let result = edge_shapes(&project);
+        assert_shapes(
+            &result,
+            "population",
+            "denom",
+            &[
+                RefShape::FixedIndex(vec!["nyc".to_string()]),
+                RefShape::Wildcard,
+            ],
+        );
+    }
+
+    /// Pure-scalar model: every edge is `{Bare}`. No arrayed source ->
+    /// every reference parses as `Expr2::Var(...)`.
+    #[test]
+    fn pure_scalar_edges_are_bare() {
+        let project = TestProject::new("scalar")
+            .stock("x", "10", &["inflow"], &[], None)
+            .flow("inflow", "rate", None)
+            .scalar_const("rate", 0.5);
+
+        let result = edge_shapes(&project);
+        assert_shapes(&result, "rate", "inflow", &[RefShape::Bare]);
+        assert_shapes(&result, "inflow", "x", &[RefShape::Bare]);
+    }
+
+    /// Edge keys come from `model_causal_edges`. Verify every variable
+    /// edge has a shape entry (no edge gets dropped) and no extra
+    /// entries are produced.
+    #[test]
+    fn edge_keys_match_variable_edges() {
+        let project = TestProject::new("coverage")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow("births[Region]", "population * 0.1", None)
+            .scalar_aux("total", "SUM(population[*])");
+
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let source_project = sync.project;
+
+        let var_edges = model_causal_edges(&db, source_model, source_project);
+        let shape_result = model_edge_shapes(&db, source_model, source_project);
+
+        let mut expected_keys: BTreeSet<(String, String)> = BTreeSet::new();
+        for (from, tos) in &var_edges.edges {
+            for to in tos {
+                expected_keys.insert((from.clone(), to.clone()));
+            }
+        }
+        let actual_keys: BTreeSet<(String, String)> =
+            shape_result.edge_shapes.keys().cloned().collect();
+        assert_eq!(
+            actual_keys, expected_keys,
+            "model_edge_shapes keys must match model_causal_edges (from, to) pairs"
+        );
+    }
+}
