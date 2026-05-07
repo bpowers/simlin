@@ -1547,6 +1547,21 @@ impl CausalGraph {
             }
         }
 
+        // The DFS depth cap is the principled upper bound on simple-path
+        // length: a simple path can visit each distinct node at most
+        // once, so N nodes -> at most N entries on the path stack. The
+        // visited set inside `dfs_simple_paths` already enforces simple-
+        // path semantics; the cap's only remaining job is recursion-stack
+        // safety, which N satisfies. The total node set is the union of
+        // the adjacency-list keys (sources) and `has_incoming` (targets),
+        // matching the convention in `detect_output_ports`.
+        let node_count = self
+            .edges
+            .keys()
+            .filter(|node| !has_incoming.contains(*node))
+            .count()
+            + has_incoming.len();
+
         for input_port in self.edges.keys() {
             if input_port == output_name {
                 continue;
@@ -1556,7 +1571,7 @@ impl CausalGraph {
                 continue;
             }
 
-            let raw_paths = self.find_all_simple_paths(input_port, output_name, 20);
+            let raw_paths = self.find_all_simple_paths(input_port, output_name, node_count);
             if raw_paths.is_empty() {
                 continue;
             }
@@ -4721,6 +4736,61 @@ mod tests {
             "Should find pathways with standard 'output' name"
         );
         assert!(pathways.contains_key(&Ident::new("input")));
+    }
+
+    #[test]
+    fn test_enumerate_module_pathways_deeper_than_legacy_cap() {
+        // Build a strictly-linear module graph deeper than the legacy
+        // hard-coded depth=20 truncation: input -> n0 -> n1 -> ... -> n19
+        // -> output, which is 22 distinct nodes and 21 edges.  A simple
+        // path can visit at most N distinct nodes (the visited set
+        // already enforces that), so the principled DFS cap is the
+        // module-graph node count.  A 21-element chain is enough to
+        // prove the old cap is gone without blowing past the per-test
+        // time budget.
+        const INTERMEDIATE_NODES: usize = 20;
+
+        let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+
+        // input -> n0
+        edges.insert(Ident::new("input"), vec![Ident::new("n0")]);
+        // n_i -> n_{i+1}
+        for i in 0..INTERMEDIATE_NODES - 1 {
+            edges.insert(
+                Ident::new(&format!("n{i}")),
+                vec![Ident::new(&format!("n{}", i + 1))],
+            );
+        }
+        // n_{LAST} -> output
+        edges.insert(
+            Ident::new(&format!("n{}", INTERMEDIATE_NODES - 1)),
+            vec![Ident::new("output")],
+        );
+
+        let graph = CausalGraph {
+            edges,
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+        };
+
+        let pathways = graph.enumerate_module_pathways(&Ident::new("output"));
+        let from_input = pathways.get(&Ident::new("input")).expect(
+            "input -> output pathway should be enumerated regardless of \
+             chain depth; a hardcoded depth-20 cap silently drops chains \
+             this long",
+        );
+        assert_eq!(
+            from_input.len(),
+            1,
+            "expected exactly one simple input -> output pathway"
+        );
+        // 22 nodes -> 21 directed links along the chain.
+        assert_eq!(
+            from_input[0].len(),
+            INTERMEDIATE_NODES + 1,
+            "pathway should traverse every link in the chain"
+        );
     }
 
     /// Construct a three-node reinforcing cycle (A → B → C → A) for
