@@ -2000,8 +2000,19 @@ pub(crate) fn build_loops_from_tiered(
 
         // Map the canonical dimension names to original datamodel
         // names so equation parsing on the loop-score variable
-        // resolves the dimension by string match. Mirrors the
-        // legacy pure-dimension branch's mapping logic.
+        // resolves the dimension by string match. Mirrors the legacy
+        // pure-dimension branch's mapping logic.
+        //
+        // Invariant: every canonical name in `fp.dimensions` came from
+        // a variable in the cycle's `lookup_dims` closure, which reads
+        // from the project's source variables. Those source variables
+        // can only reference dimensions registered in `dm_dims`, so an
+        // unmatched name signals an internal mismatch (e.g., a stale
+        // dim cache or a synthesized dimension that never made it into
+        // the datamodel) rather than a recoverable input. Panicking
+        // here makes the violation visible at the cause site instead of
+        // surfacing as a bogus loop-score equation that fails to parse
+        // downstream.
         let dimensions: Vec<String> = fp
             .dimensions
             .iter()
@@ -2010,7 +2021,15 @@ pub(crate) fn build_loops_from_tiered(
                     .iter()
                     .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
                     .map(|dm| dm.name().to_string())
-                    .unwrap_or_else(|| canonical.clone())
+                    .unwrap_or_else(|| {
+                        let known: Vec<&str> = dm_dims.iter().map(|d| d.name()).collect();
+                        unreachable!(
+                            "fast-path A2A cycle references dimension {canonical:?} that is \
+                             not in the project's datamodel dimensions {known:?}; this is an \
+                             internal invariant violation in `model_loop_circuits_tiered` \
+                             (see `FastPathCircuit::dimensions`)"
+                        )
+                    })
             })
             .collect();
 

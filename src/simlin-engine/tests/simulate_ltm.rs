@@ -3907,10 +3907,11 @@ fn measure_tiered(path: &str) -> TieredMeasurements {
 /// Postscript measurement on the cross_element_ltm fixture.
 ///
 /// Pinned numbers (post-#482, post-#448):
-/// - var_scc = 4 (population, migration_pressure, migration_in,
+/// - var_scc = 5 (population, births, migration_pressure, migration_in,
 ///   migration_out are in one variable-level SCC; total_population is
-///   acyclic).
-/// - elem_scc = 8 (4 vars * 2 elements: NYC, Boston).
+///   acyclic). The births flow's structural stock-edge plus its
+///   `population` reference closes the population<->births A2A pair.
+/// - elem_scc = 10 (5 vars * 2 elements: NYC, Boston).
 /// - var_circuits: small finite count of variable-level cycles.
 /// - elem_circuits_legacy: 8 (matches the post-Phase-4 count from the
 ///   2026-04-25 design plan postscript).
