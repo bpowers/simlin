@@ -28,7 +28,16 @@ Each `Loop` has:
 
 - `id` -- Loop identifier string (e.g., `"R1"`, `"B2"`, `"U3"`)
 - `variables` -- Tuple of variable names forming the loop
-- `polarity` -- `LoopPolarity.REINFORCING`, `LoopPolarity.BALANCING`, or `LoopPolarity.UNDETERMINED`
+- `polarity` -- One of five `LoopPolarity` variants:
+  - `LoopPolarity.REINFORCING` -- every loop-score sample is positive (R)
+  - `LoopPolarity.BALANCING` -- every loop-score sample is negative (B)
+  - `LoopPolarity.MOSTLY_REINFORCING` -- mixed signs but reinforcing dominates with confidence at or above the 0.99 threshold from Schoenberg & Eberlein (2020) (Rux)
+  - `LoopPolarity.MOSTLY_BALANCING` -- mixed signs but balancing dominates above the same threshold (Bux)
+  - `LoopPolarity.UNDETERMINED` -- mixed signs with neither side dominant enough to clear the threshold (U)
+
+  `Run.loops` can return any of the five; `Model.loops` (structural-only)
+  reports just `REINFORCING`/`BALANCING`/`UNDETERMINED` because the
+  `MOSTLY_*` variants require simulated runtime scores.
 - `behavior_time_series` -- NumPy array of importance values per timestep (from `Run.loops`; `None` for structural loops from `Model.loops`)
 
 ### Importance Methods

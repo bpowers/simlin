@@ -79,7 +79,7 @@ ReadModel returns loop analysis data from the Loops That Matter (LTM) algorithm:
 - `loopDominance`: Array of feedback loops discovered in the model. Each loop has:
   - `loopId`: Unique identifier
   - `name`: Human-assigned name (null if unnamed)
-  - `polarity`: "reinforcing", "balancing", or "undetermined"
+  - `polarity`: one of "reinforcing", "balancing", "mostly_reinforcing", "mostly_balancing", or "undetermined". "reinforcing" / "balancing" are emitted when every loop-score sample shares one sign. "mostly_reinforcing" / "mostly_balancing" (Rux / Bux in the LTM literature) are emitted when the loop expresses both polarities during simulation but one side dominates with confidence at or above the 0.99 threshold from Schoenberg & Eberlein (2020). "undetermined" covers genuinely mixed-sign loops below that threshold.
   - `variables`: Ordered list of variable names around the loop
   - `importance`: Array of importance values (0 to 1) per simulation timestep, indicating how much this loop drives model behavior at each point in time
 
