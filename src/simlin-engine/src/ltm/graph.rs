@@ -917,13 +917,18 @@ pub(crate) fn assign_loop_ids(loops: &mut [Loop]) {
     let mut u_counter = 1;
 
     for loop_item in loops.iter_mut() {
+        // ID prefix is decided by the dominant polarity. MostlyReinforcing
+        // and MostlyBalancing share the r/b counters with their pure
+        // counterparts because user-facing IDs and downstream consumers
+        // (UI legend, persisted loop names) treat them as "Rux"/"Bux"
+        // variants of R/B rather than as a distinct namespace.
         loop_item.id = match loop_item.polarity {
-            LoopPolarity::Reinforcing => {
+            LoopPolarity::Reinforcing | LoopPolarity::MostlyReinforcing => {
                 let id = format!("r{r_counter}");
                 r_counter += 1;
                 id
             }
-            LoopPolarity::Balancing => {
+            LoopPolarity::Balancing | LoopPolarity::MostlyBalancing => {
                 let id = format!("b{b_counter}");
                 b_counter += 1;
                 id

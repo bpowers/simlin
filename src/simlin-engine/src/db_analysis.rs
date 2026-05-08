@@ -877,27 +877,55 @@ impl LoopCircuitsResult {
 }
 
 /// A detected feedback loop with polarity and deterministic ID.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, salsa::Update)]
 pub struct DetectedLoop {
-    /// Deterministic ID: r1, r2, ... (reinforcing), b1, b2, ... (balancing),
-    /// u1, u2, ... (undetermined).
+    /// Deterministic ID: r1, r2, ... (reinforcing/mostly-reinforcing),
+    /// b1, b2, ... (balancing/mostly-balancing), u1, u2, ... (undetermined).
     pub id: String,
     /// Variable names in the loop, in circuit order.
     pub variables: Vec<String>,
     /// Loop polarity.
     pub polarity: DetectedLoopPolarity,
+    /// Polarity-confidence ratio in `[0.0, 1.0]`.
+    ///
+    /// For the structural pipeline (`model_detected_loops`), this is `1.0`
+    /// when every link in the loop has a determined sign and `0.0` when any
+    /// link is unknown (the U case).  When runtime loop scores feed into
+    /// classification (e.g. via [`crate::ltm::LoopPolarity::from_runtime_scores`]),
+    /// the ratio comes from `|r - |b|| / (r + |b|)` over the loop-score
+    /// series and can take values strictly between 0 and 1, distinguishing
+    /// `Rux`/`Bux` ("mostly R/B") from `U`.
+    pub polarity_confidence: f64,
 }
 
-/// Loop polarity as determined by structural analysis of link signs.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+/// Loop polarity as determined by structural analysis of link signs (and,
+/// where available, by the runtime loop-score series).
+///
+/// `MostlyReinforcing` / `MostlyBalancing` correspond to the LTM
+/// literature's "Rux" / "Bux" labels: the loop has expressed both
+/// polarities at runtime but one polarity dominates with confidence at or
+/// above [`crate::ltm::POLARITY_CONFIDENCE_THRESHOLD`]. The structural
+/// `model_detected_loops` pipeline never produces these variants -- it has
+/// no runtime data -- but downstream consumers must handle them when the
+/// detected loops are enriched with simulated scores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
 pub enum DetectedLoopPolarity {
     Reinforcing,
     Balancing,
+    /// "Rux" -- mixed-sign runtime scores, predominantly reinforcing.
+    MostlyReinforcing,
+    /// "Bux" -- mixed-sign runtime scores, predominantly balancing.
+    MostlyBalancing,
     Undetermined,
 }
 
 /// Result of full loop detection with polarity and IDs.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+///
+/// `Eq` cannot be derived because each `DetectedLoop` carries an `f64`
+/// `polarity_confidence`; use `PartialEq` for value comparison and the
+/// existing structural fields (`id`, `variables`, `polarity`) when an
+/// equivalence on a stable subset is required.
+#[derive(Clone, Debug, PartialEq, salsa::Update)]
 pub struct DetectedLoopsResult {
     pub loops: Vec<DetectedLoop>,
 }
@@ -1674,16 +1702,34 @@ pub fn model_detected_loops(
                         }
                     }
                 }
+                // Structural classification has no runtime score data, so
+                // confidence is binary: 1.0 when every link in the loop has
+                // a determined polarity (R/B), 0.0 when any link is unknown
+                // and the loop falls back to Undetermined.  The structural
+                // path never produces MostlyReinforcing/MostlyBalancing --
+                // those variants are reserved for callers that classify on
+                // top of a simulated loop-score series via
+                // [`LoopPolarity::from_runtime_scores`].
+                let (polarity, polarity_confidence) = match l.polarity {
+                    crate::ltm::LoopPolarity::Reinforcing => {
+                        (DetectedLoopPolarity::Reinforcing, 1.0)
+                    }
+                    crate::ltm::LoopPolarity::Balancing => (DetectedLoopPolarity::Balancing, 1.0),
+                    crate::ltm::LoopPolarity::MostlyReinforcing => {
+                        (DetectedLoopPolarity::MostlyReinforcing, 1.0)
+                    }
+                    crate::ltm::LoopPolarity::MostlyBalancing => {
+                        (DetectedLoopPolarity::MostlyBalancing, 1.0)
+                    }
+                    crate::ltm::LoopPolarity::Undetermined => {
+                        (DetectedLoopPolarity::Undetermined, 0.0)
+                    }
+                };
                 DetectedLoop {
                     id: l.id,
                     variables: vars,
-                    polarity: match l.polarity {
-                        crate::ltm::LoopPolarity::Reinforcing => DetectedLoopPolarity::Reinforcing,
-                        crate::ltm::LoopPolarity::Balancing => DetectedLoopPolarity::Balancing,
-                        crate::ltm::LoopPolarity::Undetermined => {
-                            DetectedLoopPolarity::Undetermined
-                        }
-                    },
+                    polarity,
+                    polarity_confidence,
                 }
             })
             .collect(),
@@ -2753,6 +2799,200 @@ mod detected_loops_scc_gate_tests {
             "60-node SCC must trip the MAX_LTM_SCC_NODES = 50 gate, got {} loops",
             result.loops.len()
         );
+    }
+}
+
+/// Tests for the `polarity_confidence` field surfaced on `DetectedLoop`
+/// (issue #485).  The structural pipeline can only assign 1.0 or 0.0,
+/// so these tests pin both ends of that boundary; the runtime-aware
+/// classification (Rux/Bux) is covered by the
+/// `LoopPolarity::from_runtime_scores` unit tests in `ltm/tests.rs`.
+#[cfg(test)]
+mod polarity_confidence_tests {
+    use super::*;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::ltm::{LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD};
+    use crate::test_common::TestProject;
+
+    /// Helper: detect loops for a TestProject and return the result.
+    fn detect_loops(project: &TestProject) -> DetectedLoopsResult {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        model_detected_loops(&db, source_model, sync.project)
+    }
+
+    /// A textbook reinforcing population loop has every link with a known
+    /// positive polarity, so structural detection assigns confidence 1.0.
+    #[test]
+    fn structural_reinforcing_loop_has_full_confidence() {
+        let project = TestProject::new("pop_growth")
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * birth_rate", None)
+            .aux("birth_rate", "0.02", None);
+        let result = detect_loops(&project);
+        assert_eq!(result.loops.len(), 1, "exactly one loop expected");
+        let loop_item = &result.loops[0];
+        assert_eq!(loop_item.polarity, DetectedLoopPolarity::Reinforcing);
+        assert!(
+            (loop_item.polarity_confidence - 1.0).abs() < f64::EPSILON,
+            "fully-determined R loops must surface confidence 1.0, got {}",
+            loop_item.polarity_confidence
+        );
+    }
+
+    /// A goal-seeking balancing loop with all-known link polarities also
+    /// gets confidence 1.0 from the structural pipeline.
+    #[test]
+    fn structural_balancing_loop_has_full_confidence() {
+        let project = TestProject::new("goal_seek")
+            .stock("level", "100", &["adjustment"], &[], None)
+            .flow("adjustment", "gap / adjustment_time", None)
+            .aux("gap", "goal - level", None)
+            .aux("goal", "200", None)
+            .aux("adjustment_time", "5", None);
+        let result = detect_loops(&project);
+        let balancing = result
+            .loops
+            .iter()
+            .find(|l| l.polarity == DetectedLoopPolarity::Balancing)
+            .expect("balancing loop must be present");
+        assert!(
+            (balancing.polarity_confidence - 1.0).abs() < f64::EPSILON,
+            "fully-determined B loops must surface confidence 1.0, got {}",
+            balancing.polarity_confidence
+        );
+    }
+
+    /// A loop whose link polarity cannot be determined statically yields
+    /// `Undetermined` with confidence 0.0 -- the structural pipeline has
+    /// no signed runtime evidence at this point.  This pins the U-side
+    /// of the binary structural confidence rule.  We use a non-monotonic
+    /// graphical function (lookup table) on the feedback edge to force
+    /// `LinkPolarity::Unknown`; the conservative loop-polarity rule then
+    /// upgrades the loop to Undetermined.
+    #[test]
+    fn structural_undetermined_loop_has_zero_confidence() {
+        use crate::datamodel;
+        use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
+
+        let mut model_vars = vec![
+            x_stock("water", "100", &[], &["outflow"], None),
+            x_flow("outflow", "water * lookup(rate, water)", None),
+        ];
+        let mut lookup_var = x_aux("rate", "0", None);
+        if let datamodel::Variable::Aux(aux) = &mut lookup_var {
+            // Increasing then decreasing: monotonicity-inferring polarity
+            // analysis must concede `Unknown` here.
+            aux.gf = Some(datamodel::GraphicalFunction {
+                kind: datamodel::GraphicalFunctionKind::Continuous,
+                x_points: Some(vec![0.0, 50.0, 100.0, 150.0]),
+                y_points: vec![0.1, 0.5, 0.2, 0.6],
+                x_scale: datamodel::GraphicalFunctionScale {
+                    min: 0.0,
+                    max: 150.0,
+                },
+                y_scale: datamodel::GraphicalFunctionScale { min: 0.1, max: 0.6 },
+            });
+        }
+        model_vars.push(lookup_var);
+
+        let model = x_model("main", model_vars);
+        let datamodel = x_project(sim_specs_with_units("months"), &[model]);
+        let db = SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let result = model_detected_loops(&db, source_model, sync.project);
+        assert!(!result.loops.is_empty(), "should detect at least one loop");
+        let undetermined = result
+            .loops
+            .iter()
+            .find(|l| l.polarity == DetectedLoopPolarity::Undetermined)
+            .expect("loop containing non-monotone lookup must be Undetermined");
+        assert!(
+            undetermined.polarity_confidence.abs() < f64::EPSILON,
+            "structural Undetermined loops carry confidence 0.0, got {}",
+            undetermined.polarity_confidence
+        );
+    }
+
+    /// End-to-end check: when LTM is enabled and a small model is
+    /// simulated, runtime classification of single-sign loop scores
+    /// is consistent with what an LTM consumer would derive from the
+    /// simulated loop_score series for unambiguous loops.
+    #[test]
+    fn small_simulated_model_surfaces_consistent_confidence() {
+        use crate::CompiledSimulation;
+        use crate::db::{
+            compile_project_incremental, set_project_ltm_enabled, sync_from_datamodel_incremental,
+        };
+        use crate::vm::Vm;
+
+        let datamodel_project = TestProject::new("logistic_for_confidence")
+            .with_sim_time(0.0, 30.0, 0.25)
+            .stock("population", "10", &["births"], &["deaths"], None)
+            .flow("births", "population * birth_rate", None)
+            .flow("deaths", "population * population / capacity", None)
+            .aux("birth_rate", "0.1", None)
+            .aux("capacity", "100", None)
+            .build_datamodel();
+
+        // Structural detection: r1 (reinforcing) + b1 (carrying capacity).
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+        let source_model = sync.models["main"].source_model;
+        let detected = model_detected_loops(&db, source_model, sync.project);
+        assert!(
+            detected.loops.len() >= 2,
+            "expected at least one R loop and one B loop, got {} loops",
+            detected.loops.len()
+        );
+        for loop_item in &detected.loops {
+            assert!(
+                (loop_item.polarity_confidence - 1.0).abs() < f64::EPSILON,
+                "all-known-link loops in this model must have structural confidence 1.0; loop {} got {}",
+                loop_item.id,
+                loop_item.polarity_confidence
+            );
+        }
+
+        // Compile with LTM, simulate, and classify each loop's runtime
+        // score series.  The reinforcing births loop and the balancing
+        // carrying-capacity loop both keep a single sign throughout, so
+        // both should classify with confidence 1.0.
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let compiled: CompiledSimulation =
+            compile_project_incremental(&db, sync.project, "main").unwrap();
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        for loop_item in &detected.loops {
+            let var_name = format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{}", loop_item.id);
+            let Some(&offset) = results.offsets.get(var_name.as_str()) else {
+                continue;
+            };
+            let series: Vec<f64> = (0..results.step_count)
+                .map(|step| results.data[step * results.step_size + offset])
+                .collect();
+            if let Some((runtime_polarity, runtime_confidence)) =
+                LoopPolarity::from_runtime_scores(&series)
+            {
+                assert!(
+                    !matches!(runtime_polarity, LoopPolarity::Undetermined),
+                    "simulated single-sign loop {} must not classify as Undetermined",
+                    loop_item.id
+                );
+                assert!(
+                    runtime_confidence >= POLARITY_CONFIDENCE_THRESHOLD,
+                    "loop {} runtime confidence {} should clear the {} threshold",
+                    loop_item.id,
+                    runtime_confidence,
+                    POLARITY_CONFIDENCE_THRESHOLD
+                );
+            }
+        }
     }
 }
 

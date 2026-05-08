@@ -121,9 +121,19 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
         } else {
             ptr::null_mut()
         };
+        // The C ABI exposes only the legacy three-way polarity surface
+        // (Reinforcing / Balancing / Undetermined), so MostlyReinforcing /
+        // MostlyBalancing fold into their dominant cousin here.  The
+        // polarity_confidence ratio is dropped at this boundary because
+        // the FFI struct has no field for it; native Rust callers that
+        // need confidence go through `engine::db::DetectedLoop` directly.
         let polarity = match loop_item.polarity {
-            engine::db::DetectedLoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
-            engine::db::DetectedLoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
+            engine::db::DetectedLoopPolarity::Reinforcing
+            | engine::db::DetectedLoopPolarity::MostlyReinforcing => {
+                SimlinLoopPolarity::Reinforcing
+            }
+            engine::db::DetectedLoopPolarity::Balancing
+            | engine::db::DetectedLoopPolarity::MostlyBalancing => SimlinLoopPolarity::Balancing,
             engine::db::DetectedLoopPolarity::Undetermined => SimlinLoopPolarity::Undetermined,
         };
         c_loops.push(SimlinLoop {

@@ -272,10 +272,10 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `LoopPolarity::from_runtime_scores`)
 - **Severity**: low
-- **Description**: The paper's polarity-confidence metric `|r - |b|| / (r + |b|)` classifies loops as Rux/Bux when mostly one polarity. Simlin collapses any sign change to Undetermined, losing information on mostly-reinforcing loops that briefly dip balancing (or vice versa). Fix: retain the ratio alongside the categorical polarity and surface it in `DetectedLoopsResult`.
+- **Description**: The paper's polarity-confidence metric `|r - |b|| / (r + |b|)` classifies loops as Rux/Bux when mostly one polarity. Simlin collapses any sign change to Undetermined, losing information on mostly-reinforcing loops that briefly dip balancing (or vice versa). Fix: retain the ratio alongside the categorical polarity and surface it in `DetectedLoopsResult`. Implementation in flight on branch `ltm/485-polarity-confidence` (PR #490, in draft); mark RESOLVED with the merge commit hash once the PR lands.
 - **Tracked in**: #485 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-29
+- **Last reviewed**: 2026-05-06
 
 ### 31. RK4 + LTM Combination Has No Hard-Error Guard
 

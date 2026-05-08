@@ -209,9 +209,16 @@ fn build_uid_to_loop_name(
 /// Convert a `FoundLoop` to the `FeedbackLoop` form expected by
 /// `calculate_dominant_periods`.
 fn to_feedback_loop(fl: &crate::ltm_finding::FoundLoop) -> FeedbackLoop {
+    // metadata::LoopPolarity is a 3-way coarse enum; the mostly-* variants
+    // collapse into their dominant cousin since the layout-side legend
+    // does not visually distinguish them today.
     let polarity = match fl.loop_info.polarity {
-        crate::ltm::LoopPolarity::Reinforcing => metadata::LoopPolarity::Reinforcing,
-        crate::ltm::LoopPolarity::Balancing => metadata::LoopPolarity::Balancing,
+        crate::ltm::LoopPolarity::Reinforcing | crate::ltm::LoopPolarity::MostlyReinforcing => {
+            metadata::LoopPolarity::Reinforcing
+        }
+        crate::ltm::LoopPolarity::Balancing | crate::ltm::LoopPolarity::MostlyBalancing => {
+            metadata::LoopPolarity::Balancing
+        }
         crate::ltm::LoopPolarity::Undetermined => metadata::LoopPolarity::Undetermined,
     };
 
@@ -254,9 +261,16 @@ fn to_loop_summary(
     model_name: &str,
     project: &datamodel::Project,
 ) -> LoopSummary {
+    // The five-string surface mirrors `LoopPolarity::abbreviation` (R/B/Rux/
+    // Bux/U) so consumers reading the JSON polarity field see the same
+    // vocabulary the LTM literature uses.  AI-agent docs in
+    // simlin-mcp/src/instructions.md and skills/loop-dominance.md are kept
+    // in sync; if you add another variant, update those too.
     let polarity = match fl.loop_info.polarity {
         crate::ltm::LoopPolarity::Reinforcing => "reinforcing",
         crate::ltm::LoopPolarity::Balancing => "balancing",
+        crate::ltm::LoopPolarity::MostlyReinforcing => "mostly_reinforcing",
+        crate::ltm::LoopPolarity::MostlyBalancing => "mostly_balancing",
         crate::ltm::LoopPolarity::Undetermined => "undetermined",
     }
     .to_string();

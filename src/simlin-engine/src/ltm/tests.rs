@@ -9,8 +9,8 @@ use super::polarity::{
     expr_references_var, flip_polarity, is_negative_constant, is_positive_constant,
 };
 use super::types::{
-    Link, LinkPolarity, Loop, LoopPolarity, ModuleLtmRole, TruncatedByBudget,
-    classify_module_for_ltm, normalize_module_ref,
+    Link, LinkPolarity, Loop, LoopPolarity, ModuleLtmRole, POLARITY_CONFIDENCE_THRESHOLD,
+    TruncatedByBudget, classify_module_for_ltm, normalize_module_ref,
 };
 use crate::ast::BinaryOp;
 use crate::common::{Canonical, Ident};
@@ -880,56 +880,153 @@ fn test_logistic_growth_loops() {
 
 #[test]
 fn test_loop_polarity_from_runtime_scores_reinforcing() {
-    // All positive scores -> Reinforcing
+    // All positive scores -> Reinforcing, confidence 1.0
     let scores = vec![f64::NAN, 1.0, 2.0, 3.0, 0.5];
-    let polarity = LoopPolarity::from_runtime_scores(&scores);
-    assert_eq!(polarity, Some(LoopPolarity::Reinforcing));
+    let result = LoopPolarity::from_runtime_scores(&scores);
+    assert_eq!(
+        result,
+        Some((LoopPolarity::Reinforcing, 1.0)),
+        "all-positive valid scores should give a perfectly confident reinforcing classification"
+    );
 }
 
 #[test]
 fn test_loop_polarity_from_runtime_scores_balancing() {
-    // All negative scores -> Balancing
+    // All negative scores -> Balancing, confidence 1.0
     let scores = vec![f64::NAN, -1.0, -2.0, -3.0, -0.5];
-    let polarity = LoopPolarity::from_runtime_scores(&scores);
-    assert_eq!(polarity, Some(LoopPolarity::Balancing));
+    let result = LoopPolarity::from_runtime_scores(&scores);
+    assert_eq!(
+        result,
+        Some((LoopPolarity::Balancing, 1.0)),
+        "all-negative valid scores should give a perfectly confident balancing classification"
+    );
+}
+
+#[test]
+fn test_loop_polarity_from_runtime_scores_mostly_reinforcing() {
+    // Mostly positive scores with a tiny negative blip -> MostlyReinforcing.
+    // r = 1 + 2 + 3 + 0.5 = 6.5, |b| = 0.01
+    // confidence = |6.5 - 0.01| / (6.5 + 0.01) ~= 0.9969 (>= 0.99)
+    let scores = vec![f64::NAN, 1.0, 2.0, 3.0, 0.5, -0.01];
+    let (polarity, confidence) =
+        LoopPolarity::from_runtime_scores(&scores).expect("mixed but valid scores");
+    assert_eq!(polarity, LoopPolarity::MostlyReinforcing);
+    assert!(
+        (POLARITY_CONFIDENCE_THRESHOLD..1.0).contains(&confidence),
+        "confidence {confidence} should sit between the threshold and 1.0 for a mostly-R loop"
+    );
+}
+
+#[test]
+fn test_loop_polarity_from_runtime_scores_mostly_balancing() {
+    // Mostly negative scores with a tiny positive blip -> MostlyBalancing.
+    let scores = vec![f64::NAN, -1.0, -2.0, -3.0, -0.5, 0.01];
+    let (polarity, confidence) =
+        LoopPolarity::from_runtime_scores(&scores).expect("mixed but valid scores");
+    assert_eq!(polarity, LoopPolarity::MostlyBalancing);
+    assert!(
+        (POLARITY_CONFIDENCE_THRESHOLD..1.0).contains(&confidence),
+        "confidence {confidence} should sit between the threshold and 1.0 for a mostly-B loop"
+    );
 }
 
 #[test]
 fn test_loop_polarity_from_runtime_scores_undetermined() {
-    // Mix of positive and negative scores -> Undetermined
-    let scores = vec![f64::NAN, 1.0, -2.0, 3.0, -0.5];
-    let polarity = LoopPolarity::from_runtime_scores(&scores);
-    assert_eq!(polarity, Some(LoopPolarity::Undetermined));
+    // Symmetric mix of positive and negative scores -> Undetermined,
+    // confidence near 0.0
+    let scores = vec![f64::NAN, 1.0, -1.0, 2.0, -2.0, 3.0, -3.0];
+    let (polarity, confidence) =
+        LoopPolarity::from_runtime_scores(&scores).expect("mixed but valid scores");
+    assert_eq!(polarity, LoopPolarity::Undetermined);
+    assert!(
+        confidence < 1e-9,
+        "symmetric mix should produce confidence near zero, got {confidence}"
+    );
+}
+
+#[test]
+fn test_loop_polarity_from_runtime_scores_dominant_below_threshold_undetermined() {
+    // Positive dominates but only weakly -- confidence below 0.99 should
+    // fall into Undetermined, not MostlyReinforcing.
+    // r = 6, |b| = 4 -> confidence = 0.2
+    let scores = vec![f64::NAN, 6.0, -4.0];
+    let (polarity, confidence) =
+        LoopPolarity::from_runtime_scores(&scores).expect("mixed but valid scores");
+    assert_eq!(polarity, LoopPolarity::Undetermined);
+    assert!(
+        confidence < POLARITY_CONFIDENCE_THRESHOLD,
+        "confidence {confidence} below threshold should classify as Undetermined"
+    );
 }
 
 #[test]
 fn test_loop_polarity_from_runtime_scores_empty() {
     // Empty scores -> None
     let scores: Vec<f64> = vec![];
-    let polarity = LoopPolarity::from_runtime_scores(&scores);
-    assert_eq!(polarity, None);
+    let result = LoopPolarity::from_runtime_scores(&scores);
+    assert_eq!(result, None);
 }
 
 #[test]
 fn test_loop_polarity_from_runtime_scores_all_nan() {
     // All NaN scores -> None
     let scores = vec![f64::NAN, f64::NAN, f64::NAN];
-    let polarity = LoopPolarity::from_runtime_scores(&scores);
-    assert_eq!(polarity, None);
+    let result = LoopPolarity::from_runtime_scores(&scores);
+    assert_eq!(result, None);
 }
 
 #[test]
 fn test_loop_polarity_from_runtime_scores_all_zero() {
     // All zero scores (after filtering NaN) -> None
     let scores = vec![f64::NAN, 0.0, 0.0, 0.0];
-    let polarity = LoopPolarity::from_runtime_scores(&scores);
-    assert_eq!(polarity, None);
+    let result = LoopPolarity::from_runtime_scores(&scores);
+    assert_eq!(result, None);
+}
+
+#[test]
+fn test_loop_polarity_from_runtime_scores_all_infinite() {
+    // Pure +Inf / -Inf inputs should be filtered out alongside NaN/zero,
+    // leaving no valid scores.  Without the `is_finite()` filter this
+    // produced `Inf / Inf = NaN` confidence and a spurious classification.
+    let scores = vec![f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY];
+    let result = LoopPolarity::from_runtime_scores(&scores);
+    assert_eq!(result, None);
+}
+
+#[test]
+fn test_loop_polarity_from_runtime_scores_inf_with_finite_reinforcing() {
+    // A stray Inf must not contaminate `positive_sum`; the finite
+    // positive entries should still produce a confident Reinforcing
+    // classification.
+    let scores = vec![f64::INFINITY, 1.0, 2.0, 3.0];
+    let result = LoopPolarity::from_runtime_scores(&scores);
+    assert_eq!(
+        result,
+        Some((LoopPolarity::Reinforcing, 1.0)),
+        "Inf must be filtered out so the finite positives drive classification"
+    );
+}
+
+#[test]
+fn test_loop_polarity_from_runtime_scores_neg_inf_with_finite_balancing() {
+    // Symmetric coverage: a stray -Inf must not contaminate
+    // `negative_sum_abs`; the finite negative entries should still
+    // produce a confident Balancing classification.
+    let scores = vec![f64::NEG_INFINITY, -1.0, -2.0, -3.0];
+    let result = LoopPolarity::from_runtime_scores(&scores);
+    assert_eq!(
+        result,
+        Some((LoopPolarity::Balancing, 1.0)),
+        "-Inf must be filtered out so the finite negatives drive classification"
+    );
 }
 
 #[test]
 fn test_loop_polarity_abbreviation() {
     assert_eq!(LoopPolarity::Reinforcing.abbreviation(), "R");
     assert_eq!(LoopPolarity::Balancing.abbreviation(), "B");
+    assert_eq!(LoopPolarity::MostlyReinforcing.abbreviation(), "Rux");
+    assert_eq!(LoopPolarity::MostlyBalancing.abbreviation(), "Bux");
     assert_eq!(LoopPolarity::Undetermined.abbreviation(), "U");
 }
 

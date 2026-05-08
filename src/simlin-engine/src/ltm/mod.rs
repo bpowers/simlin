@@ -41,7 +41,9 @@ mod types;
 // ltm_augment, ltm_finding, json_sdai, etc.) compile unchanged.
 pub use graph::CausalGraph;
 pub use partitions::CyclePartitions;
-pub use types::{Link, LinkPolarity, Loop, LoopPolarity, TruncatedByBudget};
+pub use types::{
+    Link, LinkPolarity, Loop, LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD, TruncatedByBudget,
+};
 
 // Crate-internal helpers used from sibling modules in `simlin-engine`.
 pub(crate) use graph::assign_loop_ids;
