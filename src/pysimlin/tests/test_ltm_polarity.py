@@ -10,7 +10,7 @@ import math
 import numpy as np
 
 from simlin import Project
-from simlin.analysis import LoopPolarity
+from simlin.analysis import POLARITY_CONFIDENCE_THRESHOLD, LoopPolarity
 
 
 class TestLtmReinforcingLoop:
@@ -183,10 +183,17 @@ class TestLtmUndeterminedPolarity:
     """Test the from_runtime_scores classification method."""
 
     def test_from_runtime_scores_undetermined(self) -> None:
-        """Test that from_runtime_scores correctly classifies mixed-sign scores."""
-        # Create an array with both positive and negative values
+        """Mixed-sign scores below the confidence threshold are UNDETERMINED."""
+        # |6 - 3| / (6 + 3) = 0.333 -> below threshold -> UNDETERMINED.
         mixed_scores = np.array([float("nan"), 1.0, 2.0, -1.0, -2.0, 3.0])
         polarity = LoopPolarity.from_runtime_scores(mixed_scores)
+        assert polarity == LoopPolarity.UNDETERMINED
+
+    def test_from_runtime_scores_undetermined_symmetric(self) -> None:
+        """Equal-magnitude positive and negative scores are UNDETERMINED."""
+        # |3 - 3| / (3 + 3) = 0.0 -> well below threshold.
+        symmetric_scores = np.array([1.0, 2.0, -1.0, -2.0])
+        polarity = LoopPolarity.from_runtime_scores(symmetric_scores)
         assert polarity == LoopPolarity.UNDETERMINED
 
     def test_from_runtime_scores_reinforcing(self) -> None:
@@ -201,6 +208,29 @@ class TestLtmUndeterminedPolarity:
         polarity = LoopPolarity.from_runtime_scores(negative_scores)
         assert polarity == LoopPolarity.BALANCING
 
+    def test_from_runtime_scores_mostly_reinforcing(self) -> None:
+        """Mostly-positive scores with a tiny negative dip cross the threshold."""
+        # |6.5 - 0.02| / (6.5 + 0.02) ~= 0.9939 -> above 0.99 threshold.
+        scores = np.array([1.0, 1.5, 2.0, 0.5, -0.02, 1.5])
+        polarity = LoopPolarity.from_runtime_scores(scores)
+        assert polarity == LoopPolarity.MOSTLY_REINFORCING
+
+    def test_from_runtime_scores_mostly_balancing(self) -> None:
+        """Mostly-negative scores with a tiny positive blip cross the threshold."""
+        # |0.02 - 6.5| / (0.02 + 6.5) ~= 0.9939 -> above 0.99 threshold,
+        # negative dominant -> MOSTLY_BALANCING.
+        scores = np.array([-1.0, -1.5, -2.0, -0.5, 0.02, -1.5])
+        polarity = LoopPolarity.from_runtime_scores(scores)
+        assert polarity == LoopPolarity.MOSTLY_BALANCING
+
+    def test_from_runtime_scores_weakly_dominant_undetermined(self) -> None:
+        """One-side dominance below the threshold stays UNDETERMINED."""
+        # |3 - 1| / (3 + 1) = 0.5 -> below 0.99 threshold despite the
+        # positive sum exceeding the negative sum.
+        scores = np.array([3.0, -1.0])
+        polarity = LoopPolarity.from_runtime_scores(scores)
+        assert polarity == LoopPolarity.UNDETERMINED
+
     def test_from_runtime_scores_all_nan(self) -> None:
         """Test that from_runtime_scores returns None for all-NaN scores."""
         nan_scores = np.array([float("nan"), float("nan"), float("nan")])
@@ -213,6 +243,10 @@ class TestLtmUndeterminedPolarity:
         polarity = LoopPolarity.from_runtime_scores(zero_scores)
         assert polarity is None
 
+    def test_polarity_confidence_threshold_value(self) -> None:
+        """The Python-side threshold must match the Rust constant."""
+        assert POLARITY_CONFIDENCE_THRESHOLD == 0.99
+
 
 class TestLoopPolarityEnum:
     """Test the LoopPolarity enum."""
@@ -222,12 +256,20 @@ class TestLoopPolarityEnum:
         assert str(LoopPolarity.REINFORCING) == "R"
         assert str(LoopPolarity.BALANCING) == "B"
         assert str(LoopPolarity.UNDETERMINED) == "U"
+        assert str(LoopPolarity.MOSTLY_REINFORCING) == "Rux"
+        assert str(LoopPolarity.MOSTLY_BALANCING) == "Bux"
 
     def test_polarity_values(self) -> None:
-        """Test that polarity integer values match FFI."""
+        """Test that polarity integer values match FFI for R/B/U.
+
+        MOSTLY_* are Python-side variants only; the C FFI coalesces them
+        onto REINFORCING/BALANCING.
+        """
         assert LoopPolarity.REINFORCING == 0
         assert LoopPolarity.BALANCING == 1
         assert LoopPolarity.UNDETERMINED == 2
+        assert LoopPolarity.MOSTLY_REINFORCING == 3
+        assert LoopPolarity.MOSTLY_BALANCING == 4
 
 
 class TestStructuralPolarityClassification:

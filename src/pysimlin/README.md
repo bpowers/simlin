@@ -488,10 +488,11 @@ Loops are classified by polarity, which indicates how they affect the system:
 
 Loop IDs use the polarity as a prefix (e.g., "R1", "B2", "U3").
 
-When you run a simulation, pysimlin computes actual loop scores at each timestep. The polarity is classified based on these runtime values:
-- If loop scores are consistently positive throughout: Reinforcing
-- If loop scores are consistently negative throughout: Balancing
-- If loop scores change sign during simulation: Undetermined (occurs in nonlinear models where link effects depend on variable values)
+When you run a simulation, pysimlin computes actual loop scores at each timestep. The polarity is classified based on these runtime values using the Schoenberg & Eberlein (2020) polarity-confidence ratio `|r - |b|| / (r + |b|)`:
+- All loop scores positive: Reinforcing
+- All loop scores negative: Balancing
+- Mixed-sign with one polarity dominating at confidence >= 0.99: Mostly Reinforcing (Rux) or Mostly Balancing (Bux)
+- Mixed-sign with no clear dominance: Undetermined
 
 ```python
 from simlin import LoopPolarity
@@ -502,6 +503,8 @@ run = model.run()
 reinforcing = [l for l in run.loops if l.polarity == LoopPolarity.REINFORCING]
 balancing = [l for l in run.loops if l.polarity == LoopPolarity.BALANCING]
 undetermined = [l for l in run.loops if l.polarity == LoopPolarity.UNDETERMINED]
+mostly_r = [l for l in run.loops if l.polarity == LoopPolarity.MOSTLY_REINFORCING]
+mostly_b = [l for l in run.loops if l.polarity == LoopPolarity.MOSTLY_BALANCING]
 ```
 
 ### Loops That Matter (LTM)

@@ -314,13 +314,16 @@ class Run:
             loop_scores.sort(key=lambda x: abs(x[2]), reverse=True)
 
             # Group loops by effective polarity at this timestep.
+            # MOSTLY_* loops are bucketed with their dominant pure cousin
+            # (Rux -> reinforcing, Bux -> balancing) because the dominant
+            # polarity matches the loop's behavior across most of the run.
             # For UNDETERMINED loops, derive polarity from the score sign.
             reinforcing_loops = []
             balancing_loops = []
             for lid, pol, score in loop_scores:
-                if pol == LoopPolarity.REINFORCING:
+                if pol == LoopPolarity.REINFORCING or pol == LoopPolarity.MOSTLY_REINFORCING:
                     reinforcing_loops.append((lid, score))
-                elif pol == LoopPolarity.BALANCING:
+                elif pol == LoopPolarity.BALANCING or pol == LoopPolarity.MOSTLY_BALANCING:
                     balancing_loops.append((lid, score))
                 elif pol == LoopPolarity.UNDETERMINED:
                     # Derive polarity from score sign at this timestep

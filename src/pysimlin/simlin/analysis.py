@@ -24,24 +24,49 @@ class LinkPolarity(IntEnum):
             return "?"
 
 
+# Threshold above which a loop with mixed-sign runtime scores is classified
+# as MOSTLY_REINFORCING / MOSTLY_BALANCING (Rux / Bux) instead of UNDETERMINED.
+# Mirrors `POLARITY_CONFIDENCE_THRESHOLD` in `src/simlin-engine/src/ltm.rs`;
+# both implementations use the `>= 0.99` form of the cutoff described in
+# Schoenberg & Eberlein (2020) "Seamlessly Integrating LTM" / Schoenberg
+# (2020) thesis section 7.6 (the cited papers describe it as "above 0.99").
+POLARITY_CONFIDENCE_THRESHOLD: float = 0.99
+
+
 class LoopPolarity(IntEnum):
     """Polarity of a feedback loop.
 
     The polarity indicates how the loop affects the system:
     - REINFORCING (R): Loop amplifies changes (positive loop score)
     - BALANCING (B): Loop counteracts changes (negative loop score)
-    - UNDETERMINED (U): Loop polarity cannot be determined or changes during simulation
+    - MOSTLY_REINFORCING (Rux): Mixed-sign runtime scores but predominantly
+      reinforcing (confidence at or above POLARITY_CONFIDENCE_THRESHOLD)
+    - MOSTLY_BALANCING (Bux): Mixed-sign runtime scores but predominantly
+      balancing (confidence at or above POLARITY_CONFIDENCE_THRESHOLD)
+    - UNDETERMINED (U): Loop polarity cannot be determined; mixed-sign
+      runtime scores with neither polarity dominant
+
+    Integer values 0-2 mirror the C FFI; values 3 and 4 are Python-only
+    classifications produced by `from_runtime_scores` (the FFI does not
+    surface a polarity-confidence ratio yet, so structural loops never
+    arrive as MOSTLY_*).
     """
 
     REINFORCING = 0
     BALANCING = 1
     UNDETERMINED = 2
+    MOSTLY_REINFORCING = 3
+    MOSTLY_BALANCING = 4
 
     def __str__(self) -> str:
         if self == LoopPolarity.REINFORCING:
             return "R"
         elif self == LoopPolarity.BALANCING:
             return "B"
+        elif self == LoopPolarity.MOSTLY_REINFORCING:
+            return "Rux"
+        elif self == LoopPolarity.MOSTLY_BALANCING:
+            return "Bux"
         else:
             return "U"
 
@@ -49,11 +74,18 @@ class LoopPolarity(IntEnum):
     def from_runtime_scores(cls, scores: "NDArray[np.float64]") -> Optional["LoopPolarity"]:
         """Classify loop polarity based on actual runtime loop score values.
 
-        This function examines the loop score values from a simulation run
-        and determines the appropriate polarity:
-        - All valid (non-NaN, non-zero) scores positive -> Reinforcing
-        - All valid scores negative -> Balancing
-        - Mix of positive and negative -> Undetermined
+        Mirrors `LoopPolarity::from_runtime_scores` in
+        `src/simlin-engine/src/ltm.rs`.  The polarity confidence
+        ``|r - |b|| / (r + |b|)`` (Schoenberg & Eberlein, 2020) drives
+        the classification:
+
+        - All valid (non-NaN, non-zero) scores positive -> REINFORCING
+        - All valid scores negative -> BALANCING
+        - Mixed signs and confidence at or above
+          POLARITY_CONFIDENCE_THRESHOLD -> MOSTLY_REINFORCING /
+          MOSTLY_BALANCING based on which side dominates the magnitude
+          tally
+        - Mixed signs and confidence below the threshold -> UNDETERMINED
         - No valid scores -> returns None
 
         Args:
@@ -68,17 +100,34 @@ class LoopPolarity(IntEnum):
         if len(valid_scores) == 0:
             return None
 
-        has_positive = np.any(valid_scores > 0)
-        has_negative = np.any(valid_scores < 0)
+        positive_sum = float(valid_scores[valid_scores > 0].sum())
+        negative_sum_abs = float(-valid_scores[valid_scores < 0].sum())
+
+        denom = positive_sum + negative_sum_abs
+        if denom <= 0.0:
+            # Mathematically unreachable: at least one filtered-in score
+            # is non-zero, so the magnitude sum is strictly positive.
+            # Guard anyway so a hostile array of subnormals can't surface
+            # a divide-by-zero NaN.
+            return None
+
+        confidence = abs(positive_sum - negative_sum_abs) / denom
+
+        has_positive = positive_sum > 0.0
+        has_negative = negative_sum_abs > 0.0
 
         if has_positive and not has_negative:
             return cls.REINFORCING
-        elif has_negative and not has_positive:
+        if has_negative and not has_positive:
             return cls.BALANCING
-        elif has_positive and has_negative:
-            return cls.UNDETERMINED
-        else:
-            return None  # All zeros after filtering
+        if confidence >= POLARITY_CONFIDENCE_THRESHOLD:
+            # Equal-magnitude r and |b| would yield confidence 0, which
+            # cannot pass the threshold check for any threshold > 0, so
+            # the dominant side is always strictly larger here.
+            if positive_sum > negative_sum_abs:
+                return cls.MOSTLY_REINFORCING
+            return cls.MOSTLY_BALANCING
+        return cls.UNDETERMINED
 
 
 @dataclass
@@ -131,7 +180,10 @@ class Loop:
     """Variables in this loop"""
 
     polarity: LoopPolarity
-    """Loop polarity: REINFORCING (R), BALANCING (B), or UNDETERMINED (U)"""
+    """Loop polarity: REINFORCING (R), BALANCING (B), MOSTLY_REINFORCING (Rux),
+    MOSTLY_BALANCING (Bux), or UNDETERMINED (U). MOSTLY_* values only arise
+    from `LoopPolarity.from_runtime_scores`; the C FFI surface coalesces them
+    onto REINFORCING/BALANCING because it has no polarity-confidence field."""
 
     behavior_time_series: NDArray[np.float64] | None = None
     """
