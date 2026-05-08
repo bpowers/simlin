@@ -48,7 +48,8 @@ pub(super) struct TruncatedByBudgetInternal;
 /// Result bundle from the shared indexed-circuit enumerator: the
 /// IndexedGraph owns the node table (so callers can map indices back to
 /// `Ident<Canonical>` on demand), and `circuits` is already deduplicated
-/// by sorted-node-set.
+/// by canonical edge-sequence rotation (see
+/// [`super::canonical_rotation`]).
 pub(super) struct IndexedCircuits {
     pub(super) graph: IndexedGraph,
     pub(super) circuits: Vec<Vec<u32>>,
@@ -102,20 +103,25 @@ struct JohnsonState {
     b_list: Vec<Vec<u32>>,
     path: Vec<u32>,
     circuits: Vec<Vec<u32>>,
-    /// 64-bit rapidhash fingerprints of already-emitted circuits (by
-    /// sorted node-index set).  Lets us reject duplicate node-set
-    /// circuits during enumeration so peak memory stays proportional to
-    /// unique output, not to the number of raw DFS emissions.
+    /// 64-bit rapidhash fingerprints of already-emitted circuits, keyed
+    /// on the **canonical edge-sequence rotation** of each emitted
+    /// circuit (see [`super::canonical_rotation`]).  Lets us reject
+    /// duplicate rotations of the same directed cycle during
+    /// enumeration so peak memory stays proportional to unique output,
+    /// not to the number of raw DFS emissions.
     ///
-    /// Shared across all DFS starts within a single SCC.  Safe to
-    /// share because Johnson's emits each cycle from its lex-smallest
-    /// start (enforced by the `w < start` gate in `johnson_circuit`),
-    /// so cycles surfaced from different starts already have disjoint
-    /// node sets; the deduplication matters only *within* a single
-    /// start, where a multidigraph SCC can emit multiple rotations
-    /// over the same node set.  Different SCCs' node sets are disjoint
-    /// outright; `JohnsonState` is rebuilt per SCC, so `seen` does not
-    /// need manual clearing between SCCs.
+    /// Shared across all DFS starts within a single SCC.  Safe to share
+    /// because Johnson's emits each cycle from its lex-smallest start
+    /// (enforced by the `w < start` gate in `johnson_circuit`), so
+    /// cycles surfaced from different starts already have disjoint node
+    /// sets.  Within a single start, distinct directed cycles over the
+    /// same node set (e.g. `A -> B -> C -> A` vs `A -> C -> B -> A` in
+    /// a multidigraph) canonicalize to different rotations and are
+    /// kept as separate loops.  The dedup catches only true rotational
+    /// duplicates -- the rare case where a different DFS branch
+    /// re-discovers the same directed cycle.  Different SCCs' node sets
+    /// are disjoint outright; `JohnsonState` is rebuilt per SCC, so
+    /// `seen` does not need manual clearing between SCCs.
     seen: HashSet<u64>,
     /// Scratch buffer for hashing: reused rather than allocated per-call.
     hash_scratch: Vec<u32>,
@@ -142,8 +148,9 @@ const CIRCUIT_HASH_SEED: u64 = 0xabcdef0123456789;
 /// FNV-1a's ~10 GiB/s, a 3.5x throughput improvement per-hash.  On the
 /// wrld3 `ltm_mem_bench` the end-to-end enumeration speedup is ~4%
 /// (hashing is a small but non-negligible share of total time; the
-/// rest is Johnson's DFS, Vec/HashSet bookkeeping, and sort_unstable
-/// on the scratch buffer).  See `benches/rapidhash_bench.rs`.
+/// rest is Johnson's DFS, Vec/HashSet bookkeeping, and the
+/// canonical-rotation pass via [`super::canonical_rotation`]).  See
+/// `benches/rapidhash_bench.rs`.
 ///
 /// rapidhash is preferred here for correctness as much as speed:
 ///   * It is deterministic given a fixed seed and secret, which matters
@@ -165,8 +172,15 @@ const CIRCUIT_HASH_SEED: u64 = 0xabcdef0123456789;
 ///     promoting to 128-bit fingerprints if a future model regularly
 ///     enumerates past a few hundred thousand distinct circuits.
 ///
-/// Callers pass an already-sorted slice (Johnson's algorithm emits
-/// rotations of the same cycle; sorting makes those collide).
+/// Callers pass the **canonical edge-sequence rotation** of a circuit
+/// (see [`super::canonical_rotation`]).  Two distinct directed cycles
+/// over the same node set canonicalize to different sequences, so this
+/// fingerprint distinguishes them -- which is the elementary-circuit
+/// identity used by the LTM literature.  Older code keyed a sorted
+/// node-set into this hash; that buggy variant collapsed `A -> B -> C
+/// -> A` and `A -> C -> B -> A` into one loop and is replaced by the
+/// canonical rotation.  See issue #308 /
+/// `docs/design-plans/2026-05-06-ltm-308-canonical-cycle-dedup.md`.
 #[inline]
 fn hash_u32_slice(vals: &[u32]) -> u64 {
     crate::rapidhash::hash_u32_slice(vals, CIRCUIT_HASH_SEED)
@@ -198,20 +212,21 @@ impl IndexedGraph {
         // Successor lists use first-seen insertion order to dedup
         // duplicate edges that `CausalGraph::from_model` can produce
         // (e.g. a flow that is both an inflow and an outflow of the
-        // same stock).  We deliberately do NOT sort: on multidigraph
-        // inputs (multiple directed cycles sharing a node set, e.g.
-        // K_n with all edges bidirectional) the DFS visit order
-        // determines which rotation survives the fingerprint dedup in
-        // `johnson_circuit`, and we choose not to pin a canonical
-        // "lex-smallest rotation" in production code -- pinning that
-        // invariant would help only tests, not correctness or salsa
-        // cache stability.  Within a single process HashMap iteration
-        // is stable (same hasher seed), so repeat calls on the same
-        // `CausalGraph` yield identical output; across processes the
-        // multidigraph rotation is free to vary.  Downstream consumers
+        // same stock).  We deliberately do NOT sort: distinct directed
+        // cycles over the same node set (e.g. `A -> B -> C -> A` vs
+        // `A -> C -> B -> A` on a multidigraph) canonicalize to
+        // different rotations and are retained as separate loops by
+        // the dedup in `johnson_circuit`.  The successor visit order
+        // controls which order rotations of the **same** directed
+        // cycle are surfaced, but only one survives the canonical-
+        // rotation dedup either way.  Within a single process HashMap
+        // iteration is stable (same hasher seed), so repeat calls on
+        // the same `CausalGraph` yield identical output; across
+        // processes the order in which rotations of one directed
+        // cycle are observed may vary, but the canonical rotation
+        // emitted is always the same.  Downstream consumers
         // (`circuit_to_links`, polarity analysis, stock enrichment)
-        // operate on whichever rotation is emitted and are robust to
-        // the choice.
+        // operate on the surviving rotation.
         for (from, tos) in edges {
             let fi = node_to_idx[from] as usize;
             let mut seen: HashSet<u32> = HashSet::new();
@@ -498,26 +513,47 @@ impl IndexedGraph {
                 //
                 // Multidigraph graphs (e.g. arms-race 3-cliques, K_n
                 // bidirectional cliques) produce multiple distinct
-                // directed cycles over the same node set; LTM semantics
-                // fold those into a single loop.  Dedup here rather than
-                // post-hoc so peak memory stays proportional to unique
-                // output.
+                // directed cycles over the same node set.  Dedup keys
+                // off the canonical edge-sequence rotation (see
+                // [`super::canonical_rotation`]) so that opposite-
+                // direction cycles like `A -> B -> C -> A` and
+                // `A -> C -> B -> A` are kept as separate loops --
+                // matching the elementary-circuit identity used in the
+                // LTM literature.  Issue #308 / `docs/design-plans/
+                // 2026-05-06-ltm-308-canonical-cycle-dedup.md`.
+                //
+                // The same Johnson `w < start` invariant means each
+                // raw emission already starts at the cycle's
+                // index-smallest node, but that's not enough on its own
+                // for a multidigraph: two distinct cycles can share the
+                // same start and the same node set.  Computing the
+                // canonical rotation here normalizes the rare case
+                // where a different DFS branch surfaces a cycle's
+                // alternate ordering before this one.  Dedup happens
+                // here rather than post-hoc so peak memory stays
+                // proportional to unique output.
                 //
                 // The budget is charged on every RAW cycle discovery,
                 // not just unique emissions: the cap exists to bound
-                // DFS work, and on a dense multidigraph the raw cycle
-                // count can far exceed the unique-node-set count (K9
-                // has 125,664 elementary directed cycles but only 502
-                // unique node sets).  `found_cycle = true` fires
-                // whether or not the circuit survives dedup so the
-                // blocked/B[] unblock machinery behaves correctly.
+                // DFS work.  `found_cycle = true` fires whether or not
+                // the circuit survives dedup so the blocked/B[]
+                // unblock machinery behaves correctly.
                 if *budget == 0 {
                     return Err(TruncatedByBudgetInternal);
                 }
                 *budget -= 1;
+                // Compute the canonical rotation start and write the
+                // rotation halves directly into the reusable
+                // `hash_scratch` buffer.  Routing through the
+                // allocating `canonical_rotation` wrapper would create
+                // a throwaway `Vec<u32>` per emission, costly at WRLD3
+                // scale (~1.86M raw cycles on the element-level
+                // enumeration).
+                let path = &state.path;
+                let k = super::lex_smallest_rotation_start(path);
                 state.hash_scratch.clear();
-                state.hash_scratch.extend_from_slice(&state.path);
-                state.hash_scratch.sort_unstable();
+                state.hash_scratch.extend_from_slice(&path[k..]);
+                state.hash_scratch.extend_from_slice(&path[..k]);
                 let fp = hash_u32_slice(&state.hash_scratch);
                 if state.seen.insert(fp) {
                     state.circuits.push(state.path.clone());
@@ -656,14 +692,17 @@ impl IndexedGraph {
     }
 
     /// Debug-only helper: confirm the invariant that
-    /// `enumerate_circuits_in_scc` emits each node-set at most once per
-    /// SCC.  Used by `debug_assert!` callers; release builds compile
-    /// the call out via `debug_assert!`'s no-op expansion.
-    pub(super) fn has_no_duplicate_node_sets(circuits: &[Vec<u32>]) -> bool {
+    /// `enumerate_circuits_in_scc` emits each canonical edge-sequence
+    /// rotation at most once per SCC.  Distinct directed cycles over
+    /// the same node set canonicalize to different rotations and are
+    /// thus retained -- this check guards only against accidental
+    /// re-emission of the **same** directed cycle.  Used by
+    /// `debug_assert!` callers; release builds compile the call out
+    /// via `debug_assert!`'s no-op expansion.
+    pub(super) fn has_no_duplicate_canonical_rotations(circuits: &[Vec<u32>]) -> bool {
         let mut seen: HashSet<Vec<u32>> = HashSet::with_capacity(circuits.len());
         for c in circuits {
-            let mut key = c.clone();
-            key.sort_unstable();
+            let key = super::canonical_rotation(c);
             if !seen.insert(key) {
                 return false;
             }

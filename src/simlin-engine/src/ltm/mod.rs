@@ -111,5 +111,91 @@ pub fn detect_loops(model: &ModelStage1, project: &Project) -> Result<Vec<Loop>>
         .expect("usize::MAX budget cannot be exhausted by Johnson's enumeration"))
 }
 
+/// Return the start index of the **canonical cyclic rotation** of `s`.
+///
+/// `s` is treated as a closed cycle and the returned index `k` denotes
+/// the rotation `s[k], s[k+1 % n], ..., s[k-1 % n]` whose full ordered
+/// element sequence is lex-smallest among all `n` rotations.  Element-
+/// wise comparison proceeds left-to-right; the first differing position
+/// decides.  In the elementary-cycle setting (no repeated nodes, which
+/// Johnson's and the discovery DFS both enforce) the lex-smallest
+/// **starting element** alone determines the canonical rotation; the
+/// full-sequence comparison keeps the helper correct on hypothetical
+/// inputs with equal starting elements.
+///
+/// Returns 0 for empty or single-element input.
+///
+/// ## Complexity
+///
+/// Worst-case O(n^2).  We deliberately keep the simple cyclic
+/// comparison loop instead of an O(n) algorithm such as Booth (1980)
+/// or Duval/Lyndon factorization: empirical timing on the WRLD3 LTM
+/// element-level enumeration (~1.86M raw cycles, mean cycle length
+/// ~47, alphabet of distinct `u32` indices) shows the simple loop is
+/// 10-15% faster end-to-end because the inner comparison almost
+/// always exits at the first differing element when the cycle uses
+/// distinct nodes -- so the algorithm runs in roughly O(n) on real
+/// inputs while paying near-zero per-element overhead.  The O(n)
+/// algorithms incur higher constant factors (failure-function or
+/// equivalent bookkeeping per position) that dominate for the small
+/// `n` permitted by [`MAX_LTM_SCC_NODES`] (50).  See PR #494 for the
+/// timing data.
+pub(crate) fn lex_smallest_rotation_start<T: Ord>(s: &[T]) -> usize {
+    let n = s.len();
+    if n <= 1 {
+        return 0;
+    }
+    let mut best = 0usize;
+    for candidate in 1..n {
+        // Compare the rotation starting at `candidate` against the
+        // rotation starting at `best`, position by position.
+        for i in 0..n {
+            let cur = &s[(best + i) % n];
+            let cand = &s[(candidate + i) % n];
+            match cand.cmp(cur) {
+                std::cmp::Ordering::Less => {
+                    best = candidate;
+                    break;
+                }
+                std::cmp::Ordering::Greater => break,
+                std::cmp::Ordering::Equal => continue,
+            }
+        }
+    }
+    best
+}
+
+/// Return the **canonical cyclic rotation** of `circuit`.
+///
+/// The input is treated as a closed elementary cycle: position `i`
+/// edges to position `(i + 1) % len`.  Two slices that represent the
+/// same directed cycle but at different starting positions
+/// (e.g. `[A, B, C]` and `[B, C, A]`) canonicalize to the same output.
+/// Two distinct directed cycles over the same node set
+/// (e.g. `[A, B, C]` representing `A -> B -> C -> A` and `[A, C, B]`
+/// representing `A -> C -> B -> A`) canonicalize to **different**
+/// outputs and are thus retained as distinct loops by callers that
+/// dedup on this key.
+///
+/// Convenience wrapper around [`lex_smallest_rotation_start`] that
+/// allocates a fresh `Vec`.  The hot Johnson enumerator in
+/// `IndexedGraph::johnson_circuit` calls
+/// [`lex_smallest_rotation_start`] directly so it can write the
+/// rotation halves into a reusable buffer, avoiding the per-emission
+/// allocation this wrapper performs.
+///
+/// Empty input returns empty.
+pub(crate) fn canonical_rotation<T: Ord + Clone>(circuit: &[T]) -> Vec<T> {
+    let n = circuit.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let start = lex_smallest_rotation_start(circuit);
+    let mut out = Vec::with_capacity(n);
+    out.extend_from_slice(&circuit[start..]);
+    out.extend_from_slice(&circuit[..start]);
+    out
+}
+
 #[cfg(test)]
 mod tests;

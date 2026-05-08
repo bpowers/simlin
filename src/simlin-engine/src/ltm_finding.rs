@@ -237,7 +237,15 @@ impl SearchGraph {
         stack.pop();
     }
 
-    /// Add loop to results if it hasn't been seen before (deduplicate by node set).
+    /// Add loop to results if it hasn't been seen before, deduplicated
+    /// by **canonical edge-sequence rotation** (see
+    /// `crate::ltm::canonical_rotation`).  Two distinct directed cycles
+    /// over the same node set (e.g. `A -> B -> C -> A` and
+    /// `A -> C -> B -> A` on a multidigraph) canonicalize to different
+    /// rotations and are correctly retained as separate loops --
+    /// matching the elementary-circuit identity used by the LTM
+    /// literature and the exhaustive enumerator in `ltm/indexed.rs`.
+    /// Issue #308.
     fn add_loop_if_unique(
         stack: &[Ident<Canonical>],
         found_loops: &mut Vec<Vec<Ident<Canonical>>>,
@@ -247,11 +255,10 @@ impl SearchGraph {
             return;
         }
 
-        // Create a sorted node set as the deduplication key
-        let mut node_set: Vec<String> = stack.iter().map(|id| id.as_str().to_string()).collect();
-        node_set.sort();
+        let path: Vec<String> = stack.iter().map(|id| id.as_str().to_string()).collect();
+        let key = crate::ltm::canonical_rotation(&path);
 
-        if seen_sets.insert(node_set) {
+        if seen_sets.insert(key) {
             found_loops.push(stack.to_vec());
         }
     }
@@ -693,7 +700,10 @@ pub fn discover_loops_with_graph(
         return Ok(Vec::new());
     }
 
-    // Collect all unique loop paths across all timesteps
+    // Collect all unique loop paths across all timesteps, dedup-keyed
+    // on the canonical edge-sequence rotation so opposite-direction
+    // cycles over the same node set are kept as distinct loops (see
+    // `crate::ltm::canonical_rotation` and issue #308).
     let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
     let mut seen_sets: HashSet<Vec<String>> = HashSet::new();
 
@@ -705,10 +715,10 @@ pub fn discover_loops_with_graph(
         let paths = graph.find_strongest_loops();
 
         for path in paths {
-            let mut node_set: Vec<String> = path.iter().map(|id| id.as_str().to_string()).collect();
-            node_set.sort();
+            let path_strings: Vec<String> = path.iter().map(|id| id.as_str().to_string()).collect();
+            let key = crate::ltm::canonical_rotation(&path_strings);
 
-            if seen_sets.insert(node_set) {
+            if seen_sets.insert(key) {
                 all_paths.push(path);
             }
         }
@@ -1151,6 +1161,50 @@ mod tests {
 
         let loop_nodes = sorted_node_set(&loops[0]);
         assert_eq!(loop_nodes, vec!["a", "b"]);
+    }
+
+    /// Issue #308 regression test for `add_loop_if_unique`:
+    /// the discovery DFS must keep both directions of a directed
+    /// 3-cycle as distinct loops when they share a node set.
+    ///
+    /// We exercise the helper directly because constructing a
+    /// `SearchGraph` whose strongest-path DFS naturally surfaces both
+    /// directions of a 3-cycle is fragile (the heuristic prunes
+    /// alternate paths via `best_score`).  Calling
+    /// `add_loop_if_unique` with the two paths is a precise check
+    /// that the dedup key distinguishes them.
+    #[test]
+    fn add_loop_if_unique_keeps_distinct_directed_three_cycles() {
+        let mut found_loops: Vec<Vec<Ident<Canonical>>> = Vec::new();
+        let mut seen: HashSet<Vec<String>> = HashSet::new();
+
+        let forward: Vec<Ident<Canonical>> =
+            vec![Ident::new("a"), Ident::new("b"), Ident::new("c")];
+        let reverse: Vec<Ident<Canonical>> =
+            vec![Ident::new("a"), Ident::new("c"), Ident::new("b")];
+
+        SearchGraph::add_loop_if_unique(&forward, &mut found_loops, &mut seen);
+        SearchGraph::add_loop_if_unique(&reverse, &mut found_loops, &mut seen);
+
+        assert_eq!(
+            found_loops.len(),
+            2,
+            "opposite-direction 3-cycles must be retained as distinct loops"
+        );
+        assert_eq!(found_loops[0], forward);
+        assert_eq!(found_loops[1], reverse);
+
+        // Calling again with a rotation of one of the existing cycles
+        // must still dedup (rotations of the same directed cycle
+        // canonicalize to the same key).
+        let forward_rotation: Vec<Ident<Canonical>> =
+            vec![Ident::new("b"), Ident::new("c"), Ident::new("a")];
+        SearchGraph::add_loop_if_unique(&forward_rotation, &mut found_loops, &mut seen);
+        assert_eq!(
+            found_loops.len(),
+            2,
+            "a rotation of an already-seen directed cycle must be deduped"
+        );
     }
 
     // --- Test 6: Empty graph ---

@@ -3116,20 +3116,19 @@ fn indexed_graph_tiny_in_budget_succeeds() {
 //       max_circuits + 1st circuit,
 //   (5) cross-SCC edges never traversed.
 
-/// Canonicalize a list of circuits to the set of sorted node-sets.
-/// LTM semantics fold distinct rotations with the same node-set into
-/// one loop (see `deduplicate_loops` and the multidigraph handling
-/// in `johnson_circuit`).  The post-refactor Johnson's deduplicates
-/// inline during emission; the Tiernan oracle still emits every
-/// rotation.  Reducing to sorted + deduped node-sets puts them on
-/// equal footing for equivalence comparisons.
+/// Canonicalize a list of circuits by mapping each to its canonical
+/// edge-sequence rotation (see [`super::canonical_rotation`]) and
+/// deduping.  LTM semantics keep distinct directed cycles as separate
+/// loops (see issue #308).  Johnson's already emits at most one
+/// rotation per directed cycle via inline canonical-rotation dedup;
+/// Tiernan emits multiple rotations of each cycle but each rotation
+/// canonicalizes to the same key, so reducing both sides to the
+/// canonicalized + deduped form puts them on equal footing for
+/// equivalence comparisons.
 fn canonicalize_circuits(circuits: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
     let mut keys: Vec<Vec<u32>> = circuits
         .into_iter()
-        .map(|mut c| {
-            c.sort_unstable();
-            c
-        })
+        .map(|c| super::canonical_rotation(&c))
         .collect();
     keys.sort();
     keys.dedup();
@@ -3137,7 +3136,7 @@ fn canonicalize_circuits(circuits: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
 }
 
 /// Run both Johnson's (production) and Tiernan (oracle) on a graph
-/// and assert their canonicalized node-set coverage is equal.
+/// and assert their canonical-rotation circuit coverage is equal.
 fn assert_johnson_matches_tiernan(cg: &CausalGraph) {
     let graph = IndexedGraph::from_edges(cg.edges());
     let sccs = graph.tarjan_scc();
@@ -3169,7 +3168,7 @@ fn assert_johnson_matches_tiernan(cg: &CausalGraph) {
     assert_eq!(
         johnson_canon,
         tiernan_canon,
-        "Johnson's and Tiernan node-set coverage disagrees on edges {:?}",
+        "Johnson's and Tiernan canonical-rotation coverage disagrees on edges {:?}",
         cg.edges()
     );
 }
@@ -3272,16 +3271,29 @@ fn johnson_figure_8_shared_vertex_two_circuits() {
 fn johnson_complete_k3_all_directed_cycles() {
     // K3 with all 6 directed edges.  Elementary directed cycles:
     //   3 two-cycles: {a,b}, {a,c}, {b,c}
-    //   2 three-cycles: a->b->c->a, a->c->b->a
-    // Dedup merges the two 3-cycles (same node set {a,b,c}) so the
-    // public API reports 4 circuits.
+    //   2 three-cycles: a -> b -> c -> a, a -> c -> b -> a
+    // Both directions of the 3-cycle traverse the same node set
+    // but represent distinct elementary circuits with potentially
+    // different polarity products.  Issue #308 keeps them as
+    // separate loops, so the public API reports 5 circuits.
     let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
     let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
+    assert_eq!(
+        circuits.len(),
+        5,
+        "K3 has 3 two-cycles + 2 three-cycles (forward + reverse)"
+    );
     let names = circuits_as_sorted_name_sets(&circuits);
+    // After sorting by node set, the two three-cycles collapse so
+    // we still see exactly 4 distinct node sets even though the
+    // circuit list has 5 entries.  The next test
+    // (`johnson_multidigraph_keeps_distinct_directed_cycles`)
+    // pins that the two 3-cycles really are separate.
     assert_eq!(
         names,
         vec![
             vec!["a".to_string(), "b".to_string()],
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
             vec!["a".to_string(), "b".to_string(), "c".to_string()],
             vec!["a".to_string(), "c".to_string()],
             vec!["b".to_string(), "c".to_string()],
@@ -3314,73 +3326,173 @@ fn johnson_respects_shared_budget_across_sccs() {
 }
 
 #[test]
-fn johnson_multidigraph_dedups_to_single_node_set() {
-    // On a multidigraph SCC where multiple elementary directed
-    // cycles share a node set, dedup folds them into one surviving
-    // circuit per node set.  We do NOT pin a canonical rotation:
-    // which rotation survives depends on DFS successor-visit order,
-    // which reflects `CausalGraph::edges`'s HashMap iteration order
-    // and is therefore non-deterministic across processes.  Tests
-    // that need a specific rotation should sort/normalize themselves.
+fn johnson_multidigraph_keeps_distinct_directed_cycles() {
+    // On a multidigraph SCC where multiple distinct elementary
+    // directed cycles share a node set, the canonical-rotation
+    // dedup retains them as separate loops -- matching the
+    // elementary-circuit identity used in the LTM literature
+    // (issue #308).  Each surviving circuit is rotated to start
+    // at its lex-smallest node, and the canonical rotation
+    // distinguishes the two 3-cycles via their second-position
+    // node (b vs c).
     //
-    // What we *do* guarantee: the set of node-sets emitted is
-    // correct, and two calls on the same `CausalGraph` within a
-    // single process produce identical output (HashMap iteration
-    // is stable per-instance).  `dedup_deterministic_across_calls`
-    // covers the within-process invariant; here we just check the
-    // node-set reduction.
-    //
-    // K3 with all 6 directed edges has multiple 3-cycles over
-    // {a,b,c}: dedup keeps exactly one.
+    // K3 with all 6 directed edges has exactly two 3-cycles over
+    // {a,b,c}: a -> b -> c -> a and a -> c -> b -> a.  Both
+    // surface from start='a' (the cycle's lex-smallest node) so
+    // each canonicalizes to itself; both must appear in the
+    // output.
     let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
     let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
-    let three_cycles: Vec<&Vec<Ident<Canonical>>> =
-        circuits.iter().filter(|c| c.len() == 3).collect();
-    assert_eq!(three_cycles.len(), 1, "K3 dedups to one 3-node circuit");
-    let mut nodes: Vec<&str> = three_cycles[0].iter().map(|n| n.as_str()).collect();
-    nodes.sort();
+    let three_cycles: Vec<Vec<&str>> = circuits
+        .iter()
+        .filter(|c| c.len() == 3)
+        .map(|c| c.iter().map(|n| n.as_str()).collect())
+        .collect();
     assert_eq!(
-        nodes,
-        vec!["a", "b", "c"],
-        "surviving representative must visit {{a, b, c}} in some order"
+        three_cycles.len(),
+        2,
+        "K3 retains both 3-node directed cycles as distinct loops"
+    );
+    let mut sorted: Vec<Vec<&str>> = three_cycles.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec![vec!["a", "b", "c"], vec!["a", "c", "b"]],
+        "the two surviving 3-cycles must be the forward and reverse traversals"
     );
 }
 
 #[test]
-fn johnson_budget_charges_duplicate_raw_cycles() {
+fn canonical_rotation_picks_lex_smallest_start() {
+    // Smoke test for the helper: every rotation of the same
+    // directed cycle canonicalizes to the same output.
+    let inputs = [vec![1u32, 2, 3], vec![2, 3, 1], vec![3, 1, 2]];
+    let canonical: Vec<Vec<u32>> = inputs
+        .iter()
+        .map(|c| super::canonical_rotation(c))
+        .collect();
+    for c in &canonical {
+        assert_eq!(c, &vec![1u32, 2, 3]);
+    }
+}
+
+#[test]
+fn canonical_rotation_distinguishes_opposite_directions() {
+    // Two distinct directed cycles over the same node set must
+    // canonicalize to **different** outputs so the dedup keeps
+    // both.
+    let forward = super::canonical_rotation::<u32>(&[1, 2, 3]);
+    let reverse = super::canonical_rotation::<u32>(&[1, 3, 2]);
+    assert_eq!(forward, vec![1u32, 2, 3]);
+    assert_eq!(reverse, vec![1u32, 3, 2]);
+    assert_ne!(forward, reverse);
+}
+
+#[test]
+fn canonical_rotation_handles_repeated_starting_element() {
+    // Defensive check for the `(node, next_node)` tiebreaker
+    // described in `docs/design-plans/2026-05-06-ltm-308-canonical-cycle-dedup.md`.
+    // Elementary cycles never have repeated nodes, but the helper
+    // is generic enough to handle non-elementary closed walks.
+    // Two equally-small starting elements (both `1`) are
+    // disambiguated by the second-position element.
+    let canonical = super::canonical_rotation::<u32>(&[1, 5, 1, 3]);
+    // Rotations:
+    //   start=0: [1, 5, 1, 3]
+    //   start=1: [5, 1, 3, 1]
+    //   start=2: [1, 3, 1, 5]
+    //   start=3: [3, 1, 5, 1]
+    // Lex-smallest: [1, 3, 1, 5] (the second-position 3 < 5
+    // breaks the tie between the two start-with-1 candidates).
+    assert_eq!(canonical, vec![1u32, 3, 1, 5]);
+}
+
+#[test]
+fn canonical_rotation_empty_input_returns_empty() {
+    let out: Vec<u32> = super::canonical_rotation(&[]);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn deduplicate_keeps_both_directed_three_cycles_in_multidigraph() {
+    // Direct regression test for issue #308.  Construct a 3-node
+    // SCC where every pair has bidirectional edges -- the smallest
+    // graph that surfaces both directions of a directed 3-cycle.
+    // `find_loops_with_limit` must produce TWO loops with the same
+    // node set but different link orderings, not one.
+    let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
+    let loops = cg.find_loops_with_limit(usize::MAX).unwrap();
+
+    let three_loops: Vec<&Loop> = loops.iter().filter(|l| l.links.len() == 3).collect();
+    assert_eq!(
+        three_loops.len(),
+        2,
+        "multidigraph must yield both directions of the 3-cycle as distinct Loops"
+    );
+
+    // Each loop's link sequence determines a unique directed
+    // traversal; the two loops must differ in their second-
+    // position node (b vs c) when both start at the lex-smallest
+    // node 'a'.
+    let mut seconds: Vec<&str> = three_loops.iter().map(|l| l.links[0].to.as_str()).collect();
+    seconds.sort();
+    assert_eq!(
+        seconds,
+        vec!["b", "c"],
+        "the two 3-cycle loops must be a -> b -> ... and a -> c -> ..."
+    );
+}
+
+#[test]
+fn johnson_budget_bounds_unique_directed_cycles() {
     // Complete directed graph on 4 nodes (K4) with every pair
-    // bidirectional.  The DFS discovers many raw elementary cycles
-    // that collapse to fewer distinct node-sets under dedup:
-    //   6 two-cycles: {a,b}, {a,c}, {a,d}, {b,c}, {b,d}, {c,d}
-    //   many three-cycles, all over three-node subsets
-    //   many four-cycles, all over {a,b,c,d}
-    // The raw DFS work -- not the unique output size -- is what
-    // can blow up compile time on dense multidigraphs, so
-    // `max_circuits` must bound raw cycle discovery, not post-
-    // dedup output.  Budget decrement fires on every raw emission
-    // so callers cannot have the DFS run for longer than the cap
-    // implies.
+    // bidirectional.  Each elementary directed cycle is emitted
+    // once by Johnson's (the `w >= start` gate forces emission
+    // from the lex-smallest start), and the canonical-rotation
+    // dedup keeps every distinct directed cycle as its own loop
+    // (issue #308):
+    //   6 two-cycles: {a,b}, {a,c}, {a,d}, {b,c}, {b,d}, {c,d}.
+    //     Each two-cycle has only one elementary directed form
+    //     (forward and reverse rotations of [a,b] both
+    //     canonicalize to [a,b]).
+    //   8 three-cycles: 4 node sets x 2 directions each.  Each
+    //     direction canonicalizes distinctly because the
+    //     second-position node differs.
+    //   6 four-cycles: 1 node set ({a,b,c,d}) x 6 directed
+    //     orderings (4!/4 = 6 distinct directed Hamilton cycles
+    //     starting at the lex-smallest node).
+    // Total: 6 + 8 + 6 = 20 distinct directed cycles.
+    //
+    // The budget decrement fires before the dedup `seen.insert`
+    // check -- a defense-in-depth so a future change that
+    // accidentally weakens dedup cannot make the DFS run for
+    // longer than the cap implies.  After the canonical-rotation
+    // change, raw emissions and unique survivors coincide for
+    // elementary cycles on a graph (Johnson's gate prevents the
+    // same directed cycle from being re-emitted from a non-lex
+    // start), so the budget that fits unique output also fits
+    // raw work for K4 specifically.
     let cg = build_causal_graph(&[
         ("a", &["b", "c", "d"]),
         ("b", &["a", "c", "d"]),
         ("c", &["a", "b", "d"]),
         ("d", &["a", "b", "c"]),
     ]);
-    // Unique node-sets: C(4,2) + C(4,3) + C(4,4) = 6 + 4 + 1 = 11.
     let full = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
     assert_eq!(
         full.len(),
-        11,
-        "K4 has exactly 11 distinct node-set circuits after dedup"
+        20,
+        "K4 has exactly 20 distinct directed cycles after canonical-rotation dedup"
     );
 
-    // Raw (pre-dedup) cycle count for K4 is much larger; a budget
-    // that fits unique output but not raw work must still trip.
-    // If budget is charged per unique circuit the enumeration runs
-    // past the cap -- exactly the regression we're guarding.
+    // Budget exactly fitting the unique count must succeed.
+    let exact = cg.find_circuit_node_lists_with_limit(20).unwrap();
+    assert_eq!(exact.len(), 20);
+
+    // Budget one short must trip.
     let err = cg
-        .find_circuit_node_lists_with_limit(11)
-        .expect_err("budget of 11 must trip because raw cycle discovery exceeds 11");
+        .find_circuit_node_lists_with_limit(19)
+        .expect_err("budget of 19 must trip because K4 has 20 distinct directed cycles");
     assert_eq!(err, TruncatedByBudget);
 }
 
@@ -3553,8 +3665,12 @@ fn johnson_multi_scc_in_large_node_space_golden() {
     //   scc2: {scc2_a, scc2_b}
     //   scc3: {scc3_a, scc3_b, scc3_c}
     //   scc_k3 (K3 with all 6 directed edges): three 2-cycles (one per
-    //     bidirectional pair) plus one 3-cycle (the two distinct
-    //     directed 3-rotations are deduped to a single node-set).
+    //     bidirectional pair) plus two 3-cycles (forward + reverse
+    //     traversal of {a,b,c}).  Both 3-cycles have the same sorted
+    //     node-set so they appear as duplicate entries in the
+    //     name-set view, but the canonical-rotation dedup keeps them
+    //     as distinct loops -- see issue #308 and
+    //     `johnson_multidigraph_keeps_distinct_directed_cycles`.
     //   scc4 (rim a->b->c->d->a plus chord a->c): the 4-cycle around
     //     the rim and the 3-cycle skipping b via the chord.  No third
     //     cycle exists because b is only reachable from a and only
@@ -3569,6 +3685,11 @@ fn johnson_multi_scc_in_large_node_space_golden() {
         vec!["scc_k3_a".to_string(), "scc_k3_b".to_string()],
         vec!["scc_k3_a".to_string(), "scc_k3_c".to_string()],
         vec!["scc_k3_b".to_string(), "scc_k3_c".to_string()],
+        vec![
+            "scc_k3_a".to_string(),
+            "scc_k3_b".to_string(),
+            "scc_k3_c".to_string(),
+        ],
         vec![
             "scc_k3_a".to_string(),
             "scc_k3_b".to_string(),
@@ -3602,7 +3723,11 @@ fn johnson_multi_scc_in_large_node_space_golden() {
 fn dedup_deterministic_across_calls() {
     // Multidigraph (K3 with all 6 directed edges) yields two
     // distinct directed 3-cycles sharing node set {a,b,c}; LTM
-    // semantics fold those into one.  A non-deterministic hasher
+    // semantics keep them as separate loops (issue #308) but each
+    // raw cycle has multiple rotational representations
+    // (`a -> b -> c -> a` is the same cycle as `b -> c -> a -> b`).
+    // Inline canonical-rotation dedup folds rotations of the same
+    // directed cycle into one survivor.  A non-deterministic hasher
     // could pick different representatives between calls on rare
     // collisions, which would silently invalidate the salsa
     // LoopCircuitsResult cache.  The rapidhash fingerprint is

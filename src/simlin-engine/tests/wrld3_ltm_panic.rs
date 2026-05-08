@@ -126,11 +126,21 @@ fn wrld3_element_level_enumeration_is_uncapped() {
         .find_indexed_circuits_with_limit(usize::MAX)
         .expect("usize::MAX budget must not trip TruncatedByBudget");
 
+    // Post-canonical-dedup count, validated 2026-05-06 by re-running this
+    // `#[ignore]`d benchmark in release after issue #308 switched dedup to
+    // canonical edge-sequence rotation.  The value is identical to the
+    // 2026-04-18 sorted-node-set measurement (1,863,803), which means
+    // WRLD3-03's element-level graph has no pairs of opposite-direction
+    // cycles over the same node set: every cycle's reversal hits a
+    // different node ordering (a property of the graph, not of the
+    // algorithm).  Pinning the exact value protects against silent
+    // regressions where a future change drops or duplicates circuits
+    // (a `>=` assertion would let counts collapse to e.g. 1.2M unnoticed).
     assert_eq!(
         circuits.len(),
         1_863_803,
-        "wrld3-03 element-level enumeration count must match the \
-         post-dedup Johnson's output measured by the 2026-04-18 \
-         adversarial cap-lift validation"
+        "wrld3-03 element-level enumeration count diverged from the \
+         2026-05-06 post-canonical-dedup measurement (got {})",
+        circuits.len()
     );
 }
