@@ -2538,6 +2538,50 @@ fn test_cross_dim_sum_algebraic() {
     // proportionally to its own change, so we expect per-element scores
     // to potentially have different magnitudes when combined with the
     // sign term.
+
+    // Polarity assertion: total_pop = SUM(population[*]) is monotone-positive
+    // in every population element, so the population -> total_pop link must
+    // be Positive (not Unknown). Without an Expr2::Subscript arm in
+    // analyze_expr_polarity_with_context, the parsed `Sum(Subscript(...))`
+    // shape would fall through to Unknown despite the Sum reducer arm.
+    // The growth -> population stock-feedback link (and the resulting
+    // reinforcing loop) likewise should not be Undetermined.
+    use simlin_engine::db::compute_link_polarities;
+    use simlin_engine::ltm::LinkPolarity;
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+    let polarities = compute_link_polarities(&db, source_model, sync.project);
+    let pop_to_total = polarities
+        .get(&("population".to_string(), "total_pop".to_string()))
+        .copied()
+        .unwrap_or(LinkPolarity::Unknown);
+    assert_eq!(
+        pop_to_total,
+        LinkPolarity::Positive,
+        "population -> total_pop polarity for SUM(population[*]) must be Positive, got: {:?}",
+        pop_to_total
+    );
+
+    // The growth -> population stock-feedback edge plus population -> growth
+    // form a single reinforcing loop. With both link polarities now known,
+    // the loop must classify as Reinforcing rather than Undetermined.
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert!(
+        !detected.loops.is_empty(),
+        "model should have at least one loop"
+    );
+    let undetermined: Vec<_> = detected
+        .loops
+        .iter()
+        .filter(|l| l.polarity == DetectedLoopPolarity::Undetermined)
+        .map(|l| (l.id.clone(), l.variables.clone()))
+        .collect();
+    assert!(
+        undetermined.is_empty(),
+        "no loop should remain Undetermined now that SUM(x[*]) propagates polarity, but got: {:?}",
+        undetermined
+    );
 }
 
 /// AC5.2: MEAN(population[*]) produces N scalar per-element link scores
