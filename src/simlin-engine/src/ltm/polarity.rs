@@ -89,6 +89,25 @@ pub(super) fn analyze_expr_polarity_with_context(
                 LinkPolarity::Unknown
             }
         }
+        // Whole-array reductions wrap a Subscript around the same identifier
+        // that a scalar reference would carry as Expr2::Var. The reducer arms
+        // below (Sum/Mean/single-arg Max/Min) recurse into their argument; for
+        // the production case `SUM(x[*])` that argument lowers to
+        // `Subscript(x, [Wildcard], _, _)`, not `Var(x, ...)`. Mirror the Var
+        // handler so the identifier comparison succeeds and the reducer's
+        // monotonicity guarantee carries through. The subscript indices don't
+        // affect the polarity contract for the reducer arms because each
+        // reducer is monotone in every input element. For non-reducer
+        // contexts (e.g. `x[1] + y`), this still returns the correct
+        // Positive/Negative for any reference to from_var.
+        Expr2::Subscript(ident, _, _, _) => {
+            let normalized = normalize_module_ref(ident);
+            if &normalized == from_var || ident == from_var {
+                current_polarity
+            } else {
+                LinkPolarity::Unknown
+            }
+        }
         Expr2::App(crate::builtins::BuiltinFn::Lookup(table_expr, index_expr, _), _, _) => {
             // Check if the argument contains our from_var
             let arg_polarity = analyze_expr_polarity_with_context(
@@ -170,6 +189,56 @@ pub(super) fn analyze_expr_polarity_with_context(
                 _ => LinkPolarity::Unknown,
             }
         }
+        // Array reducers SUM and MEAN: monotone in every input element, so
+        // polarity is the polarity of the (single) array argument.
+        // MEAN's variant carries Vec<Expr> to also represent the variadic scalar
+        // form MEAN(a, b, c); for polarity that form is still monotone in each
+        // argument, so we combine arg polarities the same way Add does (any
+        // disagreement collapses to Unknown).
+        Expr2::App(crate::builtins::BuiltinFn::Sum(arg), _, _) => {
+            analyze_expr_polarity_with_context(arg, from_var, current_polarity, variables)
+        }
+        Expr2::App(crate::builtins::BuiltinFn::Mean(args), _, _) => {
+            let mut combined = LinkPolarity::Unknown;
+            for arg in args {
+                let arg_pol =
+                    analyze_expr_polarity_with_context(arg, from_var, current_polarity, variables);
+                // Hoist the self-reference + Unknown short circuit ahead of the
+                // per-arg combiner so that any non-monotone dependence on
+                // from_var (e.g. ABS(x)) collapses the whole mean to Unknown,
+                // regardless of arg order. This mirrors the Add path: an
+                // Unknown that references from_var poisons the result; an
+                // Unknown that's independent of from_var (e.g. an unrelated
+                // variable or constant) is just skipped. Without this hoist a
+                // first-iteration ABS(x) would seed `combined` with Unknown and
+                // then be silently overwritten by a later known-polarity arg.
+                if arg_pol == LinkPolarity::Unknown && expr_references_var(arg, from_var) {
+                    return LinkPolarity::Unknown;
+                }
+                match (combined, arg_pol) {
+                    // Independent Unknown (constant, unrelated var): skip.
+                    (_, LinkPolarity::Unknown) => {}
+                    // First known polarity wins.
+                    (LinkPolarity::Unknown, pol) => combined = pol,
+                    // Same polarity across args: stable.
+                    (a_pol, b_pol) if a_pol == b_pol => {}
+                    // Disagreement among known polarities collapses to Unknown.
+                    _ => return LinkPolarity::Unknown,
+                }
+            }
+            combined
+        }
+        // Array reducers MAX/MIN (single-arg form): max/min of a monotone family
+        // is monotone, so propagate the inner polarity.
+        Expr2::App(crate::builtins::BuiltinFn::Max(a, None), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Min(a, None), _, _) => {
+            analyze_expr_polarity_with_context(a, from_var, current_polarity, variables)
+        }
+        // STDDEV is non-monotone (variance has no fixed sign w.r.t. inputs).
+        // RANK depends on the rest of the array, so its sign w.r.t. one element
+        // is not determined. Both must explicitly return Unknown.
+        Expr2::App(crate::builtins::BuiltinFn::Stddev(_), _, _)
+        | Expr2::App(crate::builtins::BuiltinFn::Rank(_, _), _, _) => LinkPolarity::Unknown,
         Expr2::App(_, _, _) => LinkPolarity::Unknown,
         Expr2::Op2(op, left, right, _, _) => {
             let left_pol =
@@ -325,7 +394,6 @@ pub(super) fn analyze_expr_polarity_with_context(
                 LinkPolarity::Unknown
             }
         }
-        _ => LinkPolarity::Unknown,
     }
 }
 
