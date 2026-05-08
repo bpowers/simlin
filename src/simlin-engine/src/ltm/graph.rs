@@ -219,13 +219,14 @@ impl CausalGraph {
         }
 
         // The per-SCC inline dedup in `johnson_circuit` already rejects
-        // multidigraph duplicates at the circuit (Vec<u32>) level, so
-        // every circuit that reaches this point has a unique node-set.
-        // A separate Loop-level dedup would be redundant; debug builds
-        // verify the invariant so a future regression trips a test.
+        // duplicate canonical-rotation circuits at the `Vec<u32>`
+        // level, so every circuit that reaches this point has a
+        // distinct directed edge sequence.  A separate Loop-level
+        // dedup would be redundant; debug builds verify the invariant
+        // so a future regression trips a test.
         debug_assert!(
-            loops_have_unique_node_sets(&loops),
-            "circuit enumerator must emit unique node-sets; duplicate loops reached find_loops_with_limit"
+            loops_have_unique_canonical_rotations(&loops),
+            "circuit enumerator must emit unique canonical rotations; duplicate loops reached find_loops_with_limit"
         );
 
         // Assign deterministic IDs based on sorted loop content
@@ -285,12 +286,13 @@ impl CausalGraph {
             }
         }
 
-        // Each SCC's enumerator already deduplicates by sorted node-set,
-        // and different SCCs share no nodes -- so `all_circuits` has no
-        // cross-SCC duplicates.  Debug builds verify the invariant.
+        // Each SCC's enumerator already deduplicates by canonical
+        // edge-sequence rotation, and different SCCs share no nodes --
+        // so `all_circuits` has no cross-SCC duplicates.  Debug builds
+        // verify the invariant.
         debug_assert!(
-            IndexedGraph::has_no_duplicate_node_sets(&all_circuits),
-            "enumerate_circuits_in_scc should emit unique node-sets per SCC"
+            IndexedGraph::has_no_duplicate_canonical_rotations(&all_circuits),
+            "enumerate_circuits_in_scc should emit unique canonical rotations per SCC"
         );
 
         Ok(IndexedCircuits {
@@ -942,15 +944,20 @@ pub(crate) fn assign_loop_ids(loops: &mut [Loop]) {
     }
 }
 
-/// Debug-only helper: verify every `Loop` has a distinct node-set.
-/// Used by `debug_assert!` in `find_loops_with_limit` to guard against
-/// future regressions of the inline dedup in `johnson_circuit`.  Release
+/// Debug-only helper: verify every `Loop` has a distinct canonical
+/// edge-sequence rotation.  Used by `debug_assert!` in
+/// `find_loops_with_limit` to guard against future regressions of the
+/// inline dedup in `johnson_circuit`.  Two loops over the same node
+/// set that differ in directed traversal (e.g. forward vs reverse
+/// 3-cycle on a multidigraph) have **different** canonical rotations
+/// and are correctly retained as distinct loops -- this check fires
+/// only on accidental re-emission of the same directed cycle.  Release
 /// builds compile the call out via `debug_assert!`'s no-op expansion.
-fn loops_have_unique_node_sets(loops: &[Loop]) -> bool {
+fn loops_have_unique_canonical_rotations(loops: &[Loop]) -> bool {
     let mut seen: HashSet<Vec<&str>> = HashSet::with_capacity(loops.len());
     for loop_item in loops {
-        let mut key: Vec<&str> = loop_item.links.iter().map(|l| l.from.as_str()).collect();
-        key.sort_unstable();
+        let path: Vec<&str> = loop_item.links.iter().map(|l| l.from.as_str()).collect();
+        let key = super::canonical_rotation(&path);
         if !seen.insert(key) {
             return false;
         }
