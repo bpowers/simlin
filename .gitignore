@@ -97,6 +97,7 @@ __pycache__/
 
 # Claude Code per-session runtime state
 .claude/scheduled_tasks.lock
+.claude/worktrees
 
 # simlin-mcp npm packaging artifacts
 /src/simlin-mcp/vendor
@@ -110,3 +111,4 @@ __pycache__/
 /src/simlin-serve/vendor
 /src/simlin-serve/npm
 /src/simlin-serve/dist
+
