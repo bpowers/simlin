@@ -27,9 +27,24 @@ fn git_available() -> bool {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
+    // Strip every `GIT_*` env var inherited from the parent: when the
+    // workspace test suite runs from inside an outer `git commit` (the
+    // project pre-commit hook invokes `cargo test --workspace`),
+    // `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_INDEX_FILE` propagate down and
+    // would make this `git` operate on the outer repository instead of
+    // the freshly-initialised temp dir.
+    //
+    // Iterate `vars_os` rather than `vars()` so a non-UTF-8 env var in the
+    // parent process cannot panic the test runner. The "GIT_" prefix is
+    // ASCII, so a byte-level comparison is sufficient.
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd).args(args);
+    for (key, _) in std::env::vars_os() {
+        if key.as_encoded_bytes().starts_with(b"GIT_") {
+            cmd.env_remove(&key);
+        }
+    }
+    let status = cmd
         .status()
         .unwrap_or_else(|_| panic!("git {} failed to spawn", args.join(" ")));
     assert!(status.success(), "git {} failed", args.join(" "));
