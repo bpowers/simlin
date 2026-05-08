@@ -95,15 +95,38 @@ pub(super) fn analyze_expr_polarity_with_context(
         // the production case `SUM(x[*])` that argument lowers to
         // `Subscript(x, [Wildcard], _, _)`, not `Var(x, ...)`. Mirror the Var
         // handler so the identifier comparison succeeds and the reducer's
-        // monotonicity guarantee carries through. The subscript indices don't
-        // affect the polarity contract for the reducer arms because each
-        // reducer is monotone in every input element. For non-reducer
-        // contexts (e.g. `x[1] + y`), this still returns the correct
-        // Positive/Negative for any reference to from_var.
-        Expr2::Subscript(ident, _, _, _) => {
+        // monotonicity guarantee carries through.
+        //
+        // When the array name matches `from_var`, the indices still need
+        // inspection: if any index expression also references `from_var`
+        // (e.g. `arr[INT(arr[i])]` or `arr[arr]`), the relationship is
+        // non-monotone -- shifting `from_var` moves both the lookup target
+        // and the index in lockstep -- and we must return Unknown. The
+        // dominant cases (literal, wildcard, range, expressions over OTHER
+        // variables) leave indices independent of `from_var`, and the
+        // reducer's monotonicity guarantee carries through unchanged.
+        //
+        // When the array name does NOT match `from_var`, contribute Unknown:
+        // we can't classify references that thread through another array
+        // here. Combining operators above (Add/Sub/Mul/Div, Mean variadic)
+        // detect any `from_var` reference inside indices via their own
+        // `expr_references_var` checks.
+        Expr2::Subscript(ident, indices, _, _) => {
             let normalized = normalize_module_ref(ident);
             if &normalized == from_var || ident == from_var {
-                current_polarity
+                if indices.iter().any(|idx| match idx {
+                    IndexExpr2::Expr(e) => expr_references_var(e, from_var),
+                    IndexExpr2::Range(lo, hi, _) => {
+                        expr_references_var(lo, from_var) || expr_references_var(hi, from_var)
+                    }
+                    IndexExpr2::Wildcard(_)
+                    | IndexExpr2::StarRange(_, _)
+                    | IndexExpr2::DimPosition(_, _) => false,
+                }) {
+                    LinkPolarity::Unknown
+                } else {
+                    current_polarity
+                }
             } else {
                 LinkPolarity::Unknown
             }

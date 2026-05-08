@@ -858,6 +858,119 @@ fn test_analyze_expr_polarity_array_reducers_subscript_wildcard() {
     }
 }
 
+/// The Subscript arm must distinguish between indices that are independent
+/// of `from_var` (literal, wildcard, expressions over other variables) and
+/// indices that themselves reference `from_var`. In the latter case the
+/// relationship between `from_var` and the subscripted result is non-monotone:
+/// changing `from_var` shifts both the lookup target AND the index, so no
+/// single polarity describes the result. The dominant cases (`SUM(arr[*])`,
+/// `arr[Region]`, indices over OTHER variables) keep their original behavior
+/// of returning `current_polarity` because their indices don't reference
+/// `from_var`.
+#[test]
+fn test_analyze_expr_polarity_subscript_self_indexing() {
+    use crate::ast::{Expr2, IndexExpr2, Loc};
+    use crate::builtins::BuiltinFn;
+    use LinkPolarity::{Positive, Unknown};
+
+    let arr = Ident::new("arr");
+    let other = Ident::new("other");
+    let i = Ident::new("i");
+
+    let var = |id: &Ident<Canonical>| Expr2::Var(id.clone(), None, Loc::default());
+    let lit = |n: f64| Expr2::Const(format!("{n}"), n, Loc::default());
+
+    // arr[*] -- wildcard index, no reference to arr in the index.
+    let arr_wildcard = Expr2::Subscript(
+        arr.clone(),
+        vec![IndexExpr2::Wildcard(Loc::default())],
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&arr_wildcard, &arr, Positive, None),
+        Positive,
+        "arr[*] preserves current_polarity",
+    );
+
+    // arr[3] -- literal index, no reference to arr in the index.
+    let arr_literal = Expr2::Subscript(
+        arr.clone(),
+        vec![IndexExpr2::Expr(lit(3.0))],
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&arr_literal, &arr, Positive, None),
+        Positive,
+        "arr[3] preserves current_polarity",
+    );
+
+    // arr[i] where i is a different variable -- index references some OTHER
+    // variable, but not from_var (= arr). Polarity contract still holds.
+    let arr_other_index = Expr2::Subscript(
+        arr.clone(),
+        vec![IndexExpr2::Expr(var(&i))],
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&arr_other_index, &arr, Positive, None),
+        Positive,
+        "arr[i] (i != from_var) preserves current_polarity",
+    );
+
+    // arr[arr] -- index trivially references arr. Result is non-monotone
+    // because shifting arr shifts both the lookup target and the index.
+    let arr_self_var = Expr2::Subscript(
+        arr.clone(),
+        vec![IndexExpr2::Expr(var(&arr))],
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&arr_self_var, &arr, Positive, None),
+        Unknown,
+        "arr[arr] is non-monotone",
+    );
+
+    // arr[INT(arr[i])] -- the canonical self-indexing case. Index references
+    // arr through a nested subscript; relationship is non-monotone.
+    let inner = Expr2::Subscript(
+        arr.clone(),
+        vec![IndexExpr2::Expr(var(&i))],
+        None,
+        Loc::default(),
+    );
+    let int_inner = Expr2::App(BuiltinFn::Int(Box::new(inner)), None, Loc::default());
+    let arr_self_nested = Expr2::Subscript(
+        arr.clone(),
+        vec![IndexExpr2::Expr(int_inner)],
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&arr_self_nested, &arr, Positive, None),
+        Unknown,
+        "arr[INT(arr[i])] is non-monotone",
+    );
+
+    // other[*] where from_var is arr -- subscripted array is not from_var.
+    // Existing behavior: contributes Unknown because the arm conservatively
+    // can't classify references through other arrays.
+    let other_wildcard = Expr2::Subscript(
+        other.clone(),
+        vec![IndexExpr2::Wildcard(Loc::default())],
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&other_wildcard, &arr, Positive, None),
+        Unknown,
+        "other[*] (other != from_var) returns Unknown",
+    );
+}
+
 #[test]
 fn test_graphical_function_polarity() {
     use crate::variable::Table;
