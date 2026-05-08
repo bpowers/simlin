@@ -405,26 +405,30 @@ fn discovery_arms_race_3party() {
     let exhaustive_loops = model_detected_loops(&db, source_model, sync.project);
     let exhaustive_count = exhaustive_loops.loops.len();
 
-    // The three-party arms race has 7 unique feedback loops: 3 self-adjustment
-    // (balancing), 3 pairwise (reinforcing), and 1 three-way (reinforcing).
-    // The second three-way loop (reverse direction) traverses the same node set
-    // and is deduplicated by the exhaustive search.
+    // The three-party arms race has 8 unique feedback loops: 3
+    // self-adjustment (balancing), 3 pairwise (reinforcing), and 2
+    // three-way (reinforcing) -- one for each traversal direction.
+    // Both directions visit the same node set but represent distinct
+    // elementary directed cycles, so the canonical-rotation dedup
+    // (issue #308) keeps them as separate loops.
     assert_eq!(
-        exhaustive_count, 7,
-        "Arms race should have 7 feedback loops, found {}",
+        exhaustive_count, 8,
+        "Arms race should have 8 feedback loops, found {}",
         exhaustive_count
     );
 
     // Discovery mode
     let found = discover_loops_from_path(model_path);
 
-    // With per-stock reset, discovery finds all 7 loops: each stock starts
-    // with fresh best_scores, so pairwise and three-way reinforcing loops are
-    // no longer pruned by scores from earlier stocks' self-loop searches.
+    // With per-stock reset, discovery finds all 8 loops: each stock
+    // starts with fresh best_scores, so pairwise and three-way
+    // reinforcing loops are no longer pruned by scores from earlier
+    // stocks' self-loop searches, and the canonical-rotation dedup
+    // retains both directions of the three-way loop as distinct paths.
     assert_eq!(
         found.len(),
-        7,
-        "Discovery should find all 7 loops in arms race model, found {}",
+        8,
+        "Discovery should find all 8 loops in arms race model, found {}",
         found.len()
     );
 
