@@ -2003,33 +2003,33 @@ pub(crate) fn build_loops_from_tiered(
         // resolves the dimension by string match. Mirrors the legacy
         // pure-dimension branch's mapping logic.
         //
-        // Invariant: every canonical name in `fp.dimensions` came from
-        // a variable in the cycle's `lookup_dims` closure, which reads
-        // from the project's source variables. Those source variables
-        // can only reference dimensions registered in `dm_dims`, so an
-        // unmatched name signals an internal mismatch (e.g., a stale
-        // dim cache or a synthesized dimension that never made it into
-        // the datamodel) rather than a recoverable input. Panicking
-        // here makes the violation visible at the cause site instead of
-        // surfacing as a bogus loop-score equation that fails to parse
-        // downstream.
+        // Fallback: if a canonical name in `fp.dimensions` is missing
+        // from `dm_dims`, fall back to the canonical name itself.
+        // This matches `build_element_level_loops` (the slow-path
+        // consumer below) so incremental or partially-invalid model
+        // states -- where the tiered enumerator's cached dim closure
+        // can outrun a still-being-edited datamodel dim list -- surface
+        // as a downstream analysis warning rather than a hard panic
+        // that takes down the whole LTM pipeline. We assert in debug
+        // builds so the mismatch stays observable when the model
+        // really is internally consistent.
         let dimensions: Vec<String> = fp
             .dimensions
             .iter()
             .map(|canonical| {
-                dm_dims
+                let resolved = dm_dims
                     .iter()
                     .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
-                    .map(|dm| dm.name().to_string())
-                    .unwrap_or_else(|| {
-                        let known: Vec<&str> = dm_dims.iter().map(|d| d.name()).collect();
-                        unreachable!(
-                            "fast-path A2A cycle references dimension {canonical:?} that is \
-                             not in the project's datamodel dimensions {known:?}; this is an \
-                             internal invariant violation in `model_loop_circuits_tiered` \
-                             (see `FastPathCircuit::dimensions`)"
-                        )
-                    })
+                    .map(|dm| dm.name().to_string());
+                debug_assert!(
+                    resolved.is_some(),
+                    "fast-path A2A cycle references dimension {canonical:?} that is not in \
+                     the project's datamodel dimensions {known:?}; falling back to canonical \
+                     name. This usually means the source project's dim list and the parsed \
+                     variable dims got out of sync mid-edit.",
+                    known = dm_dims.iter().map(|d| d.name()).collect::<Vec<_>>(),
+                );
+                resolved.unwrap_or_else(|| canonical.to_string())
             })
             .collect();
 
