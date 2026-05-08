@@ -215,6 +215,8 @@ fn ensure_ltm_results(
                     match loop_obj.polarity {
                         DetectedLoopPolarity::Reinforcing => "Reinforcing (R)",
                         DetectedLoopPolarity::Balancing => "Balancing (B)",
+                        DetectedLoopPolarity::MostlyReinforcing => "Mostly reinforcing (Rux)",
+                        DetectedLoopPolarity::MostlyBalancing => "Mostly balancing (Bux)",
                         DetectedLoopPolarity::Undetermined => "Undetermined (U)",
                     }
                 );
@@ -659,9 +661,17 @@ fn test_smooth_goal_seeking_ltm() {
 
     // Issue #418: module-containing loops should have known polarity
     // (Balancing in this case), not Undetermined.
-    let has_determined_polarity = detected.loops.iter().any(|l| {
-        l.polarity == DetectedLoopPolarity::Reinforcing
-            || l.polarity == DetectedLoopPolarity::Balancing
+    //
+    // Match exhaustively rather than wildcarding: the polarity enum
+    // grew Mostly{Reinforcing,Balancing} variants with #485, but the
+    // structural pipeline only emits those when runtime confidence is
+    // surfaced (it currently isn't), so a Rux/Bux result here would
+    // be a regression worth failing on rather than silently passing.
+    let has_determined_polarity = detected.loops.iter().any(|l| match l.polarity {
+        DetectedLoopPolarity::Reinforcing | DetectedLoopPolarity::Balancing => true,
+        DetectedLoopPolarity::MostlyReinforcing
+        | DetectedLoopPolarity::MostlyBalancing
+        | DetectedLoopPolarity::Undetermined => false,
     });
     assert!(
         has_determined_polarity,

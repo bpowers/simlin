@@ -3904,9 +3904,17 @@ fn try_detect_ltm_loops_incremental(
     // Phase 3: Build feedback loop structs from VM results.
     let mut feedback_loops = Vec::new();
     for dl in &detected.loops {
+        // metadata::LoopPolarity only carries R/B/U: the layout legend does
+        // not visually distinguish "mostly R" from "R" today, so the
+        // mostly-* variants collapse onto their dominant equivalents here.
+        // The polarity_confidence on `dl` is dropped at this boundary --
+        // when the layout pipeline learns to surface confidence it should
+        // pass `dl.polarity_confidence` through alongside the polarity.
         let polarity = match dl.polarity {
-            crate::db::DetectedLoopPolarity::Reinforcing => LoopPolarity::Reinforcing,
-            crate::db::DetectedLoopPolarity::Balancing => LoopPolarity::Balancing,
+            crate::db::DetectedLoopPolarity::Reinforcing
+            | crate::db::DetectedLoopPolarity::MostlyReinforcing => LoopPolarity::Reinforcing,
+            crate::db::DetectedLoopPolarity::Balancing
+            | crate::db::DetectedLoopPolarity::MostlyBalancing => LoopPolarity::Balancing,
             crate::db::DetectedLoopPolarity::Undetermined => LoopPolarity::Undetermined,
         };
 

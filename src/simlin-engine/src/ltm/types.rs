@@ -119,8 +119,16 @@ impl Loop {
 /// - Odd number of negative links → Balancing
 /// - ANY link with unknown polarity → Undetermined
 ///
-/// At runtime, if the loop score changes sign during simulation, the polarity
-/// is also classified as Undetermined.
+/// At runtime, the loop score series is also classified according to the
+/// signed-sum confidence ratio `|r - |b|| / (r + |b|)` (Schoenberg and
+/// Eberlein, 2020; see `docs/reference/ltm--loops-that-matter.md`):
+/// - r is the sum of positive scores, |b| the absolute sum of negative scores
+/// - When all valid scores share a sign the ratio is exactly 1 and the loop
+///   is classified Reinforcing or Balancing.
+/// - When both signs occur but one polarity dominates with confidence at or
+///   above [`POLARITY_CONFIDENCE_THRESHOLD`], the loop is classified
+///   `MostlyReinforcing` or `MostlyBalancing` ("Rux"/"Bux" in the paper).
+/// - Otherwise the loop is `Undetermined`.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq)]
 pub enum LoopPolarity {
@@ -130,48 +138,136 @@ pub enum LoopPolarity {
     /// B loop - counteracts changes (negative loop score)
     /// Structurally: odd number of negative links
     Balancing,
+    /// Rux loop - "predominantly reinforcing" with mixed-sign loop scores.
+    /// Confidence is at or above [`POLARITY_CONFIDENCE_THRESHOLD`] but the
+    /// loop has expressed both polarities during simulation.
+    MostlyReinforcing,
+    /// Bux loop - "predominantly balancing" with mixed-sign loop scores.
+    /// Confidence is at or above [`POLARITY_CONFIDENCE_THRESHOLD`] but the
+    /// loop has expressed both polarities during simulation.
+    MostlyBalancing,
     /// U loop - polarity cannot be determined or changes during simulation
     /// Structurally: any link has unknown polarity
-    /// At runtime: loop score has both positive and negative values
+    /// At runtime: loop score has both positive and negative values with
+    /// confidence below [`POLARITY_CONFIDENCE_THRESHOLD`].
     Undetermined,
 }
 
-impl LoopPolarity {
-    /// Classify loop polarity based on actual runtime loop score values.
-    ///
-    /// This function examines the loop score values from a simulation run
-    /// and determines the appropriate polarity:
-    /// - All valid (non-NaN, non-zero) scores positive → Reinforcing
-    /// - All valid scores negative → Balancing
-    /// - Mix of positive and negative → Undetermined
-    /// - No valid scores → returns None
-    pub fn from_runtime_scores(scores: &[f64]) -> Option<Self> {
-        let valid_scores: Vec<f64> = scores
-            .iter()
-            .copied()
-            .filter(|v| !v.is_nan() && *v != 0.0)
-            .collect();
+/// Threshold at or above which a loop with mixed-sign runtime scores is
+/// classified as `MostlyReinforcing`/`MostlyBalancing` rather than
+/// `Undetermined`.
+///
+/// The value 0.99 follows Schoenberg & Eberlein (2020) -- "Seamlessly
+/// Integrating LTM into the Modeling Process", section on simplified-CLD
+/// polarity confidence -- which uses the same ratio `|r - |b|| / (r + |b|)`
+/// and the same 0.99 cutoff to distinguish "predominantly R/B" loops
+/// (Rux/Bux) from genuinely mixed (Ux) loops.  See
+/// `docs/reference/ltm--loops-that-matter.md` section 13.7 for the formula
+/// and `docs/reference/papers/schoenberg2020.2-thesis--summary.md` section
+/// 7.6 for the labelling table.
+///
+/// The cited papers describe the cutoff verbally as "above 0.99" (`>`)
+/// while section 13.7 describes gray rendering as "0.99 or lower" (`<=`),
+/// which leaves the boundary ambiguous in prose.  This implementation
+/// uses `confidence >= POLARITY_CONFIDENCE_THRESHOLD` to match the
+/// formula in section 13.7 -- a confidence value of exactly 0.99 still
+/// signals strong dominance, so falling on the inclusive side avoids
+/// surfacing those loops as Undetermined.
+pub const POLARITY_CONFIDENCE_THRESHOLD: f64 = 0.99;
 
-        if valid_scores.is_empty() {
+impl LoopPolarity {
+    /// Classify loop polarity based on actual runtime loop score values
+    /// and return the polarity-confidence ratio in `[0.0, 1.0]`.
+    ///
+    /// The confidence is `|r - |b|| / (r + |b|)` over the valid (finite,
+    /// non-zero) entries, where `r` and `|b|` are the sum of positive and
+    /// the absolute sum of negative scores respectively.  An empty valid
+    /// set returns `None`; otherwise `r + |b|` is strictly positive and
+    /// finite (every valid entry is finite and non-zero), so the ratio is
+    /// well-defined and lies in `[0.0, 1.0]`.  Filtering on `!is_finite()`
+    /// rather than just `is_nan()` keeps `Inf`/`-Inf` -- which a
+    /// numerically unstable simulation could surface -- from poisoning
+    /// `denom` and producing `Inf / Inf = NaN` confidence (which `clamp`
+    /// would not repair).
+    ///
+    /// Classification rules (matching the Rux/Bux convention from
+    /// Schoenberg & Eberlein, 2020):
+    /// - All valid scores share a sign → `Reinforcing` / `Balancing`,
+    ///   confidence 1.0.
+    /// - Mixed signs and confidence ≥ [`POLARITY_CONFIDENCE_THRESHOLD`]
+    ///   → `MostlyReinforcing` / `MostlyBalancing` depending on which
+    ///   polarity dominates the magnitude tally.
+    /// - Mixed signs and confidence < [`POLARITY_CONFIDENCE_THRESHOLD`]
+    ///   → `Undetermined`.
+    /// - No valid scores → `None`.
+    pub fn from_runtime_scores(scores: &[f64]) -> Option<(Self, f64)> {
+        let mut positive_sum = 0.0_f64;
+        let mut negative_sum_abs = 0.0_f64;
+        let mut has_valid = false;
+
+        for &v in scores {
+            // `!is_finite()` rejects NaN, Inf, and -Inf in one check; combined
+            // with the zero filter this guarantees `denom` below is finite and
+            // strictly positive whenever `has_valid` is true.
+            if !v.is_finite() || v == 0.0 {
+                continue;
+            }
+            has_valid = true;
+            if v > 0.0 {
+                positive_sum += v;
+            } else {
+                negative_sum_abs += -v;
+            }
+        }
+
+        if !has_valid {
             return None;
         }
 
-        let has_positive = valid_scores.iter().any(|v| *v > 0.0);
-        let has_negative = valid_scores.iter().any(|v| *v < 0.0);
+        let denom = positive_sum + negative_sum_abs;
+        // `has_valid` guarantees at least one non-zero finite score, so
+        // `denom` is strictly positive here.
+        let confidence = ((positive_sum - negative_sum_abs).abs() / denom).clamp(0.0, 1.0);
 
-        match (has_positive, has_negative) {
-            (true, false) => Some(LoopPolarity::Reinforcing),
-            (false, true) => Some(LoopPolarity::Balancing),
-            (true, true) => Some(LoopPolarity::Undetermined),
-            (false, false) => None, // All zeros after filtering
-        }
+        // `has_valid` guarantees at least one strictly-positive or
+        // strictly-negative score, so the (false, false) arm cannot occur
+        // here -- it is matched with `unreachable!()` to satisfy the
+        // exhaustiveness check while documenting the invariant.
+        let polarity = match (positive_sum > 0.0, negative_sum_abs > 0.0) {
+            (true, false) => LoopPolarity::Reinforcing,
+            (false, true) => LoopPolarity::Balancing,
+            (true, true) => {
+                if confidence >= POLARITY_CONFIDENCE_THRESHOLD {
+                    if positive_sum > negative_sum_abs {
+                        LoopPolarity::MostlyReinforcing
+                    } else {
+                        // When magnitudes tie at >= threshold confidence the
+                        // ratio is 0, which violates the threshold check above
+                        // for any threshold > 0.  This branch therefore covers
+                        // the strictly-dominant balancing case.
+                        LoopPolarity::MostlyBalancing
+                    }
+                } else {
+                    LoopPolarity::Undetermined
+                }
+            }
+            (false, false) => unreachable!(),
+        };
+
+        Some((polarity, confidence))
     }
 
-    /// Returns the conventional single-letter abbreviation for this polarity
+    /// Returns the conventional abbreviation for this polarity.
+    ///
+    /// Codes follow the LTM literature: "R", "B", "Rux", "Bux", "U".
+    /// "Rux" / "Bux" denote unknown-but-predominantly-R/B loops -- the
+    /// terminology comes from Schoenberg & Eberlein (2020).
     pub fn abbreviation(&self) -> &'static str {
         match self {
             LoopPolarity::Reinforcing => "R",
             LoopPolarity::Balancing => "B",
+            LoopPolarity::MostlyReinforcing => "Rux",
+            LoopPolarity::MostlyBalancing => "Bux",
             LoopPolarity::Undetermined => "U",
         }
     }

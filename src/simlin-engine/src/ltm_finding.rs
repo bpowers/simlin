@@ -783,10 +783,17 @@ pub fn discover_loops_with_graph(
             0.0
         };
 
-        // Determine runtime polarity from scores
+        // Determine runtime polarity from scores. The confidence ratio
+        // returned alongside the polarity is discarded here because
+        // `FoundLoop` does not carry one; downstream consumers that need
+        // it (such as `DetectedLoop`) call `from_runtime_scores`
+        // directly. Falling back to the structural polarity for empty
+        // valid sets keeps behaviour identical to the pre-confidence
+        // implementation.
         let runtime_scores: Vec<f64> = scores.iter().map(|(_, s)| *s).collect();
-        let polarity =
-            LoopPolarity::from_runtime_scores(&runtime_scores).unwrap_or(polarity_structural);
+        let polarity = LoopPolarity::from_runtime_scores(&runtime_scores)
+            .map(|(p, _confidence)| p)
+            .unwrap_or(polarity_structural);
 
         let loop_info = Loop {
             id: String::new(), // Will be assigned below
@@ -913,13 +920,16 @@ fn assign_loop_ids(loops: &mut [FoundLoop]) {
     let mut u_counter = 1;
 
     for found in loops.iter_mut() {
+        // ID prefix follows the dominant polarity so MostlyReinforcing /
+        // MostlyBalancing share counters with their pure counterparts; this
+        // mirrors `crate::ltm::assign_loop_ids` for the structural side.
         found.loop_info.id = match found.loop_info.polarity {
-            LoopPolarity::Reinforcing => {
+            LoopPolarity::Reinforcing | LoopPolarity::MostlyReinforcing => {
                 let id = format!("r{r_counter}");
                 r_counter += 1;
                 id
             }
-            LoopPolarity::Balancing => {
+            LoopPolarity::Balancing | LoopPolarity::MostlyBalancing => {
                 let id = format!("b{b_counter}");
                 b_counter += 1;
                 id
