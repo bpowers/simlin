@@ -11,9 +11,14 @@
 //! Element names in the graph use canonical (lowercased) form because
 //! `dimension_element_names` produces canonical names from `Dimension`.
 
+// `model_element_loop_circuits` is `#[deprecated]` for new LTM callers;
+// these tests legitimately drive the legacy element-Johnson surface to
+// pin the element-graph topology contract.
+#[allow(deprecated)]
+use super::model_element_loop_circuits;
 use super::{
     model_causal_edges, model_cycle_partitions, model_element_causal_edges,
-    model_element_cycle_partitions, model_element_loop_circuits, model_loop_circuits,
+    model_element_cycle_partitions, model_loop_circuits,
 };
 use crate::db::{SimlinDb, sync_from_datamodel};
 use crate::test_common::TestProject;
@@ -306,6 +311,12 @@ fn arrayed_stock_expands_to_element_stock_nodes() {
 
 /// Helper: build a TestProject, sync into salsa, and return the
 /// element-level loop circuits result for the "main" model.
+///
+/// Tests in this module call the legacy `model_element_loop_circuits`
+/// directly to verify element-graph topology -- the diagnostic surface
+/// these tests pin is exactly the unfiltered element-level circuit list,
+/// not the post-#482 tiered output.
+#[allow(deprecated)]
 fn element_loop_circuits(project: &TestProject) -> super::LoopCircuitsResult {
     let datamodel = project.build_datamodel();
     let db = SimlinDb::default();

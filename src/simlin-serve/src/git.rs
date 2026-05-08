@@ -24,6 +24,33 @@ use std::time::SystemTime;
 
 use crate::registry::GitState;
 
+/// Environment variables that retarget `git` at a different repository.
+/// These override the per-call `current_dir(cwd)` we set on every spawn,
+/// which would silently make the inner git operate on the wrong tree.
+///
+/// We deliberately do NOT include identity (`GIT_AUTHOR_*`, `GIT_COMMITTER_*`),
+/// transport (`GIT_SSH_COMMAND`), credential (`GIT_ASKPASS`), or interaction
+/// (`GIT_TERMINAL_PROMPT`) variables: future code that uses `run_git` to
+/// commit, push, or pull must inherit those from the caller's environment
+/// (CI runners, deploy keys, non-interactive shells). Stripping the broader
+/// `GIT_*` namespace would be over-reach with a real cost.
+pub const GIT_PATH_TARGETING_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+];
+
+/// Remove the path-targeting `GIT_*` variables from `cmd`'s environment so
+/// it always operates on the repository at its `current_dir`. See
+/// [`GIT_PATH_TARGETING_VARS`] for the rationale and the explicit allowlist.
+pub fn strip_git_path_env(cmd: &mut Command) {
+    for name in GIT_PATH_TARGETING_VARS {
+        cmd.env_remove(name);
+    }
+}
+
 /// Cached porcelain + tracked-file results for one git working tree.
 #[derive(Debug, Clone)]
 struct RepoCache {
@@ -254,27 +281,23 @@ fn build_repo_cache(repo_root: &Path) -> std::io::Result<RepoCache> {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> std::io::Result<String> {
-    // Strip inherited `GIT_*` env vars so this command always operates on
-    // the repository at `cwd`. If the simlin-serve binary is launched
-    // from inside another git context (e.g. a developer running it from
-    // a terminal where `GIT_DIR` happens to be set, or the workspace
-    // test suite running inside the project pre-commit hook), the
-    // inherited variables would override `cwd` and silently report
-    // status against the wrong repository.
+    // `Command::new("git")` inherits the parent's environment by default.
+    // When this binary is launched from a shell where `GIT_DIR` (or one of
+    // the related path-targeting vars) is set, or when the workspace test
+    // suite runs from inside an outer `git commit` (the project pre-commit
+    // hook invokes `cargo test --workspace`), the inherited
+    // `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_OBJECT_DIRECTORY` /
+    // `GIT_COMMON_DIR` override the per-call `current_dir(cwd)` and the
+    // inner git operates against the wrong repository.
     //
-    // Use `vars_os` + byte-prefix comparison (rather than `vars()` + str
-    // prefix) so a non-UTF-8 env var anywhere in the parent process's
-    // environment cannot crash this code path. Production callers expect
-    // `Unavailable` on probe failure, not a panic. The "GIT_" prefix is
-    // ASCII, so an OsStr containing non-UTF-8 bytes definitionally
-    // cannot start with it.
+    // Strip ONLY those path-targeting vars. Author/committer identity
+    // (`GIT_AUTHOR_*`, `GIT_COMMITTER_*`), transport (`GIT_SSH_COMMAND`),
+    // credential (`GIT_ASKPASS`), and interaction flags
+    // (`GIT_TERMINAL_PROMPT`) must pass through so future code that
+    // commits/pushes/pulls inherits them as the caller intended.
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd).args(args);
-    for (key, _) in std::env::vars_os() {
-        if key.as_encoded_bytes().starts_with(b"GIT_") {
-            cmd.env_remove(&key);
-        }
-    }
+    strip_git_path_env(&mut cmd);
     let output = cmd.output()?;
     if !output.status.success() {
         return Err(std::io::Error::other(format!(
@@ -319,8 +342,9 @@ mod tests {
 
     /// Run `git` in `cwd` with `args`. Asserts success; returns stdout as String.
     ///
-    /// Clears every `GIT_*` environment variable inherited from the parent
-    /// before spawning. This matters when the test runs from inside an outer
+    /// Strips the path-targeting `GIT_*` environment variables (see
+    /// [`GIT_PATH_TARGETING_VARS`]) inherited from the parent before
+    /// spawning. This matters when the test runs from inside an outer
     /// `git commit` (e.g. the project pre-commit hook invokes
     /// `cargo test --workspace`): without sanitization, `GIT_DIR`,
     /// `GIT_WORK_TREE`, and `GIT_INDEX_FILE` propagate down to the inner
@@ -328,18 +352,10 @@ mod tests {
     /// freshly-`git init`'d temp dir, producing surprising failures like
     /// `pathspec 'model.stmx' did not match any files` or invoking the
     /// outer repo's pre-commit hook on the temp commit.
-    ///
-    /// Uses `vars_os` so a non-UTF-8 env var anywhere in the parent process
-    /// cannot panic the test runner; the "GIT_" prefix is ASCII so a
-    /// byte-level comparison is sufficient.
     fn must_git(cwd: &Path, args: &[&str]) -> String {
         let mut cmd = Command::new("git");
         cmd.current_dir(cwd).args(args);
-        for (key, _) in std::env::vars_os() {
-            if key.as_encoded_bytes().starts_with(b"GIT_") {
-                cmd.env_remove(&key);
-            }
-        }
+        strip_git_path_env(&mut cmd);
         let out = cmd
             .output()
             .unwrap_or_else(|e| panic!("spawn git {args:?}: {e}"));
@@ -446,5 +462,94 @@ mod tests {
 
         let found = enclosing_git_root(&from_file).expect("repo root");
         assert_eq!(found, dir.path());
+    }
+
+    /// `strip_git_path_env` must remove every variable in the documented
+    /// path-targeting allowlist and must NOT touch identity / transport /
+    /// credential / interaction variables. We verify the contract via
+    /// `Command::get_envs`, which reports per-command env overrides
+    /// (`Some(value)` for sets, `None` for removals) without spawning a
+    /// process or mutating the parent's environment.
+    #[test]
+    fn strip_git_path_env_removes_only_path_targeting_vars() {
+        use std::ffi::OsStr;
+
+        // Vars we expect to be removed.
+        let path_targeting = [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_COMMON_DIR",
+        ];
+        // Vars that must survive: identity, transport, credential helper,
+        // interaction flag. If a future change adds one of these to the
+        // strip list, this test will fail and force a re-read of the
+        // explanatory comment in `run_git`.
+        let preserved = [
+            ("GIT_AUTHOR_NAME", "ci-bot"),
+            ("GIT_AUTHOR_EMAIL", "ci@example.com"),
+            ("GIT_COMMITTER_NAME", "ci-bot"),
+            ("GIT_COMMITTER_EMAIL", "ci@example.com"),
+            ("GIT_SSH_COMMAND", "ssh -i /tmp/id_test"),
+            ("GIT_ASKPASS", "/usr/bin/true"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ];
+
+        let mut cmd = Command::new("git");
+        for name in path_targeting {
+            cmd.env(name, "/should/be/stripped");
+        }
+        for (name, value) in preserved {
+            cmd.env(name, value);
+        }
+
+        strip_git_path_env(&mut cmd);
+
+        // After strip: every path-targeting var must appear in `get_envs`
+        // with a `None` value, indicating an explicit removal that wins
+        // over the inherited parent env.
+        let envs: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
+        for name in path_targeting {
+            let entry = envs
+                .iter()
+                .find(|(k, _)| *k == OsStr::new(name))
+                .unwrap_or_else(|| panic!("expected env entry for {name}"));
+            assert_eq!(
+                entry.1, None,
+                "{name} must be marked for removal after strip_git_path_env"
+            );
+        }
+        // And every preserved var must still carry its original value.
+        for (name, expected_value) in preserved {
+            let entry = envs
+                .iter()
+                .find(|(k, _)| *k == OsStr::new(name))
+                .unwrap_or_else(|| panic!("expected env entry for {name}"));
+            let observed = entry.1.expect("preserved var must still have a value");
+            assert_eq!(
+                observed,
+                OsStr::new(expected_value),
+                "{name} must survive strip_git_path_env unchanged"
+            );
+        }
+    }
+
+    /// Catches accidental regression of the documented allowlist itself.
+    /// If someone reorders, adds, or removes entries from
+    /// `GIT_PATH_TARGETING_VARS`, they must update this test deliberately
+    /// and re-read the rationale comment.
+    #[test]
+    fn git_path_targeting_vars_matches_documented_allowlist() {
+        assert_eq!(
+            GIT_PATH_TARGETING_VARS,
+            &[
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_COMMON_DIR",
+            ]
+        );
     }
 }

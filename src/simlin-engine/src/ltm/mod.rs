@@ -48,9 +48,24 @@ pub(crate) use graph::assign_loop_ids;
 pub(crate) use types::normalize_module_ref;
 
 /// Maximum number of nodes in any single strongly-connected component
-/// of a model's element-level causal graph before
-/// [`crate::db::model_ltm_variables`] auto-flips from exhaustive to
-/// discovery mode.
+/// before [`crate::db::model_ltm_variables`] auto-flips from exhaustive
+/// to discovery mode.
+///
+/// As of the 2026-05-06 tiered loop enumerator (#482), the gate is
+/// evaluated at two granularities and fires when **either** exceeds the
+/// threshold:
+///
+/// - The *variable-level* SCC, computed by Tarjan on the variable graph
+///   before any Johnson run. This is the early gate that catches dense
+///   scalar-feedback models like WRLD3 (166-node variable SCC) without
+///   paying for variable-level Johnson at all.
+/// - The *slow-path subgraph* SCC, computed by Tarjan on the
+///   cross-element / mixed slice inside `model_loop_circuits_tiered`.
+///   Pure-A2A and pure-scalar cycles contribute nothing to this
+///   subgraph, so this gate fires only on legitimate cross-element
+///   pressure. The legacy "full element-graph SCC" gate is gone:
+///   pre-#482 it was effectively `max(variable SCC, cross-element SCC)`
+///   anyway, and pure-A2A models with huge N stop tripping it now.
 ///
 /// The gate is applied **before** Johnson's circuit enumeration so that
 /// the downstream `build_element_level_loops` /

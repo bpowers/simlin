@@ -929,6 +929,12 @@ fn fixed_index_link_score_denominator_uses_fixed_element() {
 /// same orchestration `model_ltm_variables` does internally.
 /// `build_element_level_loops` is `pub(crate)` so tests can inspect the
 /// link-name normalization rules directly.
+///
+/// Drives the legacy `model_element_loop_circuits` (now `#[deprecated]`
+/// for new LTM callers) on purpose -- these tests pin the behavior of
+/// the slow-path consumer `build_element_level_loops` independently of
+/// the tiered enumerator's dedup logic.
+#[allow(deprecated)]
 fn build_loops_for_test(project: &TestProject) -> Vec<crate::ltm::Loop> {
     let datamodel = project.build_datamodel();
     let db = SimlinDb::default();
@@ -1094,6 +1100,9 @@ fn mixed_scalar_loop_score_refs_resolve_to_emitted_names() {
 // shape-threading refinement that emits both contributions or picks
 // differently triggers a deliberate test update.
 
+// `model_element_loop_circuits` is `#[deprecated]`; this test pins
+// pre-tiered loop-link annotation behavior on purpose.
+#[allow(deprecated)]
 #[test]
 fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
     use salsa::Setter;

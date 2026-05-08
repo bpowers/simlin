@@ -36,11 +36,18 @@
 use std::fs;
 use std::time::Instant;
 
+// `model_element_loop_circuits` is `#[deprecated]` for new LTM
+// callers; this benchmark intentionally drives the legacy element-
+// Johnson surface to measure its enumeration cost against the tiered
+// pipeline. Suppressing the lint at the import keeps the warning
+// pertinent for accidental new uses while letting this benchmark stay
+// quiet.
+#[allow(deprecated)]
+use simlin_engine::db::model_element_loop_circuits;
 use simlin_engine::db::{
     SimlinDb, causal_graph_from_edges, causal_graph_from_element_edges,
     compile_project_incremental, model_causal_edges, model_element_causal_edges,
-    model_element_loop_circuits, model_ltm_variables, set_project_ltm_enabled,
-    sync_from_datamodel_incremental,
+    model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
 use simlin_engine::{json, open_vensim, open_xmile};
 
@@ -152,6 +159,10 @@ impl Tracker {
     }
 }
 
+// Drives the legacy `model_element_loop_circuits` (deprecated for new
+// LTM callers) for benchmarking. New benchmarks should prefer
+// `model_loop_circuits_tiered`.
+#[allow(deprecated)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mdl_path = args

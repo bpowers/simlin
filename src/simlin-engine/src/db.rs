@@ -27,11 +27,21 @@ pub use db_analysis::causal_graph_from_element_edges;
 pub(crate) use db_analysis::collect_reference_shapes;
 pub(crate) use db_analysis::reconstruct_model_variables;
 use db_analysis::*;
+// `model_element_loop_circuits` is `#[deprecated]` for LTM consumers (the
+// LTM pipeline uses `model_loop_circuits_tiered` instead). The re-export
+// itself triggers the deprecation lint, but we need to keep it visible
+// for legacy diagnostic / measurement-postscript callers in the test
+// suite and the `ltm_full_bench` example. New callers see the
+// deprecation warning automatically; existing callers are reviewed
+// individually.
+#[allow(deprecated)]
+pub use db_analysis::model_element_loop_circuits;
 pub use db_analysis::{
     CausalEdgesResult, CyclePartitionsResult, DetectedLoop, DetectedLoopPolarity,
-    DetectedLoopsResult, ElementCausalEdgesResult, LoopCircuitsResult, compute_link_polarities,
-    model_causal_edges, model_cycle_partitions, model_detected_loops, model_element_causal_edges,
-    model_element_cycle_partitions, model_element_loop_circuits, model_loop_circuits,
+    DetectedLoopsResult, EdgeShapesResult, ElementCausalEdgesResult, FastPathCircuit,
+    LoopCircuitsResult, TieredCircuitsResult, compute_link_polarities, model_causal_edges,
+    model_cycle_partitions, model_detected_loops, model_edge_shapes, model_element_causal_edges,
+    model_element_cycle_partitions, model_loop_circuits, model_loop_circuits_tiered,
 };
 
 #[path = "db_implicit_deps.rs"]

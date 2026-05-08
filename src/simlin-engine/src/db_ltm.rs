@@ -1953,6 +1953,120 @@ fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<String> {
     result
 }
 
+/// Build `Loop` structs from the tiered loop-enumeration result.
+///
+/// The fast path (`tiered.fast_path`) carries variable-level cycles
+/// already classified as PureScalar or PureSameElementA2A; each one
+/// emits a single `Loop` directly. The slow path
+/// (`tiered.slow_path`) carries element-level circuits over the
+/// cross-element subgraph; those flow through the same per-circuit
+/// grouping logic the legacy `build_element_level_loops` uses.
+///
+/// The merged Loop list is passed to `assign_loop_ids` once so loop
+/// IDs (`r1, b1, ...`) are assigned over the unified set, matching
+/// the legacy ordering: `assign_loop_ids` sorts by content-derived
+/// key (sorted distinct var names) before numbering, so the final IDs
+/// are stable regardless of which path produced each Loop.
+pub(crate) fn build_loops_from_tiered(
+    tiered: &super::TieredCircuitsResult,
+    var_graph: &crate::ltm::CausalGraph,
+    source_vars: &HashMap<String, super::SourceVariable>,
+    db: &dyn Db,
+    project: SourceProject,
+    dm_dims: &[crate::datamodel::Dimension],
+) -> Vec<crate::ltm::Loop> {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::{Loop, assign_loop_ids};
+
+    let mut all_loops: Vec<Loop> = Vec::new();
+
+    // Fast-path: each cycle materializes directly into one Loop. The
+    // FastPathCircuit's `dimensions` field carries the shared
+    // arrayed dimensions (empty for PureScalar). The links / stocks /
+    // polarity are derived from the variable-level cycle exactly as
+    // the legacy pure-dimension branch did.
+    for fp in &tiered.fast_path {
+        if fp.variables.is_empty() {
+            continue;
+        }
+        let var_level_nodes: Vec<Ident<Canonical>> = fp
+            .variables
+            .iter()
+            .map(|s| Ident::new(s.as_str()))
+            .collect();
+        let links = var_graph.circuit_to_links(&var_level_nodes);
+        let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
+        let polarity = var_graph.calculate_polarity(&links);
+
+        // Map the canonical dimension names to original datamodel
+        // names so equation parsing on the loop-score variable
+        // resolves the dimension by string match. Mirrors the legacy
+        // pure-dimension branch's mapping logic.
+        //
+        // Fallback: if a canonical name in `fp.dimensions` is missing
+        // from `dm_dims`, fall back to the canonical name itself.
+        // This matches `build_element_level_loops` (the slow-path
+        // consumer below) so incremental or partially-invalid model
+        // states -- where the tiered enumerator's cached dim closure
+        // can outrun a still-being-edited datamodel dim list -- surface
+        // as a downstream analysis warning rather than a hard panic
+        // that takes down the whole LTM pipeline. We assert in debug
+        // builds so the mismatch stays observable when the model
+        // really is internally consistent.
+        let dimensions: Vec<String> = fp
+            .dimensions
+            .iter()
+            .map(|canonical| {
+                let resolved = dm_dims
+                    .iter()
+                    .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
+                    .map(|dm| dm.name().to_string());
+                debug_assert!(
+                    resolved.is_some(),
+                    "fast-path A2A cycle references dimension {canonical:?} that is not in \
+                     the project's datamodel dimensions {known:?}; falling back to canonical \
+                     name. This usually means the source project's dim list and the parsed \
+                     variable dims got out of sync mid-edit.",
+                    known = dm_dims.iter().map(|d| d.name()).collect::<Vec<_>>(),
+                );
+                resolved.unwrap_or_else(|| canonical.to_string())
+            })
+            .collect();
+
+        all_loops.push(Loop {
+            id: String::new(),
+            links,
+            stocks,
+            polarity,
+            dimensions,
+        });
+    }
+
+    // Slow-path: feed the element-level circuit list through the
+    // existing per-circuit grouping logic. This emits cross-element
+    // and mixed scalar loops the same way the legacy code did. The
+    // helper does its own `assign_loop_ids`; we strip the IDs
+    // afterward because we re-run id assignment over the merged set
+    // to keep numbering consistent.
+    if !tiered.slow_path.is_empty() {
+        let mut slow_path_loops = build_element_level_loops(
+            &tiered.slow_path,
+            var_graph,
+            source_vars,
+            db,
+            project,
+            dm_dims,
+        );
+        for l in &mut slow_path_loops {
+            l.id.clear();
+        }
+        all_loops.extend(slow_path_loops);
+    }
+
+    assign_loop_ids(&mut all_loops);
+    all_loops
+}
+
 /// Build `Loop` structs from element-level circuits, grouping
 /// pure-dimension circuits into shared A2A loops and keeping mixed
 /// circuits as individual scalar loops.
@@ -2345,10 +2459,9 @@ pub fn model_ltm_variables(
 
     use super::{
         CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmLinkId,
-        LtmSyntheticVar, LtmVariablesResult, causal_graph_from_element_edges,
-        causal_graph_with_modules, generate_max_abs_chain_str, model_causal_edges,
-        model_element_causal_edges, model_element_cycle_partitions, model_element_loop_circuits,
-        module_input_pathways_from_edges,
+        LtmSyntheticVar, LtmVariablesResult, causal_graph_from_edges, causal_graph_with_modules,
+        generate_max_abs_chain_str, model_causal_edges, model_element_cycle_partitions,
+        model_loop_circuits_tiered, module_input_pathways_from_edges,
     };
 
     let edges_result = model_causal_edges(db, model, project);
@@ -2359,35 +2472,59 @@ pub fn model_ltm_variables(
         };
     }
 
-    // When the user explicitly requested discovery mode, honor it directly.
-    // Otherwise gate on the element-level graph's largest SCC so we avoid
-    // Cliff A (~17 GB in `build_element_level_loops`) and Cliff B (~140 TB
-    // of `rel_loop_score` equation text at WRLD3 scale) *before* paying
-    // for Johnson's circuit enumeration.  See
-    // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
+    // When the user explicitly requested discovery mode, honor it
+    // directly. Otherwise auto-flip if either:
+    //   1. The variable-level SCC exceeds `MAX_LTM_SCC_NODES`, or
+    //   2. The slow-path (cross-element / mixed) element-level
+    //      subgraph's SCC exceeds `MAX_LTM_SCC_NODES` after the tiered
+    //      enumerator classifies cycles.
+    //
+    // Gating on the *variable-level* SCC (instead of the full
+    // element-graph SCC) is the structural change that motivates this
+    // PR: pure-A2A models with tens of variables over hundreds of
+    // elements have a huge element-graph SCC but a small variable
+    // SCC, and the new tiered enumerator produces no element-level
+    // circuits for them. Today's gate fires anyway on the inflated
+    // element-graph SCC, dropping these models into discovery mode
+    // unnecessarily.
+    //
+    // The variable-level SCC check (Tarjan, O(V+E)) runs first so
+    // models like WRLD3 (var SCC = 166) auto-flip without paying for
+    // variable-level Johnson. Only models that pass that check pay
+    // for the tiered enumerator, which is itself bounded: variable
+    // Johnson sees at most `MAX_LTM_SCC_NODES` nodes, and slow-path
+    // Johnson is skipped internally when the slow-path subgraph SCC
+    // exceeds the threshold.
+    //
+    // Cliff A (~17 GB in legacy `build_element_level_loops` on
+    // WRLD3-scale models) was tied to enumerating the full element
+    // graph; the tiered path skips that entirely on pure-scalar /
+    // pure-A2A models. Cliff B (rel_loop_score equation text) was
+    // retired earlier when post-simulation normalization moved out of
+    // the VM. See `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`
+    // and `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`.
     let is_discovery_user = project.ltm_discovery_mode(db);
-    let max_scc_size = if is_discovery_user {
+    let var_scc_size = if is_discovery_user {
         0
     } else {
-        let element_edges = model_element_causal_edges(db, model, project);
-        causal_graph_from_element_edges(element_edges).largest_scc_size()
+        let edges = model_causal_edges(db, model, project);
+        causal_graph_from_edges(edges).largest_scc_size()
     };
-    let auto_flipped = !is_discovery_user && max_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
-    let is_discovery = is_discovery_user || auto_flipped;
+    let var_auto_flipped = !is_discovery_user && var_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
 
-    if auto_flipped {
+    if var_auto_flipped {
         let msg = format!(
             "LTM analysis auto-switched from exhaustive to discovery mode: \
-             the element-level causal graph's largest SCC has {} nodes, \
-             exceeding MAX_LTM_SCC_NODES = {}.  Exhaustive compilation at \
-             this scale would allocate gigabytes of synthetic-variable \
-             equation text (see \
-             docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).  \
+             the variable-level causal graph's largest SCC has {} nodes, \
+             exceeding MAX_LTM_SCC_NODES = {}.  Variable-level Johnson at \
+             this scale would enumerate millions of circuits (see \
+             docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md and \
+             docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md). \
              Per-loop scores are ranked post-simulation via the \
              strongest-path search; see \
              docs/design/ltm--loops-that-matter.md for the two-tier \
              strategy.",
-            max_scc_size,
+            var_scc_size,
             crate::ltm::MAX_LTM_SCC_NODES,
         );
         CompilationDiagnostic(Diagnostic {
@@ -2398,6 +2535,7 @@ pub fn model_ltm_variables(
         })
         .accumulate(db);
     }
+    let mut is_discovery = is_discovery_user || var_auto_flipped;
 
     // Determine output ports for this model. Stdlib models always use
     // the "output" convention. For user-defined models, output ports are
@@ -2424,22 +2562,52 @@ pub fn model_ltm_variables(
     let source_vars = model.variables(db);
     let dm_dims = project_datamodel_dims(db, project);
 
-    // Pre-compute loops for exhaustive mode using element-level circuit
-    // detection. Element-level circuits capture per-element feedback
-    // (e.g., population[NYC] -> births[NYC] -> population[NYC]) and
-    // cross-element feedback (e.g., population[NYC] -> migration ->
-    // population[Boston]).
+    // Pre-compute loops for exhaustive mode using tiered loop
+    // enumeration: variable-level Johnson runs first, and only the
+    // cross-element / mixed slice descends into element-level Johnson
+    // on the slow-path subgraph. Pure-A2A and pure-scalar cycles emit
+    // a single Loop directly (one per variable-level cycle, with
+    // `dimensions` set on the A2A case).
     //
-    // Pure-dimension loops (all nodes in a group of circuits share the
-    // same variable-level structure, differing only by subscript) produce
-    // a single A2A loop with shared ID. Mixed loops (involving scalar
-    // nodes or cross-element edges) produce individual scalar loops.
+    // See `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`
+    // for the architecture; the legacy element-graph Johnson path is
+    // still available via `model_element_loop_circuits` for callers
+    // outside this function.
     //
-    // We also need the variable-level graph for polarity analysis since
-    // the element-level graph has no variable data populated.
+    // We also need the variable-level graph for polarity analysis
+    // (`build_loops_from_tiered` calls `var_graph.calculate_polarity`
+    // and `var_graph.find_stocks_in_loop`); the element-level graph
+    // produced by `model_element_causal_edges` carries no variable
+    // data.
     let loops: Option<Vec<Loop>> = if !is_discovery {
-        let circuits_result = model_element_loop_circuits(db, model, project);
-        if circuits_result.is_empty() {
+        let tiered = model_loop_circuits_tiered(db, model, project);
+        // Late-stage auto-flip: the variable-level SCC was small enough
+        // to clear the early gate, but the cross-element / mixed
+        // subgraph (the slow path) blew past the threshold. The tiered
+        // enumerator already skipped Johnson on the slow path in that
+        // case (`slow_path` is empty); we just need to flip the
+        // is_discovery flag so link-score generation, etc. follow the
+        // discovery path.
+        if tiered.slow_path_largest_scc > crate::ltm::MAX_LTM_SCC_NODES {
+            let msg = format!(
+                "LTM analysis auto-switched from exhaustive to discovery mode: \
+                 the cross-element / mixed slow-path subgraph's largest SCC has {} nodes, \
+                 exceeding MAX_LTM_SCC_NODES = {}.  Per-loop scores are ranked \
+                 post-simulation via the strongest-path search; see \
+                 docs/design/ltm--loops-that-matter.md for the two-tier strategy.",
+                tiered.slow_path_largest_scc,
+                crate::ltm::MAX_LTM_SCC_NODES,
+            );
+            CompilationDiagnostic(Diagnostic {
+                model: model.name(db).clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg),
+                severity: DiagnosticSeverity::Warning,
+            })
+            .accumulate(db);
+            is_discovery = true;
+            None
+        } else if tiered.fast_path.is_empty() && tiered.slow_path.is_empty() {
             if !has_input_ports {
                 return LtmVariablesResult {
                     vars: vec![],
@@ -2448,18 +2616,9 @@ pub fn model_ltm_variables(
             }
             None
         } else {
-            // Build the variable-level graph with populated variables for
-            // polarity analysis. Element-level graphs have empty variables.
             let var_graph = causal_graph_with_modules(db, model, project);
-
-            let detected = build_element_level_loops(
-                circuits_result,
-                &var_graph,
-                source_vars,
-                db,
-                project,
-                dm_dims,
-            );
+            let detected =
+                build_loops_from_tiered(tiered, &var_graph, source_vars, db, project, dm_dims);
             Some(detected)
         }
     } else {
