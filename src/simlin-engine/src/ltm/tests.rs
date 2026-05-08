@@ -644,6 +644,221 @@ fn test_analyze_expr_polarity_division_edge_cases() {
 }
 
 #[test]
+fn test_analyze_expr_polarity_array_reducers() {
+    // Array reducers SUM, MEAN, MAX (single-arg), MIN (single-arg) are monotone
+    // in their argument: their polarity equals the inner expression's polarity.
+    // STDDEV and RANK are not monotone: they must return Unknown even when the
+    // argument has a known polarity.
+    use crate::ast::{Expr2, Loc, UnaryOp};
+    use crate::builtins::BuiltinFn;
+
+    let x_var = Ident::new("x");
+    let pos_inner = || Expr2::Var(x_var.clone(), None, Loc::default());
+    let neg_inner = || {
+        Expr2::Op1(
+            UnaryOp::Negative,
+            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+            None,
+            Loc::default(),
+        )
+    };
+
+    // SUM passes through positive polarity.
+    let sum_pos = Expr2::App(BuiltinFn::Sum(Box::new(pos_inner())), None, Loc::default());
+    assert_eq!(
+        analyze_expr_polarity_with_context(&sum_pos, &x_var, LinkPolarity::Positive, None),
+        LinkPolarity::Positive,
+        "SUM(x) should pass through positive polarity",
+    );
+
+    // SUM passes through negative polarity (e.g. SUM(-x)).
+    let sum_neg = Expr2::App(BuiltinFn::Sum(Box::new(neg_inner())), None, Loc::default());
+    assert_eq!(
+        analyze_expr_polarity_with_context(&sum_neg, &x_var, LinkPolarity::Positive, None),
+        LinkPolarity::Negative,
+        "SUM(-x) should pass through negative polarity",
+    );
+
+    // MEAN with a single (array) argument passes through positive polarity.
+    let mean_pos = Expr2::App(BuiltinFn::Mean(vec![pos_inner()]), None, Loc::default());
+    assert_eq!(
+        analyze_expr_polarity_with_context(&mean_pos, &x_var, LinkPolarity::Positive, None),
+        LinkPolarity::Positive,
+        "MEAN(x) should pass through positive polarity",
+    );
+
+    // MEAN with a single (array) argument passes through negative polarity.
+    let mean_neg = Expr2::App(BuiltinFn::Mean(vec![neg_inner()]), None, Loc::default());
+    assert_eq!(
+        analyze_expr_polarity_with_context(&mean_neg, &x_var, LinkPolarity::Positive, None),
+        LinkPolarity::Negative,
+        "MEAN(-x) should pass through negative polarity",
+    );
+
+    // Array MAX (no second argument) passes through inner polarity.
+    let max_array_pos = Expr2::App(
+        BuiltinFn::Max(Box::new(pos_inner()), None),
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&max_array_pos, &x_var, LinkPolarity::Positive, None),
+        LinkPolarity::Positive,
+        "MAX(x) (array form) should pass through positive polarity",
+    );
+    let max_array_neg = Expr2::App(
+        BuiltinFn::Max(Box::new(neg_inner()), None),
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&max_array_neg, &x_var, LinkPolarity::Positive, None),
+        LinkPolarity::Negative,
+        "MAX(-x) (array form) should pass through negative polarity",
+    );
+
+    // Array MIN (no second argument) passes through inner polarity.
+    let min_array_pos = Expr2::App(
+        BuiltinFn::Min(Box::new(pos_inner()), None),
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&min_array_pos, &x_var, LinkPolarity::Positive, None),
+        LinkPolarity::Positive,
+        "MIN(x) (array form) should pass through positive polarity",
+    );
+    let min_array_neg = Expr2::App(
+        BuiltinFn::Min(Box::new(neg_inner()), None),
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&min_array_neg, &x_var, LinkPolarity::Positive, None),
+        LinkPolarity::Negative,
+        "MIN(-x) (array form) should pass through negative polarity",
+    );
+
+    // STDDEV is non-monotone: even with a positive-polarity argument, the result
+    // is Unknown because variance has no fixed sign w.r.t. its inputs.
+    let stddev = Expr2::App(
+        BuiltinFn::Stddev(Box::new(pos_inner())),
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&stddev, &x_var, LinkPolarity::Positive, None),
+        LinkPolarity::Unknown,
+        "STDDEV must always return Unknown polarity",
+    );
+
+    // RANK depends on the rest of the array, so polarity is undefined.
+    let direction = Expr2::Const("1".to_string(), 1.0, Loc::default());
+    let rank = Expr2::App(
+        BuiltinFn::Rank(Box::new(pos_inner()), Box::new(direction)),
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_expr_polarity_with_context(&rank, &x_var, LinkPolarity::Positive, None),
+        LinkPolarity::Unknown,
+        "RANK must always return Unknown polarity",
+    );
+}
+
+/// Verify reducer polarity propagates through the actual parsed shape:
+/// `SUM(x[*])` lowers to `Sum(Box::new(Subscript(x, [Wildcard], _, _)))`,
+/// not `Sum(Box::new(Var(x, ...)))`. Without an `Expr2::Subscript` arm in
+/// `analyze_expr_polarity_with_context`, the new reducer arms fall through
+/// to Unknown for the production case the issue actually targets.
+#[test]
+fn test_analyze_expr_polarity_array_reducers_subscript_wildcard() {
+    use crate::ast::{Expr2, IndexExpr2, Loc, UnaryOp};
+    use crate::builtins::BuiltinFn;
+    use LinkPolarity::{Negative, Positive, Unknown};
+
+    let x = Ident::new("x");
+    let y = Ident::new("y");
+    let sub = |id: &Ident<Canonical>| {
+        Expr2::Subscript(
+            id.clone(),
+            vec![IndexExpr2::Wildcard(Loc::default())],
+            None,
+            Loc::default(),
+        )
+    };
+    let app = |b: BuiltinFn<Expr2>| Expr2::App(b, None, Loc::default());
+    let neg = |e: Expr2| Expr2::Op1(UnaryOp::Negative, Box::new(e), None, Loc::default());
+    let one = || Expr2::Const("1".to_string(), 1.0, Loc::default());
+
+    // (label, expression, context_polarity, expected_polarity)
+    let cases: Vec<(&str, Expr2, LinkPolarity, LinkPolarity)> = vec![
+        (
+            "SUM(x[*]) +",
+            app(BuiltinFn::Sum(Box::new(sub(&x)))),
+            Positive,
+            Positive,
+        ),
+        (
+            "SUM(x[*]) -",
+            app(BuiltinFn::Sum(Box::new(sub(&x)))),
+            Negative,
+            Negative,
+        ),
+        (
+            "SUM(-x[*])",
+            app(BuiltinFn::Sum(Box::new(neg(sub(&x))))),
+            Positive,
+            Negative,
+        ),
+        (
+            "SUM(y[*])",
+            app(BuiltinFn::Sum(Box::new(sub(&y)))),
+            Positive,
+            Unknown,
+        ),
+        (
+            "MEAN(x[*])",
+            app(BuiltinFn::Mean(vec![sub(&x)])),
+            Positive,
+            Positive,
+        ),
+        (
+            "MAX(x[*])",
+            app(BuiltinFn::Max(Box::new(sub(&x)), None)),
+            Positive,
+            Positive,
+        ),
+        (
+            "MIN(x[*])",
+            app(BuiltinFn::Min(Box::new(sub(&x)), None)),
+            Positive,
+            Positive,
+        ),
+        (
+            "STDDEV(x[*])",
+            app(BuiltinFn::Stddev(Box::new(sub(&x)))),
+            Positive,
+            Unknown,
+        ),
+        (
+            "RANK(x[*], 1)",
+            app(BuiltinFn::Rank(Box::new(sub(&x)), Box::new(one()))),
+            Positive,
+            Unknown,
+        ),
+    ];
+
+    for (label, expr, ctx, want) in &cases {
+        assert_eq!(
+            analyze_expr_polarity_with_context(expr, &x, *ctx, None),
+            *want,
+            "{label}",
+        );
+    }
+}
+
+#[test]
 fn test_graphical_function_polarity() {
     use crate::variable::Table;
 
@@ -1571,6 +1786,77 @@ fn test_max_min_polarity_with_non_monotone_arg() {
         analyze_link_polarity(&ast, &x_var, &empty_vars),
         LinkPolarity::Positive,
         "MAX(PULSE(1,5), x) should be Positive (PULSE is independent)"
+    );
+}
+
+#[test]
+fn test_variadic_mean_polarity_with_non_monotone_arg() {
+    // Variadic MEAN(a, b, ...) is the scalar form. It must mirror Add's
+    // self-reference handling: an arg that returns Unknown *and* references
+    // from_var (e.g. ABS(x)) makes the whole mean non-monotone, regardless
+    // of order. Without this, MEAN(ABS(x), x) would silently mis-classify
+    // as Positive because the second arg overwrites the first arg's
+    // Unknown-with-self-reference state.
+    use crate::ast::{Ast, Expr2, Loc, UnaryOp};
+    use crate::builtins::BuiltinFn;
+
+    let x_var = Ident::new("x");
+    let x_expr = || Expr2::Var(x_var.clone(), None, Loc::default());
+    let abs_x = || Expr2::App(BuiltinFn::Abs(Box::new(x_expr())), None, Loc::default());
+    let neg_x = || Expr2::Op1(UnaryOp::Negative, Box::new(x_expr()), None, Loc::default());
+    let empty_vars = HashMap::new();
+
+    // MEAN(ABS(x), x) -- ABS(x) is non-monotone in x. The mean of a
+    // non-monotone term and a monotone term is itself non-monotone.
+    let mean_abs_x = Expr2::App(
+        BuiltinFn::Mean(vec![abs_x(), x_expr()]),
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(mean_abs_x), &x_var, &empty_vars),
+        LinkPolarity::Unknown,
+        "MEAN(ABS(x), x) should be Unknown (ABS(x) is non-monotone in x)"
+    );
+
+    // MEAN(x, ABS(x)) -- order swapped from above; result must still be
+    // Unknown. This is the contrapositive of the bug: when ABS(x) is the
+    // *second* arg, the original buggy combiner happened to do the right
+    // thing because Unknown collapses Unknown; here we make sure it stays
+    // Unknown when ABS(x) is the *first* arg.
+    let mean_x_abs = Expr2::App(
+        BuiltinFn::Mean(vec![x_expr(), abs_x()]),
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(mean_x_abs), &x_var, &empty_vars),
+        LinkPolarity::Unknown,
+        "MEAN(x, ABS(x)) should be Unknown (ABS(x) is non-monotone in x)"
+    );
+
+    // MEAN(x, x): both args agree on Positive, mean is Positive.
+    let mean_x_x = Expr2::App(
+        BuiltinFn::Mean(vec![x_expr(), x_expr()]),
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(mean_x_x), &x_var, &empty_vars),
+        LinkPolarity::Positive,
+        "MEAN(x, x) should be Positive (both args monotone-positive)"
+    );
+
+    // MEAN(x, -x): args have opposite known polarities -> Unknown.
+    let mean_x_negx = Expr2::App(
+        BuiltinFn::Mean(vec![x_expr(), neg_x()]),
+        None,
+        Loc::default(),
+    );
+    assert_eq!(
+        analyze_link_polarity(&Ast::Scalar(mean_x_negx), &x_var, &empty_vars),
+        LinkPolarity::Unknown,
+        "MEAN(x, -x) should be Unknown (mixed polarity)"
     );
 }
 
