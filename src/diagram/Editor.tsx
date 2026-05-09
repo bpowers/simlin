@@ -2578,6 +2578,17 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     return project;
   }
 
+  // Release an engine handle that we opened but failed to wire into state,
+  // so the WASM allocation doesn't leak. dispose() is best-effort: a
+  // throwing dispose must not mask the original error we're surfacing.
+  private async disposeOrphanedEngine(engine: EngineProject): Promise<void> {
+    try {
+      await engine.dispose();
+    } catch {
+      // ignored: the engine is being abandoned regardless
+    }
+  }
+
   async openInitialProject(): Promise<void> {
     let engine: EngineProject;
     try {
@@ -2592,17 +2603,31 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       return;
     }
 
-    this.engineProject = engine;
+    // The try/catch deliberately extends past the engine open: this method is
+    // invoked from a fire-and-forget setTimeout in the constructor, and
+    // src/app / src/diagram have no React error boundary. If serializeJson
+    // panics in WASM or projectFromJson rejects the engine's JSON (e.g. an
+    // unknown view element type), an unguarded throw becomes an unhandled
+    // rejection and the user is left staring at editor chrome with a blank
+    // canvas and no error message.
+    try {
+      this.engineProject = engine;
 
-    const serializedProject = await engine.serializeProtobuf();
+      const serializedProject = await engine.serializeProtobuf();
 
-    const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
-    const project = await this.updateVariableErrors(projectFromJson(json));
+      const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
+      const project = await this.updateVariableErrors(projectFromJson(json));
 
-    this.setState({
-      projectHistory: [serializedProject],
-      activeProject: project,
-    });
+      this.setState({
+        projectHistory: [serializedProject],
+        activeProject: project,
+      });
+    } catch (e: unknown) {
+      this.engineProject = undefined;
+      await this.disposeOrphanedEngine(engine);
+      const err = getErrorDetails(e);
+      this.appendModelError(`opening the project failed: ${err.message ?? 'Unknown error'}`);
+    }
   }
 
   async openEngineProject(serializedProject: Readonly<Uint8Array>): Promise<EngineProject | undefined> {
@@ -2617,28 +2642,40 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       this.appendModelError(`opening the project in the engine failed: ${err.message ?? 'Unknown error'}`);
       return;
     }
-    this.engineProject = engine;
 
-    const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
-    let project = projectFromJson(json);
+    // See openInitialProject: the steps after a successful engine open can
+    // still throw (serializeJson WASM panic, projectFromJson rejecting an
+    // unknown view element type) and there is no error boundary above us.
+    try {
+      this.engineProject = engine;
 
-    if (this.newEngineShouldPullView) {
-      const queuedView = defined(this.newEngineQueuedView);
-      this.newEngineShouldPullView = false;
-      this.newEngineQueuedView = undefined;
-      const model = defined(project.models.get(this.state.modelName));
-      const views = [...model.views];
-      views[0] = queuedView;
-      const updatedModel = { ...model, views };
-      project = { ...project, models: mapSet(project.models, this.state.modelName, updatedModel) };
-      this.queueViewUpdate(queuedView);
+      const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
+      let project = projectFromJson(json);
+
+      if (this.newEngineShouldPullView) {
+        const queuedView = defined(this.newEngineQueuedView);
+        this.newEngineShouldPullView = false;
+        this.newEngineQueuedView = undefined;
+        const model = defined(project.models.get(this.state.modelName));
+        const views = [...model.views];
+        views[0] = queuedView;
+        const updatedModel = { ...model, views };
+        project = { ...project, models: mapSet(project.models, this.state.modelName, updatedModel) };
+        this.queueViewUpdate(queuedView);
+      }
+
+      this.setState({
+        activeProject: await this.updateVariableErrors(project),
+      });
+
+      return engine;
+    } catch (e: unknown) {
+      this.engineProject = undefined;
+      await this.disposeOrphanedEngine(engine);
+      const err = getErrorDetails(e);
+      this.appendModelError(`opening the project failed: ${err.message ?? 'Unknown error'}`);
+      return undefined;
     }
-
-    this.setState({
-      activeProject: await this.updateVariableErrors(project),
-    });
-
-    return engine;
   }
 
   async recalculateStatus() {
