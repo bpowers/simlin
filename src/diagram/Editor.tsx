@@ -253,6 +253,24 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   // instance's callback fire against the new instance, re-introducing
   // the stale-idents-on-new-path bug.
   private selectionDeferralTimer: ReturnType<typeof setTimeout> | null = null;
+  // Pending setTimeout(0) handles for the constructor's deferred
+  // openInitialProject() and the scheduleSimRun() / scheduleSave()
+  // dispatches. Held so componentWillUnmount can cancel them — the
+  // Editor remounts on every wouter route change in src/app and on
+  // every EditorHost path swap in src/simlin-serve. If a constructor
+  // callback fires after unmount it opens an EngineProject on a stale
+  // `this` and leaks ~several MB of WASM linear memory plus salsa
+  // caches; if scheduleSimRun / scheduleSave fire after unmount they
+  // touch a disposed engine and may setState on an unmounted component.
+  private openInitialProjectTimer: ReturnType<typeof setTimeout> | null = null;
+  private simRunTimer: ReturnType<typeof setTimeout> | null = null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  // Set in componentWillUnmount before any pending callbacks could fire
+  // and re-enter the instance. Each scheduled callback short-circuits
+  // when this is true so a setTimeout already drained from the macrotask
+  // queue at unmount time (clearTimeout no longer reaches it) does not
+  // touch state, open an engine, or call into props.onSave.
+  private unmounted = false;
 
   constructor(props: EditorProps) {
     super(props);
@@ -287,8 +305,27 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       },
     };
 
-    setTimeout(async () => {
+    this.openInitialProjectTimer = setTimeout(async () => {
+      this.openInitialProjectTimer = null;
+      // If unmount drained this callback off the macrotask queue before
+      // clearTimeout could cancel it, abort: opening an engine here would
+      // wire it onto a stale `this` that componentWillUnmount cannot reach.
+      if (this.unmounted) {
+        return;
+      }
       await this.openInitialProject();
+      if (this.unmounted) {
+        // openInitialProject finished against an unmounted instance — the
+        // engine handle is on `this.engineProject`. Dispose it here so the
+        // navigation away from this route does not strand the WASM
+        // allocation (componentWillUnmount has already run).
+        const orphan = this.engineProject;
+        this.engineProject = undefined;
+        if (orphan) {
+          await this.disposeOrphanedEngine(orphan);
+        }
+        return;
+      }
       this.scheduleSimRun();
     });
   }
@@ -307,9 +344,37 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
 
   componentWillUnmount() {
     document.removeEventListener('keydown', this.handleKeyDown);
+    // Set the unmount flag BEFORE cancelling timers: any callback that
+    // already drained off the macrotask queue between the unmount tick
+    // starting and clearTimeout reaching it must short-circuit. The
+    // clearTimeout calls below are best-effort optimization on top.
+    this.unmounted = true;
     if (this.selectionDeferralTimer !== null) {
       clearTimeout(this.selectionDeferralTimer);
       this.selectionDeferralTimer = null;
+    }
+    if (this.openInitialProjectTimer !== null) {
+      clearTimeout(this.openInitialProjectTimer);
+      this.openInitialProjectTimer = null;
+    }
+    if (this.simRunTimer !== null) {
+      clearTimeout(this.simRunTimer);
+      this.simRunTimer = null;
+    }
+    if (this.saveTimer !== null) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    // Release the WASM EngineProject handle. The Editor mounts/unmounts
+    // on every wouter route change in src/app and on every EditorHost
+    // path swap in src/simlin-serve, so without this every navigation
+    // away from a project leaks ~several MB of WASM linear memory plus
+    // the engine's salsa caches. Best-effort: a throwing dispose must
+    // not crash the host (see disposeOrphanedEngine).
+    const engine = this.engineProject;
+    this.engineProject = undefined;
+    if (engine) {
+      void this.disposeOrphanedEngine(engine);
     }
   }
 
@@ -348,7 +413,15 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   }
 
   scheduleSimRun(): void {
-    setTimeout(() => {
+    // Track only the most recent handle; any earlier pending timer is
+    // covered by the `unmounted` short-circuit below. componentWillUnmount
+    // clearTimeout()s the latest handle as a polite no-op for the
+    // pending tick.
+    this.simRunTimer = setTimeout(() => {
+      this.simRunTimer = null;
+      if (this.unmounted) {
+        return;
+      }
       const engine = this.engine();
       if (!engine) {
         return;
@@ -459,7 +532,12 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   scheduleSave(): void {
     const { projectVersion } = this.state;
 
-    setTimeout(async () => {
+    // See scheduleSimRun for why we track only the latest handle.
+    this.saveTimer = setTimeout(async () => {
+      this.saveTimer = null;
+      if (this.unmounted) {
+        return;
+      }
       await this.save(toInt(projectVersion));
     });
   }
