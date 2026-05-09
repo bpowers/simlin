@@ -76,7 +76,7 @@ jest.mock(
 );
 
 import * as React from 'react';
-import { render, fireEvent, screen, waitFor } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor, act } from '@testing-library/react';
 
 import { Login } from '../Login';
 
@@ -143,5 +143,26 @@ describe('Login OAuth click handlers', () => {
     });
 
     resolveSignIn();
+  });
+});
+
+describe('Login showProviderRedirect flow', () => {
+  test('renders the OAuth error visibly in the "you already have an account" card', () => {
+    const ref = React.createRef<Login>();
+    render(<Login ref={ref} disabled={false} auth={makeAuth()} />);
+    // Drive the component into the provider-redirect state and seed an
+    // OAuth error, as googleLoginClick / appleLoginClick do when
+    // signInWithRedirect rejects. This card has no helperText-bearing
+    // TextField, so the error must be rendered explicitly.
+    act(() => {
+      ref.current?.setState({
+        emailLoginFlow: 'showProviderRedirect',
+        provider: 'google.com',
+        email: 'a@example.com',
+        emailError: 'popup blocked by browser',
+      });
+    });
+    expect(screen.queryByText('Sign in with Google')).not.toBeNull();
+    expect(screen.getByRole('alert').textContent).toMatch(/popup blocked by browser/i);
   });
 });

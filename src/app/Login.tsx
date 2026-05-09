@@ -371,6 +371,15 @@ export class Login extends React.Component<LoginProps, LoginState> {
                     You've already used {provider} to sign up with <b>{this.state.email}</b>. Sign in with {provider} to
                     continue.
                   </p>
+                  {/* The "Sign in with {provider}" button calls googleLoginClick /
+                   * appleLoginClick, whose signInWithRedirect rejection is surfaced
+                   * via emailError -- render it here so the failure is visible (this
+                   * card has no helperText-bearing TextField like the other flows). */}
+                  {this.state.emailError !== undefined && (
+                    <p role="alert" className={typography.body2}>
+                      {this.state.emailError}
+                    </p>
+                  )}
                 </CardContent>
                 <CardActions>
                   <Button
