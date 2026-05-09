@@ -196,6 +196,29 @@ jobs:
       - name: Run TypeScript tests
         run: pnpm test
 
+      # The production deploy is a local command with no CI gate, so
+      # without this step a regression in the deploy assembly (build
+      # outputs landing at the wrong path, hashed bundle not
+      # referenced from index.html, web component bundle missing,
+      # etc.) only surfaces during the actual `gcloud app deploy`.
+      # This re-runs the deploy:assemble step against the existing
+      # build, asserts the expected artifacts, and runs deploy:clean
+      # so the workspace is restored before any subsequent steps.
+      - name: Verify deploy build artifacts
+        run: |
+          pnpm --filter @simlin/app run deploy:assemble
+          bash scripts/verify-deploy-build.sh
+          pnpm --filter @simlin/app run deploy:clean
+          # After deploy:clean the working tree should be clean. A
+          # non-empty `git status` here means deploy:clean is missing
+          # a path the build wrote into public/.
+          status=$(git status --porcelain)
+          if [ -n "$status" ]; then
+            echo "ERROR: deploy:clean left the working tree dirty:" >&2
+            echo "$status" >&2
+            exit 1
+          fi
+
   pysimlin:
     name: pysimlin type check and tests
     runs-on: ubuntu-latest
