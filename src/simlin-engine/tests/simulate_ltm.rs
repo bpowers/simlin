@@ -5356,3 +5356,327 @@ fn test_scalar_reducer_loop_discovery() {
         }
     }
 }
+
+// ============================================================================
+// AC4.6 (end-to-end): a cross-element loop over a partially-reduced axis,
+// scored from the partial-reduce link scores.
+//
+// `matrix[D1,D2]` (a stock) feeds `row_sum[D1] = SUM(matrix[D1,*])` (a
+// partial reduce collapsing only the D2 axis), and the inflow
+// `growth[D1,D2] = row_sum[D1] * c[D1,D2]` closes the loop
+// `matrix[d1,d2] -> row_sum[d1] -> growth[d1,d2] -> matrix[d1,d2]`. Within
+// a row, `matrix[d1,x]` and `matrix[d1,y]` both feed `row_sum[d1]` through
+// distinct partial-reduce link-score edges, so the loop through one element
+// "sees" the other via the reducer link score.
+// ============================================================================
+
+/// Find the per-`(d1,d2)`-element partial-reduce link score offset for the
+/// edge `{from}[d1,d2] -> {to}[d1]`. The source subscript carries both
+/// axes; the target subscript carries only the surviving axis. Returns
+/// `None` if no such variable was emitted.
+fn find_partial_reduce_offset(
+    results: &Results,
+    from_name: &str,
+    d1: &str,
+    d2: &str,
+    to_name: &str,
+) -> Option<usize> {
+    let name = format!(
+        "$\u{205A}ltm\u{205A}link_score\u{205A}{from_name}[{d1},{d2}]\u{2192}{to_name}[{d1}]"
+    );
+    results
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str() == name)
+        .map(|(_, &off)| off)
+}
+
+/// Build a 2-D arrayed feedback model whose loop runs over the
+/// partially-reduced axis.
+///
+/// Model structure (all equations use bare references so the only
+/// subscripted variables are the explicit `matrix[D1,*]` reducer arg and
+/// the synthetic per-element scores -- an explicit `row_sum[D1]` subscript
+/// inside an apply-to-all equation classifies the reference as a dynamic
+/// index, which is a separate pre-existing limitation; Phase 4 sidesteps it
+/// rather than fixing it):
+///   matrix[D1,D2] (stock, distinct per-element initial values, multiplicative
+///                  self-feedback -> the per-element trajectories diverge,
+///                  so the reducer link scores are non-degenerate)
+///   row_sum[D1]   (aux, = SUM(matrix[D1,*]))  -- the partial reduce
+///   total         (aux, = SUM(row_sum[*]))  -- a scalar full reduce on top
+///   growth[D1,D2] (flow, = matrix * total * 0.000001)  -- inflow into matrix;
+///                  `matrix` is the same-element diagonal, `total` is a
+///                  scalar that broadcasts.
+///
+/// `D1 = {a, b}`, `D2 = {x, y}`. The element-level causal graph for the
+/// `SUM(matrix[D1,*])` reference is the conservative full-cross-product
+/// (Phase 5 tightens it), so besides the clean 4-cycles `matrix[d1,d2] ->
+/// row_sum[d1] -> total -> growth[d1,d2] -> matrix[d1,d2]` there are also
+/// spurious cross-element loops; the assertions only require that a real
+/// partial-reduce link score is emitted, carries non-degenerate values, and
+/// is referenced by some loop score.
+fn build_partial_reduce_model(name: &str) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: name.to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![
+            datamodel::Dimension::named("D1".to_string(), vec!["a".to_string(), "b".to_string()]),
+            datamodel::Dimension::named("D2".to_string(), vec!["x".to_string(), "y".to_string()]),
+        ],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                // matrix[D1,D2] with distinct per-element initial values so
+                // the per-element trajectories (and hence the reducer link
+                // scores) are non-degenerate.
+                Variable::Stock(datamodel::Stock {
+                    ident: "matrix".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["D1".to_string(), "D2".to_string()],
+                        vec![
+                            ("a,x".to_string(), "100".to_string(), None, None),
+                            ("a,y".to_string(), "150".to_string(), None, None),
+                            ("b,x".to_string(), "200".to_string(), None, None),
+                            ("b,y".to_string(), "250".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // row_sum[D1] = SUM(matrix[D1,*])  -- the partial reduce.
+                Variable::Aux(datamodel::Aux {
+                    ident: "row_sum".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["D1".to_string()],
+                        "SUM(matrix[D1, *])".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // total = SUM(row_sum[*])  -- scalar full reduce.
+                Variable::Aux(datamodel::Aux {
+                    ident: "total".to_string(),
+                    equation: Equation::Scalar("SUM(row_sum[*])".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // growth[D1,D2] = matrix * total * 0.000001  -- inflow.
+                // matrix is the same-element diagonal; total broadcasts.
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["D1".to_string(), "D2".to_string()],
+                        "matrix * total * 0.000001".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// AC4.6 (end-to-end): the partial-reduce link scores `matrix[d1,d2] ->
+/// row_sum[d1]` are emitted, carry non-degenerate values, and a loop-score
+/// variable references them.
+#[test]
+fn test_partial_reduce_cross_element_loop() {
+    let project = build_partial_reduce_model("partial_reduce_loop");
+
+    // Exhaustive mode: loop scores are emitted and the matrix -> row_sum
+    // reducer edge participates in the per-element 3-cycles. Compile and
+    // fetch the synthetic-variable list from the same db so the loop-score
+    // equations below match the simulated variables exactly.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // (a) Both partial-reduce link scores in row `a` are present and
+    // non-degenerate (not identically 0 across all steps, and not always
+    // magnitude exactly 1 -- a SUM partial reduce yields a fraction
+    // strictly between 0 and 1 whenever the two row elements have
+    // different deltas).
+    let ax = find_partial_reduce_offset(&results, "matrix", "a", "x", "row_sum")
+        .expect("expected partial-reduce link score matrix[a,x] -> row_sum[a]");
+    let ay = find_partial_reduce_offset(&results, "matrix", "a", "y", "row_sum")
+        .expect("expected partial-reduce link score matrix[a,y] -> row_sum[a]");
+    // The b-row scores must exist too (one per (d1, d2) pair).
+    assert!(
+        find_partial_reduce_offset(&results, "matrix", "b", "x", "row_sum").is_some(),
+        "expected partial-reduce link score matrix[b,x] -> row_sum[b]"
+    );
+    assert!(
+        find_partial_reduce_offset(&results, "matrix", "b", "y", "row_sum").is_some(),
+        "expected partial-reduce link score matrix[b,y] -> row_sum[b]"
+    );
+
+    let read = |off: usize| -> Vec<f64> {
+        (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + off])
+            .collect()
+    };
+    let ax_vals = read(ax);
+    let ay_vals = read(ay);
+    for (label, vals) in [
+        ("matrix[a,x]->row_sum[a]", &ax_vals),
+        ("matrix[a,y]->row_sum[a]", &ay_vals),
+    ] {
+        let any_nonzero = vals.iter().any(|v| v.abs() > 1e-9 && v.is_finite());
+        assert!(
+            any_nonzero,
+            "{label} link score should be non-zero at some step, got: {vals:?}"
+        );
+        let always_unit = vals
+            .iter()
+            .all(|v| !v.is_finite() || (v.abs() - 1.0).abs() < 1e-9);
+        assert!(
+            !always_unit,
+            "{label} link score should not be magnitude 1 at every step \
+             (a SUM partial reduce splits the row delta), got: {vals:?}"
+        );
+    }
+    // Hand calc: a SUM partial reduce splits the row delta, so for row `a`
+    // the link score magnitudes are |Δm[a,x]| / |Δrow_sum[a]| and |Δm[a,y]|
+    // / |Δrow_sum[a]| with Δrow_sum[a] = Δm[a,x] + Δm[a,y]. Both inflows
+    // are positive, so the two deltas share a sign and the magnitudes add
+    // to 1 at every step where the row actually changed.
+    for step in 2..results.step_count {
+        let s = ax_vals[step].abs() + ay_vals[step].abs();
+        if ax_vals[step].is_finite() && ay_vals[step].is_finite() && s > 1e-9 {
+            assert!(
+                (s - 1.0).abs() < 1e-6,
+                "row-a partial-reduce link scores should split the row delta \
+                 (sum of magnitudes ~1) at step {step}, got |{}| + |{}| = {}",
+                ax_vals[step],
+                ay_vals[step],
+                s
+            );
+        }
+    }
+
+    // (b) At least one loop-score variable references the partial-reduce
+    // link scores. The elementary loops are the per-element 3-cycles
+    // `matrix[d1,d2] -> row_sum[d1] -> growth[d1,d2] -> matrix[d1,d2]`; the
+    // conservative full-cross-product element graph for the `SUM(matrix
+    // [D1,*])` reference also produces spurious cross-element loops (fixed
+    // in Phase 5), but at least one loop_score equation must reference a
+    // real `matrix[d1,d2]->row_sum[d1]` link score for the partial reduce
+    // to contribute at all.
+    let loop_score_var_count = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+        })
+        .count();
+    assert!(
+        loop_score_var_count > 0,
+        "exhaustive mode should emit loop_score variables for the partial-reduce model"
+    );
+
+    let partial_reduce_names: Vec<String> = ltm
+        .vars
+        .iter()
+        .map(|v| v.name.clone())
+        .filter(|n| {
+            n.starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}matrix[")
+                && n.contains("\u{2192}row_sum[")
+        })
+        .collect();
+    assert!(
+        partial_reduce_names.len() >= 4,
+        "expected >=4 partial-reduce link scores (one per (d1,d2) pair), got: {partial_reduce_names:?}"
+    );
+    let loop_score_eqs: Vec<(String, String)> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .map(|v| (v.name.clone(), v.equation.source_text()))
+        .collect();
+    let references_partial_reduce = loop_score_eqs
+        .iter()
+        .any(|(_, eq)| partial_reduce_names.iter().any(|n| eq.contains(n.as_str())));
+    assert!(
+        references_partial_reduce,
+        "at least one loop_score equation must reference a partial-reduce link \
+         score (matrix[d1,d2]->row_sum[d1]); loop_score equations: {loop_score_eqs:?}; \
+         partial-reduce link scores: {partial_reduce_names:?}"
+    );
+}
+
+/// No regression: the existing full-reduce (`SUM(population[*])` -> scalar)
+/// integration tests still pass with unchanged values. (This test exists
+/// purely to keep the AC4.6 work co-located with an explicit assertion
+/// that the full-reduce path is untouched; the heavy lifting is in
+/// `test_cross_dim_sum_algebraic` & friends above, which run as part of
+/// the same binary.)
+#[test]
+fn test_full_reduce_still_works_after_partial_reduce_support() {
+    let project =
+        build_arrayed_to_scalar_model("full_reduce_regression", "SUM(population[*])", "total_pop");
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let offsets = find_cross_dimensional_offsets(&results, "population", "total_pop");
+    assert_eq!(
+        offsets.len(),
+        3,
+        "full reduce SUM(population[*]) must still emit 3 per-source-element scalar link scores, got: {offsets:?}"
+    );
+    // And no per-(d1,d2) partial-reduce names should appear for this 1-D
+    // model.
+    assert!(
+        results
+            .offsets
+            .keys()
+            .all(|k| !k.as_str().contains("\u{2192}total_pop[")),
+        "a scalar target must not get an arrayed-result (partial-reduce) link score"
+    );
+}

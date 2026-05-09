@@ -1343,35 +1343,43 @@ fn generate_loop_score_equation(
 /// loop link inside a loop-score equation.
 ///
 /// Three cases:
-///   1. The loop edge visits an element `e` of the target (`link.to` is
-///      `to[e]`) AND a per-target-element scalar link score
-///      `$⁚ltm⁚link_score⁚{from}→{to}[{e}]` was emitted (the scalar-source
-///      -> arrayed-target case from `try_scalar_to_arrayed_link_scores`):
-///      reference that scalar variable *bare* -- the element is already in
-///      the name, so adding a `[e]` subscript would be wrong (the variable
-///      is scalar, it has no element axis to index).
-///   2. The loop edge visits an element `e` and the link score is a
-///      *dimensioned* A2A variable (`$⁚ltm⁚link_score⁚{from}→{to}` with
-///      `dimensions = [target_dims]`, from `emit_per_shape_link_scores`):
-///      reference it subscripted-after-quote, `"$⁚ltm⁚link_score⁚{from}→{to}"[e]`.
-///   3. No visited element (pure-scalar / pure-A2A loops, or `link.to` is
-///      variable-level): reference the resolved name bare.
+///
+/// 1. The loop edge visits an element `e` of the target (`link.to` is
+///    `to[e]`) AND a per-target-element *scalar* link score
+///    `$⁚ltm⁚link_score⁚{from}→{to}[{e}]` was emitted: reference that
+///    scalar variable *bare* -- the element is already in the name, so a
+///    `[e]` subscript would be wrong (the variable is scalar, it has no
+///    element axis to index). This covers both `try_scalar_to_arrayed_link_scores`
+///    (scalar source -> arrayed target, `from` unsubscripted) and
+///    `try_cross_dimensional_link_scores`'s partial-reduce arm
+///    (arrayed-result reducer `matrix[d1,d2] → row_sum[d1]`, where
+///    `link.from` is itself element-level and rides verbatim in the name).
+///
+/// 2. The loop edge visits an element `e` and the link score is a
+///    *dimensioned* A2A variable (`$⁚ltm⁚link_score⁚{from}→{to}` with
+///    `dimensions = [target_dims]`, from `emit_per_shape_link_scores`):
+///    reference it subscripted-after-quote, `"$⁚ltm⁚link_score⁚{from}→{to}"[e]`.
+///
+/// 3. No visited element (pure-scalar / pure-A2A loops, or `link.to` is
+///    variable-level): reference the resolved name bare.
 ///
 /// Cases 1 and 2 are distinguished by which name `emit_per_shape_link_scores`
-/// / `try_scalar_to_arrayed_link_scores` actually emitted: case 1's
-/// element-in-name variant takes priority because it is the form a
-/// scalar->arrayed edge gets (and the form the discovery parser keeps the
-/// scalar source unsubscripted for). A bracketed `link.from`
-/// (`"pop[nyc]"`) can only be a FixedIndex / cross-dimensional source, never
-/// a scalar one, so case 1 is skipped for it and the bracketed-from
-/// resolution in `resolve_link_score_name_for_loop` handles it instead.
+/// / `try_scalar_to_arrayed_link_scores` / `try_cross_dimensional_link_scores`
+/// actually emitted: the element-in-name scalar variant takes priority
+/// because that is the form a scalar->arrayed or arrayed-result-reducer edge
+/// gets. A bracketed `link.from` (`"pop[nyc]"`) without a matching
+/// element-in-name entry in `emitted` can only be a FixedIndex /
+/// full-reduce cross-dimensional source, so it falls through to the
+/// bracketed-from resolution in `resolve_link_score_name_for_loop`.
 fn loop_link_score_ref(link: &crate::ltm::Link, emitted: &HashSet<String>) -> String {
     let (to_var_level, visited_element) = split_node_subscript(link.to.as_str());
 
-    if let Some(elem) = visited_element
-        && !link.from.as_str().contains('[')
-    {
-        // Case 1: a per-target-element scalar link score.
+    if let Some(elem) = visited_element {
+        // Cases 1 / 1b: a per-target-element scalar link score. The name
+        // shape is identical (`$⁚ltm⁚link_score⁚{from}→{to}[{e}]`) whether
+        // `from` is a scalar source (case 1) or itself element-level
+        // (case 1b -- an arrayed-result reducer edge `matrix[d1,d2] →
+        // row_sum[d1]`); `link.from` is used verbatim either way.
         let per_elem = format!(
             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
             link.from.as_str(),

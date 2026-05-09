@@ -1991,6 +1991,40 @@ fn find_model_output_ports(
     output_ports.into_iter().collect()
 }
 
+/// Whether the edge `from -> to` is a *partial reduce*: `from` is arrayed,
+/// `to` is arrayed with strictly fewer dimensions, and every `to` dimension
+/// is one of `from`'s (matched by name). That is exactly the shape
+/// `try_cross_dimensional_link_scores` emits per-`(reduced-elem,
+/// result-elem)` scalar link scores for (`matrix[D1,D2] -> agg[D1]`). Same
+/// dimensions, broadcast, mismatched dims, and module-involved edges are
+/// not partial reduces. (Whether `to`'s equation actually applies a
+/// reducing builtin to `from` is not checked here -- the loop-link builder
+/// only needs to know to keep both element subscripts; the equation-text
+/// path classifies the reducer.)
+fn is_partial_reduce_edge(
+    db: &dyn Db,
+    source_vars: &HashMap<String, super::SourceVariable>,
+    from: &str,
+    to: &str,
+    project: SourceProject,
+) -> bool {
+    let from_sv = match source_vars.get(from) {
+        Some(sv) if sv.kind(db) != SourceVariableKind::Module => sv,
+        _ => return false,
+    };
+    let to_sv = match source_vars.get(to) {
+        Some(sv) if sv.kind(db) != SourceVariableKind::Module => sv,
+        _ => return false,
+    };
+    let from_dims = variable_dimensions(db, *from_sv, project);
+    let to_dims = variable_dimensions(db, *to_sv, project);
+    if from_dims.is_empty() || to_dims.is_empty() || to_dims.len() >= from_dims.len() {
+        return false;
+    }
+    let from_names: Vec<&str> = from_dims.iter().map(|d| d.name()).collect();
+    to_dims.iter().all(|td| from_names.contains(&td.name()))
+}
+
 /// Compute the cartesian product of element name lists as comma-joined
 /// subscript strings.
 ///
@@ -2510,6 +2544,7 @@ pub(crate) fn build_element_level_loops(
                     };
                     let from_subscripted = from_raw.contains('[');
                     let to_subscripted = to_raw.contains('[');
+                    let from_var_level = strip_subscript(from_raw);
                     let to_var_level = strip_subscript(to_raw);
                     let to_is_arrayed = source_vars
                         .get(to_var_level)
@@ -2519,7 +2554,25 @@ pub(crate) fn build_element_level_loops(
                         })
                         .unwrap_or(false);
                     let (link_from, link_to) = if from_subscripted && !to_subscripted {
-                        // Cross-dimensional: keep element-level from, bare to.
+                        // Cross-dimensional (full reduce, arrayed-from /
+                        // scalar-to): keep element-level from, bare to.
+                        (from_raw, to_raw)
+                    } else if from_subscripted
+                        && to_subscripted
+                        && is_partial_reduce_edge(
+                            db,
+                            source_vars,
+                            from_var_level,
+                            to_var_level,
+                            project,
+                        )
+                    {
+                        // Partial reduce (`matrix[d1,d2] → row_sum[d1]`): the
+                        // link score is the per-`(reduced-elem, result-elem)`
+                        // scalar var `$⁚ltm⁚link_score⁚{from}[d1,d2]→{to}[d1]`
+                        // from `try_cross_dimensional_link_scores`, so keep
+                        // BOTH subscripts -- the source carries the collapsed
+                        // axis too.
                         (from_raw, to_raw)
                     } else if to_subscripted && to_is_arrayed {
                         // Scalar->arrayed or same-element A2A: keep `to[e]`,
