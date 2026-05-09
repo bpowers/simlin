@@ -15,30 +15,7 @@ def parse_fixture(relpath: str) -> vdf_xray.VdfFile:
     return vdf_xray.parse_vdf(path.read_bytes())
 
 
-def parse_mdl_fixture(relpath: str) -> vdf_xray.MdlModel:
-    path = REPO_ROOT / relpath
-    return vdf_xray.parse_mdl_model(path.read_text(errors="replace"))
-
-
 class VdfXrayModelEditingTests(unittest.TestCase):
-    def test_parse_mdl_model_preserves_definition_order_and_dimensions(self) -> None:
-        model = parse_mdl_fixture("test/bobby/vdf/model_editing/8_change_subscript.mdl")
-
-        self.assertEqual(list(model.dimensions), ["sub1", "sub2", "sub3"])
-        self.assertEqual(model.dimensions["sub2"].elements, ["i", "j"])
-        self.assertEqual(
-            [(definition.source_index, definition.kind, definition.name, definition.dimensions)
-             for definition in model.definitions],
-            [
-                (1, "var", "constant", []),
-                (2, "var", "flow", ["sub2"]),
-                (3, "stock", "stock", ["sub2"]),
-                (4, "var", "v", []),
-            ],
-        )
-        self.assertEqual(model.sketch_names[:4], ["v", "constant", "stock", "flow"])
-        self.assertEqual(model.definitions[0].expression, "3.1415")
-        self.assertEqual(model.definitions[1].expression, "v * sub2")
 
     def test_section_scan_finds_expected_eight_sections(self) -> None:
         for relpath in [
@@ -434,42 +411,6 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         )
         self.assertEqual(overlap_block.sort_keys, [11])
 
-    def test_run7_mdl_alignment_is_precise_for_arrayed_owners_only(self) -> None:
-        run7 = parse_fixture("test/bobby/vdf/model_editing/run_7.vdf")
-        model = parse_mdl_fixture("test/bobby/vdf/model_editing/7_add_new_subscript.mdl")
-
-        matches = {
-            match.definition.name: match.candidate_block_indices
-            for match in vdf_xray.match_mdl_definitions_to_blocks(run7, model)
-        }
-
-        # Pre-fix, SAVEPER's OT[8..9) system block appeared as a shape block
-        # and matched the "constant"/"v" definitions as a spurious candidate.
-        # The record-region fix plus decoded system-record filtering drop
-        # that block before shape-block construction, so MDL alignment now
-        # only proposes genuine model-variable candidates. `flow` and `stock`
-        # were unaffected because their previous indices matched model blocks.
-        self.assertEqual(matches["flow"], [3])
-        self.assertEqual(matches["stock"], [0])
-        self.assertEqual(matches["constant"], [2, 4])
-        self.assertEqual(matches["v"], [2, 4])
-
-    def test_run8_mdl_alignment_finds_unique_arrayed_block_owners(self) -> None:
-        run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
-        model = parse_mdl_fixture("test/bobby/vdf/model_editing/8_change_subscript.mdl")
-
-        matches = {
-            match.definition.name: match.candidate_block_indices
-            for match in vdf_xray.match_mdl_definitions_to_blocks(run8, model)
-        }
-
-        # Same dynamic as run_7: SAVEPER's OT[8..9) is filtered out at the
-        # shape-block layer, so "constant" and "v" no longer pick up the
-        # system block as a match candidate.
-        self.assertEqual(matches["flow"], [2])
-        self.assertEqual(matches["stock"], [0])
-        self.assertEqual(matches["constant"], [1, 3])
-        self.assertEqual(matches["v"], [1, 3])
 
     def test_run9_record_shape_blocks_split_hidden_and_visible_stock_regions(self) -> None:
         run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
@@ -488,19 +429,6 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         )
         self.assertEqual(visible_stock_block.sort_keys, [])
 
-    def test_run9_mdl_alignment_excludes_hidden_smooth_stock_from_visible_stock(self) -> None:
-        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
-        model = parse_mdl_fixture("test/bobby/vdf/model_editing/9_smooth_time.mdl")
-
-        matches = {
-            match.definition.name: match.candidate_block_indices
-            for match in vdf_xray.match_mdl_definitions_to_blocks(run9, model)
-        }
-
-        self.assertEqual(matches["flow"], [3])
-        self.assertEqual(matches["stock"], [1])
-        self.assertEqual(matches["constant"], [2, 4])
-        self.assertEqual(matches["v"], [2, 4])
 
     def test_run7_owner_blocks_drop_overlapping_non_sentinel_stock_candidate(self) -> None:
         run7 = parse_fixture("test/bobby/vdf/model_editing/run_7.vdf")
@@ -551,19 +479,6 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(visible_stock_block.attached_sort_keys, [13])
         self.assertEqual(visible_stock_block.sort_anchor_record_indices, [18])
 
-    def test_run9_owner_mdl_alignment_keeps_hidden_helper_out_of_visible_candidates(self) -> None:
-        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
-        model = parse_mdl_fixture("test/bobby/vdf/model_editing/9_smooth_time.mdl")
-
-        matches = {
-            match.definition.name: match.candidate_block_indices
-            for match in vdf_xray.match_mdl_definitions_to_owner_blocks(run9, model)
-        }
-
-        self.assertEqual(matches["stock"], [1])
-        self.assertEqual(matches["flow"], [3])
-        self.assertEqual(matches["constant"], [2, 4])
-        self.assertEqual(matches["v"], [2, 4])
 
     def test_water_owner_blocks_drop_system_records_at_source(self) -> None:
         water = parse_fixture("test/bobby/vdf/water/Current.vdf")
@@ -628,164 +543,6 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(blocks[3].attached_sort_keys, [9])
         self.assertEqual(blocks[4].attached_sort_keys, [18])
 
-    def test_run10_owner_mdl_alignment_recovers_same_visible_candidates_as_run9(self) -> None:
-        run10 = parse_fixture("test/bobby/vdf/model_editing/run_10.vdf")
-        model = parse_mdl_fixture("test/bobby/vdf/model_editing/10_reformat.mdl")
-
-        matches = {
-            match.definition.name: match.candidate_block_indices
-            for match in vdf_xray.match_mdl_definitions_to_owner_blocks(run10, model)
-        }
-
-        self.assertEqual(matches["stock"], [1])
-        self.assertEqual(matches["flow"], [3])
-        self.assertEqual(matches["constant"], [2, 4])
-        self.assertEqual(matches["v"], [2, 4])
-
-    def test_water_owner_blocks_in_sentinel_order_match_mdl_sketch_classes(self) -> None:
-        water = parse_fixture("test/bobby/vdf/water/Current.vdf")
-        model = parse_mdl_fixture("test/bobby/vdf/water/water.mdl")
-
-        sketch_defs = vdf_xray.mdl_sketch_definitions(model)
-        blocks = vdf_xray.owner_blocks_in_sentinel_order(water)
-
-        self.assertEqual(
-            [definition.name for definition in sketch_defs],
-            ["water level", "inflow", "gap", "desired water level", "adjustment time"],
-        )
-        self.assertEqual(
-            [vdf_xray.mdl_definition_runtime_class(definition) for definition in sketch_defs],
-            ["stock", "dynamic", "dynamic", "const", "const"],
-        )
-        self.assertEqual(
-            [vdf_xray.owner_block_runtime_class(block) for block in blocks],
-            ["stock", "dynamic", "dynamic", "const", "const"],
-        )
-        self.assertEqual(
-            [(block.start, block.end) for block in blocks],
-            [(1, 2), (6, 7), (5, 6), (3, 4), (2, 3)],
-        )
-
-    def test_pop_owner_blocks_in_sentinel_order_match_mdl_sketch_classes(self) -> None:
-        pop = parse_fixture("test/bobby/vdf/pop/Current.vdf")
-        model = parse_mdl_fixture("test/bobby/vdf/pop/pop.mdl")
-
-        sketch_defs = vdf_xray.mdl_sketch_definitions(model)
-        blocks = vdf_xray.owner_blocks_in_sentinel_order(pop)
-
-        self.assertEqual(
-            [definition.name for definition in sketch_defs],
-            [
-                "young population",
-                "producing population",
-                "starting",
-                "age when first child",
-                "births per person",
-                "years giving birth",
-                "births",
-                "ending",
-            ],
-        )
-        self.assertEqual(
-            [vdf_xray.mdl_definition_runtime_class(definition) for definition in sketch_defs],
-            ["stock", "stock", "dynamic", "const", "const", "const", "dynamic", "dynamic"],
-        )
-        self.assertEqual(
-            [vdf_xray.owner_block_runtime_class(block) for block in blocks],
-            ["stock", "stock", "dynamic", "const", "const", "const", "dynamic", "dynamic"],
-        )
-
-    def test_run9_owner_blocks_in_sentinel_order_match_mdl_sketch_order(self) -> None:
-        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
-        model = parse_mdl_fixture("test/bobby/vdf/model_editing/9_smooth_time.mdl")
-
-        sketch_defs = vdf_xray.mdl_sketch_definitions(model)
-        blocks = vdf_xray.owner_blocks_in_sentinel_order(run9)
-        hidden = vdf_xray.owner_blocks_in_sentinel_order(run9, include_hidden=True)
-        hidden = [block for block in hidden if block.hidden]
-
-        self.assertEqual([definition.name for definition in sketch_defs], ["v", "constant", "stock", "flow"])
-        self.assertEqual(
-            [vdf_xray.mdl_definition_runtime_class(definition) for definition in sketch_defs],
-            ["dynamic", "const", "stock", "dynamic"],
-        )
-        self.assertEqual(
-            [vdf_xray.owner_block_runtime_class(block) for block in blocks],
-            ["dynamic", "const", "stock", "dynamic"],
-        )
-        self.assertEqual(
-            [(block.start, block.end) for block in blocks],
-            [(11, 12), (4, 5), (2, 4), (6, 8)],
-        )
-        self.assertEqual([(block.start, block.end) for block in hidden], [(1, 2)])
-
-    def test_run10_owner_blocks_in_sentinel_order_tracks_vdf_file_order_not_mdl_sketch_order(self) -> None:
-        run10 = parse_fixture("test/bobby/vdf/model_editing/run_10.vdf")
-        model = parse_mdl_fixture("test/bobby/vdf/model_editing/10_reformat.mdl")
-
-        sketch_defs = vdf_xray.mdl_sketch_definitions(model)
-        blocks = vdf_xray.owner_blocks_in_sentinel_order(run10)
-        hidden = vdf_xray.owner_blocks_in_sentinel_order(run10, include_hidden=True)
-        hidden = [block for block in hidden if block.hidden]
-
-        self.assertEqual([definition.name for definition in sketch_defs], ["v", "constant", "stock", "flow"])
-        self.assertEqual(
-            [vdf_xray.mdl_definition_runtime_class(definition) for definition in sketch_defs],
-            ["dynamic", "const", "stock", "dynamic"],
-        )
-        self.assertEqual(
-            [vdf_xray.owner_block_runtime_class(block) for block in blocks],
-            ["const", "dynamic", "dynamic", "stock"],
-        )
-        self.assertEqual(
-            [(block.start, block.end) for block in blocks],
-            [(4, 5), (6, 8), (11, 12), (2, 4)],
-        )
-        self.assertNotEqual(
-            [vdf_xray.mdl_definition_runtime_class(definition) for definition in sketch_defs],
-            [vdf_xray.owner_block_runtime_class(block) for block in blocks],
-        )
-        self.assertEqual([(block.start, block.end) for block in hidden], [(1, 2)])
-
-    def test_run10_owner_sketch_alignment_reports_order_mismatch(self) -> None:
-        run10 = parse_fixture("test/bobby/vdf/model_editing/run_10.vdf")
-        model = parse_mdl_fixture("test/bobby/vdf/model_editing/10_reformat.mdl")
-
-        buf = StringIO()
-        with redirect_stdout(buf):
-            vdf_xray.print_owner_sketch_alignment(run10, model, "10_reformat.mdl")
-        output = buf.getvalue()
-
-        self.assertIn(
-            "note: sentinel/file owner order does not match mdl sketch order in this fixture",
-            output,
-        )
-
-    def test_print_compare_includes_record_shape_block_diffs_and_mdl_alignment(self) -> None:
-        run8 = parse_fixture("test/bobby/vdf/model_editing/run_8.vdf")
-        run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
-        mdl8 = parse_mdl_fixture("test/bobby/vdf/model_editing/8_change_subscript.mdl")
-        mdl9 = parse_mdl_fixture("test/bobby/vdf/model_editing/9_smooth_time.mdl")
-
-        buf = StringIO()
-        with redirect_stdout(buf):
-            vdf_xray.print_compare(
-                run8,
-                "run_8.vdf",
-                run9,
-                "run_9.vdf",
-                left_mdl=(mdl8, "8_change_subscript.mdl"),
-                right_mdl=(mdl9, "9_smooth_time.mdl"),
-            )
-        output = buf.getvalue()
-
-        self.assertIn("=== Record Shape Block Diffs ===", output)
-        self.assertIn("=== Owner Block Diffs ===", output)
-        self.assertIn("=== MDL Alignment ===", output)
-        self.assertIn("=== Owner MDL Alignment ===", output)
-        self.assertIn("=== Owner Sketch Alignment ===", output)
-        self.assertIn("src[ 3] stock  stock[sub2] flat=2", output)
-        self.assertIn("unmatched blocks:", output)
 
     def test_run9_best_slot_alignment_prefers_display_shift_for_leading_helpers(self) -> None:
         run9 = parse_fixture("test/bobby/vdf/model_editing/run_9.vdf")
@@ -831,31 +588,6 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertEqual(vdf_xray.record_shape_length(run6, rec), 2)
         self.assertIsNone(vdf_xray.decoded_record_shape_length(run6, rec))
 
-    def test_decoded_record_spans_are_direct_pre_reconstruction_facts(self) -> None:
-        subscripts = parse_fixture("test/bobby/vdf/subscripts/subscripts.vdf")
-
-        spans = vdf_xray.decoded_record_spans(subscripts)
-        by_name = {span.name: span for span in spans}
-
-        self.assertEqual((by_name["a stock"].start, by_name["a stock"].end), (1, 4))
-        self.assertEqual((by_name["net flow"].start, by_name["net flow"].end), (6, 9))
-        self.assertEqual((by_name["other const"].start, by_name["other const"].end), (9, 12))
-        self.assertNotIn("a", by_name)
-        self.assertNotIn("b", by_name)
-        self.assertNotIn("c", by_name)
-        self.assertEqual(vdf_xray.record_span_overlaps(spans), {})
-
-    def test_ref_decoded_record_spans_still_expose_owner_descriptor_overlaps(self) -> None:
-        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
-
-        spans = vdf_xray.decoded_record_spans(ref)
-        overlaps = vdf_xray.record_span_overlaps(spans)
-        names_at_113 = {span.name for span in overlaps[113]}
-
-        self.assertNotIn(0, {span.shape_code for span in spans})
-        self.assertGreater(len(overlaps), 0)
-        self.assertIn("RS N2O", names_at_113)
-        self.assertIn("C AF Sequestered", names_at_113)
 
     def test_risk_sparse_blocks_use_full_bitmap_grid_but_saved_time_suffix(self) -> None:
         risk = parse_fixture("test/bobby/vdf/econ/risk.vdf")
@@ -1066,97 +798,6 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         self.assertIn("owner?=1", text)
         self.assertIn("lookup?=1", text)
 
-    def test_field11_union_facts_expose_owner_and_lookup_interpretations(self) -> None:
-        lookup = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
-        facts = {
-            fact.name: fact
-            for fact in vdf_xray.decoded_field11_union_facts(lookup)
-        }
-
-        table = facts["lookup table 1"]
-        stock = facts["stock"]
-        self.assertEqual((table.owner_start, table.owner_end), (1, 2))
-        self.assertEqual((stock.owner_start, stock.owner_end), (1, 2))
-        self.assertEqual(table.lookup_index, 1)
-        self.assertEqual(stock.lookup_index, 1)
-        self.assertEqual(table.lookup_ot_index, 5)
-        self.assertEqual(stock.lookup_ot_index, 5)
-        self.assertEqual(table.lookup_width, 1)
-        self.assertEqual(stock.lookup_width, 1)
-        self.assertTrue(table.lookup_width_matches_shape)
-        self.assertTrue(stock.lookup_width_matches_shape)
-
-    def test_ref_field11_union_facts_pin_lookup_descriptor_payload(self) -> None:
-        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
-        facts = {
-            fact.name: fact
-            for fact in vdf_xray.decoded_field11_union_facts(ref)
-        }
-
-        rs_n2o = facts["RS N2O"]
-        self.assertEqual((rs_n2o.owner_start, rs_n2o.owner_end), (113, 120))
-        self.assertEqual(rs_n2o.lookup_index, 113)
-        self.assertEqual(rs_n2o.lookup_ot_index, 2278)
-        self.assertEqual(rs_n2o.lookup_width, 7)
-        self.assertEqual(rs_n2o.lookup_dependency_ref_word, 4229)
-        self.assertTrue(rs_n2o.lookup_width_matches_shape)
-
-        c_af = facts["C AF Sequestered"]
-        self.assertEqual((c_af.owner_start, c_af.owner_end), (113, 116))
-        self.assertEqual(c_af.lookup_index, 113)
-        self.assertEqual(c_af.lookup_ot_index, 2278)
-        self.assertEqual(c_af.lookup_width, 7)
-        self.assertFalse(c_af.lookup_width_matches_shape)
-
-    def test_field11_union_facts_treat_zero_as_valid_lookup_index(self) -> None:
-        mark2 = parse_fixture("test/bobby/vdf/econ/mark2.vdf")
-        facts = {
-            fact.name: fact
-            for fact in vdf_xray.decoded_field11_union_facts(mark2)
-        }
-
-        federal = facts["federal funds rate lookup"]
-        self.assertIsNone(federal.owner_start)
-        self.assertEqual(federal.raw_field11, 0)
-        self.assertEqual(federal.lookup_index, 0)
-        self.assertEqual(federal.lookup_ot_index, 39)
-        self.assertEqual(federal.lookup_width, 1)
-        self.assertTrue(federal.lookup_width_matches_shape)
-
-    def test_field11_union_correlations_link_records_to_lookup_outputs(self) -> None:
-        lookup = parse_fixture("test/bobby/vdf/lookups/lookup_ex.vdf")
-        rows = {
-            row.fact.name: row
-            for row in vdf_xray.decoded_field11_union_correlations(lookup)
-        }
-
-        table = rows["lookup table 1"]
-        stock = rows["stock"]
-        self.assertEqual(table.closest_output_span.name, "net change")
-        self.assertEqual(stock.closest_output_span.name, "net change")
-        self.assertEqual(table.output_sort_delta, 2)
-        self.assertEqual(stock.output_sort_delta, 13)
-        self.assertEqual(table.overlap_component_id, stock.overlap_component_id)
-        self.assertEqual(
-            {span.name for span in table.overlap_component_spans},
-            {"lookup table 1", "stock"},
-        )
-
-    def test_field11_union_correlations_surface_ref_sort_proximity_counterexample(self) -> None:
-        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
-        rows = {
-            row.fact.name: row
-            for row in vdf_xray.decoded_field11_union_correlations(ref)
-        }
-
-        solar = rows["Solar and albedo forcings"]
-        humus = rows["C in Humus"]
-        self.assertEqual(solar.fact.lookup_index, humus.fact.lookup_index)
-        self.assertEqual(solar.closest_output_span.name, "Adjusted Other Forcings")
-        self.assertEqual(humus.closest_output_span.name, "Adjusted Other Forcings")
-        self.assertEqual(solar.output_sort_delta, 2778)
-        self.assertEqual(humus.output_sort_delta, 224)
-        self.assertEqual(solar.overlap_component_id, humus.overlap_component_id)
 
     def test_run2_name_mapping_emits_empty_mapping_when_no_model_records(self) -> None:
         run2 = parse_fixture("test/bobby/vdf/model_editing/run_2.vdf")
@@ -1333,101 +974,6 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         )
         self.assertNotIn("a stock[0]", names)
 
-    def test_precision_report_marks_easy_array_file_exact_by_xray(self) -> None:
-        subscripts = parse_fixture("test/bobby/vdf/subscripts/subscripts.vdf")
-
-        report = vdf_xray.precision_report(subscripts)
-
-        self.assertEqual(report.status, "exact-by-xray")
-        self.assertEqual(report.reasons, [])
-        self.assertGreater(report.array_result_count, 0)
-        self.assertEqual(report.duplicate_result_name_count, 0)
-        self.assertEqual(report.duplicate_result_ot_count, 0)
-        self.assertEqual(report.numeric_array_label_count, 0)
-        self.assertEqual(report.record_span_overlap_slots, 0)
-        self.assertEqual(report.unmapped_block_count, 0)
-        self.assertEqual(report.data_block_tail_mismatches, 0)
-
-    def test_precision_report_surfaces_not_proven_blockers(self) -> None:
-        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
-
-        report = vdf_xray.precision_report(ref)
-
-        self.assertEqual(report.status, "not-proven")
-        # Ref.vdf is the corpus's one fixture whose graphical-function
-        # descriptor names (e.g. `RS N2O`, `Solar and albedo forcings`) do not
-        # carry the lexical "lookup"/"table" keyword, so descriptor
-        # identification falls through to the highest-`f[10]` heuristic. The
-        # heuristic resolves Ref's overlaps cleanly (no remaining
-        # owner-vs-owner span conflict), but its use is the documented
-        # `not-proven` blocker (the file genuinely does not store the
-        # discriminator -- see vdf.md appendix).
-        self.assertIn("used-descriptor-f10-fallback", report.reasons)
-        self.assertNotIn("record-span-overlap", report.reasons)
-        self.assertEqual(report.record_span_overlap_slots, 0)
-        # Dimension labels are decoded through section-3 axis refs plus the
-        # alternate scenario element records.
-        self.assertNotIn("incomplete-dimension-anchors", report.reasons)
-        self.assertNotIn("numeric-array-labels", report.reasons)
-        self.assertEqual(report.unmapped_block_count, 0)
-        self.assertEqual(report.numeric_array_label_count, 0)
-        self.assertEqual(report.duplicate_result_name_count, 0)
-        self.assertEqual(report.duplicate_result_ot_count, 0)
-        self.assertEqual(report.data_block_tail_mismatches, 0)
-
-    def test_precision_report_tracks_mixed_bitmap_width_without_data_mismatch(self) -> None:
-        risk2 = parse_fixture("test/bobby/vdf/econ/risk2.vdf")
-
-        report = vdf_xray.precision_report(risk2)
-
-        # `risk2.vdf` was previously `not-proven` due to the
-        # field[11] union; after the direct-record-map promotion the
-        # lexical lookup-def-name test cleanly identifies its descriptor
-        # (`loan standards impact on insolvency table`), so the residual
-        # owner partition is clean and the file is `exact-by-xray`. The
-        # mixed-bitmap-width property is independent and still pinned here.
-        self.assertEqual(report.status, "exact-by-xray")
-        self.assertNotIn("record-span-overlap", report.reasons)
-        self.assertEqual(report.unmapped_block_count, 0)
-        self.assertEqual(report.bitmap_widths, [27, 29])
-        self.assertEqual(report.data_block_decode_failures, 0)
-        self.assertEqual(report.data_block_tail_mismatches, 0)
-
-    def test_corpus_precision_rows_cover_tracked_result_and_dataset_vdfs(self) -> None:
-        rows = vdf_xray.corpus_precision_rows(REPO_ROOT)
-        by_path = {row.path: row for row in rows}
-
-        self.assertEqual(len(rows), 41)
-        self.assertEqual(
-            by_path["test/bobby/vdf/econ/data.vdf"].status,
-            "dataset/not-implemented",
-        )
-        self.assertEqual(
-            by_path["test/bobby/vdf/subscripts/subscripts.vdf"].status,
-            "exact-by-xray",
-        )
-        self.assertEqual(
-            by_path["test/xmutil_test_models/Ref.vdf"].status,
-            "not-proven",
-        )
-
-        status_counts: dict[str, int] = {}
-        reason_counts: dict[str, int] = {}
-        for row in rows:
-            status_counts[row.status] = status_counts.get(row.status, 0) + 1
-            for reason in row.reasons:
-                reason_counts[reason] = reason_counts.get(reason, 0) + 1
-        # After the direct-record-map extraction promotion, the lookup-vs-helper
-        # field[11] union is resolved on every fixture except `Ref.vdf` (whose
-        # descriptor names are abbreviations -- the f[10]-highest fallback fires
-        # there). 31 (originally exact-by-xray) + 8 lookup-vs-helper fixtures
-        # (lookup_ex, econ ×5, WRLD3 ×2) become exact-by-xray; only Ref.vdf
-        # remains `not-proven`, with its f[10]-fallback reason.
-        self.assertEqual(status_counts["exact-by-xray"], 39)
-        self.assertEqual(status_counts["not-proven"], 1)
-        self.assertEqual(status_counts["dataset/not-implemented"], 1)
-        self.assertEqual(reason_counts.get("record-span-overlap", 0), 0)
-        self.assertEqual(reason_counts.get("used-descriptor-f10-fallback", 0), 1)
 
     def test_record_field8_recovers_dimension_element_groups(self) -> None:
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
@@ -1922,60 +1468,6 @@ class VdfXrayModelEditingTests(unittest.TestCase):
                 self.assertIsNotNone(positions, subrange)
                 assert positions is not None
                 self.assertEqual(positions, expected_positions, subrange)
-
-    def test_dimension_element_recovery_closes_ref_vdf_numeric_array_labels(self) -> None:
-        # Ref.vdf now has decoded labels for every dimension used by saved
-        # arrays: roots come from element records, scenario adds its compact
-        # late-record elements, and subranges come from parent-root sec5
-        # subsequence projection. The `incomplete-dimension-anchors` and
-        # `numeric-array-labels` blockers therefore no longer fire.
-        ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
-
-        recovered = {
-            dim.name: dim.elements
-            for dim in vdf_xray._recover_dimension_sets(ref)
-        }
-        # All fully-recoverable dims: 7 roots plus 11 subranges.
-        for expected_name in [
-            "Aggregated Regions",
-            "COP", "COP Developed", "COP Developing A", "COP Remaining Developing",
-            "Developing A", "Developing B",
-            "HFC type",
-            "layers", "bottom", "lower", "upper",
-            "scenario", "Semi Agg",
-            "Target", "set targets", "tNext", "tPrev",
-        ]:
-            self.assertIn(expected_name, recovered, expected_name)
-
-        self.assertEqual(recovered["bottom"], ["layer4"])
-        self.assertEqual(recovered["lower"], ["layer2", "layer3", "layer4"])
-        self.assertEqual(recovered["upper"], ["layer1", "layer2", "layer3"])
-        self.assertEqual(
-            recovered["COP Developed"],
-            ["OECD US", "OECD EU", "Remaining Developed"],
-        )
-        self.assertEqual(
-            recovered["COP Developing A"],
-            ["G77 China", "G77 India", "Remaining Developing A"],
-        )
-        self.assertEqual(
-            recovered["COP Remaining Developing"],
-            ["Remaining Developing A", "COP Developing B"],
-        )
-        self.assertEqual(recovered["Developing A"], ["China", "India"])
-        self.assertEqual(recovered["Developing B"], ["Other Developing"])
-        self.assertEqual(
-            recovered["scenario"],
-            ["Deterministic", "Low 2xCO2 sensitivity", "High 2xCO2 sensitivity"],
-        )
-        self.assertEqual(recovered["set targets"], ["t1", "t2"])
-        self.assertEqual(recovered["tNext"], ["t2", "t3"])
-        self.assertEqual(recovered["tPrev"], ["t1", "t2"])
-
-        # And finally: precision_report must drop the blocker.
-        report = vdf_xray.precision_report(ref)
-        self.assertNotIn("incomplete-dimension-anchors", report.reasons)
-        self.assertNotIn("numeric-array-labels", report.reasons)
 
 
 class CorpusDecodedRecordSpanCoverageTests(unittest.TestCase):

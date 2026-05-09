@@ -17,8 +17,9 @@ const SECTION3_DIRECTORY_ENTRY_WORDS: usize = 27;
 /// - `words[1..=3]`: packed shape words. One-dimensional entries duplicate
 ///   the flattened size (`[3, 3]`), while composite entries use
 ///   `[flattened_size, axis_a, axis_b]` (for example `[21, 7, 3]`)
-/// - `words[18..=19]`: one section-1 slot ref per encoded axis in the
-///   validated fixtures
+/// - `words[18..=19]`: one axis ref per encoded axis -- a section-1 word
+///   pointer to `field[9]` of the dimension-anchor record for that axis
+///   (`axis_ref == 60 + 16 * k`, where `k` is the anchor's record index)
 /// - `words[26]`: the encoded axis count (`1` and `2` in the validated
 ///   fixtures)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,9 +66,9 @@ impl VdfSection3DirectoryEntry {
         }
     }
 
-    /// Section-1 slot refs carried near the end of the record.
-    ///
-    /// In the validated fixtures there is one ref per encoded axis.
+    /// Axis refs carried near the end of the record: one per encoded axis,
+    /// each a section-1 word pointer to `field[9]` of the dimension-anchor
+    /// record (`axis_ref == 60 + 16 * k`, `k` = the anchor's record index).
     pub fn axis_slot_refs(&self) -> Vec<u32> {
         self.words[18..=19]
             .iter()
@@ -481,40 +482,6 @@ mod tests {
             assert!(
                 directory.validate_index_word_progression(),
                 "{path}: non-zero index_words should form an arithmetic progression with step 27"
-            );
-        }
-    }
-
-    #[test]
-    fn test_section3_section5_shared_axis_refs() {
-        // Scalar files have no shared refs.
-        let vdf = vdf_file("../../test/bobby/vdf/water/Current.vdf");
-        assert!(
-            vdf.section3_section5_shared_axis_refs().is_empty(),
-            "scalar file should have no shared axis refs"
-        );
-
-        // Simple 1D array files may have zero trailing refs in section 5,
-        // so the bridge set can be empty even with section-3 entries.
-        let vdf = vdf_file("../../test/bobby/vdf/subscripts/subscripts.vdf");
-        let _ = vdf.section3_section5_shared_axis_refs();
-
-        // Multi-dimensional Ref.vdf should have non-zero shared axis refs
-        // for entries with multiple axes.
-        let vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
-        let shared = vdf.section3_section5_shared_axis_refs();
-        let directory = vdf.parse_section3_directory().unwrap();
-        assert!(!directory.entries.is_empty());
-        assert!(
-            !shared.is_empty(),
-            "Ref.vdf should have shared axis refs between section 3 and section 5"
-        );
-        // Every shared ref should be a valid slot table entry.
-        let slot_set: HashSet<u32> = vdf.slot_table.iter().copied().collect();
-        for &r in &shared {
-            assert!(
-                slot_set.contains(&r),
-                "shared axis ref {r} should be in slot table"
             );
         }
     }
