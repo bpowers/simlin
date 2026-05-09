@@ -692,29 +692,118 @@ fn link_score_equation_for_target(text: String, to_var: &Variable) -> Equation {
     }
 }
 
-/// Generate auxiliary-to-auxiliary link score equation
-fn generate_auxiliary_to_auxiliary_equation(
+/// The dimension names to tag an `Equation::Arrayed` link score with.
+///
+/// Prefers the datamodel-cased names off the target's `eqn` field (so a
+/// directly-generated equation parses against the project's datamodel).
+/// Falls back to the AST `Vec<Dimension>`'s canonical-cased names for the
+/// (test-only) case where `to_var` was constructed without an `eqn`; in
+/// production the emission loop's `retarget_ltm_equation_dims` overwrites
+/// these with the link-score-dimensions policy result regardless.
+fn arrayed_target_dim_names(
+    to_var: &Variable,
+    ast_dims: &[crate::dimensions::Dimension],
+) -> Vec<String> {
+    target_equation_dims(to_var)
+        .unwrap_or_else(|| ast_dims.iter().map(|d| d.name().to_string()).collect())
+}
+
+/// Build the per-element-partial link-score [`Equation`] for an
+/// `Ast::Arrayed` (per-element-equation) target.
+///
+/// For each `(element, expr)` slot in the target's per-element map, the
+/// slot equation is the standard link-score guard form ([`link_score_guard_form`])
+/// whose `{partial}` is [`build_partial_equation_shaped`] applied to *that
+/// element's own equation text* with `live_source = from` and `live_shape =
+/// shape`. So the cross-element partial derived from
+/// `mp[NYC] = (pop[NYC] - pop[Boston]) * 0.01` keeps `pop[NYC]` live and
+/// freezes `pop[Boston]` at PREVIOUS when this link score's shape is
+/// `FixedIndex(["nyc"])`. An element whose equation does not reference
+/// `from` with `shape` gets all its `from` references frozen, so that slot
+/// evaluates to ~0 -- correct, because that source-element's influence on
+/// that target-element flows through a *different* `(from[other], to)`
+/// link-score variable (a different shape) and must not be double-counted
+/// here.
+///
+/// `target_ref` is the pre-rendered self-reference expression (a bare name,
+/// which within an `Equation::Arrayed` slot resolves element-wise);
+/// `source_ref` is the shape-aware source reference (constant across slots).
+/// `target_ast_dims` are the target variable's AST dimensions, passed to
+/// `classify_dependencies` so literal element-name subscripts (e.g.
+/// `[Boston]`) are recognized as dimension references and excluded from the
+/// dep set -- otherwise the PREVIOUS wrapper would treat the element name
+/// as a variable reference and wrap it inside the subscript.
+#[allow(clippy::too_many_arguments)] // threads the link-score generation context
+fn build_arrayed_link_score_equation(
     from: &Ident<Canonical>,
-    to: &Ident<Canonical>,
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
-    to_var: &Variable,
+    target_dim_names: Vec<String>,
+    target_ast_dims: &[crate::dimensions::Dimension],
+    per_elem: &HashMap<crate::common::CanonicalElementName, crate::ast::Expr2>,
+    default_expr: Option<&crate::ast::Expr2>,
+    apply_default_to_missing: bool,
+    target_ref: &str,
 ) -> Equation {
-    use crate::ast::Ast;
+    let source_ref = shape_aware_source_ref(from.as_str(), shape);
 
-    // Get the equation text of the 'to' variable.  Prefer the AST when
-    // available because the `eqn` field holds the *original* text (e.g.,
-    // "SMTH1(x, 5)") while the AST holds the post-module-expansion form
-    // (e.g., Var("$⁚s⁚0⁚smth1·output")).  Using the AST-derived text
-    // ensures the identifiers in the equation match those in `deps`.
-    //
-    // An `Ast::Arrayed` (per-element-equation) target falls through to a
-    // `"0"` placeholder partial today; Phase 1 Task 2 replaces it with
-    // real per-element partials.
-    let to_equation = if let Some(ast) = to_var.ast() {
+    let slot_equation = |expr: &crate::ast::Expr2| -> String {
+        let elem_eqn_text = crate::patch::expr2_to_string(expr);
+        // Per-element dependency set: walk *only this slot's* expression
+        // (the union over all elements -- what `identifier_set` on the
+        // whole `Ast::Arrayed` returns -- would over-freeze refs absent
+        // from this slot). Pass the target's dimensions so literal
+        // element-name subscripts are filtered out of the dep set.
+        let deps_e = crate::variable::classify_dependencies(
+            &crate::ast::Ast::Scalar(expr.clone()),
+            target_ast_dims,
+            None,
+        )
+        .all;
+        let partial_e = build_partial_equation_shaped(
+            &elem_eqn_text,
+            &deps_e,
+            from,
+            shape,
+            source_dim_elements,
+        );
+        link_score_guard_form(&partial_e, target_ref, &source_ref)
+    };
+
+    // Sort the slots by element name so the resulting `Vec` -- which lands
+    // in a salsa-tracked `LtmVariablesResult` -- is deterministic
+    // regardless of `HashMap` iteration order across runs.
+    let mut elements: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<datamodel::GraphicalFunction>,
+    )> = per_elem
+        .iter()
+        .map(|(elem, expr)| (elem.as_str().to_string(), slot_equation(expr), None, None))
+        .collect();
+    elements.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let default_slot = default_expr.map(slot_equation);
+
+    Equation::Arrayed(
+        target_dim_names,
+        elements,
+        default_slot,
+        apply_default_to_missing,
+    )
+}
+
+/// Extract the equation text of a Scalar/ApplyToAll target's AST (or fall
+/// back to the scalar `eqn` text, or `"0"`). `Ast::Arrayed` targets are
+/// handled by [`build_arrayed_link_score_equation`] before this is
+/// reached, so the `Arrayed` arm here is dead in practice.
+fn scalar_or_a2a_target_equation_text(target_var: &Variable) -> String {
+    use crate::ast::Ast;
+    if let Some(ast) = target_var.ast() {
         match ast {
             Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
-            _ => match to_var {
+            _ => match target_var {
                 Variable::Stock {
                     eqn: Some(Equation::Scalar(eq)),
                     ..
@@ -727,7 +816,7 @@ fn generate_auxiliary_to_auxiliary_equation(
             },
         }
     } else {
-        match to_var {
+        match target_var {
             Variable::Stock {
                 eqn: Some(Equation::Scalar(eq)),
                 ..
@@ -738,7 +827,47 @@ fn generate_auxiliary_to_auxiliary_equation(
             } => eq.clone(),
             _ => "0".to_string(),
         }
-    };
+    }
+}
+
+/// Generate auxiliary-to-auxiliary link score equation
+fn generate_auxiliary_to_auxiliary_equation(
+    from: &Ident<Canonical>,
+    to: &Ident<Canonical>,
+    shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+    to_var: &Variable,
+) -> Equation {
+    use crate::ast::Ast;
+
+    let to_q = quote_ident(to.as_str());
+
+    // Per-element-equation (`Ast::Arrayed`) targets carry real per-element
+    // partials: each slot's link score is the guard form built around that
+    // element's own equation, so a cross-element aux keeps a meaningful
+    // partial in every slot instead of a `"0"` placeholder (the legacy
+    // `_ => "0"` fall-through produced the latter).
+    if let Some(Ast::Arrayed(dims, per_elem, default_expr, apply_default)) = to_var.ast() {
+        let target_dim_names = arrayed_target_dim_names(to_var, dims);
+        return build_arrayed_link_score_equation(
+            from,
+            shape,
+            source_dim_elements,
+            target_dim_names,
+            dims,
+            per_elem,
+            default_expr.as_ref(),
+            *apply_default,
+            &to_q,
+        );
+    }
+
+    // Get the equation text of the 'to' variable.  Prefer the AST when
+    // available because the `eqn` field holds the *original* text (e.g.,
+    // "SMTH1(x, 5)") while the AST holds the post-module-expansion form
+    // (e.g., Var("$⁚s⁚0⁚smth1·output")).  Using the AST-derived text
+    // ensures the identifiers in the equation match those in `deps`.
+    let to_equation = scalar_or_a2a_target_equation_text(to_var);
 
     // Get dependencies of the 'to' variable
     let deps = if let Some(ast) = to_var.ast() {
@@ -751,7 +880,6 @@ fn generate_auxiliary_to_auxiliary_equation(
         build_partial_equation_shaped(&to_equation, &deps, from, shape, source_dim_elements);
 
     let from_source_q = shape_aware_source_ref(from.as_str(), shape);
-    let to_q = quote_ident(to.as_str());
 
     let text = link_score_guard_form(&partial_eq, &to_q, &from_source_q);
     link_score_equation_for_target(text, to_var)
@@ -837,11 +965,10 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
 /// Generate stock-to-flow link score equation.
 ///
 /// Like the auxiliary-to-auxiliary path but the source is known to be a
-/// stock. An `Ast::Arrayed` (per-element-equation) flow falls through to
-/// a `"0"` placeholder partial today; Phase 1 Task 2 replaces it with
-/// real per-element partials. The result variant matches the flow's
-/// shape (`Equation::Scalar` for a scalar flow, `Equation::ApplyToAll`
-/// for an arrayed flow).
+/// stock. A per-element-equation (`Ast::Arrayed`) flow gets real
+/// per-element partials via [`build_arrayed_link_score_equation`]; a
+/// scalar or A2A flow yields `Equation::Scalar` / `Equation::ApplyToAll`
+/// respectively.
 fn generate_stock_to_flow_equation(
     stock: &Ident<Canonical>,
     flow: &Ident<Canonical>,
@@ -851,33 +978,32 @@ fn generate_stock_to_flow_equation(
 ) -> Equation {
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
+    use crate::ast::Ast;
+
+    // The stock-to-flow guard form uses the flow name as the (element-wise
+    // within an `Equation::Arrayed` slot) target reference.
+    let target_ref = flow.as_str();
+
+    if let Some(Ast::Arrayed(dims, per_elem, default_expr, apply_default)) = flow_var.ast() {
+        let target_dim_names = arrayed_target_dim_names(flow_var, dims);
+        return build_arrayed_link_score_equation(
+            stock,
+            shape,
+            source_dim_elements,
+            target_dim_names,
+            dims,
+            per_elem,
+            default_expr.as_ref(),
+            *apply_default,
+            target_ref,
+        );
+    }
 
     // Get the flow equation text.  Prefer the AST when available because
     // it handles both Scalar and ApplyToAll (arrayed) equations, whereas
     // the raw `eqn` field only covers Scalar.  Without this, arrayed flows
     // fall through to "0" and produce a zero link score.
-    use crate::ast::Ast;
-
-    let flow_equation = if let Some(ast) = flow_var.ast() {
-        match ast {
-            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
-            _ => match flow_var {
-                Variable::Var {
-                    eqn: Some(Equation::Scalar(eq)),
-                    ..
-                } => eq.clone(),
-                _ => "0".to_string(),
-            },
-        }
-    } else {
-        match flow_var {
-            Variable::Var {
-                eqn: Some(Equation::Scalar(eq)),
-                ..
-            } => eq.clone(),
-            _ => "0".to_string(),
-        }
-    };
+    let flow_equation = scalar_or_a2a_target_equation_text(flow_var);
 
     // Get dependencies of the flow variable
     let deps = if let Some(ast) = flow_var.ast() {
@@ -896,7 +1022,7 @@ fn generate_stock_to_flow_equation(
     // SAFEDIV captures the wrong source delta (same bug class as the
     // auxiliary-to-auxiliary path -- see `shape_aware_source_ref`).
     let stock_source_q = shape_aware_source_ref(stock.as_str(), shape);
-    let text = link_score_guard_form(&partial_eq, flow.as_str(), &stock_source_q);
+    let text = link_score_guard_form(&partial_eq, target_ref, &stock_source_q);
     link_score_equation_for_target(text, flow_var)
 }
 
@@ -2448,5 +2574,350 @@ mod tests {
             !partial.contains("PREVIOUS(nyc)"),
             "literal element subscript wrongly treated as variable; got: {partial}",
         );
+    }
+
+    // -- Arrayed-target link scores: per-element partial equations --
+    //
+    // For a per-element-equation (`Ast::Arrayed`) target, the link score
+    // must be an `Equation::Arrayed` whose per-element slot equation is the
+    // standard link-score guard form built around *that element's own*
+    // partial equation -- not a `"0"` placeholder. The tests below build a
+    // 2-region per-element-equation aux (`migration_pressure`) and verify
+    // that the `population -> migration_pressure` link-score equation for
+    // each `FixedIndex` shape carries the right partial in every slot.
+
+    /// Build a stage-1 `Variable` (lowered, `Expr2`) for a per-element-
+    /// equation (`Equation::Arrayed`) variable from raw element equation
+    /// text. Routes through the same `datamodel::Variable` -> parse -> lower
+    /// path production uses, so the result carries both `ast: Some(Ast::Arrayed)`
+    /// and `eqn: Some(Equation::Arrayed)`.
+    fn arrayed_var_from_text(
+        ident: &str,
+        dims: &[crate::datamodel::Dimension],
+        elements: &[(&str, &str)],
+        is_flow: bool,
+    ) -> Variable {
+        use crate::datamodel::{Aux, Equation as DmEquation, Flow, Variable as DmVariable};
+
+        let equation = DmEquation::Arrayed(
+            dims.iter().map(|d| d.name().to_string()).collect(),
+            elements
+                .iter()
+                .map(|(e, eq)| ((*e).to_string(), (*eq).to_string(), None, None))
+                .collect(),
+            None,
+            false,
+        );
+        let dm_var = if is_flow {
+            DmVariable::Flow(Flow {
+                ident: ident.to_string(),
+                equation,
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            })
+        } else {
+            DmVariable::Aux(Aux {
+                ident: ident.to_string(),
+                equation,
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            })
+        };
+
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let mut implicit_vars = Vec::new();
+        let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
+            dims,
+            &dm_var,
+            &mut implicit_vars,
+            &units_ctx,
+            |mi| Ok(Some(mi.clone())),
+        );
+        let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
+        let models = HashMap::new();
+        let scope = crate::model::ScopeStage0 {
+            models: &models,
+            dimensions: &dim_ctx,
+            model_name: "test",
+        };
+        crate::model::lower_variable(&scope, &stage0)
+    }
+
+    /// Look up the slot equation for `element` in an `Equation::Arrayed`,
+    /// failing the test loudly if the equation isn't `Arrayed` or the slot
+    /// is missing.
+    fn arrayed_slot<'a>(equation: &'a Equation, element: &str) -> &'a str {
+        match equation {
+            Equation::Arrayed(_, elements, _, _) => elements
+                .iter()
+                .find(|(e, _, _, _)| e == element)
+                .map(|(_, eqn, _, _)| eqn.as_str())
+                .unwrap_or_else(|| {
+                    panic!("no slot for element {element:?} in arrayed equation: {equation:?}")
+                }),
+            other => panic!("expected Equation::Arrayed, got: {other:?}"),
+        }
+    }
+
+    fn region_dm_dimension() -> crate::datamodel::Dimension {
+        crate::datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string()],
+        )
+    }
+
+    #[test]
+    fn test_arrayed_link_score_population_to_migration_pressure_fixed_nyc() {
+        // ltm-503-cross-element-agg.AC1.1
+        // migration_pressure is a per-element-equation aux:
+        //   migration_pressure[NYC]    = (population[NYC] - population[Boston]) * 0.01
+        //   migration_pressure[Boston] = (population[Boston] - population[NYC]) * 0.01
+        // For the `population -> migration_pressure` link with shape
+        // FixedIndex(["nyc"]), the `population[nyc]` ref stays live in every
+        // slot and the other-element refs are frozen at PREVIOUS().
+        let dims = vec![region_dm_dimension()];
+        let to_var = arrayed_var_from_text(
+            "migration_pressure",
+            &dims,
+            &[
+                ("NYC", "(population[NYC] - population[Boston]) * 0.01"),
+                ("Boston", "(population[Boston] - population[NYC]) * 0.01"),
+            ],
+            false,
+        );
+
+        let from = Ident::<Canonical>::new("population");
+        let to = Ident::<Canonical>::new("migration_pressure");
+        let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
+        let source_dim_elements = region_dim_elements();
+
+        let equation = generate_auxiliary_to_auxiliary_equation(
+            &from,
+            &to,
+            &shape,
+            &source_dim_elements,
+            &to_var,
+        );
+
+        match &equation {
+            Equation::Arrayed(eq_dims, _, default, _) => {
+                assert_eq!(eq_dims, &["Region".to_string()]);
+                assert!(default.is_none(), "no EXCEPT default expected");
+            }
+            other => panic!("expected Equation::Arrayed, got: {other:?}"),
+        }
+
+        let nyc_slot = arrayed_slot(&equation, "nyc");
+        let boston_slot = arrayed_slot(&equation, "boston");
+
+        // No slot may carry the `(0)` placeholder partial that the pre-fix
+        // `_ => "0"` fall-through produced.
+        assert!(
+            !nyc_slot.contains("((0) -"),
+            "nyc slot must not use a '0' partial; got: {nyc_slot}"
+        );
+        assert!(
+            !boston_slot.contains("((0) -"),
+            "boston slot must not use a '0' partial; got: {boston_slot}"
+        );
+
+        // The `{partial}` substring is the canonical per-element equation
+        // with the live-shape ref kept live and the rest frozen.
+        assert!(
+            nyc_slot.contains("(population[nyc] - PREVIOUS(population[boston])) * 0.01"),
+            "nyc slot partial mismatch; got: {nyc_slot}"
+        );
+        assert!(
+            boston_slot.contains("(PREVIOUS(population[boston]) - population[nyc]) * 0.01"),
+            "boston slot partial mismatch; got: {boston_slot}"
+        );
+
+        // The guard form references the target element-wise (bare name) and
+        // the shape-aware source subscript.
+        assert!(
+            nyc_slot.contains("(migration_pressure - PREVIOUS(migration_pressure))"),
+            "nyc slot target ref mismatch; got: {nyc_slot}"
+        );
+        assert!(
+            nyc_slot.contains("(population[nyc] - PREVIOUS(population[nyc]))"),
+            "nyc slot source ref mismatch; got: {nyc_slot}"
+        );
+    }
+
+    #[test]
+    fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
+        // ltm-503-cross-element-agg.AC1.2
+        // Same model; shape FixedIndex(["boston"]) keeps `population[boston]`
+        // live and freezes `population[nyc]`.
+        let dims = vec![region_dm_dimension()];
+        let to_var = arrayed_var_from_text(
+            "migration_pressure",
+            &dims,
+            &[
+                ("NYC", "(population[NYC] - population[Boston]) * 0.01"),
+                ("Boston", "(population[Boston] - population[NYC]) * 0.01"),
+            ],
+            false,
+        );
+
+        let from = Ident::<Canonical>::new("population");
+        let to = Ident::<Canonical>::new("migration_pressure");
+        let shape = RefShape::FixedIndex(vec!["boston".to_string()]);
+        let source_dim_elements = region_dim_elements();
+
+        let equation = generate_auxiliary_to_auxiliary_equation(
+            &from,
+            &to,
+            &shape,
+            &source_dim_elements,
+            &to_var,
+        );
+
+        let nyc_slot = arrayed_slot(&equation, "nyc");
+        let boston_slot = arrayed_slot(&equation, "boston");
+
+        assert!(
+            !nyc_slot.contains("((0) -") && !boston_slot.contains("((0) -"),
+            "no slot may use a '0' partial; nyc={nyc_slot} boston={boston_slot}"
+        );
+        assert!(
+            nyc_slot.contains("(PREVIOUS(population[nyc]) - population[boston]) * 0.01"),
+            "nyc slot partial mismatch; got: {nyc_slot}"
+        );
+        assert!(
+            boston_slot.contains("(population[boston] - PREVIOUS(population[nyc])) * 0.01"),
+            "boston slot partial mismatch; got: {boston_slot}"
+        );
+        // Source ref is the FixedIndex(boston) subscript, constant across slots.
+        assert!(
+            boston_slot.contains("(population[boston] - PREVIOUS(population[boston]))"),
+            "boston slot source ref mismatch; got: {boston_slot}"
+        );
+    }
+
+    #[test]
+    fn test_arrayed_link_score_stock_to_flow_per_element_partials() {
+        // ltm-503-cross-element-agg.AC1.3 (unit-level): a stock-to-flow link
+        // score into a per-element-equation arrayed flow yields per-element
+        // partials referencing the flow's actual equation contents.
+        let dims = vec![crate::datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+        )];
+        // `births[Region]` per-element flow referencing the `population` stock.
+        let births = arrayed_var_from_text(
+            "births",
+            &dims,
+            &[
+                ("NYC", "population[NYC] * 0.03"),
+                ("Boston", "population[Boston] * 0.02"),
+                ("LA", "population[LA] * 0.01"),
+            ],
+            true,
+        );
+
+        let stock = Ident::<Canonical>::new("population");
+        let flow = Ident::<Canonical>::new("births");
+        // Each `births[e]` references `population[e]` -- a FixedIndex ref.
+        let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
+        let source_dim_elements = vec![vec![
+            "nyc".to_string(),
+            "boston".to_string(),
+            "la".to_string(),
+        ]];
+
+        let equation =
+            generate_stock_to_flow_equation(&stock, &flow, &shape, &source_dim_elements, &births);
+
+        let nyc_slot = arrayed_slot(&equation, "nyc");
+        let boston_slot = arrayed_slot(&equation, "boston");
+        // The NYC slot keeps population[nyc] live (shape match); the other
+        // slots freeze their population refs but still reference
+        // `population` -- never a bare `(0)` partial.
+        assert!(
+            nyc_slot.contains("population[nyc] * 0.03"),
+            "nyc slot partial should keep population[nyc] live; got: {nyc_slot}"
+        );
+        assert!(
+            boston_slot.contains("population"),
+            "boston slot should reference population; got: {boston_slot}"
+        );
+        assert!(
+            !nyc_slot.contains("((0) -") && !boston_slot.contains("((0) -"),
+            "no slot may use a '0' partial; nyc={nyc_slot} boston={boston_slot}"
+        );
+    }
+
+    #[test]
+    fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
+        // Guard: the Arrayed-target path must not regress scalar or
+        // ApplyToAll targets. A scalar aux target -> Equation::Scalar; an
+        // ApplyToAll arrayed aux target -> Equation::ApplyToAll.
+        let scalar_to = Variable::Var {
+            ident: Ident::new("scalar_target"),
+            ast: Some(Ast::Scalar(var_ref("driver"))),
+            init_ast: None,
+            eqn: Some(Equation::Scalar("driver".to_string())),
+            units: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            unit_errors: vec![],
+        };
+        let from = Ident::<Canonical>::new("driver");
+        let to = Ident::<Canonical>::new("scalar_target");
+        let equation =
+            generate_auxiliary_to_auxiliary_equation(&from, &to, &RefShape::Bare, &[], &scalar_to);
+        assert!(
+            matches!(equation, Equation::Scalar(_)),
+            "scalar target must yield Equation::Scalar; got: {equation:?}"
+        );
+
+        // ApplyToAll target.
+        let dims = vec![region_dm_dimension()];
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let mut implicit = Vec::new();
+        let a2a_dm = crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+            ident: "a2a_target".to_string(),
+            equation: Equation::ApplyToAll(vec!["Region".to_string()], "driver * 0.5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: crate::datamodel::Compat::default(),
+        });
+        let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
+            &dims,
+            &a2a_dm,
+            &mut implicit,
+            &units_ctx,
+            |mi| Ok(Some(mi.clone())),
+        );
+        let dim_ctx = crate::dimensions::DimensionsContext::from(dims.as_slice());
+        let models = HashMap::new();
+        let scope = crate::model::ScopeStage0 {
+            models: &models,
+            dimensions: &dim_ctx,
+            model_name: "test",
+        };
+        let a2a_to = crate::model::lower_variable(&scope, &stage0);
+        let to_a2a = Ident::<Canonical>::new("a2a_target");
+        let equation =
+            generate_auxiliary_to_auxiliary_equation(&from, &to_a2a, &RefShape::Bare, &[], &a2a_to);
+        match equation {
+            Equation::ApplyToAll(d, _) => assert_eq!(d, vec!["Region".to_string()]),
+            other => panic!("ApplyToAll target must yield Equation::ApplyToAll; got: {other:?}"),
+        }
     }
 }
