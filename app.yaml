@@ -1,4 +1,4 @@
-runtime: nodejs18
+runtime: nodejs24
 
 instance_class: F4
 automatic_scaling:
