@@ -24,6 +24,7 @@
 - [design-plans/](design-plans/) -- Design plans (architecture and phasing for major efforts)
   - [design-plans/2026-04-05-server-rewrite.md](design-plans/2026-04-05-server-rewrite.md) -- Local-first `simlin-serve` binary: filesystem-backed editor + in-process MCP
   - [design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md](design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md) -- Tiered LTM loop enumeration: variable-level Johnson first, expand only the cross-element subgraph
+  - [design-plans/2026-05-09-ltm-503-cross-element-agg.md](design-plans/2026-05-09-ltm-503-cross-element-agg.md) -- Cross-element LTM scoring: per-element arrayed-target partials, element-level cross-element loops, array reducers as aggregate nodes
 - [plans/](plans/README.md) -- Implementation plans (active and completed)
 - [test-plans/](test-plans/) -- Human verification plans for completed features
 - [implementation-plans/](implementation-plans/) -- Detailed phase-by-phase implementation plans
