@@ -340,8 +340,22 @@ fn walk_subexpr_for_aggs(
             }
         }
         Expr2::App(builtin, _, _) => {
-            if !in_reducer && let Some(source_vars) = reducer_source_vars(builtin, variables) {
-                // Maximal reducer subexpression -> mint a synthetic agg.
+            if !in_reducer
+                && let Some(source_vars) = reducer_source_vars(builtin, variables)
+                && reducer_is_full_reduce(builtin, variables)
+            {
+                // Maximal reducer subexpression over the full extent of its
+                // arrayed source(s) -> mint a synthetic agg. A slice-reduce
+                // (`SUM(pop[NYC, *])`) is deliberately *not* hoisted as a
+                // synthetic agg: the agg descriptor only carries the source
+                // variable name, not which elements the slice reads, so both
+                // the element-graph reroute and the per-element reducer link
+                // scores would over-approximate the unread rows with nonzero
+                // garbage. Such a subexpression stays conservatively
+                // `Wildcard`-classified (tracked as tech debt). A *whole-RHS*
+                // slice-reduce (`agg[D1] = SUM(matrix[D1, *])`) is still
+                // recognized, but as a variable-backed agg via
+                // `walk_var_equation`, not here.
                 let key = crate::patch::expr2_to_string(expr);
                 register_agg(
                     result,
@@ -543,6 +557,94 @@ fn reducer_source_vars(
     sources.sort();
     sources.dedup();
     Some(sources)
+}
+
+/// Whether every arrayed-source reference inside `builtin`'s arguments is a
+/// *full*-extent access: a bare `Var(x)` or a subscript whose indices are
+/// all wildcards/star-ranges (`x[*]`, `x[*, *]`). Returns `false` if any
+/// source variable is referenced with an explicit element name, an integer
+/// literal index, a range, or an active-dimension index -- i.e. a slice
+/// (`x[NYC, *]`, `x[D1, *]`), which `enumerate_agg_nodes` does not hoist as
+/// a synthetic agg (see the call site for why).
+///
+/// Indices that are not subscripts on a model variable (e.g. a literal-only
+/// scalar argument the parser would normally reject) don't make a reducer a
+/// slice; this only inspects subscripts whose head is a known model variable.
+fn reducer_is_full_reduce(
+    builtin: &BuiltinFn<Expr2>,
+    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+) -> bool {
+    let mut full = true;
+    builtin.for_each_expr_ref(|arg| {
+        if !full {
+            return;
+        }
+        if !expr_is_full_extent(arg, variables) {
+            full = false;
+        }
+    });
+    full
+}
+
+/// Recursive helper for [`reducer_is_full_reduce`]: `false` if `expr`
+/// contains a subscript on a model variable that uses any non-wildcard index.
+fn expr_is_full_extent(
+    expr: &Expr2,
+    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+) -> bool {
+    match expr {
+        Expr2::Const(..) | Expr2::Var(..) => true,
+        Expr2::Subscript(ident, indices, _, _) => {
+            // Subscripts whose head is not a model variable can't be a
+            // sliced source (and won't affect the agg's source set), so
+            // ignore them.
+            if variables.contains_key(&Ident::<Canonical>::new(ident.as_str())) {
+                for idx in indices {
+                    match idx {
+                        IndexExpr2::Wildcard(_) | IndexExpr2::StarRange(_, _) => {}
+                        // A literal element, integer index, range, dim
+                        // position, or arbitrary expression pins (a slice
+                        // of) the source -- not a full reduce.
+                        IndexExpr2::Expr(_) | IndexExpr2::DimPosition(_, _) => return false,
+                        IndexExpr2::Range(_, _, _) => return false,
+                    }
+                }
+            }
+            // Also descend into index expressions (a nested source ref).
+            indices.iter().all(|idx| match idx {
+                IndexExpr2::Expr(e) => expr_is_full_extent(e, variables),
+                IndexExpr2::Range(l, r, _) => {
+                    expr_is_full_extent(l, variables) && expr_is_full_extent(r, variables)
+                }
+                IndexExpr2::Wildcard(_)
+                | IndexExpr2::StarRange(_, _)
+                | IndexExpr2::DimPosition(_, _) => true,
+            })
+        }
+        Expr2::App(builtin, _, _) => {
+            let mut ok = true;
+            builtin.for_each_expr_ref(|sub| {
+                if ok && !expr_is_full_extent(sub, variables) {
+                    ok = false;
+                }
+            });
+            ok
+        }
+        Expr2::Op1(_, operand, _, _) => expr_is_full_extent(operand, variables),
+        Expr2::Op2(_, left, right, _, _) => {
+            expr_is_full_extent(left, variables) && expr_is_full_extent(right, variables)
+        }
+        Expr2::If(cond, then_e, else_e, _, _) => {
+            expr_is_full_extent(cond, variables)
+                && expr_is_full_extent(then_e, variables)
+                && expr_is_full_extent(else_e, variables)
+        }
+    }
+}
+
+/// `true` when `name` is a synthetic aggregate-node name (`$⁚ltm⁚agg⁚{n}`).
+pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
+    name.starts_with(AGG_NAME_PREFIX)
 }
 
 /// Collect the canonical names of all model variables referenced (directly or
@@ -905,5 +1007,60 @@ mod tests {
             "SIZE must not be hoisted as an agg; got: {:?}",
             result.aggs
         );
+    }
+
+    /// A reducer over an explicit *slice* used as a sub-expression
+    /// (`x[r] = ... + SUM(pop[NYC, *])`) is NOT hoisted: the slice pinning
+    /// would have to ride on the agg's source descriptor (which only carries
+    /// the source variable name, not which elements the slice reads), so the
+    /// element-graph reroute and the per-element reducer link scores would
+    /// over-approximate to the whole array (the link score for the unread
+    /// rows would be a nonzero garbage value instead of 0). Such a
+    /// subexpression stays conservatively `Wildcard`-classified. Tracked as
+    /// a follow-up.
+    #[test]
+    fn slice_reducer_subexpression_is_not_hoisted() {
+        let project = TestProject::new("slice_subexpr")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .named_dimension("Age", &["Adult", "Child"])
+            .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "10", None)
+            .array_aux_direct(
+                "x",
+                vec!["Region".into()],
+                "pop[NYC, Adult] + SUM(pop[NYC, *])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.is_empty(),
+            "a slice-reducer subexpression must not be hoisted; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// A whole-RHS slice/partial reduce (`agg[D1] = SUM(matrix[D1, *])`) IS
+    /// recognized -- but as a variable-backed agg, not a synthetic one
+    /// (covered by `whole_rhs_arrayed_partial_reduce_is_its_own_agg`). The
+    /// carve-out above is specifically for the *sub-expression* case.
+    #[test]
+    fn full_wildcard_reducer_subexpression_is_still_hoisted() {
+        // `SUM(matrix[*, *])` (all-wildcard, no literal pin) is a full
+        // reduce and IS hoistable as a synthetic agg.
+        let project = TestProject::new("full_wildcard_subexpr")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .scalar_aux("y", "5 + SUM(matrix[*, *])");
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "an all-wildcard reducer subexpression must mint one synthetic agg; got: {:?}",
+            result.aggs
+        );
+        assert_eq!(synthetic[0].source_vars, vec!["matrix".to_string()]);
     }
 }

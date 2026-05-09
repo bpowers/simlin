@@ -201,15 +201,18 @@ fn scalar_to_arrayed_broadcast() {
     assert_edge(&result, "population[la]", "births[la]");
 }
 
-// ---- Test 5: AC2.4 (cross-element via wildcard in A2A equation) ----
+// ---- Test 5: AC4.1 (reducer reference routed through an aggregate node) ----
 
-/// An A2A variable whose equation contains SUM(source[*]) should produce
-/// cross-element edges: every source element connects to every target element.
+/// An A2A variable whose equation contains `SUM(source[*])` routes that
+/// reference through a synthetic aggregate node rather than emitting the
+/// all-pairs Wildcard cross-product (Phase 5, design AC4.1).
 ///
-/// share[Region] = population / SUM(population[*])
-/// The population -> share dependency is CrossElement because of the
-/// wildcard subscript in SUM(population[*]).
-/// Each population element feeds every share element.
+/// `share[Region] = population / SUM(population[*])`: the maximal reducer
+/// subexpression `SUM(population[*])` becomes `$⁚ltm⁚agg⁚0`, so the element
+/// graph has `population[d] → $⁚ltm⁚agg⁚0` (one per source element),
+/// `$⁚ltm⁚agg⁚0 → share[r]` (one per target element), and -- from the bare
+/// `population / ...` numerator -- the diagonal `population[d] → share[d]`.
+/// There is NO direct `population[d] → share[e]` Wildcard-derived edge.
 #[test]
 fn cross_element_wildcard_in_a2a() {
     let project = TestProject::new("cross_element_a2a")
@@ -219,15 +222,27 @@ fn cross_element_wildcard_in_a2a() {
 
     let result = element_edges(&project);
 
-    // CrossElement: every population[d] -> every share[e]
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
     let regions = &["nyc", "boston", "la"];
-    for &from_r in regions {
-        for &to_r in regions {
-            assert_edge(
-                &result,
-                &format!("population[{from_r}]"),
-                &format!("share[{to_r}]"),
-            );
+
+    // population[d] -> agg (the SUM reduction), one per source element.
+    for &d in regions {
+        assert_edge(&result, &format!("population[{d}]"), agg);
+    }
+    // agg -> share[r] (the broadcast), one per target element.
+    for &r in regions {
+        assert_edge(&result, agg, &format!("share[{r}]"));
+    }
+    // The bare numerator's diagonal edges remain.
+    for &d in regions {
+        assert_edge(&result, &format!("population[{d}]"), &format!("share[{d}]"));
+    }
+    // NO direct off-diagonal Wildcard cross-product edges.
+    for &d in regions {
+        for &r in regions {
+            if d != r {
+                assert_no_edge(&result, &format!("population[{d}]"), &format!("share[{r}]"));
+            }
         }
     }
 }
@@ -431,20 +446,23 @@ fn a2a_produces_n_element_identical_loops() {
     assert_has_circuit(&result, &["population[la]", "births[la]"]);
 }
 
-// ---- Test 9: AC3.2 (cross-element loop detection) ----
+// ---- Test 9: AC4.1 (reducer reference routed through an aggregate node) ----
 
 /// A model with `population[Region]` (stock, 2 regions) and `births[Region]`
-/// (flow, `SUM(population[*]) * 0.01`) should produce both same-element and
-/// cross-element loops.
+/// (flow, `SUM(population[*]) * 0.01`) routes the inlined `SUM(population[*])`
+/// through a synthetic aggregate node `$⁚ltm⁚agg⁚0` (Phase 5, design AC4.1).
 ///
-/// The SUM(population[*]) creates CrossElement edges, meaning every population
-/// element feeds every births element. Combined with the SameElement stock
-/// inflows (births[r] -> population[r]), this produces:
-///
-/// - 2 same-element loops: [population[nyc], births[nyc]] and
-///   [population[boston], births[boston]]
-/// - 1 cross-element loop: a 4-node circuit through both regions,
-///   e.g., [population[nyc], births[boston], population[boston], births[nyc]]
+/// The element graph then has `population[d] → $⁚ltm⁚agg⁚0` (per source
+/// element), `$⁚ltm⁚agg⁚0 → births[r]` (per target element), and the
+/// structural `births[r] → population[r]`. Johnson on this graph (the legacy
+/// `model_element_loop_circuits` surface) finds two elementary circuits, one
+/// per region, each routed through `$⁚ltm⁚agg⁚0`:
+///   `[population[nyc], $⁚ltm⁚agg⁚0, births[nyc]]` and the Boston twin.
+/// The genuine cross-element loop (`population[nyc] → agg → births[boston] →
+/// population[boston] → agg → births[nyc] → ...`) visits `$⁚ltm⁚agg⁚0`
+/// twice -- it is NOT an elementary circuit, so Johnson can't emit it
+/// directly; the LTM loop builder reconstructs it (see the cross-element
+/// loop tests in `db_ltm_unified_tests.rs`).
 #[test]
 fn cross_element_loop_through_sum_reducer() {
     let project = TestProject::new("cross_element_loop")
@@ -454,29 +472,17 @@ fn cross_element_loop_through_sum_reducer() {
 
     let result = element_loop_circuits(&project);
 
-    // Should find 3 loops total: 2 same-element + 1 cross-element
+    // Two elementary circuits (one per region), each routed through the agg.
     assert_eq!(
         result.circuits.len(),
-        3,
-        "expected 3 circuits (2 same-element + 1 cross-element), got {}: {:?}",
+        2,
+        "expected 2 agg-routed elementary circuits, got {}: {:?}",
         result.circuits.len(),
         result.circuits
     );
-
-    // Same-element loops
-    assert_has_circuit(&result, &["population[nyc]", "births[nyc]"]);
-    assert_has_circuit(&result, &["population[boston]", "births[boston]"]);
-
-    // Cross-element loop: 4-node circuit through both regions
-    assert_has_circuit(
-        &result,
-        &[
-            "population[nyc]",
-            "births[boston]",
-            "population[boston]",
-            "births[nyc]",
-        ],
-    );
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    assert_has_circuit(&result, &["population[nyc]", agg, "births[nyc]"]);
+    assert_has_circuit(&result, &["population[boston]", agg, "births[boston]"]);
 }
 
 // ---- Test 10: AC3.3 (partitions group cross-element stocks) ----
@@ -705,16 +711,14 @@ fn element_graph_fixed_index_broadcast_truthful() {
     assert_no_edge(&result, "population[la]", "relative_pop[boston]");
 }
 
-/// AC1.2: Wildcard reducer remains all-pairs and the bare-Var diagonal
-/// edges survive.
+/// AC4.1 (Phase 5): a Wildcard reducer reference is routed through a
+/// synthetic aggregate node, and the bare-Var diagonal edges survive.
 ///
-/// For `share[Region] = population / SUM(population[*])`, the wildcard
-/// reducer continues to emit all N x N edges (every source element feeds
-/// every target element via the reduction). The diagonal edges from the
-/// bare `population` numerator must also be present after the refactor;
-/// today they are subsumed by the CrossElement classifier's all-pairs
-/// expansion, but the post-refactor builder emits them per-reference and
-/// the union must still cover all 9.
+/// For `share[Region] = population / SUM(population[*])`, the maximal
+/// reducer `SUM(population[*])` becomes `$⁚ltm⁚agg⁚0`. The truthful edge
+/// set is N `population[d] → agg` + N `agg → share[r]` + N bare diagonals
+/// `population[d] → share[d]` -- and explicitly NOT the N² Wildcard
+/// cross-product the pre-Phase-5 classifier emitted.
 #[test]
 fn element_graph_wildcard_reducer_plus_bare_truthful() {
     let project = TestProject::new("wildcard_plus_bare")
@@ -724,19 +728,66 @@ fn element_graph_wildcard_reducer_plus_bare_truthful() {
 
     let result = element_edges(&project);
 
-    // All 9 edges must be present: the wildcard reducer emits the full
-    // 3x3 cross product, and the bare numerator's 3 diagonal edges are a
-    // subset of those 9.
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
     let regions = &["nyc", "boston", "la"];
-    for &from_r in regions {
-        for &to_r in regions {
-            assert_edge(
-                &result,
-                &format!("population[{from_r}]"),
-                &format!("share[{to_r}]"),
-            );
+
+    for &d in regions {
+        assert_edge(&result, &format!("population[{d}]"), agg);
+        assert_edge(&result, agg, &format!("share[{d}]"));
+        assert_edge(&result, &format!("population[{d}]"), &format!("share[{d}]"));
+    }
+    for &d in regions {
+        for &r in regions {
+            if d != r {
+                assert_no_edge(&result, &format!("population[{d}]"), &format!("share[{r}]"));
+            }
         }
     }
+}
+
+/// AC4.1 (Phase 5): a whole-RHS *scalar* reducer (`total_pop = SUM(pop[*])`)
+/// is its *own* aggregate node -- no `$⁚ltm⁚agg⁚{n}` is minted, and the
+/// `pop[d] → total_pop` reduction edges plus the `total_pop → consumer`
+/// broadcast edges already exist via the normal arrayed→scalar /
+/// scalar→arrayed paths. The bare-numerator diagonal `pop[d] → migration[d]`
+/// (from `... - pop[r] * c`) is the only direct `pop → migration` edge.
+#[test]
+fn element_graph_whole_rhs_scalar_reducer_is_its_own_agg_node() {
+    let project = TestProject::new("whole_rhs_agg_graph")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["migration"], &[], None)
+        .scalar_aux("total_pop", "SUM(pop[*])")
+        .array_flow("migration[Region]", "total_pop * 0.001 - pop * 0.001", None);
+
+    let result = element_edges(&project);
+
+    // No synthetic agg node anywhere in the graph.
+    assert!(
+        !result
+            .edges
+            .keys()
+            .any(|k| k.contains("\u{205A}agg\u{205A}"))
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t.contains("\u{205A}agg\u{205A}"))),
+        "whole-RHS scalar reducer must not produce a synthetic agg node; got: {:?}",
+        result.edges
+    );
+
+    // pop[d] -> total_pop reduction edges.
+    assert_edge(&result, "pop[nyc]", "total_pop");
+    assert_edge(&result, "pop[boston]", "total_pop");
+    // total_pop -> migration[r] broadcast edges.
+    assert_edge(&result, "total_pop", "migration[nyc]");
+    assert_edge(&result, "total_pop", "migration[boston]");
+    // Bare-numerator diagonal.
+    assert_edge(&result, "pop[nyc]", "migration[nyc]");
+    assert_edge(&result, "pop[boston]", "migration[boston]");
+    // No off-diagonal pop -> migration edge (the only Wildcard ref of `pop`
+    // is via `total_pop`, which is a real scalar node, not an N×M product).
+    assert_no_edge(&result, "pop[nyc]", "migration[boston]");
+    assert_no_edge(&result, "pop[boston]", "migration[nyc]");
 }
 
 /// AC1.5: Multidim partial-fixed references conservatively expand as

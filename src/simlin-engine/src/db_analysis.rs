@@ -1481,6 +1481,12 @@ pub fn model_element_causal_edges(
 
     let mut element_edges: HashMap<String, BTreeSet<String>> = HashMap::new();
 
+    // Aggregate-node enumeration (Phase 5): each maximal inlined reducer
+    // subexpression (`SUM(pop[*])`, ...) is a synthetic node `$⁚ltm⁚agg⁚{n}`.
+    // A Wildcard/DynamicIndex reducer reference to `from` inside `to` routes
+    // `from[d] → agg` + `agg → to[e]` instead of the all-pairs cross-product.
+    let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
+
     // Cache dimension lookups to avoid repeated calls for the same variable
     let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
 
@@ -1600,7 +1606,51 @@ pub fn model_element_causal_edges(
                 continue;
             }
 
+            // Phase 5: does `to`'s equation hoist any *synthetic* aggregate
+            // node that reads `from`? If so, every Wildcard/DynamicIndex
+            // reference to `from` in `to` is rerouted through that agg node
+            // (`from[d] → agg`, `agg → to[e]`) rather than emitting the
+            // all-pairs cross-product. (Variable-backed aggs like
+            // `total_pop = SUM(pop[*])` are already real nodes -- their
+            // edges come from the normal reference walker -- so they don't
+            // trigger this reroute.) A reference to `from` in `to` that is
+            // *not* inside a hoisted reducer (a bare numerator `pop[r]`, a
+            // FixedIndex `pop[NYC]`, or a non-hoisted slice/dynamic index)
+            // still emits its own edges normally.
+            let routed_aggs: Vec<&crate::ltm_agg::AggNode> = agg_nodes
+                .aggs_in_var(to_name)
+                .filter(|a| a.is_synthetic && a.source_vars.iter().any(|s| s == from_name))
+                .collect();
+
             for site in sites {
+                let route_through_agg = !routed_aggs.is_empty()
+                    && matches!(site.shape, RefShape::Wildcard | RefShape::DynamicIndex);
+                if route_through_agg {
+                    // `from[d] → agg` (per source element) and `agg → to[e]`
+                    // (per target element / scalar). Synthetic aggs are
+                    // always scalar full-reduces in this phase, so the agg
+                    // node has no subscript.
+                    for agg in &routed_aggs {
+                        for from_elem in cartesian_element_names(from_name, &from_dims) {
+                            element_edges
+                                .entry(from_elem)
+                                .or_default()
+                                .insert(agg.name.clone());
+                        }
+                        let to_nodes: Vec<String> = if to_dims.is_empty() {
+                            vec![to_name.to_string()]
+                        } else if let Some(elem) = site.target_element.as_deref() {
+                            vec![format!("{to_name}[{elem}]")]
+                        } else {
+                            cartesian_element_names(to_name, &to_dims)
+                        };
+                        let entry = element_edges.entry(agg.name.clone()).or_default();
+                        for to_node in to_nodes {
+                            entry.insert(to_node);
+                        }
+                    }
+                    continue;
+                }
                 emit_edges_for_reference(
                     from_name,
                     to_name,
@@ -2027,16 +2077,26 @@ pub fn model_loop_circuits_tiered(
         )
     } else {
         let element_edges = model_element_causal_edges(db, model, project);
+        // A node is kept in the slow-path subgraph if its variable name is
+        // in the cross-element/mixed set OR it is a synthetic aggregate node
+        // (`$⁚ltm⁚agg⁚{n}`). Aggregate nodes have no variable-level
+        // counterpart -- `strip_element_subscript` is a no-op on them -- but
+        // a cross-element loop through a hoisted reducer genuinely traverses
+        // the agg node (twice), so dropping it would hide that loop.
+        // Including a stray agg whose neighbors are not slow-path vars just
+        // adds an isolated node, harmless.
+        let keep_node = |name: &str| -> bool {
+            slow_path_var_nodes.contains(strip_element_subscript(name))
+                || crate::ltm_agg::is_synthetic_agg_name(name)
+        };
         let mut sub_edges: HashMap<String, BTreeSet<String>> = HashMap::new();
         for (from, tos) in &element_edges.edges {
-            let from_var = strip_element_subscript(from);
-            if !slow_path_var_nodes.contains(from_var) {
+            if !keep_node(from) {
                 continue;
             }
             let mut filtered: BTreeSet<String> = BTreeSet::new();
             for to in tos {
-                let to_var = strip_element_subscript(to);
-                if slow_path_var_nodes.contains(to_var) {
+                if keep_node(to) {
                     filtered.insert(to.clone());
                 }
             }
@@ -2046,7 +2106,7 @@ pub fn model_loop_circuits_tiered(
         }
         // Stocks restricted to slow-path variables. Same projection rule:
         // keep an element-stock node only if its variable name is in
-        // the slow-path set.
+        // the slow-path set. (Agg nodes are never stocks.)
         let sub_stocks: std::collections::HashSet<crate::common::Ident<crate::common::Canonical>> =
             element_edges
                 .stocks
