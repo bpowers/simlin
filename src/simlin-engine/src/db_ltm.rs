@@ -2140,14 +2140,91 @@ pub(crate) fn build_loops_from_tiered(
     all_loops
 }
 
+/// Build element-subscripted `Link`s for one element-level circuit.
+///
+/// For circuit nodes `[n_0, ..., n_{k-1}]` (each `n_i` either `var` or
+/// `var[e_i]`), each link `n_i -> n_{i+1}` keeps the element subscript on
+/// the side(s) the loop-score equation needs to pin a per-element link
+/// score:
+///
+///   - `from = n_i` (subscript kept) when `n_i` is subscripted. A
+///     per-source-element FixedIndex / cross-dimensional link score is
+///     named `{from}[{e_i}]->{to}` (the bracketed `from` form
+///     `try_cross_dimensional_link_scores` and FixedIndex emission
+///     produce); `generate_loop_score_equation`'s resolver also falls
+///     back to the variable-level `from` form when the bracketed name
+///     wasn't emitted (e.g. a structural flow->stock A2A link score is
+///     `{strip(from)}->{to}`).
+///   - `to = n_{i+1}` (subscript kept) when `n_{i+1}` is subscripted AND
+///     its variable is dimensioned (so the link score is A2A and the loop
+///     visits one element of it -- `generate_loop_score_equation` then
+///     emits `"...→{to}"[e_{i+1}]`). Otherwise `to = strip(n_{i+1})`
+///     (the link score is scalar / cross-dimensional, referenced
+///     without a subscript).
+///
+/// `var_links` carries the variable-level links for the same circuit
+/// (from `circuit_to_links` on the stripped node sequence); link `i`'s
+/// polarity is taken from `var_links[i]` (the variable-level static
+/// polarity for that hop), defaulting to `Unknown` if the lengths ever
+/// disagree (they shouldn't).
+fn build_element_subscripted_links(
+    circuit: &[&str],
+    var_links: &[crate::ltm::Link],
+    source_vars: &HashMap<String, super::SourceVariable>,
+    db: &dyn Db,
+    project: SourceProject,
+) -> Vec<crate::ltm::Link> {
+    let mut links = Vec::with_capacity(circuit.len());
+    for i in 0..circuit.len() {
+        let from_raw = circuit[i];
+        let to_raw = circuit[(i + 1) % circuit.len()];
+        let polarity = if i < var_links.len() {
+            var_links[i].polarity
+        } else {
+            crate::ltm::LinkPolarity::Unknown
+        };
+        let link_from = if from_raw.contains('[') {
+            from_raw
+        } else {
+            strip_subscript(from_raw)
+        };
+        let to_var_level = strip_subscript(to_raw);
+        let to_is_arrayed = source_vars
+            .get(to_var_level)
+            .map(|sv| {
+                sv.kind(db) != SourceVariableKind::Module
+                    && !variable_dimensions(db, *sv, project).is_empty()
+            })
+            .unwrap_or(false);
+        let link_to = if to_raw.contains('[') && to_is_arrayed {
+            to_raw
+        } else {
+            to_var_level
+        };
+        links.push(crate::ltm::Link {
+            from: Ident::new(link_from),
+            to: Ident::new(link_to),
+            polarity,
+        });
+    }
+    links
+}
+
 /// Build `Loop` structs from element-level circuits, grouping
-/// pure-dimension circuits into shared A2A loops and keeping mixed
-/// circuits as individual scalar loops.
+/// pure-dimension circuits into shared A2A loops, scoring cross-element
+/// circuits along their element-level path, and keeping mixed circuits as
+/// individual scalar loops.
 ///
 /// Pure-dimension: all circuits in a group have the same variable-level
 /// node sequence (e.g., `[population, births]` for both `[population[nyc],
 /// births[nyc]]` and `[population[boston], births[boston]]`). These share
 /// one loop ID and produce an A2A loop score with dimensions.
+///
+/// Cross-element: a circuit that visits different elements at different
+/// points (a per-element-equation hop reading the *other* element, or a
+/// wildcard reducer). Each circuit becomes its own scalar Loop whose
+/// `Link`s carry element subscripts so the loop-score equation references
+/// the per-element link scores along the element path.
 ///
 /// Mixed: any circuit containing a scalar node or where the group has
 /// circuits with different variable-level structures. Each gets its own
@@ -2318,77 +2395,69 @@ pub(crate) fn build_element_level_loops(
                 dimensions,
             });
         } else if is_cross_element {
-            // Cross-element circuits: a circuit where nodes have different
-            // element subscripts on the same dimension (e.g., pop[nyc] ->
-            // total_pop -> pop[boston] -> total_pop -> pop[nyc] via a
-            // wildcard reducer like SUM(pop[*])).
+            // Cross-element circuits: a circuit that genuinely visits
+            // different elements at different points -- e.g.
+            //   population[nyc] -> migration_pressure[boston] ->
+            //   migration_in[nyc] -> population[nyc]
+            // (a per-element-equation hop that reads the *other* element),
+            // or the wildcard-reducer pattern
+            //   pop[nyc] -> total[boston] -> update[boston] ->
+            //   pop[boston] -> total[nyc] -> update[nyc] -> pop[nyc].
             //
-            // After the per-reference element graph (FixedIndex no longer
-            // expands to NxN), the cross-element circuits that survive
-            // originate primarily from wildcard reducers. Such reducers
-            // already encode the cross-element contribution as a single
-            // A2A link-score value per neighbour, so we extract the unique
-            // variable-level cycle and emit a scalar Loop whose links
-            // reference the canonical {from}->{to} A2A link-score variables
-            // (Bare shape). The diagonal link-score values capture the loop
-            // structure without needing dedicated off-diagonal link scores.
+            // Each circuit becomes its own scalar Loop (the loop-score
+            // *variable* is scalar: a cross-element loop visits fixed
+            // elements, it is not parameterized by a free dimension) whose
+            // `Link`s carry the element subscripts so the loop-score
+            // equation references the per-element link scores along the
+            // element-level path: `"$⁚ltm⁚link_score⁚{from}→{to}"[e]` for
+            // an A2A (dimensioned) link score visited at element `e`. See
+            // `ltm_augment::generate_loop_score_equation` for how the
+            // subscript and the link-score-name resolution interact.
             //
-            // Deduplication: strip subscripts and take the shortest unique
-            // cycle. E.g., pop[nyc]->total_pop->pop[boston]->total_pop has
-            // stripped sequence pop,total_pop,pop,total_pop; the unique
-            // cycle starting at the first repeat is pop->total_pop.
-            let stripped: Vec<&str> = representative.iter().map(|n| strip_subscript(n)).collect();
+            // (Pre-#503-fix this branch instead found the "shortest unique
+            // cycle" in the *stripped* node sequence and emitted a single
+            // scalar Loop referencing the *diagonal* A2A link scores via
+            // `circuit_to_links` -- which scored a cross-element loop as if
+            // its hops were same-element diagonal sensitivities. The
+            // diagonal collapse and the unique-cycle stripping are gone.)
+            for circuit in &circuits_in_group {
+                let element_nodes: &[&str] = circuit;
+                let var_level_nodes: Vec<Ident<Canonical>> = element_nodes
+                    .iter()
+                    .map(|n| Ident::new(strip_subscript(n)))
+                    .collect();
+                let var_links = var_graph.circuit_to_links(&var_level_nodes);
 
-            // Find the shortest unique cycle in the stripped sequence
-            let mut unique_cycle: Vec<Ident<Canonical>> = Vec::new();
-            let mut seen_set = std::collections::HashSet::new();
-            for name in &stripped {
-                if !seen_set.insert(*name) {
-                    break; // found a repeat, cycle is complete
-                }
-                unique_cycle.push(Ident::new(name));
-            }
-
-            if unique_cycle.len() >= 2 {
-                // Cross-element circuits are scored as a scalar loop using
-                // the wildcard-reducer's already-aggregated A2A link-score
-                // values: every link reads the canonical `{from}->{to}` A2A
-                // link score (Bare shape) via the variable-level link
-                // names produced by `circuit_to_links`.
-                let links = var_graph.circuit_to_links(&unique_cycle);
+                let links = build_element_subscripted_links(
+                    element_nodes,
+                    &var_links,
+                    source_vars,
+                    db,
+                    project,
+                );
 
                 // Stocks must be element-level so `partition_for_loop`
                 // can resolve them in `model_element_cycle_partitions::
                 // stock_partition` (which is keyed element-level). The
-                // `Loop` docstring's stocks-granularity invariant holds
-                // for every loop with `dimensions.is_empty()`, including
-                // this cross-element approximation. Collect every
-                // element-level stock node that appears in the original
-                // circuit -- a cross-element loop typically traverses
-                // the same stock variable at multiple elements (e.g.,
-                // population[nyc] AND population[boston]); all of those
-                // belong in `stocks` so the partition lookup hits the
-                // SCC containing them, instead of returning None and
-                // dropping the loop into the catch-all None group in
-                // `compute_rel_loop_scores`.
-                let mut element_stocks: Vec<Ident<Canonical>> = Vec::new();
-                let mut seen_stocks = std::collections::HashSet::new();
-                for &node in representative {
-                    let var_name = strip_subscript(node);
-                    if var_graph.stocks.contains(&Ident::new(var_name)) && seen_stocks.insert(node)
-                    {
-                        element_stocks.push(Ident::new(node));
-                    }
-                }
+                // `Loop` docstring's stocks-granularity invariant says any
+                // loop with `dimensions.is_empty()` MUST carry element-
+                // level stock names. Collect every element-level stock node
+                // in the circuit (a 6-node cross-element loop can traverse
+                // the same stock variable at multiple elements).
+                let stocks: Vec<Ident<Canonical>> = element_nodes
+                    .iter()
+                    .filter(|n| var_graph.stocks.contains(&Ident::new(strip_subscript(n))))
+                    .map(|n| Ident::new(n))
+                    .collect();
 
-                let polarity = var_graph.calculate_polarity(&links);
+                let polarity = var_graph.calculate_polarity(&var_links);
 
                 all_loops.push(Loop {
                     id: String::new(),
                     links,
-                    stocks: element_stocks,
+                    stocks,
                     polarity,
-                    dimensions: vec![], // scalar: wildcard-reducer aggregated
+                    dimensions: vec![], // scalar: cross-element loops visit fixed elements
                 });
             }
         } else {
@@ -3025,24 +3094,28 @@ pub fn model_ltm_variables(
         let mut seen_links: HashSet<(String, String)> = HashSet::new();
         for loop_item in detected_loops {
             for link in &loop_item.links {
-                // For cross-dimensional edges in mixed/scalar loops, the
-                // loop builder preserves an element-level `link.from` like
-                // "pop[nyc]" so loop_score equations reference the right
-                // per-element link score. But `try_cross_dimensional_link_scores`
-                // and `source_vars` lookups want the variable-level name
-                // ("pop"). Strip the subscript for both the dedup key and
-                // the cross-dim helper. The helper emits all per-element
-                // link scores (one per source element), and the dedup
-                // ensures we only fire it once per (var_from, to) pair.
+                // Loop links can carry element-level subscripts on either
+                // end -- `link.from` for a per-source-element FixedIndex /
+                // cross-dimensional edge ("pop[nyc]"), and (for cross-element
+                // loops) `link.to` for an A2A target visited at a single
+                // element ("migration_pressure[boston]"). `try_cross_
+                // dimensional_link_scores`, `emit_per_shape_link_scores`, and
+                // `source_vars` lookups all key on the variable-level name,
+                // so strip the subscript from both ends for the dedup key
+                // and the helper calls. Each helper emits the *full* link
+                // score for the (var_from, var_to) edge -- per-element when
+                // the target is arrayed -- so the loop-score equation's
+                // `[elem]` subscript picks the slot the loop actually visits.
                 let from_var_level = strip_subscript(link.from.as_str());
-                let key = (from_var_level.to_string(), link.to.to_string());
+                let to_var_level = strip_subscript(link.to.as_str());
+                let key = (from_var_level.to_string(), to_var_level.to_string());
                 if seen_links.insert(key) {
                     // Check for cross-dimensional (arrayed-to-scalar) edges.
                     if let Some(cross_vars) = try_cross_dimensional_link_scores(
                         db,
                         source_vars,
                         from_var_level,
-                        link.to.as_str(),
+                        to_var_level,
                         model,
                         project,
                     ) {
@@ -3057,7 +3130,7 @@ pub fn model_ltm_variables(
                         db,
                         source_vars,
                         from_var_level,
-                        link.to.as_str(),
+                        to_var_level,
                         RefShape::Bare,
                         model,
                         project,

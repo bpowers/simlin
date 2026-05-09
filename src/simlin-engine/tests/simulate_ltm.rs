@@ -4546,9 +4546,14 @@ fn test_cross_element_ltm_exhaustive() {
     // because the spurious NxN cross-element edges polluted the A2A loop
     // structure; post-refactor the A2A loop is clean and this slot-by-slot
     // check is robust.  We still cannot assert the same on the migration
-    // (u*) loops: those legitimately zero out one slot due to MAX(...)
+    // loops: those legitimately zero out one slot due to MAX(...)
     // semantics in migration_in / migration_out, which is fixture
     // behavior independent of the refactor.
+    //
+    // `\u{205A}r1` is the A2A reinforcing births loop, which is dimensioned
+    // over Region (2 slots). The cross-element migration loops are *scalar*
+    // loop-score vars (1 slot) -- their element-path scoring is exercised
+    // by the dedicated `test_cross_element_ltm_loop_score_*` tests below.
     let a2a_reinforcing_loop = loop_scores
         .iter()
         .find(|(name, _)| name.ends_with("\u{205A}r1"))
@@ -4565,6 +4570,46 @@ fn test_cross_element_ltm_exhaustive() {
             a2a_reinforcing_loop.0, elem
         );
     }
+
+    // Phase 2 tightening: the cross-element migration loop is scored from
+    // the actual element-level link scores along its path, not collapsed
+    // onto the diagonal. The `population[nyc] -> migration_pressure[boston]
+    // -> migration_in[nyc] -> population[nyc]` loop must reference the
+    // *swap* link score `migration_pressure[boston]→migration_in[nyc]`,
+    // not the `migration_pressure → migration_out` diagonal; and there
+    // must be a loop-score equation whose factor set is exactly the three
+    // element-path references of that loop. (The thorough element-path /
+    // hand-calc checks live in the dedicated
+    // `test_cross_element_ltm_loop_score_*` tests below.)
+    let mut db2 = SimlinDb::default();
+    let sync2 = sync_from_datamodel_incremental(&mut db2, &datamodel_project, None);
+    set_project_ltm_enabled(&mut db2, sync2.project, true);
+    let source_model2 = sync2.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db2, source_model2, sync2.project);
+    let loop_score_eqs: Vec<String> = ltm_vars
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .map(|v| v.equation.source_text())
+        .collect();
+    let migration_loop_factors: std::collections::HashSet<String> = [
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure\"[boston]",
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure[boston]\u{2192}migration_in\"[nyc]",
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population\"[nyc]",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    assert!(
+        loop_score_eqs.iter().any(|eq| eq
+            .split(" * ")
+            .map(|s| s.trim().to_string())
+            .collect::<std::collections::HashSet<_>>()
+            == migration_loop_factors),
+        "expected a loop-score equation for the population[nyc]->migration_pressure[boston]->\
+         migration_in[nyc]->population[nyc] loop with factor set {migration_loop_factors:?}; \
+         got: {loop_score_eqs:?}"
+    );
 }
 
 /// AC1.3: truthful per-reference element edge set for the cross-element
@@ -4769,6 +4814,252 @@ fn test_cross_element_link_score_migration_in_arrayed_partials() {
     assert!(
         checked_steps > 0,
         "expected at least one simulated step t >= 2 to check"
+    );
+}
+
+// -- ltm-503-cross-element-agg Phase 2: cross-element loops scored on the
+//    element-level path --
+
+/// Split a loop-score equation (a ` * `-joined product of quoted
+/// link-score references, optionally with a trailing `[elem]` subscript)
+/// into the set of its factors verbatim.
+fn loop_score_equation_factors(eq: &str) -> std::collections::HashSet<String> {
+    eq.split(" * ").map(|s| s.trim().to_string()).collect()
+}
+
+/// Find the offset of slot `element` of an A2A synthetic variable named
+/// `var_name`, dimensioned over `Region` (in declaration order). The
+/// `cross_element_ltm` fixture's `Region` is `{NYC, Boston}`, so the
+/// element offsets are NYC=base+0, Boston=base+1 (XMILE loading
+/// lowercases the names).
+fn a2a_slot_offset(results: &Results, var_name: &str, element: &str) -> usize {
+    let base = results
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str() == var_name)
+        .map(|(_, &off)| off)
+        .unwrap_or_else(|| {
+            panic!(
+                "synthetic var {var_name:?} not found in results; present link/loop scores: {:?}",
+                results
+                    .offsets
+                    .keys()
+                    .map(|k| k.as_str())
+                    .filter(|s| s.contains("\u{205A}ltm\u{205A}"))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let slot = match element {
+        "nyc" => 0,
+        "boston" => 1,
+        other => panic!("unexpected Region element {other:?}"),
+    };
+    base + slot
+}
+
+/// ltm-503-cross-element-agg.AC2.1: the cross-element loop
+/// `population[nyc] -> migration_pressure[boston] -> migration_in[nyc] ->
+/// population[nyc]` is enumerated, and its `loop_score` equation is the
+/// product of the per-element link scores along the element-level path
+/// (`"$⁚ltm⁚link_score⁚population[nyc]→migration_pressure"[boston]`,
+/// `"$⁚ltm⁚link_score⁚migration_pressure[boston]→migration_in"[nyc]`,
+/// `"$⁚ltm⁚link_score⁚migration_in→population"[nyc]`) -- NOT the
+/// unsubscripted A2A diagonal names (e.g. the `migration_out` link score
+/// that the pre-Phase-2 collapse would reference).
+#[test]
+fn test_cross_element_ltm_loop_score_uses_element_path() {
+    let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+
+    let pop_nyc_to_mp = "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure\"[boston]";
+    let mp_boston_to_in = "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure[boston]\u{2192}migration_in\"[nyc]";
+    let in_to_pop_nyc =
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population\"[nyc]";
+    let expected: std::collections::HashSet<String> =
+        [pop_nyc_to_mp, mp_boston_to_in, in_to_pop_nyc]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+    // Find a loop-score var whose factor set is exactly the three
+    // element-path references above (rotation-independent).
+    let loop_a = ltm_vars
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .find(|v| loop_score_equation_factors(&v.equation.source_text()) == expected);
+    let loop_a = loop_a.unwrap_or_else(|| {
+        panic!(
+            "no loop_score var with the cross-element migration-loop factor set {expected:?}; \
+             loop_score equations present: {:?}",
+            ltm_vars
+                .vars
+                .iter()
+                .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+                .map(|v| (v.name.as_str(), v.equation.source_text()))
+                .collect::<Vec<_>>()
+        )
+    });
+
+    let eq = loop_a.equation.source_text();
+    // It is a product of the three references and references no diagonal
+    // `migration_out` link score (the pre-Phase-2 collapse target).
+    assert!(
+        eq.contains(" * "),
+        "loop score should be a product; got: {eq}"
+    );
+    assert!(
+        !eq.contains("migration_pressure\u{2192}migration_out"),
+        "must not reference the diagonal migration_out link score; got: {eq}",
+    );
+    // And it visits a specific element of each A2A link score (subscripted
+    // references), never the bare A2A array.
+    for r in [pop_nyc_to_mp, mp_boston_to_in, in_to_pop_nyc] {
+        assert!(
+            eq.contains(r),
+            "loop score equation missing reference {r}; got: {eq}"
+        );
+    }
+}
+
+/// ltm-503-cross-element-agg.AC2.3: the symmetric loop
+/// `population[boston] -> migration_pressure[nyc] -> migration_in[boston] ->
+/// population[boston]` is also enumerated with the analogous subscripted
+/// references. (Its loop-score *value* is identically zero by the
+/// fixture's `MAX(...)` semantics -- `migration_in[Boston] =
+/// MAX(migration_pressure[NYC] * -1, 0)` and `migration_pressure[NYC] > 0`
+/// throughout -- but the loop is still enumerated and references the right
+/// link scores; that is all AC2.3 requires.)
+#[test]
+fn test_cross_element_ltm_symmetric_loop_enumerated() {
+    let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+
+    let pop_boston_to_mp = "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[boston]\u{2192}migration_pressure\"[nyc]";
+    let mp_nyc_to_in = "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure[nyc]\u{2192}migration_in\"[boston]";
+    let in_to_pop_boston =
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population\"[boston]";
+    let expected: std::collections::HashSet<String> =
+        [pop_boston_to_mp, mp_nyc_to_in, in_to_pop_boston]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+    let found = ltm_vars
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .any(|v| loop_score_equation_factors(&v.equation.source_text()) == expected);
+    assert!(
+        found,
+        "no loop_score var with the symmetric migration-loop factor set {expected:?}; \
+         loop_score equations present: {:?}",
+        ltm_vars
+            .vars
+            .iter()
+            .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+            .map(|v| (v.name.as_str(), v.equation.source_text()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// ltm-503-cross-element-agg.AC2.2: the `population[nyc] ->
+/// migration_pressure[boston] -> migration_in[nyc] -> population[nyc]`
+/// loop's `loop_score` series matches the product of the per-element link
+/// scores along its element-level path, at every simulated step t >= 2
+/// (within 1e-6).
+#[test]
+fn test_cross_element_ltm_loop_score_value_matches_hand_calc() {
+    let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
+
+    // First locate which loop id corresponds to loop A (by equation
+    // contents) using the salsa path...
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+
+    let pop_nyc_to_mp = "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure\"[boston]";
+    let mp_boston_to_in = "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure[boston]\u{2192}migration_in\"[nyc]";
+    let in_to_pop_nyc =
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population\"[nyc]";
+    let expected: std::collections::HashSet<String> =
+        [pop_nyc_to_mp, mp_boston_to_in, in_to_pop_nyc]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    let loop_a_name = ltm_vars
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .find(|v| loop_score_equation_factors(&v.equation.source_text()) == expected)
+        .map(|v| v.name.clone())
+        .expect("loop A loop_score var should exist");
+
+    // ...then compile & simulate, and compare loop A's series to the
+    // product of the three per-element link scores it references.
+    let compiled = compile_ltm_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("cross-element model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    let loop_off = results
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str() == loop_a_name.as_str())
+        .map(|(_, &off)| off)
+        .unwrap_or_else(|| panic!("loop A offset for {loop_a_name:?} not found in results"));
+
+    let pop_nyc_to_mp_off = a2a_slot_offset(
+        &results,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure",
+        "boston",
+    );
+    let mp_boston_to_in_off = a2a_slot_offset(
+        &results,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure[boston]\u{2192}migration_in",
+        "nyc",
+    );
+    let in_to_pop_off = a2a_slot_offset(
+        &results,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population",
+        "nyc",
+    );
+
+    let mut checked = 0usize;
+    let mut saw_nonzero = false;
+    for step in 2..results.step_count {
+        let base = step * results.step_size;
+        let l1 = results.data[base + pop_nyc_to_mp_off];
+        let l2 = results.data[base + mp_boston_to_in_off];
+        let l3 = results.data[base + in_to_pop_off];
+        let loop_val = results.data[base + loop_off];
+        let expected_val = l1 * l2 * l3;
+        assert!(
+            (loop_val - expected_val).abs() < 1e-6,
+            "step {step}: loop A loop_score {loop_val} != product of element link scores \
+             ({l1} * {l2} * {l3} = {expected_val})"
+        );
+        if loop_val.abs() > 1e-9 && !loop_val.is_nan() {
+            saw_nonzero = true;
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "expected at least one step t >= 2 to check");
+    assert!(
+        saw_nonzero,
+        "loop A's element-path product should be non-zero at some step \
+         (NYC pressure stays negative and population keeps changing)"
     );
 }
 

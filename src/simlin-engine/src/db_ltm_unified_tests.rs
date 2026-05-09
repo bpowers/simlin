@@ -1081,6 +1081,54 @@ fn mixed_scalar_loop_score_refs_resolve_to_emitted_names() {
     }
 }
 
+/// ltm-503-cross-element-agg.AC2.5: a model with no arrayed variables has
+/// its loop-score equations unchanged -- they reference unsubscripted
+/// scalar link scores exactly as before, with no `[elem]` subscript.
+#[test]
+fn scalar_model_loop_score_has_no_element_subscript() {
+    let db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let loop_score_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .collect();
+    assert_eq!(
+        loop_score_vars.len(),
+        1,
+        "the scalar feedback model has exactly one loop (population -> births -> population); \
+         got: {:?}",
+        loop_score_vars.iter().map(|v| &v.name).collect::<Vec<_>>(),
+    );
+    let eq = loop_score_vars[0].equation.source_text();
+    // No element subscript anywhere: every reference is a bare quoted name.
+    assert!(
+        !eq.contains('['),
+        "scalar-model loop-score equation must not contain any `[elem]` subscript; got: {eq}",
+    );
+    // It is the product of the two scalar link scores.
+    let refs = extract_quoted_refs(&eq);
+    let expected: std::collections::HashSet<&str> = [
+        "$\u{205A}ltm\u{205A}link_score\u{205A}population\u{2192}births",
+        "$\u{205A}ltm\u{205A}link_score\u{205A}births\u{2192}population",
+    ]
+    .into_iter()
+    .collect();
+    let got: std::collections::HashSet<&str> = refs.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        got, expected,
+        "loop-score equation should reference exactly the two bare scalar link scores; got: {eq}",
+    );
+    assert!(
+        eq.contains(" * "),
+        "loop-score equation should be a product; got: {eq}",
+    );
+}
+
 // -- Phase 4 Task 3.5 (edge-aliasing limitation regression test) --
 //
 // AC4.2 documented limitation: when a target equation references the
