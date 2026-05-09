@@ -85,6 +85,20 @@ mod tests {
         if has_display {
             return;
         }
+        // Some Linux distributions ship an `xdg-open` that returns 0
+        // even without `$DISPLAY` (Fedora's Asahi spin is one such
+        // host). Probe the launcher directly: if it succeeds, the
+        // strict assertion is false-positive here, and the relaxed
+        // `open_browser_does_not_panic` test above already covers the
+        // bool-flow contract. Skip in that case.
+        let probe = std::process::Command::new("xdg-open")
+            .arg("http://127.0.0.1:1/probe")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if matches!(probe, Ok(status) if status.success()) {
+            return;
+        }
         let result = open_browser("http://127.0.0.1:1/never-opens");
         assert!(
             !result,

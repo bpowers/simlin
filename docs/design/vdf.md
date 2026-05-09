@@ -133,6 +133,82 @@ facts are called out where the Rust parser has not caught up yet.
 - Attached dimension-anchor records can bind a recovered element catalog to a
   reusable section-3 shape template. When that binding is unique, sibling
   owners using the same template inherit the same element labels.
+- The full record-to-OT map is **direct** for every variable that has a record:
+  `name = names[f[2] key]`, `OT block = [f[11], f[11] + shape_len(f[6]))`. On
+  every tracked `exact-by-xray` fixture this set of direct record spans (plus
+  `Time` at `OT[0]`) covers every OT slot exactly once with no overlaps -- no
+  ordering, alphabetical placement, or slot-table alignment is needed there.
+  System variables (`INITIAL TIME`, `FINAL TIME`, `SAVEPER`, `TIME STEP`) are
+  ordinary records in this map; `#`-signature internal-helper variables
+  (`#alias>SMOOTH#`, `#LV1<DELAY3(...)#`, ...) own real OT slots and are part
+  of it. The "stocks-first-alphabetical" ordering observed in the OT array is a
+  consequence of Vensim's compiler allocation, not a rule a reader needs.
+- A stdlib-macro call adds a deterministic set of records/names/slots/OT
+  entries. Worked example: one `SMOOTH(in,t)` (= SMOOTH1) call adds +1 OT (the
+  level, class `0x08`, inserted into the contiguous stock block), +2 records
+  (one function-token stub with `f[6]==0`/no OT, plus one `#alias>SMOOTH#`
+  helper record with `f[6]==5` and `f[11]` = the level's OT), +5 names (`FUNC`
+  x2 -- the call-site copy and the macro-definition copy -- the two macro
+  parameter names, and `#alias>FUNC#`), and +3 slots (the three slotted names).
+  Per-macro internal-helper-slot counts: `SMOOTH1`/`SMOOTHI` 1, `SMOOTH3` 4
+  (LV3=output, LV2, LV1, DL), `DELAY1` 2 (output rate + LV1), `DELAY3` 7,
+  `RAMP FROM TO` 7, `SSHAPE` 2, `SAMPLE UNTIL` 1. `#`-signature helper records
+  carry opaque/recycled `f[0]`/`f[1]` values (the `0x3024`/`0x3028`/`0x302c`/
+  `0x3428` "ghost-range" `f[0]` values seen on re-saved files are exactly these
+  helpers' `type_flags`) -- the authoritative stock/non-stock signal for a
+  helper is the OT class code at `f[11]`, not `f[1]`.
+- Re-save cruft is identifiable: a record whose `f[2]` does **not** decode to a
+  parsed name-table entry is not an OT owner. This covers SCEN01's 21 "zeroed"
+  `.Supplementary` records (`f[2]==f[6]==f[11]==0`), `bact/euler.vdf`'s 2
+  zeroed records, the `run_10` re-save `:SUPPLEMENTARY` stub, and `Ref.vdf`'s
+  `f[2]==0` dimension-element records. (This supersedes the earlier per-fixture
+  "drop zeroed records in an over-full view block" workaround -- the global rule
+  is "no resolvable name key => not an owner".)
+- Section-3 axis refs decode by a fixed formula: `axis_ref == 60 + 16 * k`,
+  where `k` is the *record index* of the dimension-anchor record for that axis
+  (equivalently `sec1.data_offset + 4*axis_ref == anchor_record.file_offset + 36`
+  and `anchor_record.file_offset == sec1.data_offset + 204 + 64*k`). Verified
+  across the entire array-bearing corpus including `Ref.vdf`'s 11 entries. The
+  reader inverts: `k = (axis_ref - 60) / 16`.
+- Section-header `field3` is a constant per-section "kind" code: `135` on the
+  name-table section and the array-directory section, `100` on the OT-metadata
+  section, `500` everywhere else; unchanged across all observed years and
+  across the `0x52`/`0x53`/`0x41` containers (datasets keep the codes but the
+  positions shift). It is supplementary to position-based section
+  identification, not a decoder dependency.
+- **No Vensim version field exists in the VDF.** A corpus survey of every
+  documented-"constant" header word and every section-header `field1..field5`
+  across 2005-2026 found no value that partitions the corpus by era; the format
+  evolved compatibly (2008-era Vensim writes small integers into the section-1
+  pre-record header-block region where 2019+ writes arena-pointer-shaped values,
+  with no marker -- a reader simply tolerates whatever is there, which it does,
+  since those words are not read for decoding). The only structural fork is the
+  **magic byte** itself: `0x52` = run, `0x41` = dataset/reference-mode (5
+  sections), `0x53` = sensitivity/optimization run (8 sections plus a
+  `header[0x68]`-anchored ensemble-of-runs payload). The hedged "0x6c is not a
+  reliable version field" language elsewhere in this doc should be read as
+  "there is no version field, anywhere".
+- The owner/descriptor `field[11]` union (see appendix "Claims about the
+  owner/descriptor discriminator") is now **confirmed undecodable from the
+  file**: a field-by-field comparison across every fixture with lookups shows
+  `f[0]`, `f[1]`, `f[14]`, `f[3..5,7]` take *exactly the same* values on
+  graphical-function descriptor records as on owner records, and the section-6
+  lookup record carries no back-pointer. The reframe is the resolution: the
+  reader (Vensim) already knows which variables are graphical-function
+  definitions and ignores `field[11]` as an OT start on those records. **When
+  the descriptor records are set aside, the remaining owner-record spans form a
+  perfectly clean OT partition with zero overlaps on every fixture.** The
+  decoded *forward* link is: a descriptor record's `field[11]` is the zero-based
+  index into the section-6 lookup-record array, and that array is in
+  case-insensitive alphabetical order of the lookup-definition names. A
+  model-free reader can pair `lookupish-name records <-> lookup records` by this
+  order (decoded, not a heuristic); choosing which side of an *overlapping* pair
+  is the descriptor when the descriptor's name is *not* lookupish (the `Ref.vdf`
+  `RS N2O` over `C AF Sequestered` case) has no on-disk answer -- the
+  best-available model-free reconstruction is "among records sharing
+  `field[11] == k < lookup_count`, the one with the highest `field[10]` is the
+  descriptor" (exact on lookup_ex/econ/Ref, fails ~24% of WRLD3 SCEN01 pairs;
+  flag it as a heuristic). With the model in hand the resolution is exact.
 - `tools/vdf_xray.py --precision` reports the current Python extraction
   boundary for a single file. `exact-by-xray` means no known blockers are
   present in the current decoder, not that the underlying format rule is fully
@@ -141,23 +217,31 @@ facts are called out where the Rust parser has not caught up yet.
   fallback array labels, duplicate emitted names/OTs, incomplete dimension
   anchors, or data-block tail mismatches. `tools/vdf_xray.py
   --corpus-precision .` prints the same status for every tracked VDF fixture.
+  The 9 `not-proven` fixtures all carry the single blocker `record-span-overlap`
+  (the `field[11]` union above); on 4 of them the result count is also affected
+  by the legacy `#`-helper hide-rule (see "Slot table" and the appendix).
 
 Current reconstruction, not format fact:
 
-- Choosing which overlapping record span owns a saved series.
-- The current sentinel-record owner-block builder and non-overlap span
-  selection used by xray. These are diagnostics/reconstruction aids and can
-  still pick the wrong side of an owner/descriptor conflict in `not-proven`
-  files.
+- Choosing which *overlapping* record span owns a saved series when the
+  descriptor's name is not lookupish (`Ref.vdf` only -- this is the residual
+  `record-span-overlap` and is now understood to be undecodable from the file).
+- The non-overlap interval-DP selection and the lexical "lookupish name" test
+  used as the *model-free* fallback for the lookup-vs-helper overlap. (The
+  underlying pairing -- descriptor `field[11]` = lookup-record index, lookup
+  records in alphabetical order -- is decoded; what is reconstruction is
+  *deciding which of two records sharing that index is the descriptor* without
+  the model.)
 - Labeling axes in files that lack the decoded section-3 axis-ref to
   dimension-anchor binding.
-- Labeling array elements from unique cardinality alone.
-- Pairing lookup-like names to section-6 lookup records by matching order.
-- Non-overlap interval selection, file-order/shift-by-one owner mapping, and
-  stock-first alphabetical assignment.
+- Labeling array elements from unique cardinality alone (the section-3
+  axis-ref-to-anchor path above is exact when present).
+- File-order/shift-by-one owner mapping and stock-first alphabetical assignment
+  (the direct `f[2]`/`f[11]` record map supersedes these on every fixture that
+  has records for all its OT-bearing variables; the fallback is only for the
+  `Ref.vdf` `#`-signature region, which has the names but no records).
 - Section-4 view/sketch semantics beyond the fixed-width reference stream.
-- Exact identification of old-style aliases and descriptor records from VDF
-  alone.
+- Exact identification of old-style aliases from VDF alone.
 
 For strict debugging, use `tools/vdf_xray.py --record-facts`. It prints only
 direct record-name and record-OT span facts under the owner interpretation of
@@ -181,28 +265,35 @@ files:
 
 | Status | Count | Meaning |
 |--------|-------|---------|
-| `exact-by-xray` | 31 | No known precision blockers in current Python extraction |
-| `not-proven` | 9 | Extraction returns series, but at least one known blocker remains |
+| `exact-by-xray` | 39 | No known precision blockers in current Python extraction |
+| `not-proven` | 1 | Extraction returns series, but at least one known blocker remains (`Ref.vdf`) |
 | `dataset/not-implemented` | 1 | Dataset/reference sibling container, not a normal simulation-result VDF |
 
-The `not-proven` fixtures are structurally hard, not merely old. The 2026
-array-edit fixtures are exact-by-xray, while 2008 scalar fixtures are often
-exact-by-xray. Conversely, WRLD3 has the same descriptor-overlap pattern in a
-2005 `SCEN01.VDF` and a 2026 `experiment.vdf`. The header timestamp is useful
-provenance, but no reliable Vensim version field has been identified.
+The single `not-proven` fixture is `Ref.vdf` (C-LEARN), where graphical-function
+descriptor names like `RS N2O` and `Solar and albedo forcings` do not lexically
+identify themselves as lookup-defs (they don't carry "lookup"/"table"/"graphical
+function"), so descriptor identification falls through to the highest-`f[10]`
+heuristic. The heuristic resolves Ref's overlaps cleanly (no remaining
+owner-vs-owner span conflict, no duplicate emitted OTs), but its use is itself
+the `not-proven` blocker -- the file genuinely does not store the discriminator
+and the writer-aware reader (Vensim) bypasses the question entirely (see
+appendix). All other lookup-bearing fixtures (`lookup_ex`, the five `econ`
+files, both WRLD3 fixtures) become `exact-by-xray` because their descriptor
+names contain the lexical keyword and the decoded forward link
+(`descriptor.f[11]` = section-6 lookup-record index in alphabetical name order)
+binds them deterministically.
 
-Note: `precision_report` flags two reconstruction paths when extraction uses
-them (`used-lookup-name-order-pairing` and
-`used-system-variable-fallback`) so `exact-by-xray` does not hide those
-fallbacks. No tracked fixture currently trips either flag.
+Note: `precision_report` flags reconstruction paths when extraction uses them
+(`used-system-variable-fallback`, `used-lookup-name-order-pairing`,
+`used-descriptor-f10-fallback`) so `exact-by-xray` does not hide them. The
+first two are dead on every tracked fixture; the third fires only on `Ref.vdf`.
 
 Current blocker meanings:
 
-- `record-span-overlap`: two or more direct record-derived spans cover the
-  same OT slot. Xray currently selects a non-overlapping owner set as a
-  diagnostic reconstruction, but the C-style descriptor/owner discriminator is
-  not decoded and this selection is not evidence of the true owner in
-  `not-proven` files.
+- `record-span-overlap`: after the `f[11]` owner/descriptor union is resolved
+  via `identify_descriptor_records`, two or more *owner* spans still claim the
+  same OT slot. Zero across the tracked corpus -- `Ref.vdf` is now flagged via
+  `used-descriptor-f10-fallback` instead.
 - `unmapped-owner-blocks`: xray found owner-shaped OT blocks that it could
   not deterministically attach to emitted names. This is currently zero across
   the tracked result corpus after allowing direct record-key mappings to
@@ -1061,6 +1152,7 @@ decoded in detail.
 | Code | Meaning | OT range |
 |------|---------|----------|
 | 0x0f | Time | OT[0] only |
+| 0x05 | Input / data-like block (29-byte bitmap width on saved-suffix files) | Observed on `risk.vdf`/`risk2.vdf` `federal funds rate` / `inflation rate` |
 | 0x08 | Stock-backed variable | Contiguous in small/medium fixtures; scattered in `Ref.vdf` |
 | 0x11 | Dynamic non-stock / sometimes inline in array-heavy files | Usually non-stock range |
 | 0x16 | Observed only in `Ref.vdf`; inline OT value | Semantics unresolved |
@@ -1658,69 +1750,77 @@ partially decoded.
    conservatively in xray: only when the block/axis cardinality uniquely
    identifies a recovered dimension.
 
-### The core unsolved problem
+### The core mapping path (and what is left)
 
-The large-model name-to-OT link has two partial decoders with complementary
-failure modes. `VdfFile::to_results_via_file_order_records()` uses the
-`field[1] == 138` view-header marker (signal #11) and the shift-by-one
-`field[11]` link (signal #12) to recover some WRLD3 mappings, but agreement
-with the model-guided path is partial rather than decisive. The record-key path
-uses the direct `field[2]` string-table key (signal #10) and is the more robust
-path on small fixtures, `subscripts.vdf`, edited/re-saved fixtures, and files
-where dim-element names interleave with variable names. Neither is universally
-correct.
+For every variable that has a section-1 record, the name-to-OT link is the
+**direct** record map: `name = names[(name_string_start - sec2_data_start)/4 + 7
+== field[2]]`, `OT block = [field[11], field[11] + shape_len(field[6]))`. On the
+tracked corpus this set of direct spans (plus `Time` at `OT[0]`) covers every OT
+slot exactly once on all 31 `exact-by-xray` fixtures, and covers every OT slot on
+the 9 `not-proven` fixtures too (it just has *overlaps* there -- the
+`field[11]` owner/descriptor union, see appendix). System variables and
+`#`-signature internal helpers are ordinary records in this map. The
+`field[1]==138`-view-header + shift-by-one `field[11]` path
+(`to_results_via_file_order_records`) is a legacy *alternative* that is strictly
+worse on every re-saved/large fixture (it over-filters via the `field[11]==0`
+sentinel and drifts on interleaved dim-element names); it is retained only as a
+cross-check, not as a recommended path.
 
-Remaining gaps:
+What is left:
 
-1. **Trailing `.Supplementary` / `#`-signature region.** The last
-   view block (`.Supplementary` on WRLD3) has extra record/name entries
-   for internal stdlib helpers and `#` signature names past the slot
-   boundary. Record-count and name-count diverge here (e.g. SCEN01: 68
-   records vs 53 names; experiment: 43 records vs 66 names). The
-   shift-by-one link still applies for the first ~8 entries of the
-   block but breaks once the `#`-signature region starts. The
-   remaining variables in this block may need a separate handling.
+1. **`Ref.vdf` (`#`-signature region has names but no records).** `Ref.vdf` is
+   a re-saved-from-an-old-build file: it has 62 `#`-signature names in the name
+   table but **zero `#`-signature records** keyed via `field[2]` (its 116
+   `field[2]==0` records are dimension-element records, not `#`-sig records). So
+   those helpers' OT slots have no direct record and are filled by the
+   alphabetical/non-overlap reconstruction fallback. `Ref.vdf` also has ~429 OT
+   slots with no covering record at all (455 of which are the documented
+   raw-zero / class-`0x11` / final-value `-1.3e33` "no-saved-data" slots), 132
+   records whose `field[2]` does not resolve to a parsed name (possibly an
+   incomplete name-table parse on this build -- worth re-checking), and 205
+   records whose `field[11]` is outside `[1, OT_count)`. This is the one
+   fixture where the direct record map is materially incomplete.
 
-2. **SCEN01-style "zeroed" placeholder records.** SCEN01 carries 21
-   records with `f[2]==0 AND f[6]==0 AND f[11]==0` ("zeroed"), all
-   inside `.Supplementary` (the final view block), with `f[0]` values
-   in the ghost range {12324, 12328, 13352} paired with `f[1]` in
-   {8, 17, 255}, or `f[0]==32` paired with `f[1]==255`. These are
-   slot-less placeholders, not variable records. Dropping all 21
-   zeroed records realigns the SCEN01 Supplementary pair walk: record
-   count 419 - 21 = 398, vs 404 slots, and the post-filter pairing
-   recovers `unit population`, `unit agricultural input`, and 4 other
-   previously-sentinel-lost real variables (290/305 -> 296/305 against
-   the guided map reference).
-   Naively filtering all `f[2]==f[6]==f[11]==0` records across the
-   corpus is **too aggressive**: `bact/euler.vdf` carries 2 similar
-   zeroed records (`f[0]=32, f[1] in {143, 255}`) in the middle of
-   its main view block, and dropping them mis-shifts the subsequent
-   pair walk and loses the `outflow -> OT 1` binding that the
-   baseline accidentally recovers via chain succession. Filtering
-   only ghost-range (`f[0] in [12000, 17000]`) zeroed records drops
-   15/21 on SCEN01 without touching euler. Full generalization
-   remains open; the workable rule for now is: "drop zeroed records
-   that sit inside a view block whose record-count exceeds its name-
-   count after also dropping them" (i.e. still a per-fixture signal
-   rather than a global rule). SCEN01 is the only large fixture
-   currently exhibiting this pattern.
-   The 15 residual SCEN01 losses (after ghost-R1) include trailing
-   `#`-signature names that have no record at all and a pre-existing
-   `assimilation half life mult table` lookup-name bug that also
-   affects experiment.vdf.
+2. **`.Supplementary` / `#`-signature region on WRLD3 -- decoded.** The doc
+   previously listed this as a gap. It is not one: WRLD3's `.Supplementary`
+   view block has more *records* than *names* because it carries (a) live
+   `#`-signature internal-helper records (which DO have valid `field[2]` keys,
+   `field[6]==5`, and `field[11]` = a real OT slot, class `0x08`/`0x11`) and
+   (b) "zeroed"/stale records left from earlier compilations (`field[2]==0`,
+   `field[6]==0`, `field[11]==0`; their `field[0]` retains the helper
+   "ghost-range" `type_flags` `0x3024`/`0x3028`/`0x302c`/`0x3428`). The
+   deterministic rule is the **direct `field[2]`-key path with a class-code
+   guard**: emit a record iff `field[2]` resolves to a parsed name AND
+   `field[11] in [1, OT_count)` AND the OT class code at `field[11]` is a real
+   saved-data code (`0x05`/`0x08`/`0x11`/`0x16`/`0x17`/`0x18`) AND `field[6]` resolves
+   to a shape (`5` scalar, or a section-3 key). On SCEN01 this emits 350/419
+   records and skips all 21 zeroed records (`field[2]==0`), recovering `unit
+   agricultural input`, `#SMOOTH3(...)#` etc. that the shift-by-one path lost.
+   `bact/euler.vdf`'s 2 zeroed records (`field[2]==0`) are skipped by the same
+   rule -- the earlier "do not filter them" caveat was about the *shift-by-one
+   pair walk* shifting, which the direct path does not do. This supersedes the
+   per-fixture "drop zeroed records in an over-full view block" workaround:
+   the global rule is "no resolvable `field[2]` name key => not an OT owner".
 
 3. **Axis labels.** Resolved in xray for the tracked corpus. Section-3 axis
-   refs point to dimension-anchor records, so repeated cardinality-3 axes in
-   `Ref.vdf` are now distinguishable (`scenario`, `Aggregated Regions`,
-   `Target`, `lower`, `upper`, etc.) without the MDL.
+   refs point to dimension-anchor records (`axis_ref == 60 + 16*k`, `k` = the
+   anchor's record index), so repeated cardinality-3 axes in `Ref.vdf` are now
+   distinguishable (`scenario`, `Aggregated Regions`, `Target`, `lower`,
+   `upper`, etc.) without the MDL.
 
-4. **Lookup-record ownership.** Section-6 lookup records identify lookup
-   definitions and their evaluated-output OT indices, and their 13-word
-   payload is structurally accounted for. The remaining gap is not lookup
-   payload parsing; it is choosing which overlapping section-1 record span is
-   the emitted owner when descriptor records carry lookup-index-shaped
-   `field[11]` values that are also valid OT starts.
+4. **Lookup-record ownership -- now understood.** The remaining `record-span-
+   overlap` blocker is the `field[11]` owner/descriptor union, and the appendix
+   ("Claims about the owner/descriptor discriminator") confirms it is **not
+   encoded in the file**: no record field discriminates a graphical-function
+   descriptor from an owner. The reframe is the resolution -- a reader that has
+   the model knows the descriptor set and ignores `field[11]` on those records;
+   when the descriptors are set aside the owner spans form a clean partition.
+   The decoded forward link is "descriptor `field[11]` = lookup-record index;
+   lookup records are in case-insensitive alphabetical order of lookup-def
+   names". A model-free reader's choice for an *overlapping* pair when the
+   descriptor name is not lookupish (the `Ref.vdf` `RS N2O` case) has no on-disk
+   answer; the best reconstruction is the highest-`field[10]` heuristic, flagged
+   as such. So this is "as decoded as the format allows", not an open decode.
 
 5. **C-LEARN (`Ref.vdf`) view-grouping.** `Ref.vdf` has 69 dot-prefix
    names but only 17 `field[1] == 138` records. The view-header-per-
@@ -1881,17 +1981,54 @@ and one cross-section candidate.
 `word[12]` = optional dependency-chain root.
 The lookup record carries no back-pointer to its section-1 descriptor.
 
-**Reframe candidate**: the question "which record is the descriptor?"
-may be ill-posed from the reader's perspective. The section-6 lookup
-record already supplies everything the Vensim engine needs to evaluate
-a lookup: the x/y arrays (`word[5..6]`), the output OT (`word[10]`),
-and the input dependencies (`word[12]` chains). The reader may simply
-*ignore* `field[11]` on descriptor records, leaving the OT vs lookup-
-index union formally undisambiguated in the on-disk layout. If that
-is the case, xray's current non-overlapping-span reconstruction is
-the best that can be done without observing Vensim's reader behavior
-directly, and the tool's `record-span-overlap` blocker is honest --
-the overlap is real, not decodable.
+**Reframe -- confirmed.** A dedicated field-by-field sweep across every
+fixture with lookups (lookup_ex, econ/{base,mark2,policy}, WRLD3-03
+SCEN01/experiment, Ref.vdf) shows the descriptor records' `field[0]`,
+`field[1]`, `field[14]`, `field[3..5]`, `field[7]` value sets are each a
+*subset* of the owner records' value sets -- no value, bit, or `(f0,f1)`
+pair is descriptor-exclusive. The section-6 lookup record carries no
+back-pointer (all 13 words decoded above). So `field[11]` is a genuine
+*untagged* union: the reader (Vensim) already knows which variables are
+graphical-function definitions because it has the compiled model, and
+ignores `field[11]` as an OT start on those records (the lookup's data
+comes entirely from the section-6 lookup record's `word[5..6]/word[10..12]`
+plus the section-7 packed point arrays). The proof: on every fixture, when
+the (model-identified) descriptor records are set aside, the remaining
+owner-record spans form a *perfectly clean OT partition with zero
+overlapping slots* -- exactly what the reframe predicts. So xray's
+`record-span-overlap` blocker is honest -- the overlap is real, not
+decodable from the file -- and is not a bug to be closed by more analysis.
+
+**The one decoded forward link**: a descriptor record's `field[11]` is the
+zero-based index into the section-6 lookup-record array (verified: on every
+fixture the descriptor records' `field[11]` values are exactly a
+permutation of `[0, lookup_count)`), and that array is in case-insensitive
+**alphabetical order of the lookup-definition names** (on econ/lookup_ex
+the name table happens to be near-alphabetical so it coincides with
+name-table order; WRLD3 SCEN01 is the disambiguating case where the
+descriptor `field[11]` values are alphabetically sorted but not
+name-table-position sorted). So once a record is *known* to be a descriptor
+the binding to its lookup record / x-y arrays / output OT is direct and
+O(1); the previously "heuristic" `zip(lookupish-names, lookup-records)`
+pairing is this decoded link. The reverse direction (lookup record ->
+descriptor record) does not exist; `lookup[k].word[10]` is the OT of a
+*consumer* of the lookup, not of the lookup-def name's own record, and can
+be shared by several lookup records.
+
+**Best model-free reconstruction for an overlapping pair** (a heuristic;
+flag it): among the records that share a `field[11]` value `k` with
+`0 <= k < lookup_count`, treat the one with the *highest* `field[10]`
+(sort_key) as the lookup descriptor and the rest as owners. Exact on
+lookup_ex (1/1), econ/{base,mark2,policy} (3/3 each), Ref.vdf (35/35 -- and
+29 of the 35 don't even collide). Fails on 13/55 WRLD3 SCEN01 pairs, all
+cases where the colliding owner is a real model stock (`Land Fertility`,
+`Population 0 To 14`, ...) whose view-local `field[10]` happens to exceed
+the descriptor's -- and `field[10]` is view-local, so a global comparison
+is not well-founded. It is still strictly better than blind non-overlap
+interval selection. With the model in hand
+(`build_section6_guided_ot_map`) the resolution is exact and no heuristic
+is needed: take the model's lookup-definition set and skip those records'
+`field[11]`.
 
 #### Claims about sections 1 / 2
 

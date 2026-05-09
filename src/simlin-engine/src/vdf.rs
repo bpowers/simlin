@@ -31,10 +31,7 @@ mod signatures;
 mod stdlib_call;
 mod view_blocks;
 
-use record_results::{
-    RecordResultCandidate, array_element_labels_for_record_candidate,
-    select_non_overlapping_record_candidates,
-};
+use record_results::build_record_result_columns;
 pub use section3::{VdfSection3Directory, VdfSection3DirectoryEntry};
 
 // Stdlib call analysis used by the model-guided OT mapping lives in
@@ -90,9 +87,23 @@ fn is_vdf_metadata_entry(name: &str) -> bool {
     matches!(lower.as_str(), "ifthenelse" | "withlookup" | "lookup")
 }
 
-/// Heuristic for names that look like standalone lookup/table definitions.
-/// These names may appear in the name table but lack their own OT entries.
-fn is_lookupish_name(name: &str) -> bool {
+/// Lexical test for lookup/graphical-function names: a model-free reader's
+/// best-effort identification of names that label section-6 lookup-record
+/// entries.
+///
+/// The format itself does not store an owner-vs-descriptor tag (see
+/// `docs/design/vdf.md` appendix). The decoded forward link is structural:
+/// a graphical-function descriptor record's `f[11]` is the zero-based
+/// index into the section-6 lookup-record array, and that array is in
+/// case-insensitive alphabetical order of the lookup-definition names. A
+/// reader that has the model trivially identifies the descriptor records;
+/// a model-free reader has to recognise lookup-def names from the name
+/// table -- this lexical test is the workable approximation. It is correct
+/// on every fixture in the corpus except `Ref.vdf` (where descriptor names
+/// like `RS N2O` are abbreviations that don't carry the keyword); the
+/// `f[10]`-highest fallback in `identify_descriptor_records` covers that
+/// case.
+pub(super) fn is_lookupish_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower.contains(" lookup") || lower.contains(" table") || lower.contains("graphical function")
 }
@@ -141,6 +152,12 @@ pub const VDF_SENTINEL: u32 = 0xf6800000;
 /// Section-6 OT class code for the Time series (OT[0]) in all observed files.
 pub const VDF_SECTION6_OT_CODE_TIME: u8 = 0x0f;
 
+/// Section-6 OT class code for input/data-like blocks. Observed on
+/// `risk.vdf`/`risk2.vdf` covering names like `federal funds rate` and
+/// `inflation rate`; these slots hold real saved series with the 29-byte
+/// bitmap-width data layout.
+pub const VDF_SECTION6_OT_CODE_INPUT: u8 = 0x05;
+
 /// Section-6 OT class code marking stock-backed OT entries in all validated
 /// files.
 ///
@@ -150,6 +167,46 @@ pub const VDF_SECTION6_OT_CODE_TIME: u8 = 0x0f;
 /// stock-coded OT entry (`0x08`) to a dynamic non-stock entry (`0x11`) while
 /// the nearby section-1 record classification fields stay unchanged.
 pub const VDF_SECTION6_OT_CODE_STOCK: u8 = 0x08;
+
+/// Section-6 OT class code marking dynamic (non-stock) OT entries -- the
+/// usual classification for auxiliaries and data series stored as
+/// per-step blocks.
+pub const VDF_SECTION6_OT_CODE_DYNAMIC: u8 = 0x11;
+
+/// Section-6 OT class code marking inline non-stock OT entries observed
+/// only in `Ref.vdf`. Treated as a real owner code but with semantics still
+/// being characterised; included so the class-code guard in
+/// `decoded_record_spans` accepts them.
+pub const VDF_SECTION6_OT_CODE_REF_INLINE_LOW: u8 = 0x16;
+
+/// Section-6 OT class code marking constant non-stock OT entries (inline
+/// f32 stored in section 6's final-values array rather than a per-step
+/// block).
+pub const VDF_SECTION6_OT_CODE_CONST: u8 = 0x17;
+
+/// Section-6 OT class code marking inline non-stock OT entries observed
+/// only in `Ref.vdf`, complementing `VDF_SECTION6_OT_CODE_REF_INLINE_LOW`.
+pub const VDF_SECTION6_OT_CODE_REF_INLINE_HIGH: u8 = 0x18;
+
+/// Whether `code` is one of the section-6 OT class codes that mark a real
+/// owner OT slot (i.e. a slot a section-1 record can legitimately point at
+/// via `f[11]`).
+///
+/// `0x0f` (Time) is excluded because it is owned by `OT[0]` only -- normal
+/// owner records' `f[11]`s start at 1, and the descriptor-vs-owner
+/// reconstruction in `decoded_record_spans` uses this set to reject records
+/// whose `f[11]`-as-OT-start would land on a non-owner slot.
+pub fn is_owner_ot_class_code(code: u8) -> bool {
+    matches!(
+        code,
+        VDF_SECTION6_OT_CODE_INPUT
+            | VDF_SECTION6_OT_CODE_STOCK
+            | VDF_SECTION6_OT_CODE_DYNAMIC
+            | VDF_SECTION6_OT_CODE_REF_INLINE_LOW
+            | VDF_SECTION6_OT_CODE_CONST
+            | VDF_SECTION6_OT_CODE_REF_INLINE_HIGH
+    )
+}
 
 /// Record classification value (`field[1]`) that marks a view header record.
 ///
@@ -2274,46 +2331,59 @@ impl VdfFile {
     }
 
     /// Build a `Results` struct using only VDF structural data, driven by
-    /// the deterministic record-to-name correspondence.
+    /// the deterministic record-to-name correspondence and the decoded
+    /// forward link for graphical-function descriptors.
     ///
-    /// Each record's `field[2]` identifies a section-2 name-table entry,
-    /// `field[11]` is used under the owner-OT interpretation, and `field[6]`
-    /// selects the shape key (5 = scalar; 32 = generic single-shape array;
-    /// explicit keys resolve through section 3, including Ref-style
-    /// predecessor keys). This path is intentionally direct: no offset scan
-    /// and no external stock classifier.
+    /// ### Pipeline
     ///
-    /// ### Limitations
+    /// 1. `decoded_record_spans` produces one `DecodedRecordSpan` per
+    ///    section-1 record whose `f[2]` resolves through the section-2
+    ///    name-key formula, whose `f[11]` is interpretable as an OT-block
+    ///    start, whose `f[6]` shape code yields a structural flat span,
+    ///    and whose covered OT slots all carry a real-data class code
+    ///    (`is_owner_ot_class_code`).
+    /// 2. `identify_descriptor_records` peels off graphical-function
+    ///    descriptor records via the decoded forward link: a descriptor's
+    ///    `f[11]` is a zero-based index into the section-6 lookup-record
+    ///    array (case-insensitive alphabetical order of the lookup-def
+    ///    names). The lexical lookup-def name test handles every overlap
+    ///    in the corpus except `Ref.vdf`, where descriptor names are
+    ///    domain abbreviations; an `f[10]`-highest fallback covers that.
+    /// 3. The remaining owner spans + `Time` at OT[0] are emitted as
+    ///    `Results`. When two records bind the same name to overlapping
+    ///    starts (rare in practice), the lowest-start span wins.
     ///
-    /// Record `field[2]` is a direct key into the section-2 name table:
+    /// ### Stability of the direct mapping
+    ///
+    /// Record `f[2]` is a direct key into the section-2 name table:
     /// `(name_string_start - section2_data_start) / 4 + 7`, where
-    /// `name_string_start` points at the first printable byte after any u16
-    /// length prefix. This is stable on edited and compilation-order files
-    /// because it is an address-like string-pool word offset, not a sort rank.
+    /// `name_string_start` points at the first printable byte after any
+    /// u16 length prefix. This is stable on edited and compilation-order
+    /// files because it is an address-like string-pool word offset, not a
+    /// sort rank.
     ///
-    /// ### Filtering rules (structural only)
+    /// ### Filtering rules
     ///
-    /// - Records with `field[11] == 0` or `field[11] >= offset_table_count`
-    ///   are skipped -- OT[0] is the Time series, not a record slot.
-    /// - Records whose `field[6] == 0` are treated as non-shape/padding
-    ///   entries and skipped.
+    /// - Records with `f[11] == 0` or `f[11] >= offset_table_count` are
+    ///   skipped -- OT[0] is Time, not a record slot.
+    /// - Records whose `f[6] == 0` are treated as non-shape/padding and
+    ///   skipped (per `decoded_record_shape_length`).
     /// - Name-table entries that are empty or whose index is past the end
     ///   of the name table are skipped (no name to assign).
-    /// - When record-derived spans overlap, the largest non-overlapping OT
-    ///   partition is kept, with lower record sort keys breaking equal-coverage
-    ///   ties. This is a conservative reconstruction for observed `Ref.vdf`
-    ///   descriptor conflicts. Some descriptor records use `field[11]` as a
-    ///   section-6 lookup-record index rather than an owner OT, but the direct
-    ///   owner/descriptor discriminator is not decoded yet.
+    /// - The class-code guard rejects records whose `f[11]`-as-OT-start
+    ///   would land on a non-owner section-6 OT slot. This catches
+    ///   descriptor records whose `f[11]`-as-lookup-index numerically
+    ///   coincides with an OT slot that does not hold real data.
+    /// - Owner/descriptor overlap is resolved by descriptor identification,
+    ///   not by an overlap-selection DP.
     ///
-    /// Name category is otherwise not filtered here: if a record legitimately
-    /// points to an OT entry, its keyed name is honored even for stdlib helper,
-    /// internal signature, metadata, or builtin-looking names. Callers that
-    /// want cleaner symbols can filter results-side.
+    /// Name category is not filtered here: if a record legitimately points
+    /// at an owner OT slot, its keyed name is honored even for stdlib
+    /// helper, internal signature, metadata, or builtin-looking names.
+    /// Callers that want cleaner symbols can filter results-side.
     ///
     /// The method always returns `Results` (possibly an empty one beyond
-    /// Time) so callers can chain with other paths: it does not propagate
-    /// ambiguity errors the way `to_results` does.
+    /// Time) so callers can chain with other paths.
     pub fn to_results_via_records(&self) -> StdResult<Results, Box<dyn Error>> {
         let n_recs = self.records.len();
         if n_recs == 0 || self.names.is_empty() {
@@ -2325,7 +2395,6 @@ impl VdfFile {
         }
 
         let name_key_to_name_index = self.record_name_key_to_name_index();
-        let class_codes = self.section6_ot_class_codes();
         let vdf_data = self.extract_data()?;
 
         // Look up section-3 shape directory for arrayed spans. Scalar
@@ -2340,170 +2409,13 @@ impl VdfFile {
             .collect();
         let axis_ref_to_dim_name = self.section3_axis_ref_dimension_names();
 
-        // Precompute a set of active section-3 flat sizes for the field[6] == 32
-        // generic-arrayed case. When exactly one distinct non-zero flat size is
-        // present, it binds field[6] == 32 unambiguously.
-        let sec3_sole_flat_size: Option<usize> = section3_directory.as_ref().and_then(|d| {
-            let sizes: HashSet<usize> = d
-                .entries
-                .iter()
-                .map(|e| e.flat_size())
-                .filter(|&s| s > 0)
-                .collect();
-            if sizes.len() == 1 {
-                sizes.into_iter().next()
-            } else {
-                None
-            }
-        });
-
-        let mut ordered: Vec<(Ident<Canonical>, usize)> =
-            vec![(Ident::<Canonical>::from_str_unchecked("time"), 0)];
-        let mut claimed_ot: HashSet<usize> = HashSet::new();
-        claimed_ot.insert(0);
-
-        let mut candidates_by_range: HashMap<(usize, usize), RecordResultCandidate> =
-            HashMap::new();
-        for ri in 0..n_recs {
-            let rec = &self.records[ri];
-            let Some(&name_idx) = name_key_to_name_index.get(&rec.fields[2]) else {
-                continue;
-            };
-            let name = &self.names[name_idx];
-            if name.is_empty() {
-                continue;
-            }
-            // Skip padding records; they have f[6] == 0 meaning "no shape",
-            // and typically come from the block-0..block-2 header region
-            // or from padded tail entries that Vensim has not bound to an
-            // OT slot.
-            if rec.fields[6] == 0 {
-                continue;
-            }
-
-            let ot_start = rec.fields[11] as usize;
-            if ot_start == 0 || ot_start >= self.offset_table_count {
-                continue;
-            }
-
-            // Determine the OT span. Scalar records (field[6] == 5) always
-            // consume one slot. For arrayed records we resolve field[6]
-            // through section 3. Ref-style multi-shape directories store
-            // predecessor keys, so the directory helper may return the
-            // following physical entry rather than the entry whose index_word
-            // equals field[6]. field[6] == 32 is the single-shape generic
-            // marker.
-            let span = if rec.fields[6] == 5 {
-                1usize
-            } else {
-                let shape_code = rec.fields[6];
-                let mut found: Option<usize> = None;
-                if let Some(ref dir) = section3_directory
-                    && let Some(entry) = dir.entry_for_record_shape_code(shape_code)
-                {
-                    found = Some(entry.flat_size());
-                }
-                if found.is_none() && shape_code == 32 {
-                    found = sec3_sole_flat_size;
-                }
-                match found {
-                    Some(s) if s >= 1 => s,
-                    _ => continue,
-                }
-            };
-
-            if ot_start + span > self.offset_table_count {
-                continue;
-            }
-
-            let end = ot_start + span;
-            let candidate = candidates_by_range
-                .entry((ot_start, end))
-                .or_insert_with(|| RecordResultCandidate {
-                    start: ot_start,
-                    span,
-                    sort_rank: usize::MAX,
-                    first_name_key: rec.fields[2],
-                    record_indices: Vec::new(),
-                });
-            candidate.record_indices.push(ri);
-            candidate.first_name_key = candidate.first_name_key.min(rec.fields[2]);
-            if rec.fields[10] > 0 {
-                candidate.sort_rank = candidate.sort_rank.min(rec.fields[10] as usize);
-            }
-        }
-
-        let selected_candidates =
-            select_non_overlapping_record_candidates(candidates_by_range.into_values().collect());
-
-        for mut candidate in selected_candidates {
-            candidate
-                .record_indices
-                .sort_by_key(|&ri| self.records[ri].fields[2]);
-
-            let stock_coded_block = class_codes.as_ref().is_some_and(|codes| {
-                (candidate.start..candidate.end()).all(|ot| {
-                    codes
-                        .get(ot)
-                        .is_some_and(|&code| code == VDF_SECTION6_OT_CODE_STOCK)
-                })
-            });
-
-            let mut chosen_name: Option<String> = None;
-            for ri in &candidate.record_indices {
-                let rec = &self.records[*ri];
-                let Some(&name_idx) = name_key_to_name_index.get(&rec.fields[2]) else {
-                    continue;
-                };
-                let name = &self.names[name_idx];
-                if name.is_empty() {
-                    continue;
-                }
-                if stock_coded_block && is_lookupish_name(name) {
-                    continue;
-                }
-                chosen_name = Some(name.clone());
-                break;
-            }
-
-            let Some(name) = chosen_name else {
-                continue;
-            };
-
-            // System and user names flow through `Ident::new`, which
-            // lowercases and strips spaces/underscores. `#`-prefixed
-            // internal signatures (and other names that carry
-            // non-canonicalizable characters) use `from_str_unchecked`
-            // so the raw name is preserved as the result column key;
-            // otherwise they would collapse into an empty Ident.
-            let element_labels = array_element_labels_for_record_candidate(
-                self,
-                &candidate,
-                section3_directory.as_ref(),
-                &dimension_elements_by_name,
-                &axis_ref_to_dim_name,
-            );
-            for elem in 0..candidate.span {
-                let ot = candidate.start + elem;
-                if !claimed_ot.insert(ot) {
-                    continue;
-                }
-                let display = if candidate.span > 1 {
-                    match element_labels.as_ref().and_then(|labels| labels.get(elem)) {
-                        Some(label) => format!("{name}[{label}]"),
-                        None => format!("{name}[{elem}]"),
-                    }
-                } else {
-                    name.clone()
-                };
-                let key = if display.starts_with('#') {
-                    Ident::<Canonical>::from_str_unchecked(&display)
-                } else {
-                    Ident::<Canonical>::new(&display)
-                };
-                ordered.push((key, ot));
-            }
-        }
+        let ordered = build_record_result_columns(
+            self,
+            &name_key_to_name_index,
+            section3_directory.as_ref(),
+            &dimension_elements_by_name,
+            &axis_ref_to_dim_name,
+        );
 
         Ok(vdf_data.build_results(&ordered))
     }
@@ -5641,6 +5553,49 @@ mod tests {
                 .contains_key(&Ident::<Canonical>::new("time")),
             "Time must always be present"
         );
+    }
+
+    #[test]
+    fn test_identify_descriptor_records_uses_f10_fallback_on_ref_vdf() {
+        // Ref.vdf is the canonical case where the lexical lookup-def name
+        // test cannot disambiguate descriptor records: the descriptor names
+        // are domain abbreviations (e.g. `RS N2O`) that don't carry the
+        // "lookup"/"table"/"graphical function" keywords. The
+        // `f[10]`-highest fallback resolves the conflict and the
+        // identification result must surface that decision via
+        // `used_f10_fallback`.
+        //
+        // On every other corpus fixture the lexical test is sufficient and
+        // the fallback flag stays `false`, which is checked by the small
+        // models below as a regression guard.
+        use super::record_results::{decoded_record_spans, identify_descriptor_records};
+
+        let ref_vdf = vdf_file("../../test/xmutil_test_models/Ref.vdf");
+        let key_map = ref_vdf.record_name_key_to_name_index();
+        let dir = ref_vdf.parse_section3_directory();
+        let spans = decoded_record_spans(&ref_vdf, &key_map, dir.as_ref());
+        let id = identify_descriptor_records(&ref_vdf, &spans);
+        assert!(
+            id.used_f10_fallback,
+            "Ref.vdf descriptor identification must hit the f[10] fallback"
+        );
+        assert!(
+            !id.descriptor_indices.is_empty(),
+            "Ref.vdf must have at least one descriptor record"
+        );
+
+        for label in ["water", "pop"] {
+            let path = format!("../../test/bobby/vdf/{label}/Current.vdf");
+            let small = vdf_file(&path);
+            let key_map = small.record_name_key_to_name_index();
+            let dir = small.parse_section3_directory();
+            let spans = decoded_record_spans(&small, &key_map, dir.as_ref());
+            let id = identify_descriptor_records(&small, &spans);
+            assert!(
+                !id.used_f10_fallback,
+                "{label}: small model descriptor identification should not need the f[10] fallback"
+            );
+        }
     }
 
     #[test]

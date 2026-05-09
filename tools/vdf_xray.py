@@ -2605,19 +2605,33 @@ def _vensim_sort_key(name: str) -> str:
     return name.lower()
 
 
-def _heuristic_name_looks_lookupish(name: str) -> bool:
+def _name_looks_lookupish(name: str) -> bool:
     """
-    RECONSTRUCTION HEURISTIC: lexical test for lookup/table/graphical-function
-    names.
+    Lexical test for lookup/graphical-function names.
 
     Matches any name containing the substrings "lookup", "table", or
-    "graphical function" (case-insensitive). This is a pure name-string
-    heuristic, not a decoded file-format rule. Callers use it to route
-    lookup-shaped names away from stock ownership decisions; see
-    `_heuristic_name_allowed_for_block` and `_lookup_record_names`.
+    "graphical function" (case-insensitive). This is the model-free reader's
+    best-effort identification of names that label section-6 lookup-record
+    entries.
+
+    The format itself does not store an owner-vs-descriptor tag (see
+    `docs/design/vdf.md` appendix). The decoded forward link is structural:
+    a graphical-function descriptor record's `f[11]` is the zero-based
+    index into the section-6 lookup-record array, and that array is in
+    case-insensitive alphabetical order of the lookup-definition names. A
+    reader with the model trivially identifies the descriptor records;
+    a model-free reader has to recognize lookup-def names from the name
+    table -- this lexical test is the workable approximation. It is
+    correct on every fixture except `Ref.vdf` (where descriptor names like
+    `RS N2O` are abbreviations that don't carry the keyword); the
+    `f[10]`-highest fallback in `identify_descriptor_records` covers that.
     """
     lower = name.lower()
     return "lookup" in lower or "table" in lower or "graphical function" in lower
+
+
+# Backwards-compatible alias for callers that still import the previous name.
+_heuristic_name_looks_lookupish = _name_looks_lookupish
 
 
 def _heuristic_name_allowed_for_block(name: str, block: OwnerRecordBlock, *,
@@ -2782,19 +2796,26 @@ def _nonstock_assignment_items(
 
 def _lookup_record_names(vdf: VdfFile) -> list[str]:
     """
-    Return lookup/table names in slotted name-table order.
+    Return lexically-lookupish slotted name-table entries in name-table order.
 
-    Some files write section-6 lookup records 1:1 with lookupish name-table
-    entries, so the caller may pair them by position when the counts match.
-    Ref.vdf proves this is not universal; count mismatch means the lookup
-    payload structure still needs a more direct decoder.
+    These are the model-free reader's candidates for "names that label
+    section-6 lookup-record entries". The decoded forward link is structural:
+    a graphical-function descriptor record's `f[11]` is the zero-based index
+    into the section-6 lookup-record array, and that array is in
+    case-insensitive alphabetical order of the lookup-def names. With the
+    model in hand, the descriptor set is exact; without it, this lexical
+    list is the working approximation. Ref.vdf is the documented
+    counterexample: its descriptor names are abbreviations (`RS N2O`,
+    `Specified Global CH4`) that do not contain "lookup"/"table"/"graphical
+    function". On every other corpus fixture the candidate list has
+    cardinality equal to the section-6 lookup-record count.
     """
     out: list[str] = []
     seen: set[str] = set()
     for name in vdf.names[:len(vdf.slot_table)]:
         if classify_name(name):
             continue
-        if not _heuristic_name_looks_lookupish(name):
+        if not _name_looks_lookupish(name):
             continue
         key = name.lower()
         if key in seen:
@@ -2802,6 +2823,148 @@ def _lookup_record_names(vdf: VdfFile) -> list[str]:
         seen.add(key)
         out.append(name)
     return out
+
+
+@dataclass
+class DescriptorIdentification:
+    """Result of identifying graphical-function descriptor records."""
+    descriptor_indices: set[int]
+    used_f10_fallback: bool
+
+
+def identify_descriptor_records(
+    vdf: VdfFile,
+    spans: list[DecodedRecordSpan],
+) -> DescriptorIdentification:
+    """
+    Identify graphical-function descriptor records from `decoded_record_spans`.
+
+    Background. Vensim's writer stores graphical-function definitions
+    ("descriptor" records) and their consuming variables ("owner" records)
+    side-by-side in section 1, with `f[11]` as an *untagged* union: for
+    owners it is the OT-block start, for descriptors it is the zero-based
+    index into the section-6 lookup-record array (and that array is in
+    case-insensitive alphabetical order of the lookup-def names). The reader
+    is expected to already know which records are descriptors because
+    Vensim has the compiled model. The on-disk format does not store the
+    discriminator -- a field-by-field analysis (see `vdf.md` appendix
+    "Claims about the owner/descriptor discriminator") confirms no byte,
+    bit, or `(f0, f1)` combination distinguishes the two.
+
+    Algorithm. For each `f[11] == k` group (`k` in `[1, lookup_count)`)
+    with two or more spans:
+    1. **Lookup-def name test.** If exactly one span's name is lexically
+       lookupish (matches `_name_looks_lookupish`) it is the descriptor.
+       This catches every overlap in the corpus *except* on `Ref.vdf`,
+       where descriptor names are model-domain abbreviations.
+    2. **Highest-`f[10]` fallback.** When the lookup-def name test is
+       ambiguous, the span with the highest `f[10]` (sort-key) is treated
+       as the descriptor. Exact on `lookup_ex`, all `econ`, and `Ref.vdf`
+       (35/35 Ref pairs); imprecise on WRLD3 SCEN01 (13/55 conflict pairs)
+       because `f[10]` is view-local. Sets the `used_f10_fallback` flag.
+
+    Once a record is identified as a descriptor, its true binding is the
+    *decoded forward link*: `lookup_record[f[11]].word[10]` is the
+    evaluated-output OT, `word[5..6]` are the section-7 x/y array offsets,
+    `word[12]` is the optional dependency-chain root.
+    """
+    n_lookups = len(vdf.section6_lookup_records() or [])
+    if n_lookups == 0:
+        return DescriptorIdentification(descriptor_indices=set(), used_f10_fallback=False)
+
+    # Build OT-slot -> spans-claiming-it. Spans that overlap (share any OT slot
+    # with another span) are descriptor-pair candidates. Note: descriptors
+    # sometimes have arrayed shapes that *cross* owner ranges, so a descriptor
+    # at `f[11]==k` may not literally share `f[11]` with its colliding owners
+    # (e.g. Ref.vdf `RS PFC` at f[11]=120 with shape len 7 spans OT[120..127)
+    # which overlaps `C in Biomass` at f[11]=119 / shape len 3 spanning
+    # OT[119..122) on OT[120..122)). Span-level overlap detection catches this;
+    # an `f[11]`-only check does not.
+    by_slot: dict[int, list[DecodedRecordSpan]] = {}
+    for span in spans:
+        for ot in range(span.start, span.end):
+            by_slot.setdefault(ot, []).append(span)
+
+    # Connected components of overlapping spans (union-find on span indices).
+    span_index = {id(span): i for i, span in enumerate(spans)}
+    parent = list(range(len(spans)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    for slot_spans in by_slot.values():
+        if len(slot_spans) >= 2:
+            base_idx = span_index[id(slot_spans[0])]
+            for span in slot_spans[1:]:
+                union(base_idx, span_index[id(span)])
+
+    # A span participates in overlap iff some OT in its range has 2+ claimants
+    # (equivalently, iff its union-find root is shared with another span).
+    overlapping_span_ids = {
+        id(span)
+        for slot_spans in by_slot.values() if len(slot_spans) >= 2
+        for span in slot_spans
+    }
+    components: dict[int, list[DecodedRecordSpan]] = {}
+    for i, span in enumerate(spans):
+        if id(span) in overlapping_span_ids:
+            components.setdefault(find(i), []).append(span)
+
+    descriptor_indices: set[int] = set()
+    used_f10_fallback = False
+
+    for component in components.values():
+        # Iteratively peel off descriptor records until the component is
+        # internally non-overlapping. The decoded forward link constrains
+        # candidates to records whose `f[11]` is in `[0, lookup_count)`; each
+        # iteration picks the lookup-def-name match (lexical test, 1-of-N) or,
+        # failing that, the highest-`f[10]` candidate (Ref.vdf-style fallback).
+        active = list(component)
+        while True:
+            # Recompute slot coverage of remaining active spans and find which
+            # ones still participate in an overlap.
+            comp_by_slot: dict[int, list[DecodedRecordSpan]] = {}
+            for span in active:
+                for ot in range(span.start, span.end):
+                    comp_by_slot.setdefault(ot, []).append(span)
+            still_overlapping = {
+                id(span)
+                for slot_spans in comp_by_slot.values() if len(slot_spans) >= 2
+                for span in slot_spans
+            }
+            if not still_overlapping:
+                break
+            candidates = [
+                span for span in active
+                if id(span) in still_overlapping
+                and 0 <= vdf.records[span.rec_idx].fields[11] < n_lookups
+            ]
+            if not candidates:
+                # Owner-only overlap with no descriptor candidate: leave the
+                # component alone. The precision report will surface the
+                # residual `record-span-overlap` blocker.
+                break
+            lookupish = [span for span in candidates if _name_looks_lookupish(span.name)]
+            if len(lookupish) == 1:
+                desc = lookupish[0]
+            else:
+                desc = max(candidates, key=lambda s: (s.sort_key, s.rec_idx))
+                used_f10_fallback = True
+            descriptor_indices.add(desc.rec_idx)
+            active = [span for span in active if span.rec_idx != desc.rec_idx]
+
+    return DescriptorIdentification(
+        descriptor_indices=descriptor_indices,
+        used_f10_fallback=used_f10_fallback,
+    )
 
 
 def _array_element_labels_for_block(
@@ -3059,20 +3222,43 @@ def build_record_name_key_to_name_index(vdf: VdfFile) -> dict[int, int]:
     return out
 
 
+_OWNER_OT_CLASS_CODES: frozenset[int] = frozenset({
+    0x05,             # input/data-like blocks (29-byte bitmap width on
+                      # `risk.vdf`/`risk2.vdf`'s `federal funds rate`,
+                      # `inflation rate`)
+    OT_CODE_STOCK,    # 0x08 stock-backed
+    OT_CODE_DYNAMIC,  # 0x11 dynamic / data-block
+    0x16,             # Ref.vdf inline (semantics unresolved, but still real-data)
+    OT_CODE_CONST,    # 0x17 constant / inline f32
+    0x18,             # Ref.vdf inline
+})
+
+
 def decoded_record_spans(vdf: VdfFile) -> list[DecodedRecordSpan]:
     """
     Return direct record -> name -> OT span facts, without owner selection.
 
     This deliberately avoids hidden-slot alignment, descriptor pruning,
     non-overlap selection, name-category filtering, and array label guessing.
-    A span here means only that a record carries:
+    A span here means a record carries:
     - f[2] resolving through the decoded section-2 name key formula;
     - an in-range f[11] under the owner OT-start interpretation;
-    - a non-zero f[6] shape code whose span is structurally decoded.
+    - a non-zero f[6] shape code whose span is structurally decoded;
+    - and (class-code guard) the OT slot at f[11] holds real saved data
+      (class code in `_OWNER_OT_CLASS_CODES`). The guard rejects records
+      whose f[11], interpreted as an OT, would land on a class-`0x0f` Time
+      slot (only OT[0]) or any unknown future code; on the current corpus
+      this is a no-op for the 31 `exact-by-xray` fixtures (their owner-record
+      f[11]s already point only to owner-coded slots) and is forward-defensive
+      for files where a graphical-function descriptor's `f[11]`-as-lookup-index
+      happens to numerically land on a non-owner OT slot.
 
     Whether that record is an emitted user-facing series owner remains a
-    separate question when spans overlap or when f[11] is a lookup-record
-    index rather than an owner OT start.
+    separate question when spans overlap (the field[11] owner/descriptor union;
+    see vdf.md appendix). The owner spans on every fixture form a clean,
+    no-overlap, all-OT-slots-covered partition once descriptor records are set
+    aside, so a model-aware caller never needs the reconstruction stack on the
+    decoded result of this function.
     """
     key_to_name_idx = build_record_name_key_to_name_index(vdf)
     codes = vdf.section6_ot_class_codes() or []
@@ -3089,6 +3275,15 @@ def decoded_record_spans(vdf: VdfFile) -> list[DecodedRecordSpan]:
             continue
         end = start + length
         if end > vdf.offset_table_count:
+            continue
+        # Class-code guard: every OT slot in the span must be a real-data slot.
+        # Time (0x0f) is never spanned (start>=1 guards OT[0]); any other code
+        # outside the owner set indicates a stale or descriptor-reinterpreted
+        # f[11], not a real owner span.
+        if codes and any(
+            ot_idx < len(codes) and codes[ot_idx] not in _OWNER_OT_CLASS_CODES
+            for ot_idx in range(start, end)
+        ):
             continue
         spans.append(DecodedRecordSpan(
             rec_idx=rec_idx,
@@ -3518,11 +3713,12 @@ class PrecisionReport:
     data_block_decode_failures: int
     data_block_tail_mismatches: int
     bitmap_widths: list[int]
-    # Flags mirroring the two silent-reconstruction reasons. Equivalent to
+    # Flags mirroring the silent-reconstruction reasons. Equivalent to
     # scanning `reasons` for the matching string, but faster to inspect in
     # aggregate corpus reports.
-    used_system_variable_fallback: bool = False
+    system_variable_record_missing: bool = False
     used_lookup_name_order_pairing: bool = False
+    used_descriptor_f10_fallback: bool = False
 
     def is_exact_by_xray(self) -> bool:
         return self.status == "exact-by-xray"
@@ -3553,181 +3749,133 @@ class NamedResultsDiagnostics:
     reconstruction step. `precision_report` forwards each flag into the
     blocker list so `exact-by-xray` status never hides reconstruction.
     """
-    used_system_variable_fallback: bool = False
+    system_variable_record_missing: bool = False
     used_lookup_name_order_pairing: bool = False
+    # Set when graphical-function descriptor identification falls back to the
+    # highest-`f[10]` tie-break because the lexical lookup-def-name test was
+    # ambiguous on a conflict pair (`Ref.vdf` is the canonical case; the file
+    # genuinely does not store a discriminator, see vdf.md appendix).
+    used_descriptor_f10_fallback: bool = False
+
+
+def _owner_block_from_span(span: DecodedRecordSpan) -> OwnerRecordBlock:
+    """
+    Adapter: build a thin `OwnerRecordBlock` from a `DecodedRecordSpan` so the
+    array-element-labelling helpers (which operate on `OwnerRecordBlock`) can
+    consume direct-record-map spans without a separate code path.
+    """
+    return OwnerRecordBlock(
+        start=span.start,
+        end=span.end,
+        ot_codes=list(span.ot_codes),
+        sentinel_record_indices=[span.rec_idx],
+        shape_codes=[span.shape_code] if span.shape_code != 0 else [],
+        slot_refs=[span.slot_ref] if span.slot_ref else [],
+        direct_sort_keys=[span.sort_key] if span.sort_key > 0 else [],
+        attached_sort_keys=[span.sort_key] if span.sort_key > 0 else [],
+    )
 
 
 def extract_named_results_with_diagnostics(
     vdf: VdfFile,
 ) -> tuple[Optional[list[NamedResult]], NamedResultsDiagnostics]:
     """
-    Like `extract_named_results`, but also returns a diagnostics record
-    flagging any reconstruction paths taken during extraction.
+    Extract named time series via the **direct record map** plus the decoded
+    forward link for graphical-function descriptors.
 
-    `used_system_variable_fallback` is set when system variables (INITIAL
-    TIME, FINAL TIME, SAVEPER, TIME STEP) are placed via
-    `_assign_group_positions(_nonstock_assignment_items(...))` or the bare
-    alphabetical zip-onto-remaining fallback. Both are reconstruction rules
-    (Vensim-sort-order placement), not decoded fields.
+    Pipeline (no heuristics on the primary path; `f[10]` fallback flagged
+    when it fires):
 
-    `used_lookup_name_order_pairing` is set when the zip-by-order pairing
-    between lookupish name-table entries and section-6 lookup records is
-    taken. That pairing is explicitly reconstruction and breaks on Ref.vdf,
-    so callers using it deserve to see the blocker string.
+    1. `decoded_record_spans` (record `f[2]`->name, `f[11]`->OT-start,
+       `f[6]`->shape, plus class-code guard) yields the structural owner-
+       shaped spans -- the writer's direct map.
+    2. `identify_descriptor_records` removes graphical-function descriptor
+       records via the decoded forward link: a descriptor's `f[11]` is the
+       index into the section-6 lookup-record array (alphabetical name
+       order), not an OT start. The `f[10]`-highest tie-break flags
+       `used_descriptor_f10_fallback` on `Ref.vdf`-style cases where the
+       lookup-def names are abbreviations that don't carry the
+       "lookup"/"table" keyword.
+    3. The remaining owner spans + `Time` at `OT[0]` are the result set.
+       System variables are partitioned out and emitted last, matching the
+       previous output ordering.
+
+    `#`-signature internal-helper variables (`#alias>SMOOTH#`, `#LV1<...#`,
+    `#FUNCNAME(args)#`, ...) own real OT slots and are emitted under their
+    decoded names -- consumers wanting a "user-facing" symbol table can strip
+    `#`-prefixed names themselves.
+
+    `system_variable_record_missing` flag: set when any system variable
+    (`INITIAL TIME`, `FINAL TIME`, `SAVEPER`, `TIME STEP`) lacks a direct
+    record in the file, in which case that variable is silently dropped
+    from the result set. Dead on every tracked fixture; defensive only.
     """
     diagnostics = NamedResultsDiagnostics()
 
-    mapping = map_names_to_owner_blocks(vdf)
-    if mapping is None:
-        return None, diagnostics
-
-    # Extract time values
     time_values = vdf.extract_time_values()
     if time_values is None:
         return None, diagnostics
-    dimension_sets = _recover_dimension_sets(vdf)
-    shape_label_bindings = _shape_template_label_bindings(
-        vdf,
-        list(mapping.name_to_block.values()),
-        dimension_sets,
-    )
+
+    spans = decoded_record_spans(vdf)
+    desc_id = identify_descriptor_records(vdf, spans)
+    if desc_id.used_f10_fallback:
+        diagnostics.used_descriptor_f10_fallback = True
+
+    owner_spans = [s for s in spans if s.rec_idx not in desc_id.descriptor_indices]
+
+    # Partition owner spans into model vs system. If the same name appears more
+    # than once (shouldn't happen on the corpus), keep the lowest-start span.
+    model_spans: dict[str, DecodedRecordSpan] = {}
+    system_spans: dict[str, DecodedRecordSpan] = {}
+    for span in owner_spans:
+        if span.name == "Time":
+            continue
+        target = system_spans if span.name in SYSTEM_NAMES else model_spans
+        prev = target.get(span.name)
+        if prev is None or span.start < prev.start:
+            target[span.name] = span
+
     codes = vdf.section6_ot_class_codes()
     final_values = vdf.section6_final_values()
+    dimension_sets = _recover_dimension_sets(vdf)
 
-    results: list[NamedResult] = []
-    emitted_names: set[str] = set()
-    emitted_ot_indices: set[int] = set()
-
-    # Time itself
-    results.append(NamedResult(name="Time", ot_index=0, values=time_values))
-    emitted_names.add("Time")
-    emitted_ot_indices.add(0)
-
-    # Mapped variable results
-    for name in mapping.variable_names:
-        block = mapping.name_to_block.get(name)
-        if block is None:
-            continue
-
-        if block.length() == 1:
-            # Scalar variable
-            ot_idx = block.start
-            series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
-            if series is None:
-                continue
-            results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
-            emitted_names.add(name)
-            emitted_ot_indices.add(ot_idx)
-        else:
-            # Arrayed variable: one result per OT element
-            element_labels = _array_element_labels_for_block(
-                vdf,
-                block,
-                dimension_sets,
-                shape_label_bindings,
-            )
-            for elem_offset in range(block.length()):
-                ot_idx = block.start + elem_offset
-                series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
-                if series is None:
-                    continue
-                if element_labels is not None and elem_offset < len(element_labels):
-                    elem_name = f"{name}[{element_labels[elem_offset]}]"
-                else:
-                    elem_name = f"{name}[{elem_offset}]"
-                results.append(NamedResult(
-                    name=elem_name, ot_index=ot_idx, values=series))
-                emitted_names.add(elem_name)
-                emitted_ot_indices.add(ot_idx)
-
-    # Standalone lookup/table outputs have direct OT bindings in section 6.
-    # The "zip by order" pairing below is reconstruction: it assumes that
-    # lookupish name-table entries align 1:1 with section-6 lookup records.
-    # Flag it on the diagnostics so precision_report can surface it.
-    lookup_names = _lookup_record_names(vdf)
-    lookup_records = vdf.section6_lookup_records() or []
-    if lookup_names and lookup_records and len(lookup_names) == len(lookup_records):
-        paired_any = False
-        for name, record in zip(lookup_names, lookup_records):
-            ot_idx = record.ot_index()
-            if name in emitted_names or ot_idx in emitted_ot_indices:
-                continue
-            raw = vdf.offset_table_entry(ot_idx)
-            if raw is None:
-                continue
-            series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
-            if series is None:
-                continue
-            results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
-            emitted_names.add(name)
-            emitted_ot_indices.add(ot_idx)
-            paired_any = True
-        if paired_any:
-            diagnostics.used_lookup_name_order_pairing = True
-
-    # System variables have direct scalar records of their own (except Time,
-    # which is OT[0]). Prefer those decoded record bindings; the gap-aware
-    # nonstock layout remains only as a fallback for malformed/partial files.
-    codes = vdf.section6_ot_class_codes() or []
-    system_positions = system_ot_indices_from_records(vdf)
-    missing_system_names = [
-        name
-        for name in sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key)
-        if name not in system_positions
+    results: list[NamedResult] = [
+        NamedResult(name="Time", ot_index=0, values=time_values)
     ]
-    if missing_system_names:
-        nonstock_positions = _group_ot_positions(codes, want_stock=False)
-        fallback_positions = _assign_group_positions(
-            _nonstock_assignment_items(mapping.name_to_block),
-            nonstock_positions,
+
+    def emit_span(name: str, span: DecodedRecordSpan) -> None:
+        if span.length() == 1:
+            series = vdf.extract_ot_series(span.start, time_values, codes, final_values)
+            if series is None:
+                return
+            results.append(NamedResult(name=name, ot_index=span.start, values=series))
+            return
+        element_labels = _array_element_labels_for_block(
+            vdf, _owner_block_from_span(span), dimension_sets,
         )
-        if fallback_positions is None:
-            claimed = {block.start + i for block in mapping.name_to_block.values()
-                       for i in range(block.length())}
-            remaining = [pos for pos in nonstock_positions if pos not in claimed]
-            fallback_positions = {
-                name: pos
-                for name, pos in zip(
-                    sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key),
-                    remaining,
-                )
-            }
-        # Only mark the fallback as "used" if at least one of the missing
-        # system variables actually picked up a position through it. A file
-        # whose system records supplied everything directly does not trip.
-        for name in missing_system_names:
-            if name in fallback_positions:
-                system_positions[name] = fallback_positions[name]
-                diagnostics.used_system_variable_fallback = True
+        for elem_offset in range(span.length()):
+            ot_idx = span.start + elem_offset
+            series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
+            if series is None:
+                continue
+            if element_labels is not None and elem_offset < len(element_labels):
+                elem_name = f"{name}[{element_labels[elem_offset]}]"
+            else:
+                elem_name = f"{name}[{elem_offset}]"
+            results.append(NamedResult(name=elem_name, ot_index=ot_idx, values=series))
 
-    if not system_positions:
-        claimed = {block.start + i for block in mapping.name_to_block.values()
-                   for i in range(block.length())}
-        nonstock_positions = _group_ot_positions(codes, want_stock=False)
-        remaining = [pos for pos in nonstock_positions if pos not in claimed]
-        fallback_count = 0
-        for name, pos in zip(
-            sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key),
-            remaining,
-        ):
-            system_positions[name] = pos
-            fallback_count += 1
-        if fallback_count:
-            diagnostics.used_system_variable_fallback = True
+    # Emit model vars first, alphabetically (Vensim case-insensitive sort).
+    for name in sorted(model_spans.keys(), key=_vensim_sort_key):
+        emit_span(name, model_spans[name])
 
+    # Emit system vars last, alphabetically. Dead-flag the (corpus-empty)
+    # case where a system variable lacks a direct record.
     for name in sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key):
-        ot_idx = system_positions.get(name)
-        if ot_idx is None:
+        span = system_spans.get(name)
+        if span is None:
+            diagnostics.system_variable_record_missing = True
             continue
-        raw = vdf.offset_table_entry(ot_idx)
-        if raw is None:
-            continue
-        series = vdf.extract_ot_series(ot_idx, time_values, codes, final_values)
-        if series is None:
-            continue
-        results.append(NamedResult(name=name, ot_index=ot_idx, values=series))
-        emitted_names.add(name)
-        emitted_ot_indices.add(ot_idx)
+        emit_span(name, span)
 
     return results, diagnostics
 
@@ -3853,8 +4001,17 @@ def precision_report(vdf: VdfFile) -> PrecisionReport:
     if duplicate_result_ot_count:
         reasons.append("duplicate-result-ots")
 
+    # Span-overlap reporting: count overlaps after graphical-function descriptor
+    # records are removed via the decoded forward link. If owner-only spans
+    # still overlap after that, the file has a residual ambiguity that the
+    # decoded path cannot resolve (typically `Ref.vdf`-style cases where
+    # descriptor identification falls back to the `f[10]` heuristic and may
+    # miss). The descriptor heuristic itself is reflected in
+    # `used_descriptor_f10_fallback`, surfaced separately in `reasons` below.
     spans = decoded_record_spans(vdf)
-    overlaps = record_span_overlaps(spans)
+    desc_id = identify_descriptor_records(vdf, spans)
+    owner_spans = [s for s in spans if s.rec_idx not in desc_id.descriptor_indices]
+    overlaps = record_span_overlaps(owner_spans)
     if overlaps:
         reasons.append("record-span-overlap")
 
@@ -3883,14 +4040,17 @@ def precision_report(vdf: VdfFile) -> PrecisionReport:
     if incomplete_anchor_count:
         reasons.append("incomplete-dimension-anchors")
 
-    # Flag silent reconstruction paths that would otherwise let a file pass
-    # as "exact-by-xray" while the underlying mapping relies on the
-    # lookup-name zip-by-order pairing or the system-variable alphabetical
-    # placement fallback. See /tmp/vdf_audit_phase1.md Section B.3.1.
-    if diagnostics.used_system_variable_fallback:
-        reasons.append("used-system-variable-fallback")
+    # Flag silent reconstruction paths and missing-record cases that would
+    # otherwise let a file pass as "exact-by-xray" while the result set is
+    # incomplete or relies on a fallback. The descriptor-f10 case is the
+    # only one that actually fires today (`Ref.vdf`); the others are
+    # defensive flags for files outside the current corpus.
+    if diagnostics.system_variable_record_missing:
+        reasons.append("system-variable-record-missing")
     if diagnostics.used_lookup_name_order_pairing:
         reasons.append("used-lookup-name-order-pairing")
+    if diagnostics.used_descriptor_f10_fallback:
+        reasons.append("used-descriptor-f10-fallback")
 
     data_blocks, decode_failures, tail_mismatches, bitmap_widths = _data_block_precision_stats(
         vdf,
@@ -3946,8 +4106,9 @@ def precision_report(vdf: VdfFile) -> PrecisionReport:
         data_block_decode_failures=decode_failures,
         data_block_tail_mismatches=tail_mismatches,
         bitmap_widths=bitmap_widths,
-        used_system_variable_fallback=diagnostics.used_system_variable_fallback,
+        system_variable_record_missing=diagnostics.system_variable_record_missing,
         used_lookup_name_order_pairing=diagnostics.used_lookup_name_order_pairing,
+        used_descriptor_f10_fallback=diagnostics.used_descriptor_f10_fallback,
     )
 
 
