@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use super::compile_ltm_equation_fragment;
+use super::{compile_ltm_equation_fragment, scalarize_ltm_equation};
 use crate::datamodel;
 use crate::db::{
     LtmLinkId, RefShape, SimlinDb, compute_layout, link_score_equation_text,
@@ -501,4 +501,43 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
             "slot {elem:?} must not use a trivial '0' partial, got: {slot_eqn}"
         );
     }
+}
+
+#[test]
+fn test_scalarize_ltm_equation_arrayed_collapse() {
+    use datamodel::Equation::{ApplyToAll, Arrayed, Scalar};
+
+    // Arrayed with multiple per-element slots collapses to the *first* slot's text.
+    let multi = Arrayed(
+        vec!["region".to_string()],
+        vec![
+            ("nyc".to_string(), "first slot".to_string(), None, None),
+            ("boston".to_string(), "second slot".to_string(), None, None),
+        ],
+        None,
+        false,
+    );
+    assert!(matches!(scalarize_ltm_equation(multi), Scalar(text) if text == "first slot"));
+
+    // Arrayed with no slots but a Some(default) falls back to the default text.
+    let default_only = Arrayed(
+        vec!["region".to_string()],
+        vec![],
+        Some("default eqn".to_string()),
+        false,
+    );
+    assert!(matches!(scalarize_ltm_equation(default_only), Scalar(text) if text == "default eqn"));
+
+    // Arrayed with neither slots nor a default falls back to "0".
+    let empty = Arrayed(vec!["region".to_string()], vec![], None, false);
+    assert!(matches!(scalarize_ltm_equation(empty), Scalar(text) if text == "0"));
+
+    // ApplyToAll and Scalar inputs are preserved (text kept, dims dropped).
+    assert!(matches!(
+        scalarize_ltm_equation(ApplyToAll(vec!["region".to_string()], "a2a eqn".to_string())),
+        Scalar(text) if text == "a2a eqn"
+    ));
+    assert!(
+        matches!(scalarize_ltm_equation(Scalar("scalar eqn".to_string())), Scalar(text) if text == "scalar eqn")
+    );
 }

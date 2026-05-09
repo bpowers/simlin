@@ -435,10 +435,13 @@ fn ltm_synthetic_equation(text: String, dimensions: &[String]) -> datamodel::Equ
 /// Reduce an LTM equation to a scalar one, keeping the equation text.
 /// Used by the legacy `(from, to)`-keyed link-score path
 /// (`link_score_equation_text`), which always emits a scalar variable
-/// regardless of the target's dimensionality. For an `Equation::Arrayed`,
-/// the first per-element slot's text is used (the legacy path predates
-/// per-element link scores and is only ever compiled for scalar targets
-/// in practice).
+/// regardless of the target's dimensionality, and by
+/// [`retarget_ltm_equation_dims`] to collapse a degenerate zero-dimension
+/// `Arrayed` (the empty-`dims` case) -- a per-element link score with no
+/// dimension to index is meaningless, so it falls back to scalar. For an
+/// `Equation::Arrayed`, the first per-element slot's text is used (the
+/// legacy path predates per-element link scores and is only ever compiled
+/// for scalar targets in practice).
 pub(super) fn scalarize_ltm_equation(equation: datamodel::Equation) -> datamodel::Equation {
     match equation {
         datamodel::Equation::Scalar(_) => equation,
