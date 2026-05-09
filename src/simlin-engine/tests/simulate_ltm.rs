@@ -6252,25 +6252,88 @@ fn test_agg_link_scores_heterogeneous_match_hand_calc() {
 }
 
 /// AC4.7 / AC4.2: discovery mode (strongest-path) on the inlined-reducer model
-/// finds the cross-element-through-aggregate loop -- the rerouted element graph
-/// makes the agg node reachable, so discovery traverses it -- but the *reported*
-/// `FoundLoop` has the synthetic aggregate node trimmed out, leaving links of the
-/// `pop[d] -> share[e]` form (the loop-score equation still uses the un-trimmed
-/// agg-traversing path; the trim is reporting-only). Uses heterogeneous initial
-/// values so the loop scores are non-zero (discovery's strongest-path DFS and the
-/// post-sim contribution filter both need a non-degenerate run).
+/// `share[r] = pop[r] / SUM(pop[*])`, `update[r] = share[r] * pop[r] * c`,
+/// `pop[r]` a stock fed by `update`.
+///
+/// What this verifies:
+///
+/// 1. **The synthetic aggregate node is trimmed out of every reported loop**
+///    (AC4.2). The rerouted element graph (`model_element_causal_edges`) routes
+///    the inlined `SUM(pop[*])` through a synthetic `$⁚ltm⁚agg⁚0` node, so the
+///    self-element loop discovery actually traverses is the four-edge cycle
+///    `pop[big] -> $⁚ltm⁚agg⁚0 -> share[big] -> update[big] -> pop[big]`. The
+///    trim post-pass collapses `[pop[big] -> agg, agg -> share[big]]` into a
+///    single `[pop[big] -> share[big]]` edge, so no reported `Link` references
+///    `$⁚ltm⁚agg⁚0`.
+///
+/// 2. **The discovered loop's `loop_score` series is the product of the
+///    per-element link scores along the *un-trimmed* path -- including the
+///    `pop[big] -> agg` and `agg -> share[big]` halves** (AC4.2). This is the
+///    assertion that distinguishes the SUM/aggregate path from the bare
+///    `pop[r]` numerator path: the numerator path would be a three-factor loop
+///    `pop[r] -> share[r] -> update[r] -> pop[r]`; the aggregate path is the
+///    four-factor `pop[r] -> agg -> share[r] -> update[r] -> pop[r]`. After the
+///    trim, the *reported* links of the two are textually identical (both are
+///    `pop[big] -> share[big] -> update[big] -> pop[big]`), so the loop's
+///    *score* -- which factor terms it is a product of -- is what tells them
+///    apart. (For this fixture the bare numerator link score `pop -> share`
+///    happens to evaluate to zero, so discovery's strongest path is the
+///    aggregate one; a model with no SUM reducer would instead carry the
+///    three-factor score.)
+///
+/// Strongest-path discovery reports one loop per stock node, so a genuinely
+/// *cross-element* loop (`pop[big] -> agg -> share[small] -> ... -> pop[small]
+/// -> agg -> share[big] -> ... -> pop[big]`) is never the reported winner for
+/// this fixture; the point being checked is that discovery's loop-finding is
+/// *routed through* the aggregate node and *scored on* the un-trimmed path,
+/// then the aggregate node is hidden from the reported structure.
+///
+/// Heterogeneous initial values (`pop[big] = 1000`, `pop[small] = 10`) keep the
+/// loop scores non-degenerate so discovery's DFS and the post-sim contribution
+/// filter both have a real run to work with.
 #[test]
-fn test_discovery_finds_cross_element_through_agg_loop() {
+fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
     let project = build_heterogeneous_share_model(0.01);
 
-    let found = discover_loops_element_level(&project);
+    // Compile in discovery mode and simulate so we have both the discovered
+    // loops *and* the raw link-score series they were scored from.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main").expect("compilation should succeed");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let canonical_name = simlin_engine::canonicalize("main");
+    let source_model = sync
+        .project
+        .models(&db)
+        .get(canonical_name.as_ref())
+        .copied()
+        .expect("main model should exist in salsa DB");
+    let element_edges = model_element_causal_edges(&db, source_model, sync.project);
+    let causal_graph = causal_graph_from_element_edges(element_edges);
+    let stocks: Vec<Ident<Canonical>> =
+        element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+    let dm_dims = project_datamodel_dims(&db, sync.project);
+    let found = ltm_finding::discover_loops_with_graph(
+        &results,
+        &causal_graph,
+        &stocks,
+        &ltm_vars.vars,
+        dm_dims,
+    )
+    .expect("discover_loops_with_graph should succeed");
     assert!(
         !found.is_empty(),
         "discovery should find at least one loop in the inlined-reducer model"
     );
 
     let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
-
     let path_strings: Vec<Vec<String>> = found
         .iter()
         .map(|fl| {
@@ -6282,9 +6345,9 @@ fn test_discovery_finds_cross_element_through_agg_loop() {
         })
         .collect();
 
-    // AC4.2: no reported loop's links may reference the synthetic aggregate
-    // node -- the trim post-pass collapses `[X -> agg, agg -> Y]` into
-    // `[X -> Y]` with composed polarity.
+    // (1) AC4.2 trim: no reported loop's links may reference the synthetic
+    // aggregate node -- the trim post-pass collapses `[X -> agg, agg -> Y]`
+    // into `[X -> Y]` with composed polarity.
     for fl in &found {
         for link in &fl.loop_info.links {
             assert_ne!(
@@ -6302,22 +6365,104 @@ fn test_discovery_finds_cross_element_through_agg_loop() {
         }
     }
 
-    // AC4.7: discovery still found the feedback that runs through the aggregate
-    // (the denominator coupling) -- after trimming, that surfaces as a
-    // `pop[d] -> share[d]` link feeding the `share -> update -> pop` cycle. A
-    // model without the agg-traversal would not produce this loop.
-    let has_trimmed_agg_loop = found.iter().any(|fl| {
-        let links = &fl.loop_info.links;
-        links
-            .iter()
-            .any(|l| l.from.as_str().starts_with("pop[") && l.to.as_str().starts_with("share["))
-            && links.iter().any(|l| {
-                l.from.as_str().starts_with("update[") && l.to.as_str().starts_with("pop[")
+    // Identify the reported `pop[big] -> share[big] -> update[big] -> pop[big]`
+    // loop. After trimming, this is the *only* loop whose link set is exactly
+    // those three edges; its un-trimmed form is the four-edge aggregate cycle
+    // `pop[big] -> $⁚ltm⁚agg⁚0 -> share[big] -> update[big] -> pop[big]`, which
+    // we confirm below by reproducing its loop_score from the un-trimmed link
+    // scores. (`build_heterogeneous_share_model`'s `Region` is `{Big, Small}`,
+    // so the canonical element names are `big`, `small`.)
+    let expected_links: std::collections::HashSet<(String, String)> = [
+        ("pop[big]", "share[big]"),
+        ("share[big]", "update[big]"),
+        ("update[big]", "pop[big]"),
+    ]
+    .into_iter()
+    .map(|(a, b)| (a.to_string(), b.to_string()))
+    .collect();
+    let share_loop_matches: Vec<&ltm_finding::FoundLoop> = found
+        .iter()
+        .filter(|fl| {
+            fl.loop_info
+                .links
+                .iter()
+                .map(|l| (l.from.as_str().to_string(), l.to.as_str().to_string()))
+                .collect::<std::collections::HashSet<_>>()
+                == expected_links
+        })
+        .collect();
+    assert_eq!(
+        share_loop_matches.len(),
+        1,
+        "expected exactly one reported `pop[big] -> share[big] -> update[big] -> pop[big]` loop; \
+         found loops: {path_strings:?}"
+    );
+    let share_loop = share_loop_matches[0];
+
+    // (2) AC4.2 scoring on the un-trimmed path. Read the four per-element link
+    // scores along the un-trimmed aggregate cycle straight from `results`:
+    //   pop[big] -> $⁚ltm⁚agg⁚0       (the reducer half, Phase-4 machinery)
+    //   $⁚ltm⁚agg⁚0 -> share[big]     (the Bare scalar->arrayed half)
+    //   share[big] -> update[big]     (A2A diagonal, Region slot 0 == big)
+    //   update[big] -> pop[big]       (flow->stock, A2A diagonal, slot 0 == big)
+    // and assert the discovered loop's `loop_score` is their product at every
+    // step where the score is defined (>= step 2 -- the flow->stock link score
+    // needs two prior committed timesteps). `saw_nonzero` guards against a
+    // vacuous all-zero equality and, since the bare numerator product is
+    // identically zero for this fixture, also pins that the discovered loop
+    // really did route through the aggregate node rather than the numerator.
+    let off_exact = |name: &str| -> usize {
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing offset {name}; ltm offsets present: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .map(|k| k.as_str())
+                        .filter(|s| s.contains("\u{205A}ltm\u{205A}"))
+                        .collect::<Vec<_>>()
+                )
             })
-    });
+    };
+    let off_pop_big_to_agg = off_exact(&format!(
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop[big]\u{2192}{agg}"
+    ));
+    let off_agg_to_share_big = off_exact(&format!(
+        "$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}share[big]"
+    ));
+    // The `share -> update` and `update -> pop` link scores are Apply-to-All
+    // over `Region`; element `big` is declared first, so it is slot 0 of the
+    // base offset.
+    let off_share_to_update_big =
+        off_exact("$\u{205A}ltm\u{205A}link_score\u{205A}share\u{2192}update");
+    let off_update_to_pop_big =
+        off_exact("$\u{205A}ltm\u{205A}link_score\u{205A}update\u{2192}pop");
+    let at = |step: usize, o: usize| results.data[step * results.step_size + o];
+
+    let mut saw_nonzero = false;
+    for step in 2..results.step_count {
+        let product = at(step, off_pop_big_to_agg)
+            * at(step, off_agg_to_share_big)
+            * at(step, off_share_to_update_big)
+            * at(step, off_update_to_pop_big);
+        let loop_score = share_loop.scores[step].1;
+        assert!(
+            (loop_score - product).abs() < 1e-6,
+            "step {step}: discovered loop_score = {loop_score}, but the product of the un-trimmed \
+             per-element link scores (pop[big]->agg * agg->share[big] * share->update[big] * \
+             update->pop[big]) = {product}"
+        );
+        if product.abs() > 1e-9 {
+            saw_nonzero = true;
+        }
+    }
     assert!(
-        has_trimmed_agg_loop,
-        "discovery should still find the cross-element-through-agg loop \
-         (as a trimmed `pop -> share -> update -> pop` cycle); found loops: {path_strings:?}"
+        saw_nonzero,
+        "expected at least one step where the un-trimmed loop_score product is non-zero \
+         (otherwise the equality above is vacuous, and we could not tell the aggregate path \
+         from the zero-valued bare-numerator path); found loops: {path_strings:?}"
     );
 }
