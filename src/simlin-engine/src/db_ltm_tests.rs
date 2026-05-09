@@ -5,7 +5,8 @@
 use super::compile_ltm_equation_fragment;
 use crate::datamodel;
 use crate::db::{
-    LtmLinkId, SimlinDb, compute_layout, link_score_equation_text, sync_from_datamodel,
+    LtmLinkId, RefShape, SimlinDb, compute_layout, link_score_equation_text,
+    link_score_equation_text_shaped, sync_from_datamodel,
 };
 use crate::test_common::TestProject;
 
@@ -364,4 +365,140 @@ fn test_stock_to_flow_link_score_handles_apply_to_all() {
             || equation_text.contains("population"),
         "link score equation should not use a trivial '0' partial equation"
     );
+}
+
+/// ltm-503-cross-element-agg.AC1.3: regression sibling to
+/// `test_stock_to_flow_link_score_handles_apply_to_all`, covering the
+/// `Ast::Arrayed` (per-element-equation) flow case that
+/// `generate_stock_to_flow_equation` previously fell through to a `"0"`
+/// placeholder partial for.
+///
+/// Build a `population[Region]` stock with a per-element-equation
+/// `births[Region]` inflow (`<NYC: population[NYC] * 0.03>`, etc.), enable
+/// LTM, and ask for the `population -> births` link score with a
+/// `FixedIndex` shape. The result must be `Equation::Arrayed` whose every
+/// per-element slot references the flow's actual equation contents
+/// (`population`) and contains no literal `(0)` partial.
+#[test]
+fn test_stock_to_flow_link_score_handles_arrayed() {
+    let dm_dimension = datamodel::Dimension::named(
+        "Region".to_string(),
+        vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+    );
+    // `population[Region]` stock with `births` as its sole inflow.
+    let population = datamodel::Variable::Stock(datamodel::Stock {
+        ident: "population".to_string(),
+        equation: datamodel::Equation::ApplyToAll(vec!["Region".to_string()], "100".to_string()),
+        documentation: String::new(),
+        units: None,
+        inflows: vec!["births".to_string()],
+        outflows: vec![],
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    // Per-element-equation flow referencing the stock element-wise.
+    let births = datamodel::Variable::Flow(datamodel::Flow {
+        ident: "births".to_string(),
+        equation: datamodel::Equation::Arrayed(
+            vec!["Region".to_string()],
+            vec![
+                (
+                    "NYC".to_string(),
+                    "population[NYC] * 0.03".to_string(),
+                    None,
+                    None,
+                ),
+                (
+                    "Boston".to_string(),
+                    "population[Boston] * 0.02".to_string(),
+                    None,
+                    None,
+                ),
+                (
+                    "LA".to_string(),
+                    "population[LA] * 0.01".to_string(),
+                    None,
+                    None,
+                ),
+            ],
+            None,
+            false,
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    let project = datamodel::Project {
+        name: "s2f_arrayed_regression".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![dm_dimension],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![population, births],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+
+    // Each `births[e]` references `population[e]` -- a FixedIndex(e) ref --
+    // so the per-shape emission yields `population[e] -> births` link
+    // scores. The non-shaped `link_score_equation_text` would `scalarize`
+    // the result; use the shaped entry point so the arrayed equation
+    // survives intact.
+    let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
+    let lsv = link_score_equation_text_shaped(
+        &db,
+        link_id,
+        RefShape::FixedIndex(vec!["nyc".to_string()]),
+        source_model,
+        sync.project,
+    );
+    let lsv = lsv
+        .as_ref()
+        .expect("stock-to-arrayed-flow link score should be generated");
+
+    let elements = match &lsv.equation {
+        datamodel::Equation::Arrayed(_, elements, _, _) => elements,
+        other => {
+            panic!("stock-to-arrayed-flow link score must be Equation::Arrayed, got: {other:?}")
+        }
+    };
+    assert!(
+        !elements.is_empty(),
+        "arrayed link score should have per-element slots"
+    );
+    for (elem, slot_eqn, _, _) in elements {
+        // The flow's actual equation contents (`population`) must show up
+        // in every slot -- before the fix this was a constant `(0)`.
+        assert!(
+            slot_eqn.contains("population"),
+            "slot {elem:?} should reference 'population' (the flow's equation contents), \
+             got: {slot_eqn}"
+        );
+        // No slot may carry the `(0)` placeholder partial.
+        assert!(
+            !slot_eqn.contains("((0) -"),
+            "slot {elem:?} must not use a trivial '0' partial, got: {slot_eqn}"
+        );
+    }
 }
