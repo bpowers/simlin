@@ -15,7 +15,9 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
-use crate::ltm::{CyclePartitions, Loop, normalize_module_ref};
+use crate::ltm::{
+    CyclePartitions, Loop, normalize_module_ref, split_node_subscript, strip_subscript,
+};
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
@@ -1033,31 +1035,6 @@ fn generate_stock_to_flow_equation(
     let stock_source_q = shape_aware_source_ref(stock.as_str(), shape);
     let text = link_score_guard_form(&partial_eq, target_ref, &stock_source_q);
     link_score_equation_for_target(text, flow_var)
-}
-
-/// Strip a trailing `[...]` element subscript from a node name.
-///
-/// `"population[nyc]"` -> `"population"`; `"x[nyc,boston]"` -> `"x"`;
-/// `"scalar_var"` -> `"scalar_var"` (unchanged). Mirrors the helper of
-/// the same name in `db_ltm.rs`; kept local here because the only other
-/// use site is in the same module.
-fn strip_subscript(name: &str) -> &str {
-    match name.rfind('[') {
-        Some(pos) => &name[..pos],
-        None => name,
-    }
-}
-
-/// Split a node name into `(variable_level_name, Some(subscript))` or
-/// `(name, None)` when there is no `[...]` subscript.
-///
-/// `"migration_pressure[boston]"` -> `("migration_pressure", Some("boston"))`;
-/// `"x[nyc,boston]"` -> `("x", Some("nyc,boston"))`; `"x"` -> `("x", None)`.
-fn split_node_subscript(name: &str) -> (&str, Option<&str>) {
-    match (name.rfind('['), name.rfind(']')) {
-        (Some(open), Some(close)) if close > open => (&name[..open], Some(&name[open + 1..close])),
-        _ => (name, None),
-    }
 }
 
 /// Resolve the link-score variable name a downstream consumer (loop

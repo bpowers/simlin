@@ -2183,7 +2183,7 @@ fn canonical_cycle_rotation(nodes: &[String]) -> Vec<String> {
 ///
 /// `population[nyc]` -> `population`; `population[nyc,boston]` ->
 /// `population`; a name without `[` is returned unchanged. Mirrors
-/// `db_ltm::strip_subscript`; inlined here to keep the tiered
+/// `crate::ltm::strip_subscript`; inlined here to keep the tiered
 /// enumerator self-contained.
 fn strip_element_subscript(name: &str) -> &str {
     match name.find('[') {

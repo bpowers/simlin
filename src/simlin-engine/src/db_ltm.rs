@@ -15,6 +15,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
+use crate::ltm::strip_subscript;
 
 use super::{
     Db, LtmLinkId, ModelDepGraphResult, ParsedVariableResult, RefShape, SourceModel, SourceProject,
@@ -1990,19 +1991,6 @@ fn find_model_output_ports(
     output_ports.into_iter().collect()
 }
 
-/// Strip the subscript suffix from an element-level node name.
-///
-/// For `"population[nyc]"` returns `"population"`. For `"scalar_var"`
-/// (no bracket) returns the name unchanged. For multi-dimensional
-/// subscripts like `"x[nyc,boston]"` the same rule applies: find last
-/// `[`, truncate there.
-fn strip_subscript(name: &str) -> &str {
-    match name.rfind('[') {
-        Some(pos) => &name[..pos],
-        None => name,
-    }
-}
-
 /// Compute the cartesian product of element name lists as comma-joined
 /// subscript strings.
 ///
@@ -2232,8 +2220,10 @@ fn build_element_subscripted_links(
 ///
 /// Visibility is `pub(crate)` so unit tests in
 /// `db_ltm_unified_tests.rs` can drive this function directly to
-/// inspect per-link `shape` annotations -- the field isn't otherwise
-/// observable through the LtmVariablesResult.vars surface (which only
+/// inspect the element-subscripted `Link.from` / `Link.to` strings the
+/// loop builder produces (e.g. `"population[nyc]"`) -- there is no
+/// separate per-link shape field, and these per-link strings aren't
+/// observable through the `LtmVariablesResult.vars` surface (which only
 /// exposes the rendered equation strings).
 pub(crate) fn build_element_level_loops(
     element_circuits: &super::LoopCircuitsResult,
