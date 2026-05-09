@@ -210,6 +210,28 @@ pub enum Equation {
     ),
 }
 
+impl Equation {
+    /// The equation's source text concatenated into a single string:
+    /// the scalar / Apply-to-All formula verbatim, or -- for the
+    /// per-element (`Arrayed`) variant -- every element formula plus any
+    /// EXCEPT default joined by newlines. Convenience for diagnostics and
+    /// tests that want to inspect an equation as text without first
+    /// matching on its variant.
+    pub fn source_text(&self) -> String {
+        match self {
+            Equation::Scalar(s) | Equation::ApplyToAll(_, s) => s.clone(),
+            Equation::Arrayed(_, elements, default, _) => {
+                let mut parts: Vec<&str> =
+                    elements.iter().map(|(_, eqn, _, _)| eqn.as_str()).collect();
+                if let Some(default_eqn) = default {
+                    parts.push(default_eqn.as_str());
+                }
+                parts.join("\n")
+            }
+        }
+    }
+}
+
 /// The kind of external data function from Vensim's GET DIRECT family.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, salsa::Update)]

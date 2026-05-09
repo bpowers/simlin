@@ -1778,7 +1778,7 @@ fn test_model_ltm_synthetic_variables_generates_scores() {
     // All vars should have non-empty equations
     for var in &ltm.vars {
         assert!(
-            !var.equation.is_empty(),
+            !var.equation.source_text().is_empty(),
             "var {} should have non-empty equation",
             var.name
         );

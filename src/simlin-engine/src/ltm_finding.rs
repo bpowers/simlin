@@ -1387,12 +1387,12 @@ mod tests {
         let ltm_vars = vec![
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}birth_rate\u{2192}births".to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec!["Region".to_string()],
             },
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}scalar_a\u{2192}scalar_b".to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec![],
             },
         ];
@@ -1521,7 +1521,7 @@ mod tests {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
                 .to_string(),
-            equation: String::new(),
+            equation: datamodel::Equation::Scalar(String::new()),
             dimensions: vec![],
         }];
 
@@ -1559,7 +1559,7 @@ mod tests {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
                 .to_string(),
-            equation: String::new(),
+            equation: datamodel::Equation::Scalar(String::new()),
             dimensions: vec!["Region".to_string()],
         }];
         let dims = vec![datamodel::Dimension::named(
@@ -1624,7 +1624,7 @@ mod tests {
 
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop".to_string(),
-            equation: String::new(),
+            equation: datamodel::Equation::Scalar(String::new()),
             dimensions: vec!["Region".to_string()],
         }];
         let dims = vec![datamodel::Dimension::named(
@@ -1689,7 +1689,7 @@ mod tests {
 
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total".to_string(),
-            equation: String::new(),
+            equation: datamodel::Equation::Scalar(String::new()),
             dimensions: vec![],
         }];
 
@@ -1742,13 +1742,13 @@ mod tests {
         let ltm_vars = vec![
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share".to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec![],
             },
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
                     .to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec![],
             },
         ];
@@ -1797,13 +1797,13 @@ mod tests {
         let ltm_vars = vec![
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births".to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec!["Region".to_string()],
             },
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births\u{205A}wildcard"
                     .to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec!["Region".to_string()],
             },
         ];
@@ -1869,12 +1869,12 @@ mod tests {
         let ltm_vars = vec![
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share".to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec!["Region".to_string()],
             },
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec!["Region".to_string()],
             },
         ];

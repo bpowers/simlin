@@ -582,6 +582,14 @@ fn read_rss_mib() -> Option<f64> {
 /// Exposed as `generate_link_score_equation_for_link` for use by tracked
 /// functions in `db.rs`.
 ///
+/// Returns a [`datamodel::Equation`] whose variant matches the *target*
+/// variable's shape: `Equation::Scalar` for a scalar target,
+/// `Equation::ApplyToAll(target_dims, _)` for an arrayed target (so the
+/// compiler expands the formula per element). `target_dims` uses the
+/// target's datamodel dimension names; the link emission loop overwrites
+/// them with the link-score-dimensions policy result, which is the same
+/// list for every compatible-dimension edge.
+///
 /// `shape` selects which AST occurrences of `from` remain live in the
 /// partial equation; non-matching occurrences (and every reference to
 /// other deps) are wrapped in `PREVIOUS()`. `source_dim_elements` carries
@@ -599,7 +607,7 @@ pub(crate) fn generate_link_score_equation_for_link(
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
     all_vars: &HashMap<Ident<Canonical>, Variable>,
-) -> String {
+) -> Equation {
     generate_link_score_equation(from, to, shape, source_dim_elements, to_var, all_vars)
 }
 
@@ -611,7 +619,7 @@ fn generate_link_score_equation(
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
     all_vars: &HashMap<Ident<Canonical>, Variable>,
-) -> String {
+) -> Equation {
     // Check if this is a flow-to-stock link
     let is_flow_to_stock = matches!(to_var, Variable::Stock { .. })
         && matches!(
@@ -636,6 +644,54 @@ fn generate_link_score_equation(
     }
 }
 
+/// Wrap a per-input partial equation in the standard LTM link-score guard
+/// form: zero at the initial timestep, zero when either Δtarget or
+/// Δsource is zero, and otherwise `|Δpartial/Δtarget| * sign(Δpartial/Δsource)`,
+/// where `Δpartial` is `partial - PREVIOUS(target)` (the partial measures
+/// what the target *would* be with `from` live and everything else
+/// frozen). `target_ref` and `source_ref` are pre-formatted reference
+/// expressions (already quoted or rendered as subscripts as the caller
+/// requires).
+fn link_score_guard_form(partial_eq: &str, target_ref: &str, source_ref: &str) -> String {
+    let numerator = format!("(({partial_eq}) - PREVIOUS({target_ref}))");
+    let target_diff = format!("({target_ref} - PREVIOUS({target_ref}))");
+    let source_diff = format!("({source_ref} - PREVIOUS({source_ref}))");
+    let abs_part = format!("ABS(SAFEDIV({numerator}, {target_diff}, 0))");
+    let sign_part = format!("SIGN(SAFEDIV({numerator}, {source_diff}, 0))");
+    format!(
+        "if (TIME = INITIAL_TIME) then 0 \
+         else if ({target_diff} = 0) OR ({source_diff} = 0) then 0 \
+         else {abs_part} * {sign_part}"
+    )
+}
+
+/// The datamodel-cased dimension names of `var`'s equation, when `var`
+/// is arrayed; `None` for scalar variables and modules. Link-score
+/// equations are tagged with these so `parse_ltm_equation` resolves the
+/// dimensions by exact-name match against the project's datamodel.
+fn target_equation_dims(var: &Variable) -> Option<Vec<String>> {
+    let eqn = match var {
+        Variable::Stock { eqn, .. } | Variable::Var { eqn, .. } => eqn.as_ref()?,
+        Variable::Module { .. } => return None,
+    };
+    match eqn {
+        Equation::Scalar(_) => None,
+        Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, _, _, _) => {
+            (!dims.is_empty()).then(|| dims.clone())
+        }
+    }
+}
+
+/// Build the link-score [`Equation`] for a target with the given guard-form
+/// equation `text`: `Equation::Scalar` for a scalar target,
+/// `Equation::ApplyToAll(target_dims, text)` for an arrayed target.
+fn link_score_equation_for_target(text: String, to_var: &Variable) -> Equation {
+    match target_equation_dims(to_var) {
+        Some(dims) => Equation::ApplyToAll(dims, text),
+        None => Equation::Scalar(text),
+    }
+}
+
 /// Generate auxiliary-to-auxiliary link score equation
 fn generate_auxiliary_to_auxiliary_equation(
     from: &Ident<Canonical>,
@@ -643,7 +699,7 @@ fn generate_auxiliary_to_auxiliary_equation(
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
-) -> String {
+) -> Equation {
     use crate::ast::Ast;
 
     // Get the equation text of the 'to' variable.  Prefer the AST when
@@ -651,6 +707,10 @@ fn generate_auxiliary_to_auxiliary_equation(
     // "SMTH1(x, 5)") while the AST holds the post-module-expansion form
     // (e.g., Var("$⁚s⁚0⁚smth1·output")).  Using the AST-derived text
     // ensures the identifiers in the equation match those in `deps`.
+    //
+    // An `Ast::Arrayed` (per-element-equation) target falls through to a
+    // `"0"` placeholder partial today; Phase 1 Task 2 replaces it with
+    // real per-element partials.
     let to_equation = if let Some(ast) = to_var.ast() {
         match ast {
             Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
@@ -693,25 +753,8 @@ fn generate_auxiliary_to_auxiliary_equation(
     let from_source_q = shape_aware_source_ref(from.as_str(), shape);
     let to_q = quote_ident(to.as_str());
 
-    // Using SAFEDIV for both divisions
-    // Note: We still need the outer check for when EITHER is zero, since we multiply the results
-    let abs_part = format!(
-        "ABS(SAFEDIV((({partial_eq}) - PREVIOUS({to_q})), ({to_q} - PREVIOUS({to_q})), 0))",
-    );
-    let sign_part = format!(
-        "SIGN(SAFEDIV((({partial_eq}) - PREVIOUS({to_q})), ({from_source_q} - PREVIOUS({from_source_q})), 0))",
-    );
-
-    // Return 0 at the initial timestep when PREVIOUS values don't exist yet
-    format!(
-        "if \
-            (TIME = INITIAL_TIME) \
-            then 0 \
-            else if \
-                (({to_q} - PREVIOUS({to_q})) = 0) OR (({from_source_q} - PREVIOUS({from_source_q})) = 0) \
-                then 0 \
-                else {abs_part} * {sign_part}",
-    )
+    let text = link_score_guard_form(&partial_eq, &to_q, &from_source_q);
+    link_score_equation_for_target(text, to_var)
 }
 
 /// Render the source reference that drives the link-score's denominator
@@ -749,8 +792,14 @@ fn shape_aware_source_ref(from: &str, shape: &RefShape) -> String {
     }
 }
 
-/// Generate flow-to-stock link score equation
-fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable) -> String {
+/// Generate flow-to-stock link score equation.
+///
+/// The structural inflow/outflow formula has no per-element equation
+/// text -- the compiler applies it element-wise when the stock and flow
+/// are arrayed -- so the result is `Equation::Scalar` for a scalar stock
+/// and `Equation::ApplyToAll(stock_dims, _)` for an arrayed stock (the
+/// shared formula evaluated per element).
+fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable) -> Equation {
     // Check if this flow is an inflow or outflow
     let is_inflow = if let Variable::Stock { inflows, .. } = stock_var {
         inflows.iter().any(|f| f.as_str() == flow)
@@ -776,22 +825,30 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
     );
 
     // Return 0 for the first two timesteps when we don't have enough history for second-order differences
-    format!(
+    let text = format!(
         "if \
             (TIME = INITIAL_TIME) OR (PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME) \
             then 0 \
             else {sign}ABS(SAFEDIV({numerator}, {denominator}, 0))"
-    )
+    );
+    link_score_equation_for_target(text, stock_var)
 }
 
-/// Generate stock-to-flow link score equation
+/// Generate stock-to-flow link score equation.
+///
+/// Like the auxiliary-to-auxiliary path but the source is known to be a
+/// stock. An `Ast::Arrayed` (per-element-equation) flow falls through to
+/// a `"0"` placeholder partial today; Phase 1 Task 2 replaces it with
+/// real per-element partials. The result variant matches the flow's
+/// shape (`Equation::Scalar` for a scalar flow, `Equation::ApplyToAll`
+/// for an arrayed flow).
 fn generate_stock_to_flow_equation(
     stock: &Ident<Canonical>,
     flow: &Ident<Canonical>,
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
     flow_var: &Variable,
-) -> String {
+) -> Equation {
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
 
@@ -838,28 +895,9 @@ fn generate_stock_to_flow_equation(
     // Δstock[elem], not the variable-level Δstock; otherwise the
     // SAFEDIV captures the wrong source delta (same bug class as the
     // auxiliary-to-auxiliary path -- see `shape_aware_source_ref`).
-    let flow_diff = format!("({flow} - PREVIOUS({flow}))", flow = flow.as_str());
     let stock_source_q = shape_aware_source_ref(stock.as_str(), shape);
-    let stock_diff = format!("({stock_source_q} - PREVIOUS({stock_source_q}))");
-    let partial_change = format!(
-        "(({partial_eq}) - PREVIOUS({flow}))",
-        partial_eq = partial_eq,
-        flow = flow.as_str()
-    );
-
-    let abs_part = format!("ABS(SAFEDIV({partial_change}, {flow_diff}, 0))");
-    let sign_part = format!("SIGN(SAFEDIV({partial_change}, {stock_diff}, 0))");
-
-    // Return 0 at the initial timestep when PREVIOUS values don't exist yet
-    format!(
-        "if \
-            (TIME = INITIAL_TIME) \
-            then 0 \
-            else if \
-                ({flow_diff} = 0) OR ({stock_diff} = 0) \
-                then 0 \
-                else {abs_part} * {sign_part}"
-    )
+    let text = link_score_guard_form(&partial_eq, flow.as_str(), &stock_source_q);
+    link_score_equation_for_target(text, flow_var)
 }
 
 /// Resolve the link-score variable name a downstream consumer (loop

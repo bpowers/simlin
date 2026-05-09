@@ -26,7 +26,7 @@ fn test_model_ltm_variables_generates_scores() {
 
     for var in &ltm.vars {
         assert!(
-            !var.equation.is_empty(),
+            !var.equation.source_text().is_empty(),
             "var {} should have non-empty equation",
             var.name
         );
@@ -869,22 +869,21 @@ fn fixed_index_link_score_denominator_uses_fixed_element() {
         .iter()
         .find(|v| v.name == fixed_name)
         .expect("expected FixedIndex(nyc) link score");
+    let fixed_eq = fixed.equation.source_text();
 
     // The denominator that drives the SIGN of the link score must
     // reference `pop[nyc]` (the FixedIndex element kept live in the
     // partial), not the bare variable-level `pop`.
     assert!(
-        fixed.equation.contains("(pop[nyc] - PREVIOUS(pop[nyc]))"),
-        "FixedIndex link score denominator must reference pop[nyc]; got: {}",
-        fixed.equation
+        fixed_eq.contains("(pop[nyc] - PREVIOUS(pop[nyc]))"),
+        "FixedIndex link score denominator must reference pop[nyc]; got: {fixed_eq}",
     );
     // It must NOT contain the unsuffixed `(pop - PREVIOUS(pop))` form,
     // which under A2A becomes `Δpop[r]` and normalizes by the wrong
     // source.
     assert!(
-        !fixed.equation.contains("(pop - PREVIOUS(pop))"),
-        "FixedIndex link score must not normalize by the unsuffixed Δpop; got: {}",
-        fixed.equation
+        !fixed_eq.contains("(pop - PREVIOUS(pop))"),
+        "FixedIndex link score must not normalize by the unsuffixed Δpop; got: {fixed_eq}",
     );
 
     // The Bare variant must still use the unsuffixed source delta --
@@ -896,10 +895,10 @@ fn fixed_index_link_score_denominator_uses_fixed_element() {
         .iter()
         .find(|v| v.name == bare_name)
         .expect("expected Bare link score");
+    let bare_eq = bare.equation.source_text();
     assert!(
-        bare.equation.contains("(pop - PREVIOUS(pop))"),
-        "Bare link score must keep its unsuffixed Δpop denominator; got: {}",
-        bare.equation
+        bare_eq.contains("(pop - PREVIOUS(pop))"),
+        "Bare link score must keep its unsuffixed Δpop denominator; got: {bare_eq}",
     );
 }
 
@@ -1069,7 +1068,7 @@ fn mixed_scalar_loop_score_refs_resolve_to_emitted_names() {
     );
 
     for lsv in &loop_score_vars {
-        let refs = extract_quoted_refs(&lsv.equation);
+        let refs = extract_quoted_refs(&lsv.equation.source_text());
         for r in &refs {
             assert!(
                 emitted.contains(r),
@@ -1429,7 +1428,7 @@ fn loop_score_picks_emitted_shape_when_only_wildcard_exists() {
     // Every link-score reference inside a loop_score equation must
     // resolve to a variable that was actually emitted.
     for lsv in &loop_score_vars {
-        let refs = extract_quoted_refs(&lsv.equation);
+        let refs = extract_quoted_refs(&lsv.equation.source_text());
         for r in &refs {
             assert!(
                 emitted.contains(r),
@@ -1495,7 +1494,7 @@ fn cross_dim_link_score_equations_match_between_exhaustive_and_discovery() {
 
     let by_name = |vars: &[LtmSyntheticVar]| -> std::collections::HashMap<String, String> {
         vars.iter()
-            .map(|v| (v.name.clone(), v.equation.clone()))
+            .map(|v| (v.name.clone(), v.equation.source_text()))
             .collect()
     };
     let ex_eqs = by_name(&ltm_ex.vars);

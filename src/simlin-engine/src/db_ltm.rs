@@ -51,33 +51,29 @@ pub(super) fn ltm_module_idents(
     module_idents
 }
 
-/// Parse an LTM synthetic variable's equation string.
+/// Parse an LTM synthetic variable's equation.
 ///
-/// Creates a transient `datamodel::Variable::Aux`, runs it through
-/// `parse_var` (which invokes `BuiltinVisitor` and
-/// `instantiate_implicit_modules`), and returns the parsed variable plus
-/// any implicit helper/module variables generated while parsing.
+/// Creates a transient `datamodel::Variable::Aux` carrying `equation`
+/// verbatim, runs it through `parse_var` (which invokes `BuiltinVisitor`
+/// and `instantiate_implicit_modules`), and returns the parsed variable
+/// plus any implicit helper/module variables generated while parsing.
 ///
-/// When `var_dimensions` is non-empty, the equation is wrapped in
-/// `Equation::ApplyToAll` so the compiler expands it across all
-/// dimension elements. When empty, the equation is scalar (original
-/// behavior).
+/// `equation` already carries its own dimensionality: `Equation::Scalar`
+/// for scalar LTM vars, `Equation::ApplyToAll` for A2A vars (so the
+/// compiler expands the formula across all dimension elements), and
+/// `Equation::Arrayed` for per-element link-score equations -- the
+/// `datamodel::Equation` -> `Ast` conversion in `variable.rs` produces
+/// the matching `Ast` variant for each.
 pub(super) fn parse_ltm_equation(
     var_name: &str,
-    equation: &str,
-    var_dimensions: &[String],
+    equation: &datamodel::Equation,
     dims: &[datamodel::Dimension],
     units_ctx: &crate::units::Context,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
 ) -> ParsedVariableResult {
-    let eqn = if var_dimensions.is_empty() {
-        datamodel::Equation::Scalar(equation.to_string())
-    } else {
-        datamodel::Equation::ApplyToAll(var_dimensions.to_vec(), equation.to_string())
-    };
     let dm_var = datamodel::Variable::Aux(datamodel::Aux {
         ident: canonicalize(var_name).into_owned(),
-        equation: eqn,
+        equation: equation.clone(),
         documentation: String::new(),
         units: None,
         gf: None,
@@ -105,21 +101,13 @@ pub(super) fn parse_ltm_equation(
 pub(super) fn parse_ltm_equation_for_model_with_ids(
     db: &dyn Db,
     var_name: &str,
-    equation: &str,
-    var_dimensions: &[String],
+    equation: &datamodel::Equation,
     project: SourceProject,
     module_idents: &HashSet<Ident<Canonical>>,
 ) -> ParsedVariableResult {
     let dims = project_datamodel_dims(db, project);
     let units_ctx = project_units_context(db, project);
-    parse_ltm_equation(
-        var_name,
-        equation,
-        var_dimensions,
-        dims,
-        units_ctx,
-        Some(module_idents),
-    )
+    parse_ltm_equation(var_name, equation, dims, units_ctx, Some(module_idents))
 }
 
 pub(super) fn parse_ltm_var_with_ids(
@@ -132,7 +120,6 @@ pub(super) fn parse_ltm_var_with_ids(
         db,
         &ltm_var.name,
         &ltm_var.equation,
-        &ltm_var.dimensions,
         project,
         module_idents,
     )
@@ -189,7 +176,6 @@ pub fn model_ltm_implicit_var_info(
         let parsed = parse_ltm_equation(
             &ltm_var.name,
             &ltm_var.equation,
-            &ltm_var.dimensions,
             dims,
             units_ctx,
             Some(&module_idents),
@@ -263,14 +249,7 @@ pub fn compile_ltm_var_fragment(
 ) -> Option<VarFragmentResult> {
     let lsv = link_score_equation_text(db, link_id, model, project).as_ref()?;
 
-    compile_ltm_equation_fragment(
-        db,
-        &lsv.name,
-        &lsv.equation,
-        &lsv.dimensions,
-        model,
-        project,
-    )
+    compile_ltm_equation_fragment(db, &lsv.name, &lsv.equation, model, project)
 }
 
 /// Compute the per-shape link score equation text for a single causal link.
@@ -375,7 +354,7 @@ pub fn link_score_equation_text_shaped<'db>(
 
         return Some(LtmSyntheticVar {
             name: var_name,
-            equation,
+            equation: datamodel::Equation::Scalar(equation),
             dimensions: vec![],
         });
     }
@@ -404,6 +383,12 @@ pub fn link_score_equation_text_shaped<'db>(
         all_vars.insert(from_ident.clone(), fv.clone());
     }
     all_vars.insert(to_ident.clone(), to_var.clone());
+    // The generator returns the equation already tagged with the target's
+    // dimensionality (`Scalar`, `ApplyToAll`, or -- once Phase 1 Task 2
+    // lands -- `Arrayed`). `dimensions` is left empty here; the emission
+    // loop in `model_ltm_variables` overwrites both `dimensions` and the
+    // equation's dimension names with the link-score-dimensions policy
+    // result (`emit_per_shape_link_scores`).
     let equation = crate::ltm_augment::generate_link_score_equation_for_link(
         &from_ident,
         &to_ident,
@@ -420,21 +405,98 @@ pub fn link_score_equation_text_shaped<'db>(
     })
 }
 
-/// Compile an arbitrary LTM equation string to symbolic bytecodes.
+/// The dimension names an LTM `Equation` carries (datamodel casing),
+/// or `&[]` for a scalar one. These are the names whose product gives
+/// the variable's layout slot count, and the same names `compute_layout`
+/// reads from `LtmSyntheticVar::dimensions` -- the two are kept in sync
+/// at every `LtmSyntheticVar` construction site.
+fn ltm_equation_dimensions(equation: &datamodel::Equation) -> &[String] {
+    match equation {
+        datamodel::Equation::Scalar(_) => &[],
+        datamodel::Equation::ApplyToAll(dims, _) | datamodel::Equation::Arrayed(dims, _, _, _) => {
+            dims
+        }
+    }
+}
+
+/// Build the `Equation` variant an `LtmSyntheticVar` should carry given
+/// its synthetic equation *text* and dimension list: empty `dimensions`
+/// ⇒ `Equation::Scalar`, non-empty ⇒ `Equation::ApplyToAll` over exactly
+/// those names. (`Equation::Arrayed` link-score equations are built
+/// directly by the augmentation layer, not via this helper.)
+fn ltm_synthetic_equation(text: String, dimensions: &[String]) -> datamodel::Equation {
+    if dimensions.is_empty() {
+        datamodel::Equation::Scalar(text)
+    } else {
+        datamodel::Equation::ApplyToAll(dimensions.to_vec(), text)
+    }
+}
+
+/// Reduce an LTM equation to a scalar one, keeping the equation text.
+/// Used by the legacy `(from, to)`-keyed link-score path
+/// (`link_score_equation_text`), which always emits a scalar variable
+/// regardless of the target's dimensionality. For an `Equation::Arrayed`,
+/// the first per-element slot's text is used (the legacy path predates
+/// per-element link scores and is only ever compiled for scalar targets
+/// in practice).
+pub(super) fn scalarize_ltm_equation(equation: datamodel::Equation) -> datamodel::Equation {
+    match equation {
+        datamodel::Equation::Scalar(_) => equation,
+        datamodel::Equation::ApplyToAll(_, text) => datamodel::Equation::Scalar(text),
+        datamodel::Equation::Arrayed(_, elements, default, _) => {
+            let text = elements
+                .into_iter()
+                .next()
+                .map(|(_, eqn, _, _)| eqn)
+                .or(default)
+                .unwrap_or_else(|| "0".to_string());
+            datamodel::Equation::Scalar(text)
+        }
+    }
+}
+
+/// Re-tag a link-score `Equation` so its dimension names match `dims`
+/// (the link-score-dimensions policy result the emission loop assigned to
+/// `LtmSyntheticVar::dimensions`). Empty `dims` collapses the equation to
+/// `Scalar`; non-empty `dims` widens a scalar to `ApplyToAll` or
+/// re-targets the dimension names of an existing `ApplyToAll`/`Arrayed`,
+/// preserving the equation text / per-element formulas verbatim.
+fn retarget_ltm_equation_dims(
+    equation: datamodel::Equation,
+    dims: &[String],
+) -> datamodel::Equation {
+    use datamodel::Equation::{ApplyToAll, Arrayed, Scalar};
+    match equation {
+        Scalar(text) | ApplyToAll(_, text) => {
+            if dims.is_empty() {
+                Scalar(text)
+            } else {
+                ApplyToAll(dims.to_vec(), text)
+            }
+        }
+        Arrayed(_, elements, default, apply_default) => {
+            // A per-element link-score equation is only emitted for an
+            // arrayed target, which always carries non-empty target dims.
+            Arrayed(dims.to_vec(), elements, default, apply_default)
+        }
+    }
+}
+
+/// Compile an arbitrary LTM `Equation` to symbolic bytecodes.
 ///
 /// Shared implementation used by `compile_ltm_var_fragment` (link scores)
 /// and the loop/relative score compilation in `assemble_module`. Builds
 /// a mini-context that includes both model variables and implicit vars
 /// synthesized while parsing the LTM equation.
 ///
-/// When `var_dimensions` is non-empty, the equation is compiled as
-/// Apply-to-All (A2A), producing bytecodes spanning
-/// `product(dim_lengths)` slots. When empty, the variable is scalar.
+/// The variant of `equation` determines the variable's slot count: a
+/// `Scalar` equation gets 1 slot; an `ApplyToAll`/`Arrayed` equation
+/// gets `product(dim_lengths)` slots and is compiled with the A2A /
+/// per-element expansion the compiler applies to those variants.
 pub(super) fn compile_ltm_equation_fragment(
     db: &dyn Db,
     var_name: &str,
-    equation: &str,
-    var_dimensions: &[String],
+    equation: &datamodel::Equation,
     model: SourceModel,
     project: SourceProject,
 ) -> Option<VarFragmentResult> {
@@ -452,14 +514,9 @@ pub(super) fn compile_ltm_equation_fragment(
     let units_ctx = project_units_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
 
-    let parsed = parse_ltm_equation(
-        var_name,
-        equation,
-        var_dimensions,
-        dims,
-        units_ctx,
-        Some(&module_idents),
-    );
+    let var_dimensions = ltm_equation_dimensions(equation);
+
+    let parsed = parse_ltm_equation(var_name, equation, dims, units_ctx, Some(&module_idents));
 
     // Check for parse errors
     if parsed
@@ -587,8 +644,8 @@ pub(super) fn compile_ltm_equation_fragment(
         );
     }
 
-    // Compute the LTM variable's size from its dimensions.
-    // Scalar vars get size 1; A2A vars get product(dim_lengths).
+    // Compute the LTM variable's size from the equation's dimension names.
+    // Scalar vars get size 1; A2A/Arrayed vars get product(dim_lengths).
     let var_size: usize = if var_dimensions.is_empty() {
         1
     } else {
@@ -825,7 +882,6 @@ pub(super) fn compile_ltm_equation_fragment(
                         let parent_parsed = parse_ltm_equation(
                             &parent_lsv.name,
                             &parent_lsv.equation,
-                            &parent_lsv.dimensions,
                             dims,
                             units_ctx,
                             Some(&module_idents),
@@ -2817,7 +2873,7 @@ pub fn model_ltm_variables(
             );
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
-                equation,
+                equation: datamodel::Equation::Scalar(equation),
                 dimensions: vec![], // scalar -- one variable per element
             });
         }
@@ -2910,6 +2966,16 @@ pub fn model_ltm_variables(
                 // same compatibility rule.  link_score_dimensions already
                 // implements this for every case, so one assignment suffices.
                 lsv.dimensions = target_dims.clone();
+                // Keep the equation's dimensionality in lockstep with the
+                // `dimensions` field that layout sizing keys off of. The
+                // shaped fn returns a `Scalar`/`ApplyToAll` equation tagged
+                // with the *target's own* dimension names, which equal
+                // `target_dims` for every compatible-dimension edge; for the
+                // (rare) incompatible-dimension arrayed-target edge,
+                // link_score_dimensions returns empty, so we collapse the
+                // equation to scalar here -- matching the pre-existing
+                // behavior where such edges produced a scalar link score.
+                lsv.equation = retarget_ltm_equation_dims(lsv.equation, &target_dims);
                 vars.push(lsv);
             }
         }
@@ -3033,7 +3099,7 @@ pub fn model_ltm_variables(
             &emitted_link_score_names,
         );
         for (name, var) in loop_vars {
-            let equation = match var.get_equation() {
+            let equation_text = match var.get_equation() {
                 Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),
                 _ => String::new(),
             };
@@ -3052,7 +3118,7 @@ pub fn model_ltm_variables(
                 .unwrap_or_default();
             vars.push(LtmSyntheticVar {
                 name: name.to_string(),
-                equation,
+                equation: ltm_synthetic_equation(equation_text, &dimensions),
                 dimensions,
             });
         }
@@ -3104,7 +3170,7 @@ pub fn model_ltm_variables(
             pathway_names.push(path_var_name.clone());
             vars.push(LtmSyntheticVar {
                 name: path_var_name,
-                equation,
+                equation: datamodel::Equation::Scalar(equation),
                 dimensions: vec![],
             });
         }
@@ -3116,7 +3182,7 @@ pub fn model_ltm_variables(
         let equation = generate_max_abs_chain_str(&pathway_names);
         vars.push(LtmSyntheticVar {
             name: composite_name,
-            equation,
+            equation: datamodel::Equation::Scalar(equation),
             dimensions: vec![],
         });
     }

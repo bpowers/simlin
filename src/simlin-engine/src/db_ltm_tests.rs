@@ -83,8 +83,7 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$⁚ltm⁚test_prev_module",
-        "PREVIOUS(producer)",
-        &[],
+        &datamodel::Equation::Scalar("PREVIOUS(producer)".to_string()),
         source_model,
         sync.project,
     )
@@ -132,8 +131,7 @@ fn test_a2a_ltm_equation_fragment_compiles() {
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$\u{205A}ltm\u{205A}test_a2a_link_score",
-        "PREVIOUS(population) * 0.5",
-        &dims,
+        &datamodel::Equation::ApplyToAll(dims.clone(), "PREVIOUS(population) * 0.5".to_string()),
         source_model,
         sync.project,
     )
@@ -259,8 +257,7 @@ fn test_a2a_ltm_previous_per_element() {
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$\u{205A}ltm\u{205A}test_prev_per_elem",
-        "PREVIOUS(population) * 0.5",
-        &dims,
+        &datamodel::Equation::ApplyToAll(dims.clone(), "PREVIOUS(population) * 0.5".to_string()),
         source_model,
         sync.project,
     )
@@ -356,16 +353,15 @@ fn test_stock_to_flow_link_score_handles_apply_to_all() {
     // the flow_equation was "0" (ApplyToAll fell through the Scalar-only
     // match arm). After the fix, the equation should reference the actual
     // flow equation contents (which include "population").
+    let equation_text = lsv.equation.source_text();
     assert!(
-        lsv.equation.contains("population"),
+        equation_text.contains("population"),
         "stock-to-flow link score equation should reference 'population', \
-         but got: {}",
-        lsv.equation
+         but got: {equation_text}",
     );
     assert!(
-        !lsv.equation
-            .starts_with("if (TIME = INITIAL_TIME) then 0 else if")
-            || lsv.equation.contains("population"),
+        !equation_text.starts_with("if (TIME = INITIAL_TIME) then 0 else if")
+            || equation_text.contains("population"),
         "link score equation should not use a trivial '0' partial equation"
     );
 }

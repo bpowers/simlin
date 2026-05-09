@@ -1965,14 +1965,26 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
 
 // ── LTM tracked functions ──────────────────────────────────────────────
 
-/// A single LTM synthetic variable definition (name + equation text).
+/// A single LTM synthetic variable definition (name + equation).
 ///
-/// When `dimensions` is non-empty, this variable is Apply-to-All (A2A)
-/// and occupies `product(dim_lengths)` slots in the layout instead of 1.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+/// `equation` carries its own dimensionality (`Equation::Scalar`,
+/// `Equation::ApplyToAll`, or `Equation::Arrayed`). The redundant
+/// `dimensions` field is retained because layout sizing (`compute_layout`)
+/// and discovery-time offset parsing (`parse_link_offsets`) key off it;
+/// every constructor keeps `equation`'s dimension names in lockstep with
+/// `dimensions`. When `dimensions` is non-empty the variable occupies
+/// `product(dim_lengths)` layout slots instead of 1.
+//
+// `equation: datamodel::Equation` blocks deriving `Eq` (the embedded
+// `GraphicalFunction` carries `f64` points) and unconditional `Debug`
+// (datamodel types only derive `Debug` under `debug-derive`, off in the
+// WASM / pysimlin builds). Salsa only needs `PartialEq` for incrementality;
+// nothing uses this as a hash/set key.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct LtmSyntheticVar {
     pub name: String,
-    pub equation: String,
+    pub equation: datamodel::Equation,
     pub dimensions: Vec<String>,
 }
 
@@ -1985,7 +1997,11 @@ pub struct LtmSyntheticVar {
 /// `compute_rel_loop_scores` normalizes across a partition.  Populated only in
 /// exhaustive LTM mode; discovery mode emits no loop_score variables and
 /// leaves this map empty.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+//
+// `Debug`/`Eq` are conditional/absent for the same reasons as
+// `LtmSyntheticVar` (which it embeds).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
     pub loop_partitions: HashMap<String, Option<usize>>,
@@ -2124,7 +2140,7 @@ pub fn link_score_equation_text<'db>(
 
         return Some(LtmSyntheticVar {
             name: var_name,
-            equation,
+            equation: datamodel::Equation::Scalar(equation),
             dimensions: vec![],
         });
     }
@@ -2150,6 +2166,13 @@ pub fn link_score_equation_text<'db>(
         &to_var,
         &all_vars,
     );
+
+    // This legacy entry always emits a scalar link score (`dimensions`
+    // is unconditionally empty here). If the generator produced an
+    // arrayed variant for an arrayed target, collapse it to a scalar
+    // equation that references the array vars directly -- exactly the
+    // pre-Phase-3 behavior this function reproduces.
+    let equation = db_ltm::scalarize_ltm_equation(equation);
 
     Some(LtmSyntheticVar {
         name: var_name,
@@ -4977,11 +5000,12 @@ pub fn assemble_module(
             // The link_score prefix is always "$⁚ltm⁚link_score⁚" (fixed length).
             //
             // The salsa-cached compile_ltm_var_fragment reads from
-            // link_score_equation_text which returns empty dimensions (dimensions
-            // are set later in model_ltm_variables). For A2A link scores (non-empty
-            // dimensions), we must use compile_ltm_equation_fragment directly with
-            // the ltm_var's dimensions so the equation gets compiled with the correct
-            // A2A expansion.
+            // link_score_equation_text, whose link score equation is always
+            // scalar (per-shape dimensions are applied later in
+            // model_ltm_variables). For per-shape / A2A link scores, use
+            // compile_ltm_equation_fragment directly on this ltm_var's
+            // equation so the (already dimension-tagged) equation gets
+            // compiled with the correct A2A expansion.
             const LINK_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}link_score\u{205A}";
             let fragment_result = if ltm_var.name.starts_with(LINK_SCORE_PREFIX) {
                 if ltm_var.dimensions.is_empty() {
@@ -5006,13 +5030,12 @@ pub fn assemble_module(
                     if has_element_subscript || has_shape_suffix {
                         // Per-shape link score (FixedIndex with [elem], or
                         // Wildcard/DynamicIndex with shape suffix): compile
-                        // directly since the equation text in ltm_var.equation
+                        // directly since the equation in ltm_var.equation
                         // already encodes the shape-specific PREVIOUS wrapping.
                         compile_ltm_equation_fragment(
                             db,
                             &ltm_var.name,
                             &ltm_var.equation,
-                            &ltm_var.dimensions,
                             model,
                             project,
                         )
@@ -5029,34 +5052,26 @@ pub fn assemble_module(
                             db,
                             &ltm_var.name,
                             &ltm_var.equation,
-                            &ltm_var.dimensions,
                             model,
                             project,
                         )
                     }
                 } else {
-                    // A2A link score: compile directly with the correct dimensions
-                    // from model_ltm_variables. Cannot use the salsa-cached path
-                    // because link_score_equation_text returns empty dimensions.
+                    // A2A link score: compile directly. Cannot use the
+                    // salsa-cached path because link_score_equation_text
+                    // emits a scalar equation; this ltm_var's equation is
+                    // the dimension-tagged ApplyToAll/Arrayed variant.
                     compile_ltm_equation_fragment(
                         db,
                         &ltm_var.name,
                         &ltm_var.equation,
-                        &ltm_var.dimensions,
                         model,
                         project,
                     )
                 }
             } else {
                 // Loop scores and relative loop scores: compile directly
-                compile_ltm_equation_fragment(
-                    db,
-                    &ltm_var.name,
-                    &ltm_var.equation,
-                    &ltm_var.dimensions,
-                    model,
-                    project,
-                )
+                compile_ltm_equation_fragment(db, &ltm_var.name, &ltm_var.equation, model, project)
             };
 
             if let Some(result) = fragment_result {
