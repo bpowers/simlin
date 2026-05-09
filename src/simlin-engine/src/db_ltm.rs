@@ -2034,6 +2034,14 @@ fn find_model_output_ports(
 /// reducing builtin to `from` is not checked here -- the loop-link builder
 /// only needs to know to keep both element subscripts; the equation-text
 /// path classifies the reducer.)
+///
+/// This shape-only check is *not* superseded by the aggregate-node reroute:
+/// that reroute (`enumerate_agg_nodes` + `model_element_causal_edges`) only
+/// covers *scalar synthetic* aggs hoisted out of a larger expression. A
+/// whole-RHS arrayed-result reducer (`agg[D1] = SUM(matrix[D1,*])`) is a
+/// *variable-backed* agg whose edges still come from the normal reference
+/// walker, so the loop-link builder still needs this predicate to know to
+/// keep both element subscripts on the `matrix[d1,d2] -> agg[d1]` link.
 fn is_partial_reduce_edge(
     db: &dyn Db,
     source_vars: &HashMap<String, super::SourceVariable>,

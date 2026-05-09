@@ -23,6 +23,7 @@
 - [tech-debt.md](tech-debt.md) -- Known technical debt items with measurement commands
 - [design-plans/](design-plans/) -- Design plans (architecture and phasing for major efforts)
   - [design-plans/2026-04-05-server-rewrite.md](design-plans/2026-04-05-server-rewrite.md) -- Local-first `simlin-serve` binary: filesystem-backed editor + in-process MCP
+  - [design-plans/2026-04-25-ltm-per-ref-elem-graph.md](design-plans/2026-04-25-ltm-per-ref-elem-graph.md) -- Per-reference element causal graph: classify each AST reference by access shape, emit truthful per-reference element edges (includes a post-Phases-1-5 measurement postscript)
   - [design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md](design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md) -- Tiered LTM loop enumeration: variable-level Johnson first, expand only the cross-element subgraph
   - [design-plans/2026-05-09-ltm-503-cross-element-agg.md](design-plans/2026-05-09-ltm-503-cross-element-agg.md) -- Cross-element LTM scoring: per-element arrayed-target partials, element-level cross-element loops, array reducers as aggregate nodes
 - [plans/](plans/README.md) -- Implementation plans (active and completed)

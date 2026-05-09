@@ -4219,20 +4219,29 @@ fn measure_tiered(path: &str) -> TieredMeasurements {
 
 /// Postscript measurement on the cross_element_ltm fixture.
 ///
-/// Pinned numbers (post-#482, post-#448):
+/// Pinned numbers (post-#482, post-#448, post-cross-element-aggregate-scoring;
+/// re-measured 2026-05-09 -- see `docs/design-plans/2026-04-25-ltm-per-ref-elem-graph.md`'s
+/// "Re-measurement after the cross-element aggregate-scoring work" section):
 /// - var_scc = 5 (population, births, migration_pressure, migration_in,
 ///   migration_out are in one variable-level SCC; total_population is
 ///   acyclic). The births flow's structural stock-edge plus its
 ///   `population` reference closes the population<->births A2A pair.
-/// - elem_scc = 10 (5 vars * 2 elements: NYC, Boston).
-/// - var_circuits: small finite count of variable-level cycles.
-/// - elem_circuits_legacy: 8 (matches the post-Phase-4 count from the
-///   2026-04-25 design plan postscript).
-/// - fast_path: 1 (the population <-> births A2A reinforcing cycle).
-/// - slow_path: matches the cross-element cycles induced by
-///   migration_pressure's FixedIndex references.
-/// - slow_path_scc: <= elem_scc; only the cross-element subgraph nodes
-///   participate.
+/// - elem_scc = 10 (5 vars * 2 elements: NYC, Boston). `total_population =
+///   SUM(population[*])` is a *whole-RHS* reducer, so it is a
+///   variable-backed aggregate node -- no synthetic `$⁚ltm⁚agg⁚{n}` is
+///   minted and the element graph for that edge is unchanged.
+/// - var_circuits = 3 (the small finite count of variable-level cycles).
+/// - elem_circuits_legacy = 8 (the per-reference walker trimmed the
+///   spurious FixedIndex cross-edges that the pre-Phase-2 classifier
+///   emitted, so this is down from 12; the aggregate-node work didn't
+///   change it because the only reducer here is whole-RHS).
+/// - fast_path = 1 (the population <-> births A2A reinforcing cycle).
+/// - slow_path = 6 (the cross-element migration circuits, now scored on
+///   the element-level path with subscripted link-score refs rather than
+///   the diagonal A2A scores; each cross-element circuit is its own
+///   scalar loop-score var).
+/// - slow_path_scc = 8 (<= elem_scc; only the cross-element subgraph
+///   nodes participate).
 #[test]
 fn measurement_postscript_cross_element_ltm() {
     let m = measure_tiered("../../test/cross_element_ltm/cross_element.stmx");
@@ -4260,11 +4269,15 @@ fn measurement_postscript_cross_element_ltm() {
 
 /// Postscript measurement on the arrayed_population_ltm fixture.
 ///
-/// Pinned numbers (post-#482, post-#448):
+/// Pinned numbers (post-#482, post-#448, post-cross-element-aggregate-scoring;
+/// re-measured 2026-05-09):
 /// - Pure-A2A model with 2 cycles per region (births, deaths) over 3
-///   regions. Variable-level circuits = 2 (births reinforcing, deaths
-///   balancing). Legacy element-level circuits = 6 (2 cycles * 3
-///   regions). Tiered enumerator emits 2 fast-path cycles, 0 slow-path.
+///   regions, no reducers and no per-element-equation targets ⇒ no
+///   aggregate nodes ⇒ the element graph is unchanged by the
+///   cross-element aggregate-scoring work. var_scc = 3, elem_scc = 3.
+///   Variable-level circuits = 2 (births reinforcing, deaths balancing).
+///   Legacy element-level circuits = 6 (2 cycles * 3 regions). Tiered
+///   enumerator emits 2 fast-path cycles, 0 slow-path, slow_path_scc = 0.
 #[test]
 fn measurement_postscript_arrayed_population_ltm() {
     let m = measure_tiered("../../test/arrayed_population_ltm/arrayed_population.stmx");

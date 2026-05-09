@@ -216,9 +216,26 @@ as a separator:
 | Variable | Pattern |
 |----------|---------|
 | Link score | `$⁚ltm⁚link_score⁚{from}→{to}` |
+| Link score (per source element) | `$⁚ltm⁚link_score⁚{from}[{elem}]→{to}` |
+| Link score (per target element) | `$⁚ltm⁚link_score⁚{from}→{to}[{elem}]` |
+| Aggregate node | `$⁚ltm⁚agg⁚{n}` |
 | Pathway score | `$⁚ltm⁚path⁚{port}⁚{index}` |
 | Composite score | `$⁚ltm⁚composite⁚{port}` |
 | Loop score | `$⁚ltm⁚loop_score⁚{loop_id}` |
+
+The per-element link-score names ride the element on the `from` side (an
+arrayed-source → scalar-target reducer edge, one scalar variable per source
+element) or the `to` side (a scalar-source → arrayed-target edge, one scalar
+variable per target element). See "Aggregate Nodes" and "Link Score
+Classification" below.
+
+`$⁚ltm⁚agg⁚{n}` is a synthetic auxiliary that stands in for a maximal inlined
+array-reducer subexpression: an aux whose equation is the canonical reducer
+subexpr (`SUM(pop[*])`, `MEAN(...)`), conceptually inserted between the
+reducer's array-element sources and the consumers that referenced it inline.
+Whole-RHS-scalar reducers are *not* synthesized -- the variable whose entire
+dt-equation is the reducer (`total_population = SUM(population[*])`) *is* the
+aggregate node. See "Aggregate Nodes" below.
 
 Relative loop scores are not emitted as synthetic variables. They are computed
 post-simulation by `ltm_post::compute_rel_loop_scores` from `loop_score` result
@@ -543,10 +560,12 @@ Each reference is classified by access shape:
 | scalar      | arrayed     | Bare             | `from -> to[d]` for each target element d    |
 | arrayed     | scalar      | Bare             | `from[d] -> to` for each source element d    |
 | arrayed     | arrayed     | Bare             | `from[d] -> to[d]` per shared element        |
-| arrayed     | any         | Wildcard         | `from[d] -> to[e]` full cross-product        |
+| arrayed     | any         | Wildcard *(in a hoisted reducer)*   | `from[d] -> $⁚ltm⁚agg⁚n` (one per source elem) + `$⁚ltm⁚agg⁚n -> to[e]` (one per target elem / scalar) -- O(N+M) |
+| arrayed     | any         | Wildcard *(conservative slice / not hoisted)*   | `from[d] -> to[e]` full cross-product (N×M)  |
 | arrayed     | scalar      | FixedIndex(elem) | `from[elem] -> to` (one edge)                |
 | arrayed     | arrayed     | FixedIndex(elem) | `from[elem] -> to[d]` for each target element d |
-| arrayed     | any         | DynamicIndex     | conservative full cross-product              |
+| arrayed     | any         | DynamicIndex *(in a hoisted reducer)*    | rerouted through `$⁚ltm⁚agg⁚n` (as Wildcard above) |
+| arrayed     | any         | DynamicIndex *(otherwise, e.g. `arr[i+1]`)*    | conservative full cross-product              |
 
 `Bare` covers both bare `Expr2::Var` references (scalar dep or A2A
 same-element). `FixedIndex` carries the resolved element subscripts from a
@@ -554,13 +573,34 @@ literal-index `Subscript` node. `Wildcard` covers reducer patterns
 (`SUM(x[*])`); `DynamicIndex` covers any subscript with non-literal indices
 (`@N`, `Range`, `StarRange`, or arbitrary `Expr`).
 
+**Aggregate-node reroute.** A `Wildcard`/`DynamicIndex` reference inside a
+*maximal inlined reducer subexpression* is not expanded as an all-pairs
+cross-product. Instead `model_element_causal_edges` consults
+`enumerate_agg_nodes` (`ltm_agg.rs`), which hoists each such subexpression into
+a synthetic `$⁚ltm⁚agg⁚{n}` node, and routes `source[d] → $⁚ltm⁚agg⁚{n}` (one
+edge per source element) and `$⁚ltm⁚agg⁚{n} → target[e]` (one per target
+element, or a single scalar edge), so the per-reducer cost is O(N+M) edges
+rather than O(N×M). See "Aggregate Nodes" below. Two cases are *not* hoisted
+(tracked as tech debt; the conservative cross-product stays in place): a
+reducer over an explicit slice used as a sub-expression
+(`x[r] = ... + SUM(pop[NYC, *])`, the slice pinning can't ride the agg's source
+descriptor yet -- GH #514), and a bare non-literal index (`arr[i+1]`, which is
+a dynamic reference, not a reducer). Variable-backed aggs
+(`total_population = SUM(population[*])`) are already real nodes -- their edges
+come from the normal arrayed→scalar / scalar→arrayed reference walker -- so they
+are not rerouted.
+
 Edges from multiple reference sites in the same target are unioned. For
 `relative_pop[R] = population / population[NYC]`, the bare numerator emits
 diagonal edges `population[d] -> relative_pop[d]` and the fixed-index
 denominator emits broadcast edges `population[NYC] -> relative_pop[d]` --
 2N - 1 unique edges, not N^2. For `share[R] = pop / SUM(pop[*])`, the bare
-numerator and the wildcard reducer each emit their own edge sets; the
-result is the union (N diagonals plus N^2 cross-pairs, deduplicated).
+numerator emits the N diagonals `pop[d] -> share[d]` and the hoisted
+`SUM(pop[*])` reducer emits the N `pop[d] -> $⁚ltm⁚agg⁚0` edges plus the N
+`$⁚ltm⁚agg⁚0 -> share[d]` edges -- 3N edges, not N + N² (and as the source
+dimension grows relative to the target's, or as more consumers share the
+reducer, the gap widens: an 8-region `share` model goes from 80 element edges
+to 40).
 
 Structural flow-to-stock edges (an inflow or outflow's variable name does
 not appear in the stock's equation, which holds only the initial value)
@@ -568,9 +608,10 @@ are emitted as same-element diagonals without AST consultation.
 
 Multidimensional subscripts where some indices are literal and others are
 wildcards (e.g., `source[NYC, *]`) are conservatively classified as
-`Wildcard`. A future refinement could honor partial-fixed semantics; the
-overhead is bounded today because such patterns are uncommon in real
-models.
+`Wildcard` and -- not being hoisted as an agg yet (GH #514) -- still expand to
+the full cross-product. A future refinement could honor partial-fixed
+semantics; the overhead is bounded today because such patterns are uncommon in
+real models.
 
 Stock names are similarly expanded: `population` with dimension `Region`
 becomes `population[NYC]`, `population[Boston]`, etc. When no variables in
@@ -582,7 +623,12 @@ classifier that collapsed every reference between a `(from, to)` pair to a
 single kind. That collapse over-expanded fixed-index references to N^2
 edges (resolving tech-debt #20) and forced the link-score partial equation
 to wrap every reference uniformly in `PREVIOUS()`, breaking targets that
-mixed bare and reducer references (resolving tech-debt #26). The
+mixed bare and reducer references (resolving tech-debt #26). Reducer
+references went through a brief intermediate stage -- a per-shape
+`$⁚ltm⁚link_score⁚{from}→{to}⁚wildcard` / `…⁚dynamic` variant -- which the
+aggregate-node treatment then made obsolete and retired: the lumped reducer
+link score is decomposed into the chain `source[d] → $⁚ltm⁚agg⁚{n} → target`,
+each link of which has a real per-element score (see "Aggregate Nodes"). The
 post-refactor measurements in
 `docs/design-plans/2026-04-25-ltm-per-ref-elem-graph.md` show that the
 element-graph SCC sizes that previously drove tech-debt #25's auto-flip
@@ -591,19 +637,82 @@ though `MAX_LTM_SCC_NODES = 50` was retained because WRLD3-class models
 trip the gate from variable-level cycle structure rather than
 element-graph artifacts.
 
+### Aggregate Nodes
+
+An *aggregate node* is the conceptual stand-in for an inlined array-reducer
+subexpression, mirroring how the LTM papers handle macros like `DELAY3` and
+`SMOOTH`: the aggregation has hidden internal structure, so causality is
+routed *through* it rather than scored as one lumped link.
+
+`enumerate_agg_nodes` (salsa-tracked, `ltm_agg.rs`) walks every variable's
+`Expr2` AST left-to-right depth-first and identifies each maximal reducer
+subexpression (`SUM`, `MEAN`, `MIN`, `MAX`, `STDDEV`, `RANK`, `SIZE` over an
+array view). AST-identical subexpressions (keyed by canonical printed equation
+text, since `Expr2` is not `Eq`) dedupe to one node. Two kinds:
+
+- **Synthetic** (`is_synthetic == true`): the reducer is a *sub-expression* of
+  a larger equation (`share[r] = pop[r] / SUM(pop[*])`). A `$⁚ltm⁚agg⁚{n}`
+  auxiliary is minted whose dt-equation is exactly the reducer.
+  `model_ltm_variables` emits the aux plus two link-score families:
+  - `source[d] → $⁚ltm⁚agg⁚{n}` -- one scalar `$⁚ltm⁚link_score⁚{from}[{d}]→{agg}`
+    per source element. The agg's *own* equation is the reducer, so the
+    `Linear`/`Nonlinear`/`Constant` classification from `classify_reducer`
+    applies directly (varying `from[d]` moves the agg by exactly its own delta
+    regardless of what else the reducer combines).
+  - `$⁚ltm⁚agg⁚{n} → target` -- the partial of `target`'s equation with `agg`
+    held live, with every hoisted reducer subexpression in `target` first
+    textually substituted by its agg name (so `agg` appears where `SUM(...)`
+    was, and any other hoisted reducer becomes `PREVIOUS(agg_j)`). For an
+    arrayed `target` this is one scalar `$⁚ltm⁚link_score⁚{agg}→{to}[{e}]` per
+    target element; for a scalar `target`, a single `$⁚ltm⁚link_score⁚{agg}→{to}`.
+
+  A loop running through the inlined reducer therefore traverses
+  `… → from[d] → $⁚ltm⁚agg⁚{n} → to[e] → …`, and the loop-score equation
+  composes the two halves by the chain rule -- recovering each source element's
+  fractional contribution to the aggregate's velocity, exactly the factor that
+  matters when elements have very different magnitudes. **Model equations are
+  not rewritten**; the simulation evaluates the inline reducer, and the agg aux
+  evaluates to the same value.
+
+- **Variable-backed** (`is_synthetic == false`): the reducer is the *entire*
+  dt-equation of a scalar or apply-to-all variable (`total_population = SUM(pop[*])`,
+  `row_sum[D1] = SUM(matrix[D1,*])`). That variable *is* the aggregate node;
+  no synthetic is minted, and its edges to/from come from the normal
+  arrayed→scalar / scalar→arrayed reference walker. (`row_sum[D1] = SUM(matrix[D1,*])`
+  -- a whole-RHS *partial* reduce -- carries its result-axis dims on the agg
+  descriptor, but the element-graph reroute still leaves the conservative
+  cross-product in place for the partial-reduce edge, since the edges to a real
+  variable node already exist.)
+
+**Loop reporting trims agg nodes.** `$⁚ltm⁚agg⁚{n}` nodes don't appear in the
+user-facing loop list -- like the internal stocks of `DELAY3`/`SMOOTH` in the
+papers, they're machinery, not a variable the modeler authored. The discovery
+and exhaustive paths report each `FoundLoop` / `Loop` with the synthetic agg
+nodes trimmed out of the node sequence (the loop-score equation, however, is
+the product of the *un-trimmed* link-score chain, so the agg's two halves are
+both factored in). This resolves GH #503: a cross-element loop through a
+reducer is no longer normalized by the wrong (diagonal A2A) link score; the
+denominator is naturally Δ(aggregate).
+
 ### Link Score Classification
 
-Three categories of element-level link scores:
+Categories of element-level link scores:
 
-**A2A same-dimension** and **scalar-to-arrayed**: The standard ceteris-paribus
-link score equation is generated once with dimensions on the `LtmSyntheticVar`.
-The simulation engine evaluates it per element automatically via A2A expansion.
-These appear in results as a single variable occupying N slots (one per element).
+**A2A same-dimension** and **scalar-to-arrayed (per element)**: For an A2A
+edge, the standard ceteris-paribus equation is generated once with dimensions
+on the `LtmSyntheticVar`; the simulation engine evaluates it per element via
+A2A expansion (one variable, N slots). For a scalar-source → arrayed-target
+edge, one *scalar* `$⁚ltm⁚link_score⁚{from}→{to}[{elem}]` is emitted per target
+element (the element rides on the `to` side); a single Bare-A2A variable would
+be undiscoverable because the discovery parser would invent a `{from}[{elem}]`
+node that doesn't match the scalar source's bare node.
 
-**Arrayed-to-scalar (cross-dimensional)**: When an arrayed source feeds a scalar
-target through a reducing function, the link represents how each source element
-contributes to the scalar output. `classify_reducer` in `ltm_augment.rs` walks
-the target's AST to find the reducing builtin and classify it:
+**Arrayed-to-scalar (cross-dimensional / whole-RHS reducer)**: When an arrayed
+source feeds a scalar (or partially-collapsed) target through a reducing
+function that is the target's *entire* equation -- the variable-backed
+aggregate-node case -- each source element gets its own scalar link score.
+`classify_reducer` in `ltm_augment.rs` walks the target's AST to find the
+reducing builtin and classify it:
 
 | Reducer kind | Functions | Equation strategy |
 |-------------|-----------|-------------------|
@@ -613,7 +722,23 @@ the target's AST to find the reducing builtin and classify it:
 
 `generate_element_to_scalar_equation` produces N separate scalar link score
 variables (one per source element), each with its own equation isolating that
-element's contribution.
+element's contribution. (Arrayed-result reducers -- `agg[D1] = SUM(matrix[D1,*])`
+-- are supported too: each `(target_element, source_slice)` pair gets a scalar
+partial-reduce link score `$⁚ltm⁚link_score⁚{from}[{d1,d2}]→{to}[{d1}]`.)
+
+**Inlined reducer (synthetic aggregate node)**: When the reducer is a
+*sub-expression* of a larger equation, the link from the array elements to the
+consumer is *not* one lumped score. The reducer is hoisted into `$⁚ltm⁚agg⁚{n}`
+and the link is the chain `source[d] → $⁚ltm⁚agg⁚{n} → target` -- the
+`source[d] → agg` half uses the same `classify_reducer` machinery (the agg's
+equation *is* the reducer), and the `agg → target` half is a plain Bare partial
+of `target`'s equation with the reducer subexpr AST-substituted by the agg
+name. See "Aggregate Nodes" above.
+
+**FixedIndex (per source element)**: A literal-index reference `from[NYC]`
+inside `target` gets its own scalar `$⁚ltm⁚link_score⁚{from}[{nyc}]→{to}` (one
+per literal element referenced, expanding to the target's dims if the target is
+arrayed); the partial holds `from[nyc]` live and wraps the rest in `PREVIOUS`.
 
 ### Loop Scores
 
@@ -632,9 +757,11 @@ element-level enumeration is needed:
   `DynamicIndex` reference, or the cycle mixes scalar and arrayed nodes,
   or the arrayed nodes don't share a dimension list. These cycles drive
   the slow-path subgraph: the element graph restricted to the variables
-  participating in such cycles. Johnson runs on this restricted subgraph,
-  and the results flow through the same per-circuit grouping logic the
-  legacy `build_element_level_loops` uses.
+  participating in such cycles, *with synthetic `$⁚ltm⁚agg⁚{n}` nodes
+  kept* (a cross-element loop through a hoisted reducer genuinely traverses
+  the agg, so dropping it would hide the loop). Johnson runs on this
+  restricted subgraph, and the results flow through the same per-circuit
+  grouping logic the legacy `build_element_level_loops` uses.
 
 Slow-path element-level circuits are grouped by their variable-level node
 sequence (strip subscripts, join) to distinguish A2A loops from mixed loops:
@@ -648,28 +775,49 @@ loop scores are derived post-simulation per-element by `compute_rel_loop_scores`
 consumers (e.g. `libsimlin::analysis`), normalizing each element's loop score
 against the per-element partition sum.
 
-**Mixed loops**: Circuits containing scalar nodes or with inconsistent
-variable-level structures. Each circuit becomes its own scalar `Loop` with a
-unique ID. This handles cross-element feedback paths (e.g.,
-`population[NYC] -> migration -> population[Boston] -> migration -> population[NYC]`).
+**Cross-element / mixed loops**: Circuits containing scalar nodes or with
+inconsistent variable-level structures. Each circuit becomes its own scalar
+`Loop` with a unique ID. A loop that genuinely visits distinct elements
+(`pop[nyc] → mp[boston] → mi[nyc] → pop[nyc]`) keeps the element subscripts on
+its `Link.from` / `Link.to` strings, and `classify_cycle` /
+`build_element_level_loops` produce a loop-score equation that references the
+*subscripted* link scores along the actual path
+(`"$⁚ltm⁚link_score⁚{from}→{to}"[e]` for a per-element slot of an A2A link
+score, or the per-element scalar `$⁚ltm⁚link_score⁚{from}[{e}]→{to}` /
+`$⁚ltm⁚link_score⁚{from}→{to}[{e}]` form) -- not the diagonal A2A scores the
+loop doesn't visit. A loop running through an inlined reducer traverses the
+synthetic agg node (`… → from[d] → $⁚ltm⁚agg⁚{n} → to[e] → …`); the agg is
+trimmed from the *reported* node sequence but its two link-score halves are
+factored into the loop score (see "Aggregate Nodes"). Recovered cross-agg loops
+(a loop that hops one inlined reducer per element) are capped at
+`MAX_AGG_PETALS` per agg to bound the combinatorial blowup (GH #515).
 
 ### Discovery Mode
 
 When `ltm_discovery_mode = true`, element-level discovery proceeds as:
 
-1. `model_ltm_variables` generates link score variables for all edges. A2A link
-   scores occupy N slots; cross-dimensional scores are N separate scalar
-   variables.
+1. `model_ltm_variables` generates link score variables for all edges: A2A link
+   scores occupy N slots; an arrayed-source → scalar-target reducer is N
+   per-source-element scalar `$⁚ltm⁚link_score⁚{from}[{d}]→{to}` variables; a
+   scalar-source → arrayed-target edge is N per-target-element scalar
+   `$⁚ltm⁚link_score⁚{from}→{to}[{e}]` variables; an inlined reducer is the
+   `$⁚ltm⁚agg⁚{n}` aux plus its two link-score families.
 2. Post-simulation, `discover_loops_with_graph` receives the `LtmSyntheticVar`
    list and datamodel dimensions. `parse_link_offsets` expands A2A link score
    slots into per-element edges: for each A2A link score at offset O with
    dimension of size N, it emits N `LinkOffset` entries at offsets O, O+1, ...,
-   O+N-1 with element-subscripted from/to names.
+   O+N-1 with element-subscripted from/to names. Per-element scalar link scores
+   (element on the `from` *or* the `to` side) and agg-hop link scores
+   (`$⁚ltm⁚agg⁚{n}` on either end) ride through `parse_link_offsets`'s
+   `[`-in-name single-passthrough branch unchanged -- the element / agg name is
+   already in the variable name. A Bare/FixedIndex collision on the same
+   expanded element key is broken Bare-first.
 3. The `SearchGraph` is built from these element-level link offsets. Element-level
-   stocks (expanded from `model_element_causal_edges`) serve as DFS starting
-   points.
+   stocks (expanded from `model_element_causal_edges`, which routes inlined
+   reducers through their `$⁚ltm⁚agg⁚{n}` nodes) serve as DFS starting points.
 4. Discovered element-level loops are grouped and classified identically to
-   exhaustive mode via `build_element_level_loops`.
+   exhaustive mode via `build_element_level_loops`; the synthetic agg nodes are
+   trimmed from each reported `FoundLoop`'s node sequence.
 
 ## Current Limitations
 
