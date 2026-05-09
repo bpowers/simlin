@@ -5520,7 +5520,7 @@ fn test_partial_reduce_cross_element_loop() {
     let project = build_partial_reduce_model("partial_reduce_loop");
 
     // Exhaustive mode: loop scores are emitted and the matrix -> row_sum
-    // reducer edge participates in the per-element 3-cycles. Compile and
+    // reducer edge participates in the feedback loops. Compile and
     // fetch the synthetic-variable list from the same db so the loop-score
     // equations below match the simulated variables exactly.
     let mut db = SimlinDb::default();
@@ -5599,13 +5599,15 @@ fn test_partial_reduce_cross_element_loop() {
     }
 
     // (b) At least one loop-score variable references the partial-reduce
-    // link scores. The elementary loops are the per-element 3-cycles
-    // `matrix[d1,d2] -> row_sum[d1] -> growth[d1,d2] -> matrix[d1,d2]`; the
-    // conservative full-cross-product element graph for the `SUM(matrix
-    // [D1,*])` reference also produces spurious cross-element loops (fixed
-    // in Phase 5), but at least one loop_score equation must reference a
+    // link scores. The elementary loop that runs through `row_sum` is the
+    // per-element 4-cycle `matrix[d1,d2] -> row_sum[d1] -> total ->
+    // growth[d1,d2] -> matrix[d1,d2]` (`growth` references the scalar
+    // full-reduce `total`, not `row_sum` directly); the conservative
+    // full-cross-product element graph for the `SUM(matrix[D1,*])`
+    // reference also produces spurious cross-element loops (fixed in
+    // Phase 5), but at least one loop_score equation must reference a
     // real `matrix[d1,d2]->row_sum[d1]` link score for the partial reduce
-    // to contribute at all.
+    // to contribute at all -- independent of which cycle it lands in.
     let loop_score_var_count = results
         .offsets
         .keys()
