@@ -3169,10 +3169,15 @@ pub fn model_ltm_variables(
             let link_score_refs: Vec<String> = pathway_links
                 .iter()
                 .map(|link| {
+                    // Pathway links come from the variable-level causal
+                    // graph (`enumerate_pathways_to_outputs`), so `link.to`
+                    // never carries an element subscript and there is no
+                    // visited-element to pass.
                     let resolved = crate::ltm_augment::resolve_link_score_name_for_loop(
                         link.from.as_str(),
                         link.to.as_str(),
                         &pathway_emitted_names,
+                        None,
                     );
                     format!("\"{resolved}\"")
                 })

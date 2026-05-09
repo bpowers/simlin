@@ -1035,6 +1035,31 @@ fn generate_stock_to_flow_equation(
     link_score_equation_for_target(text, flow_var)
 }
 
+/// Strip a trailing `[...]` element subscript from a node name.
+///
+/// `"population[nyc]"` -> `"population"`; `"x[nyc,boston]"` -> `"x"`;
+/// `"scalar_var"` -> `"scalar_var"` (unchanged). Mirrors the helper of
+/// the same name in `db_ltm.rs`; kept local here because the only other
+/// use site is in the same module.
+fn strip_subscript(name: &str) -> &str {
+    match name.rfind('[') {
+        Some(pos) => &name[..pos],
+        None => name,
+    }
+}
+
+/// Split a node name into `(variable_level_name, Some(subscript))` or
+/// `(name, None)` when there is no `[...]` subscript.
+///
+/// `"migration_pressure[boston]"` -> `("migration_pressure", Some("boston"))`;
+/// `"x[nyc,boston]"` -> `("x", Some("nyc,boston"))`; `"x"` -> `("x", None)`.
+fn split_node_subscript(name: &str) -> (&str, Option<&str>) {
+    match (name.rfind('['), name.rfind(']')) {
+        (Some(open), Some(close)) if close > open => (&name[..open], Some(&name[open + 1..close])),
+        _ => (name, None),
+    }
+}
+
 /// Resolve the link-score variable name a downstream consumer (loop
 /// score, pathway score, composite score) should reference for a single
 /// `(from, to)` edge.
@@ -1046,30 +1071,29 @@ fn generate_stock_to_flow_equation(
 /// shape, so we resolve at equation-generation time by trying candidate
 /// names in priority order against the set of names actually emitted.
 ///
-/// Priority:
+/// `to` is always the *variable-level* target name (no subscript).
+/// `from` may carry an element subscript (`"population[nyc]"`):
+///   - For a per-source-element FixedIndex reference (e.g.
+///     `migration_pressure[NYC] = (population[NYC] - population[Boston]) * 0.01`),
+///     `emit_per_shape_link_scores` emits the bracketed-from name
+///     `population[nyc]→migration_pressure`; we match that verbatim.
+///   - For a diagonal A2A reference or a structural flow→stock edge
+///     visited at a specific element, the emitted name uses the
+///     variable-level from (`migration_in→population`, dimensioned over
+///     the target's dims); we fall back to the stripped-from form.
 ///
-/// 1. `Bare` -- the canonical `{from}→{to}` form. Cross-dimensional
-///    edges naturally produce a bracketed `from` like `"pop[nyc]"`,
-///    which combines with Bare naming to match the per-element name
-///    `try_cross_dimensional_link_scores` emits. This is also the only
-///    correct choice when both Bare and a suffixed variant coexist, so
-///    the documented edge-aliasing limitation stays consistent.
+/// `target_element` is the element the loop edge visits at the target
+/// node (when known). It lets `find_fixed_index_emitted_name` prefer an
+/// exact `{from}[{e}]→{to}` match over its alphabetical-first heuristic.
+/// With `target_element = None` the resolver is byte-identical to its
+/// pre-Phase-2 behavior.
 ///
-/// 2. `FixedIndex` -- e.g., `share[r] = pop[NYC]` where the only AST
-///    occurrence of `pop` is a literal-element subscript. The emitted
-///    name is `pop[nyc]→share`. We scan `emitted` for any name matching
-///    `{from}[...]→{to}` (no shape suffix) and pick the lexicographically
-///    first match, deterministically resolving multi-element targets
-///    like `share[r] = pop[NYC] + pop[BOSTON]`. Picking one is the
-///    documented edge-aliasing under-counting; here it manifests across
-///    multiple FixedIndex variants.
+/// Priority (when `from` is variable-level):
 ///
-/// 3. `Wildcard` (`⁚wildcard` suffix) -- e.g., `share[r] = SUM(pop[*])`
-///    where the only AST occurrence of `pop` is inside a wildcard
-///    reducer.
-///
-/// 4. `DynamicIndex` (`⁚dynamic` suffix) -- analogous to Wildcard for
-///    expression-indexed subscripts.
+/// 1. `Bare` -- the canonical `{from}→{to}` form.
+/// 2. `FixedIndex` -- a `{from}[...]→{to}` name; prefer the exact
+///    `target_element` match, else the lexicographically first match.
+/// 3. `Wildcard` (`⁚wildcard` suffix) / 4. `DynamicIndex` (`⁚dynamic`).
 ///
 /// If none of the candidates is in `emitted`, return the Bare canonical
 /// name anyway and let the fragment compiler's stub-dep fallback fire.
@@ -1078,12 +1102,38 @@ pub(crate) fn resolve_link_score_name_for_loop(
     from: &str,
     to: &str,
     emitted: &HashSet<String>,
+    target_element: Option<&str>,
 ) -> String {
+    if from.contains('[') {
+        // Bracketed-from edge. Try the FixedIndex-style name (bracket
+        // kept) first, then the variable-level (Bare / Wildcard /
+        // DynamicIndex) names that an A2A or structural flow→stock link
+        // score would carry.
+        let verbatim = link_score_var_name(from, to, &RefShape::Bare);
+        if emitted.contains(&verbatim) {
+            return verbatim;
+        }
+        let stripped = strip_subscript(from);
+        let bare = link_score_var_name(stripped, to, &RefShape::Bare);
+        if emitted.contains(&bare) {
+            return bare;
+        }
+        let wildcard = link_score_var_name(stripped, to, &RefShape::Wildcard);
+        if emitted.contains(&wildcard) {
+            return wildcard;
+        }
+        let dynamic = link_score_var_name(stripped, to, &RefShape::DynamicIndex);
+        if emitted.contains(&dynamic) {
+            return dynamic;
+        }
+        return verbatim;
+    }
+
     let bare = link_score_var_name(from, to, &RefShape::Bare);
     if emitted.contains(&bare) {
         return bare;
     }
-    if let Some(fixed) = find_fixed_index_emitted_name(from, to, emitted) {
+    if let Some(fixed) = find_fixed_index_emitted_name(from, to, emitted, target_element) {
         return fixed;
     }
     let wildcard = link_score_var_name(from, to, &RefShape::Wildcard);
@@ -1097,14 +1147,24 @@ pub(crate) fn resolve_link_score_name_for_loop(
     bare
 }
 
-/// Scan `emitted` for any link-score variable name matching the
-/// FixedIndex pattern `{prefix}{from}[...]→{to}` (no shape suffix).
-/// Returns the lexicographically first match for determinism.
+/// Scan `emitted` for a link-score variable name matching the FixedIndex
+/// pattern `{prefix}{from}[...]→{to}` (no shape suffix).
+///
+/// When `target_element` is `Some(e)` and `{from}[{e}]→{to}` is in
+/// `emitted`, return that exact match. Otherwise return the
+/// lexicographically first match for determinism.
 fn find_fixed_index_emitted_name(
     from: &str,
     to: &str,
     emitted: &HashSet<String>,
+    target_element: Option<&str>,
 ) -> Option<String> {
+    if let Some(e) = target_element {
+        let exact = link_score_var_name(from, to, &RefShape::FixedIndex(vec![e.to_string()]));
+        if emitted.contains(&exact) {
+            return Some(exact);
+        }
+    }
     let prefix = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}[");
     let suffix = format!("]\u{2192}{to}");
     let mut matches: Vec<&String> = emitted
@@ -1125,6 +1185,15 @@ fn find_fixed_index_emitted_name(
 /// else, the access shape is implicit in which name was actually
 /// emitted by `emit_per_shape_link_scores`.
 ///
+/// A cross-element loop link carries an element subscript on `link.to`
+/// (e.g. `migration_pressure[boston]`) when the target link-score
+/// variable is A2A (dimensioned over the target's dims). In that case
+/// the loop visits a single element of that A2A score, so the reference
+/// is subscripted at the reference site: `"$⁚ltm⁚link_score⁚{from}→{to}"[e]`.
+/// For pure-scalar and pure-A2A loops `link.to` is variable-level, so
+/// the output is the unsubscripted product of quoted link-score names,
+/// byte-identical to the pre-Phase-2 form.
+///
 /// `emitted_link_score_names` carries every link-score variable name the
 /// caller has emitted so far. For each loop link we try the canonical
 /// Bare name first (since `try_cross_dimensional_link_scores` and the
@@ -1143,13 +1212,20 @@ fn generate_loop_score_equation(
         .links
         .iter()
         .map(|link| {
+            let (to_var_level, visited_element) = split_node_subscript(link.to.as_str());
             let name = resolve_link_score_name_for_loop(
                 link.from.as_str(),
-                link.to.as_str(),
+                to_var_level,
                 emitted_link_score_names,
+                visited_element,
             );
-            // Double-quote the variable name so it can be parsed
-            format!("\"{name}\"")
+            // Double-quote the variable name so it can be parsed. A
+            // cross-element loop edge visits a single element of an A2A
+            // link score, so subscript the reference at that element.
+            match visited_element {
+                Some(elem) => format!("\"{name}\"[{elem}]"),
+                None => format!("\"{name}\""),
+            }
         })
         .collect();
 
@@ -2416,7 +2492,7 @@ mod tests {
         let mut emitted = HashSet::new();
         emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string());
 
-        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted);
+        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted, None);
         assert_eq!(
             chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share",
             "resolver should pick the FixedIndex variant when Bare is not emitted",
@@ -2435,7 +2511,7 @@ mod tests {
         emitted
             .insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston]\u{2192}share".to_string());
 
-        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted);
+        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted, None);
         // Lexicographic sort: "pop[boston]→share" < "pop[nyc]→share".
         assert_eq!(
             chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston]\u{2192}share",
@@ -2454,7 +2530,7 @@ mod tests {
         );
         emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string());
 
-        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted);
+        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted, None);
         assert_eq!(
             chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share",
             "Bare must win when present, regardless of other variants",
@@ -2469,7 +2545,7 @@ mod tests {
         let mut emitted = HashSet::new();
         emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total".to_string());
 
-        let chosen = resolve_link_score_name_for_loop("pop[nyc]", "total", &emitted);
+        let chosen = resolve_link_score_name_for_loop("pop[nyc]", "total", &emitted, None);
         assert_eq!(
             chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total",
             "bracketed from + Bare should match the emitted per-element name",
@@ -2513,6 +2589,229 @@ mod tests {
         assert!(
             !eq.contains("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\""),
             "must not reference the never-emitted Bare canonical name; got: {eq}"
+        );
+    }
+
+    // -- Task 1 (ltm-503-cross-element-agg Phase 2): target_element-aware
+    //    loop-score link-score reference resolution --
+
+    /// Regression guard: `generate_loop_score_equation` is byte-identical
+    /// to the pre-Phase-2 behavior when no `Link.to` carries an element
+    /// subscript (which is the case for every pure-scalar / pure-A2A /
+    /// mixed loop the loop builder produces today, and stays the case for
+    /// pure-A2A loops after the cross-element rewrite).
+    #[test]
+    fn loop_score_equation_unsubscripted_to_unchanged() {
+        use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "r1".to_string(),
+            links: vec![
+                Link {
+                    from: Ident::<Canonical>::new("pop"),
+                    to: Ident::<Canonical>::new("births"),
+                    polarity: LinkPolarity::Positive,
+                },
+                Link {
+                    from: Ident::<Canonical>::new("births"),
+                    to: Ident::<Canonical>::new("pop"),
+                    polarity: LinkPolarity::Positive,
+                },
+            ],
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+            dimensions: vec![],
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births".to_string());
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}births\u{2192}pop".to_string());
+
+        let eq = generate_loop_score_equation(&loop_item, &emitted);
+        assert_eq!(
+            eq,
+            "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births\" * \
+             \"$\u{205A}ltm\u{205A}link_score\u{205A}births\u{2192}pop\"",
+            "unsubscripted loop-score equation must be byte-identical to pre-Phase-2 output",
+        );
+    }
+
+    /// When `target_element = None` the resolver is unchanged: it picks
+    /// the lexicographically-first FixedIndex variant.
+    #[test]
+    fn resolver_fixed_index_no_target_element_unchanged() {
+        let mut emitted = HashSet::new();
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure"
+                .to_string(),
+        );
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[boston]\u{2192}migration_pressure"
+                .to_string(),
+        );
+
+        let chosen =
+            resolve_link_score_name_for_loop("population", "migration_pressure", &emitted, None);
+        // Lexicographic: "population[boston]..." < "population[nyc]...".
+        assert_eq!(
+            chosen,
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[boston]\u{2192}migration_pressure",
+            "with target_element=None the resolver keeps the alphabetical heuristic",
+        );
+    }
+
+    /// `target_element = Some(e)` makes the resolver prefer the FixedIndex
+    /// variant whose source element matches `e` (an exact match), rather
+    /// than guessing alphabetically.
+    #[test]
+    fn resolver_fixed_index_target_element_exact_match() {
+        let mut emitted = HashSet::new();
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure"
+                .to_string(),
+        );
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[boston]\u{2192}migration_pressure"
+                .to_string(),
+        );
+
+        let chosen = resolve_link_score_name_for_loop(
+            "population",
+            "migration_pressure",
+            &emitted,
+            Some("nyc"),
+        );
+        assert_eq!(
+            chosen,
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure",
+            "target_element=Some(\"nyc\") should select the nyc-source FixedIndex variant",
+        );
+    }
+
+    /// A cross-element loop edge `population[nyc] -> migration_pressure[boston]`
+    /// where the emitted A2A link score is the per-source-element FixedIndex
+    /// form `population[nyc]->migration_pressure` (dimensioned over Region):
+    /// the loop-score equation references it subscripted at the visited
+    /// target element -- `"$⁚ltm⁚link_score⁚population[nyc]→migration_pressure"[boston]`.
+    #[test]
+    fn loop_score_equation_subscripts_a2a_fixed_index_link_at_visited_element() {
+        use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "u1".to_string(),
+            links: vec![Link {
+                from: Ident::<Canonical>::new("population[nyc]"),
+                to: Ident::<Canonical>::new("migration_pressure[boston]"),
+                polarity: LinkPolarity::Positive,
+            }],
+            stocks: vec![],
+            polarity: LoopPolarity::Undetermined,
+            dimensions: vec![],
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure"
+                .to_string(),
+        );
+
+        let eq = generate_loop_score_equation(&loop_item, &emitted);
+        assert_eq!(
+            eq,
+            "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure\"[boston]",
+            "A2A FixedIndex link score visited at element 'boston' must be subscripted [boston]",
+        );
+    }
+
+    /// A cross-element loop edge `migration_in[nyc] -> population[nyc]` (a
+    /// structural flow->stock edge): the emitted link score uses the
+    /// *variable-level* `from` (`migration_in->population`, dimensioned
+    /// over Region), so the resolver must strip the subscript off
+    /// `Link.from` to find it, and the loop-score equation subscripts the
+    /// reference at the visited element -- `"$⁚ltm⁚link_score⁚migration_in→population"[nyc]`.
+    #[test]
+    fn loop_score_equation_strips_from_for_variable_level_a2a_link() {
+        use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "u1".to_string(),
+            links: vec![Link {
+                from: Ident::<Canonical>::new("migration_in[nyc]"),
+                to: Ident::<Canonical>::new("population[nyc]"),
+                polarity: LinkPolarity::Positive,
+            }],
+            stocks: vec![Ident::<Canonical>::new("population[nyc]")],
+            polarity: LoopPolarity::Undetermined,
+            dimensions: vec![],
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population".to_string(),
+        );
+
+        let eq = generate_loop_score_equation(&loop_item, &emitted);
+        assert_eq!(
+            eq, "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population\"[nyc]",
+            "variable-level-from A2A link score visited at 'nyc' must resolve via stripped-from \
+             and be subscripted [nyc]",
+        );
+    }
+
+    /// Full cross-element migration loop: three edges, three subscripted
+    /// references, all distinct A2A link scores, joined by ` * `.
+    #[test]
+    fn loop_score_equation_cross_element_migration_loop_full() {
+        use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "u1".to_string(),
+            links: vec![
+                Link {
+                    from: Ident::<Canonical>::new("population[nyc]"),
+                    to: Ident::<Canonical>::new("migration_pressure[boston]"),
+                    polarity: LinkPolarity::Positive,
+                },
+                Link {
+                    from: Ident::<Canonical>::new("migration_pressure[boston]"),
+                    to: Ident::<Canonical>::new("migration_in[nyc]"),
+                    polarity: LinkPolarity::Negative,
+                },
+                Link {
+                    from: Ident::<Canonical>::new("migration_in[nyc]"),
+                    to: Ident::<Canonical>::new("population[nyc]"),
+                    polarity: LinkPolarity::Positive,
+                },
+            ],
+            stocks: vec![Ident::<Canonical>::new("population[nyc]")],
+            polarity: LoopPolarity::Undetermined,
+            dimensions: vec![],
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure"
+                .to_string(),
+        );
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure[boston]\u{2192}migration_in"
+                .to_string(),
+        );
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population".to_string(),
+        );
+
+        let eq = generate_loop_score_equation(&loop_item, &emitted);
+        assert_eq!(
+            eq,
+            "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure\"[boston] * \
+             \"$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure[boston]\u{2192}migration_in\"[nyc] * \
+             \"$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population\"[nyc]",
+            "cross-element migration loop score must walk the element-level path",
+        );
+        // It must NOT reference the unsubscripted A2A diagonal names where
+        // the loop visits a specific element.
+        assert!(
+            !eq.contains(
+                "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure\u{2192}migration_out\""
+            ),
+            "must not reference the diagonal migration_out link score; got: {eq}",
         );
     }
 
