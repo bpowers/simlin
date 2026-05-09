@@ -53,6 +53,28 @@ gcloud app services set-traffic default --splits=<version>=1
 
 (`--no-promote` flows through to `gcloud app deploy` via the script's `"$@"` passthrough; the script still runs `deploy:clean` afterward via the trap.)
 
+### Experimental: deploy a self-contained server bundle (`deploy:web:bundle`)
+
+`pnpm deploy:web` deploys the whole monorepo, so GAE's Node buildpack re-runs `pnpm install` *at the root* on the instance -- which installs the production dependencies of every workspace package (`src/diagram`'s slate/radix/recharts, `website`'s rspress, `src/simlin-serve/web`'s vite, ...) plus, because pnpm v10 + `NODE_ENV=production` doesn't skip devDependencies ([GoogleCloudPlatform/buildpacks#591](https://github.com/GoogleCloudPlatform/buildpacks/issues/591)), `src/app`'s `@rsbuild/*`, `src/server`'s `firebase-tools`, `jest`, `eslint`, etc. -- a multi-hundred-MB install of which the Express server needs ~100 MB.
+
+[`scripts/deploy-web-bundle.sh`](/scripts/deploy-web-bundle.sh) (`pnpm deploy:web:bundle`) instead ships a self-contained server bundle:
+
+```
+pnpm clean && pnpm build
+pnpm --filter @simlin/app run deploy:assemble        # SPA static assets -> public/
+pnpm --filter=@simlin/server deploy --legacy --prod .deploy-bundle
+                                                     # @simlin/server + prod deps only (incl. @simlin/{core,engine} + WASM)
+# vendor @simlin/{core,engine} out of node_modules, rewrite workspace: -> file: refs, drop devDeps,
+# pnpm install --lockfile-only --ignore-workspace    # consistent lockfile so GAE's re-install is a no-op
+cp -RL config/ default_projects/ public/ -> .deploy-bundle/ ; cp .app.prod.yaml .deploy-bundle/app.yaml
+( cd .deploy-bundle && gcloud app deploy app.yaml "$@" )
+# trap restores the public/ symlinks + tracked index.html and rm's .deploy-bundle on exit/Ctrl-C
+```
+
+Validated locally: the bundle is ~100 MB vs ~800 MB for the full workspace `node_modules`; `pnpm install --frozen-lockfile` in a copy of the bundle (standing in for GAE's instance-side install) is a fast no-op; `node lib/index.js` from the bundle boots cleanly (WASM initializes, Express listens). **Not yet run through a real `gcloud app deploy`** -- do `pnpm deploy:web:bundle --no-promote` first, run the post-deploy smoke test against the version URL, and only then promote / make this the default deploy path. Tracked in [tech-debt.md](/docs/tech-debt.md) item 39.
+
+The bundle's `app.yaml` is your `.app.prod.yaml` (copied in), so its handler `static_dir`/`static_files` paths (`public/...`) and the server's cwd-relative reads (`config/default.json`, `default_projects/`, `public/index.html`) all resolve relative to the bundle root, which is the GAE app root.
+
 ## What gets uploaded, and what runs on the instance
 
 `gcloud app deploy` uploads the whole repo except `.gcloudignore` entries: `node_modules`, `target/`, `test/`, `/build*`, `scripts/`, `.github/`, `website/`, `examples/`, `src/jupyter/`, `src/app/public`, `src/app/build*`, `src/server/public`, `src/server/config`, `src/app/firebase.json`, and `.app.prod.yaml` itself. Not excluded, and load-bearing:

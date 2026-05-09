@@ -112,3 +112,6 @@ __pycache__/
 /src/simlin-serve/npm
 /src/simlin-serve/dist
 
+
+# experimental self-contained server deploy bundle (scripts/deploy-web-bundle.sh)
+/.deploy-bundle
