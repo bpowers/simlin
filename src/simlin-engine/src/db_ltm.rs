@@ -458,9 +458,11 @@ pub(super) fn scalarize_ltm_equation(equation: datamodel::Equation) -> datamodel
 /// Re-tag a link-score `Equation` so its dimension names match `dims`
 /// (the link-score-dimensions policy result the emission loop assigned to
 /// `LtmSyntheticVar::dimensions`). Empty `dims` collapses the equation to
-/// `Scalar`; non-empty `dims` widens a scalar to `ApplyToAll` or
-/// re-targets the dimension names of an existing `ApplyToAll`/`Arrayed`,
-/// preserving the equation text / per-element formulas verbatim.
+/// `Scalar` (via [`scalarize_ltm_equation`] for an `Arrayed` input, since
+/// a zero-dimension `Arrayed` is degenerate); non-empty `dims` widens a
+/// scalar to `ApplyToAll` or re-targets the dimension names of an existing
+/// `ApplyToAll`/`Arrayed`, preserving the equation text / per-element
+/// formulas verbatim.
 fn retarget_ltm_equation_dims(
     equation: datamodel::Equation,
     dims: &[String],
@@ -474,10 +476,22 @@ fn retarget_ltm_equation_dims(
                 ApplyToAll(dims.to_vec(), text)
             }
         }
-        Arrayed(_, elements, default, apply_default) => {
-            // A per-element link-score equation is only emitted for an
-            // arrayed target, which always carries non-empty target dims.
-            Arrayed(dims.to_vec(), elements, default, apply_default)
+        Arrayed(orig_dims, elements, default, apply_default) => {
+            if dims.is_empty() {
+                // The link-score-dimensions policy assigned no dimensions:
+                // the (rare) arrayed-target edge whose source dimensions
+                // are incompatible with the target's (so the per-shape A2A
+                // path was skipped and the cross-dimensional path declined
+                // it for having a non-scalar target). A zero-dimension
+                // `Arrayed` is degenerate -- its per-element partials are
+                // meaningless without a target dimension to index -- so
+                // collapse to a scalar link score, matching the contract
+                // in this function's doc comment and the pre-existing
+                // behavior where such edges produced a scalar link score.
+                scalarize_ltm_equation(Arrayed(orig_dims, elements, default, apply_default))
+            } else {
+                Arrayed(dims.to_vec(), elements, default, apply_default)
+            }
         }
     }
 }
