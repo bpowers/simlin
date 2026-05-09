@@ -192,9 +192,10 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Component**: simlin-engine (src/simlin-engine/src/ltm.rs `analyze_expr_polarity_with_context`)
 - **Severity**: medium
 - **Description**: Only the scalar two-arg forms of `Max(a, Some(b))` / `Min(a, Some(b))` are handled; the array reducer forms (`Sum`, `Mean`, `Max(_, None)`, `Min(_, None)`, `Stddev`, `Rank`) fall through to `App(_, _, _) => Unknown`. Any variable computed via `SUM(x[*])` or `MEAN(x[*])` therefore contributes `Unknown` polarity, and every loop through it is classified `Undetermined`. For `Sum` and `Mean` polarity is trivially the argument's polarity (monotone in every element). Graphical-function monotonicity also uses a strict EPSILON=1e-10 check that flags numeric import noise as `Unknown`. Fix: add reducer cases (pass through for SUM/MEAN, Unknown for STDDEV/RANK) and consider a plateau-tolerant GF monotonicity check.
+- **Related (different code site)**: #516 (LTM tracking epic: #488) -- cross-element loops recovered through a synthetic `$⁚ltm⁚agg` node always classify `Undetermined` because `recover_cross_agg_loops` (`src/simlin-engine/src/db_ltm.rs`) builds the agg-hop links off the variable-level graph, which has no agg node, so `polarity(X→agg)` / `polarity(agg→Y)` are `Unknown`. Same SUM/MEAN-is-monotone fact as this item, applied to the synthetic aggregate's incoming/outgoing edges rather than to a `SUM(x[*])` user-variable RHS; the fix may share a "polarity of a monotone reducer's incoming edge" helper.
 - **Tracked in**: #480 (LTM tracking epic: #488)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-04-29
+- **Last reviewed**: 2026-05-09
 
 ### 22. LTM Dedup Keys Fold Distinct Directed Cycles with Matching Node Sets
 

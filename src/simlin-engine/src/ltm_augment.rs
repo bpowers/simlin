@@ -614,7 +614,32 @@ fn substitute_reducers_in_expr0(expr: Expr0, reducers: &HashMap<String, String>)
         );
     }
     match expr {
-        Expr0::Const(..) | Expr0::Var(..) | Expr0::Subscript(..) => expr,
+        Expr0::Const(..) | Expr0::Var(..) => expr,
+        Expr0::Subscript(ident, indices, loc) => {
+            // A reducer can appear as (or inside) a subscript index expression
+            // -- `stock[SUM(idx[*])]` -- and `walk_subexpr_for_aggs` hoists it
+            // into a synthetic agg by descending into `IndexExpr2::Expr` /
+            // `IndexExpr2::Range`, so the substituter must mirror that descent.
+            // Wildcard / star-range / `@N` indices carry no `Expr0`, so they
+            // pass through unchanged.
+            let indices = indices
+                .into_iter()
+                .map(|idx| match idx {
+                    IndexExpr0::Expr(e) => {
+                        IndexExpr0::Expr(substitute_reducers_in_expr0(e, reducers))
+                    }
+                    IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
+                        substitute_reducers_in_expr0(l, reducers),
+                        substitute_reducers_in_expr0(r, reducers),
+                        loc,
+                    ),
+                    IndexExpr0::Wildcard(_)
+                    | IndexExpr0::StarRange(_, _)
+                    | IndexExpr0::DimPosition(_, _) => idx,
+                })
+                .collect();
+            Expr0::Subscript(ident, indices, loc)
+        }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
             let args = args
                 .into_iter()
@@ -2110,6 +2135,76 @@ mod tests {
             is_literal_element_index(&indices[0], 0, &dims),
             "is_literal_element_index must accept canonicalized integer literal",
         );
+    }
+
+    // -- substitute_reducers_in_equation tests --
+
+    /// Baseline: a reducer that is the whole equation is substituted by its
+    /// agg name.
+    #[test]
+    fn substitute_reducers_whole_equation() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("SUM(pop[*])", &reducers);
+        assert_eq!(out, "\"$⁚ltm⁚agg⁚0\"");
+    }
+
+    /// Baseline: a reducer nested in an arithmetic subexpression is
+    /// substituted; the surrounding structure is preserved.
+    #[test]
+    fn substitute_reducers_nested_in_arithmetic() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("base / SUM(pop[*])", &reducers);
+        assert_eq!(out, "base / \"$⁚ltm⁚agg⁚0\"");
+    }
+
+    /// Regression: a reducer used as a *subscript index expression*
+    /// (`stock[SUM(idx[*])]`) is hoisted into a synthetic agg by
+    /// `walk_subexpr_for_aggs` (which descends into `IndexExpr2::Expr`), so
+    /// `substitute_reducers_in_expr0` must likewise descend into the
+    /// `IndexExpr0::Expr` index of a `Subscript` and replace it -- otherwise
+    /// the agg→target link-score equation for such a target would keep the
+    /// reducer text live (no live `Var(agg)`), and the partial-equation
+    /// builder would never PREVIOUS-wrap or hold-live the agg correctly.
+    #[test]
+    fn substitute_reducers_inside_subscript_index() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(idx[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("stock[SUM(idx[*])]", &reducers);
+        assert_eq!(out, "stock[\"$⁚ltm⁚agg⁚0\"]");
+    }
+
+    /// Regression: a reducer used as one bound of a *range* subscript
+    /// (`stock[1:SUM(idx[*])]`) is also reachable by the agg walker
+    /// (`IndexExpr2::Range`), so the substituter must descend into both
+    /// `IndexExpr0::Range` bounds.
+    #[test]
+    fn substitute_reducers_inside_subscript_range_bound() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(idx[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("stock[1:SUM(idx[*])]", &reducers);
+        assert_eq!(out, "stock[1:\"$⁚ltm⁚agg⁚0\"]");
+    }
+
+    /// A reducer nested deep inside a subscript index expression (inside an
+    /// arithmetic op that is itself the index) is still substituted.
+    #[test]
+    fn substitute_reducers_deep_inside_subscript_index() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(idx[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("stock[SUM(idx[*]) + 1]", &reducers);
+        assert_eq!(out, "stock[\"$⁚ltm⁚agg⁚0\" + 1]");
+    }
+
+    /// Wildcard / star-range / dim-position subscript indices have no
+    /// sub-expression to recurse into and must pass through untouched.
+    #[test]
+    fn substitute_reducers_leaves_wildcard_subscript_alone() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("pop[*]", &reducers);
+        assert_eq!(out, "pop[*]");
     }
 
     // -- dimension_element_names tests --

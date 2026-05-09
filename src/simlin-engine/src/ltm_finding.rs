@@ -18,9 +18,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel;
 use crate::db::LtmSyntheticVar;
-#[cfg(test)]
-use crate::ltm::Link;
-use crate::ltm::{CausalGraph, CyclePartitions, Loop, LoopPolarity};
+use crate::ltm::{CausalGraph, CyclePartitions, Link, Loop, LoopPolarity};
 use crate::project::Project;
 use crate::results::Results;
 
@@ -668,6 +666,80 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
     discover_loops_with_graph(results, &causal_graph, &stocks, &[], &[])
 }
 
+/// Collapse synthetic aggregate nodes out of a discovered loop's link chain.
+///
+/// Phase 5 of the cross-element aggregate work reroutes inlined array
+/// reducers (`SUM(pop[*])`, `MEAN(...)`) through synthetic auxiliaries
+/// named `$⁚ltm⁚agg⁚{n}`. The loop *score* equation still references the
+/// un-trimmed per-element path (`pop[d] -> agg`, `agg -> share[e]`), but the
+/// loop we *report* should not expose the synthetic node: a chain
+/// `[X -> agg, agg -> Y]` collapses to a single edge `[X -> Y]` whose
+/// polarity is the product of the two (AC4.2).
+///
+/// Only nodes whose name carries the synthetic agg prefix are trimmed --
+/// whole-RHS-scalar reducers (`total_population = SUM(population[*])`) are
+/// real, variable-backed nodes and stay in the reported loop.
+///
+/// Returns `None` if the loop consists entirely of synthetic agg nodes (a
+/// degenerate cycle with nothing left after trimming) -- such a loop should
+/// be dropped from the report.
+fn trim_synthetic_aggs_from_loop_links(links: &[Link]) -> Option<Vec<Link>> {
+    use crate::ltm_agg::is_synthetic_agg_name;
+
+    // Nothing to do if no link touches a synthetic agg node.
+    if !links
+        .iter()
+        .any(|l| is_synthetic_agg_name(l.from.as_str()) || is_synthetic_agg_name(l.to.as_str()))
+    {
+        return Some(links.to_vec());
+    }
+
+    let mut links: Vec<Link> = links.to_vec();
+    loop {
+        if links.is_empty() {
+            return None;
+        }
+        // If every node in the cycle is a synthetic agg, there is nothing
+        // meaningful left to report.
+        if links
+            .iter()
+            .all(|l| is_synthetic_agg_name(l.from.as_str()) && is_synthetic_agg_name(l.to.as_str()))
+        {
+            return None;
+        }
+        // Find a link whose target is a synthetic agg node; merge it with the
+        // following link (the agg's outgoing edge in this cycle).
+        let Some(j) = links
+            .iter()
+            .position(|l| is_synthetic_agg_name(l.to.as_str()))
+        else {
+            // No synthetic agg appears as a link target anymore.
+            break;
+        };
+        let n = links.len();
+        let next = (j + 1) % n;
+        debug_assert_eq!(
+            links[j].to, links[next].from,
+            "loop links must form a cycle"
+        );
+        let merged = Link {
+            from: links[j].from.clone(),
+            to: links[next].to.clone(),
+            polarity: links[j].polarity.compose(links[next].polarity),
+        };
+        if next > j {
+            links.splice(j..=next, std::iter::once(merged));
+        } else {
+            // Wraparound: the agg was the last node in the rotation. Drop the
+            // trailing link and replace the first with the merged edge.
+            links.pop();
+            links[0] = merged;
+        }
+    }
+
+    Some(links)
+}
+
 /// Run the strongest-path loop discovery using a pre-built `CausalGraph`.
 ///
 /// This is the implementation shared by `discover_loops` (which builds
@@ -732,10 +804,13 @@ pub fn discover_loops_with_graph(
     let mut found_loops: Vec<FoundLoop> = Vec::new();
 
     for path in &all_paths {
-        // Convert path to links using CausalGraph
+        // Convert path to links using CausalGraph. These links carry the
+        // un-trimmed per-element path -- they map to the synthetic
+        // `$⁚ltm⁚link_score⁚...` variables emitted during compilation, so the
+        // loop-score offset lookups below need them as-is. The synthetic
+        // aggregate nodes are trimmed only from the *reported* loop (below).
         let links = causal_graph.circuit_to_links(path);
         let loop_stocks = causal_graph.find_stocks_in_loop(path);
-        let polarity_structural = causal_graph.calculate_polarity(&links);
 
         // Precompute the results offset for each link in this loop, avoiding
         // repeated HashMap lookups and Ident clones in the per-timestep inner loop.
@@ -793,6 +868,16 @@ pub fn discover_loops_with_graph(
             0.0
         };
 
+        // Trim synthetic aggregate nodes out of the reported loop (AC4.2).
+        // The loop scores above were computed from the un-trimmed `links`; the
+        // structural polarity is (re-)derived from the trimmed chain so the
+        // negative-link count matches what we report. A loop made up entirely
+        // of synthetic agg nodes has nothing left to report and is dropped.
+        let Some(reported_links) = trim_synthetic_aggs_from_loop_links(&links) else {
+            continue;
+        };
+        let polarity_structural = causal_graph.calculate_polarity(&reported_links);
+
         // Determine runtime polarity from scores. The confidence ratio
         // returned alongside the polarity is discarded here because
         // `FoundLoop` does not carry one; downstream consumers that need
@@ -807,7 +892,7 @@ pub fn discover_loops_with_graph(
 
         let loop_info = Loop {
             id: String::new(), // Will be assigned below
-            links,
+            links: reported_links,
             stocks: loop_stocks,
             polarity,
             dimensions: vec![],

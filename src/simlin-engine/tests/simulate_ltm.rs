@@ -2851,6 +2851,227 @@ fn test_cross_dim_compound_nonlinear() {
     );
 }
 
+/// Build a feedback model whose scalar aux hoists *two* reducers reading the
+/// same array: `ratio = MAX(pop[*]) / MEAN(pop[*])`. Phase 5 mints
+/// `$⁚ltm⁚agg⁚0 = MAX(pop[*])` and `$⁚ltm⁚agg⁚1 = MEAN(pop[*])`, and the
+/// `pop → ratio` edge is rerouted through both. `pop` is fed back by
+/// `update[r] = ratio * c` (an absolute increment, *not* proportional to
+/// `pop[r]`) so the elements grow at different relative rates and `ratio`
+/// keeps changing -- a proportional flow would freeze `ratio` and the
+/// agg→ratio link scores would all be zeroed by the Δtarget=0 guard.
+fn build_two_reducer_target_model(c: f64) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+    datamodel::Project {
+        name: "two_reducer".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 6.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["Big".to_string(), "Small".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("Big".to_string(), "1000".to_string(), None, None),
+                            ("Small".to_string(), "100".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["update".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "ratio".to_string(),
+                    equation: Equation::Scalar("MAX(pop[*]) / MEAN(pop[*])".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "update".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        format!("ratio * {c}"),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// AC4.2 regression: when a target hoists 2+ reducers (`ratio = MAX(pop[*]) /
+/// MEAN(pop[*])`), the `$⁚ltm⁚agg⁚j → ratio` link score must hold *every other*
+/// agg at PREVIOUS, not just leave it live. With the other agg left live the
+/// substituted partial equals the actual `ratio` equation, the link-score
+/// numerator becomes `Δratio`, and `ABS(SAFEDIV(Δratio, Δratio, 0))` collapses
+/// the magnitude to exactly 1. The correct value -- the partial with the other
+/// agg frozen -- is not ±1.
+///
+/// This also exercises the agg-node fragment dispatch in `compile_project_incremental`
+/// Pass 3: an `$⁚ltm⁚agg⁚n → scalar_target` link score has no bracket or shape
+/// suffix in its name, so the legacy `(from, to)`-keyed salsa fragment path used
+/// to claim it -- but that path `reconstruct_single_variable`s the synthetic agg
+/// name, gets `None`, and emits a degenerate equation that the agg name appears
+/// nowhere in, collapsing the link score to zero. The fix routes any agg-node
+/// link score through `ltm_var.equation` directly.
+#[test]
+fn test_agg_to_target_link_score_multi_reducer_target() {
+    // A large per-step increment so `ratio` moves visibly each timestep
+    // (keeps the hand-calc comparisons well clear of floating-point noise).
+    let project = build_two_reducer_target_model(50.0);
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
+    let results = vm.into_results();
+
+    let off = |name: &str| -> usize {
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing offset {name}; have: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let agg0 = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg1 = "$\u{205A}ltm\u{205A}agg\u{205A}1";
+    let ratio_off = off("ratio");
+    let agg0_off = off(agg0);
+    let agg1_off = off(agg1);
+    // Determine which agg is MAX and which is MEAN by comparing to the
+    // hand-computed values at step 0 (MAX(1000,100)=1000, MEAN=550).
+    let at = |step: usize, o: usize| results.data[step * results.step_size + o];
+    let pop_big = off("pop[big]");
+    let pop_small = off("pop[small]");
+    let max_at = |s: usize| at(s, pop_big).max(at(s, pop_small));
+    let mean_at = |s: usize| (at(s, pop_big) + at(s, pop_small)) / 2.0;
+    // Identify agg roles.
+    let agg0_is_max = (at(0, agg0_off) - max_at(0)).abs() < 1e-9;
+    let (max_off, mean_off) = if agg0_is_max {
+        (agg0_off, agg1_off)
+    } else {
+        (agg1_off, agg0_off)
+    };
+    // Sanity: the agg values track MAX/MEAN.
+    for s in 0..results.step_count {
+        assert!(
+            (at(s, max_off) - max_at(s)).abs() < 1e-7 * max_at(s).abs().max(1.0),
+            "step {s}: MAX agg = {}, hand = {}",
+            at(s, max_off),
+            max_at(s)
+        );
+        assert!(
+            (at(s, mean_off) - mean_at(s)).abs() < 1e-7 * mean_at(s).abs().max(1.0),
+            "step {s}: MEAN agg = {}, hand = {}",
+            at(s, mean_off),
+            mean_at(s)
+        );
+    }
+
+    let ls0_off = off(&format!(
+        "$\u{205A}ltm\u{205A}link_score\u{205A}{agg0}\u{2192}ratio"
+    ));
+    let ls1_off = off(&format!(
+        "$\u{205A}ltm\u{205A}link_score\u{205A}{agg1}\u{2192}ratio"
+    ));
+
+    // ratio = agg_max / agg_mean. Partial w.r.t. agg_max held live:
+    //   p_max(s) = agg_max(s) / agg_mean(s-1)
+    // Partial w.r.t. agg_mean held live:
+    //   p_mean(s) = agg_max(s-1) / agg_mean(s)
+    // link_score = ABS((p - PREVIOUS(ratio)) / (ratio - PREVIOUS(ratio)))
+    //              * SIGN((p - PREVIOUS(ratio)) / (agg - PREVIOUS(agg)))
+    let expected_ls = |s: usize, partial: f64, agg_now: f64, agg_prev: f64| -> f64 {
+        let ratio_prev = at(s - 1, ratio_off);
+        let ratio_now = at(s, ratio_off);
+        let d_ratio = ratio_now - ratio_prev;
+        let d_agg = agg_now - agg_prev;
+        if d_ratio.abs() < 1e-15 || d_agg.abs() < 1e-15 {
+            return 0.0;
+        }
+        let num = partial - ratio_prev;
+        (num / d_ratio).abs() * (num / d_agg).signum()
+    };
+
+    let mut saw_non_unit_magnitude = false;
+    for s in 1..results.step_count {
+        let p_max = at(s, max_off) / at(s - 1, mean_off);
+        let p_mean = at(s - 1, max_off) / at(s, mean_off);
+        let exp_max = expected_ls(s, p_max, at(s, max_off), at(s - 1, max_off));
+        let exp_mean = expected_ls(s, p_mean, at(s, mean_off), at(s - 1, mean_off));
+        // Map back to agg0/agg1 ordering.
+        let (exp_ls0, exp_ls1) = if agg0_is_max {
+            (exp_max, exp_mean)
+        } else {
+            (exp_mean, exp_max)
+        };
+        assert!(
+            (at(s, ls0_off) - exp_ls0).abs() < 1e-6,
+            "step {s}: {agg0}->ratio link score = {}, hand calc = {}",
+            at(s, ls0_off),
+            exp_ls0
+        );
+        assert!(
+            (at(s, ls1_off) - exp_ls1).abs() < 1e-6,
+            "step {s}: {agg1}->ratio link score = {}, hand calc = {}",
+            at(s, ls1_off),
+            exp_ls1
+        );
+        // The buggy version would force |link score| == 1 on every step where
+        // Δratio != 0. Confirm we see a step where it is genuinely != 1.
+        if at(s, ls0_off).abs() > 1e-9 && (at(s, ls0_off).abs() - 1.0).abs() > 1e-3 {
+            saw_non_unit_magnitude = true;
+        }
+        if at(s, ls1_off).abs() > 1e-9 && (at(s, ls1_off).abs() - 1.0).abs() > 1e-3 {
+            saw_non_unit_magnitude = true;
+        }
+    }
+    assert!(
+        saw_non_unit_magnitude,
+        "expected at least one step where an agg->ratio link score magnitude \
+         is not 1 (the multi-reducer bug would pin it to exactly 1)"
+    );
+}
+
 /// AC5.7: SIZE(population[*]) produces no link score variables because
 /// SIZE is a constant (depends only on dimension cardinality).
 #[test]
@@ -5784,6 +6005,76 @@ fn test_agg_aux_value_matches_reducer() {
     }
 }
 
+/// AC4.2 regression (exhaustive loop-link path): `share[r] = pop[r] / SUM(pop[*])`
+/// references `pop` *both* directly (the `pop[r]` numerator) and via the hoisted
+/// reducer `$⁚ltm⁚agg⁚0 = SUM(pop[*])`. With `update[r] = share[r] * pop[r] * c`
+/// feeding `pop[r]`, the element graph has two parallel cycles: the numerator path
+/// `pop[r] → share[r] → update[r] → pop[r]` and the reducer path
+/// `pop[r] → $⁚ltm⁚agg⁚0 → share[r] → update[r] → pop[r]`. The exhaustive
+/// loop-link emitter visits the agg-routed loop links (`pop → agg`, `agg → share`)
+/// directly *and* visits the direct `pop → share` loop link through
+/// `emit_link_scores_for_edge`, which used to re-emit the agg's two halves -- so
+/// `$⁚ltm⁚link_score⁚pop[..]→$⁚ltm⁚agg⁚0` and `$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚0→share[..]`
+/// ended up in the `Vec<LtmSyntheticVar>` twice. There must be no duplicate
+/// synthetic variable names.
+#[test]
+fn test_no_duplicate_ltm_vars_with_agg_routed_and_direct_edge() {
+    // Non-discovery (exhaustive) compilation: this model is not a sub-model and
+    // has internal loops, so it takes the `else if let Some(detected_loops)`
+    // branch where the duplication lived.
+    let project = build_heterogeneous_share_model(0.01);
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut dups: Vec<&str> = Vec::new();
+    for v in &ltm_vars.vars {
+        if !seen.insert(v.name.as_str()) {
+            dups.push(v.name.as_str());
+        }
+    }
+    assert!(
+        dups.is_empty(),
+        "model_ltm_variables emitted duplicate synthetic variable names: {dups:?}; \
+         full list: {:?}",
+        ltm_vars
+            .vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // Sanity: the agg-routed link scores are still present (the fix skips the
+    // *re*-emission via the direct edge, not the legitimate emission via the
+    // agg-routed loop links).
+    assert!(
+        ltm_vars.vars.iter().any(|v| v
+            .name
+            .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}pop[")
+            && v.name.contains("\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0")),
+        "expected a pop[..]→$⁚ltm⁚agg⁚0 link score; got: {:?}",
+        ltm_vars
+            .vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        ltm_vars.vars.iter().any(|v| v.name.starts_with(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}share"
+        )),
+        "expected a $⁚ltm⁚agg⁚0→share[..] link score; got: {:?}",
+        ltm_vars
+            .vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Build a 2-region `share[r] = pop[r] / SUM(pop[*])` model with heterogeneous
 /// stock initial values (`pop[big] >> pop[small]`), `pop` fed back by
 /// `update[r] = share[r] * pop[r] * c` -- the `* pop[r]` makes growth curved
@@ -5960,11 +6251,14 @@ fn test_agg_link_scores_heterogeneous_match_hand_calc() {
     }
 }
 
-/// AC4.7: discovery mode (strongest-path) on the inlined-reducer model finds
-/// the cross-element-through-aggregate loop -- the rerouted element graph
-/// makes the agg node reachable, so discovery traverses it. Uses heterogeneous
-/// initial values so the loop scores are non-zero (discovery's strongest-path
-/// DFS and the post-sim contribution filter both need a non-degenerate run).
+/// AC4.7 / AC4.2: discovery mode (strongest-path) on the inlined-reducer model
+/// finds the cross-element-through-aggregate loop -- the rerouted element graph
+/// makes the agg node reachable, so discovery traverses it -- but the *reported*
+/// `FoundLoop` has the synthetic aggregate node trimmed out, leaving links of the
+/// `pop[d] -> share[e]` form (the loop-score equation still uses the un-trimmed
+/// agg-traversing path; the trim is reporting-only). Uses heterogeneous initial
+/// values so the loop scores are non-zero (discovery's strongest-path DFS and the
+/// post-sim contribution filter both need a non-degenerate run).
 #[test]
 fn test_discovery_finds_cross_element_through_agg_loop() {
     let project = build_heterogeneous_share_model(0.01);
@@ -5975,27 +6269,55 @@ fn test_discovery_finds_cross_element_through_agg_loop() {
         "discovery should find at least one loop in the inlined-reducer model"
     );
 
-    // At least one discovered loop must traverse the synthetic aggregate
-    // node (its links reference `$⁚ltm⁚agg⁚0` on one end or the other).
     let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
-    let touches_agg = found.iter().any(|fl| {
-        fl.loop_info
-            .links
-            .iter()
-            .any(|l| l.from.as_str() == agg || l.to.as_str() == agg)
-    });
-    assert!(
-        touches_agg,
-        "discovery should find a loop through the aggregate node {agg}; \
-         found loops: {:?}",
-        found
-            .iter()
-            .map(|fl| fl
-                .loop_info
+
+    let path_strings: Vec<Vec<String>> = found
+        .iter()
+        .map(|fl| {
+            fl.loop_info
                 .links
                 .iter()
                 .map(|l| format!("{}->{}", l.from.as_str(), l.to.as_str()))
-                .collect::<Vec<_>>())
-            .collect::<Vec<_>>()
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    // AC4.2: no reported loop's links may reference the synthetic aggregate
+    // node -- the trim post-pass collapses `[X -> agg, agg -> Y]` into
+    // `[X -> Y]` with composed polarity.
+    for fl in &found {
+        for link in &fl.loop_info.links {
+            assert_ne!(
+                link.from.as_str(),
+                agg,
+                "reported loop link must not start at the synthetic aggregate node; \
+                 found loops: {path_strings:?}"
+            );
+            assert_ne!(
+                link.to.as_str(),
+                agg,
+                "reported loop link must not end at the synthetic aggregate node; \
+                 found loops: {path_strings:?}"
+            );
+        }
+    }
+
+    // AC4.7: discovery still found the feedback that runs through the aggregate
+    // (the denominator coupling) -- after trimming, that surfaces as a
+    // `pop[d] -> share[d]` link feeding the `share -> update -> pop` cycle. A
+    // model without the agg-traversal would not produce this loop.
+    let has_trimmed_agg_loop = found.iter().any(|fl| {
+        let links = &fl.loop_info.links;
+        links
+            .iter()
+            .any(|l| l.from.as_str().starts_with("pop[") && l.to.as_str().starts_with("share["))
+            && links.iter().any(|l| {
+                l.from.as_str().starts_with("update[") && l.to.as_str().starts_with("pop[")
+            })
+    });
+    assert!(
+        has_trimmed_agg_loop,
+        "discovery should still find the cross-element-through-agg loop \
+         (as a trimmed `pop -> share -> update -> pop` cycle); found loops: {path_strings:?}"
     );
 }

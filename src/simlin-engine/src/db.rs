@@ -4996,16 +4996,18 @@ pub fn assemble_module(
         for ltm_var in &ltm_vars.vars {
             let ltm_var_canonical = canonicalize(&ltm_var.name).into_owned();
 
-            // Try compile_ltm_var_fragment for link scores (keyed by LtmLinkId).
-            // The link_score prefix is always "$⁚ltm⁚link_score⁚" (fixed length).
-            //
-            // The salsa-cached compile_ltm_var_fragment reads from
-            // link_score_equation_text, whose link score equation is always
-            // scalar (per-shape dimensions are applied later in
-            // model_ltm_variables). For per-shape / A2A link scores, use
-            // compile_ltm_equation_fragment directly on this ltm_var's
-            // equation so the (already dimension-tagged) equation gets
-            // compiled with the correct A2A expansion.
+            // Compile this LTM var's already-prepared equation verbatim. Used
+            // for every shape except the standard scalar `from→to` link score,
+            // which instead goes through the salsa-cached
+            // `compile_ltm_var_fragment` path below: that path re-derives the
+            // equation from `link_score_equation_text` (always scalar; per-
+            // shape dimensions, element subscripts and reducer substitutions
+            // are applied later in `model_ltm_variables`), so for anything that
+            // carries those it would produce the wrong (or a degenerate)
+            // fragment.
+            let compile_direct = || {
+                compile_ltm_equation_fragment(db, &ltm_var.name, &ltm_var.equation, model, project)
+            };
             const LINK_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}link_score\u{205A}";
             let fragment_result = if ltm_var.name.starts_with(LINK_SCORE_PREFIX) {
                 if ltm_var.dimensions.is_empty() {
@@ -5023,8 +5025,19 @@ pub fn assemble_module(
                     //     from→to⁚dynamic): compile directly because the salsa-cached
                     //     path keys by (from, to) and would try to reconstruct
                     //     "to⁚wildcard" as a user variable.
+                    // (e) Aggregate-node link score (from = $⁚ltm⁚agg⁚n, or to =
+                    //     $⁚ltm⁚agg⁚n): compile directly. The (from, to)-keyed salsa
+                    //     path would `reconstruct_single_variable` the synthetic agg
+                    //     name, get `None`, and emit a degenerate ceteris-paribus
+                    //     equation against the *target's* original (reducer-bearing)
+                    //     equation -- which the agg name appears nowhere in -- so the
+                    //     numerator collapses to zero. `model_ltm_variables` already
+                    //     produced the correct reducer-substituted equation in
+                    //     `ltm_var.equation`; use it verbatim.
                     let suffix = &ltm_var.name[LINK_SCORE_PREFIX.len()..];
                     let arrow_pos = suffix.find('\u{2192}');
+                    let from_to: Option<(&str, &str)> = arrow_pos
+                        .map(|arrow| (&suffix[..arrow], &suffix[arrow + '\u{2192}'.len_utf8()..]));
                     // Any `[` -- on either side of the arrow -- marks an
                     // element-pinned equation that ltm_var.equation already
                     // carries verbatim; the (from, to)-keyed salsa path can't
@@ -5033,52 +5046,31 @@ pub fn assemble_module(
                     let has_shape_suffix = crate::ltm_augment::LINK_SCORE_SHAPE_SUFFIXES
                         .iter()
                         .any(|s| suffix.ends_with(s));
+                    let touches_synthetic_agg = from_to.is_some_and(|(from_name, to_name)| {
+                        crate::ltm_agg::is_synthetic_agg_name(from_name)
+                            || crate::ltm_agg::is_synthetic_agg_name(to_name)
+                    });
 
-                    if has_element_subscript || has_shape_suffix {
-                        // Element-pinned or per-shape link score: compile
-                        // directly since the equation in ltm_var.equation
-                        // already encodes the shape-specific PREVIOUS wrapping
-                        // and element subscripts.
-                        compile_ltm_equation_fragment(
-                            db,
-                            &ltm_var.name,
-                            &ltm_var.equation,
-                            model,
-                            project,
-                        )
-                    } else if let Some(arrow) = arrow_pos {
-                        let from_name = &suffix[..arrow];
-                        let to_name = &suffix[arrow + '\u{2192}'.len_utf8()..];
+                    if has_element_subscript || has_shape_suffix || touches_synthetic_agg {
+                        compile_direct()
+                    } else if let Some((from_name, to_name)) = from_to {
                         let link_id =
                             LtmLinkId::new(db, from_name.to_string(), to_name.to_string());
                         compile_ltm_var_fragment(db, link_id, model, project)
                             .as_ref()
                             .cloned()
                     } else {
-                        compile_ltm_equation_fragment(
-                            db,
-                            &ltm_var.name,
-                            &ltm_var.equation,
-                            model,
-                            project,
-                        )
+                        compile_direct()
                     }
                 } else {
-                    // A2A link score: compile directly. Cannot use the
-                    // salsa-cached path because link_score_equation_text
-                    // emits a scalar equation; this ltm_var's equation is
-                    // the dimension-tagged ApplyToAll/Arrayed variant.
-                    compile_ltm_equation_fragment(
-                        db,
-                        &ltm_var.name,
-                        &ltm_var.equation,
-                        model,
-                        project,
-                    )
+                    // A2A link score: the equation is the dimension-tagged
+                    // ApplyToAll/Arrayed variant, not the scalar one the
+                    // salsa-cached path would re-derive.
+                    compile_direct()
                 }
             } else {
-                // Loop scores and relative loop scores: compile directly
-                compile_ltm_equation_fragment(db, &ltm_var.name, &ltm_var.equation, model, project)
+                // Loop scores and relative loop scores.
+                compile_direct()
             };
 
             if let Some(result) = fragment_result {

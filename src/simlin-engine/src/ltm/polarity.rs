@@ -157,14 +157,9 @@ pub(super) fn analyze_expr_polarity_with_context(
                 && let Some(t) = tables.first()
             {
                 let table_polarity = analyze_graphical_function_polarity(t);
-                // Combine the polarities
-                return match (arg_polarity, table_polarity) {
-                    (LinkPolarity::Positive, LinkPolarity::Positive) => LinkPolarity::Positive,
-                    (LinkPolarity::Positive, LinkPolarity::Negative) => LinkPolarity::Negative,
-                    (LinkPolarity::Negative, LinkPolarity::Positive) => LinkPolarity::Negative,
-                    (LinkPolarity::Negative, LinkPolarity::Negative) => LinkPolarity::Positive,
-                    _ => LinkPolarity::Unknown,
-                };
+                // Combine the polarities: composing argument monotonicity
+                // with table monotonicity is plain sign multiplication.
+                return arg_polarity.compose(table_polarity);
             }
             LinkPolarity::Unknown
         }
@@ -313,25 +308,8 @@ pub(super) fn analyze_expr_polarity_with_context(
                     // rather than the expr_references_var pattern used by Add/Sub/Div.
                     // If both have known polarity, combine them
                     if left_pol != LinkPolarity::Unknown && right_pol != LinkPolarity::Unknown {
-                        // Positive * Positive = Positive
-                        // Positive * Negative = Negative
-                        // Negative * Positive = Negative
-                        // Negative * Negative = Positive
-                        match (left_pol, right_pol) {
-                            (LinkPolarity::Positive, LinkPolarity::Positive) => {
-                                LinkPolarity::Positive
-                            }
-                            (LinkPolarity::Positive, LinkPolarity::Negative) => {
-                                LinkPolarity::Negative
-                            }
-                            (LinkPolarity::Negative, LinkPolarity::Positive) => {
-                                LinkPolarity::Negative
-                            }
-                            (LinkPolarity::Negative, LinkPolarity::Negative) => {
-                                LinkPolarity::Positive
-                            }
-                            _ => LinkPolarity::Unknown,
-                        }
+                        // Sign multiplication: ++ -> +, +- -> -, -- -> +.
+                        left_pol.compose(right_pol)
                     } else if left_pol != LinkPolarity::Unknown {
                         // Only left has polarity, check if right is a constant or constant-valued variable
                         if is_positive_constant(right)

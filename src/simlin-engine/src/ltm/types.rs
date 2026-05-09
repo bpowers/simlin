@@ -27,6 +27,23 @@ pub enum LinkPolarity {
     Unknown,  // Cannot determine polarity statically
 }
 
+impl LinkPolarity {
+    /// Compose two consecutive link polarities (sign multiplication).
+    ///
+    /// Used when collapsing a chain `X -> M -> Y` into a single edge
+    /// `X -> Y`: the resulting polarity is the product of the two.
+    /// `Unknown` is absorbing -- any chain through an unknown-polarity
+    /// link is itself unknown.
+    pub fn compose(self, other: LinkPolarity) -> LinkPolarity {
+        use LinkPolarity::*;
+        match (self, other) {
+            (Unknown, _) | (_, Unknown) => Unknown,
+            (Positive, Positive) | (Negative, Negative) => Positive,
+            (Positive, Negative) | (Negative, Positive) => Negative,
+        }
+    }
+}
+
 /// Represents a causal link between two variables.
 ///
 /// The per-reference access shape distinction (Bare / FixedIndex / Wildcard

@@ -3778,6 +3778,14 @@ pub fn model_ltm_variables(
         let base_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
         let mut all_deps = base_deps.clone();
         all_deps.insert(agg_canonical.clone());
+        // When `to` hoists 2+ reducers (e.g. `x = SUM(a[*]) / SUM(b[*])`), the
+        // substituted equation text references *every* agg name, not just the
+        // one this link starts from. The other aggs must be in `all_deps` so
+        // they get PREVIOUS-wrapped (ceteris paribus) -- otherwise they are
+        // left live and the agg→target link score collapses to ±1.
+        for other_agg in reducer_subst.values() {
+            all_deps.insert(Ident::<Canonical>::new(other_agg));
+        }
         let deps_to_subscript: HashSet<Ident<Canonical>> = all_deps
             .iter()
             .filter(|d| {
@@ -3863,32 +3871,37 @@ pub fn model_ltm_variables(
                     .collect();
                 for element in &cartesian_subscripts(&dim_element_lists) {
                     let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
-                    let slot = per_elem.get(&canonical_elem).or(default_expr.as_ref());
-                    let substituted = match slot {
-                        Some(expr) => slot_text(expr),
-                        None => String::new(),
-                    };
-                    let equation = if substituted.is_empty() {
-                        "0".to_string()
-                    } else {
-                        // Re-derive per-slot deps (the union over all slots
-                        // would over-freeze refs absent from this slot), then
-                        // extend with the agg name.
-                        let mut slot_deps = crate::variable::classify_dependencies(
-                            &Ast::Scalar(slot.unwrap().clone()),
-                            target_ast_dims,
-                            None,
-                        )
-                        .all;
-                        slot_deps.insert(agg_canonical.clone());
-                        crate::ltm_augment::generate_scalar_to_element_equation(
-                            &agg.name,
-                            to,
-                            element,
-                            &substituted,
-                            &slot_deps,
-                            &deps_to_subscript,
-                        )
+                    // Thread the slot expression through directly rather than
+                    // relying on the invariant that `substituted.is_empty()`
+                    // iff there is no slot expression.
+                    let equation = match per_elem.get(&canonical_elem).or(default_expr.as_ref()) {
+                        None => "0".to_string(),
+                        Some(slot_expr) => {
+                            let substituted = slot_text(slot_expr);
+                            // Re-derive per-slot deps (the union over all slots
+                            // would over-freeze refs absent from this slot),
+                            // then extend with this agg's name and every other
+                            // agg referenced in the (substituted) slot text so
+                            // they are all PREVIOUS-wrapped (ceteris paribus).
+                            let mut slot_deps = crate::variable::classify_dependencies(
+                                &Ast::Scalar(slot_expr.clone()),
+                                target_ast_dims,
+                                None,
+                            )
+                            .all;
+                            slot_deps.insert(agg_canonical.clone());
+                            for other_agg in reducer_subst.values() {
+                                slot_deps.insert(Ident::<Canonical>::new(other_agg));
+                            }
+                            crate::ltm_augment::generate_scalar_to_element_equation(
+                                &agg.name,
+                                to,
+                                element,
+                                &substituted,
+                                &slot_deps,
+                                &deps_to_subscript,
+                            )
+                        }
                     };
                     vars.push(LtmSyntheticVar {
                         name: format!(
@@ -3910,6 +3923,16 @@ pub fn model_ltm_variables(
     /// emission. The agg reroute still emits the non-reducer (Bare /
     /// FixedIndex) shapes of `from` in `to` via `emit_per_shape_link_scores`
     /// with the reducer shapes suppressed.
+    ///
+    /// `skip_agg_halves` is set by the exhaustive loop-link caller: when a
+    /// loop traverses the *direct* `from → to` reference (e.g. the `pop[r]`
+    /// numerator in `share[r] = pop[r] / SUM(pop[*])`) the routed agg's two
+    /// halves (`from → agg`, `agg → to`) are emitted -- if at all -- by the
+    /// `agg_by_name` branches of that caller when the loop also traverses the
+    /// reducer path, so re-emitting them here would push duplicate
+    /// `LtmSyntheticVar`s into the `Vec`. The discovery / sub-model caller
+    /// passes `false` since it iterates causal edges (not loop links) and the
+    /// `from → agg`/`agg → to` edges aren't separately visited there.
     #[allow(clippy::too_many_arguments)]
     fn emit_link_scores_for_edge(
         db: &dyn Db,
@@ -3920,6 +3943,7 @@ pub fn model_ltm_variables(
         model: SourceModel,
         project: SourceProject,
         dm_dims: &[crate::datamodel::Dimension],
+        skip_agg_halves: bool,
         vars: &mut Vec<LtmSyntheticVar>,
     ) {
         let routed_aggs: Vec<&crate::ltm_agg::AggNode> = agg_nodes
@@ -3927,18 +3951,28 @@ pub fn model_ltm_variables(
             .filter(|a| a.is_synthetic && a.source_vars.iter().any(|s| s == from))
             .collect();
         if !routed_aggs.is_empty() {
-            for agg in &routed_aggs {
-                emit_source_to_agg_link_scores(db, source_vars, from, agg, model, project, vars);
-                emit_agg_to_target_link_scores(
-                    db,
-                    source_vars,
-                    agg_nodes,
-                    agg,
-                    to,
-                    model,
-                    project,
-                    vars,
-                );
+            if !skip_agg_halves {
+                for agg in &routed_aggs {
+                    emit_source_to_agg_link_scores(
+                        db,
+                        source_vars,
+                        from,
+                        agg,
+                        model,
+                        project,
+                        vars,
+                    );
+                    emit_agg_to_target_link_scores(
+                        db,
+                        source_vars,
+                        agg_nodes,
+                        agg,
+                        to,
+                        model,
+                        project,
+                        vars,
+                    );
+                }
             }
             // The Bare numerator / FixedIndex references of `from` in `to`
             // still get their own (non-reducer) link scores.
@@ -3998,6 +4032,7 @@ pub fn model_ltm_variables(
                     model,
                     project,
                     dm_dims,
+                    /* skip_agg_halves = */ false,
                     &mut vars,
                 );
             }
@@ -4069,6 +4104,7 @@ pub fn model_ltm_variables(
                         model,
                         project,
                         dm_dims,
+                        /* skip_agg_halves = */ true,
                         &mut vars,
                     );
                 }

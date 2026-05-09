@@ -254,10 +254,15 @@ fn walk_var_equation(
     {
         // Whole-RHS reducer: the variable IS the aggregate node.
         let key = crate::patch::expr2_to_string(expr);
-        // A scalar variable's whole-RHS reducer is a full reduce (scalar
-        // result). An arrayed variable's whole-RHS reducer holds per-element
-        // aggregate values, so the result dims are the variable's own dims.
-        let result_dims = if var_is_arrayed {
+        // The agg node's result shape is the *reducer's* result shape, not
+        // the owning variable's. A full reduce (`SUM(pop[*])`) collapses to a
+        // scalar even when broadcast to an arrayed variable
+        // (`share[Region] = SUM(pop[*])`): every element holds the same value,
+        // so `result_dims` is `[]`. Only a *partial* reduce that still varies
+        // per element of the variable -- a slice-reduce keyed by the active
+        // A2A dimension, e.g. `rowsum[D1] = SUM(matrix[D1, *])` -- keeps the
+        // variable's dims as its result dims.
+        let result_dims = if var_is_arrayed && !reducer_is_full_reduce(builtin, variables) {
             var_dim_names.to_vec()
         } else {
             vec![]
@@ -768,6 +773,40 @@ mod tests {
         assert!(!agg.is_synthetic);
         assert_eq!(agg.source_vars, vec!["matrix".to_string()]);
         assert_eq!(agg.result_dims, vec!["D1".to_string()]);
+    }
+
+    /// AC4.3 (arrayed full-reduce broadcast): `share[Region] = SUM(pop[*])` is
+    /// a whole-RHS reducer, so the variable is the agg -- but `SUM(pop[*])` is a
+    /// *full* reduce (scalar result) merely broadcast to `[Region]`, so the
+    /// agg's `result_dims` is `[]`, not `[Region]`. (Contrast with
+    /// `agg[D1] = SUM(matrix[D1, *])`, a partial reduce that genuinely varies
+    /// per `D1`.)
+    #[test]
+    fn whole_rhs_arrayed_full_reduce_broadcast_has_scalar_result_dims() {
+        let project = TestProject::new("whole_rhs_broadcast")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("share[Region]", "SUM(pop[*])");
+
+        let result = agg_nodes(&project);
+
+        assert!(
+            result.aggs.iter().all(|a| !a.is_synthetic),
+            "whole-RHS reducer must not mint a synthetic agg; got: {:?}",
+            result.aggs
+        );
+        let agg = result
+            .aggs_in_var("share")
+            .next()
+            .expect("expected an agg owned by `share`");
+        assert_eq!(agg.name, "share");
+        assert!(!agg.is_synthetic);
+        assert_eq!(agg.source_vars, vec!["pop".to_string()]);
+        assert!(
+            agg.result_dims.is_empty(),
+            "a full reduce broadcast to an arrayed variable has scalar result dims, got: {:?}",
+            agg.result_dims
+        );
     }
 
     /// AC4.1 (the basic mint): `share[r] = pop[r] / SUM(pop[*])` mints one
