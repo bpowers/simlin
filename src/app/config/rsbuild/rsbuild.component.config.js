@@ -21,9 +21,14 @@ module.exports = mergeRsbuildConfig(
         root: resolveApp('build-component'),
       },
       filename: {
-        // Fixed filename for web component to ensure predictable embedding
-        js: 'static/js/[name].js',
-        css: 'static/css/[name].css',
+        // Fixed filename (no content hash -- see filenameHash below) so the
+        // embed URL is stable: <script src="/static/js/sd-component.js">.
+        // The static/js/ (and static/css/) directory prefix comes from
+        // distPath.js / distPath.css in shared.config.js; do NOT repeat it
+        // here or the output nests as static/js/static/js/sd-component.js
+        // and every external embed 404s.
+        js: '[name].js',
+        css: '[name].css',
       },
       // Disable content hash for web component
       filenameHash: false,
