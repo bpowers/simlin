@@ -3716,7 +3716,7 @@ class PrecisionReport:
     # Flags mirroring the silent-reconstruction reasons. Equivalent to
     # scanning `reasons` for the matching string, but faster to inspect in
     # aggregate corpus reports.
-    used_system_variable_fallback: bool = False
+    system_variable_record_missing: bool = False
     used_lookup_name_order_pairing: bool = False
     used_descriptor_f10_fallback: bool = False
 
@@ -3749,7 +3749,7 @@ class NamedResultsDiagnostics:
     reconstruction step. `precision_report` forwards each flag into the
     blocker list so `exact-by-xray` status never hides reconstruction.
     """
-    used_system_variable_fallback: bool = False
+    system_variable_record_missing: bool = False
     used_lookup_name_order_pairing: bool = False
     # Set when graphical-function descriptor identification falls back to the
     # highest-`f[10]` tie-break because the lexical lookup-def-name test was
@@ -3805,9 +3805,10 @@ def extract_named_results_with_diagnostics(
     decoded names -- consumers wanting a "user-facing" symbol table can strip
     `#`-prefixed names themselves.
 
-    `used_system_variable_fallback` flag: set when any system variable
+    `system_variable_record_missing` flag: set when any system variable
     (`INITIAL TIME`, `FINAL TIME`, `SAVEPER`, `TIME STEP`) lacks a direct
-    record in the file. Dead on every tracked fixture; defensive only.
+    record in the file, in which case that variable is silently dropped
+    from the result set. Dead on every tracked fixture; defensive only.
     """
     diagnostics = NamedResultsDiagnostics()
 
@@ -3872,7 +3873,7 @@ def extract_named_results_with_diagnostics(
     for name in sorted((n for n in SYSTEM_NAMES if n != "Time"), key=_vensim_sort_key):
         span = system_spans.get(name)
         if span is None:
-            diagnostics.used_system_variable_fallback = True
+            diagnostics.system_variable_record_missing = True
             continue
         emit_span(name, span)
 
@@ -4039,12 +4040,13 @@ def precision_report(vdf: VdfFile) -> PrecisionReport:
     if incomplete_anchor_count:
         reasons.append("incomplete-dimension-anchors")
 
-    # Flag silent reconstruction paths that would otherwise let a file pass
-    # as "exact-by-xray" while the underlying mapping relies on the
-    # lookup-name zip-by-order pairing or the system-variable alphabetical
-    # placement fallback. See /tmp/vdf_audit_phase1.md Section B.3.1.
-    if diagnostics.used_system_variable_fallback:
-        reasons.append("used-system-variable-fallback")
+    # Flag silent reconstruction paths and missing-record cases that would
+    # otherwise let a file pass as "exact-by-xray" while the result set is
+    # incomplete or relies on a fallback. The descriptor-f10 case is the
+    # only one that actually fires today (`Ref.vdf`); the others are
+    # defensive flags for files outside the current corpus.
+    if diagnostics.system_variable_record_missing:
+        reasons.append("system-variable-record-missing")
     if diagnostics.used_lookup_name_order_pairing:
         reasons.append("used-lookup-name-order-pairing")
     if diagnostics.used_descriptor_f10_fallback:
@@ -4104,7 +4106,7 @@ def precision_report(vdf: VdfFile) -> PrecisionReport:
         data_block_decode_failures=decode_failures,
         data_block_tail_mismatches=tail_mismatches,
         bitmap_widths=bitmap_widths,
-        used_system_variable_fallback=diagnostics.used_system_variable_fallback,
+        system_variable_record_missing=diagnostics.system_variable_record_missing,
         used_lookup_name_order_pairing=diagnostics.used_lookup_name_order_pairing,
         used_descriptor_f10_fallback=diagnostics.used_descriptor_f10_fallback,
     )

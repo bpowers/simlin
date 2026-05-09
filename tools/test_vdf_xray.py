@@ -2022,7 +2022,14 @@ class CorpusDecodedRecordSpanCoverageTests(unittest.TestCase):
         "test/bobby/vdf/water/water.vdf",
     ]
 
-    NOT_PROVEN_OVERLAP_PAIRS = {
+    # Each fixture here exhibits raw descriptor/owner span overlap in
+    # `decoded_record_spans` (before `identify_descriptor_records` runs).
+    # The pair-equivalent count is a structural fingerprint of the file
+    # and changes only when the format itself changes; descriptor
+    # identification then resolves the conflict via the decoded forward
+    # link, so these fixtures still classify as `exact-by-xray` in the
+    # corpus precision report.
+    DESCRIPTOR_CONFLICT_PAIRS = {
         "test/bobby/vdf/lookups/lookup_ex.vdf": 1,
         "test/bobby/vdf/econ/base.vdf": 3,
         "test/bobby/vdf/econ/mark2.vdf": 3,
@@ -2056,15 +2063,17 @@ class CorpusDecodedRecordSpanCoverageTests(unittest.TestCase):
                     f"missing={sorted(expected - covered)} extra={sorted(covered - expected)}",
                 )
 
-    def test_decoded_record_spans_overlap_count_pinned_on_not_proven_fixtures(self) -> None:
+    def test_decoded_record_spans_overlap_count_pinned_on_descriptor_conflict_fixtures(self) -> None:
         """
-        On `not-proven` fixtures, the overlap count equals the documented
-        descriptor/owner conflict-pair count (the field[11] owner/descriptor
-        union). The number is a structural fingerprint of the fixture and
-        changes only when the discriminator is actually decoded (which the
-        appendix proves cannot happen from the file alone).
+        Pin the raw descriptor/owner overlap count surfaced by
+        `decoded_record_spans` *before* `identify_descriptor_records`
+        runs. The count is the field[11] owner/descriptor union expressed
+        as slot-level pair-equivalents and is a structural fingerprint of
+        the file. These fixtures still classify as `exact-by-xray` in the
+        precision report -- descriptor identification cleans the spans up
+        -- but the pre-resolution overlap shape must stay stable.
         """
-        for relpath, expected_pairs in self.NOT_PROVEN_OVERLAP_PAIRS.items():
+        for relpath, expected_pairs in self.DESCRIPTOR_CONFLICT_PAIRS.items():
             with self.subTest(fixture=relpath):
                 vdf = parse_fixture(relpath)
                 spans = vdf_xray.decoded_record_spans(vdf)

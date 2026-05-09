@@ -144,20 +144,26 @@ pub(super) fn decoded_record_spans(
         if end > vdf.offset_table_count {
             continue;
         }
-        // Class-code guard: every OT slot in the span must carry a real-data
-        // owner code. Time (0x0f) is excluded by `start >= 1`; any non-owner
-        // code in-range indicates a descriptor reinterpretation of `f[11]`
-        // or a stale ghost record, not a real owner span.
+        // Class-code guard: every in-bounds OT slot in the span must carry
+        // a real-data owner code. Time (0x0f) is excluded by `start >= 1`;
+        // any non-owner code in-range indicates a descriptor
+        // reinterpretation of `f[11]` or a stale ghost record, not a real
+        // owner span. Slots past the end of `codes` are silently accepted
+        // to match the Python xray implementation -- the upstream
+        // `end > offset_table_count` gate already covers the realistic OOB
+        // case, and a short class-code array would be a parser defect
+        // rather than a span-level signal.
         if let Some(ref code_vec) = codes {
-            let mut all_owner = true;
+            let mut any_non_owner_in_bounds = false;
             for ot_idx in start..end {
-                let code = code_vec.get(ot_idx).copied().unwrap_or(0);
-                if !is_owner_ot_class_code(code) {
-                    all_owner = false;
+                if let Some(&code) = code_vec.get(ot_idx)
+                    && !is_owner_ot_class_code(code)
+                {
+                    any_non_owner_in_bounds = true;
                     break;
                 }
             }
-            if !all_owner {
+            if any_non_owner_in_bounds {
                 continue;
             }
         }
