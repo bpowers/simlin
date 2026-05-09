@@ -24,13 +24,17 @@ module.exports = mergeRsbuildConfig(
     },
     html: {
       inject: 'body',
-      // Content Security Policy will be added via plugin if needed
-      meta: isProduction ? {
-        'Content-Security-Policy': {
-          'http-equiv': 'Content-Security-Policy',
-          content: process.env.CSP_CONTENT || "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://api.simlin.com wss://api.simlin.com https://firestore.googleapis.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com https://www.googleapis.com; worker-src 'self' blob:;",
-        },
-      } : undefined,
+      // CSP is set by Express helmet in src/server/app.ts on every
+      // dynamic route (notably /:username/:projectName, the SPA's
+      // primary entry). A meta tag here would intersect per-directive
+      // with the helmet header on those routes -- and the two are
+      // hard to keep in sync, so the previous meta tag silently
+      // blocked Firebase auth iframes, blob: scripts, and
+      // apis.google.com once helmet's stricter directives diverged.
+      // The few pages served as App Engine static files (/, /new,
+      // /legal*, /privacy in app.yaml) load the same SPA bundle from
+      // /static/js/* with no inline scripts, so they are not a
+      // material XSS vector even without a CSP.
     },
     performance: {
       chunkSplit: {
