@@ -3101,18 +3101,57 @@ pub fn model_ltm_variables(
             .collect();
         let elements = cartesian_subscripts(&dim_element_lists);
 
-        let mut cross_vars = Vec::with_capacity(elements.len());
-        for element in &elements {
-            // Element-specific equation text + that text's dependency set.
-            let (elem_text, elem_deps): (String, HashSet<Ident<Canonical>>) = match ast {
-                Ast::ApplyToAll(_, expr) => (
-                    crate::patch::expr2_to_string(expr),
-                    crate::variable::identifier_set(ast, target_ast_dims, None),
+        // Build one `LtmSyntheticVar` for `element` from its equation text and
+        // that text's dependency set. The element name is the only part of the
+        // generated equation/name that varies between elements.
+        let build_var = |element: &str,
+                         elem_text: &str,
+                         elem_deps: &HashSet<Ident<Canonical>>,
+                         deps_to_sub: &HashSet<Ident<Canonical>>|
+         -> LtmSyntheticVar {
+            let equation = if elem_text.is_empty() {
+                "0".to_string()
+            } else {
+                crate::ltm_augment::generate_scalar_to_element_equation(
+                    from,
+                    to,
+                    element,
+                    elem_text,
+                    elem_deps,
+                    deps_to_sub,
+                )
+            };
+            LtmSyntheticVar {
+                name: format!(
+                    "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
+                    from, to, element
                 ),
-                Ast::Arrayed(_, per_elem, default_expr, _) => {
+                equation: datamodel::Equation::Scalar(equation),
+                dimensions: vec![], // scalar -- one variable per target element
+            }
+        };
+
+        let mut cross_vars = Vec::with_capacity(elements.len());
+        match ast {
+            // ApplyToAll: one shared body for every element, so its text, its
+            // dependency set, and the subset to element-pin are all
+            // element-invariant -- compute them once, outside the loop.
+            Ast::ApplyToAll(_, expr) => {
+                let elem_text = crate::patch::expr2_to_string(expr);
+                let elem_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
+                let deps_to_sub = deps_to_subscript(&elem_deps);
+                for element in &elements {
+                    cross_vars.push(build_var(element, &elem_text, &elem_deps, &deps_to_sub));
+                }
+            }
+            // Arrayed: each element has its own slot expression (or the default
+            // slot), so the body and its dependency set genuinely differ per
+            // element and must be recomputed inside the loop.
+            Ast::Arrayed(_, per_elem, default_expr, _) => {
+                for element in &elements {
                     let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
                     let slot = per_elem.get(&canonical_elem).or(default_expr.as_ref());
-                    match slot {
+                    let (elem_text, elem_deps): (String, HashSet<Ident<Canonical>>) = match slot {
                         Some(expr) => (
                             crate::patch::expr2_to_string(expr),
                             crate::variable::identifier_set(
@@ -3127,33 +3166,12 @@ pub fn model_ltm_variables(
                         // historical placeholder behaviour for un-derivable
                         // partials.
                         None => (String::new(), HashSet::new()),
-                    }
+                    };
+                    let deps_to_sub = deps_to_subscript(&elem_deps);
+                    cross_vars.push(build_var(element, &elem_text, &elem_deps, &deps_to_sub));
                 }
-                Ast::Scalar(_) => unreachable!("target is arrayed"),
-            };
-
-            let deps_to_sub = deps_to_subscript(&elem_deps);
-            let equation = if elem_text.is_empty() {
-                "0".to_string()
-            } else {
-                crate::ltm_augment::generate_scalar_to_element_equation(
-                    from,
-                    to,
-                    element,
-                    &elem_text,
-                    &elem_deps,
-                    &deps_to_sub,
-                )
-            };
-            let var_name = format!(
-                "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
-                from, to, element
-            );
-            cross_vars.push(LtmSyntheticVar {
-                name: var_name,
-                equation: datamodel::Equation::Scalar(equation),
-                dimensions: vec![], // scalar -- one variable per target element
-            });
+            }
+            Ast::Scalar(_) => unreachable!("target is arrayed"),
         }
         Some(cross_vars)
     }
