@@ -1761,15 +1761,34 @@ fn compat_name_field<'a>(
         .unwrap_or(default)
 }
 
+/// Distance from a valve to its flow label when the original sketch geometry
+/// isn't available. Vensim's own files put the label ~19-20px from the valve;
+/// 16px is close enough that a wider/wrapped label collides with the pipe.
+const FLOW_LABEL_OFFSET: f64 = 20.0;
+
 fn default_flow_label_point(flow: &view_element::Flow, transform: SketchTransform) -> (i32, i32) {
     let (x, y) = match flow.label_side {
-        view_element::LabelSide::Top => (flow.x, flow.y - 16.0),
-        view_element::LabelSide::Left => (flow.x - 16.0, flow.y),
+        view_element::LabelSide::Top => (flow.x, flow.y - FLOW_LABEL_OFFSET),
+        view_element::LabelSide::Left => (flow.x - FLOW_LABEL_OFFSET, flow.y),
         view_element::LabelSide::Center => (flow.x, flow.y),
-        view_element::LabelSide::Bottom => (flow.x, flow.y + 16.0),
-        view_element::LabelSide::Right => (flow.x + 16.0, flow.y),
+        view_element::LabelSide::Bottom => (flow.x, flow.y + FLOW_LABEL_OFFSET),
+        view_element::LabelSide::Right => (flow.x + FLOW_LABEL_OFFSET, flow.y),
     };
     transform.point(x, y)
+}
+
+/// Estimated bounding box (width, height in px) for a flow label, used when the
+/// original sketch didn't record one.
+///
+/// Vensim sizes a flow label's box to its text; a fixed default that's too
+/// narrow for a longer name makes Vensim wrap the label, which then overlaps
+/// the flow's pipe. Estimating roughly from the displayed text length (~6px
+/// per character at the sketch's default font, deliberately erring wide so the
+/// text never wraps) avoids that. The height matches Vensim's single-line
+/// flow labels.
+fn default_flow_label_size(displayed_name: &str) -> (i32, i32) {
+    let width = (displayed_name.chars().count() as i32 * 6).max(15);
+    (width, 11)
 }
 
 /// Write a Flow element as type 1 pipe connectors, type 11 (valve), and
@@ -1848,7 +1867,10 @@ fn write_flow_element_with_context(
     };
     let (label_w, label_h, label_shape, label_bits) = match label_compat {
         Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
-        None => (49, 8, 40, 3),
+        None => {
+            let (w, h) = default_flow_label_size(&collapse_display_newlines(&flow.name));
+            (w, h, 40, 3)
+        }
     };
     let valve_name = compat_name_field(valve_compat, "0");
     let valve_tail = compat_tail(valve_compat, "0,0,1,0,0,0");

@@ -1613,7 +1613,9 @@ fn sketch_flow_element_produces_valve_and_variable() {
     );
     // No flow points, so no pipe connectors; valve and label follow
     assert!(buf.contains("11,100,0,295,191,6,8,34,3,0,0,1,0,0,0"));
-    assert!(buf.contains("10,6,Infection Rate,295,207,49,8,40,3,0,0,-1,0,0,0"));
+    // Label sits 20px below the valve (y 191 -> 211); its box is sized to the
+    // text ("Infection Rate" -> 14 chars * 6px = 84 wide, single-line height 11).
+    assert!(buf.contains("10,6,Infection Rate,295,211,84,11,40,3,0,0,-1,0,0,0"));
 }
 
 #[test]
@@ -1719,8 +1721,10 @@ fn sketch_flow_element_derives_stock_connector_points_from_takeoffs() {
         buf.contains("1,201,100,1,100,0,0,22,0,0,0,-1--1--1,,1|(100,100)|"),
         "source pipe connector should be reconstructed from the stock center: {buf}"
     );
+    // Canonical bottom-label fallback: 20px below the valve (y 100 -> 120),
+    // box sized to the text ("Infection Rate" -> 14 chars * 6px = 84, h 11).
     assert!(
-        buf.contains("10,6,Infection Rate,150,116,49,8,40,3,0,0,-1,0,0,0"),
+        buf.contains("10,6,Infection Rate,150,120,84,11,40,3,0,0,-1,0,0,0"),
         "flow label should fall back to the canonical bottom label position: {buf}"
     );
 }
@@ -4139,10 +4143,11 @@ fn flow_default_dimensions_without_compat() {
         buf.contains(",6,8,34,3,"),
         "valve without compat should use default 6,8,34,3: {buf}"
     );
-    // Label line should use default dimensions
+    // Label-line dimensions are estimated from the text ("Birth Rate" -> 10
+    // chars * 6px = 60 wide) with a single-line height of 11.
     assert!(
-        buf.contains(",49,8,40,3,"),
-        "flow label without label_compat should use default 49,8,40,3: {buf}"
+        buf.contains(",60,11,40,3,"),
+        "flow label without label_compat should size to its text: {buf}"
     );
 }
 
