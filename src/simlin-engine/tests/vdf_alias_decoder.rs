@@ -448,86 +448,6 @@ fn run_1_vdf_bare_hash_is_not_output_signature() {
     );
 }
 
-/// `identify_potential_aliases` combines the `f[1]==2065` classification
-/// signal with alias-candidate name filtering. On `econ/base.vdf` and
-/// `econ/risk.vdf` it identifies most but not all MDL-declared stdlib
-/// aliases. The one-alias gap per fixture corresponds to aliases whose
-/// MDL equation wraps a subtraction/addition inside the stdlib call
-/// (e.g. `SMTH1(a - b, t)`), which the Vensim runtime classifies as a
-/// regular variable (`f[1] == 17`) rather than an alias
-/// (`f[1] == 2065`).
-///
-/// This test pins the observed coverage so a future improvement to the
-/// classifier surfaces as a measurable change.
-#[test]
-fn identify_potential_aliases_matches_most_mdl_aliases_on_econ() {
-    if !Path::new("../../test/bobby/vdf/econ/base.vdf").exists() {
-        return;
-    }
-
-    // econ/base.vdf: MDL declares 5 stdlib-call aliases. The VDF's
-    // classification signal catches 4 (the 5th, `perceived mortgage
-    // balance`, uses an expression argument to SMTH1 and is classified
-    // as a regular variable).
-    let vdf = parse_vdf("../../test/bobby/vdf/econ/base.vdf");
-    let mdl = load_mdl("../../test/bobby/vdf/econ/mark2.mdl");
-    let mdl_aliases = collect_mdl_stdlib_aliases(&mdl);
-    assert_eq!(
-        mdl_aliases.len(),
-        5,
-        "econ/base.vdf: MDL should declare 5 stdlib aliases; got {mdl_aliases:?}"
-    );
-
-    let detected = vdf.identify_potential_aliases();
-    let detected_names: Vec<String> = detected.iter().map(|(_, n)| n.clone()).collect();
-
-    // Overlap must include at least 4 of the 5 MDL-declared aliases.
-    let overlap: Vec<&String> = detected_names
-        .iter()
-        .filter(|n| mdl_aliases.iter().any(|a| normalize(n) == normalize(a)))
-        .collect();
-    assert!(
-        overlap.len() >= 4,
-        "econ/base.vdf: expected >=4 MDL aliases in the detected set; \
-         detected={detected_names:?}, MDL aliases={mdl_aliases:?}, overlap={overlap:?}"
-    );
-
-    // No false positives: every detected alias must actually be in the
-    // MDL alias list. (Classification-driven detection should not emit
-    // non-alias names.)
-    for name in &detected_names {
-        assert!(
-            mdl_aliases.iter().any(|a| normalize(name) == normalize(a)),
-            "econ/base.vdf: detected {name:?} is not in the MDL alias list"
-        );
-    }
-
-    // econ/risk.vdf: MDL declares 7 stdlib-call aliases. Same story: the
-    // classification signal catches 6.
-    let vdf = parse_vdf("../../test/bobby/vdf/econ/risk.vdf");
-    let mdl = load_mdl("../../test/bobby/vdf/econ/mark2.mdl");
-    // mark2.mdl has 5 aliases, but risk.mdl doesn't exist. We compare
-    // the identified count against the VDF's own f[1]=2065 count as a
-    // self-consistency check since the MDL doesn't match.
-    let detected = vdf.identify_potential_aliases();
-    let detected_names: Vec<String> = detected.iter().map(|(_, n)| n.clone()).collect();
-    assert!(
-        detected_names.len() >= 5,
-        "econ/risk.vdf: expected >=5 detected aliases; got {detected_names:?}"
-    );
-    let _ = mdl; // silence the "unused" warning on this fixture.
-
-    // Order must match the name-table file order (strictly increasing
-    // name indices).
-    for pair in detected.windows(2) {
-        assert!(
-            pair[0].0 < pair[1].0,
-            "detected aliases must be in name-table file order; got {:?}",
-            detected
-        );
-    }
-}
-
 /// Pair MDL-declared aliases with VDF output signatures via file-order
 /// (Agent 1's Claim B): for each alias in MDL declaration order (resolved
 /// to VDF name-index) and each output sig in file-order, the pairs agree
@@ -579,13 +499,6 @@ fn alias_to_output_sig_pairing_via_file_order_agrees_on_family() {
              sig {sig_name:?} (family {sfam})"
         );
     }
-}
-
-fn collect_mdl_stdlib_aliases(project: &simlin_engine::datamodel::Project) -> Vec<String> {
-    collect_mdl_alias_equations(project)
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect()
 }
 
 fn collect_mdl_alias_equations(

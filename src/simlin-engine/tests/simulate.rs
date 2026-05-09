@@ -10,7 +10,6 @@ use std::io::BufReader;
 
 #[cfg(feature = "file_io")]
 use simlin_engine::FilesystemDataProvider;
-use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Results, Vm, project_io};
@@ -125,55 +124,6 @@ fn load_expected_results(xmile_path: &str) -> Option<Results> {
 }
 
 /// Compare VDF reference data against simulation results with cross-simulator
-/// Build a Results struct from a VDF data extraction and an empirical OT map.
-fn build_results_from_ot_map(
-    vdf: &simlin_engine::vdf::VdfData,
-    ot_map: &HashMap<Ident<Canonical>, usize>,
-) -> Results {
-    use simlin_engine::{Method, SimSpecs};
-
-    let step_count = vdf.time_values.len();
-    let step_size = ot_map.len();
-    let mut step_data = vec![f64::NAN; step_count * step_size];
-    let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
-
-    let mut sorted_entries: Vec<_> = ot_map.iter().collect();
-    sorted_entries.sort_by_key(|&(_, &ot)| ot);
-
-    for (col, (id, &ot_idx)) in sorted_entries.into_iter().enumerate() {
-        offsets.insert(id.clone(), col);
-        if let Some(series) = vdf.entries.get(ot_idx) {
-            for step in 0..step_count {
-                step_data[step * step_size + col] = series[step];
-            }
-        }
-    }
-
-    let initial_time = vdf.time_values[0];
-    let final_time = vdf.time_values[step_count - 1];
-    let saveper = if step_count > 1 {
-        vdf.time_values[1] - vdf.time_values[0]
-    } else {
-        1.0
-    };
-
-    Results {
-        offsets,
-        data: step_data.into_boxed_slice(),
-        step_size,
-        step_count,
-        specs: SimSpecs {
-            start: initial_time,
-            stop: final_time,
-            dt: saveper,
-            save_step: saveper,
-            method: Method::Euler,
-            n_chunks: step_count,
-        },
-        is_vensim: true,
-    }
-}
-
 /// tolerance. VDF stores f32 (~7 digits) and Vensim's integration may differ
 /// from ours, so we allow up to 1% relative error.
 /// Variables present in `results` but not in `vdf_expected` are skipped
@@ -930,27 +880,24 @@ fn simulates_wrld3_03() {
         .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
     let results = vm.into_results();
 
-    // Verify VDF parsing and section6 mapping succeed on the WRLD3 reference
-    // data. Full series-level comparison requires empirical refinement which
-    // is beyond the scope of the structural section6 mapping.
+    // Verify VDF parsing and record-based extraction succeed on the WRLD3
+    // reference data. Full series-level comparison is checked by the
+    // `simulates_clearn` path; here we only confirm the decoder recovers a
+    // broad column set with the right time axis.
     let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
     let vdf_data_bytes =
         std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
     let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
         .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
-    let model = datamodel_project.models.first().unwrap();
-    let ot_map = vdf_file
-        .build_section6_guided_ot_map(model)
-        .unwrap_or_else(|e| panic!("VDF build_section6_guided_ot_map failed: {e}"));
+    let vdf_results = vdf_file
+        .to_results_via_records()
+        .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"));
     assert!(
-        ot_map.len() > 200,
-        "WRLD3: expected broad section6 mapping, got {}",
-        ot_map.len()
+        vdf_results.offsets.len() > 200,
+        "WRLD3: expected broad record-based mapping, got {}",
+        vdf_results.offsets.len()
     );
-    let vdf_data = vdf_file
-        .extract_data()
-        .unwrap_or_else(|e| panic!("VDF extract_data failed: {e}"));
-    assert_eq!(vdf_data.time_values.len(), results.step_count);
+    assert_eq!(vdf_results.step_count, results.step_count);
 }
 
 // C-LEARN uses Vensim macros (SAMPLE UNTIL, SSHAPE) that the native MDL
@@ -983,14 +930,9 @@ fn simulates_clearn() {
         std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
     let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
         .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
-    let model = datamodel_project.models.first().unwrap();
-    let ot_map = vdf_file
-        .build_section6_guided_ot_map(model)
-        .unwrap_or_else(|e| panic!("VDF build_section6_guided_ot_map failed: {e}"));
-    let vdf_data = vdf_file
-        .extract_data()
-        .unwrap_or_else(|e| panic!("VDF extract_data failed: {e}"));
-    let vdf_results = build_results_from_ot_map(&vdf_data, &ot_map);
+    let vdf_results = vdf_file
+        .to_results_via_records()
+        .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"));
 
     ensure_vdf_results(&vdf_results, &results);
 }

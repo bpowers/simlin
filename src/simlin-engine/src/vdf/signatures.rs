@@ -27,9 +27,7 @@
 //! - new-style: the name contains exactly one `>` at the top level
 //!   (separating the alias prefix from the function name).
 //!
-//! See `docs/design/vdf.md` under "Confirmed structural signals" for the
-//! validation data and the file-order pairing hypothesis that ties each
-//! user alias to the output signature at the matching file-order slot.
+//! See `docs/design/vdf.md` for the validation data behind these encodings.
 
 /// Old-style internal `#` signature prefixes. Names starting with one of
 /// these are stdlib internal stocks/rates (e.g. `#LV1<DELAY1(...)>`) that
@@ -118,8 +116,8 @@ pub(crate) fn parse_new_style_alias_sig(sig: &str) -> Option<&str> {
 /// alias.
 ///
 /// Old-style fixtures (`#FUNC(args)#`) yield an empty vector here because
-/// the alias name is not encoded in the signature; those callers need a
-/// model-guided path (see `VdfFile::build_section6_guided_ot_map`).
+/// the alias name is not encoded in the signature; recovering the alias
+/// binding there requires the parsed model.
 pub(crate) fn new_style_alias_signatures(names: &[String]) -> Vec<(usize, String, String)> {
     let mut out = Vec::new();
     for (i, name) in names.iter().enumerate() {
@@ -146,162 +144,6 @@ pub(crate) fn output_signatures(names: &[String]) -> Vec<(usize, String)> {
         .filter(|(_, n)| is_output_sig_name(n))
         .map(|(i, n)| (i, n.clone()))
         .collect()
-}
-
-/// Record classification word observed on alias-backed variable records:
-/// `0x811` (high byte `0x08` "associated with stocks" + low byte `0x11`
-/// "dynamic non-stock"). Every alias record seen in `econ` and WRLD3
-/// carries this when the stdlib-call arguments are simple name
-/// references. Aliases with expression arguments (`SMTH1(a - b, t)`)
-/// are classified as regular variables (`f[1] == 17`) instead.
-const ALIAS_CLASSIFICATION_WORD: u32 = 2065;
-
-/// Identify the slotted user names that are stdlib-call aliases using a
-/// composite of two structural signals:
-///
-/// 1. **Classification signal (`f[1] == 2065`)**: Vensim tags alias-backed
-///    variable records with `0x811` (see [`ALIAS_CLASSIFICATION_WORD`])
-///    on "classic" single-assignment old-style VDFs. Empirically this
-///    signal fires on 4 of 5 declared aliases in `econ/base.vdf`, 6 of 7
-///    in `econ/risk.vdf`, and 6 of 12 MDL-declared aliases in WRLD3
-///    SCEN01.
-///
-/// 2. **Name-category filter (cross-agent signal)**: the file-order
-///    pairing from the view-block decoder lets us pair each record with a
-///    slotted name; we filter out Time/metadata/unit/stdlib-helper names
-///    so only plausible user-alias names survive.
-///
-/// Returns `(name_idx, name_string)` pairs in name-table file order.
-///
-/// ### Known false negatives
-/// - Aliases whose stdlib call takes expression arguments (`SMTH1(a - b,
-///   t)`) are classified as regular variables (`f[1] == 17`) instead of
-///   alias records -- we miss them. At least one per fixture on `econ/base`
-///   and `econ/risk`.
-/// - On `WRLD3-03/experiment.vdf` no record carries `f[1] == 2065`, so
-///   this detector returns empty. Callers should prefer
-///   [`new_style_alias_signatures`] on new-style VDFs.
-/// - On re-saved new-style fixtures (`econ/policy.vdf`, `econ/mark2.vdf`)
-///   this classifier returns at most one alias; the new-style
-///   `#alias>FUNC#` embedding is the correct detection path there.
-///
-/// ### The `field[11] == 0` predecessor sentinel was NOT the signal
-/// An earlier cross-agent hypothesis proposed that a predecessor record
-/// with `field[11] == 0` uniquely identifies aliases. That claim is not
-/// supported: on `econ/base.vdf` the four alias records (`f[1] == 2065`)
-/// live at record indices {30, 46, 62, 72}; their predecessors' `f[11]`
-/// values are `{23, 68, 67, 70}` -- none are zero. The classification
-/// byte is the actual load-bearing signal; this comment records the
-/// rejected hypothesis to avoid re-investigation.
-pub(crate) fn identify_potential_aliases(
-    records: &[super::VdfRecord],
-    names: &[String],
-    pairs: &[(usize, usize)],
-) -> Vec<(usize, String)> {
-    use std::collections::HashSet;
-
-    let mut out: Vec<(usize, String)> = Vec::new();
-    let mut seen_names: HashSet<usize> = HashSet::new();
-
-    for (rec_idx, name_idx) in pairs {
-        let rec = &records[*rec_idx];
-        if rec.fields[1] != ALIAS_CLASSIFICATION_WORD {
-            continue;
-        }
-        let name = &names[*name_idx];
-        if name_is_alias_candidate(name) && !seen_names.contains(name_idx) {
-            seen_names.insert(*name_idx);
-            out.push((*name_idx, name.clone()));
-        }
-    }
-
-    // Sort by name-table file order so the output is deterministic.
-    out.sort_by_key(|(idx, _)| *idx);
-    out
-}
-
-/// Whether a name is a plausible stdlib-alias candidate: a slotted user
-/// variable name that is not Time, a system constant, a unit annotation,
-/// a builtin, or metadata.
-///
-/// The inline reject list below covers three name categories observed
-/// in VDF name tables across the test corpus:
-/// 1. **Vensim Control variables** (`Time`, `INITIAL TIME`, `FINAL TIME`,
-///    `TIME STEP`, `SAVEPER`) -- appear in every VDF, never user
-///    variables.
-/// 2. **Vensim builtin function tokens** (`SUM`, `MIN`, `SMOOTH`, `PI`,
-///    `if then else`, etc.) -- these appear in the name table because
-///    equations reference them, but they are operators, not variables.
-///    Derived from `docs/reference/xmile-v1.0.html` plus the Vensim
-///    user reference manual; kept as an inline list rather than
-///    reusing the crate's `builtins.rs` set because that set is
-///    XMILE-canonical (lowercase) while VDF name tables preserve
-///    Vensim's original UPPERCASE/case-mixed spelling.
-/// 3. **Stdlib module internal names** (`LV1`, `LV2`, `LV3`, `ST`, `RT1`,
-///    `RT2`, `DL`, `DEL`, `IN`, `INI`, `OUTPUT`) -- fixed internal
-///    symbol names that SMOOTH / DELAY / TREND macros emit as name-
-///    table entries. Never user-alias names.
-///
-/// Names of actual user variables in real Vensim models never
-/// collide with this list in practice; if a user picks e.g. `ABS` as
-/// a variable name the MDL parser rejects it before the VDF is written.
-fn name_is_alias_candidate(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let Some(first) = name.chars().next() else {
-        return false;
-    };
-    if matches!(first, '.' | '-' | ':' | '?' | '#') {
-        return false;
-    }
-    !matches!(
-        name,
-        "Time"
-            | "INITIAL TIME"
-            | "FINAL TIME"
-            | "TIME STEP"
-            | "SAVEPER"
-            | "SUM"
-            | "PROD"
-            | "VMIN"
-            | "VMAX"
-            | "LOG"
-            | "MIN"
-            | "MAX"
-            | "ABS"
-            | "EXP"
-            | "LN"
-            | "SMOOTH"
-            | "SMOOTH3"
-            | "SMOOTHI"
-            | "DELAY1"
-            | "DELAY3"
-            | "TREND"
-            | "IN"
-            | "INI"
-            | "OUTPUT"
-            | "PI"
-            | "SIN"
-            | "COS"
-            | "TAN"
-            | "SQRT"
-            | "STEP"
-            | "INTEGER"
-            | "RAMP"
-            | "PULSE"
-            | "MODULO"
-            | "DEL"
-            | "LV1"
-            | "LV2"
-            | "LV3"
-            | "ST"
-            | "RT1"
-            | "RT2"
-            | "DL"
-            | "if then else"
-            | "IF THEN ELSE"
-    )
 }
 
 #[cfg(test)]
@@ -451,31 +293,5 @@ mod tests {
         // Bare / empty.
         assert_eq!(parse_new_style_alias_sig("#"), None);
         assert_eq!(parse_new_style_alias_sig("##"), None);
-    }
-
-    #[test]
-    fn test_name_is_alias_candidate_rejects_metadata_and_builtins() {
-        // Positive: real user variable names.
-        assert!(name_is_alias_candidate("defaults"));
-        assert!(name_is_alias_candidate("perceived HPI"));
-        assert!(name_is_alias_candidate("average risk of derivatives"));
-        // Metadata prefixes.
-        assert!(!name_is_alias_candidate(".Control"));
-        assert!(!name_is_alias_candidate("-dmnl"));
-        assert!(!name_is_alias_candidate(":SUPPLEMENTARY"));
-        assert!(!name_is_alias_candidate("?"));
-        assert!(!name_is_alias_candidate("#SMOOTH(x,3)#"));
-        // Time/system names.
-        assert!(!name_is_alias_candidate("Time"));
-        assert!(!name_is_alias_candidate("INITIAL TIME"));
-        assert!(!name_is_alias_candidate("SAVEPER"));
-        // Stdlib builtins / helpers.
-        assert!(!name_is_alias_candidate("SMOOTH"));
-        assert!(!name_is_alias_candidate("DELAY1"));
-        assert!(!name_is_alias_candidate("DEL"));
-        assert!(!name_is_alias_candidate("LV1"));
-        assert!(!name_is_alias_candidate("RT1"));
-        // Empty.
-        assert!(!name_is_alias_candidate(""));
     }
 }

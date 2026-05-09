@@ -6,7 +6,7 @@
 - [design/2026-02-21-incremental-compilation.md](design/2026-02-21-incremental-compilation.md) -- Incremental compilation via salsa: symbolic bytecode, per-variable tracking, LTM integration
 - [design/ltm--loops-that-matter.md](design/ltm--loops-that-matter.md) -- LTM implementation design: data structures, synthetic variables, module handling
 - [design/mdl-parser.md](design/mdl-parser.md) -- Vensim MDL parser design history and implementation notes
-- [design/vdf.md](design/vdf.md) -- VDF binary format reverse-engineering and parser design
+- [design/vdf.md](design/vdf.md) -- VDF binary format specification and parser design
 
 ## Development Standards
 
