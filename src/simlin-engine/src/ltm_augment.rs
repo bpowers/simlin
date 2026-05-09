@@ -413,6 +413,147 @@ pub(crate) fn build_partial_equation_shaped(
     print_eqn(&transformed)
 }
 
+/// Replace every bare `Var(id)` reference in `equation_text` where `id`
+/// (canonicalized) is in `idents` with `Subscript(id, [element])`,
+/// pinning that variable to `element`.
+///
+/// Used when collapsing a scalar-source -> arrayed-target link score into
+/// per-target-element scalar variables: the target's A2A equation body
+/// references arrayed deps that share the target's dimension *bare* (the
+/// A2A expansion subscripts them at runtime), but a *scalar* per-element
+/// link-score variable must spell out the subscript. `idents` is the set
+/// of those deps (the caller computes it -- it needs to know which deps
+/// are arrayed and share the target's dimension).
+///
+/// `Subscript` nodes are left untouched: a dep that already carries an
+/// explicit subscript (an `Ast::Arrayed` per-element slot wrote
+/// `population[NYC]`) is already element-pinned, and double-subscripting
+/// would be nonsensical. Function-name identifiers and identifiers not in
+/// `idents` are likewise left alone. The result is re-printed in the
+/// canonical equation format (via parse + `print_eqn`); a parse failure
+/// degrades to the lowercased input, matching `build_partial_equation_shaped`.
+///
+/// `element` is a single element name (`"nyc"`) for a one-dimensional
+/// target, or a comma-joined tuple (`"nyc,adult"`) for a multi-dimensional
+/// one -- the same form `db_ltm::cartesian_subscripts` produces and the
+/// `parse_link_offsets` discovery parser expects on the `to` side.
+pub(crate) fn subscript_idents_at_element(
+    equation_text: &str,
+    idents: &HashSet<Ident<Canonical>>,
+    element: &str,
+) -> String {
+    if idents.is_empty() {
+        return equation_text.to_string();
+    }
+    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
+        return equation_text.to_lowercase();
+    };
+    let index_exprs: Vec<IndexExpr0> = element
+        .split(',')
+        .map(|e| {
+            IndexExpr0::Expr(Expr0::Var(
+                crate::common::RawIdent::new_from_str(e.trim()),
+                crate::ast::Loc::default(),
+            ))
+        })
+        .collect();
+    print_eqn(&subscript_idents_in_expr0(ast, idents, &index_exprs))
+}
+
+fn subscript_idents_in_expr0(
+    expr: Expr0,
+    idents: &HashSet<Ident<Canonical>>,
+    index_exprs: &[IndexExpr0],
+) -> Expr0 {
+    match expr {
+        Expr0::Const(..) => expr,
+        Expr0::Var(ref ident, loc) => {
+            let canonical = Ident::new(ident.as_str());
+            if idents.contains(&canonical) {
+                Expr0::Subscript(ident.clone(), index_exprs.to_vec(), loc)
+            } else {
+                expr
+            }
+        }
+        // Already-subscripted references are element-pinned by their own
+        // index; leave them (and their indices) untouched.
+        Expr0::Subscript(..) => expr,
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            let args = args
+                .into_iter()
+                .map(|a| subscript_idents_in_expr0(a, idents, index_exprs))
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, inner, loc) => Expr0::Op1(
+            op,
+            Box::new(subscript_idents_in_expr0(*inner, idents, index_exprs)),
+            loc,
+        ),
+        Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
+            op,
+            Box::new(subscript_idents_in_expr0(*lhs, idents, index_exprs)),
+            Box::new(subscript_idents_in_expr0(*rhs, idents, index_exprs)),
+            loc,
+        ),
+        Expr0::If(cond, then_expr, else_expr, loc) => Expr0::If(
+            Box::new(subscript_idents_in_expr0(*cond, idents, index_exprs)),
+            Box::new(subscript_idents_in_expr0(*then_expr, idents, index_exprs)),
+            Box::new(subscript_idents_in_expr0(*else_expr, idents, index_exprs)),
+            loc,
+        ),
+    }
+}
+
+/// Generate a per-target-element scalar link-score equation for a
+/// scalar-source -> arrayed-target edge.
+///
+/// For target element `element` of arrayed target `to`, produces the
+/// link-score guard form (`link_score_guard_form`) whose partial holds
+/// the scalar source `from` live and freezes everything else at PREVIOUS,
+/// with the target reference (and any arrayed deps that share the target's
+/// dimension) pinned to `element`. The result is `Equation::Scalar`-shaped
+/// text -- one such variable is emitted per target element, named
+/// `$⁚ltm⁚link_score⁚{from}→{to}[{element}]`, mirroring the arrayed->scalar
+/// `{from}[{elem}]→{to}` convention from `generate_element_to_scalar_equation`.
+///
+/// `to_elem_eqn_text` is the target's equation text for this element: the
+/// shared A2A body for an `Equation::ApplyToAll` target, or the matching
+/// per-element slot's text (or the default slot) for an `Equation::Arrayed`
+/// one. `to_deps` is the full dependency set of that equation (computed with
+/// the target's AST dimensions so element-name subscripts are not mistaken
+/// for variables). `to_deps_to_subscript` is the subset of `to_deps` that
+/// must be element-pinned -- the arrayed deps that share the target's
+/// dimension (the target self-reference is pinned implicitly via the
+/// already-subscripted `to[element]` reference the guard form is built
+/// around).
+pub(crate) fn generate_scalar_to_element_equation(
+    from: &str,
+    to: &str,
+    element: &str,
+    to_elem_eqn_text: &str,
+    to_deps: &HashSet<Ident<Canonical>>,
+    to_deps_to_subscript: &HashSet<Ident<Canonical>>,
+) -> String {
+    let from_canonical = Ident::new(from);
+    let from_q = quote_ident(from);
+    let to_q = quote_ident(to);
+    let to_elem = format!("{to_q}[{element}]");
+
+    // The scalar source is always referenced bare, so `RefShape::Bare`
+    // holds its single occurrence live and `source_dim_elements` is empty
+    // (no source subscripts to classify).
+    let partial = build_partial_equation_shaped(
+        to_elem_eqn_text,
+        to_deps,
+        &from_canonical,
+        &RefShape::Bare,
+        &[],
+    );
+    let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element);
+    link_score_guard_form(&partial, &to_elem, &from_q)
+}
+
 /// Quote an identifier for use in an equation string.
 /// Identifiers with special characters (like $, ⁚) need double quotes.
 pub(crate) fn quote_ident(ident: &str) -> String {
@@ -1188,28 +1329,73 @@ fn generate_loop_score_equation(
     let link_score_names: Vec<String> = loop_item
         .links
         .iter()
-        .map(|link| {
-            let (to_var_level, visited_element) = split_node_subscript(link.to.as_str());
-            let name = resolve_link_score_name_for_loop(
-                link.from.as_str(),
-                to_var_level,
-                emitted_link_score_names,
-                visited_element,
-            );
-            // Double-quote the variable name so it can be parsed. A
-            // cross-element loop edge visits a single element of an A2A
-            // link score, so subscript the reference at that element.
-            match visited_element {
-                Some(elem) => format!("\"{name}\"[{elem}]"),
-                None => format!("\"{name}\""),
-            }
-        })
+        .map(|link| loop_link_score_ref(link, emitted_link_score_names))
         .collect();
 
     if link_score_names.is_empty() {
         "0".to_string()
     } else {
         link_score_names.join(" * ")
+    }
+}
+
+/// The reference text (already quoted, and subscripted if needed) for one
+/// loop link inside a loop-score equation.
+///
+/// Three cases:
+///   1. The loop edge visits an element `e` of the target (`link.to` is
+///      `to[e]`) AND a per-target-element scalar link score
+///      `$⁚ltm⁚link_score⁚{from}→{to}[{e}]` was emitted (the scalar-source
+///      -> arrayed-target case from `try_scalar_to_arrayed_link_scores`):
+///      reference that scalar variable *bare* -- the element is already in
+///      the name, so adding a `[e]` subscript would be wrong (the variable
+///      is scalar, it has no element axis to index).
+///   2. The loop edge visits an element `e` and the link score is a
+///      *dimensioned* A2A variable (`$⁚ltm⁚link_score⁚{from}→{to}` with
+///      `dimensions = [target_dims]`, from `emit_per_shape_link_scores`):
+///      reference it subscripted-after-quote, `"$⁚ltm⁚link_score⁚{from}→{to}"[e]`.
+///   3. No visited element (pure-scalar / pure-A2A loops, or `link.to` is
+///      variable-level): reference the resolved name bare.
+///
+/// Cases 1 and 2 are distinguished by which name `emit_per_shape_link_scores`
+/// / `try_scalar_to_arrayed_link_scores` actually emitted: case 1's
+/// element-in-name variant takes priority because it is the form a
+/// scalar->arrayed edge gets (and the form the discovery parser keeps the
+/// scalar source unsubscripted for). A bracketed `link.from`
+/// (`"pop[nyc]"`) can only be a FixedIndex / cross-dimensional source, never
+/// a scalar one, so case 1 is skipped for it and the bracketed-from
+/// resolution in `resolve_link_score_name_for_loop` handles it instead.
+fn loop_link_score_ref(link: &crate::ltm::Link, emitted: &HashSet<String>) -> String {
+    let (to_var_level, visited_element) = split_node_subscript(link.to.as_str());
+
+    if let Some(elem) = visited_element
+        && !link.from.as_str().contains('[')
+    {
+        // Case 1: a per-target-element scalar link score.
+        let per_elem = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
+            link.from.as_str(),
+            to_var_level,
+            elem
+        );
+        if emitted.contains(&per_elem) {
+            return format!("\"{per_elem}\"");
+        }
+    }
+
+    let name = resolve_link_score_name_for_loop(
+        link.from.as_str(),
+        to_var_level,
+        emitted,
+        visited_element,
+    );
+    // Double-quote the variable name so it can be parsed. Case 2: a
+    // cross-element loop edge visits a single element of a dimensioned A2A
+    // link score, so subscript the reference at that element. Case 3: no
+    // element to pin.
+    match visited_element {
+        Some(elem) => format!("\"{name}\"[{elem}]"),
+        None => format!("\"{name}\""),
     }
 }
 

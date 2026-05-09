@@ -1706,6 +1706,54 @@ mod tests {
         assert_eq!(*offset, 42);
     }
 
+    /// AC3.3: A scalar-source -> arrayed-target link score named
+    /// `$⁚ltm⁚link_score⁚total_pop→migration[nyc]` (one scalar
+    /// `LtmSyntheticVar` per target element, `dimensions: vec![]`) resolves
+    /// to the edge `(total_pop, migration[nyc])` -- the scalar source stays
+    /// unsubscripted and the element survives on the `to` side.
+    ///
+    /// This is the discovery-side contract that `try_scalar_to_arrayed_link_scores`
+    /// relies on: the `[`-in-`to` single-passthrough branch (Branch 2 of
+    /// `parse_link_offsets`'s four-way dispatch) handles the new name shape
+    /// with no parser change, exactly as the source-subscripted mirror
+    /// (`test_parse_link_offsets_fixed_index_from_scalar`) does. Pre-fix,
+    /// these edges were named as Bare-A2A vars with `dimensions = [target_dims]`,
+    /// which `expand_a2a_link_offsets` mis-expanded by inventing a
+    /// `total_pop[nyc]` node that doesn't match the unsubscripted `total_pop`
+    /// node from the reducer edges -- making the loop unreachable.
+    #[test]
+    fn test_parse_link_offsets_scalar_to_arrayed() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}total_pop\u{2192}migration[nyc]"),
+            0usize,
+        );
+
+        let results = make_results_with_offsets(offsets, 10);
+
+        // No `ltm_vars` entry needed: with empty `var_dims`, the `[`-in-`to`
+        // passthrough branch fires regardless of the lookup result.
+        let parsed = parse_link_offsets(&results, &[], &[]);
+
+        assert_eq!(
+            parsed.len(),
+            1,
+            "scalar-to-arrayed per-target-element link score should produce a single LinkOffset"
+        );
+        let ((from, to), offset) = &parsed[0];
+        assert_eq!(
+            from.as_str(),
+            "total_pop",
+            "the scalar source must stay unsubscripted"
+        );
+        assert_eq!(
+            to.as_str(),
+            "migration[nyc]",
+            "the target element must survive on the `to` side"
+        );
+        assert_eq!(*offset, 0);
+    }
+
     /// Regression test: when `emit_per_shape_link_scores` produces both
     /// `pop→share` (Bare) and `pop→share⁚wildcard` (Wildcard) for the
     /// same edge, suffix stripping collapses them onto the same

@@ -2101,8 +2101,6 @@ fn test_a2a_flow_to_stock_link_score() {
 fn test_scalar_to_arrayed_link_score() {
     use simlin_engine::datamodel::{self, Equation, Variable};
 
-    let n_elements: usize = 3;
-
     let project = datamodel::Project {
         name: "scalar_to_arrayed".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -2197,31 +2195,41 @@ fn test_scalar_to_arrayed_link_score() {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    // The scalar-to-arrayed link score capacity -> gap should exist
-    // with 3 slots (one per region element)
-    let (link_key, base_offset) = find_link_score_offset(&results, "capacity", "gap")
-        .expect("link score for capacity -> gap should exist");
-
-    assert!(
-        !link_key.as_str().contains('['),
-        "scalar-to-arrayed link score should have a base entry, got: {}",
-        link_key.as_str()
-    );
-
-    // Verify per-element link scores are non-zero
-    for elem in 0..n_elements {
-        let elem_offset = base_offset + elem;
+    // The scalar-source -> arrayed-target edge `capacity -> gap` is emitted
+    // as one scalar link score *per target element*, named
+    // `$⁚ltm⁚link_score⁚capacity→gap[{elem}]` with no dimensions -- NOT a
+    // single Bare-A2A var with three contiguous slots. (The Bare-A2A form
+    // was undiscoverable: `parse_link_offsets`'s `expand_a2a_link_offsets`
+    // would invent a phantom `capacity[nyc]` node.)
+    for elem in ["nyc", "boston", "la"] {
+        let want = format!("$\u{205A}ltm\u{205A}link_score\u{205A}capacity\u{2192}gap[{elem}]");
+        let off = *results
+            .offsets
+            .iter()
+            .find(|(k, _)| k.as_str() == want)
+            .map(|(_, off)| off)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected per-target-element scalar link score {want:?}; link scores present: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .filter(|k| k.as_str().contains("link_score"))
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        // Each element's link score (partial of `gap[e] = capacity - level[e]`
+        // w.r.t. `capacity` live, `level[e]` frozen) is non-zero: capacity
+        // changes by +10 each step and `level[e]` drifts upward via the
+        // adj inflow, so |Δcapacity / Δgap[e]| > 0.
         let any_nonzero = (2..results.step_count).any(|step| {
-            let val = results.data[step * results.step_size + elem_offset];
+            let val = results.data[step * results.step_size + off];
             val.abs() > 1e-10 && !val.is_nan()
         });
         assert!(
             any_nonzero,
-            "scalar-to-arrayed link score element {} (offset {}) should have non-zero values, \
-             key: {}",
-            elem,
-            elem_offset,
-            link_key.as_str()
+            "per-target-element scalar link score {want:?} (offset {off}) should be non-zero at some step"
         );
     }
 }

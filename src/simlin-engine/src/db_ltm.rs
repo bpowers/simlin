@@ -2466,27 +2466,36 @@ pub(crate) fn build_element_level_loops(
                 // emission system produces, so loop-score equations
                 // reference existing variables.
                 //
-                // Link-score emission generates names in two forms:
+                // Link-score emission generates names in three forms:
                 //
                 //   1. Cross-dimensional (arrayed-from, scalar-to):
                 //      `try_cross_dimensional_link_scores` emits
-                //      "$⁚ltm⁚link_score⁚{from}[{elem}]→{to}" per element.
-                //      Here `from` is the variable-level name and `elem` is
-                //      the subscript. Element-level circuit nodes encode this
-                //      as "{from}[{elem}]" for the source and "{to}" for the
-                //      target. We preserve this form so the generated
-                //      `link_score_var_name(from, to, Bare)` call inside
-                //      `generate_loop_score_equation` produces the matching
-                //      cross-dimensional name.
+                //      "$⁚ltm⁚link_score⁚{from}[{elem}]→{to}" per source
+                //      element. Element-level circuit nodes encode this as
+                //      "{from}[{elem}]" for the source and "{to}" for the
+                //      (scalar) target. We keep the bracketed `from` and
+                //      bare `to` so `resolve_link_score_name_for_loop`
+                //      matches that name.
                 //
-                //   2. All other edges (A2A same-element, scalar-to-arrayed,
-                //      scalar-to-scalar): `emit_per_shape_link_scores` uses
-                //      variable-level (stripped) names for both from and to.
-                //      We strip subscripts here so the loop-score equation
-                //      references the same variable-level link score.
+                //   2. Scalar-source -> arrayed-target:
+                //      `try_scalar_to_arrayed_link_scores` emits
+                //      "$⁚ltm⁚link_score⁚{from}→{to}[{elem}]" per target
+                //      element. Element-level circuit nodes encode this as
+                //      "{from}" for the (scalar) source and "{to}[{elem}]"
+                //      for the target -- so we KEEP the `to` subscript
+                //      whenever the target is arrayed (Phase 2's "keep
+                //      `to[e]` when the link score is dimensioned" rule,
+                //      extended to the per-target-element scalar var case).
+                //      `generate_loop_score_equation` then references the
+                //      per-element scalar variable directly.
                 //
-                // Cross-dimensional: source has `[`, target does not.
-                // Everything else: strip subscripts from both ends.
+                //   3. Same-element A2A: `emit_per_shape_link_scores`
+                //      emits "$⁚ltm⁚link_score⁚{from}→{to}" with
+                //      `dimensions = [target_dims]`. We keep `to[e]` (case
+                //      2's rule, since the target is arrayed) and strip the
+                //      `from` subscript; `generate_loop_score_equation`
+                //      then subscripts the dimensioned link score at the
+                //      visited element. Scalar->scalar edges keep neither.
                 let element_nodes: Vec<&str> = circuit.iter().map(|n| n.as_ref()).collect();
 
                 let mut links = Vec::with_capacity(element_nodes.len());
@@ -2499,21 +2508,32 @@ pub(crate) fn build_element_level_loops(
                     } else {
                         crate::ltm::LinkPolarity::Unknown
                     };
-                    // Determine the canonical link name forms.
                     let from_subscripted = from_raw.contains('[');
                     let to_subscripted = to_raw.contains('[');
+                    let to_var_level = strip_subscript(to_raw);
+                    let to_is_arrayed = source_vars
+                        .get(to_var_level)
+                        .map(|sv| {
+                            sv.kind(db) != SourceVariableKind::Module
+                                && !variable_dimensions(db, *sv, project).is_empty()
+                        })
+                        .unwrap_or(false);
                     let (link_from, link_to) = if from_subscripted && !to_subscripted {
-                        // Cross-dimensional: keep element-level from,
-                        // bare to (matches try_cross_dimensional_link_scores).
+                        // Cross-dimensional: keep element-level from, bare to.
                         (from_raw, to_raw)
+                    } else if to_subscripted && to_is_arrayed {
+                        // Scalar->arrayed or same-element A2A: keep `to[e]`,
+                        // strip any `from` subscript.
+                        (strip_subscript(from_raw), to_raw)
                     } else {
-                        // A2A, scalar→arrayed, or scalar→scalar:
-                        // use variable-level names (matches emit_per_shape_link_scores).
-                        (strip_subscript(from_raw), strip_subscript(to_raw))
+                        // Scalar->scalar (or an arrayed target reduced to a
+                        // scalar node that lost its subscript): variable-level.
+                        (strip_subscript(from_raw), to_var_level)
                     };
-                    // Use Bare so link_score_var_name does not prepend an
-                    // extra [elem] bracket to link_from (which already
-                    // contains the subscript for cross-dimensional edges).
+                    // `Link.from` keeps any bracket it carries; the
+                    // downstream resolver maps a bracketed `from` to a
+                    // FixedIndex/cross-dimensional name and an unbracketed
+                    // one to the Bare / per-target-element form.
                     links.push(crate::ltm::Link {
                         from: Ident::new(link_from),
                         to: Ident::new(link_to),
@@ -2812,8 +2832,21 @@ pub fn model_ltm_variables(
             .map(|sv| variable_dimensions(db, *sv, project).clone())
             .unwrap_or_default();
 
+        // Scalar source -> arrayed target: NOT handled here. The main
+        // link-score loop routes these to `try_scalar_to_arrayed_link_scores`
+        // (one scalar link score per target element) before
+        // `emit_per_shape_link_scores` is reached. Returning empty here is
+        // the safe fallback if that routing is ever bypassed (e.g. the
+        // target failed to lower): a scalar Bare link score
+        // (`{from}→{to}`, no dims) parses to the useless-but-harmless edge
+        // `(from, to)`, whereas a Bare-A2A var would make
+        // `expand_a2a_link_offsets` invent a phantom `from[elem]` node that
+        // breaks loops through `from` in the search graph.
+        if from_dims.is_empty() {
+            return vec![];
+        }
+
         // Same-dimension A2A: both have identical dimension(s).
-        // Scalar-to-arrayed: source is scalar, target is arrayed.
         // Partial-collapse: source has more dimensions than target, but all
         //   target dimensions are present in the source (e.g., source[D1,D2]
         //   -> target[D1]). The link score gets the target's (shared) dims.
@@ -2830,14 +2863,12 @@ pub fn model_ltm_variables(
         // Check whether this edge should use the target's dimensions for
         // the link score. This covers:
         // - Same-dimension A2A: from_dims == to_dims
-        // - Scalar-to-arrayed: from_dims is empty
         // - Partial-collapse: to_dims ⊆ from_dims (e.g., [D1,D2]→[D1])
         // - Broadcast: from_dims ⊆ to_dims (e.g., [D1]→[D1,D2])
         //
         // In all these cases, the link score inherits the target's
         // dimensions so per-element values are computed via A2A expansion.
-        let dims_compatible = from_dims.is_empty()
-            || from_dims == *to_dims
+        let dims_compatible = from_dims == *to_dims
             || to_dims
                 .iter()
                 .all(|td| from_dims.iter().any(|fd| fd.name() == td.name()))
@@ -2956,6 +2987,177 @@ pub fn model_ltm_variables(
         Some(cross_vars)
     }
 
+    /// Generate per-target-element link score variables for a
+    /// scalar-source -> arrayed-target edge, or return `None` if the edge
+    /// is not of that shape.
+    ///
+    /// The mirror of [`try_cross_dimensional_link_scores`]: where that one
+    /// fires for (arrayed source, scalar target) reducers and emits one
+    /// scalar `LtmSyntheticVar` per *source* element named
+    /// `$⁚ltm⁚link_score⁚{from}[{elem}]→{to}`, this one fires for (scalar
+    /// source, arrayed target) edges and emits one scalar `LtmSyntheticVar`
+    /// per *target* element named `$⁚ltm⁚link_score⁚{from}→{to}[{elem}]`,
+    /// `dimensions: vec![]`.
+    ///
+    /// Why not a single Bare-A2A var with `dimensions = [target_dims]`:
+    /// that form is undiscoverable. `parse_link_offsets`'s
+    /// `expand_a2a_link_offsets` subscripts *both* `from` and `to` over
+    /// `target_dims`, inventing a `from[elem]` node -- but `from` is scalar,
+    /// so the invented node doesn't match the unsubscripted `from` node
+    /// that other edges (e.g. an arrayed->scalar reducer feeding `from`)
+    /// produce, and a loop through `from` is unreachable in the search
+    /// graph. The per-target-element scalar name parses via the `[`-in-`to`
+    /// single-passthrough branch to the edge `(from, to[elem])` with no
+    /// parser change, and `generate_loop_score_equation` references the
+    /// per-element scalar variable directly.
+    ///
+    /// The per-element equation is the partial of `to[elem]`'s equation
+    /// w.r.t. `from` live (everything else PREVIOUS), wrapped in the
+    /// standard link-score guard form with the target reference pinned to
+    /// `elem`. For an `Equation::ApplyToAll` target the body is the same
+    /// for every element (with the element pinned on the `to` side and on
+    /// the target's arrayed deps); for an `Equation::Arrayed` target it is
+    /// that element's own slot expression (which already carries explicit
+    /// subscripts). See [`crate::ltm_augment::generate_scalar_to_element_equation`].
+    ///
+    /// Returns `None` for scalar-to-scalar, A2A (same-dimension),
+    /// arrayed-to-scalar, module-involved, and any edge where the target
+    /// has no usable AST (so per-element equations can't be derived) -- in
+    /// those cases the caller falls back to its existing emission path.
+    fn try_scalar_to_arrayed_link_scores(
+        db: &dyn Db,
+        source_vars: &HashMap<String, super::SourceVariable>,
+        from: &str,
+        to: &str,
+        model: SourceModel,
+        project: SourceProject,
+    ) -> Option<Vec<LtmSyntheticVar>> {
+        // Source must be a scalar, non-module variable.
+        let from_sv = source_vars.get(from)?;
+        if from_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        if !variable_dimensions(db, *from_sv, project).is_empty() {
+            return None;
+        }
+
+        // Target must be an arrayed, non-module variable.
+        let to_sv = source_vars.get(to)?;
+        if to_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        let to_dims = variable_dimensions(db, *to_sv, project).clone();
+        if to_dims.is_empty() {
+            return None;
+        }
+
+        let to_var = super::reconstruct_single_variable(db, model, project, to)?;
+        // Without a lowered AST we can't derive per-element equations.
+        // Decline and let the caller's existing path handle the (degenerate)
+        // failed-to-lower target.
+        let ast = to_var.ast()?;
+
+        // The per-element equation text and dependency-set source differ
+        // by AST variant:
+        //   - ApplyToAll: one shared body; deps from the whole AST.
+        //   - Arrayed:    per-element slot text (or the default slot);
+        //                 deps from that slot's expression.
+        // In both cases dependency classification is given the target's
+        // AST dimensions so explicit element-name subscripts (e.g. `[NYC]`)
+        // are recognized as dimension references, not variables.
+        use crate::ast::Ast;
+        let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
+            Ast::Scalar(_) => &[],
+            Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
+        };
+
+        // Which target deps must be pinned to the element in the per-element
+        // scalar equation: the arrayed deps that share a dimension with the
+        // target. (Scalar deps stay bare; the target self-reference is
+        // pinned implicitly via the subscripted `to[elem]` in the guard
+        // form built by `generate_scalar_to_element_equation`.)
+        let deps_to_subscript = |deps: &HashSet<Ident<Canonical>>| -> HashSet<Ident<Canonical>> {
+            deps.iter()
+                .filter(|d| {
+                    source_vars
+                        .get(d.as_str())
+                        .filter(|sv| sv.kind(db) != SourceVariableKind::Module)
+                        .map(|sv| {
+                            let dd = variable_dimensions(db, *sv, project);
+                            !dd.is_empty()
+                                && dd
+                                    .iter()
+                                    .any(|x| to_dims.iter().any(|td| td.name() == x.name()))
+                        })
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        };
+
+        let dim_element_lists: Vec<Vec<String>> = to_dims
+            .iter()
+            .map(crate::ltm_augment::dimension_element_names)
+            .collect();
+        let elements = cartesian_subscripts(&dim_element_lists);
+
+        let mut cross_vars = Vec::with_capacity(elements.len());
+        for element in &elements {
+            // Element-specific equation text + that text's dependency set.
+            let (elem_text, elem_deps): (String, HashSet<Ident<Canonical>>) = match ast {
+                Ast::ApplyToAll(_, expr) => (
+                    crate::patch::expr2_to_string(expr),
+                    crate::variable::identifier_set(ast, target_ast_dims, None),
+                ),
+                Ast::Arrayed(_, per_elem, default_expr, _) => {
+                    let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
+                    let slot = per_elem.get(&canonical_elem).or(default_expr.as_ref());
+                    match slot {
+                        Some(expr) => (
+                            crate::patch::expr2_to_string(expr),
+                            crate::variable::identifier_set(
+                                &Ast::Scalar(expr.clone()),
+                                target_ast_dims,
+                                None,
+                            ),
+                        ),
+                        // No slot and no default: the target has a hole at
+                        // this element. A zero equation is the right
+                        // link-score value (no sensitivity), matching the
+                        // historical placeholder behaviour for un-derivable
+                        // partials.
+                        None => (String::new(), HashSet::new()),
+                    }
+                }
+                Ast::Scalar(_) => unreachable!("target is arrayed"),
+            };
+
+            let deps_to_sub = deps_to_subscript(&elem_deps);
+            let equation = if elem_text.is_empty() {
+                "0".to_string()
+            } else {
+                crate::ltm_augment::generate_scalar_to_element_equation(
+                    from,
+                    to,
+                    element,
+                    &elem_text,
+                    &elem_deps,
+                    &deps_to_sub,
+                )
+            };
+            let var_name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
+                from, to, element
+            );
+            cross_vars.push(LtmSyntheticVar {
+                name: var_name,
+                equation: datamodel::Equation::Scalar(equation),
+                dimensions: vec![], // scalar -- one variable per target element
+            });
+        }
+        Some(cross_vars)
+    }
+
     /// Enumerate the unique `RefShape`s under which `to`'s AST references `from`.
     ///
     /// Returns `None` for module sources/targets (modules are scalar nodes
@@ -3067,6 +3269,16 @@ pub fn model_ltm_variables(
                     vars.extend(cross_vars);
                     continue;
                 }
+                // Then scalar-source -> arrayed-target edges: emitted as
+                // one scalar link score per target element rather than a
+                // Bare-A2A var, so the discovery parser's `[`-in-`to`
+                // passthrough keeps the scalar source unsubscripted.
+                if let Some(cross_vars) =
+                    try_scalar_to_arrayed_link_scores(db, source_vars, from, to, model, project)
+                {
+                    vars.extend(cross_vars);
+                    continue;
+                }
                 emit_per_shape_link_scores(
                     db,
                     source_vars,
@@ -3102,6 +3314,19 @@ pub fn model_ltm_variables(
                 if seen_links.insert(key) {
                     // Check for cross-dimensional (arrayed-to-scalar) edges.
                     if let Some(cross_vars) = try_cross_dimensional_link_scores(
+                        db,
+                        source_vars,
+                        from_var_level,
+                        to_var_level,
+                        model,
+                        project,
+                    ) {
+                        vars.extend(cross_vars);
+                        continue;
+                    }
+                    // Then scalar-source -> arrayed-target edges (one
+                    // scalar link score per target element).
+                    if let Some(cross_vars) = try_scalar_to_arrayed_link_scores(
                         db,
                         source_vars,
                         from_var_level,

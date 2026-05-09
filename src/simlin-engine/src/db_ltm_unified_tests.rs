@@ -283,8 +283,19 @@ fn test_model_ltm_variables_a2a_same_dimension_link_scores() {
     }
 }
 
-/// Verify that scalar-to-arrayed edges produce link scores with the
-/// target's dimensions.
+/// Verify that scalar-to-arrayed edges produce one scalar link score per
+/// target element, named `$⁚ltm⁚link_score⁚{from}→{to}[{elem}]` with
+/// empty dimensions -- NOT a single Bare-A2A var with `dimensions =
+/// [target_dims]`.
+///
+/// The Bare-A2A form was undiscoverable: `parse_link_offsets`'s
+/// `expand_a2a_link_offsets` subscripts *both* sides over `target_dims`,
+/// inventing a `growth_factor[nyc]` node that doesn't match the
+/// unsubscripted `growth_factor` node coming from other edges -- so a
+/// loop through `growth_factor` is unreachable in the search graph. The
+/// per-target-element scalar form (mirroring the arrayed->scalar
+/// `{from}[{elem}]→{to}` convention) parses via the `[`-in-`to`
+/// single-passthrough branch to `(growth_factor, births[nyc])`.
 #[test]
 fn test_model_ltm_variables_scalar_to_arrayed_link_score() {
     use salsa::Setter;
@@ -305,22 +316,49 @@ fn test_model_ltm_variables_scalar_to_arrayed_link_score() {
 
     let ltm = model_ltm_variables(&db, model, source_project);
 
-    // growth_factor is scalar, births is arrayed[Region].
-    // The growth_factor->births link score should have Region dims.
-    let gf_births_ls = ltm
-        .vars
-        .iter()
-        .find(|v| {
-            v.name.contains("link_score")
-                && v.name.contains("growth_factor")
-                && v.name.contains("births")
-        })
-        .expect("should have growth_factor->births link score");
+    let names: std::collections::HashSet<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
 
-    assert_eq!(
-        gf_births_ls.dimensions,
-        vec!["Region".to_string()],
-        "scalar-to-arrayed link score should carry target's dimensions"
+    // One scalar link score per target element, with the element in the name.
+    for elem in ["nyc", "boston", "la"] {
+        let expected =
+            format!("$\u{205A}ltm\u{205A}link_score\u{205A}growth_factor\u{2192}births[{elem}]");
+        assert!(
+            names.contains(expected.as_str()),
+            "expected per-target-element scalar link score {expected:?}; emitted link scores: {:?}",
+            ltm.vars
+                .iter()
+                .filter(|v| v.name.contains("link_score"))
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        let lsv = ltm.vars.iter().find(|v| v.name == expected).unwrap();
+        assert!(
+            lsv.dimensions.is_empty(),
+            "per-target-element link score {expected:?} must be scalar (empty dimensions), got {:?}",
+            lsv.dimensions
+        );
+        // The equation references the target element on the `to` side, the
+        // scalar source unsubscripted, and is a guard-form expression.
+        let eq = lsv.equation.source_text();
+        assert!(
+            eq.contains(&format!("births[{elem}]")),
+            "equation for {expected:?} should reference births[{elem}], got: {eq}"
+        );
+        assert!(
+            eq.contains("growth_factor") && !eq.contains(&format!("growth_factor[{elem}]")),
+            "equation for {expected:?} should reference growth_factor unsubscripted, got: {eq}"
+        );
+        assert!(
+            eq.contains("if (TIME = INITIAL_TIME)"),
+            "equation for {expected:?} should be a link-score guard form, got: {eq}"
+        );
+    }
+
+    // The Bare-A2A var must NOT be emitted for a scalar->arrayed edge.
+    let bare_a2a = "$\u{205A}ltm\u{205A}link_score\u{205A}growth_factor\u{2192}births";
+    assert!(
+        !names.contains(bare_a2a),
+        "scalar->arrayed edge must not emit the Bare-A2A link score {bare_a2a:?}"
     );
 }
 
