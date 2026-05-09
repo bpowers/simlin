@@ -1,0 +1,909 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+//! Aggregate-node enumeration for LTM (Loops That Matter).
+//!
+//! An "aggregate node" is the conceptual stand-in for an inlined array-reducer
+//! subexpression (`SUM(pop[*])`, `MEAN(...)`, ...). Phase 5 of the
+//! cross-element-aggregate-scoring design treats each *maximal* reducer
+//! subexpression in a model's equations as an implicit synthetic auxiliary
+//! named `$⁚ltm⁚agg⁚{n}`, so that causality routes `source[d] → agg → target`
+//! instead of all-pairs `source[d] → target[e]`.
+//!
+//! Two consumers share this enumeration:
+//! - `model_element_causal_edges` reroutes a Wildcard/DynamicIndex reducer
+//!   reference through the agg node.
+//! - `model_ltm_variables` emits the `$⁚ltm⁚agg⁚{n}` auxiliaries plus the two
+//!   link-score families.
+//!
+//! Because both consumers must see *identical* agg names, the enumeration is
+//! salsa-tracked and fully deterministic: variables are visited in canonical
+//! sorted order, each variable's AST is walked left-to-right depth-first, and
+//! synthetic names are assigned `$⁚ltm⁚agg⁚0`, `1`, ... in first-encounter
+//! order. AST-identical reducer subexpressions dedupe to a single agg node
+//! (canonicalization is via printed equation text, since `Expr2` is not `Eq`).
+//!
+//! Two kinds of aggregate node:
+//! - **Synthetic** (`is_synthetic == true`): the reducer is a *sub-expression*
+//!   of a larger equation (`share[r] = pop[r] / SUM(pop[*])`). A
+//!   `$⁚ltm⁚agg⁚{n}` auxiliary is minted to hold its value.
+//! - **Variable-backed** (`is_synthetic == false`): the reducer is the
+//!   *entire* dt-equation of a scalar or apply-to-all variable
+//!   (`total_population = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`).
+//!   That variable *is* the aggregate node; no synthetic is minted.
+//!
+//! Cases deliberately *not* recognized here yet (the conservative
+//! full-cross-product element graph is left in place; tracked as tech debt):
+//! - A reducer over an explicit *slice* used as a sub-expression
+//!   (`x[r] = ... + SUM(pop[NYC, *])`): the slice pinning would need to ride on
+//!   the agg's source descriptor, which this enumerator does not yet track.
+//! - A *partial* reduce used as a sub-expression
+//!   (`x[D1] = ... + SUM(matrix[D1, *])`): the result-axis dims would need to
+//!   be derived from the enclosing apply-to-all context.
+//!
+//! Whole-RHS partial reduces (`row_sum[D1] = SUM(matrix[D1,*])`) *are*
+//! recognized — the variable is the agg, and `result_dims` carries its dims —
+//! but the element-graph reroute leaves the conservative full-cross-product in
+//! place for variable-backed aggs (the edges to/from a real variable node
+//! already exist via the normal reference walker).
+
+use std::collections::HashMap;
+
+use crate::ast::{Ast, Expr2, IndexExpr2};
+use crate::builtins::BuiltinFn;
+use crate::common::{Canonical, Ident, canonicalize};
+use crate::db::{
+    Db, SourceModel, SourceProject, project_datamodel_dims, reconstruct_model_variables,
+};
+
+/// Prefix for synthetic aggregate-node names: `$⁚ltm⁚agg⁚{n}`.
+///
+/// The `⁚` is U+205A (TWO DOT PUNCTUATION), matching the separator used for
+/// every other LTM synthetic-variable family (`$⁚ltm⁚link_score⁚...`, etc.).
+pub(crate) const AGG_NAME_PREFIX: &str = "$\u{205A}ltm\u{205A}agg\u{205A}";
+
+/// Build the canonical name for the `n`th synthetic aggregate node.
+pub(crate) fn synthetic_agg_name(n: usize) -> String {
+    format!("{AGG_NAME_PREFIX}{n}")
+}
+
+/// One aggregate node: the stand-in for a maximal reducer subexpression.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct AggNode {
+    /// The aggregate node's name. For a synthetic agg this is
+    /// `$⁚ltm⁚agg⁚{n}`; for a variable-backed agg this is the owning
+    /// variable's canonical name (`total_population`, `row_sum`, ...).
+    pub name: String,
+    /// The reducer subexpression rendered as equation text, e.g.
+    /// `"sum(pop[*])"`. This is the canonical (`Loc`-insensitive) key the
+    /// node was deduped on; `expr2_to_string` lowercases idents and
+    /// normalizes whitespace, so textually-distinct-but-AST-identical
+    /// subexpressions collapse to one node.
+    pub equation_text: String,
+    /// Canonical names of the model variables the reducer reads (sorted,
+    /// deduplicated). For `SUM(a[*] + b[*])` this is `["a", "b"]`.
+    pub source_vars: Vec<String>,
+    /// The aggregate's result-axis dimension names, in datamodel casing
+    /// (e.g. `["D1"]` for `row_sum[D1] = SUM(matrix[D1,*])`). Empty for a
+    /// scalar reducer (`SUM(pop[*])`). Always empty for synthetic aggs in
+    /// this phase (only whole-RHS partial reduces carry result dims, and
+    /// those are variable-backed).
+    pub result_dims: Vec<String>,
+    /// `true` when a `$⁚ltm⁚agg⁚{n}` auxiliary must be minted to hold this
+    /// value; `false` when the owning variable already *is* the aggregate
+    /// node (its entire dt-equation is exactly this reducer).
+    pub is_synthetic: bool,
+}
+
+/// The result of enumerating every aggregate node in a model.
+///
+/// Deterministic by construction so salsa caches it stably: `aggs` is in
+/// first-encounter order over the canonical-sorted variable list, `by_key`
+/// maps the canonical reducer text to an index in `aggs`, and `by_var` maps
+/// each variable's canonical name to the indices of the aggs that appear in
+/// its equation (so the element-graph reroute can ask "which agg of `to`
+/// reads `from`?").
+#[derive(Clone, Debug, PartialEq, Eq, Default, salsa::Update)]
+pub struct AggNodesResult {
+    /// Aggregate nodes in first-encounter (deterministic) order.
+    pub aggs: Vec<AggNode>,
+    /// Canonical reducer text -> index into `aggs`.
+    pub by_key: HashMap<String, usize>,
+    /// Variable canonical name -> indices into `aggs` of the aggregate
+    /// subexpressions occurring in that variable's dt-equation. An agg that
+    /// appears in two variables' equations (AST-identical → deduped) is
+    /// referenced from both variables' entries.
+    pub by_var: HashMap<String, Vec<usize>>,
+}
+
+impl AggNodesResult {
+    /// Look up an aggregate node by its canonical reducer text.
+    pub fn agg_for_key(&self, key: &str) -> Option<&AggNode> {
+        self.by_key.get(key).map(|&i| &self.aggs[i])
+    }
+
+    /// Iterate the aggregate nodes occurring in `var_name`'s dt-equation.
+    pub fn aggs_in_var<'a>(&'a self, var_name: &str) -> impl Iterator<Item = &'a AggNode> {
+        self.by_var
+            .get(var_name)
+            .into_iter()
+            .flat_map(move |idxs| idxs.iter().map(move |&i| &self.aggs[i]))
+    }
+}
+
+/// Enumerate every aggregate node (maximal reducer subexpression) in `model`.
+///
+/// Salsa-tracked: a pure function of `(db, model, project)` consuming the same
+/// reconstructed ASTs the element-graph walker uses, so both consumers see an
+/// identical map.
+#[salsa::tracked(returns(ref))]
+pub fn enumerate_agg_nodes(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> AggNodesResult {
+    let variables = reconstruct_model_variables(db, model, project);
+    let dm_dims = project_datamodel_dims(db, project);
+
+    // Visit variables in canonical-sorted order for deterministic synthetic
+    // naming. `reconstruct_model_variables` returns a HashMap, so the order
+    // is not otherwise stable.
+    let mut var_names: Vec<&Ident<Canonical>> = variables.keys().collect();
+    var_names.sort();
+
+    let mut result = AggNodesResult::default();
+    let mut next_synthetic_n: usize = 0usize;
+
+    for var_name in var_names {
+        let var = &variables[var_name];
+        let Some(ast) = var.ast() else {
+            // Stocks (init-only AST) and modules have no dt-equation to walk.
+            continue;
+        };
+        let var_name_str = var_name.as_str().to_string();
+        // Datamodel-cased dims of the variable itself (used for the
+        // whole-RHS-partial-reduce result dims).
+        let dm_dims_ref = dm_dims.as_slice();
+        let var_dim_names: Vec<String> = var
+            .get_dimensions()
+            .map(|dims| {
+                dims.iter()
+                    .map(|d| canonical_dim_to_datamodel(d.name(), dm_dims_ref))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        match ast {
+            Ast::Scalar(expr) => {
+                walk_var_equation(
+                    expr,
+                    &var_name_str,
+                    /* var_is_arrayed = */ false,
+                    &var_dim_names,
+                    &variables,
+                    &mut result,
+                    &mut next_synthetic_n,
+                );
+            }
+            Ast::ApplyToAll(_, expr) => {
+                walk_var_equation(
+                    expr,
+                    &var_name_str,
+                    /* var_is_arrayed = */ true,
+                    &var_dim_names,
+                    &variables,
+                    &mut result,
+                    &mut next_synthetic_n,
+                );
+            }
+            Ast::Arrayed(_, per_elem, default_expr, _) => {
+                // Per-element equations: each slot is its own (possibly
+                // distinct) equation. A reducer that *is* an element's whole
+                // RHS still mints a synthetic agg here -- the variable as a
+                // whole is not the aggregate (different elements may reduce
+                // differently). Visit slots in canonical element-key order
+                // for determinism.
+                let mut elem_keys: Vec<_> = per_elem.keys().collect();
+                elem_keys.sort();
+                for k in elem_keys {
+                    walk_subexpr_for_aggs(
+                        &per_elem[k],
+                        &var_name_str,
+                        &variables,
+                        &mut result,
+                        &mut next_synthetic_n,
+                        /* in_reducer = */ false,
+                    );
+                }
+                if let Some(default) = default_expr {
+                    walk_subexpr_for_aggs(
+                        default,
+                        &var_name_str,
+                        &variables,
+                        &mut result,
+                        &mut next_synthetic_n,
+                        false,
+                    );
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Walk the whole-RHS expression of a `Scalar` / `ApplyToAll` variable.
+///
+/// If the expression is *exactly* one maximal reducer App, the variable
+/// itself is the aggregate node (no synthetic minted). Otherwise the
+/// expression is walked for sub-expression reducers via
+/// [`walk_subexpr_for_aggs`].
+#[allow(clippy::too_many_arguments)]
+fn walk_var_equation(
+    expr: &Expr2,
+    var_name: &str,
+    var_is_arrayed: bool,
+    var_dim_names: &[String],
+    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    result: &mut AggNodesResult,
+    next_synthetic_n: &mut usize,
+) {
+    if let Expr2::App(builtin, _, _) = expr
+        && let Some(source_vars) = reducer_source_vars(builtin, variables)
+    {
+        // Whole-RHS reducer: the variable IS the aggregate node.
+        let key = crate::patch::expr2_to_string(expr);
+        // A scalar variable's whole-RHS reducer is a full reduce (scalar
+        // result). An arrayed variable's whole-RHS reducer holds per-element
+        // aggregate values, so the result dims are the variable's own dims.
+        let result_dims = if var_is_arrayed {
+            var_dim_names.to_vec()
+        } else {
+            vec![]
+        };
+        register_agg(
+            result,
+            next_synthetic_n,
+            &key,
+            var_name,
+            AggKind::VariableBacked {
+                var_name: var_name.to_string(),
+                result_dims,
+            },
+            source_vars,
+        );
+        return;
+    }
+    walk_subexpr_for_aggs(
+        expr,
+        var_name,
+        variables,
+        result,
+        next_synthetic_n,
+        /* in_reducer = */ false,
+    );
+}
+
+/// Recursively walk an expression looking for *maximal* reducer
+/// subexpressions (a reducer App not nested inside another reducer App).
+///
+/// `in_reducer` is `true` once we have descended into a reducer's argument:
+/// any reducer found there is *not* maximal and is skipped (only the
+/// outermost reducer becomes an agg), but the walk still continues into it to
+/// collect the outer agg's source variables -- handled by the caller via
+/// [`reducer_source_vars`], so here we simply stop minting once inside a
+/// reducer.
+fn walk_subexpr_for_aggs(
+    expr: &Expr2,
+    owner_var: &str,
+    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    result: &mut AggNodesResult,
+    next_synthetic_n: &mut usize,
+    in_reducer: bool,
+) {
+    match expr {
+        Expr2::Const(..) | Expr2::Var(..) => {}
+        Expr2::Subscript(_, indices, _, _) => {
+            for idx in indices {
+                match idx {
+                    IndexExpr2::Expr(e) => walk_subexpr_for_aggs(
+                        e,
+                        owner_var,
+                        variables,
+                        result,
+                        next_synthetic_n,
+                        in_reducer,
+                    ),
+                    IndexExpr2::Range(l, r, _) => {
+                        walk_subexpr_for_aggs(
+                            l,
+                            owner_var,
+                            variables,
+                            result,
+                            next_synthetic_n,
+                            in_reducer,
+                        );
+                        walk_subexpr_for_aggs(
+                            r,
+                            owner_var,
+                            variables,
+                            result,
+                            next_synthetic_n,
+                            in_reducer,
+                        );
+                    }
+                    IndexExpr2::Wildcard(_)
+                    | IndexExpr2::StarRange(_, _)
+                    | IndexExpr2::DimPosition(_, _) => {}
+                }
+            }
+        }
+        Expr2::App(builtin, _, _) => {
+            if !in_reducer && let Some(source_vars) = reducer_source_vars(builtin, variables) {
+                // Maximal reducer subexpression -> mint a synthetic agg.
+                let key = crate::patch::expr2_to_string(expr);
+                register_agg(
+                    result,
+                    next_synthetic_n,
+                    &key,
+                    owner_var,
+                    AggKind::Synthetic,
+                    source_vars,
+                );
+                // Descend with `in_reducer = true` so nested reducers are
+                // not separately minted, but index expressions etc. are
+                // still traversed.
+                builtin.for_each_expr_ref(|sub| {
+                    walk_subexpr_for_aggs(
+                        sub,
+                        owner_var,
+                        variables,
+                        result,
+                        next_synthetic_n,
+                        /* in_reducer = */ true,
+                    )
+                });
+            } else {
+                builtin.for_each_expr_ref(|sub| {
+                    walk_subexpr_for_aggs(
+                        sub,
+                        owner_var,
+                        variables,
+                        result,
+                        next_synthetic_n,
+                        in_reducer,
+                    )
+                });
+            }
+        }
+        Expr2::Op1(_, operand, _, _) => walk_subexpr_for_aggs(
+            operand,
+            owner_var,
+            variables,
+            result,
+            next_synthetic_n,
+            in_reducer,
+        ),
+        Expr2::Op2(_, left, right, _, _) => {
+            walk_subexpr_for_aggs(
+                left,
+                owner_var,
+                variables,
+                result,
+                next_synthetic_n,
+                in_reducer,
+            );
+            walk_subexpr_for_aggs(
+                right,
+                owner_var,
+                variables,
+                result,
+                next_synthetic_n,
+                in_reducer,
+            );
+        }
+        Expr2::If(cond, then_e, else_e, _, _) => {
+            walk_subexpr_for_aggs(
+                cond,
+                owner_var,
+                variables,
+                result,
+                next_synthetic_n,
+                in_reducer,
+            );
+            walk_subexpr_for_aggs(
+                then_e,
+                owner_var,
+                variables,
+                result,
+                next_synthetic_n,
+                in_reducer,
+            );
+            walk_subexpr_for_aggs(
+                else_e,
+                owner_var,
+                variables,
+                result,
+                next_synthetic_n,
+                in_reducer,
+            );
+        }
+    }
+}
+
+/// What sort of aggregate node a reducer subexpression maps to.
+enum AggKind {
+    /// A `$⁚ltm⁚agg⁚{n}` auxiliary must be minted.
+    Synthetic,
+    /// The owning variable already is the aggregate node.
+    VariableBacked {
+        var_name: String,
+        result_dims: Vec<String>,
+    },
+}
+
+/// Register an aggregate node for `key` (canonical reducer text), deduping on
+/// the key and recording the `owner_var` -> agg-index association.
+fn register_agg(
+    result: &mut AggNodesResult,
+    next_synthetic_n: &mut usize,
+    key: &str,
+    owner_var: &str,
+    kind: AggKind,
+    source_vars: Vec<String>,
+) {
+    let idx = if let Some(&existing) = result.by_key.get(key) {
+        existing
+    } else {
+        let (name, result_dims, is_synthetic) = match kind {
+            AggKind::Synthetic => {
+                let name = synthetic_agg_name(*next_synthetic_n);
+                *next_synthetic_n += 1;
+                (name, vec![], true)
+            }
+            AggKind::VariableBacked {
+                var_name,
+                result_dims,
+            } => (var_name, result_dims, false),
+        };
+        let mut sorted_sources = source_vars;
+        sorted_sources.sort();
+        sorted_sources.dedup();
+        result.aggs.push(AggNode {
+            name,
+            equation_text: key.to_string(),
+            source_vars: sorted_sources,
+            result_dims,
+            is_synthetic,
+        });
+        let idx = result.aggs.len() - 1;
+        result.by_key.insert(key.to_string(), idx);
+        idx
+    };
+    let entry = result.by_var.entry(owner_var.to_string()).or_default();
+    if !entry.contains(&idx) {
+        entry.push(idx);
+    }
+}
+
+/// If `builtin` is an array-reducing function applied to at least one arrayed
+/// model variable, return the set of model-variable names it reads
+/// (recursively, across the reducer's arguments). Otherwise return `None`.
+///
+/// Recognized reducers: `SUM`, `MEAN` (single-argument array form), single-arg
+/// `MIN`/`MAX`, `STDDEV`, `RANK`. `SIZE` is intentionally excluded -- its link
+/// score is always 0, mirroring `try_cross_dimensional_link_scores`'s
+/// `Some(vec![])` for SIZE -- so a `SIZE(...)` subexpression is not hoisted.
+///
+/// A reducer is only recognized when at least one of its source variables is
+/// arrayed (a scalar argument to `SUM`/`MEAN` is a no-op the parser would
+/// normally reject anyway, and is never hoisted).
+fn reducer_source_vars(
+    builtin: &BuiltinFn<Expr2>,
+    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+) -> Option<Vec<String>> {
+    let is_reducer = match builtin {
+        BuiltinFn::Sum(_) => true,
+        // The single-argument form of MEAN is the array reducer; the
+        // multi-argument form is an element-wise mean of scalars.
+        BuiltinFn::Mean(args) => args.len() == 1,
+        // Single-argument MIN/MAX (no second arg) is the array reducer form.
+        BuiltinFn::Min(_, None) | BuiltinFn::Max(_, None) => true,
+        BuiltinFn::Stddev(_) => true,
+        BuiltinFn::Rank(_, _) => true,
+        _ => false,
+    };
+    if !is_reducer {
+        return None;
+    }
+
+    let mut sources: Vec<String> = Vec::new();
+    builtin.for_each_expr_ref(|arg| collect_var_refs(arg, &mut sources));
+    // `collect_var_refs` picks up every identifier appearing in the
+    // expression, which inside a subscript includes dimension names
+    // (`matrix[D1, *]`) and literal element names (`pop[NYC]`). Keep only
+    // identifiers that are actually model variables.
+    sources.retain(|name| variables.contains_key(&Ident::<Canonical>::new(name)));
+    if sources.is_empty() {
+        return None;
+    }
+    // Require at least one arrayed source. Module variables are scalar nodes
+    // in the causal graph and never count as an arrayed reducer source.
+    let has_arrayed_source = sources.iter().any(|name| {
+        variables
+            .get(&Ident::<Canonical>::new(name))
+            .and_then(|v| v.get_dimensions())
+            .map(|dims| !dims.is_empty())
+            .unwrap_or(false)
+    });
+    if !has_arrayed_source {
+        return None;
+    }
+    sources.sort();
+    sources.dedup();
+    Some(sources)
+}
+
+/// Collect the canonical names of all model variables referenced (directly or
+/// via subscript) in `expr`, including inside nested builtins and index
+/// expressions.
+fn collect_var_refs(expr: &Expr2, out: &mut Vec<String>) {
+    match expr {
+        Expr2::Const(..) => {}
+        Expr2::Var(ident, _, _) => out.push(ident.as_str().to_string()),
+        Expr2::Subscript(ident, indices, _, _) => {
+            out.push(ident.as_str().to_string());
+            for idx in indices {
+                match idx {
+                    IndexExpr2::Expr(e) => collect_var_refs(e, out),
+                    IndexExpr2::Range(l, r, _) => {
+                        collect_var_refs(l, out);
+                        collect_var_refs(r, out);
+                    }
+                    IndexExpr2::Wildcard(_)
+                    | IndexExpr2::StarRange(_, _)
+                    | IndexExpr2::DimPosition(_, _) => {}
+                }
+            }
+        }
+        Expr2::App(builtin, _, _) => builtin.for_each_expr_ref(|sub| collect_var_refs(sub, out)),
+        Expr2::Op1(_, operand, _, _) => collect_var_refs(operand, out),
+        Expr2::Op2(_, left, right, _, _) => {
+            collect_var_refs(left, out);
+            collect_var_refs(right, out);
+        }
+        Expr2::If(cond, then_e, else_e, _, _) => {
+            collect_var_refs(cond, out);
+            collect_var_refs(then_e, out);
+            collect_var_refs(else_e, out);
+        }
+    }
+}
+
+/// Map a canonical dimension name back to its datamodel casing, falling back
+/// to the canonical form if no datamodel dimension matches.
+fn canonical_dim_to_datamodel(canonical: &str, dm_dims: &[crate::datamodel::Dimension]) -> String {
+    dm_dims
+        .iter()
+        .find(|dm| canonicalize(dm.name()).as_ref() == canonical)
+        .map(|dm| dm.name().to_string())
+        .unwrap_or_else(|| canonical.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::test_common::TestProject;
+
+    /// Build a `TestProject`, sync into salsa, and return the enumerated
+    /// aggregate nodes for the "main" model.
+    fn agg_nodes(project: &TestProject) -> AggNodesResult {
+        let datamodel = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+        let source_project = sync.project;
+        enumerate_agg_nodes(&db, source_model, source_project).clone()
+    }
+
+    /// AC4.3: a variable whose entire dt-equation is exactly one reducer call
+    /// (scalar) mints no synthetic agg -- the variable itself is the agg.
+    #[test]
+    fn whole_rhs_scalar_reducer_is_its_own_agg() {
+        let project = TestProject::new("whole_rhs")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_aux("population[Region]", "100")
+            .scalar_aux("total_population", "SUM(population[*])");
+
+        let result = agg_nodes(&project);
+
+        // No `$⁚ltm⁚agg⁚{n}` minted.
+        assert!(
+            result.aggs.iter().all(|a| !a.is_synthetic),
+            "whole-RHS scalar reducer must not mint a synthetic agg; got: {:?}",
+            result.aggs
+        );
+        // The reducer maps to a variable-backed agg named `total_population`.
+        let agg = result
+            .agg_for_key("sum(population[*])")
+            .expect("expected an agg keyed by sum(population[*])");
+        assert_eq!(agg.name, "total_population");
+        assert!(!agg.is_synthetic);
+        assert_eq!(agg.source_vars, vec!["population".to_string()]);
+        assert!(agg.result_dims.is_empty());
+        // `total_population`'s equation owns this agg.
+        assert!(
+            result
+                .aggs_in_var("total_population")
+                .any(|a| a.name == "total_population"),
+        );
+    }
+
+    /// AC4.3 (arrayed variant): `agg[D1] = SUM(matrix[D1,*])` is whole-RHS, so
+    /// the variable is the agg; `result_dims` carries `D1`.
+    #[test]
+    fn whole_rhs_arrayed_partial_reduce_is_its_own_agg() {
+        let project = TestProject::new("whole_rhs_partial")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct("agg", vec!["D1".into()], "SUM(matrix[D1, *])", None);
+
+        let result = agg_nodes(&project);
+
+        assert!(
+            result.aggs.iter().all(|a| !a.is_synthetic),
+            "whole-RHS arrayed reducer must not mint a synthetic agg; got: {:?}",
+            result.aggs
+        );
+        let agg = result
+            .aggs_in_var("agg")
+            .next()
+            .expect("expected an agg owned by `agg`");
+        assert_eq!(agg.name, "agg");
+        assert!(!agg.is_synthetic);
+        assert_eq!(agg.source_vars, vec!["matrix".to_string()]);
+        assert_eq!(agg.result_dims, vec!["D1".to_string()]);
+    }
+
+    /// AC4.1 (the basic mint): `share[r] = pop[r] / SUM(pop[*])` mints one
+    /// synthetic agg `$⁚ltm⁚agg⁚0` for the sub-expression `SUM(pop[*])`.
+    #[test]
+    fn subexpression_reducer_mints_one_synthetic_agg() {
+        let project = TestProject::new("share_mint")
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("share[Region]", "pop / SUM(pop[*])");
+
+        let result = agg_nodes(&project);
+
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "expected exactly one synthetic agg; got: {:?}",
+            result.aggs
+        );
+        assert_eq!(synthetic[0].name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
+        assert_eq!(synthetic[0].equation_text, "sum(pop[*])");
+        assert_eq!(synthetic[0].source_vars, vec!["pop".to_string()]);
+        assert!(synthetic[0].result_dims.is_empty());
+        assert!(
+            result
+                .aggs_in_var("share")
+                .any(|a| a.name == "$\u{205A}ltm\u{205A}agg\u{205A}0")
+        );
+    }
+
+    /// AC4.4 (nested reducers): `x = SUM(a[*]) / SUM(b[*])` mints two distinct
+    /// synthetic agg nodes (`$⁚ltm⁚agg⁚0` for `SUM(a[*])`, `$⁚ltm⁚agg⁚1` for
+    /// `SUM(b[*])`). The `/` is not a reducer; neither `SUM` is inside the
+    /// other, so both are maximal.
+    #[test]
+    fn nested_reducers_mint_two_aggs() {
+        let project = TestProject::new("nested")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("a[Region]", "10")
+            .array_aux("b[Region]", "20")
+            .scalar_aux("x", "SUM(a[*]) / SUM(b[*])");
+
+        let result = agg_nodes(&project);
+
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            2,
+            "expected two synthetic aggs; got: {:?}",
+            result.aggs
+        );
+        // First-encounter (left-to-right DFS) order: SUM(a[*]) then SUM(b[*]).
+        assert_eq!(synthetic[0].name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
+        assert_eq!(synthetic[0].equation_text, "sum(a[*])");
+        assert_eq!(synthetic[0].source_vars, vec!["a".to_string()]);
+        assert_eq!(synthetic[1].name, "$\u{205A}ltm\u{205A}agg\u{205A}1");
+        assert_eq!(synthetic[1].equation_text, "sum(b[*])");
+        assert_eq!(synthetic[1].source_vars, vec!["b".to_string()]);
+    }
+
+    /// AC4.4 (dedup): the same reducer subexpression appearing in two
+    /// variables' equations (with whitespace/casing differences in the
+    /// source text) maps to one synthetic agg node referenced by both.
+    #[test]
+    fn ast_identical_reducers_dedupe() {
+        let project = TestProject::new("dedup")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("pop[Region]", "100")
+            // Two different equations both contain SUM(pop[*]); the first is
+            // spelled with extra spacing and uppercase.
+            .array_aux("share_a[Region]", "pop / SUM( POP [ * ] )")
+            .array_aux("share_b[Region]", "pop * 2 / sum(pop[*])");
+
+        let result = agg_nodes(&project);
+
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "AST-identical reducers must dedupe to one agg; got: {:?}",
+            result.aggs
+        );
+        assert_eq!(synthetic[0].equation_text, "sum(pop[*])");
+        // Both variables reference the same agg index.
+        let a_idx: Vec<usize> = result.by_var.get("share_a").cloned().unwrap_or_default();
+        let b_idx: Vec<usize> = result.by_var.get("share_b").cloned().unwrap_or_default();
+        assert_eq!(a_idx.len(), 1);
+        assert_eq!(b_idx.len(), 1);
+        assert_eq!(
+            a_idx, b_idx,
+            "both variables must point at the same deduped agg index"
+        );
+    }
+
+    /// Per-element `Ast::Arrayed` target with a different reducer per element:
+    /// `x[a] = SUM(p[*]); x[b] = MEAN(p[*])` mints two synthetic agg nodes,
+    /// one per element's reducer.
+    #[test]
+    fn per_element_arrayed_target_mints_one_agg_per_element_reducer() {
+        let project = TestProject::new("per_elem")
+            .named_dimension("D", &["a", "b"])
+            .array_aux("p[D]", "1")
+            .array_with_ranges_direct(
+                "x",
+                vec!["D".into()],
+                vec![("a", "SUM(p[*])"), ("b", "MEAN(p[*])")],
+                None,
+            );
+
+        let result = agg_nodes(&project);
+
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            2,
+            "per-element reducers must mint one agg per element; got: {:?}",
+            result.aggs
+        );
+        let texts: std::collections::HashSet<&str> =
+            synthetic.iter().map(|a| a.equation_text.as_str()).collect();
+        assert!(texts.contains("sum(p[*])"), "missing sum(p[*]): {texts:?}");
+        assert!(
+            texts.contains("mean(p[*])"),
+            "missing mean(p[*]): {texts:?}"
+        );
+        // Both are owned by `x`.
+        let x_idx = result.by_var.get("x").cloned().unwrap_or_default();
+        assert_eq!(x_idx.len(), 2);
+    }
+
+    /// Determinism: the same model built twice (or with variables declared in
+    /// a different order) yields identical agg names assigned to the same
+    /// subexpressions.
+    #[test]
+    fn enumeration_is_deterministic_under_variable_reordering() {
+        // Two synthetic aggs: SUM(a[*]) and SUM(b[*]). Whichever variable
+        // happens to be visited first is irrelevant -- we always visit in
+        // canonical-name sorted order, and within an equation left-to-right.
+        let build = |order_a_first: bool| {
+            let mut p = TestProject::new("determinism")
+                .named_dimension("Region", &["NYC", "Boston"])
+                .array_aux("a[Region]", "10")
+                .array_aux("b[Region]", "20");
+            // `q` references SUM(a[*]) and SUM(b[*]); `r` references the same
+            // pair. We add them in different orders to confirm the result is
+            // identical.
+            if order_a_first {
+                p = p
+                    .scalar_aux("q", "SUM(a[*]) + SUM(b[*])")
+                    .scalar_aux("r", "SUM(a[*]) * SUM(b[*])");
+            } else {
+                p = p
+                    .scalar_aux("r", "SUM(a[*]) * SUM(b[*])")
+                    .scalar_aux("q", "SUM(a[*]) + SUM(b[*])");
+            }
+            agg_nodes(&p)
+        };
+
+        let r1 = build(true);
+        let r2 = build(false);
+        assert_eq!(
+            r1.aggs, r2.aggs,
+            "enumeration must be deterministic regardless of declaration order"
+        );
+        assert_eq!(r1.by_key, r2.by_key);
+        // Specifically: SUM(a[*]) -> agg 0, SUM(b[*]) -> agg 1 (a < b, and
+        // within q's equation SUM(a[*]) precedes SUM(b[*])).
+        assert_eq!(
+            r1.agg_for_key("sum(a[*])").map(|a| a.name.clone()),
+            Some("$\u{205A}ltm\u{205A}agg\u{205A}0".to_string())
+        );
+        assert_eq!(
+            r1.agg_for_key("sum(b[*])").map(|a| a.name.clone()),
+            Some("$\u{205A}ltm\u{205A}agg\u{205A}1".to_string())
+        );
+    }
+
+    /// A model with no reducers produces an empty result.
+    #[test]
+    fn model_without_reducers_has_no_aggs() {
+        let project = TestProject::new("no_reducers")
+            .stock("population", "100", &["births"], &["deaths"], None)
+            .flow("births", "population * 0.1", None)
+            .flow("deaths", "population * 0.05", None)
+            .scalar_const("rate", 0.1);
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.is_empty(),
+            "model without reducers must have no aggs; got: {:?}",
+            result.aggs
+        );
+        assert!(result.by_key.is_empty());
+        assert!(result.by_var.is_empty());
+    }
+
+    /// A reducer over a *scalar* source is not hoisted (the parser would
+    /// normally reject it anyway, but be defensive).
+    #[test]
+    fn reducer_over_scalar_source_is_not_hoisted() {
+        // `SUM(s)` where `s` is scalar -- pathological, but must not mint an
+        // agg. (We also keep a real arrayed reducer to confirm the
+        // enumerator still finds the legitimate one.)
+        let project = TestProject::new("scalar_reducer")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .scalar_aux("s", "5")
+            .array_aux("pop[Region]", "100")
+            .scalar_aux("y", "SUM(s) + SUM(pop[*])");
+
+        let result = agg_nodes(&project);
+        // Only the arrayed reducer is recognized.
+        assert!(
+            result.agg_for_key("sum(pop[*])").is_some(),
+            "the arrayed reducer must be recognized; got: {:?}",
+            result.aggs
+        );
+        assert!(
+            result.agg_for_key("sum(s)").is_none(),
+            "a reducer over a scalar source must not be hoisted; got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// SIZE is not hoisted -- its link score is always 0, matching
+    /// `try_cross_dimensional_link_scores`'s `Some(vec![])` for SIZE.
+    #[test]
+    fn size_reducer_is_not_hoisted() {
+        let project = TestProject::new("size_reducer")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("pop[Region]", "100")
+            .scalar_aux("n", "SIZE(pop[*])");
+
+        let result = agg_nodes(&project);
+        assert!(
+            result.aggs.is_empty(),
+            "SIZE must not be hoisted as an agg; got: {:?}",
+            result.aggs
+        );
+    }
+}
