@@ -1354,13 +1354,21 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         report = vdf_xray.precision_report(ref)
 
         self.assertEqual(report.status, "not-proven")
-        self.assertIn("record-span-overlap", report.reasons)
-        # Ref.vdf still has unresolved owner/descriptor span overlap, but
-        # dimension labels are now decoded through section-3 axis refs plus
-        # the alternate scenario element records.
+        # Ref.vdf is the corpus's one fixture whose graphical-function
+        # descriptor names (e.g. `RS N2O`, `Solar and albedo forcings`) do not
+        # carry the lexical "lookup"/"table" keyword, so descriptor
+        # identification falls through to the highest-`f[10]` heuristic. The
+        # heuristic resolves Ref's overlaps cleanly (no remaining
+        # owner-vs-owner span conflict), but its use is the documented
+        # `not-proven` blocker (the file genuinely does not store the
+        # discriminator -- see vdf.md appendix).
+        self.assertIn("used-descriptor-f10-fallback", report.reasons)
+        self.assertNotIn("record-span-overlap", report.reasons)
+        self.assertEqual(report.record_span_overlap_slots, 0)
+        # Dimension labels are decoded through section-3 axis refs plus the
+        # alternate scenario element records.
         self.assertNotIn("incomplete-dimension-anchors", report.reasons)
         self.assertNotIn("numeric-array-labels", report.reasons)
-        self.assertGreater(report.record_span_overlap_slots, 0)
         self.assertEqual(report.unmapped_block_count, 0)
         self.assertEqual(report.numeric_array_label_count, 0)
         self.assertEqual(report.duplicate_result_name_count, 0)
@@ -1372,8 +1380,14 @@ class VdfXrayModelEditingTests(unittest.TestCase):
 
         report = vdf_xray.precision_report(risk2)
 
-        self.assertEqual(report.status, "not-proven")
-        self.assertIn("record-span-overlap", report.reasons)
+        # `risk2.vdf` was previously `not-proven` due to the
+        # field[11] union; after the direct-record-map promotion the
+        # lexical lookup-def-name test cleanly identifies its descriptor
+        # (`loan standards impact on insolvency table`), so the residual
+        # owner partition is clean and the file is `exact-by-xray`. The
+        # mixed-bitmap-width property is independent and still pinned here.
+        self.assertEqual(report.status, "exact-by-xray")
+        self.assertNotIn("record-span-overlap", report.reasons)
         self.assertEqual(report.unmapped_block_count, 0)
         self.assertEqual(report.bitmap_widths, [27, 29])
         self.assertEqual(report.data_block_decode_failures, 0)
@@ -1398,11 +1412,22 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         )
 
         status_counts: dict[str, int] = {}
+        reason_counts: dict[str, int] = {}
         for row in rows:
             status_counts[row.status] = status_counts.get(row.status, 0) + 1
-        self.assertEqual(status_counts["exact-by-xray"], 31)
-        self.assertEqual(status_counts["not-proven"], 9)
+            for reason in row.reasons:
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        # After the direct-record-map extraction promotion, the lookup-vs-helper
+        # field[11] union is resolved on every fixture except `Ref.vdf` (whose
+        # descriptor names are abbreviations -- the f[10]-highest fallback fires
+        # there). 31 (originally exact-by-xray) + 8 lookup-vs-helper fixtures
+        # (lookup_ex, econ ×5, WRLD3 ×2) become exact-by-xray; only Ref.vdf
+        # remains `not-proven`, with its f[10]-fallback reason.
+        self.assertEqual(status_counts["exact-by-xray"], 39)
+        self.assertEqual(status_counts["not-proven"], 1)
         self.assertEqual(status_counts["dataset/not-implemented"], 1)
+        self.assertEqual(reason_counts.get("record-span-overlap", 0), 0)
+        self.assertEqual(reason_counts.get("used-descriptor-f10-fallback", 0), 1)
 
     def test_record_field8_recovers_dimension_element_groups(self) -> None:
         ref = parse_fixture("test/xmutil_test_models/Ref.vdf")
@@ -1951,6 +1976,156 @@ class VdfXrayModelEditingTests(unittest.TestCase):
         report = vdf_xray.precision_report(ref)
         self.assertNotIn("incomplete-dimension-anchors", report.reasons)
         self.assertNotIn("numeric-array-labels", report.reasons)
+
+
+class CorpusDecodedRecordSpanCoverageTests(unittest.TestCase):
+    """
+    Pin the corpus-wide property that motivates the direct-record-map
+    extraction path: on every `exact-by-xray` fixture, `decoded_record_spans`
+    (with the class-code guard) covers OT[1..N) exactly once and produces zero
+    overlapping span-claims. The 9 `not-proven` fixtures all share one
+    failure mode -- record-span overlap from the field[11] owner/descriptor
+    union (see docs/design/vdf.md appendix).
+    """
+
+    EXACT_BY_XRAY = [
+        "test/bobby/vdf/bact/Current.vdf",
+        "test/bobby/vdf/bact/euler-1.vdf",
+        "test/bobby/vdf/bact/euler-10.vdf",
+        "test/bobby/vdf/bact/euler-2.vdf",
+        "test/bobby/vdf/bact/euler-5.vdf",
+        "test/bobby/vdf/bact/euler.vdf",
+        "test/bobby/vdf/bact/rk4.vdf",
+        "test/bobby/vdf/bact/rk4auto-1.vdf",
+        "test/bobby/vdf/consts/b_is_3.vdf",
+        "test/bobby/vdf/consts/b_is_4.vdf",
+        "test/bobby/vdf/econ/risk.vdf",
+        "test/bobby/vdf/level_vs_aux/x_is_aux.vdf",
+        "test/bobby/vdf/level_vs_aux/x_is_stock.vdf",
+        "test/bobby/vdf/model_editing/run_1.vdf",
+        "test/bobby/vdf/model_editing/run_10.vdf",
+        "test/bobby/vdf/model_editing/run_2.vdf",
+        "test/bobby/vdf/model_editing/run_3.vdf",
+        "test/bobby/vdf/model_editing/run_4.vdf",
+        "test/bobby/vdf/model_editing/run_5.vdf",
+        "test/bobby/vdf/model_editing/run_6.vdf",
+        "test/bobby/vdf/model_editing/run_7.vdf",
+        "test/bobby/vdf/model_editing/run_8.vdf",
+        "test/bobby/vdf/model_editing/run_9.vdf",
+        "test/bobby/vdf/pop/Current.vdf",
+        "test/bobby/vdf/pop/pop.vdf",
+        "test/bobby/vdf/sd202_a2/Current.vdf",
+        "test/bobby/vdf/subscripts/subscripts.vdf",
+        "test/bobby/vdf/water/Current.vdf",
+        "test/bobby/vdf/water/base.vdf",
+        "test/bobby/vdf/water/limited.vdf",
+        "test/bobby/vdf/water/water.vdf",
+    ]
+
+    NOT_PROVEN_OVERLAP_PAIRS = {
+        "test/bobby/vdf/lookups/lookup_ex.vdf": 1,
+        "test/bobby/vdf/econ/base.vdf": 3,
+        "test/bobby/vdf/econ/mark2.vdf": 3,
+        "test/bobby/vdf/econ/policy.vdf": 3,
+        "test/bobby/vdf/econ/risk2.vdf": 1,
+        "test/bobby/vdf/econ/rk.vdf": 3,
+        "test/metasd/WRLD3-03/SCEN01.VDF": 54,
+        "test/metasd/WRLD3-03/experiment.vdf": 54,
+    }
+
+    def test_decoded_record_spans_partition_ot_on_every_exact_by_xray_fixture(self) -> None:
+        for relpath in self.EXACT_BY_XRAY:
+            with self.subTest(fixture=relpath):
+                vdf = parse_fixture(relpath)
+                spans = vdf_xray.decoded_record_spans(vdf)
+                covered: set[int] = set()
+                overlap_slots = 0
+                for span in spans:
+                    for ot in range(span.start, span.end):
+                        if ot in covered:
+                            overlap_slots += 1
+                        covered.add(ot)
+                expected = set(range(1, vdf.offset_table_count))
+                self.assertEqual(
+                    overlap_slots, 0,
+                    f"{relpath}: expected zero overlapping span-claims, got {overlap_slots}",
+                )
+                self.assertEqual(
+                    covered, expected,
+                    f"{relpath}: spans should cover OT[1..{vdf.offset_table_count}) exactly; "
+                    f"missing={sorted(expected - covered)} extra={sorted(covered - expected)}",
+                )
+
+    def test_decoded_record_spans_overlap_count_pinned_on_not_proven_fixtures(self) -> None:
+        """
+        On `not-proven` fixtures, the overlap count equals the documented
+        descriptor/owner conflict-pair count (the field[11] owner/descriptor
+        union). The number is a structural fingerprint of the fixture and
+        changes only when the discriminator is actually decoded (which the
+        appendix proves cannot happen from the file alone).
+        """
+        for relpath, expected_pairs in self.NOT_PROVEN_OVERLAP_PAIRS.items():
+            with self.subTest(fixture=relpath):
+                vdf = parse_fixture(relpath)
+                spans = vdf_xray.decoded_record_spans(vdf)
+                slot_to_records: dict[int, list[int]] = {}
+                for span in spans:
+                    for ot in range(span.start, span.end):
+                        slot_to_records.setdefault(ot, []).append(span.rec_idx)
+                # Count overlap PAIRS at the slot level (each slot with k>=2 spans
+                # contributes k-1 pair-equivalents; on the documented fixtures every
+                # overlap is a clean pair so this == the conflict-pair count).
+                pair_equiv = sum(len(recs) - 1 for recs in slot_to_records.values() if len(recs) >= 2)
+                # Coalesce contiguous overlap-pair-equivalents to per-conflict-pair count:
+                # all documented overlaps are (descriptor, owner) where the overlap is
+                # exactly one shared OT slot per pair (lookup_ex/econ) or a width-N
+                # descriptor over a width-1 or width-N owner (Ref/WRLD3 collapse to N).
+                # Use the slot-level pair-equivalent count as the pinning quantity --
+                # it is what `record-span-overlap` measures.
+                self.assertEqual(
+                    pair_equiv, expected_pairs,
+                    f"{relpath}: expected {expected_pairs} slot-level overlap "
+                    f"pair-equivalents, got {pair_equiv}",
+                )
+
+
+class DecodedRecordSpanClassCodeGuardTests(unittest.TestCase):
+    """The class-code guard added to `decoded_record_spans` rejects records
+    whose f[11]-as-OT span lands on any non-real-data class code (anything
+    outside {0x08, 0x11, 0x16, 0x17, 0x18}). On the current corpus this is a
+    no-op for the 31 exact-by-xray fixtures (their owner-record f[11]s all
+    point to real-data slots). The test pins that no `exact-by-xray` fixture
+    loses any spans to the guard."""
+
+    def test_class_code_guard_does_not_drop_spans_on_clean_fixtures(self) -> None:
+        # Re-do `decoded_record_spans`'s logic without the class-code check,
+        # and assert the count matches.
+        for relpath in CorpusDecodedRecordSpanCoverageTests.EXACT_BY_XRAY:
+            with self.subTest(fixture=relpath):
+                vdf = parse_fixture(relpath)
+                guarded = vdf_xray.decoded_record_spans(vdf)
+
+                # Replicate the unguarded path inline.
+                key_to_name_idx = vdf_xray.build_record_name_key_to_name_index(vdf)
+                unguarded_count = 0
+                for rec in vdf.records:
+                    if key_to_name_idx.get(rec.fields[2]) is None:
+                        continue
+                    start = rec.ot_index()
+                    if start <= 0 or start >= vdf.offset_table_count:
+                        continue
+                    length = vdf_xray.decoded_record_shape_length(vdf, rec)
+                    if length is None or length <= 0:
+                        continue
+                    if start + length > vdf.offset_table_count:
+                        continue
+                    unguarded_count += 1
+
+                self.assertEqual(
+                    len(guarded), unguarded_count,
+                    f"{relpath}: class-code guard unexpectedly dropped spans "
+                    f"({unguarded_count} -> {len(guarded)})",
+                )
 
 
 if __name__ == "__main__":
