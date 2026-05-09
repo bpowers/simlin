@@ -389,3 +389,174 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Mitigation in place**: `scripts/verify-deploy-build.sh` and a `git status --porcelain`-must-be-empty check in CI's `frontend` job catch the "missed a path in deploy:clean" regression class on every PR.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-08
+
+### 41. POST /api/projects/:u/:p is not transactional
+
+- **Component**: server (`src/server/api.ts:240-307`)
+- **Severity**: medium
+- **Description**: `app.db.file.create(file.getId(), file)` runs unconditionally before the version-conditional `project.update`, so a 409 (concurrent update) leaves an orphaned file blob in Firestore. The `setTimeout(() => preview.deleteOne(...))` also runs unconditionally, regardless of whether the project update actually succeeded -- which then regenerates the preview from the unchanged underlying state. Pre-existing.
+- **Suspected fix**: Move file create + project update into a single Firestore transaction; gate preview invalidation on `result !== null`.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 42. Username and project-name validation absent; Firestore filterId is single-replace
+
+- **Component**: server (`src/server/api.ts:309-370`, `src/server/models/table-firestore.ts:38-40`)
+- **Severity**: medium
+- **Description**: There is no allowlist regex on usernames or project names at the API layer. A username containing `/` registers fine, but Firestore then rejects subsequent `${userId}/${projectSlug}` writes as INVALID_ARGUMENT, bricking the account. `FirestoreTable.filterId` uses `id.replace('/', '|')` (single replace), so an id with multiple `/` is partially escaped, and a username containing a literal `|` could collide with the escaped form of another user's id. Pre-existing.
+- **Suspected fix**: Apply an allowlist regex such as `/^[a-z0-9][a-z0-9-]{0,38}$/` to usernames (and a similar one to project names) at the API boundary; switch `filterId` to `replaceAll('/', '|')`.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 43. Private-project name enumeration via response-shape asymmetry
+
+- **Component**: server (`src/server/route-handlers.ts:50-73`)
+- **Severity**: medium
+- **Description**: `createProjectRouteHandler` returns 404 for projects that don't exist, but 302 (redirect to `/`) for private projects that the requester doesn't own. The two responses are trivially distinguishable by an unauthenticated client, allowing enumeration of private project names belonging to a known username. Mild risk for an SD-modeling tool but a real information leak. Introduced in commit d44d3aea (`#210`).
+- **Suspected fix**: Standardise on the same response (e.g. always 404) for "doesn't exist" and "exists privately, not yours".
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 44. populateExamples uses an async predicate in Array.filter
+
+- **Component**: server (`src/server/new-user.ts:58-67`)
+- **Severity**: medium
+- **Description**: `files.filter(async (file) => { ... return stats.isDirectory(); })` returns a Promise from every callback, and Promises are always truthy, so `filter` is a no-op: every directory entry (including non-directories) flows into the subsequent `populateExample` loop. The bug is masked today only because each `populateExample` call is wrapped in try/catch and logs failures silently. Pre-existing.
+- **Suspected fix**: `for await` accumulating into a new array, or `await Promise.all(files.map(...))` followed by a synchronous `.filter`.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 45. temp-<uuid> user creation race produces unrecoverable duplicates
+
+- **Component**: server (`src/server/authn.ts:128-176`)
+- **Severity**: medium
+- **Description**: The first-sign-in path is check-then-insert: `findOneByScan({email})` -> if no user, create `temp-<uuidV4()>`. Two simultaneous first sign-ins for the same email both insert distinct `temp-` rows, after which every subsequent `findOneByScan({email})` throws `expected single result document, not 2`. The recovery branch only handles the temp+real case (deletes temps when a real user exists); two-temps never converge. Pre-existing.
+- **Suspected fix**: Wrap the check-and-insert in a Firestore transaction that re-reads the email index, or hash the email to a deterministic temp ID so concurrent inserts collide on the primary key.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 46. interceptWriteHeaders patched res.writeHead returns undefined
+
+- **Component**: server (`src/server/headers.ts:9-37`)
+- **Severity**: low
+- **Description**: The replacement `res.writeHead` is an arrow function that ends with `return this as ServerResponse;`. In strict CJS module scope `this` is `undefined`, so the patched method returns `undefined` instead of the `Response`. The only current caller (`request-logger.ts:42`) uses `res.writeHead(500)` and discards the return value, so the bug is latent -- but any future caller that chains `res.writeHead(...).end(...)` or relies on the documented `ServerResponse` return type will crash silently. Pre-existing.
+- **Suspected fix**: Convert the arrow to a regular function (so `this` binds to the response) or capture `res` in the closure and `return res;` explicitly.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 47. POST /api/projects/:u/:p loosely validates currVersion
+
+- **Component**: server (`src/server/api.ts:254-265`)
+- **Severity**: low
+- **Description**: `if (!req.body.currVersion)` is falsy for `0` (unreachable today since versions start at 1) but truthy for `-1`. The `as number` cast is type-only, with no runtime conversion: a client sending `currVersion: "1"` produces `newVersion = projectVersion + 1 = "11"` (string concat), and the new version is stored as a string. Pre-existing.
+- **Suspected fix**: Replace with `Number.isInteger(req.body.currVersion) && req.body.currVersion > 0` (or a parsed-then-validated `Number(...)` step) before using the value.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 48. ?project= redirect input validation absent
+
+- **Component**: app (`src/app/App.tsx:228-231`)
+- **Severity**: medium
+- **Description**: `urlParams.get('project')` is passed directly to `<Redirect to={projectParam}>` with no shape validation. Same-origin browser policy prevents cross-origin redirects, but a value like `?project=//evil.com/page` (or `?project=/foo/../bar`) is a valid same-origin pushState path that fools the subsequent `/\/.*\/.*/` path-shape check at `App.tsx:235` and routes the user to a confusing or attacker-controlled path. Introduced in commit 48a1e10a (`#107`).
+- **Suspected fix**: Validate against an allowlist before redirecting, e.g. `if (projectParam && /^\/[^/][^/]*\/[^/]+$/.test(projectParam))`.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 49. env.js dotenv block is permanently dead code
+
+- **Component**: app (`src/app/config/env.js:25-35`)
+- **Severity**: low
+- **Description**: `require('dotenv-expand')(require('dotenv').config(...))` always throws `MODULE_NOT_FOUND` because neither package is installed. The catch swallows it silently, and the comment misleadingly suggests the loading is conditional rather than universally broken. Result: any `.env*` files in `src/app/` are ignored. Introduced in commit d0bc3e37 (`#214`).
+- **Suspected fix**: Add `dotenv` and `dotenv-expand` to `src/app/package.json` if `.env` loading is actually wanted, or delete the block (and the `dotenv` export from `paths.js`) if not.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 50. paths.js still carries CRA leftovers
+
+- **Component**: app (`src/app/config/paths.js:16-90`)
+- **Severity**: low
+- **Description**: A large fraction of `paths.js` predates the rsbuild migration and is no longer consumed: `getPublicUrlOrPath`, `publicUrlOrPath`, the `homepage` lookup, `appPublic`, `yarnLockFile`, `appNodeModules`, `appPackageJson`, `appTsConfig`, `moduleFileExtensions`, and `resolveModule`. The actually-used exports are `appPath`, `appBuild`, `componentBuild`, `appHtml`, `appIndexJs`, `componentIndexJs`, and (conditionally) `dotenv`. Introduced in commit d0bc3e37 (`#214`).
+- **Suspected fix**: Trim the file to the consumed exports; delete the helpers that backed the dead exports.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 51. Dev-server proxy whitelist references non-existent endpoints
+
+- **Component**: app (`src/app/config/rsbuild/shared.config.js:96-110`)
+- **Severity**: low
+- **Description**: The dev-server proxy matches paths starting with `/api/`, `/auth/`, `/oauth/`, `/logout`, `/render/`, `/session`, and `/download/`, but only `/api/*` and `/session` actually exist on the backend (see `src/server/app.ts:252,260`, `src/server/authn.ts:234,238`). The dead matchers are noise; worse, several use `startsWith` and so prefix-collide: `/sessionAlpha` would be proxied even though only `/session` is a real route. Introduced in commit 9c7403e6 (rsbuild migration).
+- **Suspected fix**: Reduce the matcher to the actual endpoints; switch `/session` from `startsWith` to equality (`pathname === '/session'`).
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 52. NewProject and NewUser submit handlers have no double-click guard
+
+- **Component**: app (`src/app/NewProject.tsx:132-140`, `src/app/NewUser.tsx:90-98`)
+- **Severity**: medium
+- **Description**: Both `handleClose` methods schedule the create-project / create-user POST via `setTimeout` without any in-flight guard. A second click before the first POST resolves enqueues a duplicate request. The server does not enforce uniqueness, so the user can wind up with duplicate projects (or trigger a 409 cascade) on a slow network. Pre-existing.
+- **Suspected fix**: Add a `submitting` boolean to component state, set it on the first click, disable the submit button while it is true, and reset it in the request's success/error handler.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 53. InnerApp constructor side effects fire twice under StrictMode; auth listener leaks
+
+- **Component**: app (`src/app/App.tsx:97-115`)
+- **Severity**: low
+- **Description**: `connectAuthEmulator`, `onAuthStateChanged`, and the initial `setTimeout(this.getUserInfo)` all run in the `InnerApp` constructor. Under React 18+ StrictMode in dev these double-fire, and the unsubscribe handle returned by `onAuthStateChanged` is discarded so the listener leaks on unmount. In production `InnerApp` is the root component and never unmounts, so the leak is cosmetic; the dev double-fire is the more visible symptom. The pattern predates the React 18->19 upgrade and was ratified by commit 846c69eb (`#162`) without revisiting it.
+- **Suspected fix**: Move the side effects into `componentDidMount`; store the `onAuthStateChanged` unsubscribe handle and call it from `componentWillUnmount`.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 54. printUrls strips /index with substring replace instead of an anchored regex
+
+- **Component**: app (`src/app/config/rsbuild/shared.config.js:91-93`)
+- **Severity**: low
+- **Description**: `url.replace('/index', '')` strips the first occurrence of `/index` anywhere in the URL. A URL like `http://localhost:3000/index/foo/index` would become `http://localhost:3000/foo/index`, and any project path containing the literal substring `/index` (e.g. a hypothetical `username/index-models`) would have it stripped from the printed URL. Introduced in commit 9c7403e6 (rsbuild migration).
+- **Suspected fix**: `url.replace(/\/index$/, '')` so only a trailing `/index` is removed.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 55. Stale rsbuild-migration leftovers in src/app
+
+- **Component**: app (`src/app/build-comparison-results.json`, `src/app/config/build-utils.js:28`)
+- **Severity**: low
+- **Description**: Two artifacts of the rsbuild migration are still present and harmless but misleading: (a) `build-comparison-results.json` is a one-shot rsbuild-vs-webpack size comparison snapshot from the migration, no longer consumed by anything; (b) `canReadAsset` in `build-utils.js` still excludes `service-worker.js` from the asset-readability check, but no service worker exists in the project. Introduced in commit 9c7403e6 (rsbuild migration) / d0bc3e37 (`#214`).
+- **Suspected fix**: Delete both. If a service worker is reintroduced later, the exclusion can come back with it.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 56. y_points.len() - 1 underflows to usize::MAX in JSON GraphicalFunction
+
+- **Component**: simlin-engine (`src/simlin-engine/src/json.rs:692-695`)
+- **Severity**: medium
+- **Description**: When deserialising a JSON `GraphicalFunction` with no explicit `x_scale`, the default `x_scale.max` is `(y_points.len() - 1) as f64`. If `y_points` is empty, `0_usize - 1` wraps to `usize::MAX` and casts to `1.84e19_f64`, producing a `GraphicalFunction` whose x-scale is `[0, 1.84e19]`. The TypeScript twin (`graphicalFunctionFromJson` in `src/core/datamodel.ts:112`) does the same calculation correctly with `Math.max(0, ...)`. Introduced in commit fd224e99 (initial JSON serialization support).
+- **Suspected fix**: `y_points.len().saturating_sub(1) as f64`.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 57. Stale @system-dynamics/* import path in build-selection-map.test.ts
+
+- **Component**: diagram (`src/diagram/tests/build-selection-map.test.ts:6-7`)
+- **Severity**: low
+- **Description**: The file imports types from `@system-dynamics/core/datamodel` and `@system-dynamics/core/common` instead of `@simlin/core/...` like the rest of the codebase. The test passes only because TypeScript erases type-only imports during compilation, so the dangling module specifier is never resolved. Inconsistent with house style and one rename away from a confusing test failure. Introduced in commit f932a7d1.
+- **Suspected fix**: Change both imports to `@simlin/core/datamodel` / `@simlin/core/common`.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 58. TS Dimension type loses parent/mappings/size/mapsTo from JSON round-trip
+
+- **Component**: core (`src/core/datamodel.ts:1336-1356`)
+- **Severity**: low
+- **Description**: The TS `Dimension` interface only carries `name` and `subscripts`, while the Rust JSON `Dimension` has `size`, `mapsTo`, `mappings`, and `parent`. Today the deployed save paths bypass the TS `Project` for serialisation so the loss is invisible -- but `projectAttachData()` consults `dim.subscripts` to splay arrayed-variable Series data, and for indexed subdimensions the engine emits empty `elements`. So TS sees an empty `subscripts` array and silently fails to attach data for any variable arrayed over an indexed subdimension; the user would observe missing sparkline series. Pre-existing.
+- **Suspected fix**: Extend the TS `Dimension` type with `parent`/`mappings` (and optionally `size`) and use them in `projectAttachData`; alternatively add a code comment documenting the limitation and the safe paths if a full fix is out of scope.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
+
+### 59. disposeProject mutates projectChildren during for-of iteration
+
+- **Component**: engine (`src/engine/src/worker-server.ts:454-473`)
+- **Severity**: low
+- **Description**: `disposeProject` iterates `for (const childHandle of children)` while `disposeModel` / `disposeSim` (called from inside the loop) mutate the same `Set` via `this.projectChildren` bookkeeping. ECMAScript's `Set` iterator handles deletion of the *current* element well, so the code happens to work today, but a future change that deletes a not-yet-visited entry would silently skip handles and leak resources. The post-loop `this.projectChildren.delete(workerHandle)` is also redundant once iteration finishes. Introduced in commit 1b516b63 (`#238`).
+- **Suspected fix**: Snapshot the set with `[...children]` before iterating; remove the redundant post-loop `delete`.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-08
