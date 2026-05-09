@@ -629,7 +629,7 @@ fn convert_variable(
                     uid,
                     x: flow_x as f64,
                     y: flow_y as f64,
-                    label_side: view_element::LabelSide::Bottom,
+                    label_side: flow_label_side(var.x, var.y, flow_x, flow_y),
                     points,
                     compat: valve_compat,
                     label_compat: Some(make_compat(
@@ -659,6 +659,48 @@ fn convert_variable(
             }),
             None,
         )),
+    }
+}
+
+/// Derive a flow label's `LabelSide` from where Vensim drew the label box
+/// relative to the flow's anchor (the valve for an attached flow, otherwise the
+/// flow variable itself).
+///
+/// Vensim records a flow's name as a separate type-10 sketch element with its
+/// own coordinates; XMILE and our datamodel instead store a discrete
+/// `label_side` and recompute the label position from it on export (see
+/// `default_flow_label_point` in the writer). Recovering the side here -- rather
+/// than hard-coding `Bottom` -- keeps MDL->MDL round trips stable for labels
+/// that Vensim placed above/left/right of the valve, and lets edited or
+/// from-scratch models match the placement of imported-and-re-exported ones.
+///
+/// The label is mapped to whichever axis it is displaced along more strongly;
+/// ties favour the vertical axis because flow pipes usually run horizontally, so
+/// their labels sit above or below. Screen `y` grows downward, so a label drawn
+/// above the anchor has `dy < 0` and maps to `Top`. A label sitting exactly on
+/// the anchor (the common case for an unattached flow, where there is no valve
+/// to offset from) maps to `Center` so the writer leaves it in place.
+fn flow_label_side(
+    label_x: i32,
+    label_y: i32,
+    anchor_x: i32,
+    anchor_y: i32,
+) -> view_element::LabelSide {
+    let dx = label_x - anchor_x;
+    let dy = label_y - anchor_y;
+    if dx == 0 && dy == 0 {
+        return view_element::LabelSide::Center;
+    }
+    if dy.abs() >= dx.abs() {
+        if dy < 0 {
+            view_element::LabelSide::Top
+        } else {
+            view_element::LabelSide::Bottom
+        }
+    } else if dx < 0 {
+        view_element::LabelSide::Left
+    } else {
+        view_element::LabelSide::Right
     }
 }
 
@@ -2488,6 +2530,111 @@ mod tests {
         assert_eq!(label_compat.width, 55.0);
         assert_eq!(label_compat.height, 35.0);
         assert_eq!(label_compat.bits, 99);
+    }
+
+    #[test]
+    fn test_flow_label_side_from_offset() {
+        use view_element::LabelSide;
+        // Label drawn below the valve (Vensim's usual placement, ~16-20px down).
+        assert_eq!(flow_label_side(150, 119, 150, 100), LabelSide::Bottom);
+        // Label drawn above the valve.
+        assert_eq!(flow_label_side(150, 80, 150, 100), LabelSide::Top);
+        // Label drawn to the left / right (vertical-pipe flows).
+        assert_eq!(flow_label_side(120, 100, 150, 100), LabelSide::Left);
+        assert_eq!(flow_label_side(190, 100, 150, 100), LabelSide::Right);
+        // Diagonal placements pick the dominant axis; ties favour vertical.
+        assert_eq!(flow_label_side(160, 130, 150, 100), LabelSide::Bottom);
+        assert_eq!(flow_label_side(170, 95, 150, 100), LabelSide::Right);
+        assert_eq!(flow_label_side(145, 95, 150, 100), LabelSide::Top);
+        // Label sitting on the anchor (e.g. an unattached flow) -> Center.
+        assert_eq!(flow_label_side(150, 100, 150, 100), LabelSide::Center);
+    }
+
+    #[test]
+    fn test_flow_label_side_recovered_from_sketch() {
+        // A Vensim flow whose label box is drawn *above* the valve should come
+        // back as LabelSide::Top, not the old hard-coded Bottom -- otherwise an
+        // MDL->MDL round trip would silently move the label to the other side.
+        use super::super::types::VensimValve;
+
+        let header = ViewHeader {
+            version: ViewVersion::V300,
+            title: "Test View".to_string(),
+            font: None,
+        };
+        let mut view = VensimView::new(header);
+        view.insert(
+            1,
+            VensimElement::Variable(VensimVariable {
+                uid: 1,
+                name: "Stock A".to_string(),
+                x: 50,
+                y: 100,
+                width: 40,
+                height: 20,
+                attached: false,
+                is_ghost: false,
+                bits: 3,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+        view.insert(
+            2,
+            VensimElement::Valve(VensimValve {
+                uid: 2,
+                name: "444".to_string(),
+                x: 150,
+                y: 100,
+                width: 9,
+                height: 11,
+                attached: true,
+                bits: 17,
+                shape: 0,
+                tail: String::new(),
+            }),
+        );
+        // Flow label at (150, 81): 19px *above* the valve.
+        view.insert(
+            3,
+            VensimElement::Variable(VensimVariable {
+                uid: 3,
+                name: "Flow Rate".to_string(),
+                x: 150,
+                y: 81,
+                width: 55,
+                height: 11,
+                attached: true,
+                is_ghost: false,
+                bits: 3,
+                shape: 40,
+                tail: String::new(),
+            }),
+        );
+
+        let mut symbols = HashMap::new();
+        symbols.insert("stock a".to_string(), make_symbol_info(VariableType::Stock));
+        symbols.insert(
+            "flow rate".to_string(),
+            make_symbol_info(VariableType::Flow),
+        );
+
+        let result = build_views(vec![view], &symbols, &names_from_symbols(&symbols));
+        let View::StockFlow(sf) = &result[0];
+        let flow = sf
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) => Some(f),
+                _ => None,
+            })
+            .expect("expected flow element");
+        // The flow element is anchored on the valve (at y=100 before
+        // composition) while the label box was drawn 19px above it, so the
+        // recovered side is Top -- not the old hard-coded Bottom. (Getting Top
+        // also confirms the anchor is the valve, not the label box: a label
+        // sitting on its own anchor would resolve to Center.)
+        assert_eq!(flow.label_side, view_element::LabelSide::Top);
     }
 
     #[test]

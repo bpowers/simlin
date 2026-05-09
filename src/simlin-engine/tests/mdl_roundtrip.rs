@@ -466,6 +466,38 @@ fn default_project_fishbanks_xmile_to_mdl_roundtrip() {
         missing.is_empty(),
         "{path}: missing variables after XMILE->MDL->MDL parse roundtrip: {missing:?}"
     );
+
+    // The MDL sketch format stores a flow's name as a separate element rather
+    // than a `label_side`; the parser recovers the side from where that element
+    // sits relative to the valve. "New fish per year" is the one fishbanks flow
+    // with label_side="top", so it exercises that recovery -- the rest are
+    // "bottom". A regression here would silently flip flow labels to the other
+    // side of the pipe on every Vensim round trip.
+    let flow_label_side = |name: &str| -> datamodel::view_element::LabelSide {
+        mdl_project.models[0]
+            .views
+            .iter()
+            .flat_map(|view| match view {
+                datamodel::View::StockFlow(sf) => sf.elements.iter(),
+            })
+            .find_map(|el| match el {
+                ViewElement::Flow(f) if canonical_name(&f.name) == canonical_name(name) => {
+                    Some(f.label_side)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{path}: flow {name:?} missing from roundtripped view"))
+    };
+    assert_eq!(
+        flow_label_side("New fish per year"),
+        datamodel::view_element::LabelSide::Top,
+        "{path}: label_side=\"top\" flow should survive the XMILE->MDL->MDL roundtrip"
+    );
+    assert_eq!(
+        flow_label_side("Harvest Rate"),
+        datamodel::view_element::LabelSide::Bottom,
+        "{path}: label_side=\"bottom\" flow should stay below its valve"
+    );
 }
 
 // ---------------------------------------------------------------------------
