@@ -11,6 +11,7 @@
 ## Development Standards
 
 - [dev/commands.md](dev/commands.md) -- Build, test, lint commands for all languages
+- [dev/deploy.md](dev/deploy.md) -- Deploying the web app to Google App Engine: runbook, env vars, smoke test, rollback
 - [dev/benchmarks.md](dev/benchmarks.md) -- Running and profiling benchmarks (criterion, valgrind, perf, gperftools)
 - [dev/rust.md](dev/rust.md) -- Rust development standards
 - [dev/typescript.md](dev/typescript.md) -- TypeScript/React development standards

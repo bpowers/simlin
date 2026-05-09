@@ -51,6 +51,10 @@ Quick reference: `pnpm build`, `cargo test`, `pnpm test`, `pnpm lint`, `pnpm for
 
 For benchmarks and profiling, see [docs/dev/benchmarks.md](/docs/dev/benchmarks.md).
 
+## Deployment
+
+The web app deploys to Google App Engine via `pnpm deploy`. Read [docs/dev/deploy.md](/docs/dev/deploy.md) first -- the production config (`.app.prod.yaml`) isn't in the repo, there's no CI gate, and rollback is a GAE traffic split.
+
 ## Pre-commit Hooks
 
 The pre-commit hook (`scripts/pre-commit`) runs automatically and performs:
