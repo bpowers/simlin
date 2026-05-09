@@ -2670,8 +2670,161 @@ pub(crate) fn build_element_level_loops(
         }
     }
 
+    // Recover cross-element loops that traverse a synthetic aggregate node
+    // more than once (Phase 5). Johnson enumerates only *elementary* circuits,
+    // so a loop like `pop[nyc] → agg → share[boston] → ... → pop[boston] →
+    // agg → share[nyc] → ...` -- which visits `agg` twice -- is never emitted.
+    // But each agg-touching elementary circuit contributes one "petal" `agg →
+    // ... → agg`; combining `k ≥ 2` petals of the same agg whose internal
+    // nodes are pairwise disjoint reconstructs exactly those non-elementary
+    // loops. (For `SUM`/`MEAN` aggs the petals have one element each, so the
+    // combination count is `2^k - k - 1`; we cap `k` to keep it bounded.)
+    {
+        let recovered = recover_cross_agg_loops(&circuit_strs, var_graph, source_vars, db, project);
+        all_loops.extend(recovered);
+    }
+
     assign_loop_ids(&mut all_loops);
     all_loops
+}
+
+/// Maximum number of per-agg "petals" combined into non-elementary cross-agg
+/// loops. With `k` disjoint petals the combination count is `2^k - k - 1`; a
+/// model with more elements than this feeding a reducer in a loop simply
+/// doesn't get the fully-granular cross-element loop enumeration (the
+/// same-element-through-agg loops and the elementary circuits are still
+/// present). 8 → ≤ 219 recovered loops per agg.
+const MAX_AGG_PETALS: usize = 8;
+
+/// Reconstruct the cross-element loops that traverse a synthetic aggregate
+/// node more than once, from the element-level circuit list.
+///
+/// For each synthetic agg `A`, an elementary circuit that visits `A` exactly
+/// once is its "petal": rotated to start at `A`, the node sequence
+/// `[A, x_1, ..., x_m]` (the `x_i` are the petal's *internal* nodes -- the
+/// rest of the cycle). Two petals are disjoint when their internal node sets
+/// don't overlap. For `k ≥ 2` pairwise-disjoint petals of `A`, the recovered
+/// loop's element-level node sequence concatenates them, separated by `A`:
+/// `[A, p1_x..., A, p2_x..., ...]`. Links and polarities come from
+/// `build_element_subscripted_links` (which builds them the same way the
+/// cross-element branch does); the loop polarity is the product of the link
+/// polarities (Unknown anywhere → Undetermined).
+fn recover_cross_agg_loops(
+    circuit_strs: &[Vec<&str>],
+    var_graph: &crate::ltm::CausalGraph,
+    source_vars: &HashMap<String, super::SourceVariable>,
+    db: &dyn Db,
+    project: SourceProject,
+) -> Vec<crate::ltm::Loop> {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::{LinkPolarity, Loop, LoopPolarity};
+
+    /// One agg petal: the element-level node sequence rotated to start at the
+    /// agg (`[A, x_1, ..., x_m]`), plus its internal node set `{x_1..x_m}`.
+    struct Petal<'a> {
+        /// `[agg, x_1, ..., x_m]` -- the agg followed by the m internal nodes.
+        nodes: Vec<&'a str>,
+        internal: std::collections::HashSet<&'a str>,
+    }
+
+    // agg name -> its (deduped) petals.
+    let mut petals_by_agg: HashMap<&str, Vec<Petal>> = HashMap::new();
+    for circuit in circuit_strs {
+        // Synthetic agg nodes in this circuit.
+        let aggs: Vec<&str> = circuit
+            .iter()
+            .copied()
+            .filter(|n| crate::ltm_agg::is_synthetic_agg_name(n))
+            .collect();
+        // Only build petals from a circuit that touches exactly one agg, once
+        // (Johnson emits simple cycles, so "one agg in the node list" already
+        // means "visited once").
+        if aggs.len() != 1 {
+            continue;
+        }
+        let agg = aggs[0];
+        let Some(pos) = circuit.iter().position(|n| *n == agg) else {
+            continue;
+        };
+        let n = circuit.len();
+        // Rotate so the agg is first; the rest is the petal's internal nodes.
+        let nodes: Vec<&str> = (0..n).map(|j| circuit[(pos + j) % n]).collect();
+        let internal: std::collections::HashSet<&str> = nodes[1..].iter().copied().collect();
+        let entry = petals_by_agg.entry(agg).or_default();
+        // Dedup on the internal set (Johnson can emit rotations of the same
+        // simple cycle in some graphs; the internal set is rotation-invariant).
+        if entry.iter().any(|p| p.internal == internal) {
+            continue;
+        }
+        entry.push(Petal { nodes, internal });
+    }
+
+    let mut recovered: Vec<Loop> = Vec::new();
+    // Deterministic agg iteration order.
+    let mut aggs: Vec<&&str> = petals_by_agg.keys().collect();
+    aggs.sort();
+    for agg in aggs {
+        let petals = &petals_by_agg[*agg];
+        if petals.len() < 2 || petals.len() > MAX_AGG_PETALS {
+            continue;
+        }
+        let k = petals.len();
+        for mask in 0u32..(1u32 << k) {
+            if mask.count_ones() < 2 {
+                continue;
+            }
+            let chosen: Vec<usize> = (0..k).filter(|&i| (mask >> i) & 1 == 1).collect();
+            // Pairwise-disjoint internal node sets.
+            let mut union: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            if chosen
+                .iter()
+                .any(|&i| !petals[i].internal.iter().all(|n| union.insert(n)))
+            {
+                continue;
+            }
+            // Element-level node sequence: `[A, p1_internal..., A, p2_internal..., ...]`
+            // -- but `build_element_subscripted_links` builds links
+            // `seq[i] → seq[(i+1) % n]`, so listing each petal's `nodes`
+            // (which already start with `A`) back-to-back gives exactly that
+            // cyclic sequence (the last petal's last internal node wraps to
+            // the first petal's `A`).
+            let seq: Vec<&str> = chosen
+                .iter()
+                .flat_map(|&i| petals[i].nodes.iter().copied())
+                .collect();
+            let var_level_nodes: Vec<Ident<Canonical>> =
+                seq.iter().map(|n| Ident::new(strip_subscript(n))).collect();
+            let var_links = var_graph.circuit_to_links(&var_level_nodes);
+            let links = build_element_subscripted_links(&seq, &var_links, source_vars, db, project);
+            let stocks: Vec<Ident<Canonical>> = seq
+                .iter()
+                .filter(|n| var_graph.stocks.contains(&Ident::new(strip_subscript(n))))
+                .map(|n| Ident::new(n))
+                .collect();
+            let polarity = if links.iter().any(|l| l.polarity == LinkPolarity::Unknown) {
+                LoopPolarity::Undetermined
+            } else {
+                let neg = links
+                    .iter()
+                    .filter(|l| l.polarity == LinkPolarity::Negative)
+                    .count();
+                if neg % 2 == 0 {
+                    LoopPolarity::Reinforcing
+                } else {
+                    LoopPolarity::Balancing
+                }
+            };
+            recovered.push(Loop {
+                id: String::new(),
+                links,
+                stocks,
+                polarity,
+                // Cross-element loops visit fixed elements -- scalar loop score.
+                dimensions: vec![],
+            });
+        }
+    }
+    recovered
 }
 
 /// Unified LTM variable generation for any model (root or sub-model).

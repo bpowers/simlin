@@ -1913,3 +1913,87 @@ fn agg_aux_sorts_before_link_scores() {
         );
     }
 }
+
+/// AC4.2: a cross-element feedback loop through a hoisted reducer visits the
+/// aggregate node twice -- it is NOT an elementary circuit, so Johnson can't
+/// emit it directly. `build_loops_from_tiered` recovers it (combining the
+/// per-element "petals" of the agg node), and its `$⁚ltm⁚loop_score⁚{id}`
+/// equation is the product of the per-element link scores along the
+/// un-trimmed path, including the `pop[d]→agg` and `agg→share[e]` halves with
+/// `d ≠ e` (the cross-element coupling through the aggregate).
+#[test]
+fn cross_element_loop_through_agg_is_recovered() {
+    let project = TestProject::new("cross_through_agg")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let loop_score_eqs: Vec<String> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .map(|v| v.equation.source_text())
+        .collect();
+    assert!(
+        !loop_score_eqs.is_empty(),
+        "expected loop_score variables; emitted: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+
+    // The cross-element-through-agg loop's loop-score equation must reference,
+    // along the un-trimmed path, NYC's pop into the agg AND the agg into
+    // Boston's share (the cross-element hop), AND the return: Boston's pop
+    // into the agg AND the agg into NYC's share.
+    let want_factors = [
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}{agg}\""),
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}share[boston]\""),
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston]\u{2192}{agg}\""),
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}share[nyc]\""),
+    ];
+    let has_cross_through_agg = loop_score_eqs
+        .iter()
+        .any(|eq| want_factors.iter().all(|f| eq.contains(f.as_str())));
+    assert!(
+        has_cross_through_agg,
+        "no loop_score equation traverses the cross-element-through-agg path \
+         (NYC pop→agg→Boston share→...→Boston pop→agg→NYC share). \
+         Want all of {want_factors:?}.\nloop_score equations: {loop_score_eqs:?}"
+    );
+
+    // And the agg-routed link-score halves it references must actually be
+    // emitted (so the fragment compiler doesn't stub them to zero).
+    let emitted: std::collections::HashSet<String> =
+        ltm.vars.iter().map(|v| v.name.clone()).collect();
+    for f in &want_factors {
+        let bare = f.trim_matches('"');
+        assert!(
+            emitted.contains(bare),
+            "loop_score equation references {bare:?} but it was not emitted; \
+             emitted: {emitted:?}"
+        );
+    }
+
+    // The user-facing reported loops (model_detected_loops, variable-level)
+    // never include the synthetic agg node -- the aggregate is "trimmed" from
+    // the displayed loop. (The element-level loops that carry the agg node
+    // exist only internally, to build the loop-score equations.)
+    let detected = crate::db::model_detected_loops(&db, model, sync.project);
+    for l in &detected.loops {
+        assert!(
+            l.variables
+                .iter()
+                .all(|v| !v.contains("\u{205A}agg\u{205A}")),
+            "model_detected_loops should not surface synthetic agg nodes; got: {:?}",
+            l.variables
+        );
+    }
+}

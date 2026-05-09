@@ -5786,8 +5786,12 @@ fn test_agg_aux_value_matches_reducer() {
 
 /// Build a 2-region `share[r] = pop[r] / SUM(pop[*])` model with heterogeneous
 /// stock initial values (`pop[big] >> pop[small]`), `pop` fed back by
-/// `update[r] = share[r] * c`. The reducer `SUM(pop[*])` is a subexpression,
-/// so Phase 5 hoists it into `$⁚ltm⁚agg⁚0`.
+/// `update[r] = share[r] * pop[r] * c` -- the `* pop[r]` makes growth curved
+/// (a near-constant feedback flow has ~zero second-order differences, so the
+/// flow→stock link score -- and thus every loop score -- would vanish; the
+/// curvature keeps discovery's strongest-path scores non-degenerate). The
+/// reducer `SUM(pop[*])` is a subexpression, so Phase 5 hoists it into
+/// `$⁚ltm⁚agg⁚0`.
 fn build_heterogeneous_share_model(c: f64) -> simlin_engine::datamodel::Project {
     use simlin_engine::datamodel::{self, Equation, Variable};
     datamodel::Project {
@@ -5845,7 +5849,7 @@ fn build_heterogeneous_share_model(c: f64) -> simlin_engine::datamodel::Project 
                     ident: "update".to_string(),
                     equation: Equation::ApplyToAll(
                         vec!["Region".to_string()],
-                        format!("share * {c}"),
+                        format!("share * pop * {c}"),
                     ),
                     documentation: String::new(),
                     units: None,
@@ -5954,4 +5958,44 @@ fn test_agg_link_scores_heterogeneous_match_hand_calc() {
             "expected agg→share[{d}] link score {name:?}"
         );
     }
+}
+
+/// AC4.7: discovery mode (strongest-path) on the inlined-reducer model finds
+/// the cross-element-through-aggregate loop -- the rerouted element graph
+/// makes the agg node reachable, so discovery traverses it. Uses heterogeneous
+/// initial values so the loop scores are non-zero (discovery's strongest-path
+/// DFS and the post-sim contribution filter both need a non-degenerate run).
+#[test]
+fn test_discovery_finds_cross_element_through_agg_loop() {
+    let project = build_heterogeneous_share_model(0.01);
+
+    let found = discover_loops_element_level(&project);
+    assert!(
+        !found.is_empty(),
+        "discovery should find at least one loop in the inlined-reducer model"
+    );
+
+    // At least one discovered loop must traverse the synthetic aggregate
+    // node (its links reference `$⁚ltm⁚agg⁚0` on one end or the other).
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let touches_agg = found.iter().any(|fl| {
+        fl.loop_info
+            .links
+            .iter()
+            .any(|l| l.from.as_str() == agg || l.to.as_str() == agg)
+    });
+    assert!(
+        touches_agg,
+        "discovery should find a loop through the aggregate node {agg}; \
+         found loops: {:?}",
+        found
+            .iter()
+            .map(|fl| fl
+                .loop_info
+                .links
+                .iter()
+                .map(|l| format!("{}->{}", l.from.as_str(), l.to.as_str()))
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
 }
