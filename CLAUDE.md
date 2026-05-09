@@ -53,7 +53,7 @@ For benchmarks and profiling, see [docs/dev/benchmarks.md](/docs/dev/benchmarks.
 
 ## Deployment
 
-The web app deploys to Google App Engine via `pnpm deploy`. Read [docs/dev/deploy.md](/docs/dev/deploy.md) first -- the production config (`.app.prod.yaml`) isn't in the repo, there's no CI gate, and rollback is a GAE traffic split.
+The web app deploys to Google App Engine via `pnpm deploy:web`. Read [docs/dev/deploy.md](/docs/dev/deploy.md) first -- the production config (`.app.prod.yaml`) isn't in the repo, the only CI gate is a smoke test of the deploy assembly (no `gcloud` in CI), and rollback is a GAE traffic split.
 
 ## Pre-commit Hooks
 

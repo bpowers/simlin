@@ -34,7 +34,7 @@
     "rebuild-stdlib": "./scripts/gen-stdlib.sh",
     "build": "pnpm -r run build",
     "clean": "pnpm -r run clean && cargo clean",
-    "deploy": "export NODE_ENV=production && pnpm clean && pnpm build && pnpm --filter @simlin/app deploy && gcloud app deploy ./.app.prod.yaml && pnpm --filter @simlin/app deploy-clean",
+    "deploy:web": "bash scripts/deploy-web.sh",
     "start": "node src/server/lib",
     "test": "pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/engine --filter @simlin/app --filter @simlin/server --filter @simlin/serve-web --parallel run test",
     "test:ui": "playwright test",

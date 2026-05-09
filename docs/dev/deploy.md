@@ -4,7 +4,7 @@
 
 The web app at `app.simlin.com` runs on Google App Engine standard. GAE serves the static React SPA built from `src/app` and runs the Express backend in `src/server` (Firebase Auth, models persisted in Firestore as protobuf). `@simlin/mcp`, `@simlin/serve`, `pysimlin`, and `simlin-cli` are released separately to npm/PyPI -- they aren't part of this deploy.
 
-Read this before your first deploy after a long gap: the deploy is one local command with no CI gate, the production config (`.app.prod.yaml`) isn't in the repo, and the only rollback is a GAE traffic split.
+Read this before your first deploy after a long gap: the deploy is one local command (with a [CI smoke gate](#ci-coverage-of-the-deploy-build) on the assembly path), the production config (`.app.prod.yaml`) isn't in the repo, and the only rollback is a GAE traffic split.
 
 ## Prerequisites
 
@@ -17,37 +17,41 @@ Read this before your first deploy after a long gap: the deploy is one local com
 ## The deploy command
 
 ```bash
-pnpm deploy
+pnpm deploy:web
 ```
 
-Which expands to:
+The script lives at [`scripts/deploy-web.sh`](/scripts/deploy-web.sh) and runs:
 
 ```
 export NODE_ENV=production
-  && pnpm clean                              # cargo clean + each package's clean script
-  && pnpm build                              # pnpm -r run build: Rust+WASM, then every TS package
-  && pnpm --filter @simlin/app deploy        # copy build/ and build-component/ into public/; drop symlinks
-  && gcloud app deploy ./.app.prod.yaml      # upload the repo minus .gcloudignore, switch traffic
-  && pnpm --filter @simlin/app deploy-clean  # git checkout the symlinks and index.html; rm build artifacts
+pnpm clean                                       # cargo clean + each package's clean script
+pnpm build                                       # pnpm -r run build: Rust+WASM, then every TS package
+pnpm --filter @simlin/app run deploy:assemble    # copy build/ and build-component/ into public/; drop symlinks
+gcloud app deploy ./.app.prod.yaml               # upload the repo minus .gcloudignore, switch traffic
+# A bash trap runs the cleanup below on EXIT/INT/TERM, even if any step above fails:
+pnpm --filter @simlin/app run deploy:clean       # git checkout the symlinks and index.html; rm build artifacts
 ```
 
-`pnpm build` builds *every* workspace package, including `website` (rspress) and `@simlin/serve-web` (vite), neither of which ships. A failure in any of them aborts the deploy before `gcloud` runs. If you've touched only the app or server, `pnpm --filter "@simlin/app..." --filter "@simlin/server..." run build` is a narrower equivalent -- but `pnpm deploy` always runs the full build.
+`pnpm build` builds *every* workspace package, including `website` (rspress) and `@simlin/serve-web` (vite), neither of which ships. A failure in any of them aborts the deploy before `gcloud` runs. If you've touched only the app or server, `pnpm --filter "@simlin/app..." --filter "@simlin/server..." run build` is a narrower equivalent -- but `pnpm deploy:web` always runs the full build.
 
-The `src/app deploy` step ends by `rm`-ing the `public` / `default_projects` symlinks (`src/app/public` -> repo `public/`, and likewise under `src/server/`) so `gcloud` doesn't traverse the same content twice; `deploy-clean` restores them with `git checkout`. The upshot: if you interrupt `pnpm deploy` partway, run `git checkout -- public src/server && rm -rf src/app/build src/app/build-component` before retrying.
+The `deploy:assemble` step ends by `rm`-ing the `public` / `default_projects` symlinks (`src/app/public` -> repo `public/`, and likewise under `src/server/`) so `gcloud` doesn't traverse the same content twice; `deploy:clean` restores them with `git checkout`. Because cleanup is now under a `trap`, a Ctrl-C or failure during `gcloud app deploy` still restores the symlinks and removes the build artifacts before the script exits -- you don't have to recover by hand. (If for some reason the trap itself doesn't run, recover with `git checkout -- public src/server && rm -rf src/app/build src/app/build-component public/static/{js,wasm,css,media} public/asset-manifest.json`.)
+
+The script names `deploy:assemble` / `deploy:clean` / `deploy:web` use a colon because pnpm 10's built-in `pnpm deploy` subcommand silently shadowed any plain `deploy` script; `pnpm deploy` ran the built-in (which errors with `ERR_PNPM_NOTHING_TO_DEPLOY`) instead of our pipeline. Colon-separated names sidestep the collision.
+
+Pass extra flags through to `gcloud` after `--`, e.g. `pnpm deploy:web --no-promote`.
 
 ### Recommended: deploy without promoting, smoke-test, then switch traffic
 
-`pnpm deploy` switches production traffic the moment `gcloud app deploy` finishes. For a routine change that's fine. After a long gap, or when the toolchain or dependencies have moved, split it:
+`pnpm deploy:web` switches production traffic the moment `gcloud app deploy` finishes. For a routine change that's fine. After a long gap, or when the toolchain or dependencies have moved, split it:
 
 ```bash
-export NODE_ENV=production
-pnpm clean && pnpm build && pnpm --filter @simlin/app deploy
-gcloud app deploy ./.app.prod.yaml --no-promote
+pnpm deploy:web --no-promote
 # note the version URL it prints, e.g. https://<version>-dot-<project>.appspot.com
 # run the post-deploy smoke test against that URL
 gcloud app services set-traffic default --splits=<version>=1
-pnpm --filter @simlin/app deploy-clean
 ```
+
+(`--no-promote` flows through to `gcloud app deploy` via the script's `"$@"` passthrough; the script still runs `deploy:clean` afterward via the trap.)
 
 ## What gets uploaded, and what runs on the instance
 
@@ -57,13 +61,13 @@ pnpm --filter @simlin/app deploy-clean
 - `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.npmrc` -- GAE's Node buildpack runs `pnpm install` at the repo root on the instance, which recreates the `node_modules/@simlin/*` workspace symlinks pointing at the uploaded `src/*/lib`.
 - `config/default.json` + `config/production.json` -- the server's config layering.
 - `default_projects/` -- example models copied into each new account at signup.
-- `public/` -- the SPA static assets, after `pnpm --filter @simlin/app deploy` populates it from `build/`.
+- `public/` -- the SPA static assets, after `pnpm --filter @simlin/app run deploy:assemble` populates it from `build/`.
 
 On the instance GAE runs `pnpm install`, then the root `start` script: `node src/server/lib`. The server loads the engine WASM (`node_modules/@simlin/engine/core/libsimlin.wasm`) *before* it starts listening, so a missing or unresolvable WASM file crash-loops the instance -- that's the whole site down, not just model previews. The `--no-promote` smoke test catches this.
 
 ## The two app.yaml files
 
-`app.yaml` is committed; `.app.prod.yaml` is gitignored and lives only on your machine, and `pnpm deploy` deploys `.app.prod.yaml`. Treat the committed `app.yaml` as the reference -- it carries the handler routes and the `runtime` / `instance_class` / scaling block production should match. Diff `.app.prod.yaml` against it before deploying:
+`app.yaml` is committed; `.app.prod.yaml` is gitignored and lives only on your machine, and `pnpm deploy:web` deploys `.app.prod.yaml`. Treat the committed `app.yaml` as the reference -- it carries the handler routes and the `runtime` / `instance_class` / scaling block production should match. Diff `.app.prod.yaml` against it before deploying:
 
 - `runtime`: `nodejs24`. (`nodejs18` is EOL on GAE; `nodejs16`, the runtime of the last deploy before May 2026, is gone entirely -- which is why there's no "redeploy the old commit" rollback.)
 - The handler list: `/static`, `/`, `/new`, `/legal*`, `/privacy`, `robots.txt`, `ads.txt`, favicon, `manifest.json`, then `/.*` -> `script: auto`. The SPA's dynamic routes like `/:username/:projectName` fall through to `/.*`, i.e. the Express server.
@@ -115,12 +119,14 @@ gcloud app services set-traffic default --splits=<known-good-version>=1
 
 Instant, no rebuild -- but **lossy** for any model a user edited via the new app: the new engine writes protobuf fields the old engine doesn't recognize, and the old engine drops them on the next save. The Firestore document envelopes (`user`, `project`, `file`, `preview` schemas in `src/server/schemas/`) are unchanged, so the documents themselves stay readable both ways; only the model content inside `File.projectContents` is at risk. If GAE no longer holds a good version, roll forward from the deployed commit instead.
 
+## CI coverage of the deploy build
+
+The `frontend` job in [`.github/workflows/ci.yaml`](/.github/workflows/ci.yaml) runs the deploy assembly path on every push and PR: after the regular `pnpm build` and TypeScript tests, it runs `pnpm --filter @simlin/app run deploy:assemble`, then [`scripts/verify-deploy-build.sh`](/scripts/verify-deploy-build.sh), then `deploy:clean`, then asserts `git status` is empty. The verify script checks that `public/index.html` substituted the `<%= PUBLIC_URL %>` template, references a hashed `/static/js/index.<hash>.js`, that `public/static/js/sd-component.js` exists at the single-level path (the doubled-path regression caught in commit 831392fc), that `public/static/wasm/` has a WASM, and that `src/engine/core/libsimlin.wasm` and `src/server/lib/index.js` are present and non-trivial. CI does NOT run `gcloud app deploy` -- it only proves the local artifacts the deploy uploads are well-formed.
+
 ## Rough edges
 
 Things to know that don't have a clean fix yet:
 
-- `pnpm deploy` isn't idempotent and has no CI gate. Ctrl-C after `gcloud` starts uploading and `deploy-clean` never runs, leaving built files in `public/` and the symlinks dropped (recover as described under [The deploy command](#the-deploy-command)).
-- `deploy-clean` doesn't remove everything the build wrote into `public/` (`public/static/css`, `public/static/media`), so `git status` is noisy after a deploy.
-- GAE's Node buildpack installs the full dependency set on the instance -- pnpm v10 with `NODE_ENV=production` no longer skips devDependencies -- which is large and slow, and `.npmrc`'s `strict-peer-dependencies=true` makes an unmet transitive peer abort the build.
+- GAE's Node buildpack installs the full dependency set on the instance -- pnpm v10 with `NODE_ENV=production` no longer skips devDependencies (upstream bug [GoogleCloudPlatform/buildpacks#591](https://github.com/GoogleCloudPlatform/buildpacks/issues/591)) -- so the GAE build pulls in `firebase-tools`, `@rsbuild/*`, `jest`, `slate`, `radix`, rspress, and every other workspace devDep. Slow, fat, and `.npmrc`'s `strict-peer-dependencies=true` makes an unmet transitive peer abort the build. Tracked as tech debt: see [docs/tech-debt.md](/docs/tech-debt.md) "Web deploy uploads the whole monorepo and GAE installs the full dep set" -- the proper fix is a self-contained server bundle (e.g. via `pnpm deploy --legacy --prod <dir>` plus vendored workspace deps) deployed from a staging directory rather than the workspace root, but it needs design work and a real `gcloud` test before shipping.
 - Server-side PNG preview (`src/server/render.ts`) parses and rasterizes user-uploaded models in-process with no size cap beyond the 10 MB request body limit and no timeout.
 - There's no error reporting or alerting. Cloud Logging and the GAE metrics dashboard are it.
