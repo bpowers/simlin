@@ -794,39 +794,48 @@ fn build_arrayed_link_score_equation(
     )
 }
 
-/// Extract the equation text of a Scalar/ApplyToAll target's AST (or fall
-/// back to the scalar `eqn` text, or `"0"`). `Ast::Arrayed` targets are
-/// handled by [`build_arrayed_link_score_equation`] before this is
-/// reached, so the `Arrayed` arm here is dead in practice.
+/// Extract the equation text of a Scalar/ApplyToAll target's AST.
+///
+/// `Ast::Arrayed` targets are routed through
+/// [`build_arrayed_link_score_equation`] before this is reached, so the
+/// `Arrayed` AST arm here is dead in practice.
+///
+/// The `eqn`-text fallbacks (both the `Ast::Arrayed` arm and the no-AST
+/// branch) cover the degenerate case where the target failed to lower --
+/// `ast()` is `None`, or it's an `Ast::Arrayed` we didn't intercept --
+/// but its datamodel `eqn` is still a plain scalar string. Returning that
+/// raw text gives the link-score guard form *something* to differentiate,
+/// which is strictly more useful than a `"0"` partial; the stock-to-flow
+/// path has always done this for the same variable shape. A target with no
+/// usable scalar equation at all (a stub, or an arrayed `eqn` we can't
+/// flatten here) falls through to `"0"` -- the link score then degrades to
+/// the historical placeholder rather than producing a parse error.
 fn scalar_or_a2a_target_equation_text(target_var: &Variable) -> String {
     use crate::ast::Ast;
     if let Some(ast) = target_var.ast() {
         match ast {
             Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
-            _ => match target_var {
-                Variable::Stock {
-                    eqn: Some(Equation::Scalar(eq)),
-                    ..
-                }
-                | Variable::Var {
-                    eqn: Some(Equation::Scalar(eq)),
-                    ..
-                } => eq.clone(),
-                _ => "0".to_string(),
-            },
+            _ => scalar_eqn_text_or_zero(target_var),
         }
     } else {
-        match target_var {
-            Variable::Stock {
-                eqn: Some(Equation::Scalar(eq)),
-                ..
-            }
-            | Variable::Var {
-                eqn: Some(Equation::Scalar(eq)),
-                ..
-            } => eq.clone(),
-            _ => "0".to_string(),
+        scalar_eqn_text_or_zero(target_var)
+    }
+}
+
+/// The target's datamodel `eqn` text when it is a plain `Equation::Scalar`,
+/// else `"0"`. See [`scalar_or_a2a_target_equation_text`] for why this
+/// fallback exists (a variable that failed to lower).
+fn scalar_eqn_text_or_zero(target_var: &Variable) -> String {
+    match target_var {
+        Variable::Stock {
+            eqn: Some(Equation::Scalar(eq)),
+            ..
         }
+        | Variable::Var {
+            eqn: Some(Equation::Scalar(eq)),
+            ..
+        } => eq.clone(),
+        _ => "0".to_string(),
     }
 }
 

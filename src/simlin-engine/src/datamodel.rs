@@ -1454,4 +1454,49 @@ mod tests {
         assert!(project.get_model("stdlib\u{205A}systems_rate").is_some());
         assert!(project.get_model("stdlib\u{205A}systems_leak").is_none());
     }
+
+    #[test]
+    fn equation_source_text_scalar_and_apply_to_all_round_trip_verbatim() {
+        assert_eq!(Equation::Scalar("a + b".to_string()).source_text(), "a + b");
+        assert_eq!(
+            Equation::ApplyToAll(vec!["Region".to_string()], "pop * 0.02".to_string())
+                .source_text(),
+            "pop * 0.02"
+        );
+    }
+
+    #[test]
+    fn equation_source_text_arrayed_joins_elements_and_except_default() {
+        let elements = vec![
+            ("NYC".to_string(), "pop[NYC] * 0.03".to_string(), None, None),
+            (
+                "Boston".to_string(),
+                "pop[Boston] * 0.02".to_string(),
+                None,
+                None,
+            ),
+        ];
+
+        // Without an EXCEPT default: only the per-element formulas.
+        let no_default =
+            Equation::Arrayed(vec!["Region".to_string()], elements.clone(), None, false);
+        assert_eq!(
+            no_default.source_text(),
+            "pop[NYC] * 0.03\npop[Boston] * 0.02"
+        );
+
+        // With an EXCEPT default: the default formula is appended after the
+        // explicitly-listed elements. This is the branch the prior tests
+        // never exercised.
+        let with_default = Equation::Arrayed(
+            vec!["Region".to_string()],
+            elements,
+            Some("pop * 0.01".to_string()),
+            true,
+        );
+        assert_eq!(
+            with_default.source_text(),
+            "pop[NYC] * 0.03\npop[Boston] * 0.02\npop * 0.01"
+        );
+    }
 }
