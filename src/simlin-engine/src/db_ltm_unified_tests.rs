@@ -1610,3 +1610,77 @@ fn cross_dim_link_score_equations_match_between_exhaustive_and_discovery() {
         );
     }
 }
+
+/// ltm-503-cross-element-agg.AC3.2 (exhaustive loop-score side): the
+/// loop `population[nyc] -> total_pop -> migration[nyc] ->
+/// population[nyc]` (a scalar reducer factored out of the per-element
+/// migration flow) has its loop-score equation built from exactly three
+/// per-element link-score references along its element-level path:
+///   - `"$⁚ltm⁚link_score⁚population[nyc]→total_pop"` -- the arrayed->scalar
+///     reducer link score, per source element (from `try_cross_dimensional_link_scores`),
+///   - `"$⁚ltm⁚link_score⁚total_pop→migration[nyc]"` -- the scalar->arrayed
+///     link score, per target element (from `try_scalar_to_arrayed_link_scores`),
+///   - `"$⁚ltm⁚link_score⁚migration→population"[nyc]` -- the structural
+///     flow->stock A2A link score, subscripted-after-quote at the visited
+///     element.
+///
+/// In particular it must NOT reference a Bare-A2A `total_pop→migration`
+/// name (no longer emitted) nor a same-element diagonal of it.
+#[test]
+fn scalar_reducer_loop_score_uses_per_element_link_scores() {
+    let project = TestProject::new("scalar_reducer_loop")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock(
+            "population[Region]",
+            "100",
+            &["births", "migration"],
+            &[],
+            None,
+        )
+        .array_aux("birth_rate[Region]", "0.05")
+        .array_flow("births[Region]", "population * birth_rate", None)
+        .scalar_aux("total_pop", "SUM(population[*])")
+        .array_flow(
+            "migration[Region]",
+            "total_pop * 0.01 - population * 0.01",
+            None,
+        );
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let factors = |eq: &str| -> std::collections::HashSet<String> {
+        eq.split(" * ").map(|s| s.trim().to_string()).collect()
+    };
+    let expected: std::collections::HashSet<String> = [
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}total_pop\"".to_string(),
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}total_pop\u{2192}migration[nyc]\"".to_string(),
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration\u{2192}population\"[nyc]".to_string(),
+    ]
+    .into_iter()
+    .collect();
+
+    let loop_score_eqs: Vec<String> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .map(|v| v.equation.source_text())
+        .collect();
+    assert!(
+        loop_score_eqs.iter().any(|eq| factors(eq) == expected),
+        "no loop_score equation has the scalar-reducer loop's per-element factor set {expected:?}; \
+         loop_score equations present: {loop_score_eqs:?}"
+    );
+
+    // The Bare-A2A name for the scalar->arrayed edge is gone; no loop
+    // score may reference it.
+    for eq in &loop_score_eqs {
+        assert!(
+            !eq.contains("\"$\u{205A}ltm\u{205A}link_score\u{205A}total_pop\u{2192}migration\""),
+            "loop_score equation references the retired Bare-A2A name `total_pop→migration`: {eq}"
+        );
+    }
+}

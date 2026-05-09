@@ -5071,6 +5071,126 @@ fn test_cross_element_ltm_loop_score_value_matches_hand_calc() {
     );
 }
 
+/// ltm-503-cross-element-agg.AC3.2 (exhaustive loop-score value side):
+/// the loop `population[nyc] -> total_pop -> migration[nyc] ->
+/// population[nyc]` -- a scalar reducer (`total_pop = SUM(population[*])`)
+/// factored out of the per-element migration flow -- has its `loop_score`
+/// series equal to the product of the three per-element link scores it
+/// references, at every simulated step t >= 2 (within 1e-6), and that
+/// product is non-zero at some step.
+///
+/// This exercises the scalar->arrayed per-target-element link score
+/// (`$⁚ltm⁚link_score⁚total_pop→migration[nyc]`, a scalar variable) inside
+/// a real loop-score equation alongside the arrayed->scalar reducer link
+/// score (`$⁚ltm⁚link_score⁚population[nyc]→total_pop`) and the structural
+/// flow->stock A2A link score (`$⁚ltm⁚link_score⁚migration→population`,
+/// slot NYC).
+#[test]
+fn test_scalar_reducer_loop_score_value_matches_hand_calc() {
+    let project = TestProject::new("scalar_reducer_loop_value")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock(
+            "population[Region]",
+            "100",
+            &["births", "migration"],
+            &[],
+            None,
+        )
+        .array_aux("birth_rate[Region]", "0.05")
+        .array_flow("births[Region]", "population * birth_rate", None)
+        .scalar_aux("total_pop", "SUM(population[*])")
+        .array_flow(
+            "migration[Region]",
+            "total_pop * 0.01 - population * 0.01",
+            None,
+        )
+        .build_datamodel();
+
+    // Locate the loop_score var for the 3-edge `population[nyc] -> total_pop
+    // -> migration[nyc] -> population[nyc]` loop by its factor set (rotation-
+    // independent).
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+
+    let expected: std::collections::HashSet<String> = [
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}total_pop\"".to_string(),
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}total_pop\u{2192}migration[nyc]\"".to_string(),
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration\u{2192}population\"[nyc]".to_string(),
+    ]
+    .into_iter()
+    .collect();
+    let loop_name = ltm_vars
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .find(|v| loop_score_equation_factors(&v.equation.source_text()) == expected)
+        .map(|v| v.name.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "no loop_score var with the scalar-reducer loop factor set {expected:?}; \
+                 loop_score equations present: {:?}",
+                ltm_vars
+                    .vars
+                    .iter()
+                    .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+                    .map(|v| v.equation.source_text())
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let off_by_name = |name: &str| -> usize {
+        results
+            .offsets
+            .iter()
+            .find(|(k, _)| k.as_str() == name)
+            .map(|(_, &off)| off)
+            .unwrap_or_else(|| panic!("var {name:?} not found in results"))
+    };
+    let loop_off = off_by_name(loop_name.as_str());
+    let l1_off =
+        off_by_name("$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}total_pop");
+    let l2_off =
+        off_by_name("$\u{205A}ltm\u{205A}link_score\u{205A}total_pop\u{2192}migration[nyc]");
+    // The flow->stock link score `migration→population` is A2A over Region
+    // {NYC, Boston}; slot NYC is the base offset.
+    let l3_off = off_by_name("$\u{205A}ltm\u{205A}link_score\u{205A}migration\u{2192}population");
+
+    let mut checked = 0usize;
+    let mut saw_nonzero = false;
+    for step in 2..results.step_count {
+        let base = step * results.step_size;
+        let l1 = results.data[base + l1_off];
+        let l2 = results.data[base + l2_off];
+        let l3 = results.data[base + l3_off];
+        let loop_val = results.data[base + loop_off];
+        let product = l1 * l2 * l3;
+        assert!(
+            (loop_val - product).abs() < 1e-6,
+            "step {step}: scalar-reducer loop_score {loop_val} != product of element link \
+             scores ({l1} * {l2} * {l3} = {product})"
+        );
+        if loop_val.abs() > 1e-9 && !loop_val.is_nan() {
+            saw_nonzero = true;
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "expected at least one step t >= 2 to check");
+    assert!(
+        saw_nonzero,
+        "the scalar-reducer loop's link-score product should be non-zero at some step \
+         (total_pop and population both change every step)"
+    );
+}
+
 /// AC8.2: Cross-element feedback model -- discovery mode.
 ///
 /// Same model as test_cross_element_ltm_exhaustive but with discovery mode.
