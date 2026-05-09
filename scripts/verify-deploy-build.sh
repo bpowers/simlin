@@ -75,7 +75,30 @@ else
     fi
 fi
 
-# 4. A hashed WASM blob exists somewhere under public/static/wasm/.
+# 4. The web component bundle carries Rspack's runtime-publicPath logic.
+#    `assetPrefix: 'auto'` in rsbuild.component.config.js makes the bundle
+#    compute its base URL at load time from `document.currentScript.src`
+#    instead of `document.baseURI`. That is the cross-origin embed
+#    contract: a third-party page loads
+#    `<script src="https://app.simlin.com/static/js/sd-component.js">`,
+#    and the worker chunk under static/js/async/ must then resolve against
+#    app.simlin.com, not the embedding page's origin. Drop `assetPrefix:
+#    'auto'` (or the LimitChunkCountPlugin that merges the worker) and
+#    every external embed 404s on first worker init -- the failure mode
+#    fixed in commit dd9e449c.
+#
+#    This is a smoke check, not a proof of cross-origin correctness: it
+#    asserts the bundle contains the script-URL detection at all. If it's
+#    gone, `currentScript` disappears from the minified output entirely.
+if [ -f public/static/js/sd-component.js ]; then
+    if ! grep -q 'currentScript' public/static/js/sd-component.js; then
+        fail "public/static/js/sd-component.js has no 'currentScript' reference -- assetPrefix: 'auto' (runtime publicPath) appears to be missing; cross-origin embeds will 404 on the worker chunk"
+    else
+        pass "public/static/js/sd-component.js carries the runtime publicPath (document.currentScript) logic"
+    fi
+fi
+
+# 5. A hashed WASM blob exists somewhere under public/static/wasm/.
 #    rsbuild emits the engine WASM via Rspack's asset module with a
 #    content hash. The exact filename varies; the directory should
 #    contain at least one *.wasm.
@@ -90,7 +113,7 @@ else
     fi
 fi
 
-# 5. The engine package's source WASM was built. The server runtime
+# 6. The engine package's source WASM was built. The server runtime
 #    loads this via require('@simlin/engine'); a missing or empty WASM
 #    means the Rust+WASM step was skipped or failed silently.
 #    ~1MB minimum is well under any real build (release WASM is ~5MB;
@@ -106,7 +129,7 @@ else
     fi
 fi
 
-# 6. The compiled server bundle exists. GAE runs `node src/server/lib`
+# 7. The compiled server bundle exists. GAE runs `node src/server/lib`
 #    on the instance; an empty lib/ would crash-loop without a useful
 #    error.
 if [ ! -f src/server/lib/index.js ]; then
