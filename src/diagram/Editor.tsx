@@ -254,17 +254,19 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   // the stale-idents-on-new-path bug.
   private selectionDeferralTimer: ReturnType<typeof setTimeout> | null = null;
   // Pending setTimeout(0) handles for the constructor's deferred
-  // openInitialProject() and the scheduleSimRun() / scheduleSave()
-  // dispatches. Held so componentWillUnmount can cancel them — the
-  // Editor remounts on every wouter route change in src/app and on
-  // every EditorHost path swap in src/simlin-serve. If a constructor
-  // callback fires after unmount it opens an EngineProject on a stale
-  // `this` and leaks ~several MB of WASM linear memory plus salsa
-  // caches; if scheduleSimRun / scheduleSave fire after unmount they
-  // touch a disposed engine and may setState on an unmounted component.
+  // openInitialProject() and the scheduleSimRun() / scheduleSave() /
+  // handleUndoRedo() dispatches. Held so componentWillUnmount can cancel
+  // them — the Editor remounts on every wouter route change in src/app
+  // and on every EditorHost path swap in src/simlin-serve. If a
+  // constructor or handleUndoRedo callback fires after unmount it opens
+  // an EngineProject on a stale `this` and leaks ~several MB of WASM
+  // linear memory plus salsa caches; if scheduleSimRun / scheduleSave
+  // fire after unmount they touch a disposed engine and may setState on
+  // an unmounted component.
   private openInitialProjectTimer: ReturnType<typeof setTimeout> | null = null;
   private simRunTimer: ReturnType<typeof setTimeout> | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private undoRedoTimer: ReturnType<typeof setTimeout> | null = null;
   // Set in componentWillUnmount before any pending callbacks could fire
   // and re-enter the instance. Each scheduled callback short-circuits
   // when this is true so a setTimeout already drained from the macrotask
@@ -364,6 +366,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     if (this.saveTimer !== null) {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
+    }
+    if (this.undoRedoTimer !== null) {
+      clearTimeout(this.undoRedoTimer);
+      this.undoRedoTimer = null;
     }
     // Release the WASM EngineProject handle. The Editor mounts/unmounts
     // on every wouter route change in src/app and on every EditorHost
@@ -2784,8 +2790,24 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const projectVersion = this.state.projectVersion + 0.01;
     this.setState({ projectOffset, projectVersion });
 
-    setTimeout(async () => {
-      await this.openEngineProject(serializedProject);
+    this.undoRedoTimer = setTimeout(async () => {
+      this.undoRedoTimer = null;
+      if (this.unmounted) {
+        return;
+      }
+      const engine = await this.openEngineProject(serializedProject);
+      if (this.unmounted) {
+        // openEngineProject opened a fresh engine onto an instance that
+        // componentWillUnmount has already torn down — release it so the
+        // navigation away from this route does not strand the WASM
+        // allocation (componentWillUnmount cleared `this.engineProject`
+        // before this callback ran).
+        this.engineProject = undefined;
+        if (engine) {
+          await this.disposeOrphanedEngine(engine);
+        }
+        return;
+      }
       // After undo/redo, the restored project may not contain the model
       // we were viewing (e.g. undo after creating and drilling into a new
       // submodel). Reset navigation state if the current model is gone.

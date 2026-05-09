@@ -266,4 +266,46 @@ describe('Editor.componentWillUnmount() orphan-timer cancellation', () => {
     expect(openSpy).not.toHaveBeenCalled();
     expect(editor.engineProject).toBeUndefined();
   });
+
+  it('cancels the handleUndoRedo timer so EngineProject.openProtobuf is not called after unmount', () => {
+    // handleUndoRedo defers `setTimeout(() => { openEngineProject(...);
+    // ...; scheduleSimRun(); scheduleSave(); })`. openEngineProject opens a
+    // fresh engine and assigns it to this.engineProject; if the Editor has
+    // since unmounted (wouter route change / EditorHost path swap), that
+    // engine is stranded on a dead instance. The timer must be tracked and
+    // cancelled (and the callback short-circuits on `unmounted`).
+    const fakeEngine = makeFakeEngine();
+    const openProtobufSpy = jest
+      .spyOn(EngineProject, 'openProtobuf')
+      .mockResolvedValue(fakeEngine as unknown as EngineProject);
+    // The constructor also schedules openInitialProject (via openJson); stub
+    // it too so a stray fire couldn't be confused for the undo/redo path.
+    jest.spyOn(EngineProject, 'openJson').mockResolvedValue(fakeEngine as unknown as EngineProject);
+
+    const editor = new Editor({
+      inputFormat: 'json',
+      initialProjectJson: validProjectJson,
+      initialProjectVersion: 1,
+      name: 'test',
+      onSave: async () => 1,
+    });
+    // handleUndoRedo reads projectHistory[projectOffset] via defined() and
+    // calls this.setState; new Editor() never mounted, so seed the state
+    // fields it touches and make setState a no-op (the state update is
+    // irrelevant here -- we only care that the deferred work is cancelled).
+    (editor.state as { projectHistory: ReadonlyArray<Uint8Array>; projectOffset: number }).projectHistory = [
+      new Uint8Array([1, 2, 3]),
+    ];
+    (editor.state as { projectOffset: number }).projectOffset = 0;
+    editor.setState = (() => {}) as typeof editor.setState;
+
+    editor.handleUndoRedo('undo');
+
+    withDocumentStub(() => editor.componentWillUnmount());
+
+    jest.runAllTimers();
+
+    expect(openProtobufSpy).not.toHaveBeenCalled();
+    expect(editor.engineProject).toBeUndefined();
+  });
 });
