@@ -767,9 +767,13 @@ fn test_auto_flip_uses_element_level_scc_for_arrayed_models() {
 fn per_shape_link_scores_for_share_with_sum() {
     use salsa::Setter;
 
-    // share[R] = pop / SUM(pop[*]) references `pop` under both Bare
-    // (in the numerator) and Wildcard (inside SUM) shapes. Phase 3
-    // emission must produce two distinct link scores.
+    // share[R] = pop / SUM(pop[*]) references `pop` under both Bare (the
+    // numerator) and Wildcard (inside SUM). Phase 5: the Bare ref still
+    // produces the canonical `pop→share` link score, but the Wildcard ref
+    // is routed through the synthetic agg `$⁚ltm⁚agg⁚0`, so it produces
+    // `$⁚ltm⁚link_score⁚pop[d]→$⁚ltm⁚agg⁚0` (per source element) and
+    // `$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚0→share[r]` (per target element) -- and
+    // NOT a `pop→share⁚wildcard` var.
     //
     // We use a stock for `pop` because `model_ltm_variables` short-
     // circuits to an empty result when the model has no stocks (LTM
@@ -789,18 +793,41 @@ fn per_shape_link_scores_for_share_with_sum() {
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     let ltm = model_ltm_variables(&db, model, source_project);
-    let names: Vec<&String> = ltm.vars.iter().map(|v| &v.name).collect();
+    let names: std::collections::HashSet<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
 
-    let bare_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share";
-    let wildcard_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard";
-
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    // The Bare numerator's link score (unchanged).
     assert!(
-        names.iter().any(|n| n.as_str() == bare_name),
-        "expected Bare-shape link score {bare_name:?}; got: {names:?}"
+        names.contains("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share"),
+        "expected Bare-shape link score pop→share; got: {names:?}"
     );
+    // The synthetic agg itself.
     assert!(
-        names.iter().any(|n| n.as_str() == wildcard_name),
-        "expected Wildcard-shape link score {wildcard_name:?}; got: {names:?}"
+        names.contains(agg),
+        "expected synthetic agg {agg}; got: {names:?}"
+    );
+    // pop[d] → agg, one per source element.
+    for d in &["nyc", "boston"] {
+        let n = format!("$\u{205A}ltm\u{205A}link_score\u{205A}pop[{d}]\u{2192}{agg}");
+        assert!(
+            names.contains(n.as_str()),
+            "expected per-source-element reducer link score {n:?}; got: {names:?}"
+        );
+    }
+    // agg → share[r], one per target element (Phase 3 per-target-element form).
+    for r in &["nyc", "boston"] {
+        let n = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}share[{r}]");
+        assert!(
+            names.contains(n.as_str()),
+            "expected agg→share[{r}] link score {n:?}; got: {names:?}"
+        );
+    }
+    // No `⁚wildcard` / `⁚dynamic` var anymore.
+    assert!(
+        names
+            .iter()
+            .all(|n| !n.ends_with("\u{205A}wildcard") && !n.ends_with("\u{205A}dynamic")),
+        "no ⁚wildcard / ⁚dynamic link scores must be emitted; got: {names:?}"
     );
 }
 

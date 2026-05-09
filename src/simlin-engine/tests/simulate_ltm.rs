@@ -2768,28 +2768,27 @@ fn test_cross_dim_stddev_expansion() {
     }
 }
 
-/// AC5.6: A compound nonlinear expression combining MAX and MIN produces
-/// N scalar per-element link scores using nested binary calls.
+/// AC5.6 / AC4.4: A compound expression combining MAX and MIN -- as
+/// sub-expressions, not whole-RHS -- mints two synthetic aggregate nodes,
+/// and each gets N per-source-element reducer link scores.
 ///
-/// Tests the `MAX(population[*]) - MIN(population[*])` pattern where the
-/// scalar target uses two array reducers. The cross-dimensional link score
-/// generation picks up the first reducer found (MAX in this case) and
-/// generates per-element scores. The range formula ensures both the min
-/// and max elements have non-zero influence on the target.
+/// `range_pop = MAX(population[*]) - MIN(population[*])`: `MAX(population[*])`
+/// and `MIN(population[*])` are each a maximal reducer subexpression (neither
+/// is inside the other), so Phase 5 hoists them into `$⁚ltm⁚agg⁚0` and
+/// `$⁚ltm⁚agg⁚1`. The `population → range_pop` causal edge is rerouted through
+/// both: `population[d] → $⁚ltm⁚agg⁚0` and `population[d] → $⁚ltm⁚agg⁚1` per
+/// source element, then `$⁚ltm⁚agg⁚0 → range_pop` and `$⁚ltm⁚agg⁚1 → range_pop`.
+/// So the per-source-element link scores are into the agg nodes, not directly
+/// into `range_pop`.
 ///
 /// **Justified deviation from `RANK(population[*], 1)` as a scalar target:**
 /// RANK (Vensim VECTOR RANK) returns an array of 1-based ordinal positions
 /// with the same cardinality as its input. It cannot be used as the equation
 /// for a scalar aux: the engine would produce a dimension mismatch error
-/// because RANK's output is always an array. Therefore, there is no valid
-/// model structure where a scalar variable has `RANK(population[*], 1)` as its
-/// sole equation. The closest expressible case -- a scalar that reads from RANK
-/// output through an outer reducer (e.g., `SUM(RANK(population[*], 1))`) --
-/// classifies as `ReducerKind::Linear` (SUM is the outermost reducer) and is
-/// covered by `test_cross_dim_sum_algebraic`. The nonlinear reducer path
+/// because RANK's output is always an array. The nonlinear reducer path
 /// (generate_nonlinear_partial / STDDEV/RANK fallback) is exercised when MAX
-/// or MIN appears as the outermost reducer, which is exactly what this test
-/// covers with the compound `MAX(population[*]) - MIN(population[*])` pattern.
+/// or MIN appears as a reducer, which is exactly what this test covers with
+/// the compound `MAX(population[*]) - MIN(population[*])` pattern.
 #[test]
 fn test_cross_dim_compound_nonlinear() {
     let project = build_arrayed_to_scalar_model(
@@ -2803,14 +2802,41 @@ fn test_cross_dim_compound_nonlinear() {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    let offsets = find_cross_dimensional_offsets(&results, "population", "range_pop");
-    assert_eq!(
-        offsets.len(),
-        3,
-        "compound nonlinear should produce 3 per-element link scores, got: {:?}",
-        offsets
-    );
+    // Per-source-element link scores into each agg node.
+    let mut all_offsets: Vec<(String, usize)> = Vec::new();
+    for agg in &[
+        "$\u{205A}ltm\u{205A}agg\u{205A}0",
+        "$\u{205A}ltm\u{205A}agg\u{205A}1",
+    ] {
+        let offsets = find_cross_dimensional_offsets(&results, "population", agg);
+        assert_eq!(
+            offsets.len(),
+            3,
+            "reducer hoisted into {agg} should produce 3 per-source-element link scores, got: {:?}",
+            offsets
+        );
+        all_offsets.extend(offsets);
+    }
+    // Also: each agg→range_pop link score must exist.
+    for agg in &[
+        "$\u{205A}ltm\u{205A}agg\u{205A}0",
+        "$\u{205A}ltm\u{205A}agg\u{205A}1",
+    ] {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}range_pop");
+        assert!(
+            results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new(&name)),
+            "expected agg→range_pop link score {name:?}; offsets: {:?}",
+            results
+                .offsets
+                .keys()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
 
+    let offsets = all_offsets;
     // At least some elements should have non-zero link scores.
     // The range (MAX-MIN) changes when either the max or min element changes.
     let any_nonzero_anywhere = offsets.iter().any(|(_, offset)| {
@@ -5755,5 +5781,177 @@ fn test_agg_aux_value_matches_reducer() {
                 "step {step}: agg→share link score = {v} (not finite)"
             );
         }
+    }
+}
+
+/// Build a 2-region `share[r] = pop[r] / SUM(pop[*])` model with heterogeneous
+/// stock initial values (`pop[big] >> pop[small]`), `pop` fed back by
+/// `update[r] = share[r] * c`. The reducer `SUM(pop[*])` is a subexpression,
+/// so Phase 5 hoists it into `$⁚ltm⁚agg⁚0`.
+fn build_heterogeneous_share_model(c: f64) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+    datamodel::Project {
+        name: "het_share".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["Big".to_string(), "Small".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("Big".to_string(), "1000".to_string(), None, None),
+                            ("Small".to_string(), "10".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["update".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "share".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "pop / SUM(pop[*])".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "update".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        format!("share * {c}"),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// AC4.5 (heterogeneous magnitudes -- the issue's motivating case, at the
+/// link-score level): for `share[r] = pop[r] / SUM(pop[*])` with
+/// `pop[big] >> pop[small]`, the per-source-element `|Δpop[d] / Δ$⁚ltm⁚agg⁚0|`
+/// factor is present and *non-constant* across `d` -- ~1 for `pop[big]` and
+/// ~0 for `pop[small]` at every step where `pop[big]` dominates the change --
+/// and matches a hand calculation from the simulated `pop` / agg values. A
+/// single lumped `|Δ_aggregate(share[r]) / Δshare[r]|` link score would give
+/// the same value for both elements; the agg-routed link scores do not.
+#[test]
+fn test_agg_link_scores_heterogeneous_match_hand_calc() {
+    let project = build_heterogeneous_share_model(0.01);
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
+    let results = vm.into_results();
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let off = |name: &str| -> usize {
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing offset {name}; have: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let pop_big = off("pop[big]");
+    let pop_small = off("pop[small]");
+    let agg_off = off(agg);
+    let ls_big = off(&format!(
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop[big]\u{2192}{agg}"
+    ));
+    let ls_small = off(&format!(
+        "$\u{205A}ltm\u{205A}link_score\u{205A}pop[small]\u{2192}{agg}"
+    ));
+
+    let at = |step: usize, o: usize| results.data[step * results.step_size + o];
+
+    // From step 1 onward (we have a previous timestep), the per-element
+    // link score is |Δpop[d] / Δagg| * sign(Δpop[d]/Δpop[d]) = |Δpop[d]/Δagg|.
+    let mut saw_split = false;
+    for step in 1..results.step_count {
+        let d_agg = at(step, agg_off) - at(step - 1, agg_off);
+        if d_agg.abs() < 1e-12 {
+            continue;
+        }
+        let d_big = at(step, pop_big) - at(step - 1, pop_big);
+        let d_small = at(step, pop_small) - at(step - 1, pop_small);
+        let expect_big = (d_big / d_agg).abs();
+        let expect_small = (d_small / d_agg).abs();
+        assert!(
+            (at(step, ls_big) - expect_big).abs() < 1e-6,
+            "step {step}: pop[big]→agg link score = {}, hand calc = {}",
+            at(step, ls_big),
+            expect_big
+        );
+        assert!(
+            (at(step, ls_small) - expect_small).abs() < 1e-6,
+            "step {step}: pop[small]→agg link score = {}, hand calc = {}",
+            at(step, ls_small),
+            expect_small
+        );
+        // The two factors must differ measurably -- pop[big] dominates the
+        // change, so its fraction of Δagg is large and pop[small]'s is small.
+        if (expect_big - expect_small).abs() > 0.5 {
+            saw_split = true;
+        }
+    }
+    assert!(
+        saw_split,
+        "expected at least one step where the per-element |Δpop[d]/Δagg| factors \
+         differ by > 0.5 (the lumped approximation would make them equal)"
+    );
+
+    // The agg→share[d] link scores must also exist for both target elements.
+    for d in &["big", "small"] {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}share[{d}]");
+        assert!(
+            results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new(&name)),
+            "expected agg→share[{d}] link score {name:?}"
+        );
     }
 }

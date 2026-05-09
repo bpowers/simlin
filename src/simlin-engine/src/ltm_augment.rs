@@ -554,6 +554,94 @@ pub(crate) fn generate_scalar_to_element_equation(
     link_score_guard_form(&partial, &to_elem, &from_q)
 }
 
+/// Generate the `agg → scalar-target` link-score equation: the partial of
+/// `to`'s (scalar) equation w.r.t. the aggregate node `agg_name` held live,
+/// everything else PREVIOUS. `to_eqn_text` is the target's equation text with
+/// every hoisted reducer subexpression already substituted by its agg name
+/// (so the agg appears where `SUM(...)` was); `to_deps` is the (over-
+/// approximating is fine) dependency set of that substituted text. The result
+/// is `Equation::Scalar`-shaped text, named `$⁚ltm⁚link_score⁚{agg}→{to}`.
+///
+/// For an *arrayed* target the per-target-element form is produced by
+/// [`generate_scalar_to_element_equation`] instead (with `from = agg_name`).
+pub(crate) fn generate_agg_to_scalar_target_equation(
+    agg_name: &str,
+    to_name: &str,
+    to_eqn_text: &str,
+    to_deps: &HashSet<Ident<Canonical>>,
+) -> String {
+    let agg_canonical = Ident::new(agg_name);
+    let agg_q = quote_ident(agg_name);
+    let to_q = quote_ident(to_name);
+    let partial =
+        build_partial_equation_shaped(to_eqn_text, to_deps, &agg_canonical, &RefShape::Bare, &[]);
+    link_score_guard_form(&partial, &to_q, &agg_q)
+}
+
+/// Substitute each recognized reducer subexpression in `equation_text` with a
+/// (quoted) reference to its aggregate node.
+///
+/// `reducers` maps the canonical reducer-subexpression text (exactly as
+/// `crate::patch::expr2_to_string` / `print_eqn` renders it -- lowercased,
+/// whitespace-normalized) to the agg node's name. `equation_text` is parsed
+/// to `Expr0`, and any subexpression of it whose `print_eqn` equals one of
+/// those keys is replaced by a `Var(agg_name)` node, then the whole tree is
+/// re-printed. The match is on the parsed AST subtree, not a substring of the
+/// text, so a reducer text that is a textual prefix of a *different* reducer
+/// subexpression (`sum(p[*])` vs `sum(p[*] + 1)`) is never falsely matched. A
+/// parse failure degrades to the input text unchanged.
+pub(crate) fn substitute_reducers_in_equation(
+    equation_text: &str,
+    reducers: &HashMap<String, String>,
+) -> String {
+    if reducers.is_empty() {
+        return equation_text.to_string();
+    }
+    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
+        return equation_text.to_string();
+    };
+    print_eqn(&substitute_reducers_in_expr0(ast, reducers))
+}
+
+fn substitute_reducers_in_expr0(expr: Expr0, reducers: &HashMap<String, String>) -> Expr0 {
+    // A whole-subtree match wins before descending: a reducer App is opaque
+    // -- once it matches an agg, we don't recurse into its (now-irrelevant)
+    // argument.
+    if let Some(agg_name) = reducers.get(&print_eqn(&expr)) {
+        return Expr0::Var(
+            crate::common::RawIdent::new_from_str(agg_name),
+            crate::ast::Loc::default(),
+        );
+    }
+    match expr {
+        Expr0::Const(..) | Expr0::Var(..) | Expr0::Subscript(..) => expr,
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            let args = args
+                .into_iter()
+                .map(|a| substitute_reducers_in_expr0(a, reducers))
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, inner, loc) => Expr0::Op1(
+            op,
+            Box::new(substitute_reducers_in_expr0(*inner, reducers)),
+            loc,
+        ),
+        Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
+            op,
+            Box::new(substitute_reducers_in_expr0(*lhs, reducers)),
+            Box::new(substitute_reducers_in_expr0(*rhs, reducers)),
+            loc,
+        ),
+        Expr0::If(cond, then_e, else_e, loc) => Expr0::If(
+            Box::new(substitute_reducers_in_expr0(*cond, reducers)),
+            Box::new(substitute_reducers_in_expr0(*then_e, reducers)),
+            Box::new(substitute_reducers_in_expr0(*else_e, reducers)),
+            loc,
+        ),
+    }
+}
+
 /// Quote an identifier for use in an equation string.
 /// Identifiers with special characters (like $, ⁚) need double quotes.
 pub(crate) fn quote_ident(ident: &str) -> String {
