@@ -2196,7 +2196,19 @@ fn write_link_element_with_context(
     let link_uid = uid_remap.map_or(link.uid, |ids| ids.element_uid(link.uid));
     let from_uid = uid_remap.map_or(from_uid, |ids| ids.element_uid(from_uid));
     let to_uid = uid_remap.map_or(to_uid, |ids| ids.element_uid(to_uid));
-    let field4 = link_compat.map(|compat| compat.field4).unwrap_or(0);
+    // Field 4 marks whether the connector carries a meaningful control point.
+    // Vensim writes 1 on every curved influence connector and 0 on straight
+    // ones (see Vensim-authored test/.../active_initial.mdl, pop.mdl,
+    // water.mdl); with 0 it ignores any stored control point and re-routes the
+    // connector straight, which is why XMILE-exported arcs looked straight in
+    // Vensim. Recorded MDL geometry keeps its original flag verbatim.
+    let field4 = match link_compat {
+        Some(compat) => compat.field4,
+        None => match link.shape {
+            LinkShape::Straight => 0,
+            LinkShape::Arc(_) | LinkShape::MultiPoint(_) => 1,
+        },
+    };
     let field10 = link_compat.map(|compat| compat.field10).unwrap_or(0);
 
     // Field 9 = 64 marks influence (causal) connectors in Vensim sketches.
