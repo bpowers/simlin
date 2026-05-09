@@ -150,15 +150,26 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
     }
     const file = event.target.files[0];
     const contents = await readFile(file);
+    let engineProject: EngineProject;
     try {
-      let engineProject: EngineProject;
-
       if (file.name.endsWith('.mdl')) {
         engineProject = await EngineProject.openVensim(contents);
       } else {
         engineProject = await EngineProject.open(contents);
       }
+    } catch (e) {
+      // The engine never produced a handle, so there's nothing to dispose.
+      this.setState({
+        errorMsg: `${e}`,
+      });
+      return;
+    }
 
+    // Wrap every code path that uses `engineProject` in try/finally so the
+    // underlying WASM project handle is released even if serialization or
+    // JSON conversion throws. Mirrors the discipline in src/server/render.ts
+    // and src/server/project-creation.ts.
+    try {
       const projectPB = await engineProject.serializeProtobuf();
       const json = JSON.parse(await engineProject.serializeJson()) as JsonProject;
       const activeProject = projectFromJson(json);
@@ -178,7 +189,8 @@ export class NewProject extends React.Component<NewProjectProps, NewProjectState
       this.setState({
         errorMsg: `${e}`,
       });
-      return;
+    } finally {
+      await engineProject.dispose();
     }
   };
 

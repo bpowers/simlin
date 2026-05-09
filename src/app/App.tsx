@@ -91,7 +91,10 @@ interface AppState {
   firebaseIdToken?: string | null;
 }
 
-class InnerApp extends React.PureComponent<{}, AppState> {
+// Exported for unit tests; production code only constructs InnerApp via <App>.
+// We need the export so tests can drive authStateChanged / asyncAuthStateChanged
+// directly without rendering through the firebase/onAuthStateChanged plumbing.
+export class InnerApp extends React.PureComponent<{}, AppState> {
   state: AppState;
 
   constructor(props: {}) {
@@ -114,8 +117,22 @@ class InnerApp extends React.PureComponent<{}, AppState> {
     setTimeout(this.getUserInfo);
   }
 
-  authStateChanged = (user: FirebaseUser | null) => {
-    setTimeout(this.asyncAuthStateChanged, undefined, user);
+  // Firebase invokes authStateChanged synchronously from its event hub. The
+  // previous setTimeout-around-async pattern made this fire-and-forget: any
+  // rejection from getIdToken (revoked token, network failure) or maybeLogin
+  // (server `/session` error) was silently dropped. Await directly and
+  // surface failures via console.error so they're at least visible in dev
+  // tools. Returning the promise lets tests `await` the full chain.
+  authStateChanged = async (user: FirebaseUser | null): Promise<void> => {
+    try {
+      await this.asyncAuthStateChanged(user);
+    } catch (err) {
+      // We deliberately do NOT setState an error here: this method runs on
+      // every auth-state transition (including sign-out), and the app's
+      // top-level auth gate will re-render Login if needed. Logging keeps
+      // the failure visible without overwriting unrelated UI state.
+      console.error('auth state change failed:', err);
+    }
   };
 
   asyncAuthStateChanged = async (user: FirebaseUser | null) => {
@@ -242,16 +259,19 @@ class InnerApp extends React.PureComponent<{}, AppState> {
       }
     }
 
+    // Hoist the styled wrapper outside <Switch>: wouter's Switch only
+    // descends into Fragments (see flattenChildren in wouter's source),
+    // so a <div> child silently disables first-match semantics. Order
+    // routes literal-first so any future overlap with the dynamic
+    // ":username/:projectName" pattern still resolves to the literal.
     return (
-      <React.Fragment>
+      <div className={styles.inner}>
         <Switch>
-          <div className={styles.inner}>
-            <Route path="/" component={this.home} />
-            <Route path="/:username/:projectName" component={this.editor} />
-            <Route path="/new" component={this.home} />
-          </div>
+          <Route path="/" component={this.home} />
+          <Route path="/new" component={this.home} />
+          <Route path="/:username/:projectName" component={this.editor} />
         </Switch>
-      </React.Fragment>
+      </div>
     );
   }
 }

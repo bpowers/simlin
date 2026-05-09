@@ -83,18 +83,30 @@ export class Login extends React.Component<LoginProps, LoginState> {
     };
   }
 
-  appleLoginClick = () => {
+  // Surface OAuth redirect failures (provider misconfig, popup blocked,
+  // network errors, expired auth domain) into emailError so the user sees
+  // them. The previous setTimeout-around-async pattern silently swallowed
+  // rejections because nothing awaited or .catch'd the inner promise.
+  appleLoginClick = async () => {
     const provider = appleProvider();
-    setTimeout(async () => {
+    try {
       await signInWithRedirect(this.props.auth, provider);
-    });
+    } catch (err) {
+      this.setState({
+        emailError: err instanceof Error ? err.message : 'Sign in with Apple failed',
+      });
+    }
   };
-  googleLoginClick = () => {
+  googleLoginClick = async () => {
     const provider = new GoogleAuthProvider();
     provider.addScope('profile');
-    setTimeout(async () => {
+    try {
       await signInWithRedirect(this.props.auth, provider);
-    });
+    } catch (err) {
+      this.setState({
+        emailError: err instanceof Error ? err.message : 'Sign in with Google failed',
+      });
+    }
   };
   emailLoginClick = () => {
     this.setState({ emailLoginFlow: 'showEmail' });
@@ -430,6 +442,15 @@ export class Login extends React.Component<LoginProps, LoginState> {
               >
                 Sign in with email
               </Button>
+              {/* Visible error sink for OAuth click handlers. Without this, a
+               * rejected signInWithRedirect (popup blocked, provider misconfig,
+               * network failure) would set emailError but stay invisible until
+               * the user enters the email-flow path. */}
+              {this.state.emailError !== undefined && (
+                <p role="alert" className={typography.body2}>
+                  {this.state.emailError}
+                </p>
+              )}
             </div>
           );
       }
