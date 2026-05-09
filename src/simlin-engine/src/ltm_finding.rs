@@ -1754,6 +1754,47 @@ mod tests {
         assert_eq!(*offset, 0);
     }
 
+    /// ltm-503-cross-element-agg.AC4.6 (discovery side): a partial-reduce
+    /// link score `$⁚ltm⁚link_score⁚matrix[a,x]→agg[a]` -- element-level on
+    /// *both* sides, `dimensions: vec![]` -- resolves to the single edge
+    /// `(matrix[a,x], agg[a])`. It rides the same `[`-in-`from`-or-`to`
+    /// single-passthrough branch (Branch 2) the full-reduce per-source-element
+    /// names already use; no parser change is needed. Crucially it must NOT
+    /// be broadcast over `D1` (which the alternative `dimensions = ["D1"]`
+    /// shape would route through `expand_fixed_from_a2a_link_offsets`).
+    #[test]
+    fn test_parse_link_offsets_partial_reduce_passthrough() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}matrix[a,x]\u{2192}agg[a]"),
+            0usize,
+        );
+
+        let results = make_results_with_offsets(offsets, 10);
+
+        // No `ltm_vars` entry needed: with empty `var_dims`, the
+        // element-level passthrough branch fires regardless of the lookup.
+        let parsed = parse_link_offsets(&results, &[], &[]);
+
+        assert_eq!(
+            parsed.len(),
+            1,
+            "partial-reduce per-(d1,d2) link score should produce a single LinkOffset"
+        );
+        let ((from, to), offset) = &parsed[0];
+        assert_eq!(
+            from.as_str(),
+            "matrix[a,x]",
+            "the source subscript carries both the surviving and reduced axes"
+        );
+        assert_eq!(
+            to.as_str(),
+            "agg[a]",
+            "the target subscript carries only the surviving axis"
+        );
+        assert_eq!(*offset, 0);
+    }
+
     /// Regression test: when `emit_per_shape_link_scores` produces both
     /// `pop→share` (Bare) and `pop→share⁚wildcard` (Wildcard) for the
     /// same edge, suffix stripping collapses them onto the same

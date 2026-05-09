@@ -1611,6 +1611,92 @@ fn cross_dim_link_score_equations_match_between_exhaustive_and_discovery() {
     }
 }
 
+/// ltm-503-cross-element-agg.AC4.6 (the machinery): a partial reduce
+/// `agg[D1] = SUM(matrix[D1,*])` collapses only the D2 axis, leaving an
+/// arrayed result over D1. The reducer link-score machinery must emit one
+/// *scalar* link score per `(d1, d2)` pair, named
+/// `$⁚ltm⁚link_score⁚matrix[d1,d2]→agg[d1]` (the source subscript carries
+/// both axes; the target subscript only the surviving axis), each with
+/// `dimensions = vec![]`. It must NOT emit a single A2A `matrix→agg` over
+/// `D1` (that would broadcast over D1 in the discovery parser, producing
+/// wrong edges) or a per-`(d1,d2)` var carrying `dimensions = ["D1"]`.
+#[test]
+fn partial_reduce_emits_per_source_element_scalar_link_scores() {
+    let project = TestProject::new("partial_reduce_machinery")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("matrix[D1,D2]", "1", &["growth"], &[], None)
+        .array_flow("growth[D1,D2]", "matrix * 0.05", None)
+        .array_aux("agg[D1]", "SUM(matrix[D1,*])");
+
+    let datamodel = project.build_datamodel();
+
+    use salsa::Setter;
+    let mut db = SimlinDb::default();
+    let model;
+    let proj;
+    {
+        let sync = sync_from_datamodel(&db, &datamodel);
+        model = sync.models["main"].source;
+        proj = sync.project;
+    }
+    // Discovery mode visits every causal edge, so the matrix -> agg edge
+    // is exercised without needing it to participate in a loop.
+    proj.set_ltm_discovery_mode(&mut db).to(true);
+    let ltm = model_ltm_variables(&db, model, proj);
+
+    let by_name: std::collections::HashMap<String, &LtmSyntheticVar> =
+        ltm.vars.iter().map(|v| (v.name.clone(), v)).collect();
+
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name =
+            format!("$\u{205A}ltm\u{205A}link_score\u{205A}matrix[{d1},{d2}]\u{2192}agg[{d1}]");
+        let lsv = by_name.get(&name).unwrap_or_else(|| {
+            panic!(
+                "expected per-(d1,d2) partial-reduce link score {name}; emitted: {:?}",
+                by_name.keys().collect::<Vec<_>>()
+            )
+        });
+        assert!(
+            lsv.dimensions.is_empty(),
+            "partial-reduce link score {name} must be scalar (dimensions = []), got {:?}",
+            lsv.dimensions
+        );
+        // The equation must reference the row element on the target side
+        // and the full source tuple on the source side.
+        let eq = lsv.equation.source_text();
+        assert!(
+            eq.contains(&format!("agg[{d1}]")),
+            "link score {name} equation should reference agg[{d1}]: {eq}"
+        );
+        assert!(
+            eq.contains(&format!("matrix[{d1},{d2}]")),
+            "link score {name} equation should reference matrix[{d1},{d2}]: {eq}"
+        );
+    }
+
+    // Must NOT emit a Bare A2A `matrix→agg` (no element subscript on
+    // either side) -- with or without dimensions.
+    assert!(
+        !by_name.contains_key("$\u{205A}ltm\u{205A}link_score\u{205A}matrix\u{2192}agg"),
+        "must not emit a Bare A2A matrix->agg link score; emitted: {:?}",
+        by_name.keys().collect::<Vec<_>>()
+    );
+    // And no per-(d1,d2) variant should carry D1 dimensions.
+    for v in &ltm.vars {
+        if v.name
+            .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}matrix[")
+        {
+            assert!(
+                v.dimensions.is_empty(),
+                "partial-reduce link score {} must not carry dimensions, got {:?}",
+                v.name,
+                v.dimensions
+            );
+        }
+    }
+}
+
 /// ltm-503-cross-element-agg.AC3.2 (exhaustive loop-score side): the
 /// loop `population[nyc] -> total_pop -> migration[nyc] ->
 /// population[nyc]` (a scalar reducer factored out of the per-element

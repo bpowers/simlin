@@ -1661,7 +1661,83 @@ pub(crate) fn generate_element_to_scalar_equation(
     is_bare: bool,
 ) -> String {
     let source_q = quote_ident(source_var_name);
-    let target_q = quote_ident(target_var_name);
+    let target_ref = quote_ident(target_var_name);
+    build_element_reducer_link_score(
+        &source_q,
+        &target_ref,
+        current_element,
+        all_elements,
+        reducer_kind,
+        reducer_name,
+        is_bare,
+    )
+}
+
+/// Generate a per-element link score equation for a *partial* reduce edge,
+/// where an arrayed source feeds an arrayed-result reducer (e.g.
+/// `agg[D1] = SUM(matrix[D1,*])`) that collapses only some of the source's
+/// axes.
+///
+/// `current_element` is the full source element tuple (e.g. `"a,x"` for
+/// `matrix[a,x]`); `result_element` is its projection onto the surviving
+/// (result) axes (e.g. `"a"` for `agg[a]`); `all_coreduced_elements` is the
+/// set of source element tuples that share `result_element` -- i.e. the
+/// `matrix[a,*]` slice that the reducer combines -- so the algebraic
+/// shortcut divides MEAN by the reduced-axis cardinality and the nonlinear
+/// expansion enumerates exactly that slice (other rows are irrelevant). The
+/// ceteris-paribus partial therefore holds the *rest of that slice* at
+/// PREVIOUS while `source[current_element]` varies, and the target
+/// reference (`agg[result_element]`) and source reference
+/// (`source[current_element]`) are both subscripted.
+///
+/// Mirrors [`generate_element_to_scalar_equation`]; the scalar case is the
+/// degenerate partial reduce with an empty result axis. STDDEV/RANK and
+/// nested reducers fall back to the delta-ratio form against
+/// `agg[result_element]`, unchanged from the scalar case (out of scope:
+/// #483).
+#[allow(clippy::too_many_arguments)] // mirrors generate_element_to_scalar_equation's signature
+pub(crate) fn generate_element_to_reduced_equation(
+    source_var_name: &str,
+    target_var_name: &str,
+    current_element: &str,
+    result_element: &str,
+    all_coreduced_elements: &[String],
+    reducer_kind: &ReducerKind,
+    reducer_name: &str,
+    is_bare: bool,
+) -> String {
+    let source_q = quote_ident(source_var_name);
+    let target_ref = format!("{}[{}]", quote_ident(target_var_name), result_element);
+    build_element_reducer_link_score(
+        &source_q,
+        &target_ref,
+        current_element,
+        all_coreduced_elements,
+        reducer_kind,
+        reducer_name,
+        is_bare,
+    )
+}
+
+/// Shared body for the per-element reducer link score equation.
+///
+/// `source_q` is the already-quoted source variable name; `target_ref` is
+/// the already-formatted target reference (a bare quoted ident for a scalar
+/// target, or `agg[result_element]` for an arrayed-result partial reduce).
+/// `current_element` is the source element subscript that stays live;
+/// `all_elements` is the set of source elements the reducer combines
+/// (every element for a full reduce; the surviving-axis-fixed slice for a
+/// partial reduce) -- its length is the MEAN divisor and the nonlinear
+/// expansion iterates it.
+fn build_element_reducer_link_score(
+    source_q: &str,
+    target_ref: &str,
+    current_element: &str,
+    all_elements: &[String],
+    reducer_kind: &ReducerKind,
+    reducer_name: &str,
+    is_bare: bool,
+) -> String {
     let source_elem = format!("{source_q}[{current_element}]");
 
     let partial_eq = match reducer_kind {
@@ -1679,18 +1755,18 @@ pub(crate) fn generate_element_to_scalar_equation(
             // ratio of actual target change to source element change. This is
             // approximate (like STDDEV/RANK) but avoids the wrong-multiplier
             // bug that the algebraic shortcut would introduce.
-            target_q.to_string()
+            target_ref.to_string()
         }
         ReducerKind::Linear => generate_linear_partial(
-            &source_q,
-            &target_q,
+            source_q,
+            target_ref,
             current_element,
             all_elements.len(),
             reducer_name,
         ),
         ReducerKind::Nonlinear => generate_nonlinear_partial(
-            &source_q,
-            &target_q,
+            source_q,
+            target_ref,
             current_element,
             all_elements,
             reducer_name,
@@ -1699,10 +1775,10 @@ pub(crate) fn generate_element_to_scalar_equation(
 
     // Standard link score formula wrapping the partial equation.
     let abs_part = format!(
-        "ABS(SAFEDIV(({partial_eq} - PREVIOUS({target_q})), ({target_q} - PREVIOUS({target_q})), 0))"
+        "ABS(SAFEDIV(({partial_eq} - PREVIOUS({target_ref})), ({target_ref} - PREVIOUS({target_ref})), 0))"
     );
     let sign_part = format!(
-        "SIGN(SAFEDIV(({partial_eq} - PREVIOUS({target_q})), ({source_elem} - PREVIOUS({source_elem})), 0))"
+        "SIGN(SAFEDIV(({partial_eq} - PREVIOUS({target_ref})), ({source_elem} - PREVIOUS({source_elem})), 0))"
     );
 
     format!(
@@ -1710,7 +1786,7 @@ pub(crate) fn generate_element_to_scalar_equation(
             (TIME = INITIAL_TIME) \
             then 0 \
             else if \
-                (({target_q} - PREVIOUS({target_q})) = 0) OR (({source_elem} - PREVIOUS({source_elem})) = 0) \
+                (({target_ref} - PREVIOUS({target_ref})) = 0) OR (({source_elem} - PREVIOUS({source_elem})) = 0) \
                 then 0 \
                 else {abs_part} * {sign_part}"
     )
@@ -2405,6 +2481,196 @@ mod tests {
         );
         // Source name with special chars should be quoted
         assert!(eq.contains("\"$\u{205A}ltm\u{205A}var\""), "equation: {eq}");
+    }
+
+    // -- generate_element_to_reduced_equation tests (partial reduce) --
+    //
+    // A partial reduce `agg[D1] = SUM(matrix[D1,*])` collapses only the
+    // D2 axis: for source element `matrix[d1,d2]` the relevant target is
+    // `agg[d1]`, and the ceteris-paribus partial holds the other
+    // `matrix[d1,*]` elements (over the reduced axis D2) at PREVIOUS. The
+    // target reference (`to_q`) and the source reference (`source_elem`)
+    // must both be subscripted -- by the result-axis element on the
+    // target side and by the full source tuple on the source side.
+
+    #[test]
+    fn test_generate_reduced_sum_equation() {
+        // agg[D1] = SUM(matrix[D1,*]), D1 = {a, b}, D2 = {x, y}.
+        // For matrix[a,x] -> agg[a], the partial is the SUM algebraic
+        // shortcut with the target pinned to agg[a] and the source pinned
+        // to matrix[a,x]; the other reduced-axis element (matrix[a,y])
+        // must NOT appear (the shortcut avoids enumerating it).
+        let coreduced = vec!["a,x".to_string(), "a,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "agg",
+            "a,x",
+            "a",
+            &coreduced,
+            &ReducerKind::Linear,
+            "SUM",
+            true,
+        );
+        assert!(
+            eq.contains("PREVIOUS(agg[a]) + (matrix[a,x] - PREVIOUS(matrix[a,x]))"),
+            "equation: {eq}"
+        );
+        // Target reference is subscripted by the result element.
+        assert!(
+            eq.contains("(agg[a] - PREVIOUS(agg[a])) = 0"),
+            "equation: {eq}"
+        );
+        // Source reference is the full source tuple.
+        assert!(
+            eq.contains("(matrix[a,x] - PREVIOUS(matrix[a,x])) = 0"),
+            "equation: {eq}"
+        );
+        // The other reduced-axis element must not be enumerated.
+        assert!(
+            !eq.contains("matrix[a,y]"),
+            "SUM shortcut should not enumerate matrix[a,y]: {eq}"
+        );
+        // No literal "(0)" partial -- a real partial expression is emitted.
+        assert!(eq.contains("ABS(SAFEDIV("), "equation: {eq}");
+        assert!(eq.contains("SIGN(SAFEDIV("), "equation: {eq}");
+    }
+
+    #[test]
+    fn test_generate_reduced_mean_equation() {
+        // MEAN divides by the *reduced-axis* cardinality (|D2| = 2),
+        // not by the total number of matrix elements.
+        let coreduced = vec!["a,x".to_string(), "a,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "row_mean",
+            "a,x",
+            "a",
+            &coreduced,
+            &ReducerKind::Linear,
+            "MEAN",
+            true,
+        );
+        assert!(
+            eq.contains("PREVIOUS(row_mean[a]) + (matrix[a,x] - PREVIOUS(matrix[a,x])) / 2"),
+            "equation: {eq}"
+        );
+    }
+
+    #[test]
+    fn test_generate_reduced_min_equation() {
+        // MIN over the reduced axis: nested binary MIN calls over the
+        // matrix[a,*] elements (D2 = {x, y}), with matrix[a,x] live and
+        // matrix[a,y] wrapped in PREVIOUS. Elements from other rows
+        // (matrix[b,*]) must NOT appear.
+        let coreduced = vec!["a,x".to_string(), "a,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "row_min",
+            "a,x",
+            "a",
+            &coreduced,
+            &ReducerKind::Nonlinear,
+            "MIN",
+            true,
+        );
+        assert!(
+            eq.contains("MIN(matrix[a,x], PREVIOUS(matrix[a,y]))"),
+            "equation: {eq}"
+        );
+        // The partial's target reference is the row element.
+        assert!(eq.contains("PREVIOUS(row_min[a])"), "equation: {eq}");
+        // Elements from other rows must not appear.
+        assert!(!eq.contains("matrix[b"), "equation: {eq}");
+    }
+
+    #[test]
+    fn test_generate_reduced_max_equation() {
+        // The current element rides anywhere in the nesting; here it's
+        // the first of the reduced-axis elements.
+        let coreduced = vec!["b,x".to_string(), "b,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "row_max",
+            "b,y",
+            "b",
+            &coreduced,
+            &ReducerKind::Nonlinear,
+            "MAX",
+            true,
+        );
+        assert!(
+            eq.contains("MAX(PREVIOUS(matrix[b,x]), matrix[b,y])"),
+            "equation: {eq}"
+        );
+    }
+
+    #[test]
+    fn test_generate_reduced_constant_returns_zero() {
+        let coreduced = vec!["a,x".to_string(), "a,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "row_size",
+            "a,x",
+            "a",
+            &coreduced,
+            &ReducerKind::Constant,
+            "SIZE",
+            true,
+        );
+        assert_eq!(eq, "0");
+    }
+
+    #[test]
+    fn test_generate_reduced_nested_uses_delta_ratio() {
+        // A nested reducer (is_bare = false) falls back to the delta-ratio
+        // form referencing the row element directly -- same as the scalar
+        // case, just with the target subscripted.
+        let coreduced = vec!["a,x".to_string(), "a,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "row_agg",
+            "a,x",
+            "a",
+            &coreduced,
+            &ReducerKind::Linear,
+            "SUM",
+            false,
+        );
+        assert!(
+            !eq.contains("PREVIOUS(row_agg[a]) +"),
+            "should not use the algebraic shortcut for a nested reducer: {eq}"
+        );
+        assert!(
+            eq.contains("(row_agg[a] - PREVIOUS(row_agg[a]))"),
+            "should use the row element in the delta-ratio: {eq}"
+        );
+        assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+    }
+
+    #[test]
+    fn test_generate_full_reduce_unchanged_after_refactor() {
+        // The full-reduce path must stay byte-identical after extracting
+        // the shared body for the partial-reduce case.
+        let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
+        let scalar_eq = generate_element_to_scalar_equation(
+            "population",
+            "total_pop",
+            "nyc",
+            &elements,
+            &ReducerKind::Linear,
+            "SUM",
+            true,
+        );
+        // A full reduce is the degenerate partial reduce where the result
+        // axis is empty: passing an empty result element and the full
+        // element list as the "coreduced" set must reproduce the scalar
+        // equation, except the target reference picks up `[]` -- so we
+        // don't claim equality here, only that the scalar path's text is
+        // stable (the explicit-string assertion below catches regressions).
+        assert_eq!(
+            scalar_eq,
+            "if (TIME = INITIAL_TIME) then 0 else if ((total_pop - PREVIOUS(total_pop)) = 0) OR ((population[nyc] - PREVIOUS(population[nyc])) = 0) then 0 else ABS(SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), (total_pop - PREVIOUS(total_pop)), 0)) * SIGN(SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), (population[nyc] - PREVIOUS(population[nyc])), 0))"
+        );
     }
 
     // -- build_partial_equation_shaped: per-shape partial equation tests --

@@ -2900,18 +2900,32 @@ pub fn model_ltm_variables(
         }
     }
 
-    /// Generate per-element link score variables for a cross-dimensional
-    /// (arrayed-to-scalar) edge, or return `None` if the edge is not
-    /// cross-dimensional.
+    /// Generate per-element link score variables for a reducer edge, or
+    /// return `None` if the edge is not a reduce.
     ///
-    /// When an arrayed source feeds a scalar target through an
-    /// array-reducing builtin (SUM, MEAN, MIN, MAX, STDDEV, RANK),
-    /// each element gets its own scalar link score variable measuring
-    /// how much varying that single element affects the scalar target
-    /// while holding all other elements at their previous values.
+    /// Two shapes are handled:
+    ///   * **Full reduce** -- an arrayed source feeds a *scalar* target
+    ///     through an array-reducing builtin (`total = SUM(pop[*])`). Each
+    ///     source element gets its own scalar link score
+    ///     `$⁚ltm⁚link_score⁚pop[e]→total` measuring how much varying that
+    ///     single element affects the scalar target while holding all other
+    ///     elements at `PREVIOUS`.
+    ///   * **Partial reduce** -- an arrayed source feeds an *arrayed-result*
+    ///     reducer whose dims are a strict subset of the source's dims
+    ///     (`agg[D1] = SUM(matrix[D1,*])` collapses only `D2`). For each
+    ///     `(d1, d2)` pair the relevant target is only `agg[d1]`, so the
+    ///     link score is the per-`(d1, d2)` scalar variable
+    ///     `$⁚ltm⁚link_score⁚matrix[d1,d2]→agg[d1]` (both axes ride in the
+    ///     source subscript; only the surviving axis in the target
+    ///     subscript). The ceteris-paribus partial holds the rest of the
+    ///     `matrix[d1,*]` slice at `PREVIOUS`. All emitted vars are scalar
+    ///     (`dimensions = vec![]`), consistent with the full-reduce naming
+    ///     -- `parse_link_offsets` keeps element-level-on-both-sides names
+    ///     as a single passthrough edge, so no parser change is needed.
     ///
-    /// Returns `None` for scalar-to-scalar, A2A (same-dimension), and
-    /// any edge where the reducer cannot be classified. Returns
+    /// Returns `None` for scalar-to-scalar, same-dimension A2A, broadcast
+    /// (`from_dims ⊆ to_dims`), mismatched dimensions, module-involved
+    /// edges, and any edge where the reducer cannot be classified. Returns
     /// `Some(vec![])` for SIZE edges (constant reducer, no scores).
     fn try_cross_dimensional_link_scores(
         db: &dyn Db,
@@ -2921,7 +2935,7 @@ pub fn model_ltm_variables(
         model: SourceModel,
         project: SourceProject,
     ) -> Option<Vec<LtmSyntheticVar>> {
-        // Only applies when source is arrayed and target is scalar.
+        // Only applies when the source is arrayed.
         let from_sv = source_vars.get(from)?;
         if from_sv.kind(db) == SourceVariableKind::Module {
             return None;
@@ -2936,14 +2950,33 @@ pub fn model_ltm_variables(
             return None;
         }
         let to_dims = variable_dimensions(db, *to_sv, project);
-        if !to_dims.is_empty() {
-            // Same-dimension A2A or other multi-dimensional case:
-            // not cross-dimensional.
-            return None;
-        }
 
-        // The source is arrayed and the target is scalar. Classify the
-        // reducing function in the target's equation.
+        // Determine whether this edge is a full reduce (scalar target) or a
+        // partial reduce (arrayed result over a strict subset of the
+        // source's axes). The "result axis" names are the target's dims for
+        // a partial reduce (empty for a full reduce); the implied reduced
+        // axes are `from_dims` minus the result axes -- we never need the
+        // reduced-axis names explicitly because the co-reduced source slice
+        // is derived directly from the source element tuples.
+        let result_axis_names: Vec<String> = if to_dims.is_empty() {
+            vec![]
+        } else {
+            // Partial reduce requires every target dim to be a source dim
+            // and strictly fewer target dims than source dims (so at least
+            // one axis collapses). Same-dim A2A, broadcast, and mismatched
+            // dims all fall through to `None` (handled by other paths).
+            let from_names: Vec<&str> = from_dims.iter().map(|d| d.name()).collect();
+            let to_names: Vec<&str> = to_dims.iter().map(|d| d.name()).collect();
+            if to_names.len() >= from_names.len()
+                || !to_names.iter().all(|tn| from_names.contains(tn))
+            {
+                return None;
+            }
+            to_names.iter().map(|s| s.to_string()).collect()
+        };
+
+        // The source is a reducer argument. Classify the reducing function
+        // in the target's equation.
         let to_var = super::reconstruct_single_variable(db, model, project, to)?;
         let (reducer_kind, reducer_name, is_bare) =
             crate::ltm_augment::classify_reducer(&to_var, from)?;
@@ -2961,19 +2994,85 @@ pub fn model_ltm_variables(
             .iter()
             .map(crate::ltm_augment::dimension_element_names)
             .collect();
-        let elements = cartesian_subscripts(&dim_element_lists);
+        let source_elements = cartesian_subscripts(&dim_element_lists);
 
-        let mut cross_vars = Vec::with_capacity(elements.len());
-        for element in &elements {
+        if result_axis_names.is_empty() {
+            // Full reduce: one scalar link score per source element.
+            let mut cross_vars = Vec::with_capacity(source_elements.len());
+            for element in &source_elements {
+                let var_name = format!(
+                    "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
+                    from, element, to
+                );
+                let equation = crate::ltm_augment::generate_element_to_scalar_equation(
+                    from,
+                    to,
+                    element,
+                    &source_elements,
+                    &reducer_kind,
+                    reducer_name,
+                    is_bare,
+                );
+                cross_vars.push(LtmSyntheticVar {
+                    name: var_name,
+                    equation: datamodel::Equation::Scalar(equation),
+                    dimensions: vec![], // scalar -- one variable per element
+                });
+            }
+            return Some(cross_vars);
+        }
+
+        // Partial reduce: project each source element tuple onto the
+        // surviving axes (in target-dim order) to get the result element,
+        // then group source elements by result element so each group is the
+        // `matrix[d1,*]` slice the reducer combines for that row. The MEAN
+        // divisor and the nonlinear expansion both operate over that slice
+        // only (other rows are irrelevant to `agg[d1]`).
+        let from_pos: HashMap<&str, usize> = from_dims
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.name(), i))
+            .collect();
+        // For each surviving target dim, the index into a split source
+        // element tuple where that dim's element name lives. Built from the
+        // membership check above, so every name resolves.
+        let result_positions: Vec<usize> = result_axis_names
+            .iter()
+            .map(|n| from_pos[n.as_str()])
+            .collect();
+        let project_to_result = |source_elem: &str| -> String {
+            let parts: Vec<&str> = source_elem.split(',').collect();
+            result_positions
+                .iter()
+                .map(|&p| parts[p])
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        // result_element -> the source element tuples that share it, in
+        // row-major source order (deterministic).
+        let mut slices: HashMap<String, Vec<String>> = HashMap::new();
+        for se in &source_elements {
+            slices
+                .entry(project_to_result(se))
+                .or_default()
+                .push(se.clone());
+        }
+
+        let mut cross_vars = Vec::with_capacity(source_elements.len());
+        for source_elem in &source_elements {
+            let result_elem = project_to_result(source_elem);
+            let coreduced = &slices[&result_elem];
             let var_name = format!(
-                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
-                from, element, to
+                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
+                from, source_elem, to, result_elem
             );
-            let equation = crate::ltm_augment::generate_element_to_scalar_equation(
+            let equation = crate::ltm_augment::generate_element_to_reduced_equation(
                 from,
                 to,
-                element,
-                &elements,
+                source_elem,
+                &result_elem,
+                coreduced,
                 &reducer_kind,
                 reducer_name,
                 is_bare,
@@ -2981,7 +3080,7 @@ pub fn model_ltm_variables(
             cross_vars.push(LtmSyntheticVar {
                 name: var_name,
                 equation: datamodel::Equation::Scalar(equation),
-                dimensions: vec![], // scalar -- one variable per element
+                dimensions: vec![], // scalar -- one variable per (reduced-elem, result-elem)
             });
         }
         Some(cross_vars)
