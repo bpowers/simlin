@@ -4661,6 +4661,117 @@ fn test_cross_element_ltm_edge_set_truthful() {
     assert_edge("migration_out[boston]", "population[boston]");
 }
 
+/// ltm-503-cross-element-agg.AC1.4: the `migration_pressure[boston] ->
+/// migration_in` link score on the `cross_element_ltm` fixture carries a
+/// meaningful per-element partial.
+///
+/// `migration_in` is a per-element-equation (`Ast::Arrayed`) flow:
+///   migration_in[NYC]    = MAX(migration_pressure[Boston] * -1, 0)
+///   migration_in[Boston] = MAX(migration_pressure[NYC]    * -1, 0)
+/// Pre-fix the `migration_pressure[boston] -> migration_in` link score
+/// carried a `"0"`-partial-derived value (the arrayed target fell through
+/// to a constant `0` partial). Post-fix the link score is `Equation::Arrayed`
+/// over `Region` whose per-element slots are:
+///
+///   - NYC slot: the partial w.r.t. live `migration_pressure[boston]` is
+///     exactly `MAX(migration_pressure[boston] * -1, 0)` -- i.e. all of
+///     `migration_in[NYC]` -- so `Δpartial == Δmigration_in[NYC]` and
+///     `ABS(SAFEDIV(Δ, Δ)) == 1`. (`migration_pressure[Boston] = (pop[B] -
+///     pop[N]) * 0.01 < 0` throughout, and `pop[N] - pop[B]` keeps growing
+///     under the uniform birth rate, so `migration_in[NYC]` changes every
+///     step and `Δ != 0`.) Magnitude is ~1 at every step >= 2.
+///   - Boston slot: `migration_in[Boston]` references only
+///     `migration_pressure[nyc]`, which doesn't match the `FixedIndex(boston)`
+///     shape, so its `migration_pressure[nyc]` ref is frozen at PREVIOUS;
+///     and since `migration_pressure[NYC] > 0` throughout, `migration_in[Boston]
+///     = MAX(negative, 0) = 0` constantly, so `Δmigration_in[Boston] == 0`
+///     and the zero-change guard fires -- the slot is identically 0.
+#[test]
+fn test_cross_element_link_score_migration_in_arrayed_partials() {
+    let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
+
+    let compiled = compile_ltm_incremental(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("cross-element model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    // Locate the `$⁚ltm⁚link_score⁚migration_pressure[boston]→migration_in`
+    // synthetic variable's base offset. `find_cross_dimensional_offsets`
+    // returns (source_element, base_offset) pairs for every
+    // `migration_pressure[E]→migration_in` link score; we want E == "boston".
+    let mp_to_in = find_cross_dimensional_offsets(&results, "migration_pressure", "migration_in");
+    assert!(
+        !mp_to_in.is_empty(),
+        "expected per-element migration_pressure -> migration_in link scores; \
+         offsets present: {:?}",
+        results
+            .offsets
+            .keys()
+            .map(|k| k.as_str())
+            .filter(|s| s.contains("migration_in"))
+            .collect::<Vec<_>>()
+    );
+    let base_offset = mp_to_in
+        .iter()
+        .find(|(elem, _)| elem == "boston")
+        .map(|(_, off)| *off)
+        .expect("migration_pressure[boston] -> migration_in link score should exist");
+
+    // The link score is dimensioned over Region = {NYC, Boston}: slot 0 is
+    // the NYC element, slot 1 the Boston element. Confirm the dimension
+    // element order from the project's datamodel rather than assuming.
+    // (XMILE loading canonicalizes dimension and element names to lowercase.)
+    let region_dim = datamodel_project
+        .dimensions
+        .iter()
+        .find(|d| d.name() == "region")
+        .expect("Region dimension should exist");
+    let region_elems: Vec<String> = match &region_dim.elements {
+        simlin_engine::datamodel::DimensionElements::Named(names) => names.clone(),
+        simlin_engine::datamodel::DimensionElements::Indexed(_) => {
+            panic!("Region should be a named dimension")
+        }
+    };
+    assert_eq!(
+        region_elems,
+        vec!["nyc".to_string(), "boston".to_string()],
+        "fixture's Region dimension order is NYC then Boston"
+    );
+    let nyc_index = region_elems
+        .iter()
+        .position(|e| e == "nyc")
+        .expect("nyc element should exist");
+    let boston_index = region_elems
+        .iter()
+        .position(|e| e == "boston")
+        .expect("boston element should exist");
+
+    // t == 1 is the unstable first post-initial step (matches the
+    // ensure_ltm_results convention of skipping it). For every step t >= 2:
+    //   - NYC slot magnitude is within 1e-3 of 1.0
+    //   - Boston slot is exactly 0.0
+    let mut checked_steps = 0usize;
+    for step in 2..results.step_count {
+        let nyc_val = results.data[step * results.step_size + base_offset + nyc_index];
+        let boston_val = results.data[step * results.step_size + base_offset + boston_index];
+        assert!(
+            !nyc_val.is_nan() && (nyc_val.abs() - 1.0).abs() < 1e-3,
+            "step {step}: migration_pressure[boston]->migration_in NYC slot magnitude should be ~1, \
+             got {nyc_val}"
+        );
+        assert_eq!(
+            boston_val, 0.0,
+            "step {step}: migration_pressure[boston]->migration_in Boston slot should be 0"
+        );
+        checked_steps += 1;
+    }
+    assert!(
+        checked_steps > 0,
+        "expected at least one simulated step t >= 2 to check"
+    );
+}
+
 /// AC8.2: Cross-element feedback model -- discovery mode.
 ///
 /// Same model as test_cross_element_ltm_exhaustive but with discovery mode.
