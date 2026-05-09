@@ -1433,51 +1433,122 @@ fn format_sketch_name(name: &str) -> String {
     name.replace('_', " ").replace('\n', "\\n")
 }
 
+/// Number of `type 1` pipe-connector records `write_flow_pipe_connectors`
+/// emits for `flow`.
+///
+/// This MUST stay in lockstep with `write_flow_pipe_connectors_with_context`:
+/// `SketchUidRemap::dense_for_segment` reserves a contiguous UID block of this
+/// size for the flow's pipes, so an off-by-one here corrupts the whole
+/// segment's UID numbering.
+fn flow_pipe_connector_count(flow: &view_element::Flow) -> usize {
+    let n = flow.points.len();
+    // Endpoint connector to the last point's attachment (the sink), emitted
+    // only when the flow has more than one point.
+    let sink = usize::from(n > 1 && flow.points.last().and_then(|p| p.attached_to_uid).is_some());
+    // One self-connector per interior bend point.
+    let bends = n.saturating_sub(2);
+    // Endpoint connector to the first point's attachment (the source).
+    let source = usize::from(
+        flow.points
+            .first()
+            .and_then(|p| p.attached_to_uid)
+            .is_some(),
+    );
+    sink + bends + source
+}
+
 /// Remap merged/global datamodel UIDs into dense, view-local sketch IDs.
 ///
-/// Vensim sketches use small, contiguous IDs within each `V300` section.
+/// Vensim sketches use small, contiguous IDs within each `V300` section, and
+/// crucially the records appear in increasing-UID order: Vensim's sketch
+/// reader uses each record's UID as an array offset and stops loading the view
+/// when it sees a backward reference (it tolerates gaps -- forward jumps --
+/// which is why Vensim's own files skip the occasional UID).
+///
 /// After multi-view MDL files are merged into a single StockFlow, the
-/// datamodel UIDs remain globally unique across the merged view. Re-using
-/// those sparse IDs when serializing a single segment produces valid-looking
-/// records that Vensim misrenders. The writer therefore assigns fresh,
-/// per-segment IDs while leaving geometry lookups on the original IDs.
+/// datamodel UIDs remain globally unique across the merged view, and the
+/// per-flow records (cloud, pipes, valve, label) are spread across the element
+/// list rather than emitted as a contiguous block. So the writer assigns
+/// fresh UIDs in the *exact order it emits records* (see `dense_for_segment`),
+/// while leaving geometry lookups keyed on the original IDs.
 struct SketchUidRemap {
+    /// Old (datamodel) UID -> new dense UID, for auxes, stocks, flow labels,
+    /// links, aliases, and clouds.
     element_uids: HashMap<i32, i32>,
+    /// Old flow UID -> new valve UID.
     valve_uids: HashMap<i32, i32>,
+    /// Old flow UID -> new UID of that flow's first pipe connector. The flow's
+    /// pipe connectors occupy a contiguous block immediately before the valve.
+    pipe_start_uids: HashMap<i32, i32>,
+    /// One past the highest UID allocated -- the smallest still-free UID.
+    next_uid: i32,
 }
 
 impl SketchUidRemap {
-    fn dense_for_segment(elements: &[&ViewElement]) -> Self {
+    /// Allocate dense, 1-based UIDs in the order `write_view_segment` emits
+    /// sketch records, so the output is in increasing-UID order.
+    ///
+    /// `flow_clouds` maps each flow UID to the clouds emitted just before that
+    /// flow's pipe connectors; it must use the same per-flow ordering as
+    /// `write_view_segment` (which is why the caller builds it once and shares
+    /// it with both this function and the emit loop).
+    fn dense_for_segment(
+        elements: &[&ViewElement],
+        flow_clouds: &HashMap<i32, Vec<&view_element::Cloud>>,
+    ) -> Self {
         let mut element_uids = HashMap::new();
-        let mut flow_uids = Vec::new();
+        let mut valve_uids = HashMap::new();
+        let mut pipe_start_uids = HashMap::new();
         let mut next_uid = 1;
 
         for element in elements {
-            let old_uid = match element {
-                ViewElement::Aux(aux) => aux.uid,
-                ViewElement::Stock(stock) => stock.uid,
-                ViewElement::Flow(flow) => {
-                    flow_uids.push(flow.uid);
-                    flow.uid
+            match element {
+                ViewElement::Aux(aux) => {
+                    element_uids.insert(aux.uid, next_uid);
+                    next_uid += 1;
                 }
-                ViewElement::Link(link) => link.uid,
-                ViewElement::Alias(alias) => alias.uid,
-                ViewElement::Cloud(cloud) => cloud.uid,
-                ViewElement::Module(_) | ViewElement::Group(_) => continue,
-            };
-            element_uids.insert(old_uid, next_uid);
-            next_uid += 1;
-        }
-
-        let mut valve_uids = HashMap::new();
-        for flow_uid in flow_uids {
-            valve_uids.insert(flow_uid, next_uid);
-            next_uid += 1;
+                ViewElement::Stock(stock) => {
+                    element_uids.insert(stock.uid, next_uid);
+                    next_uid += 1;
+                }
+                ViewElement::Flow(flow) => {
+                    // Emission order within a flow: its clouds, then its pipe
+                    // connectors, then the valve, then the flow-label
+                    // variable -- one contiguous run of UIDs (Vensim's own
+                    // files have valve_uid + 1 == label_uid).
+                    if let Some(clouds) = flow_clouds.get(&flow.uid) {
+                        for cloud in clouds {
+                            element_uids.insert(cloud.uid, next_uid);
+                            next_uid += 1;
+                        }
+                    }
+                    pipe_start_uids.insert(flow.uid, next_uid);
+                    next_uid += flow_pipe_connector_count(flow) as i32;
+                    valve_uids.insert(flow.uid, next_uid);
+                    next_uid += 1;
+                    element_uids.insert(flow.uid, next_uid);
+                    next_uid += 1;
+                }
+                ViewElement::Link(link) => {
+                    element_uids.insert(link.uid, next_uid);
+                    next_uid += 1;
+                }
+                // Clouds are emitted with their flow, above; the standalone
+                // list entry does not produce its own record.
+                ViewElement::Cloud(_) => {}
+                ViewElement::Alias(alias) => {
+                    element_uids.insert(alias.uid, next_uid);
+                    next_uid += 1;
+                }
+                ViewElement::Module(_) | ViewElement::Group(_) => {}
+            }
         }
 
         Self {
             element_uids,
             valve_uids,
+            pipe_start_uids,
+            next_uid,
         }
     }
 
@@ -1489,8 +1560,16 @@ impl SketchUidRemap {
         self.valve_uids.get(&flow_uid).copied()
     }
 
+    /// New UID of `flow_uid`'s first pipe connector. `dense_for_segment`
+    /// reserves a block for every flow it sees, so this is `Some` for any flow
+    /// in the segment this remap was built from.
+    fn pipe_start_uid(&self, flow_uid: i32) -> Option<i32> {
+        self.pipe_start_uids.get(&flow_uid).copied()
+    }
+
+    /// Smallest UID not used by any element/valve/pipe in this segment.
     fn next_connector_uid(&self) -> i32 {
-        (self.element_uids.len() + self.valve_uids.len()) as i32 + 1
+        self.next_uid
     }
 }
 
@@ -1728,6 +1807,14 @@ fn write_flow_element_with_context(
     let label_compat = flow.label_compat.as_ref();
     let (valve_x, valve_y) = transform.point(flow.x, flow.y);
 
+    // On the production path UIDs are pre-allocated in file order, so this
+    // flow's pipe connectors occupy a known contiguous block; anchor the
+    // running connector counter at its start. (The test path passes a bare
+    // counter and no remap, so we leave it alone.)
+    if let Some(start) = uid_remap.and_then(|ids| ids.pipe_start_uid(flow.uid)) {
+        *next_connector_uid = start;
+    }
+
     // Pipe connectors must come before the valve and flow label.
     let had_pipes = write_flow_pipe_connectors_with_context(
         buf,
@@ -1822,8 +1909,12 @@ fn write_flow_pipe_connectors_with_context(
 ) -> bool {
     let mut wrote_any = false;
 
-    // Flow pipe connectors use field 4 for endpoint type and field 7 = 22 (pipe type).
-    // Flag 4 = connects to a stock, flag 100 = connects to a cloud.
+    // Flow pipe connectors use field 7 = 22 (pipe type) and field 4 for the
+    // endpoint role: 4 = the downstream/sink endpoint (where the flow's
+    // material goes), 100 = the upstream/source endpoint (where it comes
+    // from) -- this is the side the flow attaches to, *not* whether that
+    // element is a stock or a cloud. Vensim's own files set 4 on a sink that
+    // happens to be a cloud and 100 on a source that happens to be a stock.
     let write_pipe = |buf: &mut String,
                       first: bool,
                       connector_uid: i32,
@@ -1877,11 +1968,8 @@ fn write_flow_pipe_connectors_with_context(
         && let Some(endpoint_uid) = last.attached_to_uid
     {
         let (x, y) = connector_point(last);
-        let direction = if ctx.stock_uids.contains(&endpoint_uid) {
-            4
-        } else {
-            100
-        };
+        // The last point is the sink/downstream endpoint.
+        let direction = 4;
         let endpoint_uid = ctx
             .uid_remap
             .map_or(endpoint_uid, |ids| ids.element_uid(endpoint_uid));
@@ -1924,11 +2012,8 @@ fn write_flow_pipe_connectors_with_context(
         && let Some(endpoint_uid) = first.attached_to_uid
     {
         let (x, y) = connector_point(first);
-        let direction = if ctx.stock_uids.contains(&endpoint_uid) {
-            4
-        } else {
-            100
-        };
+        // The first point is the source/upstream endpoint.
+        let direction = 100;
         let endpoint_uid = ctx
             .uid_remap
             .map_or(endpoint_uid, |ids| ids.element_uid(endpoint_uid));
@@ -2518,7 +2603,21 @@ impl MdlWriter {
         _flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
         link_compat_by_uid: &HashMap<i32, &view_element::LinkSketchCompat>,
     ) {
-        let uid_remap = SketchUidRemap::dense_for_segment(elements);
+        // Collect cloud UIDs so flow pipe connectors can set the right
+        // direction flag, and build a map from flow_uid -> clouds so each
+        // cloud is emitted just before its flow's pipe connectors (Vensim
+        // requires this ordering). Built before UID allocation so the remap
+        // and the emit loop below agree on the per-flow cloud order.
+        let mut cloud_uids: HashSet<i32> = HashSet::new();
+        let mut flow_clouds: HashMap<i32, Vec<&view_element::Cloud>> = HashMap::new();
+        for elem in elements {
+            if let ViewElement::Cloud(c) = *elem {
+                cloud_uids.insert(c.uid);
+                flow_clouds.entry(c.flow_uid).or_default().push(c);
+            }
+        }
+
+        let uid_remap = SketchUidRemap::dense_for_segment(elements, &flow_clouds);
         let mut next_connector_uid = uid_remap.next_connector_uid();
         let view_title = sanitize_view_title_for_mdl(view_name);
         writeln!(self.buf, "*{}", view_title).unwrap();
@@ -2529,18 +2628,6 @@ impl MdlWriter {
             self.buf.push_str(
                 "$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0\n",
             );
-        }
-
-        // Collect cloud UIDs so flow pipe connectors can set the right direction flag.
-        // Also build a map from flow_uid -> clouds so we can emit each cloud
-        // just before its associated flow (Vensim requires this ordering).
-        let mut cloud_uids: HashSet<i32> = HashSet::new();
-        let mut flow_clouds: HashMap<i32, Vec<&view_element::Cloud>> = HashMap::new();
-        for elem in elements {
-            if let ViewElement::Cloud(c) = *elem {
-                cloud_uids.insert(c.uid);
-                flow_clouds.entry(c.flow_uid).or_default().push(c);
-            }
         }
 
         for elem in elements {

@@ -684,10 +684,15 @@ fn write_mdl_for_vensim_validation() {
 // Task 4: mark2 sketch structure validation
 // ---------------------------------------------------------------------------
 
-/// Verify that the mark2 model's sketch roundtrips with correct Vensim
-/// element ordering: for each flow, pipe connectors (type 1 with flag 22)
-/// must precede the valve (type 11) and flow label (type 10, shape=40).
-/// Clouds (type 12) must precede the pipe connectors that reference them.
+/// Verify that the mark2 model's sketch roundtrips with the ordering Vensim's
+/// reader requires *within each view*:
+///   - records appear in strictly increasing UID order (the UID is an array
+///     offset; Vensim tolerates gaps but not backward references);
+///   - a flow's pipe connectors (type 1 with flag 22) precede its valve
+///     (type 11), which precedes its label (type 10, shape 40);
+///   - a cloud (type 12) precedes the pipe connectors that reference it;
+///   - pipe-connector direction flags are 4 (sink) or 100 (source) and
+///     influence connectors carry field 9 == 64.
 #[test]
 fn mark2_sketch_ordering() {
     let file_path = resolve_path("test/bobby/vdf/econ/mark2.mdl");
@@ -696,93 +701,107 @@ fn mark2_sketch_ordering() {
 
     let mdl_text = mdl::project_to_mdl(&project).expect("write mark2.mdl");
 
-    // The written MDL should be re-parseable
+    // The written MDL should be re-parseable, and keep both views.
     let project2 = mdl::parse_mdl(&mdl_text).expect("re-parse mark2.mdl");
-
-    // Both views should survive
     assert_eq!(
         project.models[0].views.len(),
         project2.models[0].views.len()
     );
 
-    // Extract the sketch section from the written text
-    let sketch_start = mdl_text
-        .find("\\\\\\---/// Sketch information")
-        .expect("should have sketch section");
-    let sketch_text = &mdl_text[sketch_start..];
+    let views = split_sketch_into_views(&mdl_text);
+    assert!(
+        !views.is_empty(),
+        "written MDL should contain a sketch view"
+    );
 
-    // For each view, verify Vensim ordering constraints
-    for line in sketch_text.lines() {
-        // Flow pipe connectors (type 1 with field 7 = 22) must have the
-        // direction flag (field 4) set to 4 or 100
-        if line.starts_with("1,") {
+    // UIDs and cross-references share a per-view namespace, so every check is
+    // scoped to one view's element lines.
+    for view in &views {
+        let lines = &view.element_lines;
+        let fields_at = |idx: usize| -> Vec<&str> { lines[idx].split(',').collect() };
+        let uid_of = |idx: usize| -> i32 { fields_at(idx)[1].parse().expect("record UID") };
+
+        // (a) records appear in strictly increasing UID order.
+        for window in (0..lines.len()).collect::<Vec<_>>().windows(2) {
+            assert!(
+                uid_of(window[0]) < uid_of(window[1]),
+                "view {:?}: sketch records must be in increasing UID order, but \
+                 {:?} follows {:?}",
+                view.name,
+                lines[window[1]],
+                lines[window[0]],
+            );
+        }
+
+        // (b) pipe-connector direction flags; (c) influence-connector field 9.
+        for line in lines {
+            if !line.starts_with("1,") {
+                continue;
+            }
             let fields: Vec<&str> = line.split(',').collect();
-            if fields.len() > 7 && fields[7] == "22" {
+            if fields.len() <= 9 {
+                continue;
+            }
+            if fields[7] == "22" {
                 let direction: i32 = fields[4].parse().unwrap_or(0);
                 assert!(
                     direction == 4 || direction == 100,
-                    "pipe connector should have direction 4 or 100, got {direction}: {line}"
+                    "view {:?}: pipe connector direction should be 4 or 100, got {direction}: {line}",
+                    view.name,
                 );
-            }
-        }
-
-        // Influence connectors (type 1 without flag 22) should have field 9 = 64
-        if line.starts_with("1,") {
-            let fields: Vec<&str> = line.split(',').collect();
-            if fields.len() > 9 && fields[7] != "22" {
+            } else {
                 let influence_flag: i32 = fields[9].parse().unwrap_or(0);
                 assert_eq!(
                     influence_flag, 64,
-                    "influence connector should have field 9 = 64: {line}"
+                    "view {:?}: influence connector should have field 9 == 64: {line}",
+                    view.name,
                 );
             }
         }
-    }
 
-    // Verify that pipe connectors appear before their valve in each flow block.
-    // Collect all valve UIDs and verify their pipes appear earlier in the text.
-    let sketch_lines: Vec<&str> = sketch_text.lines().collect();
-    for (i, line) in sketch_lines.iter().enumerate() {
-        if !line.starts_with("11,") {
-            continue;
-        }
-        let valve_fields: Vec<&str> = line.split(',').collect();
-        let valve_uid: &str = valve_fields[1];
-
-        // Find pipe connectors that reference this valve (field 2 = valve_uid)
-        for (j, pipe_line) in sketch_lines.iter().enumerate() {
-            if !pipe_line.starts_with("1,") {
+        // (d) pipe connectors precede their valve.
+        for (i, line) in lines.iter().enumerate() {
+            if !line.starts_with("11,") {
                 continue;
             }
-            let pipe_fields: Vec<&str> = pipe_line.split(',').collect();
-            if pipe_fields.len() > 7 && pipe_fields[7] == "22" && pipe_fields[2] == valve_uid {
-                assert!(
-                    j < i,
-                    "pipe connector for valve {valve_uid} at line {j} should precede valve at line {i}"
-                );
+            let valve_uid = fields_at(i)[1];
+            for (j, pipe_line) in lines.iter().enumerate() {
+                let pipe_fields: Vec<&str> = pipe_line.split(',').collect();
+                if pipe_line.starts_with("1,")
+                    && pipe_fields.len() > 7
+                    && pipe_fields[7] == "22"
+                    && pipe_fields[2] == valve_uid
+                {
+                    assert!(
+                        j < i,
+                        "view {:?}: pipe connector for valve {valve_uid} at line {j} should \
+                         precede the valve at line {i}",
+                        view.name,
+                    );
+                }
             }
         }
-    }
 
-    // Verify cloud elements appear before the pipe connectors that reference them
-    for (i, line) in sketch_lines.iter().enumerate() {
-        if !line.starts_with("12,") {
-            continue;
-        }
-        let cloud_fields: Vec<&str> = line.split(',').collect();
-        let cloud_uid: &str = cloud_fields[1];
-
-        // Find pipe connectors that reference this cloud (field 3 = cloud_uid)
-        for (j, pipe_line) in sketch_lines.iter().enumerate() {
-            if !pipe_line.starts_with("1,") {
+        // (e) clouds precede the pipe connectors that reference them.
+        for (i, line) in lines.iter().enumerate() {
+            if !line.starts_with("12,") {
                 continue;
             }
-            let pipe_fields: Vec<&str> = pipe_line.split(',').collect();
-            if pipe_fields.len() > 7 && pipe_fields[7] == "22" && pipe_fields[3] == cloud_uid {
-                assert!(
-                    i < j,
-                    "cloud {cloud_uid} at line {i} should precede pipe connector at line {j}"
-                );
+            let cloud_uid = fields_at(i)[1];
+            for (j, pipe_line) in lines.iter().enumerate() {
+                let pipe_fields: Vec<&str> = pipe_line.split(',').collect();
+                if pipe_line.starts_with("1,")
+                    && pipe_fields.len() > 7
+                    && pipe_fields[7] == "22"
+                    && pipe_fields[3] == cloud_uid
+                {
+                    assert!(
+                        i < j,
+                        "view {:?}: cloud {cloud_uid} at line {i} should precede the pipe \
+                         connector that references it at line {j}",
+                        view.name,
+                    );
+                }
             }
         }
     }

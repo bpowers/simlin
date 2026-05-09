@@ -1709,17 +1709,75 @@ fn sketch_flow_element_derives_stock_connector_points_from_takeoffs() {
         None,
     );
 
+    // Sink pipe (last point) carries direction 4; source pipe (first point)
+    // carries direction 100 -- the endpoint *role*, not stock-vs-cloud.
     assert!(
         buf.contains("1,200,100,2,4,0,0,22,0,0,0,-1--1--1,,1|(200,100)|"),
         "sink pipe connector should be reconstructed from the stock center: {buf}"
     );
     assert!(
-        buf.contains("1,201,100,1,4,0,0,22,0,0,0,-1--1--1,,1|(100,100)|"),
+        buf.contains("1,201,100,1,100,0,0,22,0,0,0,-1--1--1,,1|(100,100)|"),
         "source pipe connector should be reconstructed from the stock center: {buf}"
     );
     assert!(
         buf.contains("10,6,Infection Rate,150,116,49,8,40,3,0,0,-1,0,0,0"),
         "flow label should fall back to the canonical bottom label position: {buf}"
+    );
+}
+
+/// An outflow into a sink cloud: the cloud-side pipe (the sink, last point)
+/// must carry direction 4 and the stock-side pipe (the source, first point)
+/// direction 100 -- the reverse of "stock => 4, cloud => 100", which is what
+/// Vensim's own outflow-to-cloud sketches do.
+#[test]
+fn sketch_flow_outflow_to_cloud_uses_role_based_direction_flags() {
+    let flow = view_element::Flow {
+        name: "Drain".to_string(),
+        uid: 6,
+        x: 150.0,
+        y: 100.0,
+        label_side: view_element::LabelSide::Bottom,
+        points: vec![
+            // Source: a stock at the left.
+            view_element::FlowPoint {
+                x: 122.5,
+                y: 100.0,
+                attached_to_uid: Some(1),
+            },
+            // Sink: a cloud at the right.
+            view_element::FlowPoint {
+                x: 200.0,
+                y: 100.0,
+                attached_to_uid: Some(2),
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    };
+    let mut buf = String::new();
+    let valve_uids = HashMap::from([(6, 100)]);
+    let elem_positions = HashMap::from([(1, (100, 100)), (2, (200, 100))]);
+    let stock_uids = HashSet::from([1]); // only uid 1 is a stock; uid 2 is the cloud
+    let mut next_connector_uid = 200;
+    write_flow_element_with_context(
+        &mut buf,
+        &flow,
+        &valve_uids,
+        &HashSet::new(),
+        &mut next_connector_uid,
+        SketchTransform::identity(),
+        &elem_positions,
+        &stock_uids,
+        None,
+    );
+
+    assert!(
+        buf.contains("1,200,100,2,4,0,0,22,0,0,0,-1--1--1,,1|(200,100)|"),
+        "sink cloud pipe should carry direction 4: {buf}"
+    );
+    assert!(
+        buf.contains("1,201,100,1,100,0,0,22,0,0,0,-1--1--1,,1|(100,100)|"),
+        "source stock pipe should carry direction 100: {buf}"
     );
 }
 
@@ -3289,6 +3347,11 @@ fn make_stock_flow(elements: Vec<ViewElement>) -> StockFlow {
     }
 }
 
+/// Collect the UIDs of all sketch records (types 1, 10, 11, 12) in the order
+/// they appear in `view_title`'s segment. Returned in file order -- NOT sorted
+/// -- because Vensim's sketch reader treats UIDs as array offsets and rejects
+/// (or misrenders) segments whose records are not in monotonically increasing
+/// UID order, so file order is exactly what callers need to assert on.
 fn sketch_record_uids_for_view(output: &str, view_title: &str) -> Vec<i32> {
     let marker = format!("*{view_title}\n");
     let start = output.find(&marker).expect("view marker should exist");
@@ -3299,7 +3362,7 @@ fn sketch_record_uids_for_view(output: &str, view_title: &str) -> Vec<i32> {
         .expect("view should end at the next sketch boundary");
     let section = &section[..end];
 
-    let mut ids = section
+    section
         .lines()
         .filter_map(|line| {
             let record_type = line.split(',').next()?;
@@ -3307,9 +3370,21 @@ fn sketch_record_uids_for_view(output: &str, view_title: &str) -> Vec<i32> {
                 .then(|| line.split(',').nth(1)?.parse::<i32>().ok())
                 .flatten()
         })
-        .collect::<Vec<_>>();
-    ids.sort_unstable();
-    ids
+        .collect::<Vec<_>>()
+}
+
+/// Assert that every sketch record's UID is strictly greater than the previous
+/// one (Vensim's array-offset invariant). `label` identifies the source case.
+fn assert_sketch_uids_strictly_increasing(uids: &[i32], label: &str) {
+    for window in uids.windows(2) {
+        assert!(
+            window[0] < window[1],
+            "{label}: sketch record UIDs must be strictly increasing in file order, \
+             but {} is followed by {}; full sequence: {uids:?}",
+            window[0],
+            window[1],
+        );
+    }
 }
 
 #[test]
@@ -3479,11 +3554,116 @@ fn write_sketch_section_reassigns_dense_uids_per_view() {
     writer.write_sketch_section(&[View::StockFlow(sf)]);
     let output = writer.buf;
 
+    // UIDs are dense (1..N) *and* appear in increasing file order, per view.
     let housing_ids = sketch_record_uids_for_view(&output, "1 housing");
-    assert_eq!(housing_ids, vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_sketch_uids_strictly_increasing(&housing_ids, "1 housing");
+    assert_eq!(housing_ids, vec![1, 2, 3, 4, 5, 6, 7], "output: {output}");
 
     let investment_ids = sketch_record_uids_for_view(&output, "2 investments");
-    assert_eq!(investment_ids, vec![1, 2, 3]);
+    assert_sketch_uids_strictly_increasing(&investment_ids, "2 investments");
+    assert_eq!(investment_ids, vec![1, 2, 3], "output: {output}");
+}
+
+/// Reproduces the shape that exposed the UID-ordering bug: a flow with a
+/// source cloud and a sink stock, plus auxes and causal links (including one
+/// targeting the flow). Vensim's sketch reader treats UIDs as array offsets
+/// and rejects/misrenders a segment whose records are not in increasing-UID
+/// order, so the writer must allocate UIDs in the order it emits records.
+#[test]
+fn sketch_records_appear_in_increasing_uid_order() {
+    let sf = StockFlow {
+        name: Some("View 1".to_owned()),
+        elements: vec![
+            ViewElement::Aux(view_element::Aux {
+                name: "v".to_owned(),
+                uid: 1,
+                x: 230.0,
+                y: 157.0,
+                label_side: view_element::LabelSide::Center,
+                compat: None,
+            }),
+            ViewElement::Aux(view_element::Aux {
+                name: "constant".to_owned(),
+                uid: 2,
+                x: 114.0,
+                y: 98.0,
+                label_side: view_element::LabelSide::Center,
+                compat: None,
+            }),
+            ViewElement::Link(view_element::Link {
+                uid: 3,
+                from_uid: 2,
+                to_uid: 1,
+                shape: LinkShape::Straight,
+                polarity: None,
+            }),
+            ViewElement::Stock(view_element::Stock {
+                name: "stock".to_owned(),
+                uid: 4,
+                x: 379.0,
+                y: 152.0,
+                label_side: view_element::LabelSide::Center,
+                compat: None,
+            }),
+            ViewElement::Flow(view_element::Flow {
+                name: "flow".to_owned(),
+                uid: 5,
+                x: 309.0,
+                y: 149.0,
+                label_side: view_element::LabelSide::Bottom,
+                points: vec![
+                    // Source endpoint: a cloud (uid 7, below in the list).
+                    view_element::FlowPoint {
+                        x: 270.0,
+                        y: 149.0,
+                        attached_to_uid: Some(7),
+                    },
+                    // Sink endpoint: the stock.
+                    view_element::FlowPoint {
+                        x: 356.5,
+                        y: 149.0,
+                        attached_to_uid: Some(4),
+                    },
+                ],
+                compat: None,
+                label_compat: None,
+            }),
+            // A causal link targeting the flow -- must resolve to the flow's
+            // (renumbered) sketch element, and must itself land after the flow.
+            ViewElement::Link(view_element::Link {
+                uid: 6,
+                from_uid: 1,
+                to_uid: 5,
+                shape: LinkShape::Straight,
+                polarity: None,
+            }),
+            // Clouds are listed after their flow (matching the parser's output).
+            ViewElement::Cloud(view_element::Cloud {
+                uid: 7,
+                flow_uid: 5,
+                x: 270.0,
+                y: 149.0,
+                compat: None,
+            }),
+        ],
+        view_box: Rect::default(),
+        zoom: 1.0,
+        use_lettered_polarity: false,
+        font: None,
+        sketch_compat: None,
+    };
+
+    let mut writer = MdlWriter::new();
+    writer.write_sketch_section(&[View::StockFlow(sf)]);
+    let output = writer.buf;
+
+    let uids = sketch_record_uids_for_view(&output, "View 1");
+    assert_sketch_uids_strictly_increasing(&uids, "single-flow view");
+    assert_eq!(
+        uids,
+        (1..=uids.len() as i32).collect::<Vec<_>>(),
+        "UIDs should be dense 1..N in file order; output: {output}"
+    );
 }
 
 #[test]
