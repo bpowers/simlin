@@ -98,6 +98,17 @@ fn format_mdl_ident(name: &str) -> String {
     }
 }
 
+/// Collapse a display newline -- a literal `\n` (backslash + `n`) that XMILE
+/// name attributes use, or a real newline character -- to a single space.
+///
+/// Vensim MDL sketch records are single-line, and the equation section spells
+/// such names with the newline collapsed, so the sketch and equation must
+/// agree on this collapsed form or Vensim cannot link the sketch element to
+/// its variable definition (it silently drops or mispositions the element).
+fn collapse_display_newlines(name: &str) -> String {
+    name.replace("\\n", " ").replace('\n', " ")
+}
+
 /// Build a mapping from canonical variable ident to display name (with
 /// original casing, spaces instead of underscores) by walking view elements.
 ///
@@ -114,7 +125,7 @@ fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
                 ViewElement::Flow(f) => &f.name,
                 _ => continue,
             };
-            let normalized_name = name.replace("\\n", " ").replace('\n', " ");
+            let normalized_name = collapse_display_newlines(name);
             let canonical = crate::common::canonicalize(&normalized_name).into_owned();
             let display = underbar_to_space(&normalized_name);
             map.entry(canonical).or_insert(display);
@@ -128,7 +139,7 @@ fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
 fn display_name_for_ident(ident: &str, display_names: &HashMap<String, String>) -> String {
     match display_names.get(ident) {
         Some(name) => {
-            let name = name.replace("\\n", " ").replace('\n', " ");
+            let name = collapse_display_newlines(name);
             if needs_mdl_quoting(&name) {
                 format!("\"{}\"", escape_mdl_quoted_ident(&name))
             } else {
@@ -1422,15 +1433,17 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
 
 // ---- Sketch element serialization ----
 
-/// Format a view element name for sketch output.
+/// Format a view element name for an MDL sketch record.
 ///
-/// Sketch names need underscores replaced with spaces (like `underbar_to_space`),
-/// but also must escape actual newline characters as the literal two-character
-/// sequence `\n`. XMILE sources may contain real newlines in view element name
-/// attributes; Vensim MDL sketch lines are single-line records, so a real
-/// newline in a name would break parsing.
+/// Sketch records are comma-delimited single lines, so the name needs the
+/// same treatment the equation section gives identifiers: collapse display
+/// newlines to a space (see `collapse_display_newlines` -- the equation
+/// section does this too, and the spellings must match for Vensim to link the
+/// sketch element to its variable), turn underscores into spaces, and quote
+/// names containing characters that would otherwise break the record (`$`,
+/// `|`, `/`, ...).
 fn format_sketch_name(name: &str) -> String {
-    name.replace('_', " ").replace('\n', "\\n")
+    format_mdl_ident(&collapse_display_newlines(name))
 }
 
 /// Number of `type 1` pipe-connector records `write_flow_pipe_connectors`

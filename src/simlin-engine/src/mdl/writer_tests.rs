@@ -2637,6 +2637,135 @@ fn sketch_roundtrip_preserves_causal_links_to_flows_without_sketch_compat() {
 }
 
 #[test]
+fn sketch_name_collapses_display_newlines_and_quotes_specials() {
+    // A literal `\n` (backslash + 'n') -- the form XMILE name attributes use --
+    // and a real newline both collapse to a space, matching the equation
+    // section. Names with characters that would break a comma-delimited record
+    // get quoted, the way Vensim writes them.
+    assert_eq!(
+        format_sketch_name("Maximum\\nfishery size"),
+        "Maximum fishery size"
+    );
+    assert_eq!(
+        format_sketch_name("Effect of fish\non catch"),
+        "Effect of fish on catch"
+    );
+    assert_eq!(format_sketch_name("max_fishery_size"), "max fishery size");
+    assert_eq!(
+        format_sketch_name("Aux with $peC!@| characters"),
+        "\"Aux with $peC!@| characters\""
+    );
+    // ...and the equation section uses the same collapsed spelling, so the
+    // sketch record and the variable definition agree.
+    let mut display_names = HashMap::new();
+    display_names.insert(
+        "maximum_fishery_size".to_string(),
+        "Maximum\\nfishery size".to_string(),
+    );
+    assert_eq!(
+        display_name_for_ident("maximum_fishery_size", &display_names),
+        "Maximum fishery size",
+    );
+}
+
+#[test]
+fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
+    // Regression: a view element whose name contains a display newline used to
+    // be written verbatim (`Maximum\nfishery size`), which did not match the
+    // equation-section spelling (`Maximum fishery size`), so the re-parser --
+    // and Vensim -- dropped the orphaned sketch element.
+    let maximum = Variable::Aux(Aux {
+        ident: "maximum_fishery_size".to_owned(),
+        equation: Equation::Scalar("4000".to_owned()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    });
+    let density = Variable::Aux(Aux {
+        ident: "fish_density".to_owned(),
+        equation: Equation::Scalar("maximum fishery size / 4".to_owned()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    });
+
+    let model = datamodel::Model {
+        name: "default".to_owned(),
+        sim_specs: None,
+        variables: vec![maximum, density],
+        views: vec![View::StockFlow(datamodel::StockFlow {
+            name: Some("View 1".to_owned()),
+            elements: vec![
+                // Literal "\n" (backslash + 'n'), as XMILE name attributes write it.
+                ViewElement::Aux(view_element::Aux {
+                    name: "Maximum\\nfishery size".to_owned(),
+                    uid: 1,
+                    x: 200.0,
+                    y: 300.0,
+                    label_side: view_element::LabelSide::Bottom,
+                    compat: None,
+                }),
+                ViewElement::Aux(view_element::Aux {
+                    name: "Fish density".to_owned(),
+                    uid: 2,
+                    x: 300.0,
+                    y: 220.0,
+                    label_side: view_element::LabelSide::Right,
+                    compat: None,
+                }),
+                ViewElement::Link(view_element::Link {
+                    uid: 3,
+                    from_uid: 1,
+                    to_uid: 2,
+                    shape: LinkShape::Straight,
+                    polarity: None,
+                }),
+            ],
+            view_box: Default::default(),
+            zoom: 1.0,
+            use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
+        })],
+        loop_metadata: vec![],
+        groups: vec![],
+    };
+    let project = make_project(vec![model]);
+
+    let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
+    // The sketch record must use the collapsed name, matching the equation LHS.
+    assert!(
+        mdl.contains("10,1,Maximum fishery size,"),
+        "sketch record should use the newline-collapsed name; got:\n{mdl}"
+    );
+
+    let reparsed = crate::mdl::parse_mdl(&mdl).expect("written MDL should parse");
+    let View::StockFlow(sf) = &reparsed.models[0].views[0];
+    let aux_idents: Vec<String> = sf
+        .elements
+        .iter()
+        .filter_map(|elem| match elem {
+            ViewElement::Aux(a) => Some(crate::common::canonicalize(&a.name).into_owned()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        aux_idents.iter().any(|i| i == "maximum_fishery_size"),
+        "view element for maximum_fishery_size should survive the roundtrip; got {aux_idents:?}"
+    );
+    assert!(
+        aux_idents.iter().any(|i| i == "fish_density"),
+        "view element for fish_density should survive the roundtrip; got {aux_idents:?}"
+    );
+}
+
+#[test]
 fn compute_control_point_straight_midpoint() {
     // For a nearly-straight arc angle, the control point should be near the midpoint
     let from = (100, 100);
