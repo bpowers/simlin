@@ -1770,3 +1770,119 @@ fn scalar_reducer_loop_score_uses_per_element_link_scores() {
         );
     }
 }
+
+// -- Phase 5 (aggregate nodes: $⁚ltm⁚agg⁚{n}) --
+//
+// A maximal inlined reducer subexpression that participates in feedback is
+// hoisted into a synthetic auxiliary `$⁚ltm⁚agg⁚{n}` (computed during
+// simulation, so `PREVIOUS(agg)` is available). A variable whose entire
+// dt-equation is exactly one reducer call is its own aggregate node -- no
+// synthetic is minted.
+
+/// AC4.1 / AC4.3: `share[r] = pop[r] / SUM(pop[*])` with `share` feeding
+/// back into `pop` mints a synthetic agg `$⁚ltm⁚agg⁚0` with equation text
+/// `sum(pop[*])` and `dimensions = vec![]` (a scalar full reduce).
+#[test]
+fn agg_aux_emitted_for_hoisted_reducer() {
+    let project = TestProject::new("agg_share")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == agg_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected synthetic agg {agg_name:?}; got: {:?}",
+                ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        agg.dimensions.is_empty(),
+        "agg should be scalar: {:?}",
+        agg.dimensions
+    );
+    assert!(
+        matches!(&agg.equation, crate::datamodel::Equation::Scalar(t) if t == "sum(pop[*])"),
+        "agg equation should be the reducer subexpr text; got: {:?}",
+        agg.equation
+    );
+}
+
+/// AC4.3: `total_population = SUM(population[*])` is a whole-RHS scalar
+/// reducer -- it IS the aggregate node, so no `$⁚ltm⁚agg⁚{n}` is minted.
+#[test]
+fn no_agg_aux_for_whole_rhs_reducer() {
+    let project = TestProject::new("whole_rhs_agg")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("population[Region]", "100", &["migration"], &[], None)
+        .scalar_aux("total_population", "SUM(population[*])")
+        .array_flow(
+            "migration[Region]",
+            "total_population * 0.001 - population * 0.001",
+            None,
+        );
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}agg\u{205A}")),
+        "whole-RHS reducer must not mint a synthetic agg; got: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
+/// The agg aux must be emitted *before* the link-score variables in the
+/// returned `vars` list (the LTM flow fragments are not topologically
+/// sorted, and the `agg → target` link score reads the agg's current-step
+/// value, so the agg fragment must run first in the same timestep).
+#[test]
+fn agg_aux_sorts_before_link_scores() {
+    let project = TestProject::new("agg_sort")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let agg_pos = ltm
+        .vars
+        .iter()
+        .position(|v| v.name.contains("\u{205A}agg\u{205A}"))
+        .expect("expected a synthetic agg variable");
+    let first_link_score_pos = ltm
+        .vars
+        .iter()
+        .position(|v| v.name.contains("\u{205A}link_score\u{205A}"));
+    if let Some(ls) = first_link_score_pos {
+        assert!(
+            agg_pos < ls,
+            "agg variable (at {agg_pos}) must sort before the first link score (at {ls}); \
+             order: {:?}",
+            ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
+    }
+}

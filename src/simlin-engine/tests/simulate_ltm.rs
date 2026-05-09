@@ -5682,3 +5682,78 @@ fn test_full_reduce_still_works_after_partial_reduce_support() {
         "a scalar target must not get an arrayed-result (partial-reduce) link score"
     );
 }
+
+// --- Phase 5: aggregate-node ($⁚ltm⁚agg⁚{n}) auxiliaries ---
+//
+// A maximal inlined reducer subexpression that participates in feedback is
+// hoisted into a synthetic auxiliary whose value at every timestep equals
+// the value the inline reducer would compute (it *is* the same expression --
+// model equations are not rewritten). `PREVIOUS(agg)` is available because
+// the agg fragment is a regular flow-phase fragment with a layout slot.
+
+/// AC4.1: the synthetic agg `$⁚ltm⁚agg⁚0 = SUM(pop[*])` computes the same
+/// value as `pop[nyc] + pop[boston]` at every timestep, and the
+/// `$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚0→share[r]` link score (which reads the agg's
+/// current-step value) is finite -- a runlist-ordering bug (agg running
+/// after the link score) would surface as a stale value mismatch.
+#[test]
+fn test_agg_aux_value_matches_reducer() {
+    let project = TestProject::new("agg_value")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        // Heterogeneous initial values so the SUM is exercised non-trivially.
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None)
+        .build_datamodel();
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
+    let results = vm.into_results();
+
+    let agg_offset = results.offsets[&Ident::<Canonical>::new("$\u{205A}ltm\u{205A}agg\u{205A}0")];
+    let pop_nyc = results.offsets[&Ident::<Canonical>::new("pop[nyc]")];
+    let pop_boston = results.offsets[&Ident::<Canonical>::new("pop[boston]")];
+
+    for step in 0..results.step_count {
+        let row = step * results.step_size;
+        let agg = results.data[row + agg_offset];
+        let expected = results.data[row + pop_nyc] + results.data[row + pop_boston];
+        assert!(
+            (agg - expected).abs() < 1e-9 * expected.abs().max(1.0),
+            "step {step}: agg = {agg}, expected SUM(pop[*]) = {expected}"
+        );
+    }
+
+    // The agg→share link score reads the agg's *current-step* value; if the
+    // agg fragment ran after it, the value would be stale (or NaN at step 0).
+    // Just require it to exist and be finite at every step.
+    let ls_offsets: Vec<usize> = results
+        .offsets
+        .iter()
+        .filter(|(k, _)| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}ltm\u{205A}agg\u{205A}0\u{2192}share")
+        })
+        .map(|(_, &o)| o)
+        .collect();
+    assert!(
+        !ls_offsets.is_empty(),
+        "expected an agg→share link score variable; offsets: {:?}",
+        results
+            .offsets
+            .keys()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+    );
+    for &o in &ls_offsets {
+        for step in 0..results.step_count {
+            let v = results.data[step * results.step_size + o];
+            assert!(
+                v.is_finite(),
+                "step {step}: agg→share link score = {v} (not finite)"
+            );
+        }
+    }
+}

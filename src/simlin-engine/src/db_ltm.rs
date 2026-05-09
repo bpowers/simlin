@@ -2767,6 +2767,40 @@ pub fn model_ltm_variables(
     let source_vars = model.variables(db);
     let dm_dims = project_datamodel_dims(db, project);
 
+    // Phase 5: emit the synthetic aggregate-node auxiliaries
+    // (`$⁚ltm⁚agg⁚{n}`). Each is a plain computed aux whose equation is one
+    // maximal inlined reducer subexpression; the simulation evaluates it
+    // each timestep (so `PREVIOUS(agg)` is available) and the two
+    // link-score halves (`source[d] → agg`, `agg → target`) reference it.
+    // A whole-RHS reducer (`total_population = SUM(population[*])`) mints
+    // *no* synthetic -- the variable already is the aggregate node. The agg
+    // vars are pushed before any link-score var so they sort first (the LTM
+    // flow fragments are appended to the runlist in `vars` order, and the
+    // `agg → target` link score reads the agg's current-step value -- so the
+    // agg fragment must execute first in the same timestep). The category
+    // function in the final `vars.sort_by` keeps them ahead of link scores.
+    let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
+    for agg in &agg_nodes.aggs {
+        if !agg.is_synthetic {
+            continue;
+        }
+        // Synthetic aggs are scalar full reduces in this phase
+        // (`result_dims` is always empty); the equation text is the
+        // canonical reducer subexpression. An arrayed-result agg would be
+        // `Equation::ApplyToAll(result_dims, ...)`, but that case is
+        // currently only produced for variable-backed aggs.
+        let equation = if agg.result_dims.is_empty() {
+            datamodel::Equation::Scalar(agg.equation_text.clone())
+        } else {
+            datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
+        };
+        vars.push(LtmSyntheticVar {
+            name: agg.name.clone(),
+            equation,
+            dimensions: agg.result_dims.clone(),
+        });
+    }
+
     // Pre-compute loops for exhaustive mode using tiered loop
     // enumeration: variable-level Johnson runs first, and only the
     // cross-element / mixed slice descends into element-level Johnson
@@ -3667,20 +3701,33 @@ pub fn model_ltm_variables(
         });
     }
 
-    // Sort by evaluation-order category (link_score before path before
-    // composite) so the VM's sequential flow evaluation respects the
-    // dependency chain: composites reference paths which reference link
-    // scores. Within each category, sort lexically for determinism.
+    // Sort by evaluation-order category so the VM's sequential flow
+    // evaluation respects the dependency chain: composites reference paths
+    // which reference loop scores which reference link scores, and link
+    // scores referencing an aggregate node read its current-step value, so
+    // the agg fragment must run first. Within each category, sort lexically
+    // for determinism. (`compute_layout` section 3 re-sorts LTM vars purely
+    // by name -- `$⁚ltm⁚agg⁚{n}` < `$⁚ltm⁚link_score⁚...` lexically, so the
+    // agg gets its layout slot before any consumer there too -- but the
+    // runlist order is what the same-timestep ordering hazard turns on, and
+    // that comes from this sort.)
     vars.sort_by(|a, b| {
         fn category(name: &str) -> u8 {
-            if name.contains("\u{205A}composite\u{205A}") {
-                3
+            // The agg check uses the `$⁚ltm⁚agg⁚` *prefix*, not a substring
+            // search: the `agg → target` link score is named
+            // `$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚{n}→{to}` and contains `⁚agg⁚`,
+            // but it is a link score (category 1) that must run *after* the
+            // agg aux it references.
+            if crate::ltm_agg::is_synthetic_agg_name(name) {
+                0 // aggregate nodes: before everything that may reference them
+            } else if name.contains("\u{205A}composite\u{205A}") {
+                4
             } else if name.contains("\u{205A}path\u{205A}") {
-                2
+                3
             } else if name.contains("\u{205A}loop_score\u{205A}") {
-                1
+                2
             } else {
-                0 // link_score and anything else
+                1 // link_score and anything else
             }
         }
         category(&a.name)
