@@ -5191,10 +5191,40 @@ fn test_scalar_reducer_loop_score_value_matches_hand_calc() {
     );
 }
 
-/// AC8.2: Cross-element feedback model -- discovery mode.
-///
-/// Same model as test_cross_element_ltm_exhaustive but with discovery mode.
-/// Verifies that cross-element loops are found.
+/// Whether any discovered loop contains a link `from -> to` (exact string
+/// match on the element-level endpoint names).
+fn discovery_loops_have_link(found: &[ltm_finding::FoundLoop], from: &str, to: &str) -> bool {
+    found.iter().any(|l| {
+        l.loop_info
+            .links
+            .iter()
+            .any(|link| link.from.as_str() == from && link.to.as_str() == to)
+    })
+}
+
+/// A flat dump of every discovered loop's `from -> to` link list, for
+/// assertion failure messages.
+fn discovery_loops_debug(found: &[ltm_finding::FoundLoop]) -> Vec<String> {
+    found
+        .iter()
+        .map(|l| {
+            l.loop_info
+                .links
+                .iter()
+                .map(|link| format!("{} -> {}", link.from.as_str(), link.to.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .collect()
+}
+
+/// AC8.2 / ltm-503-cross-element-agg.AC3.1: Cross-element feedback model --
+/// discovery mode finds the cross-element loop. The `cross_element_ltm`
+/// fixture's `migration_pressure[NYC]` reads `population[Boston]` (and vice
+/// versa), so a genuine cross-element edge `population[nyc] ->
+/// migration_pressure[boston]` (or the symmetric `population[boston] ->
+/// migration_pressure[nyc]`) appears on the element-level path of a
+/// discovered loop -- not merely "some subscripted loop".
 #[test]
 fn test_cross_element_ltm_discovery() {
     let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
@@ -5219,16 +5249,26 @@ fn test_cross_element_ltm_discovery() {
     assert!(
         has_subscripted_loop,
         "At least one discovery loop should contain element-subscripted variables. Found: {:?}",
-        found
-            .iter()
-            .map(|l| l
-                .loop_info
-                .links
-                .iter()
-                .map(|link| format!("{} -> {}", link.from.as_str(), link.to.as_str()))
-                .collect::<Vec<_>>()
-                .join(", "))
-            .collect::<Vec<_>>()
+        discovery_loops_debug(&found)
+    );
+
+    // The cross-element edge: `migration_pressure[r] = (population[r] -
+    // population[other]) * 0.01`, so the element-level causal graph has
+    // `population[other] -> migration_pressure[r]`. Discovery must keep that
+    // edge in the search graph (the FixedIndex-source A2A link score
+    // `population[nyc]->migration_pressure` expands via
+    // `expand_fixed_from_a2a_link_offsets` to per-target-element edges),
+    // and the loop `population[other] -> migration_pressure[r] ->
+    // migration_in[other] -> population[other]` is discoverable.
+    let has_cross_element_edge =
+        discovery_loops_have_link(&found, "population[nyc]", "migration_pressure[boston]")
+            || discovery_loops_have_link(&found, "population[boston]", "migration_pressure[nyc]");
+    assert!(
+        has_cross_element_edge,
+        "discovery should find a loop with the cross-element edge \
+         population[nyc] -> migration_pressure[boston] (or the symmetric \
+         population[boston] -> migration_pressure[nyc]); discovered loops: {:?}",
+        discovery_loops_debug(&found)
     );
 
     // Cross-validate: all discovered loops should be structurally valid
@@ -5238,5 +5278,81 @@ fn test_cross_element_ltm_discovery() {
             !loop_result.loop_info.links.is_empty(),
             "Discovered loop should have at least one link"
         );
+    }
+}
+
+/// ltm-503-cross-element-agg.AC3.2 (discovery side): a model that factors a
+/// scalar reducer (`total_pop = SUM(population[*])`) out of the per-element
+/// migration flow (`migration[r] = total_pop*0.01 - population[r]*0.01`,
+/// `population[r]` stock fed by `migration[r]`) -- discovery finds the loop
+/// `population[*] -> total_pop -> migration[r] -> population[r]`, i.e. a
+/// loop whose links include an edge `(total_pop, migration[nyc])` and the
+/// reducer edge `(population[nyc], total_pop)`.
+///
+/// Crucially the scalar source `total_pop` stays *unsubscripted* on both
+/// edges: a `(total_pop, migration[nyc])` edge, not `(total_pop[nyc],
+/// migration[nyc])`. Pre-fix this loop was silently undiscoverable --
+/// `total_pop -> migration` was emitted as a Bare-A2A link score with
+/// `dimensions = ["Region"]`, so `parse_link_offsets`'s
+/// `expand_a2a_link_offsets` subscripted *both* sides and invented a
+/// phantom `total_pop[nyc]` node that doesn't match the unsubscripted
+/// `total_pop` node the reducer edge (`population[nyc] -> total_pop`)
+/// produces, breaking the cycle in the search graph.
+#[test]
+fn test_scalar_reducer_loop_discovery() {
+    let project = TestProject::new("scalar_reducer_loop_discovery")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock(
+            "population[Region]",
+            "100",
+            &["births", "migration"],
+            &[],
+            None,
+        )
+        .array_aux("birth_rate[Region]", "0.05")
+        .array_flow("births[Region]", "population * birth_rate", None)
+        .scalar_aux("total_pop", "SUM(population[*])")
+        .array_flow(
+            "migration[Region]",
+            "total_pop * 0.01 - population * 0.01",
+            None,
+        )
+        .build_datamodel();
+
+    let found = discover_loops_element_level(&project);
+    assert!(
+        !found.is_empty(),
+        "discovery should find loops in the scalar-reducer model"
+    );
+
+    // The loop must visit `total_pop` *unsubscripted* on both incident
+    // edges: `population[nyc] -> total_pop` (reducer) and `total_pop ->
+    // migration[nyc]` (scalar source feeding the per-element flow).
+    let nyc_loop = discovery_loops_have_link(&found, "population[nyc]", "total_pop")
+        && discovery_loops_have_link(&found, "total_pop", "migration[nyc]");
+    let boston_loop = discovery_loops_have_link(&found, "population[boston]", "total_pop")
+        && discovery_loops_have_link(&found, "total_pop", "migration[boston]");
+    assert!(
+        nyc_loop || boston_loop,
+        "discovery should find the scalar-reducer loop population[*] -> total_pop -> \
+         migration[r] -> population[r] with `total_pop` unsubscripted on both edges; \
+         discovered loops: {:?}",
+        discovery_loops_debug(&found)
+    );
+
+    // And `total_pop` must never appear subscripted (no phantom
+    // `total_pop[nyc]` node).
+    for l in &found {
+        for link in &l.loop_info.links {
+            for endpoint in [link.from.as_str(), link.to.as_str()] {
+                assert!(
+                    !endpoint.starts_with("total_pop["),
+                    "discovery introduced a phantom subscripted scalar node {endpoint:?}; \
+                     discovered loops: {:?}",
+                    discovery_loops_debug(&found)
+                );
+            }
+        }
     }
 }
