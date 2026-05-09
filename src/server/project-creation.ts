@@ -32,10 +32,11 @@ export async function emptyProject(name: string, _userName: string): Promise<Uin
   };
 
   const engineProject = await Project.openJson(JSON.stringify(emptyJson));
-  const protobuf = await engineProject.serializeProtobuf();
-  await engineProject.dispose();
-
-  return protobuf;
+  try {
+    return await engineProject.serializeProtobuf();
+  } finally {
+    await engineProject.dispose();
+  }
 }
 
 const whitespace = /\s/gi;

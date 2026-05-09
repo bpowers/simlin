@@ -4,28 +4,20 @@
 
 import { NextFunction, Request, Response } from 'express';
 
-function jsonError(res: Response): void {
-  res.status(401).json({ error: 'unauthorized' });
-}
-
-export default (req: Request, res: Response, next: NextFunction, onFail?: (res: Response) => void): void => {
+// Express dispatches a 4-arg function as an error handler, not a
+// request middleware. Keep this default export at exactly 3 declared
+// parameters so `app.use('/api', authz, ...)` actually invokes it on
+// every request. See tests/authz.test.ts.
+export default (req: Request, res: Response, next: NextFunction): void => {
   // allow unauthorized access to projects for embedding in blogs
   const failEarly = !(req.method === 'GET' && req.path.startsWith('/projects/'));
 
-  if (!req.session || !req.session.passport) {
+  if (!req.session || !req.session.passport || !req.session.passport.user) {
     // clear session to unset cookie
     req.session = {};
 
     if (failEarly) {
-      (onFail ?? jsonError)(res);
-      return;
-    }
-  } else if (!req.session.passport.user) {
-    // clear session to unset cookie
-    req.session = {};
-
-    if (failEarly) {
-      (onFail ?? jsonError)(res);
+      res.status(401).json({ error: 'unauthorized' });
       return;
     }
   }
