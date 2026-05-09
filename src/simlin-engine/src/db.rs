@@ -5021,11 +5021,7 @@ pub fn assemble_module(
                     //     the salsa-cached path keys by (from, to) and would try to
                     //     reconstruct "to[elem]" as a user variable (which fails),
                     //     dropping the fragment and stubbing the var to zero.
-                    // (d) Per-shape Wildcard/DynamicIndex (from→to⁚wildcard or
-                    //     from→to⁚dynamic): compile directly because the salsa-cached
-                    //     path keys by (from, to) and would try to reconstruct
-                    //     "to⁚wildcard" as a user variable.
-                    // (e) Aggregate-node link score (from = $⁚ltm⁚agg⁚n, or to =
+                    // (d) Aggregate-node link score (from = $⁚ltm⁚agg⁚n, or to =
                     //     $⁚ltm⁚agg⁚n): compile directly. The (from, to)-keyed salsa
                     //     path would `reconstruct_single_variable` the synthetic agg
                     //     name, get `None`, and emit a degenerate ceteris-paribus
@@ -5043,15 +5039,12 @@ pub fn assemble_module(
                     // carries verbatim; the (from, to)-keyed salsa path can't
                     // round-trip the bracketed name back to a user variable.
                     let has_element_subscript = suffix.contains('[');
-                    let has_shape_suffix = crate::ltm_augment::LINK_SCORE_SHAPE_SUFFIXES
-                        .iter()
-                        .any(|s| suffix.ends_with(s));
                     let touches_synthetic_agg = from_to.is_some_and(|(from_name, to_name)| {
                         crate::ltm_agg::is_synthetic_agg_name(from_name)
                             || crate::ltm_agg::is_synthetic_agg_name(to_name)
                     });
 
-                    if has_element_subscript || has_shape_suffix || touches_synthetic_agg {
+                    if has_element_subscript || touches_synthetic_agg {
                         compile_direct()
                     } else if let Some((from_name, to_name)) = from_to {
                         let link_id =

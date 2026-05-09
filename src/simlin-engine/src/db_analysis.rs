@@ -73,6 +73,19 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// (e.g., `x[NYC]`), and dynamic-index references (e.g., `x[i+1]` where
 /// `i` is a position iterator). The shape determines element-edge
 /// emission and per-reference partial-equation construction.
+///
+/// Post-cross-element-aggregate-scoring (the `$⁚ltm⁚agg⁚{n}` work),
+/// `Wildcard` / `DynamicIndex` no longer drive a per-shape `⁚wildcard` /
+/// `⁚dynamic` link-score variant. A `Wildcard`/`DynamicIndex` reference
+/// *inside a maximal inlined reducer* is rerouted through a synthetic
+/// aggregate node (`from[d] → $⁚ltm⁚agg⁚{n}`, `$⁚ltm⁚agg⁚{n} → to[e]`)
+/// in `model_element_causal_edges`; these two variants now act purely as
+/// the reference-site walker's "route through an agg" marker. The only
+/// `Wildcard`/`DynamicIndex` site that still produces a direct
+/// (conservative full-cross-product) edge and a Bare-named link score is
+/// the case `enumerate_agg_nodes` deliberately doesn't hoist -- a reducer
+/// over an explicit slice used as a sub-expression (`SUM(pop[NYC, *])`),
+/// or a bare dynamic-index reference (`arr[i+1]`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
@@ -85,11 +98,15 @@ pub enum RefShape {
     /// in source order (canonical lowercase).
     FixedIndex(Vec<String>),
     /// `Expr2::Subscript(source, indices)` where at least one index is
-    /// `IndexExpr2::Wildcard`. Conservative full cross-product.
+    /// `IndexExpr2::Wildcard`. Conservative full cross-product, except
+    /// when inside a hoisted reducer subexpression (then rerouted through
+    /// a `$⁚ltm⁚agg⁚{n}` node).
     Wildcard,
     /// `Expr2::Subscript(source, indices)` where at least one index is
     /// a non-literal expression (`@N`, `Range`, `StarRange`, or
-    /// arbitrary `Expr`). Conservative full cross-product.
+    /// arbitrary `Expr`). Conservative full cross-product, except when
+    /// inside a hoisted reducer subexpression (then rerouted through a
+    /// `$⁚ltm⁚agg⁚{n}` node).
     DynamicIndex,
 }
 

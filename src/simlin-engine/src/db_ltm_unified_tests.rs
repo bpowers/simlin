@@ -831,6 +831,69 @@ fn per_shape_link_scores_for_share_with_sum() {
     );
 }
 
+/// AC5.1 (ltm-503-cross-element-agg): the `⁚wildcard` / `⁚dynamic`
+/// per-shape link-score path is retired. Reducer references are routed
+/// through synthetic `$⁚ltm⁚agg⁚{n}` aggregate nodes instead, so no
+/// `model_ltm_variables` output ever carries those shape suffixes.
+///
+/// This is a positive guard over a handful of reducer-bearing fixtures
+/// (a `share`-with-feedback model, a whole-RHS `SUM` model, and a `MEAN`
+/// reducer model): for each we fetch `model_ltm_variables` and assert
+/// that no synthetic variable name contains `⁚wildcard` or `⁚dynamic`.
+#[test]
+fn no_wildcard_or_dynamic_link_scores_for_reducer_models() {
+    fn assert_no_shape_suffix_vars(label: &str, project: &datamodel::Project) {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, project);
+        let model = sync.models["main"].source;
+        let ltm = model_ltm_variables(&db, model, sync.project);
+        assert!(
+            !ltm.vars.is_empty(),
+            "{label}: expected LTM variables for the reducer-bearing fixture"
+        );
+        for v in &ltm.vars {
+            assert!(
+                !v.name.contains("\u{205A}wildcard") && !v.name.contains("\u{205A}dynamic"),
+                "{label}: no ⁚wildcard / ⁚dynamic link scores must be emitted; \
+                 offending var: {:?}; all vars: {:?}",
+                v.name,
+                ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // `share[r] = pop[r] / SUM(pop[*])` with feedback through `update`:
+    // the maximal `SUM(pop[*])` subexpression is hoisted into a synthetic
+    // agg, and the cross-element loop is scored on the element-level path.
+    let share_with_feedback = TestProject::new("share_feedback")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None)
+        .build_datamodel();
+    assert_no_shape_suffix_vars("share_with_feedback", &share_with_feedback);
+
+    // `total_pop = SUM(pop[*])` is a *whole-RHS* reducer -- a
+    // variable-backed agg, no synthetic minted -- but it must still not
+    // produce a `⁚wildcard`-suffixed link score for any consumer edge.
+    let total_pop = TestProject::new("total_pop_sum")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["growth"], &[], None)
+        .scalar_aux("total_pop", "SUM(pop[*])")
+        .array_flow("growth[Region]", "pop * 0.01 + total_pop * 0.0001", None)
+        .build_datamodel();
+    assert_no_shape_suffix_vars("total_pop", &total_pop);
+
+    // A `MEAN` reducer feeding back through a scalar adjustment.
+    let mean_model = TestProject::new("mean_reducer")
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("pop[Region]", "100", &["adjust"], &[], None)
+        .scalar_aux("avg_pop", "MEAN(pop[*])")
+        .array_flow("adjust[Region]", "(avg_pop - pop) * 0.01", None)
+        .build_datamodel();
+    assert_no_shape_suffix_vars("mean_model", &mean_model);
+}
+
 #[test]
 fn fixed_index_link_score_emits_per_element_name() {
     use salsa::Setter;
@@ -1493,20 +1556,24 @@ fn mixed_scalar_loop_partitions_resolve_to_some() {
     );
 }
 
-/// Regression test: when a loop traverses an edge whose only AST shape
-/// is `Wildcard` (or `DynamicIndex`), `emit_per_shape_link_scores` only
-/// emits the suffixed name (`pop->share:wildcard`), not the canonical
-/// Bare name. The loop_score equation must reference the suffixed name
-/// for the link to actually contribute -- the buggy version always used
-/// Bare naming, so the loop_score multiplied against a missing variable
-/// and the fragment compiler quietly fell back to a stub dep.
+/// Regression test: every link-score reference inside a loop_score
+/// equation must resolve to a synthetic variable that was actually
+/// emitted. For `share[r] = SUM(pop[*])` the only reference of `pop` in
+/// `share` is inside the maximal inlined reducer, so it is hoisted into
+/// `$⁚ltm⁚agg⁚{n}` and the cross-element loop traverses
+/// `pop[d] → agg → share[r] → update[r] → pop[r]`. The loop_score
+/// equation must reference the agg-hop link scores (`pop[d]→agg`,
+/// `agg→share[r]`) that were emitted -- if a stale resolver invented a
+/// `pop→share` name that nothing produced, the fragment compiler would
+/// quietly fall back to a stub dep and the loop would silently lose that
+/// link's contribution.
 #[test]
 fn loop_score_picks_emitted_shape_when_only_wildcard_exists() {
-    // share[r] depends on pop only via SUM(pop[*]) -- pure wildcard,
-    // no bare ref. update[r] feeds back into pop[r] via the structural
-    // flow path. The loop pop[r] -> share[r] -> update[r] -> pop[r]
-    // exists at the element graph level (cross-element via the
-    // wildcard reducer).
+    // share[r] depends on pop only via SUM(pop[*]) -- the reducer is
+    // hoisted into a synthetic agg. update[r] feeds back into pop[r] via
+    // the structural flow path. The cross-element loop
+    // pop[r] -> agg -> share[r] -> update[r] -> pop[r] exists at the
+    // element graph level.
     let project = TestProject::new("wildcard_only_loop")
         .named_dimension("Region", &["NYC", "Boston"])
         .array_stock("pop[Region]", "100", &["update"], &[], None)
@@ -1524,7 +1591,7 @@ fn loop_score_picks_emitted_shape_when_only_wildcard_exists() {
 
     assert!(
         !emitted.is_empty(),
-        "expected LTM variables for the wildcard-only feedback fixture"
+        "expected LTM variables for the inlined-reducer feedback fixture"
     );
 
     let loop_score_vars: Vec<&LtmSyntheticVar> = ltm
@@ -1546,13 +1613,13 @@ fn loop_score_picks_emitted_shape_when_only_wildcard_exists() {
             assert!(
                 emitted.contains(r),
                 "loop_score {:?} references {:?} which is not in emitted vars.\n\
-                 Expected resolution to use an emitted shape variant when \
-                 Bare is absent.\nEmitted names matching pop->share:\n  {}\n",
+                 Expected the loop to route through the synthetic agg's two \
+                 link-score halves.\nEmitted names matching pop / share / agg:\n  {}\n",
                 lsv.name,
                 r,
                 emitted
                     .iter()
-                    .filter(|n| n.contains("pop") && n.contains("share"))
+                    .filter(|n| n.contains("pop") || n.contains("share") || n.contains("agg"))
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()
                     .join("\n  "),

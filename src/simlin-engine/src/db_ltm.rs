@@ -3606,8 +3606,15 @@ pub fn model_ltm_variables(
     /// `skip_reducer_shapes` is set when the caller has already handled the
     /// `from` reference's reducer occurrences by routing them through an
     /// aggregate node (Phase 5): the `Wildcard`/`DynamicIndex` shapes are
-    /// then suppressed here so we don't also emit a redundant
-    /// `…⁚wildcard`/`…⁚dynamic` link score for the same reference.
+    /// then suppressed here so we don't also score the reducer reference a
+    /// second time.
+    ///
+    /// `Wildcard`/`DynamicIndex` shapes that *do* reach this function (the
+    /// conservative-slice reducer that `enumerate_agg_nodes` deliberately
+    /// does not hoist) share the canonical `link_score_var_name` form with
+    /// `Bare`, so we dedup by the resulting name and keep the first
+    /// occurrence -- the AST walker returns `Bare` before any subscripted
+    /// reference, so the canonical-Bare link score wins the slot.
     #[allow(clippy::too_many_arguments)] // helper threads through emission context
     fn emit_per_shape_link_scores(
         db: &dyn Db,
@@ -3627,6 +3634,14 @@ pub fn model_ltm_variables(
         if skip_reducer_shapes {
             shapes.retain(|s| !matches!(s, RefShape::Wildcard | RefShape::DynamicIndex));
         }
+        // Distinct `RefShape`s can map to the same synthetic name (a
+        // conservative-slice `Wildcard`/`DynamicIndex` ref shares the
+        // canonical Bare name now that the per-shape suffix is retired);
+        // keep only the first shape that produces each name.
+        let mut emitted_names: HashSet<String> = HashSet::new();
+        shapes.retain(|shape| {
+            emitted_names.insert(crate::ltm_augment::link_score_var_name(from, to, shape))
+        });
 
         let target_dims = link_score_dimensions(db, source_vars, from, to, project, dm_dims);
 
@@ -3637,12 +3652,13 @@ pub fn model_ltm_variables(
             {
                 // Set the canonical name and dimensions per Phase 3 Task 4/5.
                 lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
-                // All shapes (FixedIndex, Bare, Wildcard) take the target's
-                // dimensions: for FixedIndex each per-element link score is
-                // scalar when the target is scalar and arrayed when the target
-                // is arrayed; Bare and Wildcard inherit target dims via the
-                // same compatibility rule.  link_score_dimensions already
-                // implements this for every case, so one assignment suffices.
+                // Every shape takes the target's dimensions: for FixedIndex
+                // each per-element link score is scalar when the target is
+                // scalar and arrayed when the target is arrayed; Bare (and
+                // the rare conservative-slice Wildcard/DynamicIndex) inherit
+                // the target's dims via the same compatibility rule.
+                // link_score_dimensions already implements this for every
+                // case, so one assignment suffices.
                 lsv.dimensions = target_dims.clone();
                 // Keep the equation's dimensionality in lockstep with the
                 // `dimensions` field that layout sizing keys off of. The

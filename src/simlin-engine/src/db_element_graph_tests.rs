@@ -663,14 +663,17 @@ fn scalar_model_loops_and_partitions_identical() {
 
 // ---- Per-reference element-graph edge-set tests ----
 //
-// These tests pin the per-reference element-graph behavior implemented in
-// Phase 2. `model_element_causal_edges` walks each target's `Expr2` AST,
-// classifies each reference by its `RefShape` (`Bare`, `FixedIndex`,
-// `Wildcard`, or `DynamicIndex`), and emits edges per occurrence rather
-// than per `(source, target)` pair. The earlier classifier collapsed
-// every reference into a single kind and over-approximated fixed-index
-// references as a full N x N expansion; the asserted edge sets below
-// reflect the truthful per-reference output.
+// These tests pin the per-reference element-graph behavior. `model_element_causal_edges`
+// walks each target's `Expr2` AST, classifies each reference by its
+// `RefShape` (`Bare`, `FixedIndex`, `Wildcard`, or `DynamicIndex`), and
+// emits edges per occurrence rather than per `(source, target)` pair. A
+// `Wildcard`/`DynamicIndex` reference inside a maximal inlined reducer is
+// rerouted through a synthetic `$⁚ltm⁚agg⁚{n}` aggregate node
+// (`from[d] → agg`, `agg → to[e]`, O(N+M)) instead of the all-pairs N×M
+// cross-product. The earlier classifier collapsed every reference into a
+// single kind and over-approximated fixed-index references as a full N×N
+// expansion; the asserted edge sets below reflect the truthful per-reference
+// output.
 
 /// AC1.1: Fixed-index broadcast must not be over-expanded.
 ///

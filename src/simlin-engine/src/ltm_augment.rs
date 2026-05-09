@@ -679,51 +679,31 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 
 /// Compute the canonical synthetic-variable name for a per-shape link score.
 ///
-/// Naming convention (Phase 3):
-/// - `Bare`: `$⁚ltm⁚link_score⁚{from}→{to}` — the legacy A2A/scalar form,
-///   unchanged.
+/// Naming convention:
+/// - `Bare`: `$⁚ltm⁚link_score⁚{from}→{to}` — the A2A/scalar form.
 /// - `FixedIndex(elems)`: `$⁚ltm⁚link_score⁚{from}[{elems_joined}]→{to}` —
-///   the per-element prefixed-from form already used by
+///   the per-element prefixed-from form also used by
 ///   `try_cross_dimensional_link_scores`.
-/// - `Wildcard`: `$⁚ltm⁚link_score⁚{from}→{to}⁚wildcard` — ALWAYS suffixed,
-///   even when no Bare reference coexists. This makes the link score name a
-///   stable function of `(from, to, shape)` so the discovery parser doesn't
-///   need to reason about per-model collisions.
-/// - `DynamicIndex`: `$⁚ltm⁚link_score⁚{from}→{to}⁚dynamic` — analogous to
-///   Wildcard.
+/// - `Wildcard` / `DynamicIndex`: same as `Bare`. These shapes only reach
+///   `emit_per_shape_link_scores` for the rare conservative-slice reducer
+///   (`x[r] = ... + SUM(pop[NYC, *])`); the emitter dedups by the
+///   resulting name, so the slot collapses onto the canonical Bare name
+///   rather than minting a `⁚wildcard`/`⁚dynamic` variant. Full reducers
+///   are hoisted into `$⁚ltm⁚agg⁚{n}` aggregate nodes and never reach
+///   this function as a Wildcard/DynamicIndex shape.
 ///
 /// The Unicode separators `\u{205A}` (TWO DOT PUNCTUATION) and `\u{2192}`
 /// (RIGHTWARDS ARROW) are intentional: they collide with no legal
 /// identifier, so the generated names cannot be confused with user
-/// variables. The `parse_link_offsets` discovery parser strips the
-/// `⁚wildcard` / `⁚dynamic` suffix before resolving offsets.
-/// Suffix appended to the `to` name for `Wildcard`-shape link scores.
-/// Always appended, regardless of whether other shapes coexist.
-pub(crate) const LINK_SCORE_WILDCARD_SUFFIX: &str = "\u{205A}wildcard";
-
-/// Suffix appended to the `to` name for `DynamicIndex`-shape link scores.
-/// Always appended, regardless of whether other shapes coexist.
-pub(crate) const LINK_SCORE_DYNAMIC_SUFFIX: &str = "\u{205A}dynamic";
-
-/// All shape suffixes that `link_score_var_name` may append. The discovery
-/// parser strips one of these from the end of the `to` name before
-/// resolving offsets.
-pub(crate) const LINK_SCORE_SHAPE_SUFFIXES: &[&str] =
-    &[LINK_SCORE_WILDCARD_SUFFIX, LINK_SCORE_DYNAMIC_SUFFIX];
-
+/// variables.
 pub(crate) fn link_score_var_name(from: &str, to: &str, shape: &RefShape) -> String {
     let from_part = match shape {
         RefShape::FixedIndex(elems) => format!("{}[{}]", from, elems.join(",")),
         _ => from.to_string(),
     };
-    let to_part = match shape {
-        RefShape::Wildcard => format!("{}{}", to, LINK_SCORE_WILDCARD_SUFFIX),
-        RefShape::DynamicIndex => format!("{}{}", to, LINK_SCORE_DYNAMIC_SUFFIX),
-        _ => to.to_string(),
-    };
     format!(
         "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
-        from_part, to_part
+        from_part, to
     )
 }
 
@@ -1165,13 +1145,16 @@ fn generate_auxiliary_to_auxiliary_equation(
 ///     target normalization must use Δfrom[elem], not Δfrom[r],
 ///     otherwise the cross-element sensitivity gets divided by the
 ///     wrong source delta and can flip sign or collapse to zero.
-///   - `Wildcard` / `DynamicIndex` -> `from` (TODO: the truly principled
-///     denominator would be the change in the aggregate
-///     `SUM(from[*])` / `from[expr]` referenced live in the partial,
-///     but that requires re-parsing partial_eq or threading the AST
-///     subtree through. For now we keep the variable-level Δfrom; the
-///     resulting under/over-counting is the same documented edge-
-///     aliasing limitation already pinned by integration tests).
+///   - `Wildcard` / `DynamicIndex` -> `from`. A full inlined reducer is
+///     hoisted into an aggregate node, so the *principled* aggregate-
+///     denominator is realized as the agg's own variable-level Δ (the
+///     `source[d] → agg` link score uses the reducer's algebraic
+///     shortcut, the `agg → target` link score normalizes by Δagg). The
+///     only Wildcard/DynamicIndex shape that still reaches this function
+///     is the conservative-slice case (`SUM(pop[NYC, *])` inside a
+///     larger expression), which `enumerate_agg_nodes` deliberately does
+///     not hoist; for that the variable-level Δfrom is the same
+///     documented over-approximation as the conservative element graph.
 fn shape_aware_source_ref(from: &str, shape: &RefShape) -> String {
     match shape {
         RefShape::FixedIndex(elems) if !elems.is_empty() => {
@@ -1296,11 +1279,14 @@ fn generate_stock_to_flow_equation(
 /// `(from, to)` edge.
 ///
 /// `emit_per_shape_link_scores` emits names per-shape based on what the
-/// target's AST contains: `pop→share` (Bare), `pop→share⁚wildcard`
-/// (Wildcard), `pop[nyc]→share` (FixedIndex via element-level `from`
-/// prefix), and so on. The downstream consumer doesn't carry the access
-/// shape, so we resolve at equation-generation time by trying candidate
-/// names in priority order against the set of names actually emitted.
+/// target's AST contains: `pop→share` (Bare), `pop[nyc]→share` (FixedIndex
+/// via element-level `from` prefix), and so on. The downstream consumer
+/// doesn't carry the access shape, so we resolve at equation-generation
+/// time by trying candidate names in priority order against the set of
+/// names actually emitted. (Reducer references no longer produce a
+/// per-shape link score here -- a maximal inlined reducer is hoisted into
+/// a `$⁚ltm⁚agg⁚{n}` node whose two halves carry their own canonical
+/// names, and the conservative-slice case collapses onto the Bare name.)
 ///
 /// `to` is always the *variable-level* target name (no subscript).
 /// `from` may carry an element subscript (`"population[nyc]"`):
@@ -1324,7 +1310,6 @@ fn generate_stock_to_flow_equation(
 /// 1. `Bare` -- the canonical `{from}→{to}` form.
 /// 2. `FixedIndex` -- a `{from}[...]→{to}` name; prefer the exact
 ///    `target_element` match, else the lexicographically first match.
-/// 3. `Wildcard` (`⁚wildcard` suffix) / 4. `DynamicIndex` (`⁚dynamic`).
 ///
 /// If none of the candidates is in `emitted`, return the Bare canonical
 /// name anyway and let the fragment compiler's stub-dep fallback fire.
@@ -1337,9 +1322,8 @@ pub(crate) fn resolve_link_score_name_for_loop(
 ) -> String {
     if from.contains('[') {
         // Bracketed-from edge. Try the FixedIndex-style name (bracket
-        // kept) first, then the variable-level (Bare / Wildcard /
-        // DynamicIndex) names that an A2A or structural flow→stock link
-        // score would carry.
+        // kept) first, then the variable-level Bare name that an A2A or
+        // structural flow→stock link score would carry.
         let verbatim = link_score_var_name(from, to, &RefShape::Bare);
         if emitted.contains(&verbatim) {
             return verbatim;
@@ -1348,14 +1332,6 @@ pub(crate) fn resolve_link_score_name_for_loop(
         let bare = link_score_var_name(stripped, to, &RefShape::Bare);
         if emitted.contains(&bare) {
             return bare;
-        }
-        let wildcard = link_score_var_name(stripped, to, &RefShape::Wildcard);
-        if emitted.contains(&wildcard) {
-            return wildcard;
-        }
-        let dynamic = link_score_var_name(stripped, to, &RefShape::DynamicIndex);
-        if emitted.contains(&dynamic) {
-            return dynamic;
         }
         return verbatim;
     }
@@ -1366,14 +1342,6 @@ pub(crate) fn resolve_link_score_name_for_loop(
     }
     if let Some(fixed) = find_fixed_index_emitted_name(from, to, emitted, target_element) {
         return fixed;
-    }
-    let wildcard = link_score_var_name(from, to, &RefShape::Wildcard);
-    if emitted.contains(&wildcard) {
-        return wildcard;
-    }
-    let dynamic = link_score_var_name(from, to, &RefShape::DynamicIndex);
-    if emitted.contains(&dynamic) {
-        return dynamic;
     }
     bare
 }
@@ -1428,13 +1396,15 @@ fn find_fixed_index_emitted_name(
 /// `emitted_link_score_names` carries every link-score variable name the
 /// caller has emitted so far. For each loop link we try the canonical
 /// Bare name first (since `try_cross_dimensional_link_scores` and the
-/// common Bare-AST case both produce that form) and fall back to the
-/// `⁚wildcard` and `⁚dynamic` shape suffixes when only those variants
-/// exist (e.g., `share[r] = SUM(pop[*])` emits only the wildcard
-/// variant of `pop→share`). Without this resolution the loop_score
-/// equation would multiply against a missing variable and the fragment
-/// compiler would silently insert a stub dep, dropping the link's
-/// contribution.
+/// common Bare-AST case both produce that form) and fall back to a
+/// FixedIndex per-element name when only that variant exists. A loop that
+/// runs through an inlined reducer traverses the synthetic
+/// `$⁚ltm⁚agg⁚{n}` node instead of a `(from, to)` reducer edge, so its
+/// links are `from[d] → agg` and `agg → to[e]` -- each carrying a
+/// canonical name that resolves directly. Without this resolution the
+/// loop_score equation would multiply against a missing variable and the
+/// fragment compiler would silently insert a stub dep, dropping the
+/// link's contribution.
 fn generate_loop_score_equation(
     loop_item: &Loop,
     emitted_link_score_names: &HashSet<String>,
@@ -2900,10 +2870,15 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_equation_share_wildcard_shape() {
-        // share[R] = population / SUM(population[*])
-        // For the wildcard reducer's source ref (`population[*]`), the
-        // wildcard stays live and the bare ref is wrapped in PREVIOUS().
+    fn test_partial_equation_wildcard_live_shape_holds_reducer_arg() {
+        // A `RefShape::Wildcard` `live_shape` keeps the `population[*]`
+        // reducer argument live and wraps every other reference in
+        // PREVIOUS(). Full inlined reducers are hoisted into `$⁚ltm⁚agg⁚{n}`
+        // nodes, so `build_partial_equation_shaped` only sees a Wildcard
+        // `live_shape` for the conservative-slice case `SUM(pop[NYC, *])`
+        // that `enumerate_agg_nodes` deliberately does not hoist; the
+        // textbook full-reduce shape below pins the same wrapping rule that
+        // case exercises.
         let equation = "population / SUM(population[*])";
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
@@ -3027,26 +3002,19 @@ mod tests {
     }
 
     #[test]
-    fn link_score_name_wildcard_always_suffixed() {
-        // Suffix is unconditional - same name regardless of whether Bare
-        // coexists. This is the resolution of code-review issues I2 + I6:
-        // the suffix is a function of `(from, to, shape)` alone, so the
-        // discovery parser needs no per-model collision analysis.
-        assert_eq!(
-            link_score_var_name("pop", "total", &RefShape::Wildcard),
-            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}total\u{205A}wildcard"
-        );
+    fn link_score_name_wildcard_dynamic_collapse_to_bare() {
+        // The `⁚wildcard` / `⁚dynamic` per-shape suffix was retired:
+        // a maximal inlined reducer is hoisted into a `$⁚ltm⁚agg⁚{n}`
+        // node, and the rare conservative-slice reducer collapses onto
+        // the canonical Bare name (the emitter dedups by resulting name).
+        let bare = link_score_var_name("pop", "share", &RefShape::Bare);
         assert_eq!(
             link_score_var_name("pop", "share", &RefShape::Wildcard),
-            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
+            bare
         );
-    }
-
-    #[test]
-    fn link_score_name_dynamic_index_always_suffixed() {
         assert_eq!(
-            link_score_var_name("pop", "tgt", &RefShape::DynamicIndex),
-            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}tgt\u{205A}dynamic"
+            link_score_var_name("pop", "share", &RefShape::DynamicIndex),
+            bare
         );
     }
 
@@ -3139,21 +3107,19 @@ mod tests {
         );
     }
 
-    /// Regression test: Bare must win when both Bare and a suffixed
-    /// variant coexist (the documented edge-aliasing behavior).
+    /// Regression test: Bare must win when both a Bare and a FixedIndex
+    /// per-element link score exist for the same `(from, to)` edge -- the
+    /// documented Bare-beats-FixedIndex edge-aliasing tie-break.
     #[test]
-    fn resolver_prefers_bare_over_other_shapes() {
+    fn resolver_prefers_bare_over_fixed_index() {
         let mut emitted = HashSet::new();
         emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share".to_string());
-        emitted.insert(
-            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard".to_string(),
-        );
         emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string());
 
         let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted, None);
         assert_eq!(
             chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share",
-            "Bare must win when present, regardless of other variants",
+            "Bare must win when present, regardless of any FixedIndex variant",
         );
     }
 
@@ -3169,46 +3135,6 @@ mod tests {
         assert_eq!(
             chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total",
             "bracketed from + Bare should match the emitted per-element name",
-        );
-    }
-
-    /// Regression test: when only the Wildcard variant is in `emitted`,
-    /// the resolver must pick the suffixed name rather than the Bare
-    /// canonical form. This is the case that breaks for fixtures like
-    /// `share[r] = SUM(pop[*])` where the only AST shape for (pop, share)
-    /// is Wildcard.
-    #[test]
-    fn loop_score_equation_falls_back_to_wildcard_when_bare_not_emitted() {
-        use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
-
-        let loop_item = Loop {
-            id: "u1".to_string(),
-            links: vec![Link {
-                from: Ident::<Canonical>::new("pop"),
-                to: Ident::<Canonical>::new("share"),
-                polarity: LinkPolarity::Positive,
-            }],
-            stocks: vec![],
-            polarity: LoopPolarity::Undetermined,
-            dimensions: vec![],
-        };
-
-        let mut emitted = HashSet::new();
-        // Only the wildcard variant is emitted.
-        emitted.insert(
-            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard".to_string(),
-        );
-
-        let eq = generate_loop_score_equation(&loop_item, &emitted);
-        assert!(
-            eq.contains(
-                "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard\""
-            ),
-            "expected wildcard-suffixed reference when Bare is not emitted; got: {eq}"
-        );
-        assert!(
-            !eq.contains("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\""),
-            "must not reference the never-emitted Bare canonical name; got: {eq}"
         );
     }
 
