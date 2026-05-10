@@ -98,27 +98,25 @@ fn format_mdl_ident(name: &str) -> String {
     }
 }
 
-/// Normalize a forced line break in a display name to the literal
-/// two-character `\n` (backslash + `n`) Vensim uses inside a quoted MDL name.
+/// Collapse a display newline -- a literal `\n` (backslash + `n`) that XMILE
+/// name attributes use, or a real newline character -- to a single space.
 ///
-/// XMILE name attributes carry a break as either that literal `\n` or a real
-/// newline character; an MDL record/equation line cannot contain a real
-/// newline, so we always emit the literal form. `escape_mdl_quoted_ident`
-/// performs the same normalization when it quotes a name, so this is mostly
-/// used where a name is compared or stored before it reaches that point.
-fn normalize_display_newlines(name: &str) -> String {
-    name.replace('\n', "\\n")
+/// Vensim MDL sketch records are single-line, and the equation section spells
+/// such names with the newline collapsed, so the sketch and equation must
+/// agree on this collapsed form or Vensim cannot link the sketch element to
+/// its variable definition (it silently drops or mispositions the element).
+fn collapse_display_newlines(name: &str) -> String {
+    name.replace("\\n", " ").replace('\n', " ")
 }
 
 /// Split a display name on its line breaks -- the literal two-character `\n`
 /// XMILE name attributes use (`Maximum\nfishery size`), or a real newline
 /// character. Always returns at least one segment.
 ///
-/// Used to size a sketch element's box to the modeler's chosen multi-line
-/// layout: even though the writer now preserves the break in the name itself
-/// (as the quoted `"name with \n break"` form Vensim uses), Vensim still wraps
-/// each of the modeler's lines to fit the element's width, so the box has to be
-/// wide enough for the widest line and tall enough for the line count.
+/// This is the line-preserving counterpart of `collapse_display_newlines`
+/// (which joins these same segments with spaces); the two must agree on what
+/// counts as a break. Used when sizing a sketch element's box to the modeler's
+/// chosen multi-line layout even though the name itself is written collapsed.
 fn split_display_lines(name: &str) -> Vec<String> {
     name.replace("\\n", "\n")
         .split('\n')
@@ -127,15 +125,10 @@ fn split_display_lines(name: &str) -> Vec<String> {
 }
 
 /// Build a mapping from canonical variable ident to display name (with
-/// original casing, spaces instead of underscores, and any forced line break
-/// kept as the literal `\n` Vensim uses) by walking view elements.
+/// original casing, spaces instead of underscores) by walking view elements.
 ///
 /// The first occurrence of a name wins, so if a variable appears in multiple
-/// views the first view's casing is used. `canonicalize` treats a forced break
-/// (literal `\n` or a real newline) like whitespace, so the key still matches
-/// the equation-section ident; keeping the break in the display *value* lets
-/// the equation LHS, references, and sketch records all spell it the same way
-/// (the quoted `"name with \n break"` form), which Vensim needs to link them.
+/// views the first view's casing is used.
 fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for view in views {
@@ -147,8 +140,9 @@ fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
                 ViewElement::Flow(f) => &f.name,
                 _ => continue,
             };
-            let canonical = crate::common::canonicalize(name).into_owned();
-            let display = underbar_to_space(&normalize_display_newlines(name));
+            let normalized_name = collapse_display_newlines(name);
+            let canonical = crate::common::canonicalize(&normalized_name).into_owned();
+            let display = underbar_to_space(&normalized_name);
             map.entry(canonical).or_insert(display);
         }
     }
@@ -156,16 +150,15 @@ fn build_display_name_map(views: &[View]) -> HashMap<String, String> {
 }
 
 /// Look up the display name for a canonical ident, falling back to
-/// `format_mdl_ident` if no view element provides original casing. A name with
-/// a forced break (or other characters that would break a bare MDL token) is
-/// returned in the quoted `"name with \n break"` form.
+/// `format_mdl_ident` if no view element provides original casing.
 fn display_name_for_ident(ident: &str, display_names: &HashMap<String, String>) -> String {
     match display_names.get(ident) {
         Some(name) => {
-            if needs_mdl_quoting(name) {
-                format!("\"{}\"", escape_mdl_quoted_ident(name))
+            let name = collapse_display_newlines(name);
+            if needs_mdl_quoting(&name) {
+                format!("\"{}\"", escape_mdl_quoted_ident(&name))
             } else {
-                name.clone()
+                name
             }
         }
         None => format_mdl_ident(ident),
@@ -1457,17 +1450,15 @@ pub fn write_dimension_def(buf: &mut String, dim: &datamodel::Dimension) {
 
 /// Format a view element name for an MDL sketch record.
 ///
-/// This is the same treatment the equation section gives identifiers
-/// (`format_mdl_ident`): turn underscores into spaces, and quote names whose
-/// content would otherwise break a comma-delimited single-line record -- a
-/// forced line break (`escape_mdl_quoted_ident` writes it as the literal
-/// two-character `\n` Vensim uses, since a real newline can't appear in the
-/// record), `$`, `|`, `/`, and so on. Using the same form here and in the
-/// equation section (LHS and references) is what lets Vensim link the sketch
-/// element back to its variable definition; emitting it quoted lets Vensim
-/// render the modeler's multi-line layout instead of one long line.
+/// Sketch records are comma-delimited single lines, so the name needs the
+/// same treatment the equation section gives identifiers: collapse display
+/// newlines to a space (see `collapse_display_newlines` -- the equation
+/// section does this too, and the spellings must match for Vensim to link the
+/// sketch element to its variable), turn underscores into spaces, and quote
+/// names containing characters that would otherwise break the record (`$`,
+/// `|`, `/`, ...).
 fn format_sketch_name(name: &str) -> String {
-    format_mdl_ident(name)
+    format_mdl_ident(&collapse_display_newlines(name))
 }
 
 /// Number of `type 1` pipe-connector records `write_flow_pipe_connectors`
@@ -1793,81 +1784,55 @@ fn compat_name_field<'a>(
 /// 16px is close enough that a wider/wrapped label collides with the pipe.
 const FLOW_LABEL_OFFSET: f64 = 20.0;
 
-/// Per-line height (px) for a sketch text element at the writer's default font
-/// (`Times New Roman|12` at 96 dpi). Vensim's own files with that kind of font
-/// show ~11px per wrapped line (e.g. a three-line aux box is 33px tall, a
-/// two-line flow label 22px).
-const SKETCH_LINE_HEIGHT: i32 = 11;
-
-/// Estimated sketch box (width, height in px) for a flow label, used when the
-/// original sketch didn't record one.
-///
-/// Vensim sizes a flow label's box to its text and wraps the text to fit that
-/// width; a fixed default that's too narrow for a longer name makes Vensim
-/// wrap aggressively, and the wrapped lines then collide with the pipe. We
-/// size to the displayed text instead: width = the widest line at ~6px/char
-/// (deliberately erring wide so a single-line name stays one line and a
-/// multi-line name isn't re-split tighter than the modeler's break), height =
-/// `SKETCH_LINE_HEIGHT` per line of the name's own layout.
-fn default_flow_label_size(displayed_name: &str) -> (i32, i32) {
-    let lines = split_display_lines(displayed_name);
-    let width = lines
-        .iter()
-        .map(|line| line.chars().count() as i32 * 6)
-        .max()
-        .unwrap_or(0)
-        .max(15);
-    let height = (lines.len() as i32 * SKETCH_LINE_HEIGHT).max(SKETCH_LINE_HEIGHT);
-    (width, height)
-}
-
-/// A flow label's box dimensions: the recorded ones if the flow came from an
-/// MDL with sketch geometry, otherwise `default_flow_label_size`.
-fn flow_label_size(flow: &view_element::Flow) -> (i32, i32) {
-    match &flow.label_compat {
-        Some(c) => (c.width as i32, c.height as i32),
-        None => default_flow_label_size(&flow.name),
-    }
-}
-
-/// Where to put a flow's label, given how tall that label's box is.
-///
-/// The label sits `FLOW_LABEL_OFFSET` from the valve along whichever axis
-/// `label_side` selects; the recorded `x,y` is the box *center*. For a
-/// multi-line label the center is pushed a further `(label_h - one line) / 2`
-/// away from the valve so the line nearest the valve lands where a single-line
-/// label would, rather than creeping back toward the pipe.
-fn default_flow_label_point(
-    flow: &view_element::Flow,
-    transform: SketchTransform,
-    label_h: i32,
-) -> (i32, i32) {
-    let extra = f64::from((label_h - SKETCH_LINE_HEIGHT).max(0)) / 2.0;
+fn default_flow_label_point(flow: &view_element::Flow, transform: SketchTransform) -> (i32, i32) {
     let (x, y) = match flow.label_side {
-        view_element::LabelSide::Top => (flow.x, flow.y - FLOW_LABEL_OFFSET - extra),
+        view_element::LabelSide::Top => (flow.x, flow.y - FLOW_LABEL_OFFSET),
         view_element::LabelSide::Left => (flow.x - FLOW_LABEL_OFFSET, flow.y),
         view_element::LabelSide::Center => (flow.x, flow.y),
-        view_element::LabelSide::Bottom => (flow.x, flow.y + FLOW_LABEL_OFFSET + extra),
+        view_element::LabelSide::Bottom => (flow.x, flow.y + FLOW_LABEL_OFFSET),
         view_element::LabelSide::Right => (flow.x + FLOW_LABEL_OFFSET, flow.y),
     };
     transform.point(x, y)
 }
+
+/// Estimated bounding box (width, height in px) for a flow label, used when the
+/// original sketch didn't record one.
+///
+/// Vensim sizes a flow label's box to its text; a fixed default that's too
+/// narrow for a longer name makes Vensim wrap the label, which then overlaps
+/// the flow's pipe. Estimating roughly from the displayed text length (~6px
+/// per character at the sketch's default font, deliberately erring wide so the
+/// text never wraps) avoids that. The height matches Vensim's single-line
+/// flow labels.
+fn default_flow_label_size(displayed_name: &str) -> (i32, i32) {
+    let width = (displayed_name.chars().count() as i32 * 6).max(15);
+    (width, 11)
+}
+
+/// Per-line height (px) for a multi-line sketch text element at the writer's
+/// default font (`Times New Roman|12` at 96 dpi). Vensim's own files with that
+/// kind of font show ~11px per wrapped line (e.g. a three-line aux box is 33px
+/// tall); this matches `default_flow_label_size`'s single-line height too.
+const SKETCH_LINE_HEIGHT: i32 = 11;
 
 /// Estimated sketch box (width, height in px) for an Aux or Alias element when
 /// the original Vensim geometry isn't available (e.g. exporting from XMILE).
 ///
 /// A name that renders on one line keeps the long-standing `40x20` default:
 /// Vensim word-wraps a name too long for the box and renders it readably, and
-/// `40x20` is what plenty of Vensim's own single-line auxes use. A name with
-/// an explicit break -- the literal two-character `\n` XMILE name attributes
-/// use (`Maximum\nfishery size`, `Effect of fish density\non catch per ship`),
-/// or a real newline -- is the modeler's chosen multi-line layout, and the
-/// writer now preserves it (the quoted `"name with \n break"` form). Vensim
-/// still wraps each of those lines to fit the box width, so left at `40x20` it
-/// re-splits "Effect of fish density" into "Effect" / "of fish" / "density"
-/// and crams the result into 20px of height (the overlap in the fishbanks
-/// export). Sizing the box to the modeler's lines -- width = the widest line
-/// at ~6px/char, deliberately erring wide so Vensim doesn't re-split it;
+/// `40x20` is what plenty of Vensim's own single-line auxes use. But a name
+/// with an explicit break -- the literal two-character `\n` XMILE name
+/// attributes use (`Maximum\nfishery size`, `Effect of fish density\non catch
+/// per ship`), or a real newline -- is the modeler's chosen multi-line layout,
+/// and the writer collapses that break when it emits the name (the equation
+/// section has no break, and the two spellings must match for Vensim to link
+/// the sketch element to its variable; see `collapse_display_newlines`). Left
+/// at `40x20`, Vensim then re-wraps the now-unbroken name to fit the 40px box
+/// and crams the result into 20px of height -- the overlapping "effect of fish
+/// density on catch per ship" in the fishbanks export. Sizing the box to the
+/// modeler's lines instead -- width = the widest line at ~6px/char
+/// (deliberately erring wide, like `default_flow_label_size`, so Vensim's
+/// re-wrap stays at or under that line count rather than splitting tighter),
 /// height = `SKETCH_LINE_HEIGHT` per line -- reproduces the intended layout.
 /// Widths still floor at the historical `40`, heights at `20`, so a name with
 /// short lines never collapses to a degenerate box.
@@ -1960,10 +1925,12 @@ fn write_flow_element_with_context(
         Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
         None => (6, 8, 34, 3),
     };
-    let (label_w, label_h) = flow_label_size(flow);
-    let (label_shape, label_bits) = match label_compat {
-        Some(c) => (c.shape, c.bits),
-        None => (40, 3),
+    let (label_w, label_h, label_shape, label_bits) = match label_compat {
+        Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
+        None => {
+            let (w, h) = default_flow_label_size(&collapse_display_newlines(&flow.name));
+            (w, h, 40, 3)
+        }
     };
     let valve_name = compat_name_field(valve_compat, "0");
     let valve_tail = compat_tail(valve_compat, "0,0,1,0,0,0");
@@ -1986,7 +1953,7 @@ fn write_flow_element_with_context(
     )
     .unwrap();
 
-    let (label_x, label_y) = default_flow_label_point(flow, transform, label_h);
+    let (label_x, label_y) = default_flow_label_point(flow, transform);
     let label_tail = compat_tail(label_compat, "0,0,-1,0,0,0");
     let label_uid = uid_remap.map_or(flow.uid, |ids| ids.element_uid(flow.uid));
     write!(
@@ -2952,8 +2919,7 @@ fn build_element_positions_with_transform(
                 if let Some(&valve_uid) = valve_uids.get(&f.uid) {
                     positions.insert(valve_uid, (valve_x, valve_y));
                 }
-                let (_, label_h) = flow_label_size(f);
-                let (label_x, label_y) = default_flow_label_point(f, transform, label_h);
+                let (label_x, label_y) = default_flow_label_point(f, transform);
                 (f.uid, label_x, label_y)
             }
             ViewElement::Cloud(c) => {
