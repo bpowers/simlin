@@ -1698,15 +1698,21 @@ pub fn model_element_causal_edges(
             // edges come from the normal reference walker -- so they don't
             // trigger this reroute.)
             //
-            // The reroute keys on `site.in_reducer`, not the access shape:
-            // a `to` equation with *both* `SUM(pop[*])` and a direct
-            // `pop[idx]` produces a `DynamicIndex` site for the direct
-            // `pop[idx]` too, but only the `SUM`'s argument is hoisted -- the
-            // direct `pop[idx]` reference must keep its own conservative
-            // cross-product edge. Likewise a non-hoisted slice reducer
-            // (`SUM(pop[NYC, *])`, GH #514) or bare dynamic index
-            // (`pop[i+1]`) never sets `in_reducer` for a *hoisted* agg's
-            // source, so it falls through to `emit_edges_for_reference`.
+            // The reroute keys on `site.in_reducer` *and* whether a hoisted
+            // agg actually covers `from`, not on the access shape: a `to`
+            // equation with *both* `SUM(pop[*])` and a direct `pop[idx]`
+            // produces a `DynamicIndex` site for the direct `pop[idx]` too,
+            // but only the `SUM`'s argument is hoisted -- the direct
+            // `pop[idx]` reference (`in_reducer = false`) must keep its own
+            // conservative cross-product edge. The flip side: a reducer over
+            // a single non-literal index, `SUM(pop[idx])`, *is* `in_reducer`
+            // but is *not* a full reduce (it reads one element, not the whole
+            // array), so `enumerate_agg_nodes` never mints an agg for it; with
+            // no hoisted agg reading `pop`, `routed_aggs` is empty and the
+            // `DynamicIndex` site falls through to `emit_edges_for_reference`.
+            // (A wildcard-containing slice like `SUM(pop[NYC, *])`, GH #514,
+            // classifies as `Wildcard`, not `DynamicIndex` -- wildcard wins in
+            // `classify_subscript_shape` -- and is also not hoisted.)
             let routed_aggs: Vec<&crate::ltm_agg::AggNode> = agg_nodes
                 .aggs_in_var(to_name)
                 .filter(|a| a.is_synthetic && a.source_vars.iter().any(|s| s == from_name))
@@ -2590,6 +2596,29 @@ mod collect_reference_sites_tests {
         assert_eq!(sites.len(), 1, "sites: {sites:?}");
         assert_eq!(sites[0].shape, RefShape::Wildcard);
         assert!(sites[0].in_reducer, "SUM's wildcard arg is in a reducer");
+    }
+
+    #[test]
+    fn ref_site_bare_arrayed_arg_is_in_reducer() {
+        // total = SUM(pop)   (pop is arrayed)
+        // A bare arrayed argument to a reducer is the whole-array full
+        // reduce that `enumerate_agg_nodes` hoists. The AST reference is a
+        // bare `Var`, so its site shape is `Bare` -- but it must still be
+        // flagged `in_reducer` so the element-graph reroute treats it as
+        // the reducer's input (consistent with `SUM(pop[*])`, which differs
+        // only in the explicit wildcard subscript).
+        let project = TestProject::new("bare_arrayed_arg")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("pop[Region]", "100")
+            .scalar_aux("total", "SUM(pop)");
+
+        let sites = collect(&project, "total", "pop");
+        assert_eq!(sites.len(), 1, "sites: {sites:?}");
+        assert_eq!(sites[0].shape, RefShape::Bare);
+        assert!(
+            sites[0].in_reducer,
+            "SUM's bare arrayed arg is the reducer's input"
+        );
     }
 
     #[test]

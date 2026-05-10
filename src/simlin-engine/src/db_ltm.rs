@@ -3630,10 +3630,15 @@ pub fn model_ltm_variables(
     /// double-count. `DynamicIndex` is *not* suppressed: a `to` equation can
     /// hold both `SUM(pop[*])` (hoisted) *and* a direct `pop[idx]`
     /// (DynamicIndex, not in any reducer), and that direct reference still
-    /// needs its own conservative Bare-named link score. The reducer-arg
-    /// case that produces a `DynamicIndex` site (`SUM(pop[idx, *])`, a
-    /// non-hoisted slice, GH #514) is not hoisted to begin with, so keeping
-    /// its link score here is correct -- it's the conservative fallback.
+    /// needs its own conservative Bare-named link score. Any `DynamicIndex`
+    /// site that reaches this code is from a *non-hoisted* construct -- a
+    /// direct `pop[idx]`, or a single-non-literal-index reducer `SUM(pop[idx])`
+    /// (not a *full* reduce, so `enumerate_agg_nodes` doesn't hoist it).
+    /// (`classify_subscript_shape` reports `Wildcard`, not `DynamicIndex`, for
+    /// a slice that mixes a dynamic index with a wildcard like `SUM(pop[idx, *])`
+    /// (GH #514), so that case never lands here as `DynamicIndex`.) Keeping the
+    /// `DynamicIndex` link score here is therefore correct -- it's the
+    /// conservative fallback for a reference no agg covers.
     ///
     /// `Wildcard`/`DynamicIndex` shapes that reach this function share the
     /// canonical `link_score_var_name` form with `Bare`, so we dedup by the
