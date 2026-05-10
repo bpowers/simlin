@@ -1962,14 +1962,6 @@ fn sketch_link_with_field_hints_preserves_nonsemantic_flags() {
         uid: 3,
         field4: 1,
         field10: 7,
-        from_attached_valve: false,
-        to_attached_valve: true,
-        control_x: 150.0,
-        control_y: 80.0,
-        from_x: 100.0,
-        from_y: 100.0,
-        to_x: 200.0,
-        to_y: 100.0,
     };
     let mut buf = String::new();
     write_link_element_with_context(
@@ -1994,18 +1986,12 @@ fn sketch_link_with_field_hints_still_uses_link_geometry() {
         polarity: None,
     };
     let positions = HashMap::from([(1, (110, 100)), (2, (210, 100))]);
+    // A recorded compat carries only field4/field10; the control point is always
+    // recomputed from the link's Arc angle and the current endpoint positions.
     let compat = view_element::LinkSketchCompat {
         uid: 3,
         field4: 0,
         field10: 0,
-        from_attached_valve: false,
-        to_attached_valve: false,
-        control_x: 160.0,
-        control_y: 70.0,
-        from_x: 100.0,
-        from_y: 100.0,
-        to_x: 200.0,
-        to_y: 100.0,
     };
     let mut buf = String::new();
     write_link_element_with_context(
@@ -3580,7 +3566,6 @@ fn write_sketch_section_reapplies_segment_offsets() {
                     y_offset: 370.0,
                 },
             ],
-            flows: vec![],
             links: vec![],
         }),
     };
@@ -4069,6 +4054,53 @@ fn aux_default_dimensions_without_compat() {
 }
 
 #[test]
+fn default_aux_size_keeps_single_line_at_historical_default() {
+    // A name that renders on one line keeps the long-standing 40x20 box:
+    // Vensim word-wraps a name that doesn't fit, and 40x20 matches plenty of
+    // Vensim's own single-line auxes, so there's nothing to fix here.
+    assert_eq!(default_aux_size("catch"), (40, 20));
+    assert_eq!(default_aux_size("Net regeneration"), (40, 20));
+    assert_eq!(default_aux_size(""), (40, 20));
+}
+
+#[test]
+fn default_aux_size_sizes_multiline_names_to_their_lines() {
+    // A forced break in the display name -- the literal two-character `\n`
+    // XMILE name attributes use, or a real newline -- is the modeler's chosen
+    // multi-line layout. The box grows to the widest line (~6px/char, erring
+    // wide like the flow-label estimate so Vensim doesn't re-wrap it tighter)
+    // and ~11px per line, so Vensim renders those lines instead of cramming a
+    // re-wrapped name into 20px of height.
+    assert_eq!(default_aux_size("Maximum\\nfishery size"), (12 * 6, 22));
+    assert_eq!(
+        default_aux_size("Effect of fish density\non catch per ship"),
+        (22 * 6, 22)
+    );
+    assert_eq!(default_aux_size("one\\ntwo\\nthree three"), (11 * 6, 33));
+}
+
+#[test]
+fn aux_without_compat_sizes_multiline_name() {
+    // The aux name still renders collapsed in the record ("Maximum fishery
+    // size"); only the box dimensions grow to fit the modeler's two lines
+    // (12 chars * 6px = 72 wide, two 11px lines = 22 tall).
+    let aux = view_element::Aux {
+        name: "Maximum\\nfishery size".to_string(),
+        uid: 1,
+        x: 100.0,
+        y: 200.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    };
+    let mut buf = String::new();
+    write_aux_element(&mut buf, &aux);
+    assert_eq!(
+        buf, "10,1,Maximum fishery size,100,200,72,22,8,3,0,0,-1,0,0,0",
+        "multi-line aux name should size the box to its lines: {buf}"
+    );
+}
+
+#[test]
 fn flow_valve_compat_dimensions_emitted() {
     let flow = view_element::Flow {
         name: "Birth_Rate".to_string(),
@@ -4236,6 +4268,28 @@ fn alias_default_dimensions_without_compat() {
     assert!(
         buf.contains(",40,20,8,2,"),
         "alias without compat should use default 40,20,8,2: {buf}"
+    );
+}
+
+#[test]
+fn alias_without_compat_sizes_multiline_ghosted_name() {
+    // A ghost shows the ghosted variable's name; if that name has a forced
+    // break, the alias box is sized to those lines the same way an aux box is.
+    let alias = view_element::Alias {
+        uid: 10,
+        alias_of_uid: 1,
+        x: 200.0,
+        y: 300.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    };
+    let mut name_map = HashMap::new();
+    name_map.insert(1, "Maximum\\nfishery size");
+    let mut buf = String::new();
+    write_alias_element(&mut buf, &alias, &name_map);
+    assert!(
+        buf.starts_with("10,10,Maximum fishery size,200,300,72,22,8,2,"),
+        "multi-line ghosted name should size the alias box to its lines: {buf}"
     );
 }
 

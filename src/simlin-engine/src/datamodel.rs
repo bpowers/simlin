@@ -491,52 +491,32 @@ pub mod view_element {
         pub y_offset: f64,
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
-    pub struct FlowSketchPointCompat {
-        /// Pipe-connector control point after MDL view composition.
-        pub connector_x: f64,
-        pub connector_y: f64,
-        /// Flow point coordinates as imported into the datamodel after MDL
-        /// normalization. The writer applies the current point delta to the
-        /// stored connector control point so edited flows still serialize
-        /// sensibly instead of snapping back to the original sketch geometry.
-        pub point_x: f64,
-        pub point_y: f64,
-    }
-
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq)]
-    pub struct FlowSketchCompat {
-        pub uid: i32,
-        pub valve_x: f64,
-        pub valve_y: f64,
-        pub label_x: f64,
-        pub label_y: f64,
-        pub pipe_points: Vec<FlowSketchPointCompat>,
-    }
-
+    /// Connector fields the MDL writer roundtrips verbatim but does not derive
+    /// from the datamodel `Link`: `field4` (whether the connector carries a
+    /// meaningful control point -- Vensim re-routes it straight when 0) and
+    /// `field10`. Geometry (the control point, endpoint positions, whether an
+    /// endpoint is an attached valve) is intentionally *not* kept here: the
+    /// writer recomputes the control point from `Link::shape` (so edited models
+    /// get the same fidelity as imported ones) and resolves attached-valve
+    /// endpoints to the flow variable's UID at parse time.
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
     #[derive(Clone, PartialEq)]
     pub struct LinkSketchCompat {
         pub uid: i32,
         pub field4: i32,
         pub field10: i32,
-        pub from_attached_valve: bool,
-        pub to_attached_valve: bool,
-        pub control_x: f64,
-        pub control_y: f64,
-        pub from_x: f64,
-        pub from_y: f64,
-        pub to_x: f64,
-        pub to_y: f64,
     }
 
+    /// Per-view MDL sketch metadata the writer needs but the datamodel `View`
+    /// doesn't otherwise carry: `segments` records the translation MDL view
+    /// composition applied to each original named view (so a split export can
+    /// subtract it again), and `links` carries the connector fields above.
+    /// Flow pipe geometry is not stored -- the writer recomputes pipe connectors
+    /// from the flow's points and stock edges.
     #[cfg_attr(feature = "debug-derive", derive(Debug))]
     #[derive(Clone, PartialEq, Default)]
     pub struct StockFlowSketchCompat {
         pub segments: Vec<SketchSegmentCompat>,
-        pub flows: Vec<FlowSketchCompat>,
         pub links: Vec<LinkSketchCompat>,
     }
 

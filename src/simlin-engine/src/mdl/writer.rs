@@ -109,6 +109,21 @@ fn collapse_display_newlines(name: &str) -> String {
     name.replace("\\n", " ").replace('\n', " ")
 }
 
+/// Split a display name on its line breaks -- the literal two-character `\n`
+/// XMILE name attributes use (`Maximum\nfishery size`), or a real newline
+/// character. Always returns at least one segment.
+///
+/// This is the line-preserving counterpart of `collapse_display_newlines`
+/// (which joins these same segments with spaces); the two must agree on what
+/// counts as a break. Used when sizing a sketch element's box to the modeler's
+/// chosen multi-line layout even though the name itself is written collapsed.
+fn split_display_lines(name: &str) -> Vec<String> {
+    name.replace("\\n", "\n")
+        .split('\n')
+        .map(str::to_string)
+        .collect()
+}
+
 /// Build a mapping from canonical variable ident to display name (with
 /// original casing, spaces instead of underscores) by walking view elements.
 ///
@@ -1608,7 +1623,10 @@ fn write_aux_element_with_context(
     let name = format_sketch_name(&aux.name);
     let (w, h, shape, bits) = match &aux.compat {
         Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
-        None => (40, 20, 8, 3),
+        None => {
+            let (w, h) = default_aux_size(&aux.name);
+            (w, h, 8, 3)
+        }
     };
     let (x, y) = transform.point(aux.x, aux.y);
     let tail = compat_tail(aux.compat.as_ref(), "0,0,-1,0,0,0");
@@ -1789,6 +1807,48 @@ fn default_flow_label_point(flow: &view_element::Flow, transform: SketchTransfor
 fn default_flow_label_size(displayed_name: &str) -> (i32, i32) {
     let width = (displayed_name.chars().count() as i32 * 6).max(15);
     (width, 11)
+}
+
+/// Per-line height (px) for a multi-line sketch text element at the writer's
+/// default font (`Times New Roman|12` at 96 dpi). Vensim's own files with that
+/// kind of font show ~11px per wrapped line (e.g. a three-line aux box is 33px
+/// tall); this matches `default_flow_label_size`'s single-line height too.
+const SKETCH_LINE_HEIGHT: i32 = 11;
+
+/// Estimated sketch box (width, height in px) for an Aux or Alias element when
+/// the original Vensim geometry isn't available (e.g. exporting from XMILE).
+///
+/// A name that renders on one line keeps the long-standing `40x20` default:
+/// Vensim word-wraps a name too long for the box and renders it readably, and
+/// `40x20` is what plenty of Vensim's own single-line auxes use. But a name
+/// with an explicit break -- the literal two-character `\n` XMILE name
+/// attributes use (`Maximum\nfishery size`, `Effect of fish density\non catch
+/// per ship`), or a real newline -- is the modeler's chosen multi-line layout,
+/// and the writer collapses that break when it emits the name (the equation
+/// section has no break, and the two spellings must match for Vensim to link
+/// the sketch element to its variable; see `collapse_display_newlines`). Left
+/// at `40x20`, Vensim then re-wraps the now-unbroken name to fit the 40px box
+/// and crams the result into 20px of height -- the overlapping "effect of fish
+/// density on catch per ship" in the fishbanks export. Sizing the box to the
+/// modeler's lines instead -- width = the widest line at ~6px/char
+/// (deliberately erring wide, like `default_flow_label_size`, so Vensim's
+/// re-wrap stays at or under that line count rather than splitting tighter),
+/// height = `SKETCH_LINE_HEIGHT` per line -- reproduces the intended layout.
+/// Widths still floor at the historical `40`, heights at `20`, so a name with
+/// short lines never collapses to a degenerate box.
+fn default_aux_size(display_name: &str) -> (i32, i32) {
+    let lines = split_display_lines(display_name);
+    if lines.len() <= 1 {
+        return (40, 20);
+    }
+    let width = lines
+        .iter()
+        .map(|line| line.chars().count() as i32 * 6)
+        .max()
+        .unwrap_or(40)
+        .max(40);
+    let height = (lines.len() as i32 * SKETCH_LINE_HEIGHT).max(20);
+    (width, height)
 }
 
 /// Write a Flow element as type 1 pipe connectors, type 11 (valve), and
@@ -2122,13 +2182,16 @@ fn write_alias_element_with_context(
     transform: SketchTransform,
     uid_remap: Option<&SketchUidRemap>,
 ) {
-    let name = name_map
-        .get(&alias.alias_of_uid)
-        .map(|n| format_sketch_name(n))
-        .unwrap_or_default();
+    let raw_name = name_map.get(&alias.alias_of_uid).copied().unwrap_or("");
+    let name = format_sketch_name(raw_name);
     let (w, h, shape, bits) = match &alias.compat {
         Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
-        None => (40, 20, 8, 2),
+        // A ghost shows the ghosted variable's name, so it has the same
+        // multi-line-name sizing concern as an aux (see `default_aux_size`).
+        None => {
+            let (w, h) = default_aux_size(raw_name);
+            (w, h, 8, 2)
+        }
     };
     let (alias_x, alias_y) = if stock_uids.contains(&alias.alias_of_uid) {
         (alias.x + 22.0, alias.y + 17.0)
@@ -2560,15 +2623,10 @@ impl MdlWriter {
             // references (links, aliases) resolve correctly.
             let valve_uids = allocate_valve_uids(&sf.elements);
             let name_map = build_name_map(&sf.elements);
-            let mut flow_compat_by_uid: HashMap<i32, &view_element::FlowSketchCompat> =
-                HashMap::new();
             let mut link_compat_by_uid: HashMap<i32, &view_element::LinkSketchCompat> =
                 HashMap::new();
             let mut stock_uids: HashSet<i32> = HashSet::new();
             if let Some(sketch_compat) = sf.sketch_compat.as_ref() {
-                for flow in &sketch_compat.flows {
-                    flow_compat_by_uid.insert(flow.uid, flow);
-                }
                 for link in &sketch_compat.links {
                     link_compat_by_uid.insert(link.uid, link);
                 }
@@ -2596,7 +2654,6 @@ impl MdlWriter {
                     &valve_uids,
                     transform,
                     &stock_uids,
-                    &flow_compat_by_uid,
                 ));
             }
 
@@ -2625,7 +2682,6 @@ impl MdlWriter {
                     &elem_positions,
                     &name_map,
                     &stock_uids,
-                    &flow_compat_by_uid,
                     &link_compat_by_uid,
                 );
                 segment_idx += 1;
@@ -2647,7 +2703,6 @@ impl MdlWriter {
         elem_positions: &HashMap<i32, (i32, i32)>,
         name_map: &HashMap<i32, &str>,
         stock_uids: &HashSet<i32>,
-        _flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
         link_compat_by_uid: &HashMap<i32, &view_element::LinkSketchCompat>,
     ) {
         // Collect cloud UIDs so flow pipe connectors can set the right
@@ -2837,7 +2892,6 @@ fn build_element_positions(
         valve_uids,
         SketchTransform::identity(),
         &HashSet::new(),
-        &HashMap::new(),
     )
 }
 
@@ -2846,7 +2900,6 @@ fn build_element_positions_with_transform(
     valve_uids: &HashMap<i32, i32>,
     transform: SketchTransform,
     stock_uids: &HashSet<i32>,
-    _flow_compat_by_uid: &HashMap<i32, &view_element::FlowSketchCompat>,
 ) -> HashMap<i32, (i32, i32)> {
     let mut positions = HashMap::new();
     for elem in elements {

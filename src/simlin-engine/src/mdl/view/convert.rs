@@ -112,7 +112,7 @@ pub fn build_views(
     // We do steps 3 then 1 (flow points already have attached_to_uid from compute_flow_points).
     for view in &mut result {
         let View::StockFlow(sf) = view;
-        fixup_flow_takeoffs(&mut sf.elements, sf.sketch_compat.as_mut());
+        fixup_flow_takeoffs(&mut sf.elements);
         let uid_map = reassign_uids_sequential(&mut sf.elements);
         if let Some(sketch_compat) = sf.sketch_compat.as_mut() {
             remap_sketch_compat_uids(sketch_compat, &uid_map);
@@ -131,10 +131,7 @@ const STOCK_HEIGHT: f64 = 35.0;
 /// Matches the XMILE path's `fixup_flow_takeoffs()` in xmile.rs.
 /// When a flow point is attached to a stock, the coordinate is snapped
 /// to the nearest edge of the stock rectangle rather than its center.
-fn fixup_flow_takeoffs(
-    elements: &mut [ViewElement],
-    sketch_compat: Option<&mut view_element::StockFlowSketchCompat>,
-) {
+fn fixup_flow_takeoffs(elements: &mut [ViewElement]) {
     // Collect stock positions by UID
     let stocks: HashMap<i32, (f64, f64)> = elements
         .iter()
@@ -186,10 +183,6 @@ fn fixup_flow_takeoffs(
                 adjust_takeoff_point(&mut flow.points[last_idx], sx, sy, &source);
             }
         }
-    }
-
-    if let Some(sketch_compat) = sketch_compat {
-        sync_flow_sketch_points(elements, sketch_compat);
     }
 }
 
@@ -264,35 +257,11 @@ fn reassign_uids_sequential(elements: &mut [ViewElement]) -> HashMap<i32, i32> {
     uid_map
 }
 
-fn sync_flow_sketch_points(
-    elements: &[ViewElement],
-    sketch_compat: &mut view_element::StockFlowSketchCompat,
-) {
-    for flow_compat in &mut sketch_compat.flows {
-        let Some(ViewElement::Flow(flow)) = elements
-            .iter()
-            .find(|elem| elem.get_uid() == flow_compat.uid)
-        else {
-            continue;
-        };
-        if flow.points.len() != flow_compat.pipe_points.len() {
-            continue;
-        }
-        for (point, compat) in flow.points.iter().zip(&mut flow_compat.pipe_points) {
-            compat.point_x = point.x;
-            compat.point_y = point.y;
-        }
-    }
-}
-
 fn remap_sketch_compat_uids(
     sketch_compat: &mut view_element::StockFlowSketchCompat,
     uid_map: &HashMap<i32, i32>,
 ) {
     let remap = |uid: i32| -> i32 { uid_map.get(&uid).copied().unwrap_or(uid) };
-    for flow in &mut sketch_compat.flows {
-        flow.uid = remap(flow.uid);
-    }
     for link in &mut sketch_compat.links {
         link.uid = remap(link.uid);
     }
@@ -326,7 +295,6 @@ fn merge_views(views: Vec<View>) -> Vec<View> {
         }
         if let Some(mut compat) = sf.sketch_compat {
             sketch_compat.segments.append(&mut compat.segments);
-            sketch_compat.flows.append(&mut compat.flows);
             sketch_compat.links.append(&mut compat.links);
         }
         all_elements.extend(sf.elements);
@@ -361,7 +329,6 @@ fn convert_view(
     use_lettered_polarity: bool,
 ) -> Option<View> {
     let mut elements = Vec::new();
-    let mut flow_sketch_compat = Vec::new();
     let mut link_sketch_compat = Vec::new();
     let uid_offset = view.uid_offset;
     let (valve_to_flow, flow_to_valve) = build_attached_valve_flow_maps(view);
@@ -393,7 +360,7 @@ fn convert_view(
 
         match elem {
             VensimElement::Variable(var) => {
-                if let Some((view_elem, flow_compat)) = convert_variable(
+                if let Some(view_elem) = convert_variable(
                     var,
                     uid,
                     symbols,
@@ -407,9 +374,6 @@ fn convert_view(
                 ) {
                     if matches!(&view_elem, ViewElement::Flow(_)) {
                         emitted_flow_uids.insert(uid);
-                    }
-                    if let Some(flow_compat) = flow_compat {
-                        flow_sketch_compat.push(flow_compat);
                     }
                     elements.push(view_elem);
                 }
@@ -454,7 +418,6 @@ fn convert_view(
                 x_offset: view.x_offset as f64,
                 y_offset: view.y_offset as f64,
             }],
-            flows: flow_sketch_compat,
             links: link_sketch_compat,
         }),
     }))
@@ -526,7 +489,7 @@ fn convert_variable(
     uid_offset: i32,
     view_offsets: &[i32],
     flow_to_valve: &HashMap<i32, i32>,
-) -> Option<(ViewElement, Option<view_element::FlowSketchCompat>)> {
+) -> Option<ViewElement> {
     let canonical = to_lower_space(&var.name);
 
     // Skip Time and unwanted control variables
@@ -567,41 +530,35 @@ fn convert_variable(
                 (var.x as f64, var.y as f64)
             };
 
-            return Some((
-                ViewElement::Alias(view_element::Alias {
-                    uid,
-                    alias_of_uid,
-                    x: alias_x,
-                    y: alias_y,
-                    label_side: view_element::LabelSide::Bottom,
-                    compat: Some(make_compat(
-                        var.width, var.height, var.shape, var.bits, None, &var.tail,
-                    )),
-                }),
-                None,
-            ));
+            return Some(ViewElement::Alias(view_element::Alias {
+                uid,
+                alias_of_uid,
+                x: alias_x,
+                y: alias_y,
+                label_side: view_element::LabelSide::Bottom,
+                compat: Some(make_compat(
+                    var.width, var.height, var.shape, var.bits, None, &var.tail,
+                )),
+            }));
         }
     }
 
     let var_type = symbol_info.var_type;
 
     match var_type {
-        VariableType::Stock => Some((
-            ViewElement::Stock(view_element::Stock {
-                name: xmile_name,
-                uid,
-                x: var.x as f64,
-                y: var.y as f64,
-                label_side: view_element::LabelSide::Top, // Stocks default to top
-                compat: Some(make_compat(
-                    var.width, var.height, var.shape, var.bits, None, &var.tail,
-                )),
-            }),
-            None,
-        )),
+        VariableType::Stock => Some(ViewElement::Stock(view_element::Stock {
+            name: xmile_name,
+            uid,
+            x: var.x as f64,
+            y: var.y as f64,
+            label_side: view_element::LabelSide::Top, // Stocks default to top
+            compat: Some(make_compat(
+                var.width, var.height, var.shape, var.bits, None, &var.tail,
+            )),
+        })),
         VariableType::Flow => {
             // For flows, find the associated valve and compute flow points
-            let (flow_x, flow_y, points, pipe_points) =
+            let (flow_x, flow_y, points) =
                 compute_flow_data(var, view, uid_offset, symbols, flow_to_valve);
 
             // compat holds the valve's dimensions; label_compat holds the label variable's
@@ -623,42 +580,29 @@ fn convert_variable(
                 None
             };
 
-            Some((
-                ViewElement::Flow(view_element::Flow {
-                    name: xmile_name,
-                    uid,
-                    x: flow_x as f64,
-                    y: flow_y as f64,
-                    label_side: flow_label_side(var.x, var.y, flow_x, flow_y),
-                    points,
-                    compat: valve_compat,
-                    label_compat: Some(make_compat(
-                        var.width, var.height, var.shape, var.bits, None, &var.tail,
-                    )),
-                }),
-                Some(view_element::FlowSketchCompat {
-                    uid,
-                    valve_x: flow_x as f64,
-                    valve_y: flow_y as f64,
-                    label_x: var.x as f64,
-                    label_y: var.y as f64,
-                    pipe_points,
-                }),
-            ))
-        }
-        VariableType::Aux => Some((
-            ViewElement::Aux(view_element::Aux {
+            Some(ViewElement::Flow(view_element::Flow {
                 name: xmile_name,
                 uid,
-                x: var.x as f64,
-                y: var.y as f64,
-                label_side: view_element::LabelSide::Bottom,
-                compat: Some(make_compat(
+                x: flow_x as f64,
+                y: flow_y as f64,
+                label_side: flow_label_side(var.x, var.y, flow_x, flow_y),
+                points,
+                compat: valve_compat,
+                label_compat: Some(make_compat(
                     var.width, var.height, var.shape, var.bits, None, &var.tail,
                 )),
-            }),
-            None,
-        )),
+            }))
+        }
+        VariableType::Aux => Some(ViewElement::Aux(view_element::Aux {
+            name: xmile_name,
+            uid,
+            x: var.x as f64,
+            y: var.y as f64,
+            label_side: view_element::LabelSide::Bottom,
+            compat: Some(make_compat(
+                var.width, var.height, var.shape, var.bits, None, &var.tail,
+            )),
+        })),
     }
 }
 
@@ -719,22 +663,17 @@ fn compute_flow_data(
     uid_offset: i32,
     symbols: &HashMap<String, crate::mdl::convert::SymbolInfo<'_>>,
     flow_to_valve: &HashMap<i32, i32>,
-) -> (
-    i32,
-    i32,
-    Vec<view_element::FlowPoint>,
-    Vec<view_element::FlowSketchPointCompat>,
-) {
+) -> (i32, i32, Vec<view_element::FlowPoint>) {
     // Look for valve at uid - 1 (typical Vensim layout)
     // xmutil requires BOTH conditions:
     // 1. Flow variable has attached=true (vele->Attached())
     // 2. Preceding element is a valve (elements[local_uid - 1]->Type() == VALVE)
     let valve_uid = flow_to_valve.get(&var.uid).copied().unwrap_or(var.uid - 1);
     let (flow_x, flow_y) = if var.attached  // Flow must be attached
-        && let Some(VensimElement::Valve(_valve)) = view.get(valve_uid)
+        && let Some(VensimElement::Valve(valve)) = view.get(valve_uid)
     {
         // Use valve coordinates for flow element position
-        (_valve.x, _valve.y)
+        (valve.x, valve.y)
     } else {
         // Use flow variable coordinates
         (var.x, var.y)
@@ -754,52 +693,26 @@ fn compute_flow_data(
         y: endpoints.from_y as f64,
         attached_to_uid: endpoints.from_uid,
     }];
-    let mut pipe_points = Vec::new();
 
-    let mut endpoint_connectors: HashMap<i32, (i32, i32)> = HashMap::new();
-    let mut bend_points: Vec<(i32, (i32, i32))> = Vec::new();
-    for elem in view.iter() {
-        let VensimElement::Connector(conn) = elem else {
-            continue;
-        };
-        if conn.from_uid != valve_uid {
-            continue;
-        }
-        if conn.to_uid == valve_uid {
-            bend_points.push((conn.uid, conn.control_point));
-        } else {
-            endpoint_connectors
-                .entry(conn.to_uid)
-                .or_insert(conn.control_point);
-        }
-    }
+    // Interior pipe bend points are encoded in MDL as self-connectors from the
+    // valve back to itself; emit them between the endpoints in connector order.
+    let mut bend_points: Vec<(i32, (i32, i32))> = view
+        .iter()
+        .filter_map(|elem| match elem {
+            VensimElement::Connector(conn)
+                if conn.from_uid == valve_uid && conn.to_uid == valve_uid =>
+            {
+                Some((conn.uid, conn.control_point))
+            }
+            _ => None,
+        })
+        .collect();
     bend_points.sort_by_key(|(uid, _)| *uid);
-
-    if let Some(from_uid) = endpoints.from_uid {
-        let local_uid = from_uid - uid_offset;
-        let (connector_x, connector_y) = endpoint_connectors
-            .get(&local_uid)
-            .copied()
-            .unwrap_or((endpoints.from_x, endpoints.from_y));
-        pipe_points.push(view_element::FlowSketchPointCompat {
-            connector_x: connector_x as f64,
-            connector_y: connector_y as f64,
-            point_x: endpoints.from_x as f64,
-            point_y: endpoints.from_y as f64,
-        });
-    }
-
     for (_, (bend_x, bend_y)) in bend_points {
         points.push(view_element::FlowPoint {
             x: bend_x as f64,
             y: bend_y as f64,
             attached_to_uid: None,
-        });
-        pipe_points.push(view_element::FlowSketchPointCompat {
-            connector_x: bend_x as f64,
-            connector_y: bend_y as f64,
-            point_x: bend_x as f64,
-            point_y: bend_y as f64,
         });
     }
 
@@ -809,21 +722,7 @@ fn compute_flow_data(
         attached_to_uid: endpoints.to_uid,
     });
 
-    if let Some(to_uid) = endpoints.to_uid {
-        let local_uid = to_uid - uid_offset;
-        let (connector_x, connector_y) = endpoint_connectors
-            .get(&local_uid)
-            .copied()
-            .unwrap_or((endpoints.to_x, endpoints.to_y));
-        pipe_points.push(view_element::FlowSketchPointCompat {
-            connector_x: connector_x as f64,
-            connector_y: connector_y as f64,
-            point_x: endpoints.to_x as f64,
-            point_y: endpoints.to_y as f64,
-        });
-    }
-
-    (flow_x, flow_y, points, pipe_points)
+    (flow_x, flow_y, points)
 }
 
 /// Convert a comment element that serves as a cloud (flow endpoint).
@@ -945,17 +844,6 @@ fn convert_connector(
         _ => None,
     };
 
-    let (raw_from_x, raw_from_y) = if from_attached_valve {
-        (from_elem.x() as f64, from_elem.y() as f64)
-    } else {
-        (actual_from.x() as f64, actual_from.y() as f64)
-    };
-    let (raw_to_x, raw_to_y) = if to_attached_valve {
-        (to_elem.x() as f64, to_elem.y() as f64)
-    } else {
-        (actual_to.x() as f64, actual_to.y() as f64)
-    };
-
     Some((
         ViewElement::Link(view_element::Link {
             uid,
@@ -968,14 +856,6 @@ fn convert_connector(
             uid,
             field4: conn.field4,
             field10: conn.field10,
-            from_attached_valve,
-            to_attached_valve,
-            control_x: conn.control_point.0 as f64,
-            control_y: conn.control_point.1 as f64,
-            from_x: raw_from_x,
-            from_y: raw_from_y,
-            to_x: raw_to_x,
-            to_y: raw_to_y,
         },
     ))
 }
@@ -2112,12 +1992,10 @@ mod tests {
             .expect("expected link sketch compat");
         assert_eq!(link_compat.field4, 0);
         assert_eq!(link_compat.field10, 7);
-        assert!(!link_compat.from_attached_valve);
-        assert!(!link_compat.to_attached_valve);
     }
 
     #[test]
-    fn test_attached_valve_connector_preserves_sketch_endpoint_metadata() {
+    fn test_attached_valve_connector_resolves_to_flow_uid() {
         let header = ViewHeader {
             version: ViewVersion::V300,
             title: "Test View".to_string(),
@@ -2293,6 +2171,10 @@ mod tests {
             })
             .expect("expected causal link");
 
+        // A causal connector whose `to` endpoint is an attached valve (type 11)
+        // is resolved at parse time to the flow variable's UID, so the writer
+        // never needs to know an endpoint was a valve. The connector's own
+        // fields (field4 -- here 1, meaning "curved", and field10) still survive.
         assert_eq!(
             link.to_uid, flow_uid,
             "datamodel link should target the flow, not the synthetic valve",
@@ -2311,12 +2193,6 @@ mod tests {
             .expect("expected link sketch compat");
         assert_eq!(link_compat.field4, 1);
         assert_eq!(link_compat.field10, 9);
-        assert!(!link_compat.from_attached_valve);
-        assert!(link_compat.to_attached_valve);
-        assert_eq!(link_compat.control_x, 170.0);
-        assert_eq!(link_compat.control_y, 130.0);
-        assert_eq!(link_compat.to_x, 220.0);
-        assert_eq!(link_compat.to_y, 160.0);
     }
 
     // --- Compat field population tests (AC2.1, AC2.2) ---
