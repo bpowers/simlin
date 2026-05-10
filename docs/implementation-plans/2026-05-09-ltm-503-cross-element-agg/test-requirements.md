@@ -6,8 +6,8 @@ This document maps every acceptance criterion from
 automated test (criterion text, test type, expected file path, what it verifies)
 or a documented human-verification procedure (justification + approach).
 
-It is rationalized against the implementation decisions made during planning in
-[phase_01.md](phase_01.md) ... [phase_06.md](phase_06.md) -- in particular:
+It is rationalized against the implementation decisions made during planning
+(phases 1 through 6 of the now-removed implementation plan) -- in particular:
 Phase 1 changes `LtmSyntheticVar.equation` from `String` to
 `datamodel::Equation` (tests inspecting `.equation` must destructure the
 variant); Phase 2 keeps element subscripts on cross-element `Loop` links and
