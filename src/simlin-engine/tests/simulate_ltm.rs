@@ -6412,18 +6412,28 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
     );
     let share_loop = share_loop_matches[0];
 
-    // (2) AC4.2 scoring on the un-trimmed path. Read the four per-element link
-    // scores along the un-trimmed aggregate cycle straight from `results`:
-    //   pop[big] -> $⁚ltm⁚agg⁚0       (the reducer half, Phase-4 machinery)
-    //   $⁚ltm⁚agg⁚0 -> share[big]     (the Bare scalar->arrayed half)
-    //   share[big] -> update[big]     (A2A diagonal, Region slot 0 == big)
-    //   update[big] -> pop[big]       (flow->stock, A2A diagonal, slot 0 == big)
-    // and assert the discovered loop's `loop_score` is their product at every
-    // step where the score is defined (>= step 2 -- the flow->stock link score
-    // needs two prior committed timesteps). `saw_nonzero` guards against a
-    // vacuous all-zero equality and, since the bare numerator product is
-    // identically zero for this fixture, also pins that the discovered loop
-    // really did route through the aggregate node rather than the numerator.
+    // (2) AC4.2 scoring -- the discovered loop's `loop_score` must reproduce
+    // the product of the per-element link scores along the path discovery
+    // actually traversed. Two paths trim to the same three-edge link set:
+    //
+    //   - the *aggregate* path (un-trimmed: 4 edges)
+    //       pop[big] -> $⁚ltm⁚agg⁚0 -> share[big] -> update[big] -> pop[big]
+    //   - the *bare-numerator* path (3 edges)
+    //       pop[big] -> share[big] -> update[big] -> pop[big]
+    //
+    // Both are real loops (the diagonal conflation `share = pop / SUM(pop[*])`
+    // resolved by construction -- the numerator effect and the SUM effect are
+    // distinct loops). Discovery's strongest-path heuristic picks one per
+    // timestep, so we don't know a priori which it surfaced here; we assert
+    // the `loop_score` matches one of the two products, consistently across
+    // steps, and that it is non-zero somewhere. (The "scored on the un-trimmed
+    // aggregate path" invariant proper is exercised exhaustively by
+    // `db_ltm_unified_tests::cross_element_loop_through_agg_is_recovered`,
+    // where the aggregate-path loop is a Loop in its own right rather than a
+    // strongest-path candidate. Before GH #517 was fixed the bare-numerator
+    // link score was identically `0.0` -- `pop / SUM(PREVIOUS(pop[*]))` -- so
+    // only the aggregate path was ever non-zero and this test could pin it
+    // directly; with the fix the numerator path is a live competitor.)
     let off_exact = |name: &str| -> usize {
         *results
             .offsets
@@ -6446,9 +6456,10 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
     let off_agg_to_share_big = off_exact(&format!(
         "$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}share[big]"
     ));
-    // The `share -> update` and `update -> pop` link scores are Apply-to-All
-    // over `Region`; element `big` is declared first, so it is slot 0 of the
-    // base offset.
+    // The `pop -> share` (bare numerator), `share -> update`, and
+    // `update -> pop` link scores are Apply-to-All over `Region`; element
+    // `big` is declared first, so it is slot 0 of the base offset.
+    let off_pop_to_share_big = off_exact("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share");
     let off_share_to_update_big =
         off_exact("$\u{205A}ltm\u{205A}link_score\u{205A}share\u{2192}update");
     let off_update_to_pop_big =
@@ -6456,27 +6467,49 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
     let at = |step: usize, o: usize| results.data[step * results.step_size + o];
 
     let mut saw_nonzero = false;
+    let mut traversed_path: Option<&'static str> = None;
     for step in 2..results.step_count {
-        let product = at(step, off_pop_big_to_agg)
+        let share_to_update = at(step, off_share_to_update_big);
+        let update_to_pop = at(step, off_update_to_pop_big);
+        let prod_via_agg = at(step, off_pop_big_to_agg)
             * at(step, off_agg_to_share_big)
-            * at(step, off_share_to_update_big)
-            * at(step, off_update_to_pop_big);
+            * share_to_update
+            * update_to_pop;
+        let prod_via_numerator = at(step, off_pop_to_share_big) * share_to_update * update_to_pop;
         let loop_score = share_loop.scores[step].1;
+        let matches_agg = (loop_score - prod_via_agg).abs() < 1e-6;
+        let matches_numerator = (loop_score - prod_via_numerator).abs() < 1e-6;
         assert!(
-            (loop_score - product).abs() < 1e-6,
-            "step {step}: discovered loop_score = {loop_score}, but the product of the un-trimmed \
-             per-element link scores (pop[big]->agg * agg->share[big] * share->update[big] * \
-             update->pop[big]) = {product}"
+            matches_agg || matches_numerator,
+            "step {step}: discovered loop_score = {loop_score}, but it matches neither the \
+             un-trimmed aggregate-path product (pop[big]->agg * agg->share[big] * \
+             share->update[big] * update->pop[big] = {prod_via_agg}) nor the bare-numerator-path \
+             product (pop->share[big] * share->update[big] * update->pop[big] = {prod_via_numerator})"
         );
-        if product.abs() > 1e-9 {
+        // A non-degenerate match (the two products genuinely differ) pins
+        // which path the loop took; it must not flip step-to-step.
+        let this_step = match (matches_agg, matches_numerator) {
+            (true, false) => Some("aggregate"),
+            (false, true) => Some("bare-numerator"),
+            _ => None, // products coincide (e.g. both ~0) -- uninformative
+        };
+        if let (Some(prev), Some(cur)) = (traversed_path, this_step) {
+            assert_eq!(
+                prev, cur,
+                "step {step}: discovered loop's scoring path flipped from {prev} to {cur}"
+            );
+        }
+        if traversed_path.is_none() {
+            traversed_path = this_step;
+        }
+        if loop_score.abs() > 1e-9 {
             saw_nonzero = true;
         }
     }
     assert!(
         saw_nonzero,
-        "expected at least one step where the un-trimmed loop_score product is non-zero \
-         (otherwise the equality above is vacuous, and we could not tell the aggregate path \
-         from the zero-valued bare-numerator path); found loops: {path_strings:?}"
+        "expected at least one step where the discovered loop_score is non-zero \
+         (otherwise the equality above is vacuous); found loops: {path_strings:?}"
     );
 }
 

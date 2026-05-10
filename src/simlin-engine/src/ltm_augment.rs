@@ -148,6 +148,70 @@ fn classify_expr0_subscript_shape(
     RefShape::FixedIndex(elems)
 }
 
+/// Does `name` (case-insensitively) name an array-reducing builtin in the
+/// form that collapses an array dimension? `SUM`/`STDDEV`/`SIZE`/`RANK`
+/// reduce at any arity (`RANK(arr, n)`, etc.); `MEAN`/`MIN`/`MAX` reduce an
+/// array dimension only in their single-argument form (their multi-argument
+/// forms are element-wise). Parsed `Expr0` builtin names keep their source
+/// casing, generated ones are uppercase, so the comparison is
+/// case-insensitive. Mirrors the reducer set `enumerate_agg_nodes` hoists.
+fn is_array_reducer_name(name: &str, arity: usize) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.as_str(), "sum" | "stddev" | "size" | "rank")
+        || (arity == 1 && matches!(lower.as_str(), "mean" | "min" | "max"))
+}
+
+/// Does `expr` contain the live source reference the partial isolates -- a
+/// bare `Var(live_source)` (when `live_shape` is `Bare`) or a
+/// `Subscript(live_source, indices)` whose access shape equals `live_shape`?
+///
+/// Used by [`wrap_non_matching_in_previous`] to decide whether an enclosing
+/// array-reducer App is "other content" (so the whole reducer should be
+/// `PREVIOUS`-wrapped -- `PREVIOUS(SUM(arr[*]))`, which evaluates fine) or
+/// genuinely holds the live reference (so it must be recursed into, e.g. the
+/// test-only `RefShape::Wildcard` path where `SUM(arr[*])` *is* the live
+/// thing). See GH #517: the alternative -- recursing and emitting
+/// `SUM(PREVIOUS(arr[*]))` -- is silently `0.0` at every step under an
+/// active apply-to-all dimension because codegen has no
+/// LoadPrev-of-array-view path.
+fn expr0_contains_live_match(
+    expr: &Expr0,
+    live_source: &Ident<Canonical>,
+    live_shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+) -> bool {
+    match expr {
+        Expr0::Const(..) => false,
+        Expr0::Var(ident, _) => {
+            matches!(live_shape, RefShape::Bare) && &Ident::new(ident.as_str()) == live_source
+        }
+        Expr0::Subscript(ident, indices, _) => {
+            // A `live_source` occurrence reachable only through an index
+            // expression (`other_arr[live_source]`) is never the captured
+            // live ref -- `wrap_index_non_matching_in_previous` passes a
+            // throwaway sink for those -- so we only consider a subscript
+            // whose *head* is `live_source` with the matching shape.
+            &Ident::new(ident.as_str()) == live_source
+                && &classify_expr0_subscript_shape(indices, source_dim_elements) == live_shape
+        }
+        Expr0::App(UntypedBuiltinFn(_, args), _) => args
+            .iter()
+            .any(|a| expr0_contains_live_match(a, live_source, live_shape, source_dim_elements)),
+        Expr0::Op1(_, inner, _) => {
+            expr0_contains_live_match(inner, live_source, live_shape, source_dim_elements)
+        }
+        Expr0::Op2(_, l, r, _) => {
+            expr0_contains_live_match(l, live_source, live_shape, source_dim_elements)
+                || expr0_contains_live_match(r, live_source, live_shape, source_dim_elements)
+        }
+        Expr0::If(c, t, e, _) => {
+            expr0_contains_live_match(c, live_source, live_shape, source_dim_elements)
+                || expr0_contains_live_match(t, live_source, live_shape, source_dim_elements)
+                || expr0_contains_live_match(e, live_source, live_shape, source_dim_elements)
+        }
+    }
+}
+
 /// Walk an `Expr0` tree and wrap variable references in `PREVIOUS()` except
 /// those whose access shape matches the live shape for the given source,
 /// recording into `live_ref` the *first* `live_source` occurrence left
@@ -286,6 +350,28 @@ fn wrap_non_matching_in_previous(
             }
         }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            // GH #517: an array-reducer subexpression (`SUM(pop[*])`,
+            // `MEAN(...)`, `SUM(m[D1,*])`, ...) that does not itself carry
+            // the live reference is "other content" for ceteris-paribus
+            // purposes. Wrap the whole reducer in `PREVIOUS` --
+            // `PREVIOUS(SUM(pop[*]))`, which is `PREVIOUS` of a scalar (the
+            // reducer's result, even a partial reduce, is scalar in the
+            // enclosing apply-to-all context) and evaluates fine -- rather
+            // than recursing into it and emitting `SUM(PREVIOUS(pop[*]))`,
+            // which is silently `0.0` at every step under an active A2A
+            // dimension because codegen has no LoadPrev-of-array-view path.
+            // If the live reference *is* inside this reducer (the now
+            // test-only `RefShape::Wildcard` path where `SUM(pop[*])` is the
+            // live thing), recurse normally so the live `pop[*]` stays
+            // unwrapped.
+            if is_array_reducer_name(&name, args.len())
+                && !args.iter().any(|a| {
+                    expr0_contains_live_match(a, live_source, live_shape, source_dim_elements)
+                })
+            {
+                let reducer = Expr0::App(UntypedBuiltinFn(name, args), loc);
+                return Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![reducer]), loc);
+            }
             let args = args
                 .into_iter()
                 .map(|a| {
@@ -2977,12 +3063,51 @@ mod tests {
     fn test_partial_equation_share_bare_shape() {
         // share[R] = population / SUM(population[*])
         // For the bare-Var reference (`population`), the bare ref stays live
-        // and the wildcard reducer's source ref is wrapped in PREVIOUS().
+        // and the wildcard reducer -- "other content" for this Bare link --
+        // is wrapped in PREVIOUS() *as a whole*: `PREVIOUS(sum(population[*]))`,
+        // which is PREVIOUS of the scalar total and evaluates fine. The
+        // earlier form `sum(PREVIOUS(population[*]))` was the GH #517 bug --
+        // identically `0.0` at every step under an active A2A dimension
+        // because codegen has no LoadPrev-of-array-view path.
         let equation = "population / SUM(population[*])";
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
         let partial = build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[]);
-        assert_eq!(partial, "population / sum(PREVIOUS(population[*]))");
+        assert_eq!(partial, "population / PREVIOUS(sum(population[*]))");
+    }
+
+    #[test]
+    fn test_partial_equation_reducer_wrapped_whole_with_fixed_index_live() {
+        // x[R] = pop[NYC] + SUM(pop[*]) -- the FixedIndex(nyc) link keeps
+        // `pop[nyc]` live; the coexisting `SUM(pop[*])` is "other content"
+        // and must be PREVIOUS-wrapped as a whole, not recursed into (GH
+        // #517). `dims` lets `classify_expr0_subscript_shape` recognize
+        // `[NYC]` as a literal element.
+        let equation = "pop[NYC] + SUM(pop[*])";
+        let deps = deps_set(&["pop"]);
+        let source = Ident::<Canonical>::new("pop");
+        let dims = vec![vec!["nyc".to_string(), "boston".to_string()]];
+        let partial = build_partial_equation_shaped(
+            equation,
+            &deps,
+            &source,
+            &RefShape::FixedIndex(vec!["nyc".to_string()]),
+            &dims,
+        );
+        assert_eq!(partial, "pop[nyc] + PREVIOUS(sum(pop[*]))");
+    }
+
+    #[test]
+    fn test_partial_equation_two_reducers_both_wrapped_whole() {
+        // y = SUM(a[*]) / SUM(b[*]) with `c` as the live source: neither
+        // reducer carries the live ref, so both are PREVIOUS-wrapped whole
+        // (GH #517). `c` does not appear, so nothing stays live -- the point
+        // here is purely that the reducers don't get `sum(PREVIOUS(...))`.
+        let equation = "(c + SUM(a[*])) / SUM(b[*])";
+        let deps = deps_set(&["a", "b", "c"]);
+        let source = Ident::<Canonical>::new("c");
+        let partial = build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[]);
+        assert_eq!(partial, "(c + PREVIOUS(sum(a[*]))) / PREVIOUS(sum(b[*]))");
     }
 
     #[test]

@@ -2072,4 +2072,32 @@ fn cross_element_loop_through_agg_is_recovered() {
             l.variables
         );
     }
+
+    // GH #516: the cross-element-through-agg loop must NOT classify as
+    // Undetermined. Its agg hops are derivable -- `pop[d] → agg` is Positive
+    // (SUM is monotone) and `agg → share[e]` is Negative (`share = pop / agg`,
+    // the agg is the denominator) -- so the loop's id carries a definite
+    // `r`/`b` prefix, not `u`. Find the loop_score var whose equation is the
+    // un-trimmed cross-through-agg product and check its id prefix.
+    let cross_agg_loop_score = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.contains("\u{205A}loop_score\u{205A}")
+                && want_factors
+                    .iter()
+                    .all(|f| v.equation.source_text().contains(f.as_str()))
+        })
+        .expect("expected a loop_score var for the cross-element-through-agg loop");
+    let loop_id = cross_agg_loop_score
+        .name
+        .rsplit('\u{205A}')
+        .next()
+        .expect("loop_score var name has a trailing loop id");
+    assert!(
+        loop_id.starts_with('r') || loop_id.starts_with('b'),
+        "cross-element-through-agg loop should have a determined polarity \
+         (r/b), not Undetermined (u); loop_score var = {:?}",
+        cross_agg_loop_score.name
+    );
 }

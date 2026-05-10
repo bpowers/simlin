@@ -20,7 +20,7 @@ use crate::variable::{Variable, identifier_set};
 
 use super::indexed::{IndexedCircuits, IndexedGraph, TruncatedByBudgetInternal};
 use super::partitions::{CyclePartitions, tarjan_scc};
-use super::polarity::analyze_link_polarity;
+use super::polarity::{analyze_agg_consumer_polarity, analyze_link_polarity};
 use super::types::{
     Link, LinkPolarity, Loop, LoopPolarity, ModuleLtmRole, TruncatedByBudget,
     classify_module_for_ltm, normalize_module_ref,
@@ -809,6 +809,33 @@ impl CausalGraph {
             }
         }
         LinkPolarity::Unknown
+    }
+
+    /// Polarity of `consumer`'s equation with respect to a reducer
+    /// subexpression `reducer_subexpr_text` -- the polarity of a synthetic
+    /// aggregate-node hop `$⁚ltm⁚agg → consumer` (GH #516).
+    ///
+    /// The aggregate node stands in for an inlined reducer that this
+    /// variable-level graph has no node for, so `get_link_polarity` returns
+    /// `Unknown` for it. This substitutes the reducer subexpression (matched
+    /// by its canonical printed form, exactly the `AggNode::equation_text`
+    /// key `enumerate_agg_nodes` records) with a bare `Var(agg_name)` in
+    /// `consumer`'s equation and runs the ordinary static polarity analysis.
+    /// Returns `Unknown` if `consumer` has no AST or the subexpression isn't
+    /// found.
+    pub(crate) fn agg_consumer_polarity(
+        &self,
+        consumer: &Ident<Canonical>,
+        reducer_subexpr_text: &str,
+        agg_name: &Ident<Canonical>,
+    ) -> LinkPolarity {
+        let Some(consumer_var) = self.variables.get(consumer) else {
+            return LinkPolarity::Unknown;
+        };
+        let Some(ast) = consumer_var.ast() else {
+            return LinkPolarity::Unknown;
+        };
+        analyze_agg_consumer_polarity(ast, reducer_subexpr_text, agg_name, &self.variables)
     }
 
     /// Compute per-link polarity for all edges in the causal graph.

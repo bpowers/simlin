@@ -699,6 +699,25 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
     name.starts_with(AGG_NAME_PREFIX)
 }
 
+/// `true` when an aggregate node's reducer is monotone *non-decreasing* in
+/// each of its source elements: `SUM`, `MEAN`, `MIN`, `MAX`. Raising any
+/// one element can only raise (or leave unchanged) the result -- so a
+/// `source[d] → agg` hop through such a reducer has `Positive` polarity.
+/// `STDDEV` and `RANK` are not monotone (raising an element can move the
+/// result either way), so a hop through them stays `Unknown`-polarity.
+///
+/// Keyed on the canonical reducer text (`AggNode::equation_text`, which is
+/// `print_eqn` output -- function names lowercased, no space before `(`).
+/// Only the single-argument `MIN`/`MAX` forms are ever hoisted into an
+/// aggregate node, so a leading `min(` / `max(` is always the reducer form.
+pub(crate) fn agg_reducer_is_monotone(equation_text: &str) -> bool {
+    let t = equation_text.trim_start();
+    t.starts_with("sum(")
+        || t.starts_with("mean(")
+        || t.starts_with("min(")
+        || t.starts_with("max(")
+}
+
 /// Collect the canonical names of all model variables referenced (directly or
 /// via subscript) in `expr`, including inside nested builtins and index
 /// expressions.

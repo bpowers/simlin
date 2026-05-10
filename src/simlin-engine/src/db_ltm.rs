@@ -2837,6 +2837,87 @@ fn recover_cross_agg_loops(
     recovered
 }
 
+/// Recover the polarity of synthetic-aggregate-node hops in `loops` (GH #516).
+///
+/// The loop builders derive every link's polarity from the *variable-level*
+/// causal graph, but synthetic `$⁚ltm⁚agg⁚{n}` nodes exist only in the
+/// *element* graph -- so `analyze_link_polarity` finds no reference to the
+/// agg's name in either endpoint's equation and a hop into or out of an agg
+/// comes back `Unknown`, forcing every agg-traversing loop to `Undetermined`.
+/// For the common (monotone) reducers the polarity is derivable, so patch it
+/// here:
+///
+/// - `source[d] → agg`: `SUM`/`MEAN`/`MIN`/`MAX` are monotone non-decreasing
+///   in each source element (raising any one element raises-or-holds the
+///   result), so the hop is `Positive`. `STDDEV`/`RANK` are not monotone --
+///   left `Unknown`.
+/// - `agg → consumer`: the polarity of `consumer`'s equation with respect to
+///   the reducer subexpression, computed by substituting the reducer with the
+///   agg name and running ordinary static polarity analysis
+///   (`CausalGraph::agg_consumer_polarity`).
+///
+/// Any loop whose links change is re-classified via `calculate_polarity`.
+/// If anything was patched, loop IDs are re-assigned (the `r`/`b`/`u` prefix
+/// is polarity-derived).
+fn recover_agg_hop_polarities(
+    loops: &mut [crate::ltm::Loop],
+    var_graph: &crate::ltm::CausalGraph,
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) {
+    use crate::common::{Canonical, Ident};
+    use crate::ltm::LinkPolarity;
+
+    let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
+    // Canonicalize each synthetic agg's name once so it compares directly
+    // against the (canonical) `Link.from` / `Link.to` idents.
+    let synthetic: Vec<(Ident<Canonical>, &crate::ltm_agg::AggNode)> = aggs
+        .aggs
+        .iter()
+        .filter(|a| a.is_synthetic)
+        .map(|a| (Ident::new(a.name.as_str()), a))
+        .collect();
+    if synthetic.is_empty() {
+        return;
+    }
+
+    let mut any_patched = false;
+    for lp in loops.iter_mut() {
+        let mut patched = false;
+        for link in lp.links.iter_mut() {
+            if link.polarity != LinkPolarity::Unknown {
+                continue;
+            }
+            // `source[d] → agg`: the agg is this link's target.
+            if let Some((_, agg)) = synthetic.iter().find(|(name, _)| name == &link.to) {
+                if crate::ltm_agg::agg_reducer_is_monotone(&agg.equation_text) {
+                    link.polarity = LinkPolarity::Positive;
+                    patched = true;
+                }
+                continue;
+            }
+            // `agg → consumer`: the agg is this link's source.
+            if let Some((agg_ident, agg)) = synthetic.iter().find(|(name, _)| name == &link.from) {
+                let consumer = Ident::new(strip_subscript(link.to.as_str()));
+                let p = var_graph.agg_consumer_polarity(&consumer, &agg.equation_text, agg_ident);
+                if p != LinkPolarity::Unknown {
+                    link.polarity = p;
+                    patched = true;
+                }
+            }
+        }
+        if patched {
+            lp.polarity = var_graph.calculate_polarity(&lp.links);
+            any_patched = true;
+        }
+    }
+
+    if any_patched {
+        crate::ltm::assign_loop_ids(loops);
+    }
+}
+
 /// Unified LTM variable generation for any model (root or sub-model).
 ///
 /// Auto-detects sub-model behavior by checking for input ports with causal
@@ -3053,8 +3134,13 @@ pub fn model_ltm_variables(
             None
         } else {
             let var_graph = causal_graph_with_modules(db, model, project);
-            let detected =
+            let mut detected =
                 build_loops_from_tiered(tiered, &var_graph, source_vars, db, project, dm_dims);
+            // GH #516: hops into/out of synthetic `$⁚ltm⁚agg⁚{n}` nodes come
+            // back Unknown-polarity from the loop builders (the variable-level
+            // graph has no agg node); recover the derivable cases here so
+            // agg-traversing loops aren't all forced to Undetermined.
+            recover_agg_hop_polarities(&mut detected, &var_graph, db, model, project);
             Some(detected)
         }
     } else {
