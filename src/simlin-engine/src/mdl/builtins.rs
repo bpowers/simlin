@@ -28,9 +28,27 @@ fn strip_quotes(s: &str) -> &str {
     }
 }
 
-/// Canonicalize a name using XMUtil's ToLowerSpace algorithm.
+/// Returns true if the name carries a forced line break written as the literal
+/// two-character `\n` or `\r` Vensim uses inside a quoted name.
+#[inline]
+fn has_literal_break(s: &str) -> bool {
+    s.contains("\\n") || s.contains("\\r")
+}
+
+/// Replace a literal `\n`/`\r` (backslash + letter) with the corresponding real
+/// control character, so the surrounding whitespace handling subsumes it.
+fn unescape_literal_breaks(s: &str) -> String {
+    s.replace("\\n", "\n").replace("\\r", "\r")
+}
+
+/// Canonicalize a name using XMUtil's ToLowerSpace algorithm, with one addition:
+/// a forced line break written as the literal two-character `\n`/`\r` Vensim
+/// uses inside a quoted name is treated as whitespace, the way Vensim (and
+/// `crate::common::canonicalize`) treat it -- so a reference to the variable,
+/// however it spells the break (or omits it), still matches its definition.
 ///
-/// This follows the C++ implementation in `SymbolNameSpace.cpp:81-123`:
+/// The base algorithm follows the C++ implementation in
+/// `SymbolNameSpace.cpp:81-123`:
 /// 1. Strip surrounding quotes if present
 /// 2. Skip leading whitespace (space, underscore, tab, newline, CR)
 /// 3. For each character:
@@ -42,6 +60,20 @@ fn strip_quotes(s: &str) -> &str {
 pub fn to_lower_space(s: &str) -> String {
     let s = strip_quotes(s);
 
+    // Names containing a literal `\n`/`\r` are rare; normalize them to real
+    // control characters first so the common (break-free) path stays on the
+    // allocation-free byte fast path below.
+    if has_literal_break(s) {
+        let unescaped = unescape_literal_breaks(s);
+        return to_lower_space_normalized(&unescaped);
+    }
+
+    to_lower_space_normalized(s)
+}
+
+/// `to_lower_space` minus the quote-stripping and literal-break normalization
+/// (the caller has already done both).
+fn to_lower_space_normalized(s: &str) -> String {
     // ASCII fast path: all whitespace and escaped-underscore checks involve
     // only ASCII characters, so we can process entirely at the byte level
     // and avoid char decoding and Peekable overhead.
@@ -165,12 +197,23 @@ fn to_lower_space_unicode(s: &str) -> String {
 
 /// Compare a name against an already-canonicalized target without allocating.
 ///
-/// Equivalent to `to_lower_space(s) == target` but avoids heap allocation.
-/// The `target` must already be in canonical form (lowercase, single spaces, no
+/// Equivalent to `to_lower_space(s) == target` but avoids heap allocation
+/// (except for the rare name carrying a literal `\n`/`\r` break, which is
+/// normalized first so this stays in sync with `to_lower_space`). The `target`
+/// must already be in canonical form (lowercase, single spaces, no
 /// leading/trailing whitespace).
 pub fn eq_lower_space(s: &str, target: &str) -> bool {
     let s = strip_quotes(s);
 
+    if has_literal_break(s) {
+        let unescaped = unescape_literal_breaks(s);
+        return eq_lower_space_normalized(&unescaped, target);
+    }
+    eq_lower_space_normalized(s, target)
+}
+
+/// `eq_lower_space` minus the quote-stripping and literal-break normalization.
+fn eq_lower_space_normalized(s: &str, target: &str) -> bool {
     let mut chars = s.chars().peekable();
     let mut target_chars = target.chars();
     let mut pending_space = false;
@@ -481,6 +524,10 @@ mod tests {
             "__foo__",
             "   ",
             "foo\\_bar",
+            "\"Maximum\\nfishery size\"",
+            "a\\nb",
+            "a \\n b",
+            "a\\rb",
             "\"foo\"",
             "\"MY_VAR\"",
             "",
@@ -543,6 +590,31 @@ mod tests {
         // Escaped underscore \_ should be preserved literally
         assert_eq!(to_lower_space("foo\\_bar"), "foo\\_bar");
         assert_eq!(to_lower_space("a\\_b\\_c"), "a\\_b\\_c");
+    }
+
+    #[test]
+    fn test_to_lower_space_literal_line_break() {
+        // A forced line break inside a quoted name -- written as the literal
+        // two-character `\n` (backslash + 'n'), or `\r` -- is whitespace for
+        // naming purposes: it collapses with adjacent whitespace just like a
+        // space, so a name with a break canonicalizes the same as one without.
+        assert_eq!(
+            to_lower_space("\"Maximum\\nfishery size\""),
+            "maximum fishery size"
+        );
+        assert_eq!(
+            to_lower_space("Maximum\\nfishery size"),
+            "maximum fishery size"
+        );
+        assert_eq!(
+            to_lower_space("Maximum\\nfishery size"),
+            to_lower_space("Maximum fishery size")
+        );
+        assert_eq!(to_lower_space("a\\nb"), "a b");
+        assert_eq!(to_lower_space("a \\n b"), "a b");
+        assert_eq!(to_lower_space("a\\rb"), "a b");
+        // Distinct from an escaped underscore, which survives.
+        assert_eq!(to_lower_space("a\\_b"), "a\\_b");
     }
 
     #[test]

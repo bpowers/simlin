@@ -2627,26 +2627,28 @@ fn sketch_roundtrip_preserves_causal_links_to_flows_without_sketch_compat() {
 }
 
 #[test]
-fn sketch_name_collapses_display_newlines_and_quotes_specials() {
-    // A literal `\n` (backslash + 'n') -- the form XMILE name attributes use --
-    // and a real newline both collapse to a space, matching the equation
-    // section. Names with characters that would break a comma-delimited record
-    // get quoted, the way Vensim writes them.
+fn sketch_name_preserves_display_newlines_and_quotes_specials() {
+    // A forced break in a display name -- the literal `\n` (backslash + 'n')
+    // XMILE name attributes use, or a real newline -- is kept and the name is
+    // quoted the way Vensim writes a multi-line variable name in a sketch
+    // record (`"Maximum\nfishery size"`). Underscores still become spaces, and
+    // names with characters that would break a comma-delimited record are
+    // quoted too.
     assert_eq!(
         format_sketch_name("Maximum\\nfishery size"),
-        "Maximum fishery size"
+        "\"Maximum\\nfishery size\""
     );
     assert_eq!(
         format_sketch_name("Effect of fish\non catch"),
-        "Effect of fish on catch"
+        "\"Effect of fish\\non catch\""
     );
     assert_eq!(format_sketch_name("max_fishery_size"), "max fishery size");
     assert_eq!(
         format_sketch_name("Aux with $peC!@| characters"),
         "\"Aux with $peC!@| characters\""
     );
-    // ...and the equation section uses the same collapsed spelling, so the
-    // sketch record and the variable definition agree.
+    // ...and the equation section spells it the same way, so the sketch record
+    // and the variable definition agree (which is what lets Vensim link them).
     let mut display_names = HashMap::new();
     display_names.insert(
         "maximum_fishery_size".to_string(),
@@ -2654,16 +2656,23 @@ fn sketch_name_collapses_display_newlines_and_quotes_specials() {
     );
     assert_eq!(
         display_name_for_ident("maximum_fishery_size", &display_names),
-        "Maximum fishery size",
+        "\"Maximum\\nfishery size\"",
+    );
+    // A real newline that somehow reaches the display map is normalized to the
+    // literal form on the way out.
+    display_names.insert("a".to_string(), "Line one\nLine two".to_string());
+    assert_eq!(
+        display_name_for_ident("a", &display_names),
+        "\"Line one\\nLine two\"",
     );
 }
 
 #[test]
 fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
-    // Regression: a view element whose name contains a display newline used to
-    // be written verbatim (`Maximum\nfishery size`), which did not match the
-    // equation-section spelling (`Maximum fishery size`), so the re-parser --
-    // and Vensim -- dropped the orphaned sketch element.
+    // A view element whose name contains a forced break is written as the
+    // quoted `"Maximum\nfishery size"` form Vensim uses, in both the sketch
+    // record and the equation section, so the re-parser -- and Vensim -- can
+    // still link them and Vensim renders the modeler's two-line layout.
     let maximum = Variable::Aux(Aux {
         ident: "maximum_fishery_size".to_owned(),
         equation: Equation::Scalar("4000".to_owned()),
@@ -2729,10 +2738,15 @@ fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
     let project = make_project(vec![model]);
 
     let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
-    // The sketch record must use the collapsed name, matching the equation LHS.
+    // The sketch record must spell the name the same way the equation LHS does
+    // -- quoted, with the break kept as the literal `\n` Vensim uses.
     assert!(
-        mdl.contains("10,1,Maximum fishery size,"),
-        "sketch record should use the newline-collapsed name; got:\n{mdl}"
+        mdl.contains("10,1,\"Maximum\\nfishery size\","),
+        "sketch record should use the quoted, break-preserving name; got:\n{mdl}"
+    );
+    assert!(
+        mdl.contains("\"Maximum\\nfishery size\" = 4000"),
+        "equation LHS should use the same quoted name; got:\n{mdl}"
     );
 
     let reparsed = crate::mdl::parse_mdl(&mdl).expect("written MDL should parse");
@@ -2752,6 +2766,20 @@ fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
     assert!(
         aux_idents.iter().any(|i| i == "fish_density"),
         "view element for fish_density should survive the roundtrip; got {aux_idents:?}"
+    );
+
+    // ...and a second export still spells it the quoted, break-preserving way:
+    // the re-parser's variable ident drops the break (`to_lower_space` treats a
+    // literal `\n` as whitespace), so the display-name lookup that recovers the
+    // break and casing keeps working.
+    let mdl2 = crate::mdl::project_to_mdl(&reparsed).expect("re-write should succeed");
+    assert!(
+        mdl2.contains("\"Maximum\\nfishery size\","),
+        "second export should keep the quoted, break-preserving sketch name; got:\n{mdl2}"
+    );
+    assert!(
+        mdl2.contains("\"Maximum\\nfishery size\" = 4000"),
+        "second export should keep the quoted equation LHS; got:\n{mdl2}"
     );
 }
 
@@ -4081,9 +4109,10 @@ fn default_aux_size_sizes_multiline_names_to_their_lines() {
 
 #[test]
 fn aux_without_compat_sizes_multiline_name() {
-    // The aux name still renders collapsed in the record ("Maximum fishery
-    // size"); only the box dimensions grow to fit the modeler's two lines
-    // (12 chars * 6px = 72 wide, two 11px lines = 22 tall).
+    // The aux name keeps its forced break, quoted the way Vensim writes it
+    // (`"Maximum\nfishery size"`), and the box grows to fit the modeler's two
+    // lines (widest line "fishery size" -> 12 chars * 6px = 72 wide, two 11px
+    // lines = 22 tall).
     let aux = view_element::Aux {
         name: "Maximum\\nfishery size".to_string(),
         uid: 1,
@@ -4095,8 +4124,8 @@ fn aux_without_compat_sizes_multiline_name() {
     let mut buf = String::new();
     write_aux_element(&mut buf, &aux);
     assert_eq!(
-        buf, "10,1,Maximum fishery size,100,200,72,22,8,3,0,0,-1,0,0,0",
-        "multi-line aux name should size the box to its lines: {buf}"
+        buf, "10,1,\"Maximum\\nfishery size\",100,200,72,22,8,3,0,0,-1,0,0,0",
+        "multi-line aux name should be quoted and the box sized to its lines: {buf}"
     );
 }
 
@@ -4274,7 +4303,8 @@ fn alias_default_dimensions_without_compat() {
 #[test]
 fn alias_without_compat_sizes_multiline_ghosted_name() {
     // A ghost shows the ghosted variable's name; if that name has a forced
-    // break, the alias box is sized to those lines the same way an aux box is.
+    // break, the alias keeps it (quoted) and the box is sized to those lines
+    // the same way an aux box is.
     let alias = view_element::Alias {
         uid: 10,
         alias_of_uid: 1,
@@ -4288,8 +4318,8 @@ fn alias_without_compat_sizes_multiline_ghosted_name() {
     let mut buf = String::new();
     write_alias_element(&mut buf, &alias, &name_map);
     assert!(
-        buf.starts_with("10,10,Maximum fishery size,200,300,72,22,8,2,"),
-        "multi-line ghosted name should size the alias box to its lines: {buf}"
+        buf.starts_with("10,10,\"Maximum\\nfishery size\",200,300,72,22,8,2,"),
+        "multi-line ghosted name should be quoted and the box sized to its lines: {buf}"
     );
 }
 
