@@ -21,17 +21,27 @@
 //! salsa-tracked and fully deterministic: variables are visited in canonical
 //! sorted order, each variable's AST is walked left-to-right depth-first, and
 //! synthetic names are assigned `$⁚ltm⁚agg⁚0`, `1`, ... in first-encounter
-//! order. AST-identical reducer subexpressions dedupe to a single agg node
-//! (canonicalization is via printed equation text, since `Expr2` is not `Eq`).
+//! order. AST-identical *synthetic* reducer subexpressions dedupe to a single
+//! agg node (canonicalization is via printed equation text, since `Expr2` is
+//! not `Eq`). Variable-backed aggs are never deduped (see below).
 //!
 //! Two kinds of aggregate node:
 //! - **Synthetic** (`is_synthetic == true`): the reducer is a *sub-expression*
 //!   of a larger equation (`share[r] = pop[r] / SUM(pop[*])`). A
-//!   `$⁚ltm⁚agg⁚{n}` auxiliary is minted to hold its value.
+//!   `$⁚ltm⁚agg⁚{n}` auxiliary is minted to hold its value. Two inline uses
+//!   of the same reducer text share one synthetic node (dedup by canonical
+//!   text via `synthetic_by_key`).
 //! - **Variable-backed** (`is_synthetic == false`): the reducer is the
 //!   *entire* dt-equation of a scalar or apply-to-all variable
 //!   (`total_population = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`).
-//!   That variable *is* the aggregate node; no synthetic is minted.
+//!   That variable *is* the aggregate node; no synthetic is minted. Each such
+//!   variable is its own distinct agg node -- variable-backed aggs are never
+//!   deduped and never reused by an inline use of the same reducer text (an
+//!   inline use must get its own *synthetic* node, since the element-graph
+//!   reroute and the link-score emitter both filter to `is_synthetic` aggs;
+//!   reusing the variable-backed node would silently leave the inline reducer
+//!   on the conservative direct-scoring path, with the outcome depending on
+//!   whether the whole-RHS reducer happened to be declared first).
 //!
 //! Cases deliberately *not* recognized here yet (the conservative
 //! full-cross-product element graph is left in place; tracked as tech debt):
@@ -99,28 +109,44 @@ pub struct AggNode {
 /// The result of enumerating every aggregate node in a model.
 ///
 /// Deterministic by construction so salsa caches it stably: `aggs` is in
-/// first-encounter order over the canonical-sorted variable list, `by_key`
-/// maps the canonical reducer text to an index in `aggs`, and `by_var` maps
-/// each variable's canonical name to the indices of the aggs that appear in
-/// its equation (so the element-graph reroute can ask "which agg of `to`
-/// reads `from`?").
+/// first-encounter order over the canonical-sorted variable list,
+/// `synthetic_by_key` maps the canonical reducer text to the index of the
+/// *synthetic* agg minted for it, and `by_var` maps each variable's
+/// canonical name to the indices of the aggs that appear in its equation
+/// (so the element-graph reroute can ask "which agg of `to` reads `from`?").
+///
+/// Dedup-by-key applies to *synthetic* aggs only. Two inline uses of the
+/// same reducer text collapse to one `$⁚ltm⁚agg⁚{n}` node. A *variable-
+/// backed* agg (the whole dt-equation of a scalar/A2A variable is exactly
+/// one reducer) is never deduped -- each such variable genuinely is its own
+/// aggregate node, so two whole-RHS reducers with identical text yield two
+/// distinct variable-backed aggs, and an inline use of a reducer never
+/// reuses a variable-backed agg of the same text (which would otherwise be
+/// filtered out by the `is_synthetic` checks downstream, leaving the inline
+/// reducer on the conservative direct-scoring path -- a name-ordering bug).
 #[derive(Clone, Debug, PartialEq, Eq, Default, salsa::Update)]
 pub struct AggNodesResult {
     /// Aggregate nodes in first-encounter (deterministic) order.
     pub aggs: Vec<AggNode>,
-    /// Canonical reducer text -> index into `aggs`.
-    pub by_key: HashMap<String, usize>,
+    /// Canonical reducer text -> index into `aggs` of the *synthetic* agg
+    /// minted for that text. Variable-backed aggs do not participate.
+    pub synthetic_by_key: HashMap<String, usize>,
     /// Variable canonical name -> indices into `aggs` of the aggregate
-    /// subexpressions occurring in that variable's dt-equation. An agg that
-    /// appears in two variables' equations (AST-identical → deduped) is
-    /// referenced from both variables' entries.
+    /// subexpressions occurring in that variable's dt-equation (both
+    /// synthetic and variable-backed). A synthetic agg that appears in two
+    /// variables' equations (AST-identical → deduped) is referenced from
+    /// both variables' entries.
     pub by_var: HashMap<String, Vec<usize>>,
 }
 
 impl AggNodesResult {
-    /// Look up an aggregate node by its canonical reducer text.
+    /// Look up the *synthetic* aggregate node minted for a canonical
+    /// reducer text. Returns `None` for a text that only ever appears as a
+    /// variable's whole dt-equation (variable-backed aggs are not keyed
+    /// here -- look them up via [`Self::aggs_in_var`] on the owning
+    /// variable instead).
     pub fn agg_for_key(&self, key: &str) -> Option<&AggNode> {
-        self.by_key.get(key).map(|&i| &self.aggs[i])
+        self.synthetic_by_key.get(key).map(|&i| &self.aggs[i])
     }
 
     /// Iterate the aggregate nodes occurring in `var_name`'s dt-equation.
@@ -462,8 +488,19 @@ enum AggKind {
     },
 }
 
-/// Register an aggregate node for `key` (canonical reducer text), deduping on
-/// the key and recording the `owner_var` -> agg-index association.
+/// Register an aggregate node for `key` (canonical reducer text) and record
+/// the `owner_var` -> agg-index association.
+///
+/// Synthetic aggs dedup on `key` (two inline uses of the same reducer
+/// collapse to one `$⁚ltm⁚agg⁚{n}`). Variable-backed aggs are never deduped
+/// -- each whole-RHS-reducer variable is its own distinct agg node, and an
+/// inline use never reuses a variable-backed agg of the same text (that
+/// would leave the inline reducer off the synthetic-agg path the downstream
+/// `is_synthetic` filters require).
+///
+/// Determinism: `next_synthetic_n` is incremented only on a *new* synthetic
+/// mint, in first-encounter order over the canonical-sorted variable list,
+/// so two consumers walking the same ASTs see identical names.
 fn register_agg(
     result: &mut AggNodesResult,
     next_synthetic_n: &mut usize,
@@ -472,33 +509,43 @@ fn register_agg(
     kind: AggKind,
     source_vars: Vec<String>,
 ) {
-    let idx = if let Some(&existing) = result.by_key.get(key) {
-        existing
-    } else {
-        let (name, result_dims, is_synthetic) = match kind {
-            AggKind::Synthetic => {
+    let mut sorted_sources = source_vars;
+    sorted_sources.sort();
+    sorted_sources.dedup();
+    let idx = match kind {
+        AggKind::Synthetic => {
+            if let Some(&existing) = result.synthetic_by_key.get(key) {
+                existing
+            } else {
                 let name = synthetic_agg_name(*next_synthetic_n);
                 *next_synthetic_n += 1;
-                (name, vec![], true)
+                result.aggs.push(AggNode {
+                    name,
+                    equation_text: key.to_string(),
+                    source_vars: sorted_sources,
+                    result_dims: vec![],
+                    is_synthetic: true,
+                });
+                let idx = result.aggs.len() - 1;
+                result.synthetic_by_key.insert(key.to_string(), idx);
+                idx
             }
-            AggKind::VariableBacked {
-                var_name,
-                result_dims,
-            } => (var_name, result_dims, false),
-        };
-        let mut sorted_sources = source_vars;
-        sorted_sources.sort();
-        sorted_sources.dedup();
-        result.aggs.push(AggNode {
-            name,
-            equation_text: key.to_string(),
-            source_vars: sorted_sources,
+        }
+        AggKind::VariableBacked {
+            var_name,
             result_dims,
-            is_synthetic,
-        });
-        let idx = result.aggs.len() - 1;
-        result.by_key.insert(key.to_string(), idx);
-        idx
+        } => {
+            // Each whole-RHS-reducer variable is its own aggregate node;
+            // never deduped, and not entered in `synthetic_by_key`.
+            result.aggs.push(AggNode {
+                name: var_name,
+                equation_text: key.to_string(),
+                source_vars: sorted_sources,
+                result_dims,
+                is_synthetic: false,
+            });
+            result.aggs.len() - 1
+        }
     };
     let entry = result.by_var.entry(owner_var.to_string()).or_default();
     if !entry.contains(&idx) {
@@ -732,20 +779,19 @@ mod tests {
             "whole-RHS scalar reducer must not mint a synthetic agg; got: {:?}",
             result.aggs
         );
-        // The reducer maps to a variable-backed agg named `total_population`.
+        // The reducer maps to a variable-backed agg named `total_population`,
+        // owned by `total_population`'s equation. (Variable-backed aggs are
+        // resolved via `aggs_in_var`, not `agg_for_key` -- the latter is
+        // synthetic-only, since two different scalars can each be `SUM(pop[*])`.)
         let agg = result
-            .agg_for_key("sum(population[*])")
-            .expect("expected an agg keyed by sum(population[*])");
-        assert_eq!(agg.name, "total_population");
+            .aggs_in_var("total_population")
+            .find(|a| a.name == "total_population")
+            .expect("expected a variable-backed agg owned by `total_population`");
         assert!(!agg.is_synthetic);
         assert_eq!(agg.source_vars, vec!["population".to_string()]);
         assert!(agg.result_dims.is_empty());
-        // `total_population`'s equation owns this agg.
-        assert!(
-            result
-                .aggs_in_var("total_population")
-                .any(|a| a.name == "total_population"),
-        );
+        // `agg_for_key` resolves only synthetic aggs, so it must not find this one.
+        assert!(result.agg_for_key("sum(population[*])").is_none());
     }
 
     /// AC4.3 (arrayed variant): `agg[D1] = SUM(matrix[D1,*])` is whole-RHS, so
@@ -836,6 +882,167 @@ mod tests {
                 .aggs_in_var("share")
                 .any(|a| a.name == "$\u{205A}ltm\u{205A}agg\u{205A}0")
         );
+    }
+
+    /// P2 regression: an inline reducer (`share[r] = pop[r] / SUM(pop[*])`,
+    /// which must mint a *synthetic* agg) sharing canonical text with a
+    /// *whole-RHS* reducer of the same shape (`denom = SUM(pop[*])`, which
+    /// is *variable-backed*) must NOT reuse the variable-backed agg --
+    /// regardless of declaration order. Dedup-by-key applies to synthetic
+    /// aggs only; variable-backed aggs are never deduped (a whole-RHS
+    /// reducer variable is its own distinct agg node). Before the fix, with
+    /// `denom` visited first (canonical-sorted: `denom` < `share`), the
+    /// inline use found `by_key["sum(pop[*])"]` already populated by `denom`
+    /// and reused it, so `share` got no synthetic agg and its reducer fell
+    /// back to the conservative direct path.
+    #[test]
+    fn inline_reducer_does_not_reuse_variable_backed_agg() {
+        let project = TestProject::new("inline_vs_var_backed")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("pop[Region]", "100")
+            // `denom` (canonical-sorted first) is a whole-RHS reducer ->
+            // variable-backed agg named `denom`.
+            .scalar_aux("denom", "SUM(pop[*])")
+            // `share` (visited after `denom`) uses the same reducer text as
+            // a sub-expression -> must mint its own synthetic agg.
+            .array_aux("share[Region]", "pop / SUM(pop[*])");
+
+        let result = agg_nodes(&project);
+
+        // The variable-backed agg `denom` exists and is not synthetic.
+        // (`agg_for_key` now resolves only synthetic aggs, so look up the
+        // variable-backed one through `by_var` instead.)
+        let denom_agg = result
+            .aggs_in_var("denom")
+            .find(|a| a.name == "denom")
+            .expect("expected a variable-backed agg owned by `denom`");
+        assert!(
+            !denom_agg.is_synthetic,
+            "`denom`'s agg must be variable-backed"
+        );
+        assert_eq!(denom_agg.equation_text, "sum(pop[*])");
+
+        // `share` must own a *synthetic* agg with the same reducer text.
+        let share_agg = result
+            .aggs_in_var("share")
+            .find(|a| a.is_synthetic)
+            .expect("expected a synthetic agg owned by `share`");
+        assert_eq!(share_agg.name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
+        assert_eq!(share_agg.equation_text, "sum(pop[*])");
+        assert_eq!(share_agg.source_vars, vec!["pop".to_string()]);
+        // `agg_for_key` resolves the reducer text to the *synthetic* agg.
+        assert_eq!(
+            result.agg_for_key("sum(pop[*])").map(|a| a.name.as_str()),
+            Some("$\u{205A}ltm\u{205A}agg\u{205A}0")
+        );
+
+        // There must be exactly one synthetic agg and exactly one
+        // variable-backed agg -- two distinct nodes despite identical text.
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        let var_backed_aggs: Vec<&AggNode> =
+            result.aggs.iter().filter(|a| !a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "expected one synthetic agg, got: {:?}",
+            result.aggs
+        );
+        assert_eq!(
+            var_backed_aggs.len(),
+            1,
+            "expected one variable-backed agg, got: {:?}",
+            result.aggs
+        );
+    }
+
+    /// P2 regression (reverse declaration order): the same model as
+    /// `inline_reducer_does_not_reuse_variable_backed_agg` but built so that
+    /// the inline-use variable would be visited first if order mattered.
+    /// `enumerate_agg_nodes` visits variables in canonical-sorted order, so
+    /// `denom` < `share` always; this test instead uses different names
+    /// (`a_share` < `z_denom`) to confirm the synthetic agg is minted when
+    /// the inline use is encountered *before* the whole-RHS reducer.
+    #[test]
+    fn inline_reducer_mints_synthetic_when_visited_before_variable_backed() {
+        let project = TestProject::new("inline_first")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("pop[Region]", "100")
+            // `a_share` (canonical-sorted first) uses the reducer inline.
+            .array_aux("a_share[Region]", "pop / SUM(pop[*])")
+            // `z_denom` (visited after) is the whole-RHS reducer.
+            .scalar_aux("z_denom", "SUM(pop[*])");
+
+        let result = agg_nodes(&project);
+
+        let share_agg = result
+            .aggs_in_var("a_share")
+            .find(|a| a.is_synthetic)
+            .expect("expected a synthetic agg owned by `a_share`");
+        assert_eq!(share_agg.name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
+        assert_eq!(share_agg.equation_text, "sum(pop[*])");
+
+        let denom_agg = result
+            .aggs_in_var("z_denom")
+            .find(|a| a.name == "z_denom")
+            .expect("expected a variable-backed agg owned by `z_denom`");
+        assert!(!denom_agg.is_synthetic);
+
+        assert_eq!(result.aggs.iter().filter(|a| a.is_synthetic).count(), 1);
+        assert_eq!(result.aggs.iter().filter(|a| !a.is_synthetic).count(), 1);
+    }
+
+    /// Two whole-RHS reducers with *identical* canonical text are two
+    /// distinct variable-backed agg nodes (one per variable) -- never
+    /// deduped, because each variable genuinely is its own aggregate.
+    #[test]
+    fn two_whole_rhs_reducers_same_text_are_distinct_aggs() {
+        let project = TestProject::new("two_var_backed")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("pop[Region]", "100")
+            .scalar_aux("total_a", "SUM(pop[*])")
+            .scalar_aux("total_b", "SUM(pop[*])");
+
+        let result = agg_nodes(&project);
+
+        let var_backed: Vec<&AggNode> = result.aggs.iter().filter(|a| !a.is_synthetic).collect();
+        assert_eq!(
+            var_backed.len(),
+            2,
+            "two whole-RHS reducers must be two distinct variable-backed aggs; got: {:?}",
+            result.aggs
+        );
+        let names: std::collections::HashSet<&str> =
+            var_backed.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains("total_a"), "missing total_a: {names:?}");
+        assert!(names.contains("total_b"), "missing total_b: {names:?}");
+        // No synthetic aggs (neither reducer is a sub-expression).
+        assert_eq!(result.aggs.iter().filter(|a| a.is_synthetic).count(), 0);
+    }
+
+    /// Two *inline* uses of the same reducer text still dedupe to one
+    /// synthetic agg (the synthetic dedup-by-key path is preserved).
+    #[test]
+    fn two_inline_uses_same_text_dedupe_to_one_synthetic() {
+        let project = TestProject::new("two_inline")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("share_a[Region]", "pop / SUM(pop[*])")
+            .array_aux("share_b[Region]", "pop * 2 / SUM(pop[*])");
+
+        let result = agg_nodes(&project);
+
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "two inline uses of the same reducer must dedupe to one synthetic agg; got: {:?}",
+            result.aggs
+        );
+        assert_eq!(synthetic[0].name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
+        // Both variables reference the same deduped synthetic agg index.
+        let a_idx = result.by_var.get("share_a").cloned().unwrap_or_default();
+        let b_idx = result.by_var.get("share_b").cloned().unwrap_or_default();
+        assert_eq!(a_idx, b_idx);
     }
 
     /// AC4.4 (nested reducers): `x = SUM(a[*]) / SUM(b[*])` mints two distinct
@@ -972,7 +1179,7 @@ mod tests {
             r1.aggs, r2.aggs,
             "enumeration must be deterministic regardless of declaration order"
         );
-        assert_eq!(r1.by_key, r2.by_key);
+        assert_eq!(r1.synthetic_by_key, r2.synthetic_by_key);
         // Specifically: SUM(a[*]) -> agg 0, SUM(b[*]) -> agg 1 (a < b, and
         // within q's equation SUM(a[*]) precedes SUM(b[*])).
         assert_eq!(
@@ -1000,7 +1207,7 @@ mod tests {
             "model without reducers must have no aggs; got: {:?}",
             result.aggs
         );
-        assert!(result.by_key.is_empty());
+        assert!(result.synthetic_by_key.is_empty());
         assert!(result.by_var.is_empty());
     }
 

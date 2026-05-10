@@ -6844,3 +6844,156 @@ fn test_mixed_reducer_and_dynamic_index_keeps_direct_reference() {
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("should simulate");
 }
+
+/// Build a model with both a whole-RHS reducer `denom = SUM(pop[*])`
+/// (variable-backed agg) and an inline use of the same reducer text
+/// `share[r] = pop[r] / SUM(pop[*])` (which must mint a *synthetic* agg).
+/// `denom` is canonical-sorted before `share`, so the variable-backed agg
+/// is registered first -- the case that used to make the inline use reuse
+/// it. A feedback flow `grow[r] = share[r] * pop[r] * c` feeds `pop`, so
+/// `share`'s reducer is part of a loop.
+fn build_var_backed_and_inline_same_reducer_model() -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: "var_backed_and_inline".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    equation: Equation::ApplyToAll(vec!["Region".to_string()], "100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["grow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // `denom` -- canonical-sorted before `grow` and `share`, so
+                // its variable-backed agg is registered first.
+                Variable::Aux(datamodel::Aux {
+                    ident: "denom".to_string(),
+                    equation: Equation::Scalar("SUM(pop[*])".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "grow".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "share * pop * 0.001".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "share".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "pop / SUM(pop[*])".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Regression (P2): an inline reducer (`share[r] = pop[r] / SUM(pop[*])`)
+/// must get its own synthetic `$⁚ltm⁚agg⁚{n}` node -- and the agg aux +
+/// both link-score halves in `model_ltm_variables` -- even when a
+/// whole-RHS reducer of identical text (`denom = SUM(pop[*])`) is declared
+/// first. Before the fix, the inline use reused `denom`'s variable-backed
+/// agg (deduped purely by reducer text), so no synthetic was minted and the
+/// downstream `is_synthetic` filters left `share`'s reducer on the old
+/// direct-wildcard scoring path.
+#[test]
+fn test_inline_reducer_gets_synthetic_agg_despite_var_backed_sibling() {
+    let project = build_var_backed_and_inline_same_reducer_model();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+    let has_var = |name: &str| -> bool { ltm_vars.vars.iter().any(|v| v.name == name) };
+    let var_names: Vec<&str> = ltm_vars.vars.iter().map(|v| v.name.as_str()).collect();
+
+    // The synthetic agg aux for `share`'s inline reducer.
+    assert!(
+        has_var(agg),
+        "expected synthetic agg aux {agg} for share's inline SUM; vars: {var_names:?}"
+    );
+    // Its source -> agg link scores (one per source element).
+    for d in &["nyc", "boston"] {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}pop[{d}]\u{2192}{agg}");
+        assert!(
+            has_var(&name),
+            "expected source->agg link score {name:?}; vars: {var_names:?}"
+        );
+    }
+    // Its agg -> target link scores (one per `share` element, since `share`
+    // is arrayed).
+    for r in &["nyc", "boston"] {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}share[{r}]");
+        assert!(
+            has_var(&name),
+            "expected agg->target link score {name:?}; vars: {var_names:?}"
+        );
+    }
+    // The `pop[r]` bare numerator in `share[r] = pop[r] / SUM(pop[*])` keeps
+    // its own (non-reducer) link score, named by the canonical Bare form --
+    // it is *not* swallowed by the synthetic-agg routing.
+    assert!(
+        has_var("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share"),
+        "expected the bare pop->share link score for share's numerator; vars: {var_names:?}"
+    );
+    // Sanity: only one synthetic agg was minted (the inline `SUM` in
+    // `share`), and `denom`'s whole-RHS `SUM(pop[*])` did not produce a
+    // *second* synthetic -- it is a variable-backed agg (the variable
+    // itself), so it never appears as a `$⁚ltm⁚agg⁚{n}` aux.
+    assert!(
+        !has_var("$\u{205A}ltm\u{205A}agg\u{205A}1"),
+        "denom's whole-RHS reducer must be variable-backed, not a second synthetic agg; vars: {var_names:?}"
+    );
+
+    // The model compiles and simulates with LTM enabled.
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("should compile");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
+}
