@@ -6650,3 +6650,197 @@ fn test_dynamic_index_into_scalar_link_score_nondegenerate() {
         "arr -> total link score at step 2 expected 1.0, got {at_step2}"
     );
 }
+
+/// Build a model where the *same* arrayed stock `pop` is referenced from a
+/// scalar aux `x` two ways: inside a hoisted full reducer (`SUM(pop[*])`,
+/// which Phase 5 routes through `$⁚ltm⁚agg⁚0`) *and* via a bare dynamic
+/// index (`pop[idx]`, which is NOT inside any reducer and so stays a
+/// conservative direct dependency). A feedback flow `grow[Region] = x * c`
+/// feeds `pop`, so both a reducer-routed cycle (`pop[d] → agg → x →
+/// grow[d] → pop[d]`) and a direct cycle (`pop[d] → x → grow[d] → pop[d]`)
+/// exist.
+///
+/// `idx` is a plain scalar aux (not a `Region` element name), so `pop[idx]`
+/// classifies as `RefShape::DynamicIndex` at the `Expr2` level regardless
+/// of its constant value.
+fn build_mixed_reducer_and_dynamic_index_model() -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: "mixed_reducer_dyn_index".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    equation: Equation::ApplyToAll(vec!["Region".to_string()], "100".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["grow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "idx".to_string(),
+                    equation: Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "x".to_string(),
+                    equation: Equation::Scalar("SUM(pop[*]) + pop[idx]".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "grow".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "x * 0.001".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Regression (P2): a target that references a source *both* through a
+/// hoisted reducer (`SUM(pop[*])`) *and* through a direct non-reducer
+/// reference (`pop[idx]`, a dynamic index) must keep the direct reference's
+/// conservative element edges and its conservative link score -- only the
+/// reducer-owned reference site should route through the `$⁚ltm⁚agg⁚{n}`
+/// node.
+///
+/// Before the fix, the element-graph reroute keyed `route_through_agg`
+/// purely on `RefShape::Wildcard | RefShape::DynamicIndex` (so the *direct*
+/// `pop[idx]` site, which is `DynamicIndex`, was also rerouted through the
+/// agg), and `emit_per_shape_link_scores(skip_reducer_shapes = true)`
+/// dropped the `DynamicIndex` shape (so the `pop→x` link score vanished).
+#[test]
+fn test_mixed_reducer_and_dynamic_index_keeps_direct_reference() {
+    let project = build_mixed_reducer_and_dynamic_index_model();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // ---- element graph: agg routing for the SUM, direct edges for pop[idx] ----
+    let elem_edges = model_element_causal_edges(&db, source_model, sync.project);
+    let has_edge = |from: &str, to: &str| -> bool {
+        elem_edges.edges.get(from).is_some_and(|ts| ts.contains(to))
+    };
+    for d in &["nyc", "boston"] {
+        assert!(
+            has_edge(&format!("pop[{d}]"), agg),
+            "expected pop[{d}] -> {agg} (SUM reduction); edges: {:?}",
+            elem_edges.edges
+        );
+    }
+    assert!(
+        has_edge(agg, "x"),
+        "expected {agg} -> x (agg broadcast into scalar target); edges: {:?}",
+        elem_edges.edges
+    );
+    // The direct `pop[idx]` reference (DynamicIndex, NOT inside a reducer)
+    // keeps its conservative arrayed-source -> scalar-target edges; it must
+    // NOT be folded into the agg.
+    for d in &["nyc", "boston"] {
+        assert!(
+            has_edge(&format!("pop[{d}]"), "x"),
+            "expected direct pop[{d}] -> x (from the pop[idx] dynamic index); edges: {:?}",
+            elem_edges.edges
+        );
+    }
+
+    // ---- model_ltm_variables: agg aux + both link-score halves + the
+    //      conservative pop->x link score for the dynamic index ----
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+    let has_var = |name: &str| -> bool { ltm_vars.vars.iter().any(|v| v.name == name) };
+
+    assert!(
+        has_var(agg),
+        "expected the synthetic agg aux {agg}; vars: {:?}",
+        ltm_vars
+            .vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    for d in &["nyc", "boston"] {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}pop[{d}]\u{2192}{agg}");
+        assert!(
+            has_var(&name),
+            "expected source->agg link score {name:?}; vars: {:?}",
+            ltm_vars
+                .vars
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        has_var(&format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}x"
+        )),
+        "expected agg->target link score $⁚ltm⁚link_score⁚{agg}→x; vars: {:?}",
+        ltm_vars
+            .vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    // The conservative link score for the direct `pop[idx]` reference must
+    // be emitted (it shares the canonical Bare name): `$⁚ltm⁚link_score⁚pop→x`.
+    assert!(
+        has_var("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}x"),
+        "expected the conservative pop->x link score for the dynamic-index \
+         reference (not suppressed by skip_reducer_shapes); vars: {:?}",
+        ltm_vars
+            .vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // The model still compiles and simulates with LTM enabled.
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("should compile");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
+}

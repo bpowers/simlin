@@ -3623,16 +3623,23 @@ pub fn model_ltm_variables(
     ///
     /// `skip_reducer_shapes` is set when the caller has already handled the
     /// `from` reference's reducer occurrences by routing them through an
-    /// aggregate node (Phase 5): the `Wildcard`/`DynamicIndex` shapes are
-    /// then suppressed here so we don't also score the reducer reference a
-    /// second time.
+    /// aggregate node (Phase 5). Only the `Wildcard` shape is suppressed in
+    /// that case -- a `Wildcard` reference to `from` in `to` is the hoisted
+    /// reducer's argument (`SUM(pop[*])`), already scored by the
+    /// `source → agg` / `agg → target` halves, so re-scoring it here would
+    /// double-count. `DynamicIndex` is *not* suppressed: a `to` equation can
+    /// hold both `SUM(pop[*])` (hoisted) *and* a direct `pop[idx]`
+    /// (DynamicIndex, not in any reducer), and that direct reference still
+    /// needs its own conservative Bare-named link score. The reducer-arg
+    /// case that produces a `DynamicIndex` site (`SUM(pop[idx, *])`, a
+    /// non-hoisted slice, GH #514) is not hoisted to begin with, so keeping
+    /// its link score here is correct -- it's the conservative fallback.
     ///
-    /// `Wildcard`/`DynamicIndex` shapes that *do* reach this function (the
-    /// conservative-slice reducer that `enumerate_agg_nodes` deliberately
-    /// does not hoist) share the canonical `link_score_var_name` form with
-    /// `Bare`, so we dedup by the resulting name and keep the first
-    /// occurrence -- the AST walker returns `Bare` before any subscripted
-    /// reference, so the canonical-Bare link score wins the slot.
+    /// `Wildcard`/`DynamicIndex` shapes that reach this function share the
+    /// canonical `link_score_var_name` form with `Bare`, so we dedup by the
+    /// resulting name and keep the first occurrence -- the AST walker returns
+    /// `Bare` before any subscripted reference, so the canonical-Bare link
+    /// score wins the slot when both a bare and a subscripted reference exist.
     #[allow(clippy::too_many_arguments)] // helper threads through emission context
     fn emit_per_shape_link_scores(
         db: &dyn Db,
@@ -3650,12 +3657,12 @@ pub fn model_ltm_variables(
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| vec![fallback_shape]);
         if skip_reducer_shapes {
-            shapes.retain(|s| !matches!(s, RefShape::Wildcard | RefShape::DynamicIndex));
+            shapes.retain(|s| !matches!(s, RefShape::Wildcard));
         }
         // Distinct `RefShape`s can map to the same synthetic name (a
-        // conservative-slice `Wildcard`/`DynamicIndex` ref shares the
-        // canonical Bare name now that the per-shape suffix is retired);
-        // keep only the first shape that produces each name.
+        // conservative-slice / direct-dynamic-index `Wildcard`/`DynamicIndex`
+        // ref shares the canonical Bare name now that the per-shape suffix is
+        // retired); keep only the first shape that produces each name.
         let mut emitted_names: HashSet<String> = HashSet::new();
         shapes.retain(|shape| {
             emitted_names.insert(crate::ltm_augment::link_score_var_name(from, to, shape))
