@@ -72,6 +72,139 @@ pub(super) fn analyze_link_polarity(
     }
 }
 
+/// Polarity of `consumer_ast` with respect to a reducer subexpression --
+/// the polarity of a synthetic aggregate-node hop `$⁚ltm⁚agg → consumer`.
+///
+/// The aggregate node stands in for an inlined reducer (`SUM(pop[*])`,
+/// `MEAN(...)`) that appears in `consumer`'s equation as a `SUM(...)`
+/// subexpression rather than as a variable reference, so ordinary
+/// `analyze_link_polarity` (which matches `Var(agg)` occurrences) returns
+/// `Unknown`. This substitutes the subexpression -- matched by its
+/// canonical printed form `reducer_subexpr_text` (exactly the
+/// `AggNode::equation_text` key `enumerate_agg_nodes` stores) -- with a
+/// bare `Var(agg_name)` and runs the ordinary analysis on the result.
+///
+/// Returns `Unknown` if the subexpression isn't found (graceful: the hop
+/// then stays Unknown-polarity, as it was before GH #516).
+pub(super) fn analyze_agg_consumer_polarity(
+    consumer_ast: &Ast<Expr2>,
+    reducer_subexpr_text: &str,
+    agg_name: &Ident<Canonical>,
+    variables: &HashMap<Ident<Canonical>, Variable>,
+) -> LinkPolarity {
+    let analyze = |expr: &Expr2| -> LinkPolarity {
+        let substituted = substitute_subexpr_in_expr2(expr, reducer_subexpr_text, agg_name);
+        analyze_expr_polarity_with_context(
+            &substituted,
+            agg_name,
+            LinkPolarity::Positive,
+            Some(variables),
+        )
+    };
+    match consumer_ast {
+        Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => analyze(expr),
+        Ast::Arrayed(_, elements, default_expr, _) => {
+            let mut polarity = LinkPolarity::Unknown;
+            for expr in elements.values() {
+                let p = analyze(expr);
+                if polarity == LinkPolarity::Unknown {
+                    polarity = p;
+                } else if polarity != p && p != LinkPolarity::Unknown {
+                    return LinkPolarity::Unknown;
+                }
+            }
+            if let Some(default_expr) = default_expr {
+                let p = analyze(default_expr);
+                if polarity == LinkPolarity::Unknown {
+                    polarity = p;
+                } else if polarity != p && p != LinkPolarity::Unknown {
+                    return LinkPolarity::Unknown;
+                }
+            }
+            polarity
+        }
+    }
+}
+
+/// Rebuild `expr`, replacing every subtree whose canonical printed form
+/// equals `target_text` with a bare `Var(replacement)`. Used only by
+/// [`analyze_agg_consumer_polarity`]; the printed-form comparison mirrors
+/// how `enumerate_agg_nodes` keys aggregate nodes (`Expr2` is not `Eq`).
+fn substitute_subexpr_in_expr2(
+    expr: &Expr2,
+    target_text: &str,
+    replacement: &Ident<Canonical>,
+) -> Expr2 {
+    if crate::patch::expr2_to_string(expr) == target_text {
+        return Expr2::Var(replacement.clone(), None, crate::ast::Loc::default());
+    }
+    match expr {
+        Expr2::Const(..) | Expr2::Var(..) => expr.clone(),
+        Expr2::App(builtin, bounds, loc) => Expr2::App(
+            builtin
+                .clone()
+                .map(|e| substitute_subexpr_in_expr2(&e, target_text, replacement)),
+            bounds.clone(),
+            *loc,
+        ),
+        Expr2::Subscript(ident, indices, bounds, loc) => Expr2::Subscript(
+            ident.clone(),
+            indices
+                .iter()
+                .map(|idx| substitute_subexpr_in_index(idx, target_text, replacement))
+                .collect(),
+            bounds.clone(),
+            *loc,
+        ),
+        Expr2::Op1(op, rhs, bounds, loc) => Expr2::Op1(
+            *op,
+            Box::new(substitute_subexpr_in_expr2(rhs, target_text, replacement)),
+            bounds.clone(),
+            *loc,
+        ),
+        Expr2::Op2(op, lhs, rhs, bounds, loc) => Expr2::Op2(
+            *op,
+            Box::new(substitute_subexpr_in_expr2(lhs, target_text, replacement)),
+            Box::new(substitute_subexpr_in_expr2(rhs, target_text, replacement)),
+            bounds.clone(),
+            *loc,
+        ),
+        Expr2::If(cond, then_e, else_e, bounds, loc) => Expr2::If(
+            Box::new(substitute_subexpr_in_expr2(cond, target_text, replacement)),
+            Box::new(substitute_subexpr_in_expr2(
+                then_e,
+                target_text,
+                replacement,
+            )),
+            Box::new(substitute_subexpr_in_expr2(
+                else_e,
+                target_text,
+                replacement,
+            )),
+            bounds.clone(),
+            *loc,
+        ),
+    }
+}
+
+fn substitute_subexpr_in_index(
+    idx: &IndexExpr2,
+    target_text: &str,
+    replacement: &Ident<Canonical>,
+) -> IndexExpr2 {
+    match idx {
+        IndexExpr2::Expr(e) => {
+            IndexExpr2::Expr(substitute_subexpr_in_expr2(e, target_text, replacement))
+        }
+        IndexExpr2::Range(l, r, loc) => IndexExpr2::Range(
+            substitute_subexpr_in_expr2(l, target_text, replacement),
+            substitute_subexpr_in_expr2(r, target_text, replacement),
+            *loc,
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Recursively analyze expression polarity with optional context for looking up tables
 pub(super) fn analyze_expr_polarity_with_context(
     expr: &Expr2,
@@ -157,14 +290,9 @@ pub(super) fn analyze_expr_polarity_with_context(
                 && let Some(t) = tables.first()
             {
                 let table_polarity = analyze_graphical_function_polarity(t);
-                // Combine the polarities
-                return match (arg_polarity, table_polarity) {
-                    (LinkPolarity::Positive, LinkPolarity::Positive) => LinkPolarity::Positive,
-                    (LinkPolarity::Positive, LinkPolarity::Negative) => LinkPolarity::Negative,
-                    (LinkPolarity::Negative, LinkPolarity::Positive) => LinkPolarity::Negative,
-                    (LinkPolarity::Negative, LinkPolarity::Negative) => LinkPolarity::Positive,
-                    _ => LinkPolarity::Unknown,
-                };
+                // Combine the polarities: composing argument monotonicity
+                // with table monotonicity is plain sign multiplication.
+                return arg_polarity.compose(table_polarity);
             }
             LinkPolarity::Unknown
         }
@@ -313,25 +441,8 @@ pub(super) fn analyze_expr_polarity_with_context(
                     // rather than the expr_references_var pattern used by Add/Sub/Div.
                     // If both have known polarity, combine them
                     if left_pol != LinkPolarity::Unknown && right_pol != LinkPolarity::Unknown {
-                        // Positive * Positive = Positive
-                        // Positive * Negative = Negative
-                        // Negative * Positive = Negative
-                        // Negative * Negative = Positive
-                        match (left_pol, right_pol) {
-                            (LinkPolarity::Positive, LinkPolarity::Positive) => {
-                                LinkPolarity::Positive
-                            }
-                            (LinkPolarity::Positive, LinkPolarity::Negative) => {
-                                LinkPolarity::Negative
-                            }
-                            (LinkPolarity::Negative, LinkPolarity::Positive) => {
-                                LinkPolarity::Negative
-                            }
-                            (LinkPolarity::Negative, LinkPolarity::Negative) => {
-                                LinkPolarity::Positive
-                            }
-                            _ => LinkPolarity::Unknown,
-                        }
+                        // Sign multiplication: ++ -> +, +- -> -, -- -> +.
+                        left_pol.compose(right_pol)
                     } else if left_pol != LinkPolarity::Unknown {
                         // Only left has polarity, check if right is a constant or constant-valued variable
                         if is_positive_constant(right)

@@ -1853,8 +1853,9 @@ mod tests {
     fn loop_element_index_scalar_loop() {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
-            equation: "1.0".to_string(),
+            equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
             dimensions: vec![],
+            compile_directly: false,
         }];
         let project_dims: Vec<crate::datamodel::Dimension> = vec![];
 
@@ -1874,8 +1875,9 @@ mod tests {
     fn loop_element_index_named_1d() {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
-            equation: "1.0".to_string(),
+            equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
             dimensions: vec!["Region".to_string()],
+            compile_directly: false,
         }];
         let project_dims = vec![crate::datamodel::Dimension::named(
             "Region".to_string(),
@@ -1903,8 +1905,9 @@ mod tests {
     fn loop_element_index_mixed_2d() {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
-            equation: "1.0".to_string(),
+            equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
             dimensions: vec!["Region".to_string(), "Cohort".to_string()],
+            compile_directly: false,
         }];
         let project_dims = vec![
             crate::datamodel::Dimension::named(
@@ -1938,8 +1941,9 @@ mod tests {
     fn resolve_1d_named() {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
-            equation: "1.0".to_string(),
+            equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
             dimensions: vec!["Region".to_string()],
+            compile_directly: false,
         }];
         let project_dims = vec![crate::datamodel::Dimension::named(
             "Region".to_string(),
@@ -1961,8 +1965,9 @@ mod tests {
     fn resolve_2d_named_indexed_row_major() {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
-            equation: "1.0".to_string(),
+            equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
             dimensions: vec!["Region".to_string(), "Cohort".to_string()],
+            compile_directly: false,
         }];
         let project_dims = vec![
             crate::datamodel::Dimension::named(
@@ -1991,8 +1996,9 @@ mod tests {
     fn resolve_scalar_loop() {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
-            equation: "1.0".to_string(),
+            equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
             dimensions: vec![],
+            compile_directly: false,
         }];
         let project_dims: Vec<crate::datamodel::Dimension> = vec![];
         let index = build_loop_element_index(&ltm_vars, &project_dims);
@@ -2014,8 +2020,9 @@ mod tests {
     fn resolve_dim_count_mismatch() {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
-            equation: "1.0".to_string(),
+            equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
             dimensions: vec!["Region".to_string()],
+            compile_directly: false,
         }];
         let project_dims = vec![crate::datamodel::Dimension::named(
             "Region".to_string(),
@@ -2046,8 +2053,9 @@ mod tests {
     fn resolve_unknown_element() {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
-            equation: "1.0".to_string(),
+            equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
             dimensions: vec!["Region".to_string()],
+            compile_directly: false,
         }];
         let project_dims = vec![crate::datamodel::Dimension::named(
             "Region".to_string(),
@@ -2069,8 +2077,9 @@ mod tests {
     fn resolve_indexed_errors() {
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
-            equation: "1.0".to_string(),
+            equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
             dimensions: vec!["Cohort".to_string()],
+            compile_directly: false,
         }];
         let project_dims = vec![crate::datamodel::Dimension::indexed(
             "Cohort".to_string(),
@@ -2101,18 +2110,21 @@ mod tests {
         let ltm_vars = vec![
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}a\u{2192}b".to_string(),
-                equation: "1.0".to_string(),
+                equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
                 dimensions: vec![],
+                compile_directly: false,
             },
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}loop_score\u{205A}r1".to_string(),
-                equation: "1.0".to_string(),
+                equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
                 dimensions: vec![],
+                compile_directly: false,
             },
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}path\u{205A}foo\u{205A}0".to_string(),
-                equation: "1.0".to_string(),
+                equation: crate::datamodel::Equation::Scalar("1.0".to_string()),
                 dimensions: vec![],
+                compile_directly: false,
             },
         ];
         let project_dims: Vec<crate::datamodel::Dimension> = vec![];

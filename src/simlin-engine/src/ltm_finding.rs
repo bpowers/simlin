@@ -18,9 +18,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel;
 use crate::db::LtmSyntheticVar;
-#[cfg(test)]
-use crate::ltm::Link;
-use crate::ltm::{CausalGraph, CyclePartitions, Loop, LoopPolarity};
+use crate::ltm::{CausalGraph, CyclePartitions, Link, Loop, LoopPolarity};
 use crate::project::Project;
 use crate::results::Results;
 
@@ -276,43 +274,30 @@ impl SearchGraph {
 /// 1. Bare A2A: `from→to` with non-empty dims → expands to N
 ///    `(from[d], to[d])` entries (Bare path).
 /// 2. Bare scalar: `from→to` with empty dims → single `(from, to)`.
-/// 3. Wildcard / DynamicIndex suffix: `from→to⁚wildcard` (or
-///    `⁚dynamic`) → suffix is stripped from `to`; remaining
-///    classification (scalar vs A2A) follows from `ltm_var.dimensions`.
-/// 4. FixedIndex A2A: `from[elem]→to` with non-empty dims → expands to
+/// 3. FixedIndex A2A: `from[elem]→to` with non-empty dims → expands to
 ///    N entries `(from[elem], to[d])` over the *target* dimension. The
 ///    source carries a fixed element subscript; only the target varies.
-/// 5. FixedIndex / cross-dimensional scalar: `from[elem]→to` (or
-///    similar with `[` already in either side) with empty dims → single
-///    pass-through entry.
+/// 4. FixedIndex / cross-dimensional / agg-hop scalar: `from[elem]→to`
+///    (or `to[elem]`, or an `$⁚ltm⁚agg⁚{n}` on either end) with empty
+///    dims → single pass-through entry. The element rides in the name.
 ///
 /// When `ltm_vars` is empty (e.g. in the non-salsa convenience path),
-/// all link scores are treated as scalar (no expansion). Suffix
-/// stripping still applies because the suffix is encoded in the
-/// `results.offsets` key itself.
+/// all link scores are treated as scalar (no expansion).
+///
 /// Shape priority rank for collapsing duplicate `(from, to)` keys.
-/// Lower rank wins, mirroring the priority used by
+/// Lower rank wins, mirroring the Bare-beats-FixedIndex priority used by
 /// `ltm_augment::resolve_link_score_name_for_loop`.
 ///
-/// Two collision cases this resolves:
-///
-///   1. Bare vs. shape-suffixed (Wildcard / DynamicIndex) at the
-///      `(from, to)` level: e.g., `pop→share` and `pop→share⁚wildcard`
-///      both produce `(pop, share)` after suffix stripping.
-///
-///   2. Bare A2A vs. FixedIndex A2A at the *expanded* per-element
-///      level: e.g., `pop→share` and `pop[nyc]→share` both expand
-///      to `(pop[nyc], share[nyc])`. The FixedIndex source carries
-///      its own bracketed element, but when the target is also A2A
-///      and the FixedIndex element matches the target element, the
-///      Bare A2A diagonal aliases with one FixedIndex broadcast
-///      slot. Bare wins.
+/// This resolves the collision: Bare A2A vs. FixedIndex A2A at the
+/// *expanded* per-element level: e.g., `pop→share` and `pop[nyc]→share`
+/// both expand to `(pop[nyc], share[nyc])`. The FixedIndex source carries
+/// its own bracketed element, but when the target is also A2A and the
+/// FixedIndex element matches the target element, the Bare A2A diagonal
+/// aliases with one FixedIndex broadcast slot. Bare wins.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ShapeRank {
     Bare = 0,
     FixedIndex = 1,
-    Wildcard = 2,
-    DynamicIndex = 3,
 }
 
 fn parse_link_offsets(
@@ -329,10 +314,10 @@ fn parse_link_offsets(
         .collect();
 
     // Phase 1: parse every variable into one or more `(LinkOffset,
-    // ShapeRank)` entries. The rank records which shape variant the
-    // offset came from so phase 2 can dedupe deterministically when
-    // suffix stripping collapses Bare and Wildcard/DynamicIndex onto
-    // the same key.
+    // ShapeRank)` entries. The rank records whether the offset came from
+    // a Bare or a FixedIndex link score so phase 2 can dedupe
+    // deterministically when a Bare A2A diagonal aliases with one
+    // FixedIndex broadcast slot.
     let mut tagged: Vec<(LinkOffset, ShapeRank)> = Vec::new();
 
     for (var_name, &offset) in &results.offsets {
@@ -340,30 +325,22 @@ fn parse_link_offsets(
         let Some(suffix) = name_str.strip_prefix(LINK_SCORE_PREFIX) else {
             continue;
         };
-        let Some((from_str, to_raw)) = suffix.split_once(LTM_LINK_SEP) else {
+        let Some((from_str, to_str)) = suffix.split_once(LTM_LINK_SEP) else {
             continue;
         };
 
-        // Strip the trailing shape suffix (`⁚wildcard` or `⁚dynamic`)
-        // from the to-name to recover the canonical to ident, and
-        // classify the rank by suffix + element-level from. Suffix
-        // wins over `[`-in-from for ranking because Wildcard/Dynamic
-        // and FixedIndex are mutually exclusive in the design (see
-        // `ltm_augment::link_score_var_name`); the defensive precedence
-        // doesn't matter in practice but makes the rank deterministic
-        // even if a future emitter mixed them.
-        let (to_str, suffix_rank) = strip_to_shape_suffix_with_rank(to_raw);
-        let rank = if suffix_rank != ShapeRank::Bare {
-            suffix_rank
-        } else if from_str.contains('[') {
+        // A bracketed `from` marks a per-source-element FixedIndex (or
+        // cross-dimensional) link score; everything else is Bare-ranked
+        // (a per-target-element `to[elem]` score still rides its element
+        // in the name and dedupes against nothing).
+        let rank = if from_str.contains('[') {
             ShapeRank::FixedIndex
         } else {
             ShapeRank::Bare
         };
 
         // Look up the LtmSyntheticVar for this link score to get its
-        // dimensions. The lookup uses the full original name (including
-        // any shape suffix) since that is what `ltm_augment` synthesized.
+        // dimensions.
         let var_dims = ltm_var_map
             .get(name_str)
             .map(|v| &v.dimensions[..])
@@ -404,25 +381,19 @@ fn parse_link_offsets(
     }
 
     // Phase 2: dedupe by (from, to) key. When two emitted variants
-    // collapse onto the same key, keep the lowest `(rank, offset)`
-    // entry. Two collision cases:
-    //
-    //   1. Bare vs. shape-suffixed (Wildcard / DynamicIndex) at the
-    //      `(from, to)` level after suffix stripping.
-    //
-    //   2. Bare A2A vs. FixedIndex A2A at the *expanded* per-element
-    //      level: `pop→share` and `pop[nyc]→share` both produce the
-    //      element key `(pop[nyc], share[nyc])`.
+    // collapse onto the same expanded per-element key, keep the lowest
+    // `(rank, offset)` entry. The one collision case: Bare A2A vs.
+    // FixedIndex A2A -- `pop→share` and `pop[nyc]→share` both produce the
+    // element key `(pop[nyc], share[nyc])` when the FixedIndex element
+    // matches the diagonal target element.
     //
     // Without this, `SearchGraph::from_results` would register parallel
     // edges and `discover_loops_with_graph::link_offset_map` would pick
     // one nondeterministically (HashMap iteration order over
-    // `results.offsets` chooses the survivor). This matches the
-    // shape-priority rule used by
-    // `ltm_augment::resolve_link_score_name_for_loop` so loop_score,
-    // pathway, and discovery all reference the same shape variant for
-    // a given edge -- the documented edge-aliasing under-counting
-    // limitation is consistent across consumers.
+    // `results.offsets` chooses the survivor). Bare wins, matching the
+    // priority used by `ltm_augment::resolve_link_score_name_for_loop` so
+    // loop_score, pathway, and discovery all reference the same variant
+    // for a given edge.
     //
     // Same-rank ties (e.g., two Bare A2A entries that somehow produce
     // the same expanded key, which shouldn't happen but defends
@@ -456,22 +427,6 @@ fn parse_link_offsets(
             .then_with(|| a.1.cmp(&b.1))
     });
     link_offsets
-}
-
-/// Strip the shape suffix from a link score's to-name and report which
-/// suffix (if any) was present. The rank is consumed by
-/// `parse_link_offsets`'s dedup step to pick the priority-winning
-/// variant when Bare and a suffixed variant collide on the same
-/// `(from, to)` key. Mirrors the suffixes appended by
-/// `ltm_augment::link_score_var_name`.
-fn strip_to_shape_suffix_with_rank(to_raw: &str) -> (&str, ShapeRank) {
-    if let Some(stripped) = to_raw.strip_suffix(crate::ltm_augment::LINK_SCORE_WILDCARD_SUFFIX) {
-        return (stripped, ShapeRank::Wildcard);
-    }
-    if let Some(stripped) = to_raw.strip_suffix(crate::ltm_augment::LINK_SCORE_DYNAMIC_SUFFIX) {
-        return (stripped, ShapeRank::DynamicIndex);
-    }
-    (to_raw, ShapeRank::Bare)
 }
 
 /// Expand an A2A link score into per-element `LinkOffset` entries.
@@ -668,6 +623,80 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
     discover_loops_with_graph(results, &causal_graph, &stocks, &[], &[])
 }
 
+/// Collapse synthetic aggregate nodes out of a discovered loop's link chain.
+///
+/// Phase 5 of the cross-element aggregate work reroutes inlined array
+/// reducers (`SUM(pop[*])`, `MEAN(...)`) through synthetic auxiliaries
+/// named `$⁚ltm⁚agg⁚{n}`. The loop *score* equation still references the
+/// un-trimmed per-element path (`pop[d] -> agg`, `agg -> share[e]`), but the
+/// loop we *report* should not expose the synthetic node: a chain
+/// `[X -> agg, agg -> Y]` collapses to a single edge `[X -> Y]` whose
+/// polarity is the product of the two (AC4.2).
+///
+/// Only nodes whose name carries the synthetic agg prefix are trimmed --
+/// whole-RHS-scalar reducers (`total_population = SUM(population[*])`) are
+/// real, variable-backed nodes and stay in the reported loop.
+///
+/// Returns `None` if the loop consists entirely of synthetic agg nodes (a
+/// degenerate cycle with nothing left after trimming) -- such a loop should
+/// be dropped from the report.
+fn trim_synthetic_aggs_from_loop_links(links: &[Link]) -> Option<Vec<Link>> {
+    use crate::ltm_agg::is_synthetic_agg_name;
+
+    // Nothing to do if no link touches a synthetic agg node.
+    if !links
+        .iter()
+        .any(|l| is_synthetic_agg_name(l.from.as_str()) || is_synthetic_agg_name(l.to.as_str()))
+    {
+        return Some(links.to_vec());
+    }
+
+    let mut links: Vec<Link> = links.to_vec();
+    loop {
+        if links.is_empty() {
+            return None;
+        }
+        // If every node in the cycle is a synthetic agg, there is nothing
+        // meaningful left to report.
+        if links
+            .iter()
+            .all(|l| is_synthetic_agg_name(l.from.as_str()) && is_synthetic_agg_name(l.to.as_str()))
+        {
+            return None;
+        }
+        // Find a link whose target is a synthetic agg node; merge it with the
+        // following link (the agg's outgoing edge in this cycle).
+        let Some(j) = links
+            .iter()
+            .position(|l| is_synthetic_agg_name(l.to.as_str()))
+        else {
+            // No synthetic agg appears as a link target anymore.
+            break;
+        };
+        let n = links.len();
+        let next = (j + 1) % n;
+        debug_assert_eq!(
+            links[j].to, links[next].from,
+            "loop links must form a cycle"
+        );
+        let merged = Link {
+            from: links[j].from.clone(),
+            to: links[next].to.clone(),
+            polarity: links[j].polarity.compose(links[next].polarity),
+        };
+        if next > j {
+            links.splice(j..=next, std::iter::once(merged));
+        } else {
+            // Wraparound: the agg was the last node in the rotation. Drop the
+            // trailing link and replace the first with the merged edge.
+            links.pop();
+            links[0] = merged;
+        }
+    }
+
+    Some(links)
+}
+
 /// Run the strongest-path loop discovery using a pre-built `CausalGraph`.
 ///
 /// This is the implementation shared by `discover_loops` (which builds
@@ -732,10 +761,13 @@ pub fn discover_loops_with_graph(
     let mut found_loops: Vec<FoundLoop> = Vec::new();
 
     for path in &all_paths {
-        // Convert path to links using CausalGraph
+        // Convert path to links using CausalGraph. These links carry the
+        // un-trimmed per-element path -- they map to the synthetic
+        // `$⁚ltm⁚link_score⁚...` variables emitted during compilation, so the
+        // loop-score offset lookups below need them as-is. The synthetic
+        // aggregate nodes are trimmed only from the *reported* loop (below).
         let links = causal_graph.circuit_to_links(path);
         let loop_stocks = causal_graph.find_stocks_in_loop(path);
-        let polarity_structural = causal_graph.calculate_polarity(&links);
 
         // Precompute the results offset for each link in this loop, avoiding
         // repeated HashMap lookups and Ident clones in the per-timestep inner loop.
@@ -793,6 +825,16 @@ pub fn discover_loops_with_graph(
             0.0
         };
 
+        // Trim synthetic aggregate nodes out of the reported loop (AC4.2).
+        // The loop scores above were computed from the un-trimmed `links`; the
+        // structural polarity is (re-)derived from the trimmed chain so the
+        // negative-link count matches what we report. A loop made up entirely
+        // of synthetic agg nodes has nothing left to report and is dropped.
+        let Some(reported_links) = trim_synthetic_aggs_from_loop_links(&links) else {
+            continue;
+        };
+        let polarity_structural = causal_graph.calculate_polarity(&reported_links);
+
         // Determine runtime polarity from scores. The confidence ratio
         // returned alongside the polarity is discarded here because
         // `FoundLoop` does not carry one; downstream consumers that need
@@ -807,7 +849,7 @@ pub fn discover_loops_with_graph(
 
         let loop_info = Loop {
             id: String::new(), // Will be assigned below
-            links,
+            links: reported_links,
             stocks: loop_stocks,
             polarity,
             dimensions: vec![],
@@ -1387,13 +1429,15 @@ mod tests {
         let ltm_vars = vec![
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}birth_rate\u{2192}births".to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec!["Region".to_string()],
+                compile_directly: false,
             },
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}scalar_a\u{2192}scalar_b".to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec![],
+                compile_directly: false,
             },
         ];
         let dims = vec![datamodel::Dimension::named(
@@ -1503,110 +1547,6 @@ mod tests {
         }
     }
 
-    /// Test 2: A wildcard-suffixed scalar link score (`pop→share⁚wildcard`
-    /// with empty dimensions) should yield a single LinkOffset with the
-    /// suffix stripped from `to`. The wildcard suffix marks the shape of
-    /// the original reference for collision-free naming, but for offset
-    /// resolution the canonical `to` ident is suffix-stripped.
-    #[test]
-    fn test_parse_link_offsets_wildcard_suffix_scalar() {
-        let mut offsets = HashMap::new();
-        offsets.insert(
-            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"),
-            7usize,
-        );
-
-        let results = make_results_with_offsets(offsets, 10);
-
-        let ltm_vars = vec![crate::db::LtmSyntheticVar {
-            name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
-                .to_string(),
-            equation: String::new(),
-            dimensions: vec![],
-        }];
-
-        let parsed = parse_link_offsets(&results, &ltm_vars, &[]);
-
-        assert_eq!(
-            parsed.len(),
-            1,
-            "Wildcard-suffixed scalar should produce a single LinkOffset"
-        );
-        let ((from, to), offset) = &parsed[0];
-        assert_eq!(from.as_str(), "pop");
-        assert_eq!(
-            to.as_str(),
-            "share",
-            "to-name should have wildcard suffix stripped"
-        );
-        assert_eq!(*offset, 7);
-    }
-
-    /// Test 3: A wildcard-suffixed A2A link score (`pop→share⁚wildcard`
-    /// with non-empty dimensions) should expand to N per-element entries
-    /// using the suffix-stripped `to` name. Each element-level entry pairs
-    /// `(pop[d], share[d])` at `base + element_index`.
-    #[test]
-    fn test_parse_link_offsets_wildcard_suffix_a2a_expansion() {
-        let mut offsets = HashMap::new();
-        offsets.insert(
-            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"),
-            20usize,
-        );
-
-        let results = make_results_with_offsets(offsets, 30);
-
-        let ltm_vars = vec![crate::db::LtmSyntheticVar {
-            name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
-                .to_string(),
-            equation: String::new(),
-            dimensions: vec!["Region".to_string()],
-        }];
-        let dims = vec![datamodel::Dimension::named(
-            "Region".to_string(),
-            vec![
-                "NYC".to_string(),
-                "Boston".to_string(),
-                "Chicago".to_string(),
-            ],
-        )];
-
-        let parsed = parse_link_offsets(&results, &ltm_vars, &dims);
-
-        assert_eq!(
-            parsed.len(),
-            3,
-            "Wildcard-suffixed A2A should expand to 3 per-element entries"
-        );
-
-        let nyc = parsed
-            .iter()
-            .find(|((f, t), _)| f.as_str() == "pop[nyc]" && t.as_str() == "share[nyc]");
-        assert!(
-            nyc.is_some(),
-            "Should have pop[nyc]->share[nyc] (suffix stripped)"
-        );
-        assert_eq!(nyc.unwrap().1, 20);
-
-        let boston = parsed
-            .iter()
-            .find(|((f, t), _)| f.as_str() == "pop[boston]" && t.as_str() == "share[boston]");
-        assert!(
-            boston.is_some(),
-            "Should have pop[boston]->share[boston] (suffix stripped)"
-        );
-        assert_eq!(boston.unwrap().1, 21);
-
-        let chicago = parsed
-            .iter()
-            .find(|((f, t), _)| f.as_str() == "pop[chicago]" && t.as_str() == "share[chicago]");
-        assert!(
-            chicago.is_some(),
-            "Should have pop[chicago]->share[chicago] (suffix stripped)"
-        );
-        assert_eq!(chicago.unwrap().1, 22);
-    }
-
     /// Test 4: A FixedIndex A2A link score (`pop[nyc]→rel_pop` with
     /// non-empty dimensions). The `from_str` already carries the source
     /// element subscript; the per-slot expansion runs over the *target*
@@ -1624,8 +1564,9 @@ mod tests {
 
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}rel_pop".to_string(),
-            equation: String::new(),
+            equation: datamodel::Equation::Scalar(String::new()),
             dimensions: vec!["Region".to_string()],
+            compile_directly: false,
         }];
         let dims = vec![datamodel::Dimension::named(
             "Region".to_string(),
@@ -1689,8 +1630,9 @@ mod tests {
 
         let ltm_vars = vec![crate::db::LtmSyntheticVar {
             name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total".to_string(),
-            equation: String::new(),
+            equation: datamodel::Equation::Scalar(String::new()),
             dimensions: vec![],
+            compile_directly: false,
         }];
 
         let parsed = parse_link_offsets(&results, &ltm_vars, &[]);
@@ -1706,152 +1648,103 @@ mod tests {
         assert_eq!(*offset, 42);
     }
 
-    /// Regression test: when `emit_per_shape_link_scores` produces both
-    /// `pop→share` (Bare) and `pop→share⁚wildcard` (Wildcard) for the
-    /// same edge, suffix stripping collapses them onto the same
-    /// `(from, to)` key. The buggy version returned two `LinkOffset`
-    /// entries with the same key but different offsets, which caused:
+    /// AC3.3: A scalar-source -> arrayed-target link score named
+    /// `$⁚ltm⁚link_score⁚total_pop→migration[nyc]` (one scalar
+    /// `LtmSyntheticVar` per target element, `dimensions: vec![]`) resolves
+    /// to the edge `(total_pop, migration[nyc])` -- the scalar source stays
+    /// unsubscripted and the element survives on the `to` side.
     ///
-    ///   - `SearchGraph::from_results` to register two parallel edges
-    ///     and pick whichever had the higher abs(score) per timestep,
-    ///   - `discover_loops_with_graph::link_offset_map` to keep
-    ///     whichever entry happened to be inserted last (HashMap
-    ///     iteration order over `results.offsets`),
-    ///
-    /// silently producing nondeterministic loop/pathway scores across
-    /// runs. The two consumers could even disagree (graph search picks
-    /// one shape's series, scoring uses another).
-    ///
-    /// The fix dedupes by shape priority -- Bare wins -- mirroring the
-    /// loop-score / pathway resolver. This documents the same edge-
-    /// aliasing under-counting limitation at the discovery layer.
+    /// This is the discovery-side contract that `try_scalar_to_arrayed_link_scores`
+    /// relies on: the `[`-in-`to` single-passthrough branch (Branch 2 of
+    /// `parse_link_offsets`'s four-way dispatch) handles the new name shape
+    /// with no parser change, exactly as the source-subscripted mirror
+    /// (`test_parse_link_offsets_fixed_index_from_scalar`) does. Pre-fix,
+    /// these edges were named as Bare-A2A vars with `dimensions = [target_dims]`,
+    /// which `expand_a2a_link_offsets` mis-expanded by inventing a
+    /// `total_pop[nyc]` node that doesn't match the unsubscripted `total_pop`
+    /// node from the reducer edges -- making the loop unreachable.
     #[test]
-    fn test_parse_link_offsets_dedupes_bare_and_wildcard_for_same_edge() {
+    fn test_parse_link_offsets_scalar_to_arrayed() {
         let mut offsets = HashMap::new();
         offsets.insert(
-            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share"),
-            7usize,
-        );
-        offsets.insert(
-            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"),
-            13usize,
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}total_pop\u{2192}migration[nyc]"),
+            0usize,
         );
 
-        let results = make_results_with_offsets(offsets, 20);
+        let results = make_results_with_offsets(offsets, 10);
 
-        let ltm_vars = vec![
-            crate::db::LtmSyntheticVar {
-                name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share".to_string(),
-                equation: String::new(),
-                dimensions: vec![],
-            },
-            crate::db::LtmSyntheticVar {
-                name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
-                    .to_string(),
-                equation: String::new(),
-                dimensions: vec![],
-            },
-        ];
+        // No `ltm_vars` entry needed: with empty `var_dims`, the `[`-in-`to`
+        // passthrough branch fires regardless of the lookup result.
+        let parsed = parse_link_offsets(&results, &[], &[]);
 
-        let parsed = parse_link_offsets(&results, &ltm_vars, &[]);
-
-        // Bare and Wildcard collapse onto the same (pop, share) key
-        // after suffix stripping. The dedup must yield exactly one
-        // entry, picking Bare per priority order.
         assert_eq!(
             parsed.len(),
             1,
-            "duplicate (from, to) keys must dedupe to one entry; got: {parsed:?}",
+            "scalar-to-arrayed per-target-element link score should produce a single LinkOffset"
         );
         let ((from, to), offset) = &parsed[0];
-        assert_eq!(from.as_str(), "pop");
-        assert_eq!(to.as_str(), "share");
         assert_eq!(
-            *offset, 7,
-            "must pick Bare's offset (7) over Wildcard's offset (13)",
+            from.as_str(),
+            "total_pop",
+            "the scalar source must stay unsubscripted"
         );
+        assert_eq!(
+            to.as_str(),
+            "migration[nyc]",
+            "the target element must survive on the `to` side"
+        );
+        assert_eq!(*offset, 0);
     }
 
-    /// Regression test: A2A wildcard expansion also collides with
-    /// Bare A2A expansion at the per-element key level. For
-    /// `births[Region] = pop[Region] + SUM(pop[*])` the emitter
-    /// produces both `pop→births` (Bare A2A) and
-    /// `pop→births⁚wildcard` (Wildcard A2A); each expands to per-
-    /// element keys like `(pop[nyc], births[nyc])`. Without dedup,
-    /// `SearchGraph` ends up with two parallel edges per element and
-    /// `link_offset_map` picks one nondeterministically.
+    /// ltm-503-cross-element-agg.AC4.6 (discovery side): a partial-reduce
+    /// link score `$⁚ltm⁚link_score⁚matrix[a,x]→agg[a]` -- element-level on
+    /// *both* sides, `dimensions: vec![]` -- resolves to the single edge
+    /// `(matrix[a,x], agg[a])`. It rides the same `[`-in-`from`-or-`to`
+    /// single-passthrough branch (Branch 2) the full-reduce per-source-element
+    /// names already use; no parser change is needed. Crucially it must NOT
+    /// be broadcast over `D1` (which the alternative `dimensions = ["D1"]`
+    /// shape would route through `expand_fixed_from_a2a_link_offsets`).
     #[test]
-    fn test_parse_link_offsets_dedupes_a2a_bare_and_wildcard() {
+    fn test_parse_link_offsets_partial_reduce_passthrough() {
         let mut offsets = HashMap::new();
         offsets.insert(
-            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births"),
-            10usize,
-        );
-        offsets.insert(
-            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births\u{205A}wildcard"),
-            20usize,
+            Ident::new("$\u{205A}ltm\u{205A}link_score\u{205A}matrix[a,x]\u{2192}agg[a]"),
+            0usize,
         );
 
-        let results = make_results_with_offsets(offsets, 30);
+        let results = make_results_with_offsets(offsets, 10);
 
-        let ltm_vars = vec![
-            crate::db::LtmSyntheticVar {
-                name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births".to_string(),
-                equation: String::new(),
-                dimensions: vec!["Region".to_string()],
-            },
-            crate::db::LtmSyntheticVar {
-                name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births\u{205A}wildcard"
-                    .to_string(),
-                equation: String::new(),
-                dimensions: vec!["Region".to_string()],
-            },
-        ];
-        let dims = vec![datamodel::Dimension::named(
-            "Region".to_string(),
-            vec!["NYC".to_string(), "Boston".to_string()],
-        )];
+        // No `ltm_vars` entry needed: with empty `var_dims`, the
+        // element-level passthrough branch fires regardless of the lookup.
+        let parsed = parse_link_offsets(&results, &[], &[]);
 
-        let parsed = parse_link_offsets(&results, &ltm_vars, &dims);
-
-        // Each element-level key must appear exactly once.
-        let mut counts: HashMap<(String, String), usize> = HashMap::new();
-        for ((from, to), _) in &parsed {
-            *counts
-                .entry((from.as_str().to_string(), to.as_str().to_string()))
-                .or_insert(0) += 1;
-        }
-        for ((from, to), count) in &counts {
-            assert_eq!(
-                *count, 1,
-                "duplicate per-element key ({from}, {to}) appeared {count} times: {parsed:?}",
-            );
-        }
-
-        // Verify the Bare A2A entries won (offsets 10 and 11), not
-        // the Wildcard entries (offsets 20 and 21).
-        let nyc = parsed
-            .iter()
-            .find(|((f, t), _)| f.as_str() == "pop[nyc]" && t.as_str() == "births[nyc]")
-            .expect("expected pop[nyc] -> births[nyc]");
-        assert_eq!(nyc.1, 10, "must pick Bare A2A's offset (10) for NYC");
-
-        let boston = parsed
-            .iter()
-            .find(|((f, t), _)| f.as_str() == "pop[boston]" && t.as_str() == "births[boston]")
-            .expect("expected pop[boston] -> births[boston]");
-        assert_eq!(boston.1, 11, "must pick Bare A2A's offset (11) for Boston");
+        assert_eq!(
+            parsed.len(),
+            1,
+            "partial-reduce per-(d1,d2) link score should produce a single LinkOffset"
+        );
+        let ((from, to), offset) = &parsed[0];
+        assert_eq!(
+            from.as_str(),
+            "matrix[a,x]",
+            "the source subscript carries both the surviving and reduced axes"
+        );
+        assert_eq!(
+            to.as_str(),
+            "agg[a]",
+            "the target subscript carries only the surviving axis"
+        );
+        assert_eq!(*offset, 0);
     }
 
     /// Regression test: when both a Bare A2A link score (`pop→share`)
     /// and a FixedIndex A2A link score (`pop[nyc]→share`) exist for
     /// the same edge -- e.g., `share[Region] = pop + pop[NYC]` -- both
     /// expand to the per-element key `(pop[nyc], share[nyc])` at
-    /// different offsets. Earlier I tagged FixedIndex names with the
-    /// `Bare` rank for "simplicity", which left this collision tied
-    /// at Bare and resolved by HashMap insertion order over
-    /// `results.offsets` -- nondeterministic. Bare must win over
-    /// FixedIndex deterministically.
+    /// different offsets. FixedIndex names carry the `FixedIndex` rank
+    /// (a bracketed `from`), so this collision is broken deterministically
+    /// in Bare's favor rather than left tied and resolved by HashMap
+    /// insertion order over `results.offsets`.
     #[test]
     fn test_parse_link_offsets_dedupes_a2a_bare_over_fixed_index() {
         let mut offsets = HashMap::new();
@@ -1869,13 +1762,15 @@ mod tests {
         let ltm_vars = vec![
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share".to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec!["Region".to_string()],
+                compile_directly: false,
             },
             crate::db::LtmSyntheticVar {
                 name: "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string(),
-                equation: String::new(),
+                equation: datamodel::Equation::Scalar(String::new()),
                 dimensions: vec!["Region".to_string()],
+                compile_directly: false,
             },
         ];
         let dims = vec![datamodel::Dimension::named(

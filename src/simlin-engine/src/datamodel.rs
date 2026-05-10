@@ -210,6 +210,28 @@ pub enum Equation {
     ),
 }
 
+impl Equation {
+    /// The equation's source text concatenated into a single string:
+    /// the scalar / Apply-to-All formula verbatim, or -- for the
+    /// per-element (`Arrayed`) variant -- every element formula plus any
+    /// EXCEPT default joined by newlines. Convenience for diagnostics and
+    /// tests that want to inspect an equation as text without first
+    /// matching on its variant.
+    pub fn source_text(&self) -> String {
+        match self {
+            Equation::Scalar(s) | Equation::ApplyToAll(_, s) => s.clone(),
+            Equation::Arrayed(_, elements, default, _) => {
+                let mut parts: Vec<&str> =
+                    elements.iter().map(|(_, eqn, _, _)| eqn.as_str()).collect();
+                if let Some(default_eqn) = default {
+                    parts.push(default_eqn.as_str());
+                }
+                parts.join("\n")
+            }
+        }
+    }
+}
+
 /// The kind of external data function from Vensim's GET DIRECT family.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, salsa::Update)]
@@ -1411,5 +1433,50 @@ mod tests {
         assert_eq!(project.models.len(), 2);
         assert!(project.get_model("stdlib\u{205A}systems_rate").is_some());
         assert!(project.get_model("stdlib\u{205A}systems_leak").is_none());
+    }
+
+    #[test]
+    fn equation_source_text_scalar_and_apply_to_all_round_trip_verbatim() {
+        assert_eq!(Equation::Scalar("a + b".to_string()).source_text(), "a + b");
+        assert_eq!(
+            Equation::ApplyToAll(vec!["Region".to_string()], "pop * 0.02".to_string())
+                .source_text(),
+            "pop * 0.02"
+        );
+    }
+
+    #[test]
+    fn equation_source_text_arrayed_joins_elements_and_except_default() {
+        let elements = vec![
+            ("NYC".to_string(), "pop[NYC] * 0.03".to_string(), None, None),
+            (
+                "Boston".to_string(),
+                "pop[Boston] * 0.02".to_string(),
+                None,
+                None,
+            ),
+        ];
+
+        // Without an EXCEPT default: only the per-element formulas.
+        let no_default =
+            Equation::Arrayed(vec!["Region".to_string()], elements.clone(), None, false);
+        assert_eq!(
+            no_default.source_text(),
+            "pop[NYC] * 0.03\npop[Boston] * 0.02"
+        );
+
+        // With an EXCEPT default: the default formula is appended after the
+        // explicitly-listed elements. This is the branch the prior tests
+        // never exercised.
+        let with_default = Equation::Arrayed(
+            vec!["Region".to_string()],
+            elements,
+            Some("pop * 0.01".to_string()),
+            true,
+        );
+        assert_eq!(
+            with_default.source_text(),
+            "pop[NYC] * 0.03\npop[Boston] * 0.02\npop * 0.01"
+        );
     }
 }

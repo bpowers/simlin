@@ -27,6 +27,23 @@ pub enum LinkPolarity {
     Unknown,  // Cannot determine polarity statically
 }
 
+impl LinkPolarity {
+    /// Compose two consecutive link polarities (sign multiplication).
+    ///
+    /// Used when collapsing a chain `X -> M -> Y` into a single edge
+    /// `X -> Y`: the resulting polarity is the product of the two.
+    /// `Unknown` is absorbing -- any chain through an unknown-polarity
+    /// link is itself unknown.
+    pub fn compose(self, other: LinkPolarity) -> LinkPolarity {
+        use LinkPolarity::*;
+        match (self, other) {
+            (Unknown, _) | (_, Unknown) => Unknown,
+            (Positive, Positive) | (Negative, Negative) => Positive,
+            (Positive, Negative) | (Negative, Positive) => Negative,
+        }
+    }
+}
+
 /// Represents a causal link between two variables.
 ///
 /// The per-reference access shape distinction (Bare / FixedIndex / Wildcard
@@ -34,9 +51,12 @@ pub enum LinkPolarity {
 /// a separate field. Cross-dimensional edges in mixed/scalar loops carry
 /// element-level `from` like `"pop[nyc]"` so loop-score equations resolve
 /// to the per-element link score variable that
-/// `try_cross_dimensional_link_scores` emits. All other edges use
-/// variable-level names. See `db_ltm::build_element_level_loops` for the
-/// normalization rule.
+/// `try_cross_dimensional_link_scores` emits; a cross-element loop edge
+/// that visits a single element of an A2A target carries the element on
+/// `to` (`"mp[boston]"`); a loop running through an inlined reducer
+/// traverses `from[d] → $⁚ltm⁚agg⁚{n} → to[e]` (the agg name has no
+/// subscript). All other edges use variable-level names. See
+/// `db_ltm::build_element_level_loops` for the normalization rule.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Link {

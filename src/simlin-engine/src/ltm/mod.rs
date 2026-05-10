@@ -197,5 +197,34 @@ pub(crate) fn canonical_rotation<T: Ord + Clone>(circuit: &[T]) -> Vec<T> {
     out
 }
 
+/// Strip a trailing `[...]` element subscript from an LTM node or
+/// link-endpoint name.
+///
+/// `"population[nyc]"` -> `"population"`; multi-dimensional subscripts
+/// like `"x[nyc,boston]"` also collapse to `"x"` (the last `[` is the
+/// truncation point); a name without `[` is returned unchanged. Shared
+/// by the loop builder (`db::db_ltm`) and the LTM equation generators
+/// (`ltm_augment`), which both operate on these element-level
+/// identifier strings.
+pub(crate) fn strip_subscript(name: &str) -> &str {
+    match name.rfind('[') {
+        Some(pos) => &name[..pos],
+        None => name,
+    }
+}
+
+/// Split an LTM node name into `(variable_level_name, Some(subscript))`,
+/// or `(name, None)` when there is no `[...]` subscript.
+///
+/// `"migration_pressure[boston]"` -> `("migration_pressure", Some("boston"))`;
+/// `"x[nyc,boston]"` -> `("x", Some("nyc,boston"))`; `"x"` -> `("x", None)`.
+/// The subscript text is returned without the surrounding brackets.
+pub(crate) fn split_node_subscript(name: &str) -> (&str, Option<&str>) {
+    match (name.rfind('['), name.rfind(']')) {
+        (Some(open), Some(close)) if close > open => (&name[..open], Some(&name[open + 1..close])),
+        _ => (name, None),
+    }
+}
+
 #[cfg(test)]
 mod tests;

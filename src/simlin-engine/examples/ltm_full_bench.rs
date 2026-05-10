@@ -330,7 +330,11 @@ fn main() {
             n_a2a += 1;
         }
     }
-    let total_eqn_bytes: usize = ltm_vars.vars.iter().map(|v| v.equation.len()).sum();
+    let total_eqn_bytes: usize = ltm_vars
+        .vars
+        .iter()
+        .map(|v| v.equation.source_text().len())
+        .sum();
     tracker.record(
         "ltm_variables",
         t0.elapsed().as_secs_f64() * 1000.0,

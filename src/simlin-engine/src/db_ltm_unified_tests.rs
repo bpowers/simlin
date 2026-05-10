@@ -26,7 +26,7 @@ fn test_model_ltm_variables_generates_scores() {
 
     for var in &ltm.vars {
         assert!(
-            !var.equation.is_empty(),
+            !var.equation.source_text().is_empty(),
             "var {} should have non-empty equation",
             var.name
         );
@@ -283,8 +283,19 @@ fn test_model_ltm_variables_a2a_same_dimension_link_scores() {
     }
 }
 
-/// Verify that scalar-to-arrayed edges produce link scores with the
-/// target's dimensions.
+/// Verify that scalar-to-arrayed edges produce one scalar link score per
+/// target element, named `$⁚ltm⁚link_score⁚{from}→{to}[{elem}]` with
+/// empty dimensions -- NOT a single Bare-A2A var with `dimensions =
+/// [target_dims]`.
+///
+/// The Bare-A2A form was undiscoverable: `parse_link_offsets`'s
+/// `expand_a2a_link_offsets` subscripts *both* sides over `target_dims`,
+/// inventing a `growth_factor[nyc]` node that doesn't match the
+/// unsubscripted `growth_factor` node coming from other edges -- so a
+/// loop through `growth_factor` is unreachable in the search graph. The
+/// per-target-element scalar form (mirroring the arrayed->scalar
+/// `{from}[{elem}]→{to}` convention) parses via the `[`-in-`to`
+/// single-passthrough branch to `(growth_factor, births[nyc])`.
 #[test]
 fn test_model_ltm_variables_scalar_to_arrayed_link_score() {
     use salsa::Setter;
@@ -305,22 +316,49 @@ fn test_model_ltm_variables_scalar_to_arrayed_link_score() {
 
     let ltm = model_ltm_variables(&db, model, source_project);
 
-    // growth_factor is scalar, births is arrayed[Region].
-    // The growth_factor->births link score should have Region dims.
-    let gf_births_ls = ltm
-        .vars
-        .iter()
-        .find(|v| {
-            v.name.contains("link_score")
-                && v.name.contains("growth_factor")
-                && v.name.contains("births")
-        })
-        .expect("should have growth_factor->births link score");
+    let names: std::collections::HashSet<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
 
-    assert_eq!(
-        gf_births_ls.dimensions,
-        vec!["Region".to_string()],
-        "scalar-to-arrayed link score should carry target's dimensions"
+    // One scalar link score per target element, with the element in the name.
+    for elem in ["nyc", "boston", "la"] {
+        let expected =
+            format!("$\u{205A}ltm\u{205A}link_score\u{205A}growth_factor\u{2192}births[{elem}]");
+        assert!(
+            names.contains(expected.as_str()),
+            "expected per-target-element scalar link score {expected:?}; emitted link scores: {:?}",
+            ltm.vars
+                .iter()
+                .filter(|v| v.name.contains("link_score"))
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        let lsv = ltm.vars.iter().find(|v| v.name == expected).unwrap();
+        assert!(
+            lsv.dimensions.is_empty(),
+            "per-target-element link score {expected:?} must be scalar (empty dimensions), got {:?}",
+            lsv.dimensions
+        );
+        // The equation references the target element on the `to` side, the
+        // scalar source unsubscripted, and is a guard-form expression.
+        let eq = lsv.equation.source_text();
+        assert!(
+            eq.contains(&format!("births[{elem}]")),
+            "equation for {expected:?} should reference births[{elem}], got: {eq}"
+        );
+        assert!(
+            eq.contains("growth_factor") && !eq.contains(&format!("growth_factor[{elem}]")),
+            "equation for {expected:?} should reference growth_factor unsubscripted, got: {eq}"
+        );
+        assert!(
+            eq.contains("if (TIME = INITIAL_TIME)"),
+            "equation for {expected:?} should be a link-score guard form, got: {eq}"
+        );
+    }
+
+    // The Bare-A2A var must NOT be emitted for a scalar->arrayed edge.
+    let bare_a2a = "$\u{205A}ltm\u{205A}link_score\u{205A}growth_factor\u{2192}births";
+    assert!(
+        !names.contains(bare_a2a),
+        "scalar->arrayed edge must not emit the Bare-A2A link score {bare_a2a:?}"
     );
 }
 
@@ -715,23 +753,36 @@ fn test_auto_flip_uses_element_level_scc_for_arrayed_models() {
     );
 }
 
-// -- Phase 3 (per-shape link scores) --
+// -- Per-shape link scores --
 //
-// AC3.1 / AC3.3: when a target equation references a source under multiple
-// distinct RefShapes, model_ltm_variables must emit one LtmSyntheticVar
-// per (from, to, shape) tuple. Wildcard shapes always carry the
-// '\u{205A}wildcard' suffix (Task 4 naming convention); FixedIndex shapes
-// carry the per-element prefixed-from form. Discovery mode is used here
-// so the link emission loop runs for every causal edge, not just edges
-// in detected loops.
+// When a target equation references a source under multiple distinct
+// RefShapes, model_ltm_variables emits a distinct LtmSyntheticVar per
+// shape: a `Bare` ref keeps the canonical `{from}\u{2192}{to}` name, and a
+// `FixedIndex` ref carries the per-element prefixed-from form
+// (`{from}[{elem}]\u{2192}{to}`). `Wildcard` / `DynamicIndex` reducer
+// references are *not* emitted as per-shape `\u{205A}wildcard` /
+// `\u{205A}dynamic` variants (those were retired): a maximal inlined
+// reducer is hoisted into a `$\u{205A}ltm\u{205A}agg\u{205A}{n}` aggregate
+// node whose two link-score halves (`{from}[{d}]\u{2192}agg`,
+// `agg\u{2192}{to}[{e}]`) carry the per-element edges instead. The
+// not-hoisted conservative-slice and bare-dynamic-index cases still reach
+// `emit_per_shape_link_scores` as a `Wildcard` / `DynamicIndex` shape, but
+// they reuse the canonical Bare name (the access shape only drives which
+// references the partial holds live, not the variable name). Discovery
+// mode is used here so the link emission loop runs for every causal edge,
+// not just edges in detected loops.
 
 #[test]
 fn per_shape_link_scores_for_share_with_sum() {
     use salsa::Setter;
 
-    // share[R] = pop / SUM(pop[*]) references `pop` under both Bare
-    // (in the numerator) and Wildcard (inside SUM) shapes. Phase 3
-    // emission must produce two distinct link scores.
+    // share[R] = pop / SUM(pop[*]) references `pop` under both Bare (the
+    // numerator) and Wildcard (inside SUM). Phase 5: the Bare ref still
+    // produces the canonical `pop→share` link score, but the Wildcard ref
+    // is routed through the synthetic agg `$⁚ltm⁚agg⁚0`, so it produces
+    // `$⁚ltm⁚link_score⁚pop[d]→$⁚ltm⁚agg⁚0` (per source element) and
+    // `$⁚ltm⁚link_score⁚$⁚ltm⁚agg⁚0→share[r]` (per target element) -- and
+    // NOT a `pop→share⁚wildcard` var.
     //
     // We use a stock for `pop` because `model_ltm_variables` short-
     // circuits to an empty result when the model has no stocks (LTM
@@ -751,19 +802,105 @@ fn per_shape_link_scores_for_share_with_sum() {
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     let ltm = model_ltm_variables(&db, model, source_project);
-    let names: Vec<&String> = ltm.vars.iter().map(|v| &v.name).collect();
+    let names: std::collections::HashSet<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
 
-    let bare_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share";
-    let wildcard_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard";
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    // The Bare numerator's link score (unchanged).
+    assert!(
+        names.contains("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share"),
+        "expected Bare-shape link score pop→share; got: {names:?}"
+    );
+    // The synthetic agg itself.
+    assert!(
+        names.contains(agg),
+        "expected synthetic agg {agg}; got: {names:?}"
+    );
+    // pop[d] → agg, one per source element.
+    for d in &["nyc", "boston"] {
+        let n = format!("$\u{205A}ltm\u{205A}link_score\u{205A}pop[{d}]\u{2192}{agg}");
+        assert!(
+            names.contains(n.as_str()),
+            "expected per-source-element reducer link score {n:?}; got: {names:?}"
+        );
+    }
+    // agg → share[r], one per target element (Phase 3 per-target-element form).
+    for r in &["nyc", "boston"] {
+        let n = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}share[{r}]");
+        assert!(
+            names.contains(n.as_str()),
+            "expected agg→share[{r}] link score {n:?}; got: {names:?}"
+        );
+    }
+    // No `⁚wildcard` / `⁚dynamic` var anymore.
+    assert!(
+        names
+            .iter()
+            .all(|n| !n.ends_with("\u{205A}wildcard") && !n.ends_with("\u{205A}dynamic")),
+        "no ⁚wildcard / ⁚dynamic link scores must be emitted; got: {names:?}"
+    );
+}
 
-    assert!(
-        names.iter().any(|n| n.as_str() == bare_name),
-        "expected Bare-shape link score {bare_name:?}; got: {names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n.as_str() == wildcard_name),
-        "expected Wildcard-shape link score {wildcard_name:?}; got: {names:?}"
-    );
+/// AC5.1 (ltm-503-cross-element-agg): the `⁚wildcard` / `⁚dynamic`
+/// per-shape link-score path is retired. Reducer references are routed
+/// through synthetic `$⁚ltm⁚agg⁚{n}` aggregate nodes instead, so no
+/// `model_ltm_variables` output ever carries those shape suffixes.
+///
+/// This is a positive guard over a handful of reducer-bearing fixtures
+/// (a `share`-with-feedback model, a whole-RHS `SUM` model, and a `MEAN`
+/// reducer model): for each we fetch `model_ltm_variables` and assert
+/// that no synthetic variable name contains `⁚wildcard` or `⁚dynamic`.
+#[test]
+fn no_wildcard_or_dynamic_link_scores_for_reducer_models() {
+    fn assert_no_shape_suffix_vars(label: &str, project: &datamodel::Project) {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, project);
+        let model = sync.models["main"].source;
+        let ltm = model_ltm_variables(&db, model, sync.project);
+        assert!(
+            !ltm.vars.is_empty(),
+            "{label}: expected LTM variables for the reducer-bearing fixture"
+        );
+        for v in &ltm.vars {
+            assert!(
+                !v.name.contains("\u{205A}wildcard") && !v.name.contains("\u{205A}dynamic"),
+                "{label}: no ⁚wildcard / ⁚dynamic link scores must be emitted; \
+                 offending var: {:?}; all vars: {:?}",
+                v.name,
+                ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // `share[r] = pop[r] / SUM(pop[*])` with feedback through `update`:
+    // the maximal `SUM(pop[*])` subexpression is hoisted into a synthetic
+    // agg, and the cross-element loop is scored on the element-level path.
+    let share_with_feedback = TestProject::new("share_feedback")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None)
+        .build_datamodel();
+    assert_no_shape_suffix_vars("share_with_feedback", &share_with_feedback);
+
+    // `total_pop = SUM(pop[*])` is a *whole-RHS* reducer -- a
+    // variable-backed agg, no synthetic minted -- but it must still not
+    // produce a `⁚wildcard`-suffixed link score for any consumer edge.
+    let total_pop = TestProject::new("total_pop_sum")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["growth"], &[], None)
+        .scalar_aux("total_pop", "SUM(pop[*])")
+        .array_flow("growth[Region]", "pop * 0.01 + total_pop * 0.0001", None)
+        .build_datamodel();
+    assert_no_shape_suffix_vars("total_pop", &total_pop);
+
+    // A `MEAN` reducer feeding back through a scalar adjustment.
+    let mean_model = TestProject::new("mean_reducer")
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("pop[Region]", "100", &["adjust"], &[], None)
+        .scalar_aux("avg_pop", "MEAN(pop[*])")
+        .array_flow("adjust[Region]", "(avg_pop - pop) * 0.01", None)
+        .build_datamodel();
+    assert_no_shape_suffix_vars("mean_model", &mean_model);
 }
 
 #[test]
@@ -869,22 +1006,21 @@ fn fixed_index_link_score_denominator_uses_fixed_element() {
         .iter()
         .find(|v| v.name == fixed_name)
         .expect("expected FixedIndex(nyc) link score");
+    let fixed_eq = fixed.equation.source_text();
 
     // The denominator that drives the SIGN of the link score must
     // reference `pop[nyc]` (the FixedIndex element kept live in the
     // partial), not the bare variable-level `pop`.
     assert!(
-        fixed.equation.contains("(pop[nyc] - PREVIOUS(pop[nyc]))"),
-        "FixedIndex link score denominator must reference pop[nyc]; got: {}",
-        fixed.equation
+        fixed_eq.contains("(pop[nyc] - PREVIOUS(pop[nyc]))"),
+        "FixedIndex link score denominator must reference pop[nyc]; got: {fixed_eq}",
     );
     // It must NOT contain the unsuffixed `(pop - PREVIOUS(pop))` form,
     // which under A2A becomes `Δpop[r]` and normalizes by the wrong
     // source.
     assert!(
-        !fixed.equation.contains("(pop - PREVIOUS(pop))"),
-        "FixedIndex link score must not normalize by the unsuffixed Δpop; got: {}",
-        fixed.equation
+        !fixed_eq.contains("(pop - PREVIOUS(pop))"),
+        "FixedIndex link score must not normalize by the unsuffixed Δpop; got: {fixed_eq}",
     );
 
     // The Bare variant must still use the unsuffixed source delta --
@@ -896,10 +1032,10 @@ fn fixed_index_link_score_denominator_uses_fixed_element() {
         .iter()
         .find(|v| v.name == bare_name)
         .expect("expected Bare link score");
+    let bare_eq = bare.equation.source_text();
     assert!(
-        bare.equation.contains("(pop - PREVIOUS(pop))"),
-        "Bare link score must keep its unsuffixed Δpop denominator; got: {}",
-        bare.equation
+        bare_eq.contains("(pop - PREVIOUS(pop))"),
+        "Bare link score must keep its unsuffixed Δpop denominator; got: {bare_eq}",
     );
 }
 
@@ -1069,7 +1205,7 @@ fn mixed_scalar_loop_score_refs_resolve_to_emitted_names() {
     );
 
     for lsv in &loop_score_vars {
-        let refs = extract_quoted_refs(&lsv.equation);
+        let refs = extract_quoted_refs(&lsv.equation.source_text());
         for r in &refs {
             assert!(
                 emitted.contains(r),
@@ -1080,6 +1216,54 @@ fn mixed_scalar_loop_score_refs_resolve_to_emitted_names() {
             );
         }
     }
+}
+
+/// ltm-503-cross-element-agg.AC2.5: a model with no arrayed variables has
+/// its loop-score equations unchanged -- they reference unsubscripted
+/// scalar link scores exactly as before, with no `[elem]` subscript.
+#[test]
+fn scalar_model_loop_score_has_no_element_subscript() {
+    let db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let loop_score_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .collect();
+    assert_eq!(
+        loop_score_vars.len(),
+        1,
+        "the scalar feedback model has exactly one loop (population -> births -> population); \
+         got: {:?}",
+        loop_score_vars.iter().map(|v| &v.name).collect::<Vec<_>>(),
+    );
+    let eq = loop_score_vars[0].equation.source_text();
+    // No element subscript anywhere: every reference is a bare quoted name.
+    assert!(
+        !eq.contains('['),
+        "scalar-model loop-score equation must not contain any `[elem]` subscript; got: {eq}",
+    );
+    // It is the product of the two scalar link scores.
+    let refs = extract_quoted_refs(&eq);
+    let expected: std::collections::HashSet<&str> = [
+        "$\u{205A}ltm\u{205A}link_score\u{205A}population\u{2192}births",
+        "$\u{205A}ltm\u{205A}link_score\u{205A}births\u{2192}population",
+    ]
+    .into_iter()
+    .collect();
+    let got: std::collections::HashSet<&str> = refs.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        got, expected,
+        "loop-score equation should reference exactly the two bare scalar link scores; got: {eq}",
+    );
+    assert!(
+        eq.contains(" * "),
+        "loop-score equation should be a product; got: {eq}",
+    );
 }
 
 // -- Phase 4 Task 3.5 (edge-aliasing limitation regression test) --
@@ -1381,20 +1565,24 @@ fn mixed_scalar_loop_partitions_resolve_to_some() {
     );
 }
 
-/// Regression test: when a loop traverses an edge whose only AST shape
-/// is `Wildcard` (or `DynamicIndex`), `emit_per_shape_link_scores` only
-/// emits the suffixed name (`pop->share:wildcard`), not the canonical
-/// Bare name. The loop_score equation must reference the suffixed name
-/// for the link to actually contribute -- the buggy version always used
-/// Bare naming, so the loop_score multiplied against a missing variable
-/// and the fragment compiler quietly fell back to a stub dep.
+/// Regression test: every link-score reference inside a loop_score
+/// equation must resolve to a synthetic variable that was actually
+/// emitted. For `share[r] = SUM(pop[*])` the only reference of `pop` in
+/// `share` is inside the maximal inlined reducer, so it is hoisted into
+/// `$⁚ltm⁚agg⁚{n}` and the cross-element loop traverses
+/// `pop[d] → agg → share[r] → update[r] → pop[r]`. The loop_score
+/// equation must reference the agg-hop link scores (`pop[d]→agg`,
+/// `agg→share[r]`) that were emitted -- if a stale resolver invented a
+/// `pop→share` name that nothing produced, the fragment compiler would
+/// quietly fall back to a stub dep and the loop would silently lose that
+/// link's contribution.
 #[test]
 fn loop_score_picks_emitted_shape_when_only_wildcard_exists() {
-    // share[r] depends on pop only via SUM(pop[*]) -- pure wildcard,
-    // no bare ref. update[r] feeds back into pop[r] via the structural
-    // flow path. The loop pop[r] -> share[r] -> update[r] -> pop[r]
-    // exists at the element graph level (cross-element via the
-    // wildcard reducer).
+    // share[r] depends on pop only via SUM(pop[*]) -- the reducer is
+    // hoisted into a synthetic agg. update[r] feeds back into pop[r] via
+    // the structural flow path. The cross-element loop
+    // pop[r] -> agg -> share[r] -> update[r] -> pop[r] exists at the
+    // element graph level.
     let project = TestProject::new("wildcard_only_loop")
         .named_dimension("Region", &["NYC", "Boston"])
         .array_stock("pop[Region]", "100", &["update"], &[], None)
@@ -1412,7 +1600,7 @@ fn loop_score_picks_emitted_shape_when_only_wildcard_exists() {
 
     assert!(
         !emitted.is_empty(),
-        "expected LTM variables for the wildcard-only feedback fixture"
+        "expected LTM variables for the inlined-reducer feedback fixture"
     );
 
     let loop_score_vars: Vec<&LtmSyntheticVar> = ltm
@@ -1429,18 +1617,18 @@ fn loop_score_picks_emitted_shape_when_only_wildcard_exists() {
     // Every link-score reference inside a loop_score equation must
     // resolve to a variable that was actually emitted.
     for lsv in &loop_score_vars {
-        let refs = extract_quoted_refs(&lsv.equation);
+        let refs = extract_quoted_refs(&lsv.equation.source_text());
         for r in &refs {
             assert!(
                 emitted.contains(r),
                 "loop_score {:?} references {:?} which is not in emitted vars.\n\
-                 Expected resolution to use an emitted shape variant when \
-                 Bare is absent.\nEmitted names matching pop->share:\n  {}\n",
+                 Expected the loop to route through the synthetic agg's two \
+                 link-score halves.\nEmitted names matching pop / share / agg:\n  {}\n",
                 lsv.name,
                 r,
                 emitted
                     .iter()
-                    .filter(|n| n.contains("pop") && n.contains("share"))
+                    .filter(|n| n.contains("pop") || n.contains("share") || n.contains("agg"))
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()
                     .join("\n  "),
@@ -1495,7 +1683,7 @@ fn cross_dim_link_score_equations_match_between_exhaustive_and_discovery() {
 
     let by_name = |vars: &[LtmSyntheticVar]| -> std::collections::HashMap<String, String> {
         vars.iter()
-            .map(|v| (v.name.clone(), v.equation.clone()))
+            .map(|v| (v.name.clone(), v.equation.source_text()))
             .collect()
     };
     let ex_eqs = by_name(&ltm_ex.vars);
@@ -1524,4 +1712,392 @@ fn cross_dim_link_score_equations_match_between_exhaustive_and_discovery() {
             "exhaustive equation still contains the zero-numerator form: {ex_eq}",
         );
     }
+}
+
+/// ltm-503-cross-element-agg.AC4.6 (the machinery): a partial reduce
+/// `agg[D1] = SUM(matrix[D1,*])` collapses only the D2 axis, leaving an
+/// arrayed result over D1. The reducer link-score machinery must emit one
+/// *scalar* link score per `(d1, d2)` pair, named
+/// `$⁚ltm⁚link_score⁚matrix[d1,d2]→agg[d1]` (the source subscript carries
+/// both axes; the target subscript only the surviving axis), each with
+/// `dimensions = vec![]`. It must NOT emit a single A2A `matrix→agg` over
+/// `D1` (that would broadcast over D1 in the discovery parser, producing
+/// wrong edges) or a per-`(d1,d2)` var carrying `dimensions = ["D1"]`.
+#[test]
+fn partial_reduce_emits_per_source_element_scalar_link_scores() {
+    let project = TestProject::new("partial_reduce_machinery")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("matrix[D1,D2]", "1", &["growth"], &[], None)
+        .array_flow("growth[D1,D2]", "matrix * 0.05", None)
+        .array_aux("agg[D1]", "SUM(matrix[D1,*])");
+
+    let datamodel = project.build_datamodel();
+
+    use salsa::Setter;
+    let mut db = SimlinDb::default();
+    let model;
+    let proj;
+    {
+        let sync = sync_from_datamodel(&db, &datamodel);
+        model = sync.models["main"].source;
+        proj = sync.project;
+    }
+    // Discovery mode visits every causal edge, so the matrix -> agg edge
+    // is exercised without needing it to participate in a loop.
+    proj.set_ltm_discovery_mode(&mut db).to(true);
+    let ltm = model_ltm_variables(&db, model, proj);
+
+    let by_name: std::collections::HashMap<String, &LtmSyntheticVar> =
+        ltm.vars.iter().map(|v| (v.name.clone(), v)).collect();
+
+    for (d1, d2) in [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")] {
+        let name =
+            format!("$\u{205A}ltm\u{205A}link_score\u{205A}matrix[{d1},{d2}]\u{2192}agg[{d1}]");
+        let lsv = by_name.get(&name).unwrap_or_else(|| {
+            panic!(
+                "expected per-(d1,d2) partial-reduce link score {name}; emitted: {:?}",
+                by_name.keys().collect::<Vec<_>>()
+            )
+        });
+        assert!(
+            lsv.dimensions.is_empty(),
+            "partial-reduce link score {name} must be scalar (dimensions = []), got {:?}",
+            lsv.dimensions
+        );
+        // The equation must reference the row element on the target side
+        // and the full source tuple on the source side.
+        let eq = lsv.equation.source_text();
+        assert!(
+            eq.contains(&format!("agg[{d1}]")),
+            "link score {name} equation should reference agg[{d1}]: {eq}"
+        );
+        assert!(
+            eq.contains(&format!("matrix[{d1},{d2}]")),
+            "link score {name} equation should reference matrix[{d1},{d2}]: {eq}"
+        );
+    }
+
+    // Must NOT emit a Bare A2A `matrix→agg` (no element subscript on
+    // either side) -- with or without dimensions.
+    assert!(
+        !by_name.contains_key("$\u{205A}ltm\u{205A}link_score\u{205A}matrix\u{2192}agg"),
+        "must not emit a Bare A2A matrix->agg link score; emitted: {:?}",
+        by_name.keys().collect::<Vec<_>>()
+    );
+    // And no per-(d1,d2) variant should carry D1 dimensions.
+    for v in &ltm.vars {
+        if v.name
+            .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}matrix[")
+        {
+            assert!(
+                v.dimensions.is_empty(),
+                "partial-reduce link score {} must not carry dimensions, got {:?}",
+                v.name,
+                v.dimensions
+            );
+        }
+    }
+}
+
+/// ltm-503-cross-element-agg.AC3.2 (exhaustive loop-score side): the
+/// loop `population[nyc] -> total_pop -> migration[nyc] ->
+/// population[nyc]` (a scalar reducer factored out of the per-element
+/// migration flow) has its loop-score equation built from exactly three
+/// per-element link-score references along its element-level path:
+///   - `"$⁚ltm⁚link_score⁚population[nyc]→total_pop"` -- the arrayed->scalar
+///     reducer link score, per source element (from `try_cross_dimensional_link_scores`),
+///   - `"$⁚ltm⁚link_score⁚total_pop→migration[nyc]"` -- the scalar->arrayed
+///     link score, per target element (from `try_scalar_to_arrayed_link_scores`),
+///   - `"$⁚ltm⁚link_score⁚migration→population"[nyc]` -- the structural
+///     flow->stock A2A link score, subscripted-after-quote at the visited
+///     element.
+///
+/// In particular it must NOT reference a Bare-A2A `total_pop→migration`
+/// name (no longer emitted) nor a same-element diagonal of it.
+#[test]
+fn scalar_reducer_loop_score_uses_per_element_link_scores() {
+    let project = TestProject::new("scalar_reducer_loop")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock(
+            "population[Region]",
+            "100",
+            &["births", "migration"],
+            &[],
+            None,
+        )
+        .array_aux("birth_rate[Region]", "0.05")
+        .array_flow("births[Region]", "population * birth_rate", None)
+        .scalar_aux("total_pop", "SUM(population[*])")
+        .array_flow(
+            "migration[Region]",
+            "total_pop * 0.01 - population * 0.01",
+            None,
+        );
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let factors = |eq: &str| -> std::collections::HashSet<String> {
+        eq.split(" * ").map(|s| s.trim().to_string()).collect()
+    };
+    let expected: std::collections::HashSet<String> = [
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}total_pop\"".to_string(),
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}total_pop\u{2192}migration[nyc]\"".to_string(),
+        "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration\u{2192}population\"[nyc]".to_string(),
+    ]
+    .into_iter()
+    .collect();
+
+    let loop_score_eqs: Vec<String> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .map(|v| v.equation.source_text())
+        .collect();
+    assert!(
+        loop_score_eqs.iter().any(|eq| factors(eq) == expected),
+        "no loop_score equation has the scalar-reducer loop's per-element factor set {expected:?}; \
+         loop_score equations present: {loop_score_eqs:?}"
+    );
+
+    // The Bare-A2A name for the scalar->arrayed edge is gone; no loop
+    // score may reference it.
+    for eq in &loop_score_eqs {
+        assert!(
+            !eq.contains("\"$\u{205A}ltm\u{205A}link_score\u{205A}total_pop\u{2192}migration\""),
+            "loop_score equation references the retired Bare-A2A name `total_pop→migration`: {eq}"
+        );
+    }
+}
+
+// -- Phase 5 (aggregate nodes: $⁚ltm⁚agg⁚{n}) --
+//
+// A maximal inlined reducer subexpression that participates in feedback is
+// hoisted into a synthetic auxiliary `$⁚ltm⁚agg⁚{n}` (computed during
+// simulation, so `PREVIOUS(agg)` is available). A variable whose entire
+// dt-equation is exactly one reducer call is its own aggregate node -- no
+// synthetic is minted.
+
+/// AC4.1 / AC4.3: `share[r] = pop[r] / SUM(pop[*])` with `share` feeding
+/// back into `pop` mints a synthetic agg `$⁚ltm⁚agg⁚0` with equation text
+/// `sum(pop[*])` and `dimensions = vec![]` (a scalar full reduce).
+#[test]
+fn agg_aux_emitted_for_hoisted_reducer() {
+    let project = TestProject::new("agg_share")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let agg_name = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == agg_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected synthetic agg {agg_name:?}; got: {:?}",
+                ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        agg.dimensions.is_empty(),
+        "agg should be scalar: {:?}",
+        agg.dimensions
+    );
+    assert!(
+        matches!(&agg.equation, crate::datamodel::Equation::Scalar(t) if t == "sum(pop[*])"),
+        "agg equation should be the reducer subexpr text; got: {:?}",
+        agg.equation
+    );
+}
+
+/// AC4.3: `total_population = SUM(population[*])` is a whole-RHS scalar
+/// reducer -- it IS the aggregate node, so no `$⁚ltm⁚agg⁚{n}` is minted.
+#[test]
+fn no_agg_aux_for_whole_rhs_reducer() {
+    let project = TestProject::new("whole_rhs_agg")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("population[Region]", "100", &["migration"], &[], None)
+        .scalar_aux("total_population", "SUM(population[*])")
+        .array_flow(
+            "migration[Region]",
+            "total_population * 0.001 - population * 0.001",
+            None,
+        );
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}agg\u{205A}")),
+        "whole-RHS reducer must not mint a synthetic agg; got: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
+/// The agg aux must be emitted *before* the link-score variables in the
+/// returned `vars` list (the LTM flow fragments are not topologically
+/// sorted, and the `agg → target` link score reads the agg's current-step
+/// value, so the agg fragment must run first in the same timestep).
+#[test]
+fn agg_aux_sorts_before_link_scores() {
+    let project = TestProject::new("agg_sort")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let agg_pos = ltm
+        .vars
+        .iter()
+        .position(|v| v.name.contains("\u{205A}agg\u{205A}"))
+        .expect("expected a synthetic agg variable");
+    let first_link_score_pos = ltm
+        .vars
+        .iter()
+        .position(|v| v.name.contains("\u{205A}link_score\u{205A}"));
+    if let Some(ls) = first_link_score_pos {
+        assert!(
+            agg_pos < ls,
+            "agg variable (at {agg_pos}) must sort before the first link score (at {ls}); \
+             order: {:?}",
+            ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// AC4.2: a cross-element feedback loop through a hoisted reducer visits the
+/// aggregate node twice -- it is NOT an elementary circuit, so Johnson can't
+/// emit it directly. `build_loops_from_tiered` recovers it (combining the
+/// per-element "petals" of the agg node), and its `$⁚ltm⁚loop_score⁚{id}`
+/// equation is the product of the per-element link scores along the
+/// un-trimmed path, including the `pop[d]→agg` and `agg→share[e]` halves with
+/// `d ≠ e` (the cross-element coupling through the aggregate).
+#[test]
+fn cross_element_loop_through_agg_is_recovered() {
+    let project = TestProject::new("cross_through_agg")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let loop_score_eqs: Vec<String> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .map(|v| v.equation.source_text())
+        .collect();
+    assert!(
+        !loop_score_eqs.is_empty(),
+        "expected loop_score variables; emitted: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+
+    // The cross-element-through-agg loop's loop-score equation must reference,
+    // along the un-trimmed path, NYC's pop into the agg AND the agg into
+    // Boston's share (the cross-element hop), AND the return: Boston's pop
+    // into the agg AND the agg into NYC's share.
+    let want_factors = [
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}{agg}\""),
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}share[boston]\""),
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston]\u{2192}{agg}\""),
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}share[nyc]\""),
+    ];
+    let has_cross_through_agg = loop_score_eqs
+        .iter()
+        .any(|eq| want_factors.iter().all(|f| eq.contains(f.as_str())));
+    assert!(
+        has_cross_through_agg,
+        "no loop_score equation traverses the cross-element-through-agg path \
+         (NYC pop→agg→Boston share→...→Boston pop→agg→NYC share). \
+         Want all of {want_factors:?}.\nloop_score equations: {loop_score_eqs:?}"
+    );
+
+    // And the agg-routed link-score halves it references must actually be
+    // emitted (so the fragment compiler doesn't stub them to zero).
+    let emitted: std::collections::HashSet<String> =
+        ltm.vars.iter().map(|v| v.name.clone()).collect();
+    for f in &want_factors {
+        let bare = f.trim_matches('"');
+        assert!(
+            emitted.contains(bare),
+            "loop_score equation references {bare:?} but it was not emitted; \
+             emitted: {emitted:?}"
+        );
+    }
+
+    // The user-facing reported loops (model_detected_loops, variable-level)
+    // never include the synthetic agg node -- the aggregate is "trimmed" from
+    // the displayed loop. (The element-level loops that carry the agg node
+    // exist only internally, to build the loop-score equations.)
+    let detected = crate::db::model_detected_loops(&db, model, sync.project);
+    for l in &detected.loops {
+        assert!(
+            l.variables
+                .iter()
+                .all(|v| !v.contains("\u{205A}agg\u{205A}")),
+            "model_detected_loops should not surface synthetic agg nodes; got: {:?}",
+            l.variables
+        );
+    }
+
+    // GH #516: the cross-element-through-agg loop must NOT classify as
+    // Undetermined. Its agg hops are derivable -- `pop[d] → agg` is Positive
+    // (SUM is monotone) and `agg → share[e]` is Negative (`share = pop / agg`,
+    // the agg is the denominator) -- so the loop's id carries a definite
+    // `r`/`b` prefix, not `u`. Find the loop_score var whose equation is the
+    // un-trimmed cross-through-agg product and check its id prefix.
+    let cross_agg_loop_score = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.contains("\u{205A}loop_score\u{205A}")
+                && want_factors
+                    .iter()
+                    .all(|f| v.equation.source_text().contains(f.as_str()))
+        })
+        .expect("expected a loop_score var for the cross-element-through-agg loop");
+    let loop_id = cross_agg_loop_score
+        .name
+        .rsplit('\u{205A}')
+        .next()
+        .expect("loop_score var name has a trailing loop id");
+    assert!(
+        loop_id.starts_with('r') || loop_id.starts_with('b'),
+        "cross-element-through-agg loop should have a determined polarity \
+         (r/b), not Undetermined (u); loop_score var = {:?}",
+        cross_agg_loop_score.name
+    );
 }

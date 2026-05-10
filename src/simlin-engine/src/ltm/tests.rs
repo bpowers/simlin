@@ -3527,6 +3527,29 @@ fn canonical_rotation_empty_input_returns_empty() {
 }
 
 #[test]
+fn strip_subscript_truncates_at_last_open_bracket() {
+    assert_eq!(super::strip_subscript("population"), "population");
+    assert_eq!(super::strip_subscript("population[nyc]"), "population");
+    assert_eq!(super::strip_subscript("m[nyc,boston]"), "m");
+}
+
+#[test]
+fn split_node_subscript_returns_variable_name_and_optional_subscript() {
+    assert_eq!(
+        super::split_node_subscript("population"),
+        ("population", None)
+    );
+    assert_eq!(
+        super::split_node_subscript("population[nyc]"),
+        ("population", Some("nyc"))
+    );
+    assert_eq!(
+        super::split_node_subscript("m[nyc,boston]"),
+        ("m", Some("nyc,boston"))
+    );
+}
+
+#[test]
 fn deduplicate_keeps_both_directed_three_cycles_in_multidigraph() {
     // Direct regression test for issue #308.  Construct a 3-node
     // SCC where every pair has bidirectional edges -- the smallest

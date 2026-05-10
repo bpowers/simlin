@@ -636,3 +636,78 @@ FixedIndex fixture (cross_element's elem-SCC stayed at 10), Phase 5's
 optional `MAX_LTM_SCC_NODES` doc-comment update was skipped -- the
 edge-count and circuit-count savings are real but they don't change
 the auto-flip story the existing comment tells.
+
+### Re-measurement after the cross-element aggregate-scoring work (2026-05-09)
+
+The `2026-05-09-ltm-503-cross-element-agg.md` design plan landed the
+aggregate-node treatment (each maximal inlined reducer is hoisted into a
+synthetic `$⁚ltm⁚agg⁚{n}` aux; `pop[d] → agg → target` is scored by the
+chain rule; cross-element loops are scored on the element-level path; the
+`⁚wildcard`/`⁚dynamic` per-shape link-score machinery was retired). Numbers
+below are from `cargo run --release --example ltm_full_bench -- <fixture>`
+and -- for the `share`/`mean` reducer-with-feedback fixtures, which are
+inline `TestProject` builds rather than files in `test/` -- from a one-off
+driver around `model_element_causal_edges` / `model_loop_circuits_tiered`.
+All values are on the `ltm-503-cross-element-agg` branch tip.
+
+| Fixture | var-edges | elem-edges | elem-SCC | elem-circuits (legacy) | tiered fast / slow | slow-SCC | Auto-flip |
+|---------|----------:|-----------:|---------:|-----------------------:|-------------------:|---------:|-----------|
+| cross_element_ltm | 8 | 18 | 10 | 8 | 1 / 6 | 8 | no |
+| arrayed_population_ltm | 6 | 18 | 3 | 6 | 2 / 0 | 0 | no |
+| hero_culture_ltm | 41 | 41 | 15 | 14 | -- | -- | no |
+| WRLD3-03 | 483 | 483 | 166 | 1,863,803 | -- | -- | yes (166 > 50) |
+| `share[r] = pop[r]/SUM(pop[*])` + feedback, 3 regions | 3 | 15 | 10 | -- | 0 / 6 | 10 | no |
+| same, 8 regions | 3 | 40 | 25 | -- | 0 / 16 | 25 | no |
+| `MEAN(pop[*])` + feedback, 3 regions | 4 | 12 | 7 | -- | 1 / 3 | 7 | no |
+
+Notes:
+
+- **cross_element_ltm**: structural element-edge and element-SCC numbers
+  are unchanged from the 2026-04-25 post-Phase-4 measurement (18 / 10) --
+  the fixture's `total_population = SUM(population[*])` is a *whole-RHS*
+  reducer, so it is a variable-backed agg (no synthetic minted) and the
+  element graph is unchanged for that edge. What changed is the *loop
+  scoring*: the cross-element migration loops are now scored on the
+  element-level path with subscripted link-score refs instead of the
+  diagonal A2A scores the loop doesn't visit, and the count grew (each
+  cross-element circuit became its own scalar loop-score var, and the
+  per-region migration loops are no longer collapsed onto the diagonal).
+  The legacy element-circuit count moved from 12 (pre-Phase-2) to 8
+  (per-reference walker trimmed the spurious FixedIndex cross-edges) and
+  stays at 8; the tiered enumerator splits this into 1 fast-path A2A cycle
+  (population ↔ births) and 6 slow-path cross-element circuits.
+- **arrayed_population_ltm**: unchanged (pure-A2A, no reducers, no
+  per-element-equation targets ⇒ no aggregate nodes ⇒ no element-graph
+  change). 2 fast-path cycles, 0 slow-path.
+- **hero_culture_ltm** and **WRLD3-03**: unchanged (both scalar models;
+  the element graph collapses to the variable graph, and there are no
+  inlined reducers). WRLD3's 166-node SCC and `loop=0` synthetic-var count
+  (auto-flip ⇒ discovery bypasses loop-score generation) are as before.
+- **`share`/`mean` reducer-with-feedback fixtures**: these are the
+  measurable win of the aggregate-node reroute. For `share[r] = pop[r] /
+  SUM(pop[*])` with feedback, the inlined `SUM(pop[*])` becomes
+  `$⁚ltm⁚agg⁚0`: instead of an N×M (= N² here) all-pairs `pop[d] →
+  share[e]` cross-product, the element graph gets N `pop[d] → agg` edges +
+  N `agg → share[d]` edges + the N bare-numerator diagonals + the N
+  structural `share[d] → update[d]` / `update[d] → pop[d]` edges. At 3
+  regions the total is 15 element edges; at 8 regions it is 40, versus 80
+  for the pre-agg cross-product (8² = 64 wildcard cross + 8 + 8) -- and the
+  slow-path circuit count tracks proportionally (6 vs many more, 16 vs
+  many more). The element-SCC still spans all `pop`/`share`/`update`
+  elements (a genuine cross-element feedback cluster), but the loop scores
+  are now *correct* -- each source element's fractional contribution to the
+  aggregate's velocity is recovered via the `pop[d] → agg` half's reducer
+  algebraic shortcut. (`MEAN(pop[*])` is a whole-RHS reducer, so `avg_pop`
+  is a variable-backed agg; the element-edge count there is the same it
+  was, but the cross-element migration-style loop is again element-level
+  rather than garbage diagonal.)
+
+Threshold decision: `MAX_LTM_SCC_NODES = 50` is still retained. None of
+the fixtures moved across or materially closer to the gate; WRLD3 trips it
+for the same variable-level structural reason, and the reducer fixtures'
+element-SCCs (7, 10, 25) sit comfortably under it. The aggregate-node
+reroute *reduces* element-edge and slow-path-circuit counts on inlined-
+reducer models (and the reduction grows with the source dimension size /
+the number of consumers sharing a reducer), so if anything the gate's
+headroom on those models improved. The `MAX_LTM_SCC_NODES` doc-comment
+again needs no update.

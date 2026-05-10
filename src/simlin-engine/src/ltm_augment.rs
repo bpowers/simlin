@@ -15,7 +15,9 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
-use crate::ltm::{CyclePartitions, Loop, normalize_module_ref};
+use crate::ltm::{
+    CyclePartitions, Loop, normalize_module_ref, split_node_subscript, strip_subscript,
+};
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
@@ -146,8 +148,74 @@ fn classify_expr0_subscript_shape(
     RefShape::FixedIndex(elems)
 }
 
+/// Does `name` (case-insensitively) name an array-reducing builtin in the
+/// form that collapses an array dimension? `SUM`/`STDDEV`/`SIZE`/`RANK`
+/// reduce at any arity (`RANK(arr, n)`, etc.); `MEAN`/`MIN`/`MAX` reduce an
+/// array dimension only in their single-argument form (their multi-argument
+/// forms are element-wise). Parsed `Expr0` builtin names keep their source
+/// casing, generated ones are uppercase, so the comparison is
+/// case-insensitive. Mirrors the reducer set `enumerate_agg_nodes` hoists.
+fn is_array_reducer_name(name: &str, arity: usize) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.as_str(), "sum" | "stddev" | "size" | "rank")
+        || (arity == 1 && matches!(lower.as_str(), "mean" | "min" | "max"))
+}
+
+/// Does `expr` contain the live source reference the partial isolates -- a
+/// bare `Var(live_source)` (when `live_shape` is `Bare`) or a
+/// `Subscript(live_source, indices)` whose access shape equals `live_shape`?
+///
+/// Used by [`wrap_non_matching_in_previous`] to decide whether an enclosing
+/// array-reducer App is "other content" (so the whole reducer should be
+/// `PREVIOUS`-wrapped -- `PREVIOUS(SUM(arr[*]))`, which evaluates fine) or
+/// genuinely holds the live reference (so it must be recursed into, e.g. the
+/// test-only `RefShape::Wildcard` path where `SUM(arr[*])` *is* the live
+/// thing). See GH #517: the alternative -- recursing and emitting
+/// `SUM(PREVIOUS(arr[*]))` -- is silently `0.0` at every step under an
+/// active apply-to-all dimension because codegen has no
+/// LoadPrev-of-array-view path.
+fn expr0_contains_live_match(
+    expr: &Expr0,
+    live_source: &Ident<Canonical>,
+    live_shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+) -> bool {
+    match expr {
+        Expr0::Const(..) => false,
+        Expr0::Var(ident, _) => {
+            matches!(live_shape, RefShape::Bare) && &Ident::new(ident.as_str()) == live_source
+        }
+        Expr0::Subscript(ident, indices, _) => {
+            // A `live_source` occurrence reachable only through an index
+            // expression (`other_arr[live_source]`) is never the captured
+            // live ref -- `wrap_index_non_matching_in_previous` passes a
+            // throwaway sink for those -- so we only consider a subscript
+            // whose *head* is `live_source` with the matching shape.
+            &Ident::new(ident.as_str()) == live_source
+                && &classify_expr0_subscript_shape(indices, source_dim_elements) == live_shape
+        }
+        Expr0::App(UntypedBuiltinFn(_, args), _) => args
+            .iter()
+            .any(|a| expr0_contains_live_match(a, live_source, live_shape, source_dim_elements)),
+        Expr0::Op1(_, inner, _) => {
+            expr0_contains_live_match(inner, live_source, live_shape, source_dim_elements)
+        }
+        Expr0::Op2(_, l, r, _) => {
+            expr0_contains_live_match(l, live_source, live_shape, source_dim_elements)
+                || expr0_contains_live_match(r, live_source, live_shape, source_dim_elements)
+        }
+        Expr0::If(c, t, e, _) => {
+            expr0_contains_live_match(c, live_source, live_shape, source_dim_elements)
+                || expr0_contains_live_match(t, live_source, live_shape, source_dim_elements)
+                || expr0_contains_live_match(e, live_source, live_shape, source_dim_elements)
+        }
+    }
+}
+
 /// Walk an `Expr0` tree and wrap variable references in `PREVIOUS()` except
-/// those whose access shape matches the live shape for the given source.
+/// those whose access shape matches the live shape for the given source,
+/// recording into `live_ref` the *first* `live_source` occurrence left
+/// live (in document order, after the transform).
 ///
 /// `live_source` identifies the source variable whose live shape is held
 /// out from `PREVIOUS` wrapping. `live_shape` declares which AST occurrences
@@ -160,12 +228,23 @@ fn classify_expr0_subscript_shape(
 /// unknown identifiers). Indices of subscripts are recursively transformed
 /// even when the outer subscript matches the live shape, so nested
 /// references like `arr[other_var]` still get wrapped.
-pub(crate) fn wrap_non_matching_in_previous(
+///
+/// `live_ref` ends up holding the bare `Var(live_source)` for a `Bare`
+/// shape, or the (already index-transformed) `Subscript(live_source, ...)`
+/// for `FixedIndex`/`Wildcard`/`DynamicIndex`. Callers use this captured
+/// subtree to build the link-score's source-side normalizer: it is the
+/// source reference *as the partial isolates it*, so `Δ(live_ref)` is the
+/// exact source velocity feeding the `SIGN` factor -- crucially, a
+/// per-element / per-slice expression rather than the (possibly
+/// multi-dimensional) bare `live_source`, which would be a dimension error
+/// in a scalar link-score equation. Pass `&mut None` to ignore it.
+fn wrap_non_matching_in_previous(
     expr: Expr0,
     live_source: &Ident<Canonical>,
     live_shape: &RefShape,
     other_deps: &HashSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
+    live_ref: &mut Option<Expr0>,
 ) -> Expr0 {
     match expr {
         Expr0::Const(..) => expr,
@@ -176,6 +255,9 @@ pub(crate) fn wrap_non_matching_in_previous(
                 // shape (FixedIndex / Wildcard / DynamicIndex) doesn't
                 // match a bare reference, so we wrap.
                 if matches!(live_shape, RefShape::Bare) {
+                    if live_ref.is_none() {
+                        *live_ref = Some(expr.clone());
+                    }
                     expr
                 } else {
                     Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
@@ -235,7 +317,11 @@ pub(crate) fn wrap_non_matching_in_previous(
                         }
                     })
                     .collect();
-                return Expr0::Subscript(ident, indices, loc);
+                let subscript = Expr0::Subscript(ident, indices, loc);
+                if live_ref.is_none() {
+                    *live_ref = Some(subscript.clone());
+                }
+                return subscript;
             }
             // Non-live reference: recurse into indices so any nested
             // user-variable references get wrapped, then build the new
@@ -264,6 +350,28 @@ pub(crate) fn wrap_non_matching_in_previous(
             }
         }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            // GH #517: an array-reducer subexpression (`SUM(pop[*])`,
+            // `MEAN(...)`, `SUM(m[D1,*])`, ...) that does not itself carry
+            // the live reference is "other content" for ceteris-paribus
+            // purposes. Wrap the whole reducer in `PREVIOUS` --
+            // `PREVIOUS(SUM(pop[*]))`, which is `PREVIOUS` of a scalar (the
+            // reducer's result, even a partial reduce, is scalar in the
+            // enclosing apply-to-all context) and evaluates fine -- rather
+            // than recursing into it and emitting `SUM(PREVIOUS(pop[*]))`,
+            // which is silently `0.0` at every step under an active A2A
+            // dimension because codegen has no LoadPrev-of-array-view path.
+            // If the live reference *is* inside this reducer (the now
+            // test-only `RefShape::Wildcard` path where `SUM(pop[*])` is the
+            // live thing), recurse normally so the live `pop[*]` stays
+            // unwrapped.
+            if is_array_reducer_name(&name, args.len())
+                && !args.iter().any(|a| {
+                    expr0_contains_live_match(a, live_source, live_shape, source_dim_elements)
+                })
+            {
+                let reducer = Expr0::App(UntypedBuiltinFn(name, args), loc);
+                return Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![reducer]), loc);
+            }
             let args = args
                 .into_iter()
                 .map(|a| {
@@ -273,6 +381,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                         live_shape,
                         other_deps,
                         source_dim_elements,
+                        live_ref,
                     )
                 })
                 .collect();
@@ -286,6 +395,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             loc,
         ),
@@ -297,6 +407,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
                 *rhs,
@@ -304,6 +415,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             loc,
         ),
@@ -314,6 +426,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
                 *then_expr,
@@ -321,6 +434,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
                 *else_expr,
@@ -328,6 +442,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             loc,
         ),
@@ -341,6 +456,10 @@ fn wrap_index_non_matching_in_previous(
     other_deps: &HashSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
 ) -> IndexExpr0 {
+    // Indices are inner content of a live reference (or of a
+    // PREVIOUS-wrapped one); a `live_source` occurrence reachable only
+    // through an index is not the live reference itself, so do not
+    // capture it -- pass a throwaway sink.
     match index {
         IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_non_matching_in_previous(
             e,
@@ -348,6 +467,7 @@ fn wrap_index_non_matching_in_previous(
             live_shape,
             other_deps,
             source_dim_elements,
+            &mut None,
         )),
         IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
             wrap_non_matching_in_previous(
@@ -356,6 +476,7 @@ fn wrap_index_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                &mut None,
             ),
             wrap_non_matching_in_previous(
                 r,
@@ -363,6 +484,7 @@ fn wrap_index_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                &mut None,
             ),
             loc,
         ),
@@ -391,6 +513,40 @@ pub(crate) fn build_partial_equation_shaped(
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
 ) -> String {
+    build_partial_equation_shaped_with_live_ref(
+        equation_text,
+        deps,
+        live_source,
+        live_shape,
+        source_dim_elements,
+    )
+    .0
+}
+
+/// Like [`build_partial_equation_shaped`], but also returns the *live
+/// source reference* the partial isolates: the single occurrence of
+/// `live_source` that the PREVIOUS-wrapping transform left un-wrapped,
+/// with any inner index sub-expressions already PREVIOUS-rewritten.
+///
+/// For a `Bare` shape this is a bare `Var(live_source)`; for `FixedIndex`,
+/// `Wildcard`, or `DynamicIndex` it is the index-transformed
+/// `Subscript(live_source, ...)` -- i.e. `arr[PREVIOUS(idx)]`, `pop[NYC,*]`,
+/// etc. Callers that build a source-side normalizer (`source - PREVIOUS(source)`
+/// in `link_score_guard_form`) need this so they can scalarize a `Wildcard` /
+/// `DynamicIndex` source slice (`SUM(arr[PREVIOUS(idx)])`) instead of spelling
+/// the bare arrayed name (which is a dimension error in a scalar link-score
+/// equation, yielding an uncompilable fragment and an identically-zero score).
+///
+/// Returns `None` for the second element when the equation fails to parse
+/// (the partial then degrades to the lowercased input) or contains no
+/// left-live `live_source` occurrence at all.
+pub(crate) fn build_partial_equation_shaped_with_live_ref(
+    equation_text: &str,
+    deps: &HashSet<Ident<Canonical>>,
+    live_source: &Ident<Canonical>,
+    live_shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+) -> (String, Option<Expr0>) {
     let other_deps: HashSet<Ident<Canonical>> = deps
         .iter()
         .filter(|d| *d != live_source && normalize_module_ref(d) != *live_source)
@@ -398,17 +554,273 @@ pub(crate) fn build_partial_equation_shaped(
         .collect();
 
     let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
-        return equation_text.to_lowercase();
+        return (equation_text.to_lowercase(), None);
     };
 
+    let mut live_ref: Option<Expr0> = None;
     let transformed = wrap_non_matching_in_previous(
         ast,
         live_source,
         live_shape,
         &other_deps,
         source_dim_elements,
+        &mut live_ref,
     );
-    print_eqn(&transformed)
+    (print_eqn(&transformed), live_ref)
+}
+
+/// Replace every bare `Var(id)` reference in `equation_text` where `id`
+/// (canonicalized) is in `idents` with `Subscript(id, [element])`,
+/// pinning that variable to `element`.
+///
+/// Used when collapsing a scalar-source -> arrayed-target link score into
+/// per-target-element scalar variables: the target's A2A equation body
+/// references arrayed deps that share the target's dimension *bare* (the
+/// A2A expansion subscripts them at runtime), but a *scalar* per-element
+/// link-score variable must spell out the subscript. `idents` is the set
+/// of those deps (the caller computes it -- it needs to know which deps
+/// are arrayed and share the target's dimension).
+///
+/// `Subscript` nodes are left untouched: a dep that already carries an
+/// explicit subscript (an `Ast::Arrayed` per-element slot wrote
+/// `population[NYC]`) is already element-pinned, and double-subscripting
+/// would be nonsensical. Function-name identifiers and identifiers not in
+/// `idents` are likewise left alone. The result is re-printed in the
+/// canonical equation format (via parse + `print_eqn`); a parse failure
+/// degrades to the lowercased input, matching `build_partial_equation_shaped`.
+///
+/// `element` is a single element name (`"nyc"`) for a one-dimensional
+/// target, or a comma-joined tuple (`"nyc,adult"`) for a multi-dimensional
+/// one -- the same form `db_ltm::cartesian_subscripts` produces and the
+/// `parse_link_offsets` discovery parser expects on the `to` side.
+pub(crate) fn subscript_idents_at_element(
+    equation_text: &str,
+    idents: &HashSet<Ident<Canonical>>,
+    element: &str,
+) -> String {
+    if idents.is_empty() {
+        return equation_text.to_string();
+    }
+    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
+        return equation_text.to_lowercase();
+    };
+    let index_exprs: Vec<IndexExpr0> = element
+        .split(',')
+        .map(|e| {
+            IndexExpr0::Expr(Expr0::Var(
+                crate::common::RawIdent::new_from_str(e.trim()),
+                crate::ast::Loc::default(),
+            ))
+        })
+        .collect();
+    print_eqn(&subscript_idents_in_expr0(ast, idents, &index_exprs))
+}
+
+fn subscript_idents_in_expr0(
+    expr: Expr0,
+    idents: &HashSet<Ident<Canonical>>,
+    index_exprs: &[IndexExpr0],
+) -> Expr0 {
+    match expr {
+        Expr0::Const(..) => expr,
+        Expr0::Var(ref ident, loc) => {
+            let canonical = Ident::new(ident.as_str());
+            if idents.contains(&canonical) {
+                Expr0::Subscript(ident.clone(), index_exprs.to_vec(), loc)
+            } else {
+                expr
+            }
+        }
+        // Already-subscripted references are element-pinned by their own
+        // index; leave them (and their indices) untouched.
+        Expr0::Subscript(..) => expr,
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            let args = args
+                .into_iter()
+                .map(|a| subscript_idents_in_expr0(a, idents, index_exprs))
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, inner, loc) => Expr0::Op1(
+            op,
+            Box::new(subscript_idents_in_expr0(*inner, idents, index_exprs)),
+            loc,
+        ),
+        Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
+            op,
+            Box::new(subscript_idents_in_expr0(*lhs, idents, index_exprs)),
+            Box::new(subscript_idents_in_expr0(*rhs, idents, index_exprs)),
+            loc,
+        ),
+        Expr0::If(cond, then_expr, else_expr, loc) => Expr0::If(
+            Box::new(subscript_idents_in_expr0(*cond, idents, index_exprs)),
+            Box::new(subscript_idents_in_expr0(*then_expr, idents, index_exprs)),
+            Box::new(subscript_idents_in_expr0(*else_expr, idents, index_exprs)),
+            loc,
+        ),
+    }
+}
+
+/// Generate a per-target-element scalar link-score equation for a
+/// scalar-source -> arrayed-target edge.
+///
+/// For target element `element` of arrayed target `to`, produces the
+/// link-score guard form (`link_score_guard_form`) whose partial holds
+/// the scalar source `from` live and freezes everything else at PREVIOUS,
+/// with the target reference (and any arrayed deps that share the target's
+/// dimension) pinned to `element`. The result is `Equation::Scalar`-shaped
+/// text -- one such variable is emitted per target element, named
+/// `$⁚ltm⁚link_score⁚{from}→{to}[{element}]`, mirroring the arrayed->scalar
+/// `{from}[{elem}]→{to}` convention from `generate_element_to_scalar_equation`.
+///
+/// `to_elem_eqn_text` is the target's equation text for this element: the
+/// shared A2A body for an `Equation::ApplyToAll` target, or the matching
+/// per-element slot's text (or the default slot) for an `Equation::Arrayed`
+/// one. `to_deps` is the full dependency set of that equation (computed with
+/// the target's AST dimensions so element-name subscripts are not mistaken
+/// for variables). `to_deps_to_subscript` is the subset of `to_deps` that
+/// must be element-pinned -- the arrayed deps that share the target's
+/// dimension (the target self-reference is pinned implicitly via the
+/// already-subscripted `to[element]` reference the guard form is built
+/// around).
+pub(crate) fn generate_scalar_to_element_equation(
+    from: &str,
+    to: &str,
+    element: &str,
+    to_elem_eqn_text: &str,
+    to_deps: &HashSet<Ident<Canonical>>,
+    to_deps_to_subscript: &HashSet<Ident<Canonical>>,
+) -> String {
+    let from_canonical = Ident::new(from);
+    let from_q = quote_ident(from);
+    let to_q = quote_ident(to);
+    let to_elem = format!("{to_q}[{element}]");
+
+    // The scalar source is always referenced bare, so `RefShape::Bare`
+    // holds its single occurrence live and `source_dim_elements` is empty
+    // (no source subscripts to classify).
+    let partial = build_partial_equation_shaped(
+        to_elem_eqn_text,
+        to_deps,
+        &from_canonical,
+        &RefShape::Bare,
+        &[],
+    );
+    let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element);
+    link_score_guard_form(&partial, &to_elem, &from_q)
+}
+
+/// Generate the `agg → scalar-target` link-score equation: the partial of
+/// `to`'s (scalar) equation w.r.t. the aggregate node `agg_name` held live,
+/// everything else PREVIOUS. `to_eqn_text` is the target's equation text with
+/// every hoisted reducer subexpression already substituted by its agg name
+/// (so the agg appears where `SUM(...)` was); `to_deps` is the (over-
+/// approximating is fine) dependency set of that substituted text. The result
+/// is `Equation::Scalar`-shaped text, named `$⁚ltm⁚link_score⁚{agg}→{to}`.
+///
+/// For an *arrayed* target the per-target-element form is produced by
+/// [`generate_scalar_to_element_equation`] instead (with `from = agg_name`).
+pub(crate) fn generate_agg_to_scalar_target_equation(
+    agg_name: &str,
+    to_name: &str,
+    to_eqn_text: &str,
+    to_deps: &HashSet<Ident<Canonical>>,
+) -> String {
+    let agg_canonical = Ident::new(agg_name);
+    let agg_q = quote_ident(agg_name);
+    let to_q = quote_ident(to_name);
+    let partial =
+        build_partial_equation_shaped(to_eqn_text, to_deps, &agg_canonical, &RefShape::Bare, &[]);
+    link_score_guard_form(&partial, &to_q, &agg_q)
+}
+
+/// Substitute each recognized reducer subexpression in `equation_text` with a
+/// (quoted) reference to its aggregate node.
+///
+/// `reducers` maps the canonical reducer-subexpression text (exactly as
+/// `crate::patch::expr2_to_string` / `print_eqn` renders it -- lowercased,
+/// whitespace-normalized) to the agg node's name. `equation_text` is parsed
+/// to `Expr0`, and any subexpression of it whose `print_eqn` equals one of
+/// those keys is replaced by a `Var(agg_name)` node, then the whole tree is
+/// re-printed. The match is on the parsed AST subtree, not a substring of the
+/// text, so a reducer text that is a textual prefix of a *different* reducer
+/// subexpression (`sum(p[*])` vs `sum(p[*] + 1)`) is never falsely matched. A
+/// parse failure degrades to the input text unchanged.
+pub(crate) fn substitute_reducers_in_equation(
+    equation_text: &str,
+    reducers: &HashMap<String, String>,
+) -> String {
+    if reducers.is_empty() {
+        return equation_text.to_string();
+    }
+    let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
+        return equation_text.to_string();
+    };
+    print_eqn(&substitute_reducers_in_expr0(ast, reducers))
+}
+
+fn substitute_reducers_in_expr0(expr: Expr0, reducers: &HashMap<String, String>) -> Expr0 {
+    // A whole-subtree match wins before descending: a reducer App is opaque
+    // -- once it matches an agg, we don't recurse into its (now-irrelevant)
+    // argument.
+    if let Some(agg_name) = reducers.get(&print_eqn(&expr)) {
+        return Expr0::Var(
+            crate::common::RawIdent::new_from_str(agg_name),
+            crate::ast::Loc::default(),
+        );
+    }
+    match expr {
+        Expr0::Const(..) | Expr0::Var(..) => expr,
+        Expr0::Subscript(ident, indices, loc) => {
+            // A reducer can appear as (or inside) a subscript index expression
+            // -- `stock[SUM(idx[*])]` -- and `walk_subexpr_for_aggs` hoists it
+            // into a synthetic agg by descending into `IndexExpr2::Expr` /
+            // `IndexExpr2::Range`, so the substituter must mirror that descent.
+            // Wildcard / star-range / `@N` indices carry no `Expr0`, so they
+            // pass through unchanged.
+            let indices = indices
+                .into_iter()
+                .map(|idx| match idx {
+                    IndexExpr0::Expr(e) => {
+                        IndexExpr0::Expr(substitute_reducers_in_expr0(e, reducers))
+                    }
+                    IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
+                        substitute_reducers_in_expr0(l, reducers),
+                        substitute_reducers_in_expr0(r, reducers),
+                        loc,
+                    ),
+                    IndexExpr0::Wildcard(_)
+                    | IndexExpr0::StarRange(_, _)
+                    | IndexExpr0::DimPosition(_, _) => idx,
+                })
+                .collect();
+            Expr0::Subscript(ident, indices, loc)
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            let args = args
+                .into_iter()
+                .map(|a| substitute_reducers_in_expr0(a, reducers))
+                .collect();
+            Expr0::App(UntypedBuiltinFn(name, args), loc)
+        }
+        Expr0::Op1(op, inner, loc) => Expr0::Op1(
+            op,
+            Box::new(substitute_reducers_in_expr0(*inner, reducers)),
+            loc,
+        ),
+        Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
+            op,
+            Box::new(substitute_reducers_in_expr0(*lhs, reducers)),
+            Box::new(substitute_reducers_in_expr0(*rhs, reducers)),
+            loc,
+        ),
+        Expr0::If(cond, then_e, else_e, loc) => Expr0::If(
+            Box::new(substitute_reducers_in_expr0(*cond, reducers)),
+            Box::new(substitute_reducers_in_expr0(*then_e, reducers)),
+            Box::new(substitute_reducers_in_expr0(*else_e, reducers)),
+            loc,
+        ),
+    }
 }
 
 /// Quote an identifier for use in an equation string.
@@ -423,51 +835,31 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 
 /// Compute the canonical synthetic-variable name for a per-shape link score.
 ///
-/// Naming convention (Phase 3):
-/// - `Bare`: `$⁚ltm⁚link_score⁚{from}→{to}` — the legacy A2A/scalar form,
-///   unchanged.
+/// Naming convention:
+/// - `Bare`: `$⁚ltm⁚link_score⁚{from}→{to}` — the A2A/scalar form.
 /// - `FixedIndex(elems)`: `$⁚ltm⁚link_score⁚{from}[{elems_joined}]→{to}` —
-///   the per-element prefixed-from form already used by
+///   the per-element prefixed-from form also used by
 ///   `try_cross_dimensional_link_scores`.
-/// - `Wildcard`: `$⁚ltm⁚link_score⁚{from}→{to}⁚wildcard` — ALWAYS suffixed,
-///   even when no Bare reference coexists. This makes the link score name a
-///   stable function of `(from, to, shape)` so the discovery parser doesn't
-///   need to reason about per-model collisions.
-/// - `DynamicIndex`: `$⁚ltm⁚link_score⁚{from}→{to}⁚dynamic` — analogous to
-///   Wildcard.
+/// - `Wildcard` / `DynamicIndex`: same as `Bare`. These shapes only reach
+///   `emit_per_shape_link_scores` for the rare conservative-slice reducer
+///   (`x[r] = ... + SUM(pop[NYC, *])`); the emitter dedups by the
+///   resulting name, so the slot collapses onto the canonical Bare name
+///   rather than minting a `⁚wildcard`/`⁚dynamic` variant. Full reducers
+///   are hoisted into `$⁚ltm⁚agg⁚{n}` aggregate nodes and never reach
+///   this function as a Wildcard/DynamicIndex shape.
 ///
 /// The Unicode separators `\u{205A}` (TWO DOT PUNCTUATION) and `\u{2192}`
 /// (RIGHTWARDS ARROW) are intentional: they collide with no legal
 /// identifier, so the generated names cannot be confused with user
-/// variables. The `parse_link_offsets` discovery parser strips the
-/// `⁚wildcard` / `⁚dynamic` suffix before resolving offsets.
-/// Suffix appended to the `to` name for `Wildcard`-shape link scores.
-/// Always appended, regardless of whether other shapes coexist.
-pub(crate) const LINK_SCORE_WILDCARD_SUFFIX: &str = "\u{205A}wildcard";
-
-/// Suffix appended to the `to` name for `DynamicIndex`-shape link scores.
-/// Always appended, regardless of whether other shapes coexist.
-pub(crate) const LINK_SCORE_DYNAMIC_SUFFIX: &str = "\u{205A}dynamic";
-
-/// All shape suffixes that `link_score_var_name` may append. The discovery
-/// parser strips one of these from the end of the `to` name before
-/// resolving offsets.
-pub(crate) const LINK_SCORE_SHAPE_SUFFIXES: &[&str] =
-    &[LINK_SCORE_WILDCARD_SUFFIX, LINK_SCORE_DYNAMIC_SUFFIX];
-
+/// variables.
 pub(crate) fn link_score_var_name(from: &str, to: &str, shape: &RefShape) -> String {
     let from_part = match shape {
         RefShape::FixedIndex(elems) => format!("{}[{}]", from, elems.join(",")),
         _ => from.to_string(),
     };
-    let to_part = match shape {
-        RefShape::Wildcard => format!("{}{}", to, LINK_SCORE_WILDCARD_SUFFIX),
-        RefShape::DynamicIndex => format!("{}{}", to, LINK_SCORE_DYNAMIC_SUFFIX),
-        _ => to.to_string(),
-    };
     format!(
         "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
-        from_part, to_part
+        from_part, to
     )
 }
 
@@ -582,6 +974,14 @@ fn read_rss_mib() -> Option<f64> {
 /// Exposed as `generate_link_score_equation_for_link` for use by tracked
 /// functions in `db.rs`.
 ///
+/// Returns a [`datamodel::Equation`] whose variant matches the *target*
+/// variable's shape: `Equation::Scalar` for a scalar target,
+/// `Equation::ApplyToAll(target_dims, _)` for an arrayed target (so the
+/// compiler expands the formula per element). `target_dims` uses the
+/// target's datamodel dimension names; the link emission loop overwrites
+/// them with the link-score-dimensions policy result, which is the same
+/// list for every compatible-dimension edge.
+///
 /// `shape` selects which AST occurrences of `from` remain live in the
 /// partial equation; non-matching occurrences (and every reference to
 /// other deps) are wrapped in `PREVIOUS()`. `source_dim_elements` carries
@@ -599,7 +999,7 @@ pub(crate) fn generate_link_score_equation_for_link(
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
     all_vars: &HashMap<Ident<Canonical>, Variable>,
-) -> String {
+) -> Equation {
     generate_link_score_equation(from, to, shape, source_dim_elements, to_var, all_vars)
 }
 
@@ -611,7 +1011,7 @@ fn generate_link_score_equation(
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
     all_vars: &HashMap<Ident<Canonical>, Variable>,
-) -> String {
+) -> Equation {
     // Check if this is a flow-to-stock link
     let is_flow_to_stock = matches!(to_var, Variable::Stock { .. })
         && matches!(
@@ -636,6 +1036,205 @@ fn generate_link_score_equation(
     }
 }
 
+/// Wrap a per-input partial equation in the standard LTM link-score guard
+/// form: zero at the initial timestep, zero when either Δtarget or
+/// Δsource is zero, and otherwise `|Δpartial/Δtarget| * sign(Δpartial/Δsource)`,
+/// where `Δpartial` is `partial - PREVIOUS(target)` (the partial measures
+/// what the target *would* be with `from` live and everything else
+/// frozen). `target_ref` and `source_ref` are pre-formatted reference
+/// expressions (already quoted or rendered as subscripts as the caller
+/// requires).
+fn link_score_guard_form(partial_eq: &str, target_ref: &str, source_ref: &str) -> String {
+    let numerator = format!("(({partial_eq}) - PREVIOUS({target_ref}))");
+    let target_diff = format!("({target_ref} - PREVIOUS({target_ref}))");
+    let source_diff = format!("({source_ref} - PREVIOUS({source_ref}))");
+    let abs_part = format!("ABS(SAFEDIV({numerator}, {target_diff}, 0))");
+    let sign_part = format!("SIGN(SAFEDIV({numerator}, {source_diff}, 0))");
+    format!(
+        "if (TIME = INITIAL_TIME) then 0 \
+         else if ({target_diff} = 0) OR ({source_diff} = 0) then 0 \
+         else {abs_part} * {sign_part}"
+    )
+}
+
+/// The datamodel-cased dimension names of `var`'s equation, when `var`
+/// is arrayed; `None` for scalar variables and modules. Link-score
+/// equations are tagged with these so `parse_ltm_equation` resolves the
+/// dimensions by exact-name match against the project's datamodel.
+fn target_equation_dims(var: &Variable) -> Option<Vec<String>> {
+    let eqn = match var {
+        Variable::Stock { eqn, .. } | Variable::Var { eqn, .. } => eqn.as_ref()?,
+        Variable::Module { .. } => return None,
+    };
+    match eqn {
+        Equation::Scalar(_) => None,
+        Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, _, _, _) => {
+            (!dims.is_empty()).then(|| dims.clone())
+        }
+    }
+}
+
+/// Build the link-score [`Equation`] for a target with the given guard-form
+/// equation `text`: `Equation::Scalar` for a scalar target,
+/// `Equation::ApplyToAll(target_dims, text)` for an arrayed target.
+fn link_score_equation_for_target(text: String, to_var: &Variable) -> Equation {
+    match target_equation_dims(to_var) {
+        Some(dims) => Equation::ApplyToAll(dims, text),
+        None => Equation::Scalar(text),
+    }
+}
+
+/// The dimension names to tag an `Equation::Arrayed` link score with.
+///
+/// Prefers the datamodel-cased names off the target's `eqn` field (so a
+/// directly-generated equation parses against the project's datamodel).
+/// Falls back to the AST `Vec<Dimension>`'s canonical-cased names for the
+/// (test-only) case where `to_var` was constructed without an `eqn`; in
+/// production the emission loop's `retarget_ltm_equation_dims` overwrites
+/// these with the link-score-dimensions policy result regardless.
+fn arrayed_target_dim_names(
+    to_var: &Variable,
+    ast_dims: &[crate::dimensions::Dimension],
+) -> Vec<String> {
+    target_equation_dims(to_var)
+        .unwrap_or_else(|| ast_dims.iter().map(|d| d.name().to_string()).collect())
+}
+
+/// Build the per-element-partial link-score [`Equation`] for an
+/// `Ast::Arrayed` (per-element-equation) target.
+///
+/// For each `(element, expr)` slot in the target's per-element map, the
+/// slot equation is the standard link-score guard form ([`link_score_guard_form`])
+/// whose `{partial}` is [`build_partial_equation_shaped`] applied to *that
+/// element's own equation text* with `live_source = from` and `live_shape =
+/// shape`. So the cross-element partial derived from
+/// `mp[NYC] = (pop[NYC] - pop[Boston]) * 0.01` keeps `pop[NYC]` live and
+/// freezes `pop[Boston]` at PREVIOUS when this link score's shape is
+/// `FixedIndex(["nyc"])`. An element whose equation does not reference
+/// `from` with `shape` gets all its `from` references frozen, so that slot
+/// evaluates to ~0 -- correct, because that source-element's influence on
+/// that target-element flows through a *different* `(from[other], to)`
+/// link-score variable (a different shape) and must not be double-counted
+/// here.
+///
+/// `target_ref` is the pre-rendered self-reference expression (a bare name,
+/// which within an `Equation::Arrayed` slot resolves element-wise). The
+/// source reference is shape-aware and re-derived per slot: a `Bare` /
+/// `FixedIndex` shape gives the same `from` / `from[elem]` for every slot,
+/// but a `Wildcard` / `DynamicIndex` shape scalarizes *this slot's* live
+/// source slice (`SUM(from[PREVIOUS(idx)])`), so a slot whose equation
+/// doesn't reference `from` falls back to `SUM(from)` while a slot that
+/// does gets the exact slice the partial isolated.
+/// `target_ast_dims` are the target variable's AST dimensions, passed to
+/// `classify_dependencies` so literal element-name subscripts (e.g.
+/// `[Boston]`) are recognized as dimension references and excluded from the
+/// dep set -- otherwise the PREVIOUS wrapper would treat the element name
+/// as a variable reference and wrap it inside the subscript.
+#[allow(clippy::too_many_arguments)] // threads the link-score generation context
+fn build_arrayed_link_score_equation(
+    from: &Ident<Canonical>,
+    shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+    target_dim_names: Vec<String>,
+    target_ast_dims: &[crate::dimensions::Dimension],
+    per_elem: &HashMap<crate::common::CanonicalElementName, crate::ast::Expr2>,
+    default_expr: Option<&crate::ast::Expr2>,
+    apply_default_to_missing: bool,
+    target_ref: &str,
+) -> Equation {
+    let slot_equation = |expr: &crate::ast::Expr2| -> String {
+        let elem_eqn_text = crate::patch::expr2_to_string(expr);
+        // Per-element dependency set: walk *only this slot's* expression
+        // (the union over all elements -- what `identifier_set` on the
+        // whole `Ast::Arrayed` returns -- would over-freeze refs absent
+        // from this slot). Pass the target's dimensions so literal
+        // element-name subscripts are filtered out of the dep set.
+        let deps_e = crate::variable::classify_dependencies(
+            &crate::ast::Ast::Scalar(expr.clone()),
+            target_ast_dims,
+            None,
+        )
+        .all;
+        let (partial_e, live_ref) = build_partial_equation_shaped_with_live_ref(
+            &elem_eqn_text,
+            &deps_e,
+            from,
+            shape,
+            source_dim_elements,
+        );
+        let source_ref = source_ref_for_guard(from, shape, live_ref.as_ref());
+        link_score_guard_form(&partial_e, target_ref, &source_ref)
+    };
+
+    // Sort the slots by element name so the resulting `Vec` -- which lands
+    // in a salsa-tracked `LtmVariablesResult` -- is deterministic
+    // regardless of `HashMap` iteration order across runs.
+    let mut elements: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<datamodel::GraphicalFunction>,
+    )> = per_elem
+        .iter()
+        .map(|(elem, expr)| (elem.as_str().to_string(), slot_equation(expr), None, None))
+        .collect();
+    elements.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let default_slot = default_expr.map(slot_equation);
+
+    Equation::Arrayed(
+        target_dim_names,
+        elements,
+        default_slot,
+        apply_default_to_missing,
+    )
+}
+
+/// Extract the equation text of a Scalar/ApplyToAll target's AST.
+///
+/// `Ast::Arrayed` targets are routed through
+/// [`build_arrayed_link_score_equation`] before this is reached, so the
+/// `Arrayed` AST arm here is dead in practice.
+///
+/// The `eqn`-text fallbacks (both the `Ast::Arrayed` arm and the no-AST
+/// branch) cover the degenerate case where the target failed to lower --
+/// `ast()` is `None`, or it's an `Ast::Arrayed` we didn't intercept --
+/// but its datamodel `eqn` is still a plain scalar string. Returning that
+/// raw text gives the link-score guard form *something* to differentiate,
+/// which is strictly more useful than a `"0"` partial; the stock-to-flow
+/// path has always done this for the same variable shape. A target with no
+/// usable scalar equation at all (a stub, or an arrayed `eqn` we can't
+/// flatten here) falls through to `"0"` -- the link score then degrades to
+/// the historical placeholder rather than producing a parse error.
+fn scalar_or_a2a_target_equation_text(target_var: &Variable) -> String {
+    use crate::ast::Ast;
+    if let Some(ast) = target_var.ast() {
+        match ast {
+            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
+            _ => scalar_eqn_text_or_zero(target_var),
+        }
+    } else {
+        scalar_eqn_text_or_zero(target_var)
+    }
+}
+
+/// The target's datamodel `eqn` text when it is a plain `Equation::Scalar`,
+/// else `"0"`. See [`scalar_or_a2a_target_equation_text`] for why this
+/// fallback exists (a variable that failed to lower).
+fn scalar_eqn_text_or_zero(target_var: &Variable) -> String {
+    match target_var {
+        Variable::Stock {
+            eqn: Some(Equation::Scalar(eq)),
+            ..
+        }
+        | Variable::Var {
+            eqn: Some(Equation::Scalar(eq)),
+            ..
+        } => eq.clone(),
+        _ => "0".to_string(),
+    }
+}
+
 /// Generate auxiliary-to-auxiliary link score equation
 fn generate_auxiliary_to_auxiliary_equation(
     from: &Ident<Canonical>,
@@ -643,42 +1242,37 @@ fn generate_auxiliary_to_auxiliary_equation(
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
-) -> String {
+) -> Equation {
     use crate::ast::Ast;
+
+    let to_q = quote_ident(to.as_str());
+
+    // Per-element-equation (`Ast::Arrayed`) targets carry real per-element
+    // partials: each slot's link score is the guard form built around that
+    // element's own equation, so a cross-element aux keeps a meaningful
+    // partial in every slot instead of a `"0"` placeholder (the legacy
+    // `_ => "0"` fall-through produced the latter).
+    if let Some(Ast::Arrayed(dims, per_elem, default_expr, apply_default)) = to_var.ast() {
+        let target_dim_names = arrayed_target_dim_names(to_var, dims);
+        return build_arrayed_link_score_equation(
+            from,
+            shape,
+            source_dim_elements,
+            target_dim_names,
+            dims,
+            per_elem,
+            default_expr.as_ref(),
+            *apply_default,
+            &to_q,
+        );
+    }
 
     // Get the equation text of the 'to' variable.  Prefer the AST when
     // available because the `eqn` field holds the *original* text (e.g.,
     // "SMTH1(x, 5)") while the AST holds the post-module-expansion form
     // (e.g., Var("$⁚s⁚0⁚smth1·output")).  Using the AST-derived text
     // ensures the identifiers in the equation match those in `deps`.
-    let to_equation = if let Some(ast) = to_var.ast() {
-        match ast {
-            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
-            _ => match to_var {
-                Variable::Stock {
-                    eqn: Some(Equation::Scalar(eq)),
-                    ..
-                }
-                | Variable::Var {
-                    eqn: Some(Equation::Scalar(eq)),
-                    ..
-                } => eq.clone(),
-                _ => "0".to_string(),
-            },
-        }
-    } else {
-        match to_var {
-            Variable::Stock {
-                eqn: Some(Equation::Scalar(eq)),
-                ..
-            }
-            | Variable::Var {
-                eqn: Some(Equation::Scalar(eq)),
-                ..
-            } => eq.clone(),
-            _ => "0".to_string(),
-        }
-    };
+    let to_equation = scalar_or_a2a_target_equation_text(to_var);
 
     // Get dependencies of the 'to' variable
     let deps = if let Some(ast) = to_var.ast() {
@@ -687,38 +1281,56 @@ fn generate_auxiliary_to_auxiliary_equation(
         HashSet::new()
     };
 
-    let partial_eq =
-        build_partial_equation_shaped(&to_equation, &deps, from, shape, source_dim_elements);
-
-    let from_source_q = shape_aware_source_ref(from.as_str(), shape);
-    let to_q = quote_ident(to.as_str());
-
-    // Using SAFEDIV for both divisions
-    // Note: We still need the outer check for when EITHER is zero, since we multiply the results
-    let abs_part = format!(
-        "ABS(SAFEDIV((({partial_eq}) - PREVIOUS({to_q})), ({to_q} - PREVIOUS({to_q})), 0))",
-    );
-    let sign_part = format!(
-        "SIGN(SAFEDIV((({partial_eq}) - PREVIOUS({to_q})), ({from_source_q} - PREVIOUS({from_source_q})), 0))",
+    let (partial_eq, live_ref) = build_partial_equation_shaped_with_live_ref(
+        &to_equation,
+        &deps,
+        from,
+        shape,
+        source_dim_elements,
     );
 
-    // Return 0 at the initial timestep when PREVIOUS values don't exist yet
-    format!(
-        "if \
-            (TIME = INITIAL_TIME) \
-            then 0 \
-            else if \
-                (({to_q} - PREVIOUS({to_q})) = 0) OR (({from_source_q} - PREVIOUS({from_source_q})) = 0) \
-                then 0 \
-                else {abs_part} * {sign_part}",
-    )
+    let from_source_q = source_ref_for_guard(from, shape, live_ref.as_ref());
+
+    let text = link_score_guard_form(&partial_eq, &to_q, &from_source_q);
+    link_score_equation_for_target(text, to_var)
+}
+
+/// Choose the source-side reference for [`link_score_guard_form`].
+///
+/// For `Bare` / `FixedIndex` shapes this is [`shape_aware_source_ref`]
+/// (a bare ident or a `from[elem]` subscript). For `Wildcard` /
+/// `DynamicIndex` shapes -- the not-hoisted conservative-slice
+/// (`SUM(pop[NYC,*])` inside a larger expr) and bare-dynamic-index
+/// (`arr[idx]`, `arr[i+1]`) cases -- spelling the bare arrayed source in a
+/// *scalar* link-score equation is a dimension error, so the fragment
+/// fails to compile and the score is identically zero. Instead, reuse the
+/// exact source slice the partial isolates (`arr[PREVIOUS(idx)]`,
+/// `pop[NYC,*]`) wrapped in `SUM(...)`: `SUM` of a single element is the
+/// identity, `SUM` of a slice is scalar, and the result feeds only the
+/// SIGN factor and the `=0` zero-guard (both sign/zero-only), so using
+/// `SUM` in place of the reducer's own algebra is harmless. If the
+/// transform left no live reference (parse failure, or the source
+/// vanished from the equation), fall back to `SUM(from)` -- still better
+/// than a guaranteed dimension error.
+fn source_ref_for_guard(
+    from: &Ident<Canonical>,
+    shape: &RefShape,
+    live_ref: Option<&Expr0>,
+) -> String {
+    match shape {
+        RefShape::Bare | RefShape::FixedIndex(_) => shape_aware_source_ref(from.as_str(), shape),
+        RefShape::Wildcard | RefShape::DynamicIndex => match live_ref {
+            Some(r) => format!("SUM({})", print_eqn(r)),
+            None => format!("SUM({})", quote_ident(from.as_str())),
+        },
+    }
 }
 
 /// Render the source reference that drives the link-score's denominator
-/// (the SIGN normalizer and the early-return zero-guard) for a given
-/// shape. The denominator must match the *live* source reference left
-/// in `partial_eq` so SAFEDIV captures the same source the partial
-/// isolates.
+/// (the SIGN normalizer and the early-return zero-guard) for a `Bare` or
+/// `FixedIndex` shape. The denominator must match the *live* source
+/// reference left in `partial_eq` so SAFEDIV captures the same source the
+/// partial isolates.
 ///
 ///   - `Bare` -> `from` (per-element under A2A; the partial keeps the
 ///     bare reference live, so per-element Δfrom is correct).
@@ -729,13 +1341,16 @@ fn generate_auxiliary_to_auxiliary_equation(
 ///     target normalization must use Δfrom[elem], not Δfrom[r],
 ///     otherwise the cross-element sensitivity gets divided by the
 ///     wrong source delta and can flip sign or collapse to zero.
-///   - `Wildcard` / `DynamicIndex` -> `from` (TODO: the truly principled
-///     denominator would be the change in the aggregate
-///     `SUM(from[*])` / `from[expr]` referenced live in the partial,
-///     but that requires re-parsing partial_eq or threading the AST
-///     subtree through. For now we keep the variable-level Δfrom; the
-///     resulting under/over-counting is the same documented edge-
-///     aliasing limitation already pinned by integration tests).
+///
+/// `Wildcard` / `DynamicIndex` shapes never reach this function for the
+/// source-side guard: a bare arrayed `from` in a *scalar* link-score
+/// equation is a dimension error (uncompilable fragment -> identically
+/// zero score), so [`source_ref_for_guard`] reuses the partial's
+/// isolated source slice wrapped in `SUM(...)` instead. (A *fully*
+/// inlined reducer is hoisted into a `$⁚ltm⁚agg⁚{n}` node and normalized
+/// by Δagg; the conservative-slice and bare-dynamic-index cases that
+/// `enumerate_agg_nodes` does not hoist are what `source_ref_for_guard`
+/// handles.)
 fn shape_aware_source_ref(from: &str, shape: &RefShape) -> String {
     match shape {
         RefShape::FixedIndex(elems) if !elems.is_empty() => {
@@ -749,8 +1364,14 @@ fn shape_aware_source_ref(from: &str, shape: &RefShape) -> String {
     }
 }
 
-/// Generate flow-to-stock link score equation
-fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable) -> String {
+/// Generate flow-to-stock link score equation.
+///
+/// The structural inflow/outflow formula has no per-element equation
+/// text -- the compiler applies it element-wise when the stock and flow
+/// are arrayed -- so the result is `Equation::Scalar` for a scalar stock
+/// and `Equation::ApplyToAll(stock_dims, _)` for an arrayed stock (the
+/// shared formula evaluated per element).
+fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable) -> Equation {
     // Check if this flow is an inflow or outflow
     let is_inflow = if let Variable::Stock { inflows, .. } = stock_var {
         inflows.iter().any(|f| f.as_str() == flow)
@@ -776,51 +1397,57 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
     );
 
     // Return 0 for the first two timesteps when we don't have enough history for second-order differences
-    format!(
+    let text = format!(
         "if \
             (TIME = INITIAL_TIME) OR (PREVIOUS(TIME, INITIAL_TIME) = INITIAL_TIME) \
             then 0 \
             else {sign}ABS(SAFEDIV({numerator}, {denominator}, 0))"
-    )
+    );
+    link_score_equation_for_target(text, stock_var)
 }
 
-/// Generate stock-to-flow link score equation
+/// Generate stock-to-flow link score equation.
+///
+/// Like the auxiliary-to-auxiliary path but the source is known to be a
+/// stock. A per-element-equation (`Ast::Arrayed`) flow gets real
+/// per-element partials via [`build_arrayed_link_score_equation`]; a
+/// scalar or A2A flow yields `Equation::Scalar` / `Equation::ApplyToAll`
+/// respectively.
 fn generate_stock_to_flow_equation(
     stock: &Ident<Canonical>,
     flow: &Ident<Canonical>,
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
     flow_var: &Variable,
-) -> String {
+) -> Equation {
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
+    use crate::ast::Ast;
+
+    // The stock-to-flow guard form uses the flow name as the (element-wise
+    // within an `Equation::Arrayed` slot) target reference.
+    let target_ref = flow.as_str();
+
+    if let Some(Ast::Arrayed(dims, per_elem, default_expr, apply_default)) = flow_var.ast() {
+        let target_dim_names = arrayed_target_dim_names(flow_var, dims);
+        return build_arrayed_link_score_equation(
+            stock,
+            shape,
+            source_dim_elements,
+            target_dim_names,
+            dims,
+            per_elem,
+            default_expr.as_ref(),
+            *apply_default,
+            target_ref,
+        );
+    }
 
     // Get the flow equation text.  Prefer the AST when available because
     // it handles both Scalar and ApplyToAll (arrayed) equations, whereas
     // the raw `eqn` field only covers Scalar.  Without this, arrayed flows
     // fall through to "0" and produce a zero link score.
-    use crate::ast::Ast;
-
-    let flow_equation = if let Some(ast) = flow_var.ast() {
-        match ast {
-            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => crate::patch::expr2_to_string(expr),
-            _ => match flow_var {
-                Variable::Var {
-                    eqn: Some(Equation::Scalar(eq)),
-                    ..
-                } => eq.clone(),
-                _ => "0".to_string(),
-            },
-        }
-    } else {
-        match flow_var {
-            Variable::Var {
-                eqn: Some(Equation::Scalar(eq)),
-                ..
-            } => eq.clone(),
-            _ => "0".to_string(),
-        }
-    };
+    let flow_equation = scalar_or_a2a_target_equation_text(flow_var);
 
     // Get dependencies of the flow variable
     let deps = if let Some(ast) = flow_var.ast() {
@@ -829,37 +1456,24 @@ fn generate_stock_to_flow_equation(
         HashSet::new()
     };
 
-    let partial_eq =
-        build_partial_equation_shaped(&flow_equation, &deps, stock, shape, source_dim_elements);
+    let (partial_eq, live_ref) = build_partial_equation_shaped_with_live_ref(
+        &flow_equation,
+        &deps,
+        stock,
+        shape,
+        source_dim_elements,
+    );
 
     // Link score formula from LTM paper: |Δxz/Δz| × sign(Δxz/Δx)
     // For stock-to-flow: x=stock, z=flow. The stock side respects
     // shape: a FixedIndex(elem) link score must normalize by
-    // Δstock[elem], not the variable-level Δstock; otherwise the
-    // SAFEDIV captures the wrong source delta (same bug class as the
-    // auxiliary-to-auxiliary path -- see `shape_aware_source_ref`).
-    let flow_diff = format!("({flow} - PREVIOUS({flow}))", flow = flow.as_str());
-    let stock_source_q = shape_aware_source_ref(stock.as_str(), shape);
-    let stock_diff = format!("({stock_source_q} - PREVIOUS({stock_source_q}))");
-    let partial_change = format!(
-        "(({partial_eq}) - PREVIOUS({flow}))",
-        partial_eq = partial_eq,
-        flow = flow.as_str()
-    );
-
-    let abs_part = format!("ABS(SAFEDIV({partial_change}, {flow_diff}, 0))");
-    let sign_part = format!("SIGN(SAFEDIV({partial_change}, {stock_diff}, 0))");
-
-    // Return 0 at the initial timestep when PREVIOUS values don't exist yet
-    format!(
-        "if \
-            (TIME = INITIAL_TIME) \
-            then 0 \
-            else if \
-                ({flow_diff} = 0) OR ({stock_diff} = 0) \
-                then 0 \
-                else {abs_part} * {sign_part}"
-    )
+    // Δstock[elem], not the variable-level Δstock; a Wildcard /
+    // DynamicIndex source slice is scalarized (`SUM(stock[PREVIOUS(idx)])`)
+    // because bare arrayed `stock` in a scalar equation is a dimension
+    // error -- see `source_ref_for_guard`.
+    let stock_source_q = source_ref_for_guard(stock, shape, live_ref.as_ref());
+    let text = link_score_guard_form(&partial_eq, target_ref, &stock_source_q);
+    link_score_equation_for_target(text, flow_var)
 }
 
 /// Resolve the link-score variable name a downstream consumer (loop
@@ -867,36 +1481,37 @@ fn generate_stock_to_flow_equation(
 /// `(from, to)` edge.
 ///
 /// `emit_per_shape_link_scores` emits names per-shape based on what the
-/// target's AST contains: `pop→share` (Bare), `pop→share⁚wildcard`
-/// (Wildcard), `pop[nyc]→share` (FixedIndex via element-level `from`
-/// prefix), and so on. The downstream consumer doesn't carry the access
-/// shape, so we resolve at equation-generation time by trying candidate
-/// names in priority order against the set of names actually emitted.
+/// target's AST contains: `pop→share` (Bare), `pop[nyc]→share` (FixedIndex
+/// via element-level `from` prefix), and so on. The downstream consumer
+/// doesn't carry the access shape, so we resolve at equation-generation
+/// time by trying candidate names in priority order against the set of
+/// names actually emitted. (Reducer references no longer produce a
+/// per-shape link score here -- a maximal inlined reducer is hoisted into
+/// a `$⁚ltm⁚agg⁚{n}` node whose two halves carry their own canonical
+/// names, and the conservative-slice case collapses onto the Bare name.)
 ///
-/// Priority:
+/// `to` is always the *variable-level* target name (no subscript).
+/// `from` may carry an element subscript (`"population[nyc]"`):
+///   - For a per-source-element FixedIndex reference (e.g.
+///     `migration_pressure[NYC] = (population[NYC] - population[Boston]) * 0.01`),
+///     `emit_per_shape_link_scores` emits the bracketed-from name
+///     `population[nyc]→migration_pressure`; we match that verbatim.
+///   - For a diagonal A2A reference or a structural flow→stock edge
+///     visited at a specific element, the emitted name uses the
+///     variable-level from (`migration_in→population`, dimensioned over
+///     the target's dims); we fall back to the stripped-from form.
 ///
-/// 1. `Bare` -- the canonical `{from}→{to}` form. Cross-dimensional
-///    edges naturally produce a bracketed `from` like `"pop[nyc]"`,
-///    which combines with Bare naming to match the per-element name
-///    `try_cross_dimensional_link_scores` emits. This is also the only
-///    correct choice when both Bare and a suffixed variant coexist, so
-///    the documented edge-aliasing limitation stays consistent.
+/// `target_element` is the element the loop edge visits at the target
+/// node (when known). It lets `find_fixed_index_emitted_name` prefer an
+/// exact `{from}[{e}]→{to}` match over its alphabetical-first heuristic.
+/// With `target_element = None` the resolver is byte-identical to its
+/// pre-Phase-2 behavior.
 ///
-/// 2. `FixedIndex` -- e.g., `share[r] = pop[NYC]` where the only AST
-///    occurrence of `pop` is a literal-element subscript. The emitted
-///    name is `pop[nyc]→share`. We scan `emitted` for any name matching
-///    `{from}[...]→{to}` (no shape suffix) and pick the lexicographically
-///    first match, deterministically resolving multi-element targets
-///    like `share[r] = pop[NYC] + pop[BOSTON]`. Picking one is the
-///    documented edge-aliasing under-counting; here it manifests across
-///    multiple FixedIndex variants.
+/// Priority (when `from` is variable-level):
 ///
-/// 3. `Wildcard` (`⁚wildcard` suffix) -- e.g., `share[r] = SUM(pop[*])`
-///    where the only AST occurrence of `pop` is inside a wildcard
-///    reducer.
-///
-/// 4. `DynamicIndex` (`⁚dynamic` suffix) -- analogous to Wildcard for
-///    expression-indexed subscripts.
+/// 1. `Bare` -- the canonical `{from}→{to}` form.
+/// 2. `FixedIndex` -- a `{from}[...]→{to}` name; prefer the exact
+///    `target_element` match, else the lexicographically first match.
 ///
 /// If none of the candidates is in `emitted`, return the Bare canonical
 /// name anyway and let the fragment compiler's stub-dep fallback fire.
@@ -905,33 +1520,52 @@ pub(crate) fn resolve_link_score_name_for_loop(
     from: &str,
     to: &str,
     emitted: &HashSet<String>,
+    target_element: Option<&str>,
 ) -> String {
+    if from.contains('[') {
+        // Bracketed-from edge. Try the FixedIndex-style name (bracket
+        // kept) first, then the variable-level Bare name that an A2A or
+        // structural flow→stock link score would carry.
+        let verbatim = link_score_var_name(from, to, &RefShape::Bare);
+        if emitted.contains(&verbatim) {
+            return verbatim;
+        }
+        let stripped = strip_subscript(from);
+        let bare = link_score_var_name(stripped, to, &RefShape::Bare);
+        if emitted.contains(&bare) {
+            return bare;
+        }
+        return verbatim;
+    }
+
     let bare = link_score_var_name(from, to, &RefShape::Bare);
     if emitted.contains(&bare) {
         return bare;
     }
-    if let Some(fixed) = find_fixed_index_emitted_name(from, to, emitted) {
+    if let Some(fixed) = find_fixed_index_emitted_name(from, to, emitted, target_element) {
         return fixed;
-    }
-    let wildcard = link_score_var_name(from, to, &RefShape::Wildcard);
-    if emitted.contains(&wildcard) {
-        return wildcard;
-    }
-    let dynamic = link_score_var_name(from, to, &RefShape::DynamicIndex);
-    if emitted.contains(&dynamic) {
-        return dynamic;
     }
     bare
 }
 
-/// Scan `emitted` for any link-score variable name matching the
-/// FixedIndex pattern `{prefix}{from}[...]→{to}` (no shape suffix).
-/// Returns the lexicographically first match for determinism.
+/// Scan `emitted` for a link-score variable name matching the FixedIndex
+/// pattern `{prefix}{from}[...]→{to}` (no shape suffix).
+///
+/// When `target_element` is `Some(e)` and `{from}[{e}]→{to}` is in
+/// `emitted`, return that exact match. Otherwise return the
+/// lexicographically first match for determinism.
 fn find_fixed_index_emitted_name(
     from: &str,
     to: &str,
     emitted: &HashSet<String>,
+    target_element: Option<&str>,
 ) -> Option<String> {
+    if let Some(e) = target_element {
+        let exact = link_score_var_name(from, to, &RefShape::FixedIndex(vec![e.to_string()]));
+        if emitted.contains(&exact) {
+            return Some(exact);
+        }
+    }
     let prefix = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}[");
     let suffix = format!("]\u{2192}{to}");
     let mut matches: Vec<&String> = emitted
@@ -952,16 +1586,27 @@ fn find_fixed_index_emitted_name(
 /// else, the access shape is implicit in which name was actually
 /// emitted by `emit_per_shape_link_scores`.
 ///
+/// A cross-element loop link carries an element subscript on `link.to`
+/// (e.g. `migration_pressure[boston]`) when the target link-score
+/// variable is A2A (dimensioned over the target's dims). In that case
+/// the loop visits a single element of that A2A score, so the reference
+/// is subscripted at the reference site: `"$⁚ltm⁚link_score⁚{from}→{to}"[e]`.
+/// For pure-scalar and pure-A2A loops `link.to` is variable-level, so
+/// the output is the unsubscripted product of quoted link-score names,
+/// byte-identical to the pre-Phase-2 form.
+///
 /// `emitted_link_score_names` carries every link-score variable name the
 /// caller has emitted so far. For each loop link we try the canonical
 /// Bare name first (since `try_cross_dimensional_link_scores` and the
-/// common Bare-AST case both produce that form) and fall back to the
-/// `⁚wildcard` and `⁚dynamic` shape suffixes when only those variants
-/// exist (e.g., `share[r] = SUM(pop[*])` emits only the wildcard
-/// variant of `pop→share`). Without this resolution the loop_score
-/// equation would multiply against a missing variable and the fragment
-/// compiler would silently insert a stub dep, dropping the link's
-/// contribution.
+/// common Bare-AST case both produce that form) and fall back to a
+/// FixedIndex per-element name when only that variant exists. A loop that
+/// runs through an inlined reducer traverses the synthetic
+/// `$⁚ltm⁚agg⁚{n}` node instead of a `(from, to)` reducer edge, so its
+/// links are `from[d] → agg` and `agg → to[e]` -- each carrying a
+/// canonical name that resolves directly. Without this resolution the
+/// loop_score equation would multiply against a missing variable and the
+/// fragment compiler would silently insert a stub dep, dropping the
+/// link's contribution.
 fn generate_loop_score_equation(
     loop_item: &Loop,
     emitted_link_score_names: &HashSet<String>,
@@ -969,21 +1614,81 @@ fn generate_loop_score_equation(
     let link_score_names: Vec<String> = loop_item
         .links
         .iter()
-        .map(|link| {
-            let name = resolve_link_score_name_for_loop(
-                link.from.as_str(),
-                link.to.as_str(),
-                emitted_link_score_names,
-            );
-            // Double-quote the variable name so it can be parsed
-            format!("\"{name}\"")
-        })
+        .map(|link| loop_link_score_ref(link, emitted_link_score_names))
         .collect();
 
     if link_score_names.is_empty() {
         "0".to_string()
     } else {
         link_score_names.join(" * ")
+    }
+}
+
+/// The reference text (already quoted, and subscripted if needed) for one
+/// loop link inside a loop-score equation.
+///
+/// Three cases:
+///
+/// 1. The loop edge visits an element `e` of the target (`link.to` is
+///    `to[e]`) AND a per-target-element *scalar* link score
+///    `$⁚ltm⁚link_score⁚{from}→{to}[{e}]` was emitted: reference that
+///    scalar variable *bare* -- the element is already in the name, so a
+///    `[e]` subscript would be wrong (the variable is scalar, it has no
+///    element axis to index). This covers both `try_scalar_to_arrayed_link_scores`
+///    (scalar source -> arrayed target, `from` unsubscripted) and
+///    `try_cross_dimensional_link_scores`'s partial-reduce arm
+///    (arrayed-result reducer `matrix[d1,d2] → row_sum[d1]`, where
+///    `link.from` is itself element-level and rides verbatim in the name).
+///
+/// 2. The loop edge visits an element `e` and the link score is a
+///    *dimensioned* A2A variable (`$⁚ltm⁚link_score⁚{from}→{to}` with
+///    `dimensions = [target_dims]`, from `emit_per_shape_link_scores`):
+///    reference it subscripted-after-quote, `"$⁚ltm⁚link_score⁚{from}→{to}"[e]`.
+///
+/// 3. No visited element (pure-scalar / pure-A2A loops, or `link.to` is
+///    variable-level): reference the resolved name bare.
+///
+/// Cases 1 and 2 are distinguished by which name `emit_per_shape_link_scores`
+/// / `try_scalar_to_arrayed_link_scores` / `try_cross_dimensional_link_scores`
+/// actually emitted: the element-in-name scalar variant takes priority
+/// because that is the form a scalar->arrayed or arrayed-result-reducer edge
+/// gets. A bracketed `link.from` (`"pop[nyc]"`) without a matching
+/// element-in-name entry in `emitted` can only be a FixedIndex /
+/// full-reduce cross-dimensional source, so it falls through to the
+/// bracketed-from resolution in `resolve_link_score_name_for_loop`.
+fn loop_link_score_ref(link: &crate::ltm::Link, emitted: &HashSet<String>) -> String {
+    let (to_var_level, visited_element) = split_node_subscript(link.to.as_str());
+
+    if let Some(elem) = visited_element {
+        // Cases 1 / 1b: a per-target-element scalar link score. The name
+        // shape is identical (`$⁚ltm⁚link_score⁚{from}→{to}[{e}]`) whether
+        // `from` is a scalar source (case 1) or itself element-level
+        // (case 1b -- an arrayed-result reducer edge `matrix[d1,d2] →
+        // row_sum[d1]`); `link.from` is used verbatim either way.
+        let per_elem = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
+            link.from.as_str(),
+            to_var_level,
+            elem
+        );
+        if emitted.contains(&per_elem) {
+            return format!("\"{per_elem}\"");
+        }
+    }
+
+    let name = resolve_link_score_name_for_loop(
+        link.from.as_str(),
+        to_var_level,
+        emitted,
+        visited_element,
+    );
+    // Double-quote the variable name so it can be parsed. Case 2: a
+    // cross-element loop edge visits a single element of a dimensioned A2A
+    // link score, so subscript the reference at that element. Case 3: no
+    // element to pin.
+    match visited_element {
+        Some(elem) => format!("\"{name}\"[{elem}]"),
+        None => format!("\"{name}\""),
     }
 }
 
@@ -1249,7 +1954,83 @@ pub(crate) fn generate_element_to_scalar_equation(
     is_bare: bool,
 ) -> String {
     let source_q = quote_ident(source_var_name);
-    let target_q = quote_ident(target_var_name);
+    let target_ref = quote_ident(target_var_name);
+    build_element_reducer_link_score(
+        &source_q,
+        &target_ref,
+        current_element,
+        all_elements,
+        reducer_kind,
+        reducer_name,
+        is_bare,
+    )
+}
+
+/// Generate a per-element link score equation for a *partial* reduce edge,
+/// where an arrayed source feeds an arrayed-result reducer (e.g.
+/// `agg[D1] = SUM(matrix[D1,*])`) that collapses only some of the source's
+/// axes.
+///
+/// `current_element` is the full source element tuple (e.g. `"a,x"` for
+/// `matrix[a,x]`); `result_element` is its projection onto the surviving
+/// (result) axes (e.g. `"a"` for `agg[a]`); `all_coreduced_elements` is the
+/// set of source element tuples that share `result_element` -- i.e. the
+/// `matrix[a,*]` slice that the reducer combines -- so the algebraic
+/// shortcut divides MEAN by the reduced-axis cardinality and the nonlinear
+/// expansion enumerates exactly that slice (other rows are irrelevant). The
+/// ceteris-paribus partial therefore holds the *rest of that slice* at
+/// PREVIOUS while `source[current_element]` varies, and the target
+/// reference (`agg[result_element]`) and source reference
+/// (`source[current_element]`) are both subscripted.
+///
+/// Mirrors [`generate_element_to_scalar_equation`]; the scalar case is the
+/// degenerate partial reduce with an empty result axis. STDDEV/RANK and
+/// nested reducers fall back to the delta-ratio form against
+/// `agg[result_element]`, unchanged from the scalar case (out of scope:
+/// #483).
+#[allow(clippy::too_many_arguments)] // mirrors generate_element_to_scalar_equation's signature
+pub(crate) fn generate_element_to_reduced_equation(
+    source_var_name: &str,
+    target_var_name: &str,
+    current_element: &str,
+    result_element: &str,
+    all_coreduced_elements: &[String],
+    reducer_kind: &ReducerKind,
+    reducer_name: &str,
+    is_bare: bool,
+) -> String {
+    let source_q = quote_ident(source_var_name);
+    let target_ref = format!("{}[{}]", quote_ident(target_var_name), result_element);
+    build_element_reducer_link_score(
+        &source_q,
+        &target_ref,
+        current_element,
+        all_coreduced_elements,
+        reducer_kind,
+        reducer_name,
+        is_bare,
+    )
+}
+
+/// Shared body for the per-element reducer link score equation.
+///
+/// `source_q` is the already-quoted source variable name; `target_ref` is
+/// the already-formatted target reference (a bare quoted ident for a scalar
+/// target, or `agg[result_element]` for an arrayed-result partial reduce).
+/// `current_element` is the source element subscript that stays live;
+/// `all_elements` is the set of source elements the reducer combines
+/// (every element for a full reduce; the surviving-axis-fixed slice for a
+/// partial reduce) -- its length is the MEAN divisor and the nonlinear
+/// expansion iterates it.
+fn build_element_reducer_link_score(
+    source_q: &str,
+    target_ref: &str,
+    current_element: &str,
+    all_elements: &[String],
+    reducer_kind: &ReducerKind,
+    reducer_name: &str,
+    is_bare: bool,
+) -> String {
     let source_elem = format!("{source_q}[{current_element}]");
 
     let partial_eq = match reducer_kind {
@@ -1267,18 +2048,18 @@ pub(crate) fn generate_element_to_scalar_equation(
             // ratio of actual target change to source element change. This is
             // approximate (like STDDEV/RANK) but avoids the wrong-multiplier
             // bug that the algebraic shortcut would introduce.
-            target_q.to_string()
+            target_ref.to_string()
         }
         ReducerKind::Linear => generate_linear_partial(
-            &source_q,
-            &target_q,
+            source_q,
+            target_ref,
             current_element,
             all_elements.len(),
             reducer_name,
         ),
         ReducerKind::Nonlinear => generate_nonlinear_partial(
-            &source_q,
-            &target_q,
+            source_q,
+            target_ref,
             current_element,
             all_elements,
             reducer_name,
@@ -1287,10 +2068,10 @@ pub(crate) fn generate_element_to_scalar_equation(
 
     // Standard link score formula wrapping the partial equation.
     let abs_part = format!(
-        "ABS(SAFEDIV(({partial_eq} - PREVIOUS({target_q})), ({target_q} - PREVIOUS({target_q})), 0))"
+        "ABS(SAFEDIV(({partial_eq} - PREVIOUS({target_ref})), ({target_ref} - PREVIOUS({target_ref})), 0))"
     );
     let sign_part = format!(
-        "SIGN(SAFEDIV(({partial_eq} - PREVIOUS({target_q})), ({source_elem} - PREVIOUS({source_elem})), 0))"
+        "SIGN(SAFEDIV(({partial_eq} - PREVIOUS({target_ref})), ({source_elem} - PREVIOUS({source_elem})), 0))"
     );
 
     format!(
@@ -1298,7 +2079,7 @@ pub(crate) fn generate_element_to_scalar_equation(
             (TIME = INITIAL_TIME) \
             then 0 \
             else if \
-                (({target_q} - PREVIOUS({target_q})) = 0) OR (({source_elem} - PREVIOUS({source_elem})) = 0) \
+                (({target_ref} - PREVIOUS({target_ref})) = 0) OR (({source_elem} - PREVIOUS({source_elem})) = 0) \
                 then 0 \
                 else {abs_part} * {sign_part}"
     )
@@ -1526,6 +2307,76 @@ mod tests {
             is_literal_element_index(&indices[0], 0, &dims),
             "is_literal_element_index must accept canonicalized integer literal",
         );
+    }
+
+    // -- substitute_reducers_in_equation tests --
+
+    /// Baseline: a reducer that is the whole equation is substituted by its
+    /// agg name.
+    #[test]
+    fn substitute_reducers_whole_equation() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("SUM(pop[*])", &reducers);
+        assert_eq!(out, "\"$⁚ltm⁚agg⁚0\"");
+    }
+
+    /// Baseline: a reducer nested in an arithmetic subexpression is
+    /// substituted; the surrounding structure is preserved.
+    #[test]
+    fn substitute_reducers_nested_in_arithmetic() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("base / SUM(pop[*])", &reducers);
+        assert_eq!(out, "base / \"$⁚ltm⁚agg⁚0\"");
+    }
+
+    /// Regression: a reducer used as a *subscript index expression*
+    /// (`stock[SUM(idx[*])]`) is hoisted into a synthetic agg by
+    /// `walk_subexpr_for_aggs` (which descends into `IndexExpr2::Expr`), so
+    /// `substitute_reducers_in_expr0` must likewise descend into the
+    /// `IndexExpr0::Expr` index of a `Subscript` and replace it -- otherwise
+    /// the agg→target link-score equation for such a target would keep the
+    /// reducer text live (no live `Var(agg)`), and the partial-equation
+    /// builder would never PREVIOUS-wrap or hold-live the agg correctly.
+    #[test]
+    fn substitute_reducers_inside_subscript_index() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(idx[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("stock[SUM(idx[*])]", &reducers);
+        assert_eq!(out, "stock[\"$⁚ltm⁚agg⁚0\"]");
+    }
+
+    /// Regression: a reducer used as one bound of a *range* subscript
+    /// (`stock[1:SUM(idx[*])]`) is also reachable by the agg walker
+    /// (`IndexExpr2::Range`), so the substituter must descend into both
+    /// `IndexExpr0::Range` bounds.
+    #[test]
+    fn substitute_reducers_inside_subscript_range_bound() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(idx[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("stock[1:SUM(idx[*])]", &reducers);
+        assert_eq!(out, "stock[1:\"$⁚ltm⁚agg⁚0\"]");
+    }
+
+    /// A reducer nested deep inside a subscript index expression (inside an
+    /// arithmetic op that is itself the index) is still substituted.
+    #[test]
+    fn substitute_reducers_deep_inside_subscript_index() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(idx[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("stock[SUM(idx[*]) + 1]", &reducers);
+        assert_eq!(out, "stock[\"$⁚ltm⁚agg⁚0\" + 1]");
+    }
+
+    /// Wildcard / star-range / dim-position subscript indices have no
+    /// sub-expression to recurse into and must pass through untouched.
+    #[test]
+    fn substitute_reducers_leaves_wildcard_subscript_alone() {
+        let mut reducers = HashMap::new();
+        reducers.insert("sum(pop[*])".to_string(), "$⁚ltm⁚agg⁚0".to_string());
+        let out = substitute_reducers_in_equation("pop[*]", &reducers);
+        assert_eq!(out, "pop[*]");
     }
 
     // -- dimension_element_names tests --
@@ -1995,6 +2846,196 @@ mod tests {
         assert!(eq.contains("\"$\u{205A}ltm\u{205A}var\""), "equation: {eq}");
     }
 
+    // -- generate_element_to_reduced_equation tests (partial reduce) --
+    //
+    // A partial reduce `agg[D1] = SUM(matrix[D1,*])` collapses only the
+    // D2 axis: for source element `matrix[d1,d2]` the relevant target is
+    // `agg[d1]`, and the ceteris-paribus partial holds the other
+    // `matrix[d1,*]` elements (over the reduced axis D2) at PREVIOUS. The
+    // target reference (`to_q`) and the source reference (`source_elem`)
+    // must both be subscripted -- by the result-axis element on the
+    // target side and by the full source tuple on the source side.
+
+    #[test]
+    fn test_generate_reduced_sum_equation() {
+        // agg[D1] = SUM(matrix[D1,*]), D1 = {a, b}, D2 = {x, y}.
+        // For matrix[a,x] -> agg[a], the partial is the SUM algebraic
+        // shortcut with the target pinned to agg[a] and the source pinned
+        // to matrix[a,x]; the other reduced-axis element (matrix[a,y])
+        // must NOT appear (the shortcut avoids enumerating it).
+        let coreduced = vec!["a,x".to_string(), "a,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "agg",
+            "a,x",
+            "a",
+            &coreduced,
+            &ReducerKind::Linear,
+            "SUM",
+            true,
+        );
+        assert!(
+            eq.contains("PREVIOUS(agg[a]) + (matrix[a,x] - PREVIOUS(matrix[a,x]))"),
+            "equation: {eq}"
+        );
+        // Target reference is subscripted by the result element.
+        assert!(
+            eq.contains("(agg[a] - PREVIOUS(agg[a])) = 0"),
+            "equation: {eq}"
+        );
+        // Source reference is the full source tuple.
+        assert!(
+            eq.contains("(matrix[a,x] - PREVIOUS(matrix[a,x])) = 0"),
+            "equation: {eq}"
+        );
+        // The other reduced-axis element must not be enumerated.
+        assert!(
+            !eq.contains("matrix[a,y]"),
+            "SUM shortcut should not enumerate matrix[a,y]: {eq}"
+        );
+        // No literal "(0)" partial -- a real partial expression is emitted.
+        assert!(eq.contains("ABS(SAFEDIV("), "equation: {eq}");
+        assert!(eq.contains("SIGN(SAFEDIV("), "equation: {eq}");
+    }
+
+    #[test]
+    fn test_generate_reduced_mean_equation() {
+        // MEAN divides by the *reduced-axis* cardinality (|D2| = 2),
+        // not by the total number of matrix elements.
+        let coreduced = vec!["a,x".to_string(), "a,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "row_mean",
+            "a,x",
+            "a",
+            &coreduced,
+            &ReducerKind::Linear,
+            "MEAN",
+            true,
+        );
+        assert!(
+            eq.contains("PREVIOUS(row_mean[a]) + (matrix[a,x] - PREVIOUS(matrix[a,x])) / 2"),
+            "equation: {eq}"
+        );
+    }
+
+    #[test]
+    fn test_generate_reduced_min_equation() {
+        // MIN over the reduced axis: nested binary MIN calls over the
+        // matrix[a,*] elements (D2 = {x, y}), with matrix[a,x] live and
+        // matrix[a,y] wrapped in PREVIOUS. Elements from other rows
+        // (matrix[b,*]) must NOT appear.
+        let coreduced = vec!["a,x".to_string(), "a,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "row_min",
+            "a,x",
+            "a",
+            &coreduced,
+            &ReducerKind::Nonlinear,
+            "MIN",
+            true,
+        );
+        assert!(
+            eq.contains("MIN(matrix[a,x], PREVIOUS(matrix[a,y]))"),
+            "equation: {eq}"
+        );
+        // The partial's target reference is the row element.
+        assert!(eq.contains("PREVIOUS(row_min[a])"), "equation: {eq}");
+        // Elements from other rows must not appear.
+        assert!(!eq.contains("matrix[b"), "equation: {eq}");
+    }
+
+    #[test]
+    fn test_generate_reduced_max_equation() {
+        // The current element rides anywhere in the nesting; here it's
+        // the first of the reduced-axis elements.
+        let coreduced = vec!["b,x".to_string(), "b,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "row_max",
+            "b,y",
+            "b",
+            &coreduced,
+            &ReducerKind::Nonlinear,
+            "MAX",
+            true,
+        );
+        assert!(
+            eq.contains("MAX(PREVIOUS(matrix[b,x]), matrix[b,y])"),
+            "equation: {eq}"
+        );
+    }
+
+    #[test]
+    fn test_generate_reduced_constant_returns_zero() {
+        let coreduced = vec!["a,x".to_string(), "a,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "row_size",
+            "a,x",
+            "a",
+            &coreduced,
+            &ReducerKind::Constant,
+            "SIZE",
+            true,
+        );
+        assert_eq!(eq, "0");
+    }
+
+    #[test]
+    fn test_generate_reduced_nested_uses_delta_ratio() {
+        // A nested reducer (is_bare = false) falls back to the delta-ratio
+        // form referencing the row element directly -- same as the scalar
+        // case, just with the target subscripted.
+        let coreduced = vec!["a,x".to_string(), "a,y".to_string()];
+        let eq = generate_element_to_reduced_equation(
+            "matrix",
+            "row_agg",
+            "a,x",
+            "a",
+            &coreduced,
+            &ReducerKind::Linear,
+            "SUM",
+            false,
+        );
+        assert!(
+            !eq.contains("PREVIOUS(row_agg[a]) +"),
+            "should not use the algebraic shortcut for a nested reducer: {eq}"
+        );
+        assert!(
+            eq.contains("(row_agg[a] - PREVIOUS(row_agg[a]))"),
+            "should use the row element in the delta-ratio: {eq}"
+        );
+        assert!(eq.contains("TIME = INITIAL_TIME"), "equation: {eq}");
+    }
+
+    #[test]
+    fn test_generate_full_reduce_unchanged_after_refactor() {
+        // The full-reduce path must stay byte-identical after extracting
+        // the shared body for the partial-reduce case.
+        let elements = vec!["nyc".to_string(), "boston".to_string(), "la".to_string()];
+        let scalar_eq = generate_element_to_scalar_equation(
+            "population",
+            "total_pop",
+            "nyc",
+            &elements,
+            &ReducerKind::Linear,
+            "SUM",
+            true,
+        );
+        // A full reduce is the degenerate partial reduce where the result
+        // axis is empty: passing an empty result element and the full
+        // element list as the "coreduced" set must reproduce the scalar
+        // equation, except the target reference picks up `[]` -- so we
+        // don't claim equality here, only that the scalar path's text is
+        // stable (the explicit-string assertion below catches regressions).
+        assert_eq!(
+            scalar_eq,
+            "if (TIME = INITIAL_TIME) then 0 else if ((total_pop - PREVIOUS(total_pop)) = 0) OR ((population[nyc] - PREVIOUS(population[nyc])) = 0) then 0 else ABS(SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), (total_pop - PREVIOUS(total_pop)), 0)) * SIGN(SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), (population[nyc] - PREVIOUS(population[nyc])), 0))"
+        );
+    }
+
     // -- build_partial_equation_shaped: per-shape partial equation tests --
     //
     // Each test below pins the exact text that
@@ -2022,19 +3063,63 @@ mod tests {
     fn test_partial_equation_share_bare_shape() {
         // share[R] = population / SUM(population[*])
         // For the bare-Var reference (`population`), the bare ref stays live
-        // and the wildcard reducer's source ref is wrapped in PREVIOUS().
+        // and the wildcard reducer -- "other content" for this Bare link --
+        // is wrapped in PREVIOUS() *as a whole*: `PREVIOUS(sum(population[*]))`,
+        // which is PREVIOUS of the scalar total and evaluates fine. The
+        // earlier form `sum(PREVIOUS(population[*]))` was the GH #517 bug --
+        // identically `0.0` at every step under an active A2A dimension
+        // because codegen has no LoadPrev-of-array-view path.
         let equation = "population / SUM(population[*])";
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
         let partial = build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[]);
-        assert_eq!(partial, "population / sum(PREVIOUS(population[*]))");
+        assert_eq!(partial, "population / PREVIOUS(sum(population[*]))");
     }
 
     #[test]
-    fn test_partial_equation_share_wildcard_shape() {
-        // share[R] = population / SUM(population[*])
-        // For the wildcard reducer's source ref (`population[*]`), the
-        // wildcard stays live and the bare ref is wrapped in PREVIOUS().
+    fn test_partial_equation_reducer_wrapped_whole_with_fixed_index_live() {
+        // x[R] = pop[NYC] + SUM(pop[*]) -- the FixedIndex(nyc) link keeps
+        // `pop[nyc]` live; the coexisting `SUM(pop[*])` is "other content"
+        // and must be PREVIOUS-wrapped as a whole, not recursed into (GH
+        // #517). `dims` lets `classify_expr0_subscript_shape` recognize
+        // `[NYC]` as a literal element.
+        let equation = "pop[NYC] + SUM(pop[*])";
+        let deps = deps_set(&["pop"]);
+        let source = Ident::<Canonical>::new("pop");
+        let dims = vec![vec!["nyc".to_string(), "boston".to_string()]];
+        let partial = build_partial_equation_shaped(
+            equation,
+            &deps,
+            &source,
+            &RefShape::FixedIndex(vec!["nyc".to_string()]),
+            &dims,
+        );
+        assert_eq!(partial, "pop[nyc] + PREVIOUS(sum(pop[*]))");
+    }
+
+    #[test]
+    fn test_partial_equation_two_reducers_both_wrapped_whole() {
+        // y = SUM(a[*]) / SUM(b[*]) with `c` as the live source: neither
+        // reducer carries the live ref, so both are PREVIOUS-wrapped whole
+        // (GH #517). `c` does not appear, so nothing stays live -- the point
+        // here is purely that the reducers don't get `sum(PREVIOUS(...))`.
+        let equation = "(c + SUM(a[*])) / SUM(b[*])";
+        let deps = deps_set(&["a", "b", "c"]);
+        let source = Ident::<Canonical>::new("c");
+        let partial = build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[]);
+        assert_eq!(partial, "(c + PREVIOUS(sum(a[*]))) / PREVIOUS(sum(b[*]))");
+    }
+
+    #[test]
+    fn test_partial_equation_wildcard_live_shape_holds_reducer_arg() {
+        // A `RefShape::Wildcard` `live_shape` keeps the `population[*]`
+        // reducer argument live and wraps every other reference in
+        // PREVIOUS(). Full inlined reducers are hoisted into `$⁚ltm⁚agg⁚{n}`
+        // nodes, so `build_partial_equation_shaped` only sees a Wildcard
+        // `live_shape` for the conservative-slice case `SUM(pop[NYC, *])`
+        // that `enumerate_agg_nodes` deliberately does not hoist; the
+        // textbook full-reduce shape below pins the same wrapping rule that
+        // case exercises.
         let equation = "population / SUM(population[*])";
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
@@ -2158,26 +3243,19 @@ mod tests {
     }
 
     #[test]
-    fn link_score_name_wildcard_always_suffixed() {
-        // Suffix is unconditional - same name regardless of whether Bare
-        // coexists. This is the resolution of code-review issues I2 + I6:
-        // the suffix is a function of `(from, to, shape)` alone, so the
-        // discovery parser needs no per-model collision analysis.
-        assert_eq!(
-            link_score_var_name("pop", "total", &RefShape::Wildcard),
-            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}total\u{205A}wildcard"
-        );
+    fn link_score_name_wildcard_dynamic_collapse_to_bare() {
+        // The `⁚wildcard` / `⁚dynamic` per-shape suffix was retired:
+        // a maximal inlined reducer is hoisted into a `$⁚ltm⁚agg⁚{n}`
+        // node, and the rare conservative-slice reducer collapses onto
+        // the canonical Bare name (the emitter dedups by resulting name).
+        let bare = link_score_var_name("pop", "share", &RefShape::Bare);
         assert_eq!(
             link_score_var_name("pop", "share", &RefShape::Wildcard),
-            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard"
+            bare
         );
-    }
-
-    #[test]
-    fn link_score_name_dynamic_index_always_suffixed() {
         assert_eq!(
-            link_score_var_name("pop", "tgt", &RefShape::DynamicIndex),
-            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}tgt\u{205A}dynamic"
+            link_score_var_name("pop", "share", &RefShape::DynamicIndex),
+            bare
         );
     }
 
@@ -2243,7 +3321,7 @@ mod tests {
         let mut emitted = HashSet::new();
         emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string());
 
-        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted);
+        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted, None);
         assert_eq!(
             chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share",
             "resolver should pick the FixedIndex variant when Bare is not emitted",
@@ -2262,7 +3340,7 @@ mod tests {
         emitted
             .insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston]\u{2192}share".to_string());
 
-        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted);
+        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted, None);
         // Lexicographic sort: "pop[boston]→share" < "pop[nyc]→share".
         assert_eq!(
             chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston]\u{2192}share",
@@ -2270,21 +3348,19 @@ mod tests {
         );
     }
 
-    /// Regression test: Bare must win when both Bare and a suffixed
-    /// variant coexist (the documented edge-aliasing behavior).
+    /// Regression test: Bare must win when both a Bare and a FixedIndex
+    /// per-element link score exist for the same `(from, to)` edge -- the
+    /// documented Bare-beats-FixedIndex edge-aliasing tie-break.
     #[test]
-    fn resolver_prefers_bare_over_other_shapes() {
+    fn resolver_prefers_bare_over_fixed_index() {
         let mut emitted = HashSet::new();
         emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share".to_string());
-        emitted.insert(
-            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard".to_string(),
-        );
         emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}share".to_string());
 
-        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted);
+        let chosen = resolve_link_score_name_for_loop("pop", "share", &emitted, None);
         assert_eq!(
             chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share",
-            "Bare must win when present, regardless of other variants",
+            "Bare must win when present, regardless of any FixedIndex variant",
         );
     }
 
@@ -2296,50 +3372,233 @@ mod tests {
         let mut emitted = HashSet::new();
         emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total".to_string());
 
-        let chosen = resolve_link_score_name_for_loop("pop[nyc]", "total", &emitted);
+        let chosen = resolve_link_score_name_for_loop("pop[nyc]", "total", &emitted, None);
         assert_eq!(
             chosen, "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc]\u{2192}total",
             "bracketed from + Bare should match the emitted per-element name",
         );
     }
 
-    /// Regression test: when only the Wildcard variant is in `emitted`,
-    /// the resolver must pick the suffixed name rather than the Bare
-    /// canonical form. This is the case that breaks for fixtures like
-    /// `share[r] = SUM(pop[*])` where the only AST shape for (pop, share)
-    /// is Wildcard.
+    // -- Task 1 (ltm-503-cross-element-agg Phase 2): target_element-aware
+    //    loop-score link-score reference resolution --
+
+    /// Regression guard: `generate_loop_score_equation` is byte-identical
+    /// to the pre-Phase-2 behavior when no `Link.to` carries an element
+    /// subscript (which is the case for every pure-scalar / pure-A2A /
+    /// mixed loop the loop builder produces today, and stays the case for
+    /// pure-A2A loops after the cross-element rewrite).
     #[test]
-    fn loop_score_equation_falls_back_to_wildcard_when_bare_not_emitted() {
+    fn loop_score_equation_unsubscripted_to_unchanged() {
+        use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "r1".to_string(),
+            links: vec![
+                Link {
+                    from: Ident::<Canonical>::new("pop"),
+                    to: Ident::<Canonical>::new("births"),
+                    polarity: LinkPolarity::Positive,
+                },
+                Link {
+                    from: Ident::<Canonical>::new("births"),
+                    to: Ident::<Canonical>::new("pop"),
+                    polarity: LinkPolarity::Positive,
+                },
+            ],
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+            dimensions: vec![],
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births".to_string());
+        emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}births\u{2192}pop".to_string());
+
+        let eq = generate_loop_score_equation(&loop_item, &emitted);
+        assert_eq!(
+            eq,
+            "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births\" * \
+             \"$\u{205A}ltm\u{205A}link_score\u{205A}births\u{2192}pop\"",
+            "unsubscripted loop-score equation must be byte-identical to pre-Phase-2 output",
+        );
+    }
+
+    /// When `target_element = None` the resolver is unchanged: it picks
+    /// the lexicographically-first FixedIndex variant.
+    #[test]
+    fn resolver_fixed_index_no_target_element_unchanged() {
+        let mut emitted = HashSet::new();
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure"
+                .to_string(),
+        );
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[boston]\u{2192}migration_pressure"
+                .to_string(),
+        );
+
+        let chosen =
+            resolve_link_score_name_for_loop("population", "migration_pressure", &emitted, None);
+        // Lexicographic: "population[boston]..." < "population[nyc]...".
+        assert_eq!(
+            chosen,
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[boston]\u{2192}migration_pressure",
+            "with target_element=None the resolver keeps the alphabetical heuristic",
+        );
+    }
+
+    /// `target_element = Some(e)` makes the resolver prefer the FixedIndex
+    /// variant whose source element matches `e` (an exact match), rather
+    /// than guessing alphabetically.
+    #[test]
+    fn resolver_fixed_index_target_element_exact_match() {
+        let mut emitted = HashSet::new();
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure"
+                .to_string(),
+        );
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[boston]\u{2192}migration_pressure"
+                .to_string(),
+        );
+
+        let chosen = resolve_link_score_name_for_loop(
+            "population",
+            "migration_pressure",
+            &emitted,
+            Some("nyc"),
+        );
+        assert_eq!(
+            chosen,
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure",
+            "target_element=Some(\"nyc\") should select the nyc-source FixedIndex variant",
+        );
+    }
+
+    /// A cross-element loop edge `population[nyc] -> migration_pressure[boston]`
+    /// where the emitted A2A link score is the per-source-element FixedIndex
+    /// form `population[nyc]->migration_pressure` (dimensioned over Region):
+    /// the loop-score equation references it subscripted at the visited
+    /// target element -- `"$⁚ltm⁚link_score⁚population[nyc]→migration_pressure"[boston]`.
+    #[test]
+    fn loop_score_equation_subscripts_a2a_fixed_index_link_at_visited_element() {
         use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
 
         let loop_item = Loop {
             id: "u1".to_string(),
             links: vec![Link {
-                from: Ident::<Canonical>::new("pop"),
-                to: Ident::<Canonical>::new("share"),
+                from: Ident::<Canonical>::new("population[nyc]"),
+                to: Ident::<Canonical>::new("migration_pressure[boston]"),
                 polarity: LinkPolarity::Positive,
             }],
             stocks: vec![],
             polarity: LoopPolarity::Undetermined,
             dimensions: vec![],
         };
-
         let mut emitted = HashSet::new();
-        // Only the wildcard variant is emitted.
         emitted.insert(
-            "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard".to_string(),
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure"
+                .to_string(),
         );
 
         let eq = generate_loop_score_equation(&loop_item, &emitted);
-        assert!(
-            eq.contains(
-                "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\u{205A}wildcard\""
-            ),
-            "expected wildcard-suffixed reference when Bare is not emitted; got: {eq}"
+        assert_eq!(
+            eq,
+            "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure\"[boston]",
+            "A2A FixedIndex link score visited at element 'boston' must be subscripted [boston]",
         );
+    }
+
+    /// A cross-element loop edge `migration_in[nyc] -> population[nyc]` (a
+    /// structural flow->stock edge): the emitted link score uses the
+    /// *variable-level* `from` (`migration_in->population`, dimensioned
+    /// over Region), so the resolver must strip the subscript off
+    /// `Link.from` to find it, and the loop-score equation subscripts the
+    /// reference at the visited element -- `"$⁚ltm⁚link_score⁚migration_in→population"[nyc]`.
+    #[test]
+    fn loop_score_equation_strips_from_for_variable_level_a2a_link() {
+        use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "u1".to_string(),
+            links: vec![Link {
+                from: Ident::<Canonical>::new("migration_in[nyc]"),
+                to: Ident::<Canonical>::new("population[nyc]"),
+                polarity: LinkPolarity::Positive,
+            }],
+            stocks: vec![Ident::<Canonical>::new("population[nyc]")],
+            polarity: LoopPolarity::Undetermined,
+            dimensions: vec![],
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population".to_string(),
+        );
+
+        let eq = generate_loop_score_equation(&loop_item, &emitted);
+        assert_eq!(
+            eq, "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population\"[nyc]",
+            "variable-level-from A2A link score visited at 'nyc' must resolve via stripped-from \
+             and be subscripted [nyc]",
+        );
+    }
+
+    /// Full cross-element migration loop: three edges, three subscripted
+    /// references, all distinct A2A link scores, joined by ` * `.
+    #[test]
+    fn loop_score_equation_cross_element_migration_loop_full() {
+        use crate::ltm::{Link, LinkPolarity, Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "u1".to_string(),
+            links: vec![
+                Link {
+                    from: Ident::<Canonical>::new("population[nyc]"),
+                    to: Ident::<Canonical>::new("migration_pressure[boston]"),
+                    polarity: LinkPolarity::Positive,
+                },
+                Link {
+                    from: Ident::<Canonical>::new("migration_pressure[boston]"),
+                    to: Ident::<Canonical>::new("migration_in[nyc]"),
+                    polarity: LinkPolarity::Negative,
+                },
+                Link {
+                    from: Ident::<Canonical>::new("migration_in[nyc]"),
+                    to: Ident::<Canonical>::new("population[nyc]"),
+                    polarity: LinkPolarity::Positive,
+                },
+            ],
+            stocks: vec![Ident::<Canonical>::new("population[nyc]")],
+            polarity: LoopPolarity::Undetermined,
+            dimensions: vec![],
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure"
+                .to_string(),
+        );
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure[boston]\u{2192}migration_in"
+                .to_string(),
+        );
+        emitted.insert(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population".to_string(),
+        );
+
+        let eq = generate_loop_score_equation(&loop_item, &emitted);
+        assert_eq!(
+            eq,
+            "\"$\u{205A}ltm\u{205A}link_score\u{205A}population[nyc]\u{2192}migration_pressure\"[boston] * \
+             \"$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure[boston]\u{2192}migration_in\"[nyc] * \
+             \"$\u{205A}ltm\u{205A}link_score\u{205A}migration_in\u{2192}population\"[nyc]",
+            "cross-element migration loop score must walk the element-level path",
+        );
+        // It must NOT reference the unsubscripted A2A diagonal names where
+        // the loop visits a specific element.
         assert!(
-            !eq.contains("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}share\""),
-            "must not reference the never-emitted Bare canonical name; got: {eq}"
+            !eq.contains(
+                "\"$\u{205A}ltm\u{205A}link_score\u{205A}migration_pressure\u{2192}migration_out\""
+            ),
+            "must not reference the diagonal migration_out link score; got: {eq}",
         );
     }
 
@@ -2410,5 +3669,350 @@ mod tests {
             !partial.contains("PREVIOUS(nyc)"),
             "literal element subscript wrongly treated as variable; got: {partial}",
         );
+    }
+
+    // -- Arrayed-target link scores: per-element partial equations --
+    //
+    // For a per-element-equation (`Ast::Arrayed`) target, the link score
+    // must be an `Equation::Arrayed` whose per-element slot equation is the
+    // standard link-score guard form built around *that element's own*
+    // partial equation -- not a `"0"` placeholder. The tests below build a
+    // 2-region per-element-equation aux (`migration_pressure`) and verify
+    // that the `population -> migration_pressure` link-score equation for
+    // each `FixedIndex` shape carries the right partial in every slot.
+
+    /// Build a stage-1 `Variable` (lowered, `Expr2`) for a per-element-
+    /// equation (`Equation::Arrayed`) variable from raw element equation
+    /// text. Routes through the same `datamodel::Variable` -> parse -> lower
+    /// path production uses, so the result carries both `ast: Some(Ast::Arrayed)`
+    /// and `eqn: Some(Equation::Arrayed)`.
+    fn arrayed_var_from_text(
+        ident: &str,
+        dims: &[crate::datamodel::Dimension],
+        elements: &[(&str, &str)],
+        is_flow: bool,
+    ) -> Variable {
+        use crate::datamodel::{Aux, Equation as DmEquation, Flow, Variable as DmVariable};
+
+        let equation = DmEquation::Arrayed(
+            dims.iter().map(|d| d.name().to_string()).collect(),
+            elements
+                .iter()
+                .map(|(e, eq)| ((*e).to_string(), (*eq).to_string(), None, None))
+                .collect(),
+            None,
+            false,
+        );
+        let dm_var = if is_flow {
+            DmVariable::Flow(Flow {
+                ident: ident.to_string(),
+                equation,
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            })
+        } else {
+            DmVariable::Aux(Aux {
+                ident: ident.to_string(),
+                equation,
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            })
+        };
+
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let mut implicit_vars = Vec::new();
+        let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
+            dims,
+            &dm_var,
+            &mut implicit_vars,
+            &units_ctx,
+            |mi| Ok(Some(mi.clone())),
+        );
+        let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
+        let models = HashMap::new();
+        let scope = crate::model::ScopeStage0 {
+            models: &models,
+            dimensions: &dim_ctx,
+            model_name: "test",
+        };
+        crate::model::lower_variable(&scope, &stage0)
+    }
+
+    /// Look up the slot equation for `element` in an `Equation::Arrayed`,
+    /// failing the test loudly if the equation isn't `Arrayed` or the slot
+    /// is missing.
+    fn arrayed_slot<'a>(equation: &'a Equation, element: &str) -> &'a str {
+        match equation {
+            Equation::Arrayed(_, elements, _, _) => elements
+                .iter()
+                .find(|(e, _, _, _)| e == element)
+                .map(|(_, eqn, _, _)| eqn.as_str())
+                .unwrap_or_else(|| {
+                    panic!("no slot for element {element:?} in arrayed equation: {equation:?}")
+                }),
+            other => panic!("expected Equation::Arrayed, got: {other:?}"),
+        }
+    }
+
+    fn region_dm_dimension() -> crate::datamodel::Dimension {
+        crate::datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string()],
+        )
+    }
+
+    #[test]
+    fn test_arrayed_link_score_population_to_migration_pressure_fixed_nyc() {
+        // ltm-503-cross-element-agg.AC1.1
+        // migration_pressure is a per-element-equation aux:
+        //   migration_pressure[NYC]    = (population[NYC] - population[Boston]) * 0.01
+        //   migration_pressure[Boston] = (population[Boston] - population[NYC]) * 0.01
+        // For the `population -> migration_pressure` link with shape
+        // FixedIndex(["nyc"]), the `population[nyc]` ref stays live in every
+        // slot and the other-element refs are frozen at PREVIOUS().
+        let dims = vec![region_dm_dimension()];
+        let to_var = arrayed_var_from_text(
+            "migration_pressure",
+            &dims,
+            &[
+                ("NYC", "(population[NYC] - population[Boston]) * 0.01"),
+                ("Boston", "(population[Boston] - population[NYC]) * 0.01"),
+            ],
+            false,
+        );
+
+        let from = Ident::<Canonical>::new("population");
+        let to = Ident::<Canonical>::new("migration_pressure");
+        let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
+        let source_dim_elements = region_dim_elements();
+
+        let equation = generate_auxiliary_to_auxiliary_equation(
+            &from,
+            &to,
+            &shape,
+            &source_dim_elements,
+            &to_var,
+        );
+
+        match &equation {
+            Equation::Arrayed(eq_dims, _, default, _) => {
+                assert_eq!(eq_dims, &["Region".to_string()]);
+                assert!(default.is_none(), "no EXCEPT default expected");
+            }
+            other => panic!("expected Equation::Arrayed, got: {other:?}"),
+        }
+
+        let nyc_slot = arrayed_slot(&equation, "nyc");
+        let boston_slot = arrayed_slot(&equation, "boston");
+
+        // No slot may carry the `(0)` placeholder partial that the pre-fix
+        // `_ => "0"` fall-through produced.
+        assert!(
+            !nyc_slot.contains("((0) -"),
+            "nyc slot must not use a '0' partial; got: {nyc_slot}"
+        );
+        assert!(
+            !boston_slot.contains("((0) -"),
+            "boston slot must not use a '0' partial; got: {boston_slot}"
+        );
+
+        // The `{partial}` substring is the canonical per-element equation
+        // with the live-shape ref kept live and the rest frozen.
+        assert!(
+            nyc_slot.contains("(population[nyc] - PREVIOUS(population[boston])) * 0.01"),
+            "nyc slot partial mismatch; got: {nyc_slot}"
+        );
+        assert!(
+            boston_slot.contains("(PREVIOUS(population[boston]) - population[nyc]) * 0.01"),
+            "boston slot partial mismatch; got: {boston_slot}"
+        );
+
+        // The guard form references the target element-wise (bare name) and
+        // the shape-aware source subscript.
+        assert!(
+            nyc_slot.contains("(migration_pressure - PREVIOUS(migration_pressure))"),
+            "nyc slot target ref mismatch; got: {nyc_slot}"
+        );
+        assert!(
+            nyc_slot.contains("(population[nyc] - PREVIOUS(population[nyc]))"),
+            "nyc slot source ref mismatch; got: {nyc_slot}"
+        );
+    }
+
+    #[test]
+    fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
+        // ltm-503-cross-element-agg.AC1.2
+        // Same model; shape FixedIndex(["boston"]) keeps `population[boston]`
+        // live and freezes `population[nyc]`.
+        let dims = vec![region_dm_dimension()];
+        let to_var = arrayed_var_from_text(
+            "migration_pressure",
+            &dims,
+            &[
+                ("NYC", "(population[NYC] - population[Boston]) * 0.01"),
+                ("Boston", "(population[Boston] - population[NYC]) * 0.01"),
+            ],
+            false,
+        );
+
+        let from = Ident::<Canonical>::new("population");
+        let to = Ident::<Canonical>::new("migration_pressure");
+        let shape = RefShape::FixedIndex(vec!["boston".to_string()]);
+        let source_dim_elements = region_dim_elements();
+
+        let equation = generate_auxiliary_to_auxiliary_equation(
+            &from,
+            &to,
+            &shape,
+            &source_dim_elements,
+            &to_var,
+        );
+
+        let nyc_slot = arrayed_slot(&equation, "nyc");
+        let boston_slot = arrayed_slot(&equation, "boston");
+
+        assert!(
+            !nyc_slot.contains("((0) -") && !boston_slot.contains("((0) -"),
+            "no slot may use a '0' partial; nyc={nyc_slot} boston={boston_slot}"
+        );
+        assert!(
+            nyc_slot.contains("(PREVIOUS(population[nyc]) - population[boston]) * 0.01"),
+            "nyc slot partial mismatch; got: {nyc_slot}"
+        );
+        assert!(
+            boston_slot.contains("(population[boston] - PREVIOUS(population[nyc])) * 0.01"),
+            "boston slot partial mismatch; got: {boston_slot}"
+        );
+        // Source ref is the FixedIndex(boston) subscript, constant across slots.
+        assert!(
+            boston_slot.contains("(population[boston] - PREVIOUS(population[boston]))"),
+            "boston slot source ref mismatch; got: {boston_slot}"
+        );
+    }
+
+    #[test]
+    fn test_arrayed_link_score_stock_to_flow_per_element_partials() {
+        // ltm-503-cross-element-agg.AC1.3 (unit-level): a stock-to-flow link
+        // score into a per-element-equation arrayed flow yields per-element
+        // partials referencing the flow's actual equation contents.
+        let dims = vec![crate::datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+        )];
+        // `births[Region]` per-element flow referencing the `population` stock.
+        let births = arrayed_var_from_text(
+            "births",
+            &dims,
+            &[
+                ("NYC", "population[NYC] * 0.03"),
+                ("Boston", "population[Boston] * 0.02"),
+                ("LA", "population[LA] * 0.01"),
+            ],
+            true,
+        );
+
+        let stock = Ident::<Canonical>::new("population");
+        let flow = Ident::<Canonical>::new("births");
+        // Each `births[e]` references `population[e]` -- a FixedIndex ref.
+        let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
+        let source_dim_elements = vec![vec![
+            "nyc".to_string(),
+            "boston".to_string(),
+            "la".to_string(),
+        ]];
+
+        let equation =
+            generate_stock_to_flow_equation(&stock, &flow, &shape, &source_dim_elements, &births);
+
+        let nyc_slot = arrayed_slot(&equation, "nyc");
+        let boston_slot = arrayed_slot(&equation, "boston");
+        // The NYC slot keeps population[nyc] live (shape match); the other
+        // slots freeze their population refs but still reference
+        // `population` -- never a bare `(0)` partial.
+        assert!(
+            nyc_slot.contains("population[nyc] * 0.03"),
+            "nyc slot partial should keep population[nyc] live; got: {nyc_slot}"
+        );
+        assert!(
+            boston_slot.contains("population"),
+            "boston slot should reference population; got: {boston_slot}"
+        );
+        assert!(
+            !nyc_slot.contains("((0) -") && !boston_slot.contains("((0) -"),
+            "no slot may use a '0' partial; nyc={nyc_slot} boston={boston_slot}"
+        );
+    }
+
+    #[test]
+    fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
+        // Guard: the Arrayed-target path must not regress scalar or
+        // ApplyToAll targets. A scalar aux target -> Equation::Scalar; an
+        // ApplyToAll arrayed aux target -> Equation::ApplyToAll.
+        let scalar_to = Variable::Var {
+            ident: Ident::new("scalar_target"),
+            ast: Some(Ast::Scalar(var_ref("driver"))),
+            init_ast: None,
+            eqn: Some(Equation::Scalar("driver".to_string())),
+            units: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            unit_errors: vec![],
+        };
+        let from = Ident::<Canonical>::new("driver");
+        let to = Ident::<Canonical>::new("scalar_target");
+        let equation =
+            generate_auxiliary_to_auxiliary_equation(&from, &to, &RefShape::Bare, &[], &scalar_to);
+        assert!(
+            matches!(equation, Equation::Scalar(_)),
+            "scalar target must yield Equation::Scalar; got: {equation:?}"
+        );
+
+        // ApplyToAll target.
+        let dims = vec![region_dm_dimension()];
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let mut implicit = Vec::new();
+        let a2a_dm = crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+            ident: "a2a_target".to_string(),
+            equation: Equation::ApplyToAll(vec!["Region".to_string()], "driver * 0.5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: crate::datamodel::Compat::default(),
+        });
+        let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
+            &dims,
+            &a2a_dm,
+            &mut implicit,
+            &units_ctx,
+            |mi| Ok(Some(mi.clone())),
+        );
+        let dim_ctx = crate::dimensions::DimensionsContext::from(dims.as_slice());
+        let models = HashMap::new();
+        let scope = crate::model::ScopeStage0 {
+            models: &models,
+            dimensions: &dim_ctx,
+            model_name: "test",
+        };
+        let a2a_to = crate::model::lower_variable(&scope, &stage0);
+        let to_a2a = Ident::<Canonical>::new("a2a_target");
+        let equation =
+            generate_auxiliary_to_auxiliary_equation(&from, &to_a2a, &RefShape::Bare, &[], &a2a_to);
+        match equation {
+            Equation::ApplyToAll(d, _) => assert_eq!(d, vec!["Region".to_string()]),
+            other => panic!("ApplyToAll target must yield Equation::ApplyToAll; got: {other:?}"),
+        }
     }
 }
