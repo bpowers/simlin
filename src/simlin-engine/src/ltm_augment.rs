@@ -149,7 +149,9 @@ fn classify_expr0_subscript_shape(
 }
 
 /// Walk an `Expr0` tree and wrap variable references in `PREVIOUS()` except
-/// those whose access shape matches the live shape for the given source.
+/// those whose access shape matches the live shape for the given source,
+/// recording into `live_ref` the *first* `live_source` occurrence left
+/// live (in document order, after the transform).
 ///
 /// `live_source` identifies the source variable whose live shape is held
 /// out from `PREVIOUS` wrapping. `live_shape` declares which AST occurrences
@@ -162,12 +164,23 @@ fn classify_expr0_subscript_shape(
 /// unknown identifiers). Indices of subscripts are recursively transformed
 /// even when the outer subscript matches the live shape, so nested
 /// references like `arr[other_var]` still get wrapped.
-pub(crate) fn wrap_non_matching_in_previous(
+///
+/// `live_ref` ends up holding the bare `Var(live_source)` for a `Bare`
+/// shape, or the (already index-transformed) `Subscript(live_source, ...)`
+/// for `FixedIndex`/`Wildcard`/`DynamicIndex`. Callers use this captured
+/// subtree to build the link-score's source-side normalizer: it is the
+/// source reference *as the partial isolates it*, so `Δ(live_ref)` is the
+/// exact source velocity feeding the `SIGN` factor -- crucially, a
+/// per-element / per-slice expression rather than the (possibly
+/// multi-dimensional) bare `live_source`, which would be a dimension error
+/// in a scalar link-score equation. Pass `&mut None` to ignore it.
+fn wrap_non_matching_in_previous(
     expr: Expr0,
     live_source: &Ident<Canonical>,
     live_shape: &RefShape,
     other_deps: &HashSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
+    live_ref: &mut Option<Expr0>,
 ) -> Expr0 {
     match expr {
         Expr0::Const(..) => expr,
@@ -178,6 +191,9 @@ pub(crate) fn wrap_non_matching_in_previous(
                 // shape (FixedIndex / Wildcard / DynamicIndex) doesn't
                 // match a bare reference, so we wrap.
                 if matches!(live_shape, RefShape::Bare) {
+                    if live_ref.is_none() {
+                        *live_ref = Some(expr.clone());
+                    }
                     expr
                 } else {
                     Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
@@ -237,7 +253,11 @@ pub(crate) fn wrap_non_matching_in_previous(
                         }
                     })
                     .collect();
-                return Expr0::Subscript(ident, indices, loc);
+                let subscript = Expr0::Subscript(ident, indices, loc);
+                if live_ref.is_none() {
+                    *live_ref = Some(subscript.clone());
+                }
+                return subscript;
             }
             // Non-live reference: recurse into indices so any nested
             // user-variable references get wrapped, then build the new
@@ -275,6 +295,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                         live_shape,
                         other_deps,
                         source_dim_elements,
+                        live_ref,
                     )
                 })
                 .collect();
@@ -288,6 +309,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             loc,
         ),
@@ -299,6 +321,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
                 *rhs,
@@ -306,6 +329,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             loc,
         ),
@@ -316,6 +340,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
                 *then_expr,
@@ -323,6 +348,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
                 *else_expr,
@@ -330,6 +356,7 @@ pub(crate) fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                live_ref,
             )),
             loc,
         ),
@@ -343,6 +370,10 @@ fn wrap_index_non_matching_in_previous(
     other_deps: &HashSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
 ) -> IndexExpr0 {
+    // Indices are inner content of a live reference (or of a
+    // PREVIOUS-wrapped one); a `live_source` occurrence reachable only
+    // through an index is not the live reference itself, so do not
+    // capture it -- pass a throwaway sink.
     match index {
         IndexExpr0::Expr(e) => IndexExpr0::Expr(wrap_non_matching_in_previous(
             e,
@@ -350,6 +381,7 @@ fn wrap_index_non_matching_in_previous(
             live_shape,
             other_deps,
             source_dim_elements,
+            &mut None,
         )),
         IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
             wrap_non_matching_in_previous(
@@ -358,6 +390,7 @@ fn wrap_index_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                &mut None,
             ),
             wrap_non_matching_in_previous(
                 r,
@@ -365,6 +398,7 @@ fn wrap_index_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                &mut None,
             ),
             loc,
         ),
@@ -393,6 +427,40 @@ pub(crate) fn build_partial_equation_shaped(
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
 ) -> String {
+    build_partial_equation_shaped_with_live_ref(
+        equation_text,
+        deps,
+        live_source,
+        live_shape,
+        source_dim_elements,
+    )
+    .0
+}
+
+/// Like [`build_partial_equation_shaped`], but also returns the *live
+/// source reference* the partial isolates: the single occurrence of
+/// `live_source` that the PREVIOUS-wrapping transform left un-wrapped,
+/// with any inner index sub-expressions already PREVIOUS-rewritten.
+///
+/// For a `Bare` shape this is a bare `Var(live_source)`; for `FixedIndex`,
+/// `Wildcard`, or `DynamicIndex` it is the index-transformed
+/// `Subscript(live_source, ...)` -- i.e. `arr[PREVIOUS(idx)]`, `pop[NYC,*]`,
+/// etc. Callers that build a source-side normalizer (`source - PREVIOUS(source)`
+/// in `link_score_guard_form`) need this so they can scalarize a `Wildcard` /
+/// `DynamicIndex` source slice (`SUM(arr[PREVIOUS(idx)])`) instead of spelling
+/// the bare arrayed name (which is a dimension error in a scalar link-score
+/// equation, yielding an uncompilable fragment and an identically-zero score).
+///
+/// Returns `None` for the second element when the equation fails to parse
+/// (the partial then degrades to the lowercased input) or contains no
+/// left-live `live_source` occurrence at all.
+pub(crate) fn build_partial_equation_shaped_with_live_ref(
+    equation_text: &str,
+    deps: &HashSet<Ident<Canonical>>,
+    live_source: &Ident<Canonical>,
+    live_shape: &RefShape,
+    source_dim_elements: &[Vec<String>],
+) -> (String, Option<Expr0>) {
     let other_deps: HashSet<Ident<Canonical>> = deps
         .iter()
         .filter(|d| *d != live_source && normalize_module_ref(d) != *live_source)
@@ -400,17 +468,19 @@ pub(crate) fn build_partial_equation_shaped(
         .collect();
 
     let Ok(Some(ast)) = Expr0::new(equation_text, LexerType::Equation) else {
-        return equation_text.to_lowercase();
+        return (equation_text.to_lowercase(), None);
     };
 
+    let mut live_ref: Option<Expr0> = None;
     let transformed = wrap_non_matching_in_previous(
         ast,
         live_source,
         live_shape,
         &other_deps,
         source_dim_elements,
+        &mut live_ref,
     );
-    print_eqn(&transformed)
+    (print_eqn(&transformed), live_ref)
 }
 
 /// Replace every bare `Var(id)` reference in `equation_text` where `id`
@@ -962,8 +1032,13 @@ fn arrayed_target_dim_names(
 /// here.
 ///
 /// `target_ref` is the pre-rendered self-reference expression (a bare name,
-/// which within an `Equation::Arrayed` slot resolves element-wise);
-/// `source_ref` is the shape-aware source reference (constant across slots).
+/// which within an `Equation::Arrayed` slot resolves element-wise). The
+/// source reference is shape-aware and re-derived per slot: a `Bare` /
+/// `FixedIndex` shape gives the same `from` / `from[elem]` for every slot,
+/// but a `Wildcard` / `DynamicIndex` shape scalarizes *this slot's* live
+/// source slice (`SUM(from[PREVIOUS(idx)])`), so a slot whose equation
+/// doesn't reference `from` falls back to `SUM(from)` while a slot that
+/// does gets the exact slice the partial isolated.
 /// `target_ast_dims` are the target variable's AST dimensions, passed to
 /// `classify_dependencies` so literal element-name subscripts (e.g.
 /// `[Boston]`) are recognized as dimension references and excluded from the
@@ -981,8 +1056,6 @@ fn build_arrayed_link_score_equation(
     apply_default_to_missing: bool,
     target_ref: &str,
 ) -> Equation {
-    let source_ref = shape_aware_source_ref(from.as_str(), shape);
-
     let slot_equation = |expr: &crate::ast::Expr2| -> String {
         let elem_eqn_text = crate::patch::expr2_to_string(expr);
         // Per-element dependency set: walk *only this slot's* expression
@@ -996,13 +1069,14 @@ fn build_arrayed_link_score_equation(
             None,
         )
         .all;
-        let partial_e = build_partial_equation_shaped(
+        let (partial_e, live_ref) = build_partial_equation_shaped_with_live_ref(
             &elem_eqn_text,
             &deps_e,
             from,
             shape,
             source_dim_elements,
         );
+        let source_ref = source_ref_for_guard(from, shape, live_ref.as_ref());
         link_score_guard_form(&partial_e, target_ref, &source_ref)
     };
 
@@ -1121,20 +1195,56 @@ fn generate_auxiliary_to_auxiliary_equation(
         HashSet::new()
     };
 
-    let partial_eq =
-        build_partial_equation_shaped(&to_equation, &deps, from, shape, source_dim_elements);
+    let (partial_eq, live_ref) = build_partial_equation_shaped_with_live_ref(
+        &to_equation,
+        &deps,
+        from,
+        shape,
+        source_dim_elements,
+    );
 
-    let from_source_q = shape_aware_source_ref(from.as_str(), shape);
+    let from_source_q = source_ref_for_guard(from, shape, live_ref.as_ref());
 
     let text = link_score_guard_form(&partial_eq, &to_q, &from_source_q);
     link_score_equation_for_target(text, to_var)
 }
 
+/// Choose the source-side reference for [`link_score_guard_form`].
+///
+/// For `Bare` / `FixedIndex` shapes this is [`shape_aware_source_ref`]
+/// (a bare ident or a `from[elem]` subscript). For `Wildcard` /
+/// `DynamicIndex` shapes -- the not-hoisted conservative-slice
+/// (`SUM(pop[NYC,*])` inside a larger expr) and bare-dynamic-index
+/// (`arr[idx]`, `arr[i+1]`) cases -- spelling the bare arrayed source in a
+/// *scalar* link-score equation is a dimension error, so the fragment
+/// fails to compile and the score is identically zero. Instead, reuse the
+/// exact source slice the partial isolates (`arr[PREVIOUS(idx)]`,
+/// `pop[NYC,*]`) wrapped in `SUM(...)`: `SUM` of a single element is the
+/// identity, `SUM` of a slice is scalar, and the result feeds only the
+/// SIGN factor and the `=0` zero-guard (both sign/zero-only), so using
+/// `SUM` in place of the reducer's own algebra is harmless. If the
+/// transform left no live reference (parse failure, or the source
+/// vanished from the equation), fall back to `SUM(from)` -- still better
+/// than a guaranteed dimension error.
+fn source_ref_for_guard(
+    from: &Ident<Canonical>,
+    shape: &RefShape,
+    live_ref: Option<&Expr0>,
+) -> String {
+    match shape {
+        RefShape::Bare | RefShape::FixedIndex(_) => shape_aware_source_ref(from.as_str(), shape),
+        RefShape::Wildcard | RefShape::DynamicIndex => match live_ref {
+            Some(r) => format!("SUM({})", print_eqn(r)),
+            None => format!("SUM({})", quote_ident(from.as_str())),
+        },
+    }
+}
+
 /// Render the source reference that drives the link-score's denominator
-/// (the SIGN normalizer and the early-return zero-guard) for a given
-/// shape. The denominator must match the *live* source reference left
-/// in `partial_eq` so SAFEDIV captures the same source the partial
-/// isolates.
+/// (the SIGN normalizer and the early-return zero-guard) for a `Bare` or
+/// `FixedIndex` shape. The denominator must match the *live* source
+/// reference left in `partial_eq` so SAFEDIV captures the same source the
+/// partial isolates.
 ///
 ///   - `Bare` -> `from` (per-element under A2A; the partial keeps the
 ///     bare reference live, so per-element Δfrom is correct).
@@ -1145,16 +1255,16 @@ fn generate_auxiliary_to_auxiliary_equation(
 ///     target normalization must use Δfrom[elem], not Δfrom[r],
 ///     otherwise the cross-element sensitivity gets divided by the
 ///     wrong source delta and can flip sign or collapse to zero.
-///   - `Wildcard` / `DynamicIndex` -> `from`. A full inlined reducer is
-///     hoisted into an aggregate node, so the *principled* aggregate-
-///     denominator is realized as the agg's own variable-level Δ (the
-///     `source[d] → agg` link score uses the reducer's algebraic
-///     shortcut, the `agg → target` link score normalizes by Δagg). The
-///     only Wildcard/DynamicIndex shape that still reaches this function
-///     is the conservative-slice case (`SUM(pop[NYC, *])` inside a
-///     larger expression), which `enumerate_agg_nodes` deliberately does
-///     not hoist; for that the variable-level Δfrom is the same
-///     documented over-approximation as the conservative element graph.
+///
+/// `Wildcard` / `DynamicIndex` shapes never reach this function for the
+/// source-side guard: a bare arrayed `from` in a *scalar* link-score
+/// equation is a dimension error (uncompilable fragment -> identically
+/// zero score), so [`source_ref_for_guard`] reuses the partial's
+/// isolated source slice wrapped in `SUM(...)` instead. (A *fully*
+/// inlined reducer is hoisted into a `$⁚ltm⁚agg⁚{n}` node and normalized
+/// by Δagg; the conservative-slice and bare-dynamic-index cases that
+/// `enumerate_agg_nodes` does not hoist are what `source_ref_for_guard`
+/// handles.)
 fn shape_aware_source_ref(from: &str, shape: &RefShape) -> String {
     match shape {
         RefShape::FixedIndex(elems) if !elems.is_empty() => {
@@ -1260,16 +1370,22 @@ fn generate_stock_to_flow_equation(
         HashSet::new()
     };
 
-    let partial_eq =
-        build_partial_equation_shaped(&flow_equation, &deps, stock, shape, source_dim_elements);
+    let (partial_eq, live_ref) = build_partial_equation_shaped_with_live_ref(
+        &flow_equation,
+        &deps,
+        stock,
+        shape,
+        source_dim_elements,
+    );
 
     // Link score formula from LTM paper: |Δxz/Δz| × sign(Δxz/Δx)
     // For stock-to-flow: x=stock, z=flow. The stock side respects
     // shape: a FixedIndex(elem) link score must normalize by
-    // Δstock[elem], not the variable-level Δstock; otherwise the
-    // SAFEDIV captures the wrong source delta (same bug class as the
-    // auxiliary-to-auxiliary path -- see `shape_aware_source_ref`).
-    let stock_source_q = shape_aware_source_ref(stock.as_str(), shape);
+    // Δstock[elem], not the variable-level Δstock; a Wildcard /
+    // DynamicIndex source slice is scalarized (`SUM(stock[PREVIOUS(idx)])`)
+    // because bare arrayed `stock` in a scalar equation is a dimension
+    // error -- see `source_ref_for_guard`.
+    let stock_source_q = source_ref_for_guard(stock, shape, live_ref.as_ref());
     let text = link_score_guard_form(&partial_eq, target_ref, &stock_source_q);
     link_score_equation_for_target(text, flow_var)
 }

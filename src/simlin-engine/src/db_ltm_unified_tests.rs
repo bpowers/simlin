@@ -753,15 +753,24 @@ fn test_auto_flip_uses_element_level_scc_for_arrayed_models() {
     );
 }
 
-// -- Phase 3 (per-shape link scores) --
+// -- Per-shape link scores --
 //
-// AC3.1 / AC3.3: when a target equation references a source under multiple
-// distinct RefShapes, model_ltm_variables must emit one LtmSyntheticVar
-// per (from, to, shape) tuple. Wildcard shapes always carry the
-// '\u{205A}wildcard' suffix (Task 4 naming convention); FixedIndex shapes
-// carry the per-element prefixed-from form. Discovery mode is used here
-// so the link emission loop runs for every causal edge, not just edges
-// in detected loops.
+// When a target equation references a source under multiple distinct
+// RefShapes, model_ltm_variables emits a distinct LtmSyntheticVar per
+// shape: a `Bare` ref keeps the canonical `{from}\u{2192}{to}` name, and a
+// `FixedIndex` ref carries the per-element prefixed-from form
+// (`{from}[{elem}]\u{2192}{to}`). `Wildcard` / `DynamicIndex` reducer
+// references are *not* emitted as per-shape `\u{205A}wildcard` /
+// `\u{205A}dynamic` variants (those were retired): a maximal inlined
+// reducer is hoisted into a `$\u{205A}ltm\u{205A}agg\u{205A}{n}` aggregate
+// node whose two link-score halves (`{from}[{d}]\u{2192}agg`,
+// `agg\u{2192}{to}[{e}]`) carry the per-element edges instead. The
+// not-hoisted conservative-slice and bare-dynamic-index cases still reach
+// `emit_per_shape_link_scores` as a `Wildcard` / `DynamicIndex` shape, but
+// they reuse the canonical Bare name (the access shape only drives which
+// references the partial holds live, not the variable name). Discovery
+// mode is used here so the link emission loop runs for every causal edge,
+// not just edges in detected loops.
 
 #[test]
 fn per_shape_link_scores_for_share_with_sum() {

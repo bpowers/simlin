@@ -390,6 +390,7 @@ pub fn link_score_equation_text_shaped<'db>(
             name: var_name,
             equation: datamodel::Equation::Scalar(equation),
             dimensions: vec![],
+            compile_directly: false,
         });
     }
 
@@ -418,11 +419,11 @@ pub fn link_score_equation_text_shaped<'db>(
     }
     all_vars.insert(to_ident.clone(), to_var.clone());
     // The generator returns the equation already tagged with the target's
-    // dimensionality (`Scalar`, `ApplyToAll`, or -- once Phase 1 Task 2
-    // lands -- `Arrayed`). `dimensions` is left empty here; the emission
-    // loop in `model_ltm_variables` overwrites both `dimensions` and the
-    // equation's dimension names with the link-score-dimensions policy
-    // result (`emit_per_shape_link_scores`).
+    // dimensionality (`Scalar`, `ApplyToAll`, or `Arrayed`). `dimensions`
+    // and `compile_directly` are left at defaults here; the emission loop
+    // in `model_ltm_variables` (`emit_per_shape_link_scores`) overwrites
+    // `dimensions`, the equation's dimension names, and `compile_directly`
+    // (set when `shape` is not `Bare`) with the per-shape policy result.
     let equation = crate::ltm_augment::generate_link_score_equation_for_link(
         &from_ident,
         &to_ident,
@@ -436,6 +437,7 @@ pub fn link_score_equation_text_shaped<'db>(
         name: var_name,
         equation,
         dimensions: vec![],
+        compile_directly: false,
     })
 }
 
@@ -2992,6 +2994,7 @@ pub fn model_ltm_variables(
             name: agg.name.clone(),
             equation,
             dimensions: agg.result_dims.clone(),
+            compile_directly: false,
         });
     }
 
@@ -3298,6 +3301,9 @@ pub fn model_ltm_variables(
                     name: var_name,
                     equation: datamodel::Equation::Scalar(equation),
                     dimensions: vec![], // scalar -- one variable per element
+                    // bracketed name -> routed direct by `assemble_module`'s
+                    // element-subscript check; the flag is irrelevant here.
+                    compile_directly: false,
                 });
             }
             return Some(cross_vars);
@@ -3362,6 +3368,8 @@ pub fn model_ltm_variables(
                 name: var_name,
                 equation: datamodel::Equation::Scalar(equation),
                 dimensions: vec![], // scalar -- one variable per (reduced-elem, result-elem)
+                // bracketed name -> routed direct by `assemble_module`.
+                compile_directly: false,
             });
         }
         Some(cross_vars)
@@ -3508,6 +3516,8 @@ pub fn model_ltm_variables(
                 ),
                 equation: datamodel::Equation::Scalar(equation),
                 dimensions: vec![], // scalar -- one variable per target element
+                // bracketed name -> routed direct by `assemble_module`.
+                compile_directly: false,
             }
         };
 
@@ -3678,6 +3688,18 @@ pub fn model_ltm_variables(
                 // equation to scalar here -- matching the pre-existing
                 // behavior where such edges produced a scalar link score.
                 lsv.equation = retarget_ltm_equation_dims(lsv.equation, &target_dims);
+                // A non-`Bare` shape carries a partial that the (from, to)-
+                // keyed salsa compilation path (`link_score_equation_text`,
+                // always `RefShape::Bare`) cannot reproduce: a
+                // `Wildcard`/`DynamicIndex` reference into a scalar target
+                // would have its whole subscript wrapped in `PREVIOUS()` and
+                // the ceteris-paribus numerator zeroed. Force `assemble_module`
+                // to compile this var's equation verbatim. (For `Bare`, the
+                // salsa-cached path is correct and keeps incrementality;
+                // `FixedIndex` carries an element subscript on the name and is
+                // already routed directly by the bracket check, but flagging
+                // it too is harmless.)
+                lsv.compile_directly = !matches!(shape, RefShape::Bare);
                 vars.push(lsv);
             }
         }
@@ -3747,6 +3769,8 @@ pub fn model_ltm_variables(
                 name: var_name,
                 equation: datamodel::Equation::Scalar(equation),
                 dimensions: vec![],
+                // bracketed name + synthetic agg -> routed direct already.
+                compile_directly: false,
             });
         }
     }
@@ -3854,6 +3878,8 @@ pub fn model_ltm_variables(
                     ),
                     equation: datamodel::Equation::Scalar(equation),
                     dimensions: vec![],
+                    // synthetic agg on the `from` side -> routed direct already.
+                    compile_directly: false,
                 });
             }
             Ast::ApplyToAll(_, expr) => {
@@ -3882,6 +3908,8 @@ pub fn model_ltm_variables(
                         ),
                         equation: datamodel::Equation::Scalar(equation),
                         dimensions: vec![],
+                        // synthetic agg on `from` + bracketed `to` -> routed direct.
+                        compile_directly: false,
                     });
                 }
             }
@@ -3934,6 +3962,8 @@ pub fn model_ltm_variables(
                         ),
                         equation: datamodel::Equation::Scalar(equation),
                         dimensions: vec![],
+                        // synthetic agg on `from` + bracketed `to` -> routed direct.
+                        compile_directly: false,
                     });
                 }
             }
@@ -4204,6 +4234,9 @@ pub fn model_ltm_variables(
                 name: name.to_string(),
                 equation: ltm_synthetic_equation(equation_text, &dimensions),
                 dimensions,
+                // Loop scores aren't link scores; `assemble_module` compiles
+                // them directly via the non-link-score branch already.
+                compile_directly: false,
             });
         }
     }
@@ -4261,6 +4294,7 @@ pub fn model_ltm_variables(
                 name: path_var_name,
                 equation: datamodel::Equation::Scalar(equation),
                 dimensions: vec![],
+                compile_directly: false,
             });
         }
 
@@ -4273,6 +4307,7 @@ pub fn model_ltm_variables(
             name: composite_name,
             equation: datamodel::Equation::Scalar(equation),
             dimensions: vec![],
+            compile_directly: false,
         });
     }
 

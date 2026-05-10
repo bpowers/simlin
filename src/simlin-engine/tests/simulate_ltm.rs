@@ -6479,3 +6479,174 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
          from the zero-valued bare-numerator path); found loops: {path_strings:?}"
     );
 }
+
+/// Build a model with a dynamic-index reference from an arrayed stock into a
+/// scalar aux, embedded in a balancing feedback loop.
+///
+/// Model structure (all over a size-2 indexed dimension `Dim`):
+///   arr[Dim]  (stock, inits arr[1]=10, arr[2]=20, inflow adjust)
+///   idx       (aux, = 2 -- a scalar aux, NOT a dimension element name, so
+///              `arr[idx]` classifies as RefShape::DynamicIndex)
+///   total     (aux, = arr[idx])
+///   adjust[Dim] (flow, = (100 - total) * 0.1)
+///
+/// Causal loop: arr -> total (DynamicIndex) -> adjust (bare) -> arr (flow->stock).
+/// The `arr -> total` edge is the case Phase 6 broke: post-Phase-6 the
+/// scalar `$⁚ltm⁚link_score⁚arr→total` var carries a DynamicIndex-shaped
+/// partial (`arr[PREVIOUS(idx)] - PREVIOUS(total)`), but the `(from,to)`-keyed
+/// salsa compilation path in `assemble_module` re-derives it with
+/// `RefShape::Bare`, wrapping the whole subscript in PREVIOUS and collapsing
+/// the numerator to `PREVIOUS(total) - PREVIOUS(total) ≈ 0`.
+fn build_dynamic_index_into_scalar_model() -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: "dyn_index_into_scalar".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 6.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::indexed("Dim".to_string(), 2)],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "arr".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Dim".to_string()],
+                        vec![
+                            ("1".to_string(), "10".to_string(), None, None),
+                            ("2".to_string(), "20".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["adjust".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "idx".to_string(),
+                    equation: Equation::Scalar("2".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "total".to_string(),
+                    equation: Equation::Scalar("arr[idx]".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "adjust".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Dim".to_string()],
+                        "(100 - total) * 0.1".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Regression: a `DynamicIndex` reference from an arrayed stock into a scalar
+/// aux must produce a non-degenerate `$⁚ltm⁚link_score⁚{from}→{to}` series.
+///
+/// Before this fix, Phase 6 removed the per-shape routing that sent a
+/// `Wildcard`/`DynamicIndex`-shaped scalar link score through direct
+/// (non-salsa) compilation; the salsa `(from,to)` path then re-derived the
+/// partial as `RefShape::Bare`, wrapping the entire subscript in `PREVIOUS()`.
+/// For `total = arr[idx]` that makes the numerator
+/// `PREVIOUS(arr[idx]) - PREVIOUS(total) == 0`, so the link score (and any
+/// loop score that multiplies it) was identically zero.
+#[test]
+fn test_dynamic_index_into_scalar_link_score_nondegenerate() {
+    let project = build_dynamic_index_into_scalar_model();
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let (key, offset) = find_link_score_offset(&results, "arr", "total").unwrap_or_else(|| {
+        panic!(
+            "missing $⁚ltm⁚link_score⁚arr→total offset; ltm offsets present: {:?}",
+            results
+                .offsets
+                .keys()
+                .map(|k| k.as_str())
+                .filter(|s| s.contains("\u{205A}ltm\u{205A}"))
+                .collect::<Vec<_>>()
+        )
+    });
+    // The link score var must carry the canonical (subscript-free) name --
+    // a DynamicIndex shape collapses onto the Bare name post-Phase-6.
+    assert_eq!(
+        key.as_str(),
+        "$\u{205A}ltm\u{205A}link_score\u{205A}arr\u{2192}total"
+    );
+
+    // The flow->stock link score needs two prior committed timesteps; from
+    // step 2 onward the `arr -> total` score must be defined and non-zero
+    // for at least one step. (Identically zero is the pre-fix bug.)
+    let saw_nonzero = (2..results.step_count).any(|step| {
+        let v = results.data[step * results.step_size + offset];
+        v.abs() > 1e-9 && !v.is_nan()
+    });
+    assert!(
+        saw_nonzero,
+        "arr -> total link score (offset {offset}) is identically zero across all steps; \
+         the DynamicIndex-shaped partial was not used (Phase 6 regression)"
+    );
+
+    // Hand calc at step 2. With dt = 1 and adjust[1] = (100 - total) * 0.1 too,
+    // but only the [2] slot matters for `total = arr[idx]` (idx = 2):
+    //   step 0: arr[2] = 20, total = 20, adjust[2] = (100 - 20) * 0.1 = 8
+    //   step 1: arr[2] = 28, total = 28, adjust[2] = (100 - 28) * 0.1 = 7.2
+    //   step 2: arr[2] = 35.2, total = 35.2
+    // The ceteris-paribus partial of `total = arr[idx]` w.r.t. `arr` keeps
+    // the live `arr[idx]` reference and PREVIOUS-wraps everything else:
+    // `arr[PREVIOUS(idx)] - PREVIOUS(total)`. At step 2, PREVIOUS(idx) = 2,
+    // so num = arr[2]@2 - total@1 = 35.2 - 28 = 7.2. The guard form is
+    //   ABS(SAFEDIV(num, total - PREVIOUS(total), 0))
+    //     * SIGN(SAFEDIV(num, source_diff, 0))
+    // where the source side is the scalarized live slice
+    // `SUM(arr[PREVIOUS(idx)]) - PREVIOUS(SUM(arr[PREVIOUS(idx)]))`
+    // (= SUM(arr[2])@2 - SUM(arr[2])@1 = 35.2 - 28 = 7.2; positive).
+    // total - PREVIOUS(total) = 35.2 - 28 = 7.2 (== num) so ABS(...) = 1,
+    // and source_diff > 0 so SIGN(...) = +1. => link score at step 2 == 1.0.
+    let at_step2 = results.data[2 * results.step_size + offset];
+    assert!(
+        (at_step2 - 1.0).abs() < 1e-6,
+        "arr -> total link score at step 2 expected 1.0, got {at_step2}"
+    );
+}
