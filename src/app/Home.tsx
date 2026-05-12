@@ -117,7 +117,7 @@ class Home extends React.Component<HomeProps, HomeState> {
                   <div className={styles.preview}>
                     <img src={`/api/preview/${project.id}`} alt="model preview" className={styles.previewImg} />
                   </div>
-                  <h3 className={typography.heading5}>{project.displayName}</h3>
+                  <h3 className={clsx(typography.heading5, styles.cardTitle)}>{project.displayName}</h3>
                   <p>{project.description}&nbsp;</p>
                 </Paper>
               </Link>

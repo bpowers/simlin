@@ -46,6 +46,14 @@
   padding: 12px;
 }
 
+/*
+ * Project card title. typography.heading5 zeroes the <h3> margin (MUI
+ * style), so restore the deliberate space around it here.
+ */
+.cardTitle {
+  margin: 24px 0;
+}
+
 .preview {
   text-align: center;
   height: 200px;
@@ -74,7 +82,13 @@
   max-width: 1024px;
 }
 
+/*
+ * The new-project form sits directly under the fixed AppBar; give it top
+ * breathing room now that typography.heading2 no longer supplies the <h2>
+ * browser-default margin.
+ */
 .newProjectForm {
+  margin-top: 32px;
 }
 
 .centeredFlex {

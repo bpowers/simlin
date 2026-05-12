@@ -48,9 +48,10 @@
 }
 
 .logo {
+  display: block;
   width: 160px;
   height: 160px;
-  margin-bottom: 24px;
+  margin: 0 auto 24px;
 }
 
 .appleButton {
