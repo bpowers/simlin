@@ -78,6 +78,116 @@ pub(crate) fn synthetic_agg_name(n: usize) -> String {
     format!("{AGG_NAME_PREFIX}{n}")
 }
 
+// --- Array-reducer recognition ---------------------------------------------
+//
+// This is the single place the LTM machinery decides "is this builtin an array
+// reducer, and if so what algebraic shape does it have?". Every consumer --
+// the agg enumerator's hoisting test, the element-graph walker's
+// `in_reducer` marker, the cross-dimensional link-score generator, and the
+// `Expr0`-walking partial-equation builder -- reads `reducer_kind` (or one of
+// the thin predicates below) rather than restating the set.
+
+/// Algebraic classification of an array-reducing builtin, used to pick a
+/// link-score generation strategy when an arrayed variable feeds a scalar (or
+/// lower-rank) target through it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReducerKind {
+    /// `SUM`, single-argument `MEAN`: the partial derivative is algebraically
+    /// simple.
+    /// `SUM`: partial = PREVIOUS(target) + (source[d] - PREVIOUS(source[d]))
+    /// `MEAN`: same as `SUM` but divided by the number of elements.
+    Linear,
+    /// Single-argument `MIN`/`MAX`, `STDDEV`, `RANK`: must enumerate all
+    /// elements explicitly, wrapping every element except the current one in
+    /// `PREVIOUS`.
+    Nonlinear,
+    /// `SIZE`: output is constant (depends only on dimension cardinality).
+    /// Link score is always 0; skip generation entirely. `SIZE` is
+    /// *recognized* as a reducer but never hoisted (see [`reducer_is_hoistable`]).
+    Constant,
+}
+
+/// The canonical lowercase-name + arity decider for the array-reducer set.
+///
+/// `SUM`/`STDDEV`/`SIZE`/`RANK` reduce an array dimension at any arity
+/// (`RANK(arr, dir)` is still a reducer); `MEAN`/`MIN`/`MAX` reduce a
+/// dimension only in their single-argument form (their multi-argument forms
+/// are scalar element-wise operations -- a 2-arg `MIN(a, b)` is `min(a, b)`,
+/// a multi-arg `MEAN(a, b, c)` is `(a + b + c) / 3`).
+//
+// `allow(dead_code)`: the five former recognition sites are rewired onto this
+// table in the immediately-following commit, which removes these attributes.
+#[allow(dead_code)]
+pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<ReducerKind> {
+    match name {
+        "sum" => Some(ReducerKind::Linear),
+        "mean" if arity == 1 => Some(ReducerKind::Linear),
+        "min" | "max" if arity == 1 => Some(ReducerKind::Nonlinear),
+        "stddev" => Some(ReducerKind::Nonlinear),
+        "rank" => Some(ReducerKind::Nonlinear),
+        "size" => Some(ReducerKind::Constant),
+        _ => None,
+    }
+}
+
+/// [`reducer_kind_from_name`] applied to a `BuiltinFn`.
+///
+/// Generic over the contained expression type because it only inspects the
+/// builtin's identity and arity, never the arguments themselves -- so
+/// `BuiltinFn<Expr2>` (the element-graph walker, `classify_reducer`) and any
+/// future `BuiltinFn<Expr0>` caller share one implementation.
+#[allow(dead_code)]
+pub(crate) fn reducer_kind<E>(builtin: &BuiltinFn<E>) -> Option<ReducerKind> {
+    // Only `MEAN`/`MIN`/`MAX` are arity-sensitive; for everything else
+    // `reducer_kind_from_name` ignores the arity argument.
+    let arity = match builtin {
+        BuiltinFn::Mean(args) => args.len(),
+        BuiltinFn::Min(_, opt) | BuiltinFn::Max(_, opt) => 1 + opt.is_some() as usize,
+        _ => 1,
+    };
+    reducer_kind_from_name(builtin.name(), arity)
+}
+
+/// `true` when a reducer named `name` is monotone *non-decreasing* in each of
+/// its source elements: `SUM`, `MEAN`, `MIN`, `MAX`. Raising any one element
+/// can only raise (or leave unchanged) the result, so a `source[d] → agg` hop
+/// through such a reducer has `Positive` polarity.
+///
+/// Monotonicity is keyed on the reducer *name* rather than carried by
+/// [`ReducerKind`] because `Nonlinear` lumps the monotone single-argument
+/// `MIN`/`MAX` together with the non-monotone `STDDEV`/`RANK` -- but it lives
+/// here next to [`reducer_kind`], so AC1.2's "the array-reducer set and its
+/// `Linear`/`Nonlinear`/`Constant` + `is_monotone` classification are defined
+/// in exactly one place" still holds.
+#[allow(dead_code)]
+pub(crate) fn reducer_name_is_monotone(name: &str) -> bool {
+    matches!(name, "sum" | "mean" | "min" | "max")
+}
+
+/// [`reducer_name_is_monotone`] for a recognized reducer `BuiltinFn`. A
+/// builtin that isn't a recognized reducer is never "monotone" in this sense
+/// (e.g. a 2-arg `MIN(a, b)` is not an array reducer at all).
+#[allow(dead_code)]
+pub(crate) fn reducer_is_monotone<E>(builtin: &BuiltinFn<E>) -> bool {
+    reducer_kind(builtin).is_some() && reducer_name_is_monotone(builtin.name())
+}
+
+/// `true` when `builtin` is a recognized array reducer that is *hoisted* into
+/// an aggregate node -- i.e. recognized AND not [`ReducerKind::Constant`].
+///
+/// `SIZE` is recognized as a reducer but never hoisted (its link score is
+/// always 0), and it never sets the element-graph walker's `in_reducer`
+/// marker. This is the exact replacement for the former
+/// `db_analysis::builtin_is_array_reducer` and for the inline `is_reducer`
+/// arm of [`reducer_source_vars`].
+#[allow(dead_code)]
+pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
+    matches!(
+        reducer_kind(builtin),
+        Some(ReducerKind::Linear | ReducerKind::Nonlinear)
+    )
+}
+
 /// One aggregate node: the stand-in for a maximal reducer subexpression.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct AggNode {
@@ -1327,5 +1437,108 @@ mod tests {
             result.aggs
         );
         assert_eq!(synthetic[0].source_vars, vec!["matrix".to_string()]);
+    }
+
+    /// AC1.2: the consolidated `reducer_kind` table classifies every array
+    /// reducer the LTM machinery cares about, and `reducer_is_monotone` /
+    /// `reducer_is_hoistable` derive the right subsets. `reducer_kind` is
+    /// generic over the contained expression type, so `BuiltinFn::<i32>`
+    /// literals suffice -- it only inspects structure and arity.
+    #[test]
+    fn reducer_kind_classifies_every_array_reducer() {
+        use crate::builtins::BuiltinFn;
+
+        let sum = BuiltinFn::Sum(Box::new(0i32));
+        let mean_1 = BuiltinFn::Mean(vec![0i32]);
+        let mean_2 = BuiltinFn::Mean(vec![0i32, 1i32]);
+        let min_1 = BuiltinFn::Min(Box::new(0i32), None);
+        let min_2 = BuiltinFn::Min(Box::new(0i32), Some(Box::new(1i32)));
+        let max_1 = BuiltinFn::Max(Box::new(0i32), None);
+        let max_2 = BuiltinFn::Max(Box::new(0i32), Some(Box::new(1i32)));
+        let stddev = BuiltinFn::Stddev(Box::new(0i32));
+        let rank = BuiltinFn::Rank(Box::new(0i32), Box::new(1i32));
+        let size = BuiltinFn::Size(Box::new(0i32));
+        let abs = BuiltinFn::Abs(Box::new(0i32));
+
+        assert_eq!(reducer_kind(&sum), Some(ReducerKind::Linear));
+        assert_eq!(reducer_kind(&mean_1), Some(ReducerKind::Linear));
+        // Multi-argument MEAN is a scalar mean-of-arguments, not a reducer.
+        assert_eq!(reducer_kind(&mean_2), None);
+        assert_eq!(reducer_kind(&min_1), Some(ReducerKind::Nonlinear));
+        // 2-arg MIN/MAX are scalar binary builtins, not reducers.
+        assert_eq!(reducer_kind(&min_2), None);
+        assert_eq!(reducer_kind(&max_1), Some(ReducerKind::Nonlinear));
+        assert_eq!(reducer_kind(&max_2), None);
+        assert_eq!(reducer_kind(&stddev), Some(ReducerKind::Nonlinear));
+        assert_eq!(reducer_kind(&rank), Some(ReducerKind::Nonlinear));
+        assert_eq!(reducer_kind(&size), Some(ReducerKind::Constant));
+        assert_eq!(reducer_kind(&abs), None);
+
+        // Monotone: SUM / 1-arg MEAN / 1-arg MIN / 1-arg MAX. STDDEV, RANK,
+        // SIZE are not (raising one element can move the result either way,
+        // or not at all). 2-arg MIN/MAX are not reducers, so not monotone.
+        assert!(reducer_is_monotone(&sum));
+        assert!(reducer_is_monotone(&mean_1));
+        assert!(reducer_is_monotone(&min_1));
+        assert!(reducer_is_monotone(&max_1));
+        assert!(!reducer_is_monotone(&mean_2));
+        assert!(!reducer_is_monotone(&min_2));
+        assert!(!reducer_is_monotone(&max_2));
+        assert!(!reducer_is_monotone(&stddev));
+        assert!(!reducer_is_monotone(&rank));
+        assert!(!reducer_is_monotone(&size));
+        assert!(!reducer_is_monotone(&abs));
+
+        // The name-keyed predicate agrees with the builtin-keyed one for the
+        // recognized names.
+        assert!(reducer_name_is_monotone("sum"));
+        assert!(reducer_name_is_monotone("mean"));
+        assert!(reducer_name_is_monotone("min"));
+        assert!(reducer_name_is_monotone("max"));
+        assert!(!reducer_name_is_monotone("stddev"));
+        assert!(!reducer_name_is_monotone("rank"));
+        assert!(!reducer_name_is_monotone("size"));
+        assert!(!reducer_name_is_monotone("abs"));
+
+        // Hoistable: recognized AND not Constant -- SUM / 1-arg MEAN /
+        // 1-arg MIN / 1-arg MAX / STDDEV / RANK. SIZE is recognized but never
+        // hoisted (its link score is always 0); 2-arg MIN/MAX are not
+        // recognized at all.
+        assert!(reducer_is_hoistable(&sum));
+        assert!(reducer_is_hoistable(&mean_1));
+        assert!(reducer_is_hoistable(&min_1));
+        assert!(reducer_is_hoistable(&max_1));
+        assert!(reducer_is_hoistable(&stddev));
+        assert!(reducer_is_hoistable(&rank));
+        assert!(!reducer_is_hoistable(&size));
+        assert!(!reducer_is_hoistable(&mean_2));
+        assert!(!reducer_is_hoistable(&min_2));
+        assert!(!reducer_is_hoistable(&max_2));
+        assert!(!reducer_is_hoistable(&abs));
+
+        // `reducer_kind_from_name` is the raw lowercase + arity decider that
+        // `is_array_reducer_name` reads: SIZE included; mean/min/max only at
+        // arity 1; sum/stddev/rank/size at any arity.
+        assert_eq!(reducer_kind_from_name("sum", 1), Some(ReducerKind::Linear));
+        assert_eq!(reducer_kind_from_name("mean", 1), Some(ReducerKind::Linear));
+        assert_eq!(reducer_kind_from_name("mean", 2), None);
+        assert_eq!(
+            reducer_kind_from_name("min", 1),
+            Some(ReducerKind::Nonlinear)
+        );
+        assert_eq!(reducer_kind_from_name("min", 2), None);
+        assert_eq!(
+            reducer_kind_from_name("stddev", 7),
+            Some(ReducerKind::Nonlinear)
+        );
+        assert_eq!(
+            reducer_kind_from_name("rank", 2),
+            Some(ReducerKind::Nonlinear)
+        );
+        assert_eq!(
+            reducer_kind_from_name("size", 1),
+            Some(ReducerKind::Constant)
+        );
+        assert_eq!(reducer_kind_from_name("abs", 1), None);
     }
 }

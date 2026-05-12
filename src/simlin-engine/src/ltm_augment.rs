@@ -1711,24 +1711,10 @@ fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable
     })
 }
 
-/// Classification of array-reducing builtins for cross-dimensional link score generation.
-///
-/// When an arrayed variable feeds a scalar target through a reducing function,
-/// each element gets its own scalar link score. The reducer kind determines
-/// the equation generation strategy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReducerKind {
-    /// SUM, MEAN: partial derivative is algebraically simple.
-    /// SUM: partial = PREVIOUS(target) + (source[d] - PREVIOUS(source[d]))
-    /// MEAN: same as SUM but divided by the number of elements.
-    Linear,
-    /// MIN, MAX, STDDEV, RANK: must enumerate all elements explicitly,
-    /// wrapping all elements except the current one in PREVIOUS.
-    Nonlinear,
-    /// SIZE: output is constant (depends only on dimension cardinality).
-    /// Link score is always 0; skip generation entirely.
-    Constant,
-}
+/// Classification of array-reducing builtins for cross-dimensional link score
+/// generation. Defined once in [`crate::ltm_agg`] alongside the single
+/// reducer-recognition table; re-exported here so existing references compile.
+pub(crate) use crate::ltm_agg::ReducerKind;
 
 /// Collect element names from a dimension as owned strings.
 ///
