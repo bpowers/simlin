@@ -11,6 +11,7 @@ import { Database } from './models/db-interfaces';
 import { populateExamples } from './new-user';
 import { createFile, createProject, emptyProject } from './project-creation';
 import { renderToPNG } from './render';
+import { createDeleteProjectHandler } from './route-handlers';
 import { Preview as PreviewPb } from './schemas/preview_pb';
 import { Project as ProjectPb } from './schemas/project_pb';
 import { User as UserPb } from './schemas/user_pb';
@@ -305,6 +306,8 @@ export const apiRouter = (app: Application): Router => {
 
     res.status(200).json({ version: newVersion });
   });
+
+  api.delete('/projects/:username/:projectName', createDeleteProjectHandler({ db: app.db }));
 
   api.patch('/user', async (req: Request, res: Response): Promise<void> => {
     const userModel = getUser(req, res);

@@ -235,6 +235,12 @@ interface EditorPropsBase {
   // (e.g. simlin-serve's EditorHost) use this to forward selection state
   // to backend listeners; HostedWebEditor in src/app does not subscribe.
   onSelectionChanged?: (idents: string[]) => void;
+  // When provided (and the editor is not read-only), the model-properties
+  // drawer offers a destructive "Delete project" action that calls this.
+  // Resolving means the host has navigated away; rejecting surfaces the
+  // error in the confirmation dialog. Hosts without a deletable backing
+  // project (the local file-backed viewer, embeds) leave this undefined.
+  onDeleteProject?: () => Promise<void>;
 }
 
 export type EditorProps = EditorPropsBase & ProjectInputProps;
@@ -1478,6 +1484,10 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     const simSpec = project.simSpecs;
     const dt = simSpec.dt.isReciprocal ? 1 / simSpec.dt.value : simSpec.dt.value;
 
+    // A read-only viewer should never see a delete affordance even if a host
+    // wired the callback.
+    const onDelete = !this.props.readOnlyMode ? this.props.onDeleteProject : undefined;
+
     return (
       <ModelPropertiesDrawer
         modelName={project.name}
@@ -1492,6 +1502,7 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         onDtChange={this.handleDtChange}
         onTimeUnitsChange={this.handleTimeUnitsChange}
         onDownloadXmile={this.handleDownloadXmile}
+        onDelete={onDelete}
       />
     );
   }

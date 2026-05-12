@@ -97,6 +97,45 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
     return projectVersion;
   };
 
+  handleDelete = async (): Promise<void> => {
+    if (this.props.readOnlyMode) return;
+
+    const base = this.getBaseURL();
+    const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
+    const response = await fetch(apiPath, {
+      credentials: 'same-origin',
+      method: 'DELETE',
+      cache: 'no-cache',
+    });
+
+    const status = response.status;
+    if (!(status >= 200 && status < 400)) {
+      let errorMsg = `HTTP ${status} while deleting project`;
+      try {
+        const body = await response.json();
+        if (body && typeof body.error === 'string') {
+          errorMsg = body.error as string;
+        }
+      } catch {
+        // keep the status-bearing fallback
+      }
+      // Surface this to the in-editor confirmation dialog (which stays open
+      // for a retry) rather than appendModelError(): once a project loads,
+      // serviceErrors are no longer rendered.
+      throw new Error(errorMsg);
+    }
+
+    // Full navigation back to the project list so it refetches without the
+    // just-deleted project.
+    this.redirectToHome(`${base}/`);
+  };
+
+  // Extracted so tests can observe the post-delete navigation without
+  // assigning to jsdom's non-writable window.location.
+  redirectToHome(url: string): void {
+    window.location.assign(url);
+  }
+
   async loadProject(): Promise<void> {
     const base = this.getBaseURL();
     const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
@@ -138,6 +177,7 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
           name={this.props.projectName}
           embedded={this.props.embedded}
           onSave={this.handleSave}
+          onDeleteProject={this.props.readOnlyMode ? undefined : this.handleDelete}
           readOnlyMode={this.props.readOnlyMode}
         />
       </div>
