@@ -26,6 +26,7 @@
   - [design-plans/2026-04-25-ltm-per-ref-elem-graph.md](design-plans/2026-04-25-ltm-per-ref-elem-graph.md) -- Per-reference element causal graph: classify each AST reference by access shape, emit truthful per-reference element edges (includes a post-Phases-1-5 measurement postscript)
   - [design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md](design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md) -- Tiered LTM loop enumeration: variable-level Johnson first, expand only the cross-element subgraph
   - [design-plans/2026-05-09-ltm-503-cross-element-agg.md](design-plans/2026-05-09-ltm-503-cross-element-agg.md) -- Cross-element LTM scoring: per-element arrayed-target partials, element-level cross-element loops, array reducers as aggregate nodes
+  - [design-plans/2026-05-11-ltm-arrays-hardening.md](design-plans/2026-05-11-ltm-arrays-hardening.md) -- Arrayed/cross-element LTM hardening: unify the reference-site walkers behind one classification IR (#520), then layer eight fixes (#487, #511, #510, #514, #515, #483, #502, #492)
 - [plans/](plans/README.md) -- Implementation plans (active and completed)
 - [test-plans/](test-plans/) -- Human verification plans for completed features
 - [implementation-plans/](implementation-plans/) -- Detailed phase-by-phase implementation plans
