@@ -1,3 +1,18 @@
+const path = require('node:path');
+
+// wouter ships as ESM-only ("type":"module"), which CommonJS Jest's resolver
+// mishandles via the package.json "exports" conditions, so we map "wouter" and
+// its subpaths ("wouter/memory-location", etc.) straight at the .js sources and
+// let ts-jest down-level them (transformIgnorePatterns is [] so node_modules is
+// transformed). Derive the path from require.resolve() rather than hardcoding
+// the pnpm virtual-store directory: that directory's name embeds the React
+// version hash, so a hardcoded `wouter@3.9.0_react@<X>` path silently breaks
+// every app test the moment the lockfile bumps React (see issue #523).
+// require.resolve('wouter') runs from this file, where wouter is a direct
+// dependency, and lands on `<store>/wouter/src/index.js`.
+const wouterEntry = require.resolve('wouter');
+const wouterSrcDir = path.dirname(wouterEntry);
+
 /** @type {import('jest').Config} */
 const config = {
   // The legacy build-utils tests use plain JS in a Node env. The new TSX tests
@@ -17,14 +32,10 @@ const config = {
       moduleFileExtensions: ['ts', 'tsx', 'js'],
       moduleNameMapper: {
         '\\.css$': '<rootDir>/tests/css-module-stub.ts',
-        // wouter ships as ESM-only ("type":"module") which CommonJS ts-jest cannot
-        // process. The diagram package uses a stub for the same reason; here we
-        // resolve to the real ESM source via ts-jest so routing tests can verify
-        // wouter's <Switch> behavior. Mapping the package entry directly to the
-        // .js source bypasses the package.json "exports" condition resolution
-        // that breaks under CJS Jest.
-        '^wouter$': '<rootDir>/../../node_modules/.pnpm/wouter@3.9.0_react@19.2.4/node_modules/wouter/src/index.js',
-        '^wouter/(.*)$': '<rootDir>/../../node_modules/.pnpm/wouter@3.9.0_react@19.2.4/node_modules/wouter/src/$1',
+        // See the wouterEntry/wouterSrcDir comment above for why these point at
+        // the real .js sources instead of letting Jest resolve "wouter".
+        '^wouter$': wouterEntry,
+        '^wouter/(.*)$': path.join(wouterSrcDir, '$1'),
         '^@simlin/engine/internal/wasm$': '<rootDir>/../engine/src/internal/wasm.node.ts',
         '^@simlin/engine/internal/backend-factory$': '<rootDir>/../engine/src/backend-factory.node.ts',
         '^@simlin/engine$': '<rootDir>/../engine/src/index.ts',
