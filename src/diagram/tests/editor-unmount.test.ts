@@ -22,7 +22,7 @@
 //     correctly used elsewhere in Editor.tsx (e.g. `openEngineProject()`
 //     and the `disposeOrphanedEngine` helper added in commit 3cfe8e4e).
 //
-//  2. The constructor and `scheduleSimRun()` / `scheduleSave()` schedule
+//  2. componentDidMount and `scheduleSimRun()` / `scheduleSave()` schedule
 //     fire-and-forget `setTimeout(..., 0)` callbacks without retaining
 //     the handle. On unmount any in-flight load completes against a
 //     stale `this`, opens a fresh engine, and immediately leaks (and
@@ -30,12 +30,18 @@
 //     compounds with leak #1: even a properly disposing unmount cannot
 //     catch an engine that is opened *after* unmount.
 //
+// (The deferred openInitialProject() lives in componentDidMount, not the
+// constructor, so a React 18 StrictMode unmount/remount re-schedules it --
+// see Editor.componentDidMount. The "deferred project load" describe block
+// at the bottom covers that.)
+//
 // We use Object.create(Editor.prototype) for the engine-disposal tests
-// (they don't need the constructor's deferred work) and `new Editor()`
-// with `jest.useFakeTimers()` for the timer-cancellation tests (we want
-// to observe the constructor's pending setTimeout). The document stub
+// (they don't exercise the deferred project load) and `new Editor()`
+// with `jest.useFakeTimers()` for the timer tests (we want to observe the
+// pending setTimeout componentDidMount schedules). The document stub
 // mirrors the one in editor-selection-changed.test.ts so we can call
-// componentWillUnmount under @jest-environment node without jsdom.
+// componentWillUnmount / componentDidMount under @jest-environment node
+// without jsdom.
 
 import { Project as EngineProject } from '@simlin/engine';
 
@@ -235,20 +241,20 @@ describe('Editor.componentWillUnmount() orphan-timer cancellation', () => {
     expect(onSaveSpy).not.toHaveBeenCalled();
   });
 
-  it('cancels the constructor timer so EngineProject.openJson is not called after unmount', () => {
-    // The constructor schedules `setTimeout(() => { openInitialProject();
+  it('cancels the deferred openInitialProject() timer so EngineProject.openJson is not called after unmount', () => {
+    // componentDidMount schedules `setTimeout(() => { openInitialProject();
     // scheduleSimRun(); })`. EditorHost (src/simlin-serve) and wouter route
     // changes (src/app) frequently mount/unmount the Editor in the same
-    // tick a navigation occurs. If the constructor timer is not tracked,
-    // the deferred openInitialProject() races with componentWillUnmount,
-    // opens an engine on the unmounted instance, and leaks it.
+    // tick a navigation occurs. If the timer is not tracked, the deferred
+    // openInitialProject() races with componentWillUnmount, opens an engine
+    // on the unmounted instance, and leaks it.
     const fakeEngine = makeFakeEngine();
     const openSpy = jest
       .spyOn(EngineProject, 'openJson')
       .mockResolvedValue(fakeEngine as unknown as EngineProject);
 
-    // `new Editor(props)` triggers the real constructor; jest.useFakeTimers()
-    // holds the deferred openInitialProject() until we drain timers.
+    // jest.useFakeTimers() holds the deferred openInitialProject() until we
+    // drain timers; componentWillUnmount runs first and must cancel it.
     const editor = new Editor({
       inputFormat: 'json',
       initialProjectJson: validProjectJson,
@@ -257,7 +263,10 @@ describe('Editor.componentWillUnmount() orphan-timer cancellation', () => {
       onSave: async () => 1,
     });
 
-    withDocumentStub(() => editor.componentWillUnmount());
+    withDocumentStub(() => {
+      editor.componentDidMount();
+      editor.componentWillUnmount();
+    });
 
     jest.runAllTimers();
 
@@ -278,9 +287,6 @@ describe('Editor.componentWillUnmount() orphan-timer cancellation', () => {
     const openProtobufSpy = jest
       .spyOn(EngineProject, 'openProtobuf')
       .mockResolvedValue(fakeEngine as unknown as EngineProject);
-    // The constructor also schedules openInitialProject (via openJson); stub
-    // it too so a stray fire couldn't be confused for the undo/redo path.
-    jest.spyOn(EngineProject, 'openJson').mockResolvedValue(fakeEngine as unknown as EngineProject);
 
     const editor = new Editor({
       inputFormat: 'json',
@@ -307,5 +313,75 @@ describe('Editor.componentWillUnmount() orphan-timer cancellation', () => {
 
     expect(openProtobufSpy).not.toHaveBeenCalled();
     expect(editor.engineProject).toBeUndefined();
+  });
+});
+
+describe('Editor.componentDidMount() deferred project load', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  function makeMountedProps(): EditorInstance['props'] {
+    return {
+      inputFormat: 'json',
+      initialProjectJson: validProjectJson,
+      initialProjectVersion: 1,
+      name: 'test',
+      onSave: async () => 1,
+    } as unknown as EditorInstance['props'];
+  }
+
+  it('does not schedule the deferred load from the constructor alone', () => {
+    // The constructor must be side-effect free. React 18 StrictMode (dev)
+    // double-invokes the render phase, creating a second Editor instance
+    // that is then discarded -- its componentDidMount and componentWillUnmount
+    // never run. A timer scheduled in the constructor would still fire on
+    // that zombie `this`, opening an EngineProject and then crashing in
+    // loadSim() on the state.activeProject that the discarded instance's
+    // setState() never committed.
+    jest.spyOn(EngineProject, 'openJson').mockResolvedValue(makeFakeEngine() as unknown as EngineProject);
+
+    const editor = new Editor(makeMountedProps());
+    const openInitialProjectSpy = jest.spyOn(editor, 'openInitialProject').mockResolvedValue(undefined);
+
+    jest.runAllTimers();
+
+    expect(openInitialProjectSpy).not.toHaveBeenCalled();
+  });
+
+  it('reschedules openInitialProject() across a StrictMode mount/unmount/mount cycle', () => {
+    // React 18 StrictMode drives every committed component through
+    // componentDidMount -> componentWillUnmount -> componentDidMount on the
+    // *same* instance, without re-running the constructor. If the deferred
+    // openInitialProject() were scheduled in the constructor (and cancelled
+    // by componentWillUnmount), the second mount would never reschedule it:
+    // engineProject and state.activeProject stay undefined and the editor
+    // sits on a blank canvas. Scheduling in componentDidMount makes the
+    // cycle schedule -> cancel -> schedule, so the load still happens once.
+    jest.spyOn(EngineProject, 'openJson').mockResolvedValue(makeFakeEngine() as unknown as EngineProject);
+
+    const editor = new Editor(makeMountedProps());
+    const openInitialProjectSpy = jest.spyOn(editor, 'openInitialProject').mockResolvedValue(undefined);
+    // The deferred callback calls scheduleSimRun() after openInitialProject()
+    // resolves; stub it so the test doesn't leave a real timer pending once
+    // jest.useRealTimers() restores in afterEach.
+    jest.spyOn(editor, 'scheduleSimRun').mockImplementation(() => {});
+
+    withDocumentStub(() => {
+      editor.componentDidMount();
+      editor.componentWillUnmount();
+      editor.componentDidMount();
+    });
+    // Still deferred -- nothing has run synchronously.
+    expect(openInitialProjectSpy).not.toHaveBeenCalled();
+
+    jest.runAllTimers();
+
+    expect(openInitialProjectSpy).toHaveBeenCalledTimes(1);
   });
 });

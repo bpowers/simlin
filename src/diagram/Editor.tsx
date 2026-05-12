@@ -259,13 +259,13 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
   // instance's callback fire against the new instance, re-introducing
   // the stale-idents-on-new-path bug.
   private selectionDeferralTimer: ReturnType<typeof setTimeout> | null = null;
-  // Pending setTimeout(0) handles for the constructor's deferred
+  // Pending setTimeout(0) handles for componentDidMount's deferred
   // openInitialProject() and the scheduleSimRun() / scheduleSave() /
   // handleUndoRedo() dispatches. Held so componentWillUnmount can cancel
   // them — the Editor remounts on every wouter route change in src/app
   // and on every EditorHost path swap in src/simlin-serve. If a
-  // constructor or handleUndoRedo callback fires after unmount it opens
-  // an EngineProject on a stale `this` and leaks ~several MB of WASM
+  // componentDidMount or handleUndoRedo callback fires after unmount it
+  // opens an EngineProject on a stale `this` and leaks ~several MB of WASM
   // linear memory plus salsa caches; if scheduleSimRun / scheduleSave
   // fire after unmount they touch a disposed engine and may setState on
   // an unmounted component.
@@ -312,7 +312,44 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
         modelErrors: [],
       },
     };
+    // The deferred initial project load is kicked off in componentDidMount,
+    // not here — see the comment there. Keep this constructor side-effect
+    // free (state setup only).
+  }
 
+  componentDidMount() {
+    // React 18 StrictMode (dev) drives every committed component through
+    // componentDidMount → componentWillUnmount → componentDidMount on the
+    // *same* instance, without re-running the constructor. That shapes two
+    // things here:
+    //
+    //  - `unmounted` must be (re)set false on every mount. componentWillUnmount
+    //    sets it true; if the only place it were set false were the constructor
+    //    (and the load scheduled there too), the second StrictMode mount would
+    //    leave it stuck true and every scheduled callback would short-circuit.
+    //  - The deferred openInitialProject() must be scheduled here, not in the
+    //    constructor. componentWillUnmount cancels openInitialProjectTimer, so
+    //    a constructor-scheduled timer would be cancelled by the StrictMode
+    //    unmount and never rescheduled — the editor would sit on a blank canvas
+    //    forever (engineProject and state.activeProject never get populated).
+    //    Scheduling here also keeps a StrictMode-discarded *render-phase*
+    //    instance (whose componentWillUnmount never runs, so it can't cancel
+    //    anything) from leaking the timer onto a zombie `this`: such an
+    //    instance never reaches componentDidMount.
+    this.unmounted = false;
+
+    if (this.props.readOnlyMode)
+      this.setState({
+        modelErrors: [
+          ...this.state.modelErrors,
+          new Error("This is a read-only version. Any changes you make won't be saved."),
+        ],
+      });
+
+    document.addEventListener('keydown', this.handleKeyDown);
+
+    // componentWillUnmount clears this handle, so a StrictMode unmount/remount
+    // becomes schedule → cancel → schedule and the load still happens once.
     this.openInitialProjectTimer = setTimeout(async () => {
       this.openInitialProjectTimer = null;
       // If unmount drained this callback off the macrotask queue before
@@ -336,18 +373,6 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       }
       this.scheduleSimRun();
     });
-  }
-
-  componentDidMount() {
-    if (this.props.readOnlyMode)
-      this.setState({
-        modelErrors: [
-          ...this.state.modelErrors,
-          new Error("This is a read-only version. Any changes you make won't be saved."),
-        ],
-      });
-
-    document.addEventListener('keydown', this.handleKeyDown);
   }
 
   componentWillUnmount() {

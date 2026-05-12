@@ -13,7 +13,7 @@
 // serializeProtobuf(), JSON.parse(serializeJson(...)), projectFromJson()
 // (which throws on an unknown view element type), updateVariableErrors(),
 // and the final setState() -- were unguarded. openInitialProject() is
-// invoked from a fire-and-forget setTimeout in the constructor and there
+// invoked from a fire-and-forget setTimeout in componentDidMount and there
 // is no React error boundary in src/app or src/diagram, so a panic in the
 // engine's serializeJson or a rejection from projectFromJson became an
 // unhandled rejection: state.activeProject stayed undefined and the user
