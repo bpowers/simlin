@@ -10,7 +10,7 @@ import styles from './Button.module.css';
 
 interface ButtonProps {
   variant?: 'text' | 'contained' | 'outlined';
-  color?: 'primary' | 'secondary' | 'inherit';
+  color?: 'primary' | 'secondary' | 'error' | 'inherit';
   size?: 'small' | 'medium' | 'large';
   disabled?: boolean;
   onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
@@ -49,19 +49,32 @@ export default class Button extends React.PureComponent<ButtonProps> {
     let variantColorClass: string;
     let disabledClass: string | undefined;
     if (variant === 'contained') {
-      variantColorClass = color === 'secondary' ? styles.containedSecondary : styles.containedPrimary;
+      variantColorClass =
+        color === 'secondary'
+          ? styles.containedSecondary
+          : color === 'error'
+            ? styles.containedError
+            : styles.containedPrimary;
       disabledClass = disabled ? styles.disabledContained : undefined;
     } else if (variant === 'outlined') {
       variantColorClass =
         color === 'secondary'
           ? styles.outlinedSecondary
-          : color === 'inherit'
-            ? styles.outlinedInherit
-            : styles.outlinedPrimary;
+          : color === 'error'
+            ? styles.outlinedError
+            : color === 'inherit'
+              ? styles.outlinedInherit
+              : styles.outlinedPrimary;
       disabledClass = disabled ? styles.disabledOutlined : undefined;
     } else {
       variantColorClass =
-        color === 'secondary' ? styles.textSecondary : color === 'inherit' ? styles.textInherit : styles.textPrimary;
+        color === 'secondary'
+          ? styles.textSecondary
+          : color === 'error'
+            ? styles.textError
+            : color === 'inherit'
+              ? styles.textInherit
+              : styles.textPrimary;
       disabledClass = disabled ? styles.disabledText : undefined;
     }
 

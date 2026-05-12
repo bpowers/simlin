@@ -1,6 +1,6 @@
 # @simlin/diagram
 
-Last verified: 2026-04-26
+Last verified: 2026-05-11
 
 React components for model visualization and editing. Designed as a general-purpose SD model editor toolkit without dependencies on the Simlin app or server API.
 
@@ -11,7 +11,9 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
 ### Editor and Core Logic
 
-- `Editor.tsx` -- Main model editor: user interaction, state, and tool selection. Manages module navigation stack (`modelStack`), module CRUD handlers, and delegates to `ModuleDetails` for module editing. Optional `onSelectionChanged?: (idents: string[]) => void` prop fires after each selection change (used by `simlin-serve`'s `EditorHost` to forward selection state to backend listeners; `HostedWebEditor` in `src/app` does not subscribe). The callback runs through `setTimeout(..., 0)` so React commits the new selection before `getSelectionIdents()` reads `this.state.selection`.
+- `Editor.tsx` -- Main model editor: user interaction, state, and tool selection. Manages module navigation stack (`modelStack`), module CRUD handlers, and delegates to `ModuleDetails` for module editing. Optional `onSelectionChanged?: (idents: string[]) => void` prop fires after each selection change (used by `simlin-serve`'s `EditorHost` to forward selection state to backend listeners; `HostedWebEditor` in `src/app` does not subscribe). The callback runs through `setTimeout(..., 0)` so React commits the new selection before `getSelectionIdents()` reads `this.state.selection`. Optional `onDeleteProject?: () => Promise<void>` prop: when set and not `readOnlyMode`, `getDrawer()` forwards it to `ModelPropertiesDrawer` as the drawer's destructive "Delete project" action (hosts backed by a non-deletable project -- `simlin-serve`, embeds -- leave it undefined).
+- `ModelPropertiesDrawer.tsx` -- Hamburger-menu drawer: model name, sim-spec fields (start/stop/dt/time units), "Download model", and -- when `onDelete` is supplied -- a `DeleteProjectButton`.
+- `DeleteProjectButton.tsx` -- Low-emphasis destructive button + modal confirmation (`Dialog`) that calls `onDelete`; a rejected `onDelete` keeps the dialog open with the error message, a resolved one means the host has navigated away. Kept separate so the confirmation state lives in one small, reusable place.
 - `VariableDetails.tsx` -- Variable properties/equation panel (stocks, flows, auxes)
 - `ModuleDetails.tsx` -- Module properties panel: model reference selector, input wiring table, output ports, units/docs editors
 - `BreadcrumbBar.tsx` -- Breadcrumb navigation: back arrow + breadcrumb trail when inside a module, hamburger menu at root
@@ -22,7 +24,7 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 - `arc-utils.ts` -- Arc geometry helpers (`radToDeg`, `degToRad`, arc math)
 - `keyboard-shortcuts.ts` -- Keyboard shortcut handling
 - `StaticDiagram.tsx` -- Static (non-interactive) diagram renderer
-- `HostedWebEditor.tsx` -- Web editor wrapper
+- `HostedWebEditor.tsx` -- Web editor wrapper for `src/app`: loads/saves a hosted project via the server's project HTTP API and owns `handleDelete` (DELETEs the project route, then full-navigates to the project list). Passes `onDeleteProject` to `Editor` only when not `readOnlyMode`.
 - `LineChart.tsx` -- Chart visualization
 
 ### Module Logic (Functional Core)

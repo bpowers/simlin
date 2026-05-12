@@ -69,6 +69,29 @@ describe('Button', () => {
     expect(button.className).toContain('textPrimary');
   });
 
+  test('applies contained error classes', () => {
+    render(
+      <Button variant="contained" color="error">
+        Delete
+      </Button>,
+    );
+    expect(screen.getByRole('button').className).toContain('containedError');
+  });
+
+  test('applies outlined error classes', () => {
+    render(
+      <Button variant="outlined" color="error">
+        Delete
+      </Button>,
+    );
+    expect(screen.getByRole('button').className).toContain('outlinedError');
+  });
+
+  test('applies text error classes', () => {
+    render(<Button color="error">Delete</Button>);
+    expect(screen.getByRole('button').className).toContain('textError');
+  });
+
   test('applies outlined primary classes', () => {
     render(
       <Button variant="outlined" color="primary">

@@ -22,6 +22,12 @@ export const EditIcon = (props: IconProps) => (
   </SvgIcon>
 );
 
+export const DeleteIcon = (props: IconProps) => (
+  <SvgIcon {...props}>
+    <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6zM19 4h-3.5l-1-1h-5l-1 1H5v2h14z" />
+  </SvgIcon>
+);
+
 export const MenuIcon = (props: IconProps) => (
   <SvgIcon {...props}>
     <path d="M3 18h18v-2H3zm0-5h18v-2H3zm0-7v2h18V6z" />

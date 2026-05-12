@@ -29,6 +29,31 @@ export interface ProjectRouteHandlerDeps {
 }
 
 /**
+ * Database operations needed to delete a project: looking the project up to
+ * verify ownership, then removing the project document. Deleting the project
+ * doc is what makes the project disappear from listings and the SSR route;
+ * the (orphaned) `File` documents are intentionally left behind, consistent
+ * with how every save already orphans the prior `File` doc.
+ */
+export interface DeletableProjectDb extends ProjectDb {
+  deleteOne(id: string): Promise<void>;
+}
+
+/**
+ * Database operations needed to clean up a project's cached preview PNG.
+ */
+export interface DeletablePreviewDb {
+  deleteOne(id: string): Promise<void>;
+}
+
+export interface DeleteProjectHandlerDeps {
+  db: {
+    project: DeletableProjectDb;
+    preview: DeletablePreviewDb;
+  };
+}
+
+/**
  * Create the route handler for /:username/:projectName
  *
  * This handler:
@@ -92,5 +117,59 @@ export function createProjectRouteHandler(deps: ProjectRouteHandlerDeps) {
     res.set('Cache-Control', 'no-store');
     res.set('Max-Age', '0');
     next();
+  };
+}
+
+/**
+ * Create the route handler for DELETE /api/projects/:username/:projectName.
+ *
+ * Permanently deletes the project (no soft-delete / undo). Only the project's
+ * owner may delete it. Ownership is checked twice: once against the URL
+ * username before any DB lookup -- so a logged-in user can't probe whether
+ * another user's private project exists via the 404-vs-401 distinction -- and
+ * again against the stored record's ownerId as defense in depth. The cached
+ * preview PNG is removed on a best-effort basis; the underlying `File`
+ * documents are intentionally left orphaned.
+ */
+export function createDeleteProjectHandler(deps: DeleteProjectHandlerDeps) {
+  return async (req: Request, res: Response): Promise<void> => {
+    const authUser = getAuthenticatedUser(req);
+    if (!authUser) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+
+    const username = req.params.username as string;
+    const projectName = req.params.projectName as string;
+
+    if (authUser.userId !== username) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+
+    const projectId = `${username}/${projectName}`;
+    const project = await deps.db.project.findOne(projectId);
+    if (!project) {
+      res.status(404).json({});
+      return;
+    }
+
+    if (!isResourceOwner(authUser, project.getOwnerId())) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+
+    await deps.db.project.deleteOne(projectId);
+
+    // A stale preview is harmless once the project doc is gone (the preview
+    // route 404s without a project), so don't fail the request if it can't
+    // be removed -- just leave it for any future GC.
+    try {
+      await deps.db.preview.deleteOne(projectId);
+    } catch (err) {
+      logger.warn(`unable to delete preview for ${projectId}: ${err}`);
+    }
+
+    res.status(200).json({});
   };
 }

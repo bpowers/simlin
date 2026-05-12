@@ -11,6 +11,7 @@ import Drawer from './components/Drawer';
 import TextField from './components/TextField';
 import { ArrowBackIcon, ClearIcon, CloudDownloadIcon } from './components/icons';
 
+import { DeleteProjectButton } from './DeleteProjectButton';
 import { ModelIcon } from './ModelIcon';
 
 import styles from './ModelPropertiesDrawer.module.css';
@@ -28,6 +29,10 @@ interface ModelPropertiesDrawerProps {
   onDtChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onTimeUnitsChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onDownloadXmile: () => void;
+  // When provided, a destructive "Delete project" action is shown. Hosts that
+  // can't (or shouldn't) delete -- read-only viewers, embeds, the local
+  // file-backed viewer -- simply leave this undefined.
+  onDelete?: () => Promise<void>;
 }
 
 export class ModelPropertiesDrawer extends React.PureComponent<ModelPropertiesDrawerProps> {
@@ -106,6 +111,9 @@ export class ModelPropertiesDrawer extends React.PureComponent<ModelPropertiesDr
             >
               Download model
             </Button>
+            {this.props.onDelete ? (
+              <DeleteProjectButton projectName={modelName} onDelete={this.props.onDelete} />
+            ) : null}
           </div>
         </div>
       </Drawer>

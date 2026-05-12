@@ -1,0 +1,9 @@
+.trigger {
+  justify-content: center;
+  width: 100%;
+  margin-top: 12px;
+}
+
+.errorText {
+  color: var(--color-error);
+}
