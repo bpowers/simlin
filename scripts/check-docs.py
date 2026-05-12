@@ -40,6 +40,13 @@ def strip_fenced_code_blocks(content: str) -> str:
     return "".join(result)
 
 
+def blank_inline_code_spans(content: str) -> str:
+    """Replace single-line inline code spans (`...`) with same-length runs of
+    spaces so code/math notation like `s[d](t)` isn't parsed as a `[text](target)`
+    markdown link. Length is preserved so reported line numbers stay accurate."""
+    return re.sub(r"`[^`\n]+`", lambda m: " " * len(m.group(0)), content)
+
+
 def resolve_path(ref: str, file_dir: Path, repo_root: Path) -> Path | None:
     """Try to resolve a path reference, returning the resolved Path or None."""
     # Strip leading / which means repo-root-relative
@@ -67,11 +74,15 @@ def check_file(file_path: Path, repo_root: Path) -> list[str]:
     errors: list[str] = []
     raw_content = file_path.read_text()
     content = strip_fenced_code_blocks(raw_content)
+    # Link-target detection runs against a copy with inline code spans blanked
+    # out, so notation like `s[d](t)` inside backticks isn't mistaken for a link.
+    # The backtick-path check below still needs the spans, so it uses `content`.
+    content_links = blank_inline_code_spans(content)
     file_dir = file_path.parent
     rel_path = file_path.relative_to(repo_root)
 
     # Check markdown link targets: [text](path)
-    for match in re.finditer(r'\[([^\]]*)\]\(([^)\s]+)\)', content):
+    for match in re.finditer(r'\[([^\]]*)\]\(([^)\s]+)\)', content_links):
         target = match.group(2)
         # Skip URLs and anchors
         if target.startswith(("http://", "https://", "mailto:", "#")):
@@ -81,7 +92,7 @@ def check_file(file_path: Path, repo_root: Path) -> list[str]:
         if not target:
             continue
         if resolve_path(target, file_dir, repo_root) is None:
-            line_num = content[:match.start()].count("\n") + 1
+            line_num = content_links[:match.start()].count("\n") + 1
             errors.append(f"{rel_path}:{line_num}: broken link target '{target}'")
 
     # Check backtick-quoted paths in CLAUDE.md files only
