@@ -154,11 +154,12 @@ fn classify_expr0_subscript_shape(
 /// array dimension only in their single-argument form (their multi-argument
 /// forms are element-wise). Parsed `Expr0` builtin names keep their source
 /// casing, generated ones are uppercase, so the comparison is
-/// case-insensitive. Mirrors the reducer set `enumerate_agg_nodes` hoists.
+/// case-insensitive. A thin reader of [`crate::ltm_agg::reducer_kind_from_name`]
+/// -- the one reducer table -- so this `Expr0`-walk-time check and the agg
+/// enumerator agree on the set (including `SIZE`, which is recognized here
+/// even though it is never hoisted).
 fn is_array_reducer_name(name: &str, arity: usize) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(lower.as_str(), "sum" | "stddev" | "size" | "rank")
-        || (arity == 1 && matches!(lower.as_str(), "mean" | "min" | "max"))
+    crate::ltm_agg::reducer_kind_from_name(&name.to_ascii_lowercase(), arity).is_some()
 }
 
 /// Does `expr` contain the live source reference the partial isolates -- a
@@ -1813,72 +1814,46 @@ fn classify_reducer_in_expr(
     }
 }
 
-/// Check if a BuiltinFn is an array reducer and its argument references the
-/// source variable. Returns the `(ReducerKind, function_name)` if so.
+/// If `builtin` is a recognized array reducer (per
+/// [`crate::ltm_agg::reducer_kind`]) whose array argument references the source
+/// variable, return its `(ReducerKind, uppercase function name)`.
+///
+/// For every recognized reducer the array argument is the *first* expression
+/// argument (`SUM(arr)`, `MEAN(arr)`, `MIN(arr)`, `MAX(arr)`, `STDDEV(arr)`,
+/// `RANK(arr, dir)`, `SIZE(arr)`), so we check exactly that one. Multi-argument
+/// `MEAN` and 2-argument `MIN`/`MAX` are scalar element-wise operations, not
+/// reducers, and `reducer_kind` already excludes them.
 fn classify_builtin_if_references_source(
     builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
     source_ident: &str,
 ) -> Option<(ReducerKind, &'static str)> {
     use crate::builtins::BuiltinFn;
 
-    let canonical_source = canonicalize(source_ident);
+    let kind = crate::ltm_agg::reducer_kind(builtin)?;
 
-    match builtin {
-        BuiltinFn::Sum(arg) => {
-            if expr_references_var(arg, canonical_source.as_ref()) {
-                Some((ReducerKind::Linear, "SUM"))
-            } else {
-                None
-            }
-        }
-        BuiltinFn::Mean(args) => {
-            if args
-                .iter()
-                .any(|a| expr_references_var(a, canonical_source.as_ref()))
-            {
-                Some((ReducerKind::Linear, "MEAN"))
-            } else {
-                None
-            }
-        }
-        // Single-arg MIN/MAX (no second argument) is the array reducer form.
-        BuiltinFn::Min(arg, None) => {
-            if expr_references_var(arg, canonical_source.as_ref()) {
-                Some((ReducerKind::Nonlinear, "MIN"))
-            } else {
-                None
-            }
-        }
-        BuiltinFn::Max(arg, None) => {
-            if expr_references_var(arg, canonical_source.as_ref()) {
-                Some((ReducerKind::Nonlinear, "MAX"))
-            } else {
-                None
-            }
-        }
-        BuiltinFn::Stddev(arg) => {
-            if expr_references_var(arg, canonical_source.as_ref()) {
-                Some((ReducerKind::Nonlinear, "STDDEV"))
-            } else {
-                None
-            }
-        }
-        BuiltinFn::Rank(arg, _) => {
-            if expr_references_var(arg, canonical_source.as_ref()) {
-                Some((ReducerKind::Nonlinear, "RANK"))
-            } else {
-                None
-            }
-        }
-        BuiltinFn::Size(arg) => {
-            if expr_references_var(arg, canonical_source.as_ref()) {
-                Some((ReducerKind::Constant, "SIZE"))
-            } else {
-                None
-            }
-        }
-        _ => None,
+    // The recognized-reducer set is exactly `SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/
+    // `RANK`/`SIZE`, and in each the reduced array is the first argument.
+    // (`for_each_expr_ref` can't be used here -- it doesn't tie the yielded
+    // reference's lifetime to the borrow of `builtin`.)
+    let (array_arg, upper): (&crate::ast::Expr2, &'static str) = match builtin {
+        BuiltinFn::Sum(arg) => (arg, "SUM"),
+        BuiltinFn::Mean(args) => (args.first()?, "MEAN"),
+        BuiltinFn::Min(arg, _) => (arg, "MIN"),
+        BuiltinFn::Max(arg, _) => (arg, "MAX"),
+        BuiltinFn::Stddev(arg) => (arg, "STDDEV"),
+        BuiltinFn::Rank(arg, _) => (arg, "RANK"),
+        BuiltinFn::Size(arg) => (arg, "SIZE"),
+        other => unreachable!(
+            "reducer_kind admitted a non-reducer builtin: {}",
+            other.name()
+        ),
+    };
+
+    let canonical_source = canonicalize(source_ident);
+    if !expr_references_var(array_arg, canonical_source.as_ref()) {
+        return None;
     }
+    Some((kind, upper))
 }
 
 /// Check if an Expr2 references a variable with the given canonical name,

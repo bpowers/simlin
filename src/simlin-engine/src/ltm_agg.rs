@@ -114,10 +114,6 @@ pub(crate) enum ReducerKind {
 /// dimension only in their single-argument form (their multi-argument forms
 /// are scalar element-wise operations -- a 2-arg `MIN(a, b)` is `min(a, b)`,
 /// a multi-arg `MEAN(a, b, c)` is `(a + b + c) / 3`).
-//
-// `allow(dead_code)`: the five former recognition sites are rewired onto this
-// table in the immediately-following commit, which removes these attributes.
-#[allow(dead_code)]
 pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<ReducerKind> {
     match name {
         "sum" => Some(ReducerKind::Linear),
@@ -136,7 +132,6 @@ pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<Reducer
 /// builtin's identity and arity, never the arguments themselves -- so
 /// `BuiltinFn<Expr2>` (the element-graph walker, `classify_reducer`) and any
 /// future `BuiltinFn<Expr0>` caller share one implementation.
-#[allow(dead_code)]
 pub(crate) fn reducer_kind<E>(builtin: &BuiltinFn<E>) -> Option<ReducerKind> {
     // Only `MEAN`/`MIN`/`MAX` are arity-sensitive; for everything else
     // `reducer_kind_from_name` ignores the arity argument.
@@ -159,7 +154,6 @@ pub(crate) fn reducer_kind<E>(builtin: &BuiltinFn<E>) -> Option<ReducerKind> {
 /// here next to [`reducer_kind`], so AC1.2's "the array-reducer set and its
 /// `Linear`/`Nonlinear`/`Constant` + `is_monotone` classification are defined
 /// in exactly one place" still holds.
-#[allow(dead_code)]
 pub(crate) fn reducer_name_is_monotone(name: &str) -> bool {
     matches!(name, "sum" | "mean" | "min" | "max")
 }
@@ -167,6 +161,13 @@ pub(crate) fn reducer_name_is_monotone(name: &str) -> bool {
 /// [`reducer_name_is_monotone`] for a recognized reducer `BuiltinFn`. A
 /// builtin that isn't a recognized reducer is never "monotone" in this sense
 /// (e.g. a 2-arg `MIN(a, b)` is not an array reducer at all).
+//
+// `allow(dead_code)`: this is the `BuiltinFn`-form companion to
+// `reducer_name_is_monotone` (the only current monotone consumer,
+// `recover_agg_hop_polarities`, has the agg's printed equation text, not a
+// `BuiltinFn`, so it uses `agg_reducer_is_monotone`). Kept here so the
+// monotone predicate has both shapes alongside `reducer_kind`; the static
+// polarity pass (out of scope for this phase) is the natural caller.
 #[allow(dead_code)]
 pub(crate) fn reducer_is_monotone<E>(builtin: &BuiltinFn<E>) -> bool {
     reducer_kind(builtin).is_some() && reducer_name_is_monotone(builtin.name())
@@ -177,10 +178,9 @@ pub(crate) fn reducer_is_monotone<E>(builtin: &BuiltinFn<E>) -> bool {
 ///
 /// `SIZE` is recognized as a reducer but never hoisted (its link score is
 /// always 0), and it never sets the element-graph walker's `in_reducer`
-/// marker. This is the exact replacement for the former
+/// marker. This is the replacement for the former
 /// `db_analysis::builtin_is_array_reducer` and for the inline `is_reducer`
 /// arm of [`reducer_source_vars`].
-#[allow(dead_code)]
 pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
     matches!(
         reducer_kind(builtin),
@@ -663,12 +663,12 @@ fn register_agg(
     }
 }
 
-/// If `builtin` is an array-reducing function applied to at least one arrayed
-/// model variable, return the set of model-variable names it reads
-/// (recursively, across the reducer's arguments). Otherwise return `None`.
+/// If `builtin` is an array-reducing function (per [`reducer_is_hoistable`])
+/// applied to at least one arrayed model variable, return the set of
+/// model-variable names it reads (recursively, across the reducer's
+/// arguments). Otherwise return `None`.
 ///
-/// Recognized reducers: `SUM`, `MEAN` (single-argument array form), single-arg
-/// `MIN`/`MAX`, `STDDEV`, `RANK`. `SIZE` is intentionally excluded -- its link
+/// `SIZE` is intentionally excluded by `reducer_is_hoistable` -- its link
 /// score is always 0, mirroring `try_cross_dimensional_link_scores`'s
 /// `Some(vec![])` for SIZE -- so a `SIZE(...)` subexpression is not hoisted.
 ///
@@ -679,18 +679,7 @@ fn reducer_source_vars(
     builtin: &BuiltinFn<Expr2>,
     variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
 ) -> Option<Vec<String>> {
-    let is_reducer = match builtin {
-        BuiltinFn::Sum(_) => true,
-        // The single-argument form of MEAN is the array reducer; the
-        // multi-argument form is an element-wise mean of scalars.
-        BuiltinFn::Mean(args) => args.len() == 1,
-        // Single-argument MIN/MAX (no second arg) is the array reducer form.
-        BuiltinFn::Min(_, None) | BuiltinFn::Max(_, None) => true,
-        BuiltinFn::Stddev(_) => true,
-        BuiltinFn::Rank(_, _) => true,
-        _ => false,
-    };
-    if !is_reducer {
+    if !reducer_is_hoistable(builtin) {
         return None;
     }
 
@@ -810,22 +799,24 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
 }
 
 /// `true` when an aggregate node's reducer is monotone *non-decreasing* in
-/// each of its source elements: `SUM`, `MEAN`, `MIN`, `MAX`. Raising any
-/// one element can only raise (or leave unchanged) the result -- so a
-/// `source[d] → agg` hop through such a reducer has `Positive` polarity.
-/// `STDDEV` and `RANK` are not monotone (raising an element can move the
-/// result either way), so a hop through them stays `Unknown`-polarity.
+/// each of its source elements (`SUM`, `MEAN`, `MIN`, `MAX`), so a
+/// `source[d] → agg` hop through it has `Positive` polarity. `STDDEV` and
+/// `RANK` are not monotone, so a hop through them stays `Unknown`-polarity.
 ///
 /// Keyed on the canonical reducer text (`AggNode::equation_text`, which is
-/// `print_eqn` output -- function names lowercased, no space before `(`).
-/// Only the single-argument `MIN`/`MAX` forms are ever hoisted into an
-/// aggregate node, so a leading `min(` / `max(` is always the reducer form.
+/// `print_eqn` output -- function names lowercased, no space before `(`); the
+/// leading function name is everything up to the first `(`. The monotone set
+/// itself comes from [`reducer_name_is_monotone`] so this stays a thin reader
+/// of the one reducer table. Only the single-argument `MIN`/`MAX` forms are
+/// ever hoisted into an aggregate node, so a leading `min(` / `max(` is always
+/// the reducer form.
 pub(crate) fn agg_reducer_is_monotone(equation_text: &str) -> bool {
-    let t = equation_text.trim_start();
-    t.starts_with("sum(")
-        || t.starts_with("mean(")
-        || t.starts_with("min(")
-        || t.starts_with("max(")
+    let name = equation_text
+        .split('(')
+        .next()
+        .unwrap_or(equation_text)
+        .trim();
+    reducer_name_is_monotone(name)
 }
 
 /// Collect the canonical names of all model variables referenced (directly or

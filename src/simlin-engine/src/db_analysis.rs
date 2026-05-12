@@ -331,26 +331,6 @@ fn collect_reference_sites(
     sites
 }
 
-/// Is this builtin an array reducer whose inlined uses `enumerate_agg_nodes`
-/// hoists into an aggregate node?
-///
-/// Mirrors `ltm_agg::reducer_source_vars`'s recognition set so the
-/// reference-site walker's `in_reducer` flag agrees exactly with which
-/// subexpressions actually get a hoisted agg: `SUM`/`STDDEV`/`RANK`
-/// unconditionally, `MEAN` only in its 1-arg array form, `MIN`/`MAX` only
-/// in their 1-arg array form (the 2-arg `MIN(a, b)` / `MAX(a, b)` are
-/// scalar pairwise ops, not reducers). `SIZE` is excluded -- its result
-/// doesn't depend on element values, so it isn't routed through an agg.
-fn builtin_is_array_reducer(builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>) -> bool {
-    use crate::builtins::BuiltinFn;
-    match builtin {
-        BuiltinFn::Sum(_) | BuiltinFn::Stddev(_) | BuiltinFn::Rank(_, _) => true,
-        BuiltinFn::Mean(args) => args.len() == 1,
-        BuiltinFn::Min(_, None) | BuiltinFn::Max(_, None) => true,
-        _ => false,
-    }
-}
-
 /// Recursively walk an `Expr2` tree, pushing one `ReferenceSite` for each
 /// reference to `source_ident`. See `collect_reference_sites` for the
 /// shape-classification rules.
@@ -361,8 +341,8 @@ fn builtin_is_array_reducer(builtin: &crate::builtins::BuiltinFn<crate::ast::Exp
 /// matching the documented public signature.
 ///
 /// `in_reducer` is `true` when this expression is (transitively) an
-/// argument of an array-reducing builtin (`builtin_is_array_reducer`); it
-/// propagates onto every `ReferenceSite` emitted below and tells the
+/// argument of an array-reducing builtin (`ltm_agg::reducer_is_hoistable`);
+/// it propagates onto every `ReferenceSite` emitted below and tells the
 /// element-graph reroute whether a Wildcard/DynamicIndex reference is the
 /// reducer argument (route through the hoisted agg) or a direct subscript
 /// of the same source elsewhere in the equation (keep its own edge).
@@ -447,8 +427,10 @@ fn collect_in_expr(
             // the reducer's input -- mark it so the element-graph reroute
             // can route it through the hoisted `$⁚ltm⁚agg⁚{n}` node.
             // Stays sticky once set: a reducer nested in another reducer's
-            // argument is still inside *a* reducer.
-            let child_in_reducer = in_reducer || builtin_is_array_reducer(builtin);
+            // argument is still inside *a* reducer. The set of "hoisted"
+            // reducers is the single `reducer_kind` table (SIZE excluded --
+            // its result doesn't depend on element values).
+            let child_in_reducer = in_reducer || crate::ltm_agg::reducer_is_hoistable(builtin);
             walk_builtin_expr(builtin, |contents| match contents {
                 BuiltinContents::Ident(id, _) => {
                     if id == source_ident {
