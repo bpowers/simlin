@@ -18,7 +18,9 @@ jest.mock(
   () => ({
     getAuth: jest.fn(() => ({})),
     connectAuthEmulator: jest.fn(),
-    onAuthStateChanged: jest.fn(),
+    // Return a fresh unsubscribe stub per call so the lifecycle tests can
+    // assert componentWillUnmount tears the subscription down.
+    onAuthStateChanged: jest.fn(() => jest.fn()),
   }),
   { virtual: true },
 );
@@ -76,6 +78,7 @@ import * as React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import { Router } from 'wouter';
 import { memoryLocation } from 'wouter/memory-location';
+import { onAuthStateChanged } from '@firebase/auth';
 
 import { App, InnerApp } from '../App';
 
@@ -205,5 +208,82 @@ describe('InnerApp.authStateChanged error handling', () => {
     expect(consoleErrorSpy).toHaveBeenCalled();
 
     unmount();
+  });
+});
+
+describe('InnerApp.componentDidMount() / componentWillUnmount() lifecycle', () => {
+  // InnerApp's side effects -- subscribing to onAuthStateChanged and the
+  // deferred getUserInfo() -- belong in componentDidMount, not the constructor.
+  // React 18 StrictMode (dev) double-invokes the render phase, so a second
+  // InnerApp instance is created and discarded; its componentDidMount /
+  // componentWillUnmount never run. A constructor-scheduled getUserInfo() would
+  // fire on that zombie instance and setState() on something React never
+  // committed ("Can't call setState on a component that is not yet mounted"),
+  // and a constructor-registered onAuthStateChanged observer would keep the
+  // zombie reachable via the firebase auth event hub forever. Doing it in
+  // componentDidMount (and undoing it in componentWillUnmount) makes the
+  // StrictMode mount/unmount/mount cycle subscribe -> unsubscribe -> subscribe
+  // and schedule -> cancel -> schedule.
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    (onAuthStateChanged as jest.Mock).mockClear();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('does not subscribe to auth state or schedule getUserInfo from the constructor alone', () => {
+    const app = new InnerApp({});
+    const getUserInfoSpy = jest.spyOn(app, 'getUserInfo').mockResolvedValue(undefined);
+
+    jest.runAllTimers();
+
+    expect(onAuthStateChanged).not.toHaveBeenCalled();
+    expect(getUserInfoSpy).not.toHaveBeenCalled();
+  });
+
+  it('subscribes and schedules getUserInfo in componentDidMount, exactly once across a StrictMode mount/unmount/mount cycle', () => {
+    const app = new InnerApp({});
+    const getUserInfoSpy = jest.spyOn(app, 'getUserInfo').mockResolvedValue(undefined);
+
+    app.componentDidMount();
+    app.componentWillUnmount();
+    app.componentDidMount();
+    expect(getUserInfoSpy).not.toHaveBeenCalled();
+
+    jest.runAllTimers();
+
+    expect(getUserInfoSpy).toHaveBeenCalledTimes(1);
+    // Two mounts (StrictMode) => two subscriptions; the first is torn down by
+    // the intervening componentWillUnmount.
+    expect(onAuthStateChanged).toHaveBeenCalledTimes(2);
+  });
+
+  it('tears down the auth-state subscription on unmount', () => {
+    const app = new InnerApp({});
+    jest.spyOn(app, 'getUserInfo').mockResolvedValue(undefined);
+
+    app.componentDidMount();
+    const unsubscribe = (onAuthStateChanged as jest.Mock).mock.results[0].value as jest.Mock;
+    expect(unsubscribe).not.toHaveBeenCalled();
+
+    app.componentWillUnmount();
+
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels the pending getUserInfo timer on unmount', () => {
+    const app = new InnerApp({});
+    const getUserInfoSpy = jest.spyOn(app, 'getUserInfo').mockResolvedValue(undefined);
+
+    app.componentDidMount();
+    app.componentWillUnmount();
+
+    jest.runAllTimers();
+
+    expect(getUserInfoSpy).not.toHaveBeenCalled();
   });
 });

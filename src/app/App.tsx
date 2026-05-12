@@ -96,6 +96,11 @@ interface AppState {
 // directly without rendering through the firebase/onAuthStateChanged plumbing.
 export class InnerApp extends React.PureComponent<{}, AppState> {
   state: AppState;
+  // Pending setTimeout(0) handle for the deferred getUserInfo(), and the
+  // onAuthStateChanged unsubscribe function. Held so componentWillUnmount can
+  // cancel/tear them down. Set up in componentDidMount -- see the comment there.
+  private getUserInfoTimer: ReturnType<typeof setTimeout> | null = null;
+  private authUnsubscribe: (() => void) | null = null;
 
   constructor(props: {}) {
     super(props);
@@ -110,11 +115,35 @@ export class InnerApp extends React.PureComponent<{}, AppState> {
       authUnknown: true,
       auth,
     };
+    // The auth-state subscription and the deferred getUserInfo() are wired up
+    // in componentDidMount, not here -- see the comment there. Keep this
+    // constructor side-effect free (auth object construction is pure setup).
+  }
 
-    // notify our app when a user logs in
-    onAuthStateChanged(auth, this.authStateChanged);
+  componentDidMount() {
+    // React 18 StrictMode (dev) double-invokes the render phase (so a second
+    // InnerApp is constructed and discarded -- it never reaches this method)
+    // and, on the committed instance, runs componentDidMount ->
+    // componentWillUnmount -> componentDidMount without re-running the
+    // constructor. Registering the onAuthStateChanged observer and scheduling
+    // getUserInfo() here (and undoing both in componentWillUnmount) keeps the
+    // discarded instance from setState()ing on something React never committed
+    // and from being pinned alive by the firebase auth event hub, and makes
+    // the StrictMode cycle subscribe -> unsubscribe -> subscribe / schedule ->
+    // cancel -> schedule rather than leaking the first of each.
+    this.authUnsubscribe = onAuthStateChanged(this.state.auth, this.authStateChanged);
+    this.getUserInfoTimer = setTimeout(this.getUserInfo);
+  }
 
-    setTimeout(this.getUserInfo);
+  componentWillUnmount() {
+    if (this.authUnsubscribe) {
+      this.authUnsubscribe();
+      this.authUnsubscribe = null;
+    }
+    if (this.getUserInfoTimer !== null) {
+      clearTimeout(this.getUserInfoTimer);
+      this.getUserInfoTimer = null;
+    }
   }
 
   // Firebase invokes authStateChanged synchronously from its event hub. The

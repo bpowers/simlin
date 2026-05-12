@@ -36,6 +36,13 @@ interface HostedWebEditorState {
 }
 
 export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, HostedWebEditorState> {
+  // Pending setTimeout(0) handle for the deferred loadProject(); held so
+  // componentWillUnmount can cancel it. `unmounted` short-circuits a callback
+  // that already drained off the macrotask queue (clearTimeout no longer
+  // reaches it). Both reset in componentDidMount -- see the comment there.
+  private loadProjectTimer: ReturnType<typeof setTimeout> | null = null;
+  private unmounted = false;
+
   constructor(props: HostedWebEditorProps) {
     super(props);
 
@@ -44,10 +51,41 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
       projectBinary: undefined,
       projectVersion: -1,
     };
+    // The deferred loadProject() is kicked off in componentDidMount, not here
+    // -- see the comment there. Keep this constructor side-effect free.
+  }
 
-    setTimeout(async () => {
+  componentDidMount() {
+    // React 18 StrictMode (dev) drives every committed component through
+    // componentDidMount -> componentWillUnmount -> componentDidMount on the
+    // *same* instance without re-running the constructor, and double-invokes
+    // the render phase so a second instance is created and discarded. So:
+    //  - `unmounted` is (re)set false here, not (only) in the constructor, so
+    //    the second StrictMode mount doesn't leave it stuck true.
+    //  - loadProject() is scheduled here, not in the constructor, so the
+    //    StrictMode unmount/remount is schedule -> cancel -> schedule (one
+    //    fetch, not two) and a discarded render-phase instance -- which never
+    //    reaches componentDidMount -- never fires loadProject() onto a zombie
+    //    `this` and setState()s on an instance React never committed.
+    this.unmounted = false;
+    this.loadProjectTimer = setTimeout(async () => {
+      this.loadProjectTimer = null;
+      if (this.unmounted) {
+        return;
+      }
       await this.loadProject();
     });
+  }
+
+  componentWillUnmount() {
+    // Flag first, then cancel: a callback already drained off the macrotask
+    // queue at unmount time must short-circuit on `unmounted` (clearTimeout
+    // below is best-effort for the still-pending case).
+    this.unmounted = true;
+    if (this.loadProjectTimer !== null) {
+      clearTimeout(this.loadProjectTimer);
+      this.loadProjectTimer = null;
+    }
   }
 
   appendModelError(msg: string) {
