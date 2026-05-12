@@ -6,8 +6,15 @@
   height: 48px;
 }
 
-.flex {
+/*
+ * The app-bar title is an <h6> for document semantics, but its large
+ * browser-default block margin (2.33em) would otherwise inflate the flex
+ * Toolbar's height. Zero it so the Toolbar keeps its intended dense height;
+ * flex: 1 pushes the trailing controls to the right.
+ */
+.appBarTitle {
   flex: 1;
+  margin: 0;
 }
 
 .profileIcon {

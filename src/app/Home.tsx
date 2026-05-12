@@ -148,7 +148,7 @@ class Home extends React.Component<HomeProps, HomeState> {
             <IconButton className={styles.menuButton} color="inherit" aria-label="Menu" edge="start" size="small">
               <MenuIcon />
             </IconButton>
-            <h6 className={clsx(typography.heading6, typography.colorInherit, styles.flex)}>
+            <h6 className={clsx(typography.heading6, typography.colorInherit, styles.appBarTitle)}>
               <Link to="/" className={styles.modelLink}>
                 Simlin
               </Link>
