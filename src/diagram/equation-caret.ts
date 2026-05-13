@@ -33,11 +33,16 @@ export interface RenderedGlyph {
   readonly bottom: number;
 }
 
-/** Map a rendered glyph back to the ASCII character it stands for in the
- *  source equation. KaTeX renders `*` (multiplication) as `\cdot`/`\times`,
- *  binary `-` as a true minus sign, and `not` as `\neg`; everything else --
- *  letters, digits, parentheses, `+`, comparison operators -- renders as the
- *  same character that appears in the source. */
+/** Map a rendered glyph back to the source text it stands for. KaTeX renders
+ *  `*` (multiplication) as `\cdot`/`\times` and binary `-` as a true minus
+ *  sign, so those map back to single ASCII operators. The engine's
+ *  `Ast::to_latex` renders the `not` keyword (XMILE spells logical negation as
+ *  the word `NOT`, not `!` -- `!` isn't a token in Simlin equations at all)
+ *  as `\neg`, which KaTeX draws as a `¬` glyph; that one glyph stands for the
+ *  whole three-letter keyword, so it maps to the string `'not'` and the
+ *  alignment consumes that many source characters. Everything else -- letters,
+ *  digits, parentheses, `+`, comparison operators -- renders as the same
+ *  character that appears in the source and passes through unchanged. */
 export function glyphToAscii(ch: string): string {
   switch (ch) {
     case '·': // MIDDLE DOT
@@ -46,8 +51,8 @@ export function glyphToAscii(ch: string): string {
       return '*';
     case '−': // MINUS SIGN           (binary -)
       return '-';
-    case '¬': // NOT SIGN             (\neg)
-      return '!';
+    case '¬': // NOT SIGN             (\neg, i.e. the `not` keyword)
+      return 'not';
     default:
       return ch;
   }
@@ -68,12 +73,15 @@ const isWhitespace = (ch: string | undefined): boolean => ch !== undefined && /\
  * is the end of the equation). The result is monotonically non-decreasing.
  *
  * The match is case-insensitive (identifiers are lower-cased in LaTeX) and
- * skips whitespace in the source (the rendered math drops it). Where a glyph
- * has no source counterpart at the current position the alignment first tries
- * to resync by skipping up to `MAX_RESYNC_SKIP` source characters (the `/`
- * of a fraction, the `^` of an exponent); failing that it treats the glyph as
- * "extra" -- rendered but absent from the source, e.g. a parenthesis KaTeX
- * added for precedence -- and lets it occupy no source characters.
+ * skips whitespace in the source (the rendered math drops it). A glyph can
+ * stand for more than one source character -- the `¬` glyph stands for the
+ * `not` keyword (see `glyphToAscii`) -- in which case the whole substring is
+ * matched and consumed. Where a glyph has no source counterpart at the current
+ * position the alignment first tries to resync by skipping up to
+ * `MAX_RESYNC_SKIP` source characters (the `/` of a fraction, the `^` of an
+ * exponent); failing that it treats the glyph as "extra" -- rendered but
+ * absent from the source, e.g. a parenthesis KaTeX added for precedence -- and
+ * lets it occupy no source characters.
  */
 export function alignGlyphsToSource(glyphs: readonly RenderedGlyph[], equationStr: string): number[] {
   const n = glyphs.length;
@@ -92,9 +100,9 @@ export function alignGlyphsToSource(glyphs: readonly RenderedGlyph[], equationSt
       continue;
     }
 
-    if (ei < len && eqLower[ei] === g) {
+    if (eqLower.startsWith(g, ei)) {
       mapping[gi] = ei;
-      ei++;
+      ei += g.length;
       continue;
     }
 
@@ -105,14 +113,14 @@ export function alignGlyphsToSource(glyphs: readonly RenderedGlyph[], equationSt
     for (let step = 0; step < MAX_RESYNC_SKIP && probe < len; step++) {
       probe++;
       while (probe < len && isWhitespace(equationStr[probe])) probe++;
-      if (probe < len && eqLower[probe] === g) {
+      if (probe < len && eqLower.startsWith(g, probe)) {
         resynced = probe;
         break;
       }
     }
     if (resynced >= 0) {
       mapping[gi] = resynced;
-      ei = resynced + 1;
+      ei = resynced + g.length;
       continue;
     }
 

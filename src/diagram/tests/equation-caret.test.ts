@@ -50,8 +50,12 @@ describe('glyphToAscii', () => {
     expect(glyphToAscii('−')).toBe('-'); // U+2212
   });
 
-  it('maps the negation sign back to "!"', () => {
-    expect(glyphToAscii('¬')).toBe('!'); // \neg
+  it('maps the negation sign back to the `not` keyword', () => {
+    // KaTeX draws `\neg` (the engine's rendering of `not`) as a single `¬`
+    // glyph, but XMILE spells logical negation as the word `not` -- there is
+    // no `!` operator in Simlin equations -- so the glyph stands for the
+    // three-letter keyword.
+    expect(glyphToAscii('¬')).toBe('not'); // \neg
   });
 
   it('passes ordinary characters through unchanged', () => {
@@ -143,6 +147,41 @@ describe('alignGlyphsToSource', () => {
     // the stray `(` maps to the position before the `*` and consumes nothing
     expect(alignGlyphsToSource(glyphs, eq)).toEqual([0, 1, 1, 2, 3]);
   });
+
+  it('consumes the `not` keyword for the `¬` glyph that `\\neg` renders', () => {
+    // `not running` -> `\neg \mathrm{running}` -> a single `¬` glyph followed
+    // by the identifier glyphs. The `¬` stands for the 3-char `not` keyword;
+    // its trailing space is then skipped before the operand.
+    const eq = 'not running';
+    const glyphs = lineOf([
+      ['¬', 0, 12],
+      ['r', 12, 10],
+      ['u', 22, 10],
+      ['n', 32, 10],
+      ['n', 42, 10],
+      ['i', 52, 10],
+      ['n', 62, 10],
+      ['g', 72, 10],
+    ]);
+    expect(alignGlyphsToSource(glyphs, eq)).toEqual([0, 4, 5, 6, 7, 8, 9, 10, 11]);
+  });
+
+  it('resyncs the operand past parentheses when `not` has no space (`not(x)`)', () => {
+    const eq = 'not(running)';
+    const glyphs = lineOf([
+      ['¬', 0, 12],
+      ['r', 12, 10],
+      ['u', 22, 10],
+      ['n', 32, 10],
+      ['n', 42, 10],
+      ['i', 52, 10],
+      ['n', 62, 10],
+      ['g', 72, 10],
+    ]);
+    // `¬` -> "not"; the `(` is skipped to land `r` on its source index; the
+    // trailing `)` falls outside any glyph so the end maps to eq.length.
+    expect(alignGlyphsToSource(glyphs, eq)).toEqual([0, 4, 5, 6, 7, 8, 9, 10, 12]);
+  });
 });
 
 describe('caretOffsetForClick', () => {
@@ -167,6 +206,31 @@ describe('caretOffsetForClick', () => {
     for (const x of [92, 96, 100, 104, 108, 112]) {
       const off = caretOffsetForClick(glyphs, x, 6, eq);
       expect(off === 9 || off === 10).toBe(true);
+    }
+  });
+
+  it('places the caret inside the operand of `not <ident>`, not at offset 0', () => {
+    // Regression: `\neg` renders as one `¬` glyph for the 3-char `not`
+    // keyword; before this was handled, the alignment stalled and clicks on
+    // the operand landed at offset 0 (or the end of the equation).
+    const eq = 'not running'; // indices: n0 o1 t2 _3 r4 u5 n6 n7 i8 n9 g10
+    const glyphs = lineOf([
+      ['¬', 0, 12],
+      ['r', 12, 10],
+      ['u', 22, 10],
+      ['n', 32, 10],
+      ['n', 42, 10],
+      ['i', 52, 10],
+      ['n', 62, 10],
+      ['g', 72, 10],
+    ]);
+    // clicking the `¬` glyph lands the caret right at the `not` keyword
+    expect(caretOffsetForClick(glyphs, 6, 6, eq)).toBe(0); // left/centre of `¬`
+    expect(caretOffsetForClick(glyphs, 11, 6, eq)).toBe(4); // right edge of `¬` -> after `not `
+    // clicking anywhere across "running" lands the caret inside (or at an edge of) it
+    for (const x of [13, 27, 47, 81]) {
+      const off = caretOffsetForClick(glyphs, x, 6, eq);
+      expect(off >= 4 && off <= 11).toBe(true);
     }
   });
 
