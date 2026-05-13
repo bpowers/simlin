@@ -155,7 +155,7 @@ fn is_other_dep_iterated_dim_subscript(
 
 /// Classify an `Expr0` subscript's shape based on its indices.
 ///
-/// Mirrors `db_analysis::resolve_literal_index`'s classification logic but at
+/// Mirrors `db_ltm_ir::resolve_literal_index`'s classification logic but at
 /// the `Expr0` (parsed-AST) level — used by `wrap_non_matching_in_previous`
 /// before subscripts have been lowered to `Expr2`. Each input string in
 /// `source_dim_elements` is the canonical lowercase element name for the
@@ -195,7 +195,7 @@ fn is_literal_element_index(
 }
 
 /// Resolve a single subscript index to a literal element name, mirroring
-/// `db_analysis::resolve_literal_index` (the Expr2 sibling) so both
+/// `db_ltm_ir::resolve_literal_index` (the Expr2 sibling) so both
 /// classifiers agree on what counts as a "literal element". The two
 /// must stay in sync: the edge emitter uses the Expr2 classifier and
 /// the partial-equation builder uses this Expr0 sibling -- if they
@@ -224,7 +224,7 @@ fn resolve_literal_element_index(
             // indexed dims. Canonicalize via parse-then-format so
             // non-canonical forms like `pop[01]` reduce to `"1"` and
             // match `dimension_element_names`'s `"1".."N"` output. The
-            // Expr2 sibling (`db_analysis::resolve_literal_index`)
+            // Expr2 sibling (`db_ltm_ir::resolve_literal_index`)
             // does the same; without canonicalization here we'd
             // disagree on `01` (Expr2 -> FixedIndex(["1"]),
             // Expr0 -> DynamicIndex), the live-shape match would
@@ -273,7 +273,7 @@ fn classify_expr0_subscript_shape(
     for (i, idx) in indices.iter().enumerate() {
         // Use the same resolver as `is_literal_element_index` so this
         // classifier and the Expr2 sibling
-        // (`db_analysis::resolve_literal_index`) agree on what counts
+        // (`db_ltm_ir::resolve_literal_index`) agree on what counts
         // as a literal element. Integer literals are validated against
         // `source_dim_elements` (which contains `["1", ..., "size"]`
         // for indexed dims), so out-of-range integers like `pop[999]`
@@ -1105,13 +1105,19 @@ pub(crate) fn quote_ident(ident: &str) -> String {
 /// - `FixedIndex(elems)`: `$⁚ltm⁚link_score⁚{from}[{elems_joined}]→{to}` —
 ///   the per-element prefixed-from form also used by
 ///   `try_cross_dimensional_link_scores`.
-/// - `Wildcard` / `DynamicIndex`: same as `Bare`. These shapes only reach
-///   `emit_per_shape_link_scores` for the rare conservative-slice reducer
-///   (`x[r] = ... + SUM(pop[NYC, *])`); the emitter dedups by the
-///   resulting name, so the slot collapses onto the canonical Bare name
-///   rather than minting a `⁚wildcard`/`⁚dynamic` variant. Full reducers
-///   are hoisted into `$⁚ltm⁚agg⁚{n}` aggregate nodes and never reach
-///   this function as a Wildcard/DynamicIndex shape.
+/// - `Wildcard` / `DynamicIndex`: same as `Bare`. The emitter dedups by the
+///   resulting name, so any such slot collapses onto the canonical Bare name
+///   rather than minting a `⁚wildcard`/`⁚dynamic` variant. Every
+///   statically-describable inlined reducer -- whole-extent (`SUM(pop[*])`)
+///   or sliced (`SUM(pop[NYC, *])`, `SUM(matrix[D1, *])`) -- is hoisted into
+///   a `$⁚ltm⁚agg⁚{n}` node, so the only `Direct` references with these
+///   shapes that reach `emit_per_shape_link_scores` are a *whole-RHS*
+///   variable-backed reducer's argument (`total = SUM(population[*])`), a
+///   bare dynamic index (`arr[i+1]`), the dynamic-index reducer carve-out
+///   (`SUM(pop[idx, *])`), or a mapped-dimension sliced reducer
+///   (`SUM(matrix[State, *])` over `matrix[Region, D2]` with a `State→Region`
+///   mapping) -- a coarse conservative score is the right semantics for all
+///   of those.
 ///
 /// The Unicode separators `\u{205A}` (TWO DOT PUNCTUATION) and `\u{2192}`
 /// (RIGHTWARDS ARROW) are intentional: they collide with no legal
@@ -2599,7 +2605,7 @@ mod tests {
 
     /// Regression test for the integer-literal bounds asymmetry between
     /// the Expr0 and Expr2 classifiers. The Expr2 classifier
-    /// (`db_analysis::resolve_literal_index`) validates integer
+    /// (`db_ltm_ir::resolve_literal_index`) validates integer
     /// literals against the indexed dimension's size and returns None
     /// (so the shape becomes `DynamicIndex`) for out-of-range values.
     /// The Expr0 classifier here previously accepted any `u32`-parseable
@@ -2656,7 +2662,7 @@ mod tests {
     /// the engine's "1"-based string form before lookup, so `pop[01]`
     /// (zero-padded) classifies as `FixedIndex(["1"])` -- the same form
     /// `dimension_element_names` produces and the same form the Expr2
-    /// edge emitter (`db_analysis::resolve_literal_index`) returns
+    /// edge emitter (`db_ltm_ir::resolve_literal_index`) returns
     /// after this fix. Without canonicalization, `pop[01]` would be
     /// rejected as non-literal here (string "01" doesn't match "1" in
     /// `source_dim_elements`) while the Expr2 classifier accepted it

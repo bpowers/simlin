@@ -89,13 +89,20 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// is what tells them apart for `model_element_causal_edges` and the
 /// link-score emitter.
 ///
-/// Post-cross-element-aggregate-scoring (the `$⁚ltm⁚agg⁚{n}` work),
-/// `Wildcard` / `DynamicIndex` no longer drive a per-shape `⁚wildcard` /
-/// `⁚dynamic` link-score variant: a site that *is* a hoisted reducer's
-/// argument is scored by the agg's two halves, and a site that is *not*
-/// (a non-hoisted slice `SUM(pop[NYC, *])`, a bare dynamic index
-/// `arr[i+1]`, or a direct `pop[idx]` alongside a `SUM(pop[*])`) keeps a
-/// conservative edge and a Bare-named link score.
+/// Post-cross-element-aggregate-scoring (the `$⁚ltm⁚agg⁚{n}` work) and after
+/// #514 (sliced-reducer hoisting), `Wildcard` / `DynamicIndex` no longer
+/// drive a per-shape `⁚wildcard` / `⁚dynamic` link-score variant. Every
+/// statically-describable inlined reducer -- whole-extent (`SUM(pop[*])`) or
+/// sliced (`SUM(pop[NYC, *])`, `SUM(matrix[D1, *])`) -- is hoisted into a
+/// `$⁚ltm⁚agg⁚{n}` node and scored by the agg's two halves. A site that is
+/// *not* a hoisted reducer's argument -- a bare dynamic index (`arr[i+1]`, a
+/// range), the dynamic-index reducer carve-out (`SUM(pop[idx, *])`, `idx`
+/// non-literal, reclassified to `DynamicIndex`), a mapped-dimension sliced
+/// reducer (`SUM(matrix[State, *])` over `matrix[Region, D2]` with a
+/// `State→Region` mapping; `enumerate_agg_nodes` declines the remapped axis,
+/// so the `Wildcard` reference stays `Direct`), or a direct `pop[idx]`
+/// alongside a `SUM(pop[*])` -- keeps a conservative edge and a Bare-named
+/// link score.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A

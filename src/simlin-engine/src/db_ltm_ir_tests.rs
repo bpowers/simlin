@@ -434,11 +434,12 @@ mod model_ltm_reference_sites_tests {
 
     /// AC1.4: an all-`StarRange` reducer reference (`SUM(x[*:SubDim])`) is
     /// classified `Wildcard` and routed through the synthetic agg
-    /// `enumerate_agg_nodes` minted (because `expr_is_full_extent` already
-    /// treats `*:Dim` as a full extent) -- with *no* additional
-    /// `DynamicIndex`/`Direct` site for `(x, total)`. Before the fix the same
-    /// reference classified as `DynamicIndex`; the `route_through_agg` reroute
-    /// papered over it but left a latent disagreement.
+    /// `enumerate_agg_nodes` minted (because `compute_read_slice` maps `*:Dim`
+    /// to `AxisRead::Reduced`, so the reducer is hoisted) -- with *no*
+    /// additional `DynamicIndex`/`Direct` site for `(x, total)`. Before the
+    /// fix the same reference classified as `DynamicIndex`; the
+    /// `route_through_agg` reroute papered over it but left a latent
+    /// disagreement.
     #[test]
     fn ir_starrange_reducer_routes_through_agg_no_stray_direct_edge() {
         let project = TestProject::new("starrange_ir")

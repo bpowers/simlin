@@ -139,9 +139,9 @@ fn resolve_literal_index(
 ///    cross-product unless rerouted through an agg).
 /// 2. Every index is `IndexExpr2::Wildcard(_) | IndexExpr2::StarRange(_, _)`
 ///    ⇒ `Wildcard`. This is the AC1.4 fix: `enumerate_agg_nodes`'s
-///    `expr_is_full_extent` already treats `Wildcard(_)` *and* `StarRange(_,
-///    _)` as full-extent, so `SUM(x[*..*])` / `SUM(x[*:Dim])` *is* hoisted
-///    -- but the previous `classify_subscript_shape` only matched
+///    `compute_read_slice` already maps `Wildcard(_)` *and* `StarRange(_, _)`
+///    to `AxisRead::Reduced`, so `SUM(x[*..*])` / `SUM(x[*:Dim])` *is*
+///    hoisted -- but the previous `classify_subscript_shape` only matched
 ///    `Wildcard(_)`, so an all-`StarRange` reducer reference classified as
 ///    `DynamicIndex`. The `route_through_agg` reroute papered over it (the
 ///    site is `in_reducer`, so it routes to the agg and the `DynamicIndex`
@@ -169,8 +169,9 @@ fn classify_subscript_shape(
     }
     // AC1.4: a subscript whose indices are *all* full-extent (`*` or `*:Dim`)
     // is the reducer-style whole-extent access -- treat it as `Wildcard`,
-    // matching `enumerate_agg_nodes`'s `expr_is_full_extent` hoisting test.
-    // (The `any Wildcard(_)` case above already returned; this only adds the
+    // matching `enumerate_agg_nodes`'s `compute_read_slice` (every such axis
+    // is `AxisRead::Reduced`, so the reducer is hoisted). (The `any
+    // Wildcard(_)` case above already returned; this only adds the
     // all-`StarRange` and mixed-`Wildcard`/`StarRange` cases. `indices` is
     // never empty for a `Subscript`.)
     if !indices.is_empty()
