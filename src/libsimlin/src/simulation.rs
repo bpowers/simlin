@@ -87,6 +87,23 @@ pub unsafe extern "C" fn simlin_sim_new(
                     let project_dims = engine::db::project_datamodel_dims(&*db, source_project);
                     let element_index =
                         engine::ltm_post::build_loop_element_index(&ltm_vars.vars, project_dims);
+                    // Both snapshots are projected from the same
+                    // `LtmSyntheticVar` metadata: a loop's per-slot
+                    // partition vector has exactly one entry per
+                    // `loop_score` slot (1 for a scalar loop, the
+                    // dimension element-space size for an A2A loop).  The
+                    // FFI rel-loop-score path reads `loop_partitions[id][k]`
+                    // for the loop's queried slot `k`, so a mismatch here
+                    // would silently fall outside the partition grid.
+                    debug_assert!(
+                        ltm_vars.loop_partitions.iter().all(|(id, pv)| {
+                            element_index
+                                .get(id)
+                                .map(|m| m.n_slots.max(1) == pv.len().max(1))
+                                .unwrap_or(true)
+                        }),
+                        "loop_partitions slot counts must match loop_element_index n_slots"
+                    );
                     (ltm_vars.loop_partitions.clone(), element_index)
                 } else {
                     (HashMap::new(), HashMap::new())
