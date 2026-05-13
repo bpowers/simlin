@@ -112,12 +112,28 @@ fn is_live_source_iterated_dim_subscript(
 /// the target has iterated dimensions. When it matches,
 /// `wrap_non_matching_in_previous` collapses the subscript to a bare
 /// `Var(dep)` before wrapping it in `PREVIOUS()` -- avoiding the
-/// `PREVIOUS(Subscript(...))` codegen assertion. For the common case (the
-/// dep is declared over exactly those iteration dimensions) the frozen
-/// `PREVIOUS(dep)` picks the same element `PREVIOUS(dep[...])` would in each
-/// slot; the pathological case (`dep[D2]` where `dep` is over `D1` and `D2`
-/// maps to `D1`) would over-collapse, but such a model is already not
-/// statically scoreable in pre-#511 LTM and is out of scope here.
+/// `PREVIOUS(Subscript(...))` codegen assertion.
+///
+/// For the *natural* (non-transposed, same-position) case -- the dep is
+/// declared over exactly those iteration dimensions in the same order, so
+/// each `dep[d_i]` in slot `(d_0, d_1, ...)` reads element `(d_0, d_1,
+/// ...)` -- the frozen `PREVIOUS(dep)` picks the same element
+/// `PREVIOUS(dep[...])` would, and the collapse is exact.
+///
+/// For *non-natural-position* array deps the collapse is
+/// conservative-by-design (never a codegen error, and the link-score SIGN
+/// factor -- the sign of `dep`'s value -- is preserved when `dep` is
+/// positive) but magnitude-imprecise. The *transposed* sub-case
+/// (`arr[D2,D1]` inside an A2A-over-`D1×D2` equation where `arr` is
+/// declared `D1×D2`): in slot `(d1, d2)` the equation reads `arr[d2,d1]`,
+/// but `PREVIOUS(arr)` freezes `arr[d1,d2]_prev` -- the wrong element, so
+/// the magnitude of the link-score contribution is off (the sign is still
+/// right if `arr` is positive). The *mapped-but-position-mismatched*
+/// sub-case (`dep[D2]` where `dep` is over `D1` and `D2` maps to `D1`)
+/// similarly over-collapses to the `D1`-element rather than the mapped
+/// `D2`-element. Such models are already not statically scoreable in
+/// pre-#511 LTM; the precise non-natural-position handling is a known
+/// limitation tracked separately.
 fn is_other_dep_iterated_dim_subscript(
     indices: &[IndexExpr0],
     ctx: Option<&IteratedDimCtx<'_>>,

@@ -6145,15 +6145,43 @@ fn test_iterated_dim_subscript_loop_score_matches_hand_calc() {
             )
         });
     let loop_eq = loop_eq_by_name[loop_name].clone();
+
+    // The whole loop -- `level[r] -> row_val[r] -> inflow[r] -> level[r]` --
+    // runs through exactly these three link scores (all same-dim A2A over
+    // Region, so each appears in the loop-score equation as the quoted
+    // canonical name with a trailing `[a]`/`[b]` slot subscript). Asserting
+    // they're all present (rather than just probing two as substrings) makes
+    // a structural change to the loop-score equation format fail this test
+    // rather than slip through.
+    let link_score_prefix = "$\u{205A}ltm\u{205A}link_score\u{205A}";
+    for edge in [
+        level_to_row_val_q,
+        row_val_to_inflow_q,
+        "inflow\u{2192}level",
+    ] {
+        let expected = format!("\"{link_score_prefix}{edge}\"");
+        assert!(
+            loop_eq.contains(&expected),
+            "loop-score equation should reference {expected}; got: {loop_eq}"
+        );
+    }
+
+    // The hand-calc below relies on the loop score being a *pure product of
+    // its link scores* -- no `SIGN`, no explicit polarity factor. Splitting
+    // on ` * ` and treating every term as a link-score var reference is only
+    // valid under that assumption; the per-term validation in
+    // `resolve_offset` (every factor must be a `$⁚ltm⁚link_score⁚...` var
+    // name) makes a violation fail loudly here instead of silently
+    // misinterpreting a non-product factor.
     let factors: Vec<String> = loop_eq.split(" * ").map(|s| s.trim().to_string()).collect();
     assert!(
         factors.len() >= 2,
         "loop score should be a product of >=2 link scores; got: {loop_eq}"
     );
 
-    // Resolve the offset of each factor (a quoted var name, optionally with
-    // a trailing `[elem]` subscript picking a slot of an A2A link score over
-    // Region = {a, b} in declaration order: a=0, b=1).
+    // Resolve the offset of each factor (a quoted link-score var name,
+    // optionally with a trailing `[elem]` subscript picking a slot of an A2A
+    // link score over Region = {a, b} in declaration order: a=0, b=1).
     let region_slot = |elem: &str| -> usize {
         match elem {
             "a" => 0,
@@ -6171,6 +6199,12 @@ fn test_iterated_dim_subscript_loop_score_matches_hand_calc() {
             None => (inner, None),
         };
         let var_name = var_part.trim_matches('"');
+        assert!(
+            var_name.starts_with(link_score_prefix),
+            "loop-score factor {reference:?} is not a link-score var reference -- the \
+             loop-score equation grew a non-product term, and this hand-calc test's \
+             ` * `-split no longer holds; full equation: {loop_eq}"
+        );
         let base = results
             .offsets
             .iter()

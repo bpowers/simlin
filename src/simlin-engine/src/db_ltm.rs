@@ -3862,7 +3862,8 @@ pub fn model_ltm_variables(
             if let Some(mut lsv) =
                 link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone()
             {
-                lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
+                // `lsv.name` is already `link_score_var_name(from, to, &shape)`
+                // from the shaped path -- no need to re-derive it here.
                 let dims = ltm_equation_dimensions(&lsv.equation).to_vec();
                 lsv.dimensions = dims.clone();
                 lsv.equation = retarget_ltm_equation_dims(lsv.equation, &dims);
