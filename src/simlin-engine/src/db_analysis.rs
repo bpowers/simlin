@@ -522,68 +522,40 @@ fn emit_agg_routed_edges(
 ) {
     use crate::ltm_agg::AxisRead;
 
-    // The agg's result-axis dimensions are the `Iterated` axes' source dims,
-    // in order -- carried as canonical-named `Dimension`s here (sliced from
-    // `from_dims`) so `cartesian_element_names` / `expand_same_element` can
-    // operate on them directly.
+    // The agg's result-axis dimensions (`AggNode::result_dims`, datamodel-
+    // cased), resolved to the `Dimension` objects -- so `cartesian_element_names`
+    // / `expand_same_element` and the agg-slot subscripting below can operate
+    // on them directly. The agg's result dims are always dimensions the target
+    // `to` iterates over (they come from the target equation's iterated
+    // dimensions), and -- when the reducer reads its arrayed source by the
+    // matching iterated subscript -- a subset of the arrayed source's dims too,
+    // so we can recover the `Dimension` from `from_dims` (preferred -- it's the
+    // source row axis) or from `to_dims` (the only place to look when `from` is
+    // a *scalar* feeder of the agg). `read_slice_ok` keys the source-row layout
+    // machinery below off the well-formed slice; it is independent of where the
+    // `Iterated` `Dimension`s come from.
     let read_slice_ok = !from_dims.is_empty() && agg.read_slice.len() == from_dims.len();
-    let iterated_dims: Vec<crate::dimensions::Dimension> = if read_slice_ok {
-        agg.read_slice
+    let resolve_result_dim = |name: &str| -> Option<crate::dimensions::Dimension> {
+        let canon = canonicalize(name);
+        from_dims
             .iter()
-            .zip(from_dims)
-            .filter_map(|(a, d)| match a {
-                AxisRead::Iterated(_) => Some(d.clone()),
-                AxisRead::Pinned(_) | AxisRead::Reduced => None,
-            })
-            .collect()
-    } else {
-        vec![]
+            .chain(to_dims.iter())
+            .find(|d| d.name() == canon.as_ref())
+            .cloned()
     };
-
-    // Per source axis, the element-name list to iterate when enumerating
-    // source rows: a `Pinned` axis is fixed to one element; an `Iterated` or
-    // `Reduced` axis ranges over every element. The position of an `Iterated`
-    // axis within the result tuple is tracked so each source row maps to the
-    // matching agg result slot.
-    struct AxisPlan {
-        elems: Vec<String>,
-        /// `Some(j)` if this axis is the `j`th `Iterated` axis (its element
-        /// becomes coordinate `j` of the agg result slot); `None` otherwise.
-        iterated_pos: Option<usize>,
-    }
-    let mut axis_plans: Vec<AxisPlan> = Vec::with_capacity(from_dims.len());
-    let mut next_iterated_pos = 0usize;
-    if read_slice_ok {
-        for (a, d) in agg.read_slice.iter().zip(from_dims) {
-            let plan = match a {
-                AxisRead::Pinned(elem) => AxisPlan {
-                    elems: vec![elem.clone()],
-                    iterated_pos: None,
-                },
-                AxisRead::Iterated(_) => {
-                    let pos = next_iterated_pos;
-                    next_iterated_pos += 1;
-                    AxisPlan {
-                        elems: dimension_element_names(d),
-                        iterated_pos: Some(pos),
-                    }
-                }
-                AxisRead::Reduced => AxisPlan {
-                    elems: dimension_element_names(d),
-                    iterated_pos: None,
-                },
-            };
-            axis_plans.push(plan);
-        }
-    } else {
-        // Conservative fallback: every source element, scalar agg.
-        for d in from_dims {
-            axis_plans.push(AxisPlan {
-                elems: dimension_element_names(d),
-                iterated_pos: None,
-            });
-        }
-    }
+    let iterated_dims: Vec<crate::dimensions::Dimension> = agg
+        .result_dims
+        .iter()
+        .filter_map(|rd| resolve_result_dim(rd))
+        .collect();
+    debug_assert_eq!(
+        iterated_dims.len(),
+        agg.result_dims.len(),
+        "every agg result dim ({:?}) must resolve to a Dimension carried by `from` ({:?}) or `to` ({:?})",
+        agg.result_dims,
+        from_dims.iter().map(|d| d.name()).collect::<Vec<_>>(),
+        to_dims.iter().map(|d| d.name()).collect::<Vec<_>>(),
+    );
 
     // The agg node name for a given result-slot coordinate tuple. A scalar agg
     // (`iterated_dims` empty) keeps its bare name; an arrayed agg is
@@ -596,39 +568,120 @@ fn emit_agg_routed_edges(
         }
     };
 
-    // Source → agg edges: cartesian product over the per-axis element lists,
-    // routing each row to the agg result slot picked out by its `Iterated`
-    // coordinates. (`next_iterated_pos` is 0 in the conservative fallback.)
-    let n_iterated = if read_slice_ok { next_iterated_pos } else { 0 };
-    let mut rows: Vec<(Vec<String>, Vec<String>)> =
-        vec![(Vec::new(), vec![String::new(); n_iterated])];
-    for plan in &axis_plans {
-        let mut next_rows: Vec<(Vec<String>, Vec<String>)> =
-            Vec::with_capacity(rows.len() * plan.elems.len());
-        for (row_elems, slot) in &rows {
-            for elem in &plan.elems {
-                let mut new_row = row_elems.clone();
-                new_row.push(elem.clone());
-                let mut new_slot = slot.clone();
-                if let Some(j) = plan.iterated_pos {
-                    new_slot[j] = elem.clone();
+    if from_dims.is_empty() {
+        // A *scalar* feeder of the (possibly arrayed) agg -- this arises when
+        // the reducer's argument references a scalar variable, e.g.
+        // `growth[D1] = base + SUM(matrix[D1,*] * scale)` where `scale` is
+        // scalar (the `scale → $⁚ltm⁚agg⁚0` edge). A scalar feeder is not
+        // subscripted, so it cannot pick out one agg result slot; it feeds
+        // *every* slot. Emit `scale → agg[<each Iterated combo>]` (or
+        // `scale → agg` when the agg is scalar), bypassing the `axis_plans`
+        // row machinery below (which, fed an empty `from_dims`, would build a
+        // single empty `row_elems` and emit a malformed `scale[]` node via
+        // `format_multi_element_name(_, &[])`).
+        let entry = element_edges.entry(from_name.to_string()).or_default();
+        if iterated_dims.is_empty() {
+            entry.insert(agg.name.clone());
+        } else {
+            let mut slots: Vec<Vec<String>> = vec![Vec::new()];
+            for d in &iterated_dims {
+                let elems = dimension_element_names(d);
+                let mut next: Vec<Vec<String>> = Vec::with_capacity(slots.len() * elems.len());
+                for slot in &slots {
+                    for elem in &elems {
+                        let mut s = slot.clone();
+                        s.push(elem.clone());
+                        next.push(s);
+                    }
                 }
-                next_rows.push((new_row, new_slot));
+                slots = next;
+            }
+            for slot in &slots {
+                entry.insert(agg_node_name(slot));
             }
         }
-        rows = next_rows;
-    }
-    for (row_elems, slot) in &rows {
-        let from_node = if row_elems.len() == 1 {
-            format_element_name(from_name, &row_elems[0])
+    } else {
+        // Per source axis, the element-name list to iterate when enumerating
+        // source rows: a `Pinned` axis is fixed to one element; an `Iterated`
+        // or `Reduced` axis ranges over every element. The position of an
+        // `Iterated` axis within the result tuple is tracked so each source
+        // row maps to the matching agg result slot.
+        struct AxisPlan {
+            elems: Vec<String>,
+            /// `Some(j)` if this axis is the `j`th `Iterated` axis (its
+            /// element becomes coordinate `j` of the agg result slot);
+            /// `None` otherwise.
+            iterated_pos: Option<usize>,
+        }
+        let mut axis_plans: Vec<AxisPlan> = Vec::with_capacity(from_dims.len());
+        let mut next_iterated_pos = 0usize;
+        if read_slice_ok {
+            for (a, d) in agg.read_slice.iter().zip(from_dims) {
+                let plan = match a {
+                    AxisRead::Pinned(elem) => AxisPlan {
+                        elems: vec![elem.clone()],
+                        iterated_pos: None,
+                    },
+                    AxisRead::Iterated(_) => {
+                        let pos = next_iterated_pos;
+                        next_iterated_pos += 1;
+                        AxisPlan {
+                            elems: dimension_element_names(d),
+                            iterated_pos: Some(pos),
+                        }
+                    }
+                    AxisRead::Reduced => AxisPlan {
+                        elems: dimension_element_names(d),
+                        iterated_pos: None,
+                    },
+                };
+                axis_plans.push(plan);
+            }
         } else {
-            let refs: Vec<&str> = row_elems.iter().map(String::as_str).collect();
-            format_multi_element_name(from_name, &refs)
-        };
-        element_edges
-            .entry(from_node)
-            .or_default()
-            .insert(agg_node_name(slot));
+            // Conservative fallback: every source element, scalar agg.
+            for d in from_dims {
+                axis_plans.push(AxisPlan {
+                    elems: dimension_element_names(d),
+                    iterated_pos: None,
+                });
+            }
+        }
+
+        // Source → agg edges: cartesian product over the per-axis element
+        // lists, routing each row to the agg result slot picked out by its
+        // `Iterated` coordinates. (`next_iterated_pos` is 0 in the
+        // conservative fallback.)
+        let n_iterated = if read_slice_ok { next_iterated_pos } else { 0 };
+        let mut rows: Vec<(Vec<String>, Vec<String>)> =
+            vec![(Vec::new(), vec![String::new(); n_iterated])];
+        for plan in &axis_plans {
+            let mut next_rows: Vec<(Vec<String>, Vec<String>)> =
+                Vec::with_capacity(rows.len() * plan.elems.len());
+            for (row_elems, slot) in &rows {
+                for elem in &plan.elems {
+                    let mut new_row = row_elems.clone();
+                    new_row.push(elem.clone());
+                    let mut new_slot = slot.clone();
+                    if let Some(j) = plan.iterated_pos {
+                        new_slot[j] = elem.clone();
+                    }
+                    next_rows.push((new_row, new_slot));
+                }
+            }
+            rows = next_rows;
+        }
+        for (row_elems, slot) in &rows {
+            let from_node = if row_elems.len() == 1 {
+                format_element_name(from_name, &row_elems[0])
+            } else {
+                let refs: Vec<&str> = row_elems.iter().map(String::as_str).collect();
+                format_multi_element_name(from_name, &refs)
+            };
+            element_edges
+                .entry(from_node)
+                .or_default()
+                .insert(agg_node_name(slot));
+        }
     }
 
     // Agg → to edges. With no `Iterated` axes the agg is scalar and broadcasts

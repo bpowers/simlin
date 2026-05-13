@@ -687,4 +687,46 @@ mod model_ltm_reference_sites_tests {
             );
         });
     }
+
+    /// #514: the not-hoistable dynamic-index reducer carve-out, observed at
+    /// the IR level. `x[Region] = SUM(pop[idx, *])` with `idx` a scalar aux
+    /// (a non-literal index): `enumerate_agg_nodes` declines to hoist (the
+    /// `idx` axis isn't statically describable -- see
+    /// `ltm_agg::tests::dynamic_index_reducer_subexpression_is_not_hoisted`),
+    /// so `model_ltm_reference_sites` reclassifies the `(pop, x)` reducer-arg
+    /// site from `Wildcard` to `DynamicIndex` and leaves it `Direct` (not
+    /// `ThroughAgg`) -- the conservative cross-product, never the agg path.
+    #[test]
+    fn ir_dynamic_index_reducer_site_is_direct_dynamic_index() {
+        let project = TestProject::new("dynamic_index_reducer_ir")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .named_dimension("Age", &["Adult", "Child"])
+            .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "10", None)
+            .scalar_aux("idx", "1")
+            .array_aux_direct("x", vec!["Region".into()], "SUM(pop[idx, *])", None);
+
+        with_ir(&project, |_db, ir, aggs| {
+            assert!(
+                aggs.aggs
+                    .iter()
+                    .all(|a| !a.source_vars.contains(&"pop".to_string())),
+                "the dynamic-index reducer must not be hoisted; got: {:?}",
+                aggs.aggs
+            );
+            let sites = sites_for(ir, "pop", "x");
+            assert_eq!(sites.len(), 1, "sites: {sites:?}");
+            assert_eq!(
+                sites[0].shape,
+                RefShape::DynamicIndex,
+                "a not-hoistable dynamic-index reducer arg is reclassified \
+                 from Wildcard to DynamicIndex"
+            );
+            assert_eq!(
+                sites[0].routing,
+                SiteRouting::Direct,
+                "an unhoisted reducer arg stays on the conservative direct \
+                 path, never routed through an agg"
+            );
+        });
+    }
 }

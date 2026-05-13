@@ -896,6 +896,69 @@ fn element_graph_arrayed_agg_over_iterated_dim() {
     );
 }
 
+/// #514 (element graph, a *mixed* `Iterated` + `Pinned` + `Reduced` read
+/// slice): `matrix3d[D1, Region, Age]`, `x` A2A over `D1`, `x[D1] =
+/// matrix3d[a, NYC, Adult] + SUM(matrix3d[D1, NYC, *])`. The reducer arg's
+/// read slice is `[Iterated(d1), Pinned(nyc), Reduced]` (axis 0 iterated over
+/// the target's `D1`, axis 1 pinned to literal `NYC`, axis 2 wildcard), so
+/// the agg is arrayed over `D1` (`result_dims = [D1]`). The element graph
+/// has `matrix3d[d1, nyc, age] → agg[d1]` (only the `NYC` slab of each `D1`
+/// row, both `Age` elements) and `agg[d1] → x[d1]` (diagonal), with NO
+/// `matrix3d[d1, boston, *]` edge into the agg and NO cross-`D1`-slot agg
+/// edge. The literal `matrix3d[a, NYC, Adult]` FixedIndex reference
+/// broadcasts to every `x` element.
+#[test]
+fn element_graph_mixed_pinned_iterated_reduced_slice() {
+    let project = TestProject::new("mixed_slice_elem_graph")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("Region", &["NYC", "Boston"])
+        .named_dimension("Age", &["Adult", "Child"])
+        .array_aux_direct(
+            "matrix3d",
+            vec!["D1".into(), "Region".into(), "Age".into()],
+            "1",
+            None,
+        )
+        .array_aux_direct(
+            "x",
+            vec!["D1".into()],
+            "matrix3d[a, NYC, Adult] + SUM(matrix3d[D1, NYC, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Only the NYC slab of each D1 row feeds that D1's agg slot (both Age elems).
+    assert_edge(&result, "matrix3d[a,nyc,adult]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix3d[a,nyc,child]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix3d[b,nyc,adult]", &format!("{agg}[b]"));
+    assert_edge(&result, "matrix3d[b,nyc,child]", &format!("{agg}[b]"));
+    // The pinned `Region` axis: Boston rows never feed the agg.
+    assert_no_edge(&result, "matrix3d[a,boston,adult]", &format!("{agg}[a]"));
+    assert_no_edge(&result, "matrix3d[a,boston,child]", &format!("{agg}[a]"));
+    assert_no_edge(&result, "matrix3d[b,boston,adult]", &format!("{agg}[b]"));
+    assert_no_edge(&result, "matrix3d[b,boston,child]", &format!("{agg}[b]"));
+    // No cross-D1-slot edges.
+    assert_no_edge(&result, "matrix3d[a,nyc,adult]", &format!("{agg}[b]"));
+    assert_no_edge(&result, "matrix3d[b,nyc,adult]", &format!("{agg}[a]"));
+
+    // The agg projects diagonally into `x`.
+    assert_edge(&result, &format!("{agg}[a]"), "x[a]");
+    assert_edge(&result, &format!("{agg}[b]"), "x[b]");
+    assert_no_edge(&result, &format!("{agg}[a]"), "x[b]");
+    assert_no_edge(&result, &format!("{agg}[b]"), "x[a]");
+
+    // The literal `matrix3d[a, NYC, Adult]` FixedIndex reference broadcasts.
+    assert_edge(&result, "matrix3d[a,nyc,adult]", "x[a]");
+    assert_edge(&result, "matrix3d[a,nyc,adult]", "x[b]");
+    // No scalar (subscript-free) agg node -- the agg is arrayed over D1.
+    assert!(
+        !result.edges.contains_key(agg) && !result.edges.values().any(|ts| ts.contains(agg)),
+        "the agg over D1 must always be subscripted (agg[d1]), never bare {agg}"
+    );
+}
+
 /// AC4.4 (element graph, the dynamic-index carve-out): `x[Region] =
 /// SUM(pop[idx, *])` over `pop[Region, Age]` with `idx` a scalar aux -- a
 /// reducer over a dynamic index is *not* hoisted (`compute_read_slice`
@@ -940,6 +1003,105 @@ fn element_graph_dynamic_index_reducer_stays_conservative() {
         assert_edge(&result, from, "x[nyc]");
         assert_edge(&result, from, "x[boston]");
     }
+}
+
+/// #514 (element graph, *scalar* feeder of a hoisted *scalar* reducer): a
+/// reducer whose argument references a *scalar* model variable, hoisted out of
+/// an *arrayed* target -- `share[Region] = pop[Region] / SUM(pop[*] * scale)`
+/// with `scale` scalar. The maximal `SUM(pop[*] * scale)` subexpression is
+/// hoisted into a *scalar* synthetic agg `$⁚ltm⁚agg⁚0` (whole-extent reduce of
+/// `pop[*]`, no iterated axis), and *both* feeders are routed through it: the
+/// arrayed `pop[d] → agg` reductions and the scalar `scale → agg` edge. The
+/// `scale` node must be the *bare* scalar name (`scale`), not the malformed
+/// empty-bracket node `scale[]` the per-axis row machinery would produce when
+/// fed an empty source-dimension list. The agg then broadcasts to every
+/// `share` element. (`share`'s target must be arrayed -- with a *scalar*
+/// target the `(scale, share)` edge would be short-circuited by
+/// `model_element_causal_edges`'s both-scalar fast path before the IR's
+/// `ThroughAgg` routing is consulted, so `emit_agg_routed_edges` would never
+/// be reached with an empty `from_dims`.)
+#[test]
+fn element_graph_scalar_feeder_of_hoisted_reducer_is_bare_node() {
+    let project = TestProject::new("scalar_feeder_hoisted_reducer")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_aux("pop[Region]", "100")
+        .scalar_aux("scale", "2")
+        .array_aux("share[Region]", "pop / SUM(pop[*] * scale)");
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The scalar feeder is a *bare* node feeding the (scalar) agg -- not a
+    // malformed `scale[]` bracketed node.
+    assert_edge(&result, "scale", agg);
+    assert!(
+        !result.edges.contains_key("scale[]")
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t == "scale[]")),
+        "the scalar feeder of a hoisted reducer must be the bare `scale` node, never `scale[]`; got: {:?}",
+        result.edges
+    );
+    // The arrayed feeder reduces into the same scalar agg.
+    assert_edge(&result, "pop[nyc]", agg);
+    assert_edge(&result, "pop[boston]", agg);
+    // The (scalar) agg broadcasts to every `share` element.
+    assert_edge(&result, agg, "share[nyc]");
+    assert_edge(&result, agg, "share[boston]");
+    // The bare-numerator diagonal `pop[d] → share[d]` (from the `pop[Region] /`
+    // numerator) survives.
+    assert_edge(&result, "pop[nyc]", "share[nyc]");
+    assert_edge(&result, "pop[boston]", "share[boston]");
+}
+
+/// #514 (element graph, scalar feeder of an *arrayed* hoisted reducer): a
+/// sliced reducer over an A2A body whose argument also references a *scalar*,
+/// e.g. `growth[D1] = SUM(matrix[D1,*] * scale)` with `scale` scalar -- the
+/// reducer is hoisted into an *arrayed* agg over `D1` (`read_slice =
+/// [Iterated(d1), Reduced]`, `result_dims = [D1]`). The scalar `scale` is not
+/// subscripted, so it feeds *every* agg slot: `scale → agg[a]`, `scale →
+/// agg[b]` -- and never the malformed `scale[]`. (`growth[D1] =
+/// SUM(matrix[D1,*] * scale)` is a *whole-RHS* reducer -- a variable-backed
+/// agg -- so `+ 1` keeps `SUM(...)` a sub-expression and forces a synthetic
+/// agg.)
+#[test]
+fn element_graph_scalar_feeder_of_arrayed_hoisted_reducer_feeds_every_slot() {
+    let project = TestProject::new("scalar_feeder_arrayed_reducer")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "10", None)
+        .scalar_aux("scale", "2")
+        .array_aux_direct(
+            "growth",
+            vec!["D1".into()],
+            "SUM(matrix[D1,*] * scale) + 1",
+            None,
+        );
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The scalar feeder feeds every agg slot, as a bare node.
+    assert_edge(&result, "scale", &format!("{agg}[a]"));
+    assert_edge(&result, "scale", &format!("{agg}[b]"));
+    assert!(
+        !result.edges.contains_key("scale[]")
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t == "scale[]")),
+        "the scalar feeder of an arrayed hoisted reducer must be the bare `scale` node, never `scale[]`; got: {:?}",
+        result.edges
+    );
+    // The arrayed feeder routes each D1 row to that D1's agg slot.
+    assert_edge(&result, "matrix[a,x]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix[a,y]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix[b,x]", &format!("{agg}[b]"));
+    assert_edge(&result, "matrix[b,y]", &format!("{agg}[b]"));
+    // The arrayed agg projects diagonally into `growth`.
+    assert_edge(&result, &format!("{agg}[a]"), "growth[a]");
+    assert_edge(&result, &format!("{agg}[b]"), "growth[b]");
 }
 
 // ---- #511: iterated-dimension subscript -> same-element projection ----

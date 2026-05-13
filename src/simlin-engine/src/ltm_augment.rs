@@ -906,14 +906,16 @@ fn subscript_idents_in_expr0(
 }
 
 /// Generate a per-target-element scalar link-score equation for a
-/// scalar-source -> arrayed-target edge.
+/// scalar-source -> arrayed-target edge (or an arrayed-agg -> arrayed-target
+/// edge: the `agg → to` half a hoisted sliced reducer produces).
 ///
 /// For target element `element` of arrayed target `to`, produces the
 /// link-score guard form (`link_score_guard_form`) whose partial holds
-/// the scalar source `from` live and freezes everything else at PREVIOUS,
+/// the source `from` live and freezes everything else at PREVIOUS,
 /// with the target reference (and any arrayed deps that share the target's
-/// dimension) pinned to `element`. The result is `Equation::Scalar`-shaped
-/// text -- one such variable is emitted per target element, named
+/// dimension -- including the agg name when `from` is an arrayed agg) pinned
+/// to `element`. The result is `Equation::Scalar`-shaped text -- one such
+/// variable is emitted per target element, named
 /// `$⁚ltm⁚link_score⁚{from}→{to}[{element}]`, mirroring the arrayed->scalar
 /// `{from}[{elem}]→{to}` convention from `generate_element_to_scalar_equation`.
 ///
@@ -927,6 +929,14 @@ fn subscript_idents_in_expr0(
 /// dimension (the target self-reference is pinned implicitly via the
 /// already-subscripted `to[element]` reference the guard form is built
 /// around).
+///
+/// `source_ref_override`: the pre-rendered (quoted, possibly element-pinned)
+/// reference expression to use for the `Δsource` denominator. `None` uses the
+/// bare `quote_ident(from)` -- correct for a true scalar source. The
+/// arrayed-agg caller passes `Some("$⁚ltm⁚agg⁚n"[<slot>])` so the denominator
+/// indexes the same agg slot the link-score name and the (subscripted-in-the-
+/// partial) numerator do; a bare agg reference in a scalar equation would not
+/// compile and the link score would stub to zero.
 pub(crate) fn generate_scalar_to_element_equation(
     from: &str,
     to: &str,
@@ -934,16 +944,17 @@ pub(crate) fn generate_scalar_to_element_equation(
     to_elem_eqn_text: &str,
     to_deps: &HashSet<Ident<Canonical>>,
     to_deps_to_subscript: &HashSet<Ident<Canonical>>,
+    source_ref_override: Option<&str>,
 ) -> String {
     let from_canonical = Ident::new(from);
     let from_q = quote_ident(from);
     let to_q = quote_ident(to);
     let to_elem = format!("{to_q}[{element}]");
 
-    // The scalar source is always referenced bare, so `RefShape::Bare`
-    // holds its single occurrence live, `source_dim_elements` is empty
-    // (no source subscripts to classify), and there is no iterated-dim
-    // context (a scalar source is never subscripted).
+    // The source (a scalar variable, or the bare agg name pre-substitution)
+    // is referenced bare in `to_elem_eqn_text`, so `RefShape::Bare` holds its
+    // single occurrence live, `source_dim_elements` is empty (no source
+    // subscripts to classify), and there is no iterated-dim context.
     let partial = build_partial_equation_shaped(
         to_elem_eqn_text,
         to_deps,
@@ -953,7 +964,8 @@ pub(crate) fn generate_scalar_to_element_equation(
         None,
     );
     let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element);
-    link_score_guard_form(&partial, &to_elem, &from_q)
+    let source_ref = source_ref_override.unwrap_or(&from_q);
+    link_score_guard_form(&partial, &to_elem, source_ref)
 }
 
 /// Generate the `agg → scalar-target` link-score equation: the partial of

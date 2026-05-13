@@ -6887,6 +6887,237 @@ fn test_sliced_agg_cross_element_loop_simulates() {
     );
 }
 
+/// AC4.3 (#514, end-to-end -- the *arrayed* synthetic agg case): a sliced
+/// reducer `SUM(matrix[D1,*])` that is a *subexpression* of an A2A equation
+/// over `D1` reads one `D1` element per A2A iteration, so its read slice is
+/// `[Iterated(d1), Reduced]` and `result_dims == [D1]` -- it mints an
+/// *arrayed* synthetic agg `$⁚ltm⁚agg⁚0[d1]`. The fix verified here is the
+/// agg-half link-score emitters using subscripted agg names on both sides
+/// (`matrix[d1,d2]→$⁚ltm⁚agg⁚0[d1]` per read row, `$⁚ltm⁚agg⁚0[d1]→growth[d1]`,
+/// with the `agg→target` equation's `Δsource` denominator also carrying the
+/// `[d1]` slot subscript -- the bare-agg-name form does not compile when the
+/// agg is multi-slot), the agg's equation being reconstructed as an
+/// `ApplyToAll` over `D1` (not a scalar -- otherwise `matrix[d1,*]` is a type
+/// error and the source-half link scores silently vanish, zeroing the loop
+/// score), and the element loop through the agg being routed to the
+/// per-circuit element-subscripted path so its loop-score equation can
+/// reference those literal-element agg-half link scores. The model simulates
+/// and the cross-element-through-arrayed-agg loop is scored with a finite,
+/// non-degenerate `loop_score`.
+///
+/// The fixture is the *diagonal* case (`result_dims == growth`'s dims): the
+/// agg over `D1` feeds a target also over exactly `D1`. The original review
+/// fixture put `SUM(matrix[D1,*])` inside an A2A body over `(D1, D2)` (the
+/// strict-prefix *broadcast* case `agg[D1] → growth[D1,D2]`), where the
+/// `agg→target` partial element-pins to the full `(d1,d2)` tuple and thus
+/// over-subscripts the 1-D agg -- a known imprecision tracked as GH #528.
+/// The diagonal case exercises the same arrayed-agg link/loop machinery
+/// without that orthogonal over-subscription bug; `mflow[D1,D2] = growth[D1]`
+/// (the GH #511 iterated-dim subscript) then broadcasts `growth` over `D2`
+/// to close the per-`(D1,D2)` element loops through `matrix`.
+#[test]
+fn test_arrayed_sliced_agg_cross_element_loop_simulates() {
+    // `D1={a,b}`, `D2={x,y}`. `matrix[D1,D2]` stock <- `mflow[D1,D2]`;
+    // `growth[D1] = SUM(matrix[D1,*]) * 0.01 + 1` (A2A over D1 -- the
+    // `SUM(matrix[D1,*])` sub-expr reads `matrix[<this D1 row>, *]`: read
+    // slice `[Iterated(d1), Reduced]`, `result_dims == [D1]` -> arrayed agg
+    // over `D1`, diagonal with `growth`); `mflow[D1,D2] = growth[D1]` (the
+    // GH #511 iterated-dim subscript: `growth[D1]` inside an A2A-over-(D1,D2)
+    // body reads the same `D1` element, broadcasting `growth` over `D2`).
+    // Per-`(D1,D2)` loop: `matrix[d1,d2] → $⁚ltm⁚agg⁚0[d1] → growth[d1] → mflow[d1,d2] → matrix[d1,d2]`.
+    let project = TestProject::new("arrayed_sliced_agg_sim")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("matrix[D1,D2]", "100", &["mflow"], &[], None)
+        .array_aux("growth[D1]", "SUM(matrix[D1,*]) * 0.01 + 1")
+        .array_flow("mflow[D1,D2]", "growth[D1]", None)
+        .build_datamodel();
+
+    // The agg node carries `result_dims == [D1]` (it is arrayed).
+    {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let source_model = sync.models["main"].source_model;
+        let agg_nodes =
+            simlin_engine::ltm_agg::enumerate_agg_nodes(&db, source_model, sync.project);
+        let synthetic: Vec<_> = agg_nodes.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "expected exactly one synthetic agg for SUM(matrix[D1,*]); got: {:?}",
+            agg_nodes
+                .aggs
+                .iter()
+                .map(|a| (&a.name, a.is_synthetic, &a.result_dims))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            synthetic[0].result_dims,
+            vec!["D1".to_string()],
+            "SUM(matrix[D1,*]) as a subexpression of an A2A-over-D1 body must mint an arrayed agg over D1"
+        );
+    }
+
+    // Compile (exhaustive LTM) and simulate.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // The synthetic agg aux is itself an A2A variable over D1.
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm.vars.iter().find(|v| v.name == agg).unwrap_or_else(|| {
+        panic!(
+            "expected the synthetic agg aux {agg}; synthetic vars: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(
+        agg_var.dimensions,
+        vec!["D1".to_string()],
+        "the synthetic agg aux must be arrayed over D1"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("arrayed-synthetic-agg model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    let off = |name: &str| -> usize {
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing offset {name}; have: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let at = |step: usize, o: usize| results.data[step * results.step_size + o];
+
+    // The synthetic agg aux is A2A over D1: in `Results` an LTM A2A var is
+    // keyed by its bare name with the per-element slots laid out at
+    // `base + <D1 index>` (D1 = {a, b} in declaration order). Its `a` slot
+    // equals `matrix[a,x] + matrix[a,y]` (the D1=a row sum), `b` likewise.
+    let agg_base = off(agg);
+    for (d1_idx, (mx_a, mx_b)) in [
+        ("matrix[a,x]", "matrix[a,y]"),
+        ("matrix[b,x]", "matrix[b,y]"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let agg_slot = agg_base + d1_idx;
+        let mx_a = off(mx_a);
+        let mx_b = off(mx_b);
+        for step in 0..results.step_count {
+            let expected = at(step, mx_a) + at(step, mx_b);
+            assert!(
+                (at(step, agg_slot) - expected).abs() < 1e-9 * expected.abs().max(1.0),
+                "step {step}: {agg} slot {d1_idx} = {}, expected SUM(matrix[D1={d1_idx},*]) = {expected}",
+                at(step, agg_slot)
+            );
+        }
+    }
+
+    // Per-(read row x agg slot) source-half link scores exist (4 combos:
+    // each matrix[d1,d2] reads into the agg's d1 slot) and are finite.
+    for d1 in &["a", "b"] {
+        for d2 in &["x", "y"] {
+            let o = off(&format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[{d1},{d2}]\u{2192}{agg}[{d1}]"
+            ));
+            for step in 0..results.step_count {
+                assert!(
+                    at(step, o).is_finite(),
+                    "step {step}: matrix[{d1},{d2}]→{agg}[{d1}] link score not finite"
+                );
+            }
+        }
+    }
+    // A `matrix` row never feeds the *other* D1 row's agg slot (the slice
+    // reads only `matrix[<this D1>, *]`).
+    assert!(
+        !results
+            .offsets
+            .contains_key(&Ident::<Canonical>::new(&format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[a,x]\u{2192}{agg}[b]"
+            ))),
+        "must not emit a matrix[a,x]→{agg}[b] link score (the d1=a slice reads only matrix[a,*])"
+    );
+
+    // The agg->target half exists per target element (diagonal: the agg's
+    // `d1` slot rides the `from` side, `growth`'s element is also just `d1`).
+    for d1 in &["a", "b"] {
+        let o = off(&format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{agg}[{d1}]\u{2192}growth[{d1}]"
+        ));
+        for step in 0..results.step_count {
+            assert!(
+                at(step, o).is_finite(),
+                "step {step}: {agg}[{d1}]→growth[{d1}] link score not finite"
+            );
+        }
+    }
+
+    // The cross-element-through-arrayed-agg loop is enumerated, and its
+    // loop_score series is finite and not all-zero at some step >= 2. The
+    // loop's score equation references the per-element agg-half link scores
+    // (which only exist as literal-element scalar vars); pre-fix this
+    // circuit went through the unsubscripted A2A-collapse path and got a
+    // stub-zero loop score because no `matrix→$⁚ltm⁚agg⁚0` A2A var exists,
+    // and the `agg[d1]→growth[d1]` half (had it been built unsubscripted)
+    // would not have compiled because a multi-slot agg can't be referenced
+    // bare in a scalar equation.
+    let cross_agg_loop_score_name = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.contains("\u{205A}loop_score\u{205A}")
+                && v.equation
+                    .source_text()
+                    .contains(format!("{agg}[a]\u{2192}growth[a]").as_str())
+                && v.equation.source_text().contains("matrix[a,")
+                && v.equation.source_text().contains(format!("\u{2192}{agg}[a]").as_str())
+        })
+        .map(|v| v.name.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a loop_score var traversing matrix[a,*]→{agg}[a]→growth[a]; loop scores: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+                    .map(|v| (v.name.as_str(), v.equation.source_text()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let lo = off(&cross_agg_loop_score_name);
+    let mut saw_nonzero = false;
+    for step in 2..results.step_count {
+        let v = at(step, lo);
+        assert!(
+            v.is_finite(),
+            "step {step}: cross-element-through-arrayed-agg loop score not finite"
+        );
+        if v.abs() > 1e-12 {
+            saw_nonzero = true;
+        }
+    }
+    assert!(
+        saw_nonzero,
+        "the cross-element-through-arrayed-agg loop score must be non-degenerate (non-zero at some step >= 2)"
+    );
+}
+
 /// AC4.2 regression (exhaustive loop-link path): `share[r] = pop[r] / SUM(pop[*])`
 /// references `pop` *both* directly (the `pop[r]` numerator) and via the hoisted
 /// reducer `$⁚ltm⁚agg⁚0 = SUM(pop[*])`. With `update[r] = share[r] * pop[r] * c`

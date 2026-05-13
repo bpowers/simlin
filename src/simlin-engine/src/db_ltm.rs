@@ -2362,9 +2362,15 @@ pub(crate) fn build_loops_from_tiered(
 ///   - `to = n_{i+1}` (subscript kept) when `n_{i+1}` is subscripted AND
 ///     its variable is dimensioned (so the link score is A2A and the loop
 ///     visits one element of it -- `generate_loop_score_equation` then
-///     emits `"...→{to}"[e_{i+1}]`). Otherwise `to = strip(n_{i+1})`
-///     (the link score is scalar / cross-dimensional, referenced
-///     without a subscript).
+///     emits `"...→{to}"[e_{i+1}]`). A synthetic aggregate node
+///     (`$⁚ltm⁚agg⁚{n}[<slot>]`) is treated like a dimensioned variable
+///     here even though it isn't in `source_vars`: when the agg is arrayed
+///     its slot rides in the link-score names `emit_source_to_agg_link_scores`
+///     / `emit_agg_to_target_link_scores` emit (`{src}[<row>]→{agg}[<slot>]`,
+///     `{agg}[<slot>]→{tgt}[<elem>]`), so `loop_link_score_ref` needs the
+///     `[<slot>]` on the agg endpoint to resolve those names. Otherwise
+///     `to = strip(n_{i+1})` (the link score is scalar / cross-dimensional,
+///     referenced without a subscript).
 ///
 /// `var_links` carries the variable-level links for the same circuit
 /// (from `circuit_to_links` on the stripped node sequence); link `i`'s
@@ -2393,13 +2399,14 @@ fn build_element_subscripted_links(
             strip_subscript(from_raw)
         };
         let to_var_level = strip_subscript(to_raw);
-        let to_is_arrayed = source_vars
-            .get(to_var_level)
-            .map(|sv| {
-                sv.kind(db) != SourceVariableKind::Module
-                    && !variable_dimensions(db, *sv, project).is_empty()
-            })
-            .unwrap_or(false);
+        let to_is_arrayed = crate::ltm_agg::is_synthetic_agg_name(to_var_level)
+            || source_vars
+                .get(to_var_level)
+                .map(|sv| {
+                    sv.kind(db) != SourceVariableKind::Module
+                        && !variable_dimensions(db, *sv, project).is_empty()
+                })
+                .unwrap_or(false);
         let link_to = if to_raw.contains('[') && to_is_arrayed {
             to_raw
         } else {
@@ -2503,6 +2510,23 @@ pub(crate) fn build_element_level_loops(
         let representative: &[&str] = circuits_in_group[0];
         let all_subscripted = representative.iter().all(|n| n.contains('['));
 
+        // A circuit that traverses a synthetic aggregate node
+        // (`$⁚ltm⁚agg⁚{n}`) must never be collapsed into a single A2A loop:
+        // the per-row source link scores (`{src}[<row>]→{agg}[<slot>]`) and
+        // the agg→target link scores (`{agg}[<slot>]→{tgt}[<elem>]`) are
+        // scalar variables keyed by literal element names, so there is no
+        // dimensioned `{src}→{agg}` link-score variable an A2A loop-score
+        // equation could reference. Route these to the element-subscripted
+        // per-circuit path (one scalar `Loop` per element combination), the
+        // same path cross-element loops take -- `build_element_subscripted_links`
+        // keeps the agg's `[<slot>]` so `loop_link_score_ref` can resolve the
+        // agg-half names. (Even though the agg circuit's leading subscript
+        // elements may all agree -- e.g. `[matrix[a,x], agg[a], growth[a,x]]`
+        // -- which would otherwise classify it as a same-element A2A circuit.)
+        let representative_has_synthetic_agg = representative
+            .iter()
+            .any(|n| crate::ltm_agg::is_synthetic_agg_name(strip_subscript(n)));
+
         // Detect cross-element circuits that should NOT be collapsed
         // into A2A loops. Two patterns indicate cross-element:
         //
@@ -2552,7 +2576,11 @@ pub(crate) fn build_element_level_loops(
             false
         };
 
-        if all_subscripted && !is_cross_element && !representative.is_empty() {
+        if all_subscripted
+            && !is_cross_element
+            && !representative_has_synthetic_agg
+            && !representative.is_empty()
+        {
             // Pure-dimension group: produce a single A2A loop.
             //
             // Use the variable-level graph for polarity analysis and stock
@@ -2606,7 +2634,7 @@ pub(crate) fn build_element_level_loops(
                 polarity,
                 dimensions,
             });
-        } else if is_cross_element {
+        } else if is_cross_element || representative_has_synthetic_agg {
             // Cross-element circuits: a circuit that genuinely visits
             // different elements at different points -- e.g.
             //   population[nyc] -> migration_pressure[boston] ->
@@ -2615,6 +2643,14 @@ pub(crate) fn build_element_level_loops(
             // or the wildcard-reducer pattern
             //   pop[nyc] -> total[boston] -> update[boston] ->
             //   pop[boston] -> total[nyc] -> update[nyc] -> pop[nyc].
+            //
+            // Also: an elementary circuit through a synthetic aggregate node
+            // visited once (`matrix[a,x] -> $⁚ltm⁚agg⁚0[a] -> growth[a,x] ->
+            // matrix[a,x]` -- the "self-aggregate" feedback of a sliced
+            // reducer) lands here even when its leading subscript elements all
+            // agree; the loop score still has to reference the per-element
+            // agg-half link scores, which only exist as literal-element scalar
+            // variables.
             //
             // Each circuit becomes its own scalar Loop (the loop-score
             // *variable* is scalar: a cross-element loop visits fixed
@@ -3740,6 +3776,9 @@ pub fn model_ltm_variables(
                     elem_text,
                     elem_deps,
                     deps_to_sub,
+                    // A true scalar source: the bare `quote_ident(from)`
+                    // denominator is correct.
+                    None,
                 )
             };
             LtmSyntheticVar {
@@ -4124,8 +4163,18 @@ pub fn model_ltm_variables(
         }
         // Reconstruct a transient (parsed + lowered) `Variable` from the
         // agg's equation text so `classify_reducer` can read the reducer
-        // kind/name.
-        let agg_eqn = datamodel::Equation::Scalar(agg.equation_text.clone());
+        // kind/name. An arrayed agg (`result_dims` non-empty -- a sliced
+        // reducer like `SUM(matrix[D1,*])` over an A2A-`D1` body) must be
+        // reconstructed as an `ApplyToAll` over `result_dims`; treating
+        // `matrix[d1,*]` as a scalar equation is a type error, so the lowered
+        // reconstruction would fail and no per-read-row source link scores
+        // would be emitted (silently zeroing the synthetic agg's loop score).
+        // Mirrors the agg-aux emission above.
+        let agg_eqn = if agg.result_dims.is_empty() {
+            datamodel::Equation::Scalar(agg.equation_text.clone())
+        } else {
+            datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
+        };
         let Some(agg_var) = reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project)
         else {
             return;
@@ -4312,22 +4361,41 @@ pub fn model_ltm_variables(
                 to_dims.iter().position(|td| td.name() == canon.as_ref())
             })
             .collect();
-        // The agg side of the link-score name for a given target element: the
-        // bare agg name when scalar, `agg[<slot>]` when arrayed (the target
-        // element projected onto `result_dims`).
-        let agg_name_for_target = |element: &str| -> String {
+        // The target element projected onto the agg's `result_dims` (the
+        // agg-slot subscript), or `None` when the agg is scalar / the
+        // projection is empty.
+        let agg_slot_for_target = |element: &str| -> Option<String> {
             if !agg_is_arrayed {
-                return agg.name.clone();
+                return None;
             }
             let parts: Vec<&str> = element.split(',').collect();
             let slot: Vec<&str> = result_dim_positions
                 .iter()
                 .filter_map(|&p| parts.get(p).copied())
                 .collect();
-            if slot.is_empty() {
-                agg.name.clone()
-            } else {
-                format!("{}[{}]", agg.name, slot.join(","))
+            (!slot.is_empty()).then(|| slot.join(","))
+        };
+        // The agg side of the link-score name for a given target element: the
+        // bare agg name when scalar, `agg[<slot>]` when arrayed (the target
+        // element projected onto `result_dims`).
+        let agg_name_for_target = |element: &str| -> String {
+            match agg_slot_for_target(element) {
+                None => agg.name.clone(),
+                Some(slot) => format!("{}[{}]", agg.name, slot),
+            }
+        };
+        // The agg side of the `agg → target` link-score *equation*'s `Δsource`
+        // denominator for a given target element: the quoted agg name with the
+        // same `[<slot>]` subscript the link-score name carries (so the
+        // denominator indexes the agg slot the loop traverses). The
+        // bare-agg-name form `generate_scalar_to_element_equation` would build
+        // by default does not compile when the agg is arrayed (a multi-slot
+        // var referenced bare in a scalar equation).
+        let agg_q = crate::ltm_augment::quote_ident(&agg.name);
+        let agg_source_ref_for_target = |element: &str| -> String {
+            match agg_slot_for_target(element) {
+                None => agg_q.clone(),
+                Some(slot) => format!("{agg_q}[{slot}]"),
             }
         };
 
@@ -4380,7 +4448,8 @@ pub fn model_ltm_variables(
                     // what `substituted` holds); `deps_to_subscript` then
                     // element-pins it to `agg[<element>]` when the agg is
                     // arrayed, matching `agg_name_for_target` (exact when
-                    // `result_dims == to`'s dims).
+                    // `result_dims == to`'s dims). The `Δsource` denominator
+                    // is element-pinned the same way via the explicit override.
                     let equation = crate::ltm_augment::generate_scalar_to_element_equation(
                         &agg.name,
                         to,
@@ -4388,6 +4457,7 @@ pub fn model_ltm_variables(
                         &substituted,
                         &all_deps,
                         &deps_to_subscript,
+                        Some(&agg_source_ref_for_target(element)),
                     );
                     vars.push(LtmSyntheticVar {
                         name: format!(
@@ -4442,6 +4512,7 @@ pub fn model_ltm_variables(
                                 &substituted,
                                 &slot_deps,
                                 &deps_to_subscript,
+                                Some(&agg_source_ref_for_target(element)),
                             )
                         }
                     };
