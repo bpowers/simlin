@@ -95,14 +95,33 @@ pub unsafe extern "C" fn simlin_sim_new(
                     // FFI rel-loop-score path reads `loop_partitions[id][k]`
                     // for the loop's queried slot `k`, so a mismatch here
                     // would silently fall outside the partition grid.
+                    //
+                    // Only assert when *both* sides look genuinely arrayed
+                    // (`n_slots > 1` and `pv.len() > 1`): this mirrors the
+                    // escape hatch the engine's analogous `debug_assert!`
+                    // in `model_ltm_variables` takes when
+                    // `loop_dimension_element_tuples` returns empty (a
+                    // mid-edit state where the project dims don't yet cover
+                    // a loop's declared dimensions -- `partition_for_loop`
+                    // then falls back to whatever element suffixes are
+                    // present on the loop's stocks, and `build_loop_element_index`
+                    // products only the resolved dims, so the two counts
+                    // can transiently disagree).  `loop_dimension_element_tuples`
+                    // isn't visible across the FFI crate boundary, so the
+                    // "both > 1" guard is the closest expressible form; it
+                    // still catches a real slot-count mismatch between two
+                    // genuinely-arrayed views (which can't arise from valid
+                    // compilation) without firing on the can't-happen-in-prod
+                    // singleton-collapse transient.
                     debug_assert!(
                         ltm_vars.loop_partitions.iter().all(|(id, pv)| {
-                            element_index
-                                .get(id)
-                                .map(|m| m.n_slots.max(1) == pv.len().max(1))
-                                .unwrap_or(true)
+                            element_index.get(id).is_none_or(|m| {
+                                let (n, plen) = (m.n_slots, pv.len());
+                                !(n > 1 && plen > 1) || n == plen
+                            })
                         }),
-                        "loop_partitions slot counts must match loop_element_index n_slots"
+                        "loop_partitions slot counts must match loop_element_index n_slots \
+                         when both are genuinely arrayed (> 1 slot)"
                     );
                     (ltm_vars.loop_partitions.clone(), element_index)
                 } else {
