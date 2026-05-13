@@ -2162,10 +2162,10 @@ pub fn link_score_equation_text<'db>(
     // Standard ceteris-paribus formula for non-module links.
     //
     // `link_score_equation_text` keys by `(from, to)` only -- no per-shape
-    // info. The Bare shape and empty `source_dim_elements` reproduce the
-    // original pre-Phase-3 behavior: every non-`from` dep is wrapped and
-    // `from` stays live regardless of subscript shape. Callers needing
-    // per-shape behavior use `link_score_equation_text_shaped`.
+    // info. The Bare shape, empty `source_dim_elements`, and `None`
+    // iterated-dim context reproduce the original pre-Phase-3 behavior (the
+    // GH #511 context is `None`-safe here: this legacy path is only reached
+    // for scalar-target link scores). Per-shape callers use the `_shaped` fn.
     let mut all_vars = HashMap::new();
     if let Some(ref fv) = from_var {
         all_vars.insert(from_ident.clone(), fv.clone());
@@ -2178,6 +2178,7 @@ pub fn link_score_equation_text<'db>(
         &[],
         &to_var,
         &all_vars,
+        None,
     );
 
     // This legacy entry always emits a scalar link score. If the generator

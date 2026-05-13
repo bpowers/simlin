@@ -23,6 +23,120 @@ use std::collections::{HashMap, HashSet};
 
 use crate::db::RefShape;
 
+/// Context for recognizing GH #511 iterated-dimension source references in
+/// the partial-equation builder: the live source's declared dimension names
+/// (canonical, in declaration order; same length as `source_dim_elements`),
+/// the target equation's iterated dimension names (canonical, in the order
+/// they appear on `Ast::ApplyToAll`/`Ast::Arrayed`), and a `DimensionsContext`
+/// for the AC3.5 mapped-dimension case. `build_partial_equation_shaped` is
+/// passed `None` by callers whose live source is a scalar (or an aggregate
+/// node) -- those have no source subscripts, so iterated-dim recognition
+/// never applies.
+pub(crate) struct IteratedDimCtx<'a> {
+    pub source_dim_names: &'a [String],
+    pub target_iterated_dims: &'a [String],
+    pub dim_ctx: Option<&'a crate::dimensions::DimensionsContext>,
+}
+
+/// Recognize an *iterated-dimension* `Expr0` subscript on the *live source*
+/// -- one whose indices are exactly the target equation's iterated
+/// dimensions, in the position matching the live source's declared
+/// dimension order -- the Expr0-AST sibling of
+/// `db_ltm_ir::classify_iterated_dim_shape` (GH #511).
+///
+/// `live_source[d_0, d_1, ...]` is the iterated-dim case iff:
+///   1. it has exactly one index per source dimension (`indices.len() ==
+///      ctx.source_dim_names.len()`), and
+///   2. every index `d_i` is a bare `Var` naming a dimension that is one of
+///      the target equation's iterated dimensions, *and*
+///   3. for each `i`, `d_i` is either the same name as the source's `i`-th
+///      declared dimension `ctx.source_dim_names[i]`, or (when a
+///      `DimensionsContext` is available) a dimension that *maps to* it (the
+///      AC3.5 mapped-dimension case).
+///
+/// When it matches, `wrap_non_matching_in_previous` collapses the subscript
+/// to a bare `Var(live_source)` before the live/PREVIOUS dispatch -- it then
+/// becomes the live ref (`live_shape == Bare`) or (when `live_shape != Bare`,
+/// which shouldn't happen for an edge the IR classified `Bare`) a
+/// `PREVIOUS(Var(live_source))` (a `Var` arg, which codegen accepts -- vs
+/// the `PREVIOUS(Subscript(...))` the pre-fix code produced, which trips the
+/// codegen assertion). The model equation itself is untouched -- only the
+/// LTM partial's `Expr0` is normalized -- so simulation still evaluates
+/// `live_source[d_i]` correctly: in this slot, `live_source[d_i]` and a bare
+/// `live_source` reference inside an apply-to-all-over-the-target's-dims
+/// equation pick the same element (the bare ref broadcasts/iterates that
+/// dimension).
+fn is_live_source_iterated_dim_subscript(
+    indices: &[IndexExpr0],
+    ctx: Option<&IteratedDimCtx<'_>>,
+) -> bool {
+    use crate::common::CanonicalDimensionName;
+    let Some(ctx) = ctx else { return false };
+    if indices.is_empty() || indices.len() != ctx.source_dim_names.len() {
+        return false;
+    }
+    for (i, idx) in indices.iter().enumerate() {
+        let d = match idx {
+            IndexExpr0::Expr(Expr0::Var(name, _)) => canonicalize(name.as_str()).into_owned(),
+            _ => return false,
+        };
+        if !ctx.target_iterated_dims.iter().any(|t| t == &d) {
+            return false;
+        }
+        let src_name = &ctx.source_dim_names[i];
+        if &d == src_name {
+            continue;
+        }
+        // AC3.5: a mapped dimension is treated the same way -- don't
+        // special-case it, just don't exclude it. (No mapping context => no
+        // mapped-dimension recognition; the by-name check above still applies.)
+        if let Some(dim_ctx) = ctx.dim_ctx {
+            let d_canon = CanonicalDimensionName::from_raw(&d);
+            let src_canon = CanonicalDimensionName::from_raw(src_name);
+            if dim_ctx.has_mapping_to(&d_canon, &src_canon) {
+                continue;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// Recognize an iterated-dimension subscript on a *non-live-source*
+/// dependency (e.g. `pop[Region,Age]` in `growth[Region,Age] =
+/// row_sum[Region] * c * pop[Region,Age]` while building the partial for
+/// `(row_sum, growth)`). We don't know the dep's declared dimensions here
+/// (the partial builder works on equation text + a dep *name* set), so this
+/// is the conservative check: every index is a bare `Var` naming one of the
+/// target's iterated dimensions, and there are at most as many indices as
+/// the target has iterated dimensions. When it matches,
+/// `wrap_non_matching_in_previous` collapses the subscript to a bare
+/// `Var(dep)` before wrapping it in `PREVIOUS()` -- avoiding the
+/// `PREVIOUS(Subscript(...))` codegen assertion. For the common case (the
+/// dep is declared over exactly those iteration dimensions) the frozen
+/// `PREVIOUS(dep)` picks the same element `PREVIOUS(dep[...])` would in each
+/// slot; the pathological case (`dep[D2]` where `dep` is over `D1` and `D2`
+/// maps to `D1`) would over-collapse, but such a model is already not
+/// statically scoreable in pre-#511 LTM and is out of scope here.
+fn is_other_dep_iterated_dim_subscript(
+    indices: &[IndexExpr0],
+    ctx: Option<&IteratedDimCtx<'_>>,
+) -> bool {
+    let Some(ctx) = ctx else { return false };
+    if indices.is_empty() || indices.len() > ctx.target_iterated_dims.len() {
+        return false;
+    }
+    indices.iter().all(|idx| match idx {
+        IndexExpr0::Expr(Expr0::Var(name, _)) => {
+            let d = canonicalize(name.as_str());
+            ctx.target_iterated_dims
+                .iter()
+                .any(|t| t.as_str() == d.as_ref())
+        }
+        _ => false,
+    })
+}
+
 /// Classify an `Expr0` subscript's shape based on its indices.
 ///
 /// Mirrors `db_analysis::resolve_literal_index`'s classification logic but at
@@ -122,12 +236,22 @@ fn resolve_literal_element_index(
 fn classify_expr0_subscript_shape(
     indices: &[IndexExpr0],
     source_dim_elements: &[Vec<String>],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
 ) -> RefShape {
     if indices
         .iter()
         .any(|idx| matches!(idx, IndexExpr0::Wildcard(_)))
     {
         return RefShape::Wildcard;
+    }
+    // GH #511: an iterated-dimension subscript on the live source
+    // (`row_sum[Region]` inside an apply-to-all-over-`Region x Age` equation)
+    // reads the same source element -- it is `Bare`, mirroring
+    // `db_ltm_ir::classify_iterated_dim_shape`. Checked before the
+    // literal-element pass because a dimension name (`Region`) is not a
+    // literal element, so it would otherwise fall to `DynamicIndex`.
+    if is_live_source_iterated_dim_subscript(indices, iter_ctx) {
+        return RefShape::Bare;
     }
     let mut elems = Vec::with_capacity(indices.len());
     for (i, idx) in indices.iter().enumerate() {
@@ -180,6 +304,7 @@ fn expr0_contains_live_match(
     live_source: &Ident<Canonical>,
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
 ) -> bool {
     match expr {
         Expr0::Const(..) => false,
@@ -191,24 +316,49 @@ fn expr0_contains_live_match(
             // expression (`other_arr[live_source]`) is never the captured
             // live ref -- `wrap_index_non_matching_in_previous` passes a
             // throwaway sink for those -- so we only consider a subscript
-            // whose *head* is `live_source` with the matching shape.
+            // whose *head* is `live_source` with the matching shape. An
+            // iterated-dimension subscript classifies `Bare` here too (it is
+            // collapsed to its head `Var` in `wrap_non_matching_in_previous`).
             &Ident::new(ident.as_str()) == live_source
-                && &classify_expr0_subscript_shape(indices, source_dim_elements) == live_shape
+                && &classify_expr0_subscript_shape(indices, source_dim_elements, iter_ctx)
+                    == live_shape
         }
-        Expr0::App(UntypedBuiltinFn(_, args), _) => args
-            .iter()
-            .any(|a| expr0_contains_live_match(a, live_source, live_shape, source_dim_elements)),
-        Expr0::Op1(_, inner, _) => {
-            expr0_contains_live_match(inner, live_source, live_shape, source_dim_elements)
-        }
+        Expr0::App(UntypedBuiltinFn(_, args), _) => args.iter().any(|a| {
+            expr0_contains_live_match(a, live_source, live_shape, source_dim_elements, iter_ctx)
+        }),
+        Expr0::Op1(_, inner, _) => expr0_contains_live_match(
+            inner,
+            live_source,
+            live_shape,
+            source_dim_elements,
+            iter_ctx,
+        ),
         Expr0::Op2(_, l, r, _) => {
-            expr0_contains_live_match(l, live_source, live_shape, source_dim_elements)
-                || expr0_contains_live_match(r, live_source, live_shape, source_dim_elements)
+            expr0_contains_live_match(l, live_source, live_shape, source_dim_elements, iter_ctx)
+                || expr0_contains_live_match(
+                    r,
+                    live_source,
+                    live_shape,
+                    source_dim_elements,
+                    iter_ctx,
+                )
         }
         Expr0::If(c, t, e, _) => {
-            expr0_contains_live_match(c, live_source, live_shape, source_dim_elements)
-                || expr0_contains_live_match(t, live_source, live_shape, source_dim_elements)
-                || expr0_contains_live_match(e, live_source, live_shape, source_dim_elements)
+            expr0_contains_live_match(c, live_source, live_shape, source_dim_elements, iter_ctx)
+                || expr0_contains_live_match(
+                    t,
+                    live_source,
+                    live_shape,
+                    source_dim_elements,
+                    iter_ctx,
+                )
+                || expr0_contains_live_match(
+                    e,
+                    live_source,
+                    live_shape,
+                    source_dim_elements,
+                    iter_ctx,
+                )
         }
     }
 }
@@ -230,6 +380,16 @@ fn expr0_contains_live_match(
 /// even when the outer subscript matches the live shape, so nested
 /// references like `arr[other_var]` still get wrapped.
 ///
+/// `iter_ctx` carries the GH #511 iterated-dimension context (the live
+/// source's declared dimension names + the target equation's iterated
+/// dimensions + a `DimensionsContext` for the mapped case); when `Some`,
+/// an iterated-dimension subscript is normalized to a bare `Var` *before*
+/// the live/PREVIOUS dispatch -- so `row_sum[D1]` (a same-element reference
+/// over the target's own `D1`) becomes either the live ref (`live_shape ==
+/// Bare`) or `PREVIOUS(Var(row_sum))` (a `Var` arg, which codegen accepts,
+/// vs the `PREVIOUS(Subscript(...))` the pre-#511 code produced). Pass
+/// `None` for callers whose live source is scalar (no source subscripts).
+///
 /// `live_ref` ends up holding the bare `Var(live_source)` for a `Bare`
 /// shape, or the (already index-transformed) `Subscript(live_source, ...)`
 /// for `FixedIndex`/`Wildcard`/`DynamicIndex`. Callers use this captured
@@ -245,6 +405,7 @@ fn wrap_non_matching_in_previous(
     live_shape: &RefShape,
     other_deps: &HashSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
     live_ref: &mut Option<Expr0>,
 ) -> Expr0 {
     match expr {
@@ -270,6 +431,44 @@ fn wrap_non_matching_in_previous(
             }
         }
         Expr0::Subscript(ident, indices, loc) => {
+            let canonical = Ident::new(ident.as_str());
+            // GH #511: an iterated-dimension subscript reads the same element
+            // a bare reference would in each slot of the target equation, so
+            // normalize it to a bare `Var` here -- *before* the live/PREVIOUS
+            // dispatch -- and re-run the (much simpler) `Var` logic. The
+            // model equation is untouched; only the LTM partial's `Expr0` is
+            // rewritten, so simulation still evaluates `live_source[d_i]`.
+            // For the live source we use the precise position-matched check;
+            // for a non-live dep (`pop[Region,Age]` while building the
+            // `row_sum -> growth` partial) the conservative all-indices-are-
+            // iterated-dims check (the dep's arity isn't known here). Either
+            // way, the alternative -- `PREVIOUS(Subscript(...))` -- trips the
+            // codegen assertion.
+            if &canonical == live_source {
+                if is_live_source_iterated_dim_subscript(&indices, iter_ctx) {
+                    return wrap_non_matching_in_previous(
+                        Expr0::Var(ident, loc),
+                        live_source,
+                        live_shape,
+                        other_deps,
+                        source_dim_elements,
+                        iter_ctx,
+                        live_ref,
+                    );
+                }
+            } else if other_deps.contains(&canonical)
+                && is_other_dep_iterated_dim_subscript(&indices, iter_ctx)
+            {
+                return wrap_non_matching_in_previous(
+                    Expr0::Var(ident, loc),
+                    live_source,
+                    live_shape,
+                    other_deps,
+                    source_dim_elements,
+                    iter_ctx,
+                    live_ref,
+                );
+            }
             // Classify the subscript's shape using the ORIGINAL indices
             // BEFORE recursing into them. If a user variable shares a
             // name with a dimension element (e.g., a variable also named
@@ -277,8 +476,8 @@ fn wrap_non_matching_in_previous(
             // `App(PREVIOUS, [Var(NYC)])`, and then classification would
             // fall through to `DynamicIndex`, breaking a live FixedIndex
             // shape match.
-            let canonical = Ident::new(ident.as_str());
-            let subscript_shape = classify_expr0_subscript_shape(&indices, source_dim_elements);
+            let subscript_shape =
+                classify_expr0_subscript_shape(&indices, source_dim_elements, iter_ctx);
             if &canonical == live_source && &subscript_shape == live_shape {
                 // Live reference: the OUTER subscript stays unwrapped.
                 // Decide per-index whether to recurse:
@@ -314,6 +513,7 @@ fn wrap_non_matching_in_previous(
                                 live_shape,
                                 other_deps,
                                 source_dim_elements,
+                                iter_ctx,
                             )
                         }
                     })
@@ -337,6 +537,7 @@ fn wrap_non_matching_in_previous(
                         live_shape,
                         other_deps,
                         source_dim_elements,
+                        iter_ctx,
                     )
                 })
                 .collect();
@@ -367,7 +568,13 @@ fn wrap_non_matching_in_previous(
             // unwrapped.
             if is_array_reducer_name(&name, args.len())
                 && !args.iter().any(|a| {
-                    expr0_contains_live_match(a, live_source, live_shape, source_dim_elements)
+                    expr0_contains_live_match(
+                        a,
+                        live_source,
+                        live_shape,
+                        source_dim_elements,
+                        iter_ctx,
+                    )
                 })
             {
                 let reducer = Expr0::App(UntypedBuiltinFn(name, args), loc);
@@ -382,6 +589,7 @@ fn wrap_non_matching_in_previous(
                         live_shape,
                         other_deps,
                         source_dim_elements,
+                        iter_ctx,
                         live_ref,
                     )
                 })
@@ -396,6 +604,7 @@ fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                iter_ctx,
                 live_ref,
             )),
             loc,
@@ -408,6 +617,7 @@ fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                iter_ctx,
                 live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
@@ -416,6 +626,7 @@ fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                iter_ctx,
                 live_ref,
             )),
             loc,
@@ -427,6 +638,7 @@ fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                iter_ctx,
                 live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
@@ -435,6 +647,7 @@ fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                iter_ctx,
                 live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
@@ -443,6 +656,7 @@ fn wrap_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                iter_ctx,
                 live_ref,
             )),
             loc,
@@ -456,6 +670,7 @@ fn wrap_index_non_matching_in_previous(
     live_shape: &RefShape,
     other_deps: &HashSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
 ) -> IndexExpr0 {
     // Indices are inner content of a live reference (or of a
     // PREVIOUS-wrapped one); a `live_source` occurrence reachable only
@@ -468,6 +683,7 @@ fn wrap_index_non_matching_in_previous(
             live_shape,
             other_deps,
             source_dim_elements,
+            iter_ctx,
             &mut None,
         )),
         IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
@@ -477,6 +693,7 @@ fn wrap_index_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                iter_ctx,
                 &mut None,
             ),
             wrap_non_matching_in_previous(
@@ -485,6 +702,7 @@ fn wrap_index_non_matching_in_previous(
                 live_shape,
                 other_deps,
                 source_dim_elements,
+                iter_ctx,
                 &mut None,
             ),
             loc,
@@ -507,12 +725,18 @@ fn wrap_index_non_matching_in_previous(
 /// no wrapping happens, so the result is always in the canonical equation
 /// format expected by downstream parsing. The performance impact is
 /// negligible because LTM equations are short.
+///
+/// `iter_ctx` is the GH #511 iterated-dimension context (the target's
+/// iterated dims + the source's declared dim names + a `DimensionsContext`);
+/// pass `None` when the live source is scalar (no source subscripts to
+/// recognize). See [`wrap_non_matching_in_previous`] and [`IteratedDimCtx`].
 pub(crate) fn build_partial_equation_shaped(
     equation_text: &str,
     deps: &HashSet<Ident<Canonical>>,
     live_source: &Ident<Canonical>,
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
 ) -> String {
     build_partial_equation_shaped_with_live_ref(
         equation_text,
@@ -520,6 +744,7 @@ pub(crate) fn build_partial_equation_shaped(
         live_source,
         live_shape,
         source_dim_elements,
+        iter_ctx,
     )
     .0
 }
@@ -547,6 +772,7 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
     live_source: &Ident<Canonical>,
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
+    iter_ctx: Option<&IteratedDimCtx<'_>>,
 ) -> (String, Option<Expr0>) {
     let other_deps: HashSet<Ident<Canonical>> = deps
         .iter()
@@ -565,6 +791,7 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
         live_shape,
         &other_deps,
         source_dim_elements,
+        iter_ctx,
         &mut live_ref,
     );
     (print_eqn(&transformed), live_ref)
@@ -698,14 +925,16 @@ pub(crate) fn generate_scalar_to_element_equation(
     let to_elem = format!("{to_q}[{element}]");
 
     // The scalar source is always referenced bare, so `RefShape::Bare`
-    // holds its single occurrence live and `source_dim_elements` is empty
-    // (no source subscripts to classify).
+    // holds its single occurrence live, `source_dim_elements` is empty
+    // (no source subscripts to classify), and there is no iterated-dim
+    // context (a scalar source is never subscripted).
     let partial = build_partial_equation_shaped(
         to_elem_eqn_text,
         to_deps,
         &from_canonical,
         &RefShape::Bare,
         &[],
+        None,
     );
     let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element);
     link_score_guard_form(&partial, &to_elem, &from_q)
@@ -730,8 +959,15 @@ pub(crate) fn generate_agg_to_scalar_target_equation(
     let agg_canonical = Ident::new(agg_name);
     let agg_q = quote_ident(agg_name);
     let to_q = quote_ident(to_name);
-    let partial =
-        build_partial_equation_shaped(to_eqn_text, to_deps, &agg_canonical, &RefShape::Bare, &[]);
+    // The agg node is a scalar -- referenced bare, no iterated-dim context.
+    let partial = build_partial_equation_shaped(
+        to_eqn_text,
+        to_deps,
+        &agg_canonical,
+        &RefShape::Bare,
+        &[],
+        None,
+    );
     link_score_guard_form(&partial, &to_q, &agg_q)
 }
 
@@ -971,6 +1207,33 @@ fn read_rss_mib() -> Option<f64> {
     None
 }
 
+/// The live source's declared dimension names (canonical, in declaration
+/// order) -- looked up from the model's variable map; empty for a scalar
+/// source or one not in the map (an implicit SMOOTH/DELAY var, scalar by
+/// construction). Used to build the GH #511 [`IteratedDimCtx`].
+fn source_dim_names_for(
+    from: &Ident<Canonical>,
+    all_vars: &HashMap<Ident<Canonical>, Variable>,
+) -> Vec<String> {
+    all_vars
+        .get(from)
+        .and_then(|v| v.get_dimensions())
+        .map(|dims| dims.iter().map(|d| d.name().to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// The target equation's iterated dimension names (canonical), or `&[]`
+/// when the target is scalar. Used to build the GH #511 [`IteratedDimCtx`].
+fn target_iterated_dim_names_canonical(to_var: &Variable) -> Vec<String> {
+    use crate::ast::Ast;
+    match to_var.ast() {
+        Some(Ast::ApplyToAll(dims, _)) | Some(Ast::Arrayed(dims, _, _, _)) => {
+            dims.iter().map(|d| d.name().to_string()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Generate the equation for a link score variable.
 /// Exposed as `generate_link_score_equation_for_link` for use by tracked
 /// functions in `db.rs`.
@@ -989,10 +1252,14 @@ fn read_rss_mib() -> Option<f64> {
 /// the source variable's dimension element names (one inner vec per
 /// dimension, in source-declared order, canonical lowercase) so that
 /// literal index names like `[NYC]` can be classified as `FixedIndex`
-/// rather than the conservative `DynamicIndex` fallback.
+/// rather than the conservative `DynamicIndex` fallback. `dim_ctx` is the
+/// project's `DimensionsContext`, threaded into the GH #511 iterated-
+/// dimension recognition for the mapped-dimension case (`Some` from the
+/// salsa-tracked caller; `None` is harmless -- by-name recognition still
+/// applies).
 ///
-/// Flow-to-stock links use a fixed structural formula and ignore both
-/// `shape` and `source_dim_elements`.
+/// Flow-to-stock links use a fixed structural formula and ignore `shape`,
+/// `source_dim_elements`, and `dim_ctx`.
 pub(crate) fn generate_link_score_equation_for_link(
     from: &Ident<Canonical>,
     to: &Ident<Canonical>,
@@ -1000,11 +1267,21 @@ pub(crate) fn generate_link_score_equation_for_link(
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
     all_vars: &HashMap<Ident<Canonical>, Variable>,
+    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Equation {
-    generate_link_score_equation(from, to, shape, source_dim_elements, to_var, all_vars)
+    generate_link_score_equation(
+        from,
+        to,
+        shape,
+        source_dim_elements,
+        to_var,
+        all_vars,
+        dim_ctx,
+    )
 }
 
 /// Generate the equation for a link score variable
+#[allow(clippy::too_many_arguments)] // threads the link-score generation context
 fn generate_link_score_equation(
     from: &Ident<Canonical>,
     to: &Ident<Canonical>,
@@ -1012,6 +1289,7 @@ fn generate_link_score_equation(
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
     all_vars: &HashMap<Ident<Canonical>, Variable>,
+    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Equation {
     // Check if this is a flow-to-stock link
     let is_flow_to_stock = matches!(to_var, Variable::Stock { .. })
@@ -1030,10 +1308,28 @@ fn generate_link_score_equation(
         generate_flow_to_stock_equation(from.as_str(), to.as_str(), to_var)
     } else if is_stock_to_flow {
         // Use stock-to-flow formula
-        generate_stock_to_flow_equation(from, to, shape, source_dim_elements, to_var)
+        let source_dim_names = source_dim_names_for(from, all_vars);
+        generate_stock_to_flow_equation(
+            from,
+            to,
+            shape,
+            source_dim_elements,
+            &source_dim_names,
+            to_var,
+            dim_ctx,
+        )
     } else {
         // Use standard auxiliary-to-auxiliary formula
-        generate_auxiliary_to_auxiliary_equation(from, to, shape, source_dim_elements, to_var)
+        let source_dim_names = source_dim_names_for(from, all_vars);
+        generate_auxiliary_to_auxiliary_equation(
+            from,
+            to,
+            shape,
+            source_dim_elements,
+            &source_dim_names,
+            to_var,
+            dim_ctx,
+        )
     }
 }
 
@@ -1136,13 +1432,29 @@ fn build_arrayed_link_score_equation(
     from: &Ident<Canonical>,
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
+    source_dim_names: &[String],
     target_dim_names: Vec<String>,
     target_ast_dims: &[crate::dimensions::Dimension],
     per_elem: &HashMap<crate::common::CanonicalElementName, crate::ast::Expr2>,
     default_expr: Option<&crate::ast::Expr2>,
     apply_default_to_missing: bool,
     target_ref: &str,
+    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Equation {
+    // The #511 iterated-dimension context for the per-slot partials: each
+    // per-element slot can itself reference `from` by an iterated dimension
+    // of the *target*'s dimension space. `target_ast_dims`' canonical names
+    // are the iterated dims; for a literal-element slot (`growth[a,young] =
+    // ...`) the recognition simply never fires (the indices are literals).
+    let target_iterated_dims: Vec<String> = target_ast_dims
+        .iter()
+        .map(|d| d.name().to_string())
+        .collect();
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx,
+    };
     let slot_equation = |expr: &crate::ast::Expr2| -> String {
         let elem_eqn_text = crate::patch::expr2_to_string(expr);
         // Per-element dependency set: walk *only this slot's* expression
@@ -1162,6 +1474,7 @@ fn build_arrayed_link_score_equation(
             from,
             shape,
             source_dim_elements,
+            Some(&iter_ctx),
         );
         let source_ref = source_ref_for_guard(from, shape, live_ref.as_ref());
         link_score_guard_form(&partial_e, target_ref, &source_ref)
@@ -1242,7 +1555,9 @@ fn generate_auxiliary_to_auxiliary_equation(
     to: &Ident<Canonical>,
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
+    source_dim_names: &[String],
     to_var: &Variable,
+    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Equation {
     use crate::ast::Ast;
 
@@ -1259,12 +1574,14 @@ fn generate_auxiliary_to_auxiliary_equation(
             from,
             shape,
             source_dim_elements,
+            source_dim_names,
             target_dim_names,
             dims,
             per_elem,
             default_expr.as_ref(),
             *apply_default,
             &to_q,
+            dim_ctx,
         );
     }
 
@@ -1282,12 +1599,21 @@ fn generate_auxiliary_to_auxiliary_equation(
         HashSet::new()
     };
 
+    // GH #511: an A2A target can reference `from` by one of the target's
+    // iterated dimensions (`growth[Region,Age] = row_sum[Region] * c`).
+    let target_iterated_dims = target_iterated_dim_names_canonical(to_var);
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx,
+    };
     let (partial_eq, live_ref) = build_partial_equation_shaped_with_live_ref(
         &to_equation,
         &deps,
         from,
         shape,
         source_dim_elements,
+        Some(&iter_ctx),
     );
 
     let from_source_q = source_ref_for_guard(from, shape, live_ref.as_ref());
@@ -1419,7 +1745,9 @@ fn generate_stock_to_flow_equation(
     flow: &Ident<Canonical>,
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
+    source_dim_names: &[String],
     flow_var: &Variable,
+    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Equation {
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
@@ -1435,12 +1763,14 @@ fn generate_stock_to_flow_equation(
             stock,
             shape,
             source_dim_elements,
+            source_dim_names,
             target_dim_names,
             dims,
             per_elem,
             default_expr.as_ref(),
             *apply_default,
             target_ref,
+            dim_ctx,
         );
     }
 
@@ -1457,12 +1787,21 @@ fn generate_stock_to_flow_equation(
         HashSet::new()
     };
 
+    // GH #511: a flow can reference the stock by one of the flow's own
+    // iterated dimensions, the same way an A2A aux can.
+    let target_iterated_dims = target_iterated_dim_names_canonical(flow_var);
+    let iter_ctx = IteratedDimCtx {
+        source_dim_names,
+        target_iterated_dims: &target_iterated_dims,
+        dim_ctx,
+    };
     let (partial_eq, live_ref) = build_partial_equation_shaped_with_live_ref(
         &flow_equation,
         &deps,
         stock,
         shape,
         source_dim_elements,
+        Some(&iter_ctx),
     );
 
     // Link score formula from LTM paper: |Δxz/Δz| × sign(Δxz/Δx)
@@ -2208,7 +2547,7 @@ mod tests {
             Loc::default(),
         ))];
 
-        let shape = classify_expr0_subscript_shape(&indices, &dims);
+        let shape = classify_expr0_subscript_shape(&indices, &dims, None);
         assert_eq!(
             shape,
             RefShape::DynamicIndex,
@@ -2228,7 +2567,7 @@ mod tests {
             1.0,
             Loc::default(),
         ))];
-        let in_range_shape = classify_expr0_subscript_shape(&in_range, &dims);
+        let in_range_shape = classify_expr0_subscript_shape(&in_range, &dims, None);
         assert_eq!(
             in_range_shape,
             RefShape::FixedIndex(vec!["1".to_string()]),
@@ -2264,7 +2603,7 @@ mod tests {
             Loc::default(),
         ))];
 
-        let shape = classify_expr0_subscript_shape(&indices, &dims);
+        let shape = classify_expr0_subscript_shape(&indices, &dims, None);
         assert_eq!(
             shape,
             RefShape::FixedIndex(vec!["1".to_string()]),
@@ -3041,8 +3380,69 @@ mod tests {
         let equation = "population / SUM(population[*])";
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
-        let partial = build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[]);
+        let partial =
+            build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[], None);
         assert_eq!(partial, "population / PREVIOUS(sum(population[*]))");
+    }
+
+    /// GH #511: an iterated-dimension source subscript (`row_sum[D1]` inside
+    /// an apply-to-all-over-`D1 x D2` equation) is normalized to bare
+    /// `row_sum` in the partial -- either held live (`live_shape == Bare`)
+    /// or `PREVIOUS(row_sum)` (a `Var` arg, which codegen accepts), never
+    /// `PREVIOUS(row_sum[d1])` (a `PREVIOUS(Subscript(...))`, which trips
+    /// the codegen assertion). The model equation `row_sum[D1] * c` is
+    /// untouched -- only the LTM partial's `Expr0` is normalized.
+    #[test]
+    fn test_partial_equation_iterated_dim_source_normalized_to_bare() {
+        let equation = "row_sum[D1] * c";
+        let target_iterated_dims = vec!["d1".to_string(), "d2".to_string()];
+        // `row_sum` is over `D1`; `c` is scalar.
+        let source_dim_names = vec!["d1".to_string()];
+        let iter_ctx = IteratedDimCtx {
+            source_dim_names: &source_dim_names,
+            target_iterated_dims: &target_iterated_dims,
+            dim_ctx: None,
+        };
+
+        // `row_sum` is the live source (Bare): `row_sum[D1]` -> bare
+        // `row_sum`, held live; `c` -> `PREVIOUS(c)`.
+        let deps = deps_set(&["row_sum", "c"]);
+        let live = Ident::<Canonical>::new("row_sum");
+        let partial = build_partial_equation_shaped(
+            equation,
+            &deps,
+            &live,
+            &RefShape::Bare,
+            // `source_dim_elements` is empty: `row_sum`'s single dimension is
+            // identified by name via `iter_ctx`, not by element membership.
+            &[],
+            Some(&iter_ctx),
+        );
+        assert_eq!(
+            partial, "row_sum * PREVIOUS(c)",
+            "the iterated-dim source `row_sum[D1]` must be held live as bare `row_sum`"
+        );
+
+        // Now `c` is the live source: `row_sum[D1]` is a non-live dep ->
+        // bare `row_sum` wrapped as `PREVIOUS(row_sum)`, NOT
+        // `PREVIOUS(row_sum[d1])`.
+        let live_c = Ident::<Canonical>::new("c");
+        let partial_c = build_partial_equation_shaped(
+            equation,
+            &deps,
+            &live_c,
+            &RefShape::Bare,
+            &[],
+            Some(&iter_ctx),
+        );
+        assert!(
+            partial_c.contains("PREVIOUS(row_sum)"),
+            "the iterated-dim dep `row_sum[D1]` must be frozen as PREVIOUS(row_sum); got: {partial_c}"
+        );
+        assert!(
+            !partial_c.contains("PREVIOUS(row_sum["),
+            "must NOT produce PREVIOUS(row_sum[d1]) (a PREVIOUS-of-Subscript); got: {partial_c}"
+        );
     }
 
     #[test]
@@ -3062,6 +3462,7 @@ mod tests {
             &source,
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             &dims,
+            None,
         );
         assert_eq!(partial, "pop[nyc] + PREVIOUS(sum(pop[*]))");
     }
@@ -3075,7 +3476,8 @@ mod tests {
         let equation = "(c + SUM(a[*])) / SUM(b[*])";
         let deps = deps_set(&["a", "b", "c"]);
         let source = Ident::<Canonical>::new("c");
-        let partial = build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[]);
+        let partial =
+            build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[], None);
         assert_eq!(partial, "(c + PREVIOUS(sum(a[*]))) / PREVIOUS(sum(b[*]))");
     }
 
@@ -3093,7 +3495,7 @@ mod tests {
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
         let partial =
-            build_partial_equation_shaped(equation, &deps, &source, &RefShape::Wildcard, &[]);
+            build_partial_equation_shaped(equation, &deps, &source, &RefShape::Wildcard, &[], None);
         assert_eq!(partial, "PREVIOUS(population) / sum(population[*])");
     }
 
@@ -3115,6 +3517,7 @@ mod tests {
             &source,
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             &dims,
+            None,
         );
         assert_eq!(
             partial,
@@ -3139,6 +3542,7 @@ mod tests {
             &source,
             &RefShape::FixedIndex(vec!["boston".to_string()]),
             &dims,
+            None,
         );
         assert_eq!(
             partial,
@@ -3166,7 +3570,8 @@ mod tests {
         let shape = RefShape::Bare;
         let dims = region_dim_elements();
 
-        let partial = build_partial_equation_shaped("pop * helper", &deps, &live, &shape, &dims);
+        let partial =
+            build_partial_equation_shaped("pop * helper", &deps, &live, &shape, &dims, None);
         assert!(partial.contains("PREVIOUS(helper)"), "partial: {partial}");
         assert!(!partial.contains("PREVIOUS(pop)"), "partial: {partial}");
     }
@@ -3180,7 +3585,8 @@ mod tests {
         let shape = RefShape::Bare;
         let dims = region_dim_elements();
 
-        let partial = build_partial_equation_shaped("pop + unknown", &deps, &live, &shape, &dims);
+        let partial =
+            build_partial_equation_shaped("pop + unknown", &deps, &live, &shape, &dims, None);
         assert!(partial.contains("unknown"), "partial: {partial}");
         assert!(!partial.contains("PREVIOUS(unknown)"), "partial: {partial}");
     }
@@ -3590,7 +3996,7 @@ mod tests {
         let shape = RefShape::DynamicIndex;
 
         let partial =
-            build_partial_equation_shaped("arr[idx + helper]", &deps, &live, &shape, &dims);
+            build_partial_equation_shaped("arr[idx + helper]", &deps, &live, &shape, &dims, None);
 
         assert!(
             partial.contains("PREVIOUS(idx)"),
@@ -3625,7 +4031,7 @@ mod tests {
         let live = Ident::new("pop");
         let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
 
-        let partial = build_partial_equation_shaped("pop[NYC]", &deps, &live, &shape, &dims);
+        let partial = build_partial_equation_shaped("pop[NYC]", &deps, &live, &shape, &dims, None);
 
         // The live reference must remain unwrapped.
         assert!(
@@ -3768,7 +4174,9 @@ mod tests {
             &to,
             &shape,
             &source_dim_elements,
+            &[],
             &to_var,
+            None,
         );
 
         match &equation {
@@ -3842,7 +4250,9 @@ mod tests {
             &to,
             &shape,
             &source_dim_elements,
+            &[],
             &to_var,
+            None,
         );
 
         let nyc_slot = arrayed_slot(&equation, "nyc");
@@ -3898,8 +4308,15 @@ mod tests {
             "la".to_string(),
         ]];
 
-        let equation =
-            generate_stock_to_flow_equation(&stock, &flow, &shape, &source_dim_elements, &births);
+        let equation = generate_stock_to_flow_equation(
+            &stock,
+            &flow,
+            &shape,
+            &source_dim_elements,
+            &[],
+            &births,
+            None,
+        );
 
         let nyc_slot = arrayed_slot(&equation, "nyc");
         let boston_slot = arrayed_slot(&equation, "boston");
@@ -3940,8 +4357,15 @@ mod tests {
         };
         let from = Ident::<Canonical>::new("driver");
         let to = Ident::<Canonical>::new("scalar_target");
-        let equation =
-            generate_auxiliary_to_auxiliary_equation(&from, &to, &RefShape::Bare, &[], &scalar_to);
+        let equation = generate_auxiliary_to_auxiliary_equation(
+            &from,
+            &to,
+            &RefShape::Bare,
+            &[],
+            &[],
+            &scalar_to,
+            None,
+        );
         assert!(
             matches!(equation, Equation::Scalar(_)),
             "scalar target must yield Equation::Scalar; got: {equation:?}"
@@ -3977,8 +4401,15 @@ mod tests {
         };
         let a2a_to = crate::model::lower_variable(&scope, &stage0);
         let to_a2a = Ident::<Canonical>::new("a2a_target");
-        let equation =
-            generate_auxiliary_to_auxiliary_equation(&from, &to_a2a, &RefShape::Bare, &[], &a2a_to);
+        let equation = generate_auxiliary_to_auxiliary_equation(
+            &from,
+            &to_a2a,
+            &RefShape::Bare,
+            &[],
+            &[],
+            &a2a_to,
+            None,
+        );
         match equation {
             Equation::ApplyToAll(d, _) => assert_eq!(d, vec!["Region".to_string()]),
             other => panic!("ApplyToAll target must yield Equation::ApplyToAll; got: {other:?}"),

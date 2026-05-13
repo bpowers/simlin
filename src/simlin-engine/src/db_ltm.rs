@@ -418,6 +418,13 @@ pub fn link_score_equation_text_shaped<'db>(
         all_vars.insert(from_ident.clone(), fv.clone());
     }
     all_vars.insert(to_ident.clone(), to_var.clone());
+    // The project's `DimensionsContext` is threaded into the GH #511
+    // iterated-dimension recognition for the mapped-dimension case
+    // (`x[State]` over a source declared with `Region`, `State` maps to
+    // `Region`); the datamodel dim list is salsa-tracked, so this fn is
+    // recomputed when a dimension's mappings change.
+    let dm_dims = project_datamodel_dims(db, project);
+    let dim_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
     // The generator returns the equation already tagged with the target's
     // dimensionality (`Scalar`, `ApplyToAll`, or `Arrayed`). `dimensions`
     // and `compile_directly` are left at defaults here; the emission loop
@@ -431,6 +438,7 @@ pub fn link_score_equation_text_shaped<'db>(
         &source_dim_elements,
         &to_var,
         &all_vars,
+        Some(&dim_ctx),
     );
 
     Some(LtmSyntheticVar {

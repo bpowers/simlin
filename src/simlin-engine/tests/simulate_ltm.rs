@@ -5905,6 +5905,313 @@ fn test_partial_reduce_cross_element_loop() {
     );
 }
 
+// --- #511: iterated-dimension subscript link score ---
+//
+// An A2A equation that references an arrayed dependency by its *iterated
+// dimension* (`growth[Region,Age] = row_sum[Region] * c * pop`, `row_sum`
+// over `Region`, `growth` over `Region x Age`) used to misclassify the
+// `row_sum[Region]` subscript as `DynamicIndex`, so the link-score partial
+// PREVIOUS-wrapped a `Subscript` and codegen rejected it with "PREVIOUS
+// requires a variable reference after helper rewriting". After the fix the
+// subscript is `Bare` (it iterates over the target's own `Region` dimension
+// and reads the same source element), the link score is `row_sum` held live
+// (no spurious `SUM(...)`, no `PREVIOUS`-wrapped `Subscript`), and the model
+// simulates.
+
+/// Build a 1-D-target arrayed feedback model whose flow references an arrayed
+/// aux by the flow's own iterated dimension.
+///
+/// Model structure:
+///   level[Region]      (stock, distinct per-element initial values)
+///   row_val[Region]    (aux, = level[Region] * 0.0001)  -- references `level`
+///                       by `row_val`'s own iterated `Region` dim (the #511
+///                       case, in its simplest form: source and target are
+///                       both over `Region` and the index *is* `Region`)
+///   inflow[Region]     (flow into level, = row_val[Region])  -- references
+///                       `row_val` by the flow's own iterated `Region` dim
+///                       (the #511 case again)
+///
+/// `Region = {a, b}`. The reinforcing per-element cycle is
+/// `level[r] -> row_val[r] -> inflow[r] -> level[r]`. Both `level ->
+/// row_val` and `row_val -> inflow` carry an iterated-dimension subscript
+/// (`x[Region]` inside an apply-to-all-over-`Region` equation), the case
+/// that pre-#511 misclassified as `DynamicIndex` and produced a
+/// `PREVIOUS`-wrapped `Subscript` (the `"PREVIOUS requires a variable
+/// reference after helper rewriting"` codegen error). The structural
+/// `inflow -> level` edge closes the loop.
+fn build_iterated_dim_subscript_model(name: &str) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: name.to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "level".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), "100".to_string(), None, None),
+                            ("b".to_string(), "250".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["inflow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // row_val[Region] = level[Region] * 0.0001 -- `level[Region]`
+                // is the #511 iterated-dimension subscript (the index `Region`
+                // is `row_val`'s own iterated dimension and `level`'s declared
+                // dimension, so it reads the same element).
+                Variable::Aux(datamodel::Aux {
+                    ident: "row_val".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "level[Region] * 0.0001".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // inflow[Region] = row_val[Region] -- `row_val[Region]` is the
+                // #511 iterated-dimension subscript again.
+                Variable::Flow(datamodel::Flow {
+                    ident: "inflow".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "row_val[Region]".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// AC3.1: `row_val[Region] = level[Region] * c` + LTM compiles;
+/// `$⁚ltm⁚link_score⁚level→row_val` is emitted as the Bare partial
+/// (`level` held live, no spurious `SUM(...)`, no `PREVIOUS`-wrapped
+/// `Subscript`), is `Equation::ApplyToAll` over `Region`, and the model
+/// **simulates** without the `"PREVIOUS requires a variable reference after
+/// helper rewriting"` error.
+#[test]
+fn test_iterated_dim_subscript_link_score_is_bare_and_simulates() {
+    let project = build_iterated_dim_subscript_model("iterated_dim_link_score");
+
+    // Inspect the synthetic vars via the salsa path.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // Both `level -> row_val` and `row_val -> inflow` carry an iterated-
+    // dimension subscript; check the first one in detail.
+    let level_to_row_val = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}level\u{2192}row_val")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected $⁚ltm⁚link_score⁚level→row_val; link scores present: {:?}",
+                ltm.vars
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .filter(|s| s.contains("\u{205A}link_score\u{205A}"))
+                    .collect::<Vec<_>>()
+            )
+        });
+    // The `level -> row_val` edge is same-dimension A2A (both over Region),
+    // so the link score is `Equation::ApplyToAll` over Region (per-element).
+    match &level_to_row_val.equation {
+        simlin_engine::datamodel::Equation::ApplyToAll(dims, text) => {
+            assert_eq!(
+                dims,
+                &vec!["Region".to_string()],
+                "the level -> row_val link score should be A2A over Region"
+            );
+            // The partial holds `level` live (bare) -- no `SUM(`, no
+            // `PREVIOUS(level[...])`.
+            assert!(
+                text.contains("level"),
+                "link score equation must reference level; got: {text}"
+            );
+            assert!(
+                !text.contains("SUM("),
+                "a Bare iterated-dim source ref must not produce a spurious SUM(...); got: {text}"
+            );
+            assert!(
+                !text.contains("PREVIOUS(level["),
+                "the partial must not PREVIOUS-wrap a level subscript; got: {text}"
+            );
+        }
+        other => panic!("expected Equation::ApplyToAll for level -> row_val, got {other:?}"),
+    }
+    assert_eq!(level_to_row_val.dimensions, vec!["Region".to_string()]);
+    // And the row_val -> inflow link score exists too (the same #511 shape).
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}row_val\u{2192}inflow"),
+        "expected $⁚ltm⁚link_score⁚row_val→inflow"
+    );
+
+    // The model must simulate -- pre-fix this errored with "PREVIOUS
+    // requires a variable reference after helper rewriting".
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("iterated-dimension-subscript model should simulate with LTM enabled");
+}
+
+/// AC3.2: the per-element loop `level[r] -> row_val[r] -> inflow[r] ->
+/// level[r]` -- which runs through *two* iterated-dimension edges (`level ->
+/// row_val` and `row_val -> inflow`) -- is enumerated; its `loop_score`
+/// equation references those link scores; and the loop score's series equals
+/// the product of the per-element link scores it references at every
+/// simulated step t >= 2 (within 1e-6).
+#[test]
+fn test_iterated_dim_subscript_loop_score_matches_hand_calc() {
+    let project = build_iterated_dim_subscript_model("iterated_dim_loop_score");
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("model should simulate");
+    let results = vm.into_results();
+
+    // The loop-score equation text isn't carried in `Results`; recompute the
+    // synthetic-var list from the same datamodel to read it.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let loop_eq_by_name: HashMap<String, String> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .map(|v| (v.name.clone(), v.equation.source_text()))
+        .collect();
+
+    // Find a loop_score var whose equation references *both* iterated-dim
+    // link scores (i.e. the level -> row_val -> inflow -> level cycle).
+    let level_to_row_val_q = "level\u{2192}row_val";
+    let row_val_to_inflow_q = "row_val\u{2192}inflow";
+    let loop_offsets = find_loop_score_offsets(&results);
+    let (loop_name, loop_off) = loop_offsets
+        .iter()
+        .find(|(name, _)| {
+            loop_eq_by_name.get(name).is_some_and(|eq| {
+                eq.contains(level_to_row_val_q) && eq.contains(row_val_to_inflow_q)
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a loop_score var referencing both iterated-dim link scores; \
+                 loop_score equations: {:?}",
+                loop_eq_by_name
+            )
+        });
+    let loop_eq = loop_eq_by_name[loop_name].clone();
+    let factors: Vec<String> = loop_eq.split(" * ").map(|s| s.trim().to_string()).collect();
+    assert!(
+        factors.len() >= 2,
+        "loop score should be a product of >=2 link scores; got: {loop_eq}"
+    );
+
+    // Resolve the offset of each factor (a quoted var name, optionally with
+    // a trailing `[elem]` subscript picking a slot of an A2A link score over
+    // Region = {a, b} in declaration order: a=0, b=1).
+    let region_slot = |elem: &str| -> usize {
+        match elem {
+            "a" => 0,
+            "b" => 1,
+            other => panic!("unexpected Region element {other:?}"),
+        }
+    };
+    let resolve_offset = |reference: &str| -> usize {
+        let inner = reference.trim();
+        let (var_part, subscript): (&str, Option<&str>) = match inner.strip_suffix(']') {
+            Some(rest) => match rest.rfind('[') {
+                Some(open) => (&rest[..open], Some(&rest[open + 1..])),
+                None => (inner, None),
+            },
+            None => (inner, None),
+        };
+        let var_name = var_part.trim_matches('"');
+        let base = results
+            .offsets
+            .iter()
+            .find(|(k, _)| k.as_str() == var_name)
+            .map(|(_, &off)| off)
+            .unwrap_or_else(|| panic!("offset for link-score factor {var_name:?} not found"));
+        match subscript {
+            None => base,
+            Some(elem) => base + region_slot(elem),
+        }
+    };
+    let factor_offsets: Vec<usize> = factors.iter().map(|f| resolve_offset(f)).collect();
+
+    let mut checked = 0usize;
+    let mut saw_nonzero = false;
+    for step in 2..results.step_count {
+        let base = step * results.step_size;
+        let product: f64 = factor_offsets
+            .iter()
+            .map(|&o| results.data[base + o])
+            .product();
+        let loop_val = results.data[base + loop_off];
+        assert!(
+            (loop_val - product).abs() < 1e-6,
+            "step {step}: loop_score {loop_val} != product of its link scores {product} \
+             (factors {factors:?} at offsets {factor_offsets:?})"
+        );
+        if loop_val.abs() > 1e-9 && loop_val.is_finite() {
+            saw_nonzero = true;
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "expected at least one step t >= 2 to check");
+    assert!(
+        saw_nonzero,
+        "the iterated-dimension loop's score should be non-zero at some step"
+    );
+}
+
 /// No regression: the existing full-reduce (`SUM(population[*])` -> scalar)
 /// integration tests still pass with unchanged values. (This test exists
 /// purely to keep the AC4.6 work co-located with an explicit assertion
