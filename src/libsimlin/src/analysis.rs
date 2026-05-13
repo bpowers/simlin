@@ -460,7 +460,11 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     let mut state_guard = sim_ref.state.lock().unwrap();
     let state = &mut *state_guard;
 
-    let Some(&partition_key) = state.loop_partitions.get(parsed.base) else {
+    // `loop_partitions` is per-slot; this lookup confirms the loop exists
+    // and grabs its slot-0 partition.  (Grouping the denominator by the
+    // *queried* slot's partition -- so an element-wise-uncoupled A2A loop
+    // normalizes per element -- is a follow-up; see the field's doc comment.)
+    let Some(partition_vec) = state.loop_partitions.get(parsed.base) else {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
@@ -470,6 +474,7 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         );
         return;
     };
+    let partition_key: Option<usize> = partition_vec.first().copied().flatten();
 
     // Look up the loop's dim metadata.  Loops without an entry are
     // treated as scalar (n_slots=1) via the `unwrap_or` fallback below
@@ -564,7 +569,7 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     fn ensure_denom_for_element(
         cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
         results: &engine::Results,
-        loop_partitions: &HashMap<String, Option<usize>>,
+        loop_partitions: &HashMap<String, Vec<Option<usize>>>,
         element_index_map: &HashMap<String, engine::ltm_post::LoopElementIndex>,
         partition_key: Option<usize>,
         element_k: usize,
@@ -572,10 +577,12 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         if let Some(cached) = cache.get(&(partition_key, element_k)) {
             return cached.clone();
         }
+        // `loop_partitions[id]` is the loop's per-slot partition vector;
+        // membership here is currently keyed on the *slot-0* partition.
         let members: Vec<(&str, usize)> = loop_partitions
             .iter()
-            .filter_map(|(id, pk)| {
-                if *pk == partition_key {
+            .filter_map(|(id, pv)| {
+                if pv.first().copied().flatten() == partition_key {
                     let n = element_index_map
                         .get(id)
                         .map(|m| m.n_slots)

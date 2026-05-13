@@ -2002,21 +2002,22 @@ pub struct LtmSyntheticVar {
 
 /// Result of LTM variable generation for a model.
 ///
-/// `loop_partitions` maps each loop ID (as used in the `$⁚ltm⁚loop_score⁚{id}`
-/// synthetic variable name) to its cycle-partition index.  `None` values denote
-/// loops whose stocks are all below the parent-level graph (e.g., pure
-/// module-internal loops); they share a default grouping when
-/// `compute_rel_loop_scores` normalizes across a partition.  Populated only in
-/// exhaustive LTM mode; discovery mode emits no loop_score variables and
-/// leaves this map empty.
-//
-// `Debug`/`Eq` are conditional/absent for the same reasons as
-// `LtmSyntheticVar` (which it embeds).
+/// `loop_partitions` maps each loop ID (as in `$⁚ltm⁚loop_score⁚{id}`) to
+/// its cycle-partition index **per slot**: length 1 for scalar/cross-element/
+/// mixed loops, one entry per element (in the runtime's row-major slot order)
+/// for A2A loops, matching `ltm_post::build_loop_element_index`'s `n_slots`.
+/// Slots sharing a `(partition, slot)` key form the denominator when
+/// `ltm_post::compute_rel_loop_scores*` normalizes; an element-wise-uncoupled
+/// A2A loop's entries are N distinct partitions (the per-slot fix, GH #487),
+/// a coupled one's coincide, a `None` entry is a slot below the parent graph
+/// (e.g. a pure module-internal loop).  Populated only in exhaustive LTM
+/// mode; discovery mode leaves it empty.  (`Debug`/`Eq` are conditional/
+/// absent for the same reasons as the `LtmSyntheticVar` it embeds.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, salsa::Update)]
 pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
-    pub loop_partitions: HashMap<String, Option<usize>>,
+    pub loop_partitions: HashMap<String, Vec<Option<usize>>>,
 }
 
 /// Compute the link score equation text for a single causal link.

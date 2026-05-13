@@ -77,30 +77,39 @@ pub struct Link {
 ///
 /// # `stocks` granularity invariant
 ///
-/// The granularity of `stocks` is keyed off `dimensions`:
+/// `stocks` is **always element-level** for an arrayed model:
 ///
-/// - **`dimensions.is_empty()` -- mixed/scalar AND cross-element
-///   approximation loops**: stocks are **element-level** names (e.g.,
-///   `"pop[nyc]"`). This is required because `partition_for_loop` looks
-///   up stocks in `model_element_cycle_partitions`, whose
-///   `stock_partition` map is keyed on element-level names.  Using
-///   variable-level names here would cause `partition_for_loop` to
-///   return `None`, silently corrupting per-loop normalization in
-///   `compute_rel_loop_scores` (the loop would bucket into the
-///   catch-all `None` group instead of its actual SCC).  Cross-element
-///   approximation loops (built by the wildcard-reducer branch in
-///   `db_ltm::build_element_level_loops`) follow the same rule and
-///   include every element-level stock node that appears in the
-///   original circuit -- a single cross-element loop typically
-///   traverses the same stock variable at multiple elements (e.g.,
-///   both `population[nyc]` AND `population[boston]`), and all belong
-///   in `stocks` so the partition lookup hits the SCC containing them.
+/// - **`dimensions.is_empty()` -- scalar models, and mixed/cross-element
+///   loops in an arrayed model**: stocks are element-level names (e.g.,
+///   `"pop[nyc]"`; plain names like `"pop"` for a genuinely scalar model,
+///   which is the degenerate element-level case with no subscript).  A
+///   cross-element loop typically traverses the same stock variable at
+///   several elements (e.g. both `population[nyc]` AND `population[boston]`),
+///   and every one of those element-level nodes belongs in `stocks`.
 ///
-/// - **`!dimensions.is_empty()` -- A2A loops**: stocks are
-///   **variable-level** names (e.g., `"pop"`).  A2A loops are expanded
-///   per-element during simulation so variable-level names are correct;
-///   the element-level partition lookup is not used for A2A loops, and
-///   `partition_for_loop` legitimately returns `None` for them.
+/// - **`!dimensions.is_empty()` -- A2A loops**: stocks are element-level
+///   names covering the loop's *entire* dimension element space -- one
+///   `"{var}[{elem-tuple}]"` per element, for each variable in the cycle
+///   that is a stock (so a 3-element `pop[Region]` A2A stock-flow loop has
+///   `["pop[r0]", "pop[r1]", "pop[r2]"]`).  This is what lets
+///   `CyclePartitions::partition_for_loop` resolve a partition *per slot*:
+///   it groups these stocks by their element-tuple suffix and looks each
+///   slot up in `model_element_cycle_partitions`'s element-keyed
+///   `stock_partition` map, so two element-wise-uncoupled A2A feedback
+///   subsystems over the same dimension get distinct per-slot partitions
+///   instead of being pooled (GH #487).
+///
+/// In both cases the keys must be element-level because
+/// `partition_for_loop` looks up stocks in `model_element_cycle_partitions`,
+/// whose `stock_partition` map is element-keyed.  Variable-level names here
+/// would cause `partition_for_loop` to return `None`, silently corrupting
+/// per-loop / per-slot normalization in `ltm_post::compute_rel_loop_scores*`
+/// (the loop would bucket into the catch-all `None` group instead of its
+/// actual SCC).
+///
+/// `assign_loop_ids` derives loop IDs from `links` (sorted distinct
+/// variable names), not `stocks`, so the element-level `stocks` granularity
+/// does not perturb `r{n}`/`b{n}`/`u{n}` numbering.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct Loop {

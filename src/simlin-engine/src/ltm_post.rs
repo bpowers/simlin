@@ -14,10 +14,17 @@
 //! against the O(P × save_steps) `loop_score` timeseries that the VM
 //! already writes to `Results`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::common::{Canonical, Ident};
 use crate::results::Results;
+
+/// A `(partition, slot)` bucket key for the per-element normalization grid.
+type BucketKey = (Option<usize>, usize);
+/// A `(loop_index, read_slot)` pair: which loop contributes to a bucket and
+/// which of its own `loop_score` slots is read (0 for a broadcast scalar
+/// loop, the bucket's slot for an arrayed loop).
+type BucketMember = (usize, usize);
 
 /// Build the canonical identifier of a loop's `loop_score` synthetic variable.
 ///
@@ -30,49 +37,70 @@ pub(crate) fn loop_score_ident(loop_id: &str) -> Ident<Canonical> {
     Ident::new(&name)
 }
 
+/// Slot count of a loop's `loop_score` series from its per-slot partition
+/// vector: 1 for a scalar / cross-element / mixed loop, the dimension
+/// element-space size for an A2A loop.  Mirrors
+/// `ltm_post::build_loop_element_index`'s `n_slots`, since both are derived
+/// from the same `LtmSyntheticVar` metadata in `model_ltm_variables`.
+fn loop_n_slots(loop_partitions: &HashMap<String, Vec<Option<usize>>>, id: &str) -> usize {
+    loop_partitions.get(id).map(|v| v.len()).unwrap_or(1).max(1)
+}
+
+/// The partition (`Option<usize>`) of loop `id` at slot `k`.
+///
+/// For an arrayed loop this is `loop_partitions[id][k]`; for a scalar loop
+/// (`n_slots == 1`) it is `loop_partitions[id][0]` broadcast across every
+/// `k` -- a scalar loop has no elements, so it carries its single partition
+/// into every slot it is compared in (the same broadcast the pre-PR
+/// compile-time emitter applied when a scalar `loop_score` was referenced
+/// from an arrayed `rel_loop_score` equation).  `None` (out-of-range `k` on
+/// an arrayed loop, or a genuinely-`None` partition) means "no contribution
+/// at this slot for the purpose of *that loop's own* series", though it
+/// still buckets into the `None` cohort.
+fn slot_partition(
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    id: &str,
+    k: usize,
+) -> Option<usize> {
+    let v = loop_partitions.get(id)?;
+    if v.len() <= 1 {
+        v.first().copied().flatten()
+    } else {
+        v.get(k).copied().flatten()
+    }
+}
+
 /// Compute per-loop, per-timestep relative loop scores from simulated
-/// `loop_score` data.
+/// `loop_score` data -- the **slot-0 convenience view**.
 ///
 /// For each loop whose `loop_score` series is present in `results`, the
 /// returned value is:
 ///
 /// ```text
-/// rel_loop_score[i, t] = loop_score[i, t] / sum_j∈partition(|loop_score[j, t]|)
+/// rel_loop_score[i, t] = loop_score[i, t, 0] / Σ_{j : slot-0 partition of j == slot-0 partition of i} |loop_score[j, t, 0]|
 /// ```
 ///
-/// `loop_partitions` maps each loop ID to its cycle-partition key (as
-/// produced by `model_ltm_variables`).  Loops sharing a partition key
-/// (including the `None` "no parent-level stock" group) form the
-/// denominator.  This matches the grouping the (now-removed)
-/// compile-time emitter used, but sources the mapping from salsa-cached
-/// LTM compilation instead of rebuilding `Vec<Loop>` at each call site.
+/// `loop_partitions` maps each loop ID to its **per-slot** cycle-partition
+/// vector (as produced by `model_ltm_variables`; length 1 for a
+/// scalar/cross-element/mixed loop, one entry per element for an A2A loop).
+/// This function reports only slot 0 for every loop and groups loops by
+/// their *slot-0* partition (`loop_partitions[id][0]`) -- the catch-all
+/// `None` cohort still groups together for loops genuinely below the parent
+/// graph.  This preserves the pre-Phase-2 scalar contract (one series per
+/// loop), so existing libsimlin/pysimlin/TS callers see no shape change;
+/// callers that want genuine per-element normalization use
+/// [`compute_rel_loop_scores_per_element`].
 ///
-/// The denominator uses SAFEDIV-0 semantics: when
-/// `sum_j(|loop_score_j, t|) == 0` the result is `0` rather than `NaN`.
-/// Non-finite `loop_score` values (from upstream VM evaluation) propagate
-/// through normal IEEE-754 arithmetic, matching the behaviour of the
-/// removed SAFEDIV equation.
-///
-/// Loops whose `loop_score` is absent from `results` (e.g., because LTM
-/// was disabled for that loop, or the model was compiled in discovery
-/// mode) are omitted from the returned map.
-///
-/// ## Arrayed (A2A) loops read slot 0 only
-///
-/// For arrayed loops whose `loop_score` variable occupies multiple
-/// slots in `results`, this function reads only the first slot
-/// (element 0) for both the numerator and the partition denominator.
-/// That matches the pre-PR FFI semantics (which also returned a
-/// scalar series per loop), so existing libsimlin/pysimlin/TS
-/// callers see no behaviour change.  Callers that need genuine
-/// per-element normalization -- e.g. a dimension-aware importance
-/// ranking in the diagram UI, or a future FFI that exposes arrayed
-/// loop analysis -- should use
-/// [`compute_rel_loop_scores_per_element`], which reproduces the
-/// pre-PR compile-time per-element math.
+/// The denominator uses SAFEDIV-0 semantics: when the partition sum at
+/// slot 0 is `0` the result is `0` rather than `NaN`.  Non-finite
+/// `loop_score` values (from upstream VM evaluation) propagate through
+/// normal IEEE-754 arithmetic, matching the behaviour of the removed
+/// SAFEDIV equation.  Loops whose `loop_score` is absent from `results`
+/// (e.g. LTM disabled for that loop, or discovery-mode compilation) are
+/// omitted from the returned map.
 pub fn compute_rel_loop_scores(
     results: &Results,
-    loop_partitions: &HashMap<String, Option<usize>>,
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
 ) -> HashMap<String, Vec<f64>> {
     // Stable iteration order keeps partition grouping deterministic even
     // though the result map is itself unordered; callers that diff
@@ -85,10 +113,13 @@ pub fn compute_rel_loop_scores(
         .map(|id| results.offsets.get(&loop_score_ident(id)).copied())
         .collect();
 
+    // Group loops by their slot-0 partition (the convenience-view key).
     let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
     for (i, id) in loop_ids.iter().enumerate() {
-        let key = loop_partitions.get(*id).copied().unwrap_or(None);
-        partition_groups.entry(key).or_default().push(i);
+        partition_groups
+            .entry(slot_partition(loop_partitions, id, 0))
+            .or_default()
+            .push(i);
     }
 
     // One output series per loop, parallel to `loop_ids`.  Loops without
@@ -130,50 +161,40 @@ pub fn compute_rel_loop_scores(
     out
 }
 
-/// Per-timestep, per-element relative loop scores for arrayed (A2A)
-/// loops.
+/// Per-timestep, per-slot relative loop scores, grouped by
+/// `(partition, slot)`.
 ///
 /// [`compute_rel_loop_scores`] collapses every loop's `loop_score` to
-/// slot 0.  That matches the scalar FFI contract, but pre-PR's
-/// compile-time `rel_loop_score` synthetic variables were genuinely
-/// per-element for A2A loops; callers that want the same dimension-
-/// aware view (diagram UI per-element importance, dimension-aware
-/// pysimlin consumers, a future arrayed FFI) need a path that
-/// reproduces that math from post-sim `loop_score` data.
+/// slot 0.  This function keeps every slot, and -- crucially -- groups
+/// slots by `(slot_partition(id, k), k)` rather than by a single per-loop
+/// partition.  So an A2A loop over an element-wise-coupled dimension (every
+/// slot in partition `p`) lands in buckets `(p, 0)`, `(p, 1)`, ...; an A2A
+/// loop over an element-wise-uncoupled dimension spreads across `(p0, 0)`,
+/// `(p1, 1)`, ... -- which is precisely why two disconnected per-element
+/// feedback subsystems over the same dimension stop cross-normalizing
+/// (GH #487).
 ///
-/// Returns a flat `Vec<f64>` per loop id of length
-/// `step_count * max_slots`, where `max_slots` is the largest slot
-/// count among the loops sharing the loop's partition group.  The
-/// value at step `s`, element `k` is at index `s * max_slots + k`.
-/// Scalar loops in a mixed partition broadcast their single value
-/// across every element slot, which is what the pre-PR compile-time
-/// emitter did (a scalar loop_score referenced from an A2A
-/// rel_loop_score equation expanded uniformly across the target's
-/// elements).
+/// `loop_partitions` is the per-slot partition map from
+/// `model_ltm_variables`; the loop's slot count is `loop_partitions[id].len()`
+/// (no separate slot-count map is threaded).  Returns a flat `Vec<f64>` per
+/// loop id; the value at step `s`, slot `k` is at index `s * stride + k`,
+/// where `stride` is the loop's own slot count for an arrayed loop, and for
+/// a scalar loop the largest slot index its (slot-0) partition covers + 1
+/// (1 if no arrayed loop shares that partition).  A scalar loop broadcasts
+/// its single value into every slot of its partition's buckets -- the same
+/// broadcast the pre-PR compile-time emitter applied when a scalar
+/// `loop_score` was referenced from an arrayed `rel_loop_score` equation.
 ///
-/// `n_slots_by_loop` maps each loop id to its element count.  Missing
-/// entries or a count of 1 are treated as scalar.  The denominator at
-/// element `k` is `Σ_j |loop_score_j[k_j]|`, with each member loop
-/// contributing per the following gating:
-///   - Scalar loops (`n_slots == 1`): always contribute `row[off]` --
-///     slot 0 broadcasts across every partition element.
-///   - Arrayed loops with `k < n_slots`: contribute `row[off + k]`.
-///   - Arrayed loops with `k >= n_slots`: do NOT contribute (this
-///     loop has no element at this partition index).  Their per-loop
-///     series at position k is zero-filled rather than reading past
-///     their own slot range.  Without this gating, mixed-arrayed
-///     partitions (two loops with different dimensionalities sharing
-///     a partition) would OOB-read into the next variable's slots.
-///
+/// Denominator at bucket `(p, k)` at step `s` is `Σ |loop_score[j, s, rs_j]|`
+/// over the members of that bucket, where `rs_j` is `0` for a scalar member
+/// (broadcast) and `k` for an arrayed member with `k < n_slots[j]` (an
+/// arrayed loop with `k >= n_slots[j]` is not a member of slot-`k` buckets).
 /// SAFEDIV-0 and NaN propagation match [`compute_rel_loop_scores`].
-///
-/// `BTreeMap` on partition groups keeps the float summation order
-/// deterministic across runs, the same rationale
-/// [`compute_rel_loop_scores`] documents for its own grouping.
+/// `BTreeMap` on the bucket grid keeps the float summation order
+/// deterministic across runs.
 pub fn compute_rel_loop_scores_per_element(
     results: &Results,
-    loop_partitions: &HashMap<String, Option<usize>>,
-    n_slots_by_loop: &HashMap<String, usize>,
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
 ) -> HashMap<String, Vec<f64>> {
     let mut loop_ids: Vec<&String> = loop_partitions.keys().collect();
     loop_ids.sort();
@@ -182,96 +203,95 @@ pub fn compute_rel_loop_scores_per_element(
         .iter()
         .map(|id| results.offsets.get(&loop_score_ident(id)).copied())
         .collect();
-    let slot_counts: Vec<usize> = loop_ids
+    let n_slots: Vec<usize> = loop_ids
         .iter()
-        .map(|id| n_slots_by_loop.get(*id).copied().unwrap_or(1).max(1))
+        .map(|id| loop_n_slots(loop_partitions, id))
         .collect();
 
-    let mut partition_groups: BTreeMap<Option<usize>, Vec<usize>> = BTreeMap::new();
+    // For each partition, the set of slot indices where some loop is in it.
+    // A scalar loop contributes its single slot 0; an arrayed loop
+    // contributes its per-slot partitions.  This drives the broadcast stride
+    // for scalar loops (a scalar loop in partition `p` is "compared in" every
+    // slot of `p`'s buckets) and lets us pre-build the bucket membership.
+    let mut partition_slots: BTreeMap<Option<usize>, BTreeSet<usize>> = BTreeMap::new();
     for (i, id) in loop_ids.iter().enumerate() {
-        let key = loop_partitions.get(*id).copied().unwrap_or(None);
-        partition_groups.entry(key).or_default().push(i);
+        for k in 0..n_slots[i] {
+            partition_slots
+                .entry(slot_partition(loop_partitions, id, k))
+                .or_default()
+                .insert(k);
+        }
     }
 
-    // Per-group max_slots is the stride used for both the numerator
-    // and denominator walks.  Scalar-only groups trivially stride 1
-    // and produce output identical to `compute_rel_loop_scores`.
-    let group_max_slots: BTreeMap<Option<usize>, usize> = partition_groups
+    // Per-loop output stride: an arrayed loop's own slot count; a scalar
+    // loop's (slot-0) partition's largest covered slot index + 1.
+    let strides: Vec<usize> = loop_ids
         .iter()
-        .map(|(part, indices)| {
-            let max = indices
-                .iter()
-                .map(|&i| slot_counts[i])
-                .max()
-                .unwrap_or(1)
-                .max(1);
-            (*part, max)
+        .enumerate()
+        .map(|(i, id)| {
+            if n_slots[i] > 1 {
+                n_slots[i]
+            } else {
+                let p = slot_partition(loop_partitions, id, 0);
+                partition_slots
+                    .get(&p)
+                    .and_then(|ks| ks.iter().max().copied())
+                    .map(|m| m + 1)
+                    .unwrap_or(1)
+                    .max(1)
+            }
         })
         .collect();
+
+    // Pre-build the `(partition, slot)` -> [(loop_idx, read_slot)] grid.
+    // `read_slot` is 0 for a scalar member (broadcast) and `k` for an arrayed
+    // member; arrayed members past their own `n_slots` are not in any
+    // slot-`k` bucket (no OOB read past their own `loop_score` slots).
+    let mut members: BTreeMap<BucketKey, Vec<BucketMember>> = BTreeMap::new();
+    for (i, id) in loop_ids.iter().enumerate() {
+        if offsets[i].is_none() {
+            continue;
+        }
+        if n_slots[i] <= 1 {
+            // Scalar loop: appears in every slot of its (slot-0) partition,
+            // always reading slot 0.
+            let p = slot_partition(loop_partitions, id, 0);
+            if let Some(ks) = partition_slots.get(&p) {
+                for &k in ks {
+                    members.entry((p, k)).or_default().push((i, 0));
+                }
+            }
+        } else {
+            for k in 0..n_slots[i] {
+                let p = slot_partition(loop_partitions, id, k);
+                members.entry((p, k)).or_default().push((i, k));
+            }
+        }
+    }
 
     let mut series: Vec<Vec<f64>> = offsets
         .iter()
         .enumerate()
         .map(|(i, o)| {
             if o.is_some() {
-                let key = loop_partitions.get(loop_ids[i]).copied().unwrap_or(None);
-                let max_slots = group_max_slots.get(&key).copied().unwrap_or(1);
-                vec![0.0_f64; results.step_count * max_slots]
+                vec![0.0_f64; results.step_count * strides[i]]
             } else {
                 Vec::new()
             }
         })
         .collect();
 
-    // Resolve `(loop, partition_index_k)` to either the loop's own slot
-    // offset (for arrayed loops with their own element at k, or scalar
-    // loops broadcasting their single slot) or `None` when the loop has
-    // no element at that partition index (arrayed loops with
-    // n_slots < partition max_slots).  This gating prevents an OOB read
-    // past `row[off + n_slots[i] - 1]` into the next variable's data
-    // when partitions mix arrayed loops of different dimensionalities.
-    let slot_for = |i: usize, k: usize| -> Option<usize> {
-        let n = slot_counts[i];
-        if n <= 1 {
-            // Scalar loop: broadcast slot 0 across every partition element.
-            Some(0)
-        } else if k < n {
-            // Arrayed loop with its own element at k.
-            Some(k)
-        } else {
-            // Arrayed loop with n < partition max: this loop has no
-            // element at partition index k.  Don't contribute to the
-            // denom and zero-fill the per-loop series.
-            None
-        }
-    };
-
     for (step, row) in results.iter().enumerate() {
-        for (part_key, indices) in &partition_groups {
-            let max_slots = group_max_slots.get(part_key).copied().unwrap_or(1);
-            for k in 0..max_slots {
-                let denom: f64 = indices
-                    .iter()
-                    .filter_map(|&i| {
-                        let off = offsets[i]?;
-                        let elem = slot_for(i, k)?;
-                        Some(row[off + elem].abs())
-                    })
-                    .sum();
-                for &i in indices {
-                    let Some(off) = offsets[i] else { continue };
-                    let val = match slot_for(i, k) {
-                        Some(elem) => {
-                            let num = row[off + elem];
-                            if denom == 0.0 { 0.0 } else { num / denom }
-                        }
-                        // Loop has no element at partition index k -- zero-fill
-                        // (matches the "this loop doesn't contribute" semantic
-                        // already applied to the partition denom above).
-                        None => 0.0,
-                    };
-                    series[i][step * max_slots + k] = val;
-                }
+        for (&(_p, k), member_list) in &members {
+            let denom: f64 = member_list
+                .iter()
+                .filter_map(|&(i, rs)| offsets[i].map(|off| row[off + rs].abs()))
+                .sum();
+            for &(i, rs) in member_list {
+                let Some(off) = offsets[i] else { continue };
+                let num = row[off + rs];
+                let val = if denom == 0.0 { 0.0 } else { num / denom };
+                series[i][step * strides[i] + k] = val;
             }
         }
     }
@@ -864,30 +884,43 @@ mod tests {
         }
     }
 
-    /// Build a `loop_partitions` mapping directly from `(loop_id, partition)` pairs.
-    /// This matches the shape produced by `model_ltm_variables` at the call site.
-    fn mapping(pairs: &[(&str, Option<usize>)]) -> HashMap<String, Option<usize>> {
+    /// Build a per-loop, single-slot `loop_partitions` mapping from
+    /// `(loop_id, partition)` pairs -- the common scalar/cross-element case
+    /// where every loop has exactly one slot.
+    fn mapping(pairs: &[(&str, Option<usize>)]) -> HashMap<String, Vec<Option<usize>>> {
         pairs
             .iter()
-            .map(|(id, p)| ((*id).to_string(), *p))
+            .map(|(id, p)| ((*id).to_string(), vec![*p]))
             .collect()
     }
 
-    /// Inlined reference implementation of the SAFEDIV formula previously
-    /// emitted by `generate_relative_loop_score_equation`.
-    ///
-    /// This is intentionally a naive, per-timestep computation: the proptest
-    /// compares against it to catch any numeric divergence from the old
-    /// compile-time behaviour.
+    /// Build a per-slot `loop_partitions` mapping from `(loop_id, slots)`
+    /// pairs -- for tests that need genuinely multi-slot A2A loops.
+    fn mapping_per_slot(
+        pairs: &[(&str, Vec<Option<usize>>)],
+    ) -> HashMap<String, Vec<Option<usize>>> {
+        pairs
+            .iter()
+            .map(|(id, slots)| ((*id).to_string(), slots.clone()))
+            .collect()
+    }
+
+    /// Inlined reference implementation of `compute_rel_loop_scores`'s
+    /// slot-0-convenience SAFEDIV formula: each loop normalizes its slot-0
+    /// value against the sum of slot-0 values over loops sharing its slot-0
+    /// partition.  The proptest compares against this to catch any numeric
+    /// divergence.
     fn reference_rel_loop_scores(
         loop_ids: &[String],
-        loop_partitions: &HashMap<String, Option<usize>>,
+        loop_partitions: &HashMap<String, Vec<Option<usize>>>,
         series: &[Vec<f64>],
     ) -> Vec<Vec<f64>> {
         let step_count = series.first().map(|s| s.len()).unwrap_or(0);
         let mut groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
         for (i, id) in loop_ids.iter().enumerate() {
-            let key = loop_partitions.get(id).copied().unwrap_or(None);
+            let key = loop_partitions
+                .get(id)
+                .and_then(|v| v.first().copied().flatten());
             groups.entry(key).or_default().push(i);
         }
         let mut out: Vec<Vec<f64>> = (0..loop_ids.len())
@@ -1081,13 +1114,13 @@ mod tests {
         assert!(compute_rel_loop_score_for_id(&results, "missing", &denom).is_none());
     }
 
-    /// Per-element variant: two A2A loops in a shared partition, each
-    /// with 3 element slots.  At every element k, the sum of absolute
-    /// rel-scores across the partition must equal 1.0 (non-zero
-    /// elements) or 0.0 (zero-denominator elements) independently --
-    /// that is the whole reason the per-element helper exists.  The
-    /// scalar path collapses to slot 0, which would sum to 1.0 only
-    /// for element 0 and miss the others.
+    /// Per-element variant: two A2A loops over an element-wise-coupled
+    /// dimension (every slot in partition 0), each with 3 element slots.
+    /// At every element k both loops' slot k lands in bucket `(0, k)`, so
+    /// the sum of absolute rel-scores at element k must equal 1.0 (non-zero
+    /// elements) or 0.0 (zero-denominator elements) independently -- the
+    /// scalar path collapses to slot 0 and would sum to 1.0 only for
+    /// element 0.
     #[test]
     fn per_element_helper_normalizes_within_each_slot() {
         let n_slots: usize = 3;
@@ -1132,12 +1165,11 @@ mod tests {
             is_vensim: false,
         };
 
-        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
-        let mut slots = HashMap::new();
-        slots.insert("A".to_string(), n_slots);
-        slots.insert("B".to_string(), n_slots);
+        // Both loops coupled: every slot in partition 0.
+        let partitions =
+            mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("B", vec![Some(0); n_slots])]);
 
-        let rel = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
         let a = rel.get("A").expect("A must have a series");
         let b = rel.get("B").expect("B must have a series");
         assert_eq!(a.len(), step_count * n_slots);
@@ -1155,6 +1187,73 @@ mod tests {
                     "step {step} elem {k}: |a|+|b| = {sum}, not 1.0"
                 );
             }
+        }
+    }
+
+    /// Per-element variant, the headline GH #487 case: two A2A loops over
+    /// element-wise-*uncoupled* dimensions -- each slot of each loop is in
+    /// its own partition, and no slot of A shares a partition with any slot
+    /// of B.  Each loop's slot k therefore normalizes against itself only,
+    /// so every rel score is ±1.0 -- the two loops do NOT cross-normalize
+    /// even though `compute_rel_loop_scores`'s slot-0-pooled view used to
+    /// (pre-fix) lump them when both had `None` partitions.
+    #[test]
+    fn per_element_uncoupled_a2a_loops_do_not_cross_normalize() {
+        let step_count: usize = 3;
+        // A has 2 slots, B has 3 slots; A's slots are partitions 0,1 and
+        // B's slots are partitions 2,3,4 -- all distinct, none shared.
+        // Layout: time | A slot0 | A slot1 | B slot0..2
+        let step_size = 1 + 2 + 3;
+        let a_off = 1;
+        let b_off = 3;
+        let mut data = vec![0.0_f64; step_count * step_size];
+        for step in 0..step_count {
+            let row = &mut data[step * step_size..(step + 1) * step_size];
+            row[0] = step as f64;
+            // Distinct, non-zero, per-step-varying magnitudes.
+            for k in 0..2 {
+                row[a_off + k] = ((step + 2) * (k + 1)) as f64;
+            }
+            for k in 0..3 {
+                row[b_off + k] = -(((step + 3) * (k + 1)) as f64);
+            }
+        }
+        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        offsets.insert(Ident::new("time"), 0);
+        offsets.insert(loop_score_ident("A"), a_off);
+        offsets.insert(loop_score_ident("B"), b_off);
+        let sim_specs = crate::datamodel::SimSpecs {
+            start: 0.0,
+            stop: (step_count - 1) as f64,
+            dt: crate::datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: crate::datamodel::SimMethod::Euler,
+            time_units: None,
+        };
+        let results = Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: crate::results::Specs::from(&sim_specs),
+            is_vensim: false,
+        };
+
+        let partitions = mapping_per_slot(&[
+            ("A", vec![Some(0), Some(1)]),
+            ("B", vec![Some(2), Some(3), Some(4)]),
+        ]);
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
+        let a = rel.get("A").expect("A must have a series");
+        let b = rel.get("B").expect("B must have a series");
+        assert_eq!(a.len(), step_count * 2);
+        assert_eq!(b.len(), step_count * 3);
+        // Every slot of every loop normalizes against itself only -> ±1.0.
+        for &v in a.iter().chain(b.iter()) {
+            assert!(
+                (v.abs() - 1.0).abs() < 1e-12,
+                "uncoupled A2A slot should self-normalize to ±1.0, got {v}"
+            );
         }
     }
 
@@ -1204,12 +1303,12 @@ mod tests {
             is_vensim: false,
         };
 
-        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
-        let mut slots = HashMap::new();
-        slots.insert("A".to_string(), 1); // scalar
-        slots.insert("B".to_string(), n_slots);
+        // A is scalar (one slot in partition 0); B is A2A coupled (both
+        // slots in partition 0).  A broadcasts its single value into both
+        // of B's slots, so A's series is padded to B's stride.
+        let partitions = mapping_per_slot(&[("A", vec![Some(0)]), ("B", vec![Some(0), Some(0)])]);
 
-        let rel = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
         let a = rel.get("A").unwrap();
         let b = rel.get("B").unwrap();
         assert_eq!(a.len(), step_count * n_slots);
@@ -1358,8 +1457,8 @@ mod tests {
     /// Mismatched-dim arrayed partition: loop A has n=2 and loop B has
     /// n=3 in the same partition.  At partition element k=2, A has no
     /// own element; the helper must NOT OOB-read past A's allocated
-    /// slots into B's data, and A's series at k=2 must be 0.0 ("this
-    /// loop has no element here") rather than a bogus rel-score.
+    /// slots into B's data, and A's series stays its own length (n=2)
+    /// rather than being padded to B's.
     ///
     /// We pick B's slot 0 as a sentinel (999.0) so that an OOB read of
     /// `row[off_A + 2]` (which equals `row[off_B + 0]` in our layout)
@@ -1373,19 +1472,20 @@ mod tests {
         let loop_data = vec![vec![vec![1.0, 2.0]], vec![vec![999.0, 20.0, 30.0]]];
         let results = make_arrayed_results(&["A", "B"], &[2, 3], &loop_data);
 
-        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
-        let mut slots = HashMap::new();
-        slots.insert("A".to_string(), 2);
-        slots.insert("B".to_string(), 3);
+        // Both coupled: A's two slots and B's three slots all in partition 0.
+        let partitions = mapping_per_slot(&[
+            ("A", vec![Some(0), Some(0)]),
+            ("B", vec![Some(0), Some(0), Some(0)]),
+        ]);
 
-        let rel = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
         let a = rel.get("A").expect("A must have a series");
         let b = rel.get("B").expect("B must have a series");
-        // Stride is the partition's max_slots = 3.
-        assert_eq!(a.len(), 3);
+        // Each loop's series has its own slot count -- A's is 2, not B's 3.
+        assert_eq!(a.len(), 2);
         assert_eq!(b.len(), 3);
 
-        // k=0,1: both loops contribute their own slot value to the partition denom.
+        // k=0,1: bucket (0, k) = {A.slotk, B.slotk}.
         //   denom_0 = |1| + |999| = 1000;  a[0] = 1/1000, b[0] = 999/1000.
         //   denom_1 = |2| + |20|  = 22;    a[1] = 2/22,   b[1] = 20/22.
         assert!((a[0] - 1.0 / 1000.0).abs() < 1e-12);
@@ -1393,20 +1493,12 @@ mod tests {
         assert!((a[1] - 2.0 / 22.0).abs() < 1e-12);
         assert!((b[1] - 20.0 / 22.0).abs() < 1e-12);
 
-        // k=2: A has no element here.  Principled semantics:
-        //   - A contributes nothing to denom_2 -> denom_2 = |B[2]| = 30.
-        //   - A's series at k=2 is zero-filled (no element here).
-        //   - B's slot 2 normalises against itself only -> b[2] = 30/30 = 1.0.
-        // Pre-fix the helper OOB-reads `row[off_A + 2]` which is B's slot 0
-        // (999.0) and incorporates that into both A's and B's rel-scores.
-        assert_eq!(
-            a[2], 0.0,
-            "A has no element at partition index 2; series must be zero-filled, got {}",
-            a[2]
-        );
+        // k=2: bucket (0, 2) = {B.slot2} only -- A has no slot 2, so it's
+        // not in any slot-2 bucket and doesn't OOB-read into B's data.
+        //   denom_2 = |B[2]| = 30 -> b[2] = 30/30 = 1.0.
         assert!(
             (b[2] - 1.0).abs() < 1e-12,
-            "B's slot 2 should normalise against itself only (A doesn't contribute past its own n=2); got {}",
+            "B's slot 2 should normalise against itself only (A has no slot 2); got {}",
             b[2]
         );
     }
@@ -1563,12 +1655,14 @@ mod tests {
         }
         let results = make_arrayed_results(&["A", "B"], &[n_slots, n_slots], &[a_data, b_data]);
 
-        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
-        let mut slots = HashMap::new();
-        slots.insert("A".to_string(), n_slots);
-        slots.insert("B".to_string(), n_slots);
+        // Both A2A loops coupled (every slot in partition 0), so slot k of
+        // each lands in bucket (0, k) -- the streaming helper, called with
+        // both loops as members at element k, sums the same two slot-k
+        // values into the denominator.
+        let partitions =
+            mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("B", vec![Some(0); n_slots])]);
 
-        let full = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+        let full = compute_rel_loop_scores_per_element(&results, &partitions);
 
         for k in 0..n_slots {
             let denom = compute_partition_denominator_for_element(
@@ -1600,8 +1694,8 @@ mod tests {
         }
     }
 
-    /// Mixed-stride parity: for any partition where two arrayed loops
-    /// have different `n_slots`, the streaming pair
+    /// Mixed-stride parity: for two coupled A2A loops with different
+    /// `n_slots` sharing the same per-slot partition, the streaming pair
     /// (`compute_partition_denominator_for_element` +
     /// `compute_rel_loop_score_for_element`) must produce the same
     /// per-element rel-scores as the full-sweep
@@ -1609,16 +1703,15 @@ mod tests {
     /// libsimlin FFI per-partition cache relies on -- the streaming
     /// pair must be a strictly cheaper path to the same numbers.
     ///
-    /// The existing `per_element_streaming_matches_full_sweep` test
-    /// only covers same-shape partitions.  This test extends coverage
-    /// to mixed-stride so any future drift between the two paths is
-    /// caught structurally rather than waiting for a reviewer to
-    /// notice the divergence.
+    /// Each loop's full-sweep series has its own slot count (A: 3, B: 2);
+    /// at slot 2 only A is a member of bucket (0, 2), so the streaming
+    /// helper -- called with both loops as members at element 2 but B
+    /// gated out by `effective_slot(2, 2) == None` -- agrees.
     #[test]
     fn streaming_helpers_match_full_sweep_in_mixed_stride_partition() {
-        // A has n=3, B has n=2, sharing a partition.  Multi-step so
-        // we exercise more than one row.  Distinct-per-step values
-        // so any wrong-stride bug shows up loudly.
+        // A has n=3, B has n=2, both coupled (every slot in partition 0).
+        // Multi-step so we exercise more than one row; distinct-per-step
+        // values so any wrong-stride bug shows up loudly.
         //   step 0: A = [1.0, 2.0, 5.0],   B = [10.0, 7.0]
         //   step 1: A = [1.5, 2.5, 6.0],   B = [11.0, 8.0]
         //   step 2: A = [2.0, 3.0, 7.0],   B = [12.0, 9.0]
@@ -1632,17 +1725,22 @@ mod tests {
         ];
         let results = make_arrayed_results(&["A", "B"], &[3, 2], &loop_data);
 
-        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
-        let mut slots = HashMap::new();
-        slots.insert("A".to_string(), 3_usize);
-        slots.insert("B".to_string(), 2_usize);
+        let partitions = mapping_per_slot(&[
+            ("A", vec![Some(0), Some(0), Some(0)]),
+            ("B", vec![Some(0), Some(0)]),
+        ]);
 
-        let full = compute_rel_loop_scores_per_element(&results, &partitions, &slots);
+        let full = compute_rel_loop_scores_per_element(&results, &partitions);
+        let full_a = full.get("A").unwrap();
+        let full_b = full.get("B").unwrap();
+        // A's series is 3-strided, B's is 2-strided.
+        assert_eq!(full_a.len(), results.step_count * 3);
+        assert_eq!(full_b.len(), results.step_count * 2);
 
-        // The full-sweep helper writes each loop's series at the
-        // partition's max_slots stride (= 3 here for both A and B).
-        let max_slots = 3_usize;
-        for k in 0..max_slots {
+        // The members of bucket (0, k) for k in 0..3 are {A, B} for k<2,
+        // {A} for k==2; the streaming helper expresses this via
+        // `effective_slot(n_b, k)` returning None for B at k>=n_b.
+        for k in 0..3 {
             let denom = compute_partition_denominator_for_element(
                 &results,
                 [("A", 3_usize), ("B", 2_usize)],
@@ -1650,23 +1748,31 @@ mod tests {
             );
             let rel_a = compute_rel_loop_score_for_element(&results, "A", 3, k, &denom)
                 .expect("A must have a series");
-            let rel_b = compute_rel_loop_score_for_element(&results, "B", 2, k, &denom)
-                .expect("B must have a series");
-
             for step in 0..results.step_count {
-                let full_idx = step * max_slots + k;
-                let full_a = full.get("A").unwrap()[full_idx];
-                let full_b = full.get("B").unwrap()[full_idx];
+                let full_v = full_a[step * 3 + k];
                 assert_eq!(
-                    rel_a[step], full_a,
+                    rel_a[step], full_v,
                     "loop A step {step} elem {k}: streaming {} vs full {}",
-                    rel_a[step], full_a
+                    rel_a[step], full_v
                 );
-                assert_eq!(
-                    rel_b[step], full_b,
-                    "loop B step {step} elem {k}: streaming {} vs full {}",
-                    rel_b[step], full_b
-                );
+            }
+            if k < 2 {
+                let rel_b = compute_rel_loop_score_for_element(&results, "B", 2, k, &denom)
+                    .expect("B must have a series");
+                for step in 0..results.step_count {
+                    let full_v = full_b[step * 2 + k];
+                    assert_eq!(
+                        rel_b[step], full_v,
+                        "loop B step {step} elem {k}: streaming {} vs full {}",
+                        rel_b[step], full_v
+                    );
+                }
+            } else {
+                // B has no slot k>=2; the streaming helper returns all-zeros
+                // for it and the full-sweep series doesn't have that index.
+                let rel_b = compute_rel_loop_score_for_element(&results, "B", 2, k, &denom)
+                    .expect("B must have a series");
+                assert!(rel_b.iter().all(|&v| v == 0.0));
             }
         }
     }
@@ -2191,10 +2297,12 @@ mod tests {
             }
 
             let loop_ids: Vec<String> = (0..num_loops).map(|i| format!("L{i}")).collect();
-            let loop_partitions: HashMap<String, Option<usize>> = loop_ids
+            // Scalar-loop shape: one slot per loop (the slot-0 convenience
+            // view ignores anything beyond slot 0 anyway).
+            let loop_partitions: HashMap<String, Vec<Option<usize>>> = loop_ids
                 .iter()
                 .enumerate()
-                .map(|(i, id)| (id.clone(), Some(raw_partitions[i] % num_partitions)))
+                .map(|(i, id)| (id.clone(), vec![Some(raw_partitions[i] % num_partitions)]))
                 .collect();
 
             // Build Results matching the series.

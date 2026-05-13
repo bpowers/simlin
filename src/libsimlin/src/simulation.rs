@@ -58,7 +58,7 @@ pub unsafe extern "C" fn simlin_sim_new(
     // nothing changed since the last patch.
     type CompileSnapshot = (
         std::result::Result<engine::CompiledSimulation, engine::Error>,
-        HashMap<String, Option<usize>>,
+        HashMap<String, Vec<Option<usize>>>,
         HashMap<String, engine::ltm_post::LoopElementIndex>,
     );
     let (incremental_result, captured_loop_partitions, captured_loop_element_index): CompileSnapshot = {

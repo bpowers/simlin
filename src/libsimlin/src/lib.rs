@@ -299,15 +299,22 @@ pub(crate) struct SimState {
     pub(crate) overrides: HashMap<usize, f64>,
     /// Snapshot of `model_ltm_variables().loop_partitions` taken at
     /// `simlin_sim_new` time, while the db is locked and the
-    /// `ltm_enabled` flag is still set.  Binds post-sim
-    /// relative-loop-score queries to the loop grouping the VM
-    /// actually ran under, so the FFI stays consistent when the
-    /// project is patched (rename/delete/restructure) after the
-    /// simulation is created.  Empty when LTM was not enabled, when
-    /// the LTM pipeline auto-flipped to discovery (which empties
-    /// `loop_partitions` intentionally), or when compilation
-    /// itself failed.
-    pub(crate) loop_partitions: HashMap<String, Option<usize>>,
+    /// `ltm_enabled` flag is still set.  The value is the loop's
+    /// **per-slot** cycle-partition vector (length 1 for a
+    /// scalar/cross-element/mixed loop, one entry per element for an
+    /// A2A loop).  Binds post-sim relative-loop-score queries to the
+    /// loop grouping the VM actually ran under, so the FFI stays
+    /// consistent when the project is patched (rename/delete/restructure)
+    /// after the simulation is created.  Empty when LTM was not enabled,
+    /// when the LTM pipeline auto-flipped to discovery (which empties
+    /// `loop_partitions` intentionally), or when compilation itself
+    /// failed.
+    //
+    // The FFI consumer in `analysis.rs` currently groups loops by their
+    // *slot-0* partition; teaching `simlin_analyze_get_relative_loop_score`
+    // / `ensure_denom_for_element` to group by the queried slot's partition
+    // (so an uncoupled A2A loop normalizes per element) is a follow-up.
+    pub(crate) loop_partitions: HashMap<String, Vec<Option<usize>>>,
     /// Snapshot of per-loop dimension metadata taken at
     /// `simlin_sim_new` time.  Used by the FFI subscript resolver to
     /// turn a user-supplied loop ID like `r1[Boston]` into a slot

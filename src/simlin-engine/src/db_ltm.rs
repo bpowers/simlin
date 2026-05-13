@@ -2091,6 +2091,45 @@ fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<String> {
     result
 }
 
+/// Build the element-level `Loop::stocks` list for a cycle.
+///
+/// For a scalar cycle (`dimensions` empty), the stocks are the
+/// variable-level stock idents unchanged -- a genuinely scalar variable's
+/// name *is* its (degenerate, subscript-free) element-level node name.
+///
+/// For an A2A cycle (`dimensions` non-empty) the stocks cover the loop's
+/// *entire* dimension element space: one `"{var}[{elem-tuple}]"` per element
+/// of the dimension space (in the runtime's row-major slot order, via
+/// [`crate::ltm::loop_dimension_element_tuples`]), for each variable in
+/// `var_stocks`.  This is the granularity the `Loop` docstring's invariant
+/// requires so `CyclePartitions::partition_for_loop` can resolve a partition
+/// *per slot* against `model_element_cycle_partitions`'s element-keyed
+/// `stock_partition` map.  If `dm_dims` doesn't cover the cycle's declared
+/// dimensions (a mid-edit inconsistency), the variable-level stocks are
+/// returned unchanged -- `partition_for_loop` then falls back to whatever
+/// suffixes are present (none, here), bucketing the loop into the `None`
+/// group, the same degradation the pre-element-level code exhibited.
+fn build_a2a_loop_stocks(
+    var_stocks: &[Ident<Canonical>],
+    dimensions: &[String],
+    dm_dims: &[crate::datamodel::Dimension],
+) -> Vec<Ident<Canonical>> {
+    if dimensions.is_empty() {
+        return var_stocks.to_vec();
+    }
+    let tuples = crate::ltm::loop_dimension_element_tuples(dimensions, dm_dims);
+    if tuples.is_empty() {
+        return var_stocks.to_vec();
+    }
+    let mut stocks = Vec::with_capacity(tuples.len() * var_stocks.len());
+    for tuple in &tuples {
+        for s in var_stocks {
+            stocks.push(Ident::new(&format!("{}[{}]", s.as_str(), tuple)));
+        }
+    }
+    stocks
+}
+
 /// Build `Loop` structs from the tiered loop-enumeration result.
 ///
 /// The fast path (`tiered.fast_path`) carries variable-level cycles
@@ -2133,7 +2172,7 @@ pub(crate) fn build_loops_from_tiered(
             .map(|s| Ident::new(s.as_str()))
             .collect();
         let links = var_graph.circuit_to_links(&var_level_nodes);
-        let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
+        let var_stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
         let polarity = var_graph.calculate_polarity(&links);
 
         // Map the canonical dimension names to original datamodel
@@ -2170,6 +2209,12 @@ pub(crate) fn build_loops_from_tiered(
                 resolved.unwrap_or_else(|| canonical.to_string())
             })
             .collect();
+
+        // For a PureSameElementA2A cycle the stocks are element-level over
+        // the dimension space (per the `Loop` docstring's invariant); for a
+        // PureScalar cycle (`dimensions` empty) they're the variable-level
+        // names unchanged.
+        let stocks = build_a2a_loop_stocks(&var_stocks, &dimensions, dm_dims);
 
         all_loops.push(Loop {
             id: String::new(),
@@ -2427,7 +2472,7 @@ pub(crate) fn build_element_level_loops(
             // `{from}->{to}` link score (the Bare-shape name) via the
             // variable-level link names that `circuit_to_links` produces.
             let links = var_graph.circuit_to_links(&var_level_nodes);
-            let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
+            let var_stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
             let polarity = var_graph.calculate_polarity(&links);
 
             // Determine the shared dimension(s) from the subscripts.
@@ -2453,6 +2498,12 @@ pub(crate) fn build_element_level_loops(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+
+            // Stocks must be element-level over the dimension space so
+            // `partition_for_loop` can resolve a partition per slot (the
+            // `Loop` docstring's invariant -- the same rule the cross-element
+            // and mixed branches below already follow).
+            let stocks = build_a2a_loop_stocks(&var_stocks, &dimensions, dm_dims);
 
             all_loops.push(Loop {
                 id: String::new(),
@@ -3147,7 +3198,7 @@ pub fn model_ltm_variables(
         None
     };
 
-    let mut loop_partitions: HashMap<String, Option<usize>> = HashMap::new();
+    let mut loop_partitions: HashMap<String, Vec<Option<usize>>> = HashMap::new();
 
     // Part 1: Link scores.
     // Sub-models and discovery mode need scores for ALL edges (pathways
@@ -4284,11 +4335,40 @@ pub fn model_ltm_variables(
                 .collect(),
         };
 
-        // Capture each loop's partition index before consuming `partitions`
-        // so post-sim `compute_rel_loop_scores` can group loops into the
-        // same denominator bins the removed compile-time SAFEDIV formula did.
+        // Capture each loop's per-slot partition vector before consuming
+        // `partitions` so post-sim `compute_rel_loop_scores*` can group slots
+        // into the same `(partition, slot)` denominator bins.  The vector's
+        // length must match the loop_score series' slot count -- 1 for a
+        // scalar/cross-element/mixed loop, the dimension-element-space size
+        // for an A2A loop -- which is the same `n_slots` that
+        // `ltm_post::build_loop_element_index` derives from
+        // `LtmSyntheticVar.dimensions` + the project dims; both feed
+        // `compute_rel_loop_scores_per_element`, so a length mismatch would
+        // desync the per-element normalization.
         for l in detected_loops.iter() {
-            loop_partitions.insert(l.id.clone(), partitions.partition_for_loop(l));
+            let parts = partitions.partition_for_loop(l, dm_dims);
+            debug_assert!(
+                {
+                    let expected = if l.dimensions.is_empty() {
+                        Some(1usize)
+                    } else {
+                        let n =
+                            crate::ltm::loop_dimension_element_tuples(&l.dimensions, dm_dims).len();
+                        // n == 0 only when `dm_dims` doesn't cover the loop's
+                        // declared dimensions (a mid-edit inconsistency);
+                        // `partition_for_loop` then falls back to the present
+                        // suffixes and the length is not predictable here.
+                        if n == 0 { None } else { Some(n) }
+                    };
+                    expected.is_none_or(|n| parts.len() == n)
+                },
+                "loop {:?}: per-slot partition vector length {} disagrees with the loop's slot \
+                 count; it must equal `build_loop_element_index`'s n_slots (both feed \
+                 `compute_rel_loop_scores_per_element`)",
+                l.id,
+                parts.len(),
+            );
+            loop_partitions.insert(l.id.clone(), parts);
         }
 
         // Build the set of link-score variable names emitted so far so

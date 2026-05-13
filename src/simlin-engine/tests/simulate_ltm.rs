@@ -35,15 +35,15 @@ fn compile_ltm_incremental(project: &simlin_engine::datamodel::Project) -> Compi
     compile_ltm_incremental_with_partitions(project).0
 }
 
-/// Compile with LTM enabled and capture the loop_partitions mapping
-/// `compute_rel_loop_scores` needs to derive relative scores post-sim.
-/// Since rel_loop_score is no longer emitted as a VM variable (see
-/// docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md), tests that
-/// used to filter `results.offsets` for `$⁚ltm⁚rel_loop_score⁚{id}` must
-/// now invoke `ltm_post::compute_rel_loop_scores(results, loop_partitions)`.
+/// Compile with LTM enabled and capture the per-slot loop_partitions
+/// mapping `compute_rel_loop_scores*` need to derive relative scores
+/// post-sim.  Since rel_loop_score is no longer emitted as a VM variable
+/// (see docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md), tests
+/// that used to filter `results.offsets` for `$⁚ltm⁚rel_loop_score⁚{id}`
+/// must now invoke `ltm_post::compute_rel_loop_scores(results, loop_partitions)`.
 fn compile_ltm_incremental_with_partitions(
     project: &simlin_engine::datamodel::Project,
-) -> (CompiledSimulation, HashMap<String, Option<usize>>) {
+) -> (CompiledSimulation, HashMap<String, Vec<Option<usize>>>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
@@ -128,7 +128,7 @@ fn ensure_ltm_results(
     expected: &LtmResults,
     actual_results: &Results,
     loops: &[DetectedLoop],
-    loop_partitions: &HashMap<String, Option<usize>>,
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
 ) {
     let mut errors = Vec::new();
 
@@ -3333,13 +3333,13 @@ fn find_loop_score_offsets(results: &Results) -> Vec<(String, usize)> {
 /// Test helper: thin forwarder to the production per-element helper.
 /// Retained so the existing A2A integration tests keep calling the
 /// same name; they now pin the production code rather than a parallel
-/// implementation.
+/// implementation.  The per-slot `loop_partitions` carries each loop's
+/// slot count (its `len()`), so no separate slot-count map is threaded.
 fn compute_rel_loop_scores_per_element(
     results: &Results,
-    loop_partitions: &HashMap<String, Option<usize>>,
-    n_slots_by_loop: &HashMap<String, usize>,
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
 ) -> HashMap<String, Vec<f64>> {
-    ltm_post::compute_rel_loop_scores_per_element(results, loop_partitions, n_slots_by_loop)
+    ltm_post::compute_rel_loop_scores_per_element(results, loop_partitions)
 }
 
 /// AC6.1 + AC6.4 + AC6.5: Pure A2A loop scores for an arrayed feedback model.
@@ -3515,15 +3515,12 @@ fn test_a2a_two_loop_relative_scores_sum_to_100() {
 
     // For each element, the absolute values of the per-element relative
     // loop scores across all loops should sum to approximately 1.0.  We
-    // compute rel scores inline from loop_score data because the A2A case
-    // requires per-element normalization, while the scalar production
-    // helper (`ltm_post::compute_rel_loop_scores`) collapses to element 0.
-    let n_slots_by_loop: HashMap<String, usize> = loop_partitions
-        .keys()
-        .map(|id| (id.clone(), n_elements))
-        .collect();
-    let rel_per_element =
-        compute_rel_loop_scores_per_element(&results, &loop_partitions, &n_slots_by_loop);
+    // use the per-element helper because the A2A case requires per-element
+    // normalization, while the scalar view (`ltm_post::compute_rel_loop_scores`)
+    // collapses to element 0.  Both A2A loops pass through `population[r]`,
+    // so at each element their slots land in the same `(partition, slot)`
+    // bucket and self-normalize together.
+    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
 
     for elem in 0..n_elements {
         // Pick a timestep late enough to have meaningful values (skip
@@ -4521,12 +4518,9 @@ fn test_arrayed_population_ltm_exhaustive() {
         !loop_partitions.is_empty(),
         "Should have loop partition entries to normalize against"
     );
-    let n_slots_by_loop: HashMap<String, usize> = loop_partitions
-        .keys()
-        .map(|id| (id.clone(), n_elements))
-        .collect();
-    let rel_per_element =
-        compute_rel_loop_scores_per_element(&results, &loop_partitions, &n_slots_by_loop);
+    // This is a pure-A2A model over `Region`, so every loop has
+    // `n_elements` slots and its rel-score series strides by `n_elements`.
+    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
 
     // Check that relative loop scores per element sum to ~1.0 at some
     // timestep after initialization.

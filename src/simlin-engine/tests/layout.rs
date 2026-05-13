@@ -933,8 +933,10 @@ fn test_arrayed_loop_importance_matches_argmax_abs_aggregation() {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    let per_elem =
-        ltm_post::compute_rel_loop_scores_per_element(&results, &loop_partitions, &n_slots_by_loop);
+    // `compute_rel_loop_scores_per_element` derives each loop's slot count
+    // from `loop_partitions[id].len()`; `n_slots_by_loop` is still used below
+    // (and by `aggregate_per_element_argmax_abs` inside `compute_metadata`).
+    let per_elem = ltm_post::compute_rel_loop_scores_per_element(&results, &loop_partitions);
     let slot0_only = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
 
     // (1) Contract: for every detected loop, importance_series must equal

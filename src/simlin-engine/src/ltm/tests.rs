@@ -4,6 +4,7 @@
 
 use super::graph::{CausalGraph, get_variable_dependencies};
 use super::indexed::IndexedGraph;
+use super::partitions::CyclePartitions;
 use super::polarity::{
     analyze_expr_polarity_with_context, analyze_graphical_function_polarity, analyze_link_polarity,
     expr_references_var, flip_polarity, is_negative_constant, is_positive_constant,
@@ -14,6 +15,7 @@ use super::types::{
 };
 use crate::ast::BinaryOp;
 use crate::common::{Canonical, Ident};
+use crate::datamodel::Dimension;
 use crate::db::{
     DetectedLoopPolarity, SimlinDb, compute_link_polarities, model_cycle_partitions,
     model_detected_loops, sync_from_datamodel,
@@ -2514,6 +2516,228 @@ fn test_cycle_partitions_partition_for_loop() {
             detected_loop.id
         );
     }
+}
+
+// -- `partition_for_loop` per-slot resolution (GH #487) --
+//
+// `partition_for_loop` returns one `Option<usize>` per conceptual slot:
+// a singleton for scalar / cross-element / mixed loops, and one entry per
+// element of the dimension space for A2A loops.  These tests build a
+// `CyclePartitions` and a `Loop` directly so the per-slot behavior is
+// exercised independently of the salsa pipeline.
+
+/// Build a `CyclePartitions` from `(stock_name, partition_index)` pairs.
+/// The `partitions` outer Vec is filled out enough to be self-consistent
+/// (it isn't read by `partition_for_loop`, only `stock_partition` is).
+fn cycle_partitions_from(pairs: &[(&str, usize)]) -> CyclePartitions {
+    let stock_partition: HashMap<Ident<Canonical>, usize> = pairs
+        .iter()
+        .map(|(name, p)| (Ident::new(name), *p))
+        .collect();
+    let max_p = pairs
+        .iter()
+        .map(|(_, p)| *p)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
+    let mut partitions: Vec<Vec<Ident<Canonical>>> = vec![Vec::new(); max_p];
+    for (name, p) in pairs {
+        partitions[*p].push(Ident::new(name));
+    }
+    CyclePartitions {
+        partitions,
+        stock_partition,
+    }
+}
+
+#[test]
+fn test_partition_for_loop_scalar_singleton() {
+    // A scalar loop's stocks are plain names; result is a singleton.
+    let partitions = cycle_partitions_from(&[("stock_a", 0), ("stock_b", 1)]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![Ident::new("stock_a")],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec![],
+    };
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &[]),
+        vec![Some(0)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_cross_element_singleton() {
+    // A cross-element loop has empty `dimensions` and element-level stocks
+    // (it may traverse the same stock variable at several elements);
+    // they're all in one SCC, so the result is still a singleton.
+    let partitions = cycle_partitions_from(&[("pop[nyc]", 2), ("pop[boston]", 2)]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![Ident::new("pop[nyc]"), Ident::new("pop[boston]")],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec![],
+    };
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &[]),
+        vec![Some(2)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_below_parent_graph_is_none() {
+    // A loop whose stocks aren't in the partition map (e.g. a pure
+    // module-internal loop) resolves to a single `None`.
+    let partitions = cycle_partitions_from(&[("stock_a", 0)]);
+    let loop_item = Loop {
+        id: "u1".to_string(),
+        links: vec![],
+        stocks: vec![Ident::new("smooth·smoothed")],
+        polarity: LoopPolarity::Undetermined,
+        dimensions: vec![],
+    };
+    assert_eq!(partitions.partition_for_loop(&loop_item, &[]), vec![None]);
+}
+
+#[test]
+fn test_partition_for_loop_a2a_uncoupled_distinct_partitions() {
+    // A pure-A2A loop over a 3-element dimension whose three element-stocks
+    // sit in three *distinct* partitions (element-wise-uncoupled dynamics):
+    // `partition_for_loop` returns three distinct entries, one per slot, in
+    // declared-element row-major order.
+    let dims = vec![Dimension::named(
+        "Region".to_string(),
+        vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+    )];
+    let partitions = cycle_partitions_from(&[("pop[nyc]", 5), ("pop[boston]", 7), ("pop[la]", 9)]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![
+            Ident::new("pop[nyc]"),
+            Ident::new("pop[boston]"),
+            Ident::new("pop[la]"),
+        ],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec!["Region".to_string()],
+    };
+    // Row-major over the dimension's *declared* order (NYC, Boston, LA),
+    // which is NOT lexical (Boston < LA < NYC) -- so this also pins that
+    // the slot order follows declaration, matching `LoopElementIndex`.
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &dims),
+        vec![Some(5), Some(7), Some(9)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_a2a_coupled_partitions_coincide() {
+    // A pure-A2A loop over a 3-element dimension whose element-stocks are
+    // all in the *same* partition (element-wise-coupled dynamics, e.g. a
+    // shared aggregate couples every element): the three slot entries
+    // coincide.
+    let dims = vec![Dimension::named(
+        "Region".to_string(),
+        vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+    )];
+    let partitions = cycle_partitions_from(&[("pop[nyc]", 3), ("pop[boston]", 3), ("pop[la]", 3)]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![
+            Ident::new("pop[nyc]"),
+            Ident::new("pop[boston]"),
+            Ident::new("pop[la]"),
+        ],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec!["Region".to_string()],
+    };
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &dims),
+        vec![Some(3), Some(3), Some(3)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_a2a_two_dim_row_major() {
+    // A 2-D A2A loop: slot order is row-major (first dim slowest, last dim
+    // fastest), matching `LoopElementIndex::resolve` -- so the slots are
+    // (NYC,adult), (NYC,child), (Boston,adult), (Boston,child).
+    let dims = vec![
+        Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string()],
+        ),
+        Dimension::named(
+            "Age".to_string(),
+            vec!["adult".to_string(), "child".to_string()],
+        ),
+    ];
+    let partitions = cycle_partitions_from(&[
+        ("pop[nyc,adult]", 0),
+        ("pop[nyc,child]", 1),
+        ("pop[boston,adult]", 2),
+        ("pop[boston,child]", 3),
+    ]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![
+            Ident::new("pop[nyc,adult]"),
+            Ident::new("pop[nyc,child]"),
+            Ident::new("pop[boston,adult]"),
+            Ident::new("pop[boston,child]"),
+        ],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec!["Region".to_string(), "Age".to_string()],
+    };
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &dims),
+        vec![Some(0), Some(1), Some(2), Some(3)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_a2a_indexed_dimension() {
+    // An Indexed A2A dimension: element subscripts are 1-based integers,
+    // so the stock node names are `q[1]`, `q[2]`, `q[3]` and the slot
+    // order follows 1..=size.
+    let dims = vec![Dimension::indexed("Periods".to_string(), 3)];
+    let partitions = cycle_partitions_from(&[("q[1]", 4), ("q[2]", 4), ("q[3]", 8)]);
+    let loop_item = Loop {
+        id: "b1".to_string(),
+        links: vec![],
+        stocks: vec![Ident::new("q[1]"), Ident::new("q[2]"), Ident::new("q[3]")],
+        polarity: LoopPolarity::Balancing,
+        dimensions: vec!["Periods".to_string()],
+    };
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &dims),
+        vec![Some(4), Some(4), Some(8)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_a2a_unresolved_dim_falls_back_to_present_suffixes() {
+    // When the project's dim list doesn't cover the loop's declared
+    // dimension (a mid-edit inconsistency), `partition_for_loop` falls
+    // back to the slot suffixes actually present on the loop's stocks,
+    // sorted for determinism.
+    let partitions = cycle_partitions_from(&[("pop[boston]", 1), ("pop[nyc]", 2)]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![Ident::new("pop[nyc]"), Ident::new("pop[boston]")],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec!["Region".to_string()],
+    };
+    // No `Region` in `dims` -> fall back to sorted suffixes: "boston" < "nyc".
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &[]),
+        vec![Some(1), Some(2)]
+    );
 }
 
 #[test]

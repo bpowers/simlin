@@ -1511,8 +1511,14 @@ fn cross_element_loop_partitions_resolve_to_some() {
             .loop_partitions
             .get(id)
             .unwrap_or_else(|| panic!("loop {id:?} missing from loop_partitions"));
+        // A scalar / cross-element loop has exactly one slot.
+        assert_eq!(
+            partition.len(),
+            1,
+            "scalar / cross-element loop {id:?} should have one partition slot, got {partition:?}"
+        );
         assert!(
-            partition.is_some(),
+            partition[0].is_some(),
             "scalar / cross-element loop {id:?} resolved to None partition; \
              cross-element branch must produce element-level stocks per the \
              `Loop` docstring's invariant. loop_partitions: {:?}",
@@ -1554,14 +1560,84 @@ fn mixed_scalar_loop_partitions_resolve_to_some() {
     // At least one mixed/scalar loop must resolve to Some(N), not None.
     // Before the fix every mixed/scalar loop returned None because Loop.stocks
     // held variable-level names ("pop") but stock_partition holds element-level
-    // keys ("pop[nyc]").
-    let any_some = ltm.loop_partitions.values().any(|v| v.is_some());
+    // keys ("pop[nyc]").  (`partition_for_loop` now returns a per-slot vector;
+    // mixed/scalar loops have one slot.)
+    let any_some = ltm
+        .loop_partitions
+        .values()
+        .any(|slots| slots.iter().any(|p| p.is_some()));
     assert!(
         any_some,
         "all loop_partitions values are None, meaning partition_for_loop \
          returned None for every loop; this indicates the element-level \
          Loop.stocks regression has recurred. loop_partitions: {:?}",
         ltm.loop_partitions
+    );
+}
+
+#[test]
+fn a2a_loop_partitions_have_one_entry_per_element() {
+    // A pure-A2A stock-flow loop over a 3-element dimension whose elements
+    // are *not* cross-coupled (each `pop[r]` only depends on `pop[r]`):
+    // `loop_partitions[a2a_loop_id]` has one entry per element, and because
+    // `model_element_cycle_partitions` puts the three element-level stocks
+    // in three distinct SCCs, the three entries are three distinct partition
+    // indices.  Pre-#487 the A2A loop carried variable-level stocks
+    // (`"pop"`) so `partition_for_loop` returned a single `None`; now it
+    // returns `[Some(p0), Some(p1), Some(p2)]` in the runtime's row-major
+    // slot order -- so the rel-loop-score normalizer can keep the three
+    // per-element subsystems in separate `(partition, slot)` buckets.
+    let project = TestProject::new("a2a_partition")
+        .named_dimension("Region", &["NYC", "Boston", "LA"])
+        .array_stock("pop[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "pop * 0.1", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    // Find the A2A loop_score variable (it has non-empty `dimensions`).
+    let mut a2a_loop_ids: Vec<String> = Vec::new();
+    for v in &ltm.vars {
+        if let Some(id) = v
+            .name
+            .strip_prefix("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+            && !v.dimensions.is_empty()
+        {
+            a2a_loop_ids.push(id.to_string());
+        }
+    }
+    assert_eq!(
+        a2a_loop_ids.len(),
+        1,
+        "expected exactly one A2A loop; loop_score vars: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|v| v.name.contains("loop_score"))
+            .map(|v| (&v.name, &v.dimensions))
+            .collect::<Vec<_>>()
+    );
+    let a2a_id = &a2a_loop_ids[0];
+    let parts = ltm
+        .loop_partitions
+        .get(a2a_id)
+        .unwrap_or_else(|| panic!("A2A loop {a2a_id:?} missing from loop_partitions"));
+    assert_eq!(
+        parts.len(),
+        3,
+        "A2A loop over a 3-element dimension should have 3 partition slots, got {parts:?}"
+    );
+    assert!(
+        parts.iter().all(|p| p.is_some()),
+        "every slot of the A2A loop should resolve to a partition, got {parts:?}"
+    );
+    let distinct: std::collections::HashSet<usize> = parts.iter().filter_map(|p| *p).collect();
+    assert_eq!(
+        distinct.len(),
+        3,
+        "the 3 element-wise-uncoupled slots should be in 3 distinct partitions, got {parts:?}"
     );
 }
 

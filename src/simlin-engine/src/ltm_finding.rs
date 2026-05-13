@@ -907,10 +907,22 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartition
         "all loops must have the same number of timesteps"
     );
     if step_count > 0 {
+        // Discovered `FoundLoop`s are always scalar (`loop_info.dimensions`
+        // is `vec![]`), so `partition_for_loop` returns a length-1 vector;
+        // collapse it to slot 0.  The empty `dims` slice is fine -- it's
+        // only consulted for A2A loops, which discovery never produces.
+        let slot0 = |fl: &FoundLoop| -> Option<usize> {
+            partitions
+                .partition_for_loop(&fl.loop_info, &[])
+                .first()
+                .copied()
+                .flatten()
+        };
+
         // Group loops by partition
         let mut partition_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
         for (i, fl) in found_loops.iter().enumerate() {
-            let partition = partitions.partition_for_loop(&fl.loop_info);
+            let partition = slot0(fl);
             partition_groups.entry(partition).or_default().push(i);
         }
 
@@ -929,10 +941,7 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartition
         }
 
         // Assign partition key to each loop before retain (since retain borrows mutably)
-        let loop_partitions: Vec<Option<usize>> = found_loops
-            .iter()
-            .map(|fl| partitions.partition_for_loop(&fl.loop_info))
-            .collect();
+        let loop_partitions: Vec<Option<usize>> = found_loops.iter().map(slot0).collect();
 
         let mut keep = vec![false; found_loops.len()];
         for (idx, fl) in found_loops.iter().enumerate() {
