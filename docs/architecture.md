@@ -11,7 +11,7 @@ This is a monorepo without external users -- breaking changes are OK as long as 
 ### `src/simlin-engine` (Rust)
 Core simulation engine. Compiles, type-checks, unit-checks, and simulates SD models.
 - Projects consist of 1 or more models, compiled to bytecode (`compiler/`)
-- Primary compilation path is `db::compile_project_incremental()` using salsa tracked functions for fine-grained incrementality (`db.rs`, `db_analysis.rs`, `db_ltm.rs`)
+- Primary compilation path is `db::compile_project_incremental()` using salsa tracked functions for fine-grained incrementality (`db.rs`, `db_analysis.rs`, `db_ltm.rs`, `db_ltm_ir.rs`)
 - Equation text is parsed via recursive descent parser (`parser/mod.rs`)
 - Simulations run on a stack-based bytecode VM (`vm.rs`) with `PREVIOUS`/`INIT` intrinsic opcodes
 - `builtins.rs` defines builtin functions (including `PREVIOUS`, `INIT`); stateful module functions (TREND, SMOOTH3) are model definitions in `stdlib/*.stmx`, generated into `stdlib.gen.rs`

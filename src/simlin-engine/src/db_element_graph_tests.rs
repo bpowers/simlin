@@ -793,29 +793,19 @@ fn element_graph_whole_rhs_scalar_reducer_is_its_own_agg_node() {
     assert_no_edge(&result, "pop[boston]", "migration[nyc]");
 }
 
-/// AC1.5: Multidim partial-fixed references conservatively expand as
-/// full Wildcard.
-///
-/// For `target[Region] = pop[NYC, Adult] + SUM(pop[NYC, *])` with
-/// `pop[Region, Age]` (Region={NYC, Boston}, Age={Adult, Child}):
-///
-/// - The literal pair `pop[NYC, Adult]` produces broadcast edges from
-///   that single source element to every target element (FixedIndex).
-/// - The partial-wildcard `pop[NYC, *]` inside SUM is conservatively
-///   treated as a full Wildcard for now: it drops the literal `NYC`
-///   pinning and expands as if every (Region, Age) source element fed
-///   every target element. Tightening this to a per-dimension
-///   wildcard-on-Age-only expansion is deferred (TODO: see
-///   ltm-per-ref-elem-graph design plan AC1.5).
-///
-/// Concretely, the conservative behavior emits all 4 x 2 = 8 source-to-
-/// target edges. This is the same edge count today's CrossElement
-/// classifier emits, which is intentional: AC1.5 is documented as
-/// "not a regression vs today" -- the test should pass today AND after
-/// the refactor lands, pinning the conservative semantics in place.
+/// AC4.1 (element graph, sliced reducer): `target[Region] = pop[NYC, Adult] +
+/// SUM(pop[NYC, *])` over `pop[Region, Age]` (Region={NYC, Boston}, Age={Adult,
+/// Child}). The maximal `SUM(pop[NYC, *])` subexpression is hoisted into a
+/// synthetic agg `$⁚ltm⁚agg⁚0` whose `read_slice = [Pinned(nyc), Reduced]`, so
+/// the element graph routes *only the NYC rows* through the agg:
+/// `pop[nyc,adult] → agg`, `pop[nyc,child] → agg`, then `agg → target[r]`
+/// for every `r` (the agg is scalar -- no `Iterated` axis -- so it
+/// broadcasts). Boston's rows do *not* feed the agg, and there is no
+/// `pop[d] → target[e]` full-cross-product edge from the reducer. The literal
+/// `pop[NYC, Adult]` `FixedIndex` reference still broadcasts to every target.
 #[test]
-fn element_graph_multidim_partial_fixed_conservative() {
-    let project = TestProject::new("multidim_partial_fixed")
+fn element_graph_sliced_reducer_reads_only_pinned_row() {
+    let project = TestProject::new("sliced_reducer_elem_graph")
         .named_dimension("Region", &["NYC", "Boston"])
         .named_dimension("Age", &["Adult", "Child"])
         .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "10", None)
@@ -827,26 +817,363 @@ fn element_graph_multidim_partial_fixed_conservative() {
         );
 
     let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
 
-    // Literal-pair broadcast edges from FixedIndex source `pop[NYC, Adult]`:
-    // the single source element feeds every target element.
+    // Only the NYC row feeds the agg (the slice reads `pop[NYC, *]`).
+    assert_edge(&result, "pop[nyc,adult]", agg);
+    assert_edge(&result, "pop[nyc,child]", agg);
+    assert_no_edge(&result, "pop[boston,adult]", agg);
+    assert_no_edge(&result, "pop[boston,child]", agg);
+
+    // The scalar agg broadcasts to every target element.
+    assert_edge(&result, agg, "target[nyc]");
+    assert_edge(&result, agg, "target[boston]");
+
+    // The literal `pop[NYC, Adult]` FixedIndex reference broadcasts.
     assert_edge(&result, "pop[nyc,adult]", "target[nyc]");
     assert_edge(&result, "pop[nyc,adult]", "target[boston]");
 
-    // Partial-wildcard SUM(pop[NYC, *]) expanded conservatively as full
-    // Wildcard: every source element of `pop` (including the Boston row,
-    // because we drop the literal `NYC` pinning in the conservative
-    // expansion) feeds every target element.
+    // No `pop[d] → target[e]` full-cross-product edge from the reducer:
+    // every reducer-side path goes via the agg, and only the NYC row at that.
+    assert_no_edge(&result, "pop[nyc,child]", "target[nyc]");
+    assert_no_edge(&result, "pop[nyc,child]", "target[boston]");
+    assert_no_edge(&result, "pop[boston,adult]", "target[nyc]");
+    assert_no_edge(&result, "pop[boston,adult]", "target[boston]");
+    assert_no_edge(&result, "pop[boston,child]", "target[nyc]");
+    assert_no_edge(&result, "pop[boston,child]", "target[boston]");
+}
+
+/// AC4.2 (element graph, arrayed agg over an iterated dim): `x[D1] =
+/// matrix[a, x] + SUM(matrix[D1, *])` over `matrix[D1, D2]` (D1={a, b},
+/// D2={x, y}), `x` apply-to-all over `D1`. The maximal `SUM(matrix[D1, *])`
+/// subexpression -- a partial reduce keyed by the active A2A dimension `D1` --
+/// is hoisted into an *arrayed* synthetic agg over `D1` (`read_slice =
+/// [Iterated(d1), Reduced]`, `result_dims = [D1]`), so the element graph has
+/// `matrix[d1, d2] → agg[d1]` (each `D1` row feeds that `D1`'s agg slot) and
+/// `agg[d1] → x[d1]` (the diagonal projection), with NO `matrix[a, *] →
+/// agg[b]` cross-slot edges. The literal `matrix[a, x]` FixedIndex reference
+/// broadcasts to every `x` element.
+#[test]
+fn element_graph_arrayed_agg_over_iterated_dim() {
+    let project = TestProject::new("arrayed_agg_elem_graph")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+        .array_aux_direct(
+            "x",
+            vec!["D1".into()],
+            "matrix[a, x] + SUM(matrix[D1, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Each D1 row → that D1's agg slot.
+    assert_edge(&result, "matrix[a,x]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix[a,y]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix[b,x]", &format!("{agg}[b]"));
+    assert_edge(&result, "matrix[b,y]", &format!("{agg}[b]"));
+    // No cross-slot edges (a's rows don't feed b's slot and vice versa).
+    assert_no_edge(&result, "matrix[a,x]", &format!("{agg}[b]"));
+    assert_no_edge(&result, "matrix[a,y]", &format!("{agg}[b]"));
+    assert_no_edge(&result, "matrix[b,x]", &format!("{agg}[a]"));
+    assert_no_edge(&result, "matrix[b,y]", &format!("{agg}[a]"));
+
+    // The agg projects diagonally into `x`.
+    assert_edge(&result, &format!("{agg}[a]"), "x[a]");
+    assert_edge(&result, &format!("{agg}[b]"), "x[b]");
+    assert_no_edge(&result, &format!("{agg}[a]"), "x[b]");
+    assert_no_edge(&result, &format!("{agg}[b]"), "x[a]");
+
+    // The literal `matrix[a, x]` FixedIndex reference broadcasts to every `x`.
+    assert_edge(&result, "matrix[a,x]", "x[a]");
+    assert_edge(&result, "matrix[a,x]", "x[b]");
+    // No scalar (subscript-free) agg node -- the agg is arrayed over D1.
+    assert!(
+        !result.edges.contains_key(agg) && !result.edges.values().any(|ts| ts.contains(agg)),
+        "the agg over D1 must always be subscripted (agg[d1]), never bare {agg}"
+    );
+}
+
+/// #514 (element graph, a *mixed* `Iterated` + `Pinned` + `Reduced` read
+/// slice): `matrix3d[D1, Region, Age]`, `x` A2A over `D1`, `x[D1] =
+/// matrix3d[a, NYC, Adult] + SUM(matrix3d[D1, NYC, *])`. The reducer arg's
+/// read slice is `[Iterated(d1), Pinned(nyc), Reduced]` (axis 0 iterated over
+/// the target's `D1`, axis 1 pinned to literal `NYC`, axis 2 wildcard), so
+/// the agg is arrayed over `D1` (`result_dims = [D1]`). The element graph
+/// has `matrix3d[d1, nyc, age] → agg[d1]` (only the `NYC` slab of each `D1`
+/// row, both `Age` elements) and `agg[d1] → x[d1]` (diagonal), with NO
+/// `matrix3d[d1, boston, *]` edge into the agg and NO cross-`D1`-slot agg
+/// edge. The literal `matrix3d[a, NYC, Adult]` FixedIndex reference
+/// broadcasts to every `x` element.
+#[test]
+fn element_graph_mixed_pinned_iterated_reduced_slice() {
+    let project = TestProject::new("mixed_slice_elem_graph")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("Region", &["NYC", "Boston"])
+        .named_dimension("Age", &["Adult", "Child"])
+        .array_aux_direct(
+            "matrix3d",
+            vec!["D1".into(), "Region".into(), "Age".into()],
+            "1",
+            None,
+        )
+        .array_aux_direct(
+            "x",
+            vec!["D1".into()],
+            "matrix3d[a, NYC, Adult] + SUM(matrix3d[D1, NYC, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Only the NYC slab of each D1 row feeds that D1's agg slot (both Age elems).
+    assert_edge(&result, "matrix3d[a,nyc,adult]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix3d[a,nyc,child]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix3d[b,nyc,adult]", &format!("{agg}[b]"));
+    assert_edge(&result, "matrix3d[b,nyc,child]", &format!("{agg}[b]"));
+    // The pinned `Region` axis: Boston rows never feed the agg.
+    assert_no_edge(&result, "matrix3d[a,boston,adult]", &format!("{agg}[a]"));
+    assert_no_edge(&result, "matrix3d[a,boston,child]", &format!("{agg}[a]"));
+    assert_no_edge(&result, "matrix3d[b,boston,adult]", &format!("{agg}[b]"));
+    assert_no_edge(&result, "matrix3d[b,boston,child]", &format!("{agg}[b]"));
+    // No cross-D1-slot edges.
+    assert_no_edge(&result, "matrix3d[a,nyc,adult]", &format!("{agg}[b]"));
+    assert_no_edge(&result, "matrix3d[b,nyc,adult]", &format!("{agg}[a]"));
+
+    // The agg projects diagonally into `x`.
+    assert_edge(&result, &format!("{agg}[a]"), "x[a]");
+    assert_edge(&result, &format!("{agg}[b]"), "x[b]");
+    assert_no_edge(&result, &format!("{agg}[a]"), "x[b]");
+    assert_no_edge(&result, &format!("{agg}[b]"), "x[a]");
+
+    // The literal `matrix3d[a, NYC, Adult]` FixedIndex reference broadcasts.
+    assert_edge(&result, "matrix3d[a,nyc,adult]", "x[a]");
+    assert_edge(&result, "matrix3d[a,nyc,adult]", "x[b]");
+    // No scalar (subscript-free) agg node -- the agg is arrayed over D1.
+    assert!(
+        !result.edges.contains_key(agg) && !result.edges.values().any(|ts| ts.contains(agg)),
+        "the agg over D1 must always be subscripted (agg[d1]), never bare {agg}"
+    );
+}
+
+/// AC4.4 (element graph, the dynamic-index carve-out): `x[Region] =
+/// SUM(pop[idx, *])` over `pop[Region, Age]` with `idx` a scalar aux -- a
+/// reducer over a dynamic index is *not* hoisted (`compute_read_slice`
+/// declines the `idx` axis), so the IR reclassifies the `(pop, x)` reference
+/// from `Wildcard` to `DynamicIndex` and the element graph keeps the
+/// conservative `pop[d] → x[e]` full cross-product. No `$⁚ltm⁚agg` node
+/// appears, and `pop` has no edge to any agg node.
+#[test]
+fn element_graph_dynamic_index_reducer_stays_conservative() {
+    let project = TestProject::new("dyn_index_reducer_elem_graph")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .named_dimension("Age", &["Adult", "Child"])
+        .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "10", None)
+        .scalar_aux("idx", "1")
+        .array_aux_direct("x", vec!["Region".into()], "SUM(pop[idx, *])", None);
+
+    let result = element_edges(&project);
+
+    // No synthetic agg node anywhere in the graph.
+    assert!(
+        !result
+            .edges
+            .keys()
+            .any(|k| k.contains("\u{205A}agg\u{205A}"))
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t.contains("\u{205A}agg\u{205A}"))),
+        "a dynamic-index reducer must not produce a synthetic agg node; got: {:?}",
+        result.edges
+    );
+
+    // The conservative full cross-product: every `pop` element feeds every
+    // `x` element.
     let from_elems = &[
         "pop[nyc,adult]",
         "pop[nyc,child]",
         "pop[boston,adult]",
         "pop[boston,child]",
     ];
-    let to_elems = &["target[nyc]", "target[boston]"];
     for from in from_elems {
-        for to in to_elems {
-            assert_edge(&result, from, to);
-        }
+        assert_edge(&result, from, "x[nyc]");
+        assert_edge(&result, from, "x[boston]");
     }
+}
+
+/// #514 (element graph, *scalar* feeder of a hoisted *scalar* reducer): a
+/// reducer whose argument references a *scalar* model variable, hoisted out of
+/// an *arrayed* target -- `share[Region] = pop[Region] / SUM(pop[*] * scale)`
+/// with `scale` scalar. The maximal `SUM(pop[*] * scale)` subexpression is
+/// hoisted into a *scalar* synthetic agg `$⁚ltm⁚agg⁚0` (whole-extent reduce of
+/// `pop[*]`, no iterated axis), and *both* feeders are routed through it: the
+/// arrayed `pop[d] → agg` reductions and the scalar `scale → agg` edge. The
+/// `scale` node must be the *bare* scalar name (`scale`), not the malformed
+/// empty-bracket node `scale[]` the per-axis row machinery would produce when
+/// fed an empty source-dimension list. The agg then broadcasts to every
+/// `share` element. (`share`'s target must be arrayed -- with a *scalar*
+/// target the `(scale, share)` edge would be short-circuited by
+/// `model_element_causal_edges`'s both-scalar fast path before the IR's
+/// `ThroughAgg` routing is consulted, so `emit_agg_routed_edges` would never
+/// be reached with an empty `from_dims`.)
+#[test]
+fn element_graph_scalar_feeder_of_hoisted_reducer_is_bare_node() {
+    let project = TestProject::new("scalar_feeder_hoisted_reducer")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_aux("pop[Region]", "100")
+        .scalar_aux("scale", "2")
+        .array_aux("share[Region]", "pop / SUM(pop[*] * scale)");
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The scalar feeder is a *bare* node feeding the (scalar) agg -- not a
+    // malformed `scale[]` bracketed node.
+    assert_edge(&result, "scale", agg);
+    assert!(
+        !result.edges.contains_key("scale[]")
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t == "scale[]")),
+        "the scalar feeder of a hoisted reducer must be the bare `scale` node, never `scale[]`; got: {:?}",
+        result.edges
+    );
+    // The arrayed feeder reduces into the same scalar agg.
+    assert_edge(&result, "pop[nyc]", agg);
+    assert_edge(&result, "pop[boston]", agg);
+    // The (scalar) agg broadcasts to every `share` element.
+    assert_edge(&result, agg, "share[nyc]");
+    assert_edge(&result, agg, "share[boston]");
+    // The bare-numerator diagonal `pop[d] → share[d]` (from the `pop[Region] /`
+    // numerator) survives.
+    assert_edge(&result, "pop[nyc]", "share[nyc]");
+    assert_edge(&result, "pop[boston]", "share[boston]");
+}
+
+/// #514 (element graph, scalar feeder of an *arrayed* hoisted reducer): a
+/// sliced reducer over an A2A body whose argument also references a *scalar*,
+/// e.g. `growth[D1] = SUM(matrix[D1,*] * scale)` with `scale` scalar -- the
+/// reducer is hoisted into an *arrayed* agg over `D1` (`read_slice =
+/// [Iterated(d1), Reduced]`, `result_dims = [D1]`). The scalar `scale` is not
+/// subscripted, so it feeds *every* agg slot: `scale → agg[a]`, `scale →
+/// agg[b]` -- and never the malformed `scale[]`. (`growth[D1] =
+/// SUM(matrix[D1,*] * scale)` is a *whole-RHS* reducer -- a variable-backed
+/// agg -- so `+ 1` keeps `SUM(...)` a sub-expression and forces a synthetic
+/// agg.)
+#[test]
+fn element_graph_scalar_feeder_of_arrayed_hoisted_reducer_feeds_every_slot() {
+    let project = TestProject::new("scalar_feeder_arrayed_reducer")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "10", None)
+        .scalar_aux("scale", "2")
+        .array_aux_direct(
+            "growth",
+            vec!["D1".into()],
+            "SUM(matrix[D1,*] * scale) + 1",
+            None,
+        );
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // The scalar feeder feeds every agg slot, as a bare node.
+    assert_edge(&result, "scale", &format!("{agg}[a]"));
+    assert_edge(&result, "scale", &format!("{agg}[b]"));
+    assert!(
+        !result.edges.contains_key("scale[]")
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t == "scale[]")),
+        "the scalar feeder of an arrayed hoisted reducer must be the bare `scale` node, never `scale[]`; got: {:?}",
+        result.edges
+    );
+    // The arrayed feeder routes each D1 row to that D1's agg slot.
+    assert_edge(&result, "matrix[a,x]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix[a,y]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix[b,x]", &format!("{agg}[b]"));
+    assert_edge(&result, "matrix[b,y]", &format!("{agg}[b]"));
+    // The arrayed agg projects diagonally into `growth`.
+    assert_edge(&result, &format!("{agg}[a]"), "growth[a]");
+    assert_edge(&result, &format!("{agg}[b]"), "growth[b]");
+}
+
+// ---- #511: iterated-dimension subscript -> same-element projection ----
+
+/// AC3.1 (element-graph side): an A2A target that references an arrayed
+/// dependency by its *iterated dimension* (`growth[Region,Age] =
+/// row_sum[Region] * c`, `row_sum` over `Region`, `growth` over
+/// `Region x Age`) classifies the `row_sum[Region]` subscript as `Bare`
+/// (see `db_ltm_ir_tests::ir_iterated_dim_subscript_is_bare`), so the
+/// element graph has the same-element-on-shared-dims projection
+/// `row_sum[r] -> growth[r,a]` for every `(r, a)` -- and NOT the full
+/// `row_sum[r1] -> growth[r2,*]` cross-product. Before the fix the subscript
+/// classified as `DynamicIndex` and emitted the all-pairs cross-product.
+#[test]
+fn element_graph_iterated_dim_subscript_same_element_projection() {
+    let project = TestProject::new("iterated_dim_elem_graph")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_aux("row_sum[Region]", "100")
+        .array_aux_direct(
+            "growth",
+            vec!["Region".into(), "Age".into()],
+            "row_sum[Region] * 0.5",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    // Same-element-on-shared-dims: row_sum[r] feeds growth[r,young] and
+    // growth[r,old] -- broadcasting over the target-only dimension Age.
+    assert_edge(&result, "row_sum[a]", "growth[a,young]");
+    assert_edge(&result, "row_sum[a]", "growth[a,old]");
+    assert_edge(&result, "row_sum[b]", "growth[b,young]");
+    assert_edge(&result, "row_sum[b]", "growth[b,old]");
+
+    // No cross-region edges (the reference is same-element on Region, not a
+    // full cross-product).
+    assert_no_edge(&result, "row_sum[a]", "growth[b,young]");
+    assert_no_edge(&result, "row_sum[a]", "growth[b,old]");
+    assert_no_edge(&result, "row_sum[b]", "growth[a,young]");
+    assert_no_edge(&result, "row_sum[b]", "growth[a,old]");
+}
+
+/// AC3.5: a mapped-dimension iterated subscript (`x` over `Region`,
+/// `target` over `State`, a `State→Region` mapping, `target[State] =
+/// x[State] * c`) classifies `x[State]` as `Bare` (see
+/// `db_ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`), so the
+/// element graph is *identical* to the one a bare `x` reference (`target[State]
+/// = x * c`) produces -- no new dimension-mapping behavior. `expand_same_element`
+/// matches dimension *names*, so a disjoint-named pair like `Region`/`State`
+/// is the broadcast case (every source element feeds every target element)
+/// for both the subscripted and the bare form; the assertion below pins
+/// "subscripted iterated == bare", not the projection shape.
+#[test]
+fn element_graph_mapped_iterated_dim_matches_bare_baseline() {
+    let subscripted = TestProject::new("mapped_iterated_subscripted")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x[State] * 0.5", None);
+    let bare = TestProject::new("mapped_iterated_bare")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x * 0.5", None);
+
+    let sub_result = element_edges(&subscripted);
+    let bare_result = element_edges(&bare);
+
+    assert_eq!(
+        sub_result.edges, bare_result.edges,
+        "a mapped-dimension iterated subscript `x[State]` must produce the \
+         same element edges as a bare `x` reference into the same target"
+    );
 }

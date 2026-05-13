@@ -3879,8 +3879,8 @@ fn try_detect_ltm_loops_incremental(
     let results = vm.into_results();
 
     // `rel_loop_score` is no longer a VM variable; derive it post-sim from
-    // the `loop_score` series the VM does emit, using the partition mapping
-    // cached on `model_ltm_variables`.  See
+    // the `loop_score` series the VM does emit, using the per-slot partition
+    // mapping cached on `model_ltm_variables`.  See
     // `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`.
     //
     // For arrayed (A2A) loops we compute per-element rel scores then
@@ -3890,11 +3890,11 @@ fn try_detect_ltm_loops_incremental(
     // The aggregation is delegated to `ltm_post::aggregate_per_element_argmax_abs`
     // so the partition-stride handling (mixed partitions where stride >
     // per-loop n_slots) is centralized and unit-testable.  See issue #463.
-    let per_element_rel_scores = crate::ltm_post::compute_rel_loop_scores_per_element(
-        &results,
-        &loop_partitions,
-        &n_slots_by_loop,
-    );
+    // `compute_rel_loop_scores_per_element` derives each loop's slot count
+    // from `loop_partitions[id].len()`, so no separate slot-count map is
+    // threaded; `aggregate_per_element_argmax_abs` still takes one.
+    let per_element_rel_scores =
+        crate::ltm_post::compute_rel_loop_scores_per_element(&results, &loop_partitions);
     let importance_by_loop = crate::ltm_post::aggregate_per_element_argmax_abs(
         &per_element_rel_scores,
         &n_slots_by_loop,

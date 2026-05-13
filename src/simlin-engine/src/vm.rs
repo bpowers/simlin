@@ -5919,9 +5919,11 @@ mod empty_view_reduce_tests {
 
     // -- STDDEV: opcode guard should return NaN for size==0 (AC2.1) --
     //
-    // reduce_view returns the sum init value (0.0) for empty views. Without the guard,
-    // the ArrayStddev opcode would attempt `size - 1` on a usize of 0, which is an
-    // arithmetic overflow (panic in debug builds). The guard is safety-critical.
+    // reduce_view returns the sum init value (0.0) for empty views. The
+    // ArrayStddev opcode uses a population-variance divisor `size` (NOT
+    // `size - 1`); without the explicit `size == 0` guard the divisor would
+    // be `0.0` and `variance_sum / 0.0` yields NaN by IEEE rules -- the
+    // guard makes that NaN explicit rather than implicit.
     #[test]
     fn stddev_empty_view_reduce_returns_zero_sum() {
         let view = empty_view();
@@ -5929,10 +5931,11 @@ mod empty_view_reduce_tests {
         let temp: [f64; 0] = [];
         let ctx = empty_context();
         // reduce_view returns the sum init value (0.0) for empty views;
-        // the ArrayStddev opcode guards size==0 before computing (size-1) divisor
+        // the ArrayStddev opcode guards size==0 before dividing by the
+        // population-variance divisor `size`.
         let sum = Vm::reduce_view(&temp, &view, &curr, &ctx, |acc, v| acc + v, 0.0);
         assert_eq!(sum, 0.0);
         assert_eq!(view.size(), 0);
-        // Without the guard: `size - 1` on usize(0) would overflow/panic in debug builds
+        // Without the guard: `variance_sum / (size as f64)` = `0.0 / 0.0` = NaN.
     }
 }

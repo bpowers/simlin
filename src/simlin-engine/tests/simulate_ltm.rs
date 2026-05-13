@@ -35,15 +35,15 @@ fn compile_ltm_incremental(project: &simlin_engine::datamodel::Project) -> Compi
     compile_ltm_incremental_with_partitions(project).0
 }
 
-/// Compile with LTM enabled and capture the loop_partitions mapping
-/// `compute_rel_loop_scores` needs to derive relative scores post-sim.
-/// Since rel_loop_score is no longer emitted as a VM variable (see
-/// docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md), tests that
-/// used to filter `results.offsets` for `$⁚ltm⁚rel_loop_score⁚{id}` must
-/// now invoke `ltm_post::compute_rel_loop_scores(results, loop_partitions)`.
+/// Compile with LTM enabled and capture the per-slot loop_partitions
+/// mapping `compute_rel_loop_scores*` need to derive relative scores
+/// post-sim.  Since rel_loop_score is no longer emitted as a VM variable
+/// (see docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md), tests
+/// that used to filter `results.offsets` for `$⁚ltm⁚rel_loop_score⁚{id}`
+/// must now invoke `ltm_post::compute_rel_loop_scores(results, loop_partitions)`.
 fn compile_ltm_incremental_with_partitions(
     project: &simlin_engine::datamodel::Project,
-) -> (CompiledSimulation, HashMap<String, Option<usize>>) {
+) -> (CompiledSimulation, HashMap<String, Vec<Option<usize>>>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
@@ -128,7 +128,7 @@ fn ensure_ltm_results(
     expected: &LtmResults,
     actual_results: &Results,
     loops: &[DetectedLoop],
-    loop_partitions: &HashMap<String, Option<usize>>,
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
 ) {
     let mut errors = Vec::new();
 
@@ -2768,6 +2768,357 @@ fn test_cross_dim_stddev_expansion() {
     }
 }
 
+/// Build a 3-region STDDEV-in-a-feedback-loop model (#483, AC6.1/AC6.3).
+///
+/// `Region = {a, b, c}`; `s[Region]` is a stock with heterogeneous inits
+/// (`a=10, b=20, c=30`) fed by `update[Region]`; `total = STDDEV(s[*])`
+/// (a scalar aux); `update[Region]` is a *per-element-equation* flow
+/// (`Equation::Arrayed`) with `update[a] = total*c`, `update[b] =
+/// total*c*0.5`, `update[c] = total*c*2`. The differing per-element
+/// multipliers make the elements drift apart at different rates, so STDDEV
+/// keeps changing -- the analytic per-element ceteris-paribus partial
+/// isolates each element's contribution while the pre-#483 delta-ratio
+/// conflated them (`partial_eq == target` ⇒ the link-score magnitude was a
+/// degenerate `1` whenever `Δtotal ≠ 0`). The closed loop is `s[r] → total
+/// → update[r] → s[r]` per element, plus the cross-element
+/// `s[r] → total → update[r'] → s[r']`.
+fn build_stddev_feedback_model(c: f64) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+    datamodel::Project {
+        name: "stddev_feedback".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "s".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), "10".to_string(), None, None),
+                            ("b".to_string(), "20".to_string(), None, None),
+                            ("c".to_string(), "30".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["update".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "total".to_string(),
+                    equation: Equation::Scalar("STDDEV(s[*])".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "update".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), format!("total * {c}"), None, None),
+                            ("b".to_string(), format!("total * {c} * 0.5"), None, None),
+                            ("c".to_string(), format!("total * {c} * 2"), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Build a 3-region STDDEV-*invariant*-regime model (#483, AC6.2).
+///
+/// Same `s[Region]` stock with heterogeneous inits, but the inflow
+/// `update[Region] = k` is a *constant scalar identical for every element*,
+/// so all `s[i]` shift by the same `k` each step ⇒ STDDEV is invariant ⇒
+/// `total` is bit-for-bit constant ⇒ the `Δtarget = 0` guard in
+/// `build_element_reducer_link_score` zeros every `s[d]→total` link score
+/// at every step ≥ 1. Note: this is genuinely zero with *both* the old
+/// delta-ratio and the new analytic partial (both numerators are 0 when
+/// `Δtotal = 0`), so it pins AC6.2 but does *not* distinguish the fix --
+/// the load-bearing distinguishing test is `test_stddev_link_score_matches_hand_calc`.
+/// `update` has no `total` dependency, so there is no feedback loop;
+/// discovery mode (which scores every causal edge) emits the `s[d]→total`
+/// link scores anyway.
+fn build_stddev_invariant_model(k: f64) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+    datamodel::Project {
+        name: "stddev_invariant".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "s".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), "10".to_string(), None, None),
+                            ("b".to_string(), "20".to_string(), None, None),
+                            ("c".to_string(), "30".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["update".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "total".to_string(),
+                    equation: Equation::Scalar("STDDEV(s[*])".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "update".to_string(),
+                    equation: Equation::ApplyToAll(vec!["Region".to_string()], format!("{k}")),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// #483 / ltm-arrays-hardening.AC6.1 / AC6.3: for `total = STDDEV(s[*])`
+/// feeding back into `s`, the per-element `$⁚ltm⁚link_score⁚s[d]→total`
+/// series equals the analytic ceteris-paribus partial (the unrolled
+/// population-variance `sqrt` formula holding `s[d]` live, the other
+/// elements at `PREVIOUS`), wrapped in the standard link-score formula --
+/// matched against a hand calculation at every step within 1e-6 -- and
+/// is *not* the degenerate-`1` magnitude the pre-#483 delta-ratio produced
+/// (`partial_eq == target` ⇒ `ABS(SAFEDIV(Δtotal, Δtotal, 0)) == 1`). So
+/// this test would fail on the pre-fix code.
+#[test]
+fn test_stddev_link_score_matches_hand_calc() {
+    // A multiplier large enough that the elements drift apart visibly each
+    // step (keeps the hand calc well clear of floating-point noise) but the
+    // stock values stay modest over 5 steps.
+    let project = build_stddev_feedback_model(1.0);
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("STDDEV feedback model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    let off = |name: &str| -> usize {
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing offset {name}; have: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let s_a = off("s[a]");
+    let s_b = off("s[b]");
+    let s_c = off("s[c]");
+    let total_off = off("total");
+
+    let ls_offsets = find_cross_dimensional_offsets(&results, "s", "total");
+    assert_eq!(
+        ls_offsets.len(),
+        3,
+        "STDDEV reducer edge should produce 3 per-element link scores, got: {ls_offsets:?}"
+    );
+    let ls_off = |elem: &str| -> usize {
+        ls_offsets
+            .iter()
+            .find(|(e, _)| e == elem)
+            .unwrap_or_else(|| panic!("no s[{elem}]→total link score; have {ls_offsets:?}"))
+            .1
+    };
+
+    let at = |step: usize, o: usize| results.data[step * results.step_size + o];
+
+    // The link-score equation (`build_element_reducer_link_score`) at step
+    // `t >= 1` is:
+    //   if Δtotal == 0 OR Δs[d] == 0 then 0
+    //   else |SAFEDIV(partial_d(t) - total(t-1), Δtotal, 0)|
+    //        * SIGN(SAFEDIV(partial_d(t) - total(t-1), Δs[d], 0))
+    // where partial_d(t) = sqrt((Σ_i (s'_i - m)^2) / 3), s'_i = s[d](t) for
+    // i == d else s[i](t-1), m = (Σ_i s'_i) / 3 -- matching the engine's
+    // population-variance STDDEV (divisor N, `(v-mean).powf(2.0)`).
+    let elems: [(&str, usize); 3] = [("a", s_a), ("b", s_b), ("c", s_c)];
+    let mut checked = 0usize;
+    let mut saw_non_degenerate = false;
+    for step in 1..results.step_count {
+        let total_t = at(step, total_off);
+        let total_prev = at(step - 1, total_off);
+        let d_total = total_t - total_prev;
+        if d_total.abs() < 1e-12 {
+            continue;
+        }
+        for (live_idx, (live_elem, live_s_off)) in elems.iter().enumerate() {
+            let d_source = at(step, *live_s_off) - at(step - 1, *live_s_off);
+            // s'_i: live element at step t, others frozen at step t-1.
+            let s_prime: Vec<f64> = elems
+                .iter()
+                .enumerate()
+                .map(|(i, (_, s_off))| {
+                    if i == live_idx {
+                        at(step, *s_off)
+                    } else {
+                        at(step - 1, *s_off)
+                    }
+                })
+                .collect();
+            let m = (s_prime[0] + s_prime[1] + s_prime[2]) / 3.0;
+            let variance = ((s_prime[0] - m).powf(2.0)
+                + (s_prime[1] - m).powf(2.0)
+                + (s_prime[2] - m).powf(2.0))
+                / 3.0;
+            let partial = variance.sqrt();
+            let num = partial - total_prev;
+            let expected = if d_source.abs() < 1e-12 {
+                0.0
+            } else {
+                let sign_arg = num / d_source;
+                let sign = if sign_arg > 0.0 {
+                    1.0
+                } else if sign_arg < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+                (num / d_total).abs() * sign
+            };
+            let recorded = at(step, ls_off(live_elem));
+            assert!(
+                (recorded - expected).abs() < 1e-6,
+                "step {step}, element {live_elem}: recorded link score {recorded} != hand calc \
+                 {expected} (partial_d(t) = {partial}, total(t) = {total_t}, total(t-1) = \
+                 {total_prev}, Δs[d] = {d_source})"
+            );
+            // The pre-#483 delta-ratio produced |Δtotal/Δtotal| = 1 here
+            // (whenever Δtotal != 0); the analytic value is not degenerate-1.
+            if (recorded.abs() - 1.0).abs() > 1e-3 {
+                saw_non_degenerate = true;
+            }
+        }
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "expected at least one step t >= 1 with Δtotal != 0"
+    );
+    assert!(
+        saw_non_degenerate,
+        "the analytic STDDEV link score should differ from the pre-#483 degenerate-1 \
+         magnitude at some step (|recorded| != ~1)"
+    );
+}
+
+/// #483 / ltm-arrays-hardening.AC6.2: under a STDDEV-invariant per-element
+/// flow (every element shifted by the same constant each step), STDDEV does
+/// not change, so the `Δtarget = 0` guard zeros every `s[d]→total` link
+/// score at every step ≥ 1. (Passes with both the old delta-ratio and the
+/// new analytic partial -- both numerators vanish when `Δtotal = 0` -- so
+/// this pins AC6.2 but does *not* distinguish the fix; the distinguishing
+/// test is `test_stddev_link_score_matches_hand_calc`.)
+#[test]
+fn test_stddev_invariant_regime_link_scores_zero() {
+    let project = build_stddev_invariant_model(5.0);
+    // Discovery mode: `update` has no `total` dependency, so there is no
+    // feedback loop -- but discovery scores every causal edge, including
+    // the `s[d] → total` reducer edge.
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("STDDEV-invariant model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    let ls_offsets = find_cross_dimensional_offsets(&results, "s", "total");
+    assert_eq!(
+        ls_offsets.len(),
+        3,
+        "STDDEV reducer edge should produce 3 per-element link scores, got: {ls_offsets:?}"
+    );
+    for (elem, offset) in &ls_offsets {
+        for step in 0..results.step_count {
+            let val = results.data[step * results.step_size + offset];
+            assert!(
+                val.abs() < 1e-9 && !val.is_nan(),
+                "STDDEV-invariant regime: s[{elem}]→total link score at step {step} should be \
+                 ~0 (STDDEV is constant ⇒ Δtarget = 0 guard fires), got {val}"
+            );
+        }
+    }
+}
+
 /// AC5.6 / AC4.4: A compound expression combining MAX and MIN -- as
 /// sub-expressions, not whole-RHS -- mints two synthetic aggregate nodes,
 /// and each gets N per-source-element reducer link scores.
@@ -2786,7 +3137,8 @@ fn test_cross_dim_stddev_expansion() {
 /// with the same cardinality as its input. It cannot be used as the equation
 /// for a scalar aux: the engine would produce a dimension mismatch error
 /// because RANK's output is always an array. The nonlinear reducer path
-/// (generate_nonlinear_partial / STDDEV/RANK fallback) is exercised when MAX
+/// (generate_nonlinear_partial -- the MIN/MAX 2-arg unroll, STDDEV's analytic
+/// ceteris-paribus partial, RANK's delta-ratio stand-in) is exercised when MAX
 /// or MIN appears as a reducer, which is exactly what this test covers with
 /// the compound `MAX(population[*]) - MIN(population[*])` pattern.
 #[test]
@@ -3333,13 +3685,13 @@ fn find_loop_score_offsets(results: &Results) -> Vec<(String, usize)> {
 /// Test helper: thin forwarder to the production per-element helper.
 /// Retained so the existing A2A integration tests keep calling the
 /// same name; they now pin the production code rather than a parallel
-/// implementation.
+/// implementation.  The per-slot `loop_partitions` carries each loop's
+/// slot count (its `len()`), so no separate slot-count map is threaded.
 fn compute_rel_loop_scores_per_element(
     results: &Results,
-    loop_partitions: &HashMap<String, Option<usize>>,
-    n_slots_by_loop: &HashMap<String, usize>,
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
 ) -> HashMap<String, Vec<f64>> {
-    ltm_post::compute_rel_loop_scores_per_element(results, loop_partitions, n_slots_by_loop)
+    ltm_post::compute_rel_loop_scores_per_element(results, loop_partitions)
 }
 
 /// AC6.1 + AC6.4 + AC6.5: Pure A2A loop scores for an arrayed feedback model.
@@ -3515,15 +3867,12 @@ fn test_a2a_two_loop_relative_scores_sum_to_100() {
 
     // For each element, the absolute values of the per-element relative
     // loop scores across all loops should sum to approximately 1.0.  We
-    // compute rel scores inline from loop_score data because the A2A case
-    // requires per-element normalization, while the scalar production
-    // helper (`ltm_post::compute_rel_loop_scores`) collapses to element 0.
-    let n_slots_by_loop: HashMap<String, usize> = loop_partitions
-        .keys()
-        .map(|id| (id.clone(), n_elements))
-        .collect();
-    let rel_per_element =
-        compute_rel_loop_scores_per_element(&results, &loop_partitions, &n_slots_by_loop);
+    // use the per-element helper because the A2A case requires per-element
+    // normalization, while the scalar view (`ltm_post::compute_rel_loop_scores`)
+    // collapses to element 0.  Both A2A loops pass through `population[r]`,
+    // so at each element their slots land in the same `(partition, slot)`
+    // bucket and self-normalize together.
+    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
 
     for elem in 0..n_elements {
         // Pick a timestep late enough to have meaningful values (skip
@@ -3543,6 +3892,135 @@ fn test_a2a_two_loop_relative_scores_sum_to_100() {
                 elem,
                 rel_sum,
                 test_step
+            );
+        }
+    }
+}
+
+/// `ltm-arrays-hardening.AC2.1` regression guard: two structurally-independent
+/// A2A feedback subsystems over *different* dimensions must normalize their
+/// relative loop scores *within their own cycle partition*, not pooled across
+/// both subsystems.
+///
+/// Model: a self-reinforcing birth loop over `Region = {a, b, c}`
+///   `pop[Region]` (stock, init 100) -> `births[Region] = pop * 0.1` -> `pop`
+/// and an independent self-reinforcing production loop over `Product = {x, y}`
+///   `widgets[Product]` (stock, init 50) -> `production[Product] = widgets * 0.05` -> `widgets`
+/// with no cross-coupling, so the element graph has five disjoint single-stock
+/// SCCs (`pop[a]`, `pop[b]`, `pop[c]`, `widgets[x]`, `widgets[y]`) -- the per-
+/// slot `loop_partitions: HashMap<String, Vec<Option<usize>>>` introduced by
+/// commit 11eb1af1 (GH #487).
+///
+/// Asserts:
+///  1. The two subsystems' loops land in *distinct* `loop_partitions` slots:
+///     flattening every loop's per-slot partition vector yields five entries,
+///     all `Some`, all pairwise distinct. Under the pre-fix pooled behavior
+///     `loop_partitions` was `HashMap<String, Option<usize>>` and both loops
+///     resolved to a single shared bucket (or `None`), so this set would have
+///     size 1.
+///  2. Relative loop scores normalize *within each partition*: each loop is the
+///     only loop in each of its single-stock partitions, so every nonzero per-
+///     element relative score is exactly +1.0. Under the pre-fix pooled
+///     behavior the two reinforcing loops would cross-normalize, so the
+///     dominant loop's relative score would be the pooled ratio (~0.5) and the
+///     `== 1.0` check would fail on the old code.
+#[test]
+fn test_disconnected_a2a_loops_normalize_per_partition() {
+    use std::collections::HashSet;
+
+    let project = TestProject::new("two_a2a_subsystems")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Product", &["x", "y"])
+        .array_stock("pop[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "pop * 0.1", None)
+        .array_stock("widgets[Product]", "50", &["production"], &[], None)
+        .array_flow("production[Product]", "widgets * 0.05", None)
+        .build_datamodel();
+
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // Two structurally-independent A2A subsystems => exactly two loop IDs.
+    assert_eq!(
+        loop_partitions.len(),
+        2,
+        "two disconnected A2A subsystems should produce exactly two loop IDs, got {}: {:?}",
+        loop_partitions.len(),
+        loop_partitions.keys().collect::<Vec<_>>()
+    );
+
+    // (1) The two subsystems' loops occupy *distinct* partition slots: every
+    // element-level stock is its own SCC, so flattening all per-slot partition
+    // vectors gives five `Some` entries with no repeats. (Pre-fix: one shared
+    // bucket -> this set would be a singleton.)
+    let all_slots: Vec<Option<usize>> = loop_partitions.values().flatten().copied().collect();
+    assert_eq!(
+        all_slots.len(),
+        5,
+        "expected 3 Region slots + 2 Product slots = 5 per-slot partition entries, got {}: {:?}",
+        all_slots.len(),
+        loop_partitions
+    );
+    assert!(
+        all_slots.iter().all(|p| p.is_some()),
+        "every slot of a pure-A2A loop over a connected element resolves to a partition; got {:?}",
+        loop_partitions
+    );
+    let distinct: HashSet<usize> = all_slots.iter().filter_map(|p| *p).collect();
+    assert_eq!(
+        distinct.len(),
+        5,
+        "two disconnected A2A subsystems must occupy 5 distinct cycle partitions \
+         (not a single pooled bucket); got {} distinct from {:?}",
+        distinct.len(),
+        loop_partitions
+    );
+
+    // (2) Each loop is alone in each of its single-stock partitions, so the
+    // per-element relative loop score reduces to loop_score[k] / |loop_score[k]|.
+    // Both subsystems are purely reinforcing, so every nonzero relative score is
+    // exactly +1.0 -- NOT the pre-fix pooled value the two loops would share if
+    // they cross-normalized.
+    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    assert_eq!(
+        rel_per_element.len(),
+        2,
+        "should normalize two loop_score series, got {}",
+        rel_per_element.len()
+    );
+    for (loop_id, series) in &rel_per_element {
+        // The series is `step_count * stride` long; for a pure-A2A loop alone in
+        // its partition the stride is exactly the loop's element count.
+        let stride = loop_partitions
+            .get(loop_id)
+            .map(|pv| pv.len())
+            .expect("every rel-score loop id has a partition vector");
+        assert!(
+            stride == 2 || stride == 3,
+            "unexpected stride {stride} for {loop_id}"
+        );
+        assert_eq!(
+            series.len(),
+            results.step_count * stride,
+            "rel-score series for {loop_id} should be step_count * stride long"
+        );
+        let nonzero: Vec<f64> = series
+            .iter()
+            .copied()
+            .filter(|v| *v != 0.0 && !v.is_nan())
+            .collect();
+        assert!(
+            !nonzero.is_empty(),
+            "loop {loop_id} should have non-zero per-element relative scores once dynamics start"
+        );
+        for v in &nonzero {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "single-loop-per-partition relative score for {loop_id} should be exactly 1.0, \
+                 not pooled; got {v}"
             );
         }
     }
@@ -4521,12 +4999,9 @@ fn test_arrayed_population_ltm_exhaustive() {
         !loop_partitions.is_empty(),
         "Should have loop partition entries to normalize against"
     );
-    let n_slots_by_loop: HashMap<String, usize> = loop_partitions
-        .keys()
-        .map(|id| (id.clone(), n_elements))
-        .collect();
-    let rel_per_element =
-        compute_rel_loop_scores_per_element(&results, &loop_partitions, &n_slots_by_loop);
+    // This is a pure-A2A model over `Region`, so every loop has
+    // `n_elements` slots and its rel-score series strides by `n_elements`.
+    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
 
     // Check that relative loop scores per element sum to ~1.0 at some
     // timestep after initialization.
@@ -5654,12 +6129,10 @@ fn find_partial_reduce_offset(
 /// Build a 2-D arrayed feedback model whose loop runs over the
 /// partially-reduced axis.
 ///
-/// Model structure (all equations use bare references so the only
-/// subscripted variables are the explicit `matrix[D1,*]` reducer arg and
-/// the synthetic per-element scores -- an explicit `row_sum[D1]` subscript
-/// inside an apply-to-all equation classifies the reference as a dynamic
-/// index, which is a separate pre-existing limitation; Phase 4 sidesteps it
-/// rather than fixing it):
+/// Model structure (`growth` uses bare references because it depends on the
+/// stock `matrix` and the scalar `total`, not on `row_sum`; the
+/// `row_sum[D1]` iterated-dimension subscript itself is now classified
+/// `Bare` (GH #511) and demonstrated in `build_iterated_dim_subscript_model`):
 ///   matrix[D1,D2] (stock, distinct per-element initial values, multiplicative
 ///                  self-feedback -> the per-element trajectories diverge,
 ///                  so the reducer link scores are non-degenerate)
@@ -5669,13 +6142,19 @@ fn find_partial_reduce_offset(
 ///                  `matrix` is the same-element diagonal, `total` is a
 ///                  scalar that broadcasts.
 ///
-/// `D1 = {a, b}`, `D2 = {x, y}`. The element-level causal graph for the
-/// `SUM(matrix[D1,*])` reference is the conservative full-cross-product
-/// (Phase 5 tightens it), so besides the clean 4-cycles `matrix[d1,d2] ->
-/// row_sum[d1] -> total -> growth[d1,d2] -> matrix[d1,d2]` there are also
-/// spurious cross-element loops; the assertions only require that a real
-/// partial-reduce link score is emitted, carries non-degenerate values, and
-/// is referenced by some loop score.
+/// `D1 = {a, b}`, `D2 = {x, y}`. `row_sum`'s *whole* equation is the reducer
+/// `SUM(matrix[D1,*])`, so `row_sum` itself is the (variable-backed) aggregate
+/// node -- `result_dims = [D1]`, `read_slice = [Iterated(d1), Reduced]` (the
+/// `D1` axis is iterated over the A2A dimension space, the `D2` axis reduced).
+/// Variable-backed aggs are real variable nodes, so the `(matrix, row_sum)`
+/// element edges go through the normal reference walker (which classifies
+/// `matrix[D1,*]` as `Wildcard` -> the conservative `matrix[d1,d2] ->
+/// row_sum[d1']` cross-product), *not* the synthetic-agg reroute that #514
+/// tightened for *inline* reducer subexpressions. So besides the clean
+/// 4-cycles `matrix[d1,d2] -> row_sum[d1] -> total -> growth[d1,d2] ->
+/// matrix[d1,d2]` there are still spurious cross-element loops; the assertions
+/// only require that a real partial-reduce link score is emitted, carries
+/// non-degenerate values, and is referenced by some loop score.
 fn build_partial_reduce_model(name: &str) -> simlin_engine::datamodel::Project {
     use simlin_engine::datamodel::{self, Equation, Variable};
 
@@ -5911,6 +6390,747 @@ fn test_partial_reduce_cross_element_loop() {
     );
 }
 
+// --- #511: iterated-dimension subscript link score ---
+//
+// An A2A equation that references an arrayed dependency by its *iterated
+// dimension* (`growth[Region,Age] = row_sum[Region] * c * pop`, `row_sum`
+// over `Region`, `growth` over `Region x Age`) used to misclassify the
+// `row_sum[Region]` subscript as `DynamicIndex`, so the link-score partial
+// PREVIOUS-wrapped a `Subscript` and codegen rejected it with "PREVIOUS
+// requires a variable reference after helper rewriting". After the fix the
+// subscript is `Bare` (it iterates over the target's own `Region` dimension
+// and reads the same source element), the link score is `row_sum` held live
+// (no spurious `SUM(...)`, no `PREVIOUS`-wrapped `Subscript`), and the model
+// simulates.
+
+/// Build a 1-D-target arrayed feedback model whose flow references an arrayed
+/// aux by the flow's own iterated dimension.
+///
+/// Model structure:
+///   level[Region]      (stock, distinct per-element initial values)
+///   row_val[Region]    (aux, = level[Region] * 0.0001)  -- references `level`
+///                       by `row_val`'s own iterated `Region` dim (the #511
+///                       case, in its simplest form: source and target are
+///                       both over `Region` and the index *is* `Region`)
+///   inflow[Region]     (flow into level, = row_val[Region])  -- references
+///                       `row_val` by the flow's own iterated `Region` dim
+///                       (the #511 case again)
+///
+/// `Region = {a, b}`. The reinforcing per-element cycle is
+/// `level[r] -> row_val[r] -> inflow[r] -> level[r]`. Both `level ->
+/// row_val` and `row_val -> inflow` carry an iterated-dimension subscript
+/// (`x[Region]` inside an apply-to-all-over-`Region` equation), the case
+/// that pre-#511 misclassified as `DynamicIndex` and produced a
+/// `PREVIOUS`-wrapped `Subscript` (the `"PREVIOUS requires a variable
+/// reference after helper rewriting"` codegen error). The structural
+/// `inflow -> level` edge closes the loop.
+fn build_iterated_dim_subscript_model(name: &str) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: name.to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "level".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), "100".to_string(), None, None),
+                            ("b".to_string(), "250".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["inflow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // row_val[Region] = level[Region] * 0.0001 -- `level[Region]`
+                // is the #511 iterated-dimension subscript (the index `Region`
+                // is `row_val`'s own iterated dimension and `level`'s declared
+                // dimension, so it reads the same element).
+                Variable::Aux(datamodel::Aux {
+                    ident: "row_val".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "level[Region] * 0.0001".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // inflow[Region] = row_val[Region] -- `row_val[Region]` is the
+                // #511 iterated-dimension subscript again.
+                Variable::Flow(datamodel::Flow {
+                    ident: "inflow".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "row_val[Region]".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// AC3.1: `row_val[Region] = level[Region] * c` + LTM compiles;
+/// `$⁚ltm⁚link_score⁚level→row_val` is emitted as the Bare partial
+/// (`level` held live, no spurious `SUM(...)`, no `PREVIOUS`-wrapped
+/// `Subscript`), is `Equation::ApplyToAll` over `Region`, and the model
+/// **simulates** without the `"PREVIOUS requires a variable reference after
+/// helper rewriting"` error.
+#[test]
+fn test_iterated_dim_subscript_link_score_is_bare_and_simulates() {
+    let project = build_iterated_dim_subscript_model("iterated_dim_link_score");
+
+    // Inspect the synthetic vars via the salsa path.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // Both `level -> row_val` and `row_val -> inflow` carry an iterated-
+    // dimension subscript; check the first one in detail.
+    let level_to_row_val = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}level\u{2192}row_val")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected $⁚ltm⁚link_score⁚level→row_val; link scores present: {:?}",
+                ltm.vars
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .filter(|s| s.contains("\u{205A}link_score\u{205A}"))
+                    .collect::<Vec<_>>()
+            )
+        });
+    // The `level -> row_val` edge is same-dimension A2A (both over Region),
+    // so the link score is `Equation::ApplyToAll` over Region (per-element).
+    match &level_to_row_val.equation {
+        simlin_engine::datamodel::Equation::ApplyToAll(dims, text) => {
+            assert_eq!(
+                dims,
+                &vec!["Region".to_string()],
+                "the level -> row_val link score should be A2A over Region"
+            );
+            // The partial holds `level` live (bare) -- no `SUM(`, no
+            // `PREVIOUS(level[...])`.
+            assert!(
+                text.contains("level"),
+                "link score equation must reference level; got: {text}"
+            );
+            assert!(
+                !text.contains("SUM("),
+                "a Bare iterated-dim source ref must not produce a spurious SUM(...); got: {text}"
+            );
+            assert!(
+                !text.contains("PREVIOUS(level["),
+                "the partial must not PREVIOUS-wrap a level subscript; got: {text}"
+            );
+        }
+        other => panic!("expected Equation::ApplyToAll for level -> row_val, got {other:?}"),
+    }
+    assert_eq!(level_to_row_val.dimensions, vec!["Region".to_string()]);
+    // And the row_val -> inflow link score exists too (the same #511 shape).
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}row_val\u{2192}inflow"),
+        "expected $⁚ltm⁚link_score⁚row_val→inflow"
+    );
+
+    // The model must simulate -- pre-fix this errored with "PREVIOUS
+    // requires a variable reference after helper rewriting".
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("iterated-dimension-subscript model should simulate with LTM enabled");
+}
+
+/// AC3.2: the per-element loop `level[r] -> row_val[r] -> inflow[r] ->
+/// level[r]` -- which runs through *two* iterated-dimension edges (`level ->
+/// row_val` and `row_val -> inflow`) -- is enumerated; its `loop_score`
+/// equation references those link scores; and the loop score's series equals
+/// the product of the per-element link scores it references at every
+/// simulated step t >= 2 (within 1e-6).
+#[test]
+fn test_iterated_dim_subscript_loop_score_matches_hand_calc() {
+    let project = build_iterated_dim_subscript_model("iterated_dim_loop_score");
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("model should simulate");
+    let results = vm.into_results();
+
+    // The loop-score equation text isn't carried in `Results`; recompute the
+    // synthetic-var list from the same datamodel to read it.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let loop_eq_by_name: HashMap<String, String> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .map(|v| (v.name.clone(), v.equation.source_text()))
+        .collect();
+
+    // Find a loop_score var whose equation references *both* iterated-dim
+    // link scores (i.e. the level -> row_val -> inflow -> level cycle).
+    let level_to_row_val_q = "level\u{2192}row_val";
+    let row_val_to_inflow_q = "row_val\u{2192}inflow";
+    let loop_offsets = find_loop_score_offsets(&results);
+    let (loop_name, loop_off) = loop_offsets
+        .iter()
+        .find(|(name, _)| {
+            loop_eq_by_name.get(name).is_some_and(|eq| {
+                eq.contains(level_to_row_val_q) && eq.contains(row_val_to_inflow_q)
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a loop_score var referencing both iterated-dim link scores; \
+                 loop_score equations: {:?}",
+                loop_eq_by_name
+            )
+        });
+    let loop_eq = loop_eq_by_name[loop_name].clone();
+
+    // The whole loop -- `level[r] -> row_val[r] -> inflow[r] -> level[r]` --
+    // runs through exactly these three link scores (all same-dim A2A over
+    // Region, so each appears in the loop-score equation as the quoted
+    // canonical name with a trailing `[a]`/`[b]` slot subscript). Asserting
+    // they're all present (rather than just probing two as substrings) makes
+    // a structural change to the loop-score equation format fail this test
+    // rather than slip through.
+    let link_score_prefix = "$\u{205A}ltm\u{205A}link_score\u{205A}";
+    for edge in [
+        level_to_row_val_q,
+        row_val_to_inflow_q,
+        "inflow\u{2192}level",
+    ] {
+        let expected = format!("\"{link_score_prefix}{edge}\"");
+        assert!(
+            loop_eq.contains(&expected),
+            "loop-score equation should reference {expected}; got: {loop_eq}"
+        );
+    }
+
+    // The hand-calc below relies on the loop score being a *pure product of
+    // its link scores* -- no `SIGN`, no explicit polarity factor. Splitting
+    // on ` * ` and treating every term as a link-score var reference is only
+    // valid under that assumption; the per-term validation in
+    // `resolve_offset` (every factor must be a `$⁚ltm⁚link_score⁚...` var
+    // name) makes a violation fail loudly here instead of silently
+    // misinterpreting a non-product factor.
+    let factors: Vec<String> = loop_eq.split(" * ").map(|s| s.trim().to_string()).collect();
+    assert!(
+        factors.len() >= 2,
+        "loop score should be a product of >=2 link scores; got: {loop_eq}"
+    );
+
+    // Resolve the offset of each factor (a quoted link-score var name,
+    // optionally with a trailing `[elem]` subscript picking a slot of an A2A
+    // link score over Region = {a, b} in declaration order: a=0, b=1).
+    let region_slot = |elem: &str| -> usize {
+        match elem {
+            "a" => 0,
+            "b" => 1,
+            other => panic!("unexpected Region element {other:?}"),
+        }
+    };
+    let resolve_offset = |reference: &str| -> usize {
+        let inner = reference.trim();
+        let (var_part, subscript): (&str, Option<&str>) = match inner.strip_suffix(']') {
+            Some(rest) => match rest.rfind('[') {
+                Some(open) => (&rest[..open], Some(&rest[open + 1..])),
+                None => (inner, None),
+            },
+            None => (inner, None),
+        };
+        let var_name = var_part.trim_matches('"');
+        assert!(
+            var_name.starts_with(link_score_prefix),
+            "loop-score factor {reference:?} is not a link-score var reference -- the \
+             loop-score equation grew a non-product term, and this hand-calc test's \
+             ` * `-split no longer holds; full equation: {loop_eq}"
+        );
+        let base = results
+            .offsets
+            .iter()
+            .find(|(k, _)| k.as_str() == var_name)
+            .map(|(_, &off)| off)
+            .unwrap_or_else(|| panic!("offset for link-score factor {var_name:?} not found"));
+        match subscript {
+            None => base,
+            Some(elem) => base + region_slot(elem),
+        }
+    };
+    let factor_offsets: Vec<usize> = factors.iter().map(|f| resolve_offset(f)).collect();
+
+    let mut checked = 0usize;
+    let mut saw_nonzero = false;
+    for step in 2..results.step_count {
+        let base = step * results.step_size;
+        let product: f64 = factor_offsets
+            .iter()
+            .map(|&o| results.data[base + o])
+            .product();
+        let loop_val = results.data[base + loop_off];
+        assert!(
+            (loop_val - product).abs() < 1e-6,
+            "step {step}: loop_score {loop_val} != product of its link scores {product} \
+             (factors {factors:?} at offsets {factor_offsets:?})"
+        );
+        if loop_val.abs() > 1e-9 && loop_val.is_finite() {
+            saw_nonzero = true;
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "expected at least one step t >= 2 to check");
+    assert!(
+        saw_nonzero,
+        "the iterated-dimension loop's score should be non-zero at some step"
+    );
+}
+
+// --- #510: disjoint-dim arrayed -> arrayed link scores ---
+//
+// A disjoint-dim arrayed -> arrayed edge with per-element target equations
+// (`target[D1,D2]` whose `<element subscript>` equations reference
+// `source[D3]`, D3 disjoint from D1/D2) used to degenerate to a silent
+// scalarized stand-in (`link_score_dimensions` returned `[]` for the edge,
+// so `retarget_ltm_equation_dims` collapsed the per-element `Equation::Arrayed`
+// partial to the first slot's text). The fix emits one link-score variable
+// per distinct referenced source element (`$⁚ltm⁚link_score⁚source[m]→target`,
+// ...), each `Equation::Arrayed` over `target`'s dims holding `source[m]`
+// live in the slots that reference it and the trivial-zero guard form
+// elsewhere; and a genuinely-unscoreable edge (a `DynamicIndex` source into
+// such a target) produces a clear compile-time `Warning` instead of a silent
+// stand-in.
+
+/// Build a disjoint-dim arrayed -> arrayed model whose per-element target
+/// equations reference literal elements of a disjoint dimension.
+///
+/// `D1 = {a, b}`, `D2 = {x, y}`, `D3 = {m, n}` (all named; D3 disjoint
+/// from D1/D2). `source[D3]` is a stock (so its values change over time);
+/// `target[D1,D2]` is an `Equation::Arrayed` whose per-element equations
+/// each reference some `source[m]` and/or `source[n]`. There is no closed
+/// loop (the disjoint dims make a `target -> source` reduction impossible),
+/// so the test compiles in discovery mode (which scores every causal edge).
+fn build_disjoint_dim_arrayed_target_model(name: &str) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: name.to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![
+            datamodel::Dimension::named("D1".to_string(), vec!["a".to_string(), "b".to_string()]),
+            datamodel::Dimension::named("D2".to_string(), vec!["x".to_string(), "y".to_string()]),
+            datamodel::Dimension::named("D3".to_string(), vec!["m".to_string(), "n".to_string()]),
+        ],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                // source[D3] (stock, distinct inits) <- src_inflow (constant).
+                Variable::Stock(datamodel::Stock {
+                    ident: "source".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["D3".to_string()],
+                        vec![
+                            ("m".to_string(), "10".to_string(), None, None),
+                            ("n".to_string(), "20".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["src_inflow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "src_inflow".to_string(),
+                    equation: Equation::ApplyToAll(vec!["D3".to_string()], "0.1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // target[D1,D2] (per-element equations referencing literal
+                // elements of the disjoint dimension D3).
+                Variable::Aux(datamodel::Aux {
+                    ident: "target".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["D1".to_string(), "D2".to_string()],
+                        vec![
+                            ("a,x".to_string(), "source[m] * 2".to_string(), None, None),
+                            ("a,y".to_string(), "source[n] * 3".to_string(), None, None),
+                            ("b,x".to_string(), "source[m]".to_string(), None, None),
+                            (
+                                "b,y".to_string(),
+                                "source[n] * source[m]".to_string(),
+                                None,
+                                None,
+                            ),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Build a disjoint-dim arrayed -> arrayed model whose per-element target
+/// equations reference the disjoint dimension via a *non-literal* index --
+/// genuinely unscoreable (which target slots depend on which source
+/// elements can't be decided statically).
+///
+/// `D1 = {a, b}`, `D2 = {x, y}` (named), `D3` indexed of size 2 (so a
+/// numeric index variable is a valid subscript). `source[D3]` is a stock;
+/// `idx` is a scalar aux (= 1); `target[D1,D2]`'s per-element equations
+/// reference `source[idx]`.
+fn build_disjoint_dim_unscoreable_model(name: &str) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: name.to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![
+            datamodel::Dimension::named("D1".to_string(), vec!["a".to_string(), "b".to_string()]),
+            datamodel::Dimension::named("D2".to_string(), vec!["x".to_string(), "y".to_string()]),
+            datamodel::Dimension::indexed("D3".to_string(), 2),
+        ],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "source".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["D3".to_string()],
+                        vec![
+                            ("1".to_string(), "10".to_string(), None, None),
+                            ("2".to_string(), "20".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["src_inflow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "src_inflow".to_string(),
+                    equation: Equation::ApplyToAll(vec!["D3".to_string()], "0.1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "idx".to_string(),
+                    equation: Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "target".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["D1".to_string(), "D2".to_string()],
+                        vec![
+                            ("a,x".to_string(), "source[idx] * 2".to_string(), None, None),
+                            ("a,y".to_string(), "source[idx] * 3".to_string(), None, None),
+                            ("b,x".to_string(), "source[idx]".to_string(), None, None),
+                            ("b,y".to_string(), "source[idx] * 5".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// AC3.3: a disjoint-dim arrayed -> arrayed model with per-element target
+/// equations emits one link-score variable per distinct referenced source
+/// element (`$⁚ltm⁚link_score⁚source[m]→target`, `$⁚ltm⁚link_score⁚source[n]→target`)
+/// -- not a single `$⁚ltm⁚link_score⁚source→target` scalar stand-in -- each
+/// `Equation::Arrayed` over `target`'s dims (`["D1","D2"]`); the `[a,x]` slot
+/// of the `source[m]→target` var holds `source[m]` live (its partial differs
+/// from `PREVIOUS`-evaluated) and the `[a,y]` slot (references `source[n]`,
+/// not `m`) is the trivial-zero guard form; and running the VM, the
+/// `source[m]→target` link score is non-zero at the `[a,x]` slot at some step
+/// >= 2 and ~0 at `[a,y]` at every step >= 2.
+#[test]
+fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
+    let project = build_disjoint_dim_arrayed_target_model("disjoint_dim_arrayed");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let m_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source[m]\u{2192}target";
+    let n_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source[n]\u{2192}target";
+    let m_var = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == m_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected {m_name}; link scores present: {:?}",
+                ltm.vars
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .filter(|s| s.contains("\u{205A}link_score\u{205A}"))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        ltm.vars.iter().any(|v| v.name == n_name),
+        "expected {n_name} (one link score per distinct referenced source element)"
+    );
+    // No scalar stand-in `source→target`.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target"),
+        "must NOT emit a single scalar stand-in $⁚ltm⁚link_score⁚source→target"
+    );
+    // Each per-source-element link score is Equation::Arrayed over target's dims.
+    match &m_var.equation {
+        simlin_engine::datamodel::Equation::Arrayed(dims, elements, _, _) => {
+            assert_eq!(
+                dims,
+                &vec!["D1".to_string(), "D2".to_string()],
+                "the source[m]→target link score should be Arrayed over D1 x D2"
+            );
+            // The [a,x] slot references source[m] -> holds source[m] live (the
+            // partial mentions source[m]); the [a,y] slot references source[n]
+            // not source[m] -> the source[m] reference there is frozen, so the
+            // partial is the PREVIOUS-evaluated form (a trivial-zero guard).
+            let slot = |elem: &str| -> &str {
+                elements
+                    .iter()
+                    .find(|(e, _, _, _)| e == elem)
+                    .map(|(_, eq, _, _)| eq.as_str())
+                    .unwrap_or_else(|| panic!("slot {elem:?} not found in {elements:?}"))
+            };
+            let ax = slot("a,x");
+            let ay = slot("a,y");
+            assert!(
+                ax.contains("source[m]"),
+                "the [a,x] slot of source[m]→target should reference source[m] live; got: {ax}"
+            );
+            // The [a,y] slot's partial: every source reference is `source[n]`,
+            // which for the `source[m]` link score is "other content" and gets
+            // PREVIOUS-frozen, so the partial equals PREVIOUS(target[a,y]) and
+            // the guarded ratio is the trivial-zero form. (We don't pin the
+            // exact text -- the VM check below is the substantive one -- but it
+            // must not hold `source[m]` live.)
+            assert!(
+                !ax.contains("source[n]") || ay.contains("PREVIOUS(source[n]"),
+                "sanity: [a,y] slot freezes source[n] for the source[m] link score; got: {ay}"
+            );
+        }
+        other => panic!("expected Equation::Arrayed for source[m]→target, got {other:?}"),
+    }
+    assert_eq!(m_var.dimensions, vec!["D1".to_string(), "D2".to_string()]);
+
+    // Compile and simulate; the source[m]→target link score's [a,x] slot is
+    // non-zero at some step >= 2, and its [a,y] slot is ~0 at every step >= 2.
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("disjoint-dim arrayed-target model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    let base = results
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str() == m_name)
+        .map(|(_, &off)| off)
+        .unwrap_or_else(|| panic!("offset for {m_name:?} not found in results"));
+    // Region x Age declaration order: a,x=0; a,y=1; b,x=2; b,y=3.
+    let ax_off = base;
+    let ay_off = base + 1;
+    let mut checked = 0usize;
+    let mut saw_ax_nonzero = false;
+    for step in 2..results.step_count {
+        let row = step * results.step_size;
+        let ax_val = results.data[row + ax_off];
+        let ay_val = results.data[row + ay_off];
+        if ax_val.abs() > 1e-9 && ax_val.is_finite() {
+            saw_ax_nonzero = true;
+        }
+        assert!(
+            ay_val.abs() < 1e-6,
+            "step {step}: source[m]→target [a,y] slot should be ~0 (it references source[n], not m); got {ay_val}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "expected at least one step t >= 2 to check");
+    assert!(
+        saw_ax_nonzero,
+        "the source[m]→target [a,x] slot should be non-zero at some step >= 2"
+    );
+}
+
+/// AC3.4: a disjoint-dim arrayed -> arrayed edge where the target's
+/// per-element equations reference the disjoint dimension via a *non-literal*
+/// index produces a clear compile-time `Warning` diagnostic naming the
+/// unscoreable `source -> target` edge, and emits *no* `$⁚ltm⁚link_score⁚source...→target`
+/// variable (no scalar stand-in). The model still compiles and simulates.
+#[test]
+fn test_disjoint_dim_unscoreable_edge_warns_and_emits_no_link_score() {
+    use simlin_engine::db::CompilationDiagnostic;
+
+    let project = build_disjoint_dim_unscoreable_model("disjoint_dim_unscoreable");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // No link-score variable for the (source, target) edge -- no scalar
+    // stand-in, no per-element vars.
+    assert!(
+        !ltm.vars.iter().any(|v| {
+            v.name
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}source")
+                && v.name.contains("\u{2192}target")
+        }),
+        "an unscoreable disjoint-dim edge must emit no source...→target link score; got: {:?}",
+        ltm.vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .filter(|s| s.contains("\u{205A}link_score\u{205A}"))
+            .collect::<Vec<_>>()
+    );
+
+    // A Warning diagnostic naming the unscoreable source -> target edge.
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, source_model, sync.project);
+    let has_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+        d.severity == simlin_engine::db::DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                simlin_engine::db::DiagnosticError::Assembly(msg)
+                    if msg.contains("source") && msg.contains("target")
+            )
+    });
+    assert!(
+        has_warning,
+        "expected a Warning diagnostic naming the unscoreable source -> target edge; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+
+    // The model still compiles and simulates (a missing link score is graceful).
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("unscoreable-edge model should still compile and simulate");
+}
+
 /// No regression: the existing full-reduce (`SUM(population[*])` -> scalar)
 /// integration tests still pass with unchanged values. (This test exists
 /// purely to keep the AC4.6 work co-located with an explicit assertion
@@ -6016,6 +7236,367 @@ fn test_agg_aux_value_matches_reducer() {
             );
         }
     }
+}
+
+/// AC4.3 (#514, end-to-end): a *sliced* reducer subexpression
+/// `SUM(pop[NYC,*])` over `pop[Region,Age]` hoisted into a synthetic agg
+/// computes `pop[nyc,adult] + pop[nyc,child]` at every timestep, the
+/// per-read-row link scores `$⁚ltm⁚link_score⁚pop[nyc,age]→$⁚ltm⁚agg⁚0` exist
+/// and are finite (and there is *no* `pop[boston,*]→agg` link score -- the
+/// slice doesn't read those rows), and a cross-element feedback loop visiting
+/// NYC through the sliced agg is scored with a finite, non-degenerate
+/// `loop_score`. (`drive` is arrayed over `(Region,Age)` so each `pop` slot's
+/// loop through the agg has its own `drive`/`flow` nodes -- the disjointness
+/// `recover_cross_agg_loops` needs to stitch the two NYC petals together.)
+#[test]
+fn test_sliced_agg_cross_element_loop_simulates() {
+    let project = TestProject::new("sliced_agg_sim")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .named_dimension("Age", &["Adult", "Child"])
+        .array_stock("pop[Region,Age]", "100", &["flow"], &[], None)
+        // `SUM(pop[NYC,*])` is the maximal reducer sub-expression -> hoisted
+        // into a synthetic agg, broadcast to every `drive` element. The `pop`
+        // factor makes growth exponential.
+        .array_aux("drive[Region,Age]", "SUM(pop[NYC,*]) * pop * 0.00001")
+        .array_flow("flow[Region,Age]", "drive", None)
+        .build_datamodel();
+
+    // Compile (exhaustive LTM) and simulate.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
+    let results = vm.into_results();
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let off = |name: &str| -> usize {
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing offset {name}; have: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let at = |step: usize, o: usize| results.data[step * results.step_size + o];
+    let agg_off = off(agg);
+    let nyc_adult = off("pop[nyc,adult]");
+    let nyc_child = off("pop[nyc,child]");
+
+    // The agg equals the `pop[NYC,*]` slice sum at every step.
+    for step in 0..results.step_count {
+        let expected = at(step, nyc_adult) + at(step, nyc_child);
+        assert!(
+            (at(step, agg_off) - expected).abs() < 1e-9 * expected.abs().max(1.0),
+            "step {step}: agg = {}, expected SUM(pop[NYC,*]) = {expected}",
+            at(step, agg_off)
+        );
+    }
+
+    // The per-read-row link scores exist and are finite; the unread Boston
+    // rows get no link score into the agg.
+    for age in &["adult", "child"] {
+        let o = off(&format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,{age}]\u{2192}{agg}"
+        ));
+        for step in 0..results.step_count {
+            assert!(
+                at(step, o).is_finite(),
+                "step {step}: pop[nyc,{age}]→agg link score not finite"
+            );
+        }
+    }
+    for age in &["adult", "child"] {
+        assert!(
+            !results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new(&format!(
+                    "$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston,{age}]\u{2192}{agg}"
+                ))),
+            "must not emit a pop[boston,{age}]→agg link score (the slice reads only NYC)"
+        );
+    }
+
+    // A loop_score var traversing the NYC-through-sliced-agg path exists, and
+    // its simulated series is finite and not all-zero.
+    let cross_agg_loop_score_name = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.contains("\u{205A}loop_score\u{205A}")
+                && v.equation.source_text().contains(
+                    format!(
+                        "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,adult]\u{2192}{agg}\""
+                    )
+                    .as_str(),
+                )
+                && v.equation.source_text().contains(
+                    format!(
+                        "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,child]\u{2192}{agg}\""
+                    )
+                    .as_str(),
+                )
+        })
+        .map(|v| v.name.clone())
+        .expect("expected a loop_score var traversing both NYC slots through the sliced agg");
+    let lo = off(&cross_agg_loop_score_name);
+    let mut saw_nonzero = false;
+    for step in 0..results.step_count {
+        let v = at(step, lo);
+        assert!(
+            v.is_finite(),
+            "step {step}: cross-agg loop score not finite"
+        );
+        if v.abs() > 1e-12 {
+            saw_nonzero = true;
+        }
+    }
+    assert!(
+        saw_nonzero,
+        "the cross-element-through-sliced-agg loop score must be non-degenerate"
+    );
+}
+
+/// AC4.3 (#514, end-to-end -- the *arrayed* synthetic agg case): a sliced
+/// reducer `SUM(matrix[D1,*])` that is a *subexpression* of an A2A equation
+/// over `D1` reads one `D1` element per A2A iteration, so its read slice is
+/// `[Iterated(d1), Reduced]` and `result_dims == [D1]` -- it mints an
+/// *arrayed* synthetic agg `$⁚ltm⁚agg⁚0[d1]`. The fix verified here is the
+/// agg-half link-score emitters using subscripted agg names on both sides
+/// (`matrix[d1,d2]→$⁚ltm⁚agg⁚0[d1]` per read row, `$⁚ltm⁚agg⁚0[d1]→growth[d1]`,
+/// with the `agg→target` equation's `Δsource` denominator also carrying the
+/// `[d1]` slot subscript -- the bare-agg-name form does not compile when the
+/// agg is multi-slot), the agg's equation being reconstructed as an
+/// `ApplyToAll` over `D1` (not a scalar -- otherwise `matrix[d1,*]` is a type
+/// error and the source-half link scores silently vanish, zeroing the loop
+/// score), and the element loop through the agg being routed to the
+/// per-circuit element-subscripted path so its loop-score equation can
+/// reference those literal-element agg-half link scores. The model simulates
+/// and the cross-element-through-arrayed-agg loop is scored with a finite,
+/// non-degenerate `loop_score`.
+///
+/// The fixture is the *diagonal* case (`result_dims == growth`'s dims): the
+/// agg over `D1` feeds a target also over exactly `D1`. The original review
+/// fixture put `SUM(matrix[D1,*])` inside an A2A body over `(D1, D2)` (the
+/// strict-prefix *broadcast* case `agg[D1] → growth[D1,D2]`), where the
+/// `agg→target` partial element-pins to the full `(d1,d2)` tuple and thus
+/// over-subscripts the 1-D agg -- a known imprecision tracked as GH #528.
+/// The diagonal case exercises the same arrayed-agg link/loop machinery
+/// without that orthogonal over-subscription bug; `mflow[D1,D2] = growth[D1]`
+/// (the GH #511 iterated-dim subscript) then broadcasts `growth` over `D2`
+/// to close the per-`(D1,D2)` element loops through `matrix`.
+#[test]
+fn test_arrayed_sliced_agg_cross_element_loop_simulates() {
+    // `D1={a,b}`, `D2={x,y}`. `matrix[D1,D2]` stock <- `mflow[D1,D2]`;
+    // `growth[D1] = SUM(matrix[D1,*]) * 0.01 + 1` (A2A over D1 -- the
+    // `SUM(matrix[D1,*])` sub-expr reads `matrix[<this D1 row>, *]`: read
+    // slice `[Iterated(d1), Reduced]`, `result_dims == [D1]` -> arrayed agg
+    // over `D1`, diagonal with `growth`); `mflow[D1,D2] = growth[D1]` (the
+    // GH #511 iterated-dim subscript: `growth[D1]` inside an A2A-over-(D1,D2)
+    // body reads the same `D1` element, broadcasting `growth` over `D2`).
+    // Per-`(D1,D2)` loop: `matrix[d1,d2] → $⁚ltm⁚agg⁚0[d1] → growth[d1] → mflow[d1,d2] → matrix[d1,d2]`.
+    let project = TestProject::new("arrayed_sliced_agg_sim")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_stock("matrix[D1,D2]", "100", &["mflow"], &[], None)
+        .array_aux("growth[D1]", "SUM(matrix[D1,*]) * 0.01 + 1")
+        .array_flow("mflow[D1,D2]", "growth[D1]", None)
+        .build_datamodel();
+
+    // The agg node carries `result_dims == [D1]` (it is arrayed).
+    {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let source_model = sync.models["main"].source_model;
+        let agg_nodes =
+            simlin_engine::ltm_agg::enumerate_agg_nodes(&db, source_model, sync.project);
+        let synthetic: Vec<_> = agg_nodes.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "expected exactly one synthetic agg for SUM(matrix[D1,*]); got: {:?}",
+            agg_nodes
+                .aggs
+                .iter()
+                .map(|a| (&a.name, a.is_synthetic, &a.result_dims))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            synthetic[0].result_dims,
+            vec!["D1".to_string()],
+            "SUM(matrix[D1,*]) as a subexpression of an A2A-over-D1 body must mint an arrayed agg over D1"
+        );
+    }
+
+    // Compile (exhaustive LTM) and simulate.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // The synthetic agg aux is itself an A2A variable over D1.
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let agg_var = ltm.vars.iter().find(|v| v.name == agg).unwrap_or_else(|| {
+        panic!(
+            "expected the synthetic agg aux {agg}; synthetic vars: {:?}",
+            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(
+        agg_var.dimensions,
+        vec!["D1".to_string()],
+        "the synthetic agg aux must be arrayed over D1"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("arrayed-synthetic-agg model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    let off = |name: &str| -> usize {
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing offset {name}; have: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let at = |step: usize, o: usize| results.data[step * results.step_size + o];
+
+    // The synthetic agg aux is A2A over D1: in `Results` an LTM A2A var is
+    // keyed by its bare name with the per-element slots laid out at
+    // `base + <D1 index>` (D1 = {a, b} in declaration order). Its `a` slot
+    // equals `matrix[a,x] + matrix[a,y]` (the D1=a row sum), `b` likewise.
+    let agg_base = off(agg);
+    for (d1_idx, (mx_a, mx_b)) in [
+        ("matrix[a,x]", "matrix[a,y]"),
+        ("matrix[b,x]", "matrix[b,y]"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let agg_slot = agg_base + d1_idx;
+        let mx_a = off(mx_a);
+        let mx_b = off(mx_b);
+        for step in 0..results.step_count {
+            let expected = at(step, mx_a) + at(step, mx_b);
+            assert!(
+                (at(step, agg_slot) - expected).abs() < 1e-9 * expected.abs().max(1.0),
+                "step {step}: {agg} slot {d1_idx} = {}, expected SUM(matrix[D1={d1_idx},*]) = {expected}",
+                at(step, agg_slot)
+            );
+        }
+    }
+
+    // Per-(read row x agg slot) source-half link scores exist (4 combos:
+    // each matrix[d1,d2] reads into the agg's d1 slot) and are finite.
+    for d1 in &["a", "b"] {
+        for d2 in &["x", "y"] {
+            let o = off(&format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[{d1},{d2}]\u{2192}{agg}[{d1}]"
+            ));
+            for step in 0..results.step_count {
+                assert!(
+                    at(step, o).is_finite(),
+                    "step {step}: matrix[{d1},{d2}]→{agg}[{d1}] link score not finite"
+                );
+            }
+        }
+    }
+    // A `matrix` row never feeds the *other* D1 row's agg slot (the slice
+    // reads only `matrix[<this D1>, *]`).
+    assert!(
+        !results
+            .offsets
+            .contains_key(&Ident::<Canonical>::new(&format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}matrix[a,x]\u{2192}{agg}[b]"
+            ))),
+        "must not emit a matrix[a,x]→{agg}[b] link score (the d1=a slice reads only matrix[a,*])"
+    );
+
+    // The agg->target half exists per target element (diagonal: the agg's
+    // `d1` slot rides the `from` side, `growth`'s element is also just `d1`).
+    for d1 in &["a", "b"] {
+        let o = off(&format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{agg}[{d1}]\u{2192}growth[{d1}]"
+        ));
+        for step in 0..results.step_count {
+            assert!(
+                at(step, o).is_finite(),
+                "step {step}: {agg}[{d1}]→growth[{d1}] link score not finite"
+            );
+        }
+    }
+
+    // The cross-element-through-arrayed-agg loop is enumerated, and its
+    // loop_score series is finite and not all-zero at some step >= 2. The
+    // loop's score equation references the per-element agg-half link scores
+    // (which only exist as literal-element scalar vars); pre-fix this
+    // circuit went through the unsubscripted A2A-collapse path and got a
+    // stub-zero loop score because no `matrix→$⁚ltm⁚agg⁚0` A2A var exists,
+    // and the `agg[d1]→growth[d1]` half (had it been built unsubscripted)
+    // would not have compiled because a multi-slot agg can't be referenced
+    // bare in a scalar equation.
+    let cross_agg_loop_score_name = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.contains("\u{205A}loop_score\u{205A}")
+                && v.equation
+                    .source_text()
+                    .contains(format!("{agg}[a]\u{2192}growth[a]").as_str())
+                && v.equation.source_text().contains("matrix[a,")
+                && v.equation.source_text().contains(format!("\u{2192}{agg}[a]").as_str())
+        })
+        .map(|v| v.name.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a loop_score var traversing matrix[a,*]→{agg}[a]→growth[a]; loop scores: {:?}",
+                ltm.vars
+                    .iter()
+                    .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+                    .map(|v| (v.name.as_str(), v.equation.source_text()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let lo = off(&cross_agg_loop_score_name);
+    let mut saw_nonzero = false;
+    for step in 2..results.step_count {
+        let v = at(step, lo);
+        assert!(
+            v.is_finite(),
+            "step {step}: cross-element-through-arrayed-agg loop score not finite"
+        );
+        if v.abs() > 1e-12 {
+            saw_nonzero = true;
+        }
+    }
+    assert!(
+        saw_nonzero,
+        "the cross-element-through-arrayed-agg loop score must be non-degenerate (non-zero at some step >= 2)"
+    );
 }
 
 /// AC4.2 regression (exhaustive loop-link path): `share[r] = pop[r] / SUM(pop[*])`
@@ -7029,4 +8610,266 @@ fn test_inline_reducer_gets_synthetic_agg_despite_var_backed_sibling() {
     let compiled = compile_project_incremental(&db, sync.project, "main").expect("should compile");
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("should simulate");
+}
+
+/// AC5.2 / AC5.4 (#515, end-to-end): a 4-element-dim `share[r] = pop[r] /
+/// SUM(pop[*])` model with `update[r] = share[r] * pop[r] * c` and
+/// *heterogeneous* stock initials (so loop scores don't degenerate to zero
+/// under symmetry) hoists `SUM(pop[*])` into `$⁚ltm⁚agg⁚0`; each region has
+/// one disjoint petal through it. `recover_cross_agg_loops` reconstructs the
+/// full 4-petal subset's `(4-1)!/2 = 3` distinct cyclic orderings as
+/// distinct loops -- distinct ids, distinct `loop_score` equation texts
+/// (different edge sequences) -- but, because all three traverse the same
+/// edge *multiset*, their simulated `loop_score` time series are equal
+/// (to within floating-point round-off; multiplication is commutative, so
+/// the products coincide up to FP reassociation), and non-degenerate.
+#[test]
+fn test_four_petal_cyclic_orderings_share_loop_score_series() {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    let regions = ["A", "B", "C", "D"];
+    let c = 0.01_f64;
+    let project = datamodel::Project {
+        name: "four_petal_share".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 8.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            regions.iter().map(|s| s.to_string()).collect(),
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    // Heterogeneous initials break the all-symmetric case
+                    // where every link score (and thus loop score) is 0.
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("A".to_string(), "1000".to_string(), None, None),
+                            ("B".to_string(), "300".to_string(), None, None),
+                            ("C".to_string(), "100".to_string(), None, None),
+                            ("D".to_string(), "30".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["update".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "share".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "pop / SUM(pop[*])".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "update".to_string(),
+                    // `* pop` makes the feedback flow curved -> non-zero
+                    // flow->stock link score (and thus non-zero loop score).
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        format!("share * pop * {c}"),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    assert!(
+        !ltm.agg_recovery_truncated,
+        "a 4-petal model is well under the production budget"
+    );
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    // The full-4-petal loop_score vars: those whose equation references all
+    // four `pop[r]→agg` factors. There must be exactly 3 (the 3 cyclic
+    // orderings of the full subset), with distinct names and distinct
+    // equation texts.
+    let four_petal_loop_vars: Vec<&simlin_engine::db::LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .filter(|v| {
+            let eq = v.equation.source_text();
+            regions.iter().all(|r| {
+                eq.contains(
+                    format!(
+                        "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[{}]\u{2192}{agg}\"",
+                        r.to_lowercase()
+                    )
+                    .as_str(),
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        four_petal_loop_vars.len(),
+        3,
+        "the full 4-petal subset must give exactly (4-1)!/2 = 3 cyclic-ordering loops; \
+         got {:?}",
+        four_petal_loop_vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    let names: std::collections::HashSet<&str> = four_petal_loop_vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
+    assert_eq!(names.len(), 3, "distinct ids for the 3 cyclic orderings");
+    let eqs: std::collections::HashSet<String> = four_petal_loop_vars
+        .iter()
+        .map(|v| v.equation.source_text())
+        .collect();
+    assert_eq!(
+        eqs.len(),
+        3,
+        "the 3 cyclic orderings must have distinct edge sequences (loop_score equation texts)"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("should compile");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
+    let results = vm.into_results();
+
+    let offsets: Vec<usize> = four_petal_loop_vars
+        .iter()
+        .map(|v| {
+            *results
+                .offsets
+                .get(&Ident::<Canonical>::new(&v.name))
+                .unwrap_or_else(|| panic!("missing offset for {}", v.name))
+        })
+        .collect();
+
+    // The three series must be equal step-by-step -- they traverse the same
+    // edge multiset, and the loop score is `∏ link_score(e)`, so the products
+    // coincide up to FP reassociation of the factor order -- and the loop
+    // must be non-degenerate (genuinely computed: non-zero and finite at some
+    // step, not stubbed to a constant zero). It is a product of 16 link
+    // scores (each O(1e-3..1)), so the value is small but not zero.
+    let mut saw_nonzero = false;
+    let mut all_finite = true;
+    for step in 0..results.step_count {
+        let base = step * results.step_size;
+        let v0 = results.data[base + offsets[0]];
+        for &o in &offsets[1..] {
+            let v = results.data[base + o];
+            let both_nan = v.is_nan() && v0.is_nan();
+            assert!(
+                both_nan || (v - v0).abs() <= 1e-12 * v0.abs().max(1e-300),
+                "step {step}: cyclic-ordering loop scores diverge: {v0} vs {v}"
+            );
+        }
+        if !v0.is_finite() {
+            all_finite = false;
+        } else if v0 != 0.0 {
+            saw_nonzero = true;
+        }
+    }
+    assert!(
+        all_finite,
+        "the 4-petal loop score series must be finite at every step"
+    );
+    assert!(
+        saw_nonzero,
+        "the 4-petal loop score must be non-degenerate (non-zero at some step)"
+    );
+
+    // Stronger: the loop score equals the running product of its link scores
+    // at every step (it is a genuine product, not a stub). `[elem]` slot
+    // subscripts on the factors ride *outside* the quotes (e.g.
+    // `"$⁚ltm⁚link_score⁚update→pop"[a]`), so split each ` * `-joined factor
+    // into its quoted var name and an optional region slot.
+    {
+        let factor_offsets: Vec<usize> =
+            loop_score_equation_factors(&four_petal_loop_vars[0].equation.source_text())
+                .iter()
+                .map(|factor| {
+                    let close = factor.rfind('"').expect("factor must be quoted");
+                    let name = &factor[1..close];
+                    let after = &factor[close + 1..];
+                    let base = *results
+                        .offsets
+                        .get(&Ident::<Canonical>::new(name))
+                        .unwrap_or_else(|| panic!("missing offset for factor {name:?}"));
+                    match after.strip_prefix('[') {
+                        None => base,
+                        Some(rest) => {
+                            let elem = &rest[..rest.find(']').expect("malformed slot subscript")];
+                            let idx = regions
+                                .iter()
+                                .position(|r| r.to_lowercase() == elem)
+                                .unwrap_or_else(|| panic!("unknown region slot {elem:?}"));
+                            base + idx
+                        }
+                    }
+                })
+                .collect();
+        assert_eq!(factor_offsets.len(), 16, "a 4-petal loop has 16 edges");
+        for step in 0..results.step_count {
+            let base = step * results.step_size;
+            let product: f64 = factor_offsets
+                .iter()
+                .map(|&o| results.data[base + o])
+                .product();
+            let loop_val = results.data[base + offsets[0]];
+            let both_nan = loop_val.is_nan() && product.is_nan();
+            assert!(
+                both_nan || (loop_val - product).abs() <= 1e-9 * product.abs().max(1e-300),
+                "step {step}: loop_score {loop_val} != product of its link scores {product}"
+            );
+        }
+    }
+
+    // Sanity: the reported variable-level loops never surface the synthetic
+    // agg node, and there is exactly one synthetic agg.
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    for l in &detected.loops {
+        assert!(
+            l.variables
+                .iter()
+                .all(|name| !name.contains("\u{205A}agg\u{205A}")),
+            "model_detected_loops should not surface synthetic agg nodes; got: {:?}",
+            l.variables
+        );
+    }
 }

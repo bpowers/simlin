@@ -30,6 +30,12 @@ pub mod datamodel;
 pub mod db;
 #[cfg(test)]
 mod db_element_graph_proptest;
+// The LTM reference-site classification IR (`model_ltm_reference_sites`) and
+// the `Expr2` AST-walker helpers it owns. A sibling of `db` rather than a
+// submodule of `db.rs` so the latter stays under the per-file line cap
+// (`scripts/lint-project.sh` rule 2); `db_analysis` / `db_ltm` reach it via
+// `crate::db_ltm_ir::...`, mirroring how `ltm_agg` consumes `crate::db`.
+mod db_ltm_ir;
 pub mod diagram;
 mod dimensions;
 pub mod errors;

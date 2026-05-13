@@ -1743,9 +1743,95 @@ methods (which assume directed acyclic graphs) fundamentally cannot operate.
 
 ---
 
-## 15. Weaknesses and Limitations
+## 15. Arrayed Variables and Aggregate Nodes
 
-### 15.1 Cannot Analyze Equilibrium States
+System dynamics models often subscript variables over a dimension -- `population[Region]`,
+`capacity[Region, Product]` -- so one equation describes N parallel instances. LTM analyzes
+these at *element* granularity: a loop through `population[NYC]` is a different loop from
+the one through `population[Boston]`, even though both come from the same equation. This
+section describes how LTM handles arrays in practice; the underlying mechanics mirror the
+macro and discrete-element treatments (Sections 6 and 7).
+
+### 15.1 Element-Level Loops and the Element Causal Graph
+
+LTM expands each variable-level causal link into one or more *element-level* links and runs
+loop detection on the resulting element graph:
+
+- A reference between two scalar variables stays one link.
+- A same-element reference between two arrayed variables over the same dimension (the
+  "apply-to-all" case, `growth[r] = pop[r] * rate[r]`) expands to N diagonal links
+  `pop[r] -> growth[r]`.
+- A literal-index reference (`pop[NYC]`) expands to a broadcast: `pop[NYC]` feeds every
+  element of the target.
+- A reference into a *disjoint* dimension (a `[Region, Age]` target whose per-element
+  equations pick out `source[m]` for some `m` in an unrelated dimension) gets one link per
+  referenced element.
+
+Loops are then detected on this element graph, so the reported loops are element-specific:
+you see "the `[NYC]` instance of loop r1 is dominant from t=10 to t=30 while the `[Boston]`
+instance stays balancing." When a model has no arrayed variables, the element graph is
+identical to the ordinary causal graph -- there is no overhead.
+
+**Per-element vs cross-element loops.** Most loops in an arrayed model are *per-element*:
+the same loop structure repeated once per element, with each instance scored independently.
+The relative-loop-score normalization is done per element and per cycle partition, so one
+element's instance never dilutes another's. Some loops are genuinely *cross-element* -- the
+`[NYC]` instance of one variable feeds the `[Boston]` instance of another (a migration
+matrix, a spatial diffusion term). Those keep the explicit element subscripts on their links
+and are scored along the actual path they traverse, not the diagonal scores.
+
+### 15.2 Array Reducers as Implicit Aggregate Nodes
+
+An *array reducer* -- `SUM(pop[*])`, `MEAN(...)`, `MIN`/`MAX`, `STDDEV`, `RANK`, `SIZE` --
+collapses an array dimension. Inside an equation like `share[r] = pop[r] / SUM(pop[*])`, the
+reducer is a small aggregation with hidden internal structure: every element of `pop`
+contributes to the sum, and the sum then drives `share`. LTM treats it the way it treats a
+macro (Section 6): the reducer becomes an *aggregate node*, and causality is routed *through*
+it rather than scored as one lumped link from "all of `pop`" to `share`.
+
+Concretely, `SUM(pop[*])` becomes an internal `$⁚ltm⁚agg` node, and the link is the chain
+`pop[r] -> $⁚ltm⁚agg -> share`. The `pop[r] -> $⁚ltm⁚agg` half captures each element's
+fractional contribution to the sum's rate of change (the factor that matters when elements
+have very different magnitudes), and the `$⁚ltm⁚agg -> share` half is the ordinary partial of
+`share`'s equation. **Your model equations are not rewritten** -- the simulation still
+evaluates the inline `SUM(...)`; the aggregate node is an analysis construct.
+
+**Aggregate nodes are trimmed from reported loops.** Like the internal stocks of a DELAY3,
+an `$⁚ltm⁚agg` node is machinery, not a variable you authored, so it is removed from the
+loop's reported node sequence. A loop that runs through `SUM(pop[*])` shows `... -> pop[r]
+-> share -> ...`; the aggregate node's two half-scores are still factored into the loop
+score.
+
+**Sliced reducers (partial-reduce hoisting).** A reducer that reads only part of an array --
+`SUM(pop[NYC, *])` over `pop[Region, Age]` (just the NYC row), or `SUM(matrix[Region, *])`
+inside an apply-to-all equation over `Region` (one sum per region) -- gets the same
+treatment: the aggregate node reads only the rows the reducer actually touches. Only those
+rows feed it, and an arrayed reducer (one sum per region) becomes an arrayed aggregate node
+with one slot per region. This keeps the element graph small even on big dimensions.
+
+### 15.3 Iterated and Mapped Dimensions
+
+An explicit subscript that just names the equation's own apply-to-all dimensions --
+`row_sum[Region]` appearing inside `growth[Region, Age] = ... + row_sum[Region] * c` -- is
+*not* a dynamic index. It reads the same `Region` element of `row_sum` for each `(Region,
+Age)` tuple, so LTM treats it as a same-element-on-shared-dimensions reference: `row_sum[r]`
+feeds `growth[r, a]` for each `a`, not every-element-to-every-element. The same holds when
+the index names a dimension that *maps* to the target's dimension (a `State` index where the
+source is over `Region` and `State` maps element-wise to `Region`).
+
+### 15.4 Practical Validation
+
+The pedagogical population models (Section 11.6) and the integration test suite cover the
+arrayed cases: per-element loops over a region dimension, cross-element migration loops,
+whole-extent and sliced reducers feeding back into their inputs, and disjoint-dimension
+references. The per-element loop scores match the scores you would get by manually
+de-subscripting the model into N separate scalar models.
+
+---
+
+## 16. Weaknesses and Limitations
+
+### 16.1 Cannot Analyze Equilibrium States
 
 When all stocks are unchanging, all loop scores are 0 by definition. EEA can provide
 information under equilibrium for near-linear models.
@@ -1755,7 +1841,7 @@ small perturbation (for example via `STEP`) when that intervention is substantiv
 justified. The papers caution that artificial perturbations can distort interpretation in
 discrete or discontinuous settings.
 
-### 15.2 Focus on Endogenous Behavior
+### 16.2 Focus on Endogenous Behavior
 
 LTM focuses on feedback loops (endogenous structure). For models dominated by external
 forcing functions, feedback effects may be small and the analysis less informative. The Loop
@@ -1764,7 +1850,7 @@ Impact method (Hayward and Boswell, 2014) may be better suited for highly forced
 Link scores could in principle measure exogenous contributions, but this is not currently
 part of the method.
 
-### 15.3 Numerical Integration and Sampling Effects
+### 16.3 Numerical Integration and Sampling Effects
 
 The equations are defined on sampled trajectories, not on Euler-specific internals. In
 principle, LTM is compatible with Euler, Runge-Kutta, and other solvers as long as
@@ -1774,7 +1860,7 @@ Remaining caveat: sampling and solver choices can change the discrete-time appro
 Delta terms, especially around sharp events and discontinuities. This affects numeric score
 profiles but does not change the method's conceptual definition.
 
-### 15.4 Heuristic Nature of Loop Discovery
+### 16.4 Heuristic Nature of Loop Discovery
 
 The strongest-path algorithm does not guarantee finding the truly strongest loop, though
 empirically it finds loops that are structurally very similar to the strongest. This is
@@ -1782,28 +1868,55 @@ acceptable for practical analysis but means the method cannot prove it has found
 important loops. The LOOPSCORE builtin (Section 10) mitigates this by allowing practitioners
 to track specific loops regardless of the discovery algorithm.
 
-### 15.5 Cannot Identify Behavior Modes
+### 16.5 Cannot Identify Behavior Modes
 
 Unlike EEA, LTM does not decompose behavior into distinct modes (exponential growth,
 oscillation, etc.). It reports which loops are dominant but not *what kind of behavior* they
 are generating. A practitioner must infer the behavior mode from the combination of loop
 polarities and time-varying dominance patterns.
 
-### 15.6 Reports Only on Observed Behavior
+### 16.6 Reports Only on Observed Behavior
 
 LTM only analyzes behavior that actually occurs during a specific simulation run with
 specific parameter values. Alternative scenarios, counterfactuals, and sensitivity to
 parameters are not covered by a single LTM analysis. Monte Carlo + LTM (running many
 simulations with varied parameters) is identified as a promising future direction.
 
-### 15.7 Cannot Identify Leverage Points
+### 16.7 Cannot Identify Leverage Points
 
 Unlike EEA, LTM does not directly identify where structural changes (policy interventions)
 would most affect behavior. It identifies which loops dominate, but not where to intervene.
 
+### 16.8 Array Reducers Indexed by a Computed Index
+
+A reducer whose subscript is a *literal* element or a wildcard -- `SUM(pop[*])`,
+`SUM(pop[NYC, *])` -- is routed through an aggregate node (Section 15.2), so each array
+element's contribution is scored individually. A reducer indexed by a *computed* index --
+`SUM(pop[idx, *])` where `idx` is itself a variable, or `arr[i + 1]` -- can't be described
+statically, so it isn't hoisted: its contribution shows up as a coarse conservative link
+(every source element is treated as feeding the target, with no per-element resolution).
+This is rare in practice; the model still simulates correctly, but the loop attribution
+through such a term is approximate.
+
+### 16.9 RANK Link Scores Are Approximate
+
+RANK is an order statistic -- a discrete jump function with no useful derivative -- and it
+returns an array, so it can never be the entire equation of a scalar or apply-to-all
+variable. Its link scores use a delta-ratio approximation rather than an analytic partial.
+(SUM, MEAN, MIN, MAX, and STDDEV all get exact ceteris-paribus partials.)
+
+### 16.10 Cross-Element Loop Recovery Through Reducers Is Bounded
+
+A feedback loop that runs through an inlined reducer and visits several distinct array
+elements (a "cross-element through-aggregate" loop) is reconstructed from the loop's pieces
+rather than enumerated directly. For a reducer in a feedback loop over a *very large*
+dimension, the number of such reconstructed loops is capped, so the reported cross-element
+loop list may be incomplete. When this happens, a warning is emitted naming the affected
+reducer.
+
 ---
 
-## 16. Models Analyzed Across the Papers
+## 17. Models Analyzed Across the Papers
 
 | Model | Stocks | Variables | Loops | Papers |
 |-------|--------|-----------|-------|--------|
@@ -1822,7 +1935,7 @@ would most affect behavior. It identifies which loops dominate, but not where to
 
 ---
 
-## 17. Notation Reference
+## 18. Notation Reference
 
 | Symbol | Definition |
 |--------|-----------|
@@ -1846,7 +1959,7 @@ would most affect behavior. It identifies which loops dominate, but not where to
 
 ---
 
-## 18. Terminology
+## 19. Terminology
 
 | Term | Definition |
 |------|-----------|
@@ -1882,7 +1995,7 @@ would most affect behavior. It identifies which loops dominate, but not where to
 
 ---
 
-## 19. Summary of Key Formulas
+## 20. Summary of Key Formulas
 
 ### Instantaneous Link Score
 

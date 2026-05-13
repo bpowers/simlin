@@ -24,7 +24,6 @@ mod db_analysis;
 pub use db_analysis::RefShape;
 pub use db_analysis::causal_graph_from_edges;
 pub use db_analysis::causal_graph_from_element_edges;
-pub(crate) use db_analysis::collect_reference_shapes;
 pub(crate) use db_analysis::reconstruct_model_variables;
 use db_analysis::*;
 // `model_element_loop_circuits` is `#[deprecated]` for LTM consumers (the
@@ -105,22 +104,14 @@ thread_local! {
     static IN_TRACKED_CONTEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Attempt to push a diagnostic into the salsa accumulator. When called
-/// inside a tracked function (indicated by the `IN_TRACKED_CONTEXT`
-/// thread-local flag) the diagnostic is recorded normally. When called
-/// outside any tracked context (e.g. from `compile_project_incremental`
-/// which is a plain function) the push is silently skipped. This lets
-/// `assemble_module` / `assemble_simulation` accumulate diagnostics when
-/// invoked from tracked code while remaining safe to call from
-/// non-tracked entry points (including WASM where `panic = "abort"`
-/// makes `catch_unwind` ineffective).
-///
-/// Currently the flag is never set to `true`, so all calls are no-ops.
-/// Assembly errors are returned via `Result::Err` from
-/// `compile_project_incremental` and surfaced through
-/// `gather_error_details_with_db` in the patch pipeline. The flag
-/// exists as scaffolding for a future change where assembly functions
-/// may be called from within a tracked context.
+/// Push a diagnostic into the salsa accumulator when called inside a
+/// tracked function (per the `IN_TRACKED_CONTEXT` flag); silently skip it
+/// otherwise (e.g. from the plain `compile_project_incremental`, where
+/// calling `accumulate` would panic -- and `catch_unwind` is ineffective
+/// in WASM, which is `panic = "abort"`). Scaffolding: the flag is never
+/// set to `true` today, so all calls are no-ops -- assembly errors are
+/// instead returned via `Result::Err` and surfaced through the patch
+/// pipeline's `gather_error_details_with_db`.
 fn try_accumulate_diagnostic(db: &dyn Db, diag: Diagnostic) {
     let in_context = IN_TRACKED_CONTEXT.with(|flag| flag.get());
     if in_context {
@@ -1983,15 +1974,13 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
 /// underlying reference shape is *not* `Bare` -- a `Wildcard`/`DynamicIndex`
 /// reference into a scalar target (e.g. `total = arr[idx]`), where the salsa
 /// path would wrap the whole subscript in `PREVIOUS()` and zero the
-/// ceteris-paribus numerator. (Element-subscripted and `$⁚ltm⁚agg⁚{n}` link
-/// scores route directly via name checks already; setting this for them too
-/// is harmless.)
+/// ceteris-paribus numerator. (Element-subscripted / `$⁚ltm⁚agg⁚{n}` link
+/// scores already route directly via name checks; setting it for them is harmless.)
 //
 // `equation: datamodel::Equation` blocks deriving `Eq` (the embedded
 // `GraphicalFunction` carries `f64` points) and unconditional `Debug`
-// (datamodel types only derive `Debug` under `debug-derive`, off in the
-// WASM / pysimlin builds). Salsa only needs `PartialEq` for incrementality;
-// nothing uses this as a hash/set key.
+// (datamodel types only derive `Debug` under `debug-derive`, off in WASM /
+// pysimlin). Salsa only needs `PartialEq` for incrementality.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, salsa::Update)]
 pub struct LtmSyntheticVar {
@@ -2003,21 +1992,32 @@ pub struct LtmSyntheticVar {
 
 /// Result of LTM variable generation for a model.
 ///
-/// `loop_partitions` maps each loop ID (as used in the `$⁚ltm⁚loop_score⁚{id}`
-/// synthetic variable name) to its cycle-partition index.  `None` values denote
-/// loops whose stocks are all below the parent-level graph (e.g., pure
-/// module-internal loops); they share a default grouping when
-/// `compute_rel_loop_scores` normalizes across a partition.  Populated only in
-/// exhaustive LTM mode; discovery mode emits no loop_score variables and
-/// leaves this map empty.
-//
-// `Debug`/`Eq` are conditional/absent for the same reasons as
-// `LtmSyntheticVar` (which it embeds).
+/// `loop_partitions` maps each loop ID (as in `$⁚ltm⁚loop_score⁚{id}`) to
+/// its cycle-partition index **per slot**: length 1 for scalar/cross-element/
+/// mixed loops, one entry per element (in the runtime's row-major slot order)
+/// for A2A loops, matching `ltm_post::build_loop_element_index`'s `n_slots`.
+/// Slots sharing a `(partition, slot)` key form the denominator when
+/// `ltm_post::compute_rel_loop_scores*` normalizes; an element-wise-uncoupled
+/// A2A loop's entries are N distinct partitions (the per-slot fix, GH #487),
+/// a coupled one's coincide, a `None` entry is a slot below the parent graph
+/// (e.g. a pure module-internal loop).  Populated only in exhaustive LTM
+/// mode; discovery mode leaves it empty.
+///
+/// `agg_recovery_truncated` is `true` when reconstruction of the
+/// cross-element-through-aggregate loops (`recover_cross_agg_loops`, GH
+/// #515) hit its loop-count budget (`db_ltm::MAX_CROSS_AGG_LOOPS`) or its
+/// per-aggregate petal cap, so the recovered loop list is incomplete (a
+/// `CompilationDiagnostic` `Warning` is also emitted then -- the flag is
+/// the robust signal, the `Warning`'s reachability being #466's concern).
+/// Always `false` in discovery mode and for models with no synthetic aggs.
+/// (`Debug`/`Eq` are conditional/absent for the same reasons as
+/// `LtmSyntheticVar`.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, salsa::Update)]
 pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
-    pub loop_partitions: HashMap<String, Option<usize>>,
+    pub loop_partitions: HashMap<String, Vec<Option<usize>>>,
+    pub agg_recovery_truncated: bool,
 }
 
 /// Compute the link score equation text for a single causal link.
@@ -2162,10 +2162,10 @@ pub fn link_score_equation_text<'db>(
     // Standard ceteris-paribus formula for non-module links.
     //
     // `link_score_equation_text` keys by `(from, to)` only -- no per-shape
-    // info. The Bare shape and empty `source_dim_elements` reproduce the
-    // original pre-Phase-3 behavior: every non-`from` dep is wrapped and
-    // `from` stays live regardless of subscript shape. Callers needing
-    // per-shape behavior use `link_score_equation_text_shaped`.
+    // info. The Bare shape, empty `source_dim_elements`, and `None`
+    // iterated-dim context reproduce the original pre-Phase-3 behavior (the
+    // GH #511 context is `None`-safe here: this legacy path is only reached
+    // for scalar-target link scores). Per-shape callers use the `_shaped` fn.
     let mut all_vars = HashMap::new();
     if let Some(ref fv) = from_var {
         all_vars.insert(from_ident.clone(), fv.clone());
@@ -2178,6 +2178,7 @@ pub fn link_score_equation_text<'db>(
         &[],
         &to_var,
         &all_vars,
+        None,
     );
 
     // This legacy entry always emits a scalar link score. If the generator

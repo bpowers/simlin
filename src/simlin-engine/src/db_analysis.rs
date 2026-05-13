@@ -6,7 +6,11 @@
 //!
 //! Extracted from db.rs for file-size management. Contains:
 //! - CausalEdgesResult, LoopCircuitsResult, CyclePartitionsResult
-//! - ElementCausalEdgesResult, RefShape, ReferenceSite (element-level graph)
+//! - ElementCausalEdgesResult, RefShape (element-level graph); the
+//!   reference-site classification (`ClassifiedSite`, the AST walker, the
+//!   agg-routing decision) lives in `db_ltm_ir.rs` and is consumed here via
+//!   `model_ltm_reference_sites`
+//! - `emit_edges_for_reference` and the element-name expansion helpers
 //! - DetectedLoop, DetectedLoopsResult (polarity-aware loop detection)
 //! - model_causal_edges, model_element_causal_edges, model_loop_circuits,
 //!   model_cycle_partitions
@@ -72,23 +76,33 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// reducers (e.g., inside `SUM(x[*])`), fixed-index references
 /// (e.g., `x[NYC]`), and dynamic-index references (e.g., `x[i+1]` where
 /// `i` is a position iterator). The shape determines element-edge
-/// emission and per-reference partial-equation construction.
+/// emission ([`emit_edges_for_reference`]) and per-reference
+/// partial-equation construction.
 ///
 /// The shape does *not* by itself decide whether a reference is rerouted
-/// through a hoisted `$⁚ltm⁚agg⁚{n}` aggregate node -- that is the job of
-/// `ReferenceSite::in_reducer` (true iff the site is syntactically inside
-/// an array-reducing builtin). A `to` equation can hold both `SUM(pop[*])`
-/// (rerouted via the agg) and a direct `pop[idx]` (kept as a conservative
-/// cross-product edge), and both produce a Wildcard/DynamicIndex site;
-/// `in_reducer` is what tells them apart in `model_element_causal_edges`.
+/// through a hoisted `$⁚ltm⁚agg⁚{n}` aggregate node -- that is recorded in
+/// `db_ltm_ir::ClassifiedSite::routing` (`ThroughAgg` iff the site is
+/// syntactically inside a hoisted reducer *and* a synthetic agg of `to`
+/// reads `from`). A `to` equation can hold both `SUM(pop[*])` (routed via
+/// the agg) and a direct `pop[idx]` (kept as a conservative cross-product
+/// edge), and both produce a Wildcard/DynamicIndex site; the IR's `routing`
+/// is what tells them apart for `model_element_causal_edges` and the
+/// link-score emitter.
 ///
-/// Post-cross-element-aggregate-scoring (the `$⁚ltm⁚agg⁚{n}` work),
-/// `Wildcard` / `DynamicIndex` no longer drive a per-shape `⁚wildcard` /
-/// `⁚dynamic` link-score variant: a site that *is* a hoisted reducer's
-/// argument is scored by the agg's two halves, and a site that is *not*
-/// (a non-hoisted slice `SUM(pop[NYC, *])`, a bare dynamic index
-/// `arr[i+1]`, or a direct `pop[idx]` alongside a `SUM(pop[*])`) keeps a
-/// conservative edge and a Bare-named link score.
+/// Post-cross-element-aggregate-scoring (the `$⁚ltm⁚agg⁚{n}` work) and after
+/// #514 (sliced-reducer hoisting), `Wildcard` / `DynamicIndex` no longer
+/// drive a per-shape `⁚wildcard` / `⁚dynamic` link-score variant. Every
+/// statically-describable inlined reducer -- whole-extent (`SUM(pop[*])`) or
+/// sliced (`SUM(pop[NYC, *])`, `SUM(matrix[D1, *])`) -- is hoisted into a
+/// `$⁚ltm⁚agg⁚{n}` node and scored by the agg's two halves. A site that is
+/// *not* a hoisted reducer's argument -- a bare dynamic index (`arr[i+1]`, a
+/// range), the dynamic-index reducer carve-out (`SUM(pop[idx, *])`, `idx`
+/// non-literal, reclassified to `DynamicIndex`), a mapped-dimension sliced
+/// reducer (`SUM(matrix[State, *])` over `matrix[Region, D2]` with a
+/// `State→Region` mapping; `enumerate_agg_nodes` declines the remapped axis,
+/// so the `Wildcard` reference stays `Direct`), or a direct `pop[idx]`
+/// alongside a `SUM(pop[*])` -- keeps a conservative edge and a Bare-named
+/// link score.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
 pub enum RefShape {
     /// `Expr2::Var(source, ...)` — bare variable reference. In an A2A
@@ -101,461 +115,28 @@ pub enum RefShape {
     /// in source order (canonical lowercase).
     FixedIndex(Vec<String>),
     /// `Expr2::Subscript(source, indices)` where at least one index is
-    /// `IndexExpr2::Wildcard`. Conservative full cross-product unless the
-    /// site is inside a hoisted reducer subexpression (`ReferenceSite::
-    /// in_reducer`), in which case it is rerouted through a `$⁚ltm⁚agg⁚{n}`
-    /// node.
+    /// `IndexExpr2::Wildcard`, or every index is `Wildcard` / `StarRange`
+    /// (the reducer-style whole-extent access). A reducer reference with
+    /// this shape that `enumerate_agg_nodes` hoisted into a `$⁚ltm⁚agg⁚{n}`
+    /// node is routed `ThroughAgg` (the shape is then ignored); a *whole-RHS*
+    /// reducer's argument (`total = SUM(population[*])`,
+    /// `row_sum[D1] = SUM(matrix[D1,*])`) keeps this shape on its `Direct`
+    /// site, where it projects to the conservative reduction / cross-product
+    /// into the (variable-backed-agg) target. The not-hoistable dynamic-index
+    /// reducer carve-out (`SUM(pop[idx,*])`) is reclassified by `db_ltm_ir`
+    /// as `DynamicIndex` rather than kept here (#514), so a `Direct`
+    /// `Wildcard` site never carries an *un*-hoisted sliced reducer.
     Wildcard,
     /// `Expr2::Subscript(source, indices)` where at least one index is
-    /// a non-literal expression (`@N`, `Range`, `StarRange`, or
-    /// arbitrary `Expr`). Conservative full cross-product unless the site
-    /// is inside a hoisted reducer subexpression (`ReferenceSite::
-    /// in_reducer`), in which case it is rerouted through a `$⁚ltm⁚agg⁚{n}`
-    /// node.
+    /// a non-literal expression (`@N`, `Range`, an arbitrary `Expr`, or a
+    /// *partial* `StarRange` mixed with literal indices) -- *or* the
+    /// not-hoistable dynamic-index reducer carve-out (`SUM(pop[idx,*])`,
+    /// reclassified here from `Wildcard` by `db_ltm_ir` so the conservative
+    /// cross-product path is `DynamicIndex`-only in `emit_edges_for_reference`).
+    /// Conservative full cross-product. (A hoisted *synthetic*-agg reducer
+    /// reference never has routing `Direct` with this shape -- it's
+    /// `ThroughAgg`.)
     DynamicIndex,
-}
-
-/// One occurrence of a source variable in a target's AST.
-///
-/// The walker emits one site per reference. Callers iterating the
-/// variable-level edge map already know the source ident, so the site
-/// only needs to carry the per-reference `shape` and (for arrayed
-/// per-element targets) the `target_element` it was discovered under.
-///
-/// `target_element` is set only when the reference appears inside an
-/// `Ast::Arrayed` per-element expression: the value is the canonical
-/// element name (single-dim) or comma-separated tuple (multi-dim) of the
-/// target element being defined. For `Ast::Scalar` and `Ast::ApplyToAll`
-/// it stays `None` (the reference contributes to every target element
-/// according to the shape's normal broadcast/diagonal rules).
-///
-/// `in_reducer` is true iff the reference site occurs syntactically inside
-/// an array-reducing builtin call (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/`RANK`
-/// -- the same set `enumerate_agg_nodes` hoists; `SIZE` and the 2-arg
-/// `MIN`/`MAX` are *not* reducers). It is the precise signal for "should
-/// this reference be rerouted through a hoisted aggregate node", which the
-/// access `shape` alone cannot answer: a target with *both* `SUM(pop[*])`
-/// and a direct `pop[idx]` produces a `DynamicIndex` site for the *direct*
-/// `pop[idx]` reference too, and that one must keep its own conservative
-/// element edge / Bare link score rather than collapsing into the agg.
-#[derive(Debug, Clone)]
-pub(crate) struct ReferenceSite {
-    pub shape: RefShape,
-    pub target_element: Option<String>,
-    pub in_reducer: bool,
-}
-
-/// Resolve a single subscript index to a literal element name (canonical
-/// lowercase) if it matches one of the source's dimensions, or `None`
-/// for any other shape (wildcard, range, position, non-literal
-/// expression, or a literal that doesn't match a known element).
-///
-/// Used by `collect_reference_sites` to classify `Subscript` shapes:
-/// every index in a `FixedIndex` must resolve via this helper. If any
-/// index fails to resolve, the subscript falls back to `DynamicIndex` --
-/// or `Wildcard` if a wildcard is present (wildcards are checked first
-/// in the caller).
-///
-/// Element names parse as `Expr2::Var(ident, ...)` (the parser keeps the
-/// raw element identifier as a Var; dimension-resolution into a numeric
-/// offset happens later, in Expr3 lowering). Integer literals (used for
-/// indexed dimensions like `1`, `2`) parse as `Expr2::Const`. We accept
-/// both forms.
-///
-/// Note: `source_dims` is the source variable's *full* dimension list.
-/// In multidimensional subscripts the caller doesn't know which
-/// dimension a literal belongs to; we accept the first dimension whose
-/// element registry contains the canonical name. Literal indices that
-/// don't match any known element classify defensively as `DynamicIndex`,
-/// so the worst case is over-conservative (full cross-product) edges.
-fn resolve_literal_index(
-    idx: &crate::ast::IndexExpr2,
-    source_dims: &[crate::dimensions::Dimension],
-) -> Option<String> {
-    use crate::ast::{Expr2, IndexExpr2};
-
-    // Element names appear as `Var(ident, ...)`; integer literals appear
-    // as `Const(text, value, _)`. Anything else (wildcards, ranges, dim
-    // positions, or compound expressions) is not a literal element.
-    let canonical = match idx {
-        IndexExpr2::Expr(Expr2::Var(ident, _, _)) => ident.as_str().to_string(),
-        IndexExpr2::Expr(Expr2::Const(text, _, _)) => canonicalize(text).into_owned(),
-        _ => return None,
-    };
-
-    for dim in source_dims {
-        match dim {
-            crate::dimensions::Dimension::Named(_, named) => {
-                if named.elements.iter().any(|e| e.as_str() == canonical) {
-                    return Some(canonical);
-                }
-            }
-            crate::dimensions::Dimension::Indexed(_, size) => {
-                // Indexed dimensions accept integer literals in the
-                // range [1, size]. Canonicalize via parse-then-format
-                // so non-canonical forms like `pop[01]` reduce to `"1"`
-                // -- matching `dimension_element_names`'s `"1".."N"`
-                // output and the Expr0 sibling
-                // (`ltm_augment::resolve_literal_element_index`).
-                // Returning the original text would let `pop[01]`
-                // serialize as `FixedIndex(["01"])` while the partial
-                // builder reduces to `FixedIndex(["1"])`, the shape
-                // comparison would fail, and the live ref would be
-                // wrapped in `PREVIOUS()`.
-                if let Ok(n) = canonical.parse::<u32>()
-                    && n >= 1
-                    && n <= *size
-                {
-                    return Some(n.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Walk a target variable's AST and emit one `ReferenceSite` per occurrence
-/// of `source_ident`, accumulating per-site shapes for downstream edge
-/// emission.
-///
-/// Subscript shape classification rules:
-/// - any `IndexExpr2::Wildcard(_)` index → `Wildcard`
-/// - all indices resolve via `resolve_literal_index` → `FixedIndex(names)`
-/// - any other pattern (`StarRange`, `DimPosition`, `Range`, non-literal
-///   `Expr`, or a literal that doesn't match a known element name) →
-///   `DynamicIndex`
-///
-/// Bare `Var` references push `RefShape::Bare`. The shape is independent
-/// of whether the source is arrayed -- edge emission resolves
-/// scalar-vs-arrayed semantics from the source/target dimension lists.
-///
-/// `App` arguments are walked via `walk_builtin_expr`; `BuiltinContents::Ident`
-/// matches contribute a `Bare` site (the builtin doesn't subscript its
-/// ident argument). The walker also recurses into each `Subscript` index
-/// expression so nested references like `source_outer[source_inner[*]]`
-/// emit a site for the inner reference.
-///
-/// Return order is the AST-walk order. Duplicate sites with identical
-/// `(source, shape)` are kept; downstream emission deduplicates edges
-/// implicitly via the `BTreeSet` value type, but the per-site count may
-/// matter for callers that use sites as a metric.
-/// Return the unique `RefShape`s under which `source_ident` is referenced
-/// in `target_var`'s AST.
-///
-/// Sibling of [`collect_reference_sites`] that drops the per-site
-/// `target_element` and source-name fields. Used by `model_ltm_variables`
-/// to enumerate the shapes for which a per-shape link score must be
-/// emitted (one `LtmSyntheticVar` per `(from, to, shape)` tuple).
-///
-/// Order is the AST-walk order of first occurrence; duplicates are
-/// removed. Returns an empty vec when the source isn't referenced.
-pub(crate) fn collect_reference_shapes(
-    target_var: &crate::variable::Variable,
-    source_ident: &str,
-    source_is_arrayed: bool,
-    source_dims: &[crate::dimensions::Dimension],
-) -> Vec<RefShape> {
-    let sites = collect_reference_sites(target_var, source_ident, source_is_arrayed, source_dims);
-    let mut shapes: Vec<RefShape> = Vec::new();
-    for site in sites {
-        if !shapes.iter().any(|s| s == &site.shape) {
-            shapes.push(site.shape);
-        }
-    }
-    shapes
-}
-
-fn collect_reference_sites(
-    target_var: &crate::variable::Variable,
-    source_ident: &str,
-    source_is_arrayed: bool,
-    source_dims: &[crate::dimensions::Dimension],
-) -> Vec<ReferenceSite> {
-    let Some(ast) = target_var.ast() else {
-        return Vec::new();
-    };
-
-    let mut sites = Vec::new();
-    match ast {
-        crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
-            // Scalar/A2A equations: every reference site contributes to
-            // every target element according to its shape's broadcast or
-            // diagonal rule. `target_element = None` lets the emitter
-            // apply the default rules. The whole-equation root is not
-            // inside any reducer, so `in_reducer = false` here.
-            collect_in_expr(
-                expr,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                None,
-                false,
-                &mut sites,
-            );
-        }
-        crate::ast::Ast::Arrayed(_, subscript_map, default_expr, _) => {
-            // Per-element expressions: each reference site is pinned to the
-            // specific target element being defined. The emitter restricts
-            // edge emission to that element only.
-            for (target_elem, expr) in subscript_map.iter() {
-                collect_in_expr(
-                    expr,
-                    source_ident,
-                    source_is_arrayed,
-                    source_dims,
-                    Some(target_elem.as_str()),
-                    false,
-                    &mut sites,
-                );
-            }
-            // The EXCEPT default applies to elements not explicitly listed.
-            // We don't know the exact target element set here, but the
-            // default expression's references contribute to every other
-            // target element. Treating `target_element = None` makes the
-            // emitter broadcast across the full target dimension, which
-            // is a conservative superset that preserves the variable-level
-            // projection invariant.
-            if let Some(default) = default_expr {
-                collect_in_expr(
-                    default,
-                    source_ident,
-                    source_is_arrayed,
-                    source_dims,
-                    None,
-                    false,
-                    &mut sites,
-                );
-            }
-        }
-    }
-    sites
-}
-
-/// Is this builtin an array reducer whose inlined uses `enumerate_agg_nodes`
-/// hoists into an aggregate node?
-///
-/// Mirrors `ltm_agg::reducer_source_vars`'s recognition set so the
-/// reference-site walker's `in_reducer` flag agrees exactly with which
-/// subexpressions actually get a hoisted agg: `SUM`/`STDDEV`/`RANK`
-/// unconditionally, `MEAN` only in its 1-arg array form, `MIN`/`MAX` only
-/// in their 1-arg array form (the 2-arg `MIN(a, b)` / `MAX(a, b)` are
-/// scalar pairwise ops, not reducers). `SIZE` is excluded -- its result
-/// doesn't depend on element values, so it isn't routed through an agg.
-fn builtin_is_array_reducer(builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>) -> bool {
-    use crate::builtins::BuiltinFn;
-    match builtin {
-        BuiltinFn::Sum(_) | BuiltinFn::Stddev(_) | BuiltinFn::Rank(_, _) => true,
-        BuiltinFn::Mean(args) => args.len() == 1,
-        BuiltinFn::Min(_, None) | BuiltinFn::Max(_, None) => true,
-        _ => false,
-    }
-}
-
-/// Recursively walk an `Expr2` tree, pushing one `ReferenceSite` for each
-/// reference to `source_ident`. See `collect_reference_sites` for the
-/// shape-classification rules.
-///
-/// `source_is_arrayed` is threaded through for callers that need it
-/// during recursion-local rewriting (currently a no-op here -- shape
-/// classification is determined by the AST node and `source_dims`),
-/// matching the documented public signature.
-///
-/// `in_reducer` is `true` when this expression is (transitively) an
-/// argument of an array-reducing builtin (`builtin_is_array_reducer`); it
-/// propagates onto every `ReferenceSite` emitted below and tells the
-/// element-graph reroute whether a Wildcard/DynamicIndex reference is the
-/// reducer argument (route through the hoisted agg) or a direct subscript
-/// of the same source elsewhere in the equation (keep its own edge).
-#[allow(clippy::only_used_in_recursion)] // helper for collect_reference_sites
-fn collect_in_expr(
-    expr: &crate::ast::Expr2,
-    source_ident: &str,
-    source_is_arrayed: bool,
-    source_dims: &[crate::dimensions::Dimension],
-    target_element: Option<&str>,
-    in_reducer: bool,
-    sites: &mut Vec<ReferenceSite>,
-) {
-    use crate::ast::{Expr2, IndexExpr2};
-    use crate::builtins::{BuiltinContents, walk_builtin_expr};
-
-    let make_site = |shape: RefShape| -> ReferenceSite {
-        ReferenceSite {
-            shape,
-            target_element: target_element.map(|s| s.to_string()),
-            in_reducer,
-        }
-    };
-
-    match expr {
-        Expr2::Const(..) => {}
-        Expr2::Var(ident, _array_bounds, _) => {
-            if ident.as_str() == source_ident {
-                sites.push(make_site(RefShape::Bare));
-            }
-        }
-        Expr2::Subscript(ident, indices, _, _) => {
-            if ident.as_str() == source_ident {
-                let shape = classify_subscript_shape(indices, source_dims);
-                sites.push(make_site(shape));
-            }
-            // Always recurse into index expressions so nested references
-            // like `source_outer[source_inner[*]]` (or arbitrary index
-            // arithmetic mentioning the source) still emit per-site
-            // entries for the inner reference.
-            for idx in indices {
-                match idx {
-                    IndexExpr2::Expr(e) => {
-                        collect_in_expr(
-                            e,
-                            source_ident,
-                            source_is_arrayed,
-                            source_dims,
-                            target_element,
-                            in_reducer,
-                            sites,
-                        );
-                    }
-                    IndexExpr2::Range(l, r, _) => {
-                        collect_in_expr(
-                            l,
-                            source_ident,
-                            source_is_arrayed,
-                            source_dims,
-                            target_element,
-                            in_reducer,
-                            sites,
-                        );
-                        collect_in_expr(
-                            r,
-                            source_ident,
-                            source_is_arrayed,
-                            source_dims,
-                            target_element,
-                            in_reducer,
-                            sites,
-                        );
-                    }
-                    IndexExpr2::Wildcard(_)
-                    | IndexExpr2::StarRange(_, _)
-                    | IndexExpr2::DimPosition(_, _) => {}
-                }
-            }
-        }
-        Expr2::App(builtin, _, _) => {
-            // A reference inside an array-reducing builtin's argument is
-            // the reducer's input -- mark it so the element-graph reroute
-            // can route it through the hoisted `$⁚ltm⁚agg⁚{n}` node.
-            // Stays sticky once set: a reducer nested in another reducer's
-            // argument is still inside *a* reducer.
-            let child_in_reducer = in_reducer || builtin_is_array_reducer(builtin);
-            walk_builtin_expr(builtin, |contents| match contents {
-                BuiltinContents::Ident(id, _) => {
-                    if id == source_ident {
-                        sites.push(make_site(RefShape::Bare));
-                    }
-                }
-                BuiltinContents::Expr(sub_expr) => {
-                    collect_in_expr(
-                        sub_expr,
-                        source_ident,
-                        source_is_arrayed,
-                        source_dims,
-                        target_element,
-                        child_in_reducer,
-                        sites,
-                    );
-                }
-            });
-        }
-        Expr2::Op1(_, operand, _, _) => {
-            collect_in_expr(
-                operand,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-        }
-        Expr2::Op2(_, left, right, _, _) => {
-            collect_in_expr(
-                left,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-            collect_in_expr(
-                right,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-        }
-        Expr2::If(cond, then_expr, else_expr, _, _) => {
-            collect_in_expr(
-                cond,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-            collect_in_expr(
-                then_expr,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-            collect_in_expr(
-                else_expr,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-        }
-    }
-}
-
-/// Classify a subscript's indices into a `RefShape`.
-///
-/// Wildcard takes precedence: if any index is `IndexExpr2::Wildcard`,
-/// the shape is `Wildcard` (conservative full cross-product).
-/// Otherwise, every index must resolve via `resolve_literal_index` for
-/// the shape to be `FixedIndex`. Any other index pattern (or an
-/// unrecognized literal) falls back to `DynamicIndex`.
-fn classify_subscript_shape(
-    indices: &[crate::ast::IndexExpr2],
-    source_dims: &[crate::dimensions::Dimension],
-) -> RefShape {
-    use crate::ast::IndexExpr2;
-
-    if indices.iter().any(|i| matches!(i, IndexExpr2::Wildcard(_))) {
-        return RefShape::Wildcard;
-    }
-
-    let mut resolved: Vec<String> = Vec::with_capacity(indices.len());
-    for idx in indices {
-        match resolve_literal_index(idx, source_dims) {
-            Some(name) => resolved.push(name),
-            None => return RefShape::DynamicIndex,
-        }
-    }
-    RefShape::FixedIndex(resolved)
 }
 
 /// Collect element names from a dimension as owned strings.
@@ -599,6 +180,15 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// `DynamicIndex`), so this helper does not need to handle a
 /// "partial fixed" branch -- it only sees fully-resolved
 /// `FixedIndex(elems)` payloads or the conservative full-cross shapes.
+///
+/// A `ThroughAgg`-routed reference never reaches here -- those are routed
+/// through a synthetic aggregate node by `emit_agg_routed_edges` (only the
+/// read-slice rows). After #514 the `Direct` not-hoistable-reducer carve-out
+/// (`SUM(pop[idx,*])`) is reclassified by the IR as `DynamicIndex`, so a
+/// `Direct` `Wildcard` site is now only a variable-backed reducer's whole-RHS
+/// argument (`total = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`)
+/// or a (rare) non-reducer whole-array reference; the conservative cross
+/// product is the right semantics for all of those.
 fn emit_edges_for_reference(
     from_name: &str,
     to_name: &str,
@@ -705,7 +295,14 @@ fn emit_edges_for_reference(
         RefShape::Wildcard | RefShape::DynamicIndex => {
             // Conservative full cross product over source elements.
             // `target_nodes` already restricts the target side when
-            // inside an arrayed per-element expression.
+            // inside an arrayed per-element expression. `DynamicIndex`
+            // here is `arr[i+1]`, a range, or the not-hoistable-reducer
+            // carve-out (`SUM(pop[idx,*])`, reclassified from `Wildcard` by
+            // the IR); `Wildcard` here is only a variable-backed reducer's
+            // whole-RHS argument (a reduction into a scalar/lower-rank `to`)
+            // or a rare non-reducer whole-array reference -- a hoisted
+            // *synthetic*-agg reducer reference is routed through the agg
+            // (`emit_agg_routed_edges`) and never lands on this arm.
             let from_elements = cartesian_element_names(from_name, from_dims);
             for from_elem in &from_elements {
                 let entry = element_edges.entry(from_elem.clone()).or_default();
@@ -894,6 +491,235 @@ fn expand_same_element(
                     .insert(to_node);
             }
         }
+    }
+}
+
+/// Emit the element edges for a reference routed through a hoisted aggregate
+/// node: `source[<read slice>] → agg[<iterated>]` then `agg[<iterated>] →
+/// to[e]`, where `agg.read_slice` (one [`AxisRead`] per source axis) decides
+/// which source rows feed each agg result slot and `agg.result_dims` (the
+/// `Iterated` axes' dims) decides how the agg fans out into `to`.
+///
+/// - A [`AxisRead::Pinned`] axis fixes one element of the source on that axis.
+/// - An [`AxisRead::Iterated`] axis ranges; its element selects the agg result
+///   slot's coordinate for that dimension.
+/// - A [`AxisRead::Reduced`] axis ranges over *every* element (each one feeds
+///   the same agg result slot). For the *element graph* a representative
+///   element would suffice for reachability, but emitting one edge per element
+///   matches `cross_element_loop_through_sum_reducer`'s whole-extent
+///   expectation and the per-element link scores need them all anyway.
+///
+/// When `read_slice` is all-`Reduced` (`result_dims` empty) the agg is scalar:
+/// every source element feeds `agg`, and `agg` broadcasts to every `to`
+/// element -- the pre-Phase-4 behavior. `target_element` (a per-element
+/// `Ast::Arrayed` slot) pins the `agg → to` half to that single target.
+///
+/// Defensive: if `read_slice` doesn't have one entry per source axis (it
+/// always should for a hoisted agg whose `source_vars` includes `from`), fall
+/// back to the conservative "every source element → agg" form so a stale
+/// invariant can't drop edges.
+fn emit_agg_routed_edges(
+    from_name: &str,
+    to_name: &str,
+    from_dims: &[crate::dimensions::Dimension],
+    to_dims: &[crate::dimensions::Dimension],
+    agg: &crate::ltm_agg::AggNode,
+    target_element: Option<&str>,
+    element_edges: &mut HashMap<String, BTreeSet<String>>,
+) {
+    use crate::ltm_agg::AxisRead;
+
+    // The agg's result-axis dimensions (`AggNode::result_dims`, datamodel-
+    // cased), resolved to the `Dimension` objects -- so `cartesian_element_names`
+    // / `expand_same_element` and the agg-slot subscripting below can operate
+    // on them directly. The agg's result dims are always dimensions the target
+    // `to` iterates over (they come from the target equation's iterated
+    // dimensions), and -- when the reducer reads its arrayed source by the
+    // matching iterated subscript -- a subset of the arrayed source's dims too,
+    // so we can recover the `Dimension` from `from_dims` (preferred -- it's the
+    // source row axis) or from `to_dims` (the only place to look when `from` is
+    // a *scalar* feeder of the agg). `read_slice_ok` keys the source-row layout
+    // machinery below off the well-formed slice; it is independent of where the
+    // `Iterated` `Dimension`s come from.
+    let read_slice_ok = !from_dims.is_empty() && agg.read_slice.len() == from_dims.len();
+    let resolve_result_dim = |name: &str| -> Option<crate::dimensions::Dimension> {
+        let canon = canonicalize(name);
+        from_dims
+            .iter()
+            .chain(to_dims.iter())
+            .find(|d| d.name() == canon.as_ref())
+            .cloned()
+    };
+    let iterated_dims: Vec<crate::dimensions::Dimension> = agg
+        .result_dims
+        .iter()
+        .filter_map(|rd| resolve_result_dim(rd))
+        .collect();
+    debug_assert_eq!(
+        iterated_dims.len(),
+        agg.result_dims.len(),
+        "every agg result dim ({:?}) must resolve to a Dimension carried by `from` ({:?}) or `to` ({:?})",
+        agg.result_dims,
+        from_dims.iter().map(|d| d.name()).collect::<Vec<_>>(),
+        to_dims.iter().map(|d| d.name()).collect::<Vec<_>>(),
+    );
+
+    // The agg node name for a given result-slot coordinate tuple. A scalar agg
+    // (`iterated_dims` empty) keeps its bare name; an arrayed agg is
+    // subscripted with the iterated elements in order.
+    let agg_node_name = |slot: &[String]| -> String {
+        if slot.is_empty() {
+            agg.name.clone()
+        } else {
+            format!("{}[{}]", agg.name, slot.join(","))
+        }
+    };
+
+    if from_dims.is_empty() {
+        // A *scalar* feeder of the (possibly arrayed) agg -- this arises when
+        // the reducer's argument references a scalar variable, e.g.
+        // `growth[D1] = base + SUM(matrix[D1,*] * scale)` where `scale` is
+        // scalar (the `scale → $⁚ltm⁚agg⁚0` edge). A scalar feeder is not
+        // subscripted, so it cannot pick out one agg result slot; it feeds
+        // *every* slot. Emit `scale → agg[<each Iterated combo>]` (or
+        // `scale → agg` when the agg is scalar), bypassing the `axis_plans`
+        // row machinery below (which, fed an empty `from_dims`, would build a
+        // single empty `row_elems` and emit a malformed `scale[]` node via
+        // `format_multi_element_name(_, &[])`).
+        let entry = element_edges.entry(from_name.to_string()).or_default();
+        if iterated_dims.is_empty() {
+            entry.insert(agg.name.clone());
+        } else {
+            let mut slots: Vec<Vec<String>> = vec![Vec::new()];
+            for d in &iterated_dims {
+                let elems = dimension_element_names(d);
+                let mut next: Vec<Vec<String>> = Vec::with_capacity(slots.len() * elems.len());
+                for slot in &slots {
+                    for elem in &elems {
+                        let mut s = slot.clone();
+                        s.push(elem.clone());
+                        next.push(s);
+                    }
+                }
+                slots = next;
+            }
+            for slot in &slots {
+                entry.insert(agg_node_name(slot));
+            }
+        }
+    } else {
+        // Per source axis, the element-name list to iterate when enumerating
+        // source rows: a `Pinned` axis is fixed to one element; an `Iterated`
+        // or `Reduced` axis ranges over every element. The position of an
+        // `Iterated` axis within the result tuple is tracked so each source
+        // row maps to the matching agg result slot.
+        struct AxisPlan {
+            elems: Vec<String>,
+            /// `Some(j)` if this axis is the `j`th `Iterated` axis (its
+            /// element becomes coordinate `j` of the agg result slot);
+            /// `None` otherwise.
+            iterated_pos: Option<usize>,
+        }
+        let mut axis_plans: Vec<AxisPlan> = Vec::with_capacity(from_dims.len());
+        let mut next_iterated_pos = 0usize;
+        if read_slice_ok {
+            for (a, d) in agg.read_slice.iter().zip(from_dims) {
+                let plan = match a {
+                    AxisRead::Pinned(elem) => AxisPlan {
+                        elems: vec![elem.clone()],
+                        iterated_pos: None,
+                    },
+                    AxisRead::Iterated(_) => {
+                        let pos = next_iterated_pos;
+                        next_iterated_pos += 1;
+                        AxisPlan {
+                            elems: dimension_element_names(d),
+                            iterated_pos: Some(pos),
+                        }
+                    }
+                    AxisRead::Reduced => AxisPlan {
+                        elems: dimension_element_names(d),
+                        iterated_pos: None,
+                    },
+                };
+                axis_plans.push(plan);
+            }
+        } else {
+            // Conservative fallback: every source element, scalar agg.
+            for d in from_dims {
+                axis_plans.push(AxisPlan {
+                    elems: dimension_element_names(d),
+                    iterated_pos: None,
+                });
+            }
+        }
+
+        // Source → agg edges: cartesian product over the per-axis element
+        // lists, routing each row to the agg result slot picked out by its
+        // `Iterated` coordinates. (`next_iterated_pos` is 0 in the
+        // conservative fallback.)
+        let n_iterated = if read_slice_ok { next_iterated_pos } else { 0 };
+        let mut rows: Vec<(Vec<String>, Vec<String>)> =
+            vec![(Vec::new(), vec![String::new(); n_iterated])];
+        for plan in &axis_plans {
+            let mut next_rows: Vec<(Vec<String>, Vec<String>)> =
+                Vec::with_capacity(rows.len() * plan.elems.len());
+            for (row_elems, slot) in &rows {
+                for elem in &plan.elems {
+                    let mut new_row = row_elems.clone();
+                    new_row.push(elem.clone());
+                    let mut new_slot = slot.clone();
+                    if let Some(j) = plan.iterated_pos {
+                        new_slot[j] = elem.clone();
+                    }
+                    next_rows.push((new_row, new_slot));
+                }
+            }
+            rows = next_rows;
+        }
+        for (row_elems, slot) in &rows {
+            let from_node = if row_elems.len() == 1 {
+                format_element_name(from_name, &row_elems[0])
+            } else {
+                let refs: Vec<&str> = row_elems.iter().map(String::as_str).collect();
+                format_multi_element_name(from_name, &refs)
+            };
+            element_edges
+                .entry(from_node)
+                .or_default()
+                .insert(agg_node_name(slot));
+        }
+    }
+
+    // Agg → to edges. With no `Iterated` axes the agg is scalar and broadcasts
+    // to every target element (or the single pinned target). Otherwise the agg
+    // is arrayed over `iterated_dims`; it fans into `to` by the same
+    // same-element-on-shared-dims projection a `Bare` reference would
+    // (`expand_same_element`). An `Iterated` axis can only arise from an A2A
+    // target (a per-element `Ast::Arrayed` slot has no iterated dims, and a
+    // scalar target none either), so when `iterated_dims` is non-empty `to` is
+    // arrayed and `target_element` is `None`.
+    if iterated_dims.is_empty() {
+        let to_nodes: Vec<String> = if to_dims.is_empty() {
+            vec![to_name.to_string()]
+        } else if let Some(elem) = target_element {
+            vec![format!("{to_name}[{elem}]")]
+        } else {
+            cartesian_element_names(to_name, to_dims)
+        };
+        let entry = element_edges.entry(agg.name.clone()).or_default();
+        for to_node in to_nodes {
+            entry.insert(to_node);
+        }
+    } else {
+        // Arrayed agg → arrayed `to`: project per the `Bare` arm.
+        // `expand_same_element` formats source nodes as `name[elems]`, so
+        // passing the agg's real name lands the edges on `agg[<slot>]`.
+        debug_assert!(
+            !to_dims.is_empty() && target_element.is_none(),
+            "an Iterated-axis agg implies an A2A target"
+        );
+        expand_same_element(&agg.name, to_name, &iterated_dims, to_dims, element_edges);
     }
 }
 
@@ -1299,12 +1125,12 @@ pub struct EdgeShapesResult {
 /// enumeration: cycles can be classified as pure-A2A, pure-scalar, or
 /// cross-element/mixed by inspecting the shape set on each cycle edge.
 ///
-/// Salsa-tracked separately from `model_element_causal_edges` so that
-/// callers that only want the cycle classifier (not the element graph)
-/// don't pay for the element-edge expansion. Both functions reuse the
-/// same `collect_reference_sites` / `collect_reference_shapes` walker;
-/// the per-target AST parse results are already cached by salsa, so
-/// the duplicated walks are cheap.
+/// A projection of `model_ltm_reference_sites` (the shared reference-site
+/// IR): the shape set per `(from, to)` edge is just the distinct `shape`
+/// fields of that edge's `ClassifiedSite`s -- this function does no AST
+/// walk of its own. The structural / module short-circuit (no AST
+/// reference exists, so the IR has no entry) maps to `{Bare}`, matching
+/// `model_element_causal_edges`'s treatment of the same edges.
 #[salsa::tracked(returns(ref))]
 pub fn model_edge_shapes(
     db: &dyn Db,
@@ -1313,13 +1139,13 @@ pub fn model_edge_shapes(
 ) -> EdgeShapesResult {
     let variable_edges = model_causal_edges(db, model, project);
     let source_vars = model.variables(db);
+    let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
 
     // Build a set of structural flow->stock edges so we can label them
-    // `{Bare}` directly without an AST walk: stock equations contain
-    // only the initial value, so the flow name never appears in the
-    // stock's AST and `collect_reference_shapes` would return an empty
-    // vec. The structural edge is semantically a same-element diagonal,
-    // matching the Bare classification used by
+    // `{Bare}` directly: stock equations contain only the initial value,
+    // so the flow name never appears in the stock's AST and the IR has no
+    // entry for the edge. The structural edge is semantically a
+    // same-element diagonal, matching the Bare classification used by
     // `model_element_causal_edges` for the same case.
     let mut structural_flow_to_stock: BTreeSet<(String, String)> = BTreeSet::new();
     for (stock_name, source_var) in source_vars.iter() {
@@ -1335,31 +1161,16 @@ pub fn model_edge_shapes(
         }
     }
 
-    // Cache dimension lookups -- a variable's dimension list is needed
-    // both as the source for shape resolution and (cheaply) reused
-    // across multiple edges that share the same source.
-    let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
-    let mut lookup_dims = |name: &str| -> Vec<crate::dimensions::Dimension> {
-        if let Some(dims) = dim_cache.get(name) {
-            return dims.clone();
-        }
-        let dims = source_vars
-            .get(name)
-            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
-            .unwrap_or_default();
-        dim_cache.insert(name.to_string(), dims.clone());
-        dims
-    };
-
     let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
     for (from_name, to_set) in &variable_edges.edges {
-        let from_dims = lookup_dims(from_name);
-        let source_is_arrayed = !from_dims.is_empty();
-
         for to_name in to_set {
             // Module edges and structural flow->stock edges short-circuit
             // to {Bare}. Module targets are scalar nodes in the causal
-            // graph; structural stock edges have no AST reference.
+            // graph; structural stock edges (and any other edge with no
+            // AST reference -- e.g. a synthesized dep, or an
+            // unreconstructable target) have no IR entry, which also maps
+            // to {Bare} below, but flagging the structural/module edges
+            // here keeps the intent explicit.
             let to_is_module = source_vars
                 .get(to_name)
                 .map(|sv| sv.kind(db) == super::SourceVariableKind::Module)
@@ -1373,32 +1184,18 @@ pub fn model_edge_shapes(
                 continue;
             }
 
-            // AST-walk path: reconstruct the target and collect distinct
-            // reference shapes.
-            let target_var = match reconstruct_single_variable(db, model, project, to_name) {
-                Some(v) => v,
-                None => {
-                    // Defensive fallback: edge exists in the variable
-                    // graph but the target isn't reconstructable. Treat
-                    // as Bare so the cycle classifier still has a
-                    // shape to inspect. (Same fallback as
-                    // `model_element_causal_edges`.)
-                    let mut set = BTreeSet::new();
-                    set.insert(RefShape::Bare);
-                    edge_shapes.insert((from_name.clone(), to_name.clone()), set);
-                    continue;
-                }
-            };
-
-            let shapes =
-                collect_reference_shapes(&target_var, from_name, source_is_arrayed, &from_dims);
-            let mut set: BTreeSet<RefShape> = shapes.into_iter().collect();
+            // Project the IR: the shape set is the distinct `shape` fields
+            // of this edge's classified sites. An edge that exists in the
+            // variable graph but has no AST reference (or whose target
+            // couldn't be reconstructed) has no IR entry -> default to
+            // {Bare} so the cycle classifier sees a same-element shape
+            // rather than an empty set (which would be ambiguous).
+            let mut set: BTreeSet<RefShape> = ir
+                .sites
+                .get(&(from_name.clone(), to_name.clone()))
+                .map(|sites| sites.iter().map(|s| s.shape.clone()).collect())
+                .unwrap_or_default();
             if set.is_empty() {
-                // Edge exists in the variable graph but no AST reference
-                // of `from` survives in `to`'s equation. This can happen
-                // with synthesized references; default to Bare so the
-                // classifier sees a same-element shape rather than an
-                // empty set (which would be ambiguous).
                 set.insert(RefShape::Bare);
             }
             edge_shapes.insert((from_name.clone(), to_name.clone()), set);
@@ -1563,10 +1360,17 @@ pub fn model_element_causal_edges(
 
     let mut element_edges: HashMap<String, BTreeSet<String>> = HashMap::new();
 
-    // Aggregate-node enumeration (Phase 5): each maximal inlined reducer
-    // subexpression (`SUM(pop[*])`, ...) is a synthetic node `$⁚ltm⁚agg⁚{n}`.
-    // A Wildcard/DynamicIndex reducer reference to `from` inside `to` routes
-    // `from[d] → agg` + `agg → to[e]` instead of the all-pairs cross-product.
+    // The reference-site classification IR decides each reference's access
+    // shape and aggregate-node routing; `enumerate_agg_nodes` is consulted
+    // only to resolve a `ThroughAgg` site's `AggRef` to the synthetic agg
+    // (and its `read_slice` / `result_dims`). A `ThroughAgg` site routes only
+    // the rows the reducer reads through the agg (`emit_agg_routed_edges`),
+    // never the all-pairs cross-product; a `Direct` site uses its
+    // `shape`/`target_element` via `emit_edges_for_reference` -- a
+    // `DynamicIndex` shape (`arr[i+1]`, a range, the not-hoisted dynamic-index
+    // reducer carve-out `SUM(pop[idx,*])`) still expands to the conservative
+    // full cross-product there.
+    let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
 
     // Cache dimension lookups to avoid repeated calls for the same variable
@@ -1586,11 +1390,13 @@ pub fn model_element_causal_edges(
         dims
     };
 
-    // Build a set of structural flow->stock edges so we can skip AST
+    // Build a set of structural flow->stock edges so we can skip
     // classification for them. Stock equations contain only the initial
-    // value, so the flow name never appears in the stock's AST. Without
-    // this check, classification defaults to Scalar, which produces
-    // incorrect all-to-all expansion for arrayed stocks.
+    // value, so the flow name never appears in the stock's AST (the IR has
+    // no entry); without this bypass an arrayed stock's edge would fall
+    // through to the empty-sites fallback below, which is the same
+    // SameElement diagonal -- but flagging it here keeps the intent
+    // explicit and matches `model_edge_shapes`.
     let mut structural_flow_to_stock: BTreeSet<(String, String)> = BTreeSet::new();
     for (stock_name, source_var) in source_vars.iter() {
         if source_var.kind(db) == super::SourceVariableKind::Stock {
@@ -1605,12 +1411,16 @@ pub fn model_element_causal_edges(
         }
     }
 
-    // Expand each variable-level edge to element-level edges using the
-    // AST-walking per-reference walker. For each (source, target) pair we
-    // collect every reference site of `source` in `target`'s AST, classify
-    // each into a `RefShape`, and emit the per-shape element edges. This
-    // replaces the older single-classification-per-pair scheme that
-    // over-expanded fixed-index references to the full N x N cross product.
+    // Expand each variable-level edge to element-level edges by reading the
+    // IR's classified sites for that `(from, to)` pair. `Direct` sites emit
+    // per-shape element edges (deduped naturally via the `BTreeSet` value);
+    // `ThroughAgg` sites route only the rows the reducer reads through the
+    // synthetic agg (`source[<read slice>] → agg[<iterated>]`,
+    // `agg[<iterated>] → to[e]` per `emit_agg_routed_edges`). An edge with no
+    // IR entry (structural flow->stock, a module edge, an unreconstructable
+    // target, or a synthesized dep with no AST reference) falls back to a
+    // SameElement-diagonal `Bare` emission so the variable-level projection
+    // invariant still holds.
     for (from_name, to_set) in &variable_edges.edges {
         let from_dims = lookup_dims(from_name, &mut dim_cache);
         for to_name in to_set {
@@ -1625,15 +1435,15 @@ pub fn model_element_causal_edges(
                 continue;
             }
 
-            // Structural flow->stock edges: the stock's equation is just the
-            // initial value, so the flow name never appears in the stock's
-            // AST. Without this bypass, the walker would find no reference
-            // sites and emit no edges. Both arrayed -> emit SameElement
-            // diagonal directly.
-            if structural_flow_to_stock.contains(&(from_name.clone(), to_name.clone()))
+            let edge_key = (from_name.clone(), to_name.clone());
+            let classified = ir.sites.get(&edge_key);
+
+            // Structural flow->stock edges, or any edge with no AST
+            // reference: SameElement diagonal `Bare` emission.
+            let is_structural_flow_to_stock = structural_flow_to_stock.contains(&edge_key)
                 && !from_dims.is_empty()
-                && !to_dims.is_empty()
-            {
+                && !to_dims.is_empty();
+            if is_structural_flow_to_stock || classified.map(Vec::is_empty).unwrap_or(true) {
                 emit_edges_for_reference(
                     from_name,
                     to_name,
@@ -1646,115 +1456,44 @@ pub fn model_element_causal_edges(
                 continue;
             }
 
-            // AST-based emission: collect reference sites and emit one set
-            // of element edges per site. Multiple sites of the same shape
-            // dedupe naturally because `element_edges` values are sets.
-            let target_var = match reconstruct_single_variable(db, model, project, to_name) {
-                Some(v) => v,
-                None => {
-                    // Couldn't reconstruct (shouldn't happen for well-formed
-                    // models). Fall back to scalar broadcast emission so the
-                    // variable-level projection invariant still holds.
-                    emit_edges_for_reference(
-                        from_name,
-                        to_name,
-                        &from_dims,
-                        &to_dims,
-                        &RefShape::Bare,
-                        None,
-                        &mut element_edges,
-                    );
-                    continue;
-                }
-            };
-            let source_is_arrayed = !from_dims.is_empty();
-            let sites =
-                collect_reference_sites(&target_var, from_name, source_is_arrayed, &from_dims);
-
-            if sites.is_empty() {
-                // Defensive: the variable-level edge exists but the AST has
-                // no reference. This can happen with structural edges or
-                // synthesized references. Fall back to scalar broadcast so
-                // the variable-level projection invariant still holds.
-                emit_edges_for_reference(
-                    from_name,
-                    to_name,
-                    &from_dims,
-                    &to_dims,
-                    &RefShape::Bare,
-                    None,
-                    &mut element_edges,
-                );
-                continue;
-            }
-
-            // Phase 5: does `to`'s equation hoist any *synthetic* aggregate
-            // node that reads `from`? If so, every reference to `from` that
-            // appears *inside an array-reducing builtin argument* (the
-            // `in_reducer` sites) is rerouted through that agg node
-            // (`from[d] → agg`, `agg → to[e]`) rather than emitting the
-            // all-pairs cross-product. (Variable-backed aggs like
-            // `total_pop = SUM(pop[*])` are already real nodes -- their
-            // edges come from the normal reference walker -- so they don't
-            // trigger this reroute.)
-            //
-            // The reroute keys on `site.in_reducer` *and* whether a hoisted
-            // agg actually covers `from`, not on the access shape: a `to`
-            // equation with *both* `SUM(pop[*])` and a direct `pop[idx]`
-            // produces a `DynamicIndex` site for the direct `pop[idx]` too,
-            // but only the `SUM`'s argument is hoisted -- the direct
-            // `pop[idx]` reference (`in_reducer = false`) must keep its own
-            // conservative cross-product edge. The flip side: a reducer over
-            // a single non-literal index, `SUM(pop[idx])`, *is* `in_reducer`
-            // but is *not* a full reduce (it reads one element, not the whole
-            // array), so `enumerate_agg_nodes` never mints an agg for it; with
-            // no hoisted agg reading `pop`, `routed_aggs` is empty and the
-            // `DynamicIndex` site falls through to `emit_edges_for_reference`.
-            // (A wildcard-containing slice like `SUM(pop[NYC, *])`, GH #514,
-            // classifies as `Wildcard`, not `DynamicIndex` -- wildcard wins in
-            // `classify_subscript_shape` -- and is also not hoisted.)
-            let routed_aggs: Vec<&crate::ltm_agg::AggNode> = agg_nodes
-                .aggs_in_var(to_name)
-                .filter(|a| a.is_synthetic && a.source_vars.iter().any(|s| s == from_name))
-                .collect();
-
-            for site in sites {
-                let route_through_agg = !routed_aggs.is_empty() && site.in_reducer;
-                if route_through_agg {
-                    // `from[d] → agg` (per source element) and `agg → to[e]`
-                    // (per target element / scalar). Synthetic aggs are
-                    // always scalar full-reduces in this phase, so the agg
-                    // node has no subscript.
-                    for agg in &routed_aggs {
-                        for from_elem in cartesian_element_names(from_name, &from_dims) {
-                            element_edges
-                                .entry(from_elem)
-                                .or_default()
-                                .insert(agg.name.clone());
-                        }
-                        let to_nodes: Vec<String> = if to_dims.is_empty() {
-                            vec![to_name.to_string()]
-                        } else if let Some(elem) = site.target_element.as_deref() {
-                            vec![format!("{to_name}[{elem}]")]
-                        } else {
-                            cartesian_element_names(to_name, &to_dims)
-                        };
-                        let entry = element_edges.entry(agg.name.clone()).or_default();
-                        for to_node in to_nodes {
-                            entry.insert(to_node);
-                        }
+            for site in classified.expect("classified is Some -- checked above") {
+                match &site.routing {
+                    crate::db_ltm_ir::SiteRouting::Direct => {
+                        emit_edges_for_reference(
+                            from_name,
+                            to_name,
+                            &from_dims,
+                            &to_dims,
+                            &site.shape,
+                            site.target_element.as_deref(),
+                            &mut element_edges,
+                        );
                     }
-                    continue;
+                    crate::db_ltm_ir::SiteRouting::ThroughAgg { agg } => {
+                        // Route only the rows the reducer reads through the
+                        // agg: `source[<pinned>,<iterated>,<reduced→all>] →
+                        // agg[<iterated>]` per `Iterated`-axis combination,
+                        // then `agg[<iterated>] → to[e]` (the agg's
+                        // `result_dims` drive how it fans out into `to` --
+                        // diagonal on shared dims, broadcast otherwise, the
+                        // same projection the `Bare` arm does). A whole-extent
+                        // reducer (`read_slice` all-`Reduced`) degenerates to
+                        // the prior behavior: the agg is scalar, every source
+                        // element feeds it, and it broadcasts to every `to`
+                        // element. No `source[d] → to[e]` direct edge is
+                        // emitted for a hoisted reducer -- only the two halves.
+                        let agg_node = &agg_nodes.aggs[agg.0];
+                        emit_agg_routed_edges(
+                            from_name,
+                            to_name,
+                            &from_dims,
+                            &to_dims,
+                            agg_node,
+                            site.target_element.as_deref(),
+                            &mut element_edges,
+                        );
+                    }
                 }
-                emit_edges_for_reference(
-                    from_name,
-                    to_name,
-                    &from_dims,
-                    &to_dims,
-                    &site.shape,
-                    site.target_element.as_deref(),
-                    &mut element_edges,
-                );
             }
         }
     }
@@ -2515,244 +2254,6 @@ fn reconstruct_implicit_variable(
         |mi| Ok(Some(mi.clone())),
     );
     crate::model::lower_variable(scope, &parsed_imp)
-}
-
-#[cfg(test)]
-mod collect_reference_sites_tests {
-    use super::*;
-    use crate::db::{SimlinDb, sync_from_datamodel};
-    use crate::test_common::TestProject;
-
-    /// Helper: build a project, sync into salsa, and collect reference sites
-    /// for `source_name` as seen by `target_name`. Resolves the source's
-    /// `is_arrayed` flag and dimension list from the live salsa results so
-    /// the walker can validate literal subscripts against real elements.
-    fn collect(project: &TestProject, target_name: &str, source_name: &str) -> Vec<ReferenceSite> {
-        let datamodel = project.build_datamodel();
-        let db = SimlinDb::default();
-        let sync = sync_from_datamodel(&db, &datamodel);
-        let source_model = sync.models["main"].source;
-        let source_project = sync.project;
-        let source_vars = source_model.variables(&db);
-
-        let target_var =
-            reconstruct_single_variable(&db, source_model, source_project, target_name)
-                .unwrap_or_else(|| panic!("variable '{target_name}' not found"));
-
-        let source_dims: Vec<crate::dimensions::Dimension> = source_vars
-            .get(source_name)
-            .map(|sv| super::super::variable_dimensions(&db, *sv, source_project).to_vec())
-            .unwrap_or_default();
-        let source_is_arrayed = !source_dims.is_empty();
-
-        collect_reference_sites(&target_var, source_name, source_is_arrayed, &source_dims)
-    }
-
-    #[test]
-    fn ref_site_bare_a2a() {
-        // A2A equation: births[Region] = population * 0.1
-        // The bare `population` reference is one occurrence with shape Bare.
-        let project = TestProject::new("bare_a2a")
-            .named_dimension("Region", &["NYC", "Boston"])
-            .array_aux("population[Region]", "100")
-            .array_aux("births[Region]", "population * 0.1");
-
-        let sites = collect(&project, "births", "population");
-        assert_eq!(sites.len(), 1, "sites: {sites:?}");
-        assert_eq!(sites[0].shape, RefShape::Bare);
-    }
-
-    #[test]
-    fn ref_site_fixed_index() {
-        // relative_pop[Region] = population / population[NYC]
-        // Two occurrences: a bare `population` (numerator) and a
-        // FixedIndex `population[NYC]` (denominator).
-        let project = TestProject::new("fixed")
-            .named_dimension("Region", &["NYC", "Boston"])
-            .array_aux("population[Region]", "100")
-            .array_aux("relative_pop[Region]", "population / population[NYC]");
-
-        let sites = collect(&project, "relative_pop", "population");
-        assert_eq!(sites.len(), 2, "sites: {sites:?}");
-        // AST-walk order: numerator first (bare), denominator second (FixedIndex).
-        assert_eq!(sites[0].shape, RefShape::Bare);
-        assert_eq!(
-            sites[1].shape,
-            RefShape::FixedIndex(vec!["nyc".to_string()])
-        );
-    }
-
-    #[test]
-    fn ref_site_wildcard_reducer() {
-        // total = SUM(population[*])
-        // The wildcard subscript inside the reducer produces one Wildcard
-        // site, and it must be flagged `in_reducer`.
-        let project = TestProject::new("wild")
-            .named_dimension("Region", &["NYC", "Boston"])
-            .array_aux("population[Region]", "100")
-            .scalar_aux("total", "SUM(population[*])");
-
-        let sites = collect(&project, "total", "population");
-        assert_eq!(sites.len(), 1, "sites: {sites:?}");
-        assert_eq!(sites[0].shape, RefShape::Wildcard);
-        assert!(sites[0].in_reducer, "SUM's wildcard arg is in a reducer");
-    }
-
-    #[test]
-    fn ref_site_bare_arrayed_arg_is_in_reducer() {
-        // total = SUM(pop)   (pop is arrayed)
-        // A bare arrayed argument to a reducer is the whole-array full
-        // reduce that `enumerate_agg_nodes` hoists. The AST reference is a
-        // bare `Var`, so its site shape is `Bare` -- but it must still be
-        // flagged `in_reducer` so the element-graph reroute treats it as
-        // the reducer's input (consistent with `SUM(pop[*])`, which differs
-        // only in the explicit wildcard subscript).
-        let project = TestProject::new("bare_arrayed_arg")
-            .named_dimension("Region", &["NYC", "Boston"])
-            .array_aux("pop[Region]", "100")
-            .scalar_aux("total", "SUM(pop)");
-
-        let sites = collect(&project, "total", "pop");
-        assert_eq!(sites.len(), 1, "sites: {sites:?}");
-        assert_eq!(sites[0].shape, RefShape::Bare);
-        assert!(
-            sites[0].in_reducer,
-            "SUM's bare arrayed arg is the reducer's input"
-        );
-    }
-
-    #[test]
-    fn ref_site_mixed_bare_and_wildcard() {
-        // share[Region] = population / SUM(population[*])
-        // Two occurrences: a bare numerator (not in a reducer) and a wildcard
-        // reducer denominator (in a reducer).
-        let project = TestProject::new("mixed")
-            .named_dimension("Region", &["NYC", "Boston"])
-            .array_aux("population[Region]", "100")
-            .array_aux("share[Region]", "population / SUM(population[*])");
-
-        let sites = collect(&project, "share", "population");
-        assert_eq!(sites.len(), 2, "sites: {sites:?}");
-        let bare = sites
-            .iter()
-            .find(|s| s.shape == RefShape::Bare)
-            .expect("expected a Bare site");
-        assert!(!bare.in_reducer, "the bare numerator is not in a reducer");
-        let wildcard = sites
-            .iter()
-            .find(|s| s.shape == RefShape::Wildcard)
-            .expect("expected a Wildcard site");
-        assert!(
-            wildcard.in_reducer,
-            "the SUM's wildcard arg is in a reducer"
-        );
-    }
-
-    /// The Fix 1 case: `x = SUM(pop[*]) + pop[idx]`. Two occurrences of
-    /// `pop`: the `SUM`'s wildcard arg (Wildcard, `in_reducer`) and the
-    /// direct dynamic-index reference `pop[idx]` (DynamicIndex, *not*
-    /// `in_reducer` -- it's not syntactically inside any reducer). The
-    /// element-graph reroute keys on `in_reducer`, so the direct `pop[idx]`
-    /// must keep its own conservative edge / Bare link score even though it
-    /// shares the `DynamicIndex` shape that the old (shape-only) predicate
-    /// would have collapsed into the hoisted agg.
-    #[test]
-    fn ref_site_reducer_and_direct_dynamic_index() {
-        let project = TestProject::new("mixed_dyn")
-            .named_dimension("Region", &["NYC", "Boston"])
-            .array_aux("pop[Region]", "100")
-            .scalar_aux("idx", "1")
-            .scalar_aux("x", "SUM(pop[*]) + pop[idx]");
-
-        let sites = collect(&project, "x", "pop");
-        assert_eq!(sites.len(), 2, "sites: {sites:?}");
-        let wildcard = sites
-            .iter()
-            .find(|s| s.shape == RefShape::Wildcard)
-            .expect("expected a Wildcard site for SUM(pop[*])");
-        assert!(wildcard.in_reducer, "SUM's wildcard arg is in a reducer");
-        let dynamic = sites
-            .iter()
-            .find(|s| s.shape == RefShape::DynamicIndex)
-            .expect("expected a DynamicIndex site for pop[idx]");
-        assert!(
-            !dynamic.in_reducer,
-            "the direct pop[idx] reference is not inside any reducer"
-        );
-    }
-
-    /// `SIZE(pop[*])` is *not* a reducer for hoisting purposes (its result
-    /// doesn't depend on element values), so its wildcard arg is not
-    /// `in_reducer`. (`enumerate_agg_nodes` excludes SIZE for the same
-    /// reason; the two must agree.)
-    #[test]
-    fn ref_site_size_arg_is_not_in_reducer() {
-        let project = TestProject::new("size_arg")
-            .named_dimension("Region", &["NYC", "Boston"])
-            .array_aux("pop[Region]", "100")
-            .scalar_aux("n", "SIZE(pop[*])");
-
-        let sites = collect(&project, "n", "pop");
-        assert_eq!(sites.len(), 1, "sites: {sites:?}");
-        assert_eq!(sites[0].shape, RefShape::Wildcard);
-        assert!(
-            !sites[0].in_reducer,
-            "SIZE is not an element-value reducer, so its arg is not in_reducer"
-        );
-    }
-
-    /// The 2-argument `MIN(a, b)` / `MAX(a, b)` are scalar pairwise ops, not
-    /// array reducers, so their arguments are not `in_reducer`. The 1-arg
-    /// `MIN(pop[*])` *is* a reducer. This guards the `Min(_, None)` vs
-    /// `Min(_, Some(_))` distinction against drifting from
-    /// `ltm_agg::reducer_source_vars`.
-    #[test]
-    fn ref_site_two_arg_min_is_not_a_reducer() {
-        let project = TestProject::new("two_arg_min")
-            .named_dimension("Region", &["NYC", "Boston"])
-            .array_aux("pop[Region]", "100")
-            // floor[Region] uses pop both as a 2-arg MIN operand (not a
-            // reducer) and inside a 1-arg MIN reducer.
-            .array_aux("floor[Region]", "MIN(pop, 50) + MIN(pop[*])");
-
-        let sites = collect(&project, "floor", "pop");
-        // `MIN(pop, 50)` -> one Bare site (not in_reducer);
-        // `MIN(pop[*])` -> one Wildcard site (in_reducer).
-        assert_eq!(sites.len(), 2, "sites: {sites:?}");
-        let bare = sites
-            .iter()
-            .find(|s| s.shape == RefShape::Bare)
-            .expect("expected a Bare site for the 2-arg MIN operand");
-        assert!(
-            !bare.in_reducer,
-            "2-arg MIN(pop, 50) is a scalar pairwise op, not a reducer"
-        );
-        let wildcard = sites
-            .iter()
-            .find(|s| s.shape == RefShape::Wildcard)
-            .expect("expected a Wildcard site for the 1-arg MIN reducer");
-        assert!(wildcard.in_reducer, "1-arg MIN(pop[*]) is an array reducer");
-    }
-
-    /// A reducer nested inside another reducer's argument: every reference
-    /// below the outer reducer stays `in_reducer` (the flag is sticky).
-    #[test]
-    fn ref_site_nested_reducer_arg_stays_in_reducer() {
-        let project = TestProject::new("nested_red")
-            .named_dimension("D1", &["a", "b"])
-            .named_dimension("D2", &["x", "y"])
-            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
-            // SUM over D1 of (per-D1 partial SUM over D2) -- the inner
-            // matrix[D1,*] reference sits two reducers deep.
-            .scalar_aux("grand_total", "SUM(SUM(matrix[*, *]))");
-
-        let sites = collect(&project, "grand_total", "matrix");
-        assert_eq!(sites.len(), 1, "sites: {sites:?}");
-        assert!(
-            sites[0].in_reducer,
-            "a reference nested in two reducers is still in a reducer"
-        );
-    }
 }
 
 #[cfg(test)]

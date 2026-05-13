@@ -1538,3 +1538,184 @@ fn test_subscripted_loop_id_uses_per_element_cache() {
         simlin_project_unref(proj);
     }
 }
+
+// === Two-A2A-subsystem round-trip (GH #487, AC2.5) ===
+//
+// Two disconnected reinforcing apply-to-all feedback loops over *different*
+// dimensions: `pop[Region] -> births[Region] = pop[Region]*0.1 -> pop[Region]`
+// over `Region = {a, b, c}`, and `widgets[Product] -> production[Product] =
+// widgets[Product]*0.05 -> widgets[Product]` over `Product = {x, y}`.  Each
+// element of each loop is its own cycle partition (element-wise uncoupled), so
+// every per-element relative loop score is +1 (a single-loop partition).  Before
+// the partition-correctness fix the two A2A loops both fell into the catch-all
+// `None` cohort and cross-normalized to a pooled value (each ~0.5); the per-slot
+// `loop_partitions` keep them separate.  This test confirms the FFI exposes the
+// per-slot data correctly (the subscripted-loop-id accessor) and that what it
+// returns matches the engine's `compute_rel_loop_scores_per_element` exactly --
+// i.e. a round trip through the C API preserves the per-slot partitions.
+
+/// Build the two-A2A-subsystem datamodel project.
+fn two_a2a_subsystems_project() -> simlin_engine::datamodel::Project {
+    TestProject::new("two_a2a")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Product", &["x", "y"])
+        .array_stock("pop[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "pop * 0.1", None)
+        .array_stock("widgets[Product]", "50", &["production"], &[], None)
+        .array_flow("production[Product]", "widgets * 0.05", None)
+        .build_datamodel()
+}
+
+/// Compute the engine's reference per-element relative loop scores for `project`
+/// (the same path `simlin_analyze_get_relative_loop_score` re-derives from its
+/// snapshots): compile with LTM, run the VM, then call the production
+/// post-simulation normalizer.  Returns `(rel_per_element, n_slots_by_loop)`.
+fn engine_reference_rel_per_element(
+    project: &simlin_engine::datamodel::Project,
+) -> (
+    std::collections::HashMap<String, Vec<f64>>,
+    std::collections::HashMap<String, usize>,
+) {
+    use simlin_engine::db::{
+        compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
+        sync_from_datamodel_incremental, SimlinDb,
+    };
+    use simlin_engine::Vm;
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let source_model = sync.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+    let loop_partitions = ltm_vars.loop_partitions.clone();
+    let n_slots_by_loop: std::collections::HashMap<String, usize> = loop_partitions
+        .iter()
+        .map(|(id, pv)| (id.clone(), pv.len().max(1)))
+        .collect();
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let rel =
+        simlin_engine::ltm_post::compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    (rel, n_slots_by_loop)
+}
+
+#[test]
+fn test_two_a2a_subsystems_per_slot_rel_score_round_trips() {
+    let project = two_a2a_subsystems_project();
+    let (engine_rel, engine_n_slots) = engine_reference_rel_per_element(&project);
+    assert_eq!(
+        engine_rel.len(),
+        2,
+        "two disconnected A2A subsystems should produce exactly two loop_score series"
+    );
+
+    let pb = engine_serde::serialize(&project).unwrap();
+    let mut buf = Vec::new();
+    pb.encode(&mut buf).unwrap();
+
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!loops.is_null());
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        assert_eq!(
+            (*loops).count,
+            2,
+            "two disconnected A2A subsystems => two detected loops"
+        );
+
+        let mut step_count: usize = 0;
+        simlin_sim_get_stepcount(sim, &mut step_count, &mut err);
+        assert!(err.is_null());
+
+        // The two loops live over different dimensions, so their element
+        // counts differ; collect (id, n_elements) for each.
+        let mut loop_ids: Vec<(String, usize)> = Vec::new();
+        for l in loop_slice {
+            let id = CStr::from_ptr(l.id).to_str().unwrap().to_string();
+            let id_c = CString::new(id.clone()).unwrap();
+            let mut count: usize = 0;
+            err = ptr::null_mut();
+            simlin_analyze_get_loop_element_count(sim, id_c.as_ptr(), &mut count, &mut err);
+            assert!(err.is_null(), "loop element count must succeed for {id}");
+            assert!(count >= 1);
+            loop_ids.push((id, count));
+        }
+        // One loop over Region (3 elements), one over Product (2).
+        let mut counts: Vec<usize> = loop_ids.iter().map(|(_, n)| *n).collect();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![2, 3], "expected element counts 2 and 3");
+
+        let region_names = ["a", "b", "c"];
+        let product_names = ["x", "y"];
+        for (loop_id, n_elements) in &loop_ids {
+            let engine_series = engine_rel
+                .get(loop_id)
+                .unwrap_or_else(|| panic!("engine reference missing loop {loop_id}"));
+            let engine_stride = engine_series.len() / step_count;
+            // For a pure-A2A loop in its own partition the engine stride is
+            // exactly the loop's slot count.
+            assert_eq!(*engine_n_slots.get(loop_id).unwrap(), *n_elements);
+            assert_eq!(engine_stride, *n_elements);
+
+            // The FFI bare-arrayed-id form is the argmax-abs aggregator over the
+            // loop's slots; since every per-element score is +1 here, it must be
+            // +1 at every nonzero step too.
+            let bare = read_relative_loop_series(sim, loop_id).expect("bare access works");
+            assert_eq!(bare.len(), step_count);
+            for v in &bare {
+                assert!(
+                    *v == 0.0 || *v == 1.0,
+                    "bare aggregator should be 0 or 1, got {v}"
+                );
+            }
+
+            // The FFI subscripted form must reproduce the engine's per-element
+            // series bit-for-bit.
+            let elem_names: &[&str] = if *n_elements == 3 {
+                &region_names
+            } else {
+                &product_names
+            };
+            for (elem_idx, elem_name) in elem_names.iter().enumerate() {
+                let ffi_series = read_relative_loop_series(sim, &format!("{loop_id}[{elem_name}]"))
+                    .unwrap_or_else(|(c, m)| {
+                        panic!("subscripted access {loop_id}[{elem_name}] failed: {c:?} {m}")
+                    });
+                assert_eq!(ffi_series.len(), step_count);
+                for (s, &ffi_v) in ffi_series.iter().enumerate() {
+                    let engine_v = engine_series[s * engine_stride + elem_idx];
+                    assert_eq!(
+                        ffi_v, engine_v,
+                        "FFI rel-loop-score for {loop_id}[{elem_name}] at step {s} must match \
+                         compute_rel_loop_scores_per_element ({ffi_v} vs {engine_v})"
+                    );
+                    // AC2.1: each loop is alone in its (per-element) partition,
+                    // so the score is +1 once dynamics are nonzero -- NOT the
+                    // pre-fix pooled ~0.5 the two loops would share if they
+                    // cross-normalized.
+                    if ffi_v != 0.0 {
+                        assert_eq!(
+                            ffi_v, 1.0,
+                            "single-loop-per-partition rel score for {loop_id}[{elem_name}] at \
+                             step {s} should be 1.0, not pooled"
+                        );
+                    }
+                }
+            }
+        }
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

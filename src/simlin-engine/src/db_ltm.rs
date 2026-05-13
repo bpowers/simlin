@@ -20,10 +20,10 @@ use crate::ltm::strip_subscript;
 use super::{
     Db, LtmLinkId, ModelDepGraphResult, ParsedVariableResult, RefShape, SourceModel, SourceProject,
     SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
-    build_submodel_metadata, canonical_module_input_set, collect_reference_shapes, compute_layout,
-    link_score_equation_text, model_implicit_var_info, model_module_ident_context,
-    model_module_map, parse_source_variable_with_module_context, project_datamodel_dims,
-    project_units_context, variable_dimensions, variable_size,
+    build_submodel_metadata, canonical_module_input_set, compute_layout, link_score_equation_text,
+    model_implicit_var_info, model_module_ident_context, model_module_map,
+    parse_source_variable_with_module_context, project_datamodel_dims, project_units_context,
+    variable_dimensions, variable_size,
 };
 
 pub(super) fn ltm_module_idents(
@@ -418,6 +418,13 @@ pub fn link_score_equation_text_shaped<'db>(
         all_vars.insert(from_ident.clone(), fv.clone());
     }
     all_vars.insert(to_ident.clone(), to_var.clone());
+    // The project's `DimensionsContext` is threaded into the GH #511
+    // iterated-dimension recognition for the mapped-dimension case
+    // (`x[State]` over a source declared with `Region`, `State` maps to
+    // `Region`); the datamodel dim list is salsa-tracked, so this fn is
+    // recomputed when a dimension's mappings change.
+    let dm_dims = project_datamodel_dims(db, project);
+    let dim_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
     // The generator returns the equation already tagged with the target's
     // dimensionality (`Scalar`, `ApplyToAll`, or `Arrayed`). `dimensions`
     // and `compile_directly` are left at defaults here; the emission loop
@@ -431,6 +438,7 @@ pub fn link_score_equation_text_shaped<'db>(
         &source_dim_elements,
         &to_var,
         &all_vars,
+        Some(&dim_ctx),
     );
 
     Some(LtmSyntheticVar {
@@ -2091,6 +2099,131 @@ fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<String> {
     result
 }
 
+/// One source row a hoisted reducer reads, paired with the agg result slot it
+/// feeds and the co-reduced rows (the rows mapping to the *same* slot -- the
+/// `from`-slice the reducer combines for that slot, used as the
+/// `all_elements` argument for the per-element link-score equation builders).
+struct ReadSliceRow {
+    /// The source element subscript (comma-joined element names).
+    row: String,
+    /// The agg result slot's subscript (the `Iterated` axes' elements,
+    /// comma-joined; empty when the agg is scalar).
+    slot: String,
+    /// All source rows mapping to `slot`, in row-major order.
+    coreduced: Vec<String>,
+}
+
+/// Enumerate the source rows a hoisted reducer reads, given the agg's
+/// `read_slice` (one [`crate::ltm_agg::AxisRead`] per `from`'s axis -- which
+/// holds because `from` is one of `agg`'s `source_vars`) and `from`'s
+/// dimension element lists. A `Pinned` axis is fixed to its single element; an
+/// `Iterated` or `Reduced` axis ranges over every element of that axis. The
+/// agg result slot for a row is its `Iterated` coordinates in order.
+///
+/// `None` when `read_slice` doesn't have one entry per `from` axis (it always
+/// should for a hoisted agg whose `source_vars` contains `from`): the caller
+/// then falls back to the conservative "every source element, scalar agg" form.
+fn read_slice_rows(
+    read_slice: &[crate::ltm_agg::AxisRead],
+    from_dim_element_lists: &[Vec<String>],
+) -> Option<Vec<ReadSliceRow>> {
+    use crate::ltm_agg::AxisRead;
+    if read_slice.len() != from_dim_element_lists.len() {
+        return None;
+    }
+    // Per axis: the element list to iterate, plus whether the axis contributes
+    // a coordinate to the result slot.
+    let per_axis: Vec<(Vec<String>, bool)> = read_slice
+        .iter()
+        .zip(from_dim_element_lists)
+        .map(|(a, elems)| match a {
+            AxisRead::Pinned(e) => (vec![e.clone()], false),
+            AxisRead::Iterated(_) => (elems.clone(), true),
+            AxisRead::Reduced => (elems.clone(), false),
+        })
+        .collect();
+    // Cartesian product, tracking each row's full element tuple and its slot
+    // coordinates.
+    let mut rows: Vec<(Vec<String>, Vec<String>)> = vec![(Vec::new(), Vec::new())];
+    for (elems, contributes_to_slot) in &per_axis {
+        let mut next: Vec<(Vec<String>, Vec<String>)> =
+            Vec::with_capacity(rows.len() * elems.len());
+        for (row, slot) in &rows {
+            for e in elems {
+                let mut new_row = row.clone();
+                new_row.push(e.clone());
+                let mut new_slot = slot.clone();
+                if *contributes_to_slot {
+                    new_slot.push(e.clone());
+                }
+                next.push((new_row, new_slot));
+            }
+        }
+        rows = next;
+    }
+    // Group rows by slot to build each row's `coreduced` set.
+    let mut by_slot: HashMap<String, Vec<String>> = HashMap::new();
+    for (row, slot) in &rows {
+        by_slot
+            .entry(slot.join(","))
+            .or_default()
+            .push(row.join(","));
+    }
+    Some(
+        rows.into_iter()
+            .map(|(row, slot)| {
+                let slot = slot.join(",");
+                let row = row.join(",");
+                let coreduced = by_slot[&slot].clone();
+                ReadSliceRow {
+                    row,
+                    slot,
+                    coreduced,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Build the element-level `Loop::stocks` list for a cycle.
+///
+/// For a scalar cycle (`dimensions` empty), the stocks are the
+/// variable-level stock idents unchanged -- a genuinely scalar variable's
+/// name *is* its (degenerate, subscript-free) element-level node name.
+///
+/// For an A2A cycle (`dimensions` non-empty) the stocks cover the loop's
+/// *entire* dimension element space: one `"{var}[{elem-tuple}]"` per element
+/// of the dimension space (in the runtime's row-major slot order, via
+/// [`crate::ltm::loop_dimension_element_tuples`]), for each variable in
+/// `var_stocks`.  This is the granularity the `Loop` docstring's invariant
+/// requires so `CyclePartitions::partition_for_loop` can resolve a partition
+/// *per slot* against `model_element_cycle_partitions`'s element-keyed
+/// `stock_partition` map.  If `dm_dims` doesn't cover the cycle's declared
+/// dimensions (a mid-edit inconsistency), the variable-level stocks are
+/// returned unchanged -- `partition_for_loop` then falls back to whatever
+/// suffixes are present (none, here), bucketing the loop into the `None`
+/// group, the same degradation the pre-element-level code exhibited.
+fn build_a2a_loop_stocks(
+    var_stocks: &[Ident<Canonical>],
+    dimensions: &[String],
+    dm_dims: &[crate::datamodel::Dimension],
+) -> Vec<Ident<Canonical>> {
+    if dimensions.is_empty() {
+        return var_stocks.to_vec();
+    }
+    let tuples = crate::ltm::loop_dimension_element_tuples(dimensions, dm_dims);
+    if tuples.is_empty() {
+        return var_stocks.to_vec();
+    }
+    let mut stocks = Vec::with_capacity(tuples.len() * var_stocks.len());
+    for tuple in &tuples {
+        for s in var_stocks {
+            stocks.push(Ident::new(&format!("{}[{}]", s.as_str(), tuple)));
+        }
+    }
+    stocks
+}
+
 /// Build `Loop` structs from the tiered loop-enumeration result.
 ///
 /// The fast path (`tiered.fast_path`) carries variable-level cycles
@@ -2105,6 +2238,13 @@ fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<String> {
 /// the legacy ordering: `assign_loop_ids` sorts by content-derived
 /// key (sorted distinct var names) before numbering, so the final IDs
 /// are stable regardless of which path produced each Loop.
+///
+/// `agg_loop_budget` and the returned `Vec<String>` thread the cross-element-
+/// through-aggregate loop-count budget / truncated-aggregate-node names
+/// through to `build_element_level_loops` -> `recover_cross_agg_loops` (only
+/// the slow path can carry agg nodes); the caller surfaces the flag (and the
+/// names) on `LtmVariablesResult::agg_recovery_truncated` and the truncation
+/// `Warning`. The returned vector is empty iff nothing was clipped.
 pub(crate) fn build_loops_from_tiered(
     tiered: &super::TieredCircuitsResult,
     var_graph: &crate::ltm::CausalGraph,
@@ -2112,7 +2252,8 @@ pub(crate) fn build_loops_from_tiered(
     db: &dyn Db,
     project: SourceProject,
     dm_dims: &[crate::datamodel::Dimension],
-) -> Vec<crate::ltm::Loop> {
+    agg_loop_budget: usize,
+) -> (Vec<crate::ltm::Loop>, Vec<String>) {
     use crate::common::{Canonical, Ident};
     use crate::ltm::{Loop, assign_loop_ids};
 
@@ -2133,7 +2274,7 @@ pub(crate) fn build_loops_from_tiered(
             .map(|s| Ident::new(s.as_str()))
             .collect();
         let links = var_graph.circuit_to_links(&var_level_nodes);
-        let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
+        let var_stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
         let polarity = var_graph.calculate_polarity(&links);
 
         // Map the canonical dimension names to original datamodel
@@ -2171,6 +2312,12 @@ pub(crate) fn build_loops_from_tiered(
             })
             .collect();
 
+        // For a PureSameElementA2A cycle the stocks are element-level over
+        // the dimension space (per the `Loop` docstring's invariant); for a
+        // PureScalar cycle (`dimensions` empty) they're the variable-level
+        // names unchanged.
+        let stocks = build_a2a_loop_stocks(&var_stocks, &dimensions, dm_dims);
+
         all_loops.push(Loop {
             id: String::new(),
             links,
@@ -2186,15 +2333,18 @@ pub(crate) fn build_loops_from_tiered(
     // helper does its own `assign_loop_ids`; we strip the IDs
     // afterward because we re-run id assignment over the merged set
     // to keep numbering consistent.
+    let mut truncated_aggs: Vec<String> = Vec::new();
     if !tiered.slow_path.is_empty() {
-        let mut slow_path_loops = build_element_level_loops(
+        let (mut slow_path_loops, t) = build_element_level_loops(
             &tiered.slow_path,
             var_graph,
             source_vars,
             db,
             project,
             dm_dims,
+            agg_loop_budget,
         );
+        truncated_aggs = t;
         for l in &mut slow_path_loops {
             l.id.clear();
         }
@@ -2202,7 +2352,7 @@ pub(crate) fn build_loops_from_tiered(
     }
 
     assign_loop_ids(&mut all_loops);
-    all_loops
+    (all_loops, truncated_aggs)
 }
 
 /// Build element-subscripted `Link`s for one element-level circuit.
@@ -2223,9 +2373,15 @@ pub(crate) fn build_loops_from_tiered(
 ///   - `to = n_{i+1}` (subscript kept) when `n_{i+1}` is subscripted AND
 ///     its variable is dimensioned (so the link score is A2A and the loop
 ///     visits one element of it -- `generate_loop_score_equation` then
-///     emits `"...→{to}"[e_{i+1}]`). Otherwise `to = strip(n_{i+1})`
-///     (the link score is scalar / cross-dimensional, referenced
-///     without a subscript).
+///     emits `"...→{to}"[e_{i+1}]`). A synthetic aggregate node
+///     (`$⁚ltm⁚agg⁚{n}[<slot>]`) is treated like a dimensioned variable
+///     here even though it isn't in `source_vars`: when the agg is arrayed
+///     its slot rides in the link-score names `emit_source_to_agg_link_scores`
+///     / `emit_agg_to_target_link_scores` emit (`{src}[<row>]→{agg}[<slot>]`,
+///     `{agg}[<slot>]→{tgt}[<elem>]`), so `loop_link_score_ref` needs the
+///     `[<slot>]` on the agg endpoint to resolve those names. Otherwise
+///     `to = strip(n_{i+1})` (the link score is scalar / cross-dimensional,
+///     referenced without a subscript).
 ///
 /// `var_links` carries the variable-level links for the same circuit
 /// (from `circuit_to_links` on the stripped node sequence); link `i`'s
@@ -2254,13 +2410,14 @@ fn build_element_subscripted_links(
             strip_subscript(from_raw)
         };
         let to_var_level = strip_subscript(to_raw);
-        let to_is_arrayed = source_vars
-            .get(to_var_level)
-            .map(|sv| {
-                sv.kind(db) != SourceVariableKind::Module
-                    && !variable_dimensions(db, *sv, project).is_empty()
-            })
-            .unwrap_or(false);
+        let to_is_arrayed = crate::ltm_agg::is_synthetic_agg_name(to_var_level)
+            || source_vars
+                .get(to_var_level)
+                .map(|sv| {
+                    sv.kind(db) != SourceVariableKind::Module
+                        && !variable_dimensions(db, *sv, project).is_empty()
+                })
+                .unwrap_or(false);
         let link_to = if to_raw.contains('[') && to_is_arrayed {
             to_raw
         } else {
@@ -2295,6 +2452,15 @@ fn build_element_subscripted_links(
 /// circuits with different variable-level structures. Each gets its own
 /// scalar loop with a unique element-specific ID suffix.
 ///
+/// `agg_loop_budget` caps how many non-elementary cross-element-through-
+/// aggregate loops `recover_cross_agg_loops` materializes (across all
+/// aggregate nodes); the returned `Vec<String>` names the aggregate nodes
+/// whose enumeration that budget (or the per-aggregate petal cap) clipped
+/// (sorted, deduped -- empty iff nothing was clipped). Callers pass
+/// `cross_agg_loop_budget()` (or, in tests, a small value) and thread the
+/// names up to `LtmVariablesResult::agg_recovery_truncated` and the
+/// truncation `Warning`.
+///
 /// Visibility is `pub(crate)` so unit tests in
 /// `db_ltm_unified_tests.rs` can drive this function directly to
 /// inspect the element-subscripted `Link.from` / `Link.to` strings the
@@ -2309,7 +2475,8 @@ pub(crate) fn build_element_level_loops(
     db: &dyn Db,
     project: SourceProject,
     dm_dims: &[crate::datamodel::Dimension],
-) -> Vec<crate::ltm::Loop> {
+    agg_loop_budget: usize,
+) -> (Vec<crate::ltm::Loop>, Vec<String>) {
     use crate::common::{Canonical, Ident};
     use crate::ltm::{Loop, assign_loop_ids};
 
@@ -2364,6 +2531,23 @@ pub(crate) fn build_element_level_loops(
         let representative: &[&str] = circuits_in_group[0];
         let all_subscripted = representative.iter().all(|n| n.contains('['));
 
+        // A circuit that traverses a synthetic aggregate node
+        // (`$⁚ltm⁚agg⁚{n}`) must never be collapsed into a single A2A loop:
+        // the per-row source link scores (`{src}[<row>]→{agg}[<slot>]`) and
+        // the agg→target link scores (`{agg}[<slot>]→{tgt}[<elem>]`) are
+        // scalar variables keyed by literal element names, so there is no
+        // dimensioned `{src}→{agg}` link-score variable an A2A loop-score
+        // equation could reference. Route these to the element-subscripted
+        // per-circuit path (one scalar `Loop` per element combination), the
+        // same path cross-element loops take -- `build_element_subscripted_links`
+        // keeps the agg's `[<slot>]` so `loop_link_score_ref` can resolve the
+        // agg-half names. (Even though the agg circuit's leading subscript
+        // elements may all agree -- e.g. `[matrix[a,x], agg[a], growth[a,x]]`
+        // -- which would otherwise classify it as a same-element A2A circuit.)
+        let representative_has_synthetic_agg = representative
+            .iter()
+            .any(|n| crate::ltm_agg::is_synthetic_agg_name(strip_subscript(n)));
+
         // Detect cross-element circuits that should NOT be collapsed
         // into A2A loops. Two patterns indicate cross-element:
         //
@@ -2413,7 +2597,11 @@ pub(crate) fn build_element_level_loops(
             false
         };
 
-        if all_subscripted && !is_cross_element && !representative.is_empty() {
+        if all_subscripted
+            && !is_cross_element
+            && !representative_has_synthetic_agg
+            && !representative.is_empty()
+        {
             // Pure-dimension group: produce a single A2A loop.
             //
             // Use the variable-level graph for polarity analysis and stock
@@ -2427,7 +2615,7 @@ pub(crate) fn build_element_level_loops(
             // `{from}->{to}` link score (the Bare-shape name) via the
             // variable-level link names that `circuit_to_links` produces.
             let links = var_graph.circuit_to_links(&var_level_nodes);
-            let stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
+            let var_stocks = var_graph.find_stocks_in_loop(&var_level_nodes);
             let polarity = var_graph.calculate_polarity(&links);
 
             // Determine the shared dimension(s) from the subscripts.
@@ -2454,6 +2642,12 @@ pub(crate) fn build_element_level_loops(
                 })
                 .unwrap_or_default();
 
+            // Stocks must be element-level over the dimension space so
+            // `partition_for_loop` can resolve a partition per slot (the
+            // `Loop` docstring's invariant -- the same rule the cross-element
+            // and mixed branches below already follow).
+            let stocks = build_a2a_loop_stocks(&var_stocks, &dimensions, dm_dims);
+
             all_loops.push(Loop {
                 id: String::new(),
                 links,
@@ -2461,7 +2655,7 @@ pub(crate) fn build_element_level_loops(
                 polarity,
                 dimensions,
             });
-        } else if is_cross_element {
+        } else if is_cross_element || representative_has_synthetic_agg {
             // Cross-element circuits: a circuit that genuinely visits
             // different elements at different points -- e.g.
             //   population[nyc] -> migration_pressure[boston] ->
@@ -2470,6 +2664,14 @@ pub(crate) fn build_element_level_loops(
             // or the wildcard-reducer pattern
             //   pop[nyc] -> total[boston] -> update[boston] ->
             //   pop[boston] -> total[nyc] -> update[nyc] -> pop[nyc].
+            //
+            // Also: an elementary circuit through a synthetic aggregate node
+            // visited once (`matrix[a,x] -> $⁚ltm⁚agg⁚0[a] -> growth[a,x] ->
+            // matrix[a,x]` -- the "self-aggregate" feedback of a sliced
+            // reducer) lands here even when its leading subscript elements all
+            // agree; the loop score still has to reference the per-element
+            // agg-half link scores, which only exist as literal-element scalar
+            // variables.
             //
             // Each circuit becomes its own scalar Loop (the loop-score
             // *variable* is scalar: a cross-element loop visits fixed
@@ -2681,66 +2883,250 @@ pub(crate) fn build_element_level_loops(
     }
 
     // Recover cross-element loops that traverse a synthetic aggregate node
-    // more than once (Phase 5). Johnson enumerates only *elementary* circuits,
-    // so a loop like `pop[nyc] → agg → share[boston] → ... → pop[boston] →
-    // agg → share[nyc] → ...` -- which visits `agg` twice -- is never emitted.
-    // But each agg-touching elementary circuit contributes one "petal" `agg →
-    // ... → agg`; combining `k ≥ 2` petals of the same agg whose internal
-    // nodes are pairwise disjoint reconstructs exactly those non-elementary
-    // loops. (For `SUM`/`MEAN` aggs the petals have one element each, so the
-    // combination count is `2^k - k - 1`; we cap `k` to keep it bounded.)
-    {
-        let recovered = recover_cross_agg_loops(&circuit_strs, var_graph, source_vars, db, project);
-        all_loops.extend(recovered);
-    }
+    // more than once (Phase 5, GH #515). Johnson enumerates only *elementary*
+    // circuits, so a loop like `pop[nyc] → agg → share[boston] → ... →
+    // pop[boston] → agg → share[nyc] → ...` -- which visits `agg` twice -- is
+    // never emitted. But each agg-touching elementary circuit contributes one
+    // "petal" `agg → ... → agg`; stitching `k ≥ 2` petals of the same agg
+    // whose internal nodes are pairwise disjoint, in some cyclic order,
+    // reconstructs exactly those non-elementary loops -- bounded by
+    // `agg_loop_budget` (when it clips, the clipped aggs' names are returned
+    // and the caller accumulates a `Warning` naming them).
+    let (recovered, truncated_aggs) = recover_cross_agg_loops(
+        &circuit_strs,
+        var_graph,
+        source_vars,
+        db,
+        project,
+        agg_loop_budget,
+    );
+    all_loops.extend(recovered);
 
     assign_loop_ids(&mut all_loops);
-    all_loops
+    (all_loops, truncated_aggs)
 }
 
-/// Maximum number of per-agg "petals" combined into non-elementary cross-agg
-/// loops. With `k` disjoint petals the combination count is `2^k - k - 1`; a
-/// model with more elements than this feeding a reducer in a loop simply
-/// doesn't get the fully-granular cross-element loop enumeration (the
-/// same-element-through-agg loops and the elementary circuits are still
-/// present). 8 → ≤ 219 recovered loops per agg.
+/// Hard cap on the number of non-elementary cross-element-through-aggregate
+/// loops `recover_cross_agg_loops` materializes for a model (summed across
+/// all synthetic aggregate nodes), Phase 5 / GH #515.
+///
+/// With `k` disjoint petals through one agg the recoverable loop count is
+/// `Σ_{m=2}^{k} C(k,m)·orderings(m)` where `orderings(m)` is 1 for m=2 and
+/// `(m-1)!/2` for m≥3 -- it grows super-exponentially, so a budget is
+/// mandatory. When recovery hits this budget it stops, sets the truncation
+/// flag, and the caller emits a `Warning`; the deterministic petal priority
+/// (fewest internal nodes first, then a stable joined-name tiebreaker)
+/// makes *which* loops survive truncation reproducible. The prior implicit
+/// ceiling was `2^8 - 8 - 1 = 247` per agg (the old `MAX_AGG_PETALS = 8`
+/// hard drop); 256 keeps roughly that order of magnitude as a model-wide
+/// total. Because the budget is modest, recovery never reaches a subset
+/// large enough for `cyclic_orderings(m)` to blow up in practice.
+pub(crate) const MAX_CROSS_AGG_LOOPS: usize = 256;
+
+/// Soft per-aggregate cap on the petals considered when stitching them into
+/// loops. After sorting an agg's petals by the deterministic priority, only
+/// the smallest `MAX_AGG_PETALS` are considered (the rest are dropped and
+/// the truncation flag is set). This bounds the `2^k` subset enumeration to
+/// `2^MAX_AGG_PETALS` regardless of how dense the agg's element-graph
+/// neighborhood is. A model with more than this many *disjoint* petals
+/// through one agg is at or near the `MAX_LTM_SCC_NODES` auto-flip
+/// threshold anyway (each petal contributes ≥2 distinct nodes plus the
+/// shared agg to one SCC), so this is a conservative belt-and-suspenders;
+/// 8 matches the pre-#515 hard cap.
 const MAX_AGG_PETALS: usize = 8;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`MAX_CROSS_AGG_LOOPS`], scoped by an active
+    /// [`AggLoopBudgetGuard`]. Lets a test trip the loop budget with a tiny
+    /// fixture instead of building one large enough to trip the production
+    /// constant (per docs/dev/rust.md#test-time-budgets, the PR #461
+    /// cautionary tale).
+    static AGG_LOOP_BUDGET_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The cross-element-through-aggregate loop-count budget for the current
+/// `model_ltm_variables` invocation.  Returns [`MAX_CROSS_AGG_LOOPS`] in
+/// production builds; in `#[cfg(test)]` builds an active
+/// [`AggLoopBudgetGuard`] override takes precedence.
+fn cross_agg_loop_budget() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(b) = AGG_LOOP_BUDGET_OVERRIDE.with(|c| c.get()) {
+            return b;
+        }
+    }
+    MAX_CROSS_AGG_LOOPS
+}
+
+/// RAII guard (test-only) that overrides [`cross_agg_loop_budget`] for the
+/// current thread for the guard's lifetime, restoring the previous value on
+/// drop -- so a panicking test does not leak the override to the next test
+/// reusing the thread.
+///
+/// Because `model_ltm_variables` is salsa-memoized, the guard must outlive
+/// every `model_ltm_variables` call in the test whose budget it controls
+/// (a later call on the same `db` would otherwise return the memoized
+/// tiny-budget result regardless of the override state).
+#[cfg(test)]
+pub(crate) struct AggLoopBudgetGuard {
+    prev: Option<usize>,
+}
+
+#[cfg(test)]
+impl AggLoopBudgetGuard {
+    pub(crate) fn new(budget: usize) -> Self {
+        let prev = AGG_LOOP_BUDGET_OVERRIDE.with(|c| c.replace(Some(budget)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for AggLoopBudgetGuard {
+    fn drop(&mut self) {
+        AGG_LOOP_BUDGET_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
+/// Distinct orderings of `[0, 1, ..., n-1]` modulo rotation (index `0`
+/// pinned first to kill rotations) and modulo mirror reversal (the loop
+/// score is a commutative product over the edge multiset, so a directed
+/// cycle and its reverse share a score; the design enumerates only one of
+/// each mirror pair). Count: `1` for `n ∈ {0, 1, 2}`, `(n-1)!/2` for
+/// `n ≥ 3` (`(n-1)!` rotation classes, halved by the mirror involution --
+/// which has no fixed point for `n ≥ 3` since a length-`(n-1)` permutation
+/// of distinct indices is never a palindrome; for `n = 2` reversing the
+/// 2-cycle gives the same sequence, so there is nothing to quotient).
+///
+/// "Mirror" here is the petal-sequence reversed with the first petal still
+/// pinned -- `[0, p1, .., p_{n-1}] ↦ [0, p_{n-1}, .., p1]` -- so the rule
+/// is: enumerate the permutations of `[1, .., n-1]` via Heap's algorithm
+/// (deterministic order, which `assign_loop_ids`' stable sort relies on for
+/// stable distinct loop ids), and keep a permutation `tail` iff it is
+/// lexicographically `<= reverse(tail)` (equivalently: track the emitted
+/// canonicals in a set -- the lex test is the cheaper involution).
+///
+/// Pure: depends only on `n`. Only called from `recover_cross_agg_loops`
+/// with `n` = a disjoint petal-subset size (≥ 2, ≤ `MAX_AGG_PETALS`), and
+/// the loop budget stops recovery long before it reaches a subset large
+/// enough for `(n-1)!/2` to be a concern.
+fn cyclic_orderings(n: usize) -> Vec<Vec<usize>> {
+    if n <= 1 {
+        return vec![(0..n).collect()];
+    }
+    // Generate every permutation of the tail `[1, .., n-1]` via Heap's
+    // algorithm, in its canonical order.
+    let mut tail: Vec<usize> = (1..n).collect();
+    let mut perms: Vec<Vec<usize>> = Vec::new();
+    heaps_permutations(tail.len(), &mut tail, &mut perms);
+
+    let mut orderings: Vec<Vec<usize>> = Vec::with_capacity(perms.len().div_ceil(2));
+    for perm in perms {
+        // Skip a permutation whose mirror (the tail reversed, with 0 still
+        // pinned) sorts strictly before it -- we keep one of each mirror pair.
+        let rev: Vec<usize> = perm.iter().rev().copied().collect();
+        if perm > rev {
+            continue;
+        }
+        let mut ordering = Vec::with_capacity(n);
+        ordering.push(0);
+        ordering.extend(perm);
+        orderings.push(ordering);
+    }
+    orderings
+}
+
+/// Recursive Heap's algorithm: append every permutation of `a[0..k]` (with
+/// `a[k..]` held fixed) to `out`, in Heap's canonical order. Called with
+/// `k == a.len()`.
+fn heaps_permutations(k: usize, a: &mut [usize], out: &mut Vec<Vec<usize>>) {
+    if k <= 1 {
+        out.push(a.to_vec());
+        return;
+    }
+    for i in 0..k {
+        heaps_permutations(k - 1, a, out);
+        if k.is_multiple_of(2) {
+            a.swap(i, k - 1);
+        } else {
+            a.swap(0, k - 1);
+        }
+    }
+}
+
+/// One agg petal: the element-level node sequence rotated to start at the
+/// aggregate node (`[A, x_1, ..., x_m]`), plus its internal node set
+/// `{x_1..x_m}`. `A` is the *element-level* agg node -- for an arrayed
+/// synthetic agg that means the subscripted `$⁚ltm⁚agg⁚{n}[<elem>]` (so two
+/// petals through `agg[a]` vs `agg[b]` go through *different* nodes and are
+/// correctly never combined; `is_synthetic_agg_name` recognizes both the
+/// bare and the subscripted form via its prefix check).
+struct AggPetal<'a> {
+    /// `[agg, x_1, ..., x_m]` -- the agg followed by the m internal nodes.
+    nodes: Vec<&'a str>,
+    internal: std::collections::HashSet<&'a str>,
+}
+
 /// Reconstruct the cross-element loops that traverse a synthetic aggregate
-/// node more than once, from the element-level circuit list.
+/// node more than once, from the element-level circuit list, under a
+/// loop-count budget.
 ///
 /// For each synthetic agg `A`, an elementary circuit that visits `A` exactly
 /// once is its "petal": rotated to start at `A`, the node sequence
 /// `[A, x_1, ..., x_m]` (the `x_i` are the petal's *internal* nodes -- the
 /// rest of the cycle). Two petals are disjoint when their internal node sets
-/// don't overlap. For `k ≥ 2` pairwise-disjoint petals of `A`, the recovered
-/// loop's element-level node sequence concatenates them, separated by `A`:
-/// `[A, p1_x..., A, p2_x..., ...]`. Links and polarities come from
-/// `build_element_subscripted_links` (which builds them the same way the
-/// cross-element branch does); the loop polarity is the product of the link
-/// polarities (Unknown anywhere → Undetermined).
+/// don't overlap. For a pairwise-disjoint subset of `m ≥ 2` petals of `A`,
+/// the recovered loop's element-level node sequence concatenates the petals'
+/// `nodes` (each of which starts with `A`) in some order:
+/// `[A, p1_x..., A, p2_x..., ...]` -- `build_element_subscripted_links`
+/// builds `seq[i] → seq[(i+1) % n]`, so this is exactly the cyclic sequence
+/// `... → A → p1_x... → A → p2_x... → ... → A` (the last internal node wraps
+/// to the first petal's `A`). Links / polarities come from
+/// `build_element_subscripted_links`; the loop polarity is the product of
+/// the link polarities (Unknown anywhere → Undetermined; the synthetic-agg
+/// hops are Unknown here and patched later by `recover_agg_hop_polarities`).
+///
+/// Enumeration is bounded: an agg's petals are sorted by a deterministic
+/// priority (fewest internal nodes first -- smaller petals combine into more
+/// loops -- then a stable joined-`nodes` tiebreaker), the smallest
+/// `MAX_AGG_PETALS` are kept (clipping flags that agg as truncated), the
+/// disjoint subsets are walked smallest-cardinality-first (so under
+/// truncation the few-petal -- likely most interesting -- loops survive), and
+/// a running count is checked against `agg_loop_budget` (a global budget
+/// across all aggs; once hit, recovery stops). The deterministic agg/petal
+/// order is what makes the *truncated* loop set reproducible rather than
+/// HashMap-iteration-order dependent.
+///
+/// Returns the recovered loops and the (sorted, deduped) names of the
+/// aggregate nodes whose enumeration was clipped -- empty iff nothing was
+/// clipped. An agg `A` is reported as truncated when either (a) the soft
+/// per-agg petal cap dropped ≥ 1 of its petals, or (b) the global loop-count
+/// budget fired at any point while `A` was being enumerated *or before `A`
+/// would have been reached* (the per-agg loop walks aggs in sorted order, so
+/// when the budget fires at agg `X` every agg sorted after `X` -- that has
+/// ≥ 2 petals and so could have contributed loops -- is also un-enumerated
+/// and thus reported). This is conservative in the same direction as the
+/// petal-cap flag (see below): an agg whose disjoint-petal subsets would all
+/// have collapsed to zero loops anyway is still flagged if the budget never
+/// reached it -- over-reporting incompleteness is the safe direction, and
+/// distinguishing it would require running the very enumeration the budget
+/// exists to skip.
 fn recover_cross_agg_loops(
     circuit_strs: &[Vec<&str>],
     var_graph: &crate::ltm::CausalGraph,
     source_vars: &HashMap<String, super::SourceVariable>,
     db: &dyn Db,
     project: SourceProject,
-) -> Vec<crate::ltm::Loop> {
+    agg_loop_budget: usize,
+) -> (Vec<crate::ltm::Loop>, Vec<String>) {
     use crate::common::{Canonical, Ident};
     use crate::ltm::{LinkPolarity, Loop, LoopPolarity};
 
-    /// One agg petal: the element-level node sequence rotated to start at the
-    /// agg (`[A, x_1, ..., x_m]`), plus its internal node set `{x_1..x_m}`.
-    struct Petal<'a> {
-        /// `[agg, x_1, ..., x_m]` -- the agg followed by the m internal nodes.
-        nodes: Vec<&'a str>,
-        internal: std::collections::HashSet<&'a str>,
-    }
-
     // agg name -> its (deduped) petals.
-    let mut petals_by_agg: HashMap<&str, Vec<Petal>> = HashMap::new();
+    let mut petals_by_agg: HashMap<&str, Vec<AggPetal>> = HashMap::new();
     for circuit in circuit_strs {
-        // Synthetic agg nodes in this circuit.
+        // Synthetic agg nodes in this circuit (bare or subscripted).
         let aggs: Vec<&str> = circuit
             .iter()
             .copied()
@@ -2748,7 +3134,8 @@ fn recover_cross_agg_loops(
             .collect();
         // Only build petals from a circuit that touches exactly one agg, once
         // (Johnson emits simple cycles, so "one agg in the node list" already
-        // means "visited once").
+        // means "visited once"; a circuit through two distinct agg nodes --
+        // `agg[a]` and `agg[b]` -- is a complete loop on its own, not a petal).
         if aggs.len() != 1 {
             continue;
         }
@@ -2766,20 +3153,55 @@ fn recover_cross_agg_loops(
         if entry.iter().any(|p| p.internal == internal) {
             continue;
         }
-        entry.push(Petal { nodes, internal });
+        entry.push(AggPetal { nodes, internal });
     }
 
     let mut recovered: Vec<Loop> = Vec::new();
-    // Deterministic agg iteration order.
-    let mut aggs: Vec<&&str> = petals_by_agg.keys().collect();
+    // Names of aggs whose enumeration was clipped (by the soft petal cap or by
+    // the global budget firing during/before them). A BTreeSet so the result
+    // is deterministic-sorted and deduped regardless of insertion order.
+    let mut truncated_aggs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut emitted: usize = 0;
+    // Deterministic agg iteration order so the budget clips reproducibly.
+    let mut aggs: Vec<&str> = petals_by_agg.keys().copied().collect();
     aggs.sort();
-    for agg in aggs {
-        let petals = &petals_by_agg[*agg];
-        if petals.len() < 2 || petals.len() > MAX_AGG_PETALS {
+    // If the global budget fires mid-enumeration, every agg sorted after the
+    // one we were on is un-enumerated; this records that position so they can
+    // be folded into `truncated_aggs` afterward.
+    let mut budget_clip_idx: Option<usize> = None;
+    'outer: for (agg_idx, agg) in aggs.iter().enumerate() {
+        let mut petals: Vec<&AggPetal> = petals_by_agg[*agg].iter().collect();
+        if petals.len() < 2 {
             continue;
         }
+        // Deterministic priority: fewest internal nodes first (smaller petals
+        // combine into more loops), then a stable tiebreaker (the petal's
+        // node sequence joined). After dedup-on-internal-set the petals have
+        // distinct `internal` sets and hence distinct `nodes` sequences, so
+        // this key is a total order.
+        petals.sort_by_cached_key(|p| (p.internal.len(), p.nodes.join("\u{0}")));
+        if petals.len() > MAX_AGG_PETALS {
+            // Drop the larger petals; the recovered set for this agg is now
+            // incomplete, so report it. Conservatively flags truncation
+            // whenever the soft petal cap drops >= 1 petal, even if those
+            // petals would have contributed no disjoint-pair loop (every
+            // dropped petal's internal nodes overlap a kept petal) --
+            // over-reporting incompleteness is the safe direction, and
+            // checking would mean running the disjoint-subset enumeration the
+            // cap exists to bound.
+            petals.truncate(MAX_AGG_PETALS);
+            truncated_aggs.insert((*agg).to_string());
+        }
         let k = petals.len();
-        for mask in 0u32..(1u32 << k) {
+
+        // Walk the 2^k subset masks smallest-cardinality-first (so the few-
+        // petal loops -- which survive a tight budget -- come out first), and
+        // within each cardinality in increasing mask order (which, given the
+        // priority sort above, visits the smallest-internal petals first).
+        // `k ≤ MAX_AGG_PETALS` keeps `1u32 << k` small.
+        let mut masks: Vec<u32> = (0u32..(1u32 << k)).collect();
+        masks.sort_by_key(|&m| (m.count_ones(), m));
+        for mask in masks {
             if mask.count_ones() < 2 {
                 continue;
             }
@@ -2792,49 +3214,75 @@ fn recover_cross_agg_loops(
             {
                 continue;
             }
-            // Element-level node sequence: `[A, p1_internal..., A, p2_internal..., ...]`
-            // -- but `build_element_subscripted_links` builds links
-            // `seq[i] → seq[(i+1) % n]`, so listing each petal's `nodes`
-            // (which already start with `A`) back-to-back gives exactly that
-            // cyclic sequence (the last petal's last internal node wraps to
-            // the first petal's `A`).
-            let seq: Vec<&str> = chosen
-                .iter()
-                .flat_map(|&i| petals[i].nodes.iter().copied())
-                .collect();
-            let var_level_nodes: Vec<Ident<Canonical>> =
-                seq.iter().map(|n| Ident::new(strip_subscript(n))).collect();
-            let var_links = var_graph.circuit_to_links(&var_level_nodes);
-            let links = build_element_subscripted_links(&seq, &var_links, source_vars, db, project);
-            let stocks: Vec<Ident<Canonical>> = seq
-                .iter()
-                .filter(|n| var_graph.stocks.contains(&Ident::new(strip_subscript(n))))
-                .map(|n| Ident::new(n))
-                .collect();
-            let polarity = if links.iter().any(|l| l.polarity == LinkPolarity::Unknown) {
-                LoopPolarity::Undetermined
-            } else {
-                let neg = links
+            // Each distinct cyclic ordering of the chosen petals is its own
+            // directed cycle (a different edge *sequence*; per #308 that is a
+            // distinct loop) -- but all of them share the same edge *multiset*
+            // (every petal always contributes its same `A → first_internal →
+            // ... → last_internal → A` edges, since the sequence is cyclic),
+            // so they share a `loop_score`. For m = 2 there is exactly one
+            // ordering, equal to the pre-#515 per-subset output.
+            let m = chosen.len();
+            for ord in cyclic_orderings(m) {
+                let seq: Vec<&str> = ord
                     .iter()
-                    .filter(|l| l.polarity == LinkPolarity::Negative)
-                    .count();
-                if neg % 2 == 0 {
-                    LoopPolarity::Reinforcing
+                    .flat_map(|&j| petals[chosen[j]].nodes.iter().copied())
+                    .collect();
+                let var_level_nodes: Vec<Ident<Canonical>> =
+                    seq.iter().map(|n| Ident::new(strip_subscript(n))).collect();
+                let var_links = var_graph.circuit_to_links(&var_level_nodes);
+                let links =
+                    build_element_subscripted_links(&seq, &var_links, source_vars, db, project);
+                let stocks: Vec<Ident<Canonical>> = seq
+                    .iter()
+                    .filter(|n| var_graph.stocks.contains(&Ident::new(strip_subscript(n))))
+                    .map(|n| Ident::new(n))
+                    .collect();
+                let polarity = if links.iter().any(|l| l.polarity == LinkPolarity::Unknown) {
+                    LoopPolarity::Undetermined
                 } else {
-                    LoopPolarity::Balancing
+                    let neg = links
+                        .iter()
+                        .filter(|l| l.polarity == LinkPolarity::Negative)
+                        .count();
+                    if neg % 2 == 0 {
+                        LoopPolarity::Reinforcing
+                    } else {
+                        LoopPolarity::Balancing
+                    }
+                };
+                recovered.push(Loop {
+                    id: String::new(),
+                    links,
+                    stocks,
+                    polarity,
+                    // Cross-element loops visit fixed elements -- scalar loop score.
+                    dimensions: vec![],
+                });
+                emitted += 1;
+                if emitted >= agg_loop_budget {
+                    // This agg's enumeration was clipped; the ones sorted
+                    // after it never ran (handled below).
+                    truncated_aggs.insert((*agg).to_string());
+                    budget_clip_idx = Some(agg_idx);
+                    break 'outer;
                 }
-            };
-            recovered.push(Loop {
-                id: String::new(),
-                links,
-                stocks,
-                polarity,
-                // Cross-element loops visit fixed elements -- scalar loop score.
-                dimensions: vec![],
-            });
+            }
         }
     }
-    recovered
+
+    // The global budget clipped mid-enumeration: every agg sorted after the
+    // clip point is un-enumerated. Report those that had >= 2 petals (and so
+    // could have contributed loops); an agg with < 2 petals would have been
+    // skipped regardless of budget, so it is not "truncated".
+    if let Some(clip_idx) = budget_clip_idx {
+        for agg in &aggs[clip_idx + 1..] {
+            if petals_by_agg[*agg].len() >= 2 {
+                truncated_aggs.insert((*agg).to_string());
+            }
+        }
+    }
+
+    (recovered, truncated_aggs.into_iter().collect())
 }
 
 /// Recover the polarity of synthetic-aggregate-node hops in `loops` (GH #516).
@@ -2951,6 +3399,7 @@ pub fn model_ltm_variables(
         return LtmVariablesResult {
             vars: vec![],
             loop_partitions: HashMap::new(),
+            agg_recovery_truncated: false,
         };
     }
 
@@ -3061,11 +3510,13 @@ pub fn model_ltm_variables(
         if !agg.is_synthetic {
             continue;
         }
-        // Synthetic aggs are scalar full reduces in this phase
-        // (`result_dims` is always empty); the equation text is the
-        // canonical reducer subexpression. An arrayed-result agg would be
-        // `Equation::ApplyToAll(result_dims, ...)`, but that case is
-        // currently only produced for variable-backed aggs.
+        // The equation text is the canonical reducer subexpression. A
+        // whole-extent or pinned-slice reducer (`SUM(pop[*])`,
+        // `SUM(pop[NYC,*])`) has a scalar result; a partial-reduce slice over
+        // an iterated dimension (`SUM(matrix[D1,*])` inside an A2A-over-`D1`
+        // body) has `result_dims = [D1]` -- in an A2A-over-`D1` body
+        // `matrix[D1,*]` is exactly "the `D1`-th row, all of axis 2", so this
+        // evaluates correctly as the `Equation::ApplyToAll` body.
         let equation = if agg.result_dims.is_empty() {
             datamodel::Equation::Scalar(agg.equation_text.clone())
         } else {
@@ -3096,6 +3547,11 @@ pub fn model_ltm_variables(
     // and `var_graph.find_stocks_in_loop`); the element-level graph
     // produced by `model_element_causal_edges` carries no variable
     // data.
+    //
+    // `agg_recovery_truncated` rides on the result so a model author
+    // knows the cross-agg loop list is incomplete even if the `Warning`
+    // never reaches them (#466); set inside the loop-building branch below.
+    let mut agg_recovery_truncated = false;
     let loops: Option<Vec<Loop>> = if !is_discovery {
         let tiered = model_loop_circuits_tiered(db, model, project);
         // Late-stage auto-flip: the variable-level SCC was small enough
@@ -3129,13 +3585,52 @@ pub fn model_ltm_variables(
                 return LtmVariablesResult {
                     vars: vec![],
                     loop_partitions: HashMap::new(),
+                    agg_recovery_truncated: false,
                 };
             }
             None
         } else {
+            // Bind the budget once: `build_loops_from_tiered` enforces it and
+            // the `Warning` text below reports it, and a `#[cfg(test)]`
+            // override could in principle change between two reads.
+            let cross_agg_budget = cross_agg_loop_budget();
             let var_graph = causal_graph_with_modules(db, model, project);
-            let mut detected =
-                build_loops_from_tiered(tiered, &var_graph, source_vars, db, project, dm_dims);
+            let (mut detected, truncated_aggs) = build_loops_from_tiered(
+                tiered,
+                &var_graph,
+                source_vars,
+                db,
+                project,
+                dm_dims,
+                cross_agg_budget,
+            );
+            // Surface a truncated cross-element-through-aggregate loop
+            // recovery the same way the auto-flip-to-discovery gate surfaces
+            // its mode change: a `Warning` (the human channel) plus the
+            // robust `agg_recovery_truncated` flag on the result. The loop
+            // list is incomplete -- the budget clipped which disjoint-petal
+            // combinations were materialized. `truncated_aggs` names exactly
+            // the aggregate nodes whose enumeration was clipped (sorted), so
+            // the message points the author at the affected reducers rather
+            // than every synthetic agg in the model.
+            if !truncated_aggs.is_empty() {
+                let msg = format!(
+                    "LTM cross-element-through-aggregate loop recovery was truncated: a \
+                     reducer in a feedback loop produces more disjoint-petal combinations \
+                     than the loop budget ({}); the recovered loop list is incomplete. \
+                     Affected aggregate node(s): {}.",
+                    cross_agg_budget,
+                    truncated_aggs.join(", "),
+                );
+                CompilationDiagnostic(Diagnostic {
+                    model: model.name(db).clone(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg),
+                    severity: DiagnosticSeverity::Warning,
+                })
+                .accumulate(db);
+            }
+            agg_recovery_truncated = !truncated_aggs.is_empty();
             // GH #516: hops into/out of synthetic `$⁚ltm⁚agg⁚{n}` nodes come
             // back Unknown-polarity from the loop builders (the variable-level
             // graph has no agg node); recover the derivable cases here so
@@ -3147,7 +3642,7 @@ pub fn model_ltm_variables(
         None
     };
 
-    let mut loop_partitions: HashMap<String, Option<usize>> = HashMap::new();
+    let mut loop_partitions: HashMap<String, Vec<Option<usize>>> = HashMap::new();
 
     // Part 1: Link scores.
     // Sub-models and discovery mode need scores for ALL edges (pathways
@@ -3593,6 +4088,9 @@ pub fn model_ltm_variables(
                     elem_text,
                     elem_deps,
                     deps_to_sub,
+                    // A true scalar source: the bare `quote_ident(from)`
+                    // denominator is correct.
+                    None,
                 )
             };
             LtmSyntheticVar {
@@ -3652,83 +4150,207 @@ pub fn model_ltm_variables(
         Some(cross_vars)
     }
 
-    /// Enumerate the unique `RefShape`s under which `to`'s AST references `from`.
+    /// Accumulate the AC3.4 `Warning` for a disjoint-dim arrayed -> arrayed
+    /// edge that is not statically scoreable (the target's per-element
+    /// equations reference the source via a dynamic index, so which target
+    /// slots depend on which source elements can't be decided at compile
+    /// time). The edge gets *no* link-score variable -- a missing link score
+    /// is graceful (loop/path scores referencing it get the zero-contribution
+    /// stub-dep fallback) and far less misleading than the scalarized stand-in
+    /// the pre-#510 path produced.
+    fn emit_unscoreable_disjoint_edge_warning(
+        db: &dyn Db,
+        model: SourceModel,
+        from: &str,
+        to: &str,
+    ) {
+        use salsa::Accumulator;
+        let msg = format!(
+            "LTM link score for edge {from} -> {to} could not be computed: {to} is a \
+             per-element-equation arrayed variable whose equations reference {from} via a \
+             dynamic index, which is not statically scoreable; this edge will have no \
+             link-score variable"
+        );
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: None,
+            error: DiagnosticError::Assembly(msg),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    }
+
+    /// Emit per-distinct-source-element link scores for a disjoint-dim
+    /// arrayed -> arrayed edge whose target is a per-element-equation
+    /// (`Ast::Arrayed`) variable (GH #510), or return `None` if the edge is
+    /// not of that shape.
     ///
-    /// Returns `None` for module sources/targets (modules are scalar nodes
-    /// in the causal graph; their link score equations don't depend on
-    /// per-reference AST shape) -- the caller should fall back to a
-    /// single Bare emission. Returns an empty vec when no AST reference
-    /// exists (e.g., structural edges or implicit synthesized references)
-    /// -- the caller should also fall back.
+    /// The case: `from` is arrayed, `to` is arrayed with an `Ast::Arrayed`
+    /// AST, `from`'s dims and `to`'s dims share *no* dimension name (so the
+    /// same-dim A2A / partial-collapse / broadcast / partial-reduce paths all
+    /// declined), and `to`'s per-element equations reference `from` only via
+    /// literal element subscripts (`source[m]`) of a dimension disjoint from
+    /// `to`'s dims. For each *distinct* referenced source element `m` we emit
+    /// one `LtmSyntheticVar` named `$⁚ltm⁚link_score⁚{from}[{m}]→{to}`, an
+    /// `Equation::Arrayed` over `to`'s dims whose partial holds `from[m]` live
+    /// in the slots whose equation references `from[m]` and is the trivial-zero
+    /// guard form (`from[m]` frozen at `PREVIOUS`) elsewhere -- exactly what
+    /// `build_arrayed_link_score_equation` produces for a `FixedIndex` source
+    /// into an `Ast::Arrayed` target (reached here via the salsa-cached
+    /// `link_score_equation_text_shaped`).
     ///
-    /// For non-module variables, reconstructs the target's `Variable`
-    /// (which carries the AST) and walks it via `collect_reference_shapes`.
-    fn enumerate_shapes(
+    /// Returns:
+    ///  - `Some(vec)` with one var per distinct referenced source element when
+    ///    every reference is a literal element subscript;
+    ///  - `Some(vec![])` when the target references `from` via a non-literal
+    ///    index (a `DynamicIndex` site -- or, defensively, a `Wildcard`/`Bare`
+    ///    site that can't be a literal-element reference into a disjoint-dim
+    ///    target): a `Warning` is accumulated and no link score is emitted, and
+    ///    the caller must *not* fall through to `emit_per_shape_link_scores`;
+    ///  - `None` when the edge isn't an arrayed -> disjoint-dim-`Ast::Arrayed`
+    ///    edge at all -- the caller's existing emission path handles it.
+    ///
+    /// We reuse the Phase-1 reference-site IR (`model_ltm_reference_sites`)
+    /// for `(from, to)` rather than re-walking the target's AST: each site's
+    /// `shape` is `FixedIndex(elems)` for `from[m]`, and `target_element`
+    /// records which `to` slot it sits in (unused here -- the per-slot partial
+    /// re-derives that from the slot equation).
+    fn try_disjoint_dim_arrayed_link_scores(
         db: &dyn Db,
         source_vars: &HashMap<String, super::SourceVariable>,
         from: &str,
         to: &str,
         model: SourceModel,
         project: SourceProject,
-    ) -> Option<Vec<RefShape>> {
+    ) -> Option<Vec<LtmSyntheticVar>> {
+        // Both ends must be arrayed, non-module variables.
+        let from_sv = source_vars.get(from)?;
+        if from_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        let from_dims = variable_dimensions(db, *from_sv, project);
+        if from_dims.is_empty() {
+            return None;
+        }
         let to_sv = source_vars.get(to)?;
         if to_sv.kind(db) == SourceVariableKind::Module {
             return None;
         }
-        if let Some(from_sv) = source_vars.get(from)
-            && from_sv.kind(db) == SourceVariableKind::Module
-        {
+        let to_dims = variable_dimensions(db, *to_sv, project);
+        if to_dims.is_empty() {
             return None;
         }
-        let from_dims = source_vars
-            .get(from)
-            .map(|sv| variable_dimensions(db, *sv, project).clone())
-            .unwrap_or_default();
-        let target_var = super::reconstruct_single_variable(db, model, project, to)?;
-        let source_is_arrayed = !from_dims.is_empty();
-        Some(collect_reference_shapes(
-            &target_var,
-            from,
-            source_is_arrayed,
-            &from_dims,
-        ))
+        // Disjoint: no shared dimension name. (Same-dim A2A, partial-collapse,
+        // broadcast, and partial-reduce edges share at least one dim and are
+        // handled by `link_score_dimensions` / `try_cross_dimensional_link_scores`.)
+        let shares_a_dim = from_dims
+            .iter()
+            .any(|fd| to_dims.iter().any(|td| td.name() == fd.name()));
+        if shares_a_dim {
+            return None;
+        }
+        // The target must be a per-element-equation (`Ast::Arrayed`) variable.
+        // An `Ast::ApplyToAll` target referencing a disjoint-dim source would
+        // be a dimension error (a D3-shaped value can't broadcast onto D1xD2);
+        // a scalar source into an arrayed target is `try_scalar_to_arrayed`'s job.
+        let to_var = super::reconstruct_single_variable(db, model, project, to)?;
+        if !matches!(to_var.ast(), Some(crate::ast::Ast::Arrayed(..))) {
+            return None;
+        }
+        // Consult the reference-site IR. A `FixedIndex(elems)` site is a
+        // `from[m]` reference; anything else (a dynamic index, or -- defensively
+        // -- a `Wildcard`/`Bare`, which can't be a valid literal-element
+        // reference into a disjoint-dim target) makes the edge unscoreable.
+        let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+        let sites = ir.sites.get(&(from.to_string(), to.to_string()))?;
+        if sites.is_empty() {
+            return None;
+        }
+        // Distinct referenced source elements, in first-occurrence order.
+        let mut elem_keys: Vec<String> = Vec::new();
+        for site in sites {
+            match &site.shape {
+                RefShape::FixedIndex(es) => {
+                    // The comma-joined form is the `[m]` (or `[m,k]`) the var
+                    // name carries and `shape_aware_source_ref` renders.
+                    let key = es.join(",");
+                    if !elem_keys.contains(&key) {
+                        elem_keys.push(key);
+                    }
+                }
+                RefShape::Bare | RefShape::Wildcard | RefShape::DynamicIndex => {
+                    emit_unscoreable_disjoint_edge_warning(db, model, from, to);
+                    return Some(vec![]);
+                }
+            }
+        }
+
+        // One link-score variable per distinct referenced source element. The
+        // equation comes from the salsa-cached shaped path, which routes the
+        // `Ast::Arrayed` target through `build_arrayed_link_score_equation`
+        // (an `Equation::Arrayed` over `to`'s dims, already tagged with `to`'s
+        // datamodel dim names -- so `dimensions` mirrors them and the
+        // `retarget` is a no-op). The `[m]` in the name routes the var
+        // directly in `assemble_module`'s bracket check, so `compile_directly`
+        // is irrelevant but set `false` for consistency with the other
+        // bracketed cross-dimensional vars.
+        let mut vars = Vec::with_capacity(elem_keys.len());
+        for key in &elem_keys {
+            let shape = RefShape::FixedIndex(key.split(',').map(|s| s.to_string()).collect());
+            let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
+            if let Some(mut lsv) =
+                link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone()
+            {
+                // `lsv.name` is already `link_score_var_name(from, to, &shape)`
+                // from the shaped path -- no need to re-derive it here.
+                let dims = ltm_equation_dimensions(&lsv.equation).to_vec();
+                lsv.dimensions = dims.clone();
+                lsv.equation = retarget_ltm_equation_dims(lsv.equation, &dims);
+                lsv.compile_directly = false;
+                vars.push(lsv);
+            }
+        }
+        Some(vars)
     }
 
     /// Emit per-shape link scores for a single (from, to) edge.
     ///
     /// The emission is shape-driven (Phase 3): one `LtmSyntheticVar` per
-    /// `(from, to, shape)` tuple, named by `link_score_var_name`. Module
-    /// links and edges with no AST reference fall back to a single
-    /// Bare emission so the legacy behavior is preserved at structural
-    /// boundaries.
+    /// `(from, to, shape)` tuple, named by `link_score_var_name`. The shape
+    /// set comes from `model_ltm_reference_sites` (the distinct `shape`
+    /// fields of `(from, to)`'s classified sites); module links and edges
+    /// with no AST reference have no IR entry and fall back to a single Bare
+    /// emission so the legacy behavior is preserved at structural boundaries.
     ///
-    /// `fallback_shape` is the shape to use when shape enumeration is
-    /// not possible or yields no results (e.g., implicit synthesized
-    /// references that don't appear in the target's AST). Callers pass
-    /// `RefShape::Bare` to preserve the legacy single-shape behavior.
+    /// `fallback_shape` is the shape to use when the IR has no entry for the
+    /// edge (e.g. a module edge, or an implicit synthesized reference that
+    /// doesn't appear in the target's AST). Callers pass `RefShape::Bare` to
+    /// preserve the legacy single-shape behavior.
     ///
     /// `skip_reducer_shapes` is set when the caller has already handled the
     /// `from` reference's reducer occurrences by routing them through an
-    /// aggregate node (Phase 5). Only the `Wildcard` shape is suppressed in
-    /// that case -- a `Wildcard` reference to `from` in `to` is the hoisted
-    /// reducer's argument (`SUM(pop[*])`), already scored by the
-    /// `source → agg` / `agg → target` halves, so re-scoring it here would
-    /// double-count. `DynamicIndex` is *not* suppressed: a `to` equation can
-    /// hold both `SUM(pop[*])` (hoisted) *and* a direct `pop[idx]`
-    /// (DynamicIndex, not in any reducer), and that direct reference still
-    /// needs its own conservative Bare-named link score. Any `DynamicIndex`
-    /// site that reaches this code is from a *non-hoisted* construct -- a
-    /// direct `pop[idx]`, or a single-non-literal-index reducer `SUM(pop[idx])`
-    /// (not a *full* reduce, so `enumerate_agg_nodes` doesn't hoist it).
-    /// (`classify_subscript_shape` reports `Wildcard`, not `DynamicIndex`, for
-    /// a slice that mixes a dynamic index with a wildcard like `SUM(pop[idx, *])`
-    /// (GH #514), so that case never lands here as `DynamicIndex`.) Keeping the
-    /// `DynamicIndex` link score here is therefore correct -- it's the
-    /// conservative fallback for a reference no agg covers.
+    /// aggregate node (Phase 5) -- i.e. when the routed-agg set for `(from,
+    /// to)` is non-empty. Only the `Wildcard` shape is suppressed in that
+    /// case: a `Wildcard` reference to `from` in `to` is the hoisted
+    /// reducer's argument (`SUM(pop[*])`, classified `ThroughAgg` in the
+    /// IR), already scored by the `source → agg` / `agg → target` halves,
+    /// so re-scoring it here would double-count. Every *other* shape is kept
+    /// -- including `DynamicIndex` (a direct `pop[idx]` alongside a hoisted
+    /// `SUM(pop[*])`, classified `Direct`) **and `Bare`** (a bare arrayed
+    /// reducer arg like `SUM(pop)`, classified `ThroughAgg` for the element
+    /// graph but still given its own `Bare`-named link score here -- this is
+    /// exactly the pre-IR behavior, where `enumerate_shapes` returned every
+    /// shape of `from` in `to` and `skip_reducer_shapes` dropped only
+    /// `Wildcard`). Equivalently: feed every distinct site `shape` to the
+    /// per-shape pass, removing `Wildcard` iff the routed-agg set is
+    /// non-empty -- which is what the element-graph routing and the
+    /// link-score routing "agree" on (the same `ClassifiedSite::routing`
+    /// data), differing only in that the link scorer additionally keeps
+    /// non-`Wildcard` shapes from `ThroughAgg` sites.
     ///
     /// `Wildcard`/`DynamicIndex` shapes that reach this function share the
     /// canonical `link_score_var_name` form with `Bare`, so we dedup by the
-    /// resulting name and keep the first occurrence -- the AST walker returns
+    /// resulting name and keep the first occurrence -- the AST walk records
     /// `Bare` before any subscripted reference, so the canonical-Bare link
     /// score wins the slot when both a bare and a subscripted reference exist.
     #[allow(clippy::too_many_arguments)] // helper threads through emission context
@@ -3744,8 +4366,23 @@ pub fn model_ltm_variables(
         skip_reducer_shapes: bool,
         vars: &mut Vec<LtmSyntheticVar>,
     ) {
-        let mut shapes = enumerate_shapes(db, source_vars, from, to, model, project)
-            .filter(|s| !s.is_empty())
+        let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+        // The distinct `shape` fields of `(from, to)`'s classified sites,
+        // in AST-walk order of first occurrence (equivalent to the per-edge
+        // shape set the AST walker produced before the IR).
+        let mut shapes: Vec<RefShape> = ir
+            .sites
+            .get(&(from.to_string(), to.to_string()))
+            .map(|sites| {
+                let mut v: Vec<RefShape> = Vec::new();
+                for s in sites {
+                    if !v.contains(&s.shape) {
+                        v.push(s.shape.clone());
+                    }
+                }
+                v
+            })
+            .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec![fallback_shape]);
         if skip_reducer_shapes {
             shapes.retain(|s| !matches!(s, RefShape::Wildcard));
@@ -3803,12 +4440,20 @@ pub fn model_ltm_variables(
         }
     }
 
-    /// Emit the `source[d] → agg` link-score half: one scalar
-    /// `$⁚ltm⁚link_score⁚{from}[{d}]→{agg}` per source element of `from`,
-    /// measuring that element's fractional contribution to the aggregate's
-    /// velocity. The agg's *own* equation is exactly the reducer, so the
-    /// "bare" algebraic shortcut applies (varying `from[d]` changes the agg
-    /// by exactly its own delta regardless of what else the reducer combines).
+    /// Emit the `source[<read row>] → agg` link-score half: one scalar
+    /// `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}` (when the agg is scalar) or
+    /// `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}[<slot>]` (when the agg is arrayed
+    /// over its `result_dims` -- the partial-reduce shape that mirrors
+    /// `try_cross_dimensional_link_scores`'s `{from}[{d1,d2}]→{to}[{d1}]`) per
+    /// source *read row* -- not every source element. For a whole-extent
+    /// reducer that's all of `from`'s elements; for a sliced reducer
+    /// (`SUM(pop[NYC,*])`, `read_slice = [Pinned(nyc), Reduced]`) it's only
+    /// the rows the slice reads (here, the `pop[nyc,*]` slice), so the unread
+    /// rows get *no* link score rather than a nonzero garbage one. Each row's
+    /// `coreduced` set (the rows mapping to the same agg slot -- the
+    /// `from`-slice combined for that slot) is the `all_elements` for the
+    /// MEAN divisor / nonlinear expansion. The agg's *own* equation is exactly
+    /// the reducer, so the "bare" algebraic shortcut applies.
     fn emit_source_to_agg_link_scores(
         db: &dyn Db,
         source_vars: &HashMap<String, super::SourceVariable>,
@@ -3830,8 +4475,18 @@ pub fn model_ltm_variables(
         }
         // Reconstruct a transient (parsed + lowered) `Variable` from the
         // agg's equation text so `classify_reducer` can read the reducer
-        // kind/name.
-        let agg_eqn = datamodel::Equation::Scalar(agg.equation_text.clone());
+        // kind/name. An arrayed agg (`result_dims` non-empty -- a sliced
+        // reducer like `SUM(matrix[D1,*])` over an A2A-`D1` body) must be
+        // reconstructed as an `ApplyToAll` over `result_dims`; treating
+        // `matrix[d1,*]` as a scalar equation is a type error, so the lowered
+        // reconstruction would fail and no per-read-row source link scores
+        // would be emitted (silently zeroing the synthetic agg's loop score).
+        // Mirrors the agg-aux emission above.
+        let agg_eqn = if agg.result_dims.is_empty() {
+            datamodel::Equation::Scalar(agg.equation_text.clone())
+        } else {
+            datamodel::Equation::ApplyToAll(agg.result_dims.clone(), agg.equation_text.clone())
+        };
         let Some(agg_var) = reconstruct_ltm_var_lowered(db, &agg.name, &agg_eqn, model, project)
         else {
             return;
@@ -3848,26 +4503,66 @@ pub fn model_ltm_variables(
             .iter()
             .map(crate::ltm_augment::dimension_element_names)
             .collect();
-        let source_elements = cartesian_subscripts(&dim_element_lists);
-        for element in &source_elements {
-            let var_name = format!(
-                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
-                from, element, agg.name
-            );
-            let equation = crate::ltm_augment::generate_element_to_scalar_equation(
-                from,
-                &agg.name,
-                element,
-                &source_elements,
-                &reducer_kind,
-                reducer_name,
-                /* is_bare = */ true,
-            );
+        // The read rows: only the slice the reducer reads. If `read_slice`
+        // doesn't line up with `from`'s axes (shouldn't happen for a hoisted
+        // agg whose `source_vars` contains `from`), fall back to all elements
+        // / scalar agg.
+        let rows: Vec<ReadSliceRow> = read_slice_rows(&agg.read_slice, &dim_element_lists)
+            .unwrap_or_else(|| {
+                let all = cartesian_subscripts(&dim_element_lists);
+                all.iter()
+                    .map(|r| ReadSliceRow {
+                        row: r.clone(),
+                        slot: String::new(),
+                        coreduced: all.clone(),
+                    })
+                    .collect()
+            });
+        for ReadSliceRow {
+            row,
+            slot,
+            coreduced,
+        } in &rows
+        {
+            let (var_name, equation) = if slot.is_empty() {
+                (
+                    format!(
+                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
+                        from, row, agg.name
+                    ),
+                    crate::ltm_augment::generate_element_to_scalar_equation(
+                        from,
+                        &agg.name,
+                        row,
+                        coreduced,
+                        &reducer_kind,
+                        reducer_name,
+                        /* is_bare = */ true,
+                    ),
+                )
+            } else {
+                (
+                    format!(
+                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
+                        from, row, agg.name, slot
+                    ),
+                    crate::ltm_augment::generate_element_to_reduced_equation(
+                        from,
+                        &agg.name,
+                        row,
+                        slot,
+                        coreduced,
+                        &reducer_kind,
+                        reducer_name,
+                        /* is_bare = */ true,
+                    ),
+                )
+            };
             vars.push(LtmSyntheticVar {
                 name: var_name,
                 equation: datamodel::Equation::Scalar(equation),
                 dimensions: vec![],
-                // bracketed name + synthetic agg -> routed direct already.
+                // bracketed name (+ subscripted synthetic agg) -> routed direct.
                 compile_directly: false,
             });
         }
@@ -3880,7 +4575,12 @@ pub fn model_ltm_variables(
     /// `PREVIOUS(agg_j)`). For an arrayed `to` this is one scalar
     /// `$⁚ltm⁚link_score⁚{agg}→{to}[{e}]` per target element (mirroring the
     /// scalar→arrayed convention from `try_scalar_to_arrayed_link_scores`);
-    /// for a scalar `to` it is a single `$⁚ltm⁚link_score⁚{agg}→{to}`.
+    /// for a scalar `to` it is a single `$⁚ltm⁚link_score⁚{agg}→{to}`. When the
+    /// agg is itself arrayed over its `result_dims` (a partial-reduce
+    /// sub-expression like `x[D1] = ... + SUM(matrix[D1,*])`), the agg side of
+    /// the name carries the target element's projection onto `result_dims`
+    /// (`{agg}[{d1}]→{to}[{e}]`), and the agg reference in the per-slot
+    /// equation is element-pinned to the same slot.
     #[allow(clippy::too_many_arguments)]
     fn emit_agg_to_target_link_scores(
         db: &dyn Db,
@@ -3906,6 +4606,7 @@ pub fn model_ltm_variables(
             .collect();
 
         let agg_canonical = Ident::<Canonical>::new(&agg.name);
+        let agg_is_arrayed = !agg.result_dims.is_empty();
 
         // The set of arrayed deps that share `to`'s dimensions (need to be
         // element-pinned in the per-target-element scalar equation); scalar
@@ -3932,7 +4633,7 @@ pub fn model_ltm_variables(
         for other_agg in reducer_subst.values() {
             all_deps.insert(Ident::<Canonical>::new(other_agg));
         }
-        let deps_to_subscript: HashSet<Ident<Canonical>> = all_deps
+        let mut deps_to_subscript: HashSet<Ident<Canonical>> = all_deps
             .iter()
             .filter(|d| {
                 source_vars
@@ -3949,6 +4650,66 @@ pub fn model_ltm_variables(
             })
             .cloned()
             .collect();
+        // An arrayed agg (`result_dims` non-empty) is element-pinned in the
+        // per-target-element equation just like an arrayed dep that shares
+        // `to`'s dims: `$⁚ltm⁚agg⁚0` → `$⁚ltm⁚agg⁚0[<element>]`. This is
+        // exact when `result_dims` equals `to`'s dimensions (the diagonal
+        // `agg[d1] → to[d1]` case -- a partial-reduce sub-expression in an
+        // A2A target over exactly that dim, e.g. `x[D1] = ... + SUM(matrix[D1,*])`);
+        // for the rarer broadcast case (`agg[D1]` into `to[D1,D2]`) the
+        // element tuple over-subscripts the agg, which is a known imprecision.
+        if agg_is_arrayed {
+            deps_to_subscript.insert(agg_canonical.clone());
+        }
+
+        // Positions of the agg's `result_dims` within `to`'s dimensions, so a
+        // target element tuple can be projected onto the agg-slot subscript
+        // for the link-score name's agg side.
+        let result_dim_positions: Vec<usize> = agg
+            .result_dims
+            .iter()
+            .filter_map(|rd| {
+                let canon = crate::common::canonicalize(rd);
+                to_dims.iter().position(|td| td.name() == canon.as_ref())
+            })
+            .collect();
+        // The target element projected onto the agg's `result_dims` (the
+        // agg-slot subscript), or `None` when the agg is scalar / the
+        // projection is empty.
+        let agg_slot_for_target = |element: &str| -> Option<String> {
+            if !agg_is_arrayed {
+                return None;
+            }
+            let parts: Vec<&str> = element.split(',').collect();
+            let slot: Vec<&str> = result_dim_positions
+                .iter()
+                .filter_map(|&p| parts.get(p).copied())
+                .collect();
+            (!slot.is_empty()).then(|| slot.join(","))
+        };
+        // The agg side of the link-score name for a given target element: the
+        // bare agg name when scalar, `agg[<slot>]` when arrayed (the target
+        // element projected onto `result_dims`).
+        let agg_name_for_target = |element: &str| -> String {
+            match agg_slot_for_target(element) {
+                None => agg.name.clone(),
+                Some(slot) => format!("{}[{}]", agg.name, slot),
+            }
+        };
+        // The agg side of the `agg → target` link-score *equation*'s `Δsource`
+        // denominator for a given target element: the quoted agg name with the
+        // same `[<slot>]` subscript the link-score name carries (so the
+        // denominator indexes the agg slot the loop traverses). The
+        // bare-agg-name form `generate_scalar_to_element_equation` would build
+        // by default does not compile when the agg is arrayed (a multi-slot
+        // var referenced bare in a scalar equation).
+        let agg_q = crate::ltm_augment::quote_ident(&agg.name);
+        let agg_source_ref_for_target = |element: &str| -> String {
+            match agg_slot_for_target(element) {
+                None => agg_q.clone(),
+                Some(slot) => format!("{agg_q}[{slot}]"),
+            }
+        };
 
         // Helper: substitute the reducers in a slot expr's canonical text and
         // build the agg→target link-score equation for one target element (or
@@ -3962,6 +4723,10 @@ pub fn model_ltm_variables(
 
         match ast {
             Ast::Scalar(expr) => {
+                // A scalar `to` cannot reference a reducer in a way that makes
+                // the agg arrayed (a scalar target has no iterated dims), so
+                // the agg is always scalar here.
+                debug_assert!(!agg_is_arrayed, "a scalar target implies a scalar agg");
                 let substituted = slot_text(expr);
                 let equation = crate::ltm_augment::generate_agg_to_scalar_target_equation(
                     &agg.name,
@@ -3991,6 +4756,12 @@ pub fn model_ltm_variables(
                     .map(crate::ltm_augment::dimension_element_names)
                     .collect();
                 for element in &cartesian_subscripts(&dim_element_lists) {
+                    // The partial is built around the *bare* agg name (which is
+                    // what `substituted` holds); `deps_to_subscript` then
+                    // element-pins it to `agg[<element>]` when the agg is
+                    // arrayed, matching `agg_name_for_target` (exact when
+                    // `result_dims == to`'s dims). The `Δsource` denominator
+                    // is element-pinned the same way via the explicit override.
                     let equation = crate::ltm_augment::generate_scalar_to_element_equation(
                         &agg.name,
                         to,
@@ -3998,11 +4769,14 @@ pub fn model_ltm_variables(
                         &substituted,
                         &all_deps,
                         &deps_to_subscript,
+                        Some(&agg_source_ref_for_target(element)),
                     );
                     vars.push(LtmSyntheticVar {
                         name: format!(
                             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
-                            agg.name, to, element
+                            agg_name_for_target(element),
+                            to,
+                            element
                         ),
                         equation: datamodel::Equation::Scalar(equation),
                         dimensions: vec![],
@@ -4050,13 +4824,16 @@ pub fn model_ltm_variables(
                                 &substituted,
                                 &slot_deps,
                                 &deps_to_subscript,
+                                Some(&agg_source_ref_for_target(element)),
                             )
                         }
                     };
                     vars.push(LtmSyntheticVar {
                         name: format!(
                             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
-                            agg.name, to, element
+                            agg_name_for_target(element),
+                            to,
+                            element
                         ),
                         equation: datamodel::Equation::Scalar(equation),
                         dimensions: vec![],
@@ -4098,10 +4875,28 @@ pub fn model_ltm_variables(
         skip_agg_halves: bool,
         vars: &mut Vec<LtmSyntheticVar>,
     ) {
-        let routed_aggs: Vec<&crate::ltm_agg::AggNode> = agg_nodes
-            .aggs_in_var(to)
-            .filter(|a| a.is_synthetic && a.source_vars.iter().any(|s| s == from))
-            .collect();
+        // The set of synthetic aggs `(from, to)` routes through, read off
+        // the reference-site IR (the unique `ThroughAgg` `AggRef`s of this
+        // edge's classified sites, in first-occurrence order). This is the
+        // single place the old per-edge `routed_aggs` filter
+        // (`aggs_in_var(to).filter(is_synthetic && reads from)`) used to be
+        // restated -- it now lives only in the IR builder; here we just
+        // project the result, resolving each `AggRef` to its `AggNode` for
+        // the half-emitters.
+        let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+        let routed_aggs: Vec<&crate::ltm_agg::AggNode> = {
+            let mut idxs: Vec<usize> = Vec::new();
+            if let Some(sites) = ir.sites.get(&(from.to_string(), to.to_string())) {
+                for s in sites {
+                    if let crate::db_ltm_ir::SiteRouting::ThroughAgg { agg } = &s.routing
+                        && !idxs.contains(&agg.0)
+                    {
+                        idxs.push(agg.0);
+                    }
+                }
+            }
+            idxs.iter().map(|&i| &agg_nodes.aggs[i]).collect()
+        };
         if !routed_aggs.is_empty() {
             if !skip_agg_halves {
                 for agg in &routed_aggs {
@@ -4127,7 +4922,10 @@ pub fn model_ltm_variables(
                 }
             }
             // The Bare numerator / FixedIndex references of `from` in `to`
-            // still get their own (non-reducer) link scores.
+            // still get their own (non-reducer) link scores. (And a bare
+            // arrayed reducer arg like `SUM(pop)` keeps its `Bare`-named
+            // link score too -- `emit_per_shape_link_scores` drops only the
+            // `Wildcard` reducer-arg shape; see its doc.)
             emit_per_shape_link_scores(
                 db,
                 source_vars,
@@ -4156,6 +4954,19 @@ pub fn model_ltm_variables(
             try_scalar_to_arrayed_link_scores(db, source_vars, from, to, model, project)
         {
             vars.extend(cross_vars);
+            return;
+        }
+        // Disjoint-dim arrayed -> arrayed edges with a per-element-equation
+        // (`Ast::Arrayed`) target (GH #510): one link score per distinct
+        // referenced source element, each `Equation::Arrayed` over `to`'s
+        // dims. `Some(vec![])` means the edge is genuinely unscoreable (a
+        // dynamic-index source): a `Warning` was accumulated and no link
+        // score is emitted -- crucially, we *don't* fall through to
+        // `emit_per_shape_link_scores`, which would build a scalarized stand-in.
+        if let Some(disjoint_vars) =
+            try_disjoint_dim_arrayed_link_scores(db, source_vars, from, to, model, project)
+        {
+            vars.extend(disjoint_vars);
             return;
         }
         emit_per_shape_link_scores(
@@ -4287,11 +5098,40 @@ pub fn model_ltm_variables(
                 .collect(),
         };
 
-        // Capture each loop's partition index before consuming `partitions`
-        // so post-sim `compute_rel_loop_scores` can group loops into the
-        // same denominator bins the removed compile-time SAFEDIV formula did.
+        // Capture each loop's per-slot partition vector before consuming
+        // `partitions` so post-sim `compute_rel_loop_scores*` can group slots
+        // into the same `(partition, slot)` denominator bins.  The vector's
+        // length must match the loop_score series' slot count -- 1 for a
+        // scalar/cross-element/mixed loop, the dimension-element-space size
+        // for an A2A loop -- which is the same `n_slots` that
+        // `ltm_post::build_loop_element_index` derives from
+        // `LtmSyntheticVar.dimensions` + the project dims; both feed
+        // `compute_rel_loop_scores_per_element`, so a length mismatch would
+        // desync the per-element normalization.
         for l in detected_loops.iter() {
-            loop_partitions.insert(l.id.clone(), partitions.partition_for_loop(l));
+            let parts = partitions.partition_for_loop(l, dm_dims);
+            debug_assert!(
+                {
+                    let expected = if l.dimensions.is_empty() {
+                        Some(1usize)
+                    } else {
+                        let n =
+                            crate::ltm::loop_dimension_element_tuples(&l.dimensions, dm_dims).len();
+                        // n == 0 only when `dm_dims` doesn't cover the loop's
+                        // declared dimensions (a mid-edit inconsistency);
+                        // `partition_for_loop` then falls back to the present
+                        // suffixes and the length is not predictable here.
+                        if n == 0 { None } else { Some(n) }
+                    };
+                    expected.is_none_or(|n| parts.len() == n)
+                },
+                "loop {:?}: per-slot partition vector length {} disagrees with the loop's slot \
+                 count; it must equal `build_loop_element_index`'s n_slots (both feed \
+                 `compute_rel_loop_scores_per_element`)",
+                l.id,
+                parts.len(),
+            );
+            loop_partitions.insert(l.id.clone(), parts);
         }
 
         // Build the set of link-score variable names emitted so far so
@@ -4445,6 +5285,7 @@ pub fn model_ltm_variables(
     LtmVariablesResult {
         vars,
         loop_partitions,
+        agg_recovery_truncated,
     }
 }
 

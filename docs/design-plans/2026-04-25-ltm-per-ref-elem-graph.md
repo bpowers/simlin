@@ -711,3 +711,60 @@ reducer models (and the reduction grows with the source dimension size /
 the number of consumers sharing a reducer), so if anything the gate's
 headroom on those models improved. The `MAX_LTM_SCC_NODES` doc-comment
 again needs no update.
+
+### Re-measurement after the arrays-hardening work (2026-05-13)
+
+The `2026-05-11-ltm-arrays-hardening.md` plan (8 phases) landed on top of
+the cross-element-aggregate-scoring work: the unified reference-site
+classification IR (`db_ltm_ir.rs`), element-level A2A `Loop::stocks` +
+per-slot `loop_partitions` (#487), iterated-dimension subscripts ⇒ `Bare`
+(#511), disjoint-dim arrayed→arrayed per-source-element link scores +
+unscoreable-edge `Warning` (#510), `AggNode.read_slice` + sliced-reducer
+hoisting (#514), budgeted cyclic-ordering cross-agg loop recovery +
+`agg_recovery_truncated` (#515), the analytic STDDEV partial (#483), and
+per-element graphical-function static link polarity (#502 / #492). Numbers
+below are from the `measurement_postscript_*` tests in
+`tests/simulate_ltm.rs` (`cargo test -p simlin-engine --features file_io
+--test simulate_ltm measurement_postscript -- --nocapture`), on the
+`ltm-arrays-hardening` branch tip.
+
+| Fixture | var SCC | elem SCC | var circuits | elem circuits (legacy) | tiered fast / slow | slow SCC |
+|---------|--------:|---------:|-------------:|-----------------------:|-------------------:|---------:|
+| cross_element_ltm | 5 | 10 | 3 | 8 | 1 / 6 | 8 |
+| arrayed_population_ltm | 3 | 3 | 2 | 6 | 2 / 0 | 0 |
+
+Notes:
+
+- **Every structural number is identical to the 2026-05-09 re-measurement.**
+  `cross_element_ltm`'s only reducer (`total_population = SUM(population[*])`)
+  is a *whole-RHS* reducer, so it is variable-backed -- no synthetic agg is
+  minted and the IR's classification doesn't change the element-graph
+  edges; `arrayed_population_ltm` has no reducers and no per-element-equation
+  targets at all. (The 2026-05-09 table reported `var-edges = 8` for
+  cross_element and `= 6` for arrayed_population -- the *edge* count, not the
+  SCC *size*; `measure_tiered` here reports the variable-graph SCC size,
+  5 and 3 respectively, which is also unchanged from the prior run.) The
+  cross-agg-loop recovery, `loop_partitions`, and per-element-GF-polarity
+  changes are loop-*scoring* / metadata refinements; they don't add or remove
+  element-graph nodes or edges, so the SCC / circuit counts are stable.
+- **The sliced-reducer narrowing of #514 has no checked-in fixture.** A
+  fixture with an inlined *sliced* reducer in a feedback loop -- `share[r] =
+  pop[r] / SUM(pop[NYC, *])` over a 2-D `pop`, or `growth[D1] = ... +
+  SUM(matrix[D1, *])` over `matrix[D1, D2]` -- would show the win: only the
+  rows the slice reads (or one agg slot per iterated element) feed the
+  aggregate node instead of every element. That coverage went into
+  `src/db_element_graph_tests.rs`
+  (`element_graph_sliced_reducer_reads_only_pinned_row`,
+  `element_graph_arrayed_agg_over_iterated_dim`) and `src/ltm_agg.rs` /
+  `src/db_ltm_ir_tests.rs`, not into a golden file in `test/`. The
+  whole-extent `share`/`mean` inline fixtures from the 2026-05-09 block use
+  `SUM(pop[*])` / `MEAN(pop[*])`, which were already hoisted then, so their
+  element-graph numbers are also unchanged.
+- **Auto-flip / `MAX_LTM_SCC_NODES`**: unchanged. No fixture moved relative
+  to the gate; the IR is a once-per-variable AST walk replacing the prior
+  per-edge re-walks, so it is, if anything, slightly cheaper. The
+  `MAX_LTM_SCC_NODES` doc-comment again needs no update. The new
+  `MAX_CROSS_AGG_LOOPS = 256` model-wide loop-count budget and the soft
+  `MAX_AGG_PETALS = 8` per-agg petal cap are the cross-agg-recovery
+  truncation gates (`agg_recovery_truncated` + a `Warning`), separate from
+  the SCC-size auto-flip gate.

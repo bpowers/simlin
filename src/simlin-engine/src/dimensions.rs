@@ -109,7 +109,6 @@ impl Dimension {
         }
     }
 
-    #[allow(unused)]
     pub fn name(&self) -> &str {
         match self {
             Dimension::Indexed(name, _) | Dimension::Named(name, _) => name.as_str(),

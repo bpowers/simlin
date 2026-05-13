@@ -460,7 +460,14 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     let mut state_guard = sim_ref.state.lock().unwrap();
     let state = &mut *state_guard;
 
-    let Some(&partition_key) = state.loop_partitions.get(parsed.base) else {
+    // `loop_partitions` maps each loop id to its per-slot cycle-partition
+    // vector (length 1 for a scalar/cross-element/mixed loop, one entry per
+    // element for an A2A loop).  This lookup confirms the loop exists; the
+    // partition key for a query is read from the *queried slot*, not slot 0,
+    // so an element-wise-uncoupled A2A loop normalizes per element (matching
+    // `ltm_post::compute_rel_loop_scores_per_element`'s `(partition, slot)`
+    // bucketing).
+    if !state.loop_partitions.contains_key(parsed.base) {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
@@ -469,7 +476,7 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
             )),
         );
         return;
-    };
+    }
 
     // Look up the loop's dim metadata.  Loops without an entry are
     // treated as scalar (n_slots=1) via the `unwrap_or` fallback below
@@ -554,17 +561,35 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         return;
     };
 
-    // Compute the per-partition denominator at element_k, lazily
-    // populating the cache.  Each cache entry is the partition sum at
-    // a specific element slot, evaluated against `results`.  Member
-    // loops contribute their own slot k for k < their n_slots, or
-    // their last slot when the partition's max is larger (this matches
-    // the broadcast convention `compute_rel_loop_scores_per_element`
-    // uses).
+    // The partition of loop `pv` at slot `k`.  For an arrayed loop this is
+    // `pv[k]` (out-of-range slots and genuinely-`None` partitions both yield
+    // `None`); for a scalar loop (`len <= 1`) the single partition `pv[0]` is
+    // broadcast across every slot it is compared in -- a scalar loop has no
+    // elements, so it carries its one partition into every slot.  This is the
+    // same `slot_partition` convention `ltm_post::compute_rel_loop_scores_per_element`
+    // uses to bucket loops into the `(partition, slot)` grid.
+    fn slot_partition_at(pv: &[Option<usize>], k: usize) -> Option<usize> {
+        if pv.len() <= 1 {
+            pv.first().copied().flatten()
+        } else {
+            pv.get(k).copied().flatten()
+        }
+    }
+
+    // Compute the per-(partition, slot) denominator series, lazily populating
+    // the cache.  A loop `other` is a member of bucket `(partition_key,
+    // element_k)` iff its slot-`element_k` partition equals `partition_key`;
+    // each member then contributes `|loop_score[other, k']|` where `k'` is
+    // `effective_slot(n_slots[other], element_k)` -- 0 for a broadcast scalar
+    // member, `element_k` for an arrayed member with `element_k < n_slots`, and
+    // skipped entirely for an arrayed member past its own slots.  This
+    // reproduces `ltm_post::compute_rel_loop_scores_per_element`'s bucket sums
+    // exactly via the streaming `compute_partition_denominator_for_element`
+    // helper, just amortized across repeated FFI queries on the same bucket.
     fn ensure_denom_for_element(
         cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
         results: &engine::Results,
-        loop_partitions: &HashMap<String, Option<usize>>,
+        loop_partitions: &HashMap<String, Vec<Option<usize>>>,
         element_index_map: &HashMap<String, engine::ltm_post::LoopElementIndex>,
         partition_key: Option<usize>,
         element_k: usize,
@@ -574,8 +599,8 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         }
         let members: Vec<(&str, usize)> = loop_partitions
             .iter()
-            .filter_map(|(id, pk)| {
-                if *pk == partition_key {
+            .filter_map(|(id, pv)| {
+                if slot_partition_at(pv, element_k) == partition_key {
                     let n = element_index_map
                         .get(id)
                         .map(|m| m.n_slots)
@@ -600,6 +625,10 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     // results / partition / element-index reads.
     let series = match element_index {
         Some(k) => {
+            // Group the denominator by the *queried slot's* partition (slot 0
+            // for a scalar loop), so an uncoupled A2A loop normalizes per
+            // element rather than against a pooled slot-0 bucket.
+            let partition_key = slot_partition_at(&state.loop_partitions[parsed.base], k);
             let denom = ensure_denom_for_element(
                 &mut state.cached_partition_denominators,
                 results,
@@ -629,9 +658,12 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
             }
         }
         None => {
-            // Argmax-abs aggregator over all slots.
+            // Argmax-abs aggregator over all slots; each slot's denominator is
+            // keyed on *that slot's* partition (matching the per-element
+            // helper), not slot 0's.
             let mut denoms: Vec<Vec<f64>> = Vec::with_capacity(n_slots);
             for k in 0..n_slots {
+                let partition_key = slot_partition_at(&state.loop_partitions[parsed.base], k);
                 let denom = ensure_denom_for_element(
                     &mut state.cached_partition_denominators,
                     results,

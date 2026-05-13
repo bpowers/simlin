@@ -4,6 +4,7 @@
 
 use super::graph::{CausalGraph, get_variable_dependencies};
 use super::indexed::IndexedGraph;
+use super::partitions::CyclePartitions;
 use super::polarity::{
     analyze_expr_polarity_with_context, analyze_graphical_function_polarity, analyze_link_polarity,
     expr_references_var, flip_polarity, is_negative_constant, is_positive_constant,
@@ -14,6 +15,7 @@ use super::types::{
 };
 use crate::ast::BinaryOp;
 use crate::common::{Canonical, Ident};
+use crate::datamodel::Dimension;
 use crate::db::{
     DetectedLoopPolarity, SimlinDb, compute_link_polarities, model_cycle_partitions,
     model_detected_loops, sync_from_datamodel,
@@ -1031,6 +1033,46 @@ fn test_graphical_function_polarity() {
 }
 
 #[test]
+fn test_graphical_function_polarity_tolerates_import_noise() {
+    use crate::variable::Table;
+
+    // A table that is monotone non-decreasing modulo round-trip numeric-import
+    // noise: the second segment dips by ~2e-7 against a 1.5-wide y-range. The
+    // y-range-relative epsilon (1e-6 * 1.5 = 1.5e-6) absorbs the dip, so the
+    // table reads as Positive. With the old absolute 1e-10 epsilon this dip
+    // broke monotonicity and the table read as Unknown (#492).
+    let import_noise_table = Table::new_for_test(
+        vec![0.0, 1.0, 2.0, 3.0, 4.0],
+        vec![0.0, 0.5000001, 0.4999999, 1.0, 1.5],
+    );
+    assert_eq!(
+        analyze_graphical_function_polarity(&import_noise_table),
+        LinkPolarity::Positive,
+        "A monotone-modulo-import-noise table should read as Positive"
+    );
+
+    // A genuine ~0.7 reversal against a 1.0 y-range: far larger than the
+    // relative epsilon (1e-6), so the table is correctly Unknown.
+    let real_reversal_table =
+        Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0], vec![0.0, 1.0, 0.3, 0.7]);
+    assert_eq!(
+        analyze_graphical_function_polarity(&real_reversal_table),
+        LinkPolarity::Unknown,
+        "A genuinely non-monotone table is still Unknown"
+    );
+
+    // A perfectly constant table: y_max - y_min == 0 so epsilon clamps to
+    // 1e-12; every dy == 0 is a plateau (not > 1e-12, not < -1e-12), so the
+    // table is still classified constant and reads as Unknown.
+    let constant_table = Table::new_for_test(vec![0.0, 1.0, 2.0], vec![5.0, 5.0, 5.0]);
+    assert_eq!(
+        analyze_graphical_function_polarity(&constant_table),
+        LinkPolarity::Unknown,
+        "A constant table is still Unknown"
+    );
+}
+
+#[test]
 fn test_lookup_table_polarity_in_links() {
     use crate::datamodel;
 
@@ -1080,6 +1122,481 @@ fn test_lookup_table_polarity_in_links() {
         detected.loops[0].polarity,
         DetectedLoopPolarity::Balancing,
         "Loop with one negative link should be balancing"
+    );
+}
+
+/// A continuous graphical function over x = [0, 1, 2, ...] with the given
+/// y-points; used to build per-element GF fixtures for the #502 tests.
+#[cfg(test)]
+fn continuous_gf(y_points: Vec<f64>) -> crate::datamodel::GraphicalFunction {
+    let n = y_points.len();
+    let y_min = y_points.iter().copied().fold(f64::INFINITY, f64::min);
+    let y_max = y_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    crate::datamodel::GraphicalFunction {
+        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some((0..n).map(|i| i as f64).collect()),
+        y_points,
+        x_scale: crate::datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: (n.saturating_sub(1)) as f64,
+        },
+        y_scale: crate::datamodel::GraphicalFunctionScale {
+            min: y_min,
+            max: y_max,
+        },
+    }
+}
+
+/// A per-element graphical-function aux: `ident[dim]` whose i-th element has
+/// the i-th GF in `element_gfs` (paired with `elements` positionally). Each
+/// element's value-equation is the placeholder `"0"` (the GF is what the
+/// `LOOKUP` builtin reads, not the value).
+#[cfg(test)]
+fn per_element_gf_aux(
+    ident: &str,
+    dim: &str,
+    elements: &[&str],
+    element_gfs: Vec<crate::datamodel::GraphicalFunction>,
+) -> crate::datamodel::Variable {
+    let arrayed = elements
+        .iter()
+        .zip(element_gfs)
+        .map(|(elem, gf)| (elem.to_string(), "0".to_string(), None, Some(gf)))
+        .collect();
+    crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+        ident: ident.to_string(),
+        equation: crate::datamodel::Equation::Arrayed(vec![dim.to_string()], arrayed, None, false),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: crate::datamodel::Compat::default(),
+    })
+}
+
+/// An apply-to-all aux `ident[dim] = equation`.
+#[cfg(test)]
+fn arrayed_aux(ident: &str, dim: &str, equation: &str) -> crate::datamodel::Variable {
+    crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+        ident: ident.to_string(),
+        equation: crate::datamodel::Equation::ApplyToAll(
+            vec![dim.to_string()],
+            equation.to_string(),
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: crate::datamodel::Compat::default(),
+    })
+}
+
+/// Build a single-model `datamodel::Project` with one named dimension and the
+/// given variables, then sync it and return `compute_link_polarities`'s
+/// variable-level `(from, to) -> LinkPolarity` map.
+#[cfg(test)]
+fn link_polarities_for(
+    dim_name: &str,
+    elements: &[&str],
+    variables: Vec<crate::datamodel::Variable>,
+) -> HashMap<(String, String), LinkPolarity> {
+    let project = crate::datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: sim_specs_with_units("months"),
+        dimensions: vec![crate::datamodel::Dimension::named(
+            dim_name.to_string(),
+            elements.iter().map(|s| s.to_string()).collect(),
+        )],
+        units: vec![],
+        models: vec![x_model("main", variables)],
+        source: Default::default(),
+        ai_information: None,
+    };
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+    compute_link_polarities(&db, model, result.project)
+}
+
+#[test]
+fn test_per_element_gf_link_polarity_agree() {
+    // AC7.1: effect[Region] = LOOKUP(curve[Region], dose[Region]) where every
+    // region's curve table is monotone increasing -> the dose -> effect link
+    // gets Positive (dose's Positive arg polarity composed with the agreeing
+    // Positive table polarity), not Unknown.
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        &["nyc", "boston"],
+        vec![
+            continuous_gf(vec![0.0, 1.0, 2.0]),
+            continuous_gf(vec![0.0, 2.0, 4.0]),
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        &["nyc", "boston"],
+        vec![
+            curve,
+            arrayed_aux("dose", "region", "5"),
+            arrayed_aux("effect", "region", "lookup(curve[region], dose[region])"),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect".to_string())],
+        LinkPolarity::Positive,
+        "per-element GF with monotone-agreeing tables -> Positive link"
+    );
+}
+
+#[test]
+fn test_per_element_gf_link_polarity_disagree() {
+    // AC7.2: same model but the regions' tables disagree on direction (NYC
+    // increasing, Boston decreasing) -> the per-element fold reports the
+    // direction disagreement -> Unknown link polarity.
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        &["nyc", "boston"],
+        vec![
+            continuous_gf(vec![0.0, 1.0, 2.0]),
+            continuous_gf(vec![4.0, 2.0, 0.0]),
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        &["nyc", "boston"],
+        vec![
+            curve,
+            arrayed_aux("dose", "region", "5"),
+            arrayed_aux("effect", "region", "lookup(curve[region], dose[region])"),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect".to_string())],
+        LinkPolarity::Unknown,
+        "per-element GF with disagreeing table directions -> Unknown link"
+    );
+}
+
+#[test]
+fn test_per_element_gf_link_polarity_fixed_index() {
+    // AC7.3: a scalar target indexing one element of the arrayed GF picks that
+    // element's specific table. curve[nyc]'s table is decreasing (so the
+    // dose -> effect link is Negative); curve[boston]'s is increasing (so the
+    // dose -> effect2 link is Positive) -- confirming the FixedIndex resolves
+    // the correct element.
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        &["nyc", "boston"],
+        vec![
+            continuous_gf(vec![4.0, 2.0, 0.0]),
+            continuous_gf(vec![0.0, 1.0, 2.0]),
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        &["nyc", "boston"],
+        vec![
+            curve,
+            x_aux("dose", "5", None),
+            x_aux("effect", "lookup(curve[nyc], dose)", None),
+            x_aux("effect2", "lookup(curve[boston], dose)", None),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect".to_string())],
+        LinkPolarity::Negative,
+        "LOOKUP(curve[nyc], dose) -> NYC's decreasing table -> Negative link"
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect2".to_string())],
+        LinkPolarity::Positive,
+        "LOOKUP(curve[boston], dose) -> Boston's increasing table -> Positive link"
+    );
+}
+
+#[test]
+fn test_per_element_gf_link_polarity_one_nonmonotone_element_ignored() {
+    // AC7.5: a per-element GF where one element's table is genuinely
+    // non-monotone (Boston: y = [0, 1, 0.3, 0.7] -> Unknown from
+    // analyze_graphical_function_polarity) but the rest are Positive. Per the
+    // Ast::Arrayed adopt-first-concrete fold semantics that
+    // fold_per_element_table_polarity mirrors, an Unknown among concretes is
+    // ignored, so the link polarity is Positive (not Unknown). (The "a
+    // genuinely non-monotone table still returns Unknown" criterion is about
+    // analyze_graphical_function_polarity itself -- the scalar-table case,
+    // covered by the #492 task -- not about flipping the whole link.)
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        &["nyc", "boston", "la"],
+        vec![
+            continuous_gf(vec![0.0, 1.0, 2.0]),
+            continuous_gf(vec![0.0, 1.0, 0.3, 0.7]),
+            continuous_gf(vec![0.0, 3.0, 6.0]),
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        &["nyc", "boston", "la"],
+        vec![
+            curve,
+            arrayed_aux("dose", "region", "5"),
+            arrayed_aux("effect", "region", "lookup(curve[region], dose[region])"),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect".to_string())],
+        LinkPolarity::Positive,
+        "one non-monotone element among Positive ones is ignored by the fold -> Positive link"
+    );
+}
+
+#[test]
+fn test_per_element_gf_link_polarity_bare_var_reference() {
+    // The "bare A2A written as Var" case: effect[Region] = LOOKUP(curve,
+    // dose[Region]) where `curve` is over Region but referenced bare (no
+    // subscript). Before this change the Lookup arm used only tables.first()
+    // (NYC's table) and would report Positive; aggregating over all element
+    // tables sees the NYC-increasing / Boston-decreasing disagreement -> the
+    // link polarity is Unknown.
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        &["nyc", "boston"],
+        vec![
+            continuous_gf(vec![0.0, 1.0, 2.0]),
+            continuous_gf(vec![4.0, 2.0, 0.0]),
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        &["nyc", "boston"],
+        vec![
+            curve,
+            arrayed_aux("dose", "region", "5"),
+            arrayed_aux("effect", "region", "lookup(curve, dose[region])"),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect".to_string())],
+        LinkPolarity::Unknown,
+        "bare per-element-GF reference aggregates all tables -> disagreement -> Unknown"
+    );
+}
+
+#[test]
+fn test_lookup_forward_backward_arm_polarity() {
+    // LOOKUP / LOOKUP_FORWARD / LOOKUP_BACKWARD share the
+    // `(table_expr, index_expr, loc)` shape and the same monotonicity story,
+    // so the Lookup polarity arm covers all three via one `|` pattern. The
+    // per-element-GF tests above exercise the `LOOKUP` spelling; this one
+    // exercises `lookup_forward` and `lookup_backward` so the merged arm has
+    // direct coverage. With both regions' `curve` tables monotone increasing,
+    // `dose` enters the lookup-index position as Positive and each table is
+    // Positive, so the `dose -> effect` link is Positive (not Unknown).
+    for builtin in ["lookup_forward", "lookup_backward"] {
+        let curve = per_element_gf_aux(
+            "curve",
+            "region",
+            &["nyc", "boston"],
+            vec![
+                continuous_gf(vec![0.0, 1.0, 2.0]),
+                continuous_gf(vec![0.0, 2.0, 4.0]),
+            ],
+        );
+        let polarities = link_polarities_for(
+            "region",
+            &["nyc", "boston"],
+            vec![
+                curve,
+                arrayed_aux("dose", "region", "5"),
+                arrayed_aux(
+                    "effect",
+                    "region",
+                    &format!("{builtin}(curve[region], dose[region])"),
+                ),
+            ],
+        );
+        assert_eq!(
+            polarities[&("dose".to_string(), "effect".to_string())],
+            LinkPolarity::Positive,
+            "{builtin} with monotone-increasing per-element tables -> Positive link",
+        );
+    }
+}
+
+/// Build a minimal `Variable::Var` carrying just the parts the LOOKUP polarity
+/// path reads: `tables` (one per element, in element order) and an `ast` whose
+/// dimensions `Variable::get_dimensions` reports (an `ApplyToAll` over `dims`).
+/// Everything else is the natural default. Used by the focused unit test for
+/// `lookup_table_polarity`'s defensive subscript branches.
+#[cfg(test)]
+fn gf_var_for_test(
+    ident: &str,
+    dims: Vec<crate::dimensions::Dimension>,
+    tables: Vec<crate::variable::Table>,
+) -> Variable {
+    use crate::ast::{Ast, Expr2, Loc};
+    Variable::Var {
+        ident: Ident::new(ident),
+        ast: Some(Ast::ApplyToAll(
+            dims,
+            Expr2::Const("0".to_string(), 0.0, Loc::default()),
+        )),
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables,
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    }
+}
+
+#[test]
+fn test_lookup_table_polarity_defensive_subscript_branches() {
+    // Focused coverage of `lookup_table_polarity`'s defensive subscript
+    // branches that the datamodel-fixture tests above don't reach: a
+    // `Const` (integer-literal) FixedIndex, a multi-dimensional GF source
+    // (the conservative bail), and a `Wildcard` subscript. These are
+    // exercised through `analyze_link_polarity` with hand-built `Expr2`
+    // ASTs and a minimal var map -- the parser doesn't produce these exact
+    // shapes for a well-formed model, but the arm must stay total and
+    // classify them correctly (resolvable -> the element's polarity;
+    // otherwise -> Unknown).
+    use crate::ast::{Ast, Expr2, IndexExpr2, Loc};
+    use crate::builtins::BuiltinFn;
+    use crate::dimensions::Dimension;
+    use crate::variable::Table;
+    use LinkPolarity::{Negative, Positive, Unknown};
+
+    let dose = Ident::new("dose");
+    let region = Dimension::from(&crate::datamodel::Dimension::named(
+        "region".to_string(),
+        vec!["nyc".to_string(), "boston".to_string()],
+    ));
+    let other = Dimension::from(&crate::datamodel::Dimension::named(
+        "other".to_string(),
+        vec!["a".to_string(), "b".to_string()],
+    ));
+
+    // curve[nyc] decreasing, curve[boston] increasing -- one table per element.
+    let decreasing = Table::new_for_test(vec![0.0, 1.0, 2.0], vec![4.0, 2.0, 0.0]);
+    let increasing = Table::new_for_test(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 2.0]);
+
+    // `effect = LOOKUP(curve[<idx>], dose)` -- a scalar target. `dose` enters
+    // the index position as Positive, so the link polarity equals the polarity
+    // of the table `<idx>` resolves to.
+    let lookup_curve = |idx: IndexExpr2| -> Ast<Expr2> {
+        Ast::Scalar(Expr2::App(
+            BuiltinFn::Lookup(
+                Box::new(Expr2::Subscript(
+                    Ident::new("curve"),
+                    vec![idx],
+                    None,
+                    Loc::default(),
+                )),
+                Box::new(Expr2::Var(dose.clone(), None, Loc::default())),
+                Loc::default(),
+            ),
+            None,
+            Loc::default(),
+        ))
+    };
+    let var = |id: &str| Expr2::Var(Ident::new(id), None, Loc::default());
+    let int_const = |n: i64| Expr2::Const(n.to_string(), n as f64, Loc::default());
+
+    // (a) `curve[1]` -- a 1-based integer literal into the single dimension.
+    // Picks NYC's (offset 0) decreasing table -> Negative. `curve[2]` picks
+    // Boston's increasing table -> Positive, confirming the literal resolves
+    // to the right element.
+    let one_dim_curve = |tables: Vec<Table>| {
+        let mut vars = HashMap::new();
+        vars.insert(
+            Ident::new("curve"),
+            gf_var_for_test("curve", vec![region.clone()], tables),
+        );
+        vars
+    };
+    assert_eq!(
+        analyze_link_polarity(
+            &lookup_curve(IndexExpr2::Expr(int_const(1))),
+            &dose,
+            &one_dim_curve(vec![decreasing.clone(), increasing.clone()]),
+        ),
+        Negative,
+        "LOOKUP(curve[1], dose) resolves the literal to NYC's decreasing table",
+    );
+    assert_eq!(
+        analyze_link_polarity(
+            &lookup_curve(IndexExpr2::Expr(int_const(2))),
+            &dose,
+            &one_dim_curve(vec![decreasing.clone(), increasing.clone()]),
+        ),
+        Positive,
+        "LOOKUP(curve[2], dose) resolves the literal to Boston's increasing table",
+    );
+    // An out-of-range literal isn't statically resolvable -> Unknown.
+    assert_eq!(
+        analyze_link_polarity(
+            &lookup_curve(IndexExpr2::Expr(int_const(3))),
+            &dose,
+            &one_dim_curve(vec![decreasing.clone(), increasing.clone()]),
+        ),
+        Unknown,
+        "LOOKUP(curve[3], dose) -- out of range -> Unknown",
+    );
+
+    // (b) A multi-dimensional GF source: resolving a joint table offset would
+    // need row-major flattening of the per-element table list, which the LTM
+    // polarity cases don't require, so the arm bails to Unknown even when both
+    // indices are literal elements that would individually resolve.
+    let mut multi_dim_vars = HashMap::new();
+    multi_dim_vars.insert(
+        Ident::new("curve"),
+        gf_var_for_test(
+            "curve",
+            vec![region.clone(), other.clone()],
+            vec![increasing.clone(), increasing.clone()],
+        ),
+    );
+    let multi_dim_lookup = Ast::Scalar(Expr2::App(
+        BuiltinFn::Lookup(
+            Box::new(Expr2::Subscript(
+                Ident::new("curve"),
+                vec![IndexExpr2::Expr(var("nyc")), IndexExpr2::Expr(var("a"))],
+                None,
+                Loc::default(),
+            )),
+            Box::new(Expr2::Var(dose.clone(), None, Loc::default())),
+            Loc::default(),
+        ),
+        None,
+        Loc::default(),
+    ));
+    assert_eq!(
+        analyze_link_polarity(&multi_dim_lookup, &dose, &multi_dim_vars),
+        Unknown,
+        "a multi-dimensional GF source is the conservative bail -> Unknown",
+    );
+
+    // (c) A `Wildcard` subscript can't pick a single element's table
+    // statically -> Unknown (even though every element's table is increasing).
+    assert_eq!(
+        analyze_link_polarity(
+            &lookup_curve(IndexExpr2::Wildcard(Loc::default())),
+            &dose,
+            &one_dim_curve(vec![increasing.clone(), increasing.clone()]),
+        ),
+        Unknown,
+        "LOOKUP(curve[*], dose) -- wildcard subscript -> Unknown",
     );
 }
 
@@ -2514,6 +3031,228 @@ fn test_cycle_partitions_partition_for_loop() {
             detected_loop.id
         );
     }
+}
+
+// -- `partition_for_loop` per-slot resolution (GH #487) --
+//
+// `partition_for_loop` returns one `Option<usize>` per conceptual slot:
+// a singleton for scalar / cross-element / mixed loops, and one entry per
+// element of the dimension space for A2A loops.  These tests build a
+// `CyclePartitions` and a `Loop` directly so the per-slot behavior is
+// exercised independently of the salsa pipeline.
+
+/// Build a `CyclePartitions` from `(stock_name, partition_index)` pairs.
+/// The `partitions` outer Vec is filled out enough to be self-consistent
+/// (it isn't read by `partition_for_loop`, only `stock_partition` is).
+fn cycle_partitions_from(pairs: &[(&str, usize)]) -> CyclePartitions {
+    let stock_partition: HashMap<Ident<Canonical>, usize> = pairs
+        .iter()
+        .map(|(name, p)| (Ident::new(name), *p))
+        .collect();
+    let max_p = pairs
+        .iter()
+        .map(|(_, p)| *p)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
+    let mut partitions: Vec<Vec<Ident<Canonical>>> = vec![Vec::new(); max_p];
+    for (name, p) in pairs {
+        partitions[*p].push(Ident::new(name));
+    }
+    CyclePartitions {
+        partitions,
+        stock_partition,
+    }
+}
+
+#[test]
+fn test_partition_for_loop_scalar_singleton() {
+    // A scalar loop's stocks are plain names; result is a singleton.
+    let partitions = cycle_partitions_from(&[("stock_a", 0), ("stock_b", 1)]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![Ident::new("stock_a")],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec![],
+    };
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &[]),
+        vec![Some(0)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_cross_element_singleton() {
+    // A cross-element loop has empty `dimensions` and element-level stocks
+    // (it may traverse the same stock variable at several elements);
+    // they're all in one SCC, so the result is still a singleton.
+    let partitions = cycle_partitions_from(&[("pop[nyc]", 2), ("pop[boston]", 2)]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![Ident::new("pop[nyc]"), Ident::new("pop[boston]")],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec![],
+    };
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &[]),
+        vec![Some(2)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_below_parent_graph_is_none() {
+    // A loop whose stocks aren't in the partition map (e.g. a pure
+    // module-internal loop) resolves to a single `None`.
+    let partitions = cycle_partitions_from(&[("stock_a", 0)]);
+    let loop_item = Loop {
+        id: "u1".to_string(),
+        links: vec![],
+        stocks: vec![Ident::new("smooth·smoothed")],
+        polarity: LoopPolarity::Undetermined,
+        dimensions: vec![],
+    };
+    assert_eq!(partitions.partition_for_loop(&loop_item, &[]), vec![None]);
+}
+
+#[test]
+fn test_partition_for_loop_a2a_uncoupled_distinct_partitions() {
+    // A pure-A2A loop over a 3-element dimension whose three element-stocks
+    // sit in three *distinct* partitions (element-wise-uncoupled dynamics):
+    // `partition_for_loop` returns three distinct entries, one per slot, in
+    // declared-element row-major order.
+    let dims = vec![Dimension::named(
+        "Region".to_string(),
+        vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+    )];
+    let partitions = cycle_partitions_from(&[("pop[nyc]", 5), ("pop[boston]", 7), ("pop[la]", 9)]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![
+            Ident::new("pop[nyc]"),
+            Ident::new("pop[boston]"),
+            Ident::new("pop[la]"),
+        ],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec!["Region".to_string()],
+    };
+    // Row-major over the dimension's *declared* order (NYC, Boston, LA),
+    // which is NOT lexical (Boston < LA < NYC) -- so this also pins that
+    // the slot order follows declaration, matching `LoopElementIndex`.
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &dims),
+        vec![Some(5), Some(7), Some(9)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_a2a_coupled_partitions_coincide() {
+    // A pure-A2A loop over a 3-element dimension whose element-stocks are
+    // all in the *same* partition (element-wise-coupled dynamics, e.g. a
+    // shared aggregate couples every element): the three slot entries
+    // coincide.
+    let dims = vec![Dimension::named(
+        "Region".to_string(),
+        vec!["NYC".to_string(), "Boston".to_string(), "LA".to_string()],
+    )];
+    let partitions = cycle_partitions_from(&[("pop[nyc]", 3), ("pop[boston]", 3), ("pop[la]", 3)]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![
+            Ident::new("pop[nyc]"),
+            Ident::new("pop[boston]"),
+            Ident::new("pop[la]"),
+        ],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec!["Region".to_string()],
+    };
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &dims),
+        vec![Some(3), Some(3), Some(3)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_a2a_two_dim_row_major() {
+    // A 2-D A2A loop: slot order is row-major (first dim slowest, last dim
+    // fastest), matching `LoopElementIndex::resolve` -- so the slots are
+    // (NYC,adult), (NYC,child), (Boston,adult), (Boston,child).
+    let dims = vec![
+        Dimension::named(
+            "Region".to_string(),
+            vec!["NYC".to_string(), "Boston".to_string()],
+        ),
+        Dimension::named(
+            "Age".to_string(),
+            vec!["adult".to_string(), "child".to_string()],
+        ),
+    ];
+    let partitions = cycle_partitions_from(&[
+        ("pop[nyc,adult]", 0),
+        ("pop[nyc,child]", 1),
+        ("pop[boston,adult]", 2),
+        ("pop[boston,child]", 3),
+    ]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![
+            Ident::new("pop[nyc,adult]"),
+            Ident::new("pop[nyc,child]"),
+            Ident::new("pop[boston,adult]"),
+            Ident::new("pop[boston,child]"),
+        ],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec!["Region".to_string(), "Age".to_string()],
+    };
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &dims),
+        vec![Some(0), Some(1), Some(2), Some(3)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_a2a_indexed_dimension() {
+    // An Indexed A2A dimension: element subscripts are 1-based integers,
+    // so the stock node names are `q[1]`, `q[2]`, `q[3]` and the slot
+    // order follows 1..=size.
+    let dims = vec![Dimension::indexed("Periods".to_string(), 3)];
+    let partitions = cycle_partitions_from(&[("q[1]", 4), ("q[2]", 4), ("q[3]", 8)]);
+    let loop_item = Loop {
+        id: "b1".to_string(),
+        links: vec![],
+        stocks: vec![Ident::new("q[1]"), Ident::new("q[2]"), Ident::new("q[3]")],
+        polarity: LoopPolarity::Balancing,
+        dimensions: vec!["Periods".to_string()],
+    };
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &dims),
+        vec![Some(4), Some(4), Some(8)]
+    );
+}
+
+#[test]
+fn test_partition_for_loop_a2a_unresolved_dim_falls_back_to_present_suffixes() {
+    // When the project's dim list doesn't cover the loop's declared
+    // dimension (a mid-edit inconsistency), `partition_for_loop` falls
+    // back to the slot suffixes actually present on the loop's stocks,
+    // sorted for determinism.
+    let partitions = cycle_partitions_from(&[("pop[boston]", 1), ("pop[nyc]", 2)]);
+    let loop_item = Loop {
+        id: "r1".to_string(),
+        links: vec![],
+        stocks: vec![Ident::new("pop[nyc]"), Ident::new("pop[boston]")],
+        polarity: LoopPolarity::Reinforcing,
+        dimensions: vec!["Region".to_string()],
+    };
+    // No `Region` in `dims` -> fall back to sorted suffixes: "boston" < "nyc".
+    assert_eq!(
+        partitions.partition_for_loop(&loop_item, &[]),
+        vec![Some(1), Some(2)]
+    );
 }
 
 #[test]

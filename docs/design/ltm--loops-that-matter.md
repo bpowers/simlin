@@ -450,10 +450,24 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
 - **Unary negation and NOT**: Flip polarity
 - **IF-THEN-ELSE**: Returns the common polarity if both branches agree, `Unknown`
   otherwise
-- **Lookup tables**: Analyzes monotonicity of graphical functions
-  (`analyze_graphical_function_polarity`) -- checks consecutive y-values to
-  determine if the table is monotonically increasing (Positive), decreasing
-  (Negative), or neither (Unknown). Combines with the argument's polarity.
+- **Lookup tables** (`LOOKUP` / `BuiltinFn::Lookup` and the `LookupForward` /
+  `LookupBackward` extrapolation variants): Analyzes monotonicity of graphical
+  functions (`analyze_graphical_function_polarity`) -- checks consecutive
+  y-values to decide if the table is monotonically increasing (Positive),
+  decreasing (Negative), or neither (Unknown), then combines with the
+  argument's polarity. The strict-monotonicity test uses a y-range-relative
+  epsilon, `max(EPSILON, range_rel * (y_max - y_min))` (#492), so a near-flat
+  arm with imported numeric noise (`...12.0001, 12.0000, 12.0002...`) no longer
+  flips an otherwise-monotone curve to `Unknown`; the residual nuance is that
+  it compares the y-delta `dy`, not the slope `dy/dx`, so a curve with
+  non-uniform x-spacing can still misclassify (GH #536).
+- **Per-element graphical functions** (#502): when an *arrayed* source feeds an
+  *arrayed* per-element graphical-function target -- each element of the target
+  has its own lookup `Table` (the per-element `tables` list on `Variable::Var`) --
+  the per-element table polarities are folded into one link polarity, and the link
+  is `Positive` / `Negative` only if every element agrees. The multi-dimensional
+  case (a per-element GF over more than one dimension) stays conservatively
+  `Unknown`.
 - **Non-decreasing builtins**: `EXP`, `LN`, `LOG10`, `SQRT`, `ARCTAN`, `INT` --
   propagate the inner expression's polarity unchanged
 - **Max/Min (two-arg)**: Non-decreasing in each argument; if one operand returns
@@ -543,52 +557,100 @@ causal graph. Variable-level edges are expanded to element-level edges, loops
 are detected at element granularity, and link/loop scores are generated per
 element.
 
+### The reference-site classification IR
+
+`model_ltm_reference_sites` (salsa tracked, `db_ltm_ir.rs`) is the single
+place a causal edge's access shape *and* aggregate-node routing are decided.
+It walks each variable's `Expr2` AST exactly once, consults
+`enumerate_agg_nodes` (the sole "is this subexpression a hoistable maximal
+reducer" decider), and buckets every `Expr2::Var` / `Expr2::Subscript`
+reference by its `(from, to)` causal edge into a `Vec<ClassifiedSite>`. Each
+`ClassifiedSite` carries:
+
+- `shape: RefShape` -- `Bare`, `FixedIndex(elems)`, `Wildcard`, or
+  `DynamicIndex` (the AST-walker helpers `classify_subscript_shape` /
+  `resolve_literal_index` / `classify_iterated_dim_shape` live in
+  `db_ltm_ir.rs`);
+- `target_element: Option<String>` -- set when the reference is inside an
+  `Ast::Arrayed` per-element expression, pinning the target node set to that
+  one element tuple;
+- `routing: SiteRouting` -- `Direct` or `ThroughAgg { agg }`. A reference is
+  `ThroughAgg` iff it is syntactically inside a hoisted reducer *and* a
+  synthetic agg of `to` reads `from` (the `route_through_agg =
+  !routed_aggs.is_empty() && in_reducer` decision and the
+  `aggs_in_var(to).filter(is_synthetic && reads-from)` filter exist here and
+  nowhere else).
+
+`model_element_causal_edges`, `model_edge_shapes`, and `model_ltm_variables`
+are pure readers of this IR -- none re-walks the AST for shape/routing, none
+restates the agg-routing filter.
+
 ### Element-Level Causal Graph
 
 `model_element_causal_edges` (salsa tracked, `db_analysis.rs`) builds the
-element-level graph by walking each target variable's `Expr2` AST and
-emitting one or more element edges per reference site. A reference site is
-one occurrence of an `Expr2::Var` or `Expr2::Subscript` node naming a
-source variable; `collect_reference_sites` finds them and
-`emit_edges_for_reference` writes the edges.
+element-level graph by reading the IR's classified sites for each
+variable-level edge and emitting one or more element edges per site. A
+`Direct` site uses its `shape` / `target_element` via
+`emit_edges_for_reference`; a `ThroughAgg` site routes only the rows the
+reducer's `read_slice` reads through the synthetic agg via
+`emit_agg_routed_edges` (see "Aggregate Nodes"). The shape/routing truth
+table for `Direct` sites:
 
-Each reference is classified by access shape:
+| Source dims | Target dims | RefShape | Edges emitted |
+|-------------|-------------|----------|---------------|
+| scalar | scalar | Bare | `from -> to` |
+| scalar | arrayed | Bare | `from -> to[d]` for each target element d |
+| arrayed | scalar | Bare | `from[d] -> to` for each source element d (reduction) |
+| arrayed | arrayed (same dims) | Bare | `from[d] -> to[d]` per shared element (diagonal) |
+| arrayed | arrayed (partial collapse) | Bare | `from[d1,d2] -> to[d1]` (delegates to `expand_same_element`) |
+| arrayed | scalar | FixedIndex(elems) | `from[elems] -> to` (one edge) |
+| arrayed | arrayed | FixedIndex(elems) | `from[elems] -> to[d]` for each target element d |
+| arrayed | any | Wildcard / DynamicIndex | conservative full cross-product (N×M) |
 
-| Source dims | Target dims | RefShape         | Edges emitted                                |
-|-------------|-------------|------------------|----------------------------------------------|
-| scalar      | scalar      | Bare             | `from -> to`                                 |
-| scalar      | arrayed     | Bare             | `from -> to[d]` for each target element d    |
-| arrayed     | scalar      | Bare             | `from[d] -> to` for each source element d    |
-| arrayed     | arrayed     | Bare             | `from[d] -> to[d]` per shared element        |
-| arrayed     | any         | Wildcard *(in a hoisted reducer)*   | `from[d] -> $⁚ltm⁚agg⁚n` (one per source elem) + `$⁚ltm⁚agg⁚n -> to[e]` (one per target elem / scalar) -- O(N+M) |
-| arrayed     | any         | Wildcard *(conservative slice / not hoisted)*   | `from[d] -> to[e]` full cross-product (N×M)  |
-| arrayed     | scalar      | FixedIndex(elem) | `from[elem] -> to` (one edge)                |
-| arrayed     | arrayed     | FixedIndex(elem) | `from[elem] -> to[d]` for each target element d |
-| arrayed     | any         | DynamicIndex *(in a hoisted reducer)*    | rerouted through `$⁚ltm⁚agg⁚n` (as Wildcard above) |
-| arrayed     | any         | DynamicIndex *(otherwise, e.g. `arr[i+1]`)*    | conservative full cross-product              |
+`Wildcard` covers a subscript with at least one `Wildcard` index, or all
+indices `Wildcard` / `StarRange` (the reducer-style whole-extent access);
+`DynamicIndex` covers any other non-literal index (`@N`, `Range`, an
+arbitrary `Expr`, a *partial* `StarRange` mixed with literals) -- *and* the
+not-hoistable dynamic-index reducer carve-out `SUM(pop[idx, *])`, which the
+IR reclassifies from `Wildcard` to `DynamicIndex` so a `Direct` site that
+*could* have been a hoisted reducer never falls through to the conservative
+cross-product. So a `Direct` `Wildcard` site is now only a *whole-RHS*
+variable-backed reducer's argument (`total = SUM(population[*])`,
+`row_sum[D1] = SUM(matrix[D1, *])`) or a mapped-dimension sliced reducer
+(`SUM(matrix[State, *])` over `matrix[Region, D2]` with a `State→Region`
+mapping -- `enumerate_agg_nodes` declines the remapped axis, tracked tech
+debt), and the conservative cross-product is the right semantics for both.
 
-`Bare` covers both bare `Expr2::Var` references (scalar dep or A2A
-same-element). `FixedIndex` carries the resolved element subscripts from a
-literal-index `Subscript` node. `Wildcard` covers reducer patterns
-(`SUM(x[*])`); `DynamicIndex` covers any subscript with non-literal indices
-(`@N`, `Range`, `StarRange`, or arbitrary `Expr`).
+**Iterated-dimension subscripts** (#511). An explicit subscript whose
+indices are *exactly* the target equation's iterated (apply-to-all)
+dimensions, in the position matching the source's declared dimension order --
+`row_sum[Region]` inside `growth[Region, Age] = ... + row_sum[Region] * c`,
+where each index `d_i` either names the source's `i`-th dim or a dimension
+that *maps* to it (the AC3.5 mapped case) -- classifies as `Bare`, not
+`DynamicIndex`. Such a reference reads the *same* `Region` element of
+`row_sum` per iterated tuple, so `emit_edges_for_reference` projects it via
+`expand_same_element` (`row_sum[d1] -> growth[d1, d2]` for each `d2`), not
+the N×M cross-product. (A *sliced reducer argument* with the same shape --
+`SUM(matrix[D1, *])` inside an A2A body over `D1` -- is a different path: it
+is hoisted into an arrayed agg by `enumerate_agg_nodes`, so its reference is
+`ThroughAgg` and its `Wildcard` shape is ignored. The iterated-dim `Bare`
+branch is for a *whole-equation*-iterated subscript like `x[State]` inside
+`target[State] = x[State] * c`.)
 
-**Aggregate-node reroute.** A `Wildcard`/`DynamicIndex` reference inside a
-*maximal inlined reducer subexpression* is not expanded as an all-pairs
-cross-product. Instead `model_element_causal_edges` consults
-`enumerate_agg_nodes` (`ltm_agg.rs`), which hoists each such subexpression into
-a synthetic `$⁚ltm⁚agg⁚{n}` node, and routes `source[d] → $⁚ltm⁚agg⁚{n}` (one
-edge per source element) and `$⁚ltm⁚agg⁚{n} → target[e]` (one per target
-element, or a single scalar edge), so the per-reducer cost is O(N+M) edges
-rather than O(N×M). See "Aggregate Nodes" below. Two cases are *not* hoisted
-(tracked as tech debt; the conservative cross-product stays in place): a
-reducer over an explicit slice used as a sub-expression
-(`x[r] = ... + SUM(pop[NYC, *])`, the slice pinning can't ride the agg's source
-descriptor yet -- GH #514), and a bare non-literal index (`arr[i+1]`, which is
-a dynamic reference, not a reducer). Variable-backed aggs
-(`total_population = SUM(population[*])`) are already real nodes -- their edges
-come from the normal arrayed→scalar / scalar→arrayed reference walker -- so they
-are not rerouted.
+**Aggregate-node reroute.** A reference inside a *maximal inlined reducer
+subexpression* is not expanded as an all-pairs cross-product. The IR records
+it as `ThroughAgg`, and `model_element_causal_edges` routes only the rows the
+reducer's `read_slice` reads through the synthetic agg node:
+`source[<read slice>] → $⁚ltm⁚agg⁚{n}[<iterated>]` then `$⁚ltm⁚agg⁚{n}[<iterated>] → target[e]`,
+so the per-reducer cost is O(N + M) edges (a whole-extent reduce degenerates
+to "every source element → scalar agg → every target element"). The only
+reducers *not* hoisted are the dynamic-index carve-out (`SUM(pop[idx, *])`,
+`idx` non-literal -- not statically describable, reclassified `DynamicIndex`)
+and the mapped-dimension sliced reducer (above); a bare non-literal index
+(`arr[i+1]`) is a dynamic reference, not a reducer, so it stays conservative.
+Variable-backed aggs (`total_population = SUM(population[*])`) are already
+real nodes -- their edges come from the normal arrayed→scalar /
+scalar→arrayed reference walker -- so they are not rerouted.
 
 Edges from multiple reference sites in the same target are unioned. For
 `relative_pop[R] = population / population[NYC]`, the bare numerator emits
@@ -600,31 +662,30 @@ numerator emits the N diagonals `pop[d] -> share[d]` and the hoisted
 `$⁚ltm⁚agg⁚0 -> share[d]` edges -- 3N edges, not N + N² (and as the source
 dimension grows relative to the target's, or as more consumers share the
 reducer, the gap widens: an 8-region `share` model goes from 80 element edges
-to 40).
+to 40). A sliced reducer narrows further still: `target[Region] = SUM(pop[NYC, *])`
+over `pop[Region, Age]` routes only the `Age`-many NYC rows through the agg
+(`pop[nyc, adult] → agg`, `pop[nyc, child] → agg`, `agg → target[r]` for each
+r), not every `pop` element.
 
 Structural flow-to-stock edges (an inflow or outflow's variable name does
-not appear in the stock's equation, which holds only the initial value)
-are emitted as same-element diagonals without AST consultation.
-
-Multidimensional subscripts where some indices are literal and others are
-wildcards (e.g., `source[NYC, *]`) are conservatively classified as
-`Wildcard` and -- not being hoisted as an agg yet (GH #514) -- still expand to
-the full cross-product. A future refinement could honor partial-fixed
-semantics; the overhead is bounded today because such patterns are uncommon in
-real models.
+not appear in the stock's equation, which holds only the initial value) are
+emitted as same-element diagonals without consulting the IR. An edge with no
+IR entry (a module edge, an unreconstructable target, a synthesized dep with
+no AST reference) falls back to a same-element diagonal `Bare` emission so
+the variable-level projection invariant still holds.
 
 Stock names are similarly expanded: `population` with dimension `Region`
-becomes `population[NYC]`, `population[Boston]`, etc. When no variables in
-a model are arrayed, the element graph is identical to the variable graph
-(zero overhead).
+becomes `population[NYC]`, `population[Boston]`, etc. When no variables in a
+model are arrayed, the element graph is identical to the variable graph (zero
+overhead).
 
 This per-reference design replaces the earlier `ElementDependencyKind`
 classifier that collapsed every reference between a `(from, to)` pair to a
-single kind. That collapse over-expanded fixed-index references to N^2
-edges (resolving tech-debt #20) and forced the link-score partial equation
-to wrap every reference uniformly in `PREVIOUS()`, breaking targets that
-mixed bare and reducer references (resolving tech-debt #26). Reducer
-references went through a brief intermediate stage -- a per-shape
+single kind. That collapse over-expanded fixed-index references to N^2 edges
+(resolving tech-debt #20) and forced the link-score partial equation to wrap
+every reference uniformly in `PREVIOUS()`, breaking targets that mixed bare
+and reducer references (resolving tech-debt #26). Reducer references went
+through a brief intermediate stage -- a per-shape
 `$⁚ltm⁚link_score⁚{from}→{to}⁚wildcard` / `…⁚dynamic` variant -- which the
 aggregate-node treatment then made obsolete and retired: the lumped reducer
 link score is decomposed into the chain `source[d] → $⁚ltm⁚agg⁚{n} → target`,
@@ -633,9 +694,9 @@ post-refactor measurements in
 `docs/design-plans/2026-04-25-ltm-per-ref-elem-graph.md` show that the
 element-graph SCC sizes that previously drove tech-debt #25's auto-flip
 pressure on FixedIndex models are no longer inflated by spurious edges,
-though `MAX_LTM_SCC_NODES = 50` was retained because WRLD3-class models
-trip the gate from variable-level cycle structure rather than
-element-graph artifacts.
+though `MAX_LTM_SCC_NODES = 50` was retained because WRLD3-class models trip
+the gate from variable-level cycle structure rather than element-graph
+artifacts.
 
 ### Aggregate Nodes
 
@@ -646,43 +707,99 @@ routed *through* it rather than scored as one lumped link.
 
 `enumerate_agg_nodes` (salsa-tracked, `ltm_agg.rs`) walks every variable's
 `Expr2` AST left-to-right depth-first and identifies each maximal reducer
-subexpression (`SUM`, `MEAN`, `MIN`, `MAX`, `STDDEV`, `RANK`, `SIZE` over an
-array view). AST-identical subexpressions (keyed by canonical printed equation
-text, since `Expr2` is not `Eq`) dedupe to one node. Two kinds:
+subexpression. The recognized set -- `SUM`, `MEAN` (single-arg), `MIN` /
+`MAX` (single-arg), `STDDEV`, `RANK`, `SIZE` -- and its `Linear` / `Nonlinear`
+/ `Constant` classification live in one table, `reducer_kind` /
+`ReducerKind` in `ltm_agg.rs`; every other reducer-recognition site in the
+LTM machinery (the Expr0-walk-time `is_array_reducer_name`, `classify_reducer`,
+the static-polarity `agg_reducer_is_monotone`) is a thin reader of it, so the
+"is this a reducer" / "what kind" answers can't drift apart. AST-identical
+subexpressions (keyed by canonical printed equation text, since `Expr2` is
+not `Eq`) dedupe to one node.
+
+**Read slice and result dims.** Each `AggNode` carries a
+`read_slice: Vec<AxisRead>` -- one `AxisRead ∈ {Pinned(elem), Iterated(dim),
+Reduced}` per source axis, describing *which rows of the arrayed source the
+reducer actually reads* -- and a `result_dims`, the `Iterated` axes' dims (in
+order; empty for a whole-extent or pinned-slice reduce, since the result is a
+scalar). `compute_read_slice` decides hoistability per axis:
+
+- `*` / `*:Dim` ⇒ `Reduced` (the whole axis is reduced away);
+- an iterated-dimension index that names the source's `i`-th dim by name ⇒
+  `Iterated(d)` (the agg's result varies per element of `d`);
+- a literal element name / 1-based integer ⇒ `Pinned(elem)`;
+- anything else (`@N`, `Range`, a non-literal `Expr`, an iterated dim that
+  only lines up via a *mapping*) ⇒ `None` -- the reducer is not statically
+  describable, so it is not hoisted.
+
+So `SUM(pop[*])` ⇒ all-`Reduced`, `result_dims = []` (a scalar agg);
+`SUM(pop[NYC, *])` over `pop[Region, Age]` ⇒ `[Pinned(nyc), Reduced]`,
+`result_dims = []`; `SUM(matrix[D1, *])` inside an A2A body over `D1` ⇒
+`[Iterated(d1), Reduced]`, `result_dims = [D1]` (an *arrayed* agg, one slot
+per `D1` element); `SUM(matrix3d[D1, NYC, *])` over an A2A-`D1` body ⇒
+`[Iterated(d1), Pinned(nyc), Reduced]`. The carve-outs (tracked tech debt;
+the conservative cross-product / coarse link score stays in place) are: a
+reducer over a *dynamic index* (`SUM(pop[idx, *])`, `idx` non-literal -- the
+IR reclassifies its reference to `DynamicIndex`); a sliced reducer whose
+iterated index only matches the source row axis via a *dimension mapping*
+(`SUM(matrix[State, *])` over `matrix[Region, D2]` with a `State→Region`
+mapping -- `compute_read_slice` returns `None` because the `Iterated`-driven
+machinery assumes the agg result axis and the source row axis are literally
+the same dimension); and a multi-source reducer whose arrayed args read
+incompatible slices (`combined_read_slice` returns `None` on disagreement -- a
+multi-source reducer whose args *agree*, `SUM(a[*] + b[*])` over the same dim,
+mints one agg carrying the combined slice and both source variables).
+
+Two kinds of agg:
 
 - **Synthetic** (`is_synthetic == true`): the reducer is a *sub-expression* of
   a larger equation (`share[r] = pop[r] / SUM(pop[*])`). A `$⁚ltm⁚agg⁚{n}`
-  auxiliary is minted whose dt-equation is exactly the reducer.
-  `model_ltm_variables` emits the aux plus two link-score families:
-  - `source[d] → $⁚ltm⁚agg⁚{n}` -- one scalar `$⁚ltm⁚link_score⁚{from}[{d}]→{agg}`
-    per source element. The agg's *own* equation is the reducer, so the
-    `Linear`/`Nonlinear`/`Constant` classification from `classify_reducer`
-    applies directly (varying `from[d]` moves the agg by exactly its own delta
-    regardless of what else the reducer combines).
+  auxiliary is minted whose dt-equation is exactly the reducer (arrayed over
+  `result_dims` when those are non-empty). `model_ltm_variables` emits the aux
+  plus two link-score families:
+  - `source[<read row>] → $⁚ltm⁚agg⁚{n}` -- one scalar
+    `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}` (or `…→{agg}[<slot>]` when the agg
+    is arrayed) per *read* row -- only the rows the slice reads. The agg's
+    *own* equation is the reducer, so the `Linear` / `Nonlinear` / `Constant`
+    classification applies directly (varying that row moves the agg by exactly
+    its own co-reduced delta regardless of what else the reducer combines).
   - `$⁚ltm⁚agg⁚{n} → target` -- the partial of `target`'s equation with `agg`
     held live, with every hoisted reducer subexpression in `target` first
     textually substituted by its agg name (so `agg` appears where `SUM(...)`
     was, and any other hoisted reducer becomes `PREVIOUS(agg_j)`). For an
     arrayed `target` this is one scalar `$⁚ltm⁚link_score⁚{agg}→{to}[{e}]` per
     target element; for a scalar `target`, a single `$⁚ltm⁚link_score⁚{agg}→{to}`.
+    When the agg is itself arrayed, the agg side carries an `[<slot>]`
+    subscript *and* the `Δsource` denominator of that link-score equation
+    projects the same `[<slot>]` subscript (the bare multi-slot agg name
+    doesn't compile as a scalar denominator). This is exact for the diagonal
+    case (`result_dims` equal `target`'s iterated dims); the strict-prefix
+    *broadcast* case (`SUM(matrix[D1, *])` inside an A2A body over `D1 × D2`,
+    so the agg is over `D1` but the target is over `D1 × D2`) over-subscribes
+    the agg into the cross-product -- the loop score degrades to 0 there, GH
+    #528.
 
   A loop running through the inlined reducer therefore traverses
-  `… → from[d] → $⁚ltm⁚agg⁚{n} → to[e] → …`, and the loop-score equation
-  composes the two halves by the chain rule -- recovering each source element's
-  fractional contribution to the aggregate's velocity, exactly the factor that
-  matters when elements have very different magnitudes. **Model equations are
-  not rewritten**; the simulation evaluates the inline reducer, and the agg aux
-  evaluates to the same value.
+  `… → from[<row>] → $⁚ltm⁚agg⁚{n}[<slot>] → to[e] → …`, and the loop-score
+  equation composes the two halves by the chain rule -- recovering each source
+  row's fractional contribution to the aggregate's velocity, exactly the
+  factor that matters when elements have very different magnitudes. **Model
+  equations are not rewritten**; the simulation evaluates the inline reducer,
+  and the agg aux evaluates to the same value. A *scalar* feeder of a (possibly
+  arrayed) hoisted reducer -- `scale` in `growth[D1] = SUM(matrix[D1, *] * scale)`
+  -- is handled by `emit_agg_routed_edges`: `from_dims.is_empty()` ⇒ emit
+  `from → agg[<each result-dim combo>]` (or the bare `from → agg` when the agg
+  is scalar) and a bare element-graph node for `from`, not the malformed
+  `from[]` node the row-layout machinery would mint (GH #533 for the both-scalar
+  fast-path edge case).
 
 - **Variable-backed** (`is_synthetic == false`): the reducer is the *entire*
   dt-equation of a scalar or apply-to-all variable (`total_population = SUM(pop[*])`,
-  `row_sum[D1] = SUM(matrix[D1,*])`). That variable *is* the aggregate node;
+  `row_sum[D1] = SUM(matrix[D1, *])`). That variable *is* the aggregate node;
   no synthetic is minted, and its edges to/from come from the normal
-  arrayed→scalar / scalar→arrayed reference walker. (`row_sum[D1] = SUM(matrix[D1,*])`
-  -- a whole-RHS *partial* reduce -- carries its result-axis dims on the agg
-  descriptor, but the element-graph reroute still leaves the conservative
-  cross-product in place for the partial-reduce edge, since the edges to a real
-  variable node already exist.)
+  arrayed→scalar / scalar→arrayed reference walker -- the element-graph reroute
+  leaves the conservative cross-product in place for the variable-backed
+  reducer's edge, since the edges to a real variable node already exist.
 
 **Loop reporting trims agg nodes.** `$⁚ltm⁚agg⁚{n}` nodes don't appear in the
 user-facing loop list -- like the internal stocks of `DELAY3`/`SMOOTH` in the
@@ -711,13 +828,18 @@ node that doesn't match the scalar source's bare node.
 source feeds a scalar (or partially-collapsed) target through a reducing
 function that is the target's *entire* equation -- the variable-backed
 aggregate-node case -- each source element gets its own scalar link score.
-`classify_reducer` in `ltm_augment.rs` walks the target's AST to find the
-reducing builtin and classify it:
+`classify_reducer` (a thin reader of `ltm_agg::reducer_kind`) walks the
+target's AST to find the reducing builtin and classify it; `is_bare` tracks
+whether the reducer is the whole RHS or nested inside arithmetic (a nested
+reducer falls back to the delta-ratio, since the algebraic shortcut ignores
+the surrounding arithmetic):
 
-| Reducer kind | Functions | Equation strategy |
+| Reducer kind | Functions | Equation strategy (`is_bare`) |
 |-------------|-----------|-------------------|
 | Linear | SUM, MEAN | Algebraic shortcut: partial = `PREVIOUS(target) + (source[d] - PREVIOUS(source[d]))` (divided by N for MEAN) |
-| Nonlinear | MIN, MAX, STDDEV, RANK | Explicit expansion: reconstruct the reducer with all elements except the current one wrapped in `PREVIOUS()` |
+| Nonlinear | MIN, MAX | Nested binary calls: reconstruct the reducer with every element except the current one wrapped in `PREVIOUS()` (`MIN(s[d], MIN(PREVIOUS(s[e]), ...))`) |
+| Nonlinear | STDDEV | Analytic ceteris-paribus partial (#483): the unrolled population-variance `sqrt` formula -- `sqrt((Σ_i (s'_i - m)^2) / N)` with `s'_i = s[d]` when `i == d` else `PREVIOUS(s[i])`, `m = (Σ_i s'_i) / N` string-inlined -- matching the engine's STDDEV (divisor `N`, not `N-1`; `vm.rs::Opcode::ArrayStddev`). Single-element variance is identically 0. |
+| Nonlinear | RANK | Documented delta-ratio stand-in: the partial is `target` directly, so the surrounding link-score formula degenerates to `|Δtarget/Δtarget|`. RANK is an order statistic -- non-differentiable, array-argument-only, and unreachable as a real scalar/A2A reducer RHS (RANK returns an array -- a dimension error) -- so the delta-ratio is the conservative answer, pinned by `test_generate_rank_keeps_delta_ratio` so the choice is explicit, not a silent fallback. |
 | Constant | SIZE | Output depends only on dimension cardinality; link score is always 0 |
 
 `generate_element_to_scalar_equation` produces N separate scalar link score
@@ -729,16 +851,36 @@ partial-reduce link score `$⁚ltm⁚link_score⁚{from}[{d1,d2}]→{to}[{d1}]`.
 **Inlined reducer (synthetic aggregate node)**: When the reducer is a
 *sub-expression* of a larger equation, the link from the array elements to the
 consumer is *not* one lumped score. The reducer is hoisted into `$⁚ltm⁚agg⁚{n}`
-and the link is the chain `source[d] → $⁚ltm⁚agg⁚{n} → target` -- the
-`source[d] → agg` half uses the same `classify_reducer` machinery (the agg's
-equation *is* the reducer), and the `agg → target` half is a plain Bare partial
-of `target`'s equation with the reducer subexpr AST-substituted by the agg
-name. See "Aggregate Nodes" above.
+and the link is the chain `source[<read row>] → $⁚ltm⁚agg⁚{n} → target` -- the
+`source → agg` half uses the same `classify_reducer` machinery over the row's
+co-reduced slice (the agg's equation *is* the reducer), and the `agg → target`
+half is a plain Bare partial of `target`'s equation with the reducer subexpr
+AST-substituted by the agg name. See "Aggregate Nodes" above.
 
 **FixedIndex (per source element)**: A literal-index reference `from[NYC]`
 inside `target` gets its own scalar `$⁚ltm⁚link_score⁚{from}[{nyc}]→{to}` (one
 per literal element referenced, expanding to the target's dims if the target is
 arrayed); the partial holds `from[nyc]` live and wraps the rest in `PREVIOUS`.
+
+**Disjoint-dimension arrayed → arrayed (per source element)** (#510): When an
+arrayed *per-element-equation* target (`Ast::Arrayed`) references an arrayed
+source by literal element subscripts of a dimension *disjoint* from the
+target's -- `target[D1, D2]` whose `<element subscript>` equations reference
+`source[m]`, `m ∈ D3`, D3 sharing no dimension with D1/D2 --
+`try_disjoint_dim_arrayed_link_scores` (called from `emit_link_scores_for_edge`
+before the per-shape fallback) reuses the reference-site IR for `(from, to)`
+(each site's shape is `FixedIndex(elems)` for `source[m]`) and emits one
+`$⁚ltm⁚link_score⁚{from}[{m}]→{to}` per distinct referenced source element --
+an `Equation::Arrayed` over `to`'s dims that holds `source[m]` live in the
+slots that reference it and freezes it at `PREVIOUS` elsewhere. (The pre-#510
+path silently collapsed the per-element `Equation::Arrayed` to the first
+slot's text, since `link_score_dimensions` returned `[]` for the disjoint
+edge.) If the target references the source via a *non-literal* index (a
+`DynamicIndex` site) the edge is not statically scoreable:
+`emit_unscoreable_disjoint_edge_warning` accumulates a `CompilationDiagnostic`
+`Warning` naming the edge, *no* link-score variable is emitted, and the caller
+does not fall through to the per-shape fallback (which would build the
+misleading scalarized stand-in).
 
 ### Loop Scores
 
@@ -768,12 +910,20 @@ sequence (strip subscripts, join) to distinguish A2A loops from mixed loops:
 
 **A2A loops**: All circuits in a group have the same variable-level structure
 and every node carries a subscript. These are collapsed into a single `Loop`
-with a shared ID (e.g., `r1`) and `dimensions` populated from the underlying
-variables. Loop score equations are generated with those dimensions, producing
-N result slots (one per element) with per-element dominance profiles. Relative
-loop scores are derived post-simulation per-element by `compute_rel_loop_scores`
-consumers (e.g. `libsimlin::analysis`), normalizing each element's loop score
-against the per-element partition sum.
+with a shared ID (e.g., `r1`), `dimensions` populated from the underlying
+variables, and `stocks` populated at *element* granularity (#487) -- the A2A
+loop's stock set is the element-subscripted stocks it actually traverses, not
+the variable-level stocks. Loop score equations are generated with those
+dimensions, producing N result slots (one per element) with per-element
+dominance profiles. The loop-id → cycle-partition mapping is cached as
+`LtmVariablesResult::loop_partitions: HashMap<String, Vec<Option<usize>>>` --
+*per slot* of an A2A loop, since two elements of the same A2A loop can land in
+different cycle partitions (the slot's stocks differ). Relative loop scores are
+derived post-simulation by `compute_rel_loop_scores` consumers (e.g.
+`libsimlin::analysis`), normalizing each `(partition, slot)` loop score against
+the sum of absolute scores in that partition at that slot -- so an independent
+A2A loop's normalization no longer cross-pollutes a sibling A2A loop that
+happens to share a loop ID but lives in a different partition.
 
 **Cross-element / mixed loops**: Circuits containing scalar nodes or with
 inconsistent variable-level structures. Each circuit becomes its own scalar
@@ -786,11 +936,29 @@ its `Link.from` / `Link.to` strings, and `classify_cycle` /
 score, or the per-element scalar `$⁚ltm⁚link_score⁚{from}[{e}]→{to}` /
 `$⁚ltm⁚link_score⁚{from}→{to}[{e}]` form) -- not the diagonal A2A scores the
 loop doesn't visit. A loop running through an inlined reducer traverses the
-synthetic agg node (`… → from[d] → $⁚ltm⁚agg⁚{n} → to[e] → …`); the agg is
-trimmed from the *reported* node sequence but its two link-score halves are
-factored into the loop score (see "Aggregate Nodes"). Recovered cross-agg loops
-(a loop that hops one inlined reducer per element) are capped at
-`MAX_AGG_PETALS` per agg to bound the combinatorial blowup (GH #515).
+synthetic agg node (`… → from[<row>] → $⁚ltm⁚agg⁚{n}[<slot>] → to[e] → …`);
+the agg is trimmed from the *reported* node sequence but its two link-score
+halves are factored into the loop score (see "Aggregate Nodes").
+
+**Cross-agg loop recovery** (#515). A cross-element feedback loop *through* an
+inlined reducer visits the (subscript-free, or for an arrayed agg
+`[<slot>]`-subscripted) agg node more than once, so Johnson never emits it
+directly. `recover_cross_agg_loops` reconstructs it from the agg-touching
+elementary "petals" (`agg → … → agg`), stitching pairwise-disjoint petal
+subsets of size ≥ 2 in every distinct *cyclic ordering*: `cyclic_orderings(m)`
+pins index 0 to kill rotations and skips mirror reversals (`1` for m = 2,
+`(m-1)!/2` for m ≥ 3, via a hand-rolled Heap's algorithm), so each disjoint
+subset of `m` petals yields `(m-1)!/2` distinct directed cycles that share a
+`loop_score` (same edge multiset ⇒ same commutative product). It is bounded
+by a deterministic petal priority (fewest internal nodes first, then a stable
+joined-name tiebreaker -- makes truncation reproducible), a soft per-agg petal
+cap (`MAX_AGG_PETALS = 8`, bounding the `2^k` subset enumeration), and a
+model-wide loop-count budget (`MAX_CROSS_AGG_LOOPS = 256`, threaded as
+`agg_loop_budget`, `#[cfg(test)]`-overridable via `AggLoopBudgetGuard`).
+Clipping sets `LtmVariablesResult::agg_recovery_truncated` and accumulates a
+`Warning` (mirroring the auto-flip-to-discovery gate), naming the truncated
+aggs. `recover_agg_hop_polarities` then patches the (variable-graph-invisible,
+hence `Unknown`) agg hops for monotone reducers (GH #516).
 
 ### Discovery Mode
 
@@ -834,6 +1002,52 @@ complexity. For very large models (1000+ variables), this could become slow. The
 paper reports 10-20 seconds for Urban Dynamics (43M loops) on 2018 hardware, but
 the per-saved-timestep approach is a simplification of the paper's "every
 computational interval" strategy.
+
+### Residual array carve-outs
+
+The arrays-hardening cluster closed the conservative-slice carve-out (#514),
+the rel-loop-score cross-pollution (#487), the iterated-dimension limitation
+(#511), and the disjoint-dim degenerate link score (#510), but a few narrow
+cases remain deliberate carve-outs:
+
+- **Dynamic-index reducers stay unhoisted.** A reducer indexed by a
+  non-literal/computed index -- `SUM(pop[idx, *])` with a dynamic `idx`,
+  `arr[i+1]` -- is not statically describable, so it is not hoisted into an
+  aggregate node; its reference stays on the conservative `DynamicIndex`
+  cross-product path (a coarse `from[d] → to[e]` for every pair). Related: a
+  scalar feeder of a hoisted reducer whose target is also scalar bypasses
+  `ThroughAgg` routing on the both-scalar fast path (GH #533), and mapped-
+  dimension sliced reducers (`SUM(matrix[State, *])` over `matrix[Region, D2]`
+  with a `State→Region` mapping) decline hoisting because the `Iterated`-driven
+  machinery assumes the agg result axis and the source row axis are literally
+  the same dimension (GH #534).
+- **RANK keeps the delta-ratio approximation.** RANK is an order statistic --
+  non-differentiable and unreachable as a real scalar/A2A reducer RHS (it
+  returns an array) -- so its link score is the delta-ratio stand-in, pinned by
+  `test_generate_rank_keeps_delta_ratio` so the choice is explicit. (STDDEV, in
+  contrast, now gets an analytic ceteris-paribus partial, #483.)
+- **Cross-agg loop recovery is budgeted.** For a reducer in a feedback loop
+  over a very large dimension, the recovered cross-element loop list can be
+  incomplete: `recover_cross_agg_loops` clips at `MAX_AGG_PETALS` petals per
+  agg and `MAX_CROSS_AGG_LOOPS` loops model-wide, sets
+  `agg_recovery_truncated`, and emits a `Warning`.
+- **Multi-dim per-element graphical-function polarity is conservative.** A
+  per-element graphical function over a single dimension gets per-element static
+  polarity (#502); over more than one dimension it stays `Unknown`. The
+  monotonicity check itself compares the y-delta `dy`, not the slope `dy/dx`,
+  so a non-uniform x-spacing can still misclassify (GH #536).
+- **An arrayed synthetic agg's link score over-subscripts in the broadcast
+  case.** When the agg is over `D1` but the target is over `D1 × D2` (a
+  strict-prefix broadcast, `SUM(matrix[D1, *])` inside an A2A body over
+  `D1 × D2`), the `agg → target` link score over-subscribes the agg into the
+  cross-product and the loop score degrades to 0 (GH #528). The diagonal case
+  (agg dims equal the target's iterated dims) is exact.
+- **Smaller magnitude/over-conservatism nits.** A transposed non-live array
+  dependency's magnitude estimate in an A2A link-score partial can be
+  imprecise (GH #526); `expand_same_element` takes the full cross-product
+  instead of the positional-mapping diagonal for mapped dimensions (GH #527);
+  and the partial-iterated arrayed subscript in an A2A link-score partial
+  fails to compile because the `PREVIOUS` argument must be a `Var` (GH #525).
 
 ## Divergences from the Papers
 
