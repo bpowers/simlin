@@ -704,22 +704,31 @@ pub fn build_loop_element_index(
 ///
 /// ## Stride handling
 ///
-/// Each per-loop input series has length `step_count *
-/// max_slots_in_partition`, where `max_slots_in_partition` is the
-/// largest `n_slots` among the loops sharing that partition (see
-/// [`compute_rel_loop_scores_per_element`]).  This helper recovers the
-/// actual stride from `series.len() / step_count` so consumers don't
-/// need to track partition stride independently.
+/// [`compute_rel_loop_scores_per_element`] lays each loop's series out
+/// row-major as `series[t * stride + k]`, where:
+///
+/// - for an **arrayed** loop, `stride == n_slots` -- the loop's own
+///   slot count.  Every slot index in `0..n_slots` is a real element,
+///   so there are no padding positions and `n == stride`.
+/// - for a **scalar** loop, `stride` is the largest slot index its
+///   (slot-0) partition covers + 1 (1 if no arrayed loop shares that
+///   partition); the loop's own `n_slots` is 1, so `stride >= n` with
+///   positions `1..stride` being broadcast padding the scalar loop's
+///   own value never occupies.
+///
+/// This helper recovers `stride` from `series.len() / step_count` so
+/// consumers don't need to track partition stride independently.
 ///
 /// The inner argmax-abs iterates only the loop's *own* `n_slots`
-/// (`n_slots_by_loop[loop_id]`, default 1).  For a scalar loop in a
-/// mixed partition that means slot 0 only -- the canonical scalar
-/// view, matching the pre-PR `compute_rel_loop_scores` behaviour.  For
-/// an arrayed loop with `n < stride` (rare; arises only when
-/// partitions mix arrayed loops of different dimensionalities), only
-/// the loop's own elements are considered; positions `n..stride`
-/// (zero-filled by the helper after the OOB fix) are not eligible
-/// candidates.
+/// (`n_slots_by_loop[loop_id]`, default 1), reading `series[t * stride + k]`
+/// for `k` in `0..n_slots`.  For a scalar loop that is slot 0 only --
+/// the canonical scalar view, matching the pre-PR `compute_rel_loop_scores`
+/// behaviour; the partition's broadcast-padding positions `1..stride`
+/// are skipped.  For an arrayed loop `stride == n_slots`, so the loop
+/// over `0..n_slots` covers exactly the loop's own elements with no
+/// out-of-bounds read.  (Pre-Phase-2, arrayed loops were padded to the
+/// partition's max stride and had to skip `n_slots..stride`; that
+/// padding no longer exists.)
 ///
 /// ## Output
 ///
@@ -744,16 +753,18 @@ pub fn aggregate_per_element_argmax_abs(
         }
         let n = n_slots_by_loop.get(loop_id).copied().unwrap_or(1).max(1);
         // Recover the helper's actual stride from the input length.
-        // For mixed partitions stride > n; for scalar-only partitions
-        // and same-shape arrayed partitions stride == n.
+        // For a scalar loop in a mixed partition stride > n == 1
+        // (broadcast padding); for an arrayed loop and for a scalar
+        // loop alone in its partition stride == n.
         let stride = (series.len() / step_count.max(1)).max(1);
         let mut agg = Vec::with_capacity(step_count);
         for t in 0..step_count {
             let mut best = 0.0_f64;
             let mut best_abs = -1.0_f64;
             // Iterate this loop's own slots only.  `n <= stride` always
-            // by construction (stride is the partition's max), so the
-            // index never exceeds the series bounds.
+            // by construction (an arrayed loop has stride == n_slots; a
+            // scalar loop has n == 1 and stride >= 1), so the index
+            // never exceeds the series bounds.
             for k in 0..n {
                 let v = series[t * stride + k];
                 // `>` (not `>=`) keeps lowest-index slot on ties; NaN
@@ -936,6 +947,136 @@ mod tests {
                     let num = series[i][t];
                     let val = if denom == 0.0 { 0.0 } else { num / denom };
                     out[i].push(val);
+                }
+            }
+        }
+        out
+    }
+
+    /// Naive, from-first-principles reference for
+    /// `compute_rel_loop_scores_per_element`.  Where the engine pre-builds
+    /// a `(partition, slot)` BTreeMap grid, this loops directly over each
+    /// `(loop, output-slot, step)` and re-derives the SAFEDIV denominator
+    /// by scanning *every* loop and asking "is it a member of this bucket?"
+    /// -- a structurally different computation, so the proptest is a real
+    /// oracle, not a paraphrase of the implementation.
+    ///
+    /// Member rule (mirrors the engine's `slot_partition` broadcast and
+    /// `effective_slot` gating, spelled out inline rather than via the
+    /// engine helpers): for a bucket at partition `p`, output slot `k`,
+    /// loop `j` is a member iff
+    ///   - `j` is **scalar** (`n_slots == 1`): `slots[j][0] == p` -- it
+    ///     broadcasts its single value into every slot of partition `p`;
+    ///     it reads slot 0; OR
+    ///   - `j` is **arrayed** (`n_slots > 1`) and `k < n_slots[j]` and
+    ///     `slots[j][k] == p` -- it reads its own slot `k`; an arrayed
+    ///     loop past its own slot count is not a member of slot-`k`
+    ///     buckets (no out-of-bounds read into another loop's data).
+    ///
+    /// Output stride per loop: an arrayed loop's own slot count; a scalar
+    /// loop's (slot-0) partition's largest covered slot index + 1 (so a
+    /// scalar loop alone in its partition has stride 1).  Slots a scalar
+    /// loop's partition does not cover stay 0.0 (gaps in the covered set).
+    ///
+    /// `slots[i]` is loop `i`'s per-slot partition vector (length 1 for a
+    /// scalar loop); `series[i][step][slot]` its `loop_score`.  Returns one
+    /// flat `Vec<f64>` per loop in `loop_ids` order; element `step *
+    /// stride_i + k`.  Float summation walks loops in ascending index --
+    /// the same order the engine's sorted-`loop_id` member lists produce
+    /// when the ids are `L{i}` with `i < 10` -- so the comparison is exact.
+    fn reference_rel_loop_scores_per_element(
+        loop_ids: &[String],
+        slots: &[Vec<Option<usize>>],
+        series: &[Vec<Vec<f64>>],
+        step_count: usize,
+    ) -> Vec<Vec<f64>> {
+        let n = loop_ids.len();
+        let n_slots: Vec<usize> = slots.iter().map(|v| v.len().max(1)).collect();
+        // The partition loop `i` carries into slot `k`: an arrayed loop's
+        // own per-slot entry; a scalar loop broadcasts slot 0's partition.
+        let slot_part = |i: usize, k: usize| -> Option<usize> {
+            if n_slots[i] <= 1 {
+                slots[i].first().copied().flatten()
+            } else {
+                slots[i].get(k).copied().flatten()
+            }
+        };
+        // For each partition, the set of slot indices some loop occupies in
+        // it (a scalar loop occupies only slot 0): used for the scalar
+        // broadcast stride and to know whether a scalar loop "appears" at a
+        // given output slot.
+        let mut partition_slots: BTreeMap<Option<usize>, BTreeSet<usize>> = BTreeMap::new();
+        for (i, &ns) in n_slots.iter().enumerate() {
+            for k in 0..ns {
+                partition_slots
+                    .entry(slot_part(i, k))
+                    .or_default()
+                    .insert(k);
+            }
+        }
+        let strides: Vec<usize> = (0..n)
+            .map(|i| {
+                if n_slots[i] > 1 {
+                    n_slots[i]
+                } else {
+                    let p = slot_part(i, 0);
+                    partition_slots
+                        .get(&p)
+                        .and_then(|ks| ks.iter().max().copied())
+                        .map(|m| m + 1)
+                        .unwrap_or(1)
+                        .max(1)
+                }
+            })
+            .collect();
+        // Is loop `j` a member of the bucket (partition `p`, output slot
+        // `k`)?  If so, which of its own slots does it read?
+        //
+        // A scalar loop is in `(p, k)` iff its (slot-0) partition is `p`
+        // AND `k` is a slot index *some* loop occupies in `p`
+        // (`partition_slots[p]`) -- the engine only pushes a scalar member
+        // into the slots its partition actually spans, so a stride that
+        // overshoots a gap leaves that output position at 0.0.
+        let read_slot_in_bucket = |j: usize, p: Option<usize>, k: usize| -> Option<usize> {
+            if n_slots[j] <= 1 {
+                let covers_k = partition_slots.get(&p).is_some_and(|ks| ks.contains(&k));
+                if slot_part(j, 0) == p && covers_k {
+                    Some(0)
+                } else {
+                    None
+                }
+            } else if k < n_slots[j] && slot_part(j, k) == p {
+                Some(k)
+            } else {
+                None
+            }
+        };
+        let mut out: Vec<Vec<f64>> = (0..n)
+            .map(|i| vec![0.0_f64; step_count * strides[i]])
+            .collect();
+        for i in 0..n {
+            for k in 0..strides[i] {
+                // Which bucket is loop `i`'s output slot `k` in, and does
+                // `i` actually occupy it?  An arrayed loop occupies every
+                // `k < n_slots` (and stride == n_slots, so no overshoot);
+                // a scalar loop occupies only the slots its partition
+                // covers (its stride may overshoot a gap).
+                let p = slot_part(i, k);
+                let Some(read_i) = read_slot_in_bucket(i, p, k) else {
+                    continue;
+                };
+                // Bucket members, scanned over every loop.
+                let bucket: Vec<(usize, usize)> = (0..n)
+                    .filter_map(|j| read_slot_in_bucket(j, p, k).map(|rs| (j, rs)))
+                    .collect();
+                for step in 0..step_count {
+                    let denom: f64 = bucket
+                        .iter()
+                        .map(|&(j, rs)| series[j][step][rs].abs())
+                        .sum();
+                    let num = series[i][step][read_i];
+                    let val = if denom == 0.0 { 0.0 } else { num / denom };
+                    out[i][step * strides[i] + k] = val;
                 }
             }
         }
@@ -1386,20 +1527,22 @@ mod tests {
         assert_eq!(agg, &vec![0.10, 0.15, 0.12, 0.18]);
     }
 
-    /// `aggregate_per_element_argmax_abs`: arrayed loop in mixed-stride
-    /// partition.  The helper input has stride=5 (partition max) but the
-    /// loop only has n=2 of its own.  Output iterates only the loop's
-    /// own 2 slots when picking argmax-abs; positions 2..5 are ignored
-    /// (they're zero-filled by `compute_rel_loop_scores_per_element`
-    /// after the OOB fix).
+    /// `aggregate_per_element_argmax_abs`: the recovered stride and the
+    /// mapped `n_slots` need not agree.  Post-Phase-2
+    /// `compute_rel_loop_scores_per_element` lays an arrayed loop out at
+    /// `stride == n_slots`, but the aggregator is defensive: if a caller
+    /// supplies a series whose recovered stride (5 here) exceeds the
+    /// loop's mapped `n_slots` (2) -- e.g. a partially-snapshotted
+    /// `n_slots_by_loop` -- the argmax-abs iterates only the mapped 2
+    /// slots, never the trailing padding.
     #[test]
     fn aggregate_arrayed_in_mixed_partition_iterates_own_slots_only() {
         let mut per_elem = HashMap::new();
-        // 2 steps × 5-stride.  Loop has n=2 (real elements).
-        // Position 2..5 carry zero-fill (post OOB-fix); we DO NOT want
-        // them included in argmax-abs.  To prove the iterator stops at
-        // n=2, place a trap value (1e6) at position 4 -- if the helper
-        // ever iterates 0..stride it would pick this and we'd notice.
+        // 2 steps × 5-stride.  Loop is mapped to n=2 own slots.
+        // Positions 2..5 are stale/padding and must NOT be included in
+        // argmax-abs.  To prove the iterator stops at n=2, place a trap
+        // value (1e6) at position 4 -- if the helper ever iterates
+        // 0..stride it would pick this and we'd notice.
         per_elem.insert(
             "B".to_string(),
             vec![
@@ -2330,6 +2473,124 @@ mod tests {
                     prop_assert!(
                         (a - e).abs() <= 1e-10,
                         "loop {} t={}: actual={} expected={}", id, t, a, e
+                    );
+                }
+            }
+        }
+
+        /// `compute_rel_loop_scores_per_element` must match the naive
+        /// per-`(partition, slot)` reference for arbitrary multi-slot
+        /// partition vectors -- coupled (all entries the same `Some(p)`),
+        /// uncoupled (distinct `Some(p)` per slot), `None`-laced, and
+        /// scalar.  This is the regression net for the GH #487 bucket
+        /// grouping: the optimized BTreeMap-grid implementation and the
+        /// scan-all-loops reference are computed independently, so any
+        /// divergence in the broadcast stride, the slot gating, or the
+        /// SAFEDIV-0 handling shows up here.
+        ///
+        /// Per-loop `spec[i] = (kind, len, base, vals)` builds the
+        /// partition vector:
+        ///   - kind 0: scalar `[Some(base)]`.
+        ///   - kind 1: scalar `[None]`.
+        ///   - kind 2: coupled arrayed `[Some(base); len]`.
+        ///   - kind 3: uncoupled arrayed `[Some(base), Some(base+1), ...]`
+        ///     (distinct consecutive partitions).
+        ///   - kind 4: `None`-laced arrayed -- `vals[k]` chooses
+        ///     `Some(vals[k])` or `None` per slot.
+        /// Partition indices stay in a small pool (so coupling across
+        /// *different* loops actually happens); lengths stay tiny so 128
+        /// cases run in well under a second on a debug build.
+        #[test]
+        fn per_element_matches_naive_reference(
+            specs in prop::collection::vec(
+                (
+                    0usize..=4,                            // kind
+                    1usize..=3,                            // arrayed length
+                    0usize..=3,                            // base partition
+                    prop::collection::vec(0usize..=4, 3), // per-slot None/Some chooser (>=4 => None)
+                ),
+                1..=4,
+            ),
+            num_steps in 1usize..=4,
+            // Flat pool of loop_score samples; sliced per (loop, slot, step).
+            // Includes 0.0 so the SAFEDIV-0 path is exercised.
+            raw_vals in prop::collection::vec(-50.0_f64..=50.0_f64, 1..=300),
+        ) {
+            let n = specs.len();
+            let loop_ids: Vec<String> = (0..n).map(|i| format!("L{i}")).collect();
+
+            // Materialize each loop's per-slot partition vector.
+            let slots: Vec<Vec<Option<usize>>> = specs
+                .iter()
+                .map(|(kind, len, base, vals)| match kind {
+                    0 => vec![Some(*base)],
+                    1 => vec![None],
+                    2 => vec![Some(*base); *len],
+                    3 => (0..*len).map(|k| Some(*base + k)).collect(),
+                    _ => (0..*len)
+                        .map(|k| {
+                            let v = vals[k % vals.len()];
+                            if v >= 4 { None } else { Some(v) }
+                        })
+                        .collect(),
+                })
+                .collect();
+            let n_slots: Vec<usize> = slots.iter().map(|v| v.len().max(1)).collect();
+
+            // Build per-(loop, step, slot) loop_score data from the flat
+            // pool, advancing a single cursor so successive slots get
+            // distinct samples.  `series[i][step][slot]`.
+            let mut cursor = 0usize;
+            let mut series: Vec<Vec<Vec<f64>>> = Vec::with_capacity(n);
+            for &ns in &n_slots {
+                let mut per_step = Vec::with_capacity(num_steps);
+                for _ in 0..num_steps {
+                    let mut per_slot = Vec::with_capacity(ns);
+                    for _ in 0..ns {
+                        per_slot.push(raw_vals[cursor % raw_vals.len()]);
+                        cursor += 1;
+                    }
+                    per_step.push(per_slot);
+                }
+                series.push(per_step);
+            }
+
+            let results = make_arrayed_results(
+                &loop_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                &n_slots,
+                &series,
+            );
+            let loop_partitions: HashMap<String, Vec<Option<usize>>> = loop_ids
+                .iter()
+                .zip(slots.iter())
+                .map(|(id, v)| (id.clone(), v.clone()))
+                .collect();
+
+            let actual = compute_rel_loop_scores_per_element(&results, &loop_partitions);
+            let expected =
+                reference_rel_loop_scores_per_element(&loop_ids, &slots, &series, num_steps);
+
+            for (i, id) in loop_ids.iter().enumerate() {
+                let a = actual.get(id).expect("every loop has a series");
+                let e = &expected[i];
+                prop_assert_eq!(
+                    a.len(),
+                    e.len(),
+                    "loop {}: series length {} vs reference {}",
+                    id,
+                    a.len(),
+                    e.len()
+                );
+                for (idx, (&av, &ev)) in a.iter().zip(e.iter()).enumerate() {
+                    if av.is_nan() && ev.is_nan() {
+                        continue;
+                    }
+                    // The two paths sum the same floats in the same order
+                    // (sorted-loop-id member lists; ids are `L{i}`, i < 4),
+                    // so the result is bit-identical, not merely close.
+                    prop_assert_eq!(
+                        av, ev,
+                        "loop {} flat-index {}: actual {} vs reference {}", id, idx, av, ev
                     );
                 }
             }
