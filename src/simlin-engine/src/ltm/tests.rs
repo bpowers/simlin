@@ -1033,6 +1033,46 @@ fn test_graphical_function_polarity() {
 }
 
 #[test]
+fn test_graphical_function_polarity_tolerates_import_noise() {
+    use crate::variable::Table;
+
+    // A table that is monotone non-decreasing modulo round-trip numeric-import
+    // noise: the second segment dips by ~2e-7 against a 1.5-wide y-range. The
+    // y-range-relative epsilon (1e-6 * 1.5 = 1.5e-6) absorbs the dip, so the
+    // table reads as Positive. With the old absolute 1e-10 epsilon this dip
+    // broke monotonicity and the table read as Unknown (#492).
+    let import_noise_table = Table::new_for_test(
+        vec![0.0, 1.0, 2.0, 3.0, 4.0],
+        vec![0.0, 0.5000001, 0.4999999, 1.0, 1.5],
+    );
+    assert_eq!(
+        analyze_graphical_function_polarity(&import_noise_table),
+        LinkPolarity::Positive,
+        "A monotone-modulo-import-noise table should read as Positive"
+    );
+
+    // A genuine ~0.7 reversal against a 1.0 y-range: far larger than the
+    // relative epsilon (1e-6), so the table is correctly Unknown.
+    let real_reversal_table =
+        Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0], vec![0.0, 1.0, 0.3, 0.7]);
+    assert_eq!(
+        analyze_graphical_function_polarity(&real_reversal_table),
+        LinkPolarity::Unknown,
+        "A genuinely non-monotone table is still Unknown"
+    );
+
+    // A perfectly constant table: y_max - y_min == 0 so epsilon clamps to
+    // 1e-12; every dy == 0 is a plateau (not > 1e-12, not < -1e-12), so the
+    // table is still classified constant and reads as Unknown.
+    let constant_table = Table::new_for_test(vec![0.0, 1.0, 2.0], vec![5.0, 5.0, 5.0]);
+    assert_eq!(
+        analyze_graphical_function_polarity(&constant_table),
+        LinkPolarity::Unknown,
+        "A constant table is still Unknown"
+    );
+}
+
+#[test]
 fn test_lookup_table_polarity_in_links() {
     use crate::datamodel;
 

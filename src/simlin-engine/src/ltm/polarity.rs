@@ -639,17 +639,21 @@ pub(super) fn analyze_graphical_function_polarity(table: &crate::variable::Table
     let mut all_decreasing = true;
     let mut all_constant = true;
 
+    // y-range-relative tolerance so tables that are monotone modulo round-trip
+    // numeric-import noise keep their polarity (#492); the non-uniform-x-spacing
+    // concern -- `dy` vs slope `dy/dx` -- is out of scope, tracked separately.
+    let y_min = table.y.iter().copied().fold(f64::INFINITY, f64::min);
+    let y_max = table.y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let epsilon = (1e-6 * (y_max - y_min)).max(1e-12);
+
     // Check consecutive pairs of points
     for i in 1..table.y.len() {
         let dy = table.y[i] - table.y[i - 1];
 
-        // Use a small epsilon for floating point comparison
-        const EPSILON: f64 = 1e-10;
-
-        if dy > EPSILON {
+        if dy > epsilon {
             all_decreasing = false;
             all_constant = false;
-        } else if dy < -EPSILON {
+        } else if dy < -epsilon {
             all_increasing = false;
             all_constant = false;
         } else {
