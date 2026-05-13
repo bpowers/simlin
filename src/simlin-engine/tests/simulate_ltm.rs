@@ -5661,13 +5661,19 @@ fn find_partial_reduce_offset(
 ///                  `matrix` is the same-element diagonal, `total` is a
 ///                  scalar that broadcasts.
 ///
-/// `D1 = {a, b}`, `D2 = {x, y}`. The element-level causal graph for the
-/// `SUM(matrix[D1,*])` reference is the conservative full-cross-product
-/// (Phase 5 tightens it), so besides the clean 4-cycles `matrix[d1,d2] ->
-/// row_sum[d1] -> total -> growth[d1,d2] -> matrix[d1,d2]` there are also
-/// spurious cross-element loops; the assertions only require that a real
-/// partial-reduce link score is emitted, carries non-degenerate values, and
-/// is referenced by some loop score.
+/// `D1 = {a, b}`, `D2 = {x, y}`. `row_sum`'s *whole* equation is the reducer
+/// `SUM(matrix[D1,*])`, so `row_sum` itself is the (variable-backed) aggregate
+/// node -- `result_dims = [D1]`, `read_slice = [Iterated(d1), Reduced]` (the
+/// `D1` axis is iterated over the A2A dimension space, the `D2` axis reduced).
+/// Variable-backed aggs are real variable nodes, so the `(matrix, row_sum)`
+/// element edges go through the normal reference walker (which classifies
+/// `matrix[D1,*]` as `Wildcard` -> the conservative `matrix[d1,d2] ->
+/// row_sum[d1']` cross-product), *not* the synthetic-agg reroute that #514
+/// tightened for *inline* reducer subexpressions. So besides the clean
+/// 4-cycles `matrix[d1,d2] -> row_sum[d1] -> total -> growth[d1,d2] ->
+/// matrix[d1,d2]` there are still spurious cross-element loops; the assertions
+/// only require that a real partial-reduce link score is emitted, carries
+/// non-degenerate values, and is referenced by some loop score.
 fn build_partial_reduce_model(name: &str) -> simlin_engine::datamodel::Project {
     use simlin_engine::datamodel::{self, Equation, Variable};
 
@@ -6749,6 +6755,136 @@ fn test_agg_aux_value_matches_reducer() {
             );
         }
     }
+}
+
+/// AC4.3 (#514, end-to-end): a *sliced* reducer subexpression
+/// `SUM(pop[NYC,*])` over `pop[Region,Age]` hoisted into a synthetic agg
+/// computes `pop[nyc,adult] + pop[nyc,child]` at every timestep, the
+/// per-read-row link scores `$⁚ltm⁚link_score⁚pop[nyc,age]→$⁚ltm⁚agg⁚0` exist
+/// and are finite (and there is *no* `pop[boston,*]→agg` link score -- the
+/// slice doesn't read those rows), and a cross-element feedback loop visiting
+/// NYC through the sliced agg is scored with a finite, non-degenerate
+/// `loop_score`. (`drive` is arrayed over `(Region,Age)` so each `pop` slot's
+/// loop through the agg has its own `drive`/`flow` nodes -- the disjointness
+/// `recover_cross_agg_loops` needs to stitch the two NYC petals together.)
+#[test]
+fn test_sliced_agg_cross_element_loop_simulates() {
+    let project = TestProject::new("sliced_agg_sim")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .named_dimension("Age", &["Adult", "Child"])
+        .array_stock("pop[Region,Age]", "100", &["flow"], &[], None)
+        // `SUM(pop[NYC,*])` is the maximal reducer sub-expression -> hoisted
+        // into a synthetic agg, broadcast to every `drive` element. The `pop`
+        // factor makes growth exponential.
+        .array_aux("drive[Region,Age]", "SUM(pop[NYC,*]) * pop * 0.00001")
+        .array_flow("flow[Region,Age]", "drive", None)
+        .build_datamodel();
+
+    // Compile (exhaustive LTM) and simulate.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
+    let results = vm.into_results();
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let off = |name: &str| -> usize {
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing offset {name}; have: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let at = |step: usize, o: usize| results.data[step * results.step_size + o];
+    let agg_off = off(agg);
+    let nyc_adult = off("pop[nyc,adult]");
+    let nyc_child = off("pop[nyc,child]");
+
+    // The agg equals the `pop[NYC,*]` slice sum at every step.
+    for step in 0..results.step_count {
+        let expected = at(step, nyc_adult) + at(step, nyc_child);
+        assert!(
+            (at(step, agg_off) - expected).abs() < 1e-9 * expected.abs().max(1.0),
+            "step {step}: agg = {}, expected SUM(pop[NYC,*]) = {expected}",
+            at(step, agg_off)
+        );
+    }
+
+    // The per-read-row link scores exist and are finite; the unread Boston
+    // rows get no link score into the agg.
+    for age in &["adult", "child"] {
+        let o = off(&format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,{age}]\u{2192}{agg}"
+        ));
+        for step in 0..results.step_count {
+            assert!(
+                at(step, o).is_finite(),
+                "step {step}: pop[nyc,{age}]→agg link score not finite"
+            );
+        }
+    }
+    for age in &["adult", "child"] {
+        assert!(
+            !results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new(&format!(
+                    "$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston,{age}]\u{2192}{agg}"
+                ))),
+            "must not emit a pop[boston,{age}]→agg link score (the slice reads only NYC)"
+        );
+    }
+
+    // A loop_score var traversing the NYC-through-sliced-agg path exists, and
+    // its simulated series is finite and not all-zero.
+    let cross_agg_loop_score_name = ltm
+        .vars
+        .iter()
+        .find(|v| {
+            v.name.contains("\u{205A}loop_score\u{205A}")
+                && v.equation.source_text().contains(
+                    format!(
+                        "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,adult]\u{2192}{agg}\""
+                    )
+                    .as_str(),
+                )
+                && v.equation.source_text().contains(
+                    format!(
+                        "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,child]\u{2192}{agg}\""
+                    )
+                    .as_str(),
+                )
+        })
+        .map(|v| v.name.clone())
+        .expect("expected a loop_score var traversing both NYC slots through the sliced agg");
+    let lo = off(&cross_agg_loop_score_name);
+    let mut saw_nonzero = false;
+    for step in 0..results.step_count {
+        let v = at(step, lo);
+        assert!(
+            v.is_finite(),
+            "step {step}: cross-agg loop score not finite"
+        );
+        if v.abs() > 1e-12 {
+            saw_nonzero = true;
+        }
+    }
+    assert!(
+        saw_nonzero,
+        "the cross-element-through-sliced-agg loop score must be non-degenerate"
+    );
 }
 
 /// AC4.2 regression (exhaustive loop-link path): `share[r] = pop[r] / SUM(pop[*])`

@@ -43,20 +43,23 @@
 //!   on the conservative direct-scoring path, with the outcome depending on
 //!   whether the whole-RHS reducer happened to be declared first).
 //!
-//! Cases deliberately *not* recognized here yet (the conservative
-//! full-cross-product element graph is left in place; tracked as tech debt):
-//! - A reducer over an explicit *slice* used as a sub-expression
-//!   (`x[r] = ... + SUM(pop[NYC, *])`): the slice pinning would need to ride on
-//!   the agg's source descriptor, which this enumerator does not yet track.
-//! - A *partial* reduce used as a sub-expression
-//!   (`x[D1] = ... + SUM(matrix[D1, *])`): the result-axis dims would need to
-//!   be derived from the enclosing apply-to-all context.
+//! Each agg carries a [`AggNode::read_slice`] -- one [`AxisRead`] per source
+//! axis -- recording *which rows* the reducer reads, so the element-graph
+//! reroute and the per-element reducer link scores route only those rows.
+//! Whole-extent reducers (`SUM(pop[*])`, `SUM(matrix[*,*])`) have an all-
+//! `Reduced` slice; sliced reducers (`SUM(pop[NYC,*])` ⇒ `[Pinned(nyc),
+//! Reduced]`, `SUM(matrix[D1,*])` over an A2A-`D1` body ⇒ `[Iterated(d1),
+//! Reduced]` and an arrayed agg over `D1`) are hoisted too. The one carve-out:
+//! a reducer over a *dynamic index* (`SUM(pop[idx,*])`, `idx` non-literal) is
+//! not statically describable -- `compute_read_slice` returns `None`, the
+//! reducer is not hoisted, and its reference stays on the conservative path.
 //!
 //! Whole-RHS partial reduces (`row_sum[D1] = SUM(matrix[D1,*])`) *are*
-//! recognized — the variable is the agg, and `result_dims` carries its dims —
-//! but the element-graph reroute leaves the conservative full-cross-product in
-//! place for variable-backed aggs (the edges to/from a real variable node
-//! already exist via the normal reference walker).
+//! recognized -- the variable is the agg, `result_dims` carries its dims, and
+//! `read_slice` records the `Iterated`/`Reduced` axis split -- but the
+//! element-graph reroute leaves the conservative full-cross-product in place
+//! for variable-backed aggs (the edges to/from a real variable node already
+//! exist via the normal reference walker).
 
 use std::collections::HashMap;
 
@@ -190,6 +193,38 @@ pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
     )
 }
 
+/// How one *source axis* of a hoisted reducer is consumed.
+///
+/// A reducer reference into an arrayed source (`SUM(pop[NYC, *])`,
+/// `SUM(matrix[D1, *])`, `SUM(pop[*])`) reads each axis of the source in one
+/// of three ways. [`AggNode::read_slice`] carries one entry per source axis,
+/// in the source's declared dimension order, which is the structural truth
+/// the element graph and link-score emitters need (the canonical equation
+/// text alone is ambiguous about *which rows* a slice reads):
+/// - [`AxisRead::Pinned`] -- a single literal element of that axis is read
+///   (`pop[NYC, *]`'s first axis). Carries the canonical element name.
+/// - [`AxisRead::Iterated`] -- the axis is iterated over the enclosing
+///   variable's apply-to-all dimension space and the agg result varies per
+///   element of it (`matrix[D1, *]`'s first axis inside an A2A-over-`D1`
+///   body). Carries the canonical dimension name; it appears in
+///   [`AggNode::result_dims`] (datamodel-cased).
+/// - [`AxisRead::Reduced`] -- the whole axis is reduced away (`SUM(pop[*])`,
+///   the `*` in `SUM(pop[NYC, *])`). Every element of that axis feeds the
+///   single agg result slot.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub enum AxisRead {
+    /// A single literal element of this source axis is read (`pop[NYC, *]`).
+    /// Carries the canonical element name.
+    Pinned(String),
+    /// This source axis is iterated over the enclosing variable's
+    /// apply-to-all dimension space (`matrix[D1, *]` inside an
+    /// A2A-over-`D1` body). Carries the canonical dimension name.
+    Iterated(String),
+    /// The whole axis is reduced away (`SUM(pop[*])`); every element of it
+    /// feeds the single agg result slot.
+    Reduced,
+}
+
 /// One aggregate node: the stand-in for a maximal reducer subexpression.
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct AggNode {
@@ -207,11 +242,20 @@ pub struct AggNode {
     /// deduplicated). For `SUM(a[*] + b[*])` this is `["a", "b"]`.
     pub source_vars: Vec<String>,
     /// The aggregate's result-axis dimension names, in datamodel casing
-    /// (e.g. `["D1"]` for `row_sum[D1] = SUM(matrix[D1,*])`). Empty for a
-    /// scalar reducer (`SUM(pop[*])`). Always empty for synthetic aggs in
-    /// this phase (only whole-RHS partial reduces carry result dims, and
-    /// those are variable-backed).
+    /// (e.g. `["D1"]` for `row_sum[D1] = SUM(matrix[D1,*])` or for a
+    /// synthetic agg minted from `x[D1] = ... + SUM(matrix[D1,*])`). Empty
+    /// for a scalar reducer (`SUM(pop[*])`, `SUM(pop[NYC,*])`). These are
+    /// the [`AxisRead::Iterated`] axes' dims, in order.
     pub result_dims: Vec<String>,
+    /// One entry per source axis (in the source's declared dimension order):
+    /// which rows of the arrayed source the reducer actually reads. Drives
+    /// the element-graph reroute (`source[<pinned>,<iterated>,<reduced→rep>]
+    /// → agg[<iterated>]`) and the per-element reducer link scores (only the
+    /// read rows get a link score). For a multi-source reducer
+    /// (`SUM(a[*] + b[*])`) every source ref shares this slice (the
+    /// enumerator declines to hoist if they disagree). All-`Reduced` means a
+    /// whole-extent reduce; see [`AxisRead`].
+    pub read_slice: Vec<AxisRead>,
     /// `true` when a `$⁚ltm⁚agg⁚{n}` auxiliary must be minted to hold this
     /// value; `false` when the owning variable already *is* the aggregate
     /// node (its entire dt-equation is exactly this reducer).
@@ -283,6 +327,13 @@ pub fn enumerate_agg_nodes(
 ) -> AggNodesResult {
     let variables = reconstruct_model_variables(db, model, project);
     let dm_dims = project_datamodel_dims(db, project);
+    // The iterated-dimension recognition (a `SUM(matrix[D1, *])` slice whose
+    // first axis names the enclosing A2A dimension) reuses Phase 3's
+    // dimension-mapping check (`State[i]` over a source declared with
+    // `Region[i]`, `State → Region`). The datamodel dim list is salsa-tracked,
+    // so this context (and hence the agg enumeration) is recomputed when a
+    // dimension's mappings change.
+    let dim_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
 
     // Visit variables in canonical-sorted order for deterministic synthetic
     // naming. `reconstruct_model_variables` returns a HashMap, so the order
@@ -300,55 +351,68 @@ pub fn enumerate_agg_nodes(
             continue;
         };
         let var_name_str = var_name.as_str().to_string();
-        // Datamodel-cased dims of the variable itself (used for the
-        // whole-RHS-partial-reduce result dims).
         let dm_dims_ref = dm_dims.as_slice();
-        let var_dim_names: Vec<String> = var
-            .get_dimensions()
-            .map(|dims| {
-                dims.iter()
-                    .map(|d| canonical_dim_to_datamodel(d.name(), dm_dims_ref))
-                    .collect()
-            })
-            .unwrap_or_default();
 
         match ast {
             Ast::Scalar(expr) => {
+                // Scalar target: no iterated dimensions, so any sliced reducer
+                // can only `Pinned`/`Reduced` its source axes.
+                let ctx = AggWalkCtx {
+                    variables: &variables,
+                    target_iterated_dims: &[],
+                    dim_ctx: &dim_ctx,
+                    dm_dims: dm_dims_ref,
+                };
                 walk_var_equation(
                     expr,
                     &var_name_str,
-                    /* var_is_arrayed = */ false,
-                    &var_dim_names,
-                    &variables,
+                    &ctx,
                     &mut result,
                     &mut next_synthetic_n,
                 );
             }
-            Ast::ApplyToAll(_, expr) => {
+            Ast::ApplyToAll(dims, expr) => {
+                // The A2A dimensions are this target's iterated dimensions
+                // (canonical names, in declared order) -- a `SUM(matrix[D1,*])`
+                // slice keyed by one of them is an arrayed agg over it.
+                let target_iterated_dims: Vec<String> =
+                    dims.iter().map(|d| d.name().to_string()).collect();
+                let ctx = AggWalkCtx {
+                    variables: &variables,
+                    target_iterated_dims: &target_iterated_dims,
+                    dim_ctx: &dim_ctx,
+                    dm_dims: dm_dims_ref,
+                };
                 walk_var_equation(
                     expr,
                     &var_name_str,
-                    /* var_is_arrayed = */ true,
-                    &var_dim_names,
-                    &variables,
+                    &ctx,
                     &mut result,
                     &mut next_synthetic_n,
                 );
             }
             Ast::Arrayed(_, per_elem, default_expr, _) => {
                 // Per-element equations: each slot is its own (possibly
-                // distinct) equation. A reducer that *is* an element's whole
-                // RHS still mints a synthetic agg here -- the variable as a
-                // whole is not the aggregate (different elements may reduce
-                // differently). Visit slots in canonical element-key order
-                // for determinism.
+                // distinct) equation for a *specific* element, so there is no
+                // iterated dimension in scope -- a sliced reducer in a slot
+                // can only `Pinned`/`Reduced` its source axes. A reducer that
+                // *is* an element's whole RHS still mints a synthetic agg here
+                // (the variable as a whole is not the aggregate -- different
+                // elements may reduce differently). Visit slots in canonical
+                // element-key order for determinism.
+                let ctx = AggWalkCtx {
+                    variables: &variables,
+                    target_iterated_dims: &[],
+                    dim_ctx: &dim_ctx,
+                    dm_dims: dm_dims_ref,
+                };
                 let mut elem_keys: Vec<_> = per_elem.keys().collect();
                 elem_keys.sort();
                 for k in elem_keys {
                     walk_subexpr_for_aggs(
                         &per_elem[k],
                         &var_name_str,
-                        &variables,
+                        &ctx,
                         &mut result,
                         &mut next_synthetic_n,
                         /* in_reducer = */ false,
@@ -358,7 +422,7 @@ pub fn enumerate_agg_nodes(
                     walk_subexpr_for_aggs(
                         default,
                         &var_name_str,
-                        &variables,
+                        &ctx,
                         &mut result,
                         &mut next_synthetic_n,
                         false,
@@ -371,40 +435,48 @@ pub fn enumerate_agg_nodes(
     result
 }
 
+/// Read-only walk context shared by [`walk_var_equation`] /
+/// [`walk_subexpr_for_aggs`] for a single target variable: the model's
+/// variable map, the target equation's iterated dimension names (canonical,
+/// in source order; empty for `Ast::Scalar` and per-element `Ast::Arrayed`
+/// slots), a [`DimensionsContext`] for the AC3.5 mapped-dimension
+/// iterated-subscript check, and the datamodel dimension list (used to map
+/// an `Iterated` axis's canonical dim name back to datamodel casing for
+/// `AggNode::result_dims`). Bundling these keeps the walkers' signatures
+/// short; the mutable `result`/`next_synthetic_n` stay out of band.
+struct AggWalkCtx<'a> {
+    variables: &'a HashMap<Ident<Canonical>, crate::variable::Variable>,
+    target_iterated_dims: &'a [String],
+    dim_ctx: &'a crate::dimensions::DimensionsContext,
+    dm_dims: &'a [crate::datamodel::Dimension],
+}
+
 /// Walk the whole-RHS expression of a `Scalar` / `ApplyToAll` variable.
 ///
 /// If the expression is *exactly* one maximal reducer App, the variable
 /// itself is the aggregate node (no synthetic minted). Otherwise the
 /// expression is walked for sub-expression reducers via
 /// [`walk_subexpr_for_aggs`].
-#[allow(clippy::too_many_arguments)]
 fn walk_var_equation(
     expr: &Expr2,
     var_name: &str,
-    var_is_arrayed: bool,
-    var_dim_names: &[String],
-    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    ctx: &AggWalkCtx<'_>,
     result: &mut AggNodesResult,
     next_synthetic_n: &mut usize,
 ) {
     if let Expr2::App(builtin, _, _) = expr
-        && let Some(source_vars) = reducer_source_vars(builtin, variables)
+        && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
+        && let Some(read_slice) = combined_read_slice(builtin, ctx)
     {
-        // Whole-RHS reducer: the variable IS the aggregate node.
+        // Whole-RHS reducer: the variable IS the aggregate node. The agg
+        // node's result shape is the *reducer's* result shape (the `Iterated`
+        // axes' dims), not the owning variable's: a full reduce
+        // (`share[Region] = SUM(pop[*])`) has `result_dims == []` even though
+        // it is broadcast to an arrayed variable (every element holds the same
+        // value); a partial reduce keyed by the active A2A dimension
+        // (`rowsum[D1] = SUM(matrix[D1, *])`) keeps `[D1]` as its result dims.
         let key = crate::patch::expr2_to_string(expr);
-        // The agg node's result shape is the *reducer's* result shape, not
-        // the owning variable's. A full reduce (`SUM(pop[*])`) collapses to a
-        // scalar even when broadcast to an arrayed variable
-        // (`share[Region] = SUM(pop[*])`): every element holds the same value,
-        // so `result_dims` is `[]`. Only a *partial* reduce that still varies
-        // per element of the variable -- a slice-reduce keyed by the active
-        // A2A dimension, e.g. `rowsum[D1] = SUM(matrix[D1, *])` -- keeps the
-        // variable's dims as its result dims.
-        let result_dims = if var_is_arrayed && !reducer_is_full_reduce(builtin, variables) {
-            var_dim_names.to_vec()
-        } else {
-            vec![]
-        };
+        let result_dims = result_dims_from_read_slice(&read_slice, ctx.dm_dims);
         register_agg(
             result,
             next_synthetic_n,
@@ -413,6 +485,7 @@ fn walk_var_equation(
             AggKind::VariableBacked {
                 var_name: var_name.to_string(),
                 result_dims,
+                read_slice,
             },
             source_vars,
         );
@@ -421,7 +494,7 @@ fn walk_var_equation(
     walk_subexpr_for_aggs(
         expr,
         var_name,
-        variables,
+        ctx,
         result,
         next_synthetic_n,
         /* in_reducer = */ false,
@@ -440,7 +513,7 @@ fn walk_var_equation(
 fn walk_subexpr_for_aggs(
     expr: &Expr2,
     owner_var: &str,
-    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    ctx: &AggWalkCtx<'_>,
     result: &mut AggNodesResult,
     next_synthetic_n: &mut usize,
     in_reducer: bool,
@@ -453,7 +526,7 @@ fn walk_subexpr_for_aggs(
                     IndexExpr2::Expr(e) => walk_subexpr_for_aggs(
                         e,
                         owner_var,
-                        variables,
+                        ctx,
                         result,
                         next_synthetic_n,
                         in_reducer,
@@ -462,7 +535,7 @@ fn walk_subexpr_for_aggs(
                         walk_subexpr_for_aggs(
                             l,
                             owner_var,
-                            variables,
+                            ctx,
                             result,
                             next_synthetic_n,
                             in_reducer,
@@ -470,7 +543,7 @@ fn walk_subexpr_for_aggs(
                         walk_subexpr_for_aggs(
                             r,
                             owner_var,
-                            variables,
+                            ctx,
                             result,
                             next_synthetic_n,
                             in_reducer,
@@ -483,29 +556,33 @@ fn walk_subexpr_for_aggs(
             }
         }
         Expr2::App(builtin, _, _) => {
+            // A maximal reducer subexpression is hoisted into a synthetic agg
+            // iff every one of its arrayed source references reads a
+            // *statically describable* slice -- `compute_read_slice` is `Some`
+            // for each (and they all agree). That covers the whole-extent case
+            // (`SUM(pop[*])` ⇒ all-`Reduced`), the slice cases
+            // (`SUM(pop[NYC,*])` ⇒ `[Pinned(nyc), Reduced]`,
+            // `SUM(matrix[D1,*])` over an A2A-`D1` body ⇒
+            // `[Iterated(d1), Reduced]` → an arrayed agg over `D1`), and
+            // declines only the dynamic-index carve-out (`SUM(pop[idx,*])`,
+            // `idx` non-literal ⇒ not statically describable). A *whole-RHS*
+            // reducer (`agg[D1] = SUM(matrix[D1, *])`) is recognized too, but
+            // as a variable-backed agg via `walk_var_equation`, not here.
             if !in_reducer
-                && let Some(source_vars) = reducer_source_vars(builtin, variables)
-                && reducer_is_full_reduce(builtin, variables)
+                && let Some(source_vars) = reducer_source_vars(builtin, ctx.variables)
+                && let Some(read_slice) = combined_read_slice(builtin, ctx)
             {
-                // Maximal reducer subexpression over the full extent of its
-                // arrayed source(s) -> mint a synthetic agg. A slice-reduce
-                // (`SUM(pop[NYC, *])`) is deliberately *not* hoisted as a
-                // synthetic agg: the agg descriptor only carries the source
-                // variable name, not which elements the slice reads, so both
-                // the element-graph reroute and the per-element reducer link
-                // scores would over-approximate the unread rows with nonzero
-                // garbage. Such a subexpression stays conservatively
-                // `Wildcard`-classified (tracked as tech debt). A *whole-RHS*
-                // slice-reduce (`agg[D1] = SUM(matrix[D1, *])`) is still
-                // recognized, but as a variable-backed agg via
-                // `walk_var_equation`, not here.
                 let key = crate::patch::expr2_to_string(expr);
+                let result_dims = result_dims_from_read_slice(&read_slice, ctx.dm_dims);
                 register_agg(
                     result,
                     next_synthetic_n,
                     &key,
                     owner_var,
-                    AggKind::Synthetic,
+                    AggKind::Synthetic {
+                        result_dims,
+                        read_slice,
+                    },
                     source_vars,
                 );
                 // Descend with `in_reducer = true` so nested reducers are
@@ -515,7 +592,7 @@ fn walk_subexpr_for_aggs(
                     walk_subexpr_for_aggs(
                         sub,
                         owner_var,
-                        variables,
+                        ctx,
                         result,
                         next_synthetic_n,
                         /* in_reducer = */ true,
@@ -523,68 +600,26 @@ fn walk_subexpr_for_aggs(
                 });
             } else {
                 builtin.for_each_expr_ref(|sub| {
-                    walk_subexpr_for_aggs(
-                        sub,
-                        owner_var,
-                        variables,
-                        result,
-                        next_synthetic_n,
-                        in_reducer,
-                    )
+                    walk_subexpr_for_aggs(sub, owner_var, ctx, result, next_synthetic_n, in_reducer)
                 });
             }
         }
         Expr2::Op1(_, operand, _, _) => walk_subexpr_for_aggs(
             operand,
             owner_var,
-            variables,
+            ctx,
             result,
             next_synthetic_n,
             in_reducer,
         ),
         Expr2::Op2(_, left, right, _, _) => {
-            walk_subexpr_for_aggs(
-                left,
-                owner_var,
-                variables,
-                result,
-                next_synthetic_n,
-                in_reducer,
-            );
-            walk_subexpr_for_aggs(
-                right,
-                owner_var,
-                variables,
-                result,
-                next_synthetic_n,
-                in_reducer,
-            );
+            walk_subexpr_for_aggs(left, owner_var, ctx, result, next_synthetic_n, in_reducer);
+            walk_subexpr_for_aggs(right, owner_var, ctx, result, next_synthetic_n, in_reducer);
         }
         Expr2::If(cond, then_e, else_e, _, _) => {
-            walk_subexpr_for_aggs(
-                cond,
-                owner_var,
-                variables,
-                result,
-                next_synthetic_n,
-                in_reducer,
-            );
-            walk_subexpr_for_aggs(
-                then_e,
-                owner_var,
-                variables,
-                result,
-                next_synthetic_n,
-                in_reducer,
-            );
-            walk_subexpr_for_aggs(
-                else_e,
-                owner_var,
-                variables,
-                result,
-                next_synthetic_n,
-                in_reducer,
-            );
+            walk_subexpr_for_aggs(cond, owner_var, ctx, result, next_synthetic_n, in_reducer);
+            walk_subexpr_for_aggs(then_e, owner_var, ctx, result, next_synthetic_n, in_reducer);
+            walk_subexpr_for_aggs(else_e, owner_var, ctx, result, next_synthetic_n, in_reducer);
         }
     }
 }
@@ -592,11 +627,15 @@ fn walk_subexpr_for_aggs(
 /// What sort of aggregate node a reducer subexpression maps to.
 enum AggKind {
     /// A `$⁚ltm⁚agg⁚{n}` auxiliary must be minted.
-    Synthetic,
+    Synthetic {
+        result_dims: Vec<String>,
+        read_slice: Vec<AxisRead>,
+    },
     /// The owning variable already is the aggregate node.
     VariableBacked {
         var_name: String,
         result_dims: Vec<String>,
+        read_slice: Vec<AxisRead>,
     },
 }
 
@@ -625,7 +664,10 @@ fn register_agg(
     sorted_sources.sort();
     sorted_sources.dedup();
     let idx = match kind {
-        AggKind::Synthetic => {
+        AggKind::Synthetic {
+            result_dims,
+            read_slice,
+        } => {
             if let Some(&existing) = result.synthetic_by_key.get(key) {
                 existing
             } else {
@@ -635,7 +677,8 @@ fn register_agg(
                     name,
                     equation_text: key.to_string(),
                     source_vars: sorted_sources,
-                    result_dims: vec![],
+                    result_dims,
+                    read_slice,
                     is_synthetic: true,
                 });
                 let idx = result.aggs.len() - 1;
@@ -646,6 +689,7 @@ fn register_agg(
         AggKind::VariableBacked {
             var_name,
             result_dims,
+            read_slice,
         } => {
             // Each whole-RHS-reducer variable is its own aggregate node;
             // never deduped, and not entered in `synthetic_by_key`.
@@ -654,6 +698,7 @@ fn register_agg(
                 equation_text: key.to_string(),
                 source_vars: sorted_sources,
                 result_dims,
+                read_slice,
                 is_synthetic: false,
             });
             result.aggs.len() - 1
@@ -712,87 +757,280 @@ fn reducer_source_vars(
     Some(sources)
 }
 
-/// Whether every arrayed-source reference inside `builtin`'s arguments is a
-/// *full*-extent access: a bare `Var(x)` or a subscript whose indices are
-/// all wildcards/star-ranges (`x[*]`, `x[*, *]`). Returns `false` if any
-/// source variable is referenced with an explicit element name, an integer
-/// literal index, a range, or an active-dimension index -- i.e. a slice
-/// (`x[NYC, *]`, `x[D1, *]`), which `enumerate_agg_nodes` does not hoist as
-/// a synthetic agg (see the call site for why).
+/// Compute the *read slice* of one reference (`arg_expr`) into an arrayed
+/// model variable: one [`AxisRead`] per source axis (in the source's declared
+/// dimension order), describing which rows of the source the reference reads.
+/// `None` means "not statically describable" -- the reference is not a direct
+/// `Subscript`/`Var` on an arrayed model variable, or it indexes an axis with
+/// a non-literal index (`pop[idx, *]`, a `Range`, a `@N` position), so the
+/// enclosing reducer is not hoisted (the dynamic-index carve-out).
 ///
-/// Indices that are not subscripts on a model variable (e.g. a literal-only
-/// scalar argument the parser would normally reject) don't make a reducer a
-/// slice; this only inspects subscripts whose head is a known model variable.
-fn reducer_is_full_reduce(
-    builtin: &BuiltinFn<Expr2>,
+/// Per source axis `i`:
+/// - `IndexExpr2::Wildcard(_)` ⇒ [`AxisRead::Reduced`].
+/// - `IndexExpr2::StarRange(_, _)` ⇒ [`AxisRead::Reduced`]. (Conservative
+///   even when the named subdimension is a *proper* subset of the axis's own
+///   dimension -- matching `classify_subscript_shape`'s AC1.4 treatment of an
+///   all-`StarRange` subscript as `Wildcard`. The element-graph reroute then
+///   over-approximates the unread rows, exactly as before; tightening this is
+///   tracked separately.)
+/// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` (canonical) is one of
+///   the *target equation's* iterated dimensions AND matches the source's
+///   `i`-th declared dimension by name or by a dimension mapping (the AC3.5
+///   case) ⇒ [`AxisRead::Iterated`] carrying `d`.
+/// - `IndexExpr2::Expr(Expr2::Var(elem, ..))` or `Expr2::Const` resolving to
+///   a literal element / 1-based index of the source's `i`-th dimension ⇒
+///   [`AxisRead::Pinned`] carrying that element's canonical name.
+/// - anything else (`DimPosition`, `Range`, a non-literal `Expr`, a
+///   `Var`/`Const` that resolves to neither an iterated dim nor a literal
+///   element) ⇒ `None`.
+///
+/// A bare `Expr2::Var(source, ..)` arg (no subscript) on an arrayed source ⇒
+/// all-`Reduced` (`[Reduced; source.dims.len()]`). A reference to a *scalar*
+/// model variable ⇒ `None` (it's not a reducer source). A `Subscript` whose
+/// index count doesn't match the source's dimension count ⇒ `None`
+/// (conservative -- a partial subscript is not the case Phase 4 hoists).
+fn compute_read_slice(
+    arg_expr: &Expr2,
+    target_iterated_dims: &[String],
     variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
-) -> bool {
-    let mut full = true;
-    builtin.for_each_expr_ref(|arg| {
-        if !full {
-            return;
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> Option<Vec<AxisRead>> {
+    use crate::common::CanonicalDimensionName;
+
+    let source_dims = |ident: &Ident<Canonical>| -> Option<&[crate::dimensions::Dimension]> {
+        let dims = variables.get(ident).and_then(|v| v.get_dimensions())?;
+        if dims.is_empty() { None } else { Some(dims) }
+    };
+
+    match arg_expr {
+        Expr2::Var(ident, _, _) => {
+            // A bare arrayed-variable arg reads the whole array.
+            let dims = source_dims(ident)?;
+            Some(vec![AxisRead::Reduced; dims.len()])
         }
-        if !expr_is_full_extent(arg, variables) {
-            full = false;
+        Expr2::Subscript(ident, indices, _, _) => {
+            let dims = source_dims(ident)?;
+            // A partial subscript (fewer/more indices than the source has
+            // dimensions) is not the case Phase 4 hoists -- stay conservative.
+            if indices.len() != dims.len() {
+                return None;
+            }
+            let mut slice: Vec<AxisRead> = Vec::with_capacity(indices.len());
+            for (i, idx) in indices.iter().enumerate() {
+                let axis = match idx {
+                    IndexExpr2::Wildcard(_) | IndexExpr2::StarRange(_, _) => AxisRead::Reduced,
+                    IndexExpr2::Range(_, _, _) | IndexExpr2::DimPosition(_, _) => return None,
+                    IndexExpr2::Expr(Expr2::Var(name, _, _)) => {
+                        let name_str = name.as_str();
+                        let src_dim_name = dims[i].name();
+                        // An iterated-dimension index: the axis is iterated
+                        // over the target's dimension space (and the agg
+                        // result varies per element of it) iff `name` is one
+                        // of the target's iterated dims AND it lines up with
+                        // the source's i-th dim by name or by a mapping.
+                        if target_iterated_dims.iter().any(|t| t == name_str) {
+                            if name_str == src_dim_name {
+                                AxisRead::Iterated(name_str.to_string())
+                            } else {
+                                let name_canon = CanonicalDimensionName::from_raw(name_str);
+                                let src_canon = CanonicalDimensionName::from_raw(src_dim_name);
+                                if dim_ctx.has_mapping_to(&name_canon, &src_canon) {
+                                    AxisRead::Iterated(name_str.to_string())
+                                } else {
+                                    // A position-mismatched iterated dim is a
+                                    // genuine cross-element reference, not the
+                                    // sliced-reducer case -- decline.
+                                    return None;
+                                }
+                            }
+                        } else if let Some(elem) = resolve_literal_axis_index(idx, &dims[i]) {
+                            AxisRead::Pinned(elem)
+                        } else {
+                            return None;
+                        }
+                    }
+                    IndexExpr2::Expr(Expr2::Const(..)) => {
+                        match resolve_literal_axis_index(idx, &dims[i]) {
+                            Some(elem) => AxisRead::Pinned(elem),
+                            None => return None,
+                        }
+                    }
+                    IndexExpr2::Expr(_) => return None,
+                };
+                slice.push(axis);
+            }
+            Some(slice)
         }
-    });
-    full
+        _ => None,
+    }
 }
 
-/// Recursive helper for [`reducer_is_full_reduce`]: `false` if `expr`
-/// contains a subscript on a model variable that uses any non-wildcard index.
-fn expr_is_full_extent(
-    expr: &Expr2,
-    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
-) -> bool {
-    match expr {
-        Expr2::Const(..) | Expr2::Var(..) => true,
-        Expr2::Subscript(ident, indices, _, _) => {
-            // Subscripts whose head is not a model variable can't be a
-            // sliced source (and won't affect the agg's source set), so
-            // ignore them.
-            if variables.contains_key(&Ident::<Canonical>::new(ident.as_str())) {
-                for idx in indices {
-                    match idx {
-                        IndexExpr2::Wildcard(_) | IndexExpr2::StarRange(_, _) => {}
-                        // A literal element, integer index, range, dim
-                        // position, or arbitrary expression pins (a slice
-                        // of) the source -- not a full reduce.
-                        IndexExpr2::Expr(_) | IndexExpr2::DimPosition(_, _) => return false,
-                        IndexExpr2::Range(_, _, _) => return false,
-                    }
-                }
+/// Resolve a single subscript index to a literal element name (canonical
+/// lowercase) of `dim`, or `None` for any other shape. The `Expr2`-side
+/// sibling of `db_ltm_ir::resolve_literal_index` / `ltm_augment`'s Expr0
+/// `resolve_literal_element_index`: element names parse as `Expr2::Var`
+/// (the parser keeps the raw element identifier as a `Var`; numeric-offset
+/// resolution happens later in Expr3 lowering); integer literals (used for
+/// indexed dimensions) parse as `Expr2::Const`. For an indexed dimension the
+/// literal is canonicalized via parse-then-format so `pop[01]` reduces to
+/// `"1"`, matching the element names `dimension_element_names` produces.
+fn resolve_literal_axis_index(
+    idx: &IndexExpr2,
+    dim: &crate::dimensions::Dimension,
+) -> Option<String> {
+    let canonical = match idx {
+        IndexExpr2::Expr(Expr2::Var(ident, _, _)) => ident.as_str().to_string(),
+        IndexExpr2::Expr(Expr2::Const(text, _, _)) => canonicalize(text).into_owned(),
+        _ => return None,
+    };
+    match dim {
+        crate::dimensions::Dimension::Named(_, named) => {
+            if named.elements.iter().any(|e| e.as_str() == canonical) {
+                Some(canonical)
+            } else {
+                None
             }
-            // Also descend into index expressions (a nested source ref).
-            indices.iter().all(|idx| match idx {
-                IndexExpr2::Expr(e) => expr_is_full_extent(e, variables),
-                IndexExpr2::Range(l, r, _) => {
-                    expr_is_full_extent(l, variables) && expr_is_full_extent(r, variables)
-                }
-                IndexExpr2::Wildcard(_)
-                | IndexExpr2::StarRange(_, _)
-                | IndexExpr2::DimPosition(_, _) => true,
-            })
         }
-        Expr2::App(builtin, _, _) => {
-            let mut ok = true;
-            builtin.for_each_expr_ref(|sub| {
-                if ok && !expr_is_full_extent(sub, variables) {
-                    ok = false;
-                }
-            });
-            ok
-        }
-        Expr2::Op1(_, operand, _, _) => expr_is_full_extent(operand, variables),
-        Expr2::Op2(_, left, right, _, _) => {
-            expr_is_full_extent(left, variables) && expr_is_full_extent(right, variables)
-        }
-        Expr2::If(cond, then_e, else_e, _, _) => {
-            expr_is_full_extent(cond, variables)
-                && expr_is_full_extent(then_e, variables)
-                && expr_is_full_extent(else_e, variables)
+        crate::dimensions::Dimension::Indexed(_, size) => {
+            if let Ok(n) = canonical.parse::<u32>()
+                && n >= 1
+                && n <= *size
+            {
+                Some(n.to_string())
+            } else {
+                None
+            }
         }
     }
+}
+
+/// Compute the *combined* read slice of a reducer `builtin`'s arrayed source
+/// references: walk its argument expressions, collect every reference to an
+/// arrayed model variable, [`compute_read_slice`] each, and return the common
+/// slice if (a) at least one such reference exists, (b) `compute_read_slice`
+/// is `Some` for every one, and (c) they all agree. `None` otherwise -- the
+/// reducer is not hoisted (the dynamic-index carve-out, or a multi-source
+/// reducer whose references read incompatible slices).
+fn combined_read_slice(builtin: &BuiltinFn<Expr2>, ctx: &AggWalkCtx<'_>) -> Option<Vec<AxisRead>> {
+    let mut common: Option<Vec<AxisRead>> = None;
+    let mut any_arrayed = false;
+    let mut ok = true;
+    builtin.for_each_expr_ref(|arg| {
+        if ok {
+            collect_arrayed_source_slices(arg, ctx, &mut common, &mut any_arrayed, &mut ok);
+        }
+    });
+    if !ok || !any_arrayed {
+        return None;
+    }
+    common
+}
+
+/// Recursive helper for [`combined_read_slice`]: descend `expr` (and any
+/// nested subscript index expressions), folding each arrayed-source-variable
+/// reference's [`compute_read_slice`] into `common` (and clearing `ok` on a
+/// `None` or a disagreement). Scalar-variable references are ignored (a scalar
+/// argument to a reducer is not a reducer source).
+fn collect_arrayed_source_slices(
+    expr: &Expr2,
+    ctx: &AggWalkCtx<'_>,
+    common: &mut Option<Vec<AxisRead>>,
+    any_arrayed: &mut bool,
+    ok: &mut bool,
+) {
+    if !*ok {
+        return;
+    }
+    let is_arrayed = |ident: &Ident<Canonical>| -> bool {
+        ctx.variables
+            .get(ident)
+            .and_then(|v| v.get_dimensions())
+            .map(|d| !d.is_empty())
+            .unwrap_or(false)
+    };
+    let fold = |slice: Option<Vec<AxisRead>>, common: &mut Option<Vec<AxisRead>>, ok: &mut bool| {
+        match slice {
+            None => *ok = false,
+            Some(s) => match common {
+                None => *common = Some(s),
+                Some(existing) if *existing == s => {}
+                Some(_) => *ok = false,
+            },
+        }
+    };
+    match expr {
+        Expr2::Const(..) => {}
+        Expr2::Var(ident, _, _) => {
+            if ctx.variables.contains_key(ident) && is_arrayed(ident) {
+                *any_arrayed = true;
+                fold(
+                    compute_read_slice(expr, ctx.target_iterated_dims, ctx.variables, ctx.dim_ctx),
+                    common,
+                    ok,
+                );
+            }
+        }
+        Expr2::Subscript(ident, indices, _, _) => {
+            if ctx.variables.contains_key(ident) && is_arrayed(ident) {
+                *any_arrayed = true;
+                fold(
+                    compute_read_slice(expr, ctx.target_iterated_dims, ctx.variables, ctx.dim_ctx),
+                    common,
+                    ok,
+                );
+            }
+            // Also descend into index expressions (a nested source ref).
+            for idx in indices {
+                match idx {
+                    IndexExpr2::Expr(e) => {
+                        collect_arrayed_source_slices(e, ctx, common, any_arrayed, ok)
+                    }
+                    IndexExpr2::Range(l, r, _) => {
+                        collect_arrayed_source_slices(l, ctx, common, any_arrayed, ok);
+                        collect_arrayed_source_slices(r, ctx, common, any_arrayed, ok);
+                    }
+                    IndexExpr2::Wildcard(_)
+                    | IndexExpr2::StarRange(_, _)
+                    | IndexExpr2::DimPosition(_, _) => {}
+                }
+            }
+        }
+        Expr2::App(builtin, _, _) => {
+            builtin.for_each_expr_ref(|sub| {
+                collect_arrayed_source_slices(sub, ctx, common, any_arrayed, ok)
+            });
+        }
+        Expr2::Op1(_, operand, _, _) => {
+            collect_arrayed_source_slices(operand, ctx, common, any_arrayed, ok)
+        }
+        Expr2::Op2(_, left, right, _, _) => {
+            collect_arrayed_source_slices(left, ctx, common, any_arrayed, ok);
+            collect_arrayed_source_slices(right, ctx, common, any_arrayed, ok);
+        }
+        Expr2::If(cond, then_e, else_e, _, _) => {
+            collect_arrayed_source_slices(cond, ctx, common, any_arrayed, ok);
+            collect_arrayed_source_slices(then_e, ctx, common, any_arrayed, ok);
+            collect_arrayed_source_slices(else_e, ctx, common, any_arrayed, ok);
+        }
+    }
+}
+
+/// Map a read slice's [`AxisRead::Iterated`] axes to their datamodel-cased
+/// dimension names, in order -- the agg's [`AggNode::result_dims`]. A
+/// whole-extent reduce (all-`Reduced`) yields `[]`; a slice over an iterated
+/// dim (`SUM(matrix[D1, *])` over an A2A-`D1` body, `read_slice =
+/// [Iterated(d1), Reduced]`) yields `["D1"]`.
+fn result_dims_from_read_slice(
+    read_slice: &[AxisRead],
+    dm_dims: &[crate::datamodel::Dimension],
+) -> Vec<String> {
+    read_slice
+        .iter()
+        .filter_map(|a| match a {
+            AxisRead::Iterated(d) => Some(canonical_dim_to_datamodel(d, dm_dims)),
+            AxisRead::Pinned(_) | AxisRead::Reduced => None,
+        })
+        .collect()
 }
 
 /// `true` when `name` is a synthetic aggregate-node name (`$⁚ltm⁚agg⁚{n}`).
@@ -924,7 +1162,9 @@ mod tests {
     }
 
     /// AC4.3 (arrayed variant): `agg[D1] = SUM(matrix[D1,*])` is whole-RHS, so
-    /// the variable is the agg; `result_dims` carries `D1`.
+    /// the variable is the agg; `result_dims` carries `D1` and `read_slice`
+    /// records the `Iterated(D1)` / `Reduced` axis split (the `D1` axis is
+    /// iterated over the A2A dimension space, the second axis is reduced).
     #[test]
     fn whole_rhs_arrayed_partial_reduce_is_its_own_agg() {
         let project = TestProject::new("whole_rhs_partial")
@@ -948,6 +1188,10 @@ mod tests {
         assert!(!agg.is_synthetic);
         assert_eq!(agg.source_vars, vec!["matrix".to_string()]);
         assert_eq!(agg.result_dims, vec!["D1".to_string()]);
+        assert_eq!(
+            agg.read_slice,
+            vec![AxisRead::Iterated("d1".to_string()), AxisRead::Reduced]
+        );
     }
 
     /// AC4.3 (arrayed full-reduce broadcast): `share[Region] = SUM(pop[*])` is
@@ -1384,17 +1628,17 @@ mod tests {
         );
     }
 
-    /// A reducer over an explicit *slice* used as a sub-expression
-    /// (`x[r] = ... + SUM(pop[NYC, *])`) is NOT hoisted: the slice pinning
-    /// would have to ride on the agg's source descriptor (which only carries
-    /// the source variable name, not which elements the slice reads), so the
-    /// element-graph reroute and the per-element reducer link scores would
-    /// over-approximate to the whole array (the link score for the unread
-    /// rows would be a nonzero garbage value instead of 0). Such a
-    /// subexpression stays conservatively `Wildcard`-classified. Tracked as
-    /// a follow-up.
+    /// AC4.1: a reducer over an explicit *slice* used as a sub-expression
+    /// (`x[r] = ... + SUM(pop[NYC, *])`) IS hoisted into a synthetic agg --
+    /// the `read_slice` descriptor records which rows it reads
+    /// (`[Pinned(nyc), Reduced]` over `pop`'s `[Region, Age]` axes), so the
+    /// element-graph reroute and the per-element reducer link scores route
+    /// only those rows. `result_dims` is `[]` here: there is no `Iterated`
+    /// axis (the `Region` on the target `x` is broadcast; the read is a
+    /// single row). The `pop[NYC, Adult]` `Direct` reference is separate --
+    /// not part of the agg.
     #[test]
-    fn slice_reducer_subexpression_is_not_hoisted() {
+    fn slice_reducer_subexpression_is_hoisted() {
         let project = TestProject::new("slice_subexpr")
             .named_dimension("Region", &["NYC", "Boston"])
             .named_dimension("Age", &["Adult", "Child"])
@@ -1407,17 +1651,102 @@ mod tests {
             );
 
         let result = agg_nodes(&project);
-        assert!(
-            result.aggs.is_empty(),
-            "a slice-reducer subexpression must not be hoisted; got: {:?}",
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "a slice-reducer subexpression must mint one synthetic agg; got: {:?}",
             result.aggs
+        );
+        assert_eq!(synthetic[0].name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
+        // `expr2_to_string` puts a space after the comma in a multi-index
+        // subscript -- assert the canonical text it actually produces.
+        assert_eq!(synthetic[0].equation_text, "sum(pop[nyc, *])");
+        assert_eq!(synthetic[0].source_vars, vec!["pop".to_string()]);
+        assert_eq!(
+            synthetic[0].read_slice,
+            vec![AxisRead::Pinned("nyc".to_string()), AxisRead::Reduced]
+        );
+        assert!(
+            synthetic[0].result_dims.is_empty(),
+            "no Iterated axis -- result dims must be empty; got: {:?}",
+            synthetic[0].result_dims
+        );
+        assert!(
+            result
+                .aggs_in_var("x")
+                .any(|a| a.name == "$\u{205A}ltm\u{205A}agg\u{205A}0")
         );
     }
 
-    /// A whole-RHS slice/partial reduce (`agg[D1] = SUM(matrix[D1, *])`) IS
-    /// recognized -- but as a variable-backed agg, not a synthetic one
-    /// (covered by `whole_rhs_arrayed_partial_reduce_is_its_own_agg`). The
-    /// carve-out above is specifically for the *sub-expression* case.
+    /// AC4.2: a *partial*-reduce slice over an iterated dimension used as a
+    /// sub-expression (`x[D1] = ... + SUM(matrix[D1, *])`, `matrix[D1, D2]`,
+    /// `x` A2A over `D1`) mints an arrayed synthetic agg over `D1`:
+    /// `read_slice = [Iterated(d1), Reduced]`, `result_dims = [D1]`. The
+    /// element graph routes `matrix[d1, d2] → agg[d1]`.
+    #[test]
+    fn sliced_reducer_over_iterated_dim_mints_arrayed_agg() {
+        let project = TestProject::new("iterated_slice_subexpr")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+            .array_aux_direct(
+                "x",
+                vec!["D1".into()],
+                "matrix[a, x] + SUM(matrix[D1, *])",
+                None,
+            );
+
+        let result = agg_nodes(&project);
+        let synthetic: Vec<&AggNode> = result.aggs.iter().filter(|a| a.is_synthetic).collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "an iterated-dim slice-reducer subexpression must mint one synthetic agg; got: {:?}",
+            result.aggs
+        );
+        assert_eq!(
+            synthetic[0].read_slice,
+            vec![AxisRead::Iterated("d1".to_string()), AxisRead::Reduced]
+        );
+        assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
+        assert_eq!(synthetic[0].source_vars, vec!["matrix".to_string()]);
+        // `expr2_to_string` canonicalizes the iterated dim name lowercase.
+        assert_eq!(synthetic[0].equation_text, "sum(matrix[d1, *])");
+    }
+
+    /// AC4.4 (the carve-out): a reducer over a *dynamic* index
+    /// (`x[Region] = SUM(pop[idx, *])`, `idx` a scalar aux -- a non-literal
+    /// index) is NOT statically describable: `compute_read_slice` returns
+    /// `None` for the `idx` axis, so the reducer is not hoisted and its
+    /// reference stays on the conservative path. Pin this narrow case.
+    #[test]
+    fn dynamic_index_reducer_subexpression_is_not_hoisted() {
+        let project = TestProject::new("dynamic_index_reducer")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .named_dimension("Age", &["Adult", "Child"])
+            .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "10", None)
+            .scalar_aux("idx", "1")
+            .array_aux_direct("x", vec!["Region".into()], "SUM(pop[idx, *])", None);
+
+        let result = agg_nodes(&project);
+        assert!(
+            result
+                .aggs
+                .iter()
+                .all(|a| !a.source_vars.contains(&"pop".to_string())),
+            "a dynamic-index reducer must not be hoisted; got: {:?}",
+            result.aggs
+        );
+        assert!(result.synthetic_by_key.is_empty());
+    }
+
+    /// AC4.2 (positive guard): a whole-RHS slice/partial reduce
+    /// (`agg[D1] = SUM(matrix[D1, *])`) IS recognized -- but as a
+    /// variable-backed agg, not a synthetic one (covered by
+    /// `whole_rhs_arrayed_partial_reduce_is_its_own_agg`); and an all-
+    /// wildcard reducer subexpression (`SUM(matrix[*, *])`, no literal pin)
+    /// is still hoisted as a synthetic agg with an all-`Reduced` slice.
     #[test]
     fn full_wildcard_reducer_subexpression_is_still_hoisted() {
         // `SUM(matrix[*, *])` (all-wildcard, no literal pin) is a full
@@ -1437,6 +1766,11 @@ mod tests {
             result.aggs
         );
         assert_eq!(synthetic[0].source_vars, vec!["matrix".to_string()]);
+        assert_eq!(
+            synthetic[0].read_slice,
+            vec![AxisRead::Reduced, AxisRead::Reduced]
+        );
+        assert!(synthetic[0].result_dims.is_empty());
     }
 
     /// AC1.2: the consolidated `reducer_kind` table classifies every array

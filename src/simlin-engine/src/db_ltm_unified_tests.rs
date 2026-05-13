@@ -2177,3 +2177,117 @@ fn cross_element_loop_through_agg_is_recovered() {
         cross_agg_loop_score.name
     );
 }
+
+/// AC4.3 (#514): a *sliced* reducer subexpression (`SUM(pop[NYC,*])`) hoisted
+/// into a synthetic agg gets per-element `source[d] → agg` link scores for
+/// *only the rows it reads* -- `$⁚ltm⁚link_score⁚pop[nyc,adult]→agg` and
+/// `$⁚ltm⁚link_score⁚pop[nyc,child]→agg` -- and *no* `pop[boston,*]→agg` link
+/// scores. A cross-element feedback loop visiting NYC (`pop[nyc,age] → agg →
+/// drive[nyc,age] → flow[nyc,age] → pop[nyc,age]`, the two NYC slots sharing
+/// the agg) is enumerated and combined by `recover_cross_agg_loops`, its
+/// loop-score equation references the per-slice link scores along the
+/// un-trimmed path, and the reported loops never surface the synthetic agg.
+#[test]
+fn sliced_agg_link_scores_cover_only_the_read_rows() {
+    let project = TestProject::new("sliced_agg")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .named_dimension("Age", &["Adult", "Child"])
+        .array_stock("pop[Region,Age]", "100", &["flow"], &[], None)
+        // An A2A aux with `SUM(pop[NYC,*])` as a *sub-expression* -> the
+        // maximal `SUM(pop[NYC,*])` is hoisted into a synthetic agg, which
+        // broadcasts to every `drive` element (so each `pop` slot's loop
+        // through the agg has its own, disjoint, `drive`/`flow` nodes -- the
+        // condition `recover_cross_agg_loops` needs to combine them).
+        .array_aux("drive[Region,Age]", "SUM(pop[NYC,*]) * 0.0001")
+        // `flow` is the same-element diagonal of `drive`, closing the loop.
+        // Only the NYC slots actually feed the agg, so only they are in a
+        // loop through it.
+        .array_flow("flow[Region,Age]", "drive", None);
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let names: std::collections::HashSet<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    // The agg itself: a scalar (no Iterated axis -- `SUM(pop[NYC,*])` is a
+    // full reduce over the `*` axis with `NYC` pinned, not keyed by an A2A
+    // dim) merely broadcast to the arrayed `drive`.
+    let agg_var = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == agg)
+        .unwrap_or_else(|| panic!("expected synthetic agg {agg}; got: {names:?}"));
+    assert!(agg_var.dimensions.is_empty());
+    assert!(
+        matches!(&agg_var.equation, crate::datamodel::Equation::Scalar(t) if t == "sum(pop[nyc, *])"),
+        "agg equation should be the sliced reducer text; got: {:?}",
+        agg_var.equation
+    );
+
+    // `pop[nyc,*] → agg` link scores -- one per row the slice reads.
+    for age in &["adult", "child"] {
+        let n = format!("$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,{age}]\u{2192}{agg}");
+        assert!(
+            names.contains(n.as_str()),
+            "expected per-read-row reducer link score {n:?}; got: {names:?}"
+        );
+    }
+    // No `pop[boston,*] → agg` link scores -- Boston's rows are not read by
+    // the `pop[NYC,*]` slice.
+    for age in &["adult", "child"] {
+        let n = format!("$\u{205A}ltm\u{205A}link_score\u{205A}pop[boston,{age}]\u{2192}{agg}");
+        assert!(
+            !names.contains(n.as_str()),
+            "must NOT emit a link score for the unread row {n:?}; got: {names:?}"
+        );
+    }
+    // `agg → drive[e]` link scores -- one per target element (arrayed `to`).
+    for elem in &["nyc,adult", "nyc,child"] {
+        let n = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}drive[{elem}]");
+        assert!(
+            names.contains(n.as_str()),
+            "expected agg→drive[{elem}] link score; got: {names:?}"
+        );
+    }
+
+    // A loop-score equation traverses the NYC cross-element path through the
+    // agg: NYC-Adult into the agg, agg into drive[nyc,child], ... and
+    // NYC-Child into the agg, agg into drive[nyc,adult]. Pin that the
+    // per-read-row halves appear along the un-trimmed path (`recover_cross_agg_loops`
+    // stitched the two NYC petals together).
+    let loop_score_eqs: Vec<String> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .map(|v| v.equation.source_text())
+        .collect();
+    let want = [
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,adult]\u{2192}{agg}\""),
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[nyc,child]\u{2192}{agg}\""),
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}drive[nyc,adult]\""),
+        format!("\"$\u{205A}ltm\u{205A}link_score\u{205A}{agg}\u{2192}drive[nyc,child]\""),
+    ];
+    assert!(
+        loop_score_eqs
+            .iter()
+            .any(|eq| want.iter().all(|f| eq.contains(f.as_str()))),
+        "no loop_score equation traverses the NYC-through-sliced-agg path; \
+         want all of {want:?}.\nloop_score equations: {loop_score_eqs:?}"
+    );
+
+    // The reported (variable-level) loops never surface the synthetic agg.
+    let detected = crate::db::model_detected_loops(&db, model, sync.project);
+    for l in &detected.loops {
+        assert!(
+            l.variables
+                .iter()
+                .all(|v| !v.contains("\u{205A}agg\u{205A}")),
+            "model_detected_loops should not surface synthetic agg nodes; got: {:?}",
+            l.variables
+        );
+    }
+}

@@ -2099,6 +2099,92 @@ fn cartesian_subscripts(dim_element_lists: &[Vec<String>]) -> Vec<String> {
     result
 }
 
+/// One source row a hoisted reducer reads, paired with the agg result slot it
+/// feeds and the co-reduced rows (the rows mapping to the *same* slot -- the
+/// `from`-slice the reducer combines for that slot, used as the
+/// `all_elements` argument for the per-element link-score equation builders).
+struct ReadSliceRow {
+    /// The source element subscript (comma-joined element names).
+    row: String,
+    /// The agg result slot's subscript (the `Iterated` axes' elements,
+    /// comma-joined; empty when the agg is scalar).
+    slot: String,
+    /// All source rows mapping to `slot`, in row-major order.
+    coreduced: Vec<String>,
+}
+
+/// Enumerate the source rows a hoisted reducer reads, given the agg's
+/// `read_slice` (one [`crate::ltm_agg::AxisRead`] per `from`'s axis -- which
+/// holds because `from` is one of `agg`'s `source_vars`) and `from`'s
+/// dimension element lists. A `Pinned` axis is fixed to its single element; an
+/// `Iterated` or `Reduced` axis ranges over every element of that axis. The
+/// agg result slot for a row is its `Iterated` coordinates in order.
+///
+/// `None` when `read_slice` doesn't have one entry per `from` axis (it always
+/// should for a hoisted agg whose `source_vars` contains `from`): the caller
+/// then falls back to the conservative "every source element, scalar agg" form.
+fn read_slice_rows(
+    read_slice: &[crate::ltm_agg::AxisRead],
+    from_dim_element_lists: &[Vec<String>],
+) -> Option<Vec<ReadSliceRow>> {
+    use crate::ltm_agg::AxisRead;
+    if read_slice.len() != from_dim_element_lists.len() {
+        return None;
+    }
+    // Per axis: the element list to iterate, plus whether the axis contributes
+    // a coordinate to the result slot.
+    let per_axis: Vec<(Vec<String>, bool)> = read_slice
+        .iter()
+        .zip(from_dim_element_lists)
+        .map(|(a, elems)| match a {
+            AxisRead::Pinned(e) => (vec![e.clone()], false),
+            AxisRead::Iterated(_) => (elems.clone(), true),
+            AxisRead::Reduced => (elems.clone(), false),
+        })
+        .collect();
+    // Cartesian product, tracking each row's full element tuple and its slot
+    // coordinates.
+    let mut rows: Vec<(Vec<String>, Vec<String>)> = vec![(Vec::new(), Vec::new())];
+    for (elems, contributes_to_slot) in &per_axis {
+        let mut next: Vec<(Vec<String>, Vec<String>)> =
+            Vec::with_capacity(rows.len() * elems.len());
+        for (row, slot) in &rows {
+            for e in elems {
+                let mut new_row = row.clone();
+                new_row.push(e.clone());
+                let mut new_slot = slot.clone();
+                if *contributes_to_slot {
+                    new_slot.push(e.clone());
+                }
+                next.push((new_row, new_slot));
+            }
+        }
+        rows = next;
+    }
+    // Group rows by slot to build each row's `coreduced` set.
+    let mut by_slot: HashMap<String, Vec<String>> = HashMap::new();
+    for (row, slot) in &rows {
+        by_slot
+            .entry(slot.join(","))
+            .or_default()
+            .push(row.join(","));
+    }
+    Some(
+        rows.into_iter()
+            .map(|(row, slot)| {
+                let slot = slot.join(",");
+                let row = row.join(",");
+                let coreduced = by_slot[&slot].clone();
+                ReadSliceRow {
+                    row,
+                    slot,
+                    coreduced,
+                }
+            })
+            .collect(),
+    )
+}
+
 /// Build the element-level `Loop::stocks` list for a cycle.
 ///
 /// For a scalar cycle (`dimensions` empty), the stocks are the
@@ -3120,11 +3206,13 @@ pub fn model_ltm_variables(
         if !agg.is_synthetic {
             continue;
         }
-        // Synthetic aggs are scalar full reduces in this phase
-        // (`result_dims` is always empty); the equation text is the
-        // canonical reducer subexpression. An arrayed-result agg would be
-        // `Equation::ApplyToAll(result_dims, ...)`, but that case is
-        // currently only produced for variable-backed aggs.
+        // The equation text is the canonical reducer subexpression. A
+        // whole-extent or pinned-slice reducer (`SUM(pop[*])`,
+        // `SUM(pop[NYC,*])`) has a scalar result; a partial-reduce slice over
+        // an iterated dimension (`SUM(matrix[D1,*])` inside an A2A-over-`D1`
+        // body) has `result_dims = [D1]` -- in an A2A-over-`D1` body
+        // `matrix[D1,*]` is exactly "the `D1`-th row, all of axis 2", so this
+        // evaluates correctly as the `Equation::ApplyToAll` body.
         let equation = if agg.result_dims.is_empty() {
             datamodel::Equation::Scalar(agg.equation_text.clone())
         } else {
@@ -4001,12 +4089,20 @@ pub fn model_ltm_variables(
         }
     }
 
-    /// Emit the `source[d] → agg` link-score half: one scalar
-    /// `$⁚ltm⁚link_score⁚{from}[{d}]→{agg}` per source element of `from`,
-    /// measuring that element's fractional contribution to the aggregate's
-    /// velocity. The agg's *own* equation is exactly the reducer, so the
-    /// "bare" algebraic shortcut applies (varying `from[d]` changes the agg
-    /// by exactly its own delta regardless of what else the reducer combines).
+    /// Emit the `source[<read row>] → agg` link-score half: one scalar
+    /// `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}` (when the agg is scalar) or
+    /// `$⁚ltm⁚link_score⁚{from}[<row>]→{agg}[<slot>]` (when the agg is arrayed
+    /// over its `result_dims` -- the partial-reduce shape that mirrors
+    /// `try_cross_dimensional_link_scores`'s `{from}[{d1,d2}]→{to}[{d1}]`) per
+    /// source *read row* -- not every source element. For a whole-extent
+    /// reducer that's all of `from`'s elements; for a sliced reducer
+    /// (`SUM(pop[NYC,*])`, `read_slice = [Pinned(nyc), Reduced]`) it's only
+    /// the rows the slice reads (here, the `pop[nyc,*]` slice), so the unread
+    /// rows get *no* link score rather than a nonzero garbage one. Each row's
+    /// `coreduced` set (the rows mapping to the same agg slot -- the
+    /// `from`-slice combined for that slot) is the `all_elements` for the
+    /// MEAN divisor / nonlinear expansion. The agg's *own* equation is exactly
+    /// the reducer, so the "bare" algebraic shortcut applies.
     fn emit_source_to_agg_link_scores(
         db: &dyn Db,
         source_vars: &HashMap<String, super::SourceVariable>,
@@ -4046,26 +4142,66 @@ pub fn model_ltm_variables(
             .iter()
             .map(crate::ltm_augment::dimension_element_names)
             .collect();
-        let source_elements = cartesian_subscripts(&dim_element_lists);
-        for element in &source_elements {
-            let var_name = format!(
-                "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
-                from, element, agg.name
-            );
-            let equation = crate::ltm_augment::generate_element_to_scalar_equation(
-                from,
-                &agg.name,
-                element,
-                &source_elements,
-                &reducer_kind,
-                reducer_name,
-                /* is_bare = */ true,
-            );
+        // The read rows: only the slice the reducer reads. If `read_slice`
+        // doesn't line up with `from`'s axes (shouldn't happen for a hoisted
+        // agg whose `source_vars` contains `from`), fall back to all elements
+        // / scalar agg.
+        let rows: Vec<ReadSliceRow> = read_slice_rows(&agg.read_slice, &dim_element_lists)
+            .unwrap_or_else(|| {
+                let all = cartesian_subscripts(&dim_element_lists);
+                all.iter()
+                    .map(|r| ReadSliceRow {
+                        row: r.clone(),
+                        slot: String::new(),
+                        coreduced: all.clone(),
+                    })
+                    .collect()
+            });
+        for ReadSliceRow {
+            row,
+            slot,
+            coreduced,
+        } in &rows
+        {
+            let (var_name, equation) = if slot.is_empty() {
+                (
+                    format!(
+                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
+                        from, row, agg.name
+                    ),
+                    crate::ltm_augment::generate_element_to_scalar_equation(
+                        from,
+                        &agg.name,
+                        row,
+                        coreduced,
+                        &reducer_kind,
+                        reducer_name,
+                        /* is_bare = */ true,
+                    ),
+                )
+            } else {
+                (
+                    format!(
+                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
+                        from, row, agg.name, slot
+                    ),
+                    crate::ltm_augment::generate_element_to_reduced_equation(
+                        from,
+                        &agg.name,
+                        row,
+                        slot,
+                        coreduced,
+                        &reducer_kind,
+                        reducer_name,
+                        /* is_bare = */ true,
+                    ),
+                )
+            };
             vars.push(LtmSyntheticVar {
                 name: var_name,
                 equation: datamodel::Equation::Scalar(equation),
                 dimensions: vec![],
-                // bracketed name + synthetic agg -> routed direct already.
+                // bracketed name (+ subscripted synthetic agg) -> routed direct.
                 compile_directly: false,
             });
         }
@@ -4078,7 +4214,12 @@ pub fn model_ltm_variables(
     /// `PREVIOUS(agg_j)`). For an arrayed `to` this is one scalar
     /// `$⁚ltm⁚link_score⁚{agg}→{to}[{e}]` per target element (mirroring the
     /// scalar→arrayed convention from `try_scalar_to_arrayed_link_scores`);
-    /// for a scalar `to` it is a single `$⁚ltm⁚link_score⁚{agg}→{to}`.
+    /// for a scalar `to` it is a single `$⁚ltm⁚link_score⁚{agg}→{to}`. When the
+    /// agg is itself arrayed over its `result_dims` (a partial-reduce
+    /// sub-expression like `x[D1] = ... + SUM(matrix[D1,*])`), the agg side of
+    /// the name carries the target element's projection onto `result_dims`
+    /// (`{agg}[{d1}]→{to}[{e}]`), and the agg reference in the per-slot
+    /// equation is element-pinned to the same slot.
     #[allow(clippy::too_many_arguments)]
     fn emit_agg_to_target_link_scores(
         db: &dyn Db,
@@ -4104,6 +4245,7 @@ pub fn model_ltm_variables(
             .collect();
 
         let agg_canonical = Ident::<Canonical>::new(&agg.name);
+        let agg_is_arrayed = !agg.result_dims.is_empty();
 
         // The set of arrayed deps that share `to`'s dimensions (need to be
         // element-pinned in the per-target-element scalar equation); scalar
@@ -4130,7 +4272,7 @@ pub fn model_ltm_variables(
         for other_agg in reducer_subst.values() {
             all_deps.insert(Ident::<Canonical>::new(other_agg));
         }
-        let deps_to_subscript: HashSet<Ident<Canonical>> = all_deps
+        let mut deps_to_subscript: HashSet<Ident<Canonical>> = all_deps
             .iter()
             .filter(|d| {
                 source_vars
@@ -4147,6 +4289,47 @@ pub fn model_ltm_variables(
             })
             .cloned()
             .collect();
+        // An arrayed agg (`result_dims` non-empty) is element-pinned in the
+        // per-target-element equation just like an arrayed dep that shares
+        // `to`'s dims: `$⁚ltm⁚agg⁚0` → `$⁚ltm⁚agg⁚0[<element>]`. This is
+        // exact when `result_dims` equals `to`'s dimensions (the diagonal
+        // `agg[d1] → to[d1]` case -- a partial-reduce sub-expression in an
+        // A2A target over exactly that dim, e.g. `x[D1] = ... + SUM(matrix[D1,*])`);
+        // for the rarer broadcast case (`agg[D1]` into `to[D1,D2]`) the
+        // element tuple over-subscripts the agg, which is a known imprecision.
+        if agg_is_arrayed {
+            deps_to_subscript.insert(agg_canonical.clone());
+        }
+
+        // Positions of the agg's `result_dims` within `to`'s dimensions, so a
+        // target element tuple can be projected onto the agg-slot subscript
+        // for the link-score name's agg side.
+        let result_dim_positions: Vec<usize> = agg
+            .result_dims
+            .iter()
+            .filter_map(|rd| {
+                let canon = crate::common::canonicalize(rd);
+                to_dims.iter().position(|td| td.name() == canon.as_ref())
+            })
+            .collect();
+        // The agg side of the link-score name for a given target element: the
+        // bare agg name when scalar, `agg[<slot>]` when arrayed (the target
+        // element projected onto `result_dims`).
+        let agg_name_for_target = |element: &str| -> String {
+            if !agg_is_arrayed {
+                return agg.name.clone();
+            }
+            let parts: Vec<&str> = element.split(',').collect();
+            let slot: Vec<&str> = result_dim_positions
+                .iter()
+                .filter_map(|&p| parts.get(p).copied())
+                .collect();
+            if slot.is_empty() {
+                agg.name.clone()
+            } else {
+                format!("{}[{}]", agg.name, slot.join(","))
+            }
+        };
 
         // Helper: substitute the reducers in a slot expr's canonical text and
         // build the agg→target link-score equation for one target element (or
@@ -4160,6 +4343,10 @@ pub fn model_ltm_variables(
 
         match ast {
             Ast::Scalar(expr) => {
+                // A scalar `to` cannot reference a reducer in a way that makes
+                // the agg arrayed (a scalar target has no iterated dims), so
+                // the agg is always scalar here.
+                debug_assert!(!agg_is_arrayed, "a scalar target implies a scalar agg");
                 let substituted = slot_text(expr);
                 let equation = crate::ltm_augment::generate_agg_to_scalar_target_equation(
                     &agg.name,
@@ -4189,6 +4376,11 @@ pub fn model_ltm_variables(
                     .map(crate::ltm_augment::dimension_element_names)
                     .collect();
                 for element in &cartesian_subscripts(&dim_element_lists) {
+                    // The partial is built around the *bare* agg name (which is
+                    // what `substituted` holds); `deps_to_subscript` then
+                    // element-pins it to `agg[<element>]` when the agg is
+                    // arrayed, matching `agg_name_for_target` (exact when
+                    // `result_dims == to`'s dims).
                     let equation = crate::ltm_augment::generate_scalar_to_element_equation(
                         &agg.name,
                         to,
@@ -4200,7 +4392,9 @@ pub fn model_ltm_variables(
                     vars.push(LtmSyntheticVar {
                         name: format!(
                             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
-                            agg.name, to, element
+                            agg_name_for_target(element),
+                            to,
+                            element
                         ),
                         equation: datamodel::Equation::Scalar(equation),
                         dimensions: vec![],
@@ -4254,7 +4448,9 @@ pub fn model_ltm_variables(
                     vars.push(LtmSyntheticVar {
                         name: format!(
                             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
-                            agg.name, to, element
+                            agg_name_for_target(element),
+                            to,
+                            element
                         ),
                         equation: datamodel::Equation::Scalar(equation),
                         dimensions: vec![],

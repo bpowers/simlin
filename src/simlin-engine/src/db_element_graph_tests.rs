@@ -793,29 +793,19 @@ fn element_graph_whole_rhs_scalar_reducer_is_its_own_agg_node() {
     assert_no_edge(&result, "pop[boston]", "migration[nyc]");
 }
 
-/// AC1.5: Multidim partial-fixed references conservatively expand as
-/// full Wildcard.
-///
-/// For `target[Region] = pop[NYC, Adult] + SUM(pop[NYC, *])` with
-/// `pop[Region, Age]` (Region={NYC, Boston}, Age={Adult, Child}):
-///
-/// - The literal pair `pop[NYC, Adult]` produces broadcast edges from
-///   that single source element to every target element (FixedIndex).
-/// - The partial-wildcard `pop[NYC, *]` inside SUM is conservatively
-///   treated as a full Wildcard for now: it drops the literal `NYC`
-///   pinning and expands as if every (Region, Age) source element fed
-///   every target element. Tightening this to a per-dimension
-///   wildcard-on-Age-only expansion is deferred (TODO: see
-///   ltm-per-ref-elem-graph design plan AC1.5).
-///
-/// Concretely, the conservative behavior emits all 4 x 2 = 8 source-to-
-/// target edges. This is the same edge count today's CrossElement
-/// classifier emits, which is intentional: AC1.5 is documented as
-/// "not a regression vs today" -- the test should pass today AND after
-/// the refactor lands, pinning the conservative semantics in place.
+/// AC4.1 (element graph, sliced reducer): `target[Region] = pop[NYC, Adult] +
+/// SUM(pop[NYC, *])` over `pop[Region, Age]` (Region={NYC, Boston}, Age={Adult,
+/// Child}). The maximal `SUM(pop[NYC, *])` subexpression is hoisted into a
+/// synthetic agg `$⁚ltm⁚agg⁚0` whose `read_slice = [Pinned(nyc), Reduced]`, so
+/// the element graph routes *only the NYC rows* through the agg:
+/// `pop[nyc,adult] → agg`, `pop[nyc,child] → agg`, then `agg → target[r]`
+/// for every `r` (the agg is scalar -- no `Iterated` axis -- so it
+/// broadcasts). Boston's rows do *not* feed the agg, and there is no
+/// `pop[d] → target[e]` full-cross-product edge from the reducer. The literal
+/// `pop[NYC, Adult]` `FixedIndex` reference still broadcasts to every target.
 #[test]
-fn element_graph_multidim_partial_fixed_conservative() {
-    let project = TestProject::new("multidim_partial_fixed")
+fn element_graph_sliced_reducer_reads_only_pinned_row() {
+    let project = TestProject::new("sliced_reducer_elem_graph")
         .named_dimension("Region", &["NYC", "Boston"])
         .named_dimension("Age", &["Adult", "Child"])
         .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "10", None)
@@ -827,27 +817,128 @@ fn element_graph_multidim_partial_fixed_conservative() {
         );
 
     let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
 
-    // Literal-pair broadcast edges from FixedIndex source `pop[NYC, Adult]`:
-    // the single source element feeds every target element.
+    // Only the NYC row feeds the agg (the slice reads `pop[NYC, *]`).
+    assert_edge(&result, "pop[nyc,adult]", agg);
+    assert_edge(&result, "pop[nyc,child]", agg);
+    assert_no_edge(&result, "pop[boston,adult]", agg);
+    assert_no_edge(&result, "pop[boston,child]", agg);
+
+    // The scalar agg broadcasts to every target element.
+    assert_edge(&result, agg, "target[nyc]");
+    assert_edge(&result, agg, "target[boston]");
+
+    // The literal `pop[NYC, Adult]` FixedIndex reference broadcasts.
     assert_edge(&result, "pop[nyc,adult]", "target[nyc]");
     assert_edge(&result, "pop[nyc,adult]", "target[boston]");
 
-    // Partial-wildcard SUM(pop[NYC, *]) expanded conservatively as full
-    // Wildcard: every source element of `pop` (including the Boston row,
-    // because we drop the literal `NYC` pinning in the conservative
-    // expansion) feeds every target element.
+    // No `pop[d] → target[e]` full-cross-product edge from the reducer:
+    // every reducer-side path goes via the agg, and only the NYC row at that.
+    assert_no_edge(&result, "pop[nyc,child]", "target[nyc]");
+    assert_no_edge(&result, "pop[nyc,child]", "target[boston]");
+    assert_no_edge(&result, "pop[boston,adult]", "target[nyc]");
+    assert_no_edge(&result, "pop[boston,adult]", "target[boston]");
+    assert_no_edge(&result, "pop[boston,child]", "target[nyc]");
+    assert_no_edge(&result, "pop[boston,child]", "target[boston]");
+}
+
+/// AC4.2 (element graph, arrayed agg over an iterated dim): `x[D1] =
+/// matrix[a, x] + SUM(matrix[D1, *])` over `matrix[D1, D2]` (D1={a, b},
+/// D2={x, y}), `x` apply-to-all over `D1`. The maximal `SUM(matrix[D1, *])`
+/// subexpression -- a partial reduce keyed by the active A2A dimension `D1` --
+/// is hoisted into an *arrayed* synthetic agg over `D1` (`read_slice =
+/// [Iterated(d1), Reduced]`, `result_dims = [D1]`), so the element graph has
+/// `matrix[d1, d2] → agg[d1]` (each `D1` row feeds that `D1`'s agg slot) and
+/// `agg[d1] → x[d1]` (the diagonal projection), with NO `matrix[a, *] →
+/// agg[b]` cross-slot edges. The literal `matrix[a, x]` FixedIndex reference
+/// broadcasts to every `x` element.
+#[test]
+fn element_graph_arrayed_agg_over_iterated_dim() {
+    let project = TestProject::new("arrayed_agg_elem_graph")
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "1", None)
+        .array_aux_direct(
+            "x",
+            vec!["D1".into()],
+            "matrix[a, x] + SUM(matrix[D1, *])",
+            None,
+        );
+
+    let result = element_edges(&project);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+    // Each D1 row → that D1's agg slot.
+    assert_edge(&result, "matrix[a,x]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix[a,y]", &format!("{agg}[a]"));
+    assert_edge(&result, "matrix[b,x]", &format!("{agg}[b]"));
+    assert_edge(&result, "matrix[b,y]", &format!("{agg}[b]"));
+    // No cross-slot edges (a's rows don't feed b's slot and vice versa).
+    assert_no_edge(&result, "matrix[a,x]", &format!("{agg}[b]"));
+    assert_no_edge(&result, "matrix[a,y]", &format!("{agg}[b]"));
+    assert_no_edge(&result, "matrix[b,x]", &format!("{agg}[a]"));
+    assert_no_edge(&result, "matrix[b,y]", &format!("{agg}[a]"));
+
+    // The agg projects diagonally into `x`.
+    assert_edge(&result, &format!("{agg}[a]"), "x[a]");
+    assert_edge(&result, &format!("{agg}[b]"), "x[b]");
+    assert_no_edge(&result, &format!("{agg}[a]"), "x[b]");
+    assert_no_edge(&result, &format!("{agg}[b]"), "x[a]");
+
+    // The literal `matrix[a, x]` FixedIndex reference broadcasts to every `x`.
+    assert_edge(&result, "matrix[a,x]", "x[a]");
+    assert_edge(&result, "matrix[a,x]", "x[b]");
+    // No scalar (subscript-free) agg node -- the agg is arrayed over D1.
+    assert!(
+        !result.edges.contains_key(agg) && !result.edges.values().any(|ts| ts.contains(agg)),
+        "the agg over D1 must always be subscripted (agg[d1]), never bare {agg}"
+    );
+}
+
+/// AC4.4 (element graph, the dynamic-index carve-out): `x[Region] =
+/// SUM(pop[idx, *])` over `pop[Region, Age]` with `idx` a scalar aux -- a
+/// reducer over a dynamic index is *not* hoisted (`compute_read_slice`
+/// declines the `idx` axis), so the IR reclassifies the `(pop, x)` reference
+/// from `Wildcard` to `DynamicIndex` and the element graph keeps the
+/// conservative `pop[d] → x[e]` full cross-product. No `$⁚ltm⁚agg` node
+/// appears, and `pop` has no edge to any agg node.
+#[test]
+fn element_graph_dynamic_index_reducer_stays_conservative() {
+    let project = TestProject::new("dyn_index_reducer_elem_graph")
+        .named_dimension("Region", &["NYC", "Boston"])
+        .named_dimension("Age", &["Adult", "Child"])
+        .array_aux_direct("pop", vec!["Region".into(), "Age".into()], "10", None)
+        .scalar_aux("idx", "1")
+        .array_aux_direct("x", vec!["Region".into()], "SUM(pop[idx, *])", None);
+
+    let result = element_edges(&project);
+
+    // No synthetic agg node anywhere in the graph.
+    assert!(
+        !result
+            .edges
+            .keys()
+            .any(|k| k.contains("\u{205A}agg\u{205A}"))
+            && !result
+                .edges
+                .values()
+                .any(|ts| ts.iter().any(|t| t.contains("\u{205A}agg\u{205A}"))),
+        "a dynamic-index reducer must not produce a synthetic agg node; got: {:?}",
+        result.edges
+    );
+
+    // The conservative full cross-product: every `pop` element feeds every
+    // `x` element.
     let from_elems = &[
         "pop[nyc,adult]",
         "pop[nyc,child]",
         "pop[boston,adult]",
         "pop[boston,child]",
     ];
-    let to_elems = &["target[nyc]", "target[boston]"];
     for from in from_elems {
-        for to in to_elems {
-            assert_edge(&result, from, to);
-        }
+        assert_edge(&result, from, "x[nyc]");
+        assert_edge(&result, from, "x[boston]");
     }
 }
 

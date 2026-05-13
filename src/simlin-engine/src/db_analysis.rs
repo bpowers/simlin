@@ -109,17 +109,26 @@ pub enum RefShape {
     FixedIndex(Vec<String>),
     /// `Expr2::Subscript(source, indices)` where at least one index is
     /// `IndexExpr2::Wildcard`, or every index is `Wildcard` / `StarRange`
-    /// (the reducer-style whole-extent access). Conservative full
-    /// cross-product unless the site is inside a hoisted reducer
-    /// subexpression, in which case `db_ltm_ir` routes it through a
-    /// `$⁚ltm⁚agg⁚{n}` node.
+    /// (the reducer-style whole-extent access). A reducer reference with
+    /// this shape that `enumerate_agg_nodes` hoisted into a `$⁚ltm⁚agg⁚{n}`
+    /// node is routed `ThroughAgg` (the shape is then ignored); a *whole-RHS*
+    /// reducer's argument (`total = SUM(population[*])`,
+    /// `row_sum[D1] = SUM(matrix[D1,*])`) keeps this shape on its `Direct`
+    /// site, where it projects to the conservative reduction / cross-product
+    /// into the (variable-backed-agg) target. The not-hoistable dynamic-index
+    /// reducer carve-out (`SUM(pop[idx,*])`) is reclassified by `db_ltm_ir`
+    /// as `DynamicIndex` rather than kept here (#514), so a `Direct`
+    /// `Wildcard` site never carries an *un*-hoisted sliced reducer.
     Wildcard,
     /// `Expr2::Subscript(source, indices)` where at least one index is
     /// a non-literal expression (`@N`, `Range`, an arbitrary `Expr`, or a
-    /// *partial* `StarRange` mixed with literal indices). Conservative
-    /// full cross-product unless the site is inside a hoisted reducer
-    /// subexpression, in which case `db_ltm_ir` routes it through a
-    /// `$⁚ltm⁚agg⁚{n}` node.
+    /// *partial* `StarRange` mixed with literal indices) -- *or* the
+    /// not-hoistable dynamic-index reducer carve-out (`SUM(pop[idx,*])`,
+    /// reclassified here from `Wildcard` by `db_ltm_ir` so the conservative
+    /// cross-product path is `DynamicIndex`-only in `emit_edges_for_reference`).
+    /// Conservative full cross-product. (A hoisted *synthetic*-agg reducer
+    /// reference never has routing `Direct` with this shape -- it's
+    /// `ThroughAgg`.)
     DynamicIndex,
 }
 
@@ -164,6 +173,15 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// `DynamicIndex`), so this helper does not need to handle a
 /// "partial fixed" branch -- it only sees fully-resolved
 /// `FixedIndex(elems)` payloads or the conservative full-cross shapes.
+///
+/// A `ThroughAgg`-routed reference never reaches here -- those are routed
+/// through a synthetic aggregate node by `emit_agg_routed_edges` (only the
+/// read-slice rows). After #514 the `Direct` not-hoistable-reducer carve-out
+/// (`SUM(pop[idx,*])`) is reclassified by the IR as `DynamicIndex`, so a
+/// `Direct` `Wildcard` site is now only a variable-backed reducer's whole-RHS
+/// argument (`total = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`)
+/// or a (rare) non-reducer whole-array reference; the conservative cross
+/// product is the right semantics for all of those.
 fn emit_edges_for_reference(
     from_name: &str,
     to_name: &str,
@@ -270,7 +288,14 @@ fn emit_edges_for_reference(
         RefShape::Wildcard | RefShape::DynamicIndex => {
             // Conservative full cross product over source elements.
             // `target_nodes` already restricts the target side when
-            // inside an arrayed per-element expression.
+            // inside an arrayed per-element expression. `DynamicIndex`
+            // here is `arr[i+1]`, a range, or the not-hoistable-reducer
+            // carve-out (`SUM(pop[idx,*])`, reclassified from `Wildcard` by
+            // the IR); `Wildcard` here is only a variable-backed reducer's
+            // whole-RHS argument (a reduction into a scalar/lower-rank `to`)
+            // or a rare non-reducer whole-array reference -- a hoisted
+            // *synthetic*-agg reducer reference is routed through the agg
+            // (`emit_agg_routed_edges`) and never lands on this arm.
             let from_elements = cartesian_element_names(from_name, from_dims);
             for from_elem in &from_elements {
                 let entry = element_edges.entry(from_elem.clone()).or_default();
@@ -459,6 +484,182 @@ fn expand_same_element(
                     .insert(to_node);
             }
         }
+    }
+}
+
+/// Emit the element edges for a reference routed through a hoisted aggregate
+/// node: `source[<read slice>] → agg[<iterated>]` then `agg[<iterated>] →
+/// to[e]`, where `agg.read_slice` (one [`AxisRead`] per source axis) decides
+/// which source rows feed each agg result slot and `agg.result_dims` (the
+/// `Iterated` axes' dims) decides how the agg fans out into `to`.
+///
+/// - A [`AxisRead::Pinned`] axis fixes one element of the source on that axis.
+/// - An [`AxisRead::Iterated`] axis ranges; its element selects the agg result
+///   slot's coordinate for that dimension.
+/// - A [`AxisRead::Reduced`] axis ranges over *every* element (each one feeds
+///   the same agg result slot). For the *element graph* a representative
+///   element would suffice for reachability, but emitting one edge per element
+///   matches `cross_element_loop_through_sum_reducer`'s whole-extent
+///   expectation and the per-element link scores need them all anyway.
+///
+/// When `read_slice` is all-`Reduced` (`result_dims` empty) the agg is scalar:
+/// every source element feeds `agg`, and `agg` broadcasts to every `to`
+/// element -- the pre-Phase-4 behavior. `target_element` (a per-element
+/// `Ast::Arrayed` slot) pins the `agg → to` half to that single target.
+///
+/// Defensive: if `read_slice` doesn't have one entry per source axis (it
+/// always should for a hoisted agg whose `source_vars` includes `from`), fall
+/// back to the conservative "every source element → agg" form so a stale
+/// invariant can't drop edges.
+fn emit_agg_routed_edges(
+    from_name: &str,
+    to_name: &str,
+    from_dims: &[crate::dimensions::Dimension],
+    to_dims: &[crate::dimensions::Dimension],
+    agg: &crate::ltm_agg::AggNode,
+    target_element: Option<&str>,
+    element_edges: &mut HashMap<String, BTreeSet<String>>,
+) {
+    use crate::ltm_agg::AxisRead;
+
+    // The agg's result-axis dimensions are the `Iterated` axes' source dims,
+    // in order -- carried as canonical-named `Dimension`s here (sliced from
+    // `from_dims`) so `cartesian_element_names` / `expand_same_element` can
+    // operate on them directly.
+    let read_slice_ok = !from_dims.is_empty() && agg.read_slice.len() == from_dims.len();
+    let iterated_dims: Vec<crate::dimensions::Dimension> = if read_slice_ok {
+        agg.read_slice
+            .iter()
+            .zip(from_dims)
+            .filter_map(|(a, d)| match a {
+                AxisRead::Iterated(_) => Some(d.clone()),
+                AxisRead::Pinned(_) | AxisRead::Reduced => None,
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
+    // Per source axis, the element-name list to iterate when enumerating
+    // source rows: a `Pinned` axis is fixed to one element; an `Iterated` or
+    // `Reduced` axis ranges over every element. The position of an `Iterated`
+    // axis within the result tuple is tracked so each source row maps to the
+    // matching agg result slot.
+    struct AxisPlan {
+        elems: Vec<String>,
+        /// `Some(j)` if this axis is the `j`th `Iterated` axis (its element
+        /// becomes coordinate `j` of the agg result slot); `None` otherwise.
+        iterated_pos: Option<usize>,
+    }
+    let mut axis_plans: Vec<AxisPlan> = Vec::with_capacity(from_dims.len());
+    let mut next_iterated_pos = 0usize;
+    if read_slice_ok {
+        for (a, d) in agg.read_slice.iter().zip(from_dims) {
+            let plan = match a {
+                AxisRead::Pinned(elem) => AxisPlan {
+                    elems: vec![elem.clone()],
+                    iterated_pos: None,
+                },
+                AxisRead::Iterated(_) => {
+                    let pos = next_iterated_pos;
+                    next_iterated_pos += 1;
+                    AxisPlan {
+                        elems: dimension_element_names(d),
+                        iterated_pos: Some(pos),
+                    }
+                }
+                AxisRead::Reduced => AxisPlan {
+                    elems: dimension_element_names(d),
+                    iterated_pos: None,
+                },
+            };
+            axis_plans.push(plan);
+        }
+    } else {
+        // Conservative fallback: every source element, scalar agg.
+        for d in from_dims {
+            axis_plans.push(AxisPlan {
+                elems: dimension_element_names(d),
+                iterated_pos: None,
+            });
+        }
+    }
+
+    // The agg node name for a given result-slot coordinate tuple. A scalar agg
+    // (`iterated_dims` empty) keeps its bare name; an arrayed agg is
+    // subscripted with the iterated elements in order.
+    let agg_node_name = |slot: &[String]| -> String {
+        if slot.is_empty() {
+            agg.name.clone()
+        } else {
+            format!("{}[{}]", agg.name, slot.join(","))
+        }
+    };
+
+    // Source → agg edges: cartesian product over the per-axis element lists,
+    // routing each row to the agg result slot picked out by its `Iterated`
+    // coordinates. (`next_iterated_pos` is 0 in the conservative fallback.)
+    let n_iterated = if read_slice_ok { next_iterated_pos } else { 0 };
+    let mut rows: Vec<(Vec<String>, Vec<String>)> =
+        vec![(Vec::new(), vec![String::new(); n_iterated])];
+    for plan in &axis_plans {
+        let mut next_rows: Vec<(Vec<String>, Vec<String>)> =
+            Vec::with_capacity(rows.len() * plan.elems.len());
+        for (row_elems, slot) in &rows {
+            for elem in &plan.elems {
+                let mut new_row = row_elems.clone();
+                new_row.push(elem.clone());
+                let mut new_slot = slot.clone();
+                if let Some(j) = plan.iterated_pos {
+                    new_slot[j] = elem.clone();
+                }
+                next_rows.push((new_row, new_slot));
+            }
+        }
+        rows = next_rows;
+    }
+    for (row_elems, slot) in &rows {
+        let from_node = if row_elems.len() == 1 {
+            format_element_name(from_name, &row_elems[0])
+        } else {
+            let refs: Vec<&str> = row_elems.iter().map(String::as_str).collect();
+            format_multi_element_name(from_name, &refs)
+        };
+        element_edges
+            .entry(from_node)
+            .or_default()
+            .insert(agg_node_name(slot));
+    }
+
+    // Agg → to edges. With no `Iterated` axes the agg is scalar and broadcasts
+    // to every target element (or the single pinned target). Otherwise the agg
+    // is arrayed over `iterated_dims`; it fans into `to` by the same
+    // same-element-on-shared-dims projection a `Bare` reference would
+    // (`expand_same_element`). An `Iterated` axis can only arise from an A2A
+    // target (a per-element `Ast::Arrayed` slot has no iterated dims, and a
+    // scalar target none either), so when `iterated_dims` is non-empty `to` is
+    // arrayed and `target_element` is `None`.
+    if iterated_dims.is_empty() {
+        let to_nodes: Vec<String> = if to_dims.is_empty() {
+            vec![to_name.to_string()]
+        } else if let Some(elem) = target_element {
+            vec![format!("{to_name}[{elem}]")]
+        } else {
+            cartesian_element_names(to_name, to_dims)
+        };
+        let entry = element_edges.entry(agg.name.clone()).or_default();
+        for to_node in to_nodes {
+            entry.insert(to_node);
+        }
+    } else {
+        // Arrayed agg → arrayed `to`: project per the `Bare` arm.
+        // `expand_same_element` formats source nodes as `name[elems]`, so
+        // passing the agg's real name lands the edges on `agg[<slot>]`.
+        debug_assert!(
+            !to_dims.is_empty() && target_element.is_none(),
+            "an Iterated-axis agg implies an A2A target"
+        );
+        expand_same_element(&agg.name, to_name, &iterated_dims, to_dims, element_edges);
     }
 }
 
@@ -1101,13 +1302,14 @@ pub fn model_element_causal_edges(
 
     // The reference-site classification IR decides each reference's access
     // shape and aggregate-node routing; `enumerate_agg_nodes` is consulted
-    // only to resolve a `ThroughAgg` site's `AggRef` to the synthetic agg's
-    // name. (A `ThroughAgg` site routes `from[d] → agg`, `agg → to[e]`
-    // instead of the all-pairs cross-product; a `Direct` site uses its
-    // `shape`/`target_element` via `emit_edges_for_reference` -- including
-    // the not-yet-hoisted conservative-slice / bare-dynamic-index cases,
-    // which stay `Direct` with their Wildcard/DynamicIndex shape and so
-    // still expand to the full cross-product.)
+    // only to resolve a `ThroughAgg` site's `AggRef` to the synthetic agg
+    // (and its `read_slice` / `result_dims`). A `ThroughAgg` site routes only
+    // the rows the reducer reads through the agg (`emit_agg_routed_edges`),
+    // never the all-pairs cross-product; a `Direct` site uses its
+    // `shape`/`target_element` via `emit_edges_for_reference` -- a
+    // `DynamicIndex` shape (`arr[i+1]`, a range, the not-hoisted dynamic-index
+    // reducer carve-out `SUM(pop[idx,*])`) still expands to the conservative
+    // full cross-product there.
     let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
 
@@ -1152,11 +1354,13 @@ pub fn model_element_causal_edges(
     // Expand each variable-level edge to element-level edges by reading the
     // IR's classified sites for that `(from, to)` pair. `Direct` sites emit
     // per-shape element edges (deduped naturally via the `BTreeSet` value);
-    // `ThroughAgg` sites emit `from[d] → agg`, `agg → to[e]`. An edge with
-    // no IR entry (structural flow->stock, a module edge, an
-    // unreconstructable target, or a synthesized dep with no AST reference)
-    // falls back to a SameElement-diagonal `Bare` emission so the
-    // variable-level projection invariant still holds.
+    // `ThroughAgg` sites route only the rows the reducer reads through the
+    // synthetic agg (`source[<read slice>] → agg[<iterated>]`,
+    // `agg[<iterated>] → to[e]` per `emit_agg_routed_edges`). An edge with no
+    // IR entry (structural flow->stock, a module edge, an unreconstructable
+    // target, or a synthesized dep with no AST reference) falls back to a
+    // SameElement-diagonal `Bare` emission so the variable-level projection
+    // invariant still holds.
     for (from_name, to_set) in &variable_edges.edges {
         let from_dims = lookup_dims(from_name, &mut dim_cache);
         for to_name in to_set {
@@ -1206,28 +1410,28 @@ pub fn model_element_causal_edges(
                         );
                     }
                     crate::db_ltm_ir::SiteRouting::ThroughAgg { agg } => {
-                        // `from[d] → agg` (per source element) and
-                        // `agg → to[e]` (per target element / scalar).
-                        // Synthetic aggs are always scalar full-reduces in
-                        // this phase, so the agg node has no subscript.
+                        // Route only the rows the reducer reads through the
+                        // agg: `source[<pinned>,<iterated>,<reduced→all>] →
+                        // agg[<iterated>]` per `Iterated`-axis combination,
+                        // then `agg[<iterated>] → to[e]` (the agg's
+                        // `result_dims` drive how it fans out into `to` --
+                        // diagonal on shared dims, broadcast otherwise, the
+                        // same projection the `Bare` arm does). A whole-extent
+                        // reducer (`read_slice` all-`Reduced`) degenerates to
+                        // the prior behavior: the agg is scalar, every source
+                        // element feeds it, and it broadcasts to every `to`
+                        // element. No `source[d] → to[e]` direct edge is
+                        // emitted for a hoisted reducer -- only the two halves.
                         let agg_node = &agg_nodes.aggs[agg.0];
-                        for from_elem in cartesian_element_names(from_name, &from_dims) {
-                            element_edges
-                                .entry(from_elem)
-                                .or_default()
-                                .insert(agg_node.name.clone());
-                        }
-                        let to_nodes: Vec<String> = if to_dims.is_empty() {
-                            vec![to_name.to_string()]
-                        } else if let Some(elem) = site.target_element.as_deref() {
-                            vec![format!("{to_name}[{elem}]")]
-                        } else {
-                            cartesian_element_names(to_name, &to_dims)
-                        };
-                        let entry = element_edges.entry(agg_node.name.clone()).or_default();
-                        for to_node in to_nodes {
-                            entry.insert(to_node);
-                        }
+                        emit_agg_routed_edges(
+                            from_name,
+                            to_name,
+                            &from_dims,
+                            &to_dims,
+                            agg_node,
+                            site.target_element.as_deref(),
+                            &mut element_edges,
+                        );
                     }
                 }
             }
