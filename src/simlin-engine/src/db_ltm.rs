@@ -15,15 +15,18 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
+// The reference-site shape walker lives in the sibling `db_ltm_ir` module
+// (out of `db.rs` for the per-file line cap).
+use crate::db_ltm_ir::collect_reference_shapes;
 use crate::ltm::strip_subscript;
 
 use super::{
     Db, LtmLinkId, ModelDepGraphResult, ParsedVariableResult, RefShape, SourceModel, SourceProject,
     SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
-    build_submodel_metadata, canonical_module_input_set, collect_reference_shapes, compute_layout,
-    link_score_equation_text, model_implicit_var_info, model_module_ident_context,
-    model_module_map, parse_source_variable_with_module_context, project_datamodel_dims,
-    project_units_context, variable_dimensions, variable_size,
+    build_submodel_metadata, canonical_module_input_set, compute_layout, link_score_equation_text,
+    model_implicit_var_info, model_module_ident_context, model_module_map,
+    parse_source_variable_with_module_context, project_datamodel_dims, project_units_context,
+    variable_dimensions, variable_size,
 };
 
 pub(super) fn ltm_module_idents(

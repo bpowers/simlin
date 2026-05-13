@@ -24,7 +24,6 @@ mod db_analysis;
 pub use db_analysis::RefShape;
 pub use db_analysis::causal_graph_from_edges;
 pub use db_analysis::causal_graph_from_element_edges;
-pub(crate) use db_analysis::collect_reference_shapes;
 pub(crate) use db_analysis::reconstruct_model_variables;
 use db_analysis::*;
 // `model_element_loop_circuits` is `#[deprecated]` for LTM consumers (the
