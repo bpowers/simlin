@@ -196,19 +196,28 @@ export function caretOffsetForClick(
   return Math.max(0, Math.min(len, mapping[k]));
 }
 
+// A parenthesis. Trimmed off the ends of an *operator-gap* span (in addition
+// to whitespace): that span is the gap between the parser's two operand
+// ranges, which can include the grouping parens those ranges exclude -- e.g.
+// in `(a+b)*c` the gap between `a+b` and `c` is `)*`, so trimming the `)`
+// homes in on the `*`. Leaf/node spans never have a `(`/`)` at their edges
+// except a function call's trailing `)`, which we must keep, so the trim is
+// applied only when the span was tagged as an operator gap (`data-oploc`).
+const isParen = (ch: string | undefined): boolean => ch === '(' || ch === ')';
+
 /**
- * Map a click within a single source-annotated span -- the element the engine
- * tagged with `\htmlData{eqnloc=START_END}` (see `latex_eqn_expr0_annotated`
- * on the Rust side) -- to a caret offset in the equation text.
+ * Map a click within a single source-annotated span -- an element the engine
+ * tagged with `\htmlData{eqnloc=…}` (a syntax-node span) or `\htmlData{oploc=…}`
+ * (the gap around a binary/unary operator); see `latex_eqn_expr0_annotated` on
+ * the Rust side -- to a caret offset in the equation text.
  *
- * `[spanStart, spanEnd)` is the half-open byte range the span covers. For an
- * operator annotation that range is the *gap* between the operands, which
- * holds the operator token plus any surrounding whitespace, so we first trim
- * whitespace off both ends to home in on the operator itself; for a leaf
- * (identifier, number) the trim is a no-op. Within the trimmed range, the
- * click is mapped by glyph: for the common case where the span renders one
- * glyph per source character (identifiers, numbers, single-character
- * operators) the boundary index *is* the offset; otherwise it interpolates.
+ * `[spanStart, spanEnd)` is the half-open byte range the span covers. We trim
+ * whitespace (and, for an operator gap, parentheses) off both ends so the
+ * caret homes in on the operator token / on the leaf's text; within the
+ * trimmed range the click is mapped by glyph -- for the common case where the
+ * span renders one glyph per source character (identifiers, numbers, single-
+ * character operators) the boundary index *is* the offset; otherwise it
+ * interpolates.
  */
 export function caretOffsetWithinSpan(
   glyphs: readonly RenderedGlyph[],
@@ -217,14 +226,16 @@ export function caretOffsetWithinSpan(
   sourceText: string,
   spanStart: number,
   spanEnd: number,
+  isOperatorGap: boolean,
 ): number {
   const len = sourceText.length;
   const lo = Math.max(0, Math.min(len, Math.min(spanStart, spanEnd)));
   const hi = Math.max(0, Math.min(len, Math.max(spanStart, spanEnd)));
+  const trim = (ch: string | undefined): boolean => isWhitespace(ch) || (isOperatorGap && isParen(ch));
   let ts = lo;
-  while (ts < hi && isWhitespace(sourceText[ts])) ts++;
+  while (ts < hi && trim(sourceText[ts])) ts++;
   let te = hi;
-  while (te > ts && isWhitespace(sourceText[te - 1])) te--;
+  while (te > ts && trim(sourceText[te - 1])) te--;
   if (ts >= te) {
     // The span is empty or all whitespace -- shouldn't happen for a real
     // `eqnloc`, but fall back to the span start.

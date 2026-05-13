@@ -301,7 +301,7 @@ describe('nearestGlyphBoundary', () => {
 });
 
 describe('caretOffsetWithinSpan', () => {
-  it('maps boundary to offset 1:1 within an identifier span', () => {
+  it('maps boundary to offset 1:1 within an identifier span (eqnloc, not an operator gap)', () => {
     // source: "x = average + 1"; the identifier `average` is bytes [4,11)
     const src = 'x = average + 1';
     const glyphs = lineOf([
@@ -313,11 +313,11 @@ describe('caretOffsetWithinSpan', () => {
       ['g', 50, 10],
       ['e', 60, 10],
     ]);
-    expect(caretOffsetWithinSpan(glyphs, 5, 6, src, 4, 11)).toBe(4); // before `a`
-    expect(caretOffsetWithinSpan(glyphs, 15, 6, src, 4, 11)).toBe(5); // before `v`
-    expect(caretOffsetWithinSpan(glyphs, 35, 6, src, 4, 11)).toBe(7); // before `r`
-    expect(caretOffsetWithinSpan(glyphs, -50, 6, src, 4, 11)).toBe(4); // clamps to span start
-    expect(caretOffsetWithinSpan(glyphs, 999, 6, src, 4, 11)).toBe(11); // clamps to span end
+    expect(caretOffsetWithinSpan(glyphs, 5, 6, src, 4, 11, false)).toBe(4); // before `a`
+    expect(caretOffsetWithinSpan(glyphs, 15, 6, src, 4, 11, false)).toBe(5); // before `v`
+    expect(caretOffsetWithinSpan(glyphs, 35, 6, src, 4, 11, false)).toBe(7); // before `r`
+    expect(caretOffsetWithinSpan(glyphs, -50, 6, src, 4, 11, false)).toBe(4); // clamps to span start
+    expect(caretOffsetWithinSpan(glyphs, 999, 6, src, 4, 11, false)).toBe(11); // clamps to span end
   });
 
   it('trims surrounding whitespace from an operator-gap span to the operator', () => {
@@ -326,20 +326,33 @@ describe('caretOffsetWithinSpan', () => {
     // single `⋅` glyph.
     const src = 'a   *  b';
     const glyphs = lineOf([['⋅', 20, 6]]); // box [20,26], centre x=23
-    expect(caretOffsetWithinSpan(glyphs, 21, 6, src, 1, 7)).toBe(4); // left half -> before `*`
-    expect(caretOffsetWithinSpan(glyphs, 25, 6, src, 1, 7)).toBe(5); // right half -> after `*`
+    expect(caretOffsetWithinSpan(glyphs, 21, 6, src, 1, 7, true)).toBe(4); // left half -> before `*`
+    expect(caretOffsetWithinSpan(glyphs, 25, 6, src, 1, 7, true)).toBe(5); // right half -> after `*`
+  });
+
+  it('trims grouping parentheses from an operator-gap span (e.g. `(a+b)*c`)', () => {
+    // source: "(a+b)*c"; the parser's operand ranges are `a+b` [1,4) and `c`
+    // [6,7), so the `*` gap is bytes [4,6) = ")*". The `)` is part of the
+    // left operand's grouping, not the operator, so it's trimmed: the `*` is
+    // byte 5.
+    const src = '(a+b)*c';
+    const glyphs = lineOf([['⋅', 30, 6]]); // box [30,36]
+    expect(caretOffsetWithinSpan(glyphs, 31, 6, src, 4, 6, true)).toBe(5); // before `*`
+    expect(caretOffsetWithinSpan(glyphs, 35, 6, src, 4, 6, true)).toBe(6); // after `*`
   });
 
   it('returns the trimmed span start when there are no glyphs or the span is empty', () => {
-    expect(caretOffsetWithinSpan([], 100, 50, 'a + b', 1, 4)).toBe(2); // " + " trims to start at byte 2
+    expect(caretOffsetWithinSpan([], 100, 50, 'a + b', 1, 4, true)).toBe(2); // " + " trims to start at byte 2
     const glyphs = lineOf([['x', 0, 10]]);
-    expect(caretOffsetWithinSpan(glyphs, 5, 6, '   ', 0, 3)).toBe(0); // all-whitespace span
+    expect(caretOffsetWithinSpan(glyphs, 5, 6, '   ', 0, 3, false)).toBe(0); // all-whitespace span
   });
 
-  it('interpolates when the glyph count and source-byte count differ, staying in bounds', () => {
+  it('keeps a function call’s trailing paren (eqnloc spans are not trimmed of parens)', () => {
     // source: "min(a, b)" [0,9) but KaTeX renders 8 glyphs (the space after the
     // comma is dropped); a click on the function name / parens lands roughly
-    // right and never escapes the span.
+    // right and never escapes the span -- and the trailing `)` is *not*
+    // trimmed (this is a node span, not an operator gap), so a far-right click
+    // lands after it at byte 9.
     const src = 'min(a, b)';
     const glyphs = lineOf([
       ['m', 0, 10],
@@ -351,10 +364,10 @@ describe('caretOffsetWithinSpan', () => {
       ['b', 60, 10],
       [')', 70, 10],
     ]);
-    expect(caretOffsetWithinSpan(glyphs, -1, 6, src, 0, 9)).toBe(0);
-    expect(caretOffsetWithinSpan(glyphs, 999, 6, src, 0, 9)).toBe(9);
+    expect(caretOffsetWithinSpan(glyphs, -1, 6, src, 0, 9, false)).toBe(0);
+    expect(caretOffsetWithinSpan(glyphs, 999, 6, src, 0, 9, false)).toBe(9);
     for (const x of [5, 25, 45, 65, 79]) {
-      const off = caretOffsetWithinSpan(glyphs, x, 6, src, 0, 9);
+      const off = caretOffsetWithinSpan(glyphs, x, 6, src, 0, 9, false);
       expect(off).toBeGreaterThanOrEqual(0);
       expect(off).toBeLessThanOrEqual(9);
     }

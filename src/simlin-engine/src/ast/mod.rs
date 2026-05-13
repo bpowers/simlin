@@ -335,6 +335,43 @@ fn paren_if_necessary1(parent: &Expr2, child: &Expr2, is_right_child: bool, eqn:
     if needs { format!("({eqn})") } else { eqn }
 }
 
+/// How a binary operator is laid out in LaTeX. Most are a simple infix token
+/// (`{l} <token> {r}`); exponentiation stacks the right operand as a
+/// superscript and division uses `\frac`, neither of which has a single
+/// operator glyph. Shared by every LaTeX-rendering path so the operator
+/// strings can't drift between them.
+enum BinaryOpLatex {
+    Infix(&'static str),
+    Superscript,
+    Fraction,
+}
+
+/// LaTeX rendering for a binary operator. The tokens are chosen to be valid in
+/// math mode and idiomatic: `mod` -> `\bmod` (`%` is the TeX comment
+/// character, so the previous rendering silently ate the right operand),
+/// `and`/`or` -> `\land`/`\lor` (`&` is an alignment tab outside an array
+/// environment; `||` renders as bare bars), and the comparisons use the
+/// proper relation symbols (`\neq`, `\geq`, `\leq`).
+fn binary_op_latex(op: BinaryOp) -> BinaryOpLatex {
+    use BinaryOpLatex::{Fraction, Infix, Superscript};
+    match op {
+        BinaryOp::Add => Infix("+"),
+        BinaryOp::Sub => Infix("-"),
+        BinaryOp::Mul => Infix("\\cdot"),
+        BinaryOp::Exp => Superscript,
+        BinaryOp::Div => Fraction,
+        BinaryOp::Mod => Infix("\\bmod"),
+        BinaryOp::Gt => Infix(">"),
+        BinaryOp::Lt => Infix("<"),
+        BinaryOp::Gte => Infix("\\geq"),
+        BinaryOp::Lte => Infix("\\leq"),
+        BinaryOp::Eq => Infix("="),
+        BinaryOp::Neq => Infix("\\neq"),
+        BinaryOp::And => Infix("\\land"),
+        BinaryOp::Or => Infix("\\lor"),
+    }
+}
+
 /// Check whether a canonicalized identifier needs double-quoting to be
 /// re-parseable.  Names containing characters outside XID_Start/XID_Continue
 /// (like `$`, `⁚`, `/`) must be quoted.
@@ -666,27 +703,11 @@ impl LatexVisitor {
             Expr2::Op2(op, l, r, _, _) => {
                 let l = paren_if_necessary1(expr, l, false, self.walk(l));
                 let r = paren_if_necessary1(expr, r, true, self.walk(r));
-                let op: &str = match op {
-                    BinaryOp::Add => "+",
-                    BinaryOp::Sub => "-",
-                    BinaryOp::Exp => {
-                        return format!("{l}^{{{r}}}");
-                    }
-                    BinaryOp::Mul => "\\cdot",
-                    BinaryOp::Div => {
-                        return format!("\\frac{{{l}}}{{{r}}}");
-                    }
-                    BinaryOp::Mod => "%",
-                    BinaryOp::Gt => ">",
-                    BinaryOp::Lt => "<",
-                    BinaryOp::Gte => ">=",
-                    BinaryOp::Lte => "<=",
-                    BinaryOp::Eq => "=",
-                    BinaryOp::Neq => "!=",
-                    BinaryOp::And => "&&",
-                    BinaryOp::Or => "||",
-                };
-                format!("{l} {op} {r}")
+                match binary_op_latex(*op) {
+                    BinaryOpLatex::Infix(token) => format!("{l} {token} {r}"),
+                    BinaryOpLatex::Superscript => format!("{l}^{{{r}}}"),
+                    BinaryOpLatex::Fraction => format!("\\frac{{{l}}}{{{r}}}"),
+                }
             }
             Expr2::If(cond, t, f, _, _) => {
                 let cond = self.walk(cond);
@@ -750,33 +771,26 @@ pub fn latex_eqn_expr0(expr: &Expr0) -> String {
                 .collect();
             format!("{id}[{}]", rendered.join(", "))
         }
-        Expr0::Op1(op, inner, _) => {
-            let inner = latex_eqn_expr0(inner);
-            match op {
-                UnaryOp::Positive => format!("+{inner}"),
-                UnaryOp::Negative => format!("-{inner}"),
-                UnaryOp::Not => format!("\\neg {inner}"),
-                UnaryOp::Transpose => format!("{inner}^T"),
+        Expr0::Op1(op, inner_expr, _) => match op {
+            UnaryOp::Transpose => format!("{}^T", latex_eqn_expr0(inner_expr)),
+            _ => {
+                let inner =
+                    paren_if_necessary(expr, inner_expr, false, latex_eqn_expr0(inner_expr));
+                match op {
+                    UnaryOp::Positive => format!("+{inner}"),
+                    UnaryOp::Negative => format!("-{inner}"),
+                    UnaryOp::Not => format!("\\neg {inner}"),
+                    UnaryOp::Transpose => unreachable!(), // handled above
+                }
             }
-        }
+        },
         Expr0::Op2(op, l, r, _) => {
-            let l = latex_eqn_expr0(l);
-            let r = latex_eqn_expr0(r);
-            match op {
-                BinaryOp::Add => format!("{l} + {r}"),
-                BinaryOp::Sub => format!("{l} - {r}"),
-                BinaryOp::Exp => format!("{l}^{{{r}}}"),
-                BinaryOp::Mul => format!("{l} \\cdot {r}"),
-                BinaryOp::Div => format!("\\frac{{{l}}}{{{r}}}"),
-                BinaryOp::Mod => format!("{l} % {r}"),
-                BinaryOp::Gt => format!("{l} > {r}"),
-                BinaryOp::Lt => format!("{l} < {r}"),
-                BinaryOp::Gte => format!("{l} >= {r}"),
-                BinaryOp::Lte => format!("{l} <= {r}"),
-                BinaryOp::Eq => format!("{l} = {r}"),
-                BinaryOp::Neq => format!("{l} != {r}"),
-                BinaryOp::And => format!("{l} && {r}"),
-                BinaryOp::Or => format!("{l} || {r}"),
+            let l = paren_if_necessary(expr, l, false, latex_eqn_expr0(l));
+            let r = paren_if_necessary(expr, r, true, latex_eqn_expr0(r));
+            match binary_op_latex(*op) {
+                BinaryOpLatex::Infix(token) => format!("{l} {token} {r}"),
+                BinaryOpLatex::Superscript => format!("{l}^{{{r}}}"),
+                BinaryOpLatex::Fraction => format!("\\frac{{{l}}}{{{r}}}"),
             }
         }
         Expr0::If(cond, t, f, _) => {
@@ -793,13 +807,28 @@ pub fn latex_eqn_expr0(expr: &Expr0) -> String {
     }
 }
 
-/// Wrap `inner` in a KaTeX `\htmlData{eqnloc=START_END}` annotation. KaTeX
-/// renders this as a span carrying `data-eqnloc="START_END"`, giving the
+/// Wrap `inner` in a KaTeX `\htmlData{<attr>=START_END}` annotation. KaTeX
+/// renders this as a span carrying `data-<attr>="START_END"`, giving the
 /// half-open byte range `[START, END)` of the source equation text that the
-/// span covers. The equation-preview click handler reads this back to place
-/// the caret precisely.
-fn latex_html_data(start: u16, end: u16, inner: &str) -> String {
-    format!("\\htmlData{{eqnloc={start}_{end}}}{{{inner}}}")
+/// span covers. `attr` is `eqnloc` for a syntax node (identifier, call,
+/// sub-expression …) or `oploc` for the gap around an operator token -- the
+/// distinction tells the equation-preview click handler whether the range may
+/// have grouping parentheses at its edges to trim past. See
+/// [`HtmlDataAttr`].
+enum HtmlDataAttr {
+    /// `data-eqnloc`: the byte range of a syntax node.
+    Node,
+    /// `data-oploc`: the byte range *between two operands*, holding an operator
+    /// token plus any surrounding whitespace and grouping parentheses.
+    Op,
+}
+
+fn latex_html_data(attr: HtmlDataAttr, start: u16, end: u16, inner: &str) -> String {
+    let name = match attr {
+        HtmlDataAttr::Node => "eqnloc",
+        HtmlDataAttr::Op => "oploc",
+    };
+    format!("\\htmlData{{{name}={start}_{end}}}{{{inner}}}")
 }
 
 /// Like [`latex_eqn_expr0`], but every rendered node is wrapped in a
@@ -853,47 +882,45 @@ pub fn latex_eqn_expr0_annotated(expr: &Expr0) -> String {
                 .collect();
             format!("{id}[{}]", rendered.join(", "))
         }
-        Expr0::Op1(op, inner_expr, _) => {
-            let inner_rendered = latex_eqn_expr0_annotated(inner_expr);
-            match op {
-                UnaryOp::Transpose => format!("{inner_rendered}^T"),
-                _ => {
-                    let op_str: &str = match op {
-                        UnaryOp::Positive => "+",
-                        UnaryOp::Negative => "-",
-                        UnaryOp::Not => "\\neg ",
-                        UnaryOp::Transpose => unreachable!(), // handled above
-                    };
-                    // the operator token sits in [Op1.start, operand.start)
-                    let op_anno = latex_html_data(loc.start, inner_expr.get_loc().start, op_str);
-                    format!("{op_anno}{inner_rendered}")
-                }
+        Expr0::Op1(op, inner_expr, _) => match op {
+            UnaryOp::Transpose => format!("{}^T", latex_eqn_expr0_annotated(inner_expr)),
+            _ => {
+                let op_str: &str = match op {
+                    UnaryOp::Positive => "+",
+                    UnaryOp::Negative => "-",
+                    UnaryOp::Not => "\\neg ",
+                    UnaryOp::Transpose => unreachable!(), // handled above
+                };
+                // the operator token sits somewhere in [Op1.start, operand.start)
+                let op_anno = latex_html_data(
+                    HtmlDataAttr::Op,
+                    loc.start,
+                    inner_expr.get_loc().start,
+                    op_str,
+                );
+                let inner_rendered = paren_if_necessary(
+                    expr,
+                    inner_expr,
+                    false,
+                    latex_eqn_expr0_annotated(inner_expr),
+                );
+                format!("{op_anno}{inner_rendered}")
             }
-        }
+        },
         Expr0::Op2(op, l, r, _) => {
-            let l_rendered = latex_eqn_expr0_annotated(l);
-            let r_rendered = latex_eqn_expr0_annotated(r);
-            match op {
-                BinaryOp::Exp => format!("{l_rendered}^{{{r_rendered}}}"),
-                BinaryOp::Div => format!("\\frac{{{l_rendered}}}{{{r_rendered}}}"),
-                _ => {
-                    let op_str: &str = match op {
-                        BinaryOp::Add => "+",
-                        BinaryOp::Sub => "-",
-                        BinaryOp::Mul => "\\cdot",
-                        BinaryOp::Mod => "%",
-                        BinaryOp::Gt => ">",
-                        BinaryOp::Lt => "<",
-                        BinaryOp::Gte => ">=",
-                        BinaryOp::Lte => "<=",
-                        BinaryOp::Eq => "=",
-                        BinaryOp::Neq => "!=",
-                        BinaryOp::And => "&&",
-                        BinaryOp::Or => "||",
-                        BinaryOp::Exp | BinaryOp::Div => unreachable!(), // handled above
-                    };
-                    // the operator token sits in [L.end, R.start)
-                    let op_anno = latex_html_data(l.get_loc().end, r.get_loc().start, op_str);
+            let l_rendered = paren_if_necessary(expr, l, false, latex_eqn_expr0_annotated(l));
+            let r_rendered = paren_if_necessary(expr, r, true, latex_eqn_expr0_annotated(r));
+            match binary_op_latex(*op) {
+                BinaryOpLatex::Superscript => format!("{l_rendered}^{{{r_rendered}}}"),
+                BinaryOpLatex::Fraction => format!("\\frac{{{l_rendered}}}{{{r_rendered}}}"),
+                BinaryOpLatex::Infix(token) => {
+                    // the operator token sits somewhere in [L.end, R.start)
+                    let op_anno = latex_html_data(
+                        HtmlDataAttr::Op,
+                        l.get_loc().end,
+                        r.get_loc().start,
+                        token,
+                    );
                     format!("{l_rendered} {op_anno} {r_rendered}")
                 }
             }
@@ -910,7 +937,64 @@ pub fn latex_eqn_expr0_annotated(expr: &Expr0) -> String {
             )
         }
     };
-    latex_html_data(loc.start, loc.end, &inner)
+    latex_html_data(HtmlDataAttr::Node, loc.start, loc.end, &inner)
+}
+
+#[test]
+fn test_latex_eqn_binary_op_strings() {
+    use crate::common::Ident;
+    // Every binary operator that lacks a clean source-syntax-equals-TeX token
+    // must render as something valid in math mode. Regression: `mod` used to
+    // render as `%` (the TeX comment character, which ate the right operand);
+    // `and`/`or` as `&&`/`||` (an alignment tab / bare bars).
+    let bin = |op| {
+        let l = Box::new(Expr2::Var(Ident::new("a"), None, Loc::new(0, 1)));
+        let r = Box::new(Expr2::Var(Ident::new("b"), None, Loc::new(2, 3)));
+        latex_eqn(&Expr2::Op2(op, l, r, None, Loc::new(0, 3)))
+    };
+    assert_eq!("\\mathrm{a} + \\mathrm{b}", bin(BinaryOp::Add));
+    assert_eq!("\\mathrm{a} - \\mathrm{b}", bin(BinaryOp::Sub));
+    assert_eq!("\\mathrm{a} \\cdot \\mathrm{b}", bin(BinaryOp::Mul));
+    assert_eq!("\\mathrm{a} \\bmod \\mathrm{b}", bin(BinaryOp::Mod));
+    assert_eq!("\\mathrm{a}^{\\mathrm{b}}", bin(BinaryOp::Exp));
+    assert_eq!("\\frac{\\mathrm{a}}{\\mathrm{b}}", bin(BinaryOp::Div));
+    assert_eq!("\\mathrm{a} > \\mathrm{b}", bin(BinaryOp::Gt));
+    assert_eq!("\\mathrm{a} < \\mathrm{b}", bin(BinaryOp::Lt));
+    assert_eq!("\\mathrm{a} \\geq \\mathrm{b}", bin(BinaryOp::Gte));
+    assert_eq!("\\mathrm{a} \\leq \\mathrm{b}", bin(BinaryOp::Lte));
+    assert_eq!("\\mathrm{a} = \\mathrm{b}", bin(BinaryOp::Eq));
+    assert_eq!("\\mathrm{a} \\neq \\mathrm{b}", bin(BinaryOp::Neq));
+    assert_eq!("\\mathrm{a} \\land \\mathrm{b}", bin(BinaryOp::And));
+    assert_eq!("\\mathrm{a} \\lor \\mathrm{b}", bin(BinaryOp::Or));
+}
+
+#[test]
+fn test_latex_eqn_expr0() {
+    use crate::lexer::LexerType;
+    let render =
+        |eqn: &str| latex_eqn_expr0(&Expr0::new(eqn, LexerType::Equation).unwrap().unwrap());
+
+    // the fixed operator tokens (same set as test_latex_eqn_binary_op_strings,
+    // but via the Expr0 path)
+    assert_eq!("\\mathrm{a} \\bmod \\mathrm{b}", render("a mod b"));
+    assert_eq!("\\mathrm{a} \\land \\mathrm{b}", render("a and b"));
+    assert_eq!("\\mathrm{a} \\lor \\mathrm{b}", render("a or b"));
+    assert_eq!("\\mathrm{a} \\neq \\mathrm{b}", render("a <> b"));
+    assert_eq!("\\mathrm{a} \\geq \\mathrm{b}", render("a >= b"));
+    assert_eq!("\\mathrm{a} \\leq \\mathrm{b}", render("a <= b"));
+
+    // precedence-preserving parentheses: a lower-precedence operand of a
+    // higher-precedence operator (or of a unary operator) must be parenthesized
+    // so the rendering means the same thing as the source.
+    assert_eq!(
+        "(\\mathrm{a} + \\mathrm{b}) \\cdot \\mathrm{c}",
+        render("(a + b) * c")
+    );
+    assert_eq!("-(\\mathrm{a} + \\mathrm{b})", render("-(a + b)"));
+    assert_eq!(
+        "\\mathrm{a} - (\\mathrm{b} - \\mathrm{c})",
+        render("a - (b - c)")
+    );
 }
 
 #[test]
@@ -1019,31 +1103,46 @@ fn test_latex_eqn_expr0_annotated() {
 
     let parse = |eqn: &str| Expr0::new(eqn, LexerType::Equation).unwrap().unwrap();
 
-    // `incidents * avg` -- identifiers `[0,9)` and `[12,15)`, the `*` operator
-    // annotation spans the gap " * " (`[9,12)`).
+    // `incidents * avg` -- identifiers get `eqnloc`; the `*` operator gap " * "
+    // (`[9,12)`) gets `oploc`, which the consumer trims to the `\cdot` itself.
     assert_eq!(
-        "\\htmlData{eqnloc=0_15}{\\htmlData{eqnloc=0_9}{\\mathrm{incidents}} \\htmlData{eqnloc=9_12}{\\cdot} \\htmlData{eqnloc=12_15}{\\mathrm{avg}}}",
+        "\\htmlData{eqnloc=0_15}{\\htmlData{eqnloc=0_9}{\\mathrm{incidents}} \\htmlData{oploc=9_12}{\\cdot} \\htmlData{eqnloc=12_15}{\\mathrm{avg}}}",
         latex_eqn_expr0_annotated(&parse("incidents * avg"))
     );
 
-    // `not running` -- the `\neg` glyph's annotation spans `[0,4)` ("not ");
-    // the consumer trims that to "not" for caret placement.
+    // `not running` -- the `\neg` glyph's `oploc` spans `[0,4)` ("not "); the
+    // consumer trims that to "not" for caret placement.
     assert_eq!(
-        "\\htmlData{eqnloc=0_11}{\\htmlData{eqnloc=0_4}{\\neg }\\htmlData{eqnloc=4_11}{\\mathrm{running}}}",
+        "\\htmlData{eqnloc=0_11}{\\htmlData{oploc=0_4}{\\neg }\\htmlData{eqnloc=4_11}{\\mathrm{running}}}",
         latex_eqn_expr0_annotated(&parse("not running"))
     );
 
     // identifier underscores are escaped as `\_` inside `\mathrm`; the `+`
-    // operator's annotation spans the gap " + " (`[3,6)`).
+    // operator gap " + " (`[3,6)`) gets `oploc`.
     assert_eq!(
-        "\\htmlData{eqnloc=0_7}{\\htmlData{eqnloc=0_3}{\\mathrm{a\\_b}} \\htmlData{eqnloc=3_6}{+} \\htmlData{eqnloc=6_7}{\\mathrm{c}}}",
+        "\\htmlData{eqnloc=0_7}{\\htmlData{eqnloc=0_3}{\\mathrm{a\\_b}} \\htmlData{oploc=3_6}{+} \\htmlData{eqnloc=6_7}{\\mathrm{c}}}",
         latex_eqn_expr0_annotated(&parse("a_b + c"))
     );
 
-    // function call -- each argument is itself annotated.
+    // function call -- each argument is itself annotated; the call's range
+    // (`eqnloc`, not `oploc`) includes the closing paren, which must not be
+    // trimmed.
     assert_eq!(
         "\\htmlData{eqnloc=0_9}{\\operatorname{min}(\\htmlData{eqnloc=4_5}{\\mathrm{a}}, \\htmlData{eqnloc=7_8}{\\mathrm{b}})}",
         latex_eqn_expr0_annotated(&parse("min(a, b)"))
+    );
+
+    // a fixed operator (`mod` -> `\bmod`); its `oploc` spans the gap " mod "
+    assert_eq!(
+        "\\htmlData{eqnloc=0_7}{\\htmlData{eqnloc=0_1}{\\mathrm{a}} \\htmlData{oploc=1_6}{\\bmod} \\htmlData{eqnloc=6_7}{\\mathrm{b}}}",
+        latex_eqn_expr0_annotated(&parse("a mod b"))
+    );
+
+    // precedence parentheses are added outside the inner node's annotation;
+    // the outer `*`'s `oploc` (`[6,10)` = ") * ") will be trimmed past the `)`.
+    assert_eq!(
+        "\\htmlData{eqnloc=1_11}{(\\htmlData{eqnloc=1_6}{\\htmlData{eqnloc=1_2}{\\mathrm{a}} \\htmlData{oploc=2_5}{+} \\htmlData{eqnloc=5_6}{\\mathrm{b}}}) \\htmlData{oploc=6_10}{\\cdot} \\htmlData{eqnloc=10_11}{\\mathrm{c}}}",
+        latex_eqn_expr0_annotated(&parse("(a + b) * c"))
     );
 }
 

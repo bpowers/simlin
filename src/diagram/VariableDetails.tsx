@@ -162,9 +162,9 @@ function collectRenderedGlyphs(root: Element): RenderedGlyph[] {
   return glyphs;
 }
 
-// Parse a `data-eqnloc="START_END"` attribute value (emitted by the engine's
-// annotated LaTeX) into a `[start, end)` byte range in the equation text.
-function parseEqnloc(value: string | undefined): readonly [number, number] | undefined {
+// Parse a `data-eqnloc`/`data-oploc` attribute value ("START_END", emitted by
+// the engine's annotated LaTeX) into a `[start, end)` byte range.
+function parseLocAttr(value: string | undefined): readonly [number, number] | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -174,10 +174,11 @@ function parseEqnloc(value: string | undefined): readonly [number, number] | und
 
 // Map a click on the equation preview to a caret offset in `equationStr`.
 // Primary path: find the innermost source-annotated span the click landed in
-// (`data-eqnloc`) and resolve the click within it. Fallback: the rendered
-// LaTeX has no annotations (engine produced none; preview shows raw text), so
-// reconstruct from the glyph boxes -- or, if KaTeX rendered nothing
-// measurable, a coarse proportional mapping over the preview's content box.
+// (`data-eqnloc` for a syntax node, `data-oploc` for an operator gap) and
+// resolve the click within it. Fallback: the rendered LaTeX has no annotations
+// (engine produced none; preview shows raw text), so reconstruct from the
+// glyph boxes -- or, if KaTeX rendered nothing measurable, a coarse
+// proportional mapping over the preview's content box.
 function caretOffsetForPreviewClick(
   host: HTMLElement,
   clicked: Element | null,
@@ -185,12 +186,13 @@ function caretOffsetForPreviewClick(
   clientY: number,
   equationStr: string,
 ): number {
-  const annotated = clicked?.closest('[data-eqnloc]') ?? null;
+  const annotated = clicked?.closest('[data-eqnloc],[data-oploc]') ?? null;
   if (annotated instanceof HTMLElement && host.contains(annotated)) {
-    const range = parseEqnloc(annotated.dataset.eqnloc);
+    const isOperatorGap = annotated.dataset.oploc !== undefined;
+    const range = parseLocAttr(isOperatorGap ? annotated.dataset.oploc : annotated.dataset.eqnloc);
     if (range) {
       const glyphs = collectRenderedGlyphs(annotated);
-      return caretOffsetWithinSpan(glyphs, clientX, clientY, equationStr, range[0], range[1]);
+      return caretOffsetWithinSpan(glyphs, clientX, clientY, equationStr, range[0], range[1], isOperatorGap);
     }
   }
   const glyphs = collectRenderedGlyphs(host);
