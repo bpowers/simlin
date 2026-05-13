@@ -463,10 +463,11 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
   non-uniform x-spacing can still misclassify (GH #536).
 - **Per-element graphical functions** (#502): when an *arrayed* source feeds an
   *arrayed* per-element graphical-function target -- each element of the target
-  has its own `Table` -- polarity is computed per element from `Table::elements()`
-  and the link is `Positive` / `Negative` only if every element agrees. The
-  multi-dimensional case (a per-element GF over more than one dimension) stays
-  conservatively `Unknown`.
+  has its own lookup `Table` (the per-element `tables` list on `Variable::Var`) --
+  the per-element table polarities are folded into one link polarity, and the link
+  is `Positive` / `Negative` only if every element agrees. The multi-dimensional
+  case (a per-element GF over more than one dimension) stays conservatively
+  `Unknown`.
 - **Non-decreasing builtins**: `EXP`, `LN`, `LOG10`, `SQRT`, `ARCTAN`, `INT` --
   propagate the inner expression's polarity unchanged
 - **Max/Min (two-arg)**: Non-decreasing in each argument; if one operand returns
