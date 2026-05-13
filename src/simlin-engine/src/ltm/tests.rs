@@ -1125,6 +1125,270 @@ fn test_lookup_table_polarity_in_links() {
     );
 }
 
+/// A continuous graphical function over x = [0, 1, 2, ...] with the given
+/// y-points; used to build per-element GF fixtures for the #502 tests.
+#[cfg(test)]
+fn continuous_gf(y_points: Vec<f64>) -> crate::datamodel::GraphicalFunction {
+    let n = y_points.len();
+    let y_min = y_points.iter().copied().fold(f64::INFINITY, f64::min);
+    let y_max = y_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    crate::datamodel::GraphicalFunction {
+        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+        x_points: Some((0..n).map(|i| i as f64).collect()),
+        y_points,
+        x_scale: crate::datamodel::GraphicalFunctionScale {
+            min: 0.0,
+            max: (n.saturating_sub(1)) as f64,
+        },
+        y_scale: crate::datamodel::GraphicalFunctionScale {
+            min: y_min,
+            max: y_max,
+        },
+    }
+}
+
+/// A per-element graphical-function aux: `ident[dim]` whose i-th element has
+/// the i-th GF in `element_gfs` (paired with `elements` positionally). Each
+/// element's value-equation is the placeholder `"0"` (the GF is what the
+/// `LOOKUP` builtin reads, not the value).
+#[cfg(test)]
+fn per_element_gf_aux(
+    ident: &str,
+    dim: &str,
+    elements: &[&str],
+    element_gfs: Vec<crate::datamodel::GraphicalFunction>,
+) -> crate::datamodel::Variable {
+    let arrayed = elements
+        .iter()
+        .zip(element_gfs)
+        .map(|(elem, gf)| (elem.to_string(), "0".to_string(), None, Some(gf)))
+        .collect();
+    crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+        ident: ident.to_string(),
+        equation: crate::datamodel::Equation::Arrayed(vec![dim.to_string()], arrayed, None, false),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: crate::datamodel::Compat::default(),
+    })
+}
+
+/// An apply-to-all aux `ident[dim] = equation`.
+#[cfg(test)]
+fn arrayed_aux(ident: &str, dim: &str, equation: &str) -> crate::datamodel::Variable {
+    crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+        ident: ident.to_string(),
+        equation: crate::datamodel::Equation::ApplyToAll(
+            vec![dim.to_string()],
+            equation.to_string(),
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: crate::datamodel::Compat::default(),
+    })
+}
+
+/// Build a single-model `datamodel::Project` with one named dimension and the
+/// given variables, then sync it and return `compute_link_polarities`'s
+/// variable-level `(from, to) -> LinkPolarity` map.
+#[cfg(test)]
+fn link_polarities_for(
+    dim_name: &str,
+    elements: &[&str],
+    variables: Vec<crate::datamodel::Variable>,
+) -> HashMap<(String, String), LinkPolarity> {
+    let project = crate::datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: sim_specs_with_units("months"),
+        dimensions: vec![crate::datamodel::Dimension::named(
+            dim_name.to_string(),
+            elements.iter().map(|s| s.to_string()).collect(),
+        )],
+        units: vec![],
+        models: vec![x_model("main", variables)],
+        source: Default::default(),
+        ai_information: None,
+    };
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+    compute_link_polarities(&db, model, result.project)
+}
+
+#[test]
+fn test_per_element_gf_link_polarity_agree() {
+    // AC7.1: effect[Region] = LOOKUP(curve[Region], dose[Region]) where every
+    // region's curve table is monotone increasing -> the dose -> effect link
+    // gets Positive (dose's Positive arg polarity composed with the agreeing
+    // Positive table polarity), not Unknown.
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        &["nyc", "boston"],
+        vec![
+            continuous_gf(vec![0.0, 1.0, 2.0]),
+            continuous_gf(vec![0.0, 2.0, 4.0]),
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        &["nyc", "boston"],
+        vec![
+            curve,
+            arrayed_aux("dose", "region", "5"),
+            arrayed_aux("effect", "region", "lookup(curve[region], dose[region])"),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect".to_string())],
+        LinkPolarity::Positive,
+        "per-element GF with monotone-agreeing tables -> Positive link"
+    );
+}
+
+#[test]
+fn test_per_element_gf_link_polarity_disagree() {
+    // AC7.2: same model but the regions' tables disagree on direction (NYC
+    // increasing, Boston decreasing) -> the per-element fold reports the
+    // direction disagreement -> Unknown link polarity.
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        &["nyc", "boston"],
+        vec![
+            continuous_gf(vec![0.0, 1.0, 2.0]),
+            continuous_gf(vec![4.0, 2.0, 0.0]),
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        &["nyc", "boston"],
+        vec![
+            curve,
+            arrayed_aux("dose", "region", "5"),
+            arrayed_aux("effect", "region", "lookup(curve[region], dose[region])"),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect".to_string())],
+        LinkPolarity::Unknown,
+        "per-element GF with disagreeing table directions -> Unknown link"
+    );
+}
+
+#[test]
+fn test_per_element_gf_link_polarity_fixed_index() {
+    // AC7.3: a scalar target indexing one element of the arrayed GF picks that
+    // element's specific table. curve[nyc]'s table is decreasing (so the
+    // dose -> effect link is Negative); curve[boston]'s is increasing (so the
+    // dose -> effect2 link is Positive) -- confirming the FixedIndex resolves
+    // the correct element.
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        &["nyc", "boston"],
+        vec![
+            continuous_gf(vec![4.0, 2.0, 0.0]),
+            continuous_gf(vec![0.0, 1.0, 2.0]),
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        &["nyc", "boston"],
+        vec![
+            curve,
+            x_aux("dose", "5", None),
+            x_aux("effect", "lookup(curve[nyc], dose)", None),
+            x_aux("effect2", "lookup(curve[boston], dose)", None),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect".to_string())],
+        LinkPolarity::Negative,
+        "LOOKUP(curve[nyc], dose) -> NYC's decreasing table -> Negative link"
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect2".to_string())],
+        LinkPolarity::Positive,
+        "LOOKUP(curve[boston], dose) -> Boston's increasing table -> Positive link"
+    );
+}
+
+#[test]
+fn test_per_element_gf_link_polarity_one_nonmonotone_element_ignored() {
+    // AC7.5: a per-element GF where one element's table is genuinely
+    // non-monotone (Boston: y = [0, 1, 0.3, 0.7] -> Unknown from
+    // analyze_graphical_function_polarity) but the rest are Positive. Per the
+    // Ast::Arrayed adopt-first-concrete fold semantics that
+    // fold_per_element_table_polarity mirrors, an Unknown among concretes is
+    // ignored, so the link polarity is Positive (not Unknown). (The "a
+    // genuinely non-monotone table still returns Unknown" criterion is about
+    // analyze_graphical_function_polarity itself -- the scalar-table case,
+    // covered by the #492 task -- not about flipping the whole link.)
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        &["nyc", "boston", "la"],
+        vec![
+            continuous_gf(vec![0.0, 1.0, 2.0]),
+            continuous_gf(vec![0.0, 1.0, 0.3, 0.7]),
+            continuous_gf(vec![0.0, 3.0, 6.0]),
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        &["nyc", "boston", "la"],
+        vec![
+            curve,
+            arrayed_aux("dose", "region", "5"),
+            arrayed_aux("effect", "region", "lookup(curve[region], dose[region])"),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect".to_string())],
+        LinkPolarity::Positive,
+        "one non-monotone element among Positive ones is ignored by the fold -> Positive link"
+    );
+}
+
+#[test]
+fn test_per_element_gf_link_polarity_bare_var_reference() {
+    // The "bare A2A written as Var" case: effect[Region] = LOOKUP(curve,
+    // dose[Region]) where `curve` is over Region but referenced bare (no
+    // subscript). Before this change the Lookup arm used only tables.first()
+    // (NYC's table) and would report Positive; aggregating over all element
+    // tables sees the NYC-increasing / Boston-decreasing disagreement -> the
+    // link polarity is Unknown.
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        &["nyc", "boston"],
+        vec![
+            continuous_gf(vec![0.0, 1.0, 2.0]),
+            continuous_gf(vec![4.0, 2.0, 0.0]),
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        &["nyc", "boston"],
+        vec![
+            curve,
+            arrayed_aux("dose", "region", "5"),
+            arrayed_aux("effect", "region", "lookup(curve, dose[region])"),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect".to_string())],
+        LinkPolarity::Unknown,
+        "bare per-element-GF reference aggregates all tables -> disagreement -> Unknown"
+    );
+}
+
 #[test]
 fn test_fishbanks_loops() {
     use crate::prost::Message;

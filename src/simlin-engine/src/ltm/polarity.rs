@@ -264,8 +264,17 @@ pub(super) fn analyze_expr_polarity_with_context(
                 LinkPolarity::Unknown
             }
         }
-        Expr2::App(crate::builtins::BuiltinFn::Lookup(table_expr, index_expr, _), _, _) => {
-            // Check if the argument contains our from_var
+        // All three lookup variants share the `(table_expr, index_expr, loc)`
+        // shape and the same polarity story: the result is non-decreasing in
+        // the index when the table is, so the link polarity is the argument's
+        // monotonicity composed with the table's.
+        Expr2::App(
+            crate::builtins::BuiltinFn::Lookup(table_expr, index_expr, _)
+            | crate::builtins::BuiltinFn::LookupForward(table_expr, index_expr, _)
+            | crate::builtins::BuiltinFn::LookupBackward(table_expr, index_expr, _),
+            _,
+            _,
+        ) => {
             let arg_polarity = analyze_expr_polarity_with_context(
                 index_expr,
                 from_var,
@@ -277,24 +286,9 @@ pub(super) fn analyze_expr_polarity_with_context(
                 return LinkPolarity::Unknown;
             }
 
-            // Try to find the table and analyze its monotonicity
-            // TODO: support Expr2::Subscript for subscripted lookup tables (per-element gf)
-            let table_name = match table_expr.as_ref() {
-                Expr2::Var(name, _, _) => Some(name.as_str()),
-                _ => None,
-            };
-
-            if let (Some(vars), Some(table_name)) = (variables, table_name)
-                && let Some(Variable::Var { tables, .. }) =
-                    vars.get(&*crate::common::canonicalize(table_name))
-                && let Some(t) = tables.first()
-            {
-                let table_polarity = analyze_graphical_function_polarity(t);
-                // Combine the polarities: composing argument monotonicity
-                // with table monotonicity is plain sign multiplication.
-                return arg_polarity.compose(table_polarity);
-            }
-            LinkPolarity::Unknown
+            // Composing argument monotonicity with table monotonicity is plain
+            // sign multiplication; an Unknown on either side absorbs.
+            arg_polarity.compose(lookup_table_polarity(table_expr, variables))
         }
         // Non-decreasing single-arg builtins: propagate inner polarity.
         // Int (floor) is a step function with discontinuities, but is still
@@ -674,5 +668,138 @@ pub(super) fn analyze_graphical_function_polarity(table: &crate::variable::Table
         LinkPolarity::Negative
     } else {
         LinkPolarity::Unknown
+    }
+}
+
+/// Aggregate the per-element graphical-function tables of an arrayed GF into a
+/// single link polarity, mirroring the `Ast::Arrayed` per-element fold in
+/// [`analyze_link_polarity`]: adopt the first concrete polarity, and if two
+/// elements disagree on *direction* (`Positive` vs `Negative`) the result is
+/// `Unknown`; an `Unknown` from a non-monotone (or empty placeholder) element
+/// among direction-agreeing ones is ignored, so the link stays concrete.
+fn fold_per_element_table_polarity(tables: &[crate::variable::Table]) -> LinkPolarity {
+    let mut polarity = LinkPolarity::Unknown;
+    for table in tables {
+        let table_polarity = analyze_graphical_function_polarity(table);
+        if polarity == LinkPolarity::Unknown {
+            polarity = table_polarity;
+        } else if polarity != table_polarity && table_polarity != LinkPolarity::Unknown {
+            return LinkPolarity::Unknown;
+        }
+    }
+    polarity
+}
+
+/// Polarity contributed by the graphical-function table named by a `LOOKUP`
+/// builtin's first argument: a bare `Var(gf)` reference (a scalar GF, or a
+/// whole-array reference to a per-element GF inside an apply-to-all body), or a
+/// subscripted `gf[idx]` reference (a `FixedIndex` element selecting one
+/// element's table, or a dimension-iterator over a per-element GF). The caller
+/// composes this with the index argument's monotonicity.
+///
+/// `ltm/polarity.rs` is *upstream* of `db_analysis.rs` (the module dependency
+/// runs `db_analysis -> crate::ltm`, not the reverse), so this can't reuse
+/// `classify_subscript_shape` / `RefShape` -- it classifies directly on
+/// `&[IndexExpr2]` using `Dimension::get_offset`. The classifier is *total*:
+/// every `IndexExpr2` variant and every `Expr2` table-expression form is
+/// handled, falling to `Unknown` for anything not statically resolvable (a user
+/// can write an arbitrary subscript), so there is deliberately no
+/// `unreachable!()` here.
+fn lookup_table_polarity(
+    table_expr: &Expr2,
+    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+) -> LinkPolarity {
+    let Some(variables) = variables else {
+        return LinkPolarity::Unknown;
+    };
+    match table_expr {
+        Expr2::Var(name, _, _) => {
+            let Some(var) = variables.get(&*crate::common::canonicalize(name.as_str())) else {
+                return LinkPolarity::Unknown;
+            };
+            let Variable::Var { tables, .. } = var else {
+                return LinkPolarity::Unknown;
+            };
+            // A bare reference to a per-element GF variable inside an
+            // apply-to-all body (`effect[D] = LOOKUP(curve, dose)` where
+            // `curve` is a per-element GF over `D`) reads every element's
+            // table, so aggregate their polarities the same way the
+            // `Ast::Arrayed` per-element fold does. A scalar GF -- or an
+            // arrayed variable carrying a single variable-level GF shared by
+            // all elements -- has one table; use it directly.
+            if var.get_dimensions().is_some() && tables.len() > 1 {
+                fold_per_element_table_polarity(tables)
+            } else {
+                tables
+                    .first()
+                    .map(analyze_graphical_function_polarity)
+                    .unwrap_or(LinkPolarity::Unknown)
+            }
+        }
+        Expr2::Subscript(name, indices, _, _) => {
+            let Some(var) = variables.get(&*crate::common::canonicalize(name.as_str())) else {
+                return LinkPolarity::Unknown;
+            };
+            let Variable::Var { tables, .. } = var else {
+                return LinkPolarity::Unknown;
+            };
+            let Some(dims) = var.get_dimensions() else {
+                return LinkPolarity::Unknown;
+            };
+            // Conservative for multi-dimensional GFs: resolving a joint table
+            // offset would need row-major flattening of the per-element table
+            // list, which the current LTM polarity cases don't require.
+            let [dim] = dims else {
+                return LinkPolarity::Unknown;
+            };
+            let [index] = indices.as_slice() else {
+                return LinkPolarity::Unknown;
+            };
+            match index {
+                // A whole-extent / positional / range subscript can't pick a
+                // single element's table statically.
+                IndexExpr2::Wildcard(_)
+                | IndexExpr2::StarRange(_, _)
+                | IndexExpr2::DimPosition(_, _)
+                | IndexExpr2::Range(_, _, _) => LinkPolarity::Unknown,
+                IndexExpr2::Expr(Expr2::Var(elem, _, _)) => {
+                    if let Some(offset) = dim.get_offset(
+                        &crate::common::CanonicalElementName::from_raw(elem.as_str()),
+                    ) {
+                        // `LOOKUP(curve[NYC], x)`: the polarity of NYC's
+                        // specific table.
+                        tables
+                            .get(offset)
+                            .map(analyze_graphical_function_polarity)
+                            .unwrap_or(LinkPolarity::Unknown)
+                    } else if elem.as_str() == dim.name() {
+                        // `curve[D]` inside `effect[D] = LOOKUP(curve[D], ..)`:
+                        // a dimension-iterator over the per-element GF. The
+                        // link is determinate only if every element's table
+                        // agrees on direction. A mapped iterator over a
+                        // *different* dimension would need a `DimensionsContext`
+                        // to resolve (not available here), so it stays Unknown.
+                        fold_per_element_table_polarity(tables)
+                    } else {
+                        LinkPolarity::Unknown
+                    }
+                }
+                IndexExpr2::Expr(Expr2::Const(text, _, _)) => {
+                    // A 1-based integer index into the GF source's dimension.
+                    text.trim()
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|&n| n >= 1 && n <= dim.len())
+                        .and_then(|n| tables.get(n - 1))
+                        .map(analyze_graphical_function_polarity)
+                        .unwrap_or(LinkPolarity::Unknown)
+                }
+                // Any other index expression (a computed index, etc.) isn't
+                // statically resolvable to one element's table.
+                IndexExpr2::Expr(_) => LinkPolarity::Unknown,
+            }
+        }
+        // A computed table expression can't occur for a real GF, but be total.
+        _ => LinkPolarity::Unknown,
     }
 }
