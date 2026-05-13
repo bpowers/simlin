@@ -26,7 +26,7 @@ import { defined, Series } from '@simlin/core/common';
 import { at } from '@simlin/core/collections';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor';
-import { caretOffsetForClick, RenderedGlyph } from './equation-caret';
+import { caretOffsetForClick, caretOffsetWithinSpan, RenderedGlyph } from './equation-caret';
 import { LookupEditor } from './LookupEditor';
 import { errorCodeDescription } from '@simlin/engine';
 
@@ -122,24 +122,31 @@ function highlightErrors(
   return result;
 }
 
-// LaTeX provided by engine (Ast.to_latex); keep trivial passthrough fallback
+// LaTeX provided by engine (Ast::to_latex, with \htmlData{eqnloc=…} source
+// annotations). When the engine couldn't produce LaTeX, the preview falls back
+// to rendering the raw equation text (a trivial passthrough, no annotations).
 const passthroughLatex = (s: string) => s;
 
-// Walk the rendered KaTeX subtree of `host` (the equation preview <div>) and
-// return each visible glyph with its on-screen box. KaTeX often packs several
-// characters into a single span, so each character is measured with a
-// one-character Range. Only the `.katex-html` render tree is walked: the
-// MathML accessibility mirror (`.katex-mathml`) is clipped to a 1px box and
-// would yield bogus rects. This is the imperative-shell counterpart to the
-// pure caret-mapping logic in equation-caret.ts.
-function collectRenderedGlyphs(host: HTMLElement): RenderedGlyph[] {
+// KaTeX needs `trust` enabled to honor `\htmlData`. Scope it to that one
+// command so a user identifier that smuggled in a `\href`/`\url`/etc. is still
+// rejected; `\htmlData` only emits inert `data-*` attributes.
+const katexTrust = (context: { command: string }): boolean => context.command === '\\htmlData';
+
+// Walk the rendered KaTeX subtree under `root` and return each visible glyph
+// with its on-screen box. KaTeX often packs several characters into one span,
+// so each character is measured with a one-character Range. Text inside the
+// MathML accessibility mirror (`.katex-mathml`, clipped to a 1px box) is
+// skipped -- it would yield bogus rects. This is the imperative-shell
+// counterpart to the pure caret-mapping logic in equation-caret.ts. `root` is
+// either the whole preview <div> (fallback path) or a single
+// `\htmlData{eqnloc=…}` span (annotation path).
+function collectRenderedGlyphs(root: Element): RenderedGlyph[] {
   const glyphs: RenderedGlyph[] = [];
-  const htmlTree = host.querySelector('.katex-html');
-  if (!(htmlTree instanceof HTMLElement)) {
-    return glyphs;
-  }
-  const walker = document.createTreeWalker(htmlTree, NodeFilter.SHOW_TEXT);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    if (node.parentElement?.closest('.katex-mathml')) {
+      continue;
+    }
     const text = node.nodeValue ?? '';
     for (let i = 0; i < text.length; i++) {
       const range = document.createRange();
@@ -153,6 +160,50 @@ function collectRenderedGlyphs(host: HTMLElement): RenderedGlyph[] {
     }
   }
   return glyphs;
+}
+
+// Parse a `data-eqnloc="START_END"` attribute value (emitted by the engine's
+// annotated LaTeX) into a `[start, end)` byte range in the equation text.
+function parseEqnloc(value: string | undefined): readonly [number, number] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const m = /^(\d+)_(\d+)$/.exec(value);
+  return m ? [Number(m[1]), Number(m[2])] : undefined;
+}
+
+// Map a click on the equation preview to a caret offset in `equationStr`.
+// Primary path: find the innermost source-annotated span the click landed in
+// (`data-eqnloc`) and resolve the click within it. Fallback: the rendered
+// LaTeX has no annotations (engine produced none; preview shows raw text), so
+// reconstruct from the glyph boxes -- or, if KaTeX rendered nothing
+// measurable, a coarse proportional mapping over the preview's content box.
+function caretOffsetForPreviewClick(
+  host: HTMLElement,
+  clicked: Element | null,
+  clientX: number,
+  clientY: number,
+  equationStr: string,
+): number {
+  const annotated = clicked?.closest('[data-eqnloc]') ?? null;
+  if (annotated instanceof HTMLElement && host.contains(annotated)) {
+    const range = parseEqnloc(annotated.dataset.eqnloc);
+    if (range) {
+      const glyphs = collectRenderedGlyphs(annotated);
+      return caretOffsetWithinSpan(glyphs, clientX, clientY, equationStr, range[0], range[1]);
+    }
+  }
+  const glyphs = collectRenderedGlyphs(host);
+  if (glyphs.length > 0) {
+    return caretOffsetForClick(glyphs, clientX, clientY, equationStr);
+  }
+  const rect = host.getBoundingClientRect();
+  const style = window.getComputedStyle(host);
+  const padLeft = parseFloat(style.paddingLeft || '0');
+  const padRight = parseFloat(style.paddingRight || '0');
+  const usableWidth = Math.max(1, rect.width - padLeft - padRight);
+  const clickX = Math.max(0, Math.min(usableWidth, clientX - rect.left - padLeft));
+  return Math.max(0, Math.min(equationStr.length, Math.round((clickX / usableWidth) * equationStr.length)));
 }
 
 export class VariableDetails extends React.PureComponent<VariableDetailsProps, VariableDetailsState> {
@@ -367,18 +418,11 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
     let latexHTML = '';
     if (showPreview) {
       try {
-        let latex = this.state.latexEquation ?? passthroughLatex(equationStr);
-        // Hint line breaks after common binary operators and commas for nicer wrapping
-        const insertBreaks = (s: string): string =>
-          s
-            .replace(/\\cdot/g, '\\cdot\\allowbreak{} ')
-            .replace(/\\times/g, '\\times\\allowbreak{} ')
-            .replace(/\+/g, '+\\allowbreak{} ')
-            .replace(/-/g, '-\\allowbreak{} ')
-            .replace(/=/g, '=\\allowbreak{} ')
-            .replace(/,/g, ',\\allowbreak{} ');
-        latex = insertBreaks(latex);
-        latexHTML = katex.renderToString(latex, { throwOnError: false, displayMode: true });
+        const latex = this.state.latexEquation ?? passthroughLatex(equationStr);
+        // `displayMode` so it renders block-style; `trust` (scoped to
+        // \htmlData) so the engine's source-range annotations survive. Long
+        // equations wrap via the .eqnPreview CSS (overflow-wrap: anywhere).
+        latexHTML = katex.renderToString(latex, { throwOnError: false, displayMode: true, trust: katexTrust });
       } catch {
         // fall back to plain text
         latexHTML = '';
@@ -471,23 +515,8 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
 
   handlePreviewClick = (e: React.MouseEvent<HTMLDivElement>, equationStr: string): void => {
     const target = e.currentTarget as HTMLElement;
-    const glyphs = collectRenderedGlyphs(target);
-
-    let offset: number;
-    if (glyphs.length > 0) {
-      offset = caretOffsetForClick(glyphs, e.clientX, e.clientY, equationStr);
-    } else {
-      // KaTeX rendered nothing measurable (rare -- e.g. an empty equation, or
-      // a render error): fall back to a coarse proportional mapping over the
-      // preview's content box.
-      const rect = target.getBoundingClientRect();
-      const style = window.getComputedStyle(target);
-      const padLeft = parseFloat(style.paddingLeft || '0');
-      const padRight = parseFloat(style.paddingRight || '0');
-      const usableWidth = Math.max(1, rect.width - padLeft - padRight);
-      const clickX = Math.max(0, Math.min(usableWidth, e.clientX - rect.left - padLeft));
-      offset = Math.max(0, Math.min(equationStr.length, Math.round((clickX / usableWidth) * equationStr.length)));
-    }
+    const clicked = e.target instanceof Element ? e.target : null;
+    const offset = caretOffsetForPreviewClick(target, clicked, e.clientX, e.clientY, equationStr);
 
     this.setState({ editingEquation: true }, () => {
       // Focus and place the caret once the editable equation editor has rendered.

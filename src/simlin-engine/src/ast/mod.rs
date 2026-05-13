@@ -65,6 +65,17 @@ impl Ast<Expr0> {
             Ast::Arrayed(..) => "TODO(array)".to_owned(),
         }
     }
+
+    /// Render the equation as LaTeX with `\htmlData{eqnloc=…}` source-range
+    /// annotations on every node (see [`latex_eqn_expr0_annotated`]). Requires
+    /// KaTeX's `trust` option (scoped to `\htmlData`) to render.
+    pub fn to_latex_annotated(&self) -> String {
+        match self {
+            Ast::Scalar(expr) => latex_eqn_expr0_annotated(expr),
+            Ast::ApplyToAll(_, _expr) => "TODO(array)".to_owned(),
+            Ast::Arrayed(..) => "TODO(array)".to_owned(),
+        }
+    }
 }
 
 impl Ast<Expr2> {
@@ -782,6 +793,126 @@ pub fn latex_eqn_expr0(expr: &Expr0) -> String {
     }
 }
 
+/// Wrap `inner` in a KaTeX `\htmlData{eqnloc=START_END}` annotation. KaTeX
+/// renders this as a span carrying `data-eqnloc="START_END"`, giving the
+/// half-open byte range `[START, END)` of the source equation text that the
+/// span covers. The equation-preview click handler reads this back to place
+/// the caret precisely.
+fn latex_html_data(start: u16, end: u16, inner: &str) -> String {
+    format!("\\htmlData{{eqnloc={start}_{end}}}{{{inner}}}")
+}
+
+/// Like [`latex_eqn_expr0`], but every rendered node is wrapped in a
+/// `\htmlData{eqnloc=START_END}` annotation giving the byte range it covers
+/// in the source equation, and each binary/unary operator additionally gets
+/// an annotation spanning the gap between its operands -- the operator token
+/// plus any surrounding whitespace; the consumer trims that range to the
+/// operator itself. Exponentiation (superscript) and division (`\frac`) have
+/// no operator glyph, so they get only the whole-expression wrapper.
+///
+/// This is what the FFI's `simlin_model_get_latex_equation` returns; rendering
+/// the result requires enabling KaTeX's `trust` option, scoped to `\htmlData`.
+pub fn latex_eqn_expr0_annotated(expr: &Expr0) -> String {
+    let loc = expr.get_loc();
+    let inner = match expr {
+        Expr0::Const(s, n, _) => {
+            if n.is_nan() {
+                "\\mathrm{{NaN}}".to_owned()
+            } else {
+                s.clone()
+            }
+        }
+        Expr0::Var(raw, _) => {
+            let id = canonicalize(raw.as_str());
+            let id = str::replace(&id, "_", "\\_");
+            format!("\\mathrm{{{id}}}")
+        }
+        Expr0::App(UntypedBuiltinFn(name, args), _) => {
+            let rendered_args: Vec<String> = args.iter().map(latex_eqn_expr0_annotated).collect();
+            format!("\\operatorname{{{}}}({})", name, rendered_args.join(", "))
+        }
+        Expr0::Subscript(raw, indices, _) => {
+            let id = canonicalize(raw.as_str());
+            let rendered: Vec<String> = indices
+                .iter()
+                .map(|idx| match idx {
+                    IndexExpr0::Wildcard(_) => "*".to_string(),
+                    IndexExpr0::StarRange(id, _) => {
+                        format!("*:{}", canonicalize(id.as_str()))
+                    }
+                    IndexExpr0::Range(l, r, _) => {
+                        format!(
+                            "{}:{}",
+                            latex_eqn_expr0_annotated(l),
+                            latex_eqn_expr0_annotated(r)
+                        )
+                    }
+                    IndexExpr0::DimPosition(n, _) => format!("@{n}"),
+                    IndexExpr0::Expr(e) => latex_eqn_expr0_annotated(e),
+                })
+                .collect();
+            format!("{id}[{}]", rendered.join(", "))
+        }
+        Expr0::Op1(op, inner_expr, _) => {
+            let inner_rendered = latex_eqn_expr0_annotated(inner_expr);
+            match op {
+                UnaryOp::Transpose => format!("{inner_rendered}^T"),
+                _ => {
+                    let op_str: &str = match op {
+                        UnaryOp::Positive => "+",
+                        UnaryOp::Negative => "-",
+                        UnaryOp::Not => "\\neg ",
+                        UnaryOp::Transpose => unreachable!(), // handled above
+                    };
+                    // the operator token sits in [Op1.start, operand.start)
+                    let op_anno = latex_html_data(loc.start, inner_expr.get_loc().start, op_str);
+                    format!("{op_anno}{inner_rendered}")
+                }
+            }
+        }
+        Expr0::Op2(op, l, r, _) => {
+            let l_rendered = latex_eqn_expr0_annotated(l);
+            let r_rendered = latex_eqn_expr0_annotated(r);
+            match op {
+                BinaryOp::Exp => format!("{l_rendered}^{{{r_rendered}}}"),
+                BinaryOp::Div => format!("\\frac{{{l_rendered}}}{{{r_rendered}}}"),
+                _ => {
+                    let op_str: &str = match op {
+                        BinaryOp::Add => "+",
+                        BinaryOp::Sub => "-",
+                        BinaryOp::Mul => "\\cdot",
+                        BinaryOp::Mod => "%",
+                        BinaryOp::Gt => ">",
+                        BinaryOp::Lt => "<",
+                        BinaryOp::Gte => ">=",
+                        BinaryOp::Lte => "<=",
+                        BinaryOp::Eq => "=",
+                        BinaryOp::Neq => "!=",
+                        BinaryOp::And => "&&",
+                        BinaryOp::Or => "||",
+                        BinaryOp::Exp | BinaryOp::Div => unreachable!(), // handled above
+                    };
+                    // the operator token sits in [L.end, R.start)
+                    let op_anno = latex_html_data(l.get_loc().end, r.get_loc().start, op_str);
+                    format!("{l_rendered} {op_anno} {r_rendered}")
+                }
+            }
+        }
+        Expr0::If(cond, t, f, _) => {
+            let cond_r = latex_eqn_expr0_annotated(cond);
+            let t_r = latex_eqn_expr0_annotated(t);
+            let f_r = latex_eqn_expr0_annotated(f);
+            format!(
+                "\\begin{{cases}}
+                     {t_r} & \\text{{if }} {cond_r} \\\\
+                     {f_r} & \\text{{else}}
+                 \\end{{cases}}"
+            )
+        }
+    };
+    latex_html_data(loc.start, loc.end, &inner)
+}
+
 #[test]
 fn test_latex_eqn() {
     use crate::common::Ident;
@@ -879,6 +1010,40 @@ fn test_latex_eqn() {
             None,
             Loc::new(0, 14),
         ))
+    );
+}
+
+#[test]
+fn test_latex_eqn_expr0_annotated() {
+    use crate::lexer::LexerType;
+
+    let parse = |eqn: &str| Expr0::new(eqn, LexerType::Equation).unwrap().unwrap();
+
+    // `incidents * avg` -- identifiers `[0,9)` and `[12,15)`, the `*` operator
+    // annotation spans the gap " * " (`[9,12)`).
+    assert_eq!(
+        "\\htmlData{eqnloc=0_15}{\\htmlData{eqnloc=0_9}{\\mathrm{incidents}} \\htmlData{eqnloc=9_12}{\\cdot} \\htmlData{eqnloc=12_15}{\\mathrm{avg}}}",
+        latex_eqn_expr0_annotated(&parse("incidents * avg"))
+    );
+
+    // `not running` -- the `\neg` glyph's annotation spans `[0,4)` ("not ");
+    // the consumer trims that to "not" for caret placement.
+    assert_eq!(
+        "\\htmlData{eqnloc=0_11}{\\htmlData{eqnloc=0_4}{\\neg }\\htmlData{eqnloc=4_11}{\\mathrm{running}}}",
+        latex_eqn_expr0_annotated(&parse("not running"))
+    );
+
+    // identifier underscores are escaped as `\_` inside `\mathrm`; the `+`
+    // operator's annotation spans the gap " + " (`[3,6)`).
+    assert_eq!(
+        "\\htmlData{eqnloc=0_7}{\\htmlData{eqnloc=0_3}{\\mathrm{a\\_b}} \\htmlData{eqnloc=3_6}{+} \\htmlData{eqnloc=6_7}{\\mathrm{c}}}",
+        latex_eqn_expr0_annotated(&parse("a_b + c"))
+    );
+
+    // function call -- each argument is itself annotated.
+    assert_eq!(
+        "\\htmlData{eqnloc=0_9}{\\operatorname{min}(\\htmlData{eqnloc=4_5}{\\mathrm{a}}, \\htmlData{eqnloc=7_8}{\\mathrm{b}})}",
+        latex_eqn_expr0_annotated(&parse("min(a, b)"))
     );
 }
 

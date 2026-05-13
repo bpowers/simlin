@@ -5,22 +5,22 @@
 // Mapping a click on the rendered (KaTeX) equation preview back to a caret
 // offset in the editable equation text.
 //
-// The rendered equation is a *transformed* view of the source text -- `*`
-// becomes `\cdot`, `/` becomes a fraction, identifiers are lower-cased,
-// whitespace is dropped, etc. -- so we can't read the source offset directly
-// off the DOM. This module takes the glyphs the preview rendered (extracted by
-// the imperative shell, with their on-screen boxes) and:
+// Primary path: the engine's `Ast::to_latex` (used by the FFI) wraps every
+// node in a `\htmlData{eqnloc=START_END}` annotation carrying the source byte
+// range it covers, so KaTeX renders each atom inside a span with a
+// `data-eqnloc` attribute. The click handler finds the innermost annotated
+// span under the cursor and maps the click within it (`caretOffsetWithinSpan`)
+// -- this is exact rather than heuristic.
 //
-//   1. finds the glyph *boundary* nearest the click in 2D (so a click in the
-//      whitespace around a small operator glyph snaps to the side of that
-//      operator instead of landing inside an adjacent identifier, and so
-//      clicks on a wrapped line work);
-//   2. aligns the rendered glyph string to the source text -- character for
-//      character in the common case, with a little slack for the few places
-//      they disagree -- to translate that boundary into a source offset.
+// Fallback path: when the rendered LaTeX has no annotations (e.g. the engine
+// couldn't produce LaTeX and the UI rendered the raw equation text instead),
+// `caretOffsetForClick` reconstructs the mapping from the glyph boxes: it
+// finds the nearest glyph boundary in 2D, then aligns the rendered glyph
+// string to the source text -- character for character in the common case,
+// with a little slack for the few places they disagree.
 //
 // The functions here are pure and DOM-free; `VariableDetails.tsx` owns the DOM
-// walk that produces `RenderedGlyph`s.
+// walk that produces `RenderedGlyph`s and reads the `data-eqnloc` attributes.
 
 /** A single glyph from the rendered equation, with its on-screen bounding box
  *  in client (viewport) coordinates -- the same space as a `MouseEvent`'s
@@ -132,31 +132,20 @@ export function alignGlyphsToSource(glyphs: readonly RenderedGlyph[], equationSt
 }
 
 /**
- * Given the glyphs of a rendered equation preview (in DOM/reading order), a
- * click point in client coordinates, and the source equation text, return the
- * character offset in `equationStr` where the caret should be placed.
+ * Find the caret boundary nearest a click among `glyphs` (in DOM/reading
+ * order), returning an index in `[0, glyphs.length]` -- boundary `k` sits
+ * "before glyph k" / "after glyph k-1".
  *
- * Returns 0 when there are no glyphs (the caller is expected to fall back to a
- * coarse proportional mapping in that case, since it needs the DOM rect).
+ * Each boundary has up to two visual points: the left edge of glyph `k` and
+ * the right edge of glyph `k-1`. Those coincide except across a KaTeX line
+ * break, where the same logical boundary appears at the end of one line and
+ * the start of the next; taking whichever point is closest in 2D handles both
+ * the wrapped-line case and a click in the whitespace around a small operator
+ * glyph (it snaps to the operator's side rather than into an adjacent atom).
+ * On a tie the lower index wins, so a click dead-centre on a glyph lands
+ * before it.
  */
-export function caretOffsetForClick(
-  glyphs: readonly RenderedGlyph[],
-  clickX: number,
-  clickY: number,
-  equationStr: string,
-): number {
-  const len = equationStr.length;
-  if (glyphs.length === 0) {
-    return 0;
-  }
-
-  // A caret boundary `k` (0..glyphs.length) sits "before glyph k" and "after
-  // glyph k-1". Visually those are two points -- the left edge of glyph k and
-  // the right edge of glyph k-1 -- which coincide except across a KaTeX line
-  // break, where the same logical boundary shows up at the end of one line and
-  // the start of the next. Take the boundary whose nearest visual point is
-  // closest to the click; on a tie prefer the lower index (the left side),
-  // which makes a click dead-centre on a glyph land before it.
+export function nearestGlyphBoundary(glyphs: readonly RenderedGlyph[], clickX: number, clickY: number): number {
   let bestK = 0;
   let bestDistSq = Number.POSITIVE_INFINITY;
   const consider = (k: number, x: number, y: number): void => {
@@ -178,8 +167,73 @@ export function caretOffsetForClick(
       consider(k, g.right, (g.top + g.bottom) / 2);
     }
   }
+  return bestK;
+}
 
+/**
+ * Given the glyphs of a rendered equation preview (in DOM/reading order), a
+ * click point in client coordinates, and the source equation text, return the
+ * character offset in `equationStr` where the caret should be placed. This is
+ * the heuristic path used when the rendered LaTeX carries no source-range
+ * annotations (e.g. when the engine couldn't produce LaTeX and we fall back to
+ * rendering the raw equation text).
+ *
+ * Returns 0 when there are no glyphs (the caller is expected to fall back to a
+ * coarse proportional mapping in that case, since it needs the DOM rect).
+ */
+export function caretOffsetForClick(
+  glyphs: readonly RenderedGlyph[],
+  clickX: number,
+  clickY: number,
+  equationStr: string,
+): number {
+  const len = equationStr.length;
+  if (glyphs.length === 0) {
+    return 0;
+  }
+  const k = nearestGlyphBoundary(glyphs, clickX, clickY);
   const mapping = alignGlyphsToSource(glyphs, equationStr);
-  const offset = mapping[bestK];
-  return Math.max(0, Math.min(len, offset));
+  return Math.max(0, Math.min(len, mapping[k]));
+}
+
+/**
+ * Map a click within a single source-annotated span -- the element the engine
+ * tagged with `\htmlData{eqnloc=START_END}` (see `latex_eqn_expr0_annotated`
+ * on the Rust side) -- to a caret offset in the equation text.
+ *
+ * `[spanStart, spanEnd)` is the half-open byte range the span covers. For an
+ * operator annotation that range is the *gap* between the operands, which
+ * holds the operator token plus any surrounding whitespace, so we first trim
+ * whitespace off both ends to home in on the operator itself; for a leaf
+ * (identifier, number) the trim is a no-op. Within the trimmed range, the
+ * click is mapped by glyph: for the common case where the span renders one
+ * glyph per source character (identifiers, numbers, single-character
+ * operators) the boundary index *is* the offset; otherwise it interpolates.
+ */
+export function caretOffsetWithinSpan(
+  glyphs: readonly RenderedGlyph[],
+  clickX: number,
+  clickY: number,
+  sourceText: string,
+  spanStart: number,
+  spanEnd: number,
+): number {
+  const len = sourceText.length;
+  const lo = Math.max(0, Math.min(len, Math.min(spanStart, spanEnd)));
+  const hi = Math.max(0, Math.min(len, Math.max(spanStart, spanEnd)));
+  let ts = lo;
+  while (ts < hi && isWhitespace(sourceText[ts])) ts++;
+  let te = hi;
+  while (te > ts && isWhitespace(sourceText[te - 1])) te--;
+  if (ts >= te) {
+    // The span is empty or all whitespace -- shouldn't happen for a real
+    // `eqnloc`, but fall back to the span start.
+    return lo;
+  }
+  if (glyphs.length === 0) {
+    return ts;
+  }
+  const k = nearestGlyphBoundary(glyphs, clickX, clickY); // 0..glyphs.length
+  const offset = ts + Math.round((k * (te - ts)) / glyphs.length);
+  return Math.max(ts, Math.min(te, offset));
 }

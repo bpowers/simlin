@@ -2,7 +2,14 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { alignGlyphsToSource, caretOffsetForClick, glyphToAscii, RenderedGlyph } from '../equation-caret';
+import {
+  alignGlyphsToSource,
+  caretOffsetForClick,
+  caretOffsetWithinSpan,
+  glyphToAscii,
+  nearestGlyphBoundary,
+  RenderedGlyph,
+} from '../equation-caret';
 
 // Build a single-line run of glyphs from a list of [char, left, width] tuples.
 // All glyphs share a vertical band so the 2D-nearest-boundary search reduces
@@ -264,5 +271,92 @@ describe('caretOffsetForClick', () => {
     // Click near the end of the first line -> after `b` (source offset 2),
     // which the `+` glyph occupies, so this lands right before the `+`.
     expect(caretOffsetForClick(glyphs, 18, 6, eq)).toBe(2);
+  });
+});
+
+describe('nearestGlyphBoundary', () => {
+  it('returns 0 for no glyphs', () => {
+    expect(nearestGlyphBoundary([], 100, 50)).toBe(0);
+  });
+
+  it('picks the near side of a single glyph', () => {
+    const glyphs = lineOf([['x', 10, 10]], 0, 12); // box [10,20], centre x=15, centre y=6
+    expect(nearestGlyphBoundary(glyphs, 11, 6)).toBe(0); // left half -> before
+    expect(nearestGlyphBoundary(glyphs, 19, 6)).toBe(1); // right half -> after
+    expect(nearestGlyphBoundary(glyphs, 15, 6)).toBe(0); // dead centre -> before
+    expect(nearestGlyphBoundary(glyphs, -50, 6)).toBe(0);
+    expect(nearestGlyphBoundary(glyphs, 999, 6)).toBe(1);
+  });
+
+  it('uses the click Y to pick a wrapped line', () => {
+    const glyphs: RenderedGlyph[] = [
+      { char: 'a', left: 0, right: 10, top: 0, bottom: 12 },
+      { char: 'b', left: 0, right: 10, top: 20, bottom: 32 },
+    ];
+    // near the start of the second line -> the boundary between a and b
+    expect(nearestGlyphBoundary(glyphs, 2, 26)).toBe(1);
+    // near the end of the first line -> also the boundary between a and b
+    expect(nearestGlyphBoundary(glyphs, 8, 6)).toBe(1);
+  });
+});
+
+describe('caretOffsetWithinSpan', () => {
+  it('maps boundary to offset 1:1 within an identifier span', () => {
+    // source: "x = average + 1"; the identifier `average` is bytes [4,11)
+    const src = 'x = average + 1';
+    const glyphs = lineOf([
+      ['a', 0, 10],
+      ['v', 10, 10],
+      ['e', 20, 10],
+      ['r', 30, 10],
+      ['a', 40, 10],
+      ['g', 50, 10],
+      ['e', 60, 10],
+    ]);
+    expect(caretOffsetWithinSpan(glyphs, 5, 6, src, 4, 11)).toBe(4); // before `a`
+    expect(caretOffsetWithinSpan(glyphs, 15, 6, src, 4, 11)).toBe(5); // before `v`
+    expect(caretOffsetWithinSpan(glyphs, 35, 6, src, 4, 11)).toBe(7); // before `r`
+    expect(caretOffsetWithinSpan(glyphs, -50, 6, src, 4, 11)).toBe(4); // clamps to span start
+    expect(caretOffsetWithinSpan(glyphs, 999, 6, src, 4, 11)).toBe(11); // clamps to span end
+  });
+
+  it('trims surrounding whitespace from an operator-gap span to the operator', () => {
+    // source: "a   *  b"; the gap between operands `a` [0,1) and `b` [7,8) is
+    // bytes [1,7) = "   *  "; the `*` itself is at byte 4. KaTeX draws it as a
+    // single `⋅` glyph.
+    const src = 'a   *  b';
+    const glyphs = lineOf([['⋅', 20, 6]]); // box [20,26], centre x=23
+    expect(caretOffsetWithinSpan(glyphs, 21, 6, src, 1, 7)).toBe(4); // left half -> before `*`
+    expect(caretOffsetWithinSpan(glyphs, 25, 6, src, 1, 7)).toBe(5); // right half -> after `*`
+  });
+
+  it('returns the trimmed span start when there are no glyphs or the span is empty', () => {
+    expect(caretOffsetWithinSpan([], 100, 50, 'a + b', 1, 4)).toBe(2); // " + " trims to start at byte 2
+    const glyphs = lineOf([['x', 0, 10]]);
+    expect(caretOffsetWithinSpan(glyphs, 5, 6, '   ', 0, 3)).toBe(0); // all-whitespace span
+  });
+
+  it('interpolates when the glyph count and source-byte count differ, staying in bounds', () => {
+    // source: "min(a, b)" [0,9) but KaTeX renders 8 glyphs (the space after the
+    // comma is dropped); a click on the function name / parens lands roughly
+    // right and never escapes the span.
+    const src = 'min(a, b)';
+    const glyphs = lineOf([
+      ['m', 0, 10],
+      ['i', 10, 10],
+      ['n', 20, 10],
+      ['(', 30, 10],
+      ['a', 40, 10],
+      [',', 50, 10],
+      ['b', 60, 10],
+      [')', 70, 10],
+    ]);
+    expect(caretOffsetWithinSpan(glyphs, -1, 6, src, 0, 9)).toBe(0);
+    expect(caretOffsetWithinSpan(glyphs, 999, 6, src, 0, 9)).toBe(9);
+    for (const x of [5, 25, 45, 65, 79]) {
+      const off = caretOffsetWithinSpan(glyphs, x, 6, src, 0, 9);
+      expect(off).toBeGreaterThanOrEqual(0);
+      expect(off).toBeLessThanOrEqual(9);
+    }
   });
 });
