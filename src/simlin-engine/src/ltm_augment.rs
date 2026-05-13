@@ -2465,12 +2465,21 @@ fn generate_linear_partial(
 
 /// Generate the partial evaluation for a nonlinear reducer.
 ///
-/// For MIN/MAX (binary), nests 2-argument calls to enumerate all elements
-/// with selective PREVIOUS wrapping. For STDDEV/RANK (which only accept
-/// array arguments), falls back to the target variable directly -- the
-/// link score then measures the delta-ratio between the target and the
-/// element, which is the best available approximation when ceteris paribus
-/// decomposition is not expressible in the equation language.
+/// - **MIN/MAX**: nests 2-argument calls to enumerate every element with
+///   selective `PREVIOUS` wrapping (`MIN(s[d], MIN(PREVIOUS(s[e]), ...))`).
+/// - **STDDEV**: builds the true ceteris-paribus partial -- the unrolled
+///   population-variance `sqrt` formula holding `s[d]` live and the other
+///   elements frozen at `PREVIOUS`. This matches the engine's STDDEV,
+///   which is population variance (divisor `N`, not `N-1`; see
+///   `vm.rs::Opcode::ArrayStddev`).
+/// - **RANK**: keeps the delta-ratio stand-in (`target_q` directly, so the
+///   surrounding link-score formula degenerates to `|Δtarget/Δtarget|`).
+///   RANK is an order statistic -- non-differentiable, array-argument-only,
+///   and unreachable via real models (RANK returns an array, so it cannot
+///   be a scalar/A2A reducer RHS or a partial-reduce RHS -- a dimension
+///   error). The delta-ratio is the documented conservative stand-in,
+///   pinned by `test_generate_rank_keeps_delta_ratio` so the choice is
+///   explicit, not a silent fallback.
 fn generate_nonlinear_partial(
     source_q: &str,
     target_q: &str,
@@ -2478,21 +2487,20 @@ fn generate_nonlinear_partial(
     all_elements: &[String],
     reducer_name: &str,
 ) -> String {
+    // The term string for source element `e`: live (`s[e]`) when it is the
+    // element this partial isolates, frozen at PREVIOUS otherwise.
+    let term_for = |elem: &str| -> String {
+        if elem == current_element {
+            format!("{source_q}[{elem}]")
+        } else {
+            format!("PREVIOUS({source_q}[{elem}])")
+        }
+    };
+
     match reducer_name.to_uppercase().as_str() {
         "MIN" | "MAX" => {
             // Nest binary calls: MIN(a, MIN(b, MIN(c, d))) etc.
-            // Each element is either current (live) or wrapped in PREVIOUS.
-            let args: Vec<String> = all_elements
-                .iter()
-                .map(|elem| {
-                    if elem == current_element {
-                        format!("{source_q}[{elem}]")
-                    } else {
-                        format!("PREVIOUS({source_q}[{elem}])")
-                    }
-                })
-                .collect();
-
+            let args: Vec<String> = all_elements.iter().map(|e| term_for(e)).collect();
             let fn_name = reducer_name.to_uppercase();
             if args.len() == 1 {
                 return args[0].clone();
@@ -2505,13 +2513,35 @@ fn generate_nonlinear_partial(
             }
             result
         }
+        "STDDEV" => {
+            // Population variance has divisor N (the engine's
+            // `ArrayStddev`), so the ceteris-paribus partial for element
+            // `d` is sqrt((sum_i (s'_i - m)^2) / N) with s'_i = s[d] when
+            // i == d else PREVIOUS(s[i]), and m = (sum_i s'_i) / N. `m` is
+            // string-inlined into each squared deviation (N is the
+            // dimension cardinality, typically small; a synthetic helper
+            // aux for the mean would be a synthetic-var-emission change and
+            // is out of scope).
+            let n = all_elements.len();
+            if n <= 1 {
+                // The variance of a single element is identically 0;
+                // mirrors the MIN/MAX `args.len() == 1` special case
+                // (avoid emitting `sqrt(((... - ...)^2) / 1)`).
+                return "0".to_string();
+            }
+            let terms: Vec<String> = all_elements.iter().map(|e| term_for(e)).collect();
+            let mean = format!("(({}) / {n})", terms.join(" + "));
+            let squared_devs: Vec<String> = terms
+                .iter()
+                .map(|t| format!("(({t} - {mean})^2)"))
+                .collect();
+            format!("sqrt(({}) / {n})", squared_devs.join(" + "))
+        }
+        "RANK" => target_q.to_string(),
         _ => {
-            // STDDEV, RANK: cannot decompose into per-element scalar
-            // expressions because these builtins only accept array
-            // arguments. Fall back to the target variable itself, which
-            // gives a delta-ratio link score (how much the target
-            // changed relative to how much this element changed).
-            target_q.to_string()
+            unreachable!(
+                "generate_nonlinear_partial only handles MIN/MAX/STDDEV/RANK; got {reducer_name}"
+            )
         }
     }
 }
@@ -3111,6 +3141,65 @@ mod tests {
             ),
             "equation: {eq}"
         );
+    }
+
+    #[test]
+    fn test_generate_stddev_equation() {
+        // STDDEV's per-element ceteris-paribus partial: the unrolled
+        // population-variance `sqrt` formula holding `s[d1]` live and the
+        // other elements frozen at PREVIOUS, matching the engine's
+        // population-variance (divisor N) STDDEV. The exact-string
+        // assertion pins precedence and spacing so regressions are caught
+        // (mirrors `test_generate_full_reduce_unchanged_after_refactor`).
+        let elements = vec!["d1".to_string(), "d2".to_string(), "d3".to_string()];
+        let eq = generate_element_to_scalar_equation(
+            "s",
+            "total",
+            "d1",
+            &elements,
+            &ReducerKind::Nonlinear,
+            "STDDEV",
+            true,
+        );
+        assert_eq!(
+            eq,
+            "if (TIME = INITIAL_TIME) then 0 else if ((total - PREVIOUS(total)) = 0) OR ((s[d1] - PREVIOUS(s[d1])) = 0) then 0 else ABS(SAFEDIV((sqrt((((s[d1] - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d2]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d3]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2)) / 3) - PREVIOUS(total)), (total - PREVIOUS(total)), 0)) * SIGN(SAFEDIV((sqrt((((s[d1] - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d2]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d3]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2)) / 3) - PREVIOUS(total)), (s[d1] - PREVIOUS(s[d1])), 0))"
+        );
+        // The live source element drives the partial; the other elements
+        // are frozen at PREVIOUS.
+        assert!(eq.contains("sqrt("), "equation: {eq}");
+        assert!(eq.contains("s[d1]"), "equation: {eq}");
+        assert!(eq.contains("PREVIOUS(s[d2])"), "equation: {eq}");
+        assert!(eq.contains("PREVIOUS(s[d3])"), "equation: {eq}");
+        // Population variance squares deviations, never cubes.
+        assert!(!eq.contains("^3"), "equation: {eq}");
+    }
+
+    #[test]
+    fn test_generate_stddev_single_element_is_zero() {
+        // The variance of a single element is identically 0, so the
+        // partial is the literal `"0"` (mirrors MIN/MAX's `args.len() == 1`
+        // special case -- avoids emitting `sqrt(((... - ...)^2) / 1)`).
+        let elements = vec!["d1".to_string()];
+        let partial = generate_nonlinear_partial("s", "total", "d1", &elements, "STDDEV");
+        assert_eq!(partial, "0");
+    }
+
+    #[test]
+    fn test_generate_rank_keeps_delta_ratio() {
+        // RANK is an order statistic: non-differentiable, array-argument-only,
+        // and unreachable via real models (RANK returns an array, so it
+        // cannot be a scalar/A2A reducer RHS). The documented conservative
+        // stand-in is the delta-ratio against the target -- i.e.
+        // `generate_nonlinear_partial` returns just the target reference, so
+        // the surrounding link-score formula degenerates to |Δtarget/Δtarget|.
+        // Pinning this here makes RANK's treatment an explicit choice, not a
+        // silent fallback.
+        let elements = vec!["d1".to_string(), "d2".to_string(), "d3".to_string()];
+        let partial = generate_nonlinear_partial("s", "total", "d1", &elements, "RANK");
+        assert_eq!(partial, quote_ident("total"));
+        assert!(!partial.contains("sqrt"), "partial: {partial}");
+        assert!(!partial.contains("PREVIOUS("), "partial: {partial}");
     }
 
     #[test]
