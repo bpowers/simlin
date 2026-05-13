@@ -1090,7 +1090,9 @@ fn build_loops_for_test(project: &TestProject) -> Vec<crate::ltm::Loop> {
         &db,
         sync.project,
         dm_dims.as_slice(),
+        MAX_CROSS_AGG_LOOPS,
     )
+    .0
 }
 
 #[test]
@@ -1370,7 +1372,9 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
             &db,
             source_project,
             dm_dims.as_slice(),
+            MAX_CROSS_AGG_LOOPS,
         )
+        .0
     };
     assert!(
         !loops.is_empty(),
@@ -2288,6 +2292,294 @@ fn sliced_agg_link_scores_cover_only_the_read_rows() {
                 .all(|v| !v.contains("\u{205A}agg\u{205A}")),
             "model_detected_loops should not surface synthetic agg nodes; got: {:?}",
             l.variables
+        );
+    }
+}
+
+// ── Phase 5 (#515): budgeted cross-element-through-aggregate loop recovery ──
+
+/// Build the canonical "reducer in a feedback loop over `Region`" fixture:
+/// `pop[Region]` stock fed by `update[Region] = share[Region] * 0.001`, with
+/// `share[Region] = pop[Region] / SUM(pop[*])`. The maximal reducer
+/// `SUM(pop[*])` hoists into a synthetic scalar agg `$⁚ltm⁚agg⁚0` that every
+/// `share` element reads, so for each region `r` there is one disjoint
+/// "petal" `$⁚ltm⁚agg⁚0 → share[r] → update[r] → pop[r] → $⁚ltm⁚agg⁚0`. The
+/// element graph also has the same-element diagonal `pop[r] → share[r]` (the
+/// `pop[r]` numerator), so `pop` is read both directly and through the agg.
+fn share_reducer_loop_fixture(n: usize) -> datamodel::Project {
+    let elements: Vec<String> = (0..n).map(|i| format!("r{i}")).collect();
+    let element_refs: Vec<&str> = elements.iter().map(|s| s.as_str()).collect();
+    TestProject::new("share_reducer_loop")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &element_refs)
+        .array_stock("pop[Region]", "100", &["update"], &[], None)
+        .array_aux("share[Region]", "pop / SUM(pop[*])")
+        .array_flow("update[Region]", "share * 0.001", None)
+        .build_datamodel()
+}
+
+/// The synthetic scalar agg node `$⁚ltm⁚agg⁚0` (subscript-free; the
+/// `SUM(pop[*])` is a whole-extent reduce).
+const SHARE_REDUCER_AGG: &str = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+
+/// Count, among `model_ltm_variables`' `loop_score` equations, how many
+/// reference at least `min_petals` distinct `$⁚ltm⁚link_score⁚pop[<elem>]→agg`
+/// factors -- i.e. how many recovered loops traverse the agg node at least
+/// `min_petals` times. A single-petal elementary circuit references exactly
+/// one such factor; a k-petal combined loop references k.
+fn count_loops_through_agg(ltm: &super::LtmVariablesResult, min_petals: usize) -> usize {
+    let agg_factor_prefix = "$\u{205A}ltm\u{205A}link_score\u{205A}pop[";
+    let agg_factor_suffix = format!("\u{2192}{SHARE_REDUCER_AGG}");
+    ltm.vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
+        .filter(|v| {
+            let eq = v.equation.source_text();
+            let distinct: std::collections::HashSet<String> = extract_quoted_refs(&eq)
+                .into_iter()
+                .filter(|r| r.starts_with(agg_factor_prefix) && r.ends_with(&agg_factor_suffix))
+                .collect();
+            distinct.len() >= min_petals
+        })
+        .count()
+}
+
+/// AC5.1: a reducer in a feedback loop over a dimension with more disjoint
+/// petals than the loop budget recovers a *non-empty, budgeted* set of
+/// cross-element-through-aggregate loops (not zero, as the pre-#515 hard
+/// `petals.len() > MAX_AGG_PETALS -> continue` drop produced for >8-element
+/// dims), `LtmVariablesResult.agg_recovery_truncated` is `true`, and a
+/// `CompilationDiagnostic` `Warning` naming the truncation + the budget is
+/// emitted. The fixture is tiny (5 elements -- well under the 50-node
+/// auto-flip SCC gate); the loop budget is shrunk to 3 via the test-only
+/// `AggLoopBudgetGuard` so the budget is what clips (per
+/// docs/dev/rust.md#test-time-budgets -- never trip a real gate with a
+/// giant fixture).
+#[test]
+fn cross_agg_loop_recovery_truncates_at_budget() {
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+
+    const TEST_BUDGET: usize = 3;
+    let project = share_reducer_loop_fixture(5);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    // Hold the override for the whole test -- `model_ltm_variables` is salsa-
+    // memoized, so a later call on this db would otherwise return the cached
+    // tiny-budget result regardless of the override state.
+    let _budget_guard = super::AggLoopBudgetGuard::new(TEST_BUDGET);
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    assert!(
+        ltm.agg_recovery_truncated,
+        "with 5 disjoint petals and a budget of {TEST_BUDGET}, cross-agg loop \
+         recovery must report truncation"
+    );
+
+    let recovered = count_loops_through_agg(ltm, 2);
+    assert!(
+        recovered >= 1,
+        "the budget is a stop, not a skip: at least one cross-agg loop must be \
+         recovered even when truncated (got {recovered})"
+    );
+    assert!(
+        recovered <= TEST_BUDGET,
+        "the recovered cross-agg loop count ({recovered}) must not exceed the \
+         budget ({TEST_BUDGET})"
+    );
+
+    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    let has_truncation_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+        d.severity == DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                DiagnosticError::Assembly(msg)
+                    if msg.contains("truncated") && msg.contains(&TEST_BUDGET.to_string())
+            )
+    });
+    assert!(
+        has_truncation_warning,
+        "cross-agg loop truncation must emit a Warning mentioning truncation and \
+         the budget ({TEST_BUDGET}); got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+}
+
+/// AC5.3 (no regression): a model whose reducer-in-a-loop has 3 disjoint
+/// petals (under the production budget) recovers exactly the 3 pairwise
+/// combinations (`{p0,p1}`, `{p0,p2}`, `{p1,p2}`, one cyclic ordering each)
+/// plus the single ordering of the full 3-petal subset -- 4 recovered loops
+/// -- with `agg_recovery_truncated == false` and no truncation `Warning`.
+/// The two-petal combinations each have exactly one cyclic ordering, which
+/// is the per-subset ordering the pre-#515 `2^k`-bitmask enumeration also
+/// produced.
+#[test]
+fn cross_agg_loop_recovery_three_petals_no_truncation() {
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+
+    let project = share_reducer_loop_fixture(3);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    assert!(
+        !ltm.agg_recovery_truncated,
+        "a 3-petal model is well under the production budget; recovery must not \
+         report truncation"
+    );
+
+    // Recovered loops through the agg >= 2 times: the 3 two-petal pairs +
+    // the one ordering of the full triple = 4.
+    let two_or_more = count_loops_through_agg(ltm, 2);
+    assert_eq!(
+        two_or_more, 4,
+        "3 disjoint petals must recover C(3,2)=3 two-petal loops + 1 three-petal \
+         loop = 4 cross-agg loops; got {two_or_more}"
+    );
+    // Exactly one of those visits the agg 3 times (the full-subset loop).
+    let three_petal = count_loops_through_agg(ltm, 3);
+    assert_eq!(
+        three_petal, 1,
+        "the full 3-petal subset has exactly one cyclic ordering under the \
+         mirror-skip rule; got {three_petal}"
+    );
+
+    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    assert!(
+        !diags.iter().any(|CompilationDiagnostic(d)| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("truncated"))
+        }),
+        "no truncation Warning expected for a 3-petal model; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+}
+
+/// AC5.3 (no regression, at the slow-path loop-builder level): driving
+/// `build_loops_from_tiered` on the 3-petal fixture, the recovered
+/// cross-agg `Loop`s' link multisets and stock sets match what the pre-#515
+/// per-subset enumeration produced for the same petal pairs -- one cyclic
+/// ordering per 2-petal pair (the m=2 case the pre-fix code already
+/// covered). We compare each recovered two-petal loop's `(from, to,
+/// polarity)` link *multiset* and stock *set* against a fixture-derived
+/// expectation rather than the exact `Vec` order, because the recovered
+/// cyclic node sequence is now rotation-canonicalized via a deterministic
+/// petal sort (the pre-fix code stitched petals in Johnson-enumeration
+/// order); a loop and a rotation of it are the same loop (`assign_loop_ids`
+/// keys on the rotation-invariant endpoint set).
+#[test]
+fn cross_agg_two_petal_loops_match_pre_fix_content() {
+    use crate::common::Ident;
+    use crate::ltm::LinkPolarity;
+    use std::collections::BTreeSet;
+
+    let project = share_reducer_loop_fixture(3);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    let tiered = crate::db::model_loop_circuits_tiered(&db, model, sync.project);
+    let var_graph = causal_graph_with_modules(&db, model, sync.project);
+    let source_vars = model.variables(&db);
+    let dm_dims = project_datamodel_dims(&db, sync.project);
+    let (loops, truncated) = build_loops_from_tiered(
+        tiered,
+        &var_graph,
+        source_vars,
+        &db,
+        sync.project,
+        dm_dims.as_slice(),
+        MAX_CROSS_AGG_LOOPS,
+    );
+    assert!(!truncated, "3-petal fixture must not truncate");
+
+    let agg_ident = Ident::<Canonical>::new(SHARE_REDUCER_AGG);
+    let agg_visits = |l: &crate::ltm::Loop| l.links.iter().filter(|lk| lk.to == agg_ident).count();
+    let two_petal_loops: Vec<&crate::ltm::Loop> =
+        loops.iter().filter(|l| agg_visits(l) == 2).collect();
+    assert_eq!(
+        two_petal_loops.len(),
+        3,
+        "expected 3 two-petal recovered loops; got {}",
+        two_petal_loops.len()
+    );
+
+    // For each two-petal loop, its directed-edge multiset must be exactly the
+    // union of the two petals' edges. A petal for region r is the cyclic
+    // sequence [agg, share[r], update[r], pop[r]] -> edges agg->share[r],
+    // share[r]->update[r], update[r]->pop[r], pop[r]->agg. Link endpoint
+    // forms: `build_element_subscripted_links` keeps the `[r]` on a
+    // dimensioned-source side and (for the A2A `share→update` / `update→pop`
+    // hops) drops it, keeping the dimensioned `to` slot; `pop[r]→agg` keeps
+    // the `pop[r]` source and the bare agg `to`; `agg→share[r]` keeps the
+    // bare agg source and the `share[r]` slot.
+    let petal_edges = |r: &str| -> BTreeSet<(String, String)> {
+        let agg = SHARE_REDUCER_AGG.to_string();
+        [
+            (agg.clone(), format!("share[{r}]")),
+            (format!("share[{r}]"), format!("update[{r}]")),
+            (format!("update[{r}]"), format!("pop[{r}]")),
+            (format!("pop[{r}]"), agg.clone()),
+        ]
+        .into_iter()
+        .collect()
+    };
+    for l in &two_petal_loops {
+        let got: BTreeSet<(String, String)> = l
+            .links
+            .iter()
+            .map(|lk| (lk.from.as_str().to_string(), lk.to.as_str().to_string()))
+            .collect();
+        // Which two regions does this loop cover? Read them off the
+        // `pop[<r>]→agg` links.
+        let regions: Vec<String> = l
+            .links
+            .iter()
+            .filter(|lk| lk.to == agg_ident)
+            .map(|lk| {
+                let f = lk.from.as_str();
+                let start = f.find('[').unwrap();
+                let end = f.rfind(']').unwrap();
+                f[start + 1..end].to_string()
+            })
+            .collect();
+        assert_eq!(regions.len(), 2, "two-petal loop must touch two regions");
+        let mut want: BTreeSet<(String, String)> = petal_edges(&regions[0]);
+        want.extend(petal_edges(&regions[1]));
+        assert_eq!(
+            got, want,
+            "recovered two-petal loop (regions {regions:?}) has link multiset {got:?}, \
+             expected the union of the two petals' edges {want:?}"
+        );
+        // The stocks are the per-element `pop[r]` nodes, one per region.
+        let got_stocks: BTreeSet<String> =
+            l.stocks.iter().map(|s| s.as_str().to_string()).collect();
+        let want_stocks: BTreeSet<String> = regions.iter().map(|r| format!("pop[{r}]")).collect();
+        assert_eq!(
+            got_stocks, want_stocks,
+            "recovered two-petal loop stocks {got_stocks:?}, expected {want_stocks:?}"
+        );
+        // At the `build_loops_from_tiered` level the synthetic-agg hops are
+        // still Unknown-polarity (the variable-level graph has no agg node);
+        // `model_ltm_variables` patches them afterward via
+        // `recover_agg_hop_polarities`. So a recovered cross-agg loop here is
+        // Undetermined, and at least the two `pop[r]→agg` hops are Unknown.
+        assert_eq!(
+            l.polarity,
+            crate::ltm::LoopPolarity::Undetermined,
+            "before `recover_agg_hop_polarities`, an agg-traversing recovered loop \
+             is Undetermined"
+        );
+        let n_unknown = l
+            .links
+            .iter()
+            .filter(|lk| lk.polarity == LinkPolarity::Unknown)
+            .count();
+        assert!(
+            n_unknown >= 2,
+            "expected >= 2 Unknown agg hops; got {n_unknown}"
         );
     }
 }

@@ -2238,6 +2238,12 @@ fn build_a2a_loop_stocks(
 /// the legacy ordering: `assign_loop_ids` sorts by content-derived
 /// key (sorted distinct var names) before numbering, so the final IDs
 /// are stable regardless of which path produced each Loop.
+///
+/// `agg_loop_budget` and the returned `bool` thread the cross-element-
+/// through-aggregate loop-count budget / truncation flag through to
+/// `build_element_level_loops` -> `recover_cross_agg_loops` (only the slow
+/// path can carry agg nodes); the caller surfaces the flag on
+/// `LtmVariablesResult::agg_recovery_truncated`.
 pub(crate) fn build_loops_from_tiered(
     tiered: &super::TieredCircuitsResult,
     var_graph: &crate::ltm::CausalGraph,
@@ -2245,7 +2251,8 @@ pub(crate) fn build_loops_from_tiered(
     db: &dyn Db,
     project: SourceProject,
     dm_dims: &[crate::datamodel::Dimension],
-) -> Vec<crate::ltm::Loop> {
+    agg_loop_budget: usize,
+) -> (Vec<crate::ltm::Loop>, bool) {
     use crate::common::{Canonical, Ident};
     use crate::ltm::{Loop, assign_loop_ids};
 
@@ -2325,15 +2332,18 @@ pub(crate) fn build_loops_from_tiered(
     // helper does its own `assign_loop_ids`; we strip the IDs
     // afterward because we re-run id assignment over the merged set
     // to keep numbering consistent.
+    let mut agg_truncated = false;
     if !tiered.slow_path.is_empty() {
-        let mut slow_path_loops = build_element_level_loops(
+        let (mut slow_path_loops, t) = build_element_level_loops(
             &tiered.slow_path,
             var_graph,
             source_vars,
             db,
             project,
             dm_dims,
+            agg_loop_budget,
         );
+        agg_truncated = t;
         for l in &mut slow_path_loops {
             l.id.clear();
         }
@@ -2341,7 +2351,7 @@ pub(crate) fn build_loops_from_tiered(
     }
 
     assign_loop_ids(&mut all_loops);
-    all_loops
+    (all_loops, agg_truncated)
 }
 
 /// Build element-subscripted `Link`s for one element-level circuit.
@@ -2441,6 +2451,13 @@ fn build_element_subscripted_links(
 /// circuits with different variable-level structures. Each gets its own
 /// scalar loop with a unique element-specific ID suffix.
 ///
+/// `agg_loop_budget` caps how many non-elementary cross-element-through-
+/// aggregate loops `recover_cross_agg_loops` materializes (across all
+/// aggregate nodes); the returned `bool` is `true` when that budget (or the
+/// per-aggregate petal cap) clipped the recovered set. Callers pass
+/// `cross_agg_loop_budget()` (or, in tests, a small value) and thread the
+/// truncation flag up to `LtmVariablesResult::agg_recovery_truncated`.
+///
 /// Visibility is `pub(crate)` so unit tests in
 /// `db_ltm_unified_tests.rs` can drive this function directly to
 /// inspect the element-subscripted `Link.from` / `Link.to` strings the
@@ -2455,7 +2472,8 @@ pub(crate) fn build_element_level_loops(
     db: &dyn Db,
     project: SourceProject,
     dm_dims: &[crate::datamodel::Dimension],
-) -> Vec<crate::ltm::Loop> {
+    agg_loop_budget: usize,
+) -> (Vec<crate::ltm::Loop>, bool) {
     use crate::common::{Canonical, Ident};
     use crate::ltm::{Loop, assign_loop_ids};
 
@@ -2862,66 +2880,169 @@ pub(crate) fn build_element_level_loops(
     }
 
     // Recover cross-element loops that traverse a synthetic aggregate node
-    // more than once (Phase 5). Johnson enumerates only *elementary* circuits,
-    // so a loop like `pop[nyc] → agg → share[boston] → ... → pop[boston] →
-    // agg → share[nyc] → ...` -- which visits `agg` twice -- is never emitted.
-    // But each agg-touching elementary circuit contributes one "petal" `agg →
-    // ... → agg`; combining `k ≥ 2` petals of the same agg whose internal
-    // nodes are pairwise disjoint reconstructs exactly those non-elementary
-    // loops. (For `SUM`/`MEAN` aggs the petals have one element each, so the
-    // combination count is `2^k - k - 1`; we cap `k` to keep it bounded.)
-    {
-        let recovered = recover_cross_agg_loops(&circuit_strs, var_graph, source_vars, db, project);
-        all_loops.extend(recovered);
-    }
+    // more than once (Phase 5, GH #515). Johnson enumerates only *elementary*
+    // circuits, so a loop like `pop[nyc] → agg → share[boston] → ... →
+    // pop[boston] → agg → share[nyc] → ...` -- which visits `agg` twice -- is
+    // never emitted. But each agg-touching elementary circuit contributes one
+    // "petal" `agg → ... → agg`; stitching `k ≥ 2` petals of the same agg
+    // whose internal nodes are pairwise disjoint, in some cyclic order,
+    // reconstructs exactly those non-elementary loops -- bounded by
+    // `agg_loop_budget` (when it clips, `agg_truncated` is set and the caller
+    // accumulates a `Warning`).
+    let (recovered, agg_truncated) = recover_cross_agg_loops(
+        &circuit_strs,
+        var_graph,
+        source_vars,
+        db,
+        project,
+        agg_loop_budget,
+    );
+    all_loops.extend(recovered);
 
     assign_loop_ids(&mut all_loops);
-    all_loops
+    (all_loops, agg_truncated)
 }
 
-/// Maximum number of per-agg "petals" combined into non-elementary cross-agg
-/// loops. With `k` disjoint petals the combination count is `2^k - k - 1`; a
-/// model with more elements than this feeding a reducer in a loop simply
-/// doesn't get the fully-granular cross-element loop enumeration (the
-/// same-element-through-agg loops and the elementary circuits are still
-/// present). 8 → ≤ 219 recovered loops per agg.
+/// Hard cap on the number of non-elementary cross-element-through-aggregate
+/// loops `recover_cross_agg_loops` materializes for a model (summed across
+/// all synthetic aggregate nodes), Phase 5 / GH #515.
+///
+/// With `k` disjoint petals through one agg the recoverable loop count is
+/// `Σ_{m=2}^{k} C(k,m)·orderings(m)` where `orderings(m)` is 1 for m=2 and
+/// `(m-1)!/2` for m≥3 -- it grows super-exponentially, so a budget is
+/// mandatory. When recovery hits this budget it stops, sets the truncation
+/// flag, and the caller emits a `Warning`; the deterministic petal priority
+/// (fewest internal nodes first, then a stable joined-name tiebreaker)
+/// makes *which* loops survive truncation reproducible. The prior implicit
+/// ceiling was `2^8 - 8 - 1 = 247` per agg (the old `MAX_AGG_PETALS = 8`
+/// hard drop); 256 keeps roughly that order of magnitude as a model-wide
+/// total. Because the budget is modest, recovery never reaches a subset
+/// large enough for `cyclic_orderings(m)` to blow up in practice.
+pub(crate) const MAX_CROSS_AGG_LOOPS: usize = 256;
+
+/// Soft per-aggregate cap on the petals considered when stitching them into
+/// loops. After sorting an agg's petals by the deterministic priority, only
+/// the smallest `MAX_AGG_PETALS` are considered (the rest are dropped and
+/// the truncation flag is set). This bounds the `2^k` subset enumeration to
+/// `2^MAX_AGG_PETALS` regardless of how dense the agg's element-graph
+/// neighborhood is. A model with more than this many *disjoint* petals
+/// through one agg is at or near the `MAX_LTM_SCC_NODES` auto-flip
+/// threshold anyway (each petal contributes ≥2 distinct nodes plus the
+/// shared agg to one SCC), so this is a conservative belt-and-suspenders;
+/// 8 matches the pre-#515 hard cap.
 const MAX_AGG_PETALS: usize = 8;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`MAX_CROSS_AGG_LOOPS`], scoped by an active
+    /// [`AggLoopBudgetGuard`]. Lets a test trip the loop budget with a tiny
+    /// fixture instead of building one large enough to trip the production
+    /// constant (per docs/dev/rust.md#test-time-budgets, the PR #461
+    /// cautionary tale).
+    static AGG_LOOP_BUDGET_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The cross-element-through-aggregate loop-count budget for the current
+/// `model_ltm_variables` invocation.  Returns [`MAX_CROSS_AGG_LOOPS`] in
+/// production builds; in `#[cfg(test)]` builds an active
+/// [`AggLoopBudgetGuard`] override takes precedence.
+fn cross_agg_loop_budget() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(b) = AGG_LOOP_BUDGET_OVERRIDE.with(|c| c.get()) {
+            return b;
+        }
+    }
+    MAX_CROSS_AGG_LOOPS
+}
+
+/// RAII guard (test-only) that overrides [`cross_agg_loop_budget`] for the
+/// current thread for the guard's lifetime, restoring the previous value on
+/// drop -- so a panicking test does not leak the override to the next test
+/// reusing the thread.
+///
+/// Because `model_ltm_variables` is salsa-memoized, the guard must outlive
+/// every `model_ltm_variables` call in the test whose budget it controls
+/// (a later call on the same `db` would otherwise return the memoized
+/// tiny-budget result regardless of the override state).
+#[cfg(test)]
+pub(crate) struct AggLoopBudgetGuard {
+    prev: Option<usize>,
+}
+
+#[cfg(test)]
+impl AggLoopBudgetGuard {
+    pub(crate) fn new(budget: usize) -> Self {
+        let prev = AGG_LOOP_BUDGET_OVERRIDE.with(|c| c.replace(Some(budget)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for AggLoopBudgetGuard {
+    fn drop(&mut self) {
+        AGG_LOOP_BUDGET_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
+/// One agg petal: the element-level node sequence rotated to start at the
+/// aggregate node (`[A, x_1, ..., x_m]`), plus its internal node set
+/// `{x_1..x_m}`. `A` is the *element-level* agg node -- for an arrayed
+/// synthetic agg that means the subscripted `$⁚ltm⁚agg⁚{n}[<elem>]` (so two
+/// petals through `agg[a]` vs `agg[b]` go through *different* nodes and are
+/// correctly never combined; `is_synthetic_agg_name` recognizes both the
+/// bare and the subscripted form via its prefix check).
+struct AggPetal<'a> {
+    /// `[agg, x_1, ..., x_m]` -- the agg followed by the m internal nodes.
+    nodes: Vec<&'a str>,
+    internal: std::collections::HashSet<&'a str>,
+}
+
 /// Reconstruct the cross-element loops that traverse a synthetic aggregate
-/// node more than once, from the element-level circuit list.
+/// node more than once, from the element-level circuit list, under a
+/// loop-count budget.
 ///
 /// For each synthetic agg `A`, an elementary circuit that visits `A` exactly
 /// once is its "petal": rotated to start at `A`, the node sequence
 /// `[A, x_1, ..., x_m]` (the `x_i` are the petal's *internal* nodes -- the
 /// rest of the cycle). Two petals are disjoint when their internal node sets
-/// don't overlap. For `k ≥ 2` pairwise-disjoint petals of `A`, the recovered
-/// loop's element-level node sequence concatenates them, separated by `A`:
-/// `[A, p1_x..., A, p2_x..., ...]`. Links and polarities come from
-/// `build_element_subscripted_links` (which builds them the same way the
-/// cross-element branch does); the loop polarity is the product of the link
-/// polarities (Unknown anywhere → Undetermined).
+/// don't overlap. For a pairwise-disjoint subset of `m ≥ 2` petals of `A`,
+/// the recovered loop's element-level node sequence concatenates the petals'
+/// `nodes` (each of which starts with `A`) in some order:
+/// `[A, p1_x..., A, p2_x..., ...]` -- `build_element_subscripted_links`
+/// builds `seq[i] → seq[(i+1) % n]`, so this is exactly the cyclic sequence
+/// `... → A → p1_x... → A → p2_x... → ... → A` (the last internal node wraps
+/// to the first petal's `A`). Links / polarities come from
+/// `build_element_subscripted_links`; the loop polarity is the product of
+/// the link polarities (Unknown anywhere → Undetermined; the synthetic-agg
+/// hops are Unknown here and patched later by `recover_agg_hop_polarities`).
+///
+/// Enumeration is bounded: an agg's petals are sorted by a deterministic
+/// priority (fewest internal nodes first -- smaller petals combine into more
+/// loops -- then a stable joined-`nodes` tiebreaker), the smallest
+/// `MAX_AGG_PETALS` are kept (clipping sets `truncated`), the disjoint
+/// subsets are walked smallest-cardinality-first (so under truncation the
+/// few-petal -- likely most interesting -- loops survive), and a running
+/// count is checked against `agg_loop_budget` (a global budget across all
+/// aggs; once hit, recovery stops and `truncated` is set). The deterministic
+/// petal order is what makes the *truncated* loop set reproducible rather
+/// than HashMap-iteration-order dependent.
 fn recover_cross_agg_loops(
     circuit_strs: &[Vec<&str>],
     var_graph: &crate::ltm::CausalGraph,
     source_vars: &HashMap<String, super::SourceVariable>,
     db: &dyn Db,
     project: SourceProject,
-) -> Vec<crate::ltm::Loop> {
+    agg_loop_budget: usize,
+) -> (Vec<crate::ltm::Loop>, bool) {
     use crate::common::{Canonical, Ident};
     use crate::ltm::{LinkPolarity, Loop, LoopPolarity};
 
-    /// One agg petal: the element-level node sequence rotated to start at the
-    /// agg (`[A, x_1, ..., x_m]`), plus its internal node set `{x_1..x_m}`.
-    struct Petal<'a> {
-        /// `[agg, x_1, ..., x_m]` -- the agg followed by the m internal nodes.
-        nodes: Vec<&'a str>,
-        internal: std::collections::HashSet<&'a str>,
-    }
-
     // agg name -> its (deduped) petals.
-    let mut petals_by_agg: HashMap<&str, Vec<Petal>> = HashMap::new();
+    let mut petals_by_agg: HashMap<&str, Vec<AggPetal>> = HashMap::new();
     for circuit in circuit_strs {
-        // Synthetic agg nodes in this circuit.
+        // Synthetic agg nodes in this circuit (bare or subscripted).
         let aggs: Vec<&str> = circuit
             .iter()
             .copied()
@@ -2929,7 +3050,8 @@ fn recover_cross_agg_loops(
             .collect();
         // Only build petals from a circuit that touches exactly one agg, once
         // (Johnson emits simple cycles, so "one agg in the node list" already
-        // means "visited once").
+        // means "visited once"; a circuit through two distinct agg nodes --
+        // `agg[a]` and `agg[b]` -- is a complete loop on its own, not a petal).
         if aggs.len() != 1 {
             continue;
         }
@@ -2947,20 +3069,41 @@ fn recover_cross_agg_loops(
         if entry.iter().any(|p| p.internal == internal) {
             continue;
         }
-        entry.push(Petal { nodes, internal });
+        entry.push(AggPetal { nodes, internal });
     }
 
     let mut recovered: Vec<Loop> = Vec::new();
-    // Deterministic agg iteration order.
+    let mut truncated = false;
+    let mut emitted: usize = 0;
+    // Deterministic agg iteration order so the budget clips reproducibly.
     let mut aggs: Vec<&&str> = petals_by_agg.keys().collect();
     aggs.sort();
-    for agg in aggs {
-        let petals = &petals_by_agg[*agg];
-        if petals.len() < 2 || petals.len() > MAX_AGG_PETALS {
+    'outer: for agg in aggs {
+        let mut petals: Vec<&AggPetal> = petals_by_agg[*agg].iter().collect();
+        if petals.len() < 2 {
             continue;
         }
+        // Deterministic priority: fewest internal nodes first (smaller petals
+        // combine into more loops), then a stable tiebreaker (the petal's
+        // node sequence joined). After dedup-on-internal-set the petals have
+        // distinct `internal` sets and hence distinct `nodes` sequences, so
+        // this key is a total order.
+        petals.sort_by_cached_key(|p| (p.internal.len(), p.nodes.join("\u{0}")));
+        if petals.len() > MAX_AGG_PETALS {
+            // Drop the larger petals; the recovered set is now incomplete.
+            petals.truncate(MAX_AGG_PETALS);
+            truncated = true;
+        }
         let k = petals.len();
-        for mask in 0u32..(1u32 << k) {
+
+        // Walk the 2^k subset masks smallest-cardinality-first (so the few-
+        // petal loops -- which survive a tight budget -- come out first), and
+        // within each cardinality in increasing mask order (which, given the
+        // priority sort above, visits the smallest-internal petals first).
+        // `k ≤ MAX_AGG_PETALS` keeps `1u32 << k` small.
+        let mut masks: Vec<u32> = (0u32..(1u32 << k)).collect();
+        masks.sort_by_key(|&m| (m.count_ones(), m));
+        for mask in masks {
             if mask.count_ones() < 2 {
                 continue;
             }
@@ -2973,12 +3116,8 @@ fn recover_cross_agg_loops(
             {
                 continue;
             }
-            // Element-level node sequence: `[A, p1_internal..., A, p2_internal..., ...]`
-            // -- but `build_element_subscripted_links` builds links
-            // `seq[i] → seq[(i+1) % n]`, so listing each petal's `nodes`
-            // (which already start with `A`) back-to-back gives exactly that
-            // cyclic sequence (the last petal's last internal node wraps to
-            // the first petal's `A`).
+            // One cyclic ordering of the chosen petals: in chosen-index order
+            // (Task 2 adds the remaining distinct cyclic orderings).
             let seq: Vec<&str> = chosen
                 .iter()
                 .flat_map(|&i| petals[i].nodes.iter().copied())
@@ -3013,9 +3152,14 @@ fn recover_cross_agg_loops(
                 // Cross-element loops visit fixed elements -- scalar loop score.
                 dimensions: vec![],
             });
+            emitted += 1;
+            if emitted >= agg_loop_budget {
+                truncated = true;
+                break 'outer;
+            }
         }
     }
-    recovered
+    (recovered, truncated)
 }
 
 /// Recover the polarity of synthetic-aggregate-node hops in `loops` (GH #516).
@@ -3132,6 +3276,7 @@ pub fn model_ltm_variables(
         return LtmVariablesResult {
             vars: vec![],
             loop_partitions: HashMap::new(),
+            agg_recovery_truncated: false,
         };
     }
 
@@ -3279,6 +3424,11 @@ pub fn model_ltm_variables(
     // and `var_graph.find_stocks_in_loop`); the element-level graph
     // produced by `model_element_causal_edges` carries no variable
     // data.
+    //
+    // `agg_recovery_truncated` rides on the result so a model author
+    // knows the cross-agg loop list is incomplete even if the `Warning`
+    // never reaches them (#466); set inside the loop-building branch below.
+    let mut agg_recovery_truncated = false;
     let loops: Option<Vec<Loop>> = if !is_discovery {
         let tiered = model_loop_circuits_tiered(db, model, project);
         // Late-stage auto-flip: the variable-level SCC was small enough
@@ -3312,13 +3462,51 @@ pub fn model_ltm_variables(
                 return LtmVariablesResult {
                     vars: vec![],
                     loop_partitions: HashMap::new(),
+                    agg_recovery_truncated: false,
                 };
             }
             None
         } else {
             let var_graph = causal_graph_with_modules(db, model, project);
-            let mut detected =
-                build_loops_from_tiered(tiered, &var_graph, source_vars, db, project, dm_dims);
+            let (mut detected, agg_truncated) = build_loops_from_tiered(
+                tiered,
+                &var_graph,
+                source_vars,
+                db,
+                project,
+                dm_dims,
+                cross_agg_loop_budget(),
+            );
+            // Surface a truncated cross-element-through-aggregate loop
+            // recovery the same way the auto-flip-to-discovery gate surfaces
+            // its mode change: a `Warning` (the human channel) plus the
+            // robust `agg_recovery_truncated` flag on the result. The loop
+            // list is incomplete -- the budget clipped which disjoint-petal
+            // combinations were materialized.
+            if agg_truncated {
+                let agg_names: Vec<&str> = agg_nodes
+                    .aggs
+                    .iter()
+                    .filter(|a| a.is_synthetic)
+                    .map(|a| a.name.as_str())
+                    .collect();
+                let msg = format!(
+                    "LTM cross-element-through-aggregate loop recovery was truncated: a \
+                     reducer in a feedback loop produces more disjoint-petal combinations \
+                     than the loop budget ({}); the recovered loop list is incomplete. \
+                     Affected aggregate node(s): {}.",
+                    cross_agg_loop_budget(),
+                    agg_names.join(", "),
+                );
+                CompilationDiagnostic(Diagnostic {
+                    model: model.name(db).clone(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg),
+                    severity: DiagnosticSeverity::Warning,
+                })
+                .accumulate(db);
+            }
+            agg_recovery_truncated = agg_truncated;
             // GH #516: hops into/out of synthetic `$⁚ltm⁚agg⁚{n}` nodes come
             // back Unknown-polarity from the loop builders (the variable-level
             // graph has no agg node); recover the derivable cases here so
@@ -4973,6 +5161,7 @@ pub fn model_ltm_variables(
     LtmVariablesResult {
         vars,
         loop_partitions,
+        agg_recovery_truncated,
     }
 }
 
