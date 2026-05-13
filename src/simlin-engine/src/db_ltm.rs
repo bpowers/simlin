@@ -15,9 +15,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
-// The reference-site shape walker lives in the sibling `db_ltm_ir` module
-// (out of `db.rs` for the per-file line cap).
-use crate::db_ltm_ir::collect_reference_shapes;
 use crate::ltm::strip_subscript;
 
 use super::{
@@ -3655,83 +3652,44 @@ pub fn model_ltm_variables(
         Some(cross_vars)
     }
 
-    /// Enumerate the unique `RefShape`s under which `to`'s AST references `from`.
-    ///
-    /// Returns `None` for module sources/targets (modules are scalar nodes
-    /// in the causal graph; their link score equations don't depend on
-    /// per-reference AST shape) -- the caller should fall back to a
-    /// single Bare emission. Returns an empty vec when no AST reference
-    /// exists (e.g., structural edges or implicit synthesized references)
-    /// -- the caller should also fall back.
-    ///
-    /// For non-module variables, reconstructs the target's `Variable`
-    /// (which carries the AST) and walks it via `collect_reference_shapes`.
-    fn enumerate_shapes(
-        db: &dyn Db,
-        source_vars: &HashMap<String, super::SourceVariable>,
-        from: &str,
-        to: &str,
-        model: SourceModel,
-        project: SourceProject,
-    ) -> Option<Vec<RefShape>> {
-        let to_sv = source_vars.get(to)?;
-        if to_sv.kind(db) == SourceVariableKind::Module {
-            return None;
-        }
-        if let Some(from_sv) = source_vars.get(from)
-            && from_sv.kind(db) == SourceVariableKind::Module
-        {
-            return None;
-        }
-        let from_dims = source_vars
-            .get(from)
-            .map(|sv| variable_dimensions(db, *sv, project).clone())
-            .unwrap_or_default();
-        let target_var = super::reconstruct_single_variable(db, model, project, to)?;
-        let source_is_arrayed = !from_dims.is_empty();
-        Some(collect_reference_shapes(
-            &target_var,
-            from,
-            source_is_arrayed,
-            &from_dims,
-        ))
-    }
-
     /// Emit per-shape link scores for a single (from, to) edge.
     ///
     /// The emission is shape-driven (Phase 3): one `LtmSyntheticVar` per
-    /// `(from, to, shape)` tuple, named by `link_score_var_name`. Module
-    /// links and edges with no AST reference fall back to a single
-    /// Bare emission so the legacy behavior is preserved at structural
-    /// boundaries.
+    /// `(from, to, shape)` tuple, named by `link_score_var_name`. The shape
+    /// set comes from `model_ltm_reference_sites` (the distinct `shape`
+    /// fields of `(from, to)`'s classified sites); module links and edges
+    /// with no AST reference have no IR entry and fall back to a single Bare
+    /// emission so the legacy behavior is preserved at structural boundaries.
     ///
-    /// `fallback_shape` is the shape to use when shape enumeration is
-    /// not possible or yields no results (e.g., implicit synthesized
-    /// references that don't appear in the target's AST). Callers pass
-    /// `RefShape::Bare` to preserve the legacy single-shape behavior.
+    /// `fallback_shape` is the shape to use when the IR has no entry for the
+    /// edge (e.g. a module edge, or an implicit synthesized reference that
+    /// doesn't appear in the target's AST). Callers pass `RefShape::Bare` to
+    /// preserve the legacy single-shape behavior.
     ///
     /// `skip_reducer_shapes` is set when the caller has already handled the
     /// `from` reference's reducer occurrences by routing them through an
-    /// aggregate node (Phase 5). Only the `Wildcard` shape is suppressed in
-    /// that case -- a `Wildcard` reference to `from` in `to` is the hoisted
-    /// reducer's argument (`SUM(pop[*])`), already scored by the
-    /// `source → agg` / `agg → target` halves, so re-scoring it here would
-    /// double-count. `DynamicIndex` is *not* suppressed: a `to` equation can
-    /// hold both `SUM(pop[*])` (hoisted) *and* a direct `pop[idx]`
-    /// (DynamicIndex, not in any reducer), and that direct reference still
-    /// needs its own conservative Bare-named link score. Any `DynamicIndex`
-    /// site that reaches this code is from a *non-hoisted* construct -- a
-    /// direct `pop[idx]`, or a single-non-literal-index reducer `SUM(pop[idx])`
-    /// (not a *full* reduce, so `enumerate_agg_nodes` doesn't hoist it).
-    /// (`classify_subscript_shape` reports `Wildcard`, not `DynamicIndex`, for
-    /// a slice that mixes a dynamic index with a wildcard like `SUM(pop[idx, *])`
-    /// (GH #514), so that case never lands here as `DynamicIndex`.) Keeping the
-    /// `DynamicIndex` link score here is therefore correct -- it's the
-    /// conservative fallback for a reference no agg covers.
+    /// aggregate node (Phase 5) -- i.e. when the routed-agg set for `(from,
+    /// to)` is non-empty. Only the `Wildcard` shape is suppressed in that
+    /// case: a `Wildcard` reference to `from` in `to` is the hoisted
+    /// reducer's argument (`SUM(pop[*])`, classified `ThroughAgg` in the
+    /// IR), already scored by the `source → agg` / `agg → target` halves,
+    /// so re-scoring it here would double-count. Every *other* shape is kept
+    /// -- including `DynamicIndex` (a direct `pop[idx]` alongside a hoisted
+    /// `SUM(pop[*])`, classified `Direct`) **and `Bare`** (a bare arrayed
+    /// reducer arg like `SUM(pop)`, classified `ThroughAgg` for the element
+    /// graph but still given its own `Bare`-named link score here -- this is
+    /// exactly the pre-IR behavior, where `enumerate_shapes` returned every
+    /// shape of `from` in `to` and `skip_reducer_shapes` dropped only
+    /// `Wildcard`). Equivalently: feed every distinct site `shape` to the
+    /// per-shape pass, removing `Wildcard` iff the routed-agg set is
+    /// non-empty -- which is what the element-graph routing and the
+    /// link-score routing "agree" on (the same `ClassifiedSite::routing`
+    /// data), differing only in that the link scorer additionally keeps
+    /// non-`Wildcard` shapes from `ThroughAgg` sites.
     ///
     /// `Wildcard`/`DynamicIndex` shapes that reach this function share the
     /// canonical `link_score_var_name` form with `Bare`, so we dedup by the
-    /// resulting name and keep the first occurrence -- the AST walker returns
+    /// resulting name and keep the first occurrence -- the AST walk records
     /// `Bare` before any subscripted reference, so the canonical-Bare link
     /// score wins the slot when both a bare and a subscripted reference exist.
     #[allow(clippy::too_many_arguments)] // helper threads through emission context
@@ -3747,8 +3705,23 @@ pub fn model_ltm_variables(
         skip_reducer_shapes: bool,
         vars: &mut Vec<LtmSyntheticVar>,
     ) {
-        let mut shapes = enumerate_shapes(db, source_vars, from, to, model, project)
-            .filter(|s| !s.is_empty())
+        let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+        // The distinct `shape` fields of `(from, to)`'s classified sites,
+        // in AST-walk order of first occurrence (equivalent to the per-edge
+        // shape set the AST walker produced before the IR).
+        let mut shapes: Vec<RefShape> = ir
+            .sites
+            .get(&(from.to_string(), to.to_string()))
+            .map(|sites| {
+                let mut v: Vec<RefShape> = Vec::new();
+                for s in sites {
+                    if !v.contains(&s.shape) {
+                        v.push(s.shape.clone());
+                    }
+                }
+                v
+            })
+            .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec![fallback_shape]);
         if skip_reducer_shapes {
             shapes.retain(|s| !matches!(s, RefShape::Wildcard));
@@ -4101,10 +4074,28 @@ pub fn model_ltm_variables(
         skip_agg_halves: bool,
         vars: &mut Vec<LtmSyntheticVar>,
     ) {
-        let routed_aggs: Vec<&crate::ltm_agg::AggNode> = agg_nodes
-            .aggs_in_var(to)
-            .filter(|a| a.is_synthetic && a.source_vars.iter().any(|s| s == from))
-            .collect();
+        // The set of synthetic aggs `(from, to)` routes through, read off
+        // the reference-site IR (the unique `ThroughAgg` `AggRef`s of this
+        // edge's classified sites, in first-occurrence order). This is the
+        // single place the old per-edge `routed_aggs` filter
+        // (`aggs_in_var(to).filter(is_synthetic && reads from)`) used to be
+        // restated -- it now lives only in the IR builder; here we just
+        // project the result, resolving each `AggRef` to its `AggNode` for
+        // the half-emitters.
+        let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+        let routed_aggs: Vec<&crate::ltm_agg::AggNode> = {
+            let mut idxs: Vec<usize> = Vec::new();
+            if let Some(sites) = ir.sites.get(&(from.to_string(), to.to_string())) {
+                for s in sites {
+                    if let crate::db_ltm_ir::SiteRouting::ThroughAgg { agg } = &s.routing
+                        && !idxs.contains(&agg.0)
+                    {
+                        idxs.push(agg.0);
+                    }
+                }
+            }
+            idxs.iter().map(|&i| &agg_nodes.aggs[i]).collect()
+        };
         if !routed_aggs.is_empty() {
             if !skip_agg_halves {
                 for agg in &routed_aggs {
@@ -4130,7 +4121,10 @@ pub fn model_ltm_variables(
                 }
             }
             // The Bare numerator / FixedIndex references of `from` in `to`
-            // still get their own (non-reducer) link scores.
+            // still get their own (non-reducer) link scores. (And a bare
+            // arrayed reducer arg like `SUM(pop)` keeps its `Bare`-named
+            // link score too -- `emit_per_shape_link_scores` drops only the
+            // `Wildcard` reducer-arg shape; see its doc.)
             emit_per_shape_link_scores(
                 db,
                 source_vars,

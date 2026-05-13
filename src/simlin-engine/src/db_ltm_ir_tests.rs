@@ -6,9 +6,10 @@
 //!
 //! Two layers:
 //! 1. `collect_reference_sites_tests` -- the `(shape, in_reducer)` contract
-//!    per AST site, ported verbatim from `db_analysis.rs` (these are the
-//!    Phase-1 regression guards; they pin the *internal* per-variable walker
-//!    `collect_reference_sites`).
+//!    per AST site (the Phase-1 regression guards, ported from `db_analysis.rs`).
+//!    These exercise the production all-sources walker `collect_all_reference_sites`
+//!    (the IR builds on it) and pin the per-AST-site shape + `in_reducer`
+//!    primitive that feeds the IR's routing decision.
 //! 2. `model_ltm_reference_sites_tests` -- the *public* IR contract: the
 //!    `(shape, target_element, routing)` of each `ClassifiedSite`, the AC1.4
 //!    `StarRange` consistency, and the AC1.5 SIZE / scalar-source-reducer
@@ -16,6 +17,7 @@
 //!    `enumerate_agg_nodes` (the sole hoisting decider).
 
 use super::*;
+use crate::common::{Canonical, Ident};
 use crate::db::{SimlinDb, sync_from_datamodel};
 use crate::test_common::TestProject;
 
@@ -24,32 +26,34 @@ use crate::test_common::TestProject;
 mod collect_reference_sites_tests {
     use super::*;
 
-    /// Helper: build a project, sync into salsa, and collect reference sites
-    /// for `source_name` as seen by `target_name`. Resolves the source's
-    /// `is_arrayed` flag and dimension list from the live salsa results so
-    /// the walker can validate literal subscripts against real elements.
+    /// Helper: build a project, sync into salsa, walk `target_name`'s AST via
+    /// the production `collect_all_reference_sites`, and return the reference
+    /// sites bucketed under `source_name`. `lookup_dims` resolves a
+    /// referenced variable's dimensions from the reconstructed `Variable` map
+    /// -- the same way `model_ltm_reference_sites` does.
     fn collect(project: &TestProject, target_name: &str, source_name: &str) -> Vec<ReferenceSite> {
         let datamodel = project.build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
         let source_model = sync.models["main"].source;
         let source_project = sync.project;
-        let source_vars = source_model.variables(&db);
 
-        let target_var = crate::db::reconstruct_model_variables(&db, source_model, source_project)
-            .get(&crate::common::Ident::<crate::common::Canonical>::new(
-                target_name,
-            ))
+        let variables = crate::db::reconstruct_model_variables(&db, source_model, source_project);
+        let target_var = variables
+            .get(&Ident::<Canonical>::new(target_name))
             .cloned()
             .unwrap_or_else(|| panic!("variable '{target_name}' not found"));
 
-        let source_dims: Vec<crate::dimensions::Dimension> = source_vars
-            .get(source_name)
-            .map(|sv| crate::db::variable_dimensions(&db, *sv, source_project).to_vec())
-            .unwrap_or_default();
-        let source_is_arrayed = !source_dims.is_empty();
-
-        super::collect_reference_sites(&target_var, source_name, source_is_arrayed, &source_dims)
+        let mut lookup_dims = |name: &str| -> Vec<crate::dimensions::Dimension> {
+            variables
+                .get(&Ident::<Canonical>::new(name))
+                .and_then(|v| v.get_dimensions())
+                .map(|d| d.to_vec())
+                .unwrap_or_default()
+        };
+        super::collect_all_reference_sites(&target_var, &variables, &mut lookup_dims)
+            .remove(source_name)
+            .unwrap_or_default()
     }
 
     #[test]

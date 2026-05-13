@@ -17,7 +17,7 @@
 //! are pure readers of this IR -- none re-walks the AST for shape/routing,
 //! none restates the `routed_aggs` filter.
 //!
-//! The AST-walker helpers (`collect_reference_sites`, `collect_in_expr`,
+//! The `Expr2` AST-walker helpers (`collect_all_reference_sites`,
 //! `classify_subscript_shape`, `resolve_literal_index`) moved here from
 //! `db_analysis.rs` (their previous home before the IR existed). `RefShape`,
 //! `emit_edges_for_reference`, and the element-name expansion helpers stay in
@@ -35,12 +35,9 @@ use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_vari
 
 // ── AST-walker helpers (moved from db_analysis.rs) ─────────────────────────
 
-/// One occurrence of a source variable in a target's AST.
-///
-/// The walker emits one site per reference. Callers iterating the
-/// variable-level edge map already know the source ident, so the site
-/// only needs to carry the per-reference `shape` and (for arrayed
-/// per-element targets) the `target_element` it was discovered under.
+/// One occurrence of a source variable in a target's AST -- the IR builder's
+/// internal per-variable intermediate, before `in_reducer` + the hoisting
+/// decision are folded into [`ClassifiedSite::routing`].
 ///
 /// `target_element` is set only when the reference appears inside an
 /// `Ast::Arrayed` per-element expression: the value is the canonical
@@ -59,10 +56,6 @@ use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_vari
 /// the *direct* `pop[idx]` reference too, and that one must keep its own
 /// conservative element edge / Bare link score rather than collapsing into
 /// the agg.
-///
-/// This is the IR builder's internal per-variable intermediate; the public
-/// IR surface is [`ClassifiedSite`], which folds `in_reducer` + the hoisting
-/// decision into `routing`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReferenceSite {
     pub shape: RefShape,
@@ -139,285 +132,6 @@ fn resolve_literal_index(
     None
 }
 
-/// Walk a target variable's AST and emit one [`ReferenceSite`] per occurrence
-/// of `source_ident`, accumulating per-site shapes for downstream edge
-/// emission and aggregate-node routing.
-///
-/// Subscript shape classification rules:
-/// - any `IndexExpr2::Wildcard(_)` index → `Wildcard`
-/// - every index is `IndexExpr2::Wildcard(_) | IndexExpr2::StarRange(_, _)`
-///   → `Wildcard` (the all-`StarRange` reducer-style access; see
-///   [`classify_subscript_shape`])
-/// - all indices resolve via [`resolve_literal_index`] → `FixedIndex(names)`
-/// - any other pattern (a partial `StarRange`, `DimPosition`, `Range`,
-///   non-literal `Expr`, or a literal that doesn't match a known element
-///   name) → `DynamicIndex`
-///
-/// Bare `Var` references push `RefShape::Bare`. The shape is independent
-/// of whether the source is arrayed -- edge emission resolves
-/// scalar-vs-arrayed semantics from the source/target dimension lists.
-///
-/// `App` arguments are walked via `walk_builtin_expr`; `BuiltinContents::Ident`
-/// matches contribute a `Bare` site (the builtin doesn't subscript its
-/// ident argument). The walker also recurses into each `Subscript` index
-/// expression so nested references like `source_outer[source_inner[*]]`
-/// emit a site for the inner reference.
-///
-/// Return order is the AST-walk order (left-to-right DFS). Duplicate sites
-/// with identical `(source, shape)` are kept; downstream emission
-/// deduplicates edges implicitly via `BTreeSet` value types, but the
-/// per-site count may matter for callers that use sites as a metric.
-///
-/// `pub(crate)` so `model_element_causal_edges` (before its Task 4 rewire to
-/// read the IR) and the `ref_site_*` regression tests can call it.
-pub(crate) fn collect_reference_sites(
-    target_var: &crate::variable::Variable,
-    source_ident: &str,
-    source_is_arrayed: bool,
-    source_dims: &[crate::dimensions::Dimension],
-) -> Vec<ReferenceSite> {
-    let Some(ast) = target_var.ast() else {
-        return Vec::new();
-    };
-
-    let mut sites = Vec::new();
-    match ast {
-        crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
-            // Scalar/A2A equations: every reference site contributes to
-            // every target element according to its shape's broadcast or
-            // diagonal rule. `target_element = None` lets the emitter
-            // apply the default rules. The whole-equation root is not
-            // inside any reducer, so `in_reducer = false` here.
-            collect_in_expr(
-                expr,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                None,
-                false,
-                &mut sites,
-            );
-        }
-        crate::ast::Ast::Arrayed(_, subscript_map, default_expr, _) => {
-            // Per-element expressions: each reference site is pinned to the
-            // specific target element being defined. The emitter restricts
-            // edge emission to that element only.
-            for (target_elem, expr) in subscript_map.iter() {
-                collect_in_expr(
-                    expr,
-                    source_ident,
-                    source_is_arrayed,
-                    source_dims,
-                    Some(target_elem.as_str()),
-                    false,
-                    &mut sites,
-                );
-            }
-            // The EXCEPT default applies to elements not explicitly listed.
-            // We don't know the exact target element set here, but the
-            // default expression's references contribute to every other
-            // target element. Treating `target_element = None` makes the
-            // emitter broadcast across the full target dimension, which
-            // is a conservative superset that preserves the variable-level
-            // projection invariant.
-            if let Some(default) = default_expr {
-                collect_in_expr(
-                    default,
-                    source_ident,
-                    source_is_arrayed,
-                    source_dims,
-                    None,
-                    false,
-                    &mut sites,
-                );
-            }
-        }
-    }
-    sites
-}
-
-/// Recursively walk an `Expr2` tree, pushing one [`ReferenceSite`] for each
-/// reference to `source_ident`. See [`collect_reference_sites`] for the
-/// shape-classification rules.
-///
-/// `source_is_arrayed` is threaded through for callers that need it
-/// during recursion-local rewriting (currently a no-op here -- shape
-/// classification is determined by the AST node and `source_dims`),
-/// matching the documented public signature of the original walker.
-///
-/// `in_reducer` is `true` when this expression is (transitively) an
-/// argument of an array-reducing builtin (`ltm_agg::reducer_is_hoistable`);
-/// it propagates onto every [`ReferenceSite`] emitted below and tells the
-/// element-graph reroute whether a Wildcard/DynamicIndex reference is the
-/// reducer argument (route through the hoisted agg) or a direct subscript
-/// of the same source elsewhere in the equation (keep its own edge).
-#[allow(clippy::only_used_in_recursion)] // helper for collect_reference_sites
-fn collect_in_expr(
-    expr: &crate::ast::Expr2,
-    source_ident: &str,
-    source_is_arrayed: bool,
-    source_dims: &[crate::dimensions::Dimension],
-    target_element: Option<&str>,
-    in_reducer: bool,
-    sites: &mut Vec<ReferenceSite>,
-) {
-    use crate::ast::{Expr2, IndexExpr2};
-    use crate::builtins::{BuiltinContents, walk_builtin_expr};
-
-    let make_site = |shape: RefShape| -> ReferenceSite {
-        ReferenceSite {
-            shape,
-            target_element: target_element.map(|s| s.to_string()),
-            in_reducer,
-        }
-    };
-
-    match expr {
-        Expr2::Const(..) => {}
-        Expr2::Var(ident, _array_bounds, _) => {
-            if ident.as_str() == source_ident {
-                sites.push(make_site(RefShape::Bare));
-            }
-        }
-        Expr2::Subscript(ident, indices, _, _) => {
-            if ident.as_str() == source_ident {
-                let shape = classify_subscript_shape(indices, source_dims);
-                sites.push(make_site(shape));
-            }
-            // Always recurse into index expressions so nested references
-            // like `source_outer[source_inner[*]]` (or arbitrary index
-            // arithmetic mentioning the source) still emit per-site
-            // entries for the inner reference.
-            for idx in indices {
-                match idx {
-                    IndexExpr2::Expr(e) => {
-                        collect_in_expr(
-                            e,
-                            source_ident,
-                            source_is_arrayed,
-                            source_dims,
-                            target_element,
-                            in_reducer,
-                            sites,
-                        );
-                    }
-                    IndexExpr2::Range(l, r, _) => {
-                        collect_in_expr(
-                            l,
-                            source_ident,
-                            source_is_arrayed,
-                            source_dims,
-                            target_element,
-                            in_reducer,
-                            sites,
-                        );
-                        collect_in_expr(
-                            r,
-                            source_ident,
-                            source_is_arrayed,
-                            source_dims,
-                            target_element,
-                            in_reducer,
-                            sites,
-                        );
-                    }
-                    IndexExpr2::Wildcard(_)
-                    | IndexExpr2::StarRange(_, _)
-                    | IndexExpr2::DimPosition(_, _) => {}
-                }
-            }
-        }
-        Expr2::App(builtin, _, _) => {
-            // A reference inside an array-reducing builtin's argument is
-            // the reducer's input -- mark it so the element-graph reroute
-            // can route it through the hoisted `$⁚ltm⁚agg⁚{n}` node.
-            // Stays sticky once set: a reducer nested in another reducer's
-            // argument is still inside *a* reducer. The set of "hoisted"
-            // reducers is the single `reducer_kind` table (SIZE excluded --
-            // its result doesn't depend on element values).
-            let child_in_reducer = in_reducer || crate::ltm_agg::reducer_is_hoistable(builtin);
-            walk_builtin_expr(builtin, |contents| match contents {
-                BuiltinContents::Ident(id, _) => {
-                    if id == source_ident {
-                        sites.push(make_site(RefShape::Bare));
-                    }
-                }
-                BuiltinContents::Expr(sub_expr) => {
-                    collect_in_expr(
-                        sub_expr,
-                        source_ident,
-                        source_is_arrayed,
-                        source_dims,
-                        target_element,
-                        child_in_reducer,
-                        sites,
-                    );
-                }
-            });
-        }
-        Expr2::Op1(_, operand, _, _) => {
-            collect_in_expr(
-                operand,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-        }
-        Expr2::Op2(_, left, right, _, _) => {
-            collect_in_expr(
-                left,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-            collect_in_expr(
-                right,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-        }
-        Expr2::If(cond, then_expr, else_expr, _, _) => {
-            collect_in_expr(
-                cond,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-            collect_in_expr(
-                then_expr,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-            collect_in_expr(
-                else_expr,
-                source_ident,
-                source_is_arrayed,
-                source_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-        }
-    }
-}
-
 /// Classify a subscript's indices into a [`RefShape`].
 ///
 /// Precedence:
@@ -477,44 +191,21 @@ fn classify_subscript_shape(
     RefShape::FixedIndex(resolved)
 }
 
-/// Return the unique [`RefShape`]s under which `source_ident` is referenced
-/// in `target_var`'s AST, in AST-walk order of first occurrence.
-///
-/// Sibling of [`collect_reference_sites`] that drops the per-site
-/// `target_element` and `in_reducer` fields. Returns an empty vec when the
-/// source isn't referenced.
-///
-/// Retained as a thin projection for callers that only need the shape set
-/// (currently `model_edge_shapes` until it switches to the IR). New callers
-/// should consume `model_ltm_reference_sites` directly.
-pub(crate) fn collect_reference_shapes(
-    target_var: &crate::variable::Variable,
-    source_ident: &str,
-    source_is_arrayed: bool,
-    source_dims: &[crate::dimensions::Dimension],
-) -> Vec<RefShape> {
-    let sites = collect_reference_sites(target_var, source_ident, source_is_arrayed, source_dims);
-    let mut shapes: Vec<RefShape> = Vec::new();
-    for site in sites {
-        if !shapes.iter().any(|s| s == &site.shape) {
-            shapes.push(site.shape);
-        }
-    }
-    shapes
-}
-
 // ── Single-pass all-sources walk ───────────────────────────────────────────
 
 /// Walk a target's AST once and bucket every reference to a model variable
 /// (by source canonical name) into [`ReferenceSite`]s.
 ///
-/// This is the all-sources sibling of [`collect_reference_sites`]: instead
-/// of walking once per `(from, to)` edge, the IR builder walks each `to`'s
-/// AST a single time and records sites for every `from` it references. The
-/// per-source shape-classification rules and `in_reducer` semantics are
-/// identical (it threads the same `child_in_reducer` rule and the same
-/// `classify_subscript_shape`); `lookup_dims` resolves a referenced
-/// variable's dimensions on demand for the literal-subscript check.
+/// This is the production walker the IR builds on: rather than walking once
+/// per `(from, to)` edge, it walks each `to`'s AST a single time and records
+/// sites for every `from` it references. Subscript shapes are classified
+/// per-source via [`classify_subscript_shape`] (`lookup_dims` resolves a
+/// referenced variable's dimensions on demand for the literal-subscript
+/// check); `in_reducer` propagates through `child_in_reducer = in_reducer ||
+/// reducer_is_hoistable(builtin)` (SIZE excluded -- its result doesn't
+/// depend on element values). Walk order is left-to-right DFS over the AST,
+/// matching `enumerate_agg_nodes`, so the per-source site `Vec`s are
+/// deterministic (a salsa requirement on the cached IR result).
 fn collect_all_reference_sites(
     target_var: &crate::variable::Variable,
     variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
@@ -551,10 +242,12 @@ fn collect_all_reference_sites(
     sites
 }
 
-/// Recursive helper for [`collect_all_reference_sites`]: the all-sources
-/// analogue of [`collect_in_expr`]. Mirrors its `in_reducer` propagation
-/// (`child_in_reducer = in_reducer || reducer_is_hoistable(builtin)` -- SIZE
-/// excluded) and shape classification exactly.
+/// Recursive helper for [`collect_all_reference_sites`]: left-to-right DFS
+/// over an `Expr2` tree, pushing one [`ReferenceSite`] per model-variable
+/// reference (bucketed by source name). `in_reducer` becomes `true` once we
+/// descend into a `reducer_is_hoistable` builtin's argument and stays sticky
+/// (a reducer nested in another reducer's arg is still inside *a* reducer);
+/// `SIZE` is not `reducer_is_hoistable`, so it never sets the flag.
 fn walk_all_in_expr(
     expr: &crate::ast::Expr2,
     variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
