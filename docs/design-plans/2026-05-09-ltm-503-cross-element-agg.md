@@ -313,3 +313,40 @@ Divergence from the literature: array reducers are not discussed in any LTM pape
 - **#483** (STDDEV/RANK ceteris-paribus partials fall back to delta-ratio): the per-element reducer partials for STDDEV/RANK are a known approximation in `generate_element_to_scalar_equation`; Phase 4 extends that machinery to arrayed results but does *not* change the STDDEV/RANK approximation. If hoisting surfaces it more prominently, note it on #483.
 - **#309** (discovery iterates at `save_step` granularity, not `dt`): unrelated; this work does not change discovery's time-stepping.
 - General refactors of `build_element_level_loops` beyond what (B)/(D) require.
+
+## Postscript
+
+The follow-on `docs/design-plans/2026-05-11-ltm-arrays-hardening.md` plan
+(8 phases, landed 2026-05-13) resolved the residual array carve-outs this
+plan deferred:
+
+- **#514** -- the conservative-slice carve-out (a reducer over an explicit
+  slice used as a sub-expression, `x[r] = ... + SUM(pop[NYC, *])`, kept the
+  full N×M cross-product because the slice pinning couldn't ride the agg's
+  source descriptor): closed by `AggNode.read_slice` (`AxisRead ∈ {Pinned,
+  Iterated, Reduced}`) -- a sliced reducer is now hoisted and routes only the
+  rows it reads through the agg; an arrayed reducer over an iterated dimension
+  (`SUM(matrix[D1, *])`) mints an *arrayed* agg with one slot per `D1`
+  element. Only a reducer over a *dynamic* index (`SUM(pop[idx, *])`) stays
+  unhoisted.
+- **#487** -- A2A loops getting `partition = None`: closed by element-level
+  `Loop::stocks`, per-slot `loop_partitions: HashMap<String, Vec<Option<usize>>>`,
+  and per-(partition, slot) relative-loop-score normalization, so an
+  independent A2A loop's normalization no longer cross-pollutes a sibling.
+- **#511** -- an explicit `row_sum[D1]` subscript inside an apply-to-all body
+  over `D1 × D2` was classified as a dynamic index; now it classifies as
+  `Bare` (a same-element-on-shared-dims reference) in both the element graph
+  and the link-score partial.
+- **#510** -- a disjoint-dimension arrayed→arrayed edge with a per-element
+  target equation produced a silently scalarized stand-in link score; now it
+  emits one `Equation::Arrayed` partial per distinct referenced source
+  element, or a `Warning` (and no link score) when the index is non-literal.
+
+See the "Re-measurement after the arrays-hardening work (2026-05-13)" block
+in `docs/design-plans/2026-04-25-ltm-per-ref-elem-graph.md`'s Measurement
+Postscript for the re-run numbers (structurally unchanged on the checked-in
+fixtures -- the cluster's element-graph changes fire on inlined sliced /
+iterated-dim reducers, which are exercised by `src/db_*_tests.rs` rather than
+golden files). #483 (the STDDEV approximation it flagged) was resolved too:
+STDDEV now gets an analytic ceteris-paribus partial; only RANK keeps the
+delta-ratio (an order statistic, unreachable as a real reducer RHS).
