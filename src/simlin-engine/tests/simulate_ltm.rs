@@ -3897,6 +3897,135 @@ fn test_a2a_two_loop_relative_scores_sum_to_100() {
     }
 }
 
+/// `ltm-arrays-hardening.AC2.1` regression guard: two structurally-independent
+/// A2A feedback subsystems over *different* dimensions must normalize their
+/// relative loop scores *within their own cycle partition*, not pooled across
+/// both subsystems.
+///
+/// Model: a self-reinforcing birth loop over `Region = {a, b, c}`
+///   `pop[Region]` (stock, init 100) -> `births[Region] = pop * 0.1` -> `pop`
+/// and an independent self-reinforcing production loop over `Product = {x, y}`
+///   `widgets[Product]` (stock, init 50) -> `production[Product] = widgets * 0.05` -> `widgets`
+/// with no cross-coupling, so the element graph has five disjoint single-stock
+/// SCCs (`pop[a]`, `pop[b]`, `pop[c]`, `widgets[x]`, `widgets[y]`) -- the per-
+/// slot `loop_partitions: HashMap<String, Vec<Option<usize>>>` introduced by
+/// commit 11eb1af1 (GH #487).
+///
+/// Asserts:
+///  1. The two subsystems' loops land in *distinct* `loop_partitions` slots:
+///     flattening every loop's per-slot partition vector yields five entries,
+///     all `Some`, all pairwise distinct. Under the pre-fix pooled behavior
+///     `loop_partitions` was `HashMap<String, Option<usize>>` and both loops
+///     resolved to a single shared bucket (or `None`), so this set would have
+///     size 1.
+///  2. Relative loop scores normalize *within each partition*: each loop is the
+///     only loop in each of its single-stock partitions, so every nonzero per-
+///     element relative score is exactly +1.0. Under the pre-fix pooled
+///     behavior the two reinforcing loops would cross-normalize, so the
+///     dominant loop's relative score would be the pooled ratio (~0.5) and the
+///     `== 1.0` check would fail on the old code.
+#[test]
+fn test_disconnected_a2a_loops_normalize_per_partition() {
+    use std::collections::HashSet;
+
+    let project = TestProject::new("two_a2a_subsystems")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["a", "b", "c"])
+        .named_dimension("Product", &["x", "y"])
+        .array_stock("pop[Region]", "100", &["births"], &[], None)
+        .array_flow("births[Region]", "pop * 0.1", None)
+        .array_stock("widgets[Product]", "50", &["production"], &[], None)
+        .array_flow("production[Product]", "widgets * 0.05", None)
+        .build_datamodel();
+
+    let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // Two structurally-independent A2A subsystems => exactly two loop IDs.
+    assert_eq!(
+        loop_partitions.len(),
+        2,
+        "two disconnected A2A subsystems should produce exactly two loop IDs, got {}: {:?}",
+        loop_partitions.len(),
+        loop_partitions.keys().collect::<Vec<_>>()
+    );
+
+    // (1) The two subsystems' loops occupy *distinct* partition slots: every
+    // element-level stock is its own SCC, so flattening all per-slot partition
+    // vectors gives five `Some` entries with no repeats. (Pre-fix: one shared
+    // bucket -> this set would be a singleton.)
+    let all_slots: Vec<Option<usize>> = loop_partitions.values().flatten().copied().collect();
+    assert_eq!(
+        all_slots.len(),
+        5,
+        "expected 3 Region slots + 2 Product slots = 5 per-slot partition entries, got {}: {:?}",
+        all_slots.len(),
+        loop_partitions
+    );
+    assert!(
+        all_slots.iter().all(|p| p.is_some()),
+        "every slot of a pure-A2A loop over a connected element resolves to a partition; got {:?}",
+        loop_partitions
+    );
+    let distinct: HashSet<usize> = all_slots.iter().filter_map(|p| *p).collect();
+    assert_eq!(
+        distinct.len(),
+        5,
+        "two disconnected A2A subsystems must occupy 5 distinct cycle partitions \
+         (not a single pooled bucket); got {} distinct from {:?}",
+        distinct.len(),
+        loop_partitions
+    );
+
+    // (2) Each loop is alone in each of its single-stock partitions, so the
+    // per-element relative loop score reduces to loop_score[k] / |loop_score[k]|.
+    // Both subsystems are purely reinforcing, so every nonzero relative score is
+    // exactly +1.0 -- NOT the pre-fix pooled value the two loops would share if
+    // they cross-normalized.
+    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    assert_eq!(
+        rel_per_element.len(),
+        2,
+        "should normalize two loop_score series, got {}",
+        rel_per_element.len()
+    );
+    for (loop_id, series) in &rel_per_element {
+        // The series is `step_count * stride` long; for a pure-A2A loop alone in
+        // its partition the stride is exactly the loop's element count.
+        let stride = loop_partitions
+            .get(loop_id)
+            .map(|pv| pv.len())
+            .expect("every rel-score loop id has a partition vector");
+        assert!(
+            stride == 2 || stride == 3,
+            "unexpected stride {stride} for {loop_id}"
+        );
+        assert_eq!(
+            series.len(),
+            results.step_count * stride,
+            "rel-score series for {loop_id} should be step_count * stride long"
+        );
+        let nonzero: Vec<f64> = series
+            .iter()
+            .copied()
+            .filter(|v| *v != 0.0 && !v.is_nan())
+            .collect();
+        assert!(
+            !nonzero.is_empty(),
+            "loop {loop_id} should have non-zero per-element relative scores once dynamics start"
+        );
+        for v in &nonzero {
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "single-loop-per-partition relative score for {loop_id} should be exactly 1.0, \
+                 not pooled; got {v}"
+            );
+        }
+    }
+}
+
 /// Issue #463 prep: confirm the engine supports multi-dimensional A2A loops.
 ///
 /// Model: `population[Region, Cohort]` with a pure A2A reinforcing loop
