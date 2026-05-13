@@ -635,7 +635,7 @@ pub(super) fn analyze_graphical_function_polarity(table: &crate::variable::Table
 
     // y-range-relative tolerance so tables that are monotone modulo round-trip
     // numeric-import noise keep their polarity (#492); the non-uniform-x-spacing
-    // concern -- `dy` vs slope `dy/dx` -- is out of scope, tracked separately.
+    // concern -- `dy` vs slope `dy/dx` -- is out of scope (GH #536).
     let y_min = table.y.iter().copied().fold(f64::INFINITY, f64::min);
     let y_max = table.y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let epsilon = (1e-6 * (y_max - y_min)).max(1e-12);

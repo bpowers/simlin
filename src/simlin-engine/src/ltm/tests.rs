@@ -1390,6 +1390,217 @@ fn test_per_element_gf_link_polarity_bare_var_reference() {
 }
 
 #[test]
+fn test_lookup_forward_backward_arm_polarity() {
+    // LOOKUP / LOOKUP_FORWARD / LOOKUP_BACKWARD share the
+    // `(table_expr, index_expr, loc)` shape and the same monotonicity story,
+    // so the Lookup polarity arm covers all three via one `|` pattern. The
+    // per-element-GF tests above exercise the `LOOKUP` spelling; this one
+    // exercises `lookup_forward` and `lookup_backward` so the merged arm has
+    // direct coverage. With both regions' `curve` tables monotone increasing,
+    // `dose` enters the lookup-index position as Positive and each table is
+    // Positive, so the `dose -> effect` link is Positive (not Unknown).
+    for builtin in ["lookup_forward", "lookup_backward"] {
+        let curve = per_element_gf_aux(
+            "curve",
+            "region",
+            &["nyc", "boston"],
+            vec![
+                continuous_gf(vec![0.0, 1.0, 2.0]),
+                continuous_gf(vec![0.0, 2.0, 4.0]),
+            ],
+        );
+        let polarities = link_polarities_for(
+            "region",
+            &["nyc", "boston"],
+            vec![
+                curve,
+                arrayed_aux("dose", "region", "5"),
+                arrayed_aux(
+                    "effect",
+                    "region",
+                    &format!("{builtin}(curve[region], dose[region])"),
+                ),
+            ],
+        );
+        assert_eq!(
+            polarities[&("dose".to_string(), "effect".to_string())],
+            LinkPolarity::Positive,
+            "{builtin} with monotone-increasing per-element tables -> Positive link",
+        );
+    }
+}
+
+/// Build a minimal `Variable::Var` carrying just the parts the LOOKUP polarity
+/// path reads: `tables` (one per element, in element order) and an `ast` whose
+/// dimensions `Variable::get_dimensions` reports (an `ApplyToAll` over `dims`).
+/// Everything else is the natural default. Used by the focused unit test for
+/// `lookup_table_polarity`'s defensive subscript branches.
+#[cfg(test)]
+fn gf_var_for_test(
+    ident: &str,
+    dims: Vec<crate::dimensions::Dimension>,
+    tables: Vec<crate::variable::Table>,
+) -> Variable {
+    use crate::ast::{Ast, Expr2, Loc};
+    Variable::Var {
+        ident: Ident::new(ident),
+        ast: Some(Ast::ApplyToAll(
+            dims,
+            Expr2::Const("0".to_string(), 0.0, Loc::default()),
+        )),
+        init_ast: None,
+        eqn: None,
+        units: None,
+        tables,
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        unit_errors: vec![],
+    }
+}
+
+#[test]
+fn test_lookup_table_polarity_defensive_subscript_branches() {
+    // Focused coverage of `lookup_table_polarity`'s defensive subscript
+    // branches that the datamodel-fixture tests above don't reach: a
+    // `Const` (integer-literal) FixedIndex, a multi-dimensional GF source
+    // (the conservative bail), and a `Wildcard` subscript. These are
+    // exercised through `analyze_link_polarity` with hand-built `Expr2`
+    // ASTs and a minimal var map -- the parser doesn't produce these exact
+    // shapes for a well-formed model, but the arm must stay total and
+    // classify them correctly (resolvable -> the element's polarity;
+    // otherwise -> Unknown).
+    use crate::ast::{Ast, Expr2, IndexExpr2, Loc};
+    use crate::builtins::BuiltinFn;
+    use crate::dimensions::Dimension;
+    use crate::variable::Table;
+    use LinkPolarity::{Negative, Positive, Unknown};
+
+    let dose = Ident::new("dose");
+    let region = Dimension::from(&crate::datamodel::Dimension::named(
+        "region".to_string(),
+        vec!["nyc".to_string(), "boston".to_string()],
+    ));
+    let other = Dimension::from(&crate::datamodel::Dimension::named(
+        "other".to_string(),
+        vec!["a".to_string(), "b".to_string()],
+    ));
+
+    // curve[nyc] decreasing, curve[boston] increasing -- one table per element.
+    let decreasing = Table::new_for_test(vec![0.0, 1.0, 2.0], vec![4.0, 2.0, 0.0]);
+    let increasing = Table::new_for_test(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 2.0]);
+
+    // `effect = LOOKUP(curve[<idx>], dose)` -- a scalar target. `dose` enters
+    // the index position as Positive, so the link polarity equals the polarity
+    // of the table `<idx>` resolves to.
+    let lookup_curve = |idx: IndexExpr2| -> Ast<Expr2> {
+        Ast::Scalar(Expr2::App(
+            BuiltinFn::Lookup(
+                Box::new(Expr2::Subscript(
+                    Ident::new("curve"),
+                    vec![idx],
+                    None,
+                    Loc::default(),
+                )),
+                Box::new(Expr2::Var(dose.clone(), None, Loc::default())),
+                Loc::default(),
+            ),
+            None,
+            Loc::default(),
+        ))
+    };
+    let var = |id: &str| Expr2::Var(Ident::new(id), None, Loc::default());
+    let int_const = |n: i64| Expr2::Const(n.to_string(), n as f64, Loc::default());
+
+    // (a) `curve[1]` -- a 1-based integer literal into the single dimension.
+    // Picks NYC's (offset 0) decreasing table -> Negative. `curve[2]` picks
+    // Boston's increasing table -> Positive, confirming the literal resolves
+    // to the right element.
+    let one_dim_curve = |tables: Vec<Table>| {
+        let mut vars = HashMap::new();
+        vars.insert(
+            Ident::new("curve"),
+            gf_var_for_test("curve", vec![region.clone()], tables),
+        );
+        vars
+    };
+    assert_eq!(
+        analyze_link_polarity(
+            &lookup_curve(IndexExpr2::Expr(int_const(1))),
+            &dose,
+            &one_dim_curve(vec![decreasing.clone(), increasing.clone()]),
+        ),
+        Negative,
+        "LOOKUP(curve[1], dose) resolves the literal to NYC's decreasing table",
+    );
+    assert_eq!(
+        analyze_link_polarity(
+            &lookup_curve(IndexExpr2::Expr(int_const(2))),
+            &dose,
+            &one_dim_curve(vec![decreasing.clone(), increasing.clone()]),
+        ),
+        Positive,
+        "LOOKUP(curve[2], dose) resolves the literal to Boston's increasing table",
+    );
+    // An out-of-range literal isn't statically resolvable -> Unknown.
+    assert_eq!(
+        analyze_link_polarity(
+            &lookup_curve(IndexExpr2::Expr(int_const(3))),
+            &dose,
+            &one_dim_curve(vec![decreasing.clone(), increasing.clone()]),
+        ),
+        Unknown,
+        "LOOKUP(curve[3], dose) -- out of range -> Unknown",
+    );
+
+    // (b) A multi-dimensional GF source: resolving a joint table offset would
+    // need row-major flattening of the per-element table list, which the LTM
+    // polarity cases don't require, so the arm bails to Unknown even when both
+    // indices are literal elements that would individually resolve.
+    let mut multi_dim_vars = HashMap::new();
+    multi_dim_vars.insert(
+        Ident::new("curve"),
+        gf_var_for_test(
+            "curve",
+            vec![region.clone(), other.clone()],
+            vec![increasing.clone(), increasing.clone()],
+        ),
+    );
+    let multi_dim_lookup = Ast::Scalar(Expr2::App(
+        BuiltinFn::Lookup(
+            Box::new(Expr2::Subscript(
+                Ident::new("curve"),
+                vec![IndexExpr2::Expr(var("nyc")), IndexExpr2::Expr(var("a"))],
+                None,
+                Loc::default(),
+            )),
+            Box::new(Expr2::Var(dose.clone(), None, Loc::default())),
+            Loc::default(),
+        ),
+        None,
+        Loc::default(),
+    ));
+    assert_eq!(
+        analyze_link_polarity(&multi_dim_lookup, &dose, &multi_dim_vars),
+        Unknown,
+        "a multi-dimensional GF source is the conservative bail -> Unknown",
+    );
+
+    // (c) A `Wildcard` subscript can't pick a single element's table
+    // statically -> Unknown (even though every element's table is increasing).
+    assert_eq!(
+        analyze_link_polarity(
+            &lookup_curve(IndexExpr2::Wildcard(Loc::default())),
+            &dose,
+            &one_dim_curve(vec![increasing.clone(), increasing.clone()]),
+        ),
+        Unknown,
+        "LOOKUP(curve[*], dose) -- wildcard subscript -> Unknown",
+    );
+}
+
+#[test]
 fn test_fishbanks_loops() {
     use crate::prost::Message;
     use std::fs;
