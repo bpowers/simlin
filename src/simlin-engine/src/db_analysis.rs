@@ -864,12 +864,12 @@ pub struct EdgeShapesResult {
 /// enumeration: cycles can be classified as pure-A2A, pure-scalar, or
 /// cross-element/mixed by inspecting the shape set on each cycle edge.
 ///
-/// Salsa-tracked separately from `model_element_causal_edges` so that
-/// callers that only want the cycle classifier (not the element graph)
-/// don't pay for the element-edge expansion. Both functions reuse the
-/// same `collect_reference_sites` / `collect_reference_shapes` walker;
-/// the per-target AST parse results are already cached by salsa, so
-/// the duplicated walks are cheap.
+/// A projection of `model_ltm_reference_sites` (the shared reference-site
+/// IR): the shape set per `(from, to)` edge is just the distinct `shape`
+/// fields of that edge's `ClassifiedSite`s -- this function does no AST
+/// walk of its own. The structural / module short-circuit (no AST
+/// reference exists, so the IR has no entry) maps to `{Bare}`, matching
+/// `model_element_causal_edges`'s treatment of the same edges.
 #[salsa::tracked(returns(ref))]
 pub fn model_edge_shapes(
     db: &dyn Db,
@@ -878,13 +878,13 @@ pub fn model_edge_shapes(
 ) -> EdgeShapesResult {
     let variable_edges = model_causal_edges(db, model, project);
     let source_vars = model.variables(db);
+    let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
 
     // Build a set of structural flow->stock edges so we can label them
-    // `{Bare}` directly without an AST walk: stock equations contain
-    // only the initial value, so the flow name never appears in the
-    // stock's AST and `collect_reference_shapes` would return an empty
-    // vec. The structural edge is semantically a same-element diagonal,
-    // matching the Bare classification used by
+    // `{Bare}` directly: stock equations contain only the initial value,
+    // so the flow name never appears in the stock's AST and the IR has no
+    // entry for the edge. The structural edge is semantically a
+    // same-element diagonal, matching the Bare classification used by
     // `model_element_causal_edges` for the same case.
     let mut structural_flow_to_stock: BTreeSet<(String, String)> = BTreeSet::new();
     for (stock_name, source_var) in source_vars.iter() {
@@ -900,31 +900,16 @@ pub fn model_edge_shapes(
         }
     }
 
-    // Cache dimension lookups -- a variable's dimension list is needed
-    // both as the source for shape resolution and (cheaply) reused
-    // across multiple edges that share the same source.
-    let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
-    let mut lookup_dims = |name: &str| -> Vec<crate::dimensions::Dimension> {
-        if let Some(dims) = dim_cache.get(name) {
-            return dims.clone();
-        }
-        let dims = source_vars
-            .get(name)
-            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
-            .unwrap_or_default();
-        dim_cache.insert(name.to_string(), dims.clone());
-        dims
-    };
-
     let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
     for (from_name, to_set) in &variable_edges.edges {
-        let from_dims = lookup_dims(from_name);
-        let source_is_arrayed = !from_dims.is_empty();
-
         for to_name in to_set {
             // Module edges and structural flow->stock edges short-circuit
             // to {Bare}. Module targets are scalar nodes in the causal
-            // graph; structural stock edges have no AST reference.
+            // graph; structural stock edges (and any other edge with no
+            // AST reference -- e.g. a synthesized dep, or an
+            // unreconstructable target) have no IR entry, which also maps
+            // to {Bare} below, but flagging the structural/module edges
+            // here keeps the intent explicit.
             let to_is_module = source_vars
                 .get(to_name)
                 .map(|sv| sv.kind(db) == super::SourceVariableKind::Module)
@@ -938,36 +923,18 @@ pub fn model_edge_shapes(
                 continue;
             }
 
-            // AST-walk path: reconstruct the target and collect distinct
-            // reference shapes.
-            let target_var = match reconstruct_single_variable(db, model, project, to_name) {
-                Some(v) => v,
-                None => {
-                    // Defensive fallback: edge exists in the variable
-                    // graph but the target isn't reconstructable. Treat
-                    // as Bare so the cycle classifier still has a
-                    // shape to inspect. (Same fallback as
-                    // `model_element_causal_edges`.)
-                    let mut set = BTreeSet::new();
-                    set.insert(RefShape::Bare);
-                    edge_shapes.insert((from_name.clone(), to_name.clone()), set);
-                    continue;
-                }
-            };
-
-            let shapes = crate::db_ltm_ir::collect_reference_shapes(
-                &target_var,
-                from_name,
-                source_is_arrayed,
-                &from_dims,
-            );
-            let mut set: BTreeSet<RefShape> = shapes.into_iter().collect();
+            // Project the IR: the shape set is the distinct `shape` fields
+            // of this edge's classified sites. An edge that exists in the
+            // variable graph but has no AST reference (or whose target
+            // couldn't be reconstructed) has no IR entry -> default to
+            // {Bare} so the cycle classifier sees a same-element shape
+            // rather than an empty set (which would be ambiguous).
+            let mut set: BTreeSet<RefShape> = ir
+                .sites
+                .get(&(from_name.clone(), to_name.clone()))
+                .map(|sites| sites.iter().map(|s| s.shape.clone()).collect())
+                .unwrap_or_default();
             if set.is_empty() {
-                // Edge exists in the variable graph but no AST reference
-                // of `from` survives in `to`'s equation. This can happen
-                // with synthesized references; default to Bare so the
-                // classifier sees a same-element shape rather than an
-                // empty set (which would be ambiguous).
                 set.insert(RefShape::Bare);
             }
             edge_shapes.insert((from_name.clone(), to_name.clone()), set);
@@ -1132,10 +1099,16 @@ pub fn model_element_causal_edges(
 
     let mut element_edges: HashMap<String, BTreeSet<String>> = HashMap::new();
 
-    // Aggregate-node enumeration (Phase 5): each maximal inlined reducer
-    // subexpression (`SUM(pop[*])`, ...) is a synthetic node `$⁚ltm⁚agg⁚{n}`.
-    // A Wildcard/DynamicIndex reducer reference to `from` inside `to` routes
-    // `from[d] → agg` + `agg → to[e]` instead of the all-pairs cross-product.
+    // The reference-site classification IR decides each reference's access
+    // shape and aggregate-node routing; `enumerate_agg_nodes` is consulted
+    // only to resolve a `ThroughAgg` site's `AggRef` to the synthetic agg's
+    // name. (A `ThroughAgg` site routes `from[d] → agg`, `agg → to[e]`
+    // instead of the all-pairs cross-product; a `Direct` site uses its
+    // `shape`/`target_element` via `emit_edges_for_reference` -- including
+    // the not-yet-hoisted conservative-slice / bare-dynamic-index cases,
+    // which stay `Direct` with their Wildcard/DynamicIndex shape and so
+    // still expand to the full cross-product.)
+    let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
 
     // Cache dimension lookups to avoid repeated calls for the same variable
@@ -1155,11 +1128,13 @@ pub fn model_element_causal_edges(
         dims
     };
 
-    // Build a set of structural flow->stock edges so we can skip AST
+    // Build a set of structural flow->stock edges so we can skip
     // classification for them. Stock equations contain only the initial
-    // value, so the flow name never appears in the stock's AST. Without
-    // this check, classification defaults to Scalar, which produces
-    // incorrect all-to-all expansion for arrayed stocks.
+    // value, so the flow name never appears in the stock's AST (the IR has
+    // no entry); without this bypass an arrayed stock's edge would fall
+    // through to the empty-sites fallback below, which is the same
+    // SameElement diagonal -- but flagging it here keeps the intent
+    // explicit and matches `model_edge_shapes`.
     let mut structural_flow_to_stock: BTreeSet<(String, String)> = BTreeSet::new();
     for (stock_name, source_var) in source_vars.iter() {
         if source_var.kind(db) == super::SourceVariableKind::Stock {
@@ -1174,12 +1149,14 @@ pub fn model_element_causal_edges(
         }
     }
 
-    // Expand each variable-level edge to element-level edges using the
-    // AST-walking per-reference walker. For each (source, target) pair we
-    // collect every reference site of `source` in `target`'s AST, classify
-    // each into a `RefShape`, and emit the per-shape element edges. This
-    // replaces the older single-classification-per-pair scheme that
-    // over-expanded fixed-index references to the full N x N cross product.
+    // Expand each variable-level edge to element-level edges by reading the
+    // IR's classified sites for that `(from, to)` pair. `Direct` sites emit
+    // per-shape element edges (deduped naturally via the `BTreeSet` value);
+    // `ThroughAgg` sites emit `from[d] → agg`, `agg → to[e]`. An edge with
+    // no IR entry (structural flow->stock, a module edge, an
+    // unreconstructable target, or a synthesized dep with no AST reference)
+    // falls back to a SameElement-diagonal `Bare` emission so the
+    // variable-level projection invariant still holds.
     for (from_name, to_set) in &variable_edges.edges {
         let from_dims = lookup_dims(from_name, &mut dim_cache);
         for to_name in to_set {
@@ -1194,15 +1171,15 @@ pub fn model_element_causal_edges(
                 continue;
             }
 
-            // Structural flow->stock edges: the stock's equation is just the
-            // initial value, so the flow name never appears in the stock's
-            // AST. Without this bypass, the walker would find no reference
-            // sites and emit no edges. Both arrayed -> emit SameElement
-            // diagonal directly.
-            if structural_flow_to_stock.contains(&(from_name.clone(), to_name.clone()))
+            let edge_key = (from_name.clone(), to_name.clone());
+            let classified = ir.sites.get(&edge_key);
+
+            // Structural flow->stock edges, or any edge with no AST
+            // reference: SameElement diagonal `Bare` emission.
+            let is_structural_flow_to_stock = structural_flow_to_stock.contains(&edge_key)
                 && !from_dims.is_empty()
-                && !to_dims.is_empty()
-            {
+                && !to_dims.is_empty();
+            if is_structural_flow_to_stock || classified.map(Vec::is_empty).unwrap_or(true) {
                 emit_edges_for_reference(
                     from_name,
                     to_name,
@@ -1215,95 +1192,30 @@ pub fn model_element_causal_edges(
                 continue;
             }
 
-            // AST-based emission: collect reference sites and emit one set
-            // of element edges per site. Multiple sites of the same shape
-            // dedupe naturally because `element_edges` values are sets.
-            let target_var = match reconstruct_single_variable(db, model, project, to_name) {
-                Some(v) => v,
-                None => {
-                    // Couldn't reconstruct (shouldn't happen for well-formed
-                    // models). Fall back to scalar broadcast emission so the
-                    // variable-level projection invariant still holds.
-                    emit_edges_for_reference(
-                        from_name,
-                        to_name,
-                        &from_dims,
-                        &to_dims,
-                        &RefShape::Bare,
-                        None,
-                        &mut element_edges,
-                    );
-                    continue;
-                }
-            };
-            let source_is_arrayed = !from_dims.is_empty();
-            let sites = crate::db_ltm_ir::collect_reference_sites(
-                &target_var,
-                from_name,
-                source_is_arrayed,
-                &from_dims,
-            );
-
-            if sites.is_empty() {
-                // Defensive: the variable-level edge exists but the AST has
-                // no reference. This can happen with structural edges or
-                // synthesized references. Fall back to scalar broadcast so
-                // the variable-level projection invariant still holds.
-                emit_edges_for_reference(
-                    from_name,
-                    to_name,
-                    &from_dims,
-                    &to_dims,
-                    &RefShape::Bare,
-                    None,
-                    &mut element_edges,
-                );
-                continue;
-            }
-
-            // Phase 5: does `to`'s equation hoist any *synthetic* aggregate
-            // node that reads `from`? If so, every reference to `from` that
-            // appears *inside an array-reducing builtin argument* (the
-            // `in_reducer` sites) is rerouted through that agg node
-            // (`from[d] → agg`, `agg → to[e]`) rather than emitting the
-            // all-pairs cross-product. (Variable-backed aggs like
-            // `total_pop = SUM(pop[*])` are already real nodes -- their
-            // edges come from the normal reference walker -- so they don't
-            // trigger this reroute.)
-            //
-            // The reroute keys on `site.in_reducer` *and* whether a hoisted
-            // agg actually covers `from`, not on the access shape: a `to`
-            // equation with *both* `SUM(pop[*])` and a direct `pop[idx]`
-            // produces a `DynamicIndex` site for the direct `pop[idx]` too,
-            // but only the `SUM`'s argument is hoisted -- the direct
-            // `pop[idx]` reference (`in_reducer = false`) must keep its own
-            // conservative cross-product edge. The flip side: a reducer over
-            // a single non-literal index, `SUM(pop[idx])`, *is* `in_reducer`
-            // but is *not* a full reduce (it reads one element, not the whole
-            // array), so `enumerate_agg_nodes` never mints an agg for it; with
-            // no hoisted agg reading `pop`, `routed_aggs` is empty and the
-            // `DynamicIndex` site falls through to `emit_edges_for_reference`.
-            // (A wildcard-containing slice like `SUM(pop[NYC, *])`, GH #514,
-            // classifies as `Wildcard`, not `DynamicIndex` -- wildcard wins in
-            // `classify_subscript_shape` -- and is also not hoisted.)
-            let routed_aggs: Vec<&crate::ltm_agg::AggNode> = agg_nodes
-                .aggs_in_var(to_name)
-                .filter(|a| a.is_synthetic && a.source_vars.iter().any(|s| s == from_name))
-                .collect();
-
-            for site in sites {
-                let route_through_agg = !routed_aggs.is_empty() && site.in_reducer;
-                if route_through_agg {
-                    // `from[d] → agg` (per source element) and `agg → to[e]`
-                    // (per target element / scalar). Synthetic aggs are
-                    // always scalar full-reduces in this phase, so the agg
-                    // node has no subscript.
-                    for agg in &routed_aggs {
+            for site in classified.expect("classified is Some -- checked above") {
+                match &site.routing {
+                    crate::db_ltm_ir::SiteRouting::Direct => {
+                        emit_edges_for_reference(
+                            from_name,
+                            to_name,
+                            &from_dims,
+                            &to_dims,
+                            &site.shape,
+                            site.target_element.as_deref(),
+                            &mut element_edges,
+                        );
+                    }
+                    crate::db_ltm_ir::SiteRouting::ThroughAgg { agg } => {
+                        // `from[d] → agg` (per source element) and
+                        // `agg → to[e]` (per target element / scalar).
+                        // Synthetic aggs are always scalar full-reduces in
+                        // this phase, so the agg node has no subscript.
+                        let agg_node = &agg_nodes.aggs[agg.0];
                         for from_elem in cartesian_element_names(from_name, &from_dims) {
                             element_edges
                                 .entry(from_elem)
                                 .or_default()
-                                .insert(agg.name.clone());
+                                .insert(agg_node.name.clone());
                         }
                         let to_nodes: Vec<String> = if to_dims.is_empty() {
                             vec![to_name.to_string()]
@@ -1312,22 +1224,12 @@ pub fn model_element_causal_edges(
                         } else {
                             cartesian_element_names(to_name, &to_dims)
                         };
-                        let entry = element_edges.entry(agg.name.clone()).or_default();
+                        let entry = element_edges.entry(agg_node.name.clone()).or_default();
                         for to_node in to_nodes {
                             entry.insert(to_node);
                         }
                     }
-                    continue;
                 }
-                emit_edges_for_reference(
-                    from_name,
-                    to_name,
-                    &from_dims,
-                    &to_dims,
-                    &site.shape,
-                    site.target_element.as_deref(),
-                    &mut element_edges,
-                );
             }
         }
     }
