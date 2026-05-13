@@ -2239,11 +2239,12 @@ fn build_a2a_loop_stocks(
 /// key (sorted distinct var names) before numbering, so the final IDs
 /// are stable regardless of which path produced each Loop.
 ///
-/// `agg_loop_budget` and the returned `bool` thread the cross-element-
-/// through-aggregate loop-count budget / truncation flag through to
-/// `build_element_level_loops` -> `recover_cross_agg_loops` (only the slow
-/// path can carry agg nodes); the caller surfaces the flag on
-/// `LtmVariablesResult::agg_recovery_truncated`.
+/// `agg_loop_budget` and the returned `Vec<String>` thread the cross-element-
+/// through-aggregate loop-count budget / truncated-aggregate-node names
+/// through to `build_element_level_loops` -> `recover_cross_agg_loops` (only
+/// the slow path can carry agg nodes); the caller surfaces the flag (and the
+/// names) on `LtmVariablesResult::agg_recovery_truncated` and the truncation
+/// `Warning`. The returned vector is empty iff nothing was clipped.
 pub(crate) fn build_loops_from_tiered(
     tiered: &super::TieredCircuitsResult,
     var_graph: &crate::ltm::CausalGraph,
@@ -2252,7 +2253,7 @@ pub(crate) fn build_loops_from_tiered(
     project: SourceProject,
     dm_dims: &[crate::datamodel::Dimension],
     agg_loop_budget: usize,
-) -> (Vec<crate::ltm::Loop>, bool) {
+) -> (Vec<crate::ltm::Loop>, Vec<String>) {
     use crate::common::{Canonical, Ident};
     use crate::ltm::{Loop, assign_loop_ids};
 
@@ -2332,7 +2333,7 @@ pub(crate) fn build_loops_from_tiered(
     // helper does its own `assign_loop_ids`; we strip the IDs
     // afterward because we re-run id assignment over the merged set
     // to keep numbering consistent.
-    let mut agg_truncated = false;
+    let mut truncated_aggs: Vec<String> = Vec::new();
     if !tiered.slow_path.is_empty() {
         let (mut slow_path_loops, t) = build_element_level_loops(
             &tiered.slow_path,
@@ -2343,7 +2344,7 @@ pub(crate) fn build_loops_from_tiered(
             dm_dims,
             agg_loop_budget,
         );
-        agg_truncated = t;
+        truncated_aggs = t;
         for l in &mut slow_path_loops {
             l.id.clear();
         }
@@ -2351,7 +2352,7 @@ pub(crate) fn build_loops_from_tiered(
     }
 
     assign_loop_ids(&mut all_loops);
-    (all_loops, agg_truncated)
+    (all_loops, truncated_aggs)
 }
 
 /// Build element-subscripted `Link`s for one element-level circuit.
@@ -2453,10 +2454,12 @@ fn build_element_subscripted_links(
 ///
 /// `agg_loop_budget` caps how many non-elementary cross-element-through-
 /// aggregate loops `recover_cross_agg_loops` materializes (across all
-/// aggregate nodes); the returned `bool` is `true` when that budget (or the
-/// per-aggregate petal cap) clipped the recovered set. Callers pass
+/// aggregate nodes); the returned `Vec<String>` names the aggregate nodes
+/// whose enumeration that budget (or the per-aggregate petal cap) clipped
+/// (sorted, deduped -- empty iff nothing was clipped). Callers pass
 /// `cross_agg_loop_budget()` (or, in tests, a small value) and thread the
-/// truncation flag up to `LtmVariablesResult::agg_recovery_truncated`.
+/// names up to `LtmVariablesResult::agg_recovery_truncated` and the
+/// truncation `Warning`.
 ///
 /// Visibility is `pub(crate)` so unit tests in
 /// `db_ltm_unified_tests.rs` can drive this function directly to
@@ -2473,7 +2476,7 @@ pub(crate) fn build_element_level_loops(
     project: SourceProject,
     dm_dims: &[crate::datamodel::Dimension],
     agg_loop_budget: usize,
-) -> (Vec<crate::ltm::Loop>, bool) {
+) -> (Vec<crate::ltm::Loop>, Vec<String>) {
     use crate::common::{Canonical, Ident};
     use crate::ltm::{Loop, assign_loop_ids};
 
@@ -2887,9 +2890,9 @@ pub(crate) fn build_element_level_loops(
     // "petal" `agg → ... → agg`; stitching `k ≥ 2` petals of the same agg
     // whose internal nodes are pairwise disjoint, in some cyclic order,
     // reconstructs exactly those non-elementary loops -- bounded by
-    // `agg_loop_budget` (when it clips, `agg_truncated` is set and the caller
-    // accumulates a `Warning`).
-    let (recovered, agg_truncated) = recover_cross_agg_loops(
+    // `agg_loop_budget` (when it clips, the clipped aggs' names are returned
+    // and the caller accumulates a `Warning` naming them).
+    let (recovered, truncated_aggs) = recover_cross_agg_loops(
         &circuit_strs,
         var_graph,
         source_vars,
@@ -2900,7 +2903,7 @@ pub(crate) fn build_element_level_loops(
     all_loops.extend(recovered);
 
     assign_loop_ids(&mut all_loops);
-    (all_loops, agg_truncated)
+    (all_loops, truncated_aggs)
 }
 
 /// Hard cap on the number of non-elementary cross-element-through-aggregate
@@ -3087,13 +3090,28 @@ struct AggPetal<'a> {
 /// Enumeration is bounded: an agg's petals are sorted by a deterministic
 /// priority (fewest internal nodes first -- smaller petals combine into more
 /// loops -- then a stable joined-`nodes` tiebreaker), the smallest
-/// `MAX_AGG_PETALS` are kept (clipping sets `truncated`), the disjoint
-/// subsets are walked smallest-cardinality-first (so under truncation the
-/// few-petal -- likely most interesting -- loops survive), and a running
-/// count is checked against `agg_loop_budget` (a global budget across all
-/// aggs; once hit, recovery stops and `truncated` is set). The deterministic
-/// petal order is what makes the *truncated* loop set reproducible rather
-/// than HashMap-iteration-order dependent.
+/// `MAX_AGG_PETALS` are kept (clipping flags that agg as truncated), the
+/// disjoint subsets are walked smallest-cardinality-first (so under
+/// truncation the few-petal -- likely most interesting -- loops survive), and
+/// a running count is checked against `agg_loop_budget` (a global budget
+/// across all aggs; once hit, recovery stops). The deterministic agg/petal
+/// order is what makes the *truncated* loop set reproducible rather than
+/// HashMap-iteration-order dependent.
+///
+/// Returns the recovered loops and the (sorted, deduped) names of the
+/// aggregate nodes whose enumeration was clipped -- empty iff nothing was
+/// clipped. An agg `A` is reported as truncated when either (a) the soft
+/// per-agg petal cap dropped ≥ 1 of its petals, or (b) the global loop-count
+/// budget fired at any point while `A` was being enumerated *or before `A`
+/// would have been reached* (the per-agg loop walks aggs in sorted order, so
+/// when the budget fires at agg `X` every agg sorted after `X` -- that has
+/// ≥ 2 petals and so could have contributed loops -- is also un-enumerated
+/// and thus reported). This is conservative in the same direction as the
+/// petal-cap flag (see below): an agg whose disjoint-petal subsets would all
+/// have collapsed to zero loops anyway is still flagged if the budget never
+/// reached it -- over-reporting incompleteness is the safe direction, and
+/// distinguishing it would require running the very enumeration the budget
+/// exists to skip.
 fn recover_cross_agg_loops(
     circuit_strs: &[Vec<&str>],
     var_graph: &crate::ltm::CausalGraph,
@@ -3101,7 +3119,7 @@ fn recover_cross_agg_loops(
     db: &dyn Db,
     project: SourceProject,
     agg_loop_budget: usize,
-) -> (Vec<crate::ltm::Loop>, bool) {
+) -> (Vec<crate::ltm::Loop>, Vec<String>) {
     use crate::common::{Canonical, Ident};
     use crate::ltm::{LinkPolarity, Loop, LoopPolarity};
 
@@ -3139,12 +3157,19 @@ fn recover_cross_agg_loops(
     }
 
     let mut recovered: Vec<Loop> = Vec::new();
-    let mut truncated = false;
+    // Names of aggs whose enumeration was clipped (by the soft petal cap or by
+    // the global budget firing during/before them). A BTreeSet so the result
+    // is deterministic-sorted and deduped regardless of insertion order.
+    let mut truncated_aggs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut emitted: usize = 0;
     // Deterministic agg iteration order so the budget clips reproducibly.
-    let mut aggs: Vec<&&str> = petals_by_agg.keys().collect();
+    let mut aggs: Vec<&str> = petals_by_agg.keys().copied().collect();
     aggs.sort();
-    'outer: for agg in aggs {
+    // If the global budget fires mid-enumeration, every agg sorted after the
+    // one we were on is un-enumerated; this records that position so they can
+    // be folded into `truncated_aggs` afterward.
+    let mut budget_clip_idx: Option<usize> = None;
+    'outer: for (agg_idx, agg) in aggs.iter().enumerate() {
         let mut petals: Vec<&AggPetal> = petals_by_agg[*agg].iter().collect();
         if petals.len() < 2 {
             continue;
@@ -3156,9 +3181,16 @@ fn recover_cross_agg_loops(
         // this key is a total order.
         petals.sort_by_cached_key(|p| (p.internal.len(), p.nodes.join("\u{0}")));
         if petals.len() > MAX_AGG_PETALS {
-            // Drop the larger petals; the recovered set is now incomplete.
+            // Drop the larger petals; the recovered set for this agg is now
+            // incomplete, so report it. Conservatively flags truncation
+            // whenever the soft petal cap drops >= 1 petal, even if those
+            // petals would have contributed no disjoint-pair loop (every
+            // dropped petal's internal nodes overlap a kept petal) --
+            // over-reporting incompleteness is the safe direction, and
+            // checking would mean running the disjoint-subset enumeration the
+            // cap exists to bound.
             petals.truncate(MAX_AGG_PETALS);
-            truncated = true;
+            truncated_aggs.insert((*agg).to_string());
         }
         let k = petals.len();
 
@@ -3228,13 +3260,29 @@ fn recover_cross_agg_loops(
                 });
                 emitted += 1;
                 if emitted >= agg_loop_budget {
-                    truncated = true;
+                    // This agg's enumeration was clipped; the ones sorted
+                    // after it never ran (handled below).
+                    truncated_aggs.insert((*agg).to_string());
+                    budget_clip_idx = Some(agg_idx);
                     break 'outer;
                 }
             }
         }
     }
-    (recovered, truncated)
+
+    // The global budget clipped mid-enumeration: every agg sorted after the
+    // clip point is un-enumerated. Report those that had >= 2 petals (and so
+    // could have contributed loops); an agg with < 2 petals would have been
+    // skipped regardless of budget, so it is not "truncated".
+    if let Some(clip_idx) = budget_clip_idx {
+        for agg in &aggs[clip_idx + 1..] {
+            if petals_by_agg[*agg].len() >= 2 {
+                truncated_aggs.insert((*agg).to_string());
+            }
+        }
+    }
+
+    (recovered, truncated_aggs.into_iter().collect())
 }
 
 /// Recover the polarity of synthetic-aggregate-node hops in `loops` (GH #516).
@@ -3542,36 +3590,37 @@ pub fn model_ltm_variables(
             }
             None
         } else {
+            // Bind the budget once: `build_loops_from_tiered` enforces it and
+            // the `Warning` text below reports it, and a `#[cfg(test)]`
+            // override could in principle change between two reads.
+            let cross_agg_budget = cross_agg_loop_budget();
             let var_graph = causal_graph_with_modules(db, model, project);
-            let (mut detected, agg_truncated) = build_loops_from_tiered(
+            let (mut detected, truncated_aggs) = build_loops_from_tiered(
                 tiered,
                 &var_graph,
                 source_vars,
                 db,
                 project,
                 dm_dims,
-                cross_agg_loop_budget(),
+                cross_agg_budget,
             );
             // Surface a truncated cross-element-through-aggregate loop
             // recovery the same way the auto-flip-to-discovery gate surfaces
             // its mode change: a `Warning` (the human channel) plus the
             // robust `agg_recovery_truncated` flag on the result. The loop
             // list is incomplete -- the budget clipped which disjoint-petal
-            // combinations were materialized.
-            if agg_truncated {
-                let agg_names: Vec<&str> = agg_nodes
-                    .aggs
-                    .iter()
-                    .filter(|a| a.is_synthetic)
-                    .map(|a| a.name.as_str())
-                    .collect();
+            // combinations were materialized. `truncated_aggs` names exactly
+            // the aggregate nodes whose enumeration was clipped (sorted), so
+            // the message points the author at the affected reducers rather
+            // than every synthetic agg in the model.
+            if !truncated_aggs.is_empty() {
                 let msg = format!(
                     "LTM cross-element-through-aggregate loop recovery was truncated: a \
                      reducer in a feedback loop produces more disjoint-petal combinations \
                      than the loop budget ({}); the recovered loop list is incomplete. \
                      Affected aggregate node(s): {}.",
-                    cross_agg_loop_budget(),
-                    agg_names.join(", "),
+                    cross_agg_budget,
+                    truncated_aggs.join(", "),
                 );
                 CompilationDiagnostic(Diagnostic {
                     model: model.name(db).clone(),
@@ -3581,7 +3630,7 @@ pub fn model_ltm_variables(
                 })
                 .accumulate(db);
             }
-            agg_recovery_truncated = agg_truncated;
+            agg_recovery_truncated = !truncated_aggs.is_empty();
             // GH #516: hops into/out of synthetic `$⁚ltm⁚agg⁚{n}` nodes come
             // back Unknown-polarity from the loop builders (the variable-level
             // graph has no agg node); recover the derivable cases here so

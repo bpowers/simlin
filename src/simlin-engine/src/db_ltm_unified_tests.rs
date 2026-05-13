@@ -2349,11 +2349,11 @@ fn count_loops_through_agg(ltm: &super::LtmVariablesResult, min_petals: usize) -
 /// cross-element-through-aggregate loops (not zero, as the pre-#515 hard
 /// `petals.len() > MAX_AGG_PETALS -> continue` drop produced for >8-element
 /// dims), `LtmVariablesResult.agg_recovery_truncated` is `true`, and a
-/// `CompilationDiagnostic` `Warning` naming the truncation + the budget is
-/// emitted. The fixture is tiny (5 elements -- well under the 50-node
-/// auto-flip SCC gate); the loop budget is shrunk to 3 via the test-only
-/// `AggLoopBudgetGuard` so the budget is what clips (per
-/// docs/dev/rust.md#test-time-budgets -- never trip a real gate with a
+/// `CompilationDiagnostic` `Warning` naming the truncation, the budget, and
+/// the truncated aggregate node is emitted. The fixture is tiny (5 elements
+/// -- well under the 50-node auto-flip SCC gate); the loop budget is shrunk
+/// to 3 via the test-only `AggLoopBudgetGuard` so the budget is what clips
+/// (per docs/dev/rust.md#test-time-budgets -- never trip a real gate with a
 /// giant fixture).
 #[test]
 fn cross_agg_loop_recovery_truncates_at_budget() {
@@ -2390,18 +2390,24 @@ fn cross_agg_loop_recovery_truncates_at_budget() {
     );
 
     let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    // The single reducer `SUM(pop[*])` hoists to `$⁚ltm⁚agg⁚0`; with 5
+    // disjoint petals through it and a budget of 3, the budget fires while
+    // enumerating that one agg, so the Warning names it.
     let has_truncation_warning = diags.iter().any(|CompilationDiagnostic(d)| {
         d.severity == DiagnosticSeverity::Warning
             && matches!(
                 &d.error,
                 DiagnosticError::Assembly(msg)
-                    if msg.contains("truncated") && msg.contains(&TEST_BUDGET.to_string())
+                    if msg.contains("truncated")
+                        && msg.contains(&TEST_BUDGET.to_string())
+                        && msg.contains(SHARE_REDUCER_AGG)
             )
     });
     assert!(
         has_truncation_warning,
-        "cross-agg loop truncation must emit a Warning mentioning truncation and \
-         the budget ({TEST_BUDGET}); got: {:?}",
+        "cross-agg loop truncation must emit a Warning mentioning truncation, \
+         the budget ({TEST_BUDGET}), and the truncated agg ({SHARE_REDUCER_AGG}); \
+         got: {:?}",
         diags.iter().map(|c| &c.0).collect::<Vec<_>>()
     );
 }
@@ -2484,7 +2490,7 @@ fn cross_agg_two_petal_loops_match_pre_fix_content() {
     let var_graph = causal_graph_with_modules(&db, model, sync.project);
     let source_vars = model.variables(&db);
     let dm_dims = project_datamodel_dims(&db, sync.project);
-    let (loops, truncated) = build_loops_from_tiered(
+    let (loops, truncated_aggs) = build_loops_from_tiered(
         tiered,
         &var_graph,
         source_vars,
@@ -2493,7 +2499,10 @@ fn cross_agg_two_petal_loops_match_pre_fix_content() {
         dm_dims.as_slice(),
         MAX_CROSS_AGG_LOOPS,
     );
-    assert!(!truncated, "3-petal fixture must not truncate");
+    assert!(
+        truncated_aggs.is_empty(),
+        "3-petal fixture must not truncate; got {truncated_aggs:?}"
+    );
 
     let agg_ident = Ident::<Canonical>::new(SHARE_REDUCER_AGG);
     let agg_visits = |l: &crate::ltm::Loop| l.links.iter().filter(|lk| lk.to == agg_ident).count();
@@ -2730,7 +2739,7 @@ fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
     let var_graph = causal_graph_with_modules(&db, model, sync.project);
     let source_vars = model.variables(&db);
     let dm_dims = project_datamodel_dims(&db, sync.project);
-    let (loops, truncated) = build_loops_from_tiered(
+    let (loops, truncated_aggs) = build_loops_from_tiered(
         tiered,
         &var_graph,
         source_vars,
@@ -2739,7 +2748,7 @@ fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
         dm_dims.as_slice(),
         MAX_CROSS_AGG_LOOPS,
     );
-    assert!(!truncated);
+    assert!(truncated_aggs.is_empty(), "got {truncated_aggs:?}");
 
     // A recovered loop that visits a *subscripted* agg node twice, for each
     // D1 element. The agg node in the element graph is `$⁚ltm⁚agg⁚0[a]` /
