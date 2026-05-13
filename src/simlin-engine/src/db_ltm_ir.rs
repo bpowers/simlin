@@ -617,6 +617,26 @@ pub(crate) fn model_ltm_reference_sites(
                 })
                 .collect();
 
+            // Whether `to` is a *variable-backed* aggregate node whose source
+            // includes `from` -- i.e. `to`'s whole equation is exactly the
+            // reducer (`total = SUM(population[*])`, `row_sum[D1] =
+            // SUM(matrix[D1,*])`). In that case the `(from, to)` edge *is* the
+            // agg edge: `emit_edges_for_reference` projects the `Wildcard`
+            // syntactic shape correctly (a reduction into the scalar/lower-
+            // rank `to`), so it must keep its `Wildcard` shape.
+            let to_is_variable_backed_agg = agg_nodes
+                .by_var
+                .get(to_name_str)
+                .map(|idxs| {
+                    idxs.iter().any(|&i| {
+                        let a = &agg_nodes.aggs[i];
+                        !a.is_synthetic
+                            && a.name == to_name_str
+                            && a.source_vars.iter().any(|s| s == &from_name)
+                    })
+                })
+                .unwrap_or(false);
+
             let mut classified: Vec<ClassifiedSite> = Vec::new();
             for raw in raw_sites {
                 // `route_through_agg = !routed_aggs.is_empty() && in_reducer`.
@@ -633,8 +653,28 @@ pub(crate) fn model_ltm_reference_sites(
                         });
                     }
                 } else {
+                    // A `Direct` `Wildcard` reference that is `in_reducer` but
+                    // was *not* hoisted (no synthetic agg routes it, and `to`
+                    // isn't itself a variable-backed agg) is the not-hoistable
+                    // reducer carve-out -- a reducer over a dynamic index
+                    // (`SUM(pop[idx,*])`) whose read slice isn't statically
+                    // describable. Reclassify it as `DynamicIndex` so the
+                    // `Wildcard` *variant* only ever means "a hoisted reducer's
+                    // (ignored) syntactic shape" or "a whole-RHS variable-
+                    // backed reducer's argument" and never reaches
+                    // `emit_edges_for_reference`'s conservative cross-product
+                    // arm via a `Direct` site (#514 AC4.5: the conservative
+                    // cross-product is `DynamicIndex`-only there).
+                    let shape = if raw.in_reducer
+                        && matches!(raw.shape, RefShape::Wildcard)
+                        && !to_is_variable_backed_agg
+                    {
+                        RefShape::DynamicIndex
+                    } else {
+                        raw.shape
+                    };
                     classified.push(ClassifiedSite {
-                        shape: raw.shape,
+                        shape,
                         target_element: raw.target_element,
                         routing: SiteRouting::Direct,
                     });
