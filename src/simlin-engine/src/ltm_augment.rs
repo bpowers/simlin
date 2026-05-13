@@ -1822,7 +1822,15 @@ fn classify_reducer_in_expr(
 /// argument (`SUM(arr)`, `MEAN(arr)`, `MIN(arr)`, `MAX(arr)`, `STDDEV(arr)`,
 /// `RANK(arr, dir)`, `SIZE(arr)`), so we check exactly that one. Multi-argument
 /// `MEAN` and 2-argument `MIN`/`MAX` are scalar element-wise operations, not
-/// reducers, and `reducer_kind` already excludes them.
+/// reducers, and `reducer_kind` excludes them -- `None` here is the *correct*
+/// answer, not a fallback for an impossible case. A target whose equation is
+/// e.g. `result = MEAN(pop[NYC], other[Boston])` does reach [`classify_reducer`]
+/// (via `try_cross_dimensional_link_scores`); with `None` here it falls through
+/// to per-shape link scoring, which reads the `FixedIndex` site from the
+/// classification IR and emits exactly the `pop[nyc] → result` link score the
+/// equation has -- not the full-reduce-over-`pop` per-element scores the old
+/// hand-rolled `Mean(any arity)` arm produced (including a spurious
+/// `pop[boston] → result`).
 fn classify_builtin_if_references_source(
     builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
     source_ident: &str,

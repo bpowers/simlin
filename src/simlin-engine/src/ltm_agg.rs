@@ -178,9 +178,11 @@ pub(crate) fn reducer_is_monotone<E>(builtin: &BuiltinFn<E>) -> bool {
 ///
 /// `SIZE` is recognized as a reducer but never hoisted (its link score is
 /// always 0), and it never sets the element-graph walker's `in_reducer`
-/// marker. This is the replacement for the former
-/// `db_analysis::builtin_is_array_reducer` and for the inline `is_reducer`
-/// arm of [`reducer_source_vars`].
+/// marker. This is the predicate the reference-site IR's AST walk
+/// (`db_ltm_ir::walk_all_in_expr`) uses to flip `child_in_reducer`, and that
+/// [`reducer_source_vars`] uses to gate which subexpressions become aggregate
+/// nodes, so the agg enumerator, the element graph, and the link-score
+/// generator all agree on the hoisted set.
 pub(crate) fn reducer_is_hoistable<E>(builtin: &BuiltinFn<E>) -> bool {
     matches!(
         reducer_kind(builtin),
@@ -804,12 +806,19 @@ pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
 /// `RANK` are not monotone, so a hop through them stays `Unknown`-polarity.
 ///
 /// Keyed on the canonical reducer text (`AggNode::equation_text`, which is
-/// `print_eqn` output -- function names lowercased, no space before `(`); the
-/// leading function name is everything up to the first `(`. The monotone set
+/// `print_eqn` output -- function names lowercased, no space before `(`). The
+/// leading-name extraction (everything up to the first `(`, trimmed) is
+/// intentionally lenient: it also accepts an optional `(` and surrounding
+/// whitespace (`"sum (x)"`, or even a bare `"sum"`), so it never accidentally
+/// reads past the function name. That widening is harmless because the input is
+/// always `print_eqn` output (no space before `(`) and an aggregate's equation
+/// always *has* a `(`, so in practice only the exact-`name(` shape ever
+/// occurs; documenting the leniency is cheaper than restating the literal
+/// `"sum(" | "mean(" | ...` set the consolidation removed. The monotone set
 /// itself comes from [`reducer_name_is_monotone`] so this stays a thin reader
 /// of the one reducer table. Only the single-argument `MIN`/`MAX` forms are
-/// ever hoisted into an aggregate node, so a leading `min(` / `max(` is always
-/// the reducer form.
+/// ever hoisted into an aggregate node, so a leading `min` / `max` here is
+/// always the reducer form.
 pub(crate) fn agg_reducer_is_monotone(equation_text: &str) -> bool {
     let name = equation_text
         .split('(')
