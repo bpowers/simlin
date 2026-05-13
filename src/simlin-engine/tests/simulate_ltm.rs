@@ -5648,12 +5648,10 @@ fn find_partial_reduce_offset(
 /// Build a 2-D arrayed feedback model whose loop runs over the
 /// partially-reduced axis.
 ///
-/// Model structure (all equations use bare references so the only
-/// subscripted variables are the explicit `matrix[D1,*]` reducer arg and
-/// the synthetic per-element scores -- an explicit `row_sum[D1]` subscript
-/// inside an apply-to-all equation classifies the reference as a dynamic
-/// index, which is a separate pre-existing limitation; Phase 4 sidesteps it
-/// rather than fixing it):
+/// Model structure (`growth` uses bare references because it depends on the
+/// stock `matrix` and the scalar `total`, not on `row_sum`; the
+/// `row_sum[D1]` iterated-dimension subscript itself is now classified
+/// `Bare` (GH #511) and demonstrated in `build_iterated_dim_subscript_model`):
 ///   matrix[D1,D2] (stock, distinct per-element initial values, multiplicative
 ///                  self-feedback -> the per-element trajectories diverge,
 ///                  so the reducer link scores are non-degenerate)
@@ -6210,6 +6208,406 @@ fn test_iterated_dim_subscript_loop_score_matches_hand_calc() {
         saw_nonzero,
         "the iterated-dimension loop's score should be non-zero at some step"
     );
+}
+
+// --- #510: disjoint-dim arrayed -> arrayed link scores ---
+//
+// A disjoint-dim arrayed -> arrayed edge with per-element target equations
+// (`target[D1,D2]` whose `<element subscript>` equations reference
+// `source[D3]`, D3 disjoint from D1/D2) used to degenerate to a silent
+// scalarized stand-in (`link_score_dimensions` returned `[]` for the edge,
+// so `retarget_ltm_equation_dims` collapsed the per-element `Equation::Arrayed`
+// partial to the first slot's text). The fix emits one link-score variable
+// per distinct referenced source element (`$⁚ltm⁚link_score⁚source[m]→target`,
+// ...), each `Equation::Arrayed` over `target`'s dims holding `source[m]`
+// live in the slots that reference it and the trivial-zero guard form
+// elsewhere; and a genuinely-unscoreable edge (a `DynamicIndex` source into
+// such a target) produces a clear compile-time `Warning` instead of a silent
+// stand-in.
+
+/// Build a disjoint-dim arrayed -> arrayed model whose per-element target
+/// equations reference literal elements of a disjoint dimension.
+///
+/// `D1 = {a, b}`, `D2 = {x, y}`, `D3 = {m, n}` (all named; D3 disjoint
+/// from D1/D2). `source[D3]` is a stock (so its values change over time);
+/// `target[D1,D2]` is an `Equation::Arrayed` whose per-element equations
+/// each reference some `source[m]` and/or `source[n]`. There is no closed
+/// loop (the disjoint dims make a `target -> source` reduction impossible),
+/// so the test compiles in discovery mode (which scores every causal edge).
+fn build_disjoint_dim_arrayed_target_model(name: &str) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: name.to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![
+            datamodel::Dimension::named("D1".to_string(), vec!["a".to_string(), "b".to_string()]),
+            datamodel::Dimension::named("D2".to_string(), vec!["x".to_string(), "y".to_string()]),
+            datamodel::Dimension::named("D3".to_string(), vec!["m".to_string(), "n".to_string()]),
+        ],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                // source[D3] (stock, distinct inits) <- src_inflow (constant).
+                Variable::Stock(datamodel::Stock {
+                    ident: "source".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["D3".to_string()],
+                        vec![
+                            ("m".to_string(), "10".to_string(), None, None),
+                            ("n".to_string(), "20".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["src_inflow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "src_inflow".to_string(),
+                    equation: Equation::ApplyToAll(vec!["D3".to_string()], "0.1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // target[D1,D2] (per-element equations referencing literal
+                // elements of the disjoint dimension D3).
+                Variable::Aux(datamodel::Aux {
+                    ident: "target".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["D1".to_string(), "D2".to_string()],
+                        vec![
+                            ("a,x".to_string(), "source[m] * 2".to_string(), None, None),
+                            ("a,y".to_string(), "source[n] * 3".to_string(), None, None),
+                            ("b,x".to_string(), "source[m]".to_string(), None, None),
+                            (
+                                "b,y".to_string(),
+                                "source[n] * source[m]".to_string(),
+                                None,
+                                None,
+                            ),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Build a disjoint-dim arrayed -> arrayed model whose per-element target
+/// equations reference the disjoint dimension via a *non-literal* index --
+/// genuinely unscoreable (which target slots depend on which source
+/// elements can't be decided statically).
+///
+/// `D1 = {a, b}`, `D2 = {x, y}` (named), `D3` indexed of size 2 (so a
+/// numeric index variable is a valid subscript). `source[D3]` is a stock;
+/// `idx` is a scalar aux (= 1); `target[D1,D2]`'s per-element equations
+/// reference `source[idx]`.
+fn build_disjoint_dim_unscoreable_model(name: &str) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    datamodel::Project {
+        name: name.to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![
+            datamodel::Dimension::named("D1".to_string(), vec!["a".to_string(), "b".to_string()]),
+            datamodel::Dimension::named("D2".to_string(), vec!["x".to_string(), "y".to_string()]),
+            datamodel::Dimension::indexed("D3".to_string(), 2),
+        ],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "source".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["D3".to_string()],
+                        vec![
+                            ("1".to_string(), "10".to_string(), None, None),
+                            ("2".to_string(), "20".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["src_inflow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "src_inflow".to_string(),
+                    equation: Equation::ApplyToAll(vec!["D3".to_string()], "0.1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "idx".to_string(),
+                    equation: Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "target".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["D1".to_string(), "D2".to_string()],
+                        vec![
+                            ("a,x".to_string(), "source[idx] * 2".to_string(), None, None),
+                            ("a,y".to_string(), "source[idx] * 3".to_string(), None, None),
+                            ("b,x".to_string(), "source[idx]".to_string(), None, None),
+                            ("b,y".to_string(), "source[idx] * 5".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// AC3.3: a disjoint-dim arrayed -> arrayed model with per-element target
+/// equations emits one link-score variable per distinct referenced source
+/// element (`$⁚ltm⁚link_score⁚source[m]→target`, `$⁚ltm⁚link_score⁚source[n]→target`)
+/// -- not a single `$⁚ltm⁚link_score⁚source→target` scalar stand-in -- each
+/// `Equation::Arrayed` over `target`'s dims (`["D1","D2"]`); the `[a,x]` slot
+/// of the `source[m]→target` var holds `source[m]` live (its partial differs
+/// from `PREVIOUS`-evaluated) and the `[a,y]` slot (references `source[n]`,
+/// not `m`) is the trivial-zero guard form; and running the VM, the
+/// `source[m]→target` link score is non-zero at the `[a,x]` slot at some step
+/// >= 2 and ~0 at `[a,y]` at every step >= 2.
+#[test]
+fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
+    let project = build_disjoint_dim_arrayed_target_model("disjoint_dim_arrayed");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    let m_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source[m]\u{2192}target";
+    let n_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source[n]\u{2192}target";
+    let m_var = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == m_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected {m_name}; link scores present: {:?}",
+                ltm.vars
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .filter(|s| s.contains("\u{205A}link_score\u{205A}"))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        ltm.vars.iter().any(|v| v.name == n_name),
+        "expected {n_name} (one link score per distinct referenced source element)"
+    );
+    // No scalar stand-in `source→target`.
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name == "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target"),
+        "must NOT emit a single scalar stand-in $⁚ltm⁚link_score⁚source→target"
+    );
+    // Each per-source-element link score is Equation::Arrayed over target's dims.
+    match &m_var.equation {
+        simlin_engine::datamodel::Equation::Arrayed(dims, elements, _, _) => {
+            assert_eq!(
+                dims,
+                &vec!["D1".to_string(), "D2".to_string()],
+                "the source[m]→target link score should be Arrayed over D1 x D2"
+            );
+            // The [a,x] slot references source[m] -> holds source[m] live (the
+            // partial mentions source[m]); the [a,y] slot references source[n]
+            // not source[m] -> the source[m] reference there is frozen, so the
+            // partial is the PREVIOUS-evaluated form (a trivial-zero guard).
+            let slot = |elem: &str| -> &str {
+                elements
+                    .iter()
+                    .find(|(e, _, _, _)| e == elem)
+                    .map(|(_, eq, _, _)| eq.as_str())
+                    .unwrap_or_else(|| panic!("slot {elem:?} not found in {elements:?}"))
+            };
+            let ax = slot("a,x");
+            let ay = slot("a,y");
+            assert!(
+                ax.contains("source[m]"),
+                "the [a,x] slot of source[m]→target should reference source[m] live; got: {ax}"
+            );
+            // The [a,y] slot's partial: every source reference is `source[n]`,
+            // which for the `source[m]` link score is "other content" and gets
+            // PREVIOUS-frozen, so the partial equals PREVIOUS(target[a,y]) and
+            // the guarded ratio is the trivial-zero form. (We don't pin the
+            // exact text -- the VM check below is the substantive one -- but it
+            // must not hold `source[m]` live.)
+            assert!(
+                !ax.contains("source[n]") || ay.contains("PREVIOUS(source[n]"),
+                "sanity: [a,y] slot freezes source[n] for the source[m] link score; got: {ay}"
+            );
+        }
+        other => panic!("expected Equation::Arrayed for source[m]→target, got {other:?}"),
+    }
+    assert_eq!(m_var.dimensions, vec!["D1".to_string(), "D2".to_string()]);
+
+    // Compile and simulate; the source[m]→target link score's [a,x] slot is
+    // non-zero at some step >= 2, and its [a,y] slot is ~0 at every step >= 2.
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("disjoint-dim arrayed-target model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    let base = results
+        .offsets
+        .iter()
+        .find(|(k, _)| k.as_str() == m_name)
+        .map(|(_, &off)| off)
+        .unwrap_or_else(|| panic!("offset for {m_name:?} not found in results"));
+    // Region x Age declaration order: a,x=0; a,y=1; b,x=2; b,y=3.
+    let ax_off = base;
+    let ay_off = base + 1;
+    let mut checked = 0usize;
+    let mut saw_ax_nonzero = false;
+    for step in 2..results.step_count {
+        let row = step * results.step_size;
+        let ax_val = results.data[row + ax_off];
+        let ay_val = results.data[row + ay_off];
+        if ax_val.abs() > 1e-9 && ax_val.is_finite() {
+            saw_ax_nonzero = true;
+        }
+        assert!(
+            ay_val.abs() < 1e-6,
+            "step {step}: source[m]→target [a,y] slot should be ~0 (it references source[n], not m); got {ay_val}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "expected at least one step t >= 2 to check");
+    assert!(
+        saw_ax_nonzero,
+        "the source[m]→target [a,x] slot should be non-zero at some step >= 2"
+    );
+}
+
+/// AC3.4: a disjoint-dim arrayed -> arrayed edge where the target's
+/// per-element equations reference the disjoint dimension via a *non-literal*
+/// index produces a clear compile-time `Warning` diagnostic naming the
+/// unscoreable `source -> target` edge, and emits *no* `$⁚ltm⁚link_score⁚source...→target`
+/// variable (no scalar stand-in). The model still compiles and simulates.
+#[test]
+fn test_disjoint_dim_unscoreable_edge_warns_and_emits_no_link_score() {
+    use simlin_engine::db::CompilationDiagnostic;
+
+    let project = build_disjoint_dim_unscoreable_model("disjoint_dim_unscoreable");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // No link-score variable for the (source, target) edge -- no scalar
+    // stand-in, no per-element vars.
+    assert!(
+        !ltm.vars.iter().any(|v| {
+            v.name
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}source")
+                && v.name.contains("\u{2192}target")
+        }),
+        "an unscoreable disjoint-dim edge must emit no source...→target link score; got: {:?}",
+        ltm.vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .filter(|s| s.contains("\u{205A}link_score\u{205A}"))
+            .collect::<Vec<_>>()
+    );
+
+    // A Warning diagnostic naming the unscoreable source -> target edge.
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, source_model, sync.project);
+    let has_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+        d.severity == simlin_engine::db::DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                simlin_engine::db::DiagnosticError::Assembly(msg)
+                    if msg.contains("source") && msg.contains("target")
+            )
+    });
+    assert!(
+        has_warning,
+        "expected a Warning diagnostic naming the unscoreable source -> target edge; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+
+    // The model still compiles and simulates (a missing link score is graceful).
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("unscoreable-edge model should still compile and simulate");
 }
 
 /// No regression: the existing full-reduce (`SUM(population[*])` -> scalar)

@@ -1455,19 +1455,36 @@ fn build_arrayed_link_score_equation(
         target_iterated_dims: &target_iterated_dims,
         dim_ctx,
     };
+    // A subscript like `source[m]` where `m` is an element of *`source`'s*
+    // dimension `D3` (disjoint from the target's `D1 x D2`) is not filtered
+    // by `classify_dependencies(..., target_ast_dims, ...)` -- `target_ast_dims`
+    // covers `D1`/`D2`, not `D3` -- so `m` (and `D3` itself if spelled) leaks
+    // into the dep set as a phantom variable and gets PREVIOUS-wrapped inside
+    // the subscript (`source[PREVIOUS(m)]`). Strip the source's element names
+    // and dimension names from the dep set so the partial sees only real deps.
+    let source_dim_token_set: HashSet<&str> = source_dim_elements
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .chain(source_dim_names.iter().map(String::as_str))
+        .collect();
     let slot_equation = |expr: &crate::ast::Expr2| -> String {
         let elem_eqn_text = crate::patch::expr2_to_string(expr);
         // Per-element dependency set: walk *only this slot's* expression
         // (the union over all elements -- what `identifier_set` on the
         // whole `Ast::Arrayed` returns -- would over-freeze refs absent
         // from this slot). Pass the target's dimensions so literal
-        // element-name subscripts are filtered out of the dep set.
-        let deps_e = crate::variable::classify_dependencies(
+        // element-name subscripts of the *target*'s dims are filtered out;
+        // strip the *source*'s dim/element names afterward (see above).
+        let deps_e: HashSet<Ident<Canonical>> = crate::variable::classify_dependencies(
             &crate::ast::Ast::Scalar(expr.clone()),
             target_ast_dims,
             None,
         )
-        .all;
+        .all
+        .into_iter()
+        .filter(|d| !source_dim_token_set.contains(d.as_str()))
+        .collect();
         let (partial_e, live_ref) = build_partial_equation_shaped_with_live_ref(
             &elem_eqn_text,
             &deps_e,

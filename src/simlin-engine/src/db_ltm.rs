@@ -3711,6 +3711,168 @@ pub fn model_ltm_variables(
         Some(cross_vars)
     }
 
+    /// Accumulate the AC3.4 `Warning` for a disjoint-dim arrayed -> arrayed
+    /// edge that is not statically scoreable (the target's per-element
+    /// equations reference the source via a dynamic index, so which target
+    /// slots depend on which source elements can't be decided at compile
+    /// time). The edge gets *no* link-score variable -- a missing link score
+    /// is graceful (loop/path scores referencing it get the zero-contribution
+    /// stub-dep fallback) and far less misleading than the scalarized stand-in
+    /// the pre-#510 path produced.
+    fn emit_unscoreable_disjoint_edge_warning(
+        db: &dyn Db,
+        model: SourceModel,
+        from: &str,
+        to: &str,
+    ) {
+        use salsa::Accumulator;
+        let msg = format!(
+            "LTM link score for edge {from} -> {to} could not be computed: {to} is a \
+             per-element-equation arrayed variable whose equations reference {from} via a \
+             dynamic index, which is not statically scoreable; this edge will have no \
+             link-score variable"
+        );
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: None,
+            error: DiagnosticError::Assembly(msg),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    }
+
+    /// Emit per-distinct-source-element link scores for a disjoint-dim
+    /// arrayed -> arrayed edge whose target is a per-element-equation
+    /// (`Ast::Arrayed`) variable (GH #510), or return `None` if the edge is
+    /// not of that shape.
+    ///
+    /// The case: `from` is arrayed, `to` is arrayed with an `Ast::Arrayed`
+    /// AST, `from`'s dims and `to`'s dims share *no* dimension name (so the
+    /// same-dim A2A / partial-collapse / broadcast / partial-reduce paths all
+    /// declined), and `to`'s per-element equations reference `from` only via
+    /// literal element subscripts (`source[m]`) of a dimension disjoint from
+    /// `to`'s dims. For each *distinct* referenced source element `m` we emit
+    /// one `LtmSyntheticVar` named `$⁚ltm⁚link_score⁚{from}[{m}]→{to}`, an
+    /// `Equation::Arrayed` over `to`'s dims whose partial holds `from[m]` live
+    /// in the slots whose equation references `from[m]` and is the trivial-zero
+    /// guard form (`from[m]` frozen at `PREVIOUS`) elsewhere -- exactly what
+    /// `build_arrayed_link_score_equation` produces for a `FixedIndex` source
+    /// into an `Ast::Arrayed` target (reached here via the salsa-cached
+    /// `link_score_equation_text_shaped`).
+    ///
+    /// Returns:
+    ///  - `Some(vec)` with one var per distinct referenced source element when
+    ///    every reference is a literal element subscript;
+    ///  - `Some(vec![])` when the target references `from` via a non-literal
+    ///    index (a `DynamicIndex` site -- or, defensively, a `Wildcard`/`Bare`
+    ///    site that can't be a literal-element reference into a disjoint-dim
+    ///    target): a `Warning` is accumulated and no link score is emitted, and
+    ///    the caller must *not* fall through to `emit_per_shape_link_scores`;
+    ///  - `None` when the edge isn't an arrayed -> disjoint-dim-`Ast::Arrayed`
+    ///    edge at all -- the caller's existing emission path handles it.
+    ///
+    /// We reuse the Phase-1 reference-site IR (`model_ltm_reference_sites`)
+    /// for `(from, to)` rather than re-walking the target's AST: each site's
+    /// `shape` is `FixedIndex(elems)` for `from[m]`, and `target_element`
+    /// records which `to` slot it sits in (unused here -- the per-slot partial
+    /// re-derives that from the slot equation).
+    fn try_disjoint_dim_arrayed_link_scores(
+        db: &dyn Db,
+        source_vars: &HashMap<String, super::SourceVariable>,
+        from: &str,
+        to: &str,
+        model: SourceModel,
+        project: SourceProject,
+    ) -> Option<Vec<LtmSyntheticVar>> {
+        // Both ends must be arrayed, non-module variables.
+        let from_sv = source_vars.get(from)?;
+        if from_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        let from_dims = variable_dimensions(db, *from_sv, project);
+        if from_dims.is_empty() {
+            return None;
+        }
+        let to_sv = source_vars.get(to)?;
+        if to_sv.kind(db) == SourceVariableKind::Module {
+            return None;
+        }
+        let to_dims = variable_dimensions(db, *to_sv, project);
+        if to_dims.is_empty() {
+            return None;
+        }
+        // Disjoint: no shared dimension name. (Same-dim A2A, partial-collapse,
+        // broadcast, and partial-reduce edges share at least one dim and are
+        // handled by `link_score_dimensions` / `try_cross_dimensional_link_scores`.)
+        let shares_a_dim = from_dims
+            .iter()
+            .any(|fd| to_dims.iter().any(|td| td.name() == fd.name()));
+        if shares_a_dim {
+            return None;
+        }
+        // The target must be a per-element-equation (`Ast::Arrayed`) variable.
+        // An `Ast::ApplyToAll` target referencing a disjoint-dim source would
+        // be a dimension error (a D3-shaped value can't broadcast onto D1xD2);
+        // a scalar source into an arrayed target is `try_scalar_to_arrayed`'s job.
+        let to_var = super::reconstruct_single_variable(db, model, project, to)?;
+        if !matches!(to_var.ast(), Some(crate::ast::Ast::Arrayed(..))) {
+            return None;
+        }
+        // Consult the reference-site IR. A `FixedIndex(elems)` site is a
+        // `from[m]` reference; anything else (a dynamic index, or -- defensively
+        // -- a `Wildcard`/`Bare`, which can't be a valid literal-element
+        // reference into a disjoint-dim target) makes the edge unscoreable.
+        let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+        let sites = ir.sites.get(&(from.to_string(), to.to_string()))?;
+        if sites.is_empty() {
+            return None;
+        }
+        // Distinct referenced source elements, in first-occurrence order.
+        let mut elem_keys: Vec<String> = Vec::new();
+        for site in sites {
+            match &site.shape {
+                RefShape::FixedIndex(es) => {
+                    // The comma-joined form is the `[m]` (or `[m,k]`) the var
+                    // name carries and `shape_aware_source_ref` renders.
+                    let key = es.join(",");
+                    if !elem_keys.contains(&key) {
+                        elem_keys.push(key);
+                    }
+                }
+                RefShape::Bare | RefShape::Wildcard | RefShape::DynamicIndex => {
+                    emit_unscoreable_disjoint_edge_warning(db, model, from, to);
+                    return Some(vec![]);
+                }
+            }
+        }
+
+        // One link-score variable per distinct referenced source element. The
+        // equation comes from the salsa-cached shaped path, which routes the
+        // `Ast::Arrayed` target through `build_arrayed_link_score_equation`
+        // (an `Equation::Arrayed` over `to`'s dims, already tagged with `to`'s
+        // datamodel dim names -- so `dimensions` mirrors them and the
+        // `retarget` is a no-op). The `[m]` in the name routes the var
+        // directly in `assemble_module`'s bracket check, so `compile_directly`
+        // is irrelevant but set `false` for consistency with the other
+        // bracketed cross-dimensional vars.
+        let mut vars = Vec::with_capacity(elem_keys.len());
+        for key in &elem_keys {
+            let shape = RefShape::FixedIndex(key.split(',').map(|s| s.to_string()).collect());
+            let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
+            if let Some(mut lsv) =
+                link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone()
+            {
+                lsv.name = crate::ltm_augment::link_score_var_name(from, to, &shape);
+                let dims = ltm_equation_dimensions(&lsv.equation).to_vec();
+                lsv.dimensions = dims.clone();
+                lsv.equation = retarget_ltm_equation_dims(lsv.equation, &dims);
+                lsv.compile_directly = false;
+                vars.push(lsv);
+            }
+        }
+        Some(vars)
+    }
+
     /// Emit per-shape link scores for a single (from, to) edge.
     ///
     /// The emission is shape-driven (Phase 3): one `LtmSyntheticVar` per
@@ -4212,6 +4374,19 @@ pub fn model_ltm_variables(
             try_scalar_to_arrayed_link_scores(db, source_vars, from, to, model, project)
         {
             vars.extend(cross_vars);
+            return;
+        }
+        // Disjoint-dim arrayed -> arrayed edges with a per-element-equation
+        // (`Ast::Arrayed`) target (GH #510): one link score per distinct
+        // referenced source element, each `Equation::Arrayed` over `to`'s
+        // dims. `Some(vec![])` means the edge is genuinely unscoreable (a
+        // dynamic-index source): a `Warning` was accumulated and no link
+        // score is emitted -- crucially, we *don't* fall through to
+        // `emit_per_shape_link_scores`, which would build a scalarized stand-in.
+        if let Some(disjoint_vars) =
+            try_disjoint_dim_arrayed_link_scores(db, source_vars, from, to, model, project)
+        {
+            vars.extend(disjoint_vars);
             return;
         }
         emit_per_shape_link_scores(
