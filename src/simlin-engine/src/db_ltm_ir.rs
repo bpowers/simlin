@@ -191,7 +191,100 @@ fn classify_subscript_shape(
     RefShape::FixedIndex(resolved)
 }
 
+/// Recognize an *iterated-dimension* subscript -- one whose indices are
+/// exactly the target equation's iterated dimensions, in the position
+/// matching the source's declared dimension order -- and classify it as
+/// [`RefShape::Bare`] (a same-element-on-shared-dims reference, GH #511).
+///
+/// The precise rule: the subscript `source[d_0, d_1, ...]` is `Bare` iff
+///   1. it has exactly one index per source dimension (a *partially*
+///      iterated subscript -- some indices iterated, some literal/wildcard
+///      -- is out of scope for Phase 3 and stays with its
+///      `classify_subscript_shape` result; Phase 4 handles sliced reducers),
+///   2. every index `d_i` is a bare `Var` naming a dimension that is one of
+///      the target equation's iterated dimensions (`target_iterated_dims`),
+///      *and*
+///   3. for each `i`, `d_i` is either the same dimension name as the
+///      source's `i`-th declared dimension `D_i`, or a dimension that *maps
+///      to* `D_i` (the AC3.5 mapped-dimension case -- `State[i]` over a
+///      source declared with `Region[i]` where `State` maps to `Region`).
+///
+/// That is exactly "the reference iterates over the target's dimension
+/// space and reads the same element of the source" -- the thing
+/// `emit_edges_for_reference`'s `Bare`-arrayed arm then projects via
+/// `expand_same_element` (`row_sum[d1] -> growth[d1,*]`). A
+/// position-mismatched subscript like `row_sum[D2]` inside `growth[D1,D2]`
+/// where `row_sum` is over `D1` is a *genuine* cross-element reference --
+/// `D2` doesn't match `row_sum`'s declared `D1` -- so it returns `None` and
+/// keeps its `DynamicIndex` classification (out of scope here).
+///
+/// Returns `None` when the subscript is not this shape; the caller then
+/// falls back to [`classify_subscript_shape`].
+fn classify_iterated_dim_shape(
+    indices: &[crate::ast::IndexExpr2],
+    source_dims: &[crate::dimensions::Dimension],
+    target_iterated_dims: &[String],
+    dim_ctx: &crate::dimensions::DimensionsContext,
+) -> Option<RefShape> {
+    use crate::ast::{Expr2, IndexExpr2};
+    use crate::common::CanonicalDimensionName;
+
+    // Need one index per source dimension; an empty subscript is never a
+    // `Subscript` node, and a longer/shorter one is not the all-iterated
+    // case (a partial slice or a dimensionally-mismatched reference).
+    if indices.is_empty() || indices.len() != source_dims.len() {
+        return None;
+    }
+    for (i, idx) in indices.iter().enumerate() {
+        // Each index must be a bare `Var` -- a dimension name. (After
+        // dimension resolution, an iterated dimension name in a subscript
+        // stays an `Expr2::Var`; element names also parse that way, but the
+        // `target_iterated_dims` membership check below rejects them.)
+        let d = match idx {
+            IndexExpr2::Expr(Expr2::Var(ident, _, _)) => ident.as_str(),
+            _ => return None,
+        };
+        if !target_iterated_dims.iter().any(|t| t == d) {
+            return None;
+        }
+        let src_dim_name = source_dims[i].name();
+        if d == src_dim_name {
+            continue;
+        }
+        // AC3.5: a mapped dimension is treated the same way -- don't
+        // special-case it, just don't exclude it. The element-graph side's
+        // existing dimension-mapping resolution (`expand_same_element` /
+        // the dimension-mapping element expansion) continues to apply
+        // unchanged; we only decline to *exclude* the mapped case from the
+        // iterated-dim recognition here.
+        let d_canon = CanonicalDimensionName::from_raw(d);
+        let src_canon = CanonicalDimensionName::from_raw(src_dim_name);
+        if dim_ctx.has_mapping_to(&d_canon, &src_canon) {
+            continue;
+        }
+        return None;
+    }
+    Some(RefShape::Bare)
+}
+
 // ── Single-pass all-sources walk ───────────────────────────────────────────
+
+/// Read-only walk context shared by every recursive call of
+/// [`walk_all_in_expr`] for a single target variable: the model's variable
+/// map (so a referenced ident can be confirmed to be a model variable), the
+/// target equation's iterated dimension names (canonical, in source order;
+/// empty for an `Ast::Scalar` target), and a [`DimensionsContext`] for the
+/// AC3.5 mapped-dimension iterated-subscript check. Bundling these keeps
+/// `walk_all_in_expr`'s signature short (the only *mutable* state -- the
+/// `lookup_dims` cache and the `sites` accumulator -- stays out of band).
+struct WalkCtx<'a> {
+    variables: &'a HashMap<Ident<Canonical>, crate::variable::Variable>,
+    /// The target equation's iterated dimensions (canonical names, in the
+    /// order they appear on `Ast::ApplyToAll` / `Ast::Arrayed`). Empty for
+    /// `Ast::Scalar` -- a scalar target has no iterated-dimension subscript.
+    target_iterated_dims: Vec<String>,
+    dim_ctx: &'a crate::dimensions::DimensionsContext,
+}
 
 /// Walk a target's AST once and bucket every reference to a model variable
 /// (by source canonical name) into [`ReferenceSite`]s.
@@ -199,25 +292,41 @@ fn classify_subscript_shape(
 /// This is the production walker the IR builds on: rather than walking once
 /// per `(from, to)` edge, it walks each `to`'s AST a single time and records
 /// sites for every `from` it references. Subscript shapes are classified
-/// per-source via [`classify_subscript_shape`] (`lookup_dims` resolves a
-/// referenced variable's dimensions on demand for the literal-subscript
-/// check); `in_reducer` propagates through `child_in_reducer = in_reducer ||
-/// reducer_is_hoistable(builtin)` (SIZE excluded -- its result doesn't
-/// depend on element values). Walk order is left-to-right DFS over the AST,
-/// matching `enumerate_agg_nodes`, so the per-source site `Vec`s are
-/// deterministic (a salsa requirement on the cached IR result).
+/// per-source via [`classify_iterated_dim_shape`] (the GH #511 iterated-
+/// dimension same-element case) falling back to [`classify_subscript_shape`]
+/// (`lookup_dims` resolves a referenced variable's dimensions on demand for
+/// the literal-subscript / position checks); `in_reducer` propagates through
+/// `child_in_reducer = in_reducer || reducer_is_hoistable(builtin)` (SIZE
+/// excluded -- its result doesn't depend on element values). Walk order is
+/// left-to-right DFS over the AST, matching `enumerate_agg_nodes`, so the
+/// per-source site `Vec`s are deterministic (a salsa requirement on the
+/// cached IR result).
 fn collect_all_reference_sites(
     target_var: &crate::variable::Variable,
     variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    dim_ctx: &crate::dimensions::DimensionsContext,
     lookup_dims: &mut impl FnMut(&str) -> Vec<crate::dimensions::Dimension>,
 ) -> HashMap<String, Vec<ReferenceSite>> {
     let mut sites: HashMap<String, Vec<ReferenceSite>> = HashMap::new();
     let Some(ast) = target_var.ast() else {
         return sites;
     };
+    // The target equation's iterated dimensions drive the #511 iterated-
+    // subscript recognition; `Ast::Scalar` has none.
+    let target_iterated_dims: Vec<String> = match ast {
+        crate::ast::Ast::Scalar(_) => Vec::new(),
+        crate::ast::Ast::ApplyToAll(dims, _) | crate::ast::Ast::Arrayed(dims, _, _, _) => {
+            dims.iter().map(|d| d.name().to_string()).collect()
+        }
+    };
+    let ctx = WalkCtx {
+        variables,
+        target_iterated_dims,
+        dim_ctx,
+    };
     match ast {
         crate::ast::Ast::Scalar(expr) | crate::ast::Ast::ApplyToAll(_, expr) => {
-            walk_all_in_expr(expr, variables, lookup_dims, None, false, &mut sites);
+            walk_all_in_expr(expr, &ctx, lookup_dims, None, false, &mut sites);
         }
         crate::ast::Ast::Arrayed(_, subscript_map, default_expr, _) => {
             // Per-element expressions: visit slots in canonical element-key
@@ -227,7 +336,7 @@ fn collect_all_reference_sites(
             for k in elem_keys {
                 walk_all_in_expr(
                     &subscript_map[k],
-                    variables,
+                    &ctx,
                     lookup_dims,
                     Some(k.as_str()),
                     false,
@@ -235,7 +344,7 @@ fn collect_all_reference_sites(
                 );
             }
             if let Some(default) = default_expr {
-                walk_all_in_expr(default, variables, lookup_dims, None, false, &mut sites);
+                walk_all_in_expr(default, &ctx, lookup_dims, None, false, &mut sites);
             }
         }
     }
@@ -250,7 +359,7 @@ fn collect_all_reference_sites(
 /// `SIZE` is not `reducer_is_hoistable`, so it never sets the flag.
 fn walk_all_in_expr(
     expr: &crate::ast::Expr2,
-    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    ctx: &WalkCtx<'_>,
     lookup_dims: &mut impl FnMut(&str) -> Vec<crate::dimensions::Dimension>,
     target_element: Option<&str>,
     in_reducer: bool,
@@ -273,43 +382,36 @@ fn walk_all_in_expr(
     match expr {
         Expr2::Const(..) => {}
         Expr2::Var(ident, _, _) => {
-            if variables.contains_key(ident) {
+            if ctx.variables.contains_key(ident) {
                 push(ident.as_str(), RefShape::Bare, sites);
             }
         }
         Expr2::Subscript(ident, indices, _, _) => {
-            if variables.contains_key(ident) {
+            if ctx.variables.contains_key(ident) {
                 let from_dims = lookup_dims(ident.as_str());
-                let shape = classify_subscript_shape(indices, &from_dims);
+                // #511: an iterated-dimension subscript (`row_sum[Region]`
+                // inside `growth[Region,Age]`) reads the same source element
+                // for the slot being computed -- classify it `Bare` so it
+                // goes through `emit_edges_for_reference`'s same-element
+                // projection. A non-iterated subscript keeps its
+                // literal/wildcard/dynamic classification.
+                let shape = classify_iterated_dim_shape(
+                    indices,
+                    &from_dims,
+                    &ctx.target_iterated_dims,
+                    ctx.dim_ctx,
+                )
+                .unwrap_or_else(|| classify_subscript_shape(indices, &from_dims));
                 push(ident.as_str(), shape, sites);
             }
             for idx in indices {
                 match idx {
-                    IndexExpr2::Expr(e) => walk_all_in_expr(
-                        e,
-                        variables,
-                        lookup_dims,
-                        target_element,
-                        in_reducer,
-                        sites,
-                    ),
+                    IndexExpr2::Expr(e) => {
+                        walk_all_in_expr(e, ctx, lookup_dims, target_element, in_reducer, sites)
+                    }
                     IndexExpr2::Range(l, r, _) => {
-                        walk_all_in_expr(
-                            l,
-                            variables,
-                            lookup_dims,
-                            target_element,
-                            in_reducer,
-                            sites,
-                        );
-                        walk_all_in_expr(
-                            r,
-                            variables,
-                            lookup_dims,
-                            target_element,
-                            in_reducer,
-                            sites,
-                        );
+                        walk_all_in_expr(l, ctx, lookup_dims, target_element, in_reducer, sites);
+                        walk_all_in_expr(r, ctx, lookup_dims, target_element, in_reducer, sites);
                     }
                     IndexExpr2::Wildcard(_)
                     | IndexExpr2::StarRange(_, _)
@@ -321,13 +423,13 @@ fn walk_all_in_expr(
             let child_in_reducer = in_reducer || crate::ltm_agg::reducer_is_hoistable(builtin);
             walk_builtin_expr(builtin, |contents| match contents {
                 BuiltinContents::Ident(id, _) => {
-                    if variables.contains_key(&Ident::<Canonical>::new(id)) {
+                    if ctx.variables.contains_key(&Ident::<Canonical>::new(id)) {
                         push(id, RefShape::Bare, sites);
                     }
                 }
                 BuiltinContents::Expr(sub_expr) => walk_all_in_expr(
                     sub_expr,
-                    variables,
+                    ctx,
                     lookup_dims,
                     target_element,
                     child_in_reducer,
@@ -335,57 +437,17 @@ fn walk_all_in_expr(
                 ),
             });
         }
-        Expr2::Op1(_, operand, _, _) => walk_all_in_expr(
-            operand,
-            variables,
-            lookup_dims,
-            target_element,
-            in_reducer,
-            sites,
-        ),
+        Expr2::Op1(_, operand, _, _) => {
+            walk_all_in_expr(operand, ctx, lookup_dims, target_element, in_reducer, sites)
+        }
         Expr2::Op2(_, left, right, _, _) => {
-            walk_all_in_expr(
-                left,
-                variables,
-                lookup_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-            walk_all_in_expr(
-                right,
-                variables,
-                lookup_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
+            walk_all_in_expr(left, ctx, lookup_dims, target_element, in_reducer, sites);
+            walk_all_in_expr(right, ctx, lookup_dims, target_element, in_reducer, sites);
         }
         Expr2::If(cond, then_e, else_e, _, _) => {
-            walk_all_in_expr(
-                cond,
-                variables,
-                lookup_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-            walk_all_in_expr(
-                then_e,
-                variables,
-                lookup_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
-            walk_all_in_expr(
-                else_e,
-                variables,
-                lookup_dims,
-                target_element,
-                in_reducer,
-                sites,
-            );
+            walk_all_in_expr(cond, ctx, lookup_dims, target_element, in_reducer, sites);
+            walk_all_in_expr(then_e, ctx, lookup_dims, target_element, in_reducer, sites);
+            walk_all_in_expr(else_e, ctx, lookup_dims, target_element, in_reducer, sites);
         }
     }
 }
@@ -486,6 +548,14 @@ pub(crate) fn model_ltm_reference_sites(
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
     let variables = reconstruct_model_variables(db, model, project);
 
+    // Dimension context for the #511 iterated-subscript recognition: the
+    // mapped-dimension case (`State[i]` over a source declared with
+    // `Region[i]`, `State` maps to `Region`) needs `has_mapping_to`. The
+    // datamodel dim list (and hence this context) is salsa-tracked, so the
+    // IR is recomputed when a dimension's mappings change.
+    let dm_dims = crate::db::project_datamodel_dims(db, project);
+    let dim_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+
     // Per-source dimension lookup, cached: a source's dims are needed to
     // resolve literal subscripts and are reused across many edges.
     let mut dim_cache: HashMap<String, Vec<crate::dimensions::Dimension>> = HashMap::new();
@@ -514,7 +584,8 @@ pub(crate) fn model_ltm_reference_sites(
         let to_var = &variables[to_name];
         let to_name_str = to_name.as_str();
 
-        let raw_by_source = collect_all_reference_sites(to_var, &variables, &mut lookup_dims);
+        let raw_by_source =
+            collect_all_reference_sites(to_var, &variables, &dim_ctx, &mut lookup_dims);
         if raw_by_source.is_empty() {
             continue;
         }

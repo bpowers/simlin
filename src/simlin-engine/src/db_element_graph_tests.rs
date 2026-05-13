@@ -850,3 +850,77 @@ fn element_graph_multidim_partial_fixed_conservative() {
         }
     }
 }
+
+// ---- #511: iterated-dimension subscript -> same-element projection ----
+
+/// AC3.1 (element-graph side): an A2A target that references an arrayed
+/// dependency by its *iterated dimension* (`growth[Region,Age] =
+/// row_sum[Region] * c`, `row_sum` over `Region`, `growth` over
+/// `Region x Age`) classifies the `row_sum[Region]` subscript as `Bare`
+/// (see `db_ltm_ir_tests::ir_iterated_dim_subscript_is_bare`), so the
+/// element graph has the same-element-on-shared-dims projection
+/// `row_sum[r] -> growth[r,a]` for every `(r, a)` -- and NOT the full
+/// `row_sum[r1] -> growth[r2,*]` cross-product. Before the fix the subscript
+/// classified as `DynamicIndex` and emitted the all-pairs cross-product.
+#[test]
+fn element_graph_iterated_dim_subscript_same_element_projection() {
+    let project = TestProject::new("iterated_dim_elem_graph")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Age", &["young", "old"])
+        .array_aux("row_sum[Region]", "100")
+        .array_aux_direct(
+            "growth",
+            vec!["Region".into(), "Age".into()],
+            "row_sum[Region] * 0.5",
+            None,
+        );
+
+    let result = element_edges(&project);
+
+    // Same-element-on-shared-dims: row_sum[r] feeds growth[r,young] and
+    // growth[r,old] -- broadcasting over the target-only dimension Age.
+    assert_edge(&result, "row_sum[a]", "growth[a,young]");
+    assert_edge(&result, "row_sum[a]", "growth[a,old]");
+    assert_edge(&result, "row_sum[b]", "growth[b,young]");
+    assert_edge(&result, "row_sum[b]", "growth[b,old]");
+
+    // No cross-region edges (the reference is same-element on Region, not a
+    // full cross-product).
+    assert_no_edge(&result, "row_sum[a]", "growth[b,young]");
+    assert_no_edge(&result, "row_sum[a]", "growth[b,old]");
+    assert_no_edge(&result, "row_sum[b]", "growth[a,young]");
+    assert_no_edge(&result, "row_sum[b]", "growth[a,old]");
+}
+
+/// AC3.5: a mapped-dimension iterated subscript (`x` over `Region`,
+/// `target` over `State`, a `State→Region` mapping, `target[State] =
+/// x[State] * c`) classifies `x[State]` as `Bare` (see
+/// `db_ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`), so the
+/// element graph is *identical* to the one a bare `x` reference (`target[State]
+/// = x * c`) produces -- no new dimension-mapping behavior. `expand_same_element`
+/// matches dimension *names*, so a disjoint-named pair like `Region`/`State`
+/// is the broadcast case (every source element feeds every target element)
+/// for both the subscripted and the bare form; the assertion below pins
+/// "subscripted iterated == bare", not the projection shape.
+#[test]
+fn element_graph_mapped_iterated_dim_matches_bare_baseline() {
+    let subscripted = TestProject::new("mapped_iterated_subscripted")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x[State] * 0.5", None);
+    let bare = TestProject::new("mapped_iterated_bare")
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+        .array_aux_direct("x", vec!["Region".into()], "100", None)
+        .array_aux_direct("target", vec!["State".into()], "x * 0.5", None);
+
+    let sub_result = element_edges(&subscripted);
+    let bare_result = element_edges(&bare);
+
+    assert_eq!(
+        sub_result.edges, bare_result.edges,
+        "a mapped-dimension iterated subscript `x[State]` must produce the \
+         same element edges as a bare `x` reference into the same target"
+    );
+}

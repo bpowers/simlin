@@ -44,6 +44,8 @@ mod collect_reference_sites_tests {
             .cloned()
             .unwrap_or_else(|| panic!("variable '{target_name}' not found"));
 
+        let dm_dims = crate::db::project_datamodel_dims(&db, source_project);
+        let dim_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
         let mut lookup_dims = |name: &str| -> Vec<crate::dimensions::Dimension> {
             variables
                 .get(&Ident::<Canonical>::new(name))
@@ -51,7 +53,7 @@ mod collect_reference_sites_tests {
                 .map(|d| d.to_vec())
                 .unwrap_or_default()
         };
-        super::collect_all_reference_sites(&target_var, &variables, &mut lookup_dims)
+        super::collect_all_reference_sites(&target_var, &variables, &dim_ctx, &mut lookup_dims)
             .remove(source_name)
             .unwrap_or_default()
     }
@@ -551,6 +553,137 @@ mod model_ltm_reference_sites_tests {
             assert_eq!(
                 boston.shape,
                 RefShape::FixedIndex(vec!["boston".to_string()])
+            );
+        });
+    }
+
+    // ── #511: iterated-dimension subscripts classify as Bare ─────────────
+
+    /// AC3.1 (classification side): `growth[Region,Age] = row_sum[Region] * c`
+    /// with `row_sum` over `Region` and `growth` over `Region x Age`. The
+    /// `row_sum[Region]` subscript iterates over `growth`'s own `Region`
+    /// dimension and reads the same `Region` element of `row_sum`, so it is a
+    /// same-element-on-shared-dims reference (`RefShape::Bare`) rather than a
+    /// genuine cross-element one. Before the fix `resolve_literal_index`
+    /// rejected the dimension name `Region` and the site fell to
+    /// `DynamicIndex` (which then drove the conservative cross-product and a
+    /// `PREVIOUS(Subscript(...))` link-score partial).
+    #[test]
+    fn ir_iterated_dim_subscript_is_bare() {
+        let project = TestProject::new("iterated_dim_ir")
+            .named_dimension("Region", &["a", "b"])
+            .named_dimension("Age", &["young", "old"])
+            .array_aux("row_sum[Region]", "100")
+            .array_aux_direct(
+                "growth",
+                vec!["Region".into(), "Age".into()],
+                "row_sum[Region] * 0.5",
+                None,
+            );
+
+        with_ir(&project, |_db, ir, aggs| {
+            assert!(
+                aggs.aggs.is_empty(),
+                "no reducer here, so no aggs; got {:?}",
+                aggs.aggs
+            );
+            let sites = sites_for(ir, "row_sum", "growth");
+            assert_eq!(sites.len(), 1, "sites: {sites:?}");
+            assert_eq!(
+                sites[0].shape,
+                RefShape::Bare,
+                "an iterated-dimension subscript over the target's own dimension \
+                 reads the same source element -- it is Bare, not DynamicIndex"
+            );
+            assert_eq!(sites[0].routing, SiteRouting::Direct);
+            assert_eq!(sites[0].target_element, None);
+        });
+    }
+
+    /// AC3.5: a *mapped*-dimension iterated subscript is handled the same way
+    /// -- `Region` over `{a,b}`, `State` over `{s1,s2}` with a `State→Region`
+    /// mapping, `x` over `Region`, `target[State] = x[State] * c`: `x[State]`
+    /// is `Bare` (no new dimension-mapping code -- just don't exclude the
+    /// mapped case from the iterated-dim recognition).
+    #[test]
+    fn ir_mapped_iterated_dim_subscript_is_bare() {
+        let project = TestProject::new("mapped_iterated_dim_ir")
+            .named_dimension("Region", &["a", "b"])
+            .named_dimension_with_mapping("State", &["s1", "s2"], "Region")
+            .array_aux_direct("x", vec!["Region".into()], "100", None)
+            .array_aux_direct("target", vec!["State".into()], "x[State] * 0.5", None);
+
+        with_ir(&project, |_db, ir, _aggs| {
+            let sites = sites_for(ir, "x", "target");
+            assert_eq!(sites.len(), 1, "sites: {sites:?}");
+            assert_eq!(
+                sites[0].shape,
+                RefShape::Bare,
+                "a mapped-dimension iterated subscript (State maps to Region) is \
+                 still a same-element reference -- Bare"
+            );
+            assert_eq!(sites[0].routing, SiteRouting::Direct);
+        });
+    }
+
+    /// A *position-mismatched* iterated subscript is NOT Bare: `row_sum` over
+    /// `D1`, `growth` over `D1 x D2`, `growth[D1,D2] = row_sum[D2] * c`. Index
+    /// `D2` doesn't match `row_sum`'s declared dimension `D1` (and `D2`
+    /// doesn't map to `D1`), so it's a genuine cross-element reference and
+    /// stays `DynamicIndex` (Phase 4 territory, not Phase 3).
+    #[test]
+    fn ir_position_mismatched_iterated_dim_stays_dynamic() {
+        let project = TestProject::new("position_mismatch_ir")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux_direct("row_sum", vec!["D1".into()], "100", None)
+            .array_aux_direct(
+                "growth",
+                vec!["D1".into(), "D2".into()],
+                "row_sum[D2] * 0.5",
+                None,
+            );
+
+        with_ir(&project, |_db, ir, _aggs| {
+            let sites = sites_for(ir, "row_sum", "growth");
+            assert_eq!(sites.len(), 1, "sites: {sites:?}");
+            assert_eq!(
+                sites[0].shape,
+                RefShape::DynamicIndex,
+                "row_sum[D2] inside growth[D1,D2] is a position-mismatched \
+                 cross-element reference -- not Bare"
+            );
+        });
+    }
+
+    /// A *partially*-iterated subscript (one index iterated, one literal) is
+    /// out of scope for Phase 3 -- it keeps its current `FixedIndex`-or-
+    /// `DynamicIndex` classification (Phase 4 handles sliced reducers).
+    /// `matrix` over `D1 x D2`, `growth` over `D1 x D2`,
+    /// `growth[D1,D2] = matrix[D1, x] * c` (literal `x` in the second slot):
+    /// not all-iterated, so not Bare; the literal element makes it
+    /// `DynamicIndex` (a partial-fixed subscript classifies conservatively).
+    #[test]
+    fn ir_partially_iterated_dim_subscript_not_bare() {
+        let project = TestProject::new("partial_iterated_ir")
+            .named_dimension("D1", &["a", "b"])
+            .named_dimension("D2", &["x", "y"])
+            .array_aux_direct("matrix", vec!["D1".into(), "D2".into()], "100", None)
+            .array_aux_direct(
+                "growth",
+                vec!["D1".into(), "D2".into()],
+                "matrix[D1, x] * 0.5",
+                None,
+            );
+
+        with_ir(&project, |_db, ir, _aggs| {
+            let sites = sites_for(ir, "matrix", "growth");
+            assert_eq!(sites.len(), 1, "sites: {sites:?}");
+            assert_ne!(
+                sites[0].shape,
+                RefShape::Bare,
+                "a partially-iterated subscript (`matrix[D1, x]`) is not the \
+                 all-iterated same-element case Phase 3 recognizes"
             );
         });
     }
