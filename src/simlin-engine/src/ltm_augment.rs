@@ -2337,10 +2337,12 @@ pub(crate) fn generate_element_to_scalar_equation(
 /// (`source[current_element]`) are both subscripted.
 ///
 /// Mirrors [`generate_element_to_scalar_equation`]; the scalar case is the
-/// degenerate partial reduce with an empty result axis. STDDEV/RANK and
-/// nested reducers fall back to the delta-ratio form against
-/// `agg[result_element]`, unchanged from the scalar case (out of scope:
-/// #483).
+/// degenerate partial reduce with an empty result axis -- both share
+/// `build_element_reducer_link_score`, so the per-reducer treatment is
+/// identical. SUM/MEAN get the algebraic shortcut; MIN/MAX get the nested
+/// 2-arg unroll; STDDEV gets the analytic ceteris-paribus partial over the
+/// co-reduced slice (#483); RANK and nested reducers fall back to the
+/// delta-ratio form against `agg[result_element]`.
 #[allow(clippy::too_many_arguments)] // mirrors generate_element_to_scalar_equation's signature
 pub(crate) fn generate_element_to_reduced_equation(
     source_var_name: &str,

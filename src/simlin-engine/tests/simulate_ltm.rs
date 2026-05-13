@@ -3137,7 +3137,8 @@ fn test_stddev_invariant_regime_link_scores_zero() {
 /// with the same cardinality as its input. It cannot be used as the equation
 /// for a scalar aux: the engine would produce a dimension mismatch error
 /// because RANK's output is always an array. The nonlinear reducer path
-/// (generate_nonlinear_partial / STDDEV/RANK fallback) is exercised when MAX
+/// (generate_nonlinear_partial -- the MIN/MAX 2-arg unroll, STDDEV's analytic
+/// ceteris-paribus partial, RANK's delta-ratio stand-in) is exercised when MAX
 /// or MIN appears as a reducer, which is exactly what this test covers with
 /// the compound `MAX(population[*]) - MIN(population[*])` pattern.
 #[test]
