@@ -48,7 +48,7 @@ import { Module, moduleBounds, moduleContains, ModuleProps } from './Module';
 import { anyModuleHasModelReference } from '../module-warning';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
-import { shouldShowVariableDetails } from './pointer-utils';
+import { isDragMovement, shouldShowVariableDetails } from './pointer-utils';
 import {
   computeMouseDownSelection,
   computeMouseUpSelection,
@@ -896,6 +896,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     const showDetails = shouldShowVariableDetails(
       this.selectionCenterOffset !== undefined,
       this.state.moveDelta,
+      this.props.view.zoom,
       this.state.isMovingArrow,
       this.state.isMovingSource,
       this.state.isMovingLabel,
@@ -907,8 +908,7 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
     // without modifier, we deferred the selection change to allow group drag.
     // Now on mouseUp, if no drag occurred, collapse to the single element.
     if (this.deferredSingleSelectUid !== undefined) {
-      const didDrag =
-        this.state.moveDelta !== undefined && (this.state.moveDelta.x !== 0 || this.state.moveDelta.y !== 0);
+      const didDrag = isDragMovement(this.state.moveDelta, this.props.view.zoom);
       const newSel = computeMouseUpSelection(this.deferredSingleSelectUid, didDrag);
       const wasDeferredText = this.deferredIsText;
       this.deferredSingleSelectUid = undefined;
@@ -974,7 +974,12 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
           // we do weird one off things in this codepath, so exit early
           return;
         } else if (!this.state.isMovingArrow && !this.state.isMovingSource) {
-          this.props.onMoveSelection(delta, arcPoint, this.state.draggingSegmentIndex);
+          // A sub-threshold pointer wobble during a click is not a drag: don't
+          // nudge the element. shouldShowVariableDetails (which applies the
+          // same threshold) will open the details panel for it instead.
+          if (isDragMovement(delta, this.props.view.zoom)) {
+            this.props.onMoveSelection(delta, arcPoint, this.state.draggingSegmentIndex);
+          }
         } else {
           const element = this.getElementByUid(only(this.props.selection));
           let foundInvalidTarget = false;
@@ -991,7 +996,8 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
             this.props.onAttachLink(linkToAttach, defined(validTarget.ident));
           } else if (element.type === 'flow') {
             // don't create a flow stacked on top of 2 clouds due to a misclick
-            if (this.state.moveDelta.x === 0 && this.state.moveDelta.y === 0 && this.state.inCreation) {
+            // (a click that wobbled a pixel is still a misclick, not a drag)
+            if (!isDragMovement(this.state.moveDelta, this.props.view.zoom) && this.state.inCreation) {
               this.clearPointerState();
               return;
             }
