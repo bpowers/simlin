@@ -8130,3 +8130,265 @@ fn test_inline_reducer_gets_synthetic_agg_despite_var_backed_sibling() {
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("should simulate");
 }
+
+/// AC5.2 / AC5.4 (#515, end-to-end): a 4-element-dim `share[r] = pop[r] /
+/// SUM(pop[*])` model with `update[r] = share[r] * pop[r] * c` and
+/// *heterogeneous* stock initials (so loop scores don't degenerate to zero
+/// under symmetry) hoists `SUM(pop[*])` into `$⁚ltm⁚agg⁚0`; each region has
+/// one disjoint petal through it. `recover_cross_agg_loops` reconstructs the
+/// full 4-petal subset's `(4-1)!/2 = 3` distinct cyclic orderings as
+/// distinct loops -- distinct ids, distinct `loop_score` equation texts
+/// (different edge sequences) -- but, because all three traverse the same
+/// edge *multiset*, their simulated `loop_score` time series are equal
+/// (to within floating-point round-off; multiplication is commutative, so
+/// the products coincide up to FP reassociation), and non-degenerate.
+#[test]
+fn test_four_petal_cyclic_orderings_share_loop_score_series() {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+
+    let regions = ["A", "B", "C", "D"];
+    let c = 0.01_f64;
+    let project = datamodel::Project {
+        name: "four_petal_share".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 8.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            regions.iter().map(|s| s.to_string()).collect(),
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    // Heterogeneous initials break the all-symmetric case
+                    // where every link score (and thus loop score) is 0.
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("A".to_string(), "1000".to_string(), None, None),
+                            ("B".to_string(), "300".to_string(), None, None),
+                            ("C".to_string(), "100".to_string(), None, None),
+                            ("D".to_string(), "30".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["update".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "share".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "pop / SUM(pop[*])".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "update".to_string(),
+                    // `* pop` makes the feedback flow curved -> non-zero
+                    // flow->stock link score (and thus non-zero loop score).
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        format!("share * pop * {c}"),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    assert!(
+        !ltm.agg_recovery_truncated,
+        "a 4-petal model is well under the production budget"
+    );
+
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    // The full-4-petal loop_score vars: those whose equation references all
+    // four `pop[r]→agg` factors. There must be exactly 3 (the 3 cyclic
+    // orderings of the full subset), with distinct names and distinct
+    // equation texts.
+    let four_petal_loop_vars: Vec<&simlin_engine::db::LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+        .filter(|v| {
+            let eq = v.equation.source_text();
+            regions.iter().all(|r| {
+                eq.contains(
+                    format!(
+                        "\"$\u{205A}ltm\u{205A}link_score\u{205A}pop[{}]\u{2192}{agg}\"",
+                        r.to_lowercase()
+                    )
+                    .as_str(),
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        four_petal_loop_vars.len(),
+        3,
+        "the full 4-petal subset must give exactly (4-1)!/2 = 3 cyclic-ordering loops; \
+         got {:?}",
+        four_petal_loop_vars
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    let names: std::collections::HashSet<&str> = four_petal_loop_vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
+    assert_eq!(names.len(), 3, "distinct ids for the 3 cyclic orderings");
+    let eqs: std::collections::HashSet<String> = four_petal_loop_vars
+        .iter()
+        .map(|v| v.equation.source_text())
+        .collect();
+    assert_eq!(
+        eqs.len(),
+        3,
+        "the 3 cyclic orderings must have distinct edge sequences (loop_score equation texts)"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("should compile");
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("should simulate");
+    let results = vm.into_results();
+
+    let offsets: Vec<usize> = four_petal_loop_vars
+        .iter()
+        .map(|v| {
+            *results
+                .offsets
+                .get(&Ident::<Canonical>::new(&v.name))
+                .unwrap_or_else(|| panic!("missing offset for {}", v.name))
+        })
+        .collect();
+
+    // The three series must be equal step-by-step -- they traverse the same
+    // edge multiset, and the loop score is `∏ link_score(e)`, so the products
+    // coincide up to FP reassociation of the factor order -- and the loop
+    // must be non-degenerate (genuinely computed: non-zero and finite at some
+    // step, not stubbed to a constant zero). It is a product of 16 link
+    // scores (each O(1e-3..1)), so the value is small but not zero.
+    let mut saw_nonzero = false;
+    let mut all_finite = true;
+    for step in 0..results.step_count {
+        let base = step * results.step_size;
+        let v0 = results.data[base + offsets[0]];
+        for &o in &offsets[1..] {
+            let v = results.data[base + o];
+            let both_nan = v.is_nan() && v0.is_nan();
+            assert!(
+                both_nan || (v - v0).abs() <= 1e-12 * v0.abs().max(1e-300),
+                "step {step}: cyclic-ordering loop scores diverge: {v0} vs {v}"
+            );
+        }
+        if !v0.is_finite() {
+            all_finite = false;
+        } else if v0 != 0.0 {
+            saw_nonzero = true;
+        }
+    }
+    assert!(
+        all_finite,
+        "the 4-petal loop score series must be finite at every step"
+    );
+    assert!(
+        saw_nonzero,
+        "the 4-petal loop score must be non-degenerate (non-zero at some step)"
+    );
+
+    // Stronger: the loop score equals the running product of its link scores
+    // at every step (it is a genuine product, not a stub). `[elem]` slot
+    // subscripts on the factors ride *outside* the quotes (e.g.
+    // `"$⁚ltm⁚link_score⁚update→pop"[a]`), so split each ` * `-joined factor
+    // into its quoted var name and an optional region slot.
+    {
+        let factor_offsets: Vec<usize> =
+            loop_score_equation_factors(&four_petal_loop_vars[0].equation.source_text())
+                .iter()
+                .map(|factor| {
+                    let close = factor.rfind('"').expect("factor must be quoted");
+                    let name = &factor[1..close];
+                    let after = &factor[close + 1..];
+                    let base = *results
+                        .offsets
+                        .get(&Ident::<Canonical>::new(name))
+                        .unwrap_or_else(|| panic!("missing offset for factor {name:?}"));
+                    match after.strip_prefix('[') {
+                        None => base,
+                        Some(rest) => {
+                            let elem = &rest[..rest.find(']').expect("malformed slot subscript")];
+                            let idx = regions
+                                .iter()
+                                .position(|r| r.to_lowercase() == elem)
+                                .unwrap_or_else(|| panic!("unknown region slot {elem:?}"));
+                            base + idx
+                        }
+                    }
+                })
+                .collect();
+        assert_eq!(factor_offsets.len(), 16, "a 4-petal loop has 16 edges");
+        for step in 0..results.step_count {
+            let base = step * results.step_size;
+            let product: f64 = factor_offsets
+                .iter()
+                .map(|&o| results.data[base + o])
+                .product();
+            let loop_val = results.data[base + offsets[0]];
+            let both_nan = loop_val.is_nan() && product.is_nan();
+            assert!(
+                both_nan || (loop_val - product).abs() <= 1e-9 * product.abs().max(1e-300),
+                "step {step}: loop_score {loop_val} != product of its link scores {product}"
+            );
+        }
+    }
+
+    // Sanity: the reported variable-level loops never surface the synthetic
+    // agg node, and there is exactly one synthetic agg.
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    for l in &detected.loops {
+        assert!(
+            l.variables
+                .iter()
+                .all(|name| !name.contains("\u{205A}agg\u{205A}")),
+            "model_detected_loops should not surface synthetic agg nodes; got: {:?}",
+            l.variables
+        );
+    }
+}

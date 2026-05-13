@@ -2986,6 +2986,72 @@ impl Drop for AggLoopBudgetGuard {
     }
 }
 
+/// Distinct orderings of `[0, 1, ..., n-1]` modulo rotation (index `0`
+/// pinned first to kill rotations) and modulo mirror reversal (the loop
+/// score is a commutative product over the edge multiset, so a directed
+/// cycle and its reverse share a score; the design enumerates only one of
+/// each mirror pair). Count: `1` for `n ∈ {0, 1, 2}`, `(n-1)!/2` for
+/// `n ≥ 3` (`(n-1)!` rotation classes, halved by the mirror involution --
+/// which has no fixed point for `n ≥ 3` since a length-`(n-1)` permutation
+/// of distinct indices is never a palindrome; for `n = 2` reversing the
+/// 2-cycle gives the same sequence, so there is nothing to quotient).
+///
+/// "Mirror" here is the petal-sequence reversed with the first petal still
+/// pinned -- `[0, p1, .., p_{n-1}] ↦ [0, p_{n-1}, .., p1]` -- so the rule
+/// is: enumerate the permutations of `[1, .., n-1]` via Heap's algorithm
+/// (deterministic order, which `assign_loop_ids`' stable sort relies on for
+/// stable distinct loop ids), and keep a permutation `tail` iff it is
+/// lexicographically `<= reverse(tail)` (equivalently: track the emitted
+/// canonicals in a set -- the lex test is the cheaper involution).
+///
+/// Pure: depends only on `n`. Only called from `recover_cross_agg_loops`
+/// with `n` = a disjoint petal-subset size (≥ 2, ≤ `MAX_AGG_PETALS`), and
+/// the loop budget stops recovery long before it reaches a subset large
+/// enough for `(n-1)!/2` to be a concern.
+fn cyclic_orderings(n: usize) -> Vec<Vec<usize>> {
+    if n <= 1 {
+        return vec![(0..n).collect()];
+    }
+    // Generate every permutation of the tail `[1, .., n-1]` via Heap's
+    // algorithm, in its canonical order.
+    let mut tail: Vec<usize> = (1..n).collect();
+    let mut perms: Vec<Vec<usize>> = Vec::new();
+    heaps_permutations(tail.len(), &mut tail, &mut perms);
+
+    let mut orderings: Vec<Vec<usize>> = Vec::with_capacity(perms.len().div_ceil(2));
+    for perm in perms {
+        // Skip a permutation whose mirror (the tail reversed, with 0 still
+        // pinned) sorts strictly before it -- we keep one of each mirror pair.
+        let rev: Vec<usize> = perm.iter().rev().copied().collect();
+        if perm > rev {
+            continue;
+        }
+        let mut ordering = Vec::with_capacity(n);
+        ordering.push(0);
+        ordering.extend(perm);
+        orderings.push(ordering);
+    }
+    orderings
+}
+
+/// Recursive Heap's algorithm: append every permutation of `a[0..k]` (with
+/// `a[k..]` held fixed) to `out`, in Heap's canonical order. Called with
+/// `k == a.len()`.
+fn heaps_permutations(k: usize, a: &mut [usize], out: &mut Vec<Vec<usize>>) {
+    if k <= 1 {
+        out.push(a.to_vec());
+        return;
+    }
+    for i in 0..k {
+        heaps_permutations(k - 1, a, out);
+        if k.is_multiple_of(2) {
+            a.swap(i, k - 1);
+        } else {
+            a.swap(0, k - 1);
+        }
+    }
+}
+
 /// One agg petal: the element-level node sequence rotated to start at the
 /// aggregate node (`[A, x_1, ..., x_m]`), plus its internal node set
 /// `{x_1..x_m}`. `A` is the *element-level* agg node -- for an arrayed
@@ -3116,46 +3182,55 @@ fn recover_cross_agg_loops(
             {
                 continue;
             }
-            // One cyclic ordering of the chosen petals: in chosen-index order
-            // (Task 2 adds the remaining distinct cyclic orderings).
-            let seq: Vec<&str> = chosen
-                .iter()
-                .flat_map(|&i| petals[i].nodes.iter().copied())
-                .collect();
-            let var_level_nodes: Vec<Ident<Canonical>> =
-                seq.iter().map(|n| Ident::new(strip_subscript(n))).collect();
-            let var_links = var_graph.circuit_to_links(&var_level_nodes);
-            let links = build_element_subscripted_links(&seq, &var_links, source_vars, db, project);
-            let stocks: Vec<Ident<Canonical>> = seq
-                .iter()
-                .filter(|n| var_graph.stocks.contains(&Ident::new(strip_subscript(n))))
-                .map(|n| Ident::new(n))
-                .collect();
-            let polarity = if links.iter().any(|l| l.polarity == LinkPolarity::Unknown) {
-                LoopPolarity::Undetermined
-            } else {
-                let neg = links
+            // Each distinct cyclic ordering of the chosen petals is its own
+            // directed cycle (a different edge *sequence*; per #308 that is a
+            // distinct loop) -- but all of them share the same edge *multiset*
+            // (every petal always contributes its same `A → first_internal →
+            // ... → last_internal → A` edges, since the sequence is cyclic),
+            // so they share a `loop_score`. For m = 2 there is exactly one
+            // ordering, equal to the pre-#515 per-subset output.
+            let m = chosen.len();
+            for ord in cyclic_orderings(m) {
+                let seq: Vec<&str> = ord
                     .iter()
-                    .filter(|l| l.polarity == LinkPolarity::Negative)
-                    .count();
-                if neg % 2 == 0 {
-                    LoopPolarity::Reinforcing
+                    .flat_map(|&j| petals[chosen[j]].nodes.iter().copied())
+                    .collect();
+                let var_level_nodes: Vec<Ident<Canonical>> =
+                    seq.iter().map(|n| Ident::new(strip_subscript(n))).collect();
+                let var_links = var_graph.circuit_to_links(&var_level_nodes);
+                let links =
+                    build_element_subscripted_links(&seq, &var_links, source_vars, db, project);
+                let stocks: Vec<Ident<Canonical>> = seq
+                    .iter()
+                    .filter(|n| var_graph.stocks.contains(&Ident::new(strip_subscript(n))))
+                    .map(|n| Ident::new(n))
+                    .collect();
+                let polarity = if links.iter().any(|l| l.polarity == LinkPolarity::Unknown) {
+                    LoopPolarity::Undetermined
                 } else {
-                    LoopPolarity::Balancing
+                    let neg = links
+                        .iter()
+                        .filter(|l| l.polarity == LinkPolarity::Negative)
+                        .count();
+                    if neg % 2 == 0 {
+                        LoopPolarity::Reinforcing
+                    } else {
+                        LoopPolarity::Balancing
+                    }
+                };
+                recovered.push(Loop {
+                    id: String::new(),
+                    links,
+                    stocks,
+                    polarity,
+                    // Cross-element loops visit fixed elements -- scalar loop score.
+                    dimensions: vec![],
+                });
+                emitted += 1;
+                if emitted >= agg_loop_budget {
+                    truncated = true;
+                    break 'outer;
                 }
-            };
-            recovered.push(Loop {
-                id: String::new(),
-                links,
-                stocks,
-                polarity,
-                // Cross-element loops visit fixed elements -- scalar loop score.
-                dimensions: vec![],
-            });
-            emitted += 1;
-            if emitted >= agg_loop_budget {
-                truncated = true;
-                break 'outer;
             }
         }
     }

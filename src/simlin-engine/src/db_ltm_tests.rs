@@ -541,3 +541,63 @@ fn test_scalarize_ltm_equation_arrayed_collapse() {
         matches!(scalarize_ltm_equation(Scalar("scalar eqn".to_string())), Scalar(text) if text == "scalar eqn")
     );
 }
+
+/// `cyclic_orderings(n)` enumerates the distinct orderings of `[0, .., n-1]`
+/// modulo rotation (index 0 pinned first) and modulo mirror reversal
+/// (reverse-the-tail) -- `1` ordering for n ∈ {0, 1, 2}, `(n-1)!/2` for
+/// n ≥ 3. The exact vectors (and their order, which Heap's-algorithm
+/// determinism fixes -- and which `assign_loop_ids`' stable sort relies on
+/// for stable, distinct ids) are pinned here.
+#[test]
+fn cyclic_orderings_enumerates_distinct_rotation_and_mirror_classes() {
+    use super::cyclic_orderings;
+
+    // Degenerate / trivial cases.
+    assert_eq!(cyclic_orderings(0), vec![Vec::<usize>::new()]);
+    assert_eq!(cyclic_orderings(1), vec![vec![0]]);
+    // n=2: `0! = 1` ordering; reversing a 2-cycle gives the same sequence,
+    // so no mirror to quotient.
+    assert_eq!(cyclic_orderings(2), vec![vec![0, 1]]);
+    // n=3: `(3-1)!/2 = 1`. `[0,1,2]` and `[0,2,1]` are mirrors (reverse the
+    // tail `[1,2]` -> `[2,1]`); the lexicographically smaller tail wins.
+    assert_eq!(cyclic_orderings(3), vec![vec![0, 1, 2]]);
+    // n=4: `(4-1)!/2 = 3`. Heap's order over the tail `[1,2,3]` is
+    // `[1,2,3], [2,1,3], [3,1,2], [1,3,2], [2,3,1], [3,2,1]`; keep a tail
+    // iff it is lexicographically <= its reverse -> `[1,2,3]`, `[2,1,3]`,
+    // `[1,3,2]`.
+    assert_eq!(
+        cyclic_orderings(4),
+        vec![vec![0, 1, 2, 3], vec![0, 2, 1, 3], vec![0, 1, 3, 2]]
+    );
+
+    // Structural checks for a few more `n`: count == (n-1)!/2 for n >= 3,
+    // index 0 always first, every ordering is a permutation of 0..n, and no
+    // two are mirror images of each other.
+    fn factorial(k: usize) -> usize {
+        (1..=k).product::<usize>().max(1)
+    }
+    for n in 3..=6 {
+        let orderings = cyclic_orderings(n);
+        assert_eq!(
+            orderings.len(),
+            factorial(n - 1) / 2,
+            "cyclic_orderings({n}) should have (n-1)!/2 entries"
+        );
+        let mut seen: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
+        for ord in &orderings {
+            assert_eq!(ord[0], 0, "index 0 must be pinned first");
+            let mut sorted = ord.clone();
+            sorted.sort();
+            assert_eq!(sorted, (0..n).collect::<Vec<_>>(), "must be a permutation");
+            // Mirror = pin 0, reverse the tail.
+            let mirror: Vec<usize> = std::iter::once(0)
+                .chain(ord[1..].iter().rev().copied())
+                .collect();
+            assert!(
+                !seen.contains(&mirror),
+                "cyclic_orderings({n}) emitted both {ord:?} and its mirror {mirror:?}"
+            );
+            assert!(seen.insert(ord.clone()), "duplicate ordering {ord:?}");
+        }
+    }
+}
