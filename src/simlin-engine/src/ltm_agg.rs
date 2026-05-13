@@ -161,21 +161,6 @@ pub(crate) fn reducer_name_is_monotone(name: &str) -> bool {
     matches!(name, "sum" | "mean" | "min" | "max")
 }
 
-/// [`reducer_name_is_monotone`] for a recognized reducer `BuiltinFn`. A
-/// builtin that isn't a recognized reducer is never "monotone" in this sense
-/// (e.g. a 2-arg `MIN(a, b)` is not an array reducer at all).
-//
-// `allow(dead_code)`: this is the `BuiltinFn`-form companion to
-// `reducer_name_is_monotone` (the only current monotone consumer,
-// `recover_agg_hop_polarities`, has the agg's printed equation text, not a
-// `BuiltinFn`, so it uses `agg_reducer_is_monotone`). Kept here so the
-// monotone predicate has both shapes alongside `reducer_kind`; the static
-// polarity pass (out of scope for this phase) is the natural caller.
-#[allow(dead_code)]
-pub(crate) fn reducer_is_monotone<E>(builtin: &BuiltinFn<E>) -> bool {
-    reducer_kind(builtin).is_some() && reducer_name_is_monotone(builtin.name())
-}
-
 /// `true` when `builtin` is a recognized array reducer that is *hoisted* into
 /// an aggregate node -- i.e. recognized AND not [`ReducerKind::Constant`].
 ///
@@ -1911,6 +1896,18 @@ mod tests {
             vec![AxisRead::Reduced, AxisRead::Reduced]
         );
         assert!(synthetic[0].result_dims.is_empty());
+    }
+
+    /// The `BuiltinFn`-form companion to [`reducer_name_is_monotone`]: `true`
+    /// when `builtin` is a recognized array reducer (so a 2-arg `MIN(a, b)` --
+    /// not an array reducer at all -- is never "monotone" here) *and* that
+    /// reducer is monotone non-decreasing. Only the classification test needs
+    /// the builtin-keyed shape; the production monotone consumer
+    /// (`recover_agg_hop_polarities`) has the agg's printed equation text and
+    /// uses [`agg_reducer_is_monotone`], so this lives in the tests rather than
+    /// at module scope.
+    fn reducer_is_monotone<E>(builtin: &BuiltinFn<E>) -> bool {
+        reducer_kind(builtin).is_some() && reducer_name_is_monotone(builtin.name())
     }
 
     /// AC1.2: the consolidated `reducer_kind` table classifies every array
