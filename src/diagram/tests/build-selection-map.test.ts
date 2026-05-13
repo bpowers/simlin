@@ -58,4 +58,23 @@ describe('Canvas.buildSelectionMap', () => {
     expect(result.size).toBe(1);
     expect(result.get(1)).toBe(aux1);
   });
+
+  it('skips a selected UID that is no longer present in elements (async race after delete)', () => {
+    // Reproduces the white-screen crash: when a selected connector is deleted,
+    // Editor updates the view (removing the connector) before clearing the
+    // selection, so there is a render where props.selection still references
+    // the now-missing element. buildSelectionMap must not throw on it.
+    const props = { selection: new Set([1, 13, 2]) } as CanvasProps;
+    const result = Canvas.buildSelectionMap(props, elements, undefined);
+    expect(result.size).toBe(2);
+    expect(result.get(1)).toBe(aux1);
+    expect(result.get(2)).toBe(aux2);
+    expect(result.has(13)).toBe(false);
+  });
+
+  it('returns an empty map when every selected UID is missing from elements', () => {
+    const props = { selection: new Set([13, 14]) } as CanvasProps;
+    const result = Canvas.buildSelectionMap(props, elements, undefined);
+    expect(result.size).toBe(0);
+  });
 });

@@ -294,10 +294,21 @@ export class Canvas extends React.PureComponent<CanvasProps, CanvasState> {
         // When inCreation is undefined the async Editor update hasn't
         // finished yet — skip this transient UID; the next render after
         // Editor.setState will carry the real selection.
-      } else {
-        const e = getOrThrow(elements, uid);
-        selection.set(e.uid, e);
+        continue;
       }
+      const e = elements.get(uid);
+      if (e === undefined) {
+        // The selection can transiently reference an element that has just
+        // been removed from the view (e.g. dropping a connector's arrowhead
+        // off-canvas deletes it): Editor updates the view and clears the
+        // selection in separate setState calls, so there is a render in
+        // between where props.view no longer has the element but
+        // props.selection still does. Skip it rather than crashing the whole
+        // canvas; the next render after the selection-clear lands is
+        // consistent. (Same rationale as the inCreationUid case above.)
+        continue;
+      }
+      selection.set(e.uid, e);
     }
     return selection;
   }

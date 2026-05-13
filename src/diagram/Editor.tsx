@@ -799,6 +799,19 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
       payload: { ident },
     }));
 
+    // Clear the selection now, in the same synchronous block (before any
+    // await) as the view update below, so React batches them into a single
+    // render: no consumer should ever observe a selection that references an
+    // element the view no longer contains. (Clearing it after
+    // `await this.updateView(...)` instead left a window where props.view had
+    // dropped the deleted element but props.selection still pointed at it --
+    // Canvas.buildSelectionMap now tolerates that, but the state transition
+    // should still be atomic.) The deleteOps above were computed from the
+    // pre-clear selection.
+    this.setState({
+      selection: new Set<number>(),
+    });
+
     if (deleteOps.length > 0) {
       const patch: JsonProjectPatch = {
         models: [{ name: modelName, ops: deleteOps }],
@@ -813,9 +826,6 @@ export class Editor extends React.PureComponent<EditorProps, EditorState> {
     }
 
     await this.updateView({ ...view, elements, nextUid });
-    this.setState({
-      selection: new Set<number>(),
-    });
     this.scheduleSimRun();
   };
 
