@@ -2768,6 +2768,357 @@ fn test_cross_dim_stddev_expansion() {
     }
 }
 
+/// Build a 3-region STDDEV-in-a-feedback-loop model (#483, AC6.1/AC6.3).
+///
+/// `Region = {a, b, c}`; `s[Region]` is a stock with heterogeneous inits
+/// (`a=10, b=20, c=30`) fed by `update[Region]`; `total = STDDEV(s[*])`
+/// (a scalar aux); `update[Region]` is a *per-element-equation* flow
+/// (`Equation::Arrayed`) with `update[a] = total*c`, `update[b] =
+/// total*c*0.5`, `update[c] = total*c*2`. The differing per-element
+/// multipliers make the elements drift apart at different rates, so STDDEV
+/// keeps changing -- the analytic per-element ceteris-paribus partial
+/// isolates each element's contribution while the pre-#483 delta-ratio
+/// conflated them (`partial_eq == target` ⇒ the link-score magnitude was a
+/// degenerate `1` whenever `Δtotal ≠ 0`). The closed loop is `s[r] → total
+/// → update[r] → s[r]` per element, plus the cross-element
+/// `s[r] → total → update[r'] → s[r']`.
+fn build_stddev_feedback_model(c: f64) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+    datamodel::Project {
+        name: "stddev_feedback".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "s".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), "10".to_string(), None, None),
+                            ("b".to_string(), "20".to_string(), None, None),
+                            ("c".to_string(), "30".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["update".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "total".to_string(),
+                    equation: Equation::Scalar("STDDEV(s[*])".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "update".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), format!("total * {c}"), None, None),
+                            ("b".to_string(), format!("total * {c} * 0.5"), None, None),
+                            ("c".to_string(), format!("total * {c} * 2"), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Build a 3-region STDDEV-*invariant*-regime model (#483, AC6.2).
+///
+/// Same `s[Region]` stock with heterogeneous inits, but the inflow
+/// `update[Region] = k` is a *constant scalar identical for every element*,
+/// so all `s[i]` shift by the same `k` each step ⇒ STDDEV is invariant ⇒
+/// `total` is bit-for-bit constant ⇒ the `Δtarget = 0` guard in
+/// `build_element_reducer_link_score` zeros every `s[d]→total` link score
+/// at every step ≥ 1. Note: this is genuinely zero with *both* the old
+/// delta-ratio and the new analytic partial (both numerators are 0 when
+/// `Δtotal = 0`), so it pins AC6.2 but does *not* distinguish the fix --
+/// the load-bearing distinguishing test is `test_stddev_link_score_matches_hand_calc`.
+/// `update` has no `total` dependency, so there is no feedback loop;
+/// discovery mode (which scores every causal edge) emits the `s[d]→total`
+/// link scores anyway.
+fn build_stddev_invariant_model(k: f64) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+    datamodel::Project {
+        name: "stddev_invariant".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "s".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), "10".to_string(), None, None),
+                            ("b".to_string(), "20".to_string(), None, None),
+                            ("c".to_string(), "30".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["update".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "total".to_string(),
+                    equation: Equation::Scalar("STDDEV(s[*])".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "update".to_string(),
+                    equation: Equation::ApplyToAll(vec!["Region".to_string()], format!("{k}")),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// #483 / ltm-arrays-hardening.AC6.1 / AC6.3: for `total = STDDEV(s[*])`
+/// feeding back into `s`, the per-element `$⁚ltm⁚link_score⁚s[d]→total`
+/// series equals the analytic ceteris-paribus partial (the unrolled
+/// population-variance `sqrt` formula holding `s[d]` live, the other
+/// elements at `PREVIOUS`), wrapped in the standard link-score formula --
+/// matched against a hand calculation at every step within 1e-6 -- and
+/// is *not* the degenerate-`1` magnitude the pre-#483 delta-ratio produced
+/// (`partial_eq == target` ⇒ `ABS(SAFEDIV(Δtotal, Δtotal, 0)) == 1`). So
+/// this test would fail on the pre-fix code.
+#[test]
+fn test_stddev_link_score_matches_hand_calc() {
+    // A multiplier large enough that the elements drift apart visibly each
+    // step (keeps the hand calc well clear of floating-point noise) but the
+    // stock values stay modest over 5 steps.
+    let project = build_stddev_feedback_model(1.0);
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("STDDEV feedback model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    let off = |name: &str| -> usize {
+        *results
+            .offsets
+            .get(&Ident::<Canonical>::new(name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing offset {name}; have: {:?}",
+                    results
+                        .offsets
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let s_a = off("s[a]");
+    let s_b = off("s[b]");
+    let s_c = off("s[c]");
+    let total_off = off("total");
+
+    let ls_offsets = find_cross_dimensional_offsets(&results, "s", "total");
+    assert_eq!(
+        ls_offsets.len(),
+        3,
+        "STDDEV reducer edge should produce 3 per-element link scores, got: {ls_offsets:?}"
+    );
+    let ls_off = |elem: &str| -> usize {
+        ls_offsets
+            .iter()
+            .find(|(e, _)| e == elem)
+            .unwrap_or_else(|| panic!("no s[{elem}]→total link score; have {ls_offsets:?}"))
+            .1
+    };
+
+    let at = |step: usize, o: usize| results.data[step * results.step_size + o];
+
+    // The link-score equation (`build_element_reducer_link_score`) at step
+    // `t >= 1` is:
+    //   if Δtotal == 0 OR Δs[d] == 0 then 0
+    //   else |SAFEDIV(partial_d(t) - total(t-1), Δtotal, 0)|
+    //        * SIGN(SAFEDIV(partial_d(t) - total(t-1), Δs[d], 0))
+    // where partial_d(t) = sqrt((Σ_i (s'_i - m)^2) / 3), s'_i = s[d](t) for
+    // i == d else s[i](t-1), m = (Σ_i s'_i) / 3 -- matching the engine's
+    // population-variance STDDEV (divisor N, `(v-mean).powf(2.0)`).
+    let elems: [(&str, usize); 3] = [("a", s_a), ("b", s_b), ("c", s_c)];
+    let mut checked = 0usize;
+    let mut saw_non_degenerate = false;
+    for step in 1..results.step_count {
+        let total_t = at(step, total_off);
+        let total_prev = at(step - 1, total_off);
+        let d_total = total_t - total_prev;
+        if d_total.abs() < 1e-12 {
+            continue;
+        }
+        for (live_idx, (live_elem, live_s_off)) in elems.iter().enumerate() {
+            let d_source = at(step, *live_s_off) - at(step - 1, *live_s_off);
+            // s'_i: live element at step t, others frozen at step t-1.
+            let s_prime: Vec<f64> = elems
+                .iter()
+                .enumerate()
+                .map(|(i, (_, s_off))| {
+                    if i == live_idx {
+                        at(step, *s_off)
+                    } else {
+                        at(step - 1, *s_off)
+                    }
+                })
+                .collect();
+            let m = (s_prime[0] + s_prime[1] + s_prime[2]) / 3.0;
+            let variance = ((s_prime[0] - m).powf(2.0)
+                + (s_prime[1] - m).powf(2.0)
+                + (s_prime[2] - m).powf(2.0))
+                / 3.0;
+            let partial = variance.sqrt();
+            let num = partial - total_prev;
+            let expected = if d_source.abs() < 1e-12 {
+                0.0
+            } else {
+                let sign_arg = num / d_source;
+                let sign = if sign_arg > 0.0 {
+                    1.0
+                } else if sign_arg < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+                (num / d_total).abs() * sign
+            };
+            let recorded = at(step, ls_off(live_elem));
+            assert!(
+                (recorded - expected).abs() < 1e-6,
+                "step {step}, element {live_elem}: recorded link score {recorded} != hand calc \
+                 {expected} (partial_d(t) = {partial}, total(t) = {total_t}, total(t-1) = \
+                 {total_prev}, Δs[d] = {d_source})"
+            );
+            // The pre-#483 delta-ratio produced |Δtotal/Δtotal| = 1 here
+            // (whenever Δtotal != 0); the analytic value is not degenerate-1.
+            if (recorded.abs() - 1.0).abs() > 1e-3 {
+                saw_non_degenerate = true;
+            }
+        }
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "expected at least one step t >= 1 with Δtotal != 0"
+    );
+    assert!(
+        saw_non_degenerate,
+        "the analytic STDDEV link score should differ from the pre-#483 degenerate-1 \
+         magnitude at some step (|recorded| != ~1)"
+    );
+}
+
+/// #483 / ltm-arrays-hardening.AC6.2: under a STDDEV-invariant per-element
+/// flow (every element shifted by the same constant each step), STDDEV does
+/// not change, so the `Δtarget = 0` guard zeros every `s[d]→total` link
+/// score at every step ≥ 1. (Passes with both the old delta-ratio and the
+/// new analytic partial -- both numerators vanish when `Δtotal = 0` -- so
+/// this pins AC6.2 but does *not* distinguish the fix; the distinguishing
+/// test is `test_stddev_link_score_matches_hand_calc`.)
+#[test]
+fn test_stddev_invariant_regime_link_scores_zero() {
+    let project = build_stddev_invariant_model(5.0);
+    // Discovery mode: `update` has no `total` dependency, so there is no
+    // feedback loop -- but discovery scores every causal edge, including
+    // the `s[d] → total` reducer edge.
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end()
+        .expect("STDDEV-invariant model should simulate with LTM enabled");
+    let results = vm.into_results();
+
+    let ls_offsets = find_cross_dimensional_offsets(&results, "s", "total");
+    assert_eq!(
+        ls_offsets.len(),
+        3,
+        "STDDEV reducer edge should produce 3 per-element link scores, got: {ls_offsets:?}"
+    );
+    for (elem, offset) in &ls_offsets {
+        for step in 0..results.step_count {
+            let val = results.data[step * results.step_size + offset];
+            assert!(
+                val.abs() < 1e-9 && !val.is_nan(),
+                "STDDEV-invariant regime: s[{elem}]→total link score at step {step} should be \
+                 ~0 (STDDEV is constant ⇒ Δtarget = 0 guard fires), got {val}"
+            );
+        }
+    }
+}
+
 /// AC5.6 / AC4.4: A compound expression combining MAX and MIN -- as
 /// sub-expressions, not whole-RHS -- mints two synthetic aggregate nodes,
 /// and each gets N per-source-element reducer link scores.
