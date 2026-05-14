@@ -1769,7 +1769,16 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
     // The numerator uses PREVIOUS values to align timing with the denominator.
     // At time t, the flow at t-1 (PREVIOUS(flow)) is what drove the stock change from t-1 to t.
     // We measure the change in that causal flow: flow(t-1) - flow(t-2).
-    let numerator = format!("(PREVIOUS({flow}) - PREVIOUS(PREVIOUS({flow})))");
+    //
+    // The `time_step` factor makes the score the dimensionally-correct
+    // discretization of the continuous form `|di/dt / d^2S/dt^2|`
+    // (Schoenberg et al. 2023, Eq. 6): the denominator below is the
+    // second-order stock change `dt * (netflow(t-1) - netflow(t-2))`, which
+    // already carries one `dt`; the raw flow delta in the numerator carries
+    // none, so without this factor the score is `1/dt` too large and the
+    // error compounds once per flow-to-stock link in a loop. The published
+    // Eq. 3 omits `dt` because every worked example in the papers uses dt=1.
+    let numerator = format!("(time_step * (PREVIOUS({flow}) - PREVIOUS(PREVIOUS({flow}))))");
     let denominator = format!(
         "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))"
     );
