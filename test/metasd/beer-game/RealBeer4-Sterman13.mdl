@@ -1,0 +1,765 @@
+{UTF-8}
+:MACRO: PINK NOISE(noise mean, std deviation, correlation time, time step, seed)
+PINK NOISE = INTEG(updating pink noise,noise mean)
+	~	noise mean
+	~	Contributed by Ed Anderson, MIT/U. Texas - Austin
+		Description:  The pink noise molecule described generates a simple random 
+		series with autocorrelation.  This is useful in representing time series, 
+		like rainfall from day to day, in which today's value has some correlation 
+		with what happened yesterday.  This particular formulation will also have 
+		properties such as standard deviation and mean that are insensitive both to 
+		the time step and the correlation (smoothing) time.  Finally, the output as 
+		a whole and the difference in values between any two days is guaranteed to 
+		be Gaussian (normal) in distribution.
+		
+		Behavior:  Pink noise series will have both a historical and a random 
+		component during each period.  The relative "trend-to-noise" ratio is 
+		controlled by the length of the correlation time. As the correlation time 
+		approaches zero, the pink noise output will become more independent of its 
+		historical value and more "noisy."  On the other hand, as the correlation 
+		time approaches infinity, the pink noise output will approximate a 
+		continuous time random walk or Brownian motion.  Displayed above are two 
+		time series with correlation times of 1 and 8 months.  While both series 
+		have approximately the same standard deviation, the 1-month correlation time 
+		series is less smooth from period to period than the 8-month series, which 
+		is characterized by "sustained" swings in a given direction.  Note that this 
+		behavior will be independent of the time-step.
+		
+		The "pink" in pink noise refers to the power spectrum of the output.  A time 
+		series in which each period's observation is independent of the past is 
+		characterized by a flat or "white" power spectrum.  Smoothing a time series 
+		attenuates the higher or "bluer" frequencies of the power spectrum, leaving 
+		the lower or "redder" frequencies relatively stronger in the output.
+		
+		Caveats:  This assumes the use of Euler integration with a time step of no 
+		more than 1/4 of the correlation time.  Very long correlation times should be 
+		avoided also as the multiplication in the scaled white noise will become 
+		progressively less accurate.
+		
+		Technical Notes:  This particular form of pink noise is superior to that of 
+		Britting presented in Richardson and Pugh (1981) because the Gaussian 
+		(Normal) distribution of the output does not depend on the Central Limit 
+		Theorem.  (Dynamo did not have a Gaussian random number generator and hence 
+		R&P had to invoke the CLM to get a normal distribution.)  Rather, this 
+		molecule's normal output is a result of the observations being a sum of 
+		Gaussian draws.  Hence, the series over short intervals should better 
+		approximate normality than the macro in R&P. 
+		
+		MEAN: This is the desired mean for the pink noise.
+		STD DEVIATION: This is the desired standard deviation for the pink noise.
+		CORRELATION TIME: This is the smooth time for the noise, or for the more \
+		technically minded this is the inverse of the filter's cut-off frequency \
+		in radians.
+	|
+
+updating pink noise = gap/correlation time
+	~	noise mean/correlation time
+	~		|
+
+gap = scaled white noise-PINK NOISE
+	~	noise mean
+	~		|
+
+scaled white noise =noise mean+white noise*std deviation*SQRT((2-time step/correlation time\
+		)/(time step/correlation time))
+	~	noise mean
+	~	This adjusts the standard deviation of the white noise to compensate for the time \
+		step and the
+		         correlation time to produce the appropriate pink noise std \
+		deviation.
+	|
+
+white noise = RANDOM NORMAL(-6,6,0,1,seed){RANDOM NORMAL()}
+	~	dmnl
+	~	This is an independent, identically distributed random quantity drawn every time \
+		step.  The distribution is gaussian with mean = 0 and variance = 1.
+		Note that RANDOM NORMAL is truncated +/- 6 standard deviations here.
+		For Vensim 1.62 syntax, remove the arguments to RANDOM NORMAL.
+	|
+
+:END OF MACRO:
+:MACRO: ROUND(x,interval)
+ROUND = IF THEN ELSE(interval = 0, x, interval*INTEGER(x/interval+0.5))
+	~	x
+	~	Rounds x to the nearest interval
+	|
+
+:END OF MACRO:
+:MACRO: PEAK(x)
+PEAK = SAMPLE IF TRUE(x>PEAK,x,x)
+	~	x
+	~		|
+
+:END OF MACRO:
+Minimum Inventory[Games,Level]=SAMPLE IF TRUE(
+	Effective Inventory[Games,Level]<Minimum Inventory[Games,Level],
+	Effective Inventory[Games,Level], Effective Inventory[Games,Level])
+	~	cases
+	~		~	:SUPPLEMENTARY 
+	|
+
+Peak Inventory[Games,Level]=
+	SAMPLE IF TRUE(Effective Inventory[Games,Level]>Peak Inventory[Games,Level],
+	Effective Inventory[Games,Level], Effective Inventory[Games,Level] )
+	~	cases
+	~		~	:SUPPLEMENTARY 
+	|
+
+Peak Order Rate[Games,Level]=SAMPLE IF TRUE(
+	Placing[Games,Level]>Peak Order Rate[Games,Level],
+	Placing[Games,Level], Placing[Games,Level])
+	~	cases/week
+	~		~	:SUPPLEMENTARY 
+	|
+
+********************************************************
+	.System
+********************************************************~
+	|
+
+Desired Order Rate[Games,Level]=
+	Expected Order Rate[Games,Level]
+	+Stock Correction Rate[Games,Level]
+	*(Desired Stock[Games,Level]-Effective Inventory[Games,Level]
+	-Supply Line Weight[Games,Level]*Effective Supply Line[Games,Level])
+	~	cases/week
+	~		|
+
+Desired Stock[Games,Level]=
+	17
+	~	cases
+	~		|
+
+Fixed Order Rate= INITIAL(
+	Initial Ordering)
+	~	cases/week
+	~		|
+
+Games:
+	 (Game1-Game13)
+	~	
+	~		|
+
+Lower Levels:
+	Retailer,Wholesaler,Distributor -> Upper Levels
+	~	
+	~		|
+
+Initial Inventory=
+	12
+	~	cases
+	~		|
+
+Upper Levels:
+	Wholesaler, Distributor, Factory -> Lower Levels
+	~	
+	~		|
+
+Level:
+	Retailer,Wholesaler,Distributor,Factory
+	~	
+	~		|
+
+Incoming Order Rate[Games,Retailer]=
+	IF THEN ELSE(Time < Free Order Start Time, Fixed Order Rate,
+	ROUND(Initial Ordering + STEP(Order Step[Games],Order Step Time) 
+	+ Order Noise[Games], Integer Constraint)) ~~|
+Incoming Order Rate[Games,Upper Levels]=
+	Processing[Games,Upper Levels]
+	~	cases/week
+	~	Retail orders come from deck; others come from incoming order slips.
+	|
+
+Adjusting[Games,Level]=
+	(Incoming Order Rate[Games,Level]-Expected Order Rate[Games,Level])
+	*Expectation Adjustment Rate[Games,Level]
+	~	(cases/week)/week
+	~		|
+
+Advancing[Games,Level]=
+	Orders Placed[Games,Level]/One Week
+	~	cases/week
+	~	Players advance slips, and factories brew beer.
+	|
+
+Placing[Games,Level]=
+	IF THEN ELSE(Time < Free Order Start Time, Fixed Order Rate,
+	MAX(0,ROUND(Desired Order Rate[Games,Level], Integer Constraint)))
+	~	cases/week
+	~		|
+
+Booking[Games,Level]=
+	Incoming Order Rate[Games,Level]
+	~	cases/week
+	~		|
+
+In Transit 1[Games,Level]= INTEG (
+	Starting[Games,Level]-Moving[Games,Level],
+		Initial Ordering*One Week)
+	~	cases
+	~		|
+
+Desired Shipping[Games,Level]=
+	Incoming Order Rate[Games,Level]+Backlog[Games,Level]/One Week
+	~	cases/week
+	~		|
+
+Starting[Games,Lower Levels]=
+	Shipping[Games,Upper Levels] ~~|
+Starting[Games,Factory]=
+	Advancing[Games,Factory]
+	~	cases/week
+	~		|
+
+Expected Order Rate[Games,Level]= INTEG (
+	Adjusting[Games,Level],
+		Initial Ordering)
+	~	cases/week
+	~		|
+
+Expectation Adjustment Rate[Games,Level]=
+	0.25
+	~	fraction/week
+	~		|
+
+Free Order Start Time=
+	5
+	~	week
+	~		|
+
+Backlog[Games,Level]= INTEG (
+	Booking[Games,Level]-Fulfilling[Games,Level],
+		0)
+	~	cases
+	~		|
+
+Processing[Games,Upper Levels]=
+	Incoming Orders[Games,Upper Levels]/One Week
+	~	cases/week
+	~	Players turn over incoming order slips, process order, and discard slip.
+	|
+
+Effective Inventory[Games,Level]=
+	Recorded Inventory[Games,Level]-Recorded Backlog[Games,Level]
+	~	cases
+	~		|
+
+Effective Supply Line[Games,Level]=
+	Supply Line[Games,Level]-Receiving[Games,Level]*One Week
+	~	cases
+	~	Effective supply line perceived by players at time of order placement \
+		(shipment received in current week is deducted).
+	|
+
+Fulfilling[Games,Level]=
+	Shipping[Games,Level]
+	~	cases/week
+	~		|
+
+In Transit 2[Games,Level]= INTEG (
+	Moving[Games,Level]-Receiving[Games,Level],
+		Initial Ordering*One Week)
+	~	cases
+	~		|
+
+Incoming Orders[Games,Upper Levels]= INTEG (
+	Advancing[Games,Lower Levels]-Processing[Games,Upper Levels],
+		Initial Ordering*One Week)
+	~	cases
+	~	Incoming orders at upper levels come from advancement of orders placed at \
+		lower levels.
+	|
+
+Inventory[Games,Level]= INTEG (
+	Receiving[Games,Level]-Shipping[Games,Level],
+		Initial Inventory)
+	~	cases
+	~		|
+
+Stock Correction Rate[Games,Level]=
+	0.26
+	~	fraction/week
+	~		|
+
+Maximum Shipping[Games,Level]=
+	Inventory[Games,Level]/One Week+Receiving[Games,Level]
+	~	cases/week
+	~		|
+
+Moving[Games,Level]=
+	In Transit 1[Games,Level]/One Week
+	~	cases/week
+	~		|
+
+One Week=
+	1
+	~	week
+	~		|
+
+Orders Placed[Games,Level]= INTEG (
+	+Placing[Games,Level]-Advancing[Games,Level],
+		Initial Ordering*One Week)
+	~	cases
+	~		|
+
+Receiving[Games,Level]=
+	In Transit 2[Games,Level]/One Week
+	~	cases/week
+	~		|
+
+Recorded Backlog[Games,Level]=
+	Backlog[Games,Level]+(Booking[Games,Level]-Fulfilling[Games,Level])*One Week
+	~	cases
+	~	Backlog recorded on players' record sheets.
+	|
+
+Recorded Inventory[Games,Level]=
+	Inventory[Games,Level]+(Receiving[Games,Level]-Shipping[Games,Level])*One Week
+	~	cases
+	~	Inventory recorded on players' record sheets.
+	|
+
+Shipping[Games,Level]=
+	MIN(Desired Shipping[Games,Level],Maximum Shipping[Games,Level])
+	~	cases/week
+	~		|
+
+Supply Line[Games,Lower Levels]= INTEG (
+	Placing[Games,Lower Levels]-Receiving[Games,Lower Levels],
+		Orders Placed[Games,Lower Levels]+Incoming Orders[Games,Upper Levels]+Backlog[Games\
+		,Upper Levels]+In Transit 1[Games,Lower Levels]+In Transit 2[Games,Lower Levels]) ~~|
+Supply Line[Games,Factory]= INTEG (
+	Placing[Games,Factory]-Receiving[Games,Factory],
+		Orders Placed[Games,Factory]+In Transit 1[Games,Factory]+In Transit 2[Games,Factory\
+		])
+	~	cases
+	~		|
+
+Supply Line Weight[Games,Level]=
+	0.34
+	~	dmnl
+	~		|
+
+********************************************************
+	.Cost
+********************************************************~
+	|
+
+Total Cumulative Cost=
+	SUM(Game Cumulative Cost[Games!])
+	~	$
+	~		~	:SUPPLEMENTARY 
+	|
+
+Total Cost=
+	SUM(Game Cost[Games!])
+	~	$/week
+	~		~	:SUPPLEMENTARY 
+	|
+
+Backlog Cost[Games,Level]=
+	Backlog Unit Cost*Recorded Backlog[Games,Level]
+	~	$/week
+	~		|
+
+Backlog Unit Cost=
+	1
+	~	$/case/week
+	~		|
+
+Cost[Games,Level]=
+	Inventory Cost[Games,Level]+Backlog Cost[Games,Level]
+	~	$/week
+	~		|
+
+Cumulative Cost[Games,Level]= INTEG (
+	Cost[Games,Level],
+		0)
+	~	$
+	~		|
+
+Game Cumulative Cost[Games]=
+	SUM(Cumulative Cost[Games,Level!])
+	~	$
+	~		|
+
+Inventory Unit Cost=
+	0.5
+	~	$/case/week
+	~		|
+
+Inventory Cost[Games,Level]=
+	Inventory Unit Cost*Recorded Inventory[Games,Level]
+	~	$/week
+	~		|
+
+Game Cost[Games]=
+	SUM(Cost[Games,Level!])
+	~	$/week
+	~		|
+
+********************************************************
+	.Customer
+********************************************************~
+	|
+
+Order Step[Games]= INITIAL(
+	MAX(-Initial Ordering,
+	Order Step Size+Order Step Size SD*RANDOM NORMAL(-6,6,1,1,Order Step Seed)))
+	~	cases/week
+	~		|
+
+Order Step Time  = 5
+	~	week
+	~		|
+
+Noise SD=
+	0
+	~	cases/week
+	~		|
+
+Noise Correlation Time=
+	8
+	~	weeks
+	~		|
+
+Order Noise[Games]=
+	 PINK NOISE(Noise Mean,Noise SD,Noise Correlation Time,TIME STEP,Order Noise Seed+Games\
+		)
+	~	cases/week
+	~	Note: Games is added to the noise seed to prevent each subscript of the \
+		macro from being recognized as identical, which would cause all of the \
+		noise streams to be identical.
+	|
+
+Order Noise Seed=
+	37
+	~	dmnl
+	~		|
+
+Noise Mean=
+	0
+	~	cases/week
+	~		|
+
+Order Step Size SD=
+	0
+	~	cases/week
+	~		|
+
+Order Step Seed=
+	137
+	~	dmnl
+	~		|
+
+Initial Ordering=
+	4
+	~	cases/week
+	~		|
+
+Order Step Size=
+	4
+	~	cases/week
+	~		|
+
+Integer Constraint=
+	1
+	~	cases/week
+	~	0 = no constraint; 1 = integer constraint; other values (e.g 0.1 or 10) \
+		may also be used
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Paramaters
+	|
+
+TIME STEP  = 1
+	~	week
+	~	The time step for the simulation.
+	|
+
+FINAL TIME  = 36
+	~	week
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 1
+	~	week
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	week
+	~	The frequency with which output is stored.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*System
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-0|-1--1--1|-1--1--1|96,96,100,0
+10,1,Orders Placed,566,360,40,20,3,3,0,0,0,0,0,0
+10,2,Incoming Orders,796,360,40,20,3,3,0,0,0,0,0,0
+10,3,Inventory,541,688,40,20,3,3,0,0,0,0,0,0
+10,4,In Transit 2,731,689,40,20,3,3,0,0,0,0,0,0
+10,5,In Transit 1,911,689,40,20,3,3,0,0,0,0,0,0
+12,6,48,382,689,10,8,0,3,0,0,-1,0,0,0
+1,7,9,6,4,0,0,22,0,0,0,-1--1--1,,1|(418,689)|
+1,8,9,3,100,0,0,22,0,0,0,-1--1--1,,1|(478,689)|
+11,9,48,450,689,6,8,34,3,0,0,1,0,0,0
+10,10,Shipping,450,708,28,11,32,3,0,0,-1,0,0,0
+1,11,13,3,4,0,0,22,0,0,0,-1--1--1,,1|(608,689)|
+1,12,13,4,100,0,0,22,0,0,0,-1--1--1,,1|(669,689)|
+11,13,1212,641,689,6,8,34,3,0,0,1,0,0,0
+10,14,Receiving,641,708,31,11,32,3,0,0,-1,0,0,0
+12,15,48,975,359,10,8,0,3,0,0,-1,0,0,0
+1,16,18,15,4,0,0,22,0,0,0,-1--1--1,,1|(933,360)|
+1,17,18,2,100,0,0,22,0,0,0,-1--1--1,,1|(863,360)|
+11,18,48,896,360,6,8,34,3,0,0,1,0,0,0
+10,19,Processing,896,379,35,11,32,3,0,0,-1,0,0,0
+1,20,22,2,4,0,0,22,0,0,0,-1--1--1,,1|(721,360)|
+1,21,22,1,100,0,0,22,0,0,0,-1--1--1,,1|(640,360)|
+11,22,1004,681,360,6,8,34,3,0,0,1,0,0,0
+10,23,Advancing,681,379,34,11,32,3,0,0,-1,0,0,0
+12,24,48,400,360,10,8,0,3,0,0,-1,0,0,0
+1,25,27,1,4,0,0,22,0,0,0,-1--1--1,,1|(499,360)|
+1,26,27,24,100,0,0,22,0,0,0,-1--1--1,,1|(435,360)|
+11,27,48,467,360,6,8,34,3,0,0,1,0,0,0
+10,28,Placing,467,379,24,11,32,3,0,0,-1,0,0,0
+1,29,31,4,4,0,0,22,0,0,0,-1--1--1,,1|(793,689)|
+1,30,31,5,100,0,0,22,0,0,0,-1--1--1,,1|(849,689)|
+11,31,396,821,689,6,8,34,3,0,0,1,0,0,0
+10,32,Moving,821,708,25,11,32,3,0,0,-1,0,0,0
+10,33,Backlog,734,490,40,20,3,3,0,0,0,0,0,0
+12,34,48,935,492,10,8,0,3,0,0,-1,0,0,0
+1,35,37,33,4,0,0,22,0,0,0,-1--1--1,,1|(817,491)|
+1,36,37,34,100,0,0,22,0,0,0,-1--1--1,,1|(898,491)|
+11,37,48,866,491,6,8,34,3,0,0,1,0,0,0
+10,38,Booking,866,510,28,11,32,3,0,0,-1,0,0,0
+12,39,48,535,492,10,8,0,3,0,0,-1,0,0,0
+1,40,42,39,4,0,0,22,0,0,0,-1--1--1,,1|(582,492)|
+1,41,42,33,100,0,0,22,0,0,0,-1--1--1,,1|(662,492)|
+11,42,48,625,492,6,8,34,3,0,0,1,0,0,0
+10,43,Fulfilling,625,511,27,11,32,3,0,0,-1,0,0,0
+1,44,4,14,1,0,49,0,2,192,0,-1--1--1,|12||255-0-0,1|(675,743)|
+1,45,5,32,1,0,49,0,2,192,0,-1--1--1,|12||255-0-0,1|(862,738)|
+10,46,Desired Shipping,506,450,54,11,0,3,0,0,0,0,0,0
+1,47,33,46,1,0,0,0,0,64,0,-1--1--1,,1|(659,464)|
+10,48,Maximum Shipping,596,780,60,11,0,3,0,0,0,0,0,0
+1,49,3,48,1,0,0,0,0,64,0,-1--1--1,,1|(576,720)|
+1,50,48,10,1,0,50,0,2,64,0,-1--1--1,|12||255-0-0,1|(521,768)|
+1,51,46,9,1,0,50,0,2,192,0,-1--1--1,|12||255-0-0,1|(451,519)|
+1,52,2,19,1,0,50,0,2,0,0,-1--1--1,|12||255-0-0,1|(850,400)|
+1,53,9,43,1,0,50,0,2,64,0,-1--1--1,|12||255-0-0,1|(465,579)|
+10,54,Recorded Inventory,556,620,63,11,0,3,0,0,0,0,0,0
+10,55,Recorded Backlog,735,562,59,11,0,3,0,0,0,0,0,0
+1,56,3,54,0,0,51,0,2,64,0,-1--1--1,|12||255-0-0,1|(547,656)|
+1,57,33,55,0,0,51,0,2,64,0,-1--1--1,|12||255-0-0,1|(734,523)|
+1,58,38,55,1,0,51,0,2,64,0,-1--1--1,|12||255-0-0,1|(819,540)|
+1,59,43,55,1,0,51,0,2,192,0,-1--1--1,|12||255-0-0,1|(654,534)|
+1,60,1,23,1,0,52,0,2,192,0,-1--1--1,|12||255-0-0,1|(627,405)|
+10,61,Desired Order Rate,326,470,62,11,0,3,0,0,0,0,0,0
+1,62,14,48,1,0,0,0,0,64,0,-1--1--1,,1|(626,743)|
+1,63,13,54,1,0,51,0,2,64,0,-1--1--1,|12||255-0-0,1|(612,656)|
+1,64,9,54,1,0,51,0,2,64,0,-1--1--1,|12||255-0-0,1|(479,656)|
+10,65,Effective Inventory,556,570,59,11,0,3,0,0,0,0,0,0
+1,66,54,65,1,0,0,0,0,64,0,-1--1--1,,1|(562,597)|
+1,67,55,65,1,0,0,0,0,64,0,-1--1--1,,1|(652,589)|
+1,68,65,61,1,0,0,0,0,64,0,-1--1--1,,1|(361,508)|
+1,69,61,28,1,0,53,0,2,128,0,-1--1--1,|12||255-0-0,1|(402,392)|
+10,70,Desired Stock,218,381,46,11,0,3,0,0,0,0,0,0
+10,71,Integer Constraint,426,300,56,11,0,3,0,0,0,0,0,0
+1,72,71,27,0,0,0,0,0,64,0,-1--1--1,,1|(444,327)|
+10,73,Stock Correction Rate,316,590,71,11,0,3,0,0,0,0,0,0
+10,74,Supply Line Weight,216,560,62,11,0,3,0,0,0,0,0,0
+1,75,74,61,0,0,0,0,0,64,0,-1--1--1,,1|(265,519)|
+1,76,73,61,0,0,0,0,0,64,0,-1--1--1,,1|(319,536)|
+10,77,One Week,796,310,36,11,0,3,1,2,-1,0,0,0,0-0-0,0-0-0,|12||128-128-128
+1,78,77,22,1,1,0,0,1,0,0,128-128-128,|12||0-0-0,1|(727,331)|
+1,79,77,18,1,1,0,0,1,0,0,128-128-128,|12||0-0-0,1|(854,328)|
+10,80,One Week,456,410,45,11,0,2,1,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,81,80,46,0,1,0,0,1,64,0,128-128-128,|12||0-0-0,1|(474,425)|
+10,82,One Week,806,610,45,11,0,2,1,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,83,82,55,0,1,0,0,1,64,0,128-128-128,|12||0-0-0,1|(776,589)|
+1,84,82,54,0,1,0,0,1,64,0,128-128-128,|12||0-0-0,1|(696,613)|
+1,85,82,13,0,1,0,0,1,64,0,128-128-128,|12||0-0-0,1|(721,650)|
+1,86,82,31,0,1,0,0,1,64,0,128-128-128,|12||0-0-0,1|(812,645)|
+10,87,One Week,696,820,45,11,0,2,1,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,88,87,48,0,1,0,0,1,64,0,128-128-128,|12||0-0-0,1|(652,802)|
+10,89,Supply Line,601,245,40,20,3,3,0,0,0,0,0,0
+12,90,48,432,243,10,8,0,3,0,0,-1,0,0,0
+11,91,48,500,243,6,8,2,3,0,0,1,0,0,0
+1,92,91,89,4,0,0,22,0,0,0,-1--1--1,,1|(533,243)|
+1,93,91,90,100,0,0,22,0,0,0,-1--1--1,,1|(468,243)|
+12,94,48,795,245,10,8,0,3,0,0,-1,0,0,0
+1,95,97,94,4,0,0,22,0,0,0,-1--1--1,,1|(752,245)|
+1,96,97,89,100,0,0,22,0,0,0,-1--1--1,,1|(674,245)|
+11,97,48,714,245,6,8,34,3,0,0,1,0,0,0
+10,98,Receiving,714,264,40,11,32,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,99,27,91,1,0,0,0,0,64,0,-1--1--1,,1|(494,306)|
+10,100,Effective Supply Line,486,190,66,11,0,3,0,0,0,0,0,0
+1,101,89,100,1,0,0,0,0,64,0,-1--1--1,,1|(577,214)|
+1,102,97,100,1,0,0,0,0,64,0,-1--1--1,,1|(646,213)|
+1,103,100,61,1,0,0,0,0,64,0,-1--1--1,,1|(355,289)|
+10,104,One Week,675,170,45,11,0,2,1,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,105,104,100,1,1,0,0,1,64,0,128-128-128,|12||0-0-0,1|(564,170)|
+10,106,Incoming Order Rate,946,430,66,11,0,3,0,0,0,0,0,0
+1,107,106,46,1,0,0,0,0,64,0,-1--1--1,,1|(714,427)|
+1,108,106,37,1,0,50,0,2,64,0,-1--1--1,|12||255-0-0,1|(907,470)|
+10,109,Initial Ordering,1096,320,47,11,0,3,0,0,-1,0,0,0
+1,110,109,106,0,0,0,0,0,0,0,-1--1--1,,1|(1026,370)|
+10,111,Order Step Size,1236,310,51,11,0,3,0,0,-1,0,0,0
+1,112,19,106,1,0,0,0,0,64,0,-1--1--1,,1|(916,391)|
+10,113,Expected Order Rate,716,110,40,20,3,3,0,0,0,0,0,0
+12,114,48,926,110,10,8,0,3,0,0,-1,0,0,0
+1,115,117,113,4,0,0,22,0,0,0,-1--1--1,,1|(798,110)|
+1,116,117,114,100,0,0,22,0,0,0,-1--1--1,,1|(884,110)|
+11,117,48,846,110,6,8,34,3,0,0,1,0,0,0
+10,118,Adjusting,846,129,31,11,32,3,0,0,-1,0,0,0
+1,119,113,118,1,0,0,0,0,64,0,-1--1--1,,1|(776,153)|
+1,120,106,118,1,0,0,0,0,64,0,-1--1--1,,1|(992,233)|
+10,121,Expectation Adjustment Rate,826,40,90,11,0,3,0,0,0,0,0,0
+1,122,121,117,0,0,0,0,0,64,0,-1--1--1,,1|(834,70)|
+1,123,113,61,1,0,0,0,0,64,0,-1--1--1,,1|(323,285)|
+12,124,48,1081,687,10,8,0,3,0,0,-1,0,0,0
+1,125,127,5,4,0,0,22,0,0,0,-1--1--1,,1|(978,687)|
+1,126,127,124,100,0,0,22,0,0,0,-1--1--1,,1|(1044,687)|
+11,127,48,1012,687,6,8,34,3,0,0,1,0,0,0
+10,128,Starting,1012,706,25,11,32,3,0,0,-1,0,0,0
+10,129,Fixed Order Rate,566,290,65,11,0,2,0,2,0,0,0,0,0-0-0,0-0-0,|12||128-128-128
+10,130,Free Order Start Time,626,310,70,11,0,3,0,0,0,0,0,0
+1,131,129,27,0,0,0,0,0,64,0,-1--1--1,,1|(516,324)|
+1,132,130,27,1,0,0,0,0,64,0,-1--1--1,,1|(539,329)|
+10,133,Time,556,410,26,11,0,2,1,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,134,133,28,0,1,0,0,0,0,0,-1--1--1,,1|(517,396)|
+1,135,70,61,1,0,0,0,0,64,0,-1--1--1,,1|(257,428)|
+10,136,Order Step Size SD,1246,340,63,11,0,3,0,0,0,0,0,0
+10,137,Order Step Seed,1246,370,54,11,0,3,0,0,-1,0,0,0
+10,138,Order Step,1106,350,37,11,0,3,0,0,0,0,0,0
+1,139,138,106,0,0,0,0,0,64,0,-1--1--1,,1|(1032,386)|
+10,140,Order Noise,1113,550,41,11,0,3,0,0,-1,0,0,0
+10,141,Noise Correlation Time,1313,540,73,11,0,3,0,0,-1,0,0,0
+1,142,141,140,0,0,0,0,0,0,0,-1--1--1,,1|(1203,544)|
+10,143,Noise Mean,1263,570,40,11,0,3,0,0,-1,0,0,0
+1,144,143,140,0,0,0,0,0,0,0,-1--1--1,,1|(1195,561)|
+10,145,Noise SD,1243,600,32,11,0,3,0,0,-1,0,0,0
+1,146,145,140,0,0,0,0,0,0,0,-1--1--1,,1|(1184,577)|
+10,147,Order Noise Seed,1233,640,58,11,0,3,0,0,-1,0,0,0
+1,148,147,140,0,0,0,0,0,0,0,-1--1--1,,1|(1178,599)|
+10,149,TIME STEP,1173,670,50,11,0,2,1,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,150,149,140,0,1,0,0,0,0,0,-1--1--1,,1|(1146,616)|
+1,151,140,106,0,0,0,0,0,64,0,-1--1--1,,1|(1035,494)|
+10,152,Integer Constraint,1126,420,65,11,0,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,153,152,106,0,0,0,0,0,64,0,-1--1--1,,1|(1043,424)|
+10,154,Initial Inventory,366,760,49,11,0,3,0,0,-1,0,0,0
+10,155,Order Step Time,1116,380,54,11,0,3,0,0,-1,0,0,0
+1,156,155,106,0,0,0,0,0,0,0,-1--1--1,,1|(1037,403)|
+10,157,Time,1106,490,26,11,0,2,1,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,158,157,106,0,1,0,0,0,0,0,-1--1--1,,1|(1034,463)|
+10,159,Fixed Order Rate,1076,280,56,11,0,3,0,0,-1,0,0,0
+10,160,Free Order Start Time,1136,450,79,11,0,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,161,160,106,0,0,0,0,0,64,0,-1--1--1,,1|(1041,439)|
+1,162,159,106,1,0,0,0,0,64,0,-1--1--1,,1|(1026,348)|
+1,163,10,128,3,0,0,2,0,64,0,-1--1--1,,2|(451,834)|(1014,832)|
+1,164,23,127,3,0,0,2,0,64,0,-1--1--1,,1|(1011,493)|
+1,165,109,1,0,1,0,0,0,0,1,-1--1--1,,1|(834,338)|
+1,166,77,1,0,1,0,0,0,0,1,-1--1--1,,1|(689,332)|
+1,167,109,2,0,1,0,0,0,0,1,-1--1--1,,1|(949,339)|
+1,168,77,2,0,1,0,0,0,0,1,-1--1--1,,1|(796,323)|
+1,169,154,3,0,1,0,0,0,0,1,-1--1--1,,1|(440,729)|
+1,170,109,4,0,1,0,0,0,0,1,-1--1--1,,1|(922,495)|
+1,171,77,4,0,1,0,0,0,0,1,-1--1--1,,1|(765,488)|
+1,172,109,5,0,1,0,0,0,0,1,-1--1--1,,1|(1009,493)|
+1,173,77,5,0,1,0,0,0,0,1,-1--1--1,,1|(849,488)|
+1,174,33,89,0,1,0,0,0,0,1,-1--1--1,,1|(670,373)|
+1,175,5,89,0,1,0,0,0,0,1,-1--1--1,,1|(760,472)|
+1,176,4,89,0,1,0,0,0,0,1,-1--1--1,,1|(667,473)|
+1,177,2,89,0,1,0,0,0,0,1,-1--1--1,,1|(704,306)|
+1,178,1,89,0,1,0,0,0,0,1,-1--1--1,,1|(581,309)|
+1,179,109,113,0,1,0,0,0,0,1,-1--1--1,,1|(920,222)|
+1,180,109,138,0,1,0,0,0,0,1,-1--1--1,,1|(1098,328)|
+1,181,137,138,0,0,0,0,0,0,1,-1--1--1,,1|(1174,360)|
+1,182,111,138,0,0,0,0,0,0,1,-1--1--1,,1|(1177,327)|
+1,183,136,138,0,0,0,0,0,0,1,-1--1--1,,1|(1169,344)|
+1,184,109,159,0,1,0,0,0,0,1,-1--1--1,,1|(1089,306)|
+12,185,0,189,63,86,28,8,4,0,18,-1,0,0,0,-1--1--1,0-0-0,|12|B|128-0-0
+Beer Distribution Game, Tom Fiddaman, Ventana Systems
+12,186,0,189,127,67,18,8,135,0,18,-1,0,253,253,-1--1--1,0-0-0,|12|U|0-0-255
+http://metasd.com|http://metasd.com
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Cost & Indicators
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-0|-1--1--1|-1--1--1|96,96,0,0
+10,1,Recorded Backlog,140,127,68,11,0,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,2,Recorded Inventory,139,172,72,11,0,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,3,Game Cost,520,200,37,11,0,3,0,0,0,0,0,0
+10,4,Backlog Cost,330,127,44,11,0,3,0,0,0,0,0,0
+10,5,Inventory Cost,329,172,47,11,0,3,0,0,0,0,0,0
+1,6,4,20,0,0,0,0,0,64,0,-1--1--1,,1|(430,127)|
+1,7,5,20,0,0,0,0,0,64,0,-1--1--1,,1|(431,148)|
+1,8,20,3,0,0,0,0,0,64,0,-1--1--1,,1|(518,157)|
+1,9,1,4,0,0,0,0,0,64,0,-1--1--1,,1|(240,127)|
+1,10,2,5,0,0,0,0,0,64,0,-1--1--1,,1|(239,172)|
+10,11,Backlog Unit Cost,330,77,58,11,0,3,0,0,0,0,0,0
+10,12,Inventory Unit Cost,329,232,62,11,0,3,0,0,0,0,0,0
+1,13,11,4,0,0,0,0,0,64,0,-1--1--1,,1|(330,95)|
+1,14,12,5,0,0,0,0,0,64,0,-1--1--1,,1|(329,209)|
+10,15,Cumulative Cost,652,110,40,20,3,3,0,0,0,0,0,0
+12,16,48,438,109,8,8,0,3,0,0,-1,0,0,0
+1,17,19,15,4,0,0,22,0,0,0,-1--1--1,,1|(568,109)|
+1,18,19,16,100,0,0,22,0,0,0,-1--1--1,,1|(479,109)|
+11,19,48,518,109,6,8,34,3,0,0,1,0,0,0
+10,20,Cost,518,128,17,11,32,3,0,0,0,0,0,0
+10,21,Game Cumulative Cost,652,200,72,11,0,3,0,0,0,0,0,0
+1,22,15,21,0,0,0,0,0,64,0,-1--1--1,,1|(652,152)|
+10,23,Total Cost,521,253,34,11,0,3,0,0,0,0,0,0
+10,24,Total Cumulative Cost,653,253,70,11,0,3,0,0,0,0,0,0
+1,25,3,23,0,0,0,0,0,64,0,-1--1--1,,1|(520,219)|
+1,26,21,24,0,0,0,0,0,64,0,-1--1--1,,1|(652,219)|
+10,27,Effective Inventory,234,398,35,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,28,Placing,232,529,33,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,29,Peak Inventory,408,372,48,11,8,3,0,0,0,0,0,0
+10,30,Minimum Inventory,400,436,31,19,8,3,0,0,0,0,0,0
+10,31,Peak Order Rate,394,529,54,11,8,3,0,0,0,0,0,0
+1,32,28,31,0,0,0,0,0,64,0,-1--1--1,,1|(295,529)|
+1,33,27,29,0,0,0,0,0,64,0,-1--1--1,,1|(307,387)|
+1,34,27,30,0,0,0,0,0,64,0,-1--1--1,,1|(312,415)|
+///---\\\
+:GRAPH INVENTORY-ORDERING
+:TITLE Inventory-Ordering
+:X-AXIS Effective Inventory
+:SCALE
+:VAR Placing
+:L<%^E!@
+1:Sterman1longB.vdf
+1:Sterman1long.vdf
+9:Sterman1longB
+22:$,Dollar,Dollars,$s
+22:case,cases
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+10:StermanTable4b.txt,
+11:realopt2.voc
+12:realpay.vpd
+18:stepsize.vsc
+20:sensi.lst
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:Game Cost[Games]
+24:1
+25:36
+26:1000
+6:Factory
+6:Game11
+6:Game12
+6:Game13

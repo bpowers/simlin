@@ -27,6 +27,7 @@
   - [design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md](design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md) -- Tiered LTM loop enumeration: variable-level Johnson first, expand only the cross-element subgraph
   - [design-plans/2026-05-09-ltm-503-cross-element-agg.md](design-plans/2026-05-09-ltm-503-cross-element-agg.md) -- Cross-element LTM scoring: per-element arrayed-target partials, element-level cross-element loops, array reducers as aggregate nodes
   - [design-plans/2026-05-11-ltm-arrays-hardening.md](design-plans/2026-05-11-ltm-arrays-hardening.md) -- Arrayed/cross-element LTM hardening: unify the reference-site walkers behind one classification IR (#520), then layer eight fixes (#487, #511, #510, #514, #515, #483, #502, #492)
+  - [design-plans/2026-05-13-macros.md](design-plans/2026-05-13-macros.md) -- Vensim macro support: macros as a data-driven generalization of the stdlib module mechanism, persisted via a `MacroSpec` marker on `Model`; 7 implementation phases
 - [plans/](plans/README.md) -- Implementation plans (active and completed)
 - [test-plans/](test-plans/) -- Human verification plans for completed features
 - [implementation-plans/](implementation-plans/) -- Detailed phase-by-phase implementation plans
@@ -40,6 +41,7 @@
 ## Domain Knowledge
 
 - [reference/xmile-v1.0.html](reference/xmile-v1.0.html) -- XMILE interchange format specification
+- [reference/vensim-macros.md](reference/vensim-macros.md) -- Vensim macros (`:MACRO:`): definition/call syntax, semantics (per-invocation stock state, locality, recursion), XMILE `<macro>` representation, xmutil's mapping, and implementation implications
 - [reference/ltm--loops-that-matter.md](reference/ltm--loops-that-matter.md) -- Loops That Matter technique: link scores, loop scores, algorithm reference
 - [array-design.md](array-design.md) -- Array/subscript design notes
 

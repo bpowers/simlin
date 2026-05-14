@@ -1,0 +1,351 @@
+{UTF-8}
+********************************************************
+	.pinknoise2010
+********************************************************~
+		Pink Noise - Contributed by Ed Anderson, MIT/U. Texas - Austin
+		Description:  The pink noise molecule described generates a simple random 
+		series with autocorrelation.  This is useful in representing time series, 
+		like rainfall from day to day, in which today's value has some correlation 
+		with what happened yesterday.  This particular formulation will also have 
+		properties such as standard deviation and mean that are insensitive both to 
+		the time step and the correlation (smoothing) time.  Finally, the output as 
+		a whole and the difference in values between any two days is guaranteed to 
+		be Gaussian (normal) in distribution.
+		
+		Behavior:  Pink noise series will have both a historical and a random 
+		component during each period.  The relative "trend-to-noise" ratio is 
+		controlled by the length of the correlation time. As the correlation time 
+		approaches zero, the pink noise output will become more independent of its 
+		historical value and more "noisy."  On the other hand, as the correlation 
+		time approaches infinity, the pink noise output will approximate a 
+		continuous time random walk or Brownian motion.  Displayed above are two 
+		time series with correlation times of 1 and 8 months.  While both series 
+		have approximately the same standard deviation, the 1-month correlation time 
+		series is less smooth from period to period than the 8-month series, which 
+		is characterized by "sustained" swings in a given direction.  Note that this 
+		behavior will be independent of the time-step.
+		
+		The "pink" in pink noise refers to the power spectrum of the output.  A time 
+		series in which each period's observation is independent of the past is 
+		characterized by a flat or "white" power spectrum.  Smoothing a time series 
+		attenuates the higher or "bluer" frequencies of the power spectrum, leaving 
+		the lower or "redder" frequencies relatively stronger in the output.
+		
+		Caveats:  This assumes the use of Euler integration with a time step of no 
+		more than 1/4 of the correlation time.  Very long correlation times should be 
+		avoided also as the multiplication in the scaled white noise will become 
+		progressively less accurate.
+		
+		Technical Notes:  This particular form of pink noise is superior to that of 
+		Britting presented in Richardson and Pugh (1981) because the Gaussian 
+		(Normal) distribution of the output does not depend on the Central Limit 
+		Theorem.  (Dynamo did not have a Gaussian random number generator and hence 
+		R&P had to invoke the CLM to get a normal distribution.)  Rather, this 
+		molecule's normal output is a result of the observations being a sum of 
+		Gaussian draws.  Hence, the series over short intervals should better 
+		approximate normality than the macro in R&P. 
+		
+		MEAN: This is the desired mean for the pink noise.
+		STD DEVIATION: This is the desired standard deviation for the pink noise.
+		CORRELATION TIME: This is the smooth time for the noise, or for the more technically
+		minded this is the inverse of the filter's cut-off frequency in radians.
+		
+		Updated by Tom Fiddaman, 2010, to include a random initial value,
+		correct units, and use TIME STEP$ keyword
+	|
+
+:MACRO: PINK NOISE(mean, std deviation, correlation time, seed)
+PINK NOISE = INTEG(updating pink noise,mean+std deviation*RANDOM NORMAL(-6,6,0,1,seed\
+		))
+	~	mean
+	~	Contributed by Ed Anderson, MIT/U. Texas - Austin
+		Description:  The pink noise molecule described generates a simple random 
+		series with autocorrelation.  This is useful in representing time series, 
+		like rainfall from day to day, in which today's value has some correlation 
+		with what happened yesterday.  This particular formulation will also have 
+		properties such as standard deviation and mean that are insensitive both to 
+		the time step and the correlation (smoothing) time.  Finally, the output as 
+		a whole and the difference in values between any two days is guaranteed to 
+		be Gaussian (normal) in distribution.
+		
+		Behavior:  Pink noise series will have both a historical and a random 
+		component during each period.  The relative "trend-to-noise" ratio is 
+		controlled by the length of the correlation time. As the correlation time 
+		approaches zero, the pink noise output will become more independent of its 
+		historical value and more "noisy."  On the other hand, as the correlation 
+		time approaches infinity, the pink noise output will approximate a 
+		continuous time random walk or Brownian motion.  Displayed above are two 
+		time series with correlation times of 1 and 8 months.  While both series 
+		have approximately the same standard deviation, the 1-month correlation time 
+		series is less smooth from period to period than the 8-month series, which 
+		is characterized by "sustained" swings in a given direction.  Note that this 
+		behavior will be independent of the time-step.
+		
+		The "pink" in pink noise refers to the power spectrum of the output.  A time 
+		series in which each period's observation is independent of the past is 
+		characterized by a flat or "white" power spectrum.  Smoothing a time series 
+		attenuates the higher or "bluer" frequencies of the power spectrum, leaving 
+		the lower or "redder" frequencies relatively stronger in the output.
+		
+		Caveats:  This assumes the use of Euler integration with a time step of no 
+		more than 1/4 of the correlation time.  Very long correlation times should be 
+		avoided also as the multiplication in the scaled white noise will become 
+		progressively less accurate.
+		
+		Technical Notes:  This particular form of pink noise is superior to that of 
+		Britting presented in Richardson and Pugh (1981) because the Gaussian 
+		(Normal) distribution of the output does not depend on the Central Limit 
+		Theorem.  (Dynamo did not have a Gaussian random number generator and hence 
+		R&P had to invoke the CLM to get a normal distribution.)  Rather, this 
+		molecule's normal output is a result of the observations being a sum of 
+		Gaussian draws.  Hence, the series over short intervals should better 
+		approximate normality than the macro in R&P. 
+		
+		MEAN: This is the desired mean for the pink noise.
+		STD DEVIATION: This is the desired standard deviation for the pink noise.
+		CORRELATION TIME: This is the smooth time for the noise, or for the more technically \
+		minded this is the inverse of the filter's cut-off frequency in radians.
+		
+		Updated by Tom Fiddaman, 2010, to include a random initial value,
+		correct units, and use TIME STEP$ keyword
+	|
+
+updating pink noise = gap/correlation time
+	~	mean/correlation time
+	~		|
+
+gap = scaled white noise-PINK NOISE
+	~	mean
+	~		|
+
+scaled white noise =mean+white noise*std deviation*SQRT((2-time step$/correlation time
+)/(time step$/correlation time))
+	~	mean
+	~	This adjusts the standard deviation of the white noise to compensate for the time \
+		step and the
+		         correlation time to produce the appropriate pink noise std \
+		deviation.
+	|
+
+white noise = RANDOM NORMAL(-6,6,0,1,seed)
+	~	dmnl
+	~	This is an independent, identically distributed random quantity drawn every time \
+		step.  The distribution is gaussian with mean = 0 and variance = 1.
+		Note that RANDOM NORMAL is truncated +/- 6 standard deviations here.
+		For Vensim 1.62 syntax, remove the arguments to RANDOM NORMAL.
+	|
+
+:END OF MACRO:
+PINK NOISE structure = INTEG(updating pink noise,mean+std deviation*RANDOM NORMAL(-6,\
+		6,0,1,seed))
+	~	widgets/week
+	~	Contributed by Ed Anderson, MIT/U. Texas - Austin
+		Description:  The pink noise molecule described generates a simple random 
+		series with autocorrelation.  This is useful in representing time series, 
+		like rainfall from day to day, in which today's value has some correlation 
+		with what happened yesterday.  This particular formulation will also have 
+		properties such as standard deviation and mean that are insensitive both to 
+		the time step and the correlation (smoothing) time.  Finally, the output as 
+		a whole and the difference in values between any two days is guaranteed to 
+		be Gaussian (normal) in distribution.
+		
+		Behavior:  Pink noise series will have both a historical and a random 
+		component during each period.  The relative "trend-to-noise" ratio is 
+		controlled by the length of the correlation time. As the correlation time 
+		approaches zero, the pink noise output will become more independent of its 
+		historical value and more "noisy."  On the other hand, as the correlation 
+		time approaches infinity, the pink noise output will approximate a 
+		continuous time random walk or Brownian motion.  Displayed above are two 
+		time series with correlation times of 1 and 8 months.  While both series 
+		have approximately the same standard deviation, the 1-month correlation time 
+		series is less smooth from period to period than the 8-month series, which 
+		is characterized by "sustained" swings in a given direction.  Note that this 
+		behavior will be independent of the time-step.
+		
+		The "pink" in pink noise refers to the power spectrum of the output.  A time 
+		series in which each period's observation is independent of the past is 
+		characterized by a flat or "white" power spectrum.  Smoothing a time series 
+		attenuates the higher or "bluer" frequencies of the power spectrum, leaving 
+		the lower or "redder" frequencies relatively stronger in the output.
+		
+		Caveats:  This assumes the use of Euler integration with a time step of no 
+		more than 1/4 of the correlation time.  Very long correlation times should be 
+		avoided also as the multiplication in the scaled white noise will become 
+		progressively less accurate.
+		
+		Technical Notes:  This particular form of pink noise is superior to that of 
+		Britting presented in Richardson and Pugh (1981) because the Gaussian 
+		(Normal) distribution of the output does not depend on the Central Limit 
+		Theorem.  (Dynamo did not have a Gaussian random number generator and hence 
+		R&P had to invoke the CLM to get a normal distribution.)  Rather, this 
+		molecule's normal output is a result of the observations being a sum of 
+		Gaussian draws.  Hence, the series over short intervals should better 
+		approximate normality than the macro in R&P. 
+		
+		MEAN: This is the desired mean for the pink noise.
+		STD DEVIATION: This is the desired standard deviation for the pink noise.
+		CORRELATION TIME: This is the smooth time for the noise, or for the more technically \
+		minded this is the inverse of the filter's cut-off frequency in radians.
+		
+		Updated by Tom Fiddaman, 2010, to include a random initial value,
+		correct units, and use TIME STEP$ keyword
+	|
+
+updating pink noise = gap/correlation time
+	~	widgets/week/week
+	~		|
+
+gap = scaled white noise-PINK NOISE structure
+	~	widgets/week
+	~		|
+
+scaled white noise=
+	mean+white noise*std deviation*SQRT((2-TIME STEP/correlation time
+	)/(TIME STEP/correlation time))
+	~	widgets/week
+	~	This adjusts the standard deviation of the white noise to compensate for the time \
+		step and the
+		         correlation time to produce the appropriate pink noise std \
+		deviation.
+	|
+
+white noise = RANDOM NORMAL(-6,6,0,1,seed)
+	~	dmnl
+	~	This is an independent, identically distributed random quantity drawn every time \
+		step.  The distribution is gaussian with mean = 0 and variance = 1.
+		Note that RANDOM NORMAL is truncated +/- 6 standard deviations here.
+		For Vensim 1.62 syntax, remove the arguments to RANDOM NORMAL.
+	|
+
+correlation time=
+	10
+	~	week [1,100]
+	~		|
+
+mean=
+	10
+	~	widgets/week [0,?]
+	~		|
+
+seed=
+	1
+	~	dmnl [1,10000,1]
+	~		|
+
+std deviation=
+	1
+	~	widgets/week [0,?]
+	~		|
+
+PINK NOISE macro output=
+	PINK NOISE(mean, std deviation, correlation time, seed)
+	~	widgets/week
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 1000
+	~	week
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	week
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	week [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	week [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Macro
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,PINK NOISE macro output,397,165,47,19,8,3,0,0,0,0,0,0
+10,2,correlation time,200,133,49,11,8,3,0,0,-1,0,0,0
+1,3,2,1,0,0,0,0,0,64,0,-1--1--1,,1|(292,147)|
+10,4,mean,195,300,18,11,8,3,0,0,-1,0,0,0
+1,5,4,1,0,0,0,0,0,64,0,-1--1--1,,1|(283,240)|
+10,6,seed,197,240,16,11,8,3,0,0,-1,0,0,0
+1,7,6,1,0,0,0,0,0,64,0,-1--1--1,,1|(274,210)|
+10,8,std deviation,196,182,40,11,8,3,0,0,-1,0,0,0
+1,9,8,1,0,0,0,0,0,64,0,-1--1--1,,1|(286,174)|
+12,10,657682,935,256,267,201,3,156,0,0,2,0,0,0
+PINK NOISE macro output,graph
+12,11,657684,656,575,552,97,3,188,0,2,2,0,0,0,0-0-0,0-0-0,|0||0-0-255
+PINK NOISE macro output,Stats
+12,12,0,391,347,81,19,8,7,0,18,-1,0,0,0,0-0-0,0-0-0,|0|I|0-0-255
+Pink Noise input - created by Ed Anderson
+12,13,0,390,414,68,28,8,7,0,18,-1,0,0,0,0-0-0,0-0-0,|0|I|0-0-255
+Updated by Tom Fiddaman, Ventana Systems, 2010
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Structure
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,PINK NOISE structure,440,202,40,26,3,131,0,0,-1,0,0,0
+12,2,48,223,204,10,8,0,3,0,0,-1,0,0,0
+1,3,5,1,4,0,0,22,0,0,0,-1--1--1,,1|(361,204)|
+1,4,5,2,100,0,0,22,0,0,0,-1--1--1,,1|(271,204)|
+11,5,48,316,204,6,8,34,3,0,0,1,0,0,0
+10,6,updating pink noise,316,231,43,19,40,3,0,0,-1,0,0,0
+10,7,correlation time,227,375,58,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,8,7,6,0,0,0,0,0,0,0,-1--1--1,,1|(264,312)|
+10,9,gap,382,304,13,11,8,3,0,0,-1,0,0,0
+1,10,9,6,1,0,0,0,0,0,0,-1--1--1,,1|(345,283)|
+1,11,1,9,1,0,0,0,0,0,0,-1--1--1,,1|(432,257)|
+10,12,scaled white noise,392,385,57,11,8,3,0,0,-1,0,0,0
+1,13,12,9,0,0,0,0,0,0,0,-1--1--1,,1|(387,351)|
+1,14,7,12,0,0,0,0,0,0,0,-1--1--1,,1|(303,379)|
+10,15,mean,262,432,27,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,16,15,12,0,0,0,0,0,0,0,-1--1--1,,1|(318,411)|
+10,17,std deviation,291,512,49,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,18,17,12,0,0,0,0,0,0,0,-1--1--1,,1|(336,453)|
+10,19,TIME STEP,512,444,50,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,20,19,12,0,0,0,0,0,0,0,-1--1--1,,1|(458,417)|
+10,21,white noise,419,497,36,11,8,3,0,0,-1,0,0,0
+1,22,21,12,0,0,0,0,0,0,0,-1--1--1,,1|(407,447)|
+10,23,seed,427,575,25,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,24,23,21,0,0,0,0,0,0,0,-1--1--1,,1|(423,542)|
+1,25,15,1,0,0,0,0,0,64,1,-1--1--1,,1|(340,330)|
+1,26,23,1,0,0,0,0,0,64,1,-1--1--1,,1|(432,402)|
+1,27,17,1,0,0,0,0,0,64,1,-1--1--1,,1|(358,370)|
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:100,0
+27:3,
+34:0,
+4:Time
+5:PINK NOISE macro output
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:3
+41:0
+24:0
+25:4000
+26:4000

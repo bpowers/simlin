@@ -1,0 +1,298 @@
+Capacity Utilization  = A FUNCTION OF( Capital,Production)
+	~	
+	~		|
+
+Capital  = A FUNCTION OF( Investment,-Discards)
+	~	
+	~		|
+
+Carbon Depletion  = A FUNCTION OF( Carbon Energy Production)
+	~	
+	~		|
+
+Carbon Energy Demand  = A FUNCTION OF( Carbon Energy Share)
+	~	
+	~		|
+
+Carbon Energy Investment  = A FUNCTION OF( Carbon Energy Production)
+	~	
+	~		|
+
+Carbon Energy Price  = A FUNCTION OF( Carbon Depletion,Carbon Energy Technology,Carbon Tax
+)
+	~	
+	~		|
+
+Carbon Energy Production  = A FUNCTION OF( Carbon Energy Demand)
+	~	
+	~		|
+
+Carbon Energy Share  = A FUNCTION OF( Carbon Energy Price)
+	~	
+	~		|
+
+Carbon Energy Technology  = A FUNCTION OF( Carbon Energy Investment)
+	~	
+	~		|
+
+Carbon Tax  = A FUNCTION OF( )
+	~	
+	~		|
+
+Complementary Infrastructure  = A FUNCTION OF( Infrastructure Investment,-Infrastructure Discards
+)
+	~	
+	~		|
+
+Consumption  = A FUNCTION OF( Production)
+	~	
+	~		|
+
+Cumulative End Use Experience  = A FUNCTION OF( Consumption)
+	~	
+	~		|
+
+Cumulative Production Experience  = A FUNCTION OF( Production)
+	~	
+	~		|
+
+Cumulative R and D Investment  = A FUNCTION OF( R and D Investment)
+	~	
+	~		|
+
+Demand  = A FUNCTION OF( End Use Productivity,Price,Marketing)
+	~	
+	~		|
+
+Discards  = A FUNCTION OF( Capital)
+	~	
+	~		|
+
+Economies of Scale  = A FUNCTION OF( Capital)
+	~	
+	~		|
+
+Embodied Energy Requirements  = A FUNCTION OF( Energy Requirements Investment,-Energy Requirement Discards
+)
+	~	
+	~		|
+
+End Use Productivity  = A FUNCTION OF( Cumulative End Use Experience,Embodied Energy Requirements
+,Complementary Infrastructure)
+	~	
+	~		|
+
+Energy Requirement Discards  = A FUNCTION OF( Embodied Energy Requirements)
+	~	
+	~		|
+
+Energy Requirements Investment  = A FUNCTION OF( End Use Productivity,Price)
+	~	
+	~		|
+
+Infrastructure Discards  = A FUNCTION OF( Complementary Infrastructure)
+	~	
+	~		|
+
+Infrastructure Investment  = A FUNCTION OF( Embodied Energy Requirements)
+	~	
+	~		|
+
+Investment  = A FUNCTION OF( Production,Capacity Utilization)
+	~	
+	~		|
+
+Marketing  = A FUNCTION OF( Revenue)
+	~	
+	~		|
+
+Price  = A FUNCTION OF( Productivity)
+	~	
+	~		|
+
+Production  = A FUNCTION OF( Demand)
+	~	
+	~		|
+
+Productivity  = A FUNCTION OF( Cumulative Production Experience,Economies of Scale,Technology
+,Capacity Utilization)
+	~	
+	~		|
+
+R and D Investment  = A FUNCTION OF( Investment)
+	~	
+	~		|
+
+Revenue  = A FUNCTION OF( Price,Production)
+	~	
+	~		|
+
+Technology  = A FUNCTION OF( Cumulative R and D Investment)
+	~	
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Paramaters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Month
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V160  Do not put anything below this section - it will be ignored
+*View 1
+$Times New Roman|12||0-0-0|0-0-0|0-0-0
+|0,Capital,337,136,40,20,3,0,0,0,0,0,-1--1--1,-1--1--1
+|1,48,172,139,8,8,0,132,0,0,-1,0,-1--1--1,-1--1--1
+|2,2,238,139,6,8,39,131,0,0,-1,0,1-1--1--1,-1--1--1
+|3,Investment,238,155,29,8,32,0,0,0,0,0,-1--1--1,-1--1--1
+|4,48,504,135,8,8,0,132,0,0,-1,0,-1--1--1,-1--1--1
+|5,2,453,137,6,8,39,131,0,0,-1,0,1-1--1--1,-1--1--1
+|6,Discards,453,153,23,8,32,0,0,0,0,0,-1--1--1,-1--1--1
+|7,Productivity,539,314,33,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|8,Price,483,423,14,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|9,Demand,227,415,22,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|10,Revenue,368,333,23,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|11,Cumulative Production Experience,255,297,40,20,3,0,0,0,0,0,-1--1--1,-1--1--1
+|12,"
+B
+,398,159,12,12,4,3,0,0,0,0,-1--1--1,-1--1--1
+|13,Technology,584,154,31,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|14,48,110,296,8,8,0,132,0,0,-1,0,-1--1--1,-1--1--1
+|15,2,160,296,6,8,39,131,0,0,-1,0,1-1--1--1,-1--1--1
+|16,Production,160,312,29,8,32,0,0,0,0,0,-1--1--1,-1--1--1
+|17,Economies of Scale,481,214,48,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|18,Capacity Utilization,329,231,52,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|19,End Use Productivity,375,476,55,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|20,Complementary Infrastructure,306,659,45,20,3,0,0,0,0,0,-1--1--1,-1--1--1
+|21,48,515,662,8,8,0,132,0,0,-1,0,-1--1--1,-1--1--1
+|22,2,440,662,6,8,39,131,0,0,-1,0,1-1--1--1,-1--1--1
+|23,Infrastructure Investment,440,678,64,8,32,0,0,0,0,0,-1--1--1,-1--1--1
+|24,48,117,662,8,8,0,132,0,0,-1,0,-1--1--1,-1--1--1
+|25,2,186,661,6,8,39,131,0,0,-1,0,1-1--1--1,-1--1--1
+|26,Infrastructure Discards,186,677,58,8,32,0,0,0,0,0,-1--1--1,-1--1--1
+|27,Cumulative End Use Experience,198,498,40,20,3,0,0,0,0,0,-1--1--1,-1--1--1
+|28,48,53,497,8,8,0,132,0,0,-1,0,-1--1--1,-1--1--1
+|29,2,103,497,6,8,39,131,0,0,-1,0,1-1--1--1,-1--1--1
+|30,Consumption,103,513,35,8,32,0,0,0,0,0,-1--1--1,-1--1--1
+|31,Embodied Energy Requirements,511,582,40,20,3,0,0,0,0,0,-1--1--1,-1--1--1
+|32,48,671,585,8,8,0,132,0,0,-1,0,-1--1--1,-1--1--1
+|33,2,617,584,6,8,39,131,0,0,-1,0,1-1--1--1,-1--1--1
+|34,Energy Requirements Investment,617,614,56,22,40,0,0,0,0,0,-1--1--1,-1--1--1
+|35,48,325,580,8,8,0,132,0,0,-1,0,-1--1--1,-1--1--1
+|36,2,392,580,6,8,39,131,0,0,-1,0,1-1--1--1,-1--1--1
+|37,Energy Requirement Discards,392,605,58,17,40,0,0,0,0,0,-1--1--1,-1--1--1
+|38,Marketing,317,381,27,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|39,Cumulative R and D Investment,463,49,41,20,3,0,0,0,0,0,-1--1--1,-1--1--1
+|40,48,295,48,8,8,0,132,0,0,-1,0,-1--1--1,-1--1--1
+|41,2,363,48,6,8,39,131,0,0,-1,0,1-1--1--1,-1--1--1
+|42,R and D Investment,363,64,51,8,32,0,0,0,-1,0,-1--1--1,-1--1--1
+|43,"
+B
+,456,610,12,12,4,3,0,0,0,0,-1--1--1,-1--1--1
+|44,"
+B
+,247,701,12,12,4,3,0,0,0,0,-1--1--1,-1--1--1
+|45,"
+B
+,298,185,12,12,4,3,0,0,0,0,-1--1--1,-1--1--1
+|46,"
+R1
+,447,97,15,15,4,3,0,0,0,0,-1--1--1,-1--1--1
+|47,"
+R3
+,468,241,15,15,4,3,0,0,0,0,-1--1--1,-1--1--1
+|48,"
+R4
+,495,354,15,15,4,3,0,0,0,0,-1--1--1,-1--1--1
+|49,"
+R5
+,238,363,15,15,4,3,0,0,0,0,-1--1--1,-1--1--1
+|50,"
+B
+,351,267,12,12,4,3,0,0,0,0,-1--1--1,-1--1--1
+|51,"
+R6
+,159,434,15,15,5,3,0,0,0,0,-1--1--1,-1--1--1
+|52,"
+R7
+,475,521,15,15,4,3,0,0,0,0,-1--1--1,-1--1--1
+|53,"
+R2
+,212,221,15,15,4,3,0,0,0,0,-1--1--1,-1--1--1
+|54,"
+R8
+,366,542,15,15,4,3,0,0,0,0,-1--1--1,-1--1--1
+|55,"
+B
+,493,457,12,12,4,3,0,0,0,0,-1--1--1,-1--1--1
+|56,"
+B
+,394,386,12,12,5,3,0,0,0,0,-1--1--1,-1--1--1
+>31,37,1,0,43,0,0,-1--1--1,1|(432,630)|
+>36,31,100,0,0,22,0,-1--1--1,1|(434,580)|
+>36,35,4,0,0,22,0,-1--1--1,1|(359,580)|
+>33,32,100,0,0,22,0,-1--1--1,1|(643,584)|
+>33,31,4,0,32,22,0,-1--1--1,1|(581,584)|
+>29,28,100,0,0,22,0,-1--1--1,1|(79,497)|
+>29,27,4,0,32,22,0,-1--1--1,1|(133,497)|
+>25,20,100,0,0,22,0,-1--1--1,1|(226,661)|
+>25,24,4,0,0,22,0,-1--1--1,1|(152,661)|
+>22,21,100,0,0,22,0,-1--1--1,1|(476,662)|
+>22,20,4,0,43,22,0,-1--1--1,1|(392,662)|
+>2,0,4,0,32,22,0,-1--1--1,1|(270,139)|
+>2,1,100,0,0,22,0,-1--1--1,1|(206,139)|
+>5,4,4,0,0,22,0,-1--1--1,1|(477,137)|
+>5,0,100,0,0,22,0,-1--1--1,1|(412,137)|
+>15,11,4,0,32,22,0,-1--1--1,1|(190,296)|
+>15,14,100,0,0,22,0,-1--1--1,1|(136,296)|
+>0,17,1,0,43,0,0,-1--1--1,1|(409,211)|
+>17,7,1,0,43,0,0,-1--1--1,1|(531,287)|
+>13,7,1,0,43,0,0,-1--1--1,1|(557,293)|
+>11,7,1,0,43,0,0,-1--1--1,1|(494,308)|
+>0,18,1,0,45,0,0,-1--1--1,1|(346,207)|
+>15,18,1,0,43,0,0,-1--1--1,1|(208,257)|
+>18,7,1,0,45,0,0,-1--1--1,1|(506,289)|
+>7,8,1,0,45,0,0,-1--1--1,1|(518,402)|
+>8,9,1,0,45,0,0,-1--1--1,1|(277,422)|
+>0,6,1,0,43,0,0,-1--1--1,1|(429,175)|
+>9,16,1,0,43,0,0,-1--1--1,1|(164,336)|
+>16,29,1,0,43,0,0,-1--1--1,1|(98,469)|
+>27,19,1,0,43,0,0,-1--1--1,1|(309,491)|
+>19,9,1,0,43,0,0,-1--1--1,1|(248,437)|
+>20,26,1,0,43,0,0,-1--1--1,1|(198,704)|
+>31,19,1,0,43,0,0,-1--1--1,1|(392,504)|
+>19,33,1,0,43,0,0,-1--1--1,1|(593,555)|
+>8,33,1,0,45,0,0,-1--1--1,1|(613,546)|
+>31,22,1,0,43,0,0,-1--1--1,1|(468,649)|
+>20,19,1,0,43,0,0,-1--1--1,1|(341,497)|
+>15,3,1,0,43,0,0,-1--1--1,1|(211,175)|
+>18,3,1,0,43,0,0,-1--1--1,1|(239,181)|
+>8,10,1,0,43,0,0,-1--1--1,1|(411,338)|
+>16,10,1,0,43,0,0,-1--1--1,1|(324,334)|
+>10,38,1,0,43,0,0,-1--1--1,1|(345,366)|
+>38,9,1,0,43,0,0,-1--1--1,1|(265,407)|
+>2,42,1,0,43,0,0,-1--1--1,1|(297,80)|
+>41,39,4,0,32,22,0,-1--1--1,1|(395,48)|
+>41,40,100,0,0,22,0,-1--1--1,1|(330,48)|
+>39,13,1,0,43,0,0,-1--1--1,1|(572,129)|

@@ -1,0 +1,483 @@
+Nonenergy Carbon Emissions
+	~	TonC/year
+	~	Nonenergy carbon emissions.
+	|
+
+World Bank Population:=
+	World Population*1e+006
+	~	people
+	~	Population data (World Bank).
+	|
+
+World Population
+	~	
+	~		|
+
+********************************************************
+	.Data
+********************************************************~
+	|
+
+Oil EIA
+	~	
+	~		|
+
+Primary Trabalka
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+OilGas EIA:=
+	Oil EIA+Gas EIA
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+Primary WEC
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+Primary EIA
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+Coal EIA
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+Gas EIA
+	~	
+	~		|
+
+Share Data[source] := Production Data[source]/Total Production Data
+	~	dmnl
+	~	Energy production share data by source.
+	~	:SUPPLEMENTARY 
+	|
+
+Total Production Data := SUM(Production Data[source!])
+	~	
+	~	Total energy production data (physical terms).
+	|
+
+Production Data[Coal] := Coal Production ~~|
+Production Data[OilGas] := Oil Production+Gas Production ~~|
+Production Data[HN] := Hydro Electricity+Nuclear Electricity ~~|
+Production Data[New] := Other Electricity
+	~	GJ/year
+	~	Production data array for all sources.
+	|
+
+Price Data[Coal] := World Coal Price ~~|
+Price Data[OilGas] := (World Crude Price*Oil Production+World Gas Price*Gas Production
+)/(Oil Production+Gas Production) ~~|
+Price Data[HN] := Elect Price ~~|
+Price Data[New] := 10*Elect Price
+	~	$/GJ
+	~	Price data array for all sources.
+	|
+
+Average Energy Price = (Average Thermal Price*(Coal Production+Gas Production+Oil Production
+)
++Elect Price*Primary Electricity)
+/(Coal Production+Gas Production+Oil Production+Primary Electricity)
+	~	$/GJ
+	~	Average price of energy in physical terms, from data. Electricity in \
+		primary equivalent units.
+	~	:SUPPLEMENTARY 
+	|
+
+Average Thermal Price = (Oil Production*World Crude Price+Coal Production*World Coal Price
++Gas Production*World Gas Price)/(Coal Production+Gas Production+Oil Production)
+	~	
+	~	Average price of thermal fuels from data.
+	|
+
+Coal Production
+	~	
+	~	Coal production data.
+	|
+
+Commercial Energy
+	~	
+	~	Commercial energy data.
+	~	:SUPPLEMENTARY 
+	|
+
+Cons Frac GDP
+	~	
+	~	Consumption as a fraction of GDP (data).
+	~	:SUPPLEMENTARY 
+	|
+
+Elect Price
+	~	
+	~	Electricity price data.
+	|
+
+Gas Production
+	~	
+	~	Gas production data.
+	|
+
+GDP := World GDP*1e+009
+	~	
+	~	GDP data.
+	~	:SUPPLEMENTARY 
+	|
+
+GDP Deflator
+	~	
+	~	GDP deflator data.
+	~	:SUPPLEMENTARY 
+	|
+
+Hydro Electricity
+	~	
+	~	Hydro electricity data (primary equivalent units).
+	|
+
+Invest Frac GDP
+	~	
+	~	Investment as a fraction of GDP data.
+	|
+
+Nuclear Electricity
+	~	
+	~	Nuclear electricity production data (primary equivalent units).
+	|
+
+Oil Production
+	~	
+	~	Oil production data.
+	|
+
+Other Electricity
+	~	
+	~	Other electricity production data (primary equivalent units).
+	|
+
+Primary Electricity = Hydro Electricity+Nuclear Electricity+Other Electricity
+	~	
+	~	Primary electricity production data (primary equivalent units).
+	|
+
+Primary Energy
+	~	
+	~	Total primary energy production data.
+	~	:SUPPLEMENTARY 
+	|
+
+Thermal Electricity
+	~	
+	~	Thermal electricity production data (primary equivalent units).
+	~	:SUPPLEMENTARY 
+	|
+
+Total Electricity
+	~	
+	~	Total electricity production data (primary equivalent units).
+	~	:SUPPLEMENTARY 
+	|
+
+Traditional Energy
+	~	
+	~	Traditional energy production data.
+	~	:SUPPLEMENTARY 
+	|
+
+World Coal Price
+	~	
+	~	Coal price data.
+	|
+
+World Crude Price
+	~	
+	~	Oil price data.
+	|
+
+World Gas Price
+	~	
+	~	Gas price data.
+	|
+
+World GDP
+	~	
+	~	GDP data.
+	|
+
+World Investment = World GDP*Invest Frac GDP*1e+009
+	~	
+	~	Investment data.
+	|
+
+World Pop Growth Rt
+	~	
+	~	Population growth rate data.
+	~	:SUPPLEMENTARY 
+	|
+
+DICE IPCC CO2 Rad Forcing
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+DICE IPCC Other Rad Forcing
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+CO2 Emissions A
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+CO2 Emissions B
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+CO2 Emissions C
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+CO2 Emissions D
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+CO2 Emissions E
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+Energy CO2 Emissions A
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+Energy CO2 Emissions B
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+Energy CO2 Emissions C
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+Energy CO2 Emissions D
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+CO2 Concentration A
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+CO2 Concentration B
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+CO2 Concentration C
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+CO2 Concentration D
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+CO2 Concentration E
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+EMF Population
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+EMF GDP
+	~	
+	~		~	:SUPPLEMENTARY 
+	|
+
+********************************************************
+	.Energy.Sources
+********************************************************~
+	|
+
+nonrenewable : Coal,OilGas
+	~	dmnl
+	~	Nonrenewable energy sources.
+	|
+
+Renewable : HN,New
+	~	dmnl
+	~	Renewable energy sources.
+	|
+
+source : Coal,OilGas,HN,New
+	~	dmnl
+	~	Energy sources. Coal represents coal and similar solid fuels. OilGas
+		represents oil, gas, and natural gas liquids. HN = hydro/nuclear aggregate;
+		New = new renewables (solar, wind, biomass, etc.).
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Paramaters
+	|
+
+FINAL TIME  = 2300
+	~	year
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 1960
+	~	year
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 1
+	~	year
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.125
+	~	year
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V160  Do not put anything below this section - it will be ignored
+*Data
+$Times New Roman|12||0-0-0|0-0-0|0-0-0
+|0,World Crude Price,79,49,47,8,0,0,0,0,-1,0,-1--1--1,128-128-128
+|1,Oil Production,78,134,38,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|2,World Gas Price,78,75,42,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|3,World Coal Price,91,103,43,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|4,Elect Price,405,120,28,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|5,Primary Energy,89,246,40,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|6,Traditional Energy,90,271,47,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|7,Commercial Energy,90,296,49,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|8,Gas Production,81,167,40,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|9,Coal Production,78,201,41,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|10,Total Electricity,407,277,42,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|11,Thermal Electricity,404,250,49,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|12,Hydro Electricity,406,169,45,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|13,Nuclear Electricity,408,193,47,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|14,Other Electricity,409,220,43,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|15,GDP Deflator,544,48,36,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|16,World GDP,545,75,31,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|17,Invest Frac GDP,546,104,43,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|18,Cons Frac GDP,548,132,41,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+-19
+|20,World Pop Growth Rt,549,182,57,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|21,World Investment,678,88,46,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|22,Average Thermal Price,216,75,57,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|23,Primary Electricity,266,196,48,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|24,Average Energy Price,262,120,54,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|25,GDP,667,58,15,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+-26
+|27,World Bank Population,548,158,59,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|28,World Population,685,159,52,8,0,1,0,1,-1,0,128-128-128,128-128-128
+>28,27,0,0,0,0,0,-1--1--1,1|(626,158)|
+>16,25,0,0,0,0,0,-1--1--1,1|(607,66)|
+>14,23,0,0,0,0,0,-1--1--1,1|(346,209)|
+>13,23,0,0,0,0,0,-1--1--1,1|(344,193)|
+>12,23,0,0,0,0,0,-1--1--1,1|(342,181)|
+>9,24,0,0,0,0,0,-1--1--1,1|(163,163)|
+>8,24,0,0,0,0,0,-1--1--1,1|(164,145)|
+>1,24,0,0,0,0,0,-1--1--1,1|(155,128)|
+>22,24,0,0,0,0,0,-1--1--1,1|(233,92)|
+>4,24,0,0,0,0,0,-1--1--1,1|(353,120)|
+>23,24,0,0,0,0,0,-1--1--1,1|(264,164)|
+>9,22,0,0,0,0,0,-1--1--1,1|(141,142)|
+>8,22,0,0,0,0,0,-1--1--1,1|(142,124)|
+>1,22,0,0,0,0,0,-1--1--1,1|(140,107)|
+>3,22,0,0,0,0,0,-1--1--1,1|(146,90)|
+>2,22,0,0,0,0,0,-1--1--1,1|(132,75)|
+>0,22,0,0,0,0,0,-1--1--1,1|(140,60)|
+>17,21,0,0,0,0,0,-1--1--1,1|(603,96)|
+>16,21,0,0,0,0,0,-1--1--1,1|(597,79)|
+\\\---/// Sketch information - do not modify anything except names
+V160  Do not put anything below this section - it will be ignored
+*Data 2
+$Times New Roman|12||0-0-0|0-0-0|0-0-0
+|0,Price Data,413,159,29,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|1,Production Data,408,320,43,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|2,Elect Price,258,208,36,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|3,World Coal Price,256,178,53,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|4,World Crude Price,254,145,57,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|5,World Gas Price,250,117,52,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|6,Coal Production,257,325,50,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|7,Gas Production,249,355,48,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|8,Hydro Electricity,253,389,53,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|9,Oil Production,263,264,46,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|10,Share Data,530,320,30,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|11,Nuclear Electricity,259,297,56,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|12,Other Electricity,259,428,51,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|13,Total Production Data,529,381,59,8,0,0,0,0,-1,0,-1--1--1,128-128-128
+|14,Gas Production,538,137,48,8,0,1,0,1,-1,0,128-128-128,128-128-128
+|15,Oil Production,542,176,46,8,0,1,0,1,-1,0,128-128-128,128-128-128
+>1,10,0,0,0,0,0,-1--1--1,1|(468,320)|
+>9,1,0,0,0,0,0,-1--1--1,1|(328,289)|
+>8,1,0,0,0,0,0,-1--1--1,1|(323,357)|
+>7,1,0,0,0,0,0,-1--1--1,1|(321,339)|
+>6,1,0,0,0,0,0,-1--1--1,1|(329,322)|
+>5,0,0,0,0,0,0,-1--1--1,1|(325,136)|
+>4,0,0,0,0,0,0,-1--1--1,1|(340,152)|
+>3,0,0,0,0,0,0,-1--1--1,1|(339,167)|
+>2,0,0,0,0,0,0,-1--1--1,1|(328,186)|
+>11,1,0,0,0,0,0,-1--1--1,1|(330,307)|
+>12,1,0,0,0,0,0,-1--1--1,1|(327,378)|
+>13,10,0,0,0,0,0,-1--1--1,1|(529,357)|
+>1,13,0,0,0,0,0,-1--1--1,1|(461,347)|
+>14,0,0,0,0,0,0,-1--1--1,1|(474,147)|
+>15,0,0,0,0,0,0,-1--1--1,1|(475,167)|
+\\\---/// Sketch information - do not modify anything except names
+V160  Do not put anything below this section - it will be ignored
+*IPCC/EMF Data
+$Times New Roman|12||0-0-0|0-0-0|0-0-0
+|0,CO2 Concentration A,185,91,55,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|1,CO2 Concentration B,172,122,55,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|2,CO2 Concentration C,169,149,55,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|3,CO2 Concentration D,167,182,55,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|4,CO2 Concentration E,175,218,54,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|5,CO2 Emissions A,382,87,46,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|6,CO2 Emissions B,375,121,45,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|7,CO2 Emissions C,370,150,45,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|8,CO2 Emissions D,372,181,46,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|9,CO2 Emissions E,365,213,45,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|10,Energy CO2 Emissions A,561,86,64,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|11,Energy CO2 Emissions B,555,120,64,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|12,Energy CO2 Emissions C,552,150,64,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|13,Energy CO2 Emissions D,553,189,64,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|14,DICE IPCC CO2 Rad Forcing,176,298,75,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|15,DICE IPCC Other Rad Forcing,165,330,77,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|16,EMF Population,426,299,43,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|17,EMF GDP,421,334,29,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|18,Nonenergy Carbon Emissions,168,364,74,8,0,0,0,0,-1,0,-1--1--1,128-128-128
+\\\---/// Sketch information - do not modify anything except names
+V160  Do not put anything below this section - it will be ignored
+*Forecast Data
+$Times New Roman|12||0-0-0|0-0-0|0-0-0
+|0,Primary WEC,129,107,36,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|1,Primary EIA,122,148,33,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|2,Primary Trabalka,120,184,44,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|3,Oil EIA,123,222,21,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|4,Gas EIA,117,257,23,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|5,Coal EIA,123,290,25,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+|6,OilGas EIA,231,239,31,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+>3,6,0,0,0,0,0,-1--1--1,1|(165,228)|
+>4,6,0,0,0,0,0,-1--1--1,1|(163,249)|

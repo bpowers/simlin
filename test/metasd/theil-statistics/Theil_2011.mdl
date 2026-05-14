@@ -1,0 +1,769 @@
+{UTF-8}
+:MACRO: THEIL(historical,simulated:R2,MAPE,RMSPE,RMSE,MSE,SSE,Dif Mea,Dif Var,Dif Cov\
+		,Um,Us,Uc,Count)
+THEIL = residuals
+	~	historical
+	~	Note that first argument (historical) must be data; 
+		second argument (simulation) can be data or a simulation, 
+		but if it is data, it will not be checked for existence.
+		This could easily by changed by modifying the code below.
+		Arguments following the : are outputs. They generate model
+		variables that are visible in the listing on the Variable
+		tab of the control panel, and can be used in equations
+		and custom graphs/tables/reports. However, they cannot be
+		made visible on diagrams.
+	|
+
+R2 = r*r
+	~	Dimensionless
+	~	Correlation coefficient squared
+	|
+
+MAPE = ZIDZ(Sum APE,Count)
+	~	Dimensionless
+	~	Mean Absolute Percent Error
+	|
+
+RMSPE = SQRT(ZIDZ(Sum SPE,Count))
+	~	Dimensionless
+	~	Root Mean Square Percent Error
+	|
+
+RMSE = SQRT(MSE)
+	~	historical
+	~	Root Mean Square Error
+	|
+
+MSE = Dif Mea + Dif Var + Dif Cov
+	~	historical*historical
+	~	Mean Square Error. The addition of the three components
+	|
+
+SSE = Sum XmY2
+	~	historical*historical
+	~	Sum of Square Errors (x-y)^2
+	|
+
+Dif Mea = (M X-M Y)*(M X-M Y)
+	~	historical*historical
+	~	Difference of Means (bias)
+	|
+
+Dif Var = (Sx-Sy)*(Sx-Sy)
+	~	historical*historical
+	~	Difference of variances
+	|
+
+Dif Cov = 2*Sx*Sy*(1-r)
+	~	historical*historical
+	~	Difference of covariances
+	|
+
+Um = ZIDZ(Dif Mea,MSE)
+	~	Dimensionless
+	~	Bias inequality proportion
+	|
+
+Us = ZIDZ(Dif Var,MSE)
+	~	Dimensionless
+	~	Variance inequality proportion
+	|
+
+Uc = ZIDZ(Dif Cov,MSE)
+	~	Dimensionless
+	~	Covariance inequality proportion
+	|
+
+Count = INTEG(pick/dt,0)
+	~	Dimensionless
+	~	Counter for # of points
+	|
+
+residuals = IF THEN ELSE(pick,Xi-Yi,:NA:)
+	~	historical
+	~	Errors
+	|
+
+r=
+	MIN(1,ZIDZ(Mxy-(M X*M Y),Sx*Sy))
+	~	Dimensionless [-1,1]
+	~	Correlation coefficient. Calculated through the 'hand computation'. 
+		   Sterman (1984) pg. 63
+		MAX prevents numerical issues due to numerical precision; perhaps there is \
+		a better way to do this. -TF
+	|
+
+Sum APE = INTEG(ABS(ZIDZ(Xi-Yi,Yi))/dt,0)
+	~	Dimensionless
+	~	Sum of Absolute Percent Errors
+	|
+
+Sum SPE = INTEG((ZIDZ(Xi-Yi,Yi)*ZIDZ(Xi-Yi,Yi))/dt,0)
+	~	Dimensionless
+	~	Sum of Square Percent Errors ((x-y)/y)^2
+	|
+
+Sum XmY2 = INTEG((Xi-Yi)*(Xi-Yi)/dt,0)
+	~	historical*historical
+	~	Sum of Square Errors (x-y)^2
+	|
+
+M X = ZIDZ(Sum Xi,Count)
+	~	historical
+	~	Mean of x (sum x)/n
+	|
+
+M Y = ZIDZ(Sum Yi,Count)
+	~	historical
+	~	Mean of y (sum y)/n
+	|
+
+Sx = SQRT(MAX(0,MX2-(M X*M X)))
+	~	historical
+	~	Standard Deviation of x. Calculated using the 'hand computation' formula 
+		   to calculate the standard deviation without prior knowledge of the mean. 
+		   Sterman (1984), pg. 64
+		MAX prevents spurious numerical problems from roundoff.
+	|
+
+Sy = SQRT(MAX(0,MY2-(M Y*M Y)))
+	~	historical
+	~	Standard Deviation of y. Calculated using the 'hand computation' formula 
+		   to calculate the standard deviation without prior knowledge of the mean. 
+		   Sterman (1984), pg. 64
+		MAX prevents spurious numerical problems from roundoff.
+	|
+
+pick = IF THEN ELSE(Y = :NA: :OR: X = :NA:, 0, 1)
+	~	Dimensionless
+	~	Flag to id historical value available.
+		   Takes a value of one for every data point available
+	|
+
+dt = TIME STEP$
+	~	Time Units
+	~	Note: if your Vensim is not the latest version, you may need to pass TIME \
+		STEP as a parameter.
+	|
+
+Xi = pick*X
+	~	historical
+	~	Simulated point entering calculations
+	|
+
+Yi = pick*Y
+	~	historical
+	~	Historical point entering calculations
+	|
+
+Mxy = ZIDZ(SumXY,Count)
+	~	historical*historical
+	~	Mean of x*y (sum x*y)/n
+	|
+
+Sum Xi = INTEG(Xi/dt,0)
+	~	historical
+	~	Sum of x's (simulated)
+	|
+
+Sum Yi = INTEG(Yi/dt,0)
+	~	historical
+	~	Sum of y's (historical)
+	|
+
+MX2 = ZIDZ(SumX2,Count)
+	~	historical*historical
+	~	Mean of x^2 (sum x^2)/n
+	|
+
+MY2 = ZIDZ(SumY2,Count)
+	~	historical*historical
+	~	Mean of y^2 (sum y^2)/n
+	|
+
+Y :RAW: := historical
+	~	historical
+	~		|
+
+X:=
+	simulated
+	~	historical
+	~		|
+
+SumXY = INTEG(Xi*Yi/dt,0)
+	~	historical*historical
+	~	Sum of x*y
+	|
+
+SumX2 = INTEG(Xi*Xi/dt,0)
+	~	historical*historical
+	~	Sum of x^2 (simulated)
+	|
+
+SumY2 = INTEG(Yi*Yi/dt,0)
+	~	historical*historical
+	~	Sum of y^2 (historical)
+	|
+
+:END OF MACRO:
+********************************************************
+	.Theil.0
+********************************************************~
+		Module to Calculate Summary Statistics for Historical Fit based on:
+		
+		Sterman, J.D., (1984) Appropriate Summary Statistics for Evaluating the Historical \
+		Fit of System Dynamics Models. Dynamica, 10 (Winter), 51-66
+		
+		Rogelio Oliva.
+		September, 1995.
+		
+		Updated by Tom Fiddaman, 2009
+		tom@ventanasystems.com
+	|
+
+********************************************************
+	.Theil.1.Input
+********************************************************~
+		Input Series
+	|
+
+dummy data
+	~	Units
+	~	Replace with actual data.
+	|
+
+dummy simulation
+	~	Units
+	~	Replace with simulation output.
+	|
+
+historical := dummy data
+	~	Units
+	~	Dummy variable to id series
+	|
+
+simulated := dummy simulation
+	~	Units
+	~	Dummy variable to id series
+	|
+
+X:=
+	simulated
+	~	Units
+	~		|
+
+Y :RAW: := historical
+	~	Units
+	~		|
+
+********************************************************
+	.Theil.2.Pick
+********************************************************~
+		Selection of points through the PICK function
+	|
+
+pick=
+	IF THEN ELSE(Y = :NA: :OR: X = :NA:, 0, 1)
+	~	Dimensionless
+	~	Flag to id historical value available.
+		   Takes a value of one for every data point available
+	|
+
+Xi = pick*X
+	~	Units
+	~	Simulated point entering calculations
+	|
+
+Yi = pick*Y
+	~	Units
+	~	Historical point entering calculations
+	|
+
+********************************************************
+	.Theil.3.InputAccumulations
+********************************************************~
+		Basic Accumulations
+	|
+
+count = INTEG(pick/dt,0)
+	~	Dimensionless
+	~	Counter for # of points
+	|
+
+Sum Xi = INTEG(Xi/dt,0)
+	~	Units
+	~	Sum of x's (simulated)
+	|
+
+Sum Yi = INTEG(Yi/dt,0)
+	~	Units
+	~	Sum of y's (historical)
+	|
+
+SumX2 = INTEG(Xi*Xi/dt,0)
+	~	Units*Units
+	~	Sum of x^2 (simulated)
+	|
+
+SumXY = INTEG(Xi*Yi/dt,0)
+	~	Units*Units
+	~	Sum of x*y
+	|
+
+SumY2 = INTEG(Yi*Yi/dt,0)
+	~	Units*Units
+	~	Sum of y^2 (historical)
+	|
+
+********************************************************
+	.Theil.4.SumOfErrors
+********************************************************~
+		Sum of Errors
+	|
+
+SSE=
+	Sum XmY2
+	~	Units*Units
+	~	Sum of Square Errors (x-y)^2
+	|
+
+Sum APE = INTEG(ABS(ZIDZ(Xi-Yi,Yi))/dt,0)
+	~	Dimensionless
+	~	Sum of Absolute Percent Errors
+	|
+
+Sum SPE = INTEG((ZIDZ(Xi-Yi,Yi)*ZIDZ(Xi-Yi,Yi))/dt,0)
+	~	Dimensionless
+	~	Sum of Square Percent Errors ((x-y)/y)^2
+	|
+
+Sum XmY2 = INTEG((Xi-Yi)*(Xi-Yi)/dt,0)
+	~	Units*Units
+	~	Sum of Square Errors (x-y)^2
+	|
+
+********************************************************
+	.Theil.5.MeanSD
+********************************************************~
+		Calculation of Mean and Standard Deviation
+	|
+
+M X = ZIDZ(Sum Xi,count)
+	~	Units
+	~	Mean of x (sum x)/n
+	|
+
+M Y = ZIDZ(Sum Yi,count)
+	~	Units
+	~	Mean of y (sum y)/n
+	|
+
+MX2 = ZIDZ(SumX2,count)
+	~	Units*Units
+	~	Mean of x^2 (sum x^2)/n
+	|
+
+Mxy = ZIDZ(SumXY,count)
+	~	Units*Units
+	~	Mean of x*y (sum x*y)/n
+	|
+
+MY2 = ZIDZ(SumY2,count)
+	~	Units*Units
+	~	Mean of y^2 (sum y^2)/n
+	|
+
+r=
+	MIN(1,ZIDZ(Mxy-(M X*M Y),Sx*Sy))
+	~	Dimensionless [-1,1]
+	~	Correlation coefficient. Calculated through the 'hand computation'. 
+		   Sterman (1984) pg. 63
+		MAX prevents numerical issues due to numerical precision; perhaps there is \
+		a better way to do this. -TF
+	|
+
+Sx=
+	SQRT(MAX(0,MX2-(M X*M X)))
+	~	Units
+	~	Standard Deviation of x. Calculated using the 'hand computation' formula 
+		   to calculate the standard deviation without prior knowledge of the mean. 
+		   Sterman (1984), pg. 64
+	|
+
+Sy=
+	SQRT(MAX(0,MY2-(M Y*M Y)))
+	~	Units
+	~	Standard Deviation of y. Calculated using the 'hand computation' formula 
+		   to calculate the standard deviation without prior knowledge of the mean. 
+		   Sterman (1984), pg. 64
+	|
+
+********************************************************
+	.Theil.6.Decomposition
+********************************************************~
+		Decomposition of the Mean Square Error
+	|
+
+dif cov = 2*Sx*Sy*(1-r)
+	~	Units*Units
+	~	Difference of covariances
+	|
+
+dif mea = (M X-M Y)*(M X-M Y)
+	~	Units*Units
+	~	Difference of Means (bias)
+	|
+
+dif var = (Sx-Sy)*(Sx-Sy)
+	~	Units*Units
+	~	Difference of variances
+	|
+
+mse = dif mea + dif var + dif cov
+	~	Units*Units
+	~	Mean Square Error. The addition of the three components
+	|
+
+********************************************************
+	.Theil.7.SummaryStatistics
+********************************************************~
+		Summary Statistics
+	|
+
+mape = ZIDZ(Sum APE,count)
+	~	Dimensionless
+	~	Mean Absolute Percent Error
+	~	:SUPPLEMENTARY 
+	|
+
+r2 = r*r
+	~	Dimensionless
+	~	Correlation coefficient squared
+	~	:SUPPLEMENTARY 
+	|
+
+residuals=
+	IF THEN ELSE(pick,Xi-Yi,:NA:)
+	~	Units
+	~	Errors
+	|
+
+rmse = SQRT(mse)
+	~	Units
+	~	Root Mean Square Error
+	~	:SUPPLEMENTARY 
+	|
+
+RMSPE = SQRT(ZIDZ(Sum SPE,count))
+	~	Dimensionless
+	~	Root Mean Square Percent Error
+	~	:SUPPLEMENTARY 
+	|
+
+uc = ZIDZ(dif cov,mse)
+	~	Dimensionless
+	~	Covariance inequality proportion
+	~	:SUPPLEMENTARY 
+	|
+
+um = ZIDZ(dif mea,mse)
+	~	Dimensionless
+	~	Bias inequality proportion
+	~	:SUPPLEMENTARY 
+	|
+
+us = ZIDZ(dif var,mse)
+	~	Dimensionless
+	~	Variance inequality proportion
+	~	:SUPPLEMENTARY 
+	|
+
+********************************************************
+	.Theil.8.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+dt = TIME STEP
+	~	Time Units
+	~		|
+
+FINAL TIME  = 100
+	~	Time Units
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Time Units
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Time Units
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Time Units
+	~	The time step for the simulation.
+	|
+
+********************************************************
+	.Theil.9.Macro
+********************************************************~
+		Macro output
+	|
+
+THEIL residual=
+	THEIL(dummy data,dummy simulation:t R2,t MAPE,t RMSPE,t RMSE,t MSE,t SSE,t Dif Mea,t Dif Var\
+		,t Dif Cov,t Um,t Us,t Uc,t Count)
+	~	Units
+	~	Note the output variables following the : in the macro function call. \
+		These create model variables that can't be placed on a diagram, but can be \
+		seen in the Variable tab of the control panel and used in custom graphs, \
+		tables, etc.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Splash
+$192-192-192,0,Helvetica|14|B|0-0-0|0-0-0|0-0-0|-1--1--1|-1--1--1|96,96,100,0
+12,1,0,395,211,106,31,8,4,0,0,-1,0,0,0
+Module to Calculate Summary Statistics for Historical Fit based on:
+12,2,0,399,315,149,38,8,4,0,8,-1,0,0,0,0-0-0,0-0-0,|12||0-0-255
+Sterman, J.D., (1984) Appropriate Summary Statistics for Evaluating the Historical Fit of System Dynamics Models. Dynamica, 10 (Winter), 51-66
+12,3,0,394,413,75,21,8,4,0,0,-1,0,0,0
+Rogelio Oliva, September 1995
+12,4,0,394,509,78,28,8,4,0,8,-1,0,0,0,-1--1--1,0-0-0,|12||0-0-255
+Updated by Tom Fiddaman, Ventana Systems, 2011
+12,5,0,400,595,90,21,8,135,0,18,-1,0,253,253,-1--1--1,0-0-0,|14|U|0-0-255
+http://models.metasd.com|models.metasd.com
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Structure
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,count,1379,575,20,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,2,dt,1436,675,8,11,8,3,0,0,-1,0,0,0
+1,3,2,1,0,0,0,0,0,0,0,-1--1--1,,1|(1410,631)|
+10,4,pick,1333,679,15,11,8,3,0,0,-1,0,0,0
+1,5,4,1,0,0,0,0,0,0,0,-1--1--1,,1|(1352,633)|
+10,6,TIME STEP,1433,750,50,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,7,6,2,0,0,0,0,0,0,0,-1--1--1,,1|(1433,719)|
+10,8,Y,985,631,8,11,8,3,0,0,-1,0,0,0
+1,9,8,4,0,0,0,0,0,0,0,-1--1--1,,1|(1148,653)|
+10,10,historical,990,702,29,11,8,3,0,0,-1,0,0,0
+1,11,10,8,0,0,0,0,0,0,0,-1--1--1,,1|(988,673)|
+10,12,dummy data,992,762,52,11,8,2,0,18,-1,0,0,0,0-0-0,0-0-0,|12|B|0-128-0
+1,13,12,10,0,0,0,0,0,0,0,-1--1--1,,1|(991,738)|
+10,14,dif cov,798,190,24,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+10,15,r,720,274,5,11,8,3,0,0,-1,0,0,0
+1,16,15,14,0,0,0,0,0,0,0,-1--1--1,,1|(751,240)|
+10,17,Sx,807,304,10,11,8,3,0,0,-1,0,0,0
+1,18,17,14,0,0,0,0,0,0,0,-1--1--1,,1|(803,253)|
+10,19,Sy,894,287,10,11,8,3,0,0,-1,0,0,0
+1,20,19,14,0,0,0,0,0,0,0,-1--1--1,,1|(850,243)|
+10,21,M X,663,380,17,11,8,3,0,0,-1,0,0,0
+1,22,21,15,0,0,0,0,0,0,0,-1--1--1,,1|(688,332)|
+10,23,M Y,715,441,17,11,8,3,0,0,-1,0,0,0
+1,24,23,15,0,0,0,0,0,0,0,-1--1--1,,1|(716,364)|
+10,25,Mxy,764,383,16,11,8,3,0,0,-1,0,0,0
+1,26,25,15,0,0,0,0,0,0,0,-1--1--1,,1|(744,334)|
+1,27,17,15,0,0,0,0,0,0,0,-1--1--1,,1|(767,290)|
+1,28,19,15,0,0,0,0,0,0,0,-1--1--1,,1|(811,281)|
+1,29,1,21,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1026,478)|
+10,30,Sum Xi,646,476,25,11,8,3,0,0,-1,0,0,0
+1,31,30,21,0,0,0,0,0,0,0,-1--1--1,,1|(652,434)|
+1,32,2,30,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1056,579)|
+10,33,Xi,637,536,9,11,8,3,0,0,-1,0,0,0
+1,34,33,30,0,0,0,0,0,0,0,-1--1--1,,1|(639,512)|
+1,35,4,33,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(988,607)|
+10,36,X,628,595,8,11,8,3,0,0,-1,0,0,0
+1,37,36,33,0,0,0,0,0,0,0,-1--1--1,,1|(630,572)|
+10,38,simulated,631,671,30,11,8,3,0,0,-1,0,0,0
+1,39,38,36,0,0,0,0,0,0,0,-1--1--1,,1|(629,639)|
+1,40,1,23,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1052,508)|
+10,41,Sum Yi,844,537,25,11,8,3,0,0,-1,0,0,0
+1,42,41,23,0,0,0,0,0,0,0,-1--1--1,,1|(785,493)|
+1,43,2,41,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1155,609)|
+10,44,Yi,990,553,9,11,8,3,0,0,-1,0,0,0
+1,45,44,41,0,0,0,0,0,0,0,-1--1--1,,1|(931,546)|
+1,46,4,44,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1165,617)|
+1,47,8,44,0,0,0,0,0,0,0,-1--1--1,,1|(986,598)|
+10,48,dummy simulation,628,743,41,19,8,2,0,18,-1,0,0,0,0-0-0,0-0-0,|12|B|0-128-0
+1,49,48,38,0,0,0,0,0,0,0,-1--1--1,,1|(628,709)|
+1,50,1,25,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1076,480)|
+10,51,SumXY,814,427,27,11,8,3,0,0,-1,0,0,0
+1,52,51,25,0,0,0,0,0,0,0,-1--1--1,,1|(794,409)|
+1,53,2,51,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1140,557)|
+1,54,33,51,0,0,0,0,0,0,0,-1--1--1,,1|(715,488)|
+1,55,44,51,0,0,0,0,0,0,0,-1--1--1,,1|(910,496)|
+1,56,21,17,0,0,0,0,0,0,0,-1--1--1,,1|(732,343)|
+10,57,MX2,863,384,19,11,8,3,0,0,-1,0,0,0
+1,58,57,17,0,0,0,0,0,0,0,-1--1--1,,1|(839,349)|
+1,59,1,57,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1127,481)|
+10,60,SumX2,939,481,25,11,8,3,0,0,-1,0,0,0
+1,61,60,57,0,0,0,0,0,0,0,-1--1--1,,1|(905,437)|
+1,62,2,60,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1202,583)|
+1,63,33,60,0,0,0,0,0,0,0,-1--1--1,,1|(773,511)|
+1,64,23,19,0,0,0,0,0,0,0,-1--1--1,,1|(800,367)|
+10,65,MY2,1035,380,19,11,8,3,0,0,-1,0,0,0
+1,66,65,19,0,0,0,0,0,0,0,-1--1--1,,1|(967,334)|
+1,67,1,65,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1213,480)|
+10,68,SumY2,1028,441,25,11,8,3,0,0,-1,0,0,0
+1,69,68,65,0,0,0,0,0,0,0,-1--1--1,,1|(1030,417)|
+1,70,2,68,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1243,564)|
+1,71,44,68,0,0,0,0,0,0,0,-1--1--1,,1|(1006,503)|
+10,72,dif mea,514,404,27,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,73,21,72,0,0,0,0,0,0,0,-1--1--1,,1|(600,389)|
+1,74,23,72,0,0,0,0,0,0,0,-1--1--1,,1|(626,424)|
+10,75,dif var,909,199,24,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,76,17,75,0,0,0,0,0,0,0,-1--1--1,,1|(852,257)|
+1,77,19,75,0,0,0,0,0,0,0,-1--1--1,,1|(899,249)|
+10,78,mape,1212,205,20,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,79,1,78,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1298,396)|
+10,80,Sum APE,1207,275,32,11,8,3,0,0,-1,0,0,0
+1,81,80,78,0,0,0,0,0,0,0,-1--1--1,,1|(1208,246)|
+1,82,2,80,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1324,481)|
+1,83,33,80,0,0,0,0,0,0,0,-1--1--1,,1|(907,411)|
+1,84,44,80,0,0,0,0,0,0,0,-1--1--1,,1|(1093,419)|
+10,85,mse,581,122,16,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,86,14,85,0,0,0,0,0,0,0,-1--1--1,,1|(692,157)|
+1,87,72,85,0,0,0,0,0,0,0,-1--1--1,,1|(545,269)|
+1,88,75,85,0,0,0,0,0,0,0,-1--1--1,,1|(747,161)|
+10,89,r2,652,240,9,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,90,15,89,0,0,0,0,0,0,0,-1--1--1,,1|(694,261)|
+10,91,residuals,788,607,32,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,92,33,91,0,0,0,0,0,0,0,-1--1--1,,1|(698,564)|
+1,93,44,91,0,0,0,0,0,0,0,-1--1--1,,1|(907,574)|
+10,94,rmse,564,49,19,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,95,85,94,0,0,0,0,0,0,0,-1--1--1,,1|(574,91)|
+10,96,RMSPE,1377,210,30,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,97,1,96,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1378,399)|
+10,98,Sum SPE,1333,298,31,11,8,3,0,0,-1,0,0,0
+1,99,98,96,0,0,0,0,0,0,0,-1--1--1,,1|(1351,260)|
+1,100,2,98,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1386,493)|
+1,101,33,98,0,0,0,0,0,0,0,-1--1--1,,1|(967,422)|
+1,102,44,98,0,0,0,0,0,0,0,-1--1--1,,1|(1152,432)|
+10,103,uc,692,49,10,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,104,14,103,0,0,0,0,0,0,0,-1--1--1,,1|(749,125)|
+1,105,85,103,0,0,0,0,0,0,0,-1--1--1,,1|(633,87)|
+10,106,um,444,55,12,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,107,72,106,0,0,0,0,0,0,0,-1--1--1,,1|(480,236)|
+1,108,85,106,0,0,0,0,0,0,0,-1--1--1,,1|(516,90)|
+10,109,us,840,50,10,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,110,75,109,0,0,0,0,0,0,0,-1--1--1,,1|(877,130)|
+1,111,85,109,0,0,0,0,0,0,0,-1--1--1,,1|(706,86)|
+12,112,0,201,125,22,11,8,4,0,18,-1,0,0,0,0-0-0,0-0-0,|12|B|0-128-0
+inputs
+12,113,0,202,174,27,11,8,4,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+outputs
+10,114,Sum XmY2,1019,262,38,11,8,3,0,0,-1,0,0,0
+1,115,2,114,0,0,0,0,1,0,0,192-255-255,|12||0-0-0,1|(1234,475)|
+1,116,33,114,0,0,0,0,0,0,0,-1--1--1,,1|(818,405)|
+1,117,44,114,0,0,0,0,0,0,0,-1--1--1,,1|(1003,414)|
+1,118,4,91,0,0,0,0,1,64,0,192-255-255,|12||0-0-0,1|(1075,645)|
+1,119,36,4,1,0,0,0,0,64,0,-1--1--1,,1|(820,646)|
+10,120,SSE,1026,208,16,11,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+1,121,114,120,0,0,0,0,0,64,0,-1--1--1,,1|(1021,241)|
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Usage
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+12,1,0,432,349,130,23,8,4,0,0,0,0,0,0
+Rename the inputs to the series you want to test and supply them in a .vdf file.
+12,2,0,429,211,107,28,8,4,0,0,0,0,0,0
+Ensure that time bounds cover the whole range of data availability; + 1 time step on the end
+10,3,historical,354,283,29,11,0,3,0,0,-1,0,0,0
+10,4,simulated,534,283,30,11,0,3,0,0,-1,0,0,0
+10,5,dummy data,174,284,48,11,8,2,0,2,0,0,0,0,-1--1--1,0-0-0,|14||255-128-128
+10,6,dummy simulation,676,281,36,19,8,2,0,2,0,0,0,0,-1--1--1,0-0-0,|14||255-128-128
+1,7,5,3,0,0,0,0,0,0,0,-1--1--1,,1|(266,283)|
+1,8,6,4,0,0,0,0,0,0,0,-1--1--1,,1|(608,281)|
+12,9,0,445,133,140,38,8,132,0,16,0,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+Option 1. Run as a standalone model, with data from history/simulation replacing dummy inputs below.
+12,10,0,440,470,160,47,8,4,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+Option 2. Embed the structure of this model in your simulation (possibly cumbersome, may require you to replace units manually, creates computation overhead in your main model, but provides instant results)
+12,11,0,1000,130,137,38,8,4,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+Option 3. Use the :MACRO: version (see header of text view) in your main model (less messy, same computational overhead)
+12,12,0,927,217,50,19,8,4,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+Simulated test input
+12,13,0,925,410,52,11,8,4,0,16,-1,0,0,0,0-0-0,0-0-0,|12|B|0-0-0
+Simulated data
+10,14,dummy simulation,934,272,56,11,8,3,0,0,-1,0,0,0
+10,15,dummy data,930,471,39,11,8,3,0,0,0,0,0,0
+12,16,0,1533,283,238,177,3,188,0,0,1,0,0,0
+Inputs
+12,17,0,1514,699,217,223,3,188,0,0,1,0,0,0
+Macro_Summary_Statistics
+10,18,THEIL residual,1081,353,49,11,8,3,0,0,0,0,0,0
+1,19,14,18,0,0,0,0,0,64,0,-1--1--1,,1|(1000,309)|
+1,20,15,18,0,0,0,0,0,64,0,-1--1--1,,1|(999,416)|
+///---\\\
+:GRAPH Inputs
+:TITLE Inputs
+:DOTS
+:SCALE
+:VAR historical
+:VAR simulated
+
+:TABLE Summary_Statistics
+:TITLE Summary Statistics
+:PRETTYNUM
+:X-MIN 100
+:X-MAX 100
+:FIRST-CELLWIDTH 30
+:CELLWIDTH 14
+:FONT Times New Roman|12||0-0-0
+:VAR r2
+:VAR mape
+:VAR RMSPE
+:VAR rmse
+:VAR mse
+:VAR dif mea
+:VAR dif var
+:VAR dif cov
+:VAR um
+:VAR us
+:VAR uc
+
+:TABLE Macro_Summary_Statistics
+:TITLE Macro Summary Statistics
+:PRETTYNUM
+:X-MIN 100
+:X-MAX 100
+:FIRST-CELLWIDTH 30
+:CELLWIDTH 14
+:FONT Times New Roman|12||0-0-0
+:VAR t R2
+:VAR t MAPE
+:VAR t RMSPE
+:VAR t RMSE
+:VAR t MSE
+:VAR t SSE
+:VAR t dif mea
+:VAR t dif var
+:VAR t dif cov
+:VAR t um
+:VAR t us
+:VAR t uc
+:L<%^E!@
+1:Theil.vdf
+9:Theil
+13:Data
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Sy
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+24:0
+25:100
+26:100

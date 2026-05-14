@@ -1,0 +1,2725 @@
+{UTF-8}
+:MACRO: SSTATS(historical,simulated:R2,MAE,MAE over Mean,MAPE,RMSE,MSE,Um,Us,Uc,Count\
+		)
+SSTATS = residuals
+	~	simulated
+	~	Note that first argument (historical) must be data; 
+		second argument (simulation) can be data or a simulation, 
+		but if it is data, it will not be checked for existence.
+		This could easily by changed by modifying the code below.
+		Arguments following the : are outputs. They generate model
+		variables that are visible in the listing on the Variable
+		tab of the control panel, and can be used in equations
+		and custom graphs/tables/reports. However, they cannot be
+		made visible on diagrams.
+	|
+
+R2 = r*r
+	~	Dimensionless
+	~	Correlation coefficient squared
+	|
+
+MAE=
+	ZIDZ(sum ae,Count)
+	~	simulated
+	~	mean absolute error
+	|
+
+MAE over Mean=
+	ZIDZ(MAE,meanx)
+	~	Dimensionless
+	~	Mean Absolute Error as a fraction of the mean of the data
+	|
+
+MAPE = ZIDZ(Sum APE,Count)
+	~	Dimensionless
+	~	Mean Absolute Percent Error is reported as fraction rather than
+		percentage (x100) for consistency with other the other metrics
+	|
+
+RMSE = SQRT(MSE)
+	~	simulated
+	~	Root Mean Square Error
+	|
+
+MSE = dif mea + dif var + dif cov
+	~	simulated*simulated
+	~	Mean Square Error. The addition of the three components
+	|
+
+Um = ZIDZ(dif mea,MSE)
+	~	Dimensionless
+	~	Bias inequality proportion
+	|
+
+Us = ZIDZ(dif var,MSE)
+	~	Dimensionless
+	~	Variance inequality proportion
+	|
+
+Uc = ZIDZ(dif cov,MSE)
+	~	Dimensionless
+	~	Covariance inequality proportion
+	|
+
+Count = INTEG(pick/dt,0)
+	~	Dimensionless
+	~	Counter for # of points
+	|
+
+residuals=
+	IF THEN ELSE(pick, Yi - Xi, :NA:)
+	~	simulated
+	~	Errors
+	|
+
+r = MIN(1,ZIDZ(Mxy-(meanx*MeanY),Sx*Sy))
+	~	Dimensionless
+	~	Correlation coefficient. Calculated through the 'hand computation' formula.
+		   Sterman (1984) pg. 63
+	|
+
+sum ae= INTEG (
+	ABS(Xi - Yi)/dt,
+		0)
+	~	simulated
+	~	Sum of Absolute Errors
+	|
+
+meanx = ZIDZ(Sum Xi,Count)
+	~	simulated
+	~	Mean of x (sum x)/n
+	|
+
+Sum APE = INTEG(ABS(ZIDZ(Xi-Yi,Yi))/dt,0)
+	~	Dimensionless
+	~	Sum of Absolute Percent Errors is reported as fraction rather than
+		percentage (x100) for consistency with other the other metrics
+	|
+
+dif mea = (meanx-MeanY)*(meanx-MeanY)
+	~	simulated*simulated
+	~	Difference of Means (bias)
+	|
+
+dif var = (Sx-Sy)*(Sx-Sy)
+	~	simulated*simulated
+	~	Difference of variances
+	|
+
+dif cov = 2*Sx*Sy*(1-r)
+	~	simulated*simulated
+	~	Difference of covariances
+	|
+
+pick= IF THEN ELSE(Y = :NA: :OR: X = :NA:, 0, 1)
+	~	Dimensionless
+	~	Takes a value of one for every data point available, assuming the data are \
+		available at intervals of Interval between the Start Time and End Time.
+	|
+
+dt = TIME STEP$
+	~	Time$
+	~		|
+
+Yi = pick*Y
+	~	simulated
+	~	Sampled simulated variable
+	|
+
+Xi = pick*X
+	~	simulated
+	~	The historic data series
+	|
+
+Mxy = ZIDZ(SumXY,Count)
+	~	simulated*simulated
+	~	Mean of x*y (sum x*y)/n
+	|
+
+MeanY = ZIDZ(Sum Yi,Count)
+	~	simulated
+	~	Mean of y (sum y)/n
+	|
+
+Sx = SQRT(MAX(0,MX2-(meanx*meanx)))
+	~	simulated
+	~	Standard Deviation of x. Calculated using the 'hand computation'
+		formula to calculate the standard deviation without prior knowledge of
+		the mean.  Sterman (1984), pg. 64  MAX prevents spurious numerical
+		problems from roundoff
+	|
+
+Sy = SQRT(MAX(0,MY2-(MeanY*MeanY)))
+	~	simulated
+	~	Standard Deviation of y. Calculated using the 'hand computation'
+		formula to calculate the standard deviation without prior knowledge of
+		the mean.  Sterman (1984), pg. 64
+	|
+
+Sum Xi = INTEG(Xi/dt,0)
+	~	simulated
+	~	Sum of x's (simulated)
+	|
+
+Y = simulated
+	~	simulated
+	~	The simulated data series
+	|
+
+X :RAW: := historical
+	~	simulated
+	~	The historical data input
+	|
+
+SumXY = INTEG(Xi*Yi/dt,0)
+	~	simulated*simulated
+	~	Sum of x*y
+	|
+
+Sum Yi = INTEG(Yi/dt,0)
+	~	simulated
+	~	Sum of y
+	|
+
+MX2=
+	 ZIDZ(SumX2,Count)
+	~	simulated*simulated
+	~	Mean of x^2
+	|
+
+MY2 = ZIDZ(SumY2,Count)
+	~	simulated*simulated
+	~	Mean of y^2
+	|
+
+SumX2 = INTEG(Xi*Xi/dt,0)
+	~	simulated*simulated
+	~	Sum of x^2
+	|
+
+SumY2 = INTEG(Yi*Yi/dt,0)
+	~	simulated*simulated
+	~	Sum of y^2
+	|
+
+:END OF MACRO:
+********************************************************
+	.Active
+********************************************************~
+		Active equations
+	|
+
+Accidental drug OD deaths per day=
+	Accidental drug OD deaths per year normal*(1+Fractional increase in accidental drug OD deaths\
+		)/Days per year
+	~	popn/day
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Accidental drug OD deaths per million normal=
+	190.8
+	~	1/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Accidental drug OD deaths per year normal=
+	Total popn reference/1e+06*Accidental drug OD deaths per million normal
+	~	popn/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Adjustment in critical care cap=
+	(MAX(Critical care capacity initial, MIN(Ideal critical care cap,Max critical care capacity\
+		))-Critical care capacity)/Time to adjust critical care cap
+	~	popn/Month
+	~		|
+
+Alcohol OD deaths per day=
+	Alcohol OD deaths per year normal*(1+Fractional increase in alcohol OD deaths)/Days per year
+	~	popn/day
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Alcohol OD deaths per million normal=
+	91.8
+	~	1/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Alcohol OD deaths per year normal=
+	Total popn reference/1e+06*Alcohol OD deaths per million normal
+	~	popn/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Avg days for catch up reporting of past probable fatalities=
+	6
+	~	days [0.5,10,0.5]
+	~	Through v7: 1.5
+	|
+
+Avg time to death or recovery=
+	0.37
+	~	months [0.2,0.6,0.01]
+	~	0.37 month = 11 days
+	|
+
+Avg YLL per accidental drug overdose death=
+	38.4
+	~	years
+	~	See "Deaths by age group" spreadsheet.
+	|
+
+Avg YLL per alcohol OD death=
+	35.1
+	~	years
+	~	See "Deaths by age group" spreadsheet.
+	|
+
+Avg YLL per chronic respir disease death=
+	12.4
+	~	years
+	~	See "Deaths by age group" spreadsheet.
+	|
+
+Avg YLL per Covid fatality=
+	15.6
+	~	years
+	~	Based on 1,562 Covid-19 deaths in NYC 4/2/20; \
+		https://www1.nyc.gov/assets/doh/downloads/pdf/imm/covid-19-daily-data-summa\
+		ry-deaths.pdf.  See "Deaths by age group" spreadsheet. Also: Zhou et al \
+		Lance 3/12/20 finds avg age of non-survivors = 69.  In US, life expectancy \
+		at 69 = 15 yrs male, 17 yrs female.
+	|
+
+Avg YLL per CVD and hypertn death=
+	12.2
+	~	years
+	~	See "Deaths by age group" spreadsheet.
+	|
+
+Avg YLL per diabetes death=
+	15.9
+	~	years
+	~	See "Deaths by age group" spreadsheet.
+	|
+
+Avg YLL per family homicide=
+	46.2
+	~	years
+	~	See "Deaths by age group" spreadsheet.
+	|
+
+Avg YLL per nonfamily homicide=
+	45.6
+	~	years
+	~	See "Deaths by age group" spreadsheet.
+	|
+
+Avg YLL per other acute infect death=
+	14.9
+	~	years
+	~	See "Deaths by age group" spreadsheet.
+	|
+
+Avg YLL per suicide=
+	35.2
+	~	years
+	~	See "Deaths by age group" spreadsheet.
+	|
+
+Avg YLL per vehicle accident death=
+	36.7
+	~	years
+	~	See "Deaths by age group" spreadsheet.
+	|
+
+Basic reproduction number=
+	Effective reproduction number/Susceptible fraction of popn
+	~	dmnl
+	~		|
+
+Becoming symptomatic=
+	Infected presympto/Incubation period
+	~	popn/Month
+	~		|
+
+Catch up reporting of past fatalities per day=
+	IF THEN ELSE(Time>=Date to change reporting of fatalities, Potential for catch up reporting of dead\
+		/Avg days for catch up reporting of past probable fatalities, 0)
+	~	popn/day
+	~		|
+
+Chronic respir deaths per million normal=
+	487.4
+	~	1/year
+	~	See "Deaths by age group" spreadsheet; 2017 data from NY Times.
+	|
+
+Chronic respir disease deaths per day=
+	Chronic respir disease deaths per year normal*(1+Fractional increase in chronic respir disease deaths\
+		)/Days per year
+	~	popn/day
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Chronic respir disease deaths per year normal=
+	Total popn reference/1e+06*Chronic respir deaths per million normal
+	~	popn/year
+	~	See "Deaths by age group" spreadsheet
+	|
+
+Contact tracing=
+	Contact tracing per day*Days per month
+	~	popn/Month
+	~		|
+
+Contact tracing coverage=
+	SMOOTHI(XIDZ(Contact tracing per day,Reported new cases per day,Contact tracing in effect\
+		)*Tested frac of sympto,Time to trace and quarantine
+	,0)
+	~	dmnl
+	~		|
+
+Contact tracing daily capacity=
+	Total popn reference/1e+06*Potential cases per million contact traced per day*Contact tracing in effect
+	~	popn/day [0,10000,500]
+	~	max traceable new cases per day
+	|
+
+Contact tracing in effect=
+	IF THEN ELSE(Time<Date to start contact tracing, 0, IF THEN ELSE(Time>=Date to end contact tracing\
+		, 0, 1))
+	~	dmnl
+	~		|
+
+Contact tracing per day=
+	MIN(Contact tracing daily capacity, Reported new cases per day)
+	~	popn/day
+	~		|
+
+Contacts per day normal=
+	41
+	~	1/day [20,60,1]
+	~	(V1: 100; v2-5: 120 per month)
+	|
+
+Contacts per presympto=
+	Contacts per day normal * Days per month * (1-Social distancing) * (1-Contact tracing coverage\
+		)
+	~	1/Month
+	~		|
+
+Contacts per sympto=
+	Contacts per presympto*Reltv contacts per sympto
+	~	1/Month
+	~		|
+
+COVID fatalities per day=
+	Fatalities/Days per month
+	~	popn/day
+	~		|
+
+Critical care capacity= INTEG (
+	Adjustment in critical care cap,
+		Critical care capacity initial)
+	~	popn
+	~	In high load conditions, some severe cases don't get hospitalized due to \
+		shortages of one or more types of critical care assets: personnel, beds, \
+		materials, equipment (aside from ventilators, handled separately), EMS \
+		vehicles, etc.  ICU beds are used here as a proxy for these critical-care \
+		assets.
+	|
+
+Critical care capacity initial=
+	Total popn reference/1e+06*Critical care capacity per million initial
+	~	popn [0,200000,10000]
+	~	In high load conditions, some severe cases don't get hospitalized due to \
+		shortages of one or more types of critical care assets: personnel, beds, \
+		materials, equipment (aside from ventilators, handled separately), EMS \
+		vehicles, etc.  ICU beds are used here as a proxy for these critical-care \
+		assets.
+	|
+
+Critical care capacity per million initial=
+	278
+	~	dmnl [100,400,10]
+	~	278 per million * 330m = 92k. (Modern Healthcare 3/21/20.) In high load \
+		conditions, some severe cases don't get hospitalized due to shortages of \
+		one or more types of critical care assets: personnel, PPE, beds, \
+		materials, ventilators, EMS vehicles, etc. ICU beds are used here as a \
+		proxy for all these critical-care assets.
+	|
+
+Cumul added deaths of despair= INTEG (
+	Increase in deaths of despair,
+		0)
+	~	popn
+	~		|
+
+Cumul combined loss billions=
+	Cumul GDP loss billions + Cumul lost life value billions
+	~	bdollars
+	~		|
+
+Cumul contact tracing= INTEG (
+	Contact tracing,
+		0)
+	~	popn
+	~		|
+
+Cumul GDP loss billions= INTEG (
+	GDP loss billions,
+		0)
+	~	bdollars
+	~		|
+
+Cumul hospitalized= INTEG (
+	Hospital admissions,
+		0)
+	~	popn
+	~		|
+
+Cumul incoming infections= INTEG (
+	Incoming infections,
+		0)
+	~	popn
+	~		|
+
+Cumul lost life value billions= INTEG (
+	Lost life value billions,
+		0)
+	~	bdollars
+	~		|
+
+Cumul reported cases= INTEG (
+	Reported new cases,
+		0)
+	~	popn
+	~		|
+
+Cumul YLG from fewer street deaths= INTEG (
+	YLG from fewer street deaths,
+		0)
+	~	popn*years
+	~		|
+
+Cumul YLL from Covid fatalities= INTEG (
+	YLL from Covid fatalities,
+		0)
+	~	popn*years
+	~		|
+
+Cumul YLL from increased deaths of despair= INTEG (
+	YLL from increased deaths of despair,
+		0)
+	~	popn*years
+	~		|
+
+Cumul YLL from increased other disease deaths= INTEG (
+	YLL from increased other disease deaths,
+		0)
+	~	popn*years
+	~		|
+
+Cumul YLL lost from adverse nonCovid outcomes=
+	Cumul YLL from increased deaths of despair + Cumul YLL from increased other disease deaths
+	~	popn*years
+	~		|
+
+Cumul YLL net change from all outcomes=
+	Cumul YLL from Covid fatalities + Cumul YLL net change from nonCovid outcomes
+	~	popn*years
+	~		|
+
+Cumul YLL net change from nonCovid outcomes=
+	Cumul YLL lost from adverse nonCovid outcomes - Cumul YLG from fewer street deaths
+	~	popn*years
+	~		|
+
+CVD and hypertn deaths per day=
+	CVD and hypertn deaths per year normal*(1+Fractional increase in CVD and hypertn deaths\
+		)/Days per year
+	~	popn/day
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+CVD and hypertn deaths per million normal=
+	2193.9
+	~	1/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+CVD and hypertn deaths per year normal=
+	Total popn reference/1e+06*CVD and hypertn deaths per million normal
+	~	popn/year
+	~	See "Deaths by age group" spreadsheet
+	|
+
+Date of final prevaccine incoming infections=
+	3.25
+	~	Month [0,16,0.5]
+	~		|
+
+Date of first incoming infections=
+	0.75
+	~	Month [0,8,0.5]
+	~		|
+
+Date of peak incoming infections=
+	2
+	~	Month [0,12,0.5]
+	~		|
+
+Date to change reporting of fatalities=
+	3.46875
+	~	months [3,4,0.01]
+	~	3.46875=April 14
+	|
+
+Date to end contact tracing=
+	15
+	~	Month [5,15,0.5]
+	~		|
+
+Date to start contact tracing=
+	4
+	~	Month [2,8,0.5]
+	~		|
+
+Days per month=
+	30
+	~	days/Month
+	~		|
+
+Days per year=
+	Days per month*Months per year
+	~	days/year
+	~		|
+
+Dead frac of past infections=
+	ZIDZ(Dead from COVID, Past infections)
+	~	dmnl
+	~		|
+
+Dead from COVID= INTEG (
+	Fatalities,
+		0)
+	~	popn
+	~		|
+
+Deaths of despair per day=
+	Suicides per day+Family homicides per day+Accidental drug OD deaths per day+Alcohol OD deaths per day
+	~	popn/day
+	~		|
+
+Deaths of despair per day normal=
+	INITIAL(Deaths of despair per day)
+	~	popn/day
+	~		|
+
+Decrease in monthly nonfamily homicides=
+	Nonfamily homicides per year normal/Months per year * Fractional decrease in nonfamily homicide deaths
+	~	popn/Month
+	~		|
+
+Decrease in monthly vehicle accident deaths=
+	Vehicle accident deaths per year normal/Months per year * Fractional decrease in vehicle accident deaths
+	~	popn/Month
+	~		|
+
+Decrease in street deaths=
+	Street deaths per day normal-Street deaths per day
+	~	popn/day
+	~		|
+
+Diabetes deaths per day=
+	Diabetes deaths per year normal*(1+Fractional increase in diabetes deaths)/Days per year
+	~	popn/day
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Diabetes deaths per million normal=
+	259.6
+	~	1/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Diabetes deaths per year normal=
+	Total popn reference/1e+06*Diabetes deaths per million normal
+	~	popn/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Dollars per billion dollars=
+	1e+09
+	~	dollars/bdollars
+	~		|
+
+Effect of season on transmission=
+	Lookup for effect of season on transmission(Months elapsed in year)
+	~	dmnl
+	~		|
+
+Effect of vaccine on infection probability=
+	IF THEN ELSE(Time<Time of vaccine availability, 1, Vaccine effectiveness and reach)
+	~	dmnl
+	~		|
+
+Effective reproduction number=
+	ZIDZ(New infections,Infected) * (Incubation period+Avg time to death or recovery)
+	~	dmnl
+	~		|
+
+Family homicides per day=
+	Family homicides per year normal*(1+Fractional increase in family homicides)/Days per year
+	~	popn/day
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Family homicides per million normal=
+	6.8
+	~	1/year
+	~	See "Deaths by age group" spreadsheet; 2017 data from NY Times.
+	|
+
+Family homicides per year normal=
+	Total popn reference/1e+06*Family homicides per million normal
+	~	popn/year
+	~	See "Deaths by age group" spreadsheet; 2017 data from NY Times.
+	|
+
+Fatal frac of hospitalized=
+	0.3
+	~	dmnl [0.1,0.5,0.05]
+	~	Frac of hospitalized needing ventilator through v5b: 0.2; then through \
+		v5c: 0.25; then v6-7: 0.3; then v8 becomes Fatal frac of hospitalized.  \
+		See Physician's Weely 3/30/20 citing UK ICNARC: 66% of COVID-19 on \
+		advanced respiratory support died (compare with 36% non-COVID). If 0.3 of \
+		hospitalized need ARS, that's 20% death; and if 0.14 of the non-ARS die, \
+		that adds another 0.7*0.14=10%; total 30%.
+	|
+
+Fatal frac of severe without hospitalization=
+	1
+	~	dmnl [0.3,1,0.05]
+	~	Through v7: 0.5
+	|
+
+Fatal frac of sympto=
+	Severe frac of infected sympto * ( (1-Hospitalized frac of severe)*Fatal frac of severe without hospitalization\
+		 +  Hospitalized frac of severe*Fatal frac of hospitalized)
+	~	dmnl
+	~		|
+
+Fatalities=
+	Infected sympto*Fatal frac of sympto/Avg time to death or recovery
+	~	popn/Month
+	~		|
+
+Fractional decrease in nonfamily homicide deaths=
+	Fractional decrease in nonfamily homicides if full distancing*Social distancing
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional decrease in nonfamily homicides if full distancing=
+	0.4
+	~	dmnl
+	~		|
+
+Fractional decrease in vehicle accident deaths=
+	Fractional decrease in vehicle accident deaths if full mobility reduction*Mobility reduction
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional decrease in vehicle accident deaths if full mobility reduction=
+	0.7
+	~	dmnl
+	~		|
+
+Fractional increase in accidental drug OD deaths=
+	Fractional increase in accidental drug OD deaths if full distancing*Social distancing affecting deaths of despair
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in accidental drug OD deaths if full distancing=
+	0.2
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in alcohol OD deaths=
+	Fractional increase in alcohol OD deaths if full distancing*Social distancing affecting deaths of despair
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in alcohol OD deaths if full distancing=
+	0.2
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in chronic respir disease deaths=
+	Fractional increase in chronic respir disease deaths if full distancing*Social distancing affecting chronic disease deaths
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in chronic respir disease deaths if full distancing=
+	0.1
+	~	dmnl
+	~		|
+
+Fractional increase in CVD and hypertn deaths=
+	Fractional increase in CVD and hypertn deaths if full distancing*Social distancing affecting chronic disease deaths
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in CVD and hypertn deaths if full distancing=
+	0.1
+	~	dmnl
+	~		|
+
+Fractional increase in diabetes deaths=
+	Fractional increase in diabetes deaths if full distancing*Social distancing affecting chronic disease deaths
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in diabetes deaths if full distancing=
+	0.1
+	~	dmnl
+	~		|
+
+Fractional increase in family homicides=
+	Fractional increase in family homicides if full distancing*Social distancing affecting deaths of despair
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in family homicides if full distancing=
+	0.2
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in other acute infect deaths=
+	Fractional increase in other acute infect deaths if full distancing*Social distancing affecting acute disease deaths
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in other acute infect deaths if full distancing=
+	0.1
+	~	dmnl [0,1,0.05]
+	~	flu, pneumonia, UTI, food poisoning, STD
+	|
+
+Fractional increase in suicides=
+	Fractional increase in suicides if full distancing*Social distancing affecting deaths of despair
+	~	dmnl [0,1,0.05]
+	~		|
+
+Fractional increase in suicides if full distancing=
+	0.2
+	~	dmnl [0,1,0.05]
+	~		|
+
+GDP billions per yr reference=
+	Total popn reference * GDP per capita per yr reference / Dollars per billion dollars
+	~	bdollars/year
+	~		|
+
+GDP loss billions=
+	GDP billions per yr reference * GDP loss fraction / Months per year
+	~	bdollars/Month
+	~		|
+
+GDP loss fraction=
+	GDP loss fraction if full distancing*Social distancing
+	~	dmnl
+	~		|
+
+GDP loss fraction if full distancing=
+	0.15
+	~	dmnl [0,0.5,0.05]
+	~	See: \
+		https://www.mckinsey.com/business-functions/strategy-and-corporate-finance/\
+		our-insights/safeguarding-our-lives-and-our-livelihoods-the-imperative-of-o\
+		ur-time.  McKinsey estimates 13% loss by 2020Q3 in their "muted recovery" \
+		scenario.
+	|
+
+GDP per capita per yr reference=
+	67000
+	~	dollars/popn/year
+	~		|
+
+Hospital admissions=
+	Becoming symptomatic * Severe frac of infected sympto * Hospitalized frac of severe
+	~	popn/Month
+	~		|
+
+Hospitalized=
+	Severe * Hospitalized frac of severe
+	~	popn
+	~		|
+
+Hospitalized frac of cumul cases=
+	MIN(1,ZIDZ(Cumul hospitalized,Cumul reported cases))
+	~	dmnl
+	~		|
+
+Hospitalized frac of severe=
+	Lookup for hospitalized frac of severe(Severe ratio to critical care cap/Tolerable severe ratio to critical care cap\
+		)
+	~	dmnl
+	~		|
+
+Ideal critical care cap=
+	Severe/Tolerable severe ratio to critical care cap
+	~	popn
+	~		|
+
+Impending reported new cases=
+	Becoming symptomatic*Tested frac of sympto + New infections*Tested frac of presympto
+	~	popn/Month
+	~		|
+
+Incoming infections=
+	Effect of vaccine on infection probability * IF THEN ELSE(Time<=Date of first incoming infections\
+		,0, IF THEN ELSE(Time<=Date of peak incoming infections
+	, Incoming infections at peak
+	*(Time-Date of first incoming infections)/(Date of peak incoming infections-Date of first incoming infections\
+		), IF THEN ELSE
+	(Time<=Date of final prevaccine incoming infections, Incoming infections at peak - (\
+		Incoming infections at peak-Incoming infections final prevaccine
+	)*(Time-Date of peak incoming infections)/(Date of final prevaccine incoming infections\
+		-Date of peak incoming infections
+	), Incoming infections final prevaccine
+	)))
+	~	popn/Month
+	~		|
+
+Incoming infections at peak=
+	300
+	~	popn/Month [0,400,25]
+	~		|
+
+Incoming infections final prevaccine=
+	0
+	~	popn/Month [0,400,25]
+	~		|
+
+Increase in deaths of despair=
+	(Deaths of despair per day-Deaths of despair per day normal)*Days per month
+	~	popn/Month
+	~		|
+
+Increase in monthly alcohol OD deaths=
+	Alcohol OD deaths per year normal/Months per year * Fractional increase in alcohol OD deaths
+	~	popn/Month
+	~		|
+
+Increase in monthly chronic respir disease deaths=
+	Chronic respir disease deaths per year normal/Months per year * Fractional increase in chronic respir disease deaths
+	~	popn/Month
+	~		|
+
+Increase in monthly CVD and hypertn deaths=
+	CVD and hypertn deaths per year normal/Months per year * Fractional increase in CVD and hypertn deaths
+	~	popn/Month
+	~		|
+
+Increase in monthly diabetes deaths=
+	Diabetes deaths per year normal/Months per year * Fractional increase in diabetes deaths
+	~	popn/Month
+	~		|
+
+Increase in monthly drug OD deaths=
+	Accidental drug OD deaths per year normal/Months per year * Fractional increase in accidental drug OD deaths
+	~	popn/Month
+	~		|
+
+Increase in monthly family homicides=
+	Family homicides per year normal/Months per year * Fractional increase in family homicides
+	~	popn/Month
+	~		|
+
+Increase in monthly suicides=
+	Suicides per year normal/Months per year * Fractional increase in suicides
+	~	popn/Month
+	~		|
+
+Increase in other acute infect deaths=
+	Other acute infect deaths per year normal/Months per year * Fractional increase in other acute infect deaths
+	~	popn/Month
+	~		|
+
+Increase in other disease deaths=
+	Specified other disease deaths per day-Specified other disease deaths per day normal
+	~	popn/day
+	~		|
+
+Incubation period=
+	0.18
+	~	months [0,0.5,0.01]
+	~	.18 month = 5.4 days
+	|
+
+Infected=
+	Infected presympto + Infected sympto
+	~	popn
+	~		|
+
+Infected presympto= INTEG (
+	New infections-Becoming symptomatic,
+		0)
+	~	popn
+	~		|
+
+Infected sympto= INTEG (
+	Becoming symptomatic-Fatalities-Recoveries,
+		0)
+	~	popn
+	~		|
+
+Infection probability per contact=
+	Infection probability per contact initial * Effect of vaccine on infection probability\
+		 * Effect of season on transmission
+	~	dmnl
+	~		|
+
+Infection probability per contact initial=
+	0.011
+	~	dmnl [0,0.02,0.001]
+	~	(v1: .22, v2: .22; v2c: .105; v2e: .11; v3: .115; v4b: .112; v5: .113)  \
+		But see: \
+		https://www.uptodate.com/contents/coronavirus-disease-2019-covid-19-epidemi\
+		ology-virology-clinical-features-diagnosis-and-prevention#H3174740477.  US \
+		0.45%, S Korea 0.55%, China 5%
+	|
+
+Infectious contacts=
+	Infected sympto*Contacts per sympto + Infected presympto*Reltv infectiousness of presymptos\
+		*Contacts per presympto
+	~	popn/Month
+	~		|
+
+Infectious contacts with susceptible=
+	Infectious contacts * Susceptible fraction of popn
+	~	popn/Month
+	~		|
+
+Input series for tested frac of mild and mod sympto(
+	[(1,0)-(4.5,1)],(1,0.04),(1.25,0.04),(1.5,0.09),(1.75,0.25),(2,0.4),(2.25,0.5),(2.5,\
+		0.5),(2.75,0.5),(3,0.36),(3.25,0.26),(3.5,0.48),(3.75,0.58),(4,0.58),(4.25,0.58),(4.5\
+		,0.58))
+	~	dmnl
+	~	V7: \
+		(1,0.04),(1.25,0.04),(1.5,0.09),(1.75,0.15),(2,0.22),(2.25,0.265),(2.5,0.36\
+		),(2.75,0.39),(3,0.36),(3.25,0.26),(3.5,0.48),(3.75,0.58),(4,0.58),(4.25,0.\
+		58),(4.5,0.58)
+	|
+
+Isolation fatigue=
+	Lookup for isolation fatigue(Recent distancing affecting isolation fatigue)
+	~	dmnl
+	~		|
+
+Lookup for effect of season on transmission(
+	[(0,0.9)-(12,1)],(0,1),(1,1),(2,1),(3,1),(4,1),(5,1),(6,1),(7,1),(8,1),(9,1),(10,1),\
+		(11,1),(12,1))
+	~	dmnl
+	~	Luo et al MedRxiv 2-12-20 tentatively concludes higher humidity enhances \
+		transmission while higher temperature impedes it.  Possible then that \
+		summer will improve the situation in arid areas but not in humid ones.
+	|
+
+Lookup for hospitalized frac of severe(
+	[(0,0)-(24,1)],(0,1),(1,1),(2,0.9),(4,0.75),(6,0.6),(8,0.45),(10,0.35),(12,0.28),(16\
+		,0.2),(20,0.15),(24,0.13))
+	~	dmnl
+	~	In high load conditions, some severe cases don't get hospitalized due to \
+		shortages of one or more types of critical care assets: personnel, \
+		materials, equipment (aside from ventilators, handled separately here), \
+		vehicles.
+	|
+
+Lookup for isolation fatigue(
+	[(0,0)-(1,1)],(0,0),(0.1,0),(0.2,0.04),(0.3,0.1),(0.4,0.16),(0.5,0.25),(0.6,0.35),(0.7\
+		,0.48),(0.8,0.63),(0.9,0.8),(1,1))
+	~	dmnl
+	~		|
+
+Lookup for mobility reduction(
+	[(0,0)-(0.5,1)],(0,0),(0.05,0.22),(0.1,0.32),(0.15,0.36),(0.2,0.39),(0.25,0.41),(0.3\
+		,0.42),(0.35,0.43),(0.4,0.44),(0.45,0.45),(0.5,0.45))
+	~	dmnl
+	~	People will first eliminate their discretionary travel and after that \
+		their social interactions.  (It would take a complete quarantine, \
+		something not modeled here, for them to cut their non-discretionary travel \
+		for food and supplies.)  Thus, mobility reduction should rise faster than \
+		social distancing at first, but will hit a maximum representing the \
+		discretionary fraction of travel miles.
+	|
+
+Lookup for social distancing(
+	[(0,0)-(3,1)],(0,0),(0.5,0.27),(1,0.5),(1.5,0.67),(2,0.8),(2.5,0.84),(3,0.84))
+	~	dmnl
+	~	through v5: \
+		(0,0),(0.5,0.27),(1,0.5),(1.5,0.67),(2,0.8),(2.5,0.9),(3,0.95); v6: \
+		(0,0),(0.5,0.27),(1,0.5),(1.5,0.67),(2,0.8),(2.5,0.88),(3,0.9); v6: up to \
+		0.85
+	|
+
+Lost life value billions=
+	YLL net change from all outcomes * Valuation of year of life lost / Dollars per billion dollars
+	~	bdollars/Month
+	~		|
+
+Lost resolve from isolation fatigue=
+	Isolation fatigue*Max lost resolve from isolation fatigue
+	~	dmnl
+	~		|
+
+Max critical care capacity=
+	Critical care capacity initial*Multiple for max critical care cap
+	~	popn [100000,600000,50000]
+	~		|
+
+Max lost resolve from isolation fatigue=
+	0.25
+	~	dmnl [0,1,0.05]
+	~		|
+
+Mobility reduction=
+	Lookup for mobility reduction(Social distancing)
+	~	dmnl
+	~		|
+
+Months elapsed in year=
+	MODULO(Time,12)
+	~	Month
+	~	0 = Jan 1st; 11.97 = Dec 31st.
+	|
+
+Months per year=
+	12
+	~	months/year
+	~		|
+
+Multiple for max critical care cap=
+	4
+	~	dmnl [1,6,0.5]
+	~		|
+
+New infections=
+	Incoming infections + New infections domestic
+	~	popn/Month
+	~		|
+
+New infections domestic=
+	Infectious contacts with susceptible * Infection probability per contact
+	~	popn/Month
+	~		|
+
+Nonfamily homicide deaths per day=
+	Nonfamily homicides per year normal*(1-Fractional decrease in nonfamily homicide deaths\
+		)/Days per year
+	~	popn/day
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Nonfamily homicide deaths per million normal=
+	50.7
+	~	1/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Nonfamily homicides per year normal=
+	Total popn reference/1e+06*Nonfamily homicide deaths per million normal
+	~	popn/year
+	~	See "Deaths by age group" spreadsheet; 2018 data on total homicides from \
+		WONDER (18830), less 2017 family homicides from NY Times (2237).
+	|
+
+Other acute infect deaths per day=
+	Other acute infect deaths per year normal*(1+Fractional increase in other acute infect deaths\
+		)/Days per year
+	~	popn/day
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Other acute infect deaths per million normal=
+	390.2
+	~	1/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Other acute infect deaths per year normal=
+	Total popn reference/1e+06*Other acute infect deaths per million normal
+	~	popn/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Past infections=
+	Dead from COVID+Recovered
+	~	popn
+	~		|
+
+Potential cases per million contact traced per day=
+	0
+	~	1/day [0,60,1]
+	~	max traceable new cases per day per million popn
+	|
+
+Potential for catch up reporting of dead=
+	Dead from COVID*MAX(0,Reported frac of fatalities-Reported frac of dead)
+	~	popn
+	~		|
+
+Presympto frac of infected=
+	XIDZ(Infected presympto, Infected, 1)
+	~	dmnl
+	~		|
+
+Recent distancing affecting isolation fatigue=
+	SMOOTHI(Social distancing,Time to develop isolation fatigue,0)
+	~	dmnl
+	~		|
+
+Recent fatalities per day affecting social distancing=
+	SMOOTH3I(COVID fatalities per day,Time to adjust social distancing,0)
+	~	popn/day
+	~		|
+
+Recent fatalities per day for 50pct social distancing=
+	Total popn reference/1e+06*Recent fatalities per million per day for 50pct distancing
+	~	popn/day [100,300,10]
+	~	v2d: 200k confirmed cases; v3: 150k confirmed cases; v4: 1700 deaths in 2 \
+		weeks; v4a: 2000 deaths in 2 wks; v4b: 133 deaths per day avg past 2 \
+		weeks; v5a: 133; v5b: 115; v5c: 140; v5d: 150; v6c:165
+	|
+
+Recent fatalities per million per day for 50pct distancing=
+	0.606
+	~	1/day [0.4,0.8,0.01]
+	~	.606 per million*330m = 200 per day
+	|
+
+Recovered= INTEG (
+	Recoveries,
+		0)
+	~	popn
+	~		|
+
+Recoveries=
+	Infected sympto*(1-Fatal frac of sympto)/Avg time to death or recovery
+	~	popn/Month
+	~		|
+
+Reltv contacts per sympto=
+	0.5
+	~	dmnl [0,1,0.05]
+	~	This is the combination of behaviors for severe, moderate, and mild.  The \
+		model assumes the relative proportions of the three types remain constant.  \
+		If it's 18% severe (and.05 still socialize), 25% mild (.95 still \
+		socialize) and 57% moderate (.43 still socialize), then weighted average \
+		is 0.5 socializing relative to an asymptomatic.
+	|
+
+Reltv infectiousness of presymptos=
+	0.5
+	~	dmnl [0,100,5]
+	~	v1: 0.2; v3: 0.5
+	|
+
+Reported dead= INTEG (
+	Reported fatalities,
+		0)
+	~	popn
+	~		|
+
+Reported dead frac of cases=
+	ZIDZ(Reported dead, Cumul reported cases)
+	~	dmnl
+	~		|
+
+Reported fatalities=
+	Fatalities*Reported frac of fatalities + Catch up reporting of past fatalities per day\
+		*Days per month
+	~	popn/Month
+	~		|
+
+Reported fatalities per day=
+	Reported fatalities/Days per month
+	~	popn/day
+	~		|
+
+Reported fatalities ratio to new cases=
+	ZIDZ(Reported fatalities per day,Reported new cases per day)
+	~	dmnl
+	~		|
+
+Reported frac of cumulative infections=
+	ZIDZ(Cumul reported cases, Infected+Past infections)
+	~	dmnl
+	~		|
+
+Reported frac of dead=
+	XIDZ(Reported dead, Dead from COVID, Reported frac of fatalities)
+	~	dmnl
+	~		|
+
+Reported frac of fatalities=
+	IF THEN ELSE(Time<Date to change reporting of fatalities, Reported frac of fatalities initial\
+		, Reported frac of fatalities including probables)
+	~	dmnl
+	~		|
+
+Reported frac of fatalities including probables=
+	1
+	~	dmnl [0.6,1,0.01]
+	~		|
+
+Reported frac of fatalities initial=
+	0.89
+	~	dmnl [0.6,1,0.01]
+	~	Through v7: 0.7
+	|
+
+Reported frac of fatalities to include probables=
+	MAX(0, Reported frac of fatalities - Reported frac of fatalities initial)
+	~	dmnl
+	~	Increase reflects April 14 change in NYC reporting to include probables: \
+		https://www.worldometers.info/coronavirus/us-data/.
+	|
+
+Reported new cases=
+	SMOOTHI(Impending reported new cases, Time to get tested,0) + Reported probable fatalities per day\
+		*Days per month
+	~	popn/Month
+	~		|
+
+Reported new cases per day=
+	Reported new cases/Days per month
+	~	popn/day
+	~		|
+
+Reported probable fatalities per day=
+	Catch up reporting of past fatalities per day + (Fatalities*Reported frac of fatalities to include probables\
+		/Days per month)
+	~	popn/day
+	~		|
+
+Severe=
+	Infected sympto * Severe frac of infected sympto
+	~	popn
+	~		|
+
+Severe frac of infected sympto=
+	0.08
+	~	dmnl [0,0.3,0.005]
+	~	V2a: 0.14; v2b: .155; v2c: .16; v2d: .14; v2e: .15; v3: .14; v6: 0.18; v7: \
+		0.175
+	|
+
+Severe ratio to critical care cap=
+	Severe/Critical care capacity
+	~	dmnl
+	~		|
+
+Social distancing=
+	Social distancing if no fatigue * (1-Lost resolve from isolation fatigue)
+	~	dmnl
+	~		|
+
+Social distancing affecting acute disease deaths=
+	SMOOTH(Social distancing, Time for distancing to impact other acute infections)
+	~	dmnl
+	~		|
+
+Social distancing affecting chronic disease deaths=
+	SMOOTH(Social distancing, Time for distancing to impact chronic disease)
+	~	dmnl
+	~		|
+
+Social distancing affecting deaths of despair=
+	SMOOTH(Social distancing, Time for distancing to impact deaths of despair)
+	~	dmnl
+	~		|
+
+Social distancing if no fatigue=
+	Lookup for social distancing(Recent fatalities per day affecting social distancing/Recent fatalities per day for 50pct social distancing
+	)
+	~	dmnl
+	~		|
+
+Specified other disease deaths per day=
+	CVD and hypertn deaths per day+Diabetes deaths per day+Chronic respir disease deaths per day\
+		+Other acute infect deaths per day
+	~	popn/day
+	~		|
+
+Specified other disease deaths per day normal= INITIAL(
+	Specified other disease deaths per day)
+	~	popn/day
+	~		|
+
+Street deaths per day=
+	Vehicle accident deaths per day+Nonfamily homicide deaths per day
+	~	popn/day
+	~		|
+
+Street deaths per day normal= INITIAL(
+	Street deaths per day)
+	~	popn/day
+	~		|
+
+Suicides per day=
+	Suicides per year normal*(1+Fractional increase in suicides)/Days per year
+	~	popn/day
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Suicides per million normal=
+	147.8
+	~	1/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Suicides per year normal=
+	Total popn reference/1e+06*Suicides per million normal
+	~	popn/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Susceptible= INTEG (
+	-New infections,
+		Total popn reference)
+	~	popn
+	~		|
+
+Susceptible fraction of popn=
+	Susceptible/Total popn
+	~	dmnl
+	~		|
+
+Tested frac of mild and mod sympto=
+	Input series for tested frac of mild and mod sympto(Time)
+	~	dmnl
+	~		|
+
+Tested frac of presympto=
+	0.04
+	~	dmnl [0,0.4,0.01]
+	~	Testing based on at-risk status; e.g. some elderly in nursing homes or \
+		group residences.
+	|
+
+Tested frac of severe sympto=
+	0.95
+	~	dmnl [0.8,1,0.01]
+	~		|
+
+Tested frac of sympto=
+	Tested frac of severe sympto*Severe frac of infected sympto
+	 + Tested frac of mild and mod sympto*(1-Severe frac of infected sympto)
+	~	dmnl
+	~		|
+
+Time for distancing to impact chronic disease=
+	3
+	~	Month
+	~		|
+
+Time for distancing to impact deaths of despair=
+	1
+	~	Month [0.25,2,0.25]
+	~		|
+
+Time for distancing to impact other acute infections=
+	0.5
+	~	Month
+	~		|
+
+Time of vaccine availability=
+	15
+	~	Month [0,24,1]
+	~		|
+
+Time to adjust critical care cap=
+	2
+	~	months [0.5,6,0.25]
+	~	through v6: 2
+	|
+
+Time to adjust social distancing=
+	0.5
+	~	months [0,2,0.25]
+	~		|
+
+Time to develop isolation fatigue=
+	1
+	~	months [0.25,2,0.25]
+	~		|
+
+Time to get tested=
+	0.17
+	~	months [0.05,0.35,0.01]
+	~	.17 month = 5 days
+	|
+
+Time to trace and quarantine=
+	0.25
+	~	Month [0,10000,1000]
+	~		|
+
+Tolerable severe ratio to critical care cap=
+	0.125
+	~	dmnl [0,0.5,0.05]
+	~	Through v7: 0.25; Reflects highly uneven geographical distribution of \
+		critical care resources per capita. Large urban hospitals generally have \
+		higher utilization, thus less spare capacity for disaster response, than \
+		smaller hospitals.
+	|
+
+Total popn=
+	Total popn reference - Dead from COVID
+	~	popn
+	~		|
+
+Total popn reference=
+	3.3e+08
+	~	popn
+	~		|
+
+Vaccine effectiveness and reach=
+	0.2
+	~	dmnl [0,1,0.05]
+	~		|
+
+Valuation of year of life lost=
+	100000
+	~	dollars/popn/year
+	~		|
+
+Vehicle accident deaths per day=
+	Vehicle accident deaths per year normal*(1-Fractional decrease in vehicle accident deaths\
+		)/Days per year
+	~	popn/day
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Vehicle accident deaths per million normal=
+	126.2
+	~	1/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+Vehicle accident deaths per year normal=
+	Total popn reference/1e+06*Vehicle accident deaths per million normal
+	~	popn/year
+	~	See "Deaths by age group" spreadsheet; 2018 data from WONDER.
+	|
+
+YLG from fewer nonfamily homicides=
+	Decrease in monthly nonfamily homicides * Avg YLL per nonfamily homicide
+	~	popn*years/Month
+	~		|
+
+YLG from fewer street deaths=
+	YLG from fewer nonfamily homicides + YLG from fewer vehicle accident deaths
+	~	popn*years/Month
+	~	Years of life gained
+	|
+
+YLG from fewer vehicle accident deaths=
+	Decrease in monthly vehicle accident deaths * Avg YLL per vehicle accident death
+	~	popn*years/Month
+	~		|
+
+YLL from adverse nonCovid outcomes=
+	YLL from increased deaths of despair + YLL from increased other disease deaths
+	~	popn*years/Month
+	~	Years of life lost
+	|
+
+YLL from Covid fatalities=
+	Fatalities * Avg YLL per Covid fatality
+	~	popn*years/Month
+	~		|
+
+YLL from increased alcohol OD deaths=
+	Increase in monthly alcohol OD deaths * Avg YLL per alcohol OD death
+	~	popn*years/Month
+	~		|
+
+YLL from increased chronic respir disease deaths=
+	Increase in monthly chronic respir disease deaths * Avg YLL per chronic respir disease death
+	~	popn*years/Month
+	~		|
+
+YLL from increased CVD and hypertn deaths=
+	Increase in monthly CVD and hypertn deaths * Avg YLL per CVD and hypertn death
+	~	popn*years/Month
+	~		|
+
+YLL from increased deaths of despair=
+	YLL from increased suicides + YLL from increased family homicides + YLL from increased drug OD deaths\
+		 + YLL from increased alcohol OD deaths
+	~	popn*years/Month
+	~		|
+
+YLL from increased diabetes deaths=
+	Increase in monthly diabetes deaths * Avg YLL per diabetes death
+	~	popn*years/Month
+	~		|
+
+YLL from increased drug OD deaths=
+	Increase in monthly drug OD deaths * Avg YLL per accidental drug overdose death
+	~	popn*years/Month
+	~		|
+
+YLL from increased family homicides=
+	Increase in monthly family homicides * Avg YLL per family homicide
+	~	popn*years/Month
+	~		|
+
+YLL from increased other acute infect deaths=
+	Increase in other acute infect deaths * Avg YLL per other acute infect death
+	~	popn*years/Month
+	~		|
+
+YLL from increased other disease deaths=
+	YLL from increased chronic respir disease deaths + YLL from increased diabetes deaths\
+		 + YLL from increased CVD and hypertn deaths + YLL from increased other acute infect deaths
+	~	popn*years/Month
+	~		|
+
+YLL from increased suicides=
+	Increase in monthly suicides * Avg YLL per suicide
+	~	popn*years/Month
+	~		|
+
+YLL net change from all outcomes=
+	YLL from Covid fatalities + YLL net change from nonCovid outcomes
+	~	popn*years/Month
+	~		|
+
+YLL net change from nonCovid outcomes=
+	YLL from adverse nonCovid outcomes - YLG from fewer street deaths
+	~	popn*years/Month
+	~	Years of life lost
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+Combined loss billions=
+	GDP loss billions + Lost life value billions
+	~	bdollars/Month
+	~		|
+
+FINAL TIME  = 24
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.03125
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+********************************************************
+	.Hist
+********************************************************~
+		Historical data
+	|
+
+Cumul reported cases data:RAW::=
+	GET XLS DATA('Covid19US data.xlsx','Data','c','d5')
+	~	popn
+	~		|
+
+Mobility reduction data:RAW::=
+	GET XLS DATA('Covid19US data.xlsx','Data','c','f5')
+	~	popn
+	~	Source for mobility decrease: \
+		https://www.unacast.com/covid19/social-distancing-scoreboard
+	|
+
+Reported dead data:RAW::=
+	GET XLS DATA('Covid19US data.xlsx','Data','c','e5')
+	~	popn
+	~		|
+
+Reported dead frac of cases data:RAW::=
+	X IF MISSING(Reported dead data/Cumul reported cases data,:NA:)
+	~	dmnl
+	~		|
+
+Reported fatalities per day data:RAW::=
+	GET XLS DATA('Covid19US data.xlsx','Data','c','i5')
+	~	popn/day
+	~		|
+
+Reported fatalities ratio to new cases data:RAW::=
+	X IF MISSING(ZIDZ(Reported fatalities per day data,Reported new cases per day data),\
+		:NA:)
+	~	dmnl
+	~		|
+
+Reported new cases per day data:RAW::=
+	GET XLS DATA('Covid19US data.xlsx','Data','c','h5')
+	~	popn/day
+	~		|
+
+********************************************************
+	.Stats
+********************************************************~
+		Summary Statistics
+	|
+
+Residuals reported fatalities per day = SSTATS(Reported fatalities per day data,Reported fatalities per day\
+		:R2 Reported fatalities per day,MAE Reported fatalities per day,MAEM Reported fatalities per day\
+		,MAPE Reported fatalities per day,RMSE Reported fatalities per day,MSE Reported fatalities per day\
+		,Um Reported fatalities per day,Us Reported fatalities per day,Uc Reported fatalities per day\
+		,Count Reported fatalities per day)
+	~	popn/day
+	~		|
+
+Residuals reported new cases per day = SSTATS(Reported new cases per day data,Reported new cases per day\
+		:R2 Reported new cases per day,MAE Reported new cases per day,MAEM Reported new cases per day\
+		,MAPE Reported new cases per day,RMSE Reported new cases per day,MSE Reported new cases per day\
+		,Um Reported new cases per day,Us Reported new cases per day,Uc Reported new cases per day\
+		,Count Reported new cases per day)
+	~	popn/day
+	~		|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Main structure
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,Susceptible,429,413,51,32,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,2,Infected presympto,678,414,47,33,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,3,Infected sympto,906,414,51,32,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+1,4,6,2,4,0,0,22,0,0,0,-1--1--1,,1|(592,413)|
+1,5,6,1,100,0,0,22,0,0,0,-1--1--1,,1|(510,413)|
+11,6,3610,547,413,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,7,New infections,547,431,53,10,40,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,8,15,3,4,0,0,22,0,0,0,-1--1--1,,1|(823,413)|
+1,9,15,2,100,0,0,22,0,0,0,-1--1--1,,1|(752,413)|
+10,10,Recovered,1169,421,51,32,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+1,11,13,10,4,0,0,22,0,0,0,-1--1--1,,1|(1073,414)|
+1,12,13,3,100,0,0,22,0,0,0,-1--1--1,,1|(987,414)|
+11,13,5084,1023,414,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,14,Recoveries,1023,432,42,10,40,3,0,0,-1,0,0,0,0,0,0,0,0,0
+11,15,4578,786,413,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,16,Becoming symptomatic,786,439,47,18,40,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,17,New infections domestic,459,510,54,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,18,Contacts per presympto,543,677,47,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,19,Contacts per sympto,726,669,47,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,20,Susceptible fraction of popn,310,481,57,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,21,Total popn,275,388,39,10,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,22,1,20,1,0,0,0,0,128,0,-1--1--1,,1|(359,431)|
+1,23,21,20,1,0,0,0,0,128,0,-1--1--1,,1|(283,426)|
+1,24,20,33,1,0,0,0,0,128,0,-1--1--1,,1|(403,548)|
+1,25,17,7,0,0,0,0,0,128,0,-1--1--1,,1|(501,471)|
+10,26,Infection probability per contact,283,576,53,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,27,Dead from COVID,1135,275,51,32,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+1,28,30,27,4,0,0,22,0,0,0,-1--1--1,,1|(1036,280)|
+1,29,30,3,100,0,0,22,0,0,0,-1--1--1,,1|(906,280)|
+11,30,2796,983,280,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,31,Fatalities,983,298,34,10,40,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,32,26,17,1,0,0,0,0,128,0,-1--1--1,,1|(378,550)|
+10,33,Infectious contacts with susceptible,515,587,67,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,34,33,17,0,0,0,0,0,128,0,-1--1--1,,1|(491,554)|
+10,35,Incubation period,916,505,37,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,36,35,16,1,0,0,0,0,128,0,-1--1--1,,1|(856,485)|
+10,37,Total popn reference,323,320,39,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,38,Dead from COVID,237,282,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,39,38,21,1,0,0,0,0,128,0,-1--1--1,,1|(262,324)|
+1,40,37,21,0,0,0,0,0,128,0,-1--1--1,,1|(300,352)|
+1,41,37,1,1,0,0,0,0,64,1,-1--1--1,,1|(379,350)|
+10,42,Fatal frac of sympto,1005,360,49,20,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+1,43,42,14,0,0,0,0,0,128,0,-1--1--1,,1|(1013,394)|
+1,44,42,31,0,0,0,0,0,128,0,-1--1--1,,1|(994,330)|
+10,45,Infected,807,536,29,10,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,46,2,45,0,0,0,0,0,128,0,-1--1--1,,1|(748,481)|
+1,47,3,45,0,0,0,0,0,128,0,-1--1--1,,1|(852,480)|
+10,48,Recent fatalities per day for 50pct social distancing,566,1008,73,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,49,Social distancing,499,822,38,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,50,Infectious contacts,678,568,35,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,51,2,50,0,0,0,0,0,128,0,-1--1--1,,1|(678,491)|
+1,52,3,50,0,0,0,0,0,128,0,-1--1--1,,1|(787,494)|
+1,53,19,50,0,0,0,0,0,128,0,-1--1--1,,1|(705,624)|
+1,54,18,50,0,0,0,0,0,128,0,-1--1--1,,1|(604,626)|
+1,55,50,33,0,0,0,0,0,128,0,-1--1--1,,1|(619,574)|
+10,56,Contacts per day normal,374,650,47,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,57,56,18,1,0,0,0,0,128,0,-1--1--1,,1|(469,651)|
+10,58,Dead frac of past infections,1340,251,64,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,59,Past infections,1305,360,53,10,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,60,10,59,0,0,0,0,0,128,0,-1--1--1,,1|(1244,387)|
+1,61,27,59,1,0,0,0,0,128,0,-1--1--1,,1|(1266,302)|
+1,62,27,58,1,0,0,0,0,128,0,-1--1--1,,1|(1229,239)|
+1,63,59,58,1,0,0,0,0,128,0,-1--1--1,,1|(1330,318)|
+10,64,Lookup for social distancing,436,1042,63,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+10,65,Effect of vaccine on infection probability,144,624,71,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,66,Time,208,689,29,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,67,Infection probability per contact initial,93,547,70,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,68,67,26,1,0,0,0,0,128,0,-1--1--1,,1|(196,541)|
+1,69,65,26,1,0,0,0,0,128,0,-1--1--1,,1|(188,590)|
+10,70,Reltv contacts per sympto,726,748,51,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,71,49,18,1,0,0,0,0,128,0,-1--1--1,,1|(536,746)|
+10,72,Hospitalized,793,109,45,10,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,73,3,90,0,0,0,0,0,128,0,-1--1--1,,1|(863,343)|
+1,74,115,72,1,0,0,0,0,128,0,-1--1--1,,1|(730,140)|
+1,75,115,42,1,0,0,0,0,128,0,-1--1--1,,1|(855,256)|
+12,76,0,1841,940,186,174,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Dead_from_COVID
+12,77,0,1105,943,185,175,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Critical_care_capacity
+12,78,0,1810,216,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Infected
+12,79,0,1812,579,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Social_distancing
+12,80,0,2222,942,172,177,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Dead_frac_of_past_infections
+12,81,0,1475,943,167,175,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Hospitalized_frac_of_severe
+10,82,Reltv infectiousness of presymptos,598,495,72,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,83,82,50,1,0,0,0,0,128,0,-1--1--1,,1|(626,536)|
+1,84,66,65,1,0,0,0,0,128,0,-1--1--1,,1|(192,662)|
+10,85,Time of vaccine availability,158,764,58,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,86,Vaccine effectiveness and reach,79,712,64,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,87,86,65,1,0,0,0,0,128,0,-1--1--1,,1|(96,673)|
+1,88,85,65,1,0,0,0,0,128,0,-1--1--1,,1|(156,696)|
+10,89,Severe frac of infected sympto,750,352,58,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,90,Severe,826,283,27,10,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,91,89,90,1,0,0,0,0,128,0,-1--1--1,,1|(787,312)|
+1,92,90,72,1,0,0,0,0,128,0,-1--1--1,,1|(832,184)|
+1,93,89,42,1,0,0,0,0,128,0,-1--1--1,,1|(870,359)|
+10,94,COVID fatalities per day,1143,194,59,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,95,31,94,0,0,0,0,0,128,0,-1--1--1,,1|(1050,253)|
+10,96,Time to adjust social distancing,822,1008,61,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,97,Recent fatalities per day affecting social distancing,695,941,73,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,98,96,97,1,0,0,0,0,128,0,-1--1--1,,1|(789,957)|
+10,99,Avg time to death or recovery,1090,504,64,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,100,99,14,1,0,0,0,0,128,0,-1--1--1,,1|(1043,464)|
+1,101,99,31,1,0,0,0,0,64,0,-1--1--1,,1|(1088,398)|
+10,102,Mobility reduction,622,871,34,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,103,Lookup for mobility reduction,744,826,64,18,8,3,0,2,-1,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+1,104,103,102,1,0,0,0,0,64,0,-1--1--1,,1|(686,863)|
+1,105,49,102,1,0,0,0,0,64,0,-1--1--1,,1|(564,855)|
+12,106,0,2201,216,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Past_infections
+1,107,122,97,1,0,0,0,2,129,0,-1--1--1,|12||0-0-0,1|(813,914)|
+1,108,3,31,1,0,0,0,0,128,0,-1--1--1,,1|(927,342)|
+1,109,3,14,1,0,0,0,0,128,0,-1--1--1,,1|(968,464)|
+1,110,2,16,1,0,0,0,0,128,0,-1--1--1,,1|(742,473)|
+10,111,Critical care capacity initial,264,137,52,18,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,112,Severe ratio to critical care cap,644,244,58,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,113,90,112,1,0,0,0,0,128,0,-1--1--1,,1|(755,252)|
+10,114,Lookup for hospitalized frac of severe,753,54,69,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+10,115,Hospitalized frac of severe,693,183,61,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,116,114,115,1,0,0,0,0,128,0,-1--1--1,,1|(706,101)|
+1,117,112,115,0,0,0,0,0,128,0,-1--1--1,,1|(663,218)|
+10,118,Fatal frac of severe without hospitalization,922,186,80,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,119,118,42,0,0,0,0,0,128,0,-1--1--1,,1|(959,265)|
+10,120,Days per month,1231,125,39,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,121,120,94,1,0,0,0,0,128,0,-1--1--1,,1|(1188,147)|
+10,122,COVID fatalities per day,846,870,64,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,123,Presympto frac of infected,815,607,56,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,124,2,123,1,0,0,0,0,128,0,-1--1--1,,1|(720,520)|
+1,125,45,123,0,0,0,0,0,128,0,-1--1--1,,1|(809,560)|
+10,126,Contact tracing coverage,416,761,70,18,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,127,126,18,0,0,0,0,0,128,0,-1--1--1,,1|(473,722)|
+10,128,Time,65,265,29,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,129,Months elapsed in year,87,394,58,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,130,128,129,1,0,0,0,0,128,0,-1--1--1,,1|(57,316)|
+10,131,Lookup for effect of season on transmission,153,331,70,27,8,131,0,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+10,132,Effect of season on transmission,164,468,70,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,133,131,132,0,0,0,0,0,128,0,-1--1--1,,1|(157,397)|
+1,134,129,132,1,0,0,0,0,128,0,-1--1--1,,1|(100,418)|
+1,135,132,26,1,0,0,0,0,128,0,-1--1--1,,1|(219,507)|
+10,136,Fatal frac of hospitalized,1004,143,44,18,8,3,0,2,-1,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,137,136,42,1,0,0,0,0,64,0,-1--1--1,,1|(1032,250)|
+10,138,Critical care capacity,434,134,51,32,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+1,139,111,138,0,0,0,0,0,64,1,-1--1--1,,1|(342,135)|
+1,140,138,112,1,0,0,0,0,128,0,-1--1--1,,1|(574,168)|
+12,141,48,420,255,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,142,144,138,4,0,0,22,0,0,0,-1--1--1,,1|(421,186)|
+1,143,144,141,68,0,0,22,2,0,0,-1--1--1,|12||0-0-0,1|(421,233)|
+11,144,48,421,213,8,6,33,3,0,0,4,0,0,0,0,0,0,0,0,0
+10,145,Adjustment in critical care cap,494,213,58,18,40,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,146,138,145,1,0,0,0,0,128,0,-1--1--1,,1|(503,170)|
+10,147,Ideal critical care cap,495,280,44,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,148,Tolerable severe ratio to critical care cap,586,92,70,27,8,131,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,149,148,147,1,0,0,0,0,128,0,-1--1--1,,1|(586,148)|
+1,150,147,145,0,0,0,0,0,128,0,-1--1--1,,1|(494,253)|
+10,151,Time to adjust critical care cap,451,35,58,18,8,131,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,152,151,145,1,0,0,0,0,128,0,-1--1--1,,1|(502,103)|
+1,153,90,147,0,0,0,0,0,128,0,-1--1--1,,1|(675,281)|
+10,154,Max critical care capacity,298,52,60,18,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+1,155,154,145,1,0,0,0,0,128,0,-1--1--1,,1|(392,167)|
+1,156,111,145,1,0,0,0,0,64,0,-1--1--1,,1|(368,221)|
+10,157,Effective reproduction number,1011,584,75,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,158,New infections,883,652,40,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,159,Infected,923,702,38,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,160,159,157,1,0,0,0,0,128,0,-1--1--1,,1|(970,663)|
+1,161,158,157,0,0,0,0,0,128,0,-1--1--1,,1|(940,621)|
+1,162,99,157,1,0,0,0,0,128,0,-1--1--1,,1|(1055,555)|
+1,163,35,157,1,0,0,0,0,128,0,-1--1--1,,1|(943,544)|
+10,164,Susceptible fraction of popn,1055,712,61,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,165,Basic reproduction number,1129,648,69,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,166,157,165,1,0,0,0,0,128,0,-1--1--1,,1|(1053,621)|
+1,167,164,165,1,0,0,0,0,128,0,-1--1--1,,1|(1131,699)|
+12,168,0,1422,588,173,166,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Basic_reproduction_number
+10,169,Social distancing if no fatigue,513,927,63,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,170,64,169,0,0,0,0,0,64,0,-1--1--1,,1|(470,990)|
+1,171,97,169,0,0,0,0,0,64,0,-1--1--1,,1|(605,934)|
+1,172,48,169,0,0,0,0,0,64,0,-1--1--1,,1|(540,968)|
+1,173,169,49,0,0,0,0,0,128,0,-1--1--1,,1|(507,881)|
+10,174,Time to develop isolation fatigue,111,1034,59,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,175,Isolation fatigue,282,925,56,10,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,176,174,177,1,0,0,0,0,128,0,-1--1--1,,1|(209,1040)|
+10,177,Recent distancing affecting isolation fatigue,265,1010,66,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,178,49,177,1,0,0,0,2,129,0,-1--1--1,|12||0-0-0,1|(406,924)|
+1,179,177,175,1,0,0,0,0,128,0,-1--1--1,,1|(270,958)|
+1,180,175,185,1,0,0,0,0,128,0,-1--1--1,,1|(293,873)|
+10,181,Lookup for isolation fatigue,127,947,58,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+1,182,181,175,1,0,0,0,0,128,0,-1--1--1,,1|(202,950)|
+10,183,Max lost resolve from isolation fatigue,144,876,76,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,184,183,185,1,0,0,0,0,128,0,-1--1--1,,1|(220,849)|
+10,185,Lost resolve from isolation fatigue,336,847,63,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,186,185,49,0,0,0,0,0,128,0,-1--1--1,,1|(423,833)|
+12,187,0,2209,582,186,178,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Lost_resolve_from_isolation_fatigue
+1,188,70,19,0,0,0,0,0,128,0,-1--1--1,,1|(726,715)|
+1,189,18,19,0,0,0,0,0,128,0,-1--1--1,,1|(627,673)|
+10,190,Days per month,374,710,57,10,8,3,0,2,-1,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,191,190,18,0,0,0,0,0,128,0,-1--1--1,,1|(453,694)|
+1,192,148,115,0,0,0,0,0,128,0,-1--1--1,,1|(638,137)|
+10,193,Incoming infections,529,343,66,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,194,Incoming infections,547,459,66,18,8,2,1,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,195,193,7,0,0,0,0,0,128,0,-1--1--1,,1|(536,384)|
+10,196,Multiple for max critical care cap,126,48,58,18,8,131,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,197,111,154,1,0,0,0,0,128,0,-1--1--1,,1|(296,84)|
+1,198,196,154,0,0,0,0,0,128,0,-1--1--1,,1|(204,49)|
+10,199,Critical care capacity per million initial,106,190,70,27,8,131,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,200,37,111,1,0,0,0,0,128,0,-1--1--1,,1|(274,217)|
+1,201,199,111,1,0,0,0,0,128,0,-1--1--1,,1|(174,152)|
+10,202,Total popn reference,811,1058,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,203,Recent fatalities per million per day for 50pct distancing,661,1097,87,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,204,203,48,0,0,0,0,0,128,0,-1--1--1,,1|(618,1057)|
+1,205,202,48,0,0,0,0,0,128,0,-1--1--1,,1|(709,1037)|
+12,206,0,1220,48,403,22,8,135,0,18,-1,0,0,0,-1--1--1,0-0-0,|12|B|0-128-0,0,0,0,0,0,0
+A model of Covid-19 in the US with endogenous testing, containment measures, and social distancing
+12,207,0,1484,102,86,27,8,135,0,2,-1,0,0,0,-1--1--1,0-0-0,|12||0-128-0,0,0,0,0,0,0
+Jack Homer, PhD, April 27, 2020 v8, via metasd.com
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Other structure
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,Time,232,315,29,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,2,1,14,0,0,0,0,0,128,0,-1--1--1,,1|(232,293)|
+10,3,Severe frac of infected sympto,142,482,62,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,4,Cumul hospitalized,458,440,51,32,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+1,5,6,4,4,0,0,22,0,0,0,-1--1--1,,1|(372,435)|
+11,6,2202,332,435,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,7,Hospital admissions,332,461,43,18,40,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,8,Becoming symptomatic,140,415,52,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,9,8,7,0,0,0,0,0,128,0,-1--1--1,,1|(233,436)|
+1,10,3,7,0,0,0,0,0,128,0,-1--1--1,,1|(239,471)|
+10,11,Cumul incoming infections,446,231,51,32,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+1,12,13,11,4,0,0,22,0,0,0,-1--1--1,,1|(317,225)|
+11,13,2246,234,225,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,14,Incoming infections,234,251,35,18,40,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,15,Hospitalized frac of severe,146,543,66,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,16,15,7,0,0,0,0,0,128,0,-1--1--1,,1|(232,504)|
+12,17,48,149,222,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,18,13,17,100,0,0,22,0,0,0,-1--1--1,,1|(193,225)|
+12,19,48,250,431,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,20,6,19,100,0,0,22,0,0,0,-1--1--1,,1|(293,435)|
+10,21,Date to start contact tracing,122,789,54,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,22,Contact tracing daily capacity,389,846,56,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,23,Time,151,722,29,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,24,Contact tracing coverage,502,659,56,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,25,Date to end contact tracing,161,863,54,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,26,Contact tracing in effect,294,758,56,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,27,25,26,0,0,0,0,0,64,0,-1--1--1,,1|(221,814)|
+1,28,21,26,0,0,0,0,0,64,0,-1--1--1,,1|(200,775)|
+1,29,23,26,0,0,0,0,0,64,0,-1--1--1,,1|(202,734)|
+10,30,Time to trace and quarantine,321,648,64,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,31,30,24,1,0,0,0,0,128,0,-1--1--1,,1|(425,632)|
+12,32,421464222,947,945,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Contact_tracing_coverage
+12,33,62325942,1333,194,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Cumul_incoming_infections
+12,34,53283694,938,560,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Cumul_hospitalized
+10,35,Date of first incoming infections,127,162,70,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,36,Date of peak incoming infections,198,92,70,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,37,Date of final prevaccine incoming infections,303,41,75,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,38,Incoming infections at peak,377,98,65,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,39,Incoming infections final prevaccine,442,148,70,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,40,35,14,0,0,0,0,0,128,0,-1--1--1,,1|(174,202)|
+1,41,36,14,0,0,0,0,0,128,0,-1--1--1,,1|(213,164)|
+1,42,37,14,0,0,0,0,0,128,0,-1--1--1,,1|(269,143)|
+1,43,38,14,0,0,0,0,0,128,0,-1--1--1,,1|(310,169)|
+1,44,39,14,0,0,0,0,0,128,0,-1--1--1,,1|(343,196)|
+12,45,16715556,941,196,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Incoming_infections
+10,46,Total popn reference,459,940,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,47,Potential cases per million contact traced per day,302,930,72,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,48,47,22,0,0,0,0,0,128,0,-1--1--1,,1|(344,888)|
+1,49,46,22,0,0,0,0,0,128,0,-1--1--1,,1|(428,898)|
+1,50,63,14,0,0,0,0,0,128,0,-1--1--1,,1|(308,281)|
+1,51,66,24,1,0,0,0,2,129,0,-1--1--1,|12||0-0-0,1|(582,686)|
+1,52,26,22,0,0,0,0,0,128,0,-1--1--1,,1|(335,797)|
+10,53,Contact tracing per day,451,763,56,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,54,66,53,1,0,0,0,0,128,0,-1--1--1,,1|(534,733)|
+1,55,22,53,0,0,0,0,0,128,0,-1--1--1,,1|(415,810)|
+1,56,53,24,0,0,0,0,2,129,0,-1--1--1,|12||0-0-0,1|(472,717)|
+1,57,26,24,1,0,0,0,3,64,0,160-160-160,|12||0-0-0,1|(375,693)|
+10,58,Cumul contact tracing,675,848,51,32,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+12,59,48,497,845,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,60,67,58,4,0,0,22,0,0,0,-1--1--1,,1|(590,845)|
+1,61,67,59,100,0,0,22,0,0,0,-1--1--1,,1|(526,845)|
+1,62,53,68,0,0,0,0,0,128,0,-1--1--1,,1|(500,812)|
+10,63,Effect of vaccine on infection probability,378,310,76,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+12,64,4788764,1337,943,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Contact_tracing_per_day
+12,65,231540488,1728,941,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Cumul_contact_tracing
+10,66,Reported new cases per day,615,730,57,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+11,67,1674,551,845,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,68,Contact tracing,551,863,55,10,40,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,69,Days per month,588,928,39,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,70,69,68,0,0,0,0,0,128,0,-1--1--1,,1|(570,897)|
+10,71,Tested frac of sympto,640,612,55,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,72,71,24,1,0,0,0,2,129,0,-1--1--1,|12||0-0-0,1|(567,622)|
+10,73,Cumul reported cases,596,379,61,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,74,Hospitalized frac of cumul cases,601,492,70,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,75,73,74,0,0,0,0,0,128,0,-1--1--1,,1|(597,428)|
+1,76,4,74,1,0,0,0,0,128,0,-1--1--1,,1|(510,493)|
+12,77,3412396,1341,562,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Hospitalized_frac_of_cumul_cases
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Reported cases & fatalities
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,Cumul reported cases,824,587,57,29,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,2,Reported dead frac of cases,977,456,56,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,3,1,2,1,0,0,0,0,128,0,-1--1--1,,1|(903,545)|
+10,4,Tested frac of sympto,471,671,50,18,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,5,Reported frac of cumulative infections,837,697,75,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,6,Reported new cases per day,795,490,52,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,7,10,6,0,0,0,0,0,128,0,-1--1--1,,1|(741,558)|
+1,8,9,1,4,0,0,22,0,0,0,-1--1--1,,1|(735,590)|
+11,9,1674,698,590,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,10,Reported new cases,698,616,52,18,40,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,11,Impending reported new cases,453,578,72,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,12,11,10,1,0,0,0,2,129,0,-1--1--1,|12||0-0-0,1|(567,622)|
+1,13,4,11,0,0,0,0,0,128,0,-1--1--1,,1|(463,631)|
+1,14,56,11,0,0,0,0,0,128,0,-1--1--1,,1|(340,575)|
+10,15,Time to get tested,663,688,42,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,16,15,10,0,0,0,0,0,128,0,-1--1--1,,1|(676,658)|
+10,17,Days per month,703,435,57,10,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,18,17,6,0,0,0,0,0,128,0,-1--1--1,,1|(735,454)|
+10,19,Reported fatalities ratio to new cases,853,394,67,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,20,Past infections,905,779,40,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,21,20,5,1,0,0,0,0,64,0,-1--1--1,,1|(887,740)|
+10,22,Becoming symptomatic,354,481,52,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,23,22,11,0,0,0,0,0,64,0,-1--1--1,,1|(398,524)|
+10,24,New infections,246,504,40,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,25,24,11,0,0,0,0,0,64,0,-1--1--1,,1|(337,536)|
+12,26,48,596,588,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,27,9,26,100,0,0,22,0,0,0,-1--1--1,,1|(649,590)|
+10,28,Severe frac of infected sympto,266,681,62,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,29,28,4,1,0,0,0,0,128,0,-1--1--1,,1|(396,657)|
+1,30,57,4,1,0,0,0,0,128,0,-1--1--1,,1|(482,729)|
+10,31,Infected,777,788,38,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,32,1,5,0,0,0,0,0,128,0,-1--1--1,,1|(829,640)|
+1,33,31,5,1,0,0,0,0,128,0,-1--1--1,,1|(785,747)|
+10,34,Reported dead,815,217,57,29,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+1,35,36,34,4,0,0,22,0,0,0,-1--1--1,,1|(726,220)|
+11,36,5304,689,220,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,37,Reported fatalities,689,246,35,18,40,3,0,0,0,0,0,0,0,0,0,0,0,0
+12,38,48,597,218,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,39,36,38,100,0,0,22,0,0,0,-1--1--1,,1|(645,220)|
+10,40,Fatalities,579,333,43,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,41,Reported frac of fatalities,516,228,59,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,42,41,37,1,0,0,0,0,128,0,-1--1--1,,1|(587,253)|
+1,43,40,37,1,0,0,0,0,128,0,-1--1--1,,1|(638,289)|
+10,44,Reported fatalities per day,740,323,60,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,45,37,44,0,0,0,0,0,128,0,-1--1--1,,1|(710,278)|
+1,46,17,44,0,0,0,0,0,128,0,-1--1--1,,1|(717,389)|
+1,47,44,19,1,0,0,0,0,128,0,-1--1--1,,1|(810,352)|
+1,48,6,19,1,0,0,0,0,128,0,-1--1--1,,1|(833,448)|
+1,49,34,2,1,0,0,0,0,128,0,-1--1--1,,1|(924,310)|
+1,50,51,4,0,0,0,0,0,128,0,-1--1--1,,1|(368,712)|
+10,51,Tested frac of severe sympto,280,749,54,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+12,52,0,1275,730,206,196,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Tested_frac_of_symptomatic
+12,53,0,1720,727,206,201,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_dead_frac_of_cases
+12,54,0,2150,730,202,200,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Dead_frac_of_past_infections
+12,55,0,1724,306,204,197,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Catch_up_reporting_of_past_fatalities
+10,56,Tested frac of presympto,263,575,50,18,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,57,Tested frac of mild and mod sympto,479,759,68,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,58,Dead from COVID,978,177,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,59,Reported frac of dead,811,130,50,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,60,34,59,0,0,0,0,0,128,0,-1--1--1,,1|(813,174)|
+1,61,58,59,0,0,0,0,0,128,0,-1--1--1,,1|(904,156)|
+1,62,41,59,1,0,0,0,3,128,0,160-160-160,|12||0-0-0,1|(643,162)|
+12,63,0,2134,306,201,195,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_frac_of_dead
+12,64,0,1290,299,201,195,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_frac_of_fatalities
+10,65,Catch up reporting of past fatalities per day,319,359,78,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,66,65,37,1,0,0,0,0,128,0,-1--1--1,,1|(518,310)|
+1,67,17,37,1,0,0,0,0,128,0,-1--1--1,,1|(671,361)|
+10,68,Reported frac of fatalities to include probables,277,192,68,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,69,Reported frac of fatalities initial,472,79,59,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,70,69,41,0,0,0,0,0,128,0,-1--1--1,,1|(491,146)|
+10,71,Time,463,278,29,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,72,Reported probable fatalities per day,514,421,69,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,73,65,72,0,0,0,0,0,128,0,-1--1--1,,1|(409,387)|
+1,74,72,10,0,0,0,0,0,128,0,-1--1--1,,1|(600,513)|
+1,75,17,10,0,0,0,0,0,128,0,-1--1--1,,1|(700,514)|
+10,76,Date to change reporting of fatalities,163,289,74,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,77,68,72,1,0,0,0,0,128,0,-1--1--1,,1|(356,229)|
+1,78,40,72,0,0,0,0,0,128,0,-1--1--1,,1|(553,367)|
+1,79,17,72,0,0,0,0,0,64,0,-1--1--1,,1|(621,429)|
+10,80,Potential for catch up reporting of dead,783,55,77,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,81,58,80,0,0,0,0,0,128,0,-1--1--1,,1|(886,119)|
+1,82,59,80,0,0,0,0,0,128,0,-1--1--1,,1|(799,98)|
+1,83,41,80,1,0,0,0,0,128,0,-1--1--1,,1|(639,124)|
+10,84,Avg days for catch up reporting of past probable fatalities,155,428,78,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,85,80,65,1,0,0,0,0,128,0,-1--1--1,,1|(490,167)|
+1,86,84,65,0,0,0,0,0,128,0,-1--1--1,,1|(241,391)|
+1,87,76,65,1,0,0,0,0,128,0,-1--1--1,,1|(201,329)|
+1,88,71,65,1,0,0,0,0,128,0,-1--1--1,,1|(394,300)|
+10,89,Input series for tested frac of mild and mod sympto,406,872,78,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||128-0-0,0,0,0,0,0,0
+10,90,Time,560,879,29,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,91,90,57,0,0,0,0,0,128,0,-1--1--1,,1|(526,828)|
+1,92,89,57,1,0,0,0,0,128,0,-1--1--1,,1|(438,818)|
+10,93,Reported frac of fatalities including probables,301,89,83,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,94,76,41,0,0,0,0,0,128,0,-1--1--1,,1|(340,258)|
+1,95,71,41,0,0,0,0,0,128,0,-1--1--1,,1|(479,261)|
+1,96,93,41,0,0,0,0,0,64,0,-1--1--1,,1|(409,159)|
+1,97,69,68,0,0,0,0,0,128,0,-1--1--1,,1|(388,127)|
+1,98,41,68,0,0,0,0,0,128,0,-1--1--1,,1|(407,212)|
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Calibration graphs and data
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+12,1,0,1678,209,211,191,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Cumul_reported_cases_vs_data
+12,2,0,2155,207,215,194,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_dead_vs_data
+10,3,Cumul reported cases data,139,77,57,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+10,4,Reported dead data,127,145,56,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+10,5,Reported dead frac of cases data,314,101,71,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,6,3,5,0,0,0,0,0,128,0,-1--1--1,,1|(212,86)|
+1,7,4,5,0,0,0,0,0,128,0,-1--1--1,,1|(205,126)|
+12,8,0,2158,610,222,188,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_dead_frac_of_cumul_cases_vs_data
+12,9,0,1639,618,223,209,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Mobility_reduction_vs_data
+10,10,Contacts per day normal,118,507,61,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,11,Infection probability per contact initial,130,432,70,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,12,Reltv contacts per sympto,117,579,51,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+12,13,0,662,630,227,199,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_fatalities_per_day_vs_data
+10,14,Severe frac of infected sympto,112,648,58,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+12,15,0,662,214,226,206,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_new_cases_per_day_vs_data
+10,16,Reported new cases per day data,123,211,70,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+10,17,Reported fatalities per day data,124,275,67,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+10,18,Mobility reduction data,126,343,53,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+12,19,0,1151,635,226,163,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Hospitalized_frac_of_severe_early
+12,20,0,1163,242,213,214,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_fatalities_ratio_to_new_cases_vs_data
+10,21,Reported fatalities ratio to new cases data,306,231,67,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,22,17,21,0,0,0,0,0,128,0,-1--1--1,,1|(208,254)|
+1,23,16,21,0,0,0,0,0,128,0,-1--1--1,,1|(209,219)|
+12,24,0,2151,973,226,147,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Tested_frac_of_symptomatic_early
+12,25,0,1640,978,235,146,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Social_distancing_early
+12,26,0,1154,973,238,145,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Critical_care_capacity_early
+10,27,Lookup for social distancing,125,968,63,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+10,28,Lookup for mobility reduction,301,967,64,18,8,3,0,2,-1,0,0,0,0-0-0,0-0-0,|12||0-0-255,0,0,0,0,0,0
+10,29,Time to adjust critical care cap,308,429,58,18,8,3,0,2,-1,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,30,Fatal frac of hospitalized,307,498,72,18,8,3,0,2,-1,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+12,31,0,669,986,235,147,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_frac_of_fatalities_early
+10,32,Fatal frac of severe without hospitalization,310,579,80,18,8,3,0,2,-1,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,33,Max lost resolve from isolation fatigue,127,1027,76,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,34,Time to develop isolation fatigue,306,1028,59,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,35,Avg days for catch up reporting of past probable fatalities,305,785,78,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,36,Input series for tested frac of mild and mod sympto,124,800,78,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||128-0-0,0,0,0,0,0,0
+10,37,Tested frac of severe sympto,121,715,58,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,38,Recent fatalities per million per day for 50pct distancing,218,892,87,27,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,39,Reported frac of fatalities initial,307,645,59,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,40,Reported frac of fatalities including probables,308,713,65,27,8,3,0,2,-1,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Goodness of fit statistics
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+12,1,0,268,683,228,210,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_fatalities_per_day_vs_data
+12,2,0,266,242,226,212,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_new_cases_per_day_vs_data
+10,3,Residuals reported new cases per day,179,975,74,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+12,4,0,756,686,206,186,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Residuals_reported_fatalities_per_day
+12,5,0,755,249,205,185,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Residuals_reported_new_cases
+12,6,0,1260,683,260,150,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+SSTATS_reported_fatalities_per_day
+12,7,0,1257,252,258,147,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+SSTATS_reported_new_cases
+10,8,Residuals reported fatalities per day,407,976,74,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Economic losses
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,GDP per capita per yr reference,244,169,58,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,2,GDP billions per yr reference,192,283,60,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,3,1,2,0,0,0,0,0,128,0,-1--1--1,,1|(220,219)|
+1,4,5,2,0,0,0,0,0,128,0,-1--1--1,,1|(150,234)|
+10,5,Total popn reference,119,197,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,6,Dollars per billion dollars,155,481,48,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,7,6,2,1,0,0,0,0,128,0,-1--1--1,,1|(138,385)|
+10,8,GDP loss fraction if full distancing,511,144,71,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,9,GDP loss fraction,401,240,36,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,10,31,9,0,0,0,0,2,128,0,-1--1--1,|12||0-0-0,1|(388,169)|
+1,11,8,9,0,0,0,0,0,128,0,-1--1--1,,1|(461,187)|
+1,12,9,28,0,0,0,0,0,128,0,-1--1--1,,1|(366,305)|
+1,13,2,28,0,0,0,0,0,128,0,-1--1--1,,1|(251,328)|
+10,14,Valuation of year of life lost,474,737,61,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,15,14,22,0,0,0,0,0,128,0,-1--1--1,,1|(435,692)|
+1,16,6,22,1,0,0,0,0,128,0,-1--1--1,,1|(234,569)|
+10,17,Cumul lost life value billions,520,609,52,32,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+12,18,48,279,606,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,19,21,17,4,0,0,22,0,0,0,-1--1--1,,1|(429,606)|
+1,20,21,18,100,0,0,22,0,0,0,-1--1--1,,1|(333,606)|
+11,21,48,384,606,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,22,Lost life value billions,384,635,57,21,40,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,23,Cumul GDP loss billions,437,359,51,29,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+12,24,48,252,357,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,25,27,23,4,0,0,22,0,0,0,-1--1--1,,1|(358,357)|
+1,26,27,24,100,0,0,22,0,0,0,-1--1--1,,1|(290,357)|
+11,27,48,324,357,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,28,GDP loss billions,324,384,45,19,40,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,29,Months per year,265,459,58,10,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,30,29,28,0,0,0,0,0,128,0,-1--1--1,,1|(286,431)|
+10,31,Social distancing,379,112,43,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,32,Combined loss billions,378,499,56,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,33,Cumul combined loss billions,524,480,62,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,34,28,32,0,0,0,0,0,128,0,-1--1--1,,1|(347,435)|
+1,35,22,32,0,0,0,0,0,128,0,-1--1--1,,1|(381,572)|
+1,36,23,33,0,0,0,0,0,128,0,-1--1--1,,1|(479,419)|
+1,37,17,33,0,0,0,0,0,128,0,-1--1--1,,1|(521,544)|
+12,38,0,1284,587,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Cumul_combined_loss_billions
+12,39,0,893,216,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+GDP_loss_fraction
+12,40,0,1277,214,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Cumul_GDP_loss_billions
+12,41,0,896,583,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Cumul_lost_life_value_billions
+1,42,43,22,0,0,0,0,0,128,0,-1--1--1,,1|(332,687)|
+10,43,YLL net change from all outcomes,285,736,86,27,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*YLL combined
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,Avg YLL per Covid fatality,161,337,47,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,2,Fatalities,90,288,43,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,3,1,24,0,0,0,0,0,128,0,-1--1--1,,1|(169,275)|
+1,4,2,24,0,0,0,0,0,128,0,-1--1--1,,1|(125,253)|
+10,5,YLL net change from all outcomes,334,62,65,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,6,24,5,1,0,0,0,0,128,0,-1--1--1,,1|(244,124)|
+10,7,YLL from adverse nonCovid outcomes,478,242,73,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,8,7,9,0,0,0,0,0,128,0,-1--1--1,,1|(487,201)|
+10,9,YLL net change from nonCovid outcomes,501,147,75,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,10,9,5,1,0,0,0,0,128,0,-1--1--1,,1|(452,95)|
+10,11,YLL from increased deaths of despair,372,339,81,18,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,12,11,7,0,0,0,0,0,128,0,-1--1--1,,1|(419,295)|
+10,13,YLL from increased other disease deaths,525,382,76,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,14,13,7,0,0,0,0,0,128,0,-1--1--1,,1|(502,314)|
+10,15,YLG from fewer street deaths,622,295,78,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,16,15,9,1,0,0,0,0,128,0,-1--1--1,,1|(600,226)|
+10,17,Cumul YLL from increased other disease deaths,303,713,73,27,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,18,Cumul YLL from increased deaths of despair,112,707,72,27,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,19,Cumul YLL from Covid fatalities,323,180,52,32,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+12,20,48,101,176,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,21,23,19,4,0,0,22,0,0,0,-1--1--1,,1|(229,175)|
+1,22,23,20,100,0,0,22,0,0,0,-1--1--1,,1|(143,175)|
+11,23,48,181,175,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,24,YLL from Covid fatalities,181,201,57,18,40,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,25,Cumul YLL lost from adverse nonCovid outcomes,218,617,73,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,26,18,25,0,0,0,0,0,128,0,-1--1--1,,1|(159,666)|
+1,27,17,25,0,0,0,0,0,128,0,-1--1--1,,1|(265,670)|
+10,28,Cumul YLG from fewer street deaths,440,629,72,27,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,29,Cumul YLL net change from nonCovid outcomes,333,518,82,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,30,28,29,0,0,0,0,0,128,0,-1--1--1,,1|(391,578)|
+1,31,25,29,0,0,0,0,0,128,0,-1--1--1,,1|(269,572)|
+10,32,Cumul YLL net change from all outcomes,300,419,56,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,33,19,32,1,0,0,0,0,128,0,-1--1--1,,1|(264,332)|
+1,34,29,32,0,0,0,0,0,128,0,-1--1--1,,1|(318,475)|
+10,35,Fractional increase in suicides if full distancing,107,830,83,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,36,Time for distancing to impact deaths of despair,140,1082,83,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,37,Fractional increase in family homicides if full distancing,294,831,83,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,38,Fractional increase in accidental drug OD deaths if full distancing,497,833,86,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,39,Fractional increase in alcohol OD deaths if full distancing,699,833,95,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,40,Time for distancing to impact chronic disease,346,1071,90,18,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,41,Fractional increase in chronic respir disease deaths if full distancing,329,915,87,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,42,Fractional increase in diabetes deaths if full distancing,522,918,83,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,43,Fractional increase in CVD and hypertn deaths if full distancing,130,914,96,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,44,Fractional decrease in nonfamily homicides if full distancing,337,1002,92,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,45,Fractional decrease in vehicle accident deaths if full mobility reduction,134,1000,92,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,46,Fractional increase in other acute infect deaths if full distancing,706,917,87,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+12,47,3345788,1015,283,208,228,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+YLL_net_change_1_run
+12,48,4001122,1438,285,190,229,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+YLL_from_increased_deaths_of_despair_stack
+12,49,5508412,1070,753,216,228,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Cumul_YLL_net_change_1_run
+12,50,10881706,1878,284,201,232,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+YLL_from_increased_other_disease_deaths_stack
+12,51,5246096,1643,760,202,229,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+YLG_from_fewer_street_deaths_stack
+10,52,Time for distancing to impact other acute infections,553,1073,84,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Deaths of despair
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,Suicides per day,390,258,47,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,2,Months per year,261,310,46,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,3,Days per month,257,358,39,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,4,Days per year,413,337,51,10,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,5,3,4,0,0,0,0,0,128,0,-1--1--1,,1|(322,349)|
+1,6,2,4,0,0,0,0,0,128,0,-1--1--1,,1|(327,321)|
+1,7,4,1,1,0,0,0,0,128,0,-1--1--1,,1|(404,297)|
+10,8,Accidental drug OD deaths per day,395,430,72,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,9,4,8,1,0,0,0,0,128,0,-1--1--1,,1|(406,377)|
+10,10,Fractional increase in suicides,438,162,41,27,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,11,10,1,0,0,0,0,0,64,0,-1--1--1,,1|(415,208)|
+10,12,Suicides per year normal,138,254,47,18,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,13,12,1,1,0,0,0,0,64,0,-1--1--1,,1|(276,229)|
+10,14,Accidental drug OD deaths per year normal,153,431,72,27,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,15,14,8,0,0,0,0,0,64,0,-1--1--1,,1|(267,430)|
+10,16,Fractional increase in accidental drug OD deaths,410,522,79,27,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,17,16,8,0,0,0,0,0,64,0,-1--1--1,,1|(402,478)|
+10,18,Suicides per million normal,140,184,50,18,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,19,18,12,0,0,0,0,0,0,0,-1--1--1,,1|(139,212)|
+10,20,Total popn reference,131,328,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,21,20,12,0,0,0,0,0,0,0,-1--1--1,,1|(133,297)|
+10,22,Accidental drug OD deaths per million normal,144,571,72,27,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,23,22,14,0,0,0,0,0,0,0,-1--1--1,,1|(147,507)|
+1,24,20,14,0,0,0,0,0,0,0,-1--1--1,,1|(138,368)|
+10,25,Fractional increase in accidental drug OD deaths if full distancing,420,618,97,27,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,26,25,16,0,0,0,0,0,0,0,-1--1--1,,1|(415,576)|
+10,27,Social distancing,613,528,43,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,28,33,16,1,0,0,0,0,0,0,-1--1--1,,1|(571,448)|
+10,29,Fractional increase in suicides if full distancing,423,67,88,18,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,30,29,10,0,0,0,0,0,0,0,-1--1--1,,1|(427,103)|
+10,31,Time for distancing to impact deaths of despair,750,538,79,27,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,32,33,10,1,0,0,0,0,0,0,-1--1--1,,1|(606,261)|
+10,33,Social distancing affecting deaths of despair,660,393,67,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,34,27,33,0,0,0,0,2,129,0,-1--1--1,|12||0-0-0,1|(632,471)|
+1,35,31,33,0,0,0,0,0,128,0,-1--1--1,,1|(708,471)|
+10,36,Family homicides per year normal,1209,267,65,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,37,Fractional increase in family homicides if full distancing,1019,125,79,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,38,Alcohol OD deaths per year normal,1212,433,69,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,39,Fractional increase in alcohol OD deaths if full distancing,917,589,85,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,40,Family homicides per million normal,1206,175,65,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,41,Alcohol OD deaths per million normal,1211,518,69,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,42,Total popn reference,1211,359,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,43,40,36,0,0,0,0,0,128,0,-1--1--1,,1|(1206,214)|
+1,44,42,36,0,0,0,0,0,128,0,-1--1--1,,1|(1210,319)|
+1,45,42,38,0,0,0,0,0,128,0,-1--1--1,,1|(1211,389)|
+1,46,41,38,0,0,0,0,0,128,0,-1--1--1,,1|(1211,482)|
+10,47,Fractional increase in family homicides,904,188,70,18,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,48,Fractional increase in alcohol OD deaths,914,496,79,18,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,49,33,48,1,0,0,0,0,128,0,-1--1--1,,1|(774,462)|
+1,50,37,47,0,0,0,0,0,128,0,-1--1--1,,1|(959,157)|
+1,51,39,48,0,0,0,0,0,128,0,-1--1--1,,1|(915,544)|
+1,52,33,47,1,0,0,0,0,128,0,-1--1--1,,1|(763,263)|
+10,53,Family homicides per day,1004,268,65,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,54,Alcohol OD deaths per day,1012,430,55,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,55,47,53,0,0,0,0,0,128,0,-1--1--1,,1|(948,223)|
+1,56,36,53,0,0,0,0,0,128,0,-1--1--1,,1|(1113,267)|
+1,57,38,54,0,0,0,0,0,128,0,-1--1--1,,1|(1111,431)|
+1,58,48,54,0,0,0,0,0,128,0,-1--1--1,,1|(956,466)|
+10,59,Days per year,1022,338,60,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,60,59,53,0,0,0,0,0,128,0,-1--1--1,,1|(1015,313)|
+1,61,59,54,0,0,0,0,0,128,0,-1--1--1,,1|(1017,373)|
+10,62,Deaths of despair per day,667,193,58,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,63,1,62,0,0,0,0,0,128,0,-1--1--1,,1|(516,228)|
+1,64,53,62,1,0,0,0,0,128,0,-1--1--1,,1|(825,219)|
+1,65,54,62,1,0,0,0,0,128,0,-1--1--1,,1|(882,324)|
+1,66,8,62,0,0,0,0,0,128,0,-1--1--1,,1|(525,316)|
+12,67,0,714,831,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Deaths_of_despair_per_day
+10,68,Deaths of despair per day normal,582,120,66,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,69,62,77,1,0,0,0,0,128,0,-1--1--1,,1|(750,167)|
+1,70,68,77,0,0,0,0,0,128,0,-1--1--1,,1|(686,98)|
+1,71,62,68,0,0,0,0,0,128,1,-1--1--1,,1|(629,160)|
+10,72,Cumul added deaths of despair,960,44,72,30,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+12,73,48,715,44,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,74,76,72,4,0,0,22,0,0,0,-1--1--1,,1|(849,48)|
+1,75,76,73,100,0,0,22,0,0,0,-1--1--1,,1|(762,48)|
+11,76,48,805,48,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,77,Increase in deaths of despair,805,74,67,18,40,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,78,Days per month,623,50,39,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,79,78,77,1,0,0,0,0,128,0,-1--1--1,,1|(696,70)|
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*YLL from deaths of despair
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,Increase in monthly suicides,377,270,65,26,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,2,Suicides per year normal,144,266,52,18,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,3,Months per year,581,449,46,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,4,3,1,0,0,0,0,0,128,0,-1--1--1,,1|(488,368)|
+1,5,2,1,0,0,0,0,0,128,0,-1--1--1,,1|(247,266)|
+10,6,Avg YLL per suicide,206,176,45,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,7,YLL from increased suicides,381,188,69,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,8,6,7,0,0,0,0,0,128,0,-1--1--1,,1|(274,180)|
+1,9,1,7,0,0,0,0,0,128,0,-1--1--1,,1|(378,231)|
+1,10,7,51,1,0,0,0,0,128,0,-1--1--1,,1|(457,127)|
+10,11,Increase in monthly family homicides,825,303,79,25,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,12,Family homicides per year normal,1028,273,69,18,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,13,12,11,0,0,0,0,0,128,0,-1--1--1,,1|(938,285)|
+10,14,Avg YLL per family homicide,1024,183,57,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,15,YLL from increased family homicides,812,186,71,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,16,14,15,0,0,0,0,0,128,0,-1--1--1,,1|(931,183)|
+1,17,11,15,0,0,0,0,0,128,0,-1--1--1,,1|(819,247)|
+1,18,3,11,0,0,0,0,0,128,0,-1--1--1,,1|(690,383)|
+1,19,15,51,1,0,0,0,0,128,0,-1--1--1,,1|(756,156)|
+10,20,Increase in monthly drug OD deaths,397,564,69,18,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,21,Accidental drug OD deaths per year normal,161,545,77,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,22,21,20,0,0,0,0,0,128,0,-1--1--1,,1|(276,553)|
+10,23,Avg YLL per accidental drug overdose death,147,435,57,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,24,YLL from increased drug OD deaths,370,460,71,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,25,23,24,0,0,0,0,0,128,0,-1--1--1,,1|(244,445)|
+1,26,20,24,0,0,0,0,0,128,0,-1--1--1,,1|(385,518)|
+1,27,24,51,1,0,0,0,0,128,0,-1--1--1,,1|(487,270)|
+1,28,3,20,0,0,0,0,0,128,0,-1--1--1,,1|(494,502)|
+10,29,Increase in monthly alcohol OD deaths,726,579,69,18,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,30,Alcohol OD deaths per year normal,992,545,73,18,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,31,30,29,0,0,0,0,0,128,0,-1--1--1,,1|(863,561)|
+10,32,Avg YLL per alcohol OD death,996,443,64,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,33,YLL from increased alcohol OD deaths,781,460,71,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,34,32,33,0,0,0,0,0,128,0,-1--1--1,,1|(898,450)|
+1,35,29,33,0,0,0,0,0,128,0,-1--1--1,,1|(750,525)|
+1,36,3,29,0,0,0,0,0,128,0,-1--1--1,,1|(647,509)|
+1,37,33,51,1,0,0,0,0,128,0,-1--1--1,,1|(758,290)|
+10,38,Cumul YLL from increased deaths of despair,817,73,73,29,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,39,Fractional increase in suicides,286,360,42,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,40,39,1,0,0,0,0,0,128,0,-1--1--1,,1|(326,319)|
+10,41,Fractional increase in accidental drug OD deaths,196,622,83,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,42,41,20,0,0,0,0,0,128,0,-1--1--1,,1|(299,592)|
+10,43,Fractional increase in family homicides,1022,341,75,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,44,Fractional increase in alcohol OD deaths,991,616,81,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,45,44,29,0,0,0,0,0,128,0,-1--1--1,,1|(859,597)|
+1,46,43,11,0,0,0,0,0,128,0,-1--1--1,,1|(932,323)|
+12,47,48,557,64,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,48,50,38,4,0,0,22,0,0,0,-1--1--1,,1|(704,64)|
+1,49,50,47,100,0,0,22,0,0,0,-1--1--1,,1|(609,64)|
+11,50,48,658,64,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,51,YLL from increased deaths of despair,658,90,71,18,40,3,0,0,0,0,0,0,0,0,0,0,0,0
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Deaths from specified other disease
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,CVD and hypertn deaths per million normal,140,184,65,27,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,2,Other acute infect deaths per million normal,144,571,65,27,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,3,Chronic respir deaths per million normal,1180,175,65,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,4,Diabetes deaths per million normal,1206,565,65,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,5,Chronic respir disease deaths per year normal,1183,285,84,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,6,Diabetes deaths per year normal,1180,457,61,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,7,CVD and hypertn deaths per year normal,147,289,63,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,8,Other acute infect deaths per year normal,156,480,64,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,9,1,7,0,0,0,0,0,128,0,-1--1--1,,1|(142,229)|
+1,10,3,5,0,0,0,0,0,128,0,-1--1--1,,1|(1180,227)|
+1,11,4,6,0,0,0,0,0,128,0,-1--1--1,,1|(1194,517)|
+1,12,2,8,0,0,0,0,0,128,0,-1--1--1,,1|(148,532)|
+10,13,Total popn reference,150,393,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,14,Total popn reference,1202,380,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,15,14,6,0,0,0,0,0,128,0,-1--1--1,,1|(1192,411)|
+1,16,14,5,0,0,0,0,0,128,0,-1--1--1,,1|(1194,339)|
+1,17,13,8,0,0,0,0,0,128,0,-1--1--1,,1|(152,425)|
+1,18,13,7,0,0,0,0,0,128,0,-1--1--1,,1|(148,352)|
+10,19,Social distancing affecting chronic disease deaths,690,399,63,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,20,Social distancing,596,555,43,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,21,Time for distancing to impact chronic disease,754,536,85,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,22,20,19,0,0,0,0,2,129,0,-1--1--1,|12||0-0-0,1|(635,487)|
+1,23,21,19,0,0,0,0,0,128,0,-1--1--1,,1|(727,478)|
+10,24,Time for distancing to impact other acute infections,579,768,79,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,25,Social distancing affecting acute disease deaths,576,668,85,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,26,24,25,0,0,0,0,0,128,0,-1--1--1,,1|(577,724)|
+1,27,20,25,0,0,0,0,2,129,0,-1--1--1,|12||0-0-0,1|(587,600)|
+10,28,Fractional increase in chronic respir disease deaths if full distancing,891,89,82,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,29,Fractional increase in diabetes deaths if full distancing,957,637,79,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,30,Fractional increase in CVD and hypertn deaths if full distancing,437,68,96,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,31,Fractional increase in other acute infect deaths if full distancing,295,668,95,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,32,Fractional increase in CVD and hypertn deaths,428,178,79,27,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,33,Fractional increase in other acute infect deaths,408,578,79,27,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,34,Fractional increase in chronic respir disease deaths,904,188,81,27,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,35,Fractional increase in diabetes deaths,966,543,70,18,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,36,30,32,0,0,0,0,0,128,0,-1--1--1,,1|(433,116)|
+1,37,28,34,0,0,0,0,0,128,0,-1--1--1,,1|(896,131)|
+1,38,29,35,0,0,0,0,0,128,0,-1--1--1,,1|(960,592)|
+1,39,31,33,0,0,0,0,0,128,0,-1--1--1,,1|(345,627)|
+1,40,25,33,0,0,0,0,0,128,0,-1--1--1,,1|(498,626)|
+1,41,19,35,0,0,0,0,0,128,0,-1--1--1,,1|(829,472)|
+1,42,19,32,0,0,0,0,0,128,0,-1--1--1,,1|(564,293)|
+1,43,19,34,0,0,0,0,0,128,0,-1--1--1,,1|(791,298)|
+10,44,CVD and hypertn deaths per day,390,279,63,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,45,Other acute infect deaths per day,389,453,64,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,46,Chronic respir disease deaths per day,964,286,71,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,47,Specified other disease deaths per day,671,228,71,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,48,44,47,0,0,0,0,0,128,0,-1--1--1,,1|(519,255)|
+1,49,46,47,1,0,0,0,0,128,0,-1--1--1,,1|(808,248)|
+1,50,45,47,0,0,0,0,0,128,0,-1--1--1,,1|(518,349)|
+10,51,Days per year,968,367,60,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,52,Days per year,366,367,60,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,53,7,44,0,0,0,0,0,128,0,-1--1--1,,1|(261,284)|
+1,54,52,44,0,0,0,0,0,128,0,-1--1--1,,1|(374,333)|
+1,55,32,44,0,0,0,0,0,128,0,-1--1--1,,1|(409,226)|
+1,56,8,45,0,0,0,0,0,128,0,-1--1--1,,1|(265,467)|
+1,57,33,45,0,0,0,0,0,128,0,-1--1--1,,1|(398,517)|
+1,58,5,46,0,0,0,0,0,128,0,-1--1--1,,1|(1074,285)|
+1,59,51,46,0,0,0,0,0,128,0,-1--1--1,,1|(966,341)|
+10,60,Diabetes deaths per day,946,446,61,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,61,51,60,0,0,0,0,0,128,0,-1--1--1,,1|(960,395)|
+1,62,6,60,0,0,0,0,0,128,0,-1--1--1,,1|(1069,451)|
+1,63,35,60,0,0,0,0,0,128,0,-1--1--1,,1|(957,501)|
+1,64,52,45,0,0,0,0,0,64,0,-1--1--1,,1|(374,399)|
+1,65,34,46,0,0,0,0,0,128,0,-1--1--1,,1|(929,230)|
+1,66,60,47,0,0,0,0,0,128,0,-1--1--1,,1|(819,345)|
+12,67,0,262,906,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Deaths_from_specified_other_disease_per_day
+10,68,Specified other disease deaths per day normal,584,154,71,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,69,Increase in other disease deaths,687,67,60,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,70,68,69,0,0,0,0,0,128,0,-1--1--1,,1|(634,110)|
+1,71,47,68,0,0,0,0,0,128,1,-1--1--1,,1|(632,195)|
+1,72,47,69,0,0,0,0,0,128,0,-1--1--1,,1|(678,149)|
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*YLL from specified other disease
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,Months per year,693,464,46,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,2,Increase in monthly chronic respir disease deaths,947,366,81,27,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,3,Chronic respir disease deaths per year normal,1189,305,71,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,4,3,2,0,0,0,0,0,128,0,-1--1--1,,1|(1079,331)|
+10,5,Avg YLL per chronic respir disease death,1187,214,75,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,6,YLL from increased chronic respir disease deaths,943,224,81,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,7,5,6,0,0,0,0,0,128,0,-1--1--1,,1|(1074,218)|
+1,8,2,6,0,0,0,0,0,128,0,-1--1--1,,1|(945,301)|
+1,9,1,2,0,0,0,0,0,128,0,-1--1--1,,1|(801,422)|
+10,10,Increase in monthly diabetes deaths,929,608,69,18,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,11,Diabetes deaths per year normal,1160,582,66,18,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,12,11,10,0,0,0,0,0,128,0,-1--1--1,,1|(1052,593)|
+10,13,Avg YLL per diabetes death,1163,491,55,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,14,YLL from increased diabetes deaths,942,482,71,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,15,13,14,0,0,0,0,0,128,0,-1--1--1,,1|(1067,486)|
+1,16,10,14,0,0,0,0,0,128,0,-1--1--1,,1|(934,551)|
+1,17,1,10,0,0,0,0,0,128,0,-1--1--1,,1|(804,532)|
+1,18,6,51,0,0,0,0,0,128,0,-1--1--1,,1|(826,190)|
+1,19,14,51,1,0,0,0,0,128,0,-1--1--1,,1|(795,380)|
+10,20,Increase in monthly CVD and hypertn deaths,448,370,69,27,8,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,21,CVD and hypertn deaths per year normal,226,324,68,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,22,21,20,0,0,0,0,0,128,0,-1--1--1,,1|(329,345)|
+10,23,Avg YLL per CVD and hypertn death,234,216,66,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,24,YLL from increased CVD and hypertn deaths,460,223,71,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,25,23,24,0,0,0,0,0,128,0,-1--1--1,,1|(337,218)|
+1,26,20,24,0,0,0,0,0,128,0,-1--1--1,,1|(452,303)|
+1,27,1,20,0,0,0,0,0,128,0,-1--1--1,,1|(588,424)|
+1,28,24,51,0,0,0,0,0,128,0,-1--1--1,,1|(581,192)|
+10,29,Cumul YLL from increased other disease deaths,882,124,63,33,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,30,Increase in other acute infect deaths,517,622,69,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,31,Other acute infect deaths per year normal,275,613,89,18,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,32,31,30,0,0,0,0,0,128,0,-1--1--1,,1|(399,617)|
+10,33,Avg YLL per other acute infect death,226,519,66,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,34,YLL from increased other acute infect deaths,440,512,71,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,35,33,34,0,0,0,0,0,128,0,-1--1--1,,1|(323,515)|
+1,36,30,34,0,0,0,0,0,128,0,-1--1--1,,1|(485,577)|
+1,37,1,30,0,0,0,0,0,64,0,-1--1--1,,1|(610,538)|
+1,38,34,51,1,0,0,0,0,128,0,-1--1--1,,1|(573,392)|
+10,39,Fractional increase in CVD and hypertn deaths,218,395,83,27,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,40,Fractional increase in chronic respir disease deaths,1184,412,83,27,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,41,Fractional increase in other acute infect deaths,312,692,83,27,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,42,Fractional increase in diabetes deaths,1173,671,75,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,43,39,20,0,0,0,0,0,128,0,-1--1--1,,1|(333,382)|
+1,44,41,30,0,0,0,0,0,128,0,-1--1--1,,1|(420,654)|
+1,45,40,2,0,0,0,0,0,128,0,-1--1--1,,1|(1071,389)|
+1,46,42,10,0,0,0,0,0,128,0,-1--1--1,,1|(1057,640)|
+12,47,48,619,137,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,48,50,29,4,0,0,22,0,0,0,-1--1--1,,1|(770,132)|
+1,49,50,47,100,0,0,22,0,0,0,-1--1--1,,1|(669,132)|
+11,50,48,716,132,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,51,YLL from increased other disease deaths,716,158,77,18,40,3,0,0,0,0,0,0,0,0,0,0,0,0
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Street deaths
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,Vehicle accident deaths per million normal,162,163,65,27,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,2,Nonfamily homicide deaths per million normal,173,556,72,27,8,3,0,2,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,3,Total popn reference,172,372,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,4,Fractional decrease in vehicle accident deaths,428,178,85,18,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,5,Fractional decrease in nonfamily homicide deaths,408,578,82,27,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+10,6,Vehicle accident deaths per day,390,279,61,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,7,Nonfamily homicide deaths per day,389,453,72,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,8,Street deaths per day,506,351,49,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,9,6,8,0,0,0,0,0,128,0,-1--1--1,,1|(442,311)|
+1,10,7,8,0,0,0,0,0,128,0,-1--1--1,,1|(441,406)|
+10,11,Days per year,366,367,60,10,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,12,11,6,0,0,0,0,0,128,0,-1--1--1,,1|(374,333)|
+1,13,4,6,0,0,0,0,0,128,0,-1--1--1,,1|(411,222)|
+1,14,5,7,0,0,0,0,0,128,0,-1--1--1,,1|(398,517)|
+1,15,11,7,0,0,0,0,0,64,0,-1--1--1,,1|(374,399)|
+10,16,Nonfamily homicides per year normal,167,462,70,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,17,Fractional decrease in nonfamily homicides if full distancing,410,696,92,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,18,Vehicle accident deaths per year normal,165,274,61,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,19,Fractional decrease in vehicle accident deaths if full mobility reduction,438,83,92,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,20,1,18,0,0,0,0,0,128,0,-1--1--1,,1|(162,211)|
+1,21,3,16,0,0,0,0,0,128,0,-1--1--1,,1|(169,405)|
+1,22,2,16,0,0,0,0,0,128,0,-1--1--1,,1|(170,515)|
+1,23,3,18,0,0,0,0,0,128,0,-1--1--1,,1|(169,334)|
+10,24,Social distancing,578,631,43,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,25,19,4,0,0,0,0,0,128,0,-1--1--1,,1|(433,128)|
+1,26,17,5,0,0,0,0,0,128,0,-1--1--1,,1|(409,643)|
+1,27,24,5,0,0,0,0,0,128,0,-1--1--1,,1|(519,612)|
+1,28,29,4,0,0,0,0,0,128,0,-1--1--1,,1|(550,143)|
+10,29,Mobility reduction,636,119,39,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,30,18,6,0,0,0,0,0,128,0,-1--1--1,,1|(270,275)|
+1,31,16,7,0,0,0,0,0,128,0,-1--1--1,,1|(270,457)|
+12,32,0,884,588,187,176,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Street_deaths_per_day
+10,33,Street deaths per day normal,638,267,64,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,34,Decrease in street deaths,689,352,48,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,35,33,34,0,0,0,0,0,128,0,-1--1--1,,1|(659,303)|
+1,36,8,33,0,0,0,0,0,128,1,-1--1--1,,1|(565,312)|
+1,37,8,34,0,0,0,0,0,128,0,-1--1--1,,1|(591,351)|
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*YLG from fewer street deaths
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,Decrease in monthly nonfamily homicides,760,294,74,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,2,Nonfamily homicides per year normal,940,350,70,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,3,2,1,0,0,0,0,0,128,0,-1--1--1,,1|(850,322)|
+10,4,Avg YLL per nonfamily homicide,933,244,70,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,5,YLG from fewer nonfamily homicides,758,190,74,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,6,4,5,0,0,0,0,0,128,0,-1--1--1,,1|(852,219)|
+1,7,1,5,0,0,0,0,0,128,0,-1--1--1,,1|(759,248)|
+1,8,5,29,1,0,0,0,0,128,0,-1--1--1,,1|(661,171)|
+10,9,Months per year,568,272,46,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+1,10,9,1,0,0,0,0,0,128,0,-1--1--1,,1|(643,280)|
+10,11,Decrease in monthly vehicle accident deaths,378,294,85,18,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+10,12,Vehicle accident deaths per year normal,191,359,66,27,8,2,0,3,0,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,13,12,11,0,0,0,0,0,128,0,-1--1--1,,1|(284,326)|
+10,14,Avg YLL per vehicle accident death,181,226,72,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,15,YLG from fewer vehicle accident deaths,375,186,59,27,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,16,14,15,0,0,0,0,0,128,0,-1--1--1,,1|(277,206)|
+1,17,11,15,0,0,0,0,0,128,0,-1--1--1,,1|(376,251)|
+1,18,9,11,0,0,0,0,0,128,0,-1--1--1,,1|(499,279)|
+1,19,15,29,0,0,0,0,0,128,0,-1--1--1,,1|(490,150)|
+10,20,Cumul YLG from fewer street deaths,744,89,66,27,3,131,0,0,0,0,0,0,0,0,0,0,0,0
+10,21,Fractional decrease in vehicle accident deaths,375,391,78,27,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,22,Fractional decrease in nonfamily homicide deaths,750,410,86,27,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+1,23,21,11,0,0,0,0,0,128,0,-1--1--1,,1|(375,344)|
+1,24,22,1,0,0,0,0,0,128,0,-1--1--1,,1|(754,354)|
+12,25,48,549,85,10,8,0,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,26,28,20,4,0,0,22,0,0,0,-1--1--1,,1|(651,85)|
+1,27,28,25,100,0,0,22,0,0,0,-1--1--1,,1|(585,85)|
+11,28,48,618,85,6,8,34,3,0,0,1,0,0,0,0,0,0,0,0,0
+10,29,YLG from fewer street deaths,618,111,57,18,40,3,0,0,0,0,0,0,0,0,0,0,0,0
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Scenario testing
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,75,0
+10,1,Fractional increase in suicides if full distancing,348,625,88,18,8,3,0,2,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,2,Time for distancing to impact deaths of despair,352,922,79,27,8,3,0,2,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,3,Fractional increase in family homicides if full distancing,349,701,79,27,8,3,0,2,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,4,Fractional increase in accidental drug OD deaths if full distancing,349,772,97,27,8,3,0,2,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,5,Fractional increase in alcohol OD deaths if full distancing,351,847,85,27,8,3,0,2,0,0,0,0,64-128-128,0-0-0,|12||255-0-0,0,0,0,0,0,0
+12,6,8326208,1017,279,193,218,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Deaths_from_COVID_2_runs
+10,7,Date to start contact tracing,133,782,54,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,8,Date to end contact tracing,133,852,54,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,9,Max lost resolve from isolation fatigue,131,628,76,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,10,Time of vaccine availability,134,919,58,18,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,11,Vaccine effectiveness and reach,138,993,64,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+10,12,Potential cases per million contact traced per day,132,705,77,27,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0,0,0,0,0,0,0
+12,13,2950688,1818,277,192,218,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Deaths_of_despair_2_runs
+12,14,1576472,1417,278,189,221,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Social_distancing_2_runs
+12,15,3738924,231,281,188,221,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Reported_new_cases_2_runs
+12,16,188418198,1082,650,562,112,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Cumulative_outcomes_Run_1
+12,17,5246282,1087,902,569,114,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Cumulative_outcomes_Run_2
+12,18,724392,621,280,188,221,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Contact_tracing_coverage_2_runs
+10,19,Dead from COVID,344,1032,44,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,20,Cumul reported cases,457,1064,61,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+10,21,Contact tracing per day,238,1075,60,18,8,2,0,3,-1,0,0,0,64-128-128,0-0-0,|12||64-128-128,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:v8 run 2.vdfx
+8:Covid19USv8.vgd
+9:v8 run 2
+22:day,days
+22:month,months,mos
+22:year,years,yrs
+15:0,0,0,0,0,0
+19:75,0
+27:0,
+34:0,
+4:Time
+5:Contact tracing per day
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+72:0
+73:0
+76:0
+77:0
+78:0
+79:0
+80:0
+81:0
+24:0
+25:24
+26:24
+75:
+43:

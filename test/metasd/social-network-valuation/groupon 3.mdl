@@ -1,0 +1,787 @@
+{UTF-8}
+:MACRO: REPORT( flow, reporting interval )
+REPORT = INTEG( flow-outflow, flow*reporting interval )
+	~	flow*reporting interval
+	~		|
+
+outflow = DELAY FIXED(flow,reporting interval,flow)
+	~	flow
+	~		|
+
+:END OF MACRO:
+customer saturation effect=
+	1-(cumulative customers/potential customers)
+	~	Dmnl
+	~		|
+
+repeat saturation effect=
+	1-Repeaters/potential repeaters
+	~	Dmnl
+	~		|
+
+subscriber saturation effect=
+	1-(subscribers/potential subscribers)
+	~	Dmnl
+	~		|
+
+Repeating=
+	Customers*Fractional Repeat Rate*repeat saturation effect
+	~	users/Month
+	~		|
+
+fraction ever repeating=
+	1
+	~	fraction [0,1]
+	~		|
+
+Customers= INTEG (
+	Trying-Repeating,
+		0)
+	~	users
+	~		|
+
+potential repeaters=
+	fraction ever repeating*potential customers
+	~	users
+	~		|
+
+"$ per k$"==
+	1000
+	~	$/K$
+	~		|
+
+now=
+	36
+	~	Month
+	~		|
+
+Cost of Revenue=
+	Revenue*Frac Cost of Revenue
+	~	$/Month
+	~		|
+
+cost per customer=
+	0
+	~	$/user/Month [0,1]
+	~		|
+
+cost per new subscriber=
+	1
+	~	$/user [0,10]
+	~		|
+
+cost per repeat=
+	0
+	~	$/user [0,1]
+	~		|
+
+cost per subscriber=
+	0
+	~	$/(user*Month) [0,1]
+	~		|
+
+cost per transaction=
+	5
+	~	$/user [0,10]
+	~		|
+
+cost per trial=
+	0
+	~	$/user [0,10]
+	~		|
+
+months per year==
+	12
+	~	months/year
+	~		|
+
+data revenue[Interval]:=
+	data revenue k$[Interval]*"$ per k$"
+	~	$
+	~		|
+
+current interest rate=
+	0
+	~	fraction/year
+	~		|
+
+potential customers=
+	fraction ever buying*potential subscribers
+	~	users
+	~		|
+
+projected dividend payout=
+	1
+	~	fraction
+	~		|
+
+Future Repeat Rate=
+	0.2
+	~	fraction/Month [0,1]
+	~		|
+
+groupon frac err=
+	0.1
+	~	fraction
+	~		|
+
+data groupons sold[Qx3]:=
+	GET XLS DATA('?groupon data','users','4','d20') ~~|
+data groupons sold[Ann]:=
+	GET XLS DATA('?groupon data','users','4','d19')
+	~	users
+	~		|
+
+dividend PV= INTEG (
+	discounted dividend,
+		0)
+	~	$
+	~		|
+
+risk premium=
+	0.05
+	~	fraction/year
+	~		|
+
+"data SG&M cost k$"[Interval]:=
+	GET XLS DATA('?groupon data','income','5','r14')
+	~	K$
+	~		|
+
+"data SG&M cost"[Interval]:=
+	"data SG&M cost k$"[Interval]*"$ per k$"
+	~	$
+	~		|
+
+Reported Oper Profit[Interval]=
+	REPORT(Operating Profit,Reporting Period[Interval])
+	~	$
+	~		|
+
+Discount factor= INTEG (
+	-discounting,
+		1)
+	~	fraction
+	~		|
+
+discount rate=
+	interest rate+risk premium
+	~	fraction/year
+	~		|
+
+discounted dividend=
+	STEP(1,now)*Discount factor*projected dividend
+	~	$/Month
+	~		|
+
+discounting=
+	STEP(1,now)*Discount factor*discount rate/months per year
+	~	fraction/Month
+	~		|
+
+Groupon Value=
+	dividend PV+terminal value
+	~	$
+	~		|
+
+groupon weight[Qx3]=
+	1/(data groupons sold[Qx3]*groupon frac err*(data groupons sold[Qx3]/reference scale\
+		)^err scaling) ~~|
+groupon weight[Ann]=
+	1/(data groupons sold[Ann]*cust frac err*(data groupons sold[Ann]/reference scale)^err scaling\
+		)
+	~	1/users
+	~		|
+
+"SGA&M Cost"=
+	Groupons sold*cost per transaction
+	+cumulative customers*cost per customer
+	+subscribers*cost per subscriber
+	+Adding*cost per new subscriber
+	+Trying*cost per trial
+	+Total Repeating*cost per repeat
+	~	$/Month
+	~		|
+
+Frac Cost of Revenue=
+	0.15
+	~	fraction
+	~		|
+
+fraction ever buying=
+	0.5
+	~	fraction [0,1]
+	~		|
+
+interest rate= INTEG (
+	interest rate chg,
+		current interest rate)
+	~	fraction/year
+	~		|
+
+subscribers=
+	Lurkers+cumulative customers
+	~	users
+	~		|
+
+interest rate reversion time=
+	5
+	~	year
+	~		|
+
+terminal value=
+	discounted dividend*months per year/discount rate
+	~	$
+	~		|
+
+long run interest rate=
+	0.03
+	~	fraction/year [-0.1,0.2]
+	~		|
+
+Reporting Period[Interval]=
+	3,6,9,12
+	~	months
+	~		|
+
+Trying=
+	Lurkers*Fractional Trial Rate*customer saturation effect
+	~	users/Month
+	~		|
+
+projected dividend=
+	Operating Profit*projected dividend payout
+	~	$/Month
+	~		|
+
+Operating Profit=
+	Revenue-Cost of Revenue-"SGA&M Cost"
+	~	$/Month
+	~		|
+
+interest rate chg=
+	(long run interest rate-interest rate)/interest rate reversion time/months per year
+	~	fraction/year/Month
+	~		|
+
+Reported groupons sold[Interval]=
+	REPORT(Groupons sold,Reporting Period[Interval])
+	~	users
+	~		|
+
+Reported SGAM Cost[Interval]=
+	REPORT("SGA&M Cost",Reporting Period[Interval])
+	~	$
+	~		|
+
+Reported Revenue[Interval]=
+	REPORT(Revenue,Reporting Period[Interval])
+	~	$
+	~		|
+
+Revenue per Use=
+	12
+	~	$/user [0,20]
+	~		|
+
+reference scale=
+	1e+006
+	~	users
+	~		|
+
+cum cust weight=
+	1/(data cum cust*cust frac err*(data cum cust/reference scale)^err scaling)
+	~	1/users
+	~		|
+
+cumulative customers=
+	Customers+Repeaters
+	~	users
+	~		|
+
+repeat cust weight=
+	1/(data cum repeat cust*cust frac err*(data cum repeat cust/reference scale)^err scaling\
+		)
+	~	1/users
+	~		|
+
+data cum cust:=
+	GET XLS DATA('?groupon data','users','4','d8')
+	~	users
+	~		|
+
+data cum repeat cust:=
+	GET XLS DATA('?groupon data','users','4','d14')
+	~	users
+	~		|
+
+data revenue k$[Interval]:=
+	GET XLS DATA('?groupon data','income','5','r6')
+	~	K$
+	~		|
+
+Interval:
+	Qtr,Half,Qx3,Ann
+	~	
+	~		|
+
+Groupons sold=
+	Trying+Total Repeating
+	~	users/Month
+	~	Total participation, with first time and repeaters
+	|
+
+err scaling=
+	-0.5
+	~	Dmnl
+	~		|
+
+cust frac err=
+	0.1
+	~	Dmnl
+	~		|
+
+subscriber weight=
+	1/(data subscribers*cust frac err*(data subscribers/reference scale)^err scaling)
+	~	1/users
+	~		|
+
+Total Repeating=
+	Repeating+Repeaters*Future Repeat Rate
+	~	users/Month
+	~	Total repeat participation
+	|
+
+Revenue=
+	Revenue per Use*Groupons sold
+	~	$/Month
+	~		|
+
+Adding=
+	growth rate*effective customers for growth
+	~	users/Month
+	~		|
+
+relative persuasiveness of lurkers=
+	0.5
+	~	Dmnl [0,1]
+	~		|
+
+effective customers for growth=
+	Lurkers*relative persuasiveness of lurkers+Customers+Repeaters
+	~	users
+	~		|
+
+data subscribers:=
+	GET XLS DATA('?groupon data','users','4','d7')
+	~	users
+	~		|
+
+Repeaters= INTEG (
+	Repeating,
+		0)
+	~	users
+	~		|
+
+Fractional Repeat Rate=
+	0.5
+	~	fraction/Month [0,0.2]
+	~		|
+
+potential subscribers=
+	2e+008
+	~	users
+	~		|
+
+Fractional Trial Rate=
+	0.2
+	~	fraction/Month [0,0.2]
+	~		|
+
+growth rate=
+	unsaturated growth rate r*subscriber saturation effect
+	~	fraction/Month
+	~		|
+
+init users=
+	100000
+	~	users
+	~		|
+
+Lurkers= INTEG (
+	Adding-Trying,
+		init users)
+	~	users
+	~		|
+
+unsaturated growth rate r=
+	0.1
+	~	fraction/Month
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 120
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Users
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,Lurkers,362,339,40,20,3,3,0,0,0,0,0,0
+12,2,48,142,337,10,8,0,3,0,0,-1,0,0,0
+1,3,5,1,4,0,0,22,0,0,0,-1--1--1,,1|(282,337)|
+1,4,5,2,100,0,0,22,0,0,0,-1--1--1,,1|(191,337)|
+11,5,48,237,337,6,8,34,3,0,0,1,0,0,0
+10,6,Adding,237,356,24,11,40,3,0,0,-1,0,0,0
+10,7,subscriber saturation effect,275,560,50,19,8,3,0,0,0,0,0,0
+10,8,potential subscribers,317,476,36,19,8,3,0,0,0,0,0,0
+10,9,unsaturated growth rate r,141,432,42,19,8,3,0,0,0,0,0,0
+10,10,growth rate,249,434,37,11,8,3,0,0,0,0,0,0
+1,11,10,6,1,0,0,12,1,64,0,255-0-0,|0||0-0-0,1|(235,397)|
+1,12,8,7,0,0,0,0,0,64,0,-1--1--1,,1|(299,511)|
+1,13,7,10,1,0,0,12,1,64,0,255-0-0,|0||0-0-0,1|(248,501)|
+1,14,9,10,0,0,0,0,0,64,0,-1--1--1,,1|(190,432)|
+12,15,0,143,40,96,20,8,135,0,16,-1,0,0,0,-1--1--1,0-0-0,|12|B|0-0-0
+Groupon user projections and valuation
+12,16,0,147,113,126,38,8,7,0,0,-1,0,0,0
+Inspired by Cauwels & Sornette, facebook valuation and diagnostic of a bubble based on nonlinear demographic dynamics
+12,17,0,370,47,51,19,8,7,0,0,-1,0,0,0
+Tom Fiddaman, 2011
+12,18,0,376,87,75,17,8,135,0,18,-1,0,253,253,-1--1--1,0-0-0,|12|U|0-0-255
+http://models.metasd.com|models.metasd.com
+12,19,0,147,170,107,17,8,135,0,18,-1,0,253,253,-1--1--1,0-0-0,|12|U|0-0-255
+http://arxiv.org/abs/1110.1319|http://arxiv.org/abs/1110.1319
+10,20,Customers,604,338,40,20,3,3,0,0,0,0,0,0
+10,21,Repeaters,844,336,40,20,3,3,0,0,0,0,0,0
+1,22,24,20,4,0,0,22,0,0,0,-1--1--1,,1|(526,338)|
+1,23,24,1,100,0,0,22,0,0,0,-1--1--1,,1|(439,338)|
+11,24,1404,483,338,6,8,34,3,0,0,1,0,0,0
+10,25,Trying,483,357,21,11,40,3,0,0,-1,0,0,0
+1,26,28,21,4,0,0,22,0,0,0,-1--1--1,,1|(767,337)|
+1,27,28,20,100,0,0,22,0,0,0,-1--1--1,,1|(681,337)|
+11,28,1180,724,337,6,8,34,3,0,0,1,0,0,0
+10,29,Repeating,724,356,32,11,40,3,0,0,-1,0,0,0
+10,30,Fractional Trial Rate,495,284,48,19,8,3,0,0,0,0,0,0
+10,31,Fractional Repeat Rate,690,276,57,19,8,3,0,0,0,0,0,0
+1,32,1,25,1,0,0,0,0,64,0,-1--1--1,,1|(425,377)|
+1,33,30,24,0,0,0,0,0,64,0,-1--1--1,,1|(489,310)|
+1,34,20,29,1,0,0,0,0,64,0,-1--1--1,,1|(666,381)|
+1,35,31,28,0,0,0,0,0,64,0,-1--1--1,,1|(706,306)|
+10,36,init users,351,181,28,11,8,3,0,0,-1,0,0,0
+1,37,36,1,0,0,0,0,0,64,1,-1--1--1,,1|(355,248)|
+10,38,subscribers,599,609,36,11,8,3,0,0,0,0,0,0
+1,39,1,38,1,0,0,12,1,64,0,255-0-0,|0||0-0-0,1|(391,468)|
+1,40,38,7,1,0,0,12,1,64,0,255-0-0,|0||0-0-0,1|(433,639)|
+10,41,effective customers for growth,431,220,61,19,8,3,0,0,0,0,0,0
+10,42,relative persuasiveness of lurkers,467,143,72,19,8,3,0,0,0,0,0,0
+1,43,42,41,0,0,0,0,0,64,0,-1--1--1,,1|(452,175)|
+1,44,20,41,1,0,0,0,0,64,0,-1--1--1,,1|(547,252)|
+1,45,21,41,1,0,0,0,0,64,0,-1--1--1,,1|(728,204)|
+1,46,1,41,1,0,0,0,0,64,0,-1--1--1,,1|(416,277)|
+1,47,41,5,1,0,0,0,0,64,0,-1--1--1,,1|(305,248)|
+10,48,data subscribers,929,52,51,11,8,3,0,0,0,0,0,0
+10,49,data cum cust,928,96,44,11,8,3,0,0,0,0,0,0
+10,50,data cum repeat cust,933,153,52,19,8,3,0,0,0,0,0,0
+10,51,cumulative customers,780,562,34,19,8,3,0,0,0,0,0,0
+1,52,20,51,1,0,0,12,1,64,0,255-128-0,|0||0-0-0,1|(630,480)|
+1,53,21,51,1,0,0,12,1,64,0,255-128-0,|0||0-0-0,1|(857,472)|
+12,54,0,1613,215,235,188,3,188,0,0,1,0,0,0
+Subscribers
+12,55,0,1613,592,235,188,3,188,0,0,1,0,0,0
+Customers
+10,56,subscriber weight,1103,48,55,11,8,3,0,0,0,0,0,0
+10,57,cum cust weight,1097,92,50,11,8,3,0,0,0,0,0,0
+10,58,repeat cust weight,1095,152,57,11,8,3,0,0,0,0,0,0
+1,59,48,56,0,0,0,0,0,64,0,-1--1--1,,1|(1006,50)|
+1,60,49,57,0,0,0,0,0,64,0,-1--1--1,,1|(1002,94)|
+1,61,50,58,0,0,0,0,0,64,0,-1--1--1,,1|(1004,152)|
+10,62,cust frac err,1245,46,38,11,8,3,0,0,0,0,0,0
+10,63,reference scale,1255,98,47,11,8,3,0,0,0,0,0,0
+10,64,err scaling,1253,147,33,11,8,3,0,0,0,0,0,0
+1,65,62,56,0,0,0,0,0,64,0,-1--1--1,,1|(1189,46)|
+1,66,62,57,0,0,0,0,0,64,0,-1--1--1,,1|(1177,66)|
+1,67,62,58,0,0,0,0,0,64,0,-1--1--1,,1|(1175,94)|
+1,68,63,56,0,0,0,0,0,64,0,-1--1--1,,1|(1185,75)|
+1,69,63,57,0,0,0,0,0,64,0,-1--1--1,,1|(1184,95)|
+1,70,63,58,0,0,0,0,0,64,0,-1--1--1,,1|(1181,122)|
+1,71,64,58,0,0,0,0,0,64,0,-1--1--1,,1|(1192,148)|
+1,72,64,57,0,0,0,0,0,64,0,-1--1--1,,1|(1181,121)|
+1,73,64,56,0,0,0,0,0,64,0,-1--1--1,,1|(1183,101)|
+10,74,Trying,263,744,30,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,75,Repeating,260,797,41,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,76,Repeaters,262,851,42,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,77,Fractional Repeat Rate,265,908,45,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,78,Total Repeating,427,846,50,11,8,3,0,0,0,0,0,0
+1,79,75,78,0,0,0,0,0,64,0,-1--1--1,,1|(336,819)|
+1,80,76,78,0,0,0,0,0,64,0,-1--1--1,,1|(333,848)|
+10,81,Groupons sold,572,806,47,11,8,3,0,0,0,0,0,0
+1,82,74,81,0,0,0,0,0,64,0,-1--1--1,,1|(402,771)|
+1,83,78,81,0,0,0,0,0,64,0,-1--1--1,,1|(492,827)|
+10,84,data groupons sold,936,196,60,11,8,3,0,0,0,0,0,0
+10,85,Future Repeat Rate,414,910,46,19,8,3,0,0,-1,0,0,0
+1,86,85,78,0,0,0,0,0,64,0,-1--1--1,,1|(419,880)|
+12,87,0,1024,878,235,188,3,188,0,0,1,0,0,0
+Groupons
+10,88,groupon weight,1092,196,49,11,8,3,0,0,0,0,0,0
+1,89,84,88,0,0,0,0,0,64,0,-1--1--1,,1|(1012,196)|
+1,90,63,88,0,0,0,0,0,64,0,-1--1--1,,1|(1179,143)|
+1,91,64,88,0,0,0,0,0,64,0,-1--1--1,,1|(1180,168)|
+1,92,62,88,0,0,0,0,0,64,0,-1--1--1,,1|(1173,116)|
+10,93,Reported groupons sold,618,887,45,19,8,3,0,0,0,0,0,0
+10,94,Reporting Period,531,973,36,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,95,81,93,0,0,0,0,0,64,0,-1--1--1,,1|(589,836)|
+1,96,94,93,0,0,0,0,0,64,0,-1--1--1,,1|(569,934)|
+1,97,51,38,1,0,0,12,1,64,0,255-0-0,|0||0-0-0,1|(718,599)|
+10,98,customer saturation effect,551,494,50,19,8,3,0,0,0,0,0,0
+1,99,51,98,1,0,0,12,1,64,0,255-128-0,|0||0-0-0,1|(664,563)|
+10,100,potential customers,376,528,33,19,8,3,0,0,0,0,0,0
+1,101,8,100,0,0,0,0,0,64,0,-1--1--1,,1|(340,497)|
+10,102,fraction ever buying,411,593,40,19,8,3,0,0,0,0,0,0
+1,103,102,100,0,0,0,0,0,64,0,-1--1--1,,1|(396,566)|
+1,104,100,98,1,0,0,0,0,64,0,-1--1--1,,1|(473,523)|
+1,105,98,25,1,0,0,12,1,64,0,255-128-0,|0||0-0-0,1|(506,461)|
+10,106,groupon frac err,1243,190,51,11,8,3,0,0,0,0,0,0
+1,107,106,88,0,0,0,0,0,64,0,-1--1--1,,1|(1173,192)|
+10,108,potential repeaters,754,499,58,11,8,3,0,0,0,0,0,0
+10,109,fraction ever repeating,676,458,40,19,8,3,0,0,0,0,0,0
+1,110,109,108,1,0,0,0,0,64,0,-1--1--1,,1|(718,490)|
+1,111,21,112,1,0,0,12,1,64,0,255-128-0,|0||0-0-0,1|(841,398)|
+10,112,repeat saturation effect,770,432,53,19,8,3,0,0,0,0,0,0
+1,113,108,112,1,0,0,0,0,64,0,-1--1--1,,1|(771,483)|
+1,114,100,108,1,0,0,0,0,64,0,-1--1--1,,1|(605,560)|
+1,115,112,29,1,0,0,12,1,64,0,255-128-0,|0||0-0-0,1|(735,393)|
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Financial
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,Revenue per Use,74,65,54,11,8,3,0,0,0,0,0,0
+10,2,Revenue,239,104,28,11,8,3,0,0,0,0,0,0
+1,3,1,2,0,0,0,0,0,64,0,-1--1--1,,1|(158,84)|
+10,4,data revenue k$,740,40,51,11,8,3,0,0,0,0,0,0
+10,5,Reported Revenue,402,105,59,11,8,3,0,0,0,0,0,0
+1,6,2,5,0,0,0,0,0,64,0,-1--1--1,,1|(298,104)|
+10,7,Reporting Period,335,46,54,11,8,3,0,0,0,0,0,0
+1,8,7,5,0,0,0,0,0,64,0,-1--1--1,,1|(362,70)|
+10,9,data revenue,591,42,41,11,8,3,0,0,0,0,0,0
+1,10,4,9,0,0,0,0,0,64,0,-1--1--1,,1|(667,40)|
+10,11,"$ per k$",731,85,28,11,8,3,0,0,-1,0,0,0
+1,12,11,9,0,0,0,0,0,64,0,-1--1--1,,1|(671,67)|
+10,13,"data SG&M cost k$",734,129,41,19,8,3,0,0,0,0,0,0
+10,14,"data SG&M cost",585,131,55,11,8,3,0,0,0,0,0,0
+1,15,13,14,0,0,0,0,0,64,0,-1--1--1,,1|(673,129)|
+1,16,11,14,0,0,0,0,0,64,0,-1--1--1,,1|(667,104)|
+10,17,Groupons sold,77,145,56,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,18,17,2,0,0,0,0,0,64,0,-1--1--1,,1|(158,124)|
+12,19,990154,1071,244,235,188,3,188,0,0,1,0,0,0
+Revenue
+11,20,17569166,159,276,6,8,34,3,0,0,1,0,0,0
+10,21,Adding,159,295,33,11,40,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,22,cumulative customers,164,505,39,19,8,2,0,3,0,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,23,Trying,155,352,30,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,24,Total Repeating,167,434,59,11,8,2,0,3,0,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,25,Groupons sold,277,398,47,11,8,3,0,0,0,0,0,0
+1,26,23,25,0,0,0,0,0,64,0,-1--1--1,,1|(208,372)|
+1,27,24,25,0,0,0,0,0,64,0,-1--1--1,,1|(214,418)|
+10,28,"SGA&M Cost",481,401,47,11,8,3,0,0,0,0,0,0
+1,29,25,28,0,0,0,0,0,64,0,-1--1--1,,1|(372,398)|
+1,30,21,28,0,0,0,0,0,64,0,-1--1--1,,1|(312,345)|
+1,31,23,28,0,0,0,0,0,64,0,-1--1--1,,1|(302,373)|
+1,32,24,28,0,0,0,0,0,64,0,-1--1--1,,1|(323,417)|
+1,33,22,28,0,0,0,0,0,64,0,-1--1--1,,1|(318,454)|
+10,34,cost per customer,473,265,56,11,8,3,0,0,-1,0,0,0
+1,35,34,28,0,0,0,0,0,64,0,-1--1--1,,1|(476,326)|
+10,36,cost per new subscriber,660,294,42,19,8,3,0,0,-1,0,0,0
+1,37,36,28,0,0,0,0,0,64,0,-1--1--1,,1|(570,347)|
+10,38,cost per repeat,670,349,48,11,8,3,0,0,-1,0,0,0
+1,39,38,28,0,0,0,0,0,64,0,-1--1--1,,1|(582,373)|
+10,40,cost per transaction,524,305,35,19,8,3,0,0,-1,0,0,0
+1,41,40,28,0,0,0,0,0,64,0,-1--1--1,,1|(503,350)|
+10,42,cost per trial,411,319,40,11,8,3,0,0,-1,0,0,0
+1,43,42,28,0,0,0,0,0,64,0,-1--1--1,,1|(440,354)|
+10,44,Reported SGAM Cost,600,481,45,19,8,3,0,0,0,0,0,0
+1,45,28,44,0,0,0,0,0,64,0,-1--1--1,,1|(528,433)|
+10,46,Reporting Period,507,552,36,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,47,46,44,0,0,0,0,0,64,0,-1--1--1,,1|(547,520)|
+10,48,subscribers,160,235,45,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,49,48,28,0,0,0,0,0,64,0,-1--1--1,,1|(313,314)|
+10,50,cost per subscriber,621,255,60,11,8,3,0,0,-1,0,0,0
+1,51,50,28,0,0,0,0,0,64,0,-1--1--1,,1|(555,322)|
+10,52,Revenue,142,625,37,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,53,"SGA&M Cost",144,753,56,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,54,Cost of Revenue,326,688,53,11,8,3,0,0,0,0,0,0
+10,55,Operating Profit,508,641,51,11,8,3,0,0,0,0,0,0
+10,56,Frac Cost of Revenue,166,686,41,19,8,3,0,0,0,0,0,0
+1,57,52,55,0,0,0,0,0,64,0,-1--1--1,,1|(311,631)|
+1,58,54,55,0,0,0,0,0,64,0,-1--1--1,,1|(409,666)|
+1,59,52,54,0,0,0,0,0,64,0,-1--1--1,,1|(226,654)|
+1,60,56,54,0,0,0,0,0,64,0,-1--1--1,,1|(233,686)|
+1,61,53,55,1,0,0,0,0,64,0,-1--1--1,,1|(383,723)|
+10,62,Reported Oper Profit,690,690,49,19,8,3,0,0,0,0,0,0
+10,63,Reporting Period,597,761,36,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,64,63,62,0,0,0,0,0,64,0,-1--1--1,,1|(637,729)|
+1,65,55,62,0,0,0,0,0,64,0,-1--1--1,,1|(587,662)|
+12,66,1907474,1538,695,207,170,3,188,0,0,2,0,0,0
+Reported Oper Profit[Ann],graph
+12,67,2825206,1545,245,235,188,3,188,0,0,1,0,0,0
+Cost
+12,68,793720,1122,696,207,170,3,188,0,0,2,0,0,0
+Reported SGAM Cost[Ann],graph
+10,69,now,519,986,15,11,8,3,0,0,0,0,0,0
+10,70,dividend PV,807,919,40,20,3,3,0,0,0,0,0,0
+12,71,48,613,916,10,8,0,3,0,0,-1,0,0,0
+1,72,74,70,4,0,0,22,0,0,0,-1--1--1,,1|(734,916)|
+1,73,74,71,100,0,0,22,0,0,0,-1--1--1,,1|(656,916)|
+11,74,48,695,916,6,8,34,3,0,0,1,0,0,0
+10,75,discounted dividend,695,943,35,19,40,3,0,0,-1,0,0,0
+10,76,Discount factor,673,1042,40,20,3,3,0,0,0,0,0,0
+12,77,48,485,1042,10,8,0,3,0,0,-1,0,0,0
+1,78,80,77,4,0,0,22,0,0,0,-1--1--1,,1|(526,1042)|
+1,79,80,76,100,0,0,22,0,0,0,-1--1--1,,1|(601,1042)|
+11,80,48,564,1042,6,8,34,3,0,0,1,0,0,0
+10,81,discounting,564,1061,36,11,40,3,0,0,-1,0,0,0
+10,82,discount rate,459,1099,41,11,8,3,0,0,0,0,0,0
+10,83,interest rate,331,1040,40,20,3,3,0,0,0,0,0,0
+10,84,risk premium,310,1119,41,11,8,3,0,0,0,0,0,0
+1,85,83,82,0,0,0,0,0,64,0,-1--1--1,,1|(396,1070)|
+1,86,84,82,0,0,0,0,0,64,0,-1--1--1,,1|(377,1110)|
+1,87,82,81,1,0,0,0,0,64,0,-1--1--1,,1|(544,1088)|
+1,88,76,81,1,0,0,0,0,64,0,-1--1--1,,1|(608,1089)|
+1,89,69,80,0,0,0,0,0,64,0,-1--1--1,,1|(539,1011)|
+1,90,69,75,0,0,0,0,0,64,0,-1--1--1,,1|(589,968)|
+1,91,76,75,0,0,0,0,0,64,0,-1--1--1,,1|(682,998)|
+10,92,projected dividend,582,875,59,11,8,3,0,0,0,0,0,0
+1,93,92,74,0,0,0,0,0,64,0,-1--1--1,,1|(643,897)|
+10,94,projected dividend payout,460,928,60,19,8,3,0,0,0,0,0,0
+1,95,94,92,0,0,0,0,0,64,0,-1--1--1,,1|(523,900)|
+10,96,terminal value,819,1005,43,11,8,3,0,0,0,0,0,0
+10,97,discount rate,815,1089,50,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,98,75,96,0,0,0,0,0,64,0,-1--1--1,,1|(757,973)|
+1,99,97,96,0,0,0,0,0,64,0,-1--1--1,,1|(816,1053)|
+10,100,Groupon Value,943,970,49,11,8,3,0,0,0,0,0,0
+1,101,70,100,0,0,0,0,0,64,0,-1--1--1,,1|(873,944)|
+1,102,96,100,0,0,0,0,0,64,0,-1--1--1,,1|(873,989)|
+10,103,current interest rate,312,967,47,19,8,3,0,0,0,0,0,0
+10,104,long run interest rate,169,978,50,19,8,3,0,0,0,0,0,0
+10,105,interest rate reversion time,102,1072,45,19,8,3,0,0,0,0,0,0
+1,106,103,83,0,0,0,0,0,64,1,-1--1--1,,1|(318,996)|
+12,107,48,160,1033,10,8,0,3,0,0,-1,0,0,0
+1,108,110,83,4,0,0,22,0,0,0,-1--1--1,,1|(263,1033)|
+1,109,110,107,100,0,0,22,0,0,0,-1--1--1,,1|(197,1033)|
+11,110,48,230,1033,6,8,34,3,0,0,1,0,0,0
+10,111,interest rate chg,230,1052,50,11,40,3,0,0,-1,0,0,0
+1,112,105,111,0,0,0,0,0,64,0,-1--1--1,,1|(156,1063)|
+1,113,104,110,0,0,0,0,0,64,0,-1--1--1,,1|(202,1007)|
+1,114,83,110,1,0,0,0,0,64,0,-1--1--1,,1|(268,1003)|
+1,115,55,92,1,0,0,0,0,64,0,-1--1--1,,1|(528,761)|
+10,116,months per year,586,1131,51,11,8,3,0,0,-1,0,0,0
+1,117,116,81,0,0,0,0,0,64,0,-1--1--1,,1|(577,1102)|
+10,118,months per year,182,1120,60,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,119,118,111,0,0,0,0,0,64,0,-1--1--1,,1|(201,1091)|
+10,120,months per year,953,1055,60,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,121,120,96,0,0,0,0,0,64,0,-1--1--1,,1|(892,1032)|
+///---\\\
+:GRAPH Subscribers
+:TITLE Subscribers
+:X-MAX 36
+:DOTS
+:SCALE
+:VAR subscribers
+:VAR data subscribers
+
+:GRAPH Customers
+:TITLE Customers
+:X-MAX 36
+:DOTS
+:SCALE
+:VAR cumulative customers
+:VAR data cum cust
+:VAR Repeaters
+:VAR data cum repeat cust
+
+:GRAPH Revenue
+:TITLE Revenue
+:X-MAX 36
+:DOTS
+:SCALE
+:VAR Reported Revenue[Interval]
+:Y-MIN 0
+:VAR data revenue[Interval]
+
+:GRAPH Groupons
+:TITLE Groupons
+:X-MAX 36
+:DOTS
+:SCALE
+:VAR Reported groupons sold[Qx3]
+:VAR Reported groupons sold[Ann]
+:VAR data groupons sold[Qx3]
+:VAR data groupons sold[Ann]
+
+:GRAPH Cost
+:TITLE Cost
+:X-MAX 36
+:DOTS
+:SCALE
+:VAR Reported SGAM Cost[Interval]
+:VAR "data SG&M cost"[Interval]
+:L<%^E!@
+1:groupon3worst.vdf
+1:groupon3mid.vdf
+1:groupon3pess.vdf
+1:groupon3opt.vdf
+9:groupon3worst
+22:$,Dollar,Dollars,$s
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:user,users
+22:Week,Weeks
+22:Year,Years
+30:?groupon data=groupon data.xlsx
+10:groupon3usr.out,groupon3fin.out
+11:grouponFin2.voc
+12:grouponFin2.vpd
+15:1,0,0,0,0,0
+19:100,1
+27:2,
+34:0,
+4:Time
+5:Groupon Value
+35:Date
+36:YYYY-MM-DD
+37:2008
+38:11
+39:1
+40:2
+41:0
+24:0
+25:120
+26:120
+6:Ann
+6:Qtr
+6:Qx3
