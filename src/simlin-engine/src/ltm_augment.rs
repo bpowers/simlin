@@ -1325,21 +1325,22 @@ fn generate_link_score_equation(
     all_vars: &HashMap<Ident<Canonical>, Variable>,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> Equation {
-    // Check if this is a flow-to-stock link
-    let is_flow_to_stock = matches!(to_var, Variable::Stock { .. })
-        && matches!(
-            all_vars.get(from),
-            Some(Variable::Var { is_flow: true, .. })
-        );
-
     // Check if this is a stock-to-flow link
     let is_stock_to_flow = matches!(all_vars.get(from), Some(Variable::Stock { .. }))
         && matches!(to_var, Variable::Var { is_flow: true, .. });
 
-    if is_flow_to_stock {
+    // Flow-to-stock link: `to` is a stock and `from` is one of its flows.
+    // Binding `flow_var` here -- rather than computing an `is_flow_to_stock`
+    // bool and re-fetching the (proven-present) flow variable -- lets the
+    // generator take a plain `&Variable`.
+    if let Variable::Stock { .. } = to_var
+        && let Some(flow_var @ Variable::Var { is_flow: true, .. }) = all_vars.get(from)
+    {
         // Flow-to-stock uses a fixed structural formula -- no AST parse,
-        // so neither `shape` nor `source_dim_elements` matter here.
-        generate_flow_to_stock_equation(from.as_str(), to.as_str(), to_var)
+        // so neither `shape` nor `source_dim_elements` matter here. The
+        // flow variable is passed in only for its declared dimensions, so
+        // an arrayed flow can be referenced with an explicit subscript.
+        generate_flow_to_stock_equation(from.as_str(), to.as_str(), flow_var, to_var)
     } else if is_stock_to_flow {
         // Use stock-to-flow formula
         let source_dim_names = source_dim_names_for(from, all_vars);
@@ -1742,6 +1743,18 @@ fn shape_aware_source_ref(from: &str, shape: &RefShape) -> String {
     }
 }
 
+/// The `[Dim0,Dim1,...]` subscript suffix naming `var`'s declared
+/// dimensions (datamodel casing, declaration order), or an empty string
+/// when `var` is scalar. Built from the same `target_equation_dims`
+/// the equation tag is derived from, so the subscript and the
+/// `Equation::ApplyToAll` dimension list always agree.
+fn dimension_subscript_suffix(var: &Variable) -> String {
+    match target_equation_dims(var) {
+        Some(dims) => format!("[{}]", dims.join(",")),
+        None => String::new(),
+    }
+}
+
 /// Generate flow-to-stock link score equation.
 ///
 /// The structural inflow/outflow formula has no per-element equation
@@ -1749,7 +1762,29 @@ fn shape_aware_source_ref(from: &str, shape: &RefShape) -> String {
 /// are arrayed -- so the result is `Equation::Scalar` for a scalar stock
 /// and `Equation::ApplyToAll(stock_dims, _)` for an arrayed stock (the
 /// shared formula evaluated per element).
-fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable) -> Equation {
+///
+/// For an arrayed stock every stock/flow reference is emitted with an
+/// explicit dimension subscript (`stock[Dim]`, `flow[Dim]`) rather than a
+/// bare arrayed name. A bare arrayed name nested inside
+/// `PREVIOUS(PREVIOUS(...))` does not survive the apply-to-all expansion:
+/// the inner `PREVIOUS(name)` is an *expression* argument, so
+/// `builtins_visitor` routes it through a synthesized *scalar* helper aux
+/// whose equation is `PREVIOUS(name, 0)` -- and a bare arrayed name has no
+/// scalar meaning, so that helper fragment fails to compile and the LTM
+/// fragment compiler silently stubs it to 0 (the score then collapses to
+/// a wrong constant -- `1/9` for the canonical pop/growth model instead
+/// of the isolated-loop invariant `1`). An explicit subscript keeps every
+/// occurrence a scalar per-element access the helper aux can hold. Each
+/// variable is subscripted by its *own* declared dimensions; a valid
+/// arrayed inflow/outflow shares the stock's dimensions, so those names
+/// are all bound by the `ApplyToAll` iteration. A scalar stock/flow has
+/// no dimensions, so its references stay bare -- the pre-fix behavior.
+fn generate_flow_to_stock_equation(
+    flow: &str,
+    stock: &str,
+    flow_var: &Variable,
+    stock_var: &Variable,
+) -> Equation {
     // Check if this flow is an inflow or outflow
     let is_inflow = if let Variable::Stock { inflows, .. } = stock_var {
         inflows.iter().any(|f| f.as_str() == flow)
@@ -1758,6 +1793,14 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
     };
 
     let sign = if is_inflow { "" } else { "-" };
+
+    // Reference an arrayed stock/flow by its own declared dimensions so
+    // every occurrence is a scalar per-element access; see the function
+    // doc for why a bare arrayed name breaks the nested-PREVIOUS terms.
+    // For a scalar stock/flow the suffix is empty and the references stay
+    // bare, exactly as before.
+    let stock_ref = format!("{stock}{}", dimension_subscript_suffix(stock_var));
+    let flow_ref = format!("{flow}{}", dimension_subscript_suffix(flow_var));
 
     // Per the corrected 2023 formula (Schoenberg et al., Eq. 3):
     //   LS(inflow -> S)  = |Delta(i) / (Delta(S_t) - Delta(S_{t-dt}))| * (+1)
@@ -1778,9 +1821,10 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
     // none, so without this factor the score is `1/dt` too large and the
     // error compounds once per flow-to-stock link in a loop. The published
     // Eq. 3 omits `dt` because every worked example in the papers uses dt=1.
-    let numerator = format!("(time_step * (PREVIOUS({flow}) - PREVIOUS(PREVIOUS({flow}))))");
+    let numerator =
+        format!("(time_step * (PREVIOUS({flow_ref}) - PREVIOUS(PREVIOUS({flow_ref}))))");
     let denominator = format!(
-        "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))"
+        "(({stock_ref} - PREVIOUS({stock_ref})) - (PREVIOUS({stock_ref}) - PREVIOUS(PREVIOUS({stock_ref}))))"
     );
 
     // Return 0 for the first two timesteps when we don't have enough history for second-order differences
@@ -4565,5 +4609,161 @@ mod tests {
             Equation::ApplyToAll(d, _) => assert_eq!(d, vec!["Region".to_string()]),
             other => panic!("ApplyToAll target must yield Equation::ApplyToAll; got: {other:?}"),
         }
+    }
+
+    /// Build a `Variable::Stock` for the flow-to-stock generator tests.
+    /// Only `ident`, `eqn` (dimension source via `target_equation_dims`),
+    /// and `inflows`/`outflows` (inflow/outflow sign) matter to the
+    /// generator; the rest are defaulted.
+    fn flow_to_stock_test_stock(
+        ident: &str,
+        eqn: Equation,
+        inflows: &[&str],
+        outflows: &[&str],
+    ) -> Variable {
+        Variable::Stock {
+            ident: Ident::new(ident),
+            init_ast: None,
+            eqn: Some(eqn),
+            units: None,
+            inflows: inflows.iter().map(|f| Ident::new(f)).collect(),
+            outflows: outflows.iter().map(|f| Ident::new(f)).collect(),
+            non_negative: false,
+            errors: vec![],
+            unit_errors: vec![],
+        }
+    }
+
+    /// Build a `Variable::Var` flow for the flow-to-stock generator tests.
+    /// Only `ident` and `eqn` (dimension source) matter to the generator.
+    fn flow_to_stock_test_flow(ident: &str, eqn: Equation) -> Variable {
+        Variable::Var {
+            ident: Ident::new(ident),
+            ast: None,
+            init_ast: None,
+            eqn: Some(eqn),
+            units: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: true,
+            is_table_only: false,
+            errors: vec![],
+            unit_errors: vec![],
+        }
+    }
+
+    /// LTM deep-review Finding 2: for an *arrayed* stock the flow-to-stock
+    /// link-score equation must reference the stock and flow with explicit
+    /// dimension subscripts. A *bare* arrayed name nested inside
+    /// `PREVIOUS(PREVIOUS(...))` is routed through a synthesized *scalar*
+    /// helper aux (see `builtins_visitor`) that cannot hold an arrayed
+    /// value -- the fragment then fails to compile and the LTM compiler
+    /// silently stubs it to 0, collapsing the score to a wrong constant
+    /// (`1/9` for the canonical pop/growth model instead of the
+    /// isolated-loop invariant `1`).
+    #[test]
+    fn test_flow_to_stock_arrayed_subscripts_references() {
+        let stock = flow_to_stock_test_stock(
+            "pop",
+            Equation::ApplyToAll(vec!["region".to_string()], "100".to_string()),
+            &["growth"],
+            &[],
+        );
+        let flow = flow_to_stock_test_flow(
+            "growth",
+            Equation::ApplyToAll(vec!["region".to_string()], "pop[region] * 0.1".to_string()),
+        );
+
+        let equation = generate_flow_to_stock_equation("growth", "pop", &flow, &stock);
+        let text = match &equation {
+            Equation::ApplyToAll(dims, text) => {
+                assert_eq!(dims, &vec!["region".to_string()]);
+                text
+            }
+            other => panic!("arrayed stock must yield Equation::ApplyToAll; got: {other:?}"),
+        };
+
+        // Every stock/flow occurrence carries the dimension subscript --
+        // including the nested-PREVIOUS terms, which are exactly the ones
+        // that break with a bare arrayed name.
+        assert!(
+            text.contains("PREVIOUS(PREVIOUS(growth[region]))"),
+            "nested-PREVIOUS flow term must be subscripted; got: {text}"
+        );
+        assert!(
+            text.contains("PREVIOUS(PREVIOUS(pop[region]))"),
+            "nested-PREVIOUS stock term must be subscripted; got: {text}"
+        );
+        // ...and no bare arrayed name survives as a PREVIOUS argument.
+        assert!(
+            !text.contains("PREVIOUS(growth)") && !text.contains("PREVIOUS(growth,"),
+            "no bare arrayed flow reference may remain; got: {text}"
+        );
+        assert!(
+            !text.contains("PREVIOUS(pop)") && !text.contains("PREVIOUS(pop,"),
+            "no bare arrayed stock reference may remain; got: {text}"
+        );
+    }
+
+    /// Guard: a *scalar* stock's flow-to-stock equation must NOT gain
+    /// subscripts -- it stays the bare-name `Equation::Scalar` form so the
+    /// scalar isolated-loop invariant (pinned by `ltm_dt_invariance.rs`)
+    /// is unaffected.
+    #[test]
+    fn test_flow_to_stock_scalar_stays_bare() {
+        let stock =
+            flow_to_stock_test_stock("s", Equation::Scalar("100".to_string()), &["births"], &[]);
+        let flow = flow_to_stock_test_flow("births", Equation::Scalar("s * 0.1".to_string()));
+
+        let equation = generate_flow_to_stock_equation("births", "s", &flow, &stock);
+        let text = match &equation {
+            Equation::Scalar(text) => text,
+            other => panic!("scalar stock must yield Equation::Scalar; got: {other:?}"),
+        };
+
+        assert!(
+            text.contains("PREVIOUS(PREVIOUS(births))"),
+            "scalar flow term must stay bare; got: {text}"
+        );
+        assert!(
+            text.contains("PREVIOUS(PREVIOUS(s))"),
+            "scalar stock term must stay bare; got: {text}"
+        );
+        assert!(
+            !text.contains('['),
+            "scalar flow-to-stock equation must have no subscripts; got: {text}"
+        );
+    }
+
+    /// An arrayed *outflow* keeps the negative structural sign while still
+    /// being subscripted: the sign is applied outside `ABS()`, independent
+    /// of the subscripting.
+    #[test]
+    fn test_flow_to_stock_arrayed_outflow_sign() {
+        let stock = flow_to_stock_test_stock(
+            "pop",
+            Equation::ApplyToAll(vec!["region".to_string()], "100".to_string()),
+            &[],
+            &["deaths"],
+        );
+        let flow = flow_to_stock_test_flow(
+            "deaths",
+            Equation::ApplyToAll(vec!["region".to_string()], "pop[region] * 0.05".to_string()),
+        );
+
+        let equation = generate_flow_to_stock_equation("deaths", "pop", &flow, &stock);
+        let text = match &equation {
+            Equation::ApplyToAll(_, text) => text,
+            other => panic!("arrayed stock must yield Equation::ApplyToAll; got: {other:?}"),
+        };
+
+        assert!(
+            text.contains("-ABS(SAFEDIV("),
+            "outflow link score must carry the negative structural sign; got: {text}"
+        );
+        assert!(
+            text.contains("PREVIOUS(PREVIOUS(deaths[region]))"),
+            "outflow must still be subscripted; got: {text}"
+        );
     }
 }

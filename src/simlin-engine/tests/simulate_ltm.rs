@@ -2084,6 +2084,89 @@ fn test_a2a_flow_to_stock_link_score() {
     }
 }
 
+/// LTM deep-review Finding 2: an *arrayed* isolated feedback loop's raw
+/// loop score must be the exact isolated-loop invariant (`+/-1`) in every
+/// per-element slot, exactly like a scalar isolated loop.
+///
+/// Model -- a per-element reinforcing loop over two independent regions:
+///   `pop[region]`    (stock, init 100)
+///   `growth[region] = pop[region] * rate[region]`   (the only inflow)
+/// with distinct per-element rates so any slot leak would be visible.
+/// Each element is its own isolated one-stock loop, so each `loop_score`
+/// slot is exactly `+1` at `dt = 1` regardless of that element's gain
+/// (Schoenberg, Davidsen & Eberlein 2020, sec. 4.1 / Appendix B).
+///
+/// The bug: `generate_flow_to_stock_equation` emitted the flow-to-stock
+/// link score with *bare* arrayed names. Inside the resulting
+/// `Equation::ApplyToAll` the `PREVIOUS(PREVIOUS(...))` terms route their
+/// inner `PREVIOUS(name)` through a synthesized *scalar* helper aux (see
+/// `builtins_visitor`), which cannot hold an arrayed value -- so the
+/// helper fragment failed to compile and the LTM compiler silently
+/// stubbed it to 0. With the nested-PREVIOUS terms zeroed the score
+/// collapsed to `1/9` (`= 0.111...`) instead of `1`. `dt = 1` is chosen
+/// so the Finding-1 `dt` factor is a no-op and any deviation from `+1` is
+/// purely Finding 2.
+#[test]
+fn arrayed_isolated_loop_raw_score_is_one_per_element() {
+    let project = TestProject::new("arrayed_isolated_loop")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["growth"], &[], None)
+        .array_flow("growth[region]", "pop[region] * rate[region]", None)
+        .array_with_ranges("rate[region]", vec![("north", "0.1"), ("south", "0.4")])
+        .build_datamodel();
+
+    let compiled = compile_ltm_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // Exactly one A2A feedback loop, carried as a single base (unsubscripted)
+    // loop-score offset entry with one slot per region.
+    let loop_keys: Vec<&Ident<Canonical>> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            let s = k.as_str();
+            s.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}") && !s.contains('[')
+        })
+        .collect();
+    assert_eq!(
+        loop_keys.len(),
+        1,
+        "expected exactly one A2A loop score, found {:?}",
+        loop_keys.iter().map(|k| k.as_str()).collect::<Vec<_>>()
+    );
+    let base_offset = results.offsets[loop_keys[0]];
+
+    // Two regions -> two per-element loop-score slots (slot 0 = north,
+    // slot 1 = south). Each is an isolated reinforcing one-stock loop, so
+    // each slot is exactly +1 after the two-step startup guard (the
+    // flow-to-stock score's second-order denominator needs two steps of
+    // history before it is defined).
+    const STARTUP_STEPS: usize = 2;
+    for (elem, region) in ["north", "south"].iter().enumerate() {
+        let slot = base_offset + elem;
+        for step in 0..results.step_count {
+            let value = results.data[step * results.step_size + slot];
+            if step < STARTUP_STEPS {
+                assert_eq!(
+                    value, 0.0,
+                    "region {region}: step {step} is inside the startup guard and must be \
+                     exactly 0, got {value}"
+                );
+            } else {
+                assert!(
+                    (value - 1.0).abs() < 1e-6,
+                    "region {region}: arrayed isolated loop score at step {step} is {value}, \
+                     expected exactly +1. A value near 1/9 means the flow-to-stock link \
+                     score's nested PREVIOUS terms were stubbed to 0 (LTM review Finding 2)."
+                );
+            }
+        }
+    }
+}
+
 /// AC4.4: Scalar-to-arrayed link score varies by element when the target
 /// has different per-element values.
 ///
@@ -4129,23 +4212,32 @@ fn test_2d_arrayed_loop_score_metadata() {
 }
 
 /// Tech-debt #34: A2A loop_score variables must produce per-element
-/// distinct values when the underlying link_scores differ per element.
+/// distinct values when the underlying per-element dynamics differ --
+/// i.e. the synthesized A2A equation must evaluate with its active
+/// dimension intact, not broadcast slot 0 across every slot.
 ///
-/// Today they emit identical values across all slots because the
-/// synthesized A2A equation evaluates with active-dim broken (slot 0
-/// broadcast).  This test pins the contract: build a fixture where
-/// per-element link_scores are demonstrably distinct (heterogeneous
-/// birth_rate per region), assert the resulting `loop_score⁚<id>`
-/// variable has at least one saved step where slot 0 differs from slot
-/// 1 by more than FP noise.
+/// The fixture must be a *non-isolated* loop. An isolated loop's raw
+/// loop score is exactly `+/-1` in every element regardless of gain
+/// (the invariant pinned by `ltm_dt_invariance.rs` and
+/// `arrayed_isolated_loop_raw_score_is_one_per_element`), so a single
+/// reinforcing loop -- however heterogeneous its rates -- has identical
+/// slots by construction and cannot tell a correct per-element
+/// evaluation apart from a slot-0 broadcast. (An earlier version of this
+/// test used exactly that isolated fixture and only "passed" because LTM
+/// review Finding 2 made the flow-to-stock link score wrong in a
+/// rate-dependent way; once Finding 2 was fixed the isolated-loop slots
+/// became correctly identical and the broken premise surfaced.)
+///
+/// So this model gives each region *two* loops sharing the `population`
+/// stock -- a reinforcing birth loop and a balancing death loop -- with
+/// heterogeneous birth and death rates. Two coupled loops on one stock
+/// are not isolated, so each loop's raw score depends on the per-element
+/// rates: for `population * b` births and `population * d` deaths the
+/// birth loop scores `b / (b - d)` and the death loop `-d / (b - d)`,
+/// both genuinely distinct between NYC and Boston.
 ///
 /// Slot ordering: the fixture uses `Region: [NYC, Boston]`, so slot 0
-/// = NYC (birth_rate 0.05) and slot 1 = Boston (birth_rate 0.20).
-/// link_score(population → births) = (Δ births / Δ population) ≈
-/// birth_rate at each element, so slot 0 should be ~0.05 and slot 1
-/// ~0.20.  loop_score is the product of the two link_scores in the
-/// reinforcing loop, so it scales with birth_rate too -- slot 1
-/// must end up substantially larger than slot 0.
+/// = NYC and slot 1 = Boston.
 #[test]
 fn test_a2a_loop_score_has_distinct_per_element_values() {
     use simlin_engine::test_common::TestProject;
@@ -4155,10 +4247,15 @@ fn test_a2a_loop_score_has_distinct_per_element_values() {
         .named_dimension("Region", &["NYC", "Boston"])
         .array_with_ranges(
             "birth_rate[Region]",
-            vec![("NYC", "0.05"), ("Boston", "0.20")],
+            vec![("NYC", "0.10"), ("Boston", "0.40")],
         )
-        .array_stock("population[Region]", "100", &["births"], &[], None)
+        .array_with_ranges(
+            "death_rate[Region]",
+            vec![("NYC", "0.03"), ("Boston", "0.05")],
+        )
+        .array_stock("population[Region]", "100", &["births"], &["deaths"], None)
         .array_flow("births[Region]", "population * birth_rate", None)
+        .array_flow("deaths[Region]", "population * death_rate", None)
         .build_datamodel();
 
     let (compiled, _loop_partitions) = compile_ltm_incremental_with_partitions(&project);
@@ -4166,38 +4263,44 @@ fn test_a2a_loop_score_has_distinct_per_element_values() {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
+    // Two coupled loops on the `population` stock -> two A2A loop scores.
     let loop_scores = find_loop_score_offsets(&results);
     assert_eq!(
         loop_scores.len(),
-        1,
-        "single A2A reinforcing loop should produce exactly one loop_score variable"
+        2,
+        "the two coupled loops (birth + death) should each produce a loop_score variable, \
+         got {:?}",
+        loop_scores.iter().map(|(n, _)| n).collect::<Vec<_>>()
     );
-    let (loop_score_name, base_offset) = &loop_scores[0];
 
-    // Walk every saved step and assert that at SOME step slot 0 differs
-    // visibly from slot 1.  link_scores that scale with birth_rate must
-    // differ by ratio 4 (0.20 vs 0.05), so loop_scores should differ by
-    // an even bigger ratio (product of two distinct link_scores).
-    let mut max_diff = 0.0_f64;
-    let mut max_diff_step = 0;
-    for step in 1..results.step_count {
-        let s0 = results.data[step * results.step_size + base_offset];
-        let s1 = results.data[step * results.step_size + base_offset + 1];
-        let diff = (s0 - s1).abs();
-        if diff > max_diff {
-            max_diff = diff;
-            max_diff_step = step;
+    // Every A2A loop score in this model has genuinely per-element
+    // distinct slots (the loops are not isolated, so the raw score
+    // depends on the per-element rates). Each must show at least one
+    // saved step where slot 0 differs visibly from slot 1 -- a slot-0
+    // broadcast would make them identical.
+    for (loop_score_name, base_offset) in &loop_scores {
+        let mut max_diff = 0.0_f64;
+        let mut max_diff_step = 0;
+        for step in 1..results.step_count {
+            let s0 = results.data[step * results.step_size + base_offset];
+            let s1 = results.data[step * results.step_size + base_offset + 1];
+            let diff = (s0 - s1).abs();
+            if diff > max_diff {
+                max_diff = diff;
+                max_diff_step = step;
+            }
         }
+        assert!(
+            max_diff > 1e-6,
+            "loop_score var {} slots should differ per-element (heterogeneous birth/death \
+             rates make the non-isolated loop score rate-dependent); max |slot0 - slot1| \
+             across {} steps was {} at step {}",
+            loop_score_name,
+            results.step_count,
+            max_diff,
+            max_diff_step
+        );
     }
-    assert!(
-        max_diff > 1e-6,
-        "loop_score var {} slots should differ per-element (heterogeneous birth_rate); \
-         max |slot0 - slot1| across {} steps was {} at step {}",
-        loop_score_name,
-        results.step_count,
-        max_diff,
-        max_diff_step
-    );
 }
 
 /// AC6.2 + AC6.3: Mixed loop with cross-element feedback produces scalar
