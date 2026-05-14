@@ -684,7 +684,10 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
         None => return ptr::null_mut(),
     };
 
-    let latex = ast.to_latex();
+    // `to_latex_annotated` wraps each node in a `\htmlData{eqnloc=…}` source
+    // range annotation so the equation-preview UI can map a click back to a
+    // caret position; rendering it requires KaTeX's `trust` option.
+    let latex = ast.to_latex_annotated();
     match CString::new(latex) {
         Ok(s) => s.into_raw(),
         Err(_) => ptr::null_mut(),
