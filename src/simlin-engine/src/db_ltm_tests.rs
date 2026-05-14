@@ -54,6 +54,7 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             },
             datamodel::Model {
                 name: "producer".to_string(),
@@ -71,6 +72,7 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             },
         ],
         source: None,
@@ -451,6 +453,7 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         }],
         source: None,
         ai_information: None,

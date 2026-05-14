@@ -93,6 +93,7 @@ pub(crate) fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datam
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 
@@ -241,6 +242,7 @@ pub(crate) fn feedback_loop_project() -> crate::datamodel::Project {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         }],
         source: None,
         ai_information: None,

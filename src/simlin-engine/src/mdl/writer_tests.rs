@@ -1274,6 +1274,7 @@ fn make_model(variables: Vec<Variable>) -> datamodel::Model {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 
@@ -1429,6 +1430,7 @@ fn equations_section_full_assembly() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = datamodel::Project {
         name: "test".to_owned(),
@@ -1506,6 +1508,7 @@ fn equations_section_with_groups() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![group],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2146,6 +2149,7 @@ fn sketch_section_in_full_project() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2323,6 +2327,7 @@ fn sketch_roundtrip_sanitizes_multiline_view_title() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2429,6 +2434,7 @@ fn sketch_roundtrip_preserves_flow_endpoints_with_nonadjacent_valve_uid() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2585,6 +2591,7 @@ fn sketch_roundtrip_preserves_causal_links_to_flows_without_sketch_compat() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2725,6 +2732,7 @@ fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2989,6 +2997,7 @@ fn full_assembly_has_all_three_sections() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -4479,6 +4488,7 @@ fn equation_lhs_casing_in_full_project_roundtrip() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
     let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
@@ -4537,6 +4547,7 @@ fn grouped_variables_retain_group_order() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![group],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 

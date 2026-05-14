@@ -277,6 +277,7 @@ fn apply_add_model(project: &mut datamodel::Project, name: String) -> Result<()>
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     });
     Ok(())
 }
@@ -1511,6 +1512,7 @@ mod tests {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         });
 
         let patch = ProjectPatch {
@@ -1595,6 +1597,7 @@ mod tests {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         });
 
         let patch = ProjectPatch {
@@ -1720,6 +1723,7 @@ mod tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             source: None,
             ai_information: None,
@@ -1831,6 +1835,7 @@ mod tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             source: None,
             ai_information: None,
@@ -1908,6 +1913,7 @@ mod tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             source: None,
             ai_information: None,
@@ -2191,6 +2197,7 @@ mod tests {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         });
 
         let module = datamodel::Module {
@@ -2250,6 +2257,7 @@ mod tests {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         });
 
         let module = datamodel::Module {
@@ -2296,6 +2304,7 @@ mod tests {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         });
 
         // Add initial module
@@ -2364,6 +2373,7 @@ mod tests {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         });
 
         let module = datamodel::Module {
@@ -2505,6 +2515,7 @@ mod tests {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         });
 
         // Add a module that references old_name
@@ -2684,6 +2695,7 @@ mod tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             source: None,
             ai_information: None,
@@ -2756,6 +2768,7 @@ mod tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             source: None,
             ai_information: None,

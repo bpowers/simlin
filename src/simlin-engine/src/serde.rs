@@ -2086,6 +2086,7 @@ impl From<project_io::Model> for Model {
                 .map(LoopMetadata::from)
                 .collect(),
             groups: model.groups.into_iter().map(ModelGroup::from).collect(),
+            macro_spec: None,
         }
     }
 }
@@ -2122,6 +2123,7 @@ fn test_model_with_loop_metadata_roundtrip() {
             },
         ],
         groups: vec![],
+        macro_spec: None,
     }];
     for expected in cases {
         let expected = expected.clone();
@@ -2164,6 +2166,7 @@ fn test_model_with_groups_roundtrip() {
                 run_enabled: true,
             },
         ],
+        macro_spec: None,
     }];
     for expected in cases {
         let expected = expected.clone();
@@ -2412,6 +2415,7 @@ fn make_test_project(variables: Vec<Variable>, dimensions: Vec<Dimension>) -> Pr
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         }],
         source: Default::default(),
         ai_information: None,

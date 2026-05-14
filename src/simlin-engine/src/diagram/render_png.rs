@@ -131,6 +131,7 @@ mod tests {
                 })],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             source: None,
             ai_information: None,

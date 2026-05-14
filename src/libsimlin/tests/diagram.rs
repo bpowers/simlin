@@ -395,6 +395,7 @@ fn test_diagram_sync_main_alias_empty_model_name_patch() {
             views: Vec::new(),
             loop_metadata: Vec::new(),
             groups: Vec::new(),
+            macro_spec: None,
         }],
         source: None,
         ai_information: None,

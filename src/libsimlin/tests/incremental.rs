@@ -586,6 +586,7 @@ fn test_incremental_compile_error_preserved_in_sim() {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         }],
         source: None,
         ai_information: None,

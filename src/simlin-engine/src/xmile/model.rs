@@ -200,6 +200,7 @@ impl From<Model> for datamodel::Model {
             views,
             loop_metadata,
             groups,
+            macro_spec: None,
         }
     }
 }
@@ -213,6 +214,9 @@ impl From<datamodel::Model> for Model {
             views,
             loop_metadata,
             groups,
+            // XMILE has no macro concept; macro_spec is dropped on export.
+            // Macro round-tripping through XMILE is a later phase's concern.
+            macro_spec: _,
         } = model;
 
         // Convert groups to semantic groups
@@ -581,6 +585,7 @@ fn test_semantic_group_roundtrip() {
                 run_enabled: true,
             },
         ],
+        macro_spec: None,
     };
 
     let xmile_model: Model = original_model.clone().into();

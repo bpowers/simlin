@@ -97,6 +97,7 @@ fn simple_model() -> datamodel::Model {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     }
 }
 
@@ -109,6 +110,7 @@ fn test_generate_layout_empty() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     });
     let result = generate_layout(&project, TEST_MODEL, None).unwrap();
     assert!(result.elements.is_empty());
@@ -690,6 +692,7 @@ fn test_generate_layout_aux_only() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let result = generate_layout(&project, TEST_MODEL, None).unwrap();
@@ -724,6 +727,7 @@ fn test_generate_layout_single_aux() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let result = generate_layout(&project, TEST_MODEL, None).unwrap();
@@ -768,6 +772,7 @@ fn test_generate_layout_disconnected_stocks() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let result = generate_layout(&project, TEST_MODEL, None).unwrap();
@@ -845,6 +850,7 @@ fn test_generate_layout_disconnected_chains_do_not_explode_apart() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let result = generate_layout(&project, TEST_MODEL, None).unwrap();
@@ -991,6 +997,7 @@ fn test_compute_metadata_includes_isolated_flows_when_stocks_exist() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let project = test_project(model);
@@ -1055,6 +1062,7 @@ fn test_generate_layout_includes_isolated_flows_when_stocks_exist() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let project = test_project(model);
@@ -1116,6 +1124,7 @@ fn test_generate_layout_includes_module_elements_and_connectors() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let project = test_project(model);
@@ -1266,6 +1275,7 @@ fn test_compute_metadata_populates_feedback_loops_from_model_metadata() {
             description: String::new(),
         }],
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let project = test_project(model);
@@ -1400,6 +1410,7 @@ fn test_ast_deps_exclude_builtins() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
@@ -1463,6 +1474,7 @@ fn test_ast_deps_no_false_positives() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
@@ -1529,6 +1541,7 @@ fn test_deps_fallback_on_compile_error() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let result = generate_layout(&project, TEST_MODEL, None);
@@ -1581,6 +1594,7 @@ fn test_ltm_fallback_on_sim_error() {
             description: String::new(),
         }],
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
@@ -1639,6 +1653,7 @@ fn test_compute_metadata_falls_back_for_invalid_equation() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
@@ -1704,6 +1719,7 @@ fn test_compute_metadata_excludes_non_model_deps() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let metadata = compute_metadata(&project, TEST_MODEL, None).unwrap();
@@ -1744,6 +1760,7 @@ fn test_resolve_model_name_returns_actual_name_for_main_alias() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     // "main" should resolve to the empty string (the actual model name)
@@ -1793,6 +1810,7 @@ fn test_layout_chain() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let config = LayoutConfig::default();
@@ -1954,6 +1972,7 @@ fn test_build_clouds() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let mut metadata = ComputedMetadata::new_empty();
@@ -2112,6 +2131,7 @@ fn test_build_clouds_no_cloud_for_connected_endpoint() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let mut metadata = ComputedMetadata::new_empty();
@@ -2193,6 +2213,7 @@ fn test_build_clouds_sink_cloud() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let mut metadata = ComputedMetadata::new_empty();
@@ -2306,6 +2327,7 @@ fn test_build_connectors() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let mut metadata = ComputedMetadata::new_empty();
@@ -2481,6 +2503,7 @@ fn test_optimize_labels() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let mut metadata = ComputedMetadata::new_empty();
@@ -2606,6 +2629,7 @@ fn test_place_auxiliaries() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let config = LayoutConfig::default();
@@ -4298,6 +4322,7 @@ fn test_identify_new_elements_partial_overlap() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let result = state.identify_new_elements(&model);
@@ -4375,6 +4400,7 @@ fn test_identify_new_elements_all_present() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let result = state.identify_new_elements(&model);
@@ -4444,6 +4470,7 @@ fn test_identify_new_elements_empty_state() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let result = state.identify_new_elements(&model);
@@ -4488,6 +4515,7 @@ fn test_identify_new_elements_uid_exists_but_no_element() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let result = state.identify_new_elements(&model);
@@ -4928,6 +4956,7 @@ fn make_settlement_scenario(
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let mut dg = BTreeMap::new();
@@ -5227,6 +5256,7 @@ fn test_module_output_dep_preserved_with_db_state() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     // Main model: a module instance and an aux that references
@@ -5265,6 +5295,7 @@ fn test_module_output_dep_preserved_with_db_state() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let project = datamodel::Project {
@@ -5526,6 +5557,7 @@ fn chain_with_waste_model() -> datamodel::Model {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     }
 }
 
@@ -5689,6 +5721,7 @@ fn chain_with_two_waste_model() -> datamodel::Model {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     }
 }
 
@@ -5746,6 +5779,7 @@ fn test_layout_single_outflow_still_horizontal() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let result = generate_layout(&project, TEST_MODEL, None).unwrap();

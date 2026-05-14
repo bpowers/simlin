@@ -92,6 +92,7 @@ impl<'input> ConversionContext<'input> {
             views,
             loop_metadata: vec![],
             groups,
+            macro_spec: None,
         };
 
         Ok(Project {

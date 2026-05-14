@@ -762,6 +762,24 @@ pub struct LoopMetadata {
     pub description: String,
 }
 
+/// Marks a [`Model`] as a callable macro template rather than an ordinary
+/// model, and records its calling convention. A macro definition is an
+/// ordinary model whose `variables` are the macro body; this spec names which
+/// body variables are the formal parameters and which are the outputs.
+/// `Model.macro_spec` is `None` for every non-macro model.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
+pub struct MacroSpec {
+    /// Formal parameter names, in positional calling order. Each names a body
+    /// variable that a macro invocation binds an argument to.
+    pub parameters: Vec<String>,
+    /// The body variable whose value the call-site left-hand side receives.
+    pub primary_output: String,
+    /// Additional named outputs from Vensim's `:`-list multi-output call
+    /// syntax, in declaration order. Empty for ordinary single-output macros.
+    pub additional_outputs: Vec<String>,
+}
+
 /// Semantic/organizational group for categorizing model variables.
 /// This is distinct from visual diagram groups (ViewElement::Group).
 /// In Vensim, these are called "sectors".
@@ -789,6 +807,8 @@ pub struct Model {
     pub views: Vec<View>,
     pub loop_metadata: Vec<LoopMetadata>,
     pub groups: Vec<ModelGroup>,
+    /// `Some` if this model is a callable macro template. See [`MacroSpec`].
+    pub macro_spec: Option<MacroSpec>,
 }
 
 impl Model {
@@ -1153,6 +1173,7 @@ mod tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             source: None,
             ai_information: None,
@@ -1236,6 +1257,7 @@ mod tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             source: None,
             ai_information: None,
@@ -1281,6 +1303,7 @@ mod tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             source: None,
             ai_information: None,
@@ -1329,6 +1352,7 @@ mod tests {
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
+                    macro_spec: None,
                 },
                 // User-created model that shadows the stdlib name
                 Model {
@@ -1338,6 +1362,7 @@ mod tests {
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
+                    macro_spec: None,
                 },
             ],
             source: None,
@@ -1378,6 +1403,7 @@ mod tests {
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
+                    macro_spec: None,
                 },
                 stdlib_model,
             ],
@@ -1419,6 +1445,7 @@ mod tests {
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
+                    macro_spec: None,
                 },
                 rate_model,
                 leak_model,

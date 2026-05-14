@@ -1182,6 +1182,7 @@ mod ast_tests {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         };
 
         let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
@@ -1271,6 +1272,7 @@ mod ast_tests {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         };
 
         let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();

@@ -219,6 +219,7 @@ fn delay1() -> Model {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 
@@ -467,6 +468,7 @@ fn delay3() -> Model {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 
@@ -627,6 +629,7 @@ fn smth1() -> Model {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 
@@ -947,6 +950,7 @@ fn smth3() -> Model {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 
@@ -1084,6 +1088,7 @@ fn systems_conversion() -> Model {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 
@@ -1200,6 +1205,7 @@ fn systems_leak() -> Model {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 
@@ -1318,6 +1324,7 @@ fn systems_rate() -> Model {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 
@@ -1497,6 +1504,7 @@ fn trend() -> Model {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 
@@ -1595,5 +1603,6 @@ fn npv() -> Model {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }

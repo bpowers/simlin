@@ -1210,6 +1210,7 @@ impl From<Model> for datamodel::Model {
                 .map(|lm| lm.into())
                 .collect(),
             groups: model.groups.into_iter().map(|g| g.into()).collect(),
+            macro_spec: None,
         }
     }
 }
