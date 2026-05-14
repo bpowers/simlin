@@ -18,12 +18,12 @@ use crate::datamodel;
 use crate::ltm::strip_subscript;
 
 use super::{
-    Db, LtmLinkId, ModelDepGraphResult, ParsedVariableResult, RefShape, SourceModel, SourceProject,
-    SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
-    build_submodel_metadata, canonical_module_input_set, compute_layout, link_score_equation_text,
-    model_implicit_var_info, model_module_ident_context, model_module_map,
-    parse_source_variable_with_module_context, project_datamodel_dims, project_units_context,
-    variable_dimensions, variable_size,
+    Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, ParsedVariableResult, RefShape,
+    SourceModel, SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs,
+    build_stub_variable, build_submodel_metadata, canonical_module_input_set, compute_layout,
+    link_score_equation_text, model_implicit_var_info, model_module_ident_context,
+    model_module_map, parse_source_variable_with_module_context, project_datamodel_dims,
+    project_units_context, variable_dimensions, variable_size,
 };
 
 pub(super) fn ltm_module_idents(
@@ -1307,6 +1307,169 @@ pub(super) fn compile_ltm_equation_fragment(
             stock_bytecodes: None,
         },
     })
+}
+
+/// Select-and-compile a single LTM synthetic variable's flow-phase
+/// fragment, exactly as `assemble_module`'s LTM pass does.
+///
+/// Most synthetic equations are compiled verbatim from `ltm_var.equation`
+/// (`compile_direct`); the one exception is the standard scalar Bare
+/// `from→to` link score, which routes through the salsa-cached
+/// `(from, to)`-keyed `compile_ltm_var_fragment` so an equation edit that
+/// does not change the dependency set reuses the cached fragment.
+///
+/// Returns `None` -- or a `VarFragmentResult` whose `flow_bytecodes` is
+/// `None` -- when the synthetic equation fails to parse or compile.
+/// `assemble_module` silently drops such failures (the variable keeps its
+/// layout slot but no bytecode writes it, so it reads a constant 0);
+/// [`model_ltm_fragment_diagnostics`] calls this to detect those failures
+/// and surface them as `Warning`s instead of letting them masquerade as
+/// a correct zero score.
+pub(super) fn compile_ltm_synthetic_fragment(
+    db: &dyn Db,
+    ltm_var: &LtmSyntheticVar,
+    model: SourceModel,
+    project: SourceProject,
+) -> Option<VarFragmentResult> {
+    // Compile this LTM var's already-prepared equation verbatim.
+    // Used for everything except the standard scalar Bare `from→to`
+    // link score, which goes through the salsa-cached
+    // `compile_ltm_var_fragment` path below: that path re-derives the
+    // equation from `link_score_equation_text` (always scalar, Bare;
+    // per-shape dimensions, element subscripts and reducer
+    // substitutions are applied later in `model_ltm_variables`), so
+    // for anything that carries those it would produce the wrong (or
+    // a degenerate) fragment.
+    let compile_direct =
+        || compile_ltm_equation_fragment(db, &ltm_var.name, &ltm_var.equation, model, project);
+    const LINK_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}link_score\u{205A}";
+    if ltm_var.name.starts_with(LINK_SCORE_PREFIX) {
+        if ltm_var.dimensions.is_empty() {
+            // Scalar link score. Sub-cases:
+            // (a) Standard scalar Bare score (from→to): use salsa-cached fragment.
+            // (b) Cross-dimensional per-source-element score (from[elem]→to,
+            //     try_cross_dimensional_link_scores) or per-target-element
+            //     score (from→to[elem], try_scalar_to_arrayed_link_scores):
+            //     compile directly. The equation is unique per element and the
+            //     (from, to)-keyed salsa path can't round-trip the bracketed
+            //     name back to a user variable (it'd drop the fragment and stub
+            //     the var to zero).
+            // (d) Aggregate-node link score (from = $⁚ltm⁚agg⁚n, or to =
+            //     $⁚ltm⁚agg⁚n): compile directly. The (from, to)-keyed salsa
+            //     path would `reconstruct_single_variable` the synthetic agg
+            //     name, get `None`, and emit a degenerate ceteris-paribus
+            //     equation against the *target's* original (reducer-bearing)
+            //     equation -- which the agg name appears nowhere in -- so the
+            //     numerator collapses to zero. `model_ltm_variables` already
+            //     produced the correct reducer-substituted equation in
+            //     `ltm_var.equation`; use it verbatim.
+            // (e) Non-Bare-shaped scalar score (`Wildcard`/`DynamicIndex`
+            //     reference into a scalar target, e.g. `total = arr[idx]`):
+            //     `emit_per_shape_link_scores` set `compile_directly` because
+            //     the salsa path re-derives with `RefShape::Bare`, wrapping
+            //     the subscript in `PREVIOUS()` and zeroing the numerator.
+            let suffix = &ltm_var.name[LINK_SCORE_PREFIX.len()..];
+            let arrow_pos = suffix.find('\u{2192}');
+            let from_to: Option<(&str, &str)> =
+                arrow_pos.map(|arrow| (&suffix[..arrow], &suffix[arrow + '\u{2192}'.len_utf8()..]));
+            // Any `[` -- on either side of the arrow -- marks an
+            // element-pinned equation that ltm_var.equation already
+            // carries verbatim; the (from, to)-keyed salsa path can't
+            // round-trip the bracketed name back to a user variable.
+            let has_element_subscript = suffix.contains('[');
+            let touches_synthetic_agg = from_to.is_some_and(|(from_name, to_name)| {
+                crate::ltm_agg::is_synthetic_agg_name(from_name)
+                    || crate::ltm_agg::is_synthetic_agg_name(to_name)
+            });
+
+            if has_element_subscript || touches_synthetic_agg || ltm_var.compile_directly {
+                compile_direct()
+            } else if let Some((from_name, to_name)) = from_to {
+                let link_id = LtmLinkId::new(db, from_name.to_string(), to_name.to_string());
+                compile_ltm_var_fragment(db, link_id, model, project)
+                    .as_ref()
+                    .cloned()
+            } else {
+                compile_direct()
+            }
+        } else {
+            // A2A link score: the equation is the dimension-tagged
+            // ApplyToAll/Arrayed variant, not the scalar one the
+            // salsa-cached path would re-derive.
+            compile_direct()
+        }
+    } else {
+        // Loop scores and relative loop scores.
+        compile_direct()
+    }
+}
+
+/// Salsa-tracked diagnostic pass that compiles every LTM synthetic
+/// variable the way `assemble_module` does and emits a `Warning` for
+/// each one whose fragment fails to compile.
+///
+/// Why this exists: `assemble_module` silently drops a synthetic
+/// fragment that fails to compile -- the variable keeps its layout slot
+/// but no bytecode ever writes it, so it reads a constant 0. That silent
+/// stubbing masks correctness bugs in the LTM augmentation layer (an
+/// arrayed flow-to-stock link score that compiled to 0 and produced
+/// plausible-but-wrong loop scores went unnoticed precisely because of
+/// this). Surfacing the failure makes a degraded LTM analysis *visible*
+/// instead of silently wrong.
+///
+/// Severity is `Warning`, not `Error`: LTM is opt-in, the rest of the
+/// model still simulates, and a hard error would break compilation of
+/// every `ltm_enabled` model that hits a single bad fragment. This
+/// mirrors the auto-flip-to-discovery warning in `model_ltm_variables`.
+///
+/// `model_all_diagnostics` drives this when `ltm_enabled`, so the
+/// warning reaches `collect_all_diagnostics` exactly when the auto-flip
+/// warning does. (GH #466 tracks the separate plumbing gap: the
+/// diagnostic-collection FFI paths leave `ltm_enabled` false by default,
+/// so neither this warning nor the auto-flip warning reaches
+/// `simlin_project_get_errors` today.)
+///
+/// Only the layout-independent compile failure is reported here. A
+/// fragment that compiles but whose variable references do not resolve
+/// in the model's layout is the documented sub-model dedup case
+/// (`assemble_module`'s `fragment_vars_in_layout` drop), where the root
+/// model emits an equivalent fragment under qualified names -- that drop
+/// is intentionally left silent.
+#[salsa::tracked]
+pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
+    use salsa::Accumulator;
+
+    use super::{CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity};
+
+    let ltm_vars = model_ltm_variables(db, model, project);
+    for ltm_var in &ltm_vars.vars {
+        let fragment = compile_ltm_synthetic_fragment(db, ltm_var, model, project);
+        // A fragment is usable only if it compiled *and* produced
+        // flow-phase bytecodes. `compile_ltm_equation_fragment` returns
+        // `Some(_)` with `flow_bytecodes: None` when the synthetic
+        // equation parses but fails to lower or compile.
+        let compiled_ok = fragment
+            .as_ref()
+            .is_some_and(|r| r.fragment.flow_bytecodes.is_some());
+        if compiled_ok {
+            continue;
+        }
+        let msg = format!(
+            "LTM synthetic variable '{}' failed to compile; it keeps a \
+             layout slot but no bytecode, so it evaluates to a constant 0. \
+             Any loop or link score derived from it is silently degraded. \
+             This usually means the LTM augmentation layer emitted an \
+             equation the compiler rejected.",
+            ltm_var.name,
+        );
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: Some(ltm_var.name.clone()),
+            error: DiagnosticError::Assembly(msg),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    }
 }
 
 /// Compile a single implicit variable from an

@@ -1913,11 +1913,13 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 ///    syntax errors (bad unit strings), and compilation-level errors
 ///    (BadTable, MismatchedDimensions, etc.)
 /// 2. `check_model_units` -- accumulates unit inference/checking warnings
-/// 3. When LTM is enabled, `model_ltm_variables` -- accumulates LTM
-///    assembly diagnostics (notably the auto-flip warning that surfaces
-///    when the element-level largest SCC exceeds `MAX_LTM_SCC_NODES`).
-///    Gated on `ltm_enabled` so we don't run LTM synthesis on projects
-///    that never requested it.
+/// 3. When LTM is enabled, `model_ltm_fragment_diagnostics` -- accumulates
+///    LTM assembly diagnostics: the auto-flip warning that surfaces when
+///    the element-level largest SCC exceeds `MAX_LTM_SCC_NODES` (emitted
+///    by `model_ltm_variables`, which the fragment-diagnostic pass drives
+///    internally), and a compile-failure warning for any LTM synthetic
+///    variable whose fragment fails to compile. Gated on `ltm_enabled` so
+///    we don't run LTM synthesis on projects that never requested it.
 #[salsa::tracked]
 pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
     let source_vars = model.variables(db);
@@ -1943,14 +1945,19 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // invalidated only when unit-relevant inputs change.
     check_model_units(db, model, project);
 
-    // When LTM is enabled, also trigger LTM variable generation so that
-    // any diagnostics accumulated by `model_ltm_variables` (e.g., the
-    // auto-flip warning from db_ltm.rs) surface through
-    // `collect_all_diagnostics`.  Without this call, the warning would
-    // be invisible to `simlin-mcp`/`libsimlin` callers even though
-    // `model_ltm_variables` had already emitted it.
+    // When LTM is enabled, also trigger the LTM diagnostic pass so that
+    // diagnostics accumulated by the LTM pipeline surface through
+    // `collect_all_diagnostics`: the auto-flip-to-discovery warning from
+    // `model_ltm_variables` and the synthetic-fragment compile-failure
+    // warning from `model_ltm_fragment_diagnostics`.
+    // `model_ltm_fragment_diagnostics` drives `model_ltm_variables`
+    // internally, so the auto-flip warning rides along. Without this
+    // call the warnings are invisible to `simlin-mcp`/`libsimlin`
+    // callers even though the LTM pipeline already emitted them. (GH
+    // #466: this remains gated on `ltm_enabled`, which the
+    // diagnostic-collection FFI paths leave false by default.)
     if project.ltm_enabled(db) {
-        let _ = model_ltm_variables(db, model, project);
+        model_ltm_fragment_diagnostics(db, model, project);
     }
 }
 
@@ -5010,79 +5017,13 @@ pub fn assemble_module(
         for ltm_var in &ltm_vars.vars {
             let ltm_var_canonical = canonicalize(&ltm_var.name).into_owned();
 
-            // Compile this LTM var's already-prepared equation verbatim.
-            // Used for everything except the standard scalar Bare `from→to`
-            // link score, which goes through the salsa-cached
-            // `compile_ltm_var_fragment` path below: that path re-derives the
-            // equation from `link_score_equation_text` (always scalar, Bare;
-            // per-shape dimensions, element subscripts and reducer
-            // substitutions are applied later in `model_ltm_variables`), so
-            // for anything that carries those it would produce the wrong (or
-            // a degenerate) fragment.
-            let compile_direct = || {
-                compile_ltm_equation_fragment(db, &ltm_var.name, &ltm_var.equation, model, project)
-            };
-            const LINK_SCORE_PREFIX: &str = "$\u{205A}ltm\u{205A}link_score\u{205A}";
-            let fragment_result = if ltm_var.name.starts_with(LINK_SCORE_PREFIX) {
-                if ltm_var.dimensions.is_empty() {
-                    // Scalar link score. Sub-cases:
-                    // (a) Standard scalar Bare score (from→to): use salsa-cached fragment.
-                    // (b) Cross-dimensional per-source-element score (from[elem]→to,
-                    //     try_cross_dimensional_link_scores) or per-target-element
-                    //     score (from→to[elem], try_scalar_to_arrayed_link_scores):
-                    //     compile directly. The equation is unique per element and the
-                    //     (from, to)-keyed salsa path can't round-trip the bracketed
-                    //     name back to a user variable (it'd drop the fragment and stub
-                    //     the var to zero).
-                    // (d) Aggregate-node link score (from = $⁚ltm⁚agg⁚n, or to =
-                    //     $⁚ltm⁚agg⁚n): compile directly. The (from, to)-keyed salsa
-                    //     path would `reconstruct_single_variable` the synthetic agg
-                    //     name, get `None`, and emit a degenerate ceteris-paribus
-                    //     equation against the *target's* original (reducer-bearing)
-                    //     equation -- which the agg name appears nowhere in -- so the
-                    //     numerator collapses to zero. `model_ltm_variables` already
-                    //     produced the correct reducer-substituted equation in
-                    //     `ltm_var.equation`; use it verbatim.
-                    // (e) Non-Bare-shaped scalar score (`Wildcard`/`DynamicIndex`
-                    //     reference into a scalar target, e.g. `total = arr[idx]`):
-                    //     `emit_per_shape_link_scores` set `compile_directly` because
-                    //     the salsa path re-derives with `RefShape::Bare`, wrapping
-                    //     the subscript in `PREVIOUS()` and zeroing the numerator.
-                    let suffix = &ltm_var.name[LINK_SCORE_PREFIX.len()..];
-                    let arrow_pos = suffix.find('\u{2192}');
-                    let from_to: Option<(&str, &str)> = arrow_pos
-                        .map(|arrow| (&suffix[..arrow], &suffix[arrow + '\u{2192}'.len_utf8()..]));
-                    // Any `[` -- on either side of the arrow -- marks an
-                    // element-pinned equation that ltm_var.equation already
-                    // carries verbatim; the (from, to)-keyed salsa path can't
-                    // round-trip the bracketed name back to a user variable.
-                    let has_element_subscript = suffix.contains('[');
-                    let touches_synthetic_agg = from_to.is_some_and(|(from_name, to_name)| {
-                        crate::ltm_agg::is_synthetic_agg_name(from_name)
-                            || crate::ltm_agg::is_synthetic_agg_name(to_name)
-                    });
-
-                    if has_element_subscript || touches_synthetic_agg || ltm_var.compile_directly {
-                        compile_direct()
-                    } else if let Some((from_name, to_name)) = from_to {
-                        let link_id =
-                            LtmLinkId::new(db, from_name.to_string(), to_name.to_string());
-                        compile_ltm_var_fragment(db, link_id, model, project)
-                            .as_ref()
-                            .cloned()
-                    } else {
-                        compile_direct()
-                    }
-                } else {
-                    // A2A link score: the equation is the dimension-tagged
-                    // ApplyToAll/Arrayed variant, not the scalar one the
-                    // salsa-cached path would re-derive.
-                    compile_direct()
-                }
-            } else {
-                // Loop scores and relative loop scores.
-                compile_direct()
-            };
+            // Select and compile this LTM var's fragment. The
+            // selection logic (salsa-cached `(from, to)` path vs.
+            // direct compilation of the prepared equation) lives in
+            // `compile_ltm_synthetic_fragment` so the diagnostic pass
+            // (`model_ltm_fragment_diagnostics`) detects the exact same
+            // compile failures this assembly pass would silently drop.
+            let fragment_result = compile_ltm_synthetic_fragment(db, ltm_var, model, project);
 
             if let Some(result) = fragment_result {
                 // Drop LTM fragments whose symbolic variable references can't

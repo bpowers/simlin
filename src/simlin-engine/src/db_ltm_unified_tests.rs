@@ -638,6 +638,183 @@ fn test_ltm_disabled_does_not_surface_auto_flip_warning() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// LTM synthetic-fragment compile-failure diagnostics
+// ---------------------------------------------------------------------------
+
+/// Build a goal-seeking model with a `SMTH1` in the feedback path:
+/// `level -> smoothed_level (SMTH1) -> gap -> adjustment -> level`.
+///
+/// `SMTH1(level, 3)` expands into an implicit stdlib module instance, so
+/// the LTM augmentation layer emits a link score into the SMOOTH's
+/// module-internal stock (`$⁚ltm⁚link_score⁚level→$⁚smoothed_level⁚0⁚smth1`).
+/// That synthetic equation does not compile as a scalar ceteris-paribus
+/// equation -- `assemble_module` silently drops the fragment and the
+/// variable reads a constant 0. The model still simulates, which is
+/// exactly why the failure went unnoticed; the diagnostic pass makes it
+/// visible.
+fn build_smooth_loop_with_failing_fragment(name: &str) -> datamodel::Project {
+    TestProject::new(name)
+        .with_sim_time(0.0, 20.0, 0.25)
+        .scalar_aux("goal", "100")
+        .stock("level", "50", &["adjustment"], &[], None)
+        .scalar_aux("smoothed_level", "SMTH1(level, 3)")
+        .scalar_aux("gap", "goal - smoothed_level")
+        .scalar_aux("adjustment_time", "5")
+        .flow("adjustment", "gap / adjustment_time", None)
+        .build_datamodel()
+}
+
+/// Predicate: a diagnostic is an LTM synthetic-fragment compile-failure
+/// `Warning` (as opposed to the auto-flip warning, which is also an
+/// `Assembly` `Warning`).
+fn is_ltm_fragment_failure(d: &crate::db::Diagnostic) -> bool {
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
+    d.severity == DiagnosticSeverity::Warning
+        && matches!(
+            &d.error,
+            DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
+        )
+}
+
+/// An LTM synthetic fragment that fails to compile must surface as a
+/// `Warning` through `collect_model_diagnostics` -- the collector both
+/// `libsimlin` and `simlin-mcp` hand to end users -- when `ltm_enabled`.
+/// Without this the failure is silent: the variable keeps a layout slot,
+/// reads a constant 0, and the model still simulates, so the degraded
+/// loop/link score masquerades as a correct result.
+#[test]
+fn test_ltm_fragment_compile_failure_surfaces_warning() {
+    use crate::db::collect_model_diagnostics;
+    use salsa::Setter;
+
+    let project = build_smooth_loop_with_failing_fragment("smooth_frag_fail_surface");
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| is_ltm_fragment_failure(d))
+        .collect();
+    assert!(
+        !frag_failures.is_empty(),
+        "an LTM synthetic fragment that fails to compile must surface a \
+         Warning through collect_model_diagnostics; got: {diags:?}"
+    );
+    // The diagnostic must name the offending synthetic variable so a
+    // caller can locate the degraded score.
+    assert!(
+        frag_failures.iter().all(|d| {
+            d.variable
+                .as_deref()
+                .is_some_and(|v| v.contains("$\u{205A}ltm\u{205A}"))
+        }),
+        "fragment-failure warnings must name the LTM synthetic variable; \
+         got: {frag_failures:?}"
+    );
+}
+
+/// The compile-failure warning is accumulated by `model_ltm_fragment_diagnostics`
+/// itself. Asserting on the tracked function directly isolates the
+/// emission from the `model_all_diagnostics` wiring exercised by
+/// `test_ltm_fragment_compile_failure_surfaces_warning`.
+#[test]
+fn test_model_ltm_fragment_diagnostics_emits_warning() {
+    use crate::db::CompilationDiagnostic;
+
+    let project = build_smooth_loop_with_failing_fragment("smooth_frag_fail_direct");
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    model_ltm_fragment_diagnostics(&db, model, sync.project);
+    let diags = model_ltm_fragment_diagnostics::accumulated::<CompilationDiagnostic>(
+        &db,
+        model,
+        sync.project,
+    );
+
+    assert!(
+        diags
+            .iter()
+            .any(|CompilationDiagnostic(d)| is_ltm_fragment_failure(d)),
+        "model_ltm_fragment_diagnostics must accumulate a compile-failure \
+         Warning for the SMOOTH-internal link score; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+}
+
+/// Regression guard: a model whose LTM synthetic fragments all compile
+/// cleanly (a plain scalar feedback loop) must emit ZERO
+/// fragment-failure warnings. Surfacing failures must not become a
+/// false-positive generator for healthy models.
+#[test]
+fn test_clean_ltm_model_emits_no_fragment_warning() {
+    use crate::db::collect_model_diagnostics;
+    use salsa::Setter;
+
+    // A 5-node scalar cycle: every link score is scalar Bare and every
+    // loop score is scalar -- the bread-and-butter LTM path, all of
+    // which compiles.
+    let project = build_chain_scc_project("clean_ltm_frag", 5);
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let diags = collect_model_diagnostics(&db, source_model, source_project);
+
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| is_ltm_fragment_failure(d))
+        .collect();
+    assert!(
+        frag_failures.is_empty(),
+        "a model whose LTM fragments all compile must emit no \
+         fragment-failure warnings; got: {frag_failures:?}"
+    );
+}
+
+/// Counterpart to the surfacing test: when LTM is disabled,
+/// `collect_model_diagnostics` must not run the LTM fragment-diagnostic
+/// pass -- a model with a failing LTM fragment whose caller never asked
+/// for LTM should not emit the warning. Mirrors
+/// `test_ltm_disabled_does_not_surface_auto_flip_warning`.
+#[test]
+fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
+    use crate::db::collect_model_diagnostics;
+
+    let project = build_smooth_loop_with_failing_fragment("smooth_frag_fail_disabled");
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+
+    assert!(
+        !sync.project.ltm_enabled(&db),
+        "baseline: ltm_enabled must default to false"
+    );
+
+    let diags = collect_model_diagnostics(&db, source_model, sync.project);
+
+    let frag_failures: Vec<_> = diags
+        .iter()
+        .filter(|d| is_ltm_fragment_failure(d))
+        .collect();
+    assert!(
+        frag_failures.is_empty(),
+        "LTM-disabled project must not emit LTM fragment-failure \
+         warnings; got: {frag_failures:?}"
+    );
+}
+
 /// Adversarial corner case for Option A: the auto-flip gate must key on
 /// the *largest* SCC, not on total SCC count or total node count.  Two
 /// disjoint 40-node cycles (80 nodes total) must stay exhaustive because
