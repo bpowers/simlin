@@ -63,12 +63,23 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
 
     let model = main_model(project);
     for var in &model.variables {
-        if matches!(var, Variable::Module(_)) {
-            return Err(Error::new(
-                ErrorKind::Import,
-                ErrorCode::Generic,
-                Some("MDL format does not support Module variables".to_owned()),
-            ));
+        if let Variable::Module(m) = var {
+            // A macro-module instance (Phase 4's materialized multi-output
+            // cluster) is reconstructed into the `:` call syntax by the
+            // writer, so it is allowed. An ordinary submodule instance is
+            // still rejected (a general MDL module-export overhaul is out
+            // of scope).
+            let is_macro_module = project
+                .models
+                .iter()
+                .any(|candidate| candidate.macro_spec.is_some() && candidate.name == m.model_name);
+            if !is_macro_module {
+                return Err(Error::new(
+                    ErrorKind::Import,
+                    ErrorCode::Generic,
+                    Some("MDL format does not support Module variables".to_owned()),
+                ));
+            }
         }
     }
 
