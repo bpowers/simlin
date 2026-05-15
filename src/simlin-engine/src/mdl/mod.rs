@@ -42,7 +42,18 @@ pub(crate) const LOOKUP_SENTINEL: &str = "0+0";
 
 /// Convert a Project to Vensim MDL text.
 pub fn project_to_mdl(project: &Project) -> Result<String> {
-    if project.models.len() != 1 {
+    // MDL has no general multi-model representation, but a macro-marked model
+    // is emitted as a `:MACRO:` block (not a separate model), so only the
+    // *non-macro* models are subject to the single-model rule. An ordinary
+    // multi-model XMILE project is still rejected; a macro-bearing project
+    // (one main model plus one or more macro-marked models) is accepted.
+    if project
+        .models
+        .iter()
+        .filter(|m| m.macro_spec.is_none())
+        .count()
+        != 1
+    {
         return Err(Error::new(
             ErrorKind::Import,
             ErrorCode::Generic,
@@ -50,7 +61,7 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
         ));
     }
 
-    let model = &project.models[0];
+    let model = main_model(project);
     for var in &model.variables {
         if matches!(var, Variable::Module(_)) {
             return Err(Error::new(
@@ -63,6 +74,19 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
 
     let writer = MdlWriter::new();
     writer.write_project(project)
+}
+
+/// The single non-macro ("main") model of a macro-bearing project. The
+/// single-model invariant is enforced by [`project_to_mdl`]'s reject gate
+/// before the writer is invoked, so the main model always exists; this
+/// helper is the shared lookup so the gate, `write_project`, and
+/// `write_equations_section` all agree on which model is the body.
+pub(crate) fn main_model(project: &Project) -> &crate::datamodel::Model {
+    project
+        .models
+        .iter()
+        .find(|m| m.macro_spec.is_none())
+        .unwrap_or(&project.models[0])
 }
 
 /// Parse a Vensim MDL file into a Project.

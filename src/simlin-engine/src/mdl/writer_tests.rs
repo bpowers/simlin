@@ -1278,8 +1278,53 @@ fn make_model(variables: Vec<Variable>) -> datamodel::Model {
     }
 }
 
+/// Build a macro-marked `Model` with a `MacroSpec` and synthesized port
+/// variables, exactly as the MDL importer (Phase 2) produces: each formal
+/// parameter is a body `Variable` whose ident equals the parameter name and
+/// whose `compat.can_be_module_input` is `true`. `body` provides the
+/// non-port body equations (e.g. the primary-output equation).
+fn make_macro_model(
+    name: &str,
+    parameters: &[&str],
+    additional_outputs: &[&str],
+    body: Vec<Variable>,
+) -> datamodel::Model {
+    let mut variables = body;
+    for param in parameters {
+        let compat = Compat {
+            can_be_module_input: true,
+            ..Compat::default()
+        };
+        variables.push(Variable::Aux(Aux {
+            ident: (*param).to_owned(),
+            equation: Equation::Scalar("0".to_owned()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat,
+        }));
+    }
+    datamodel::Model {
+        name: name.to_owned(),
+        sim_specs: None,
+        variables,
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(datamodel::MacroSpec {
+            parameters: parameters.iter().map(|p| (*p).to_owned()).collect(),
+            primary_output: name.to_owned(),
+            additional_outputs: additional_outputs.iter().map(|o| (*o).to_owned()).collect(),
+        }),
+    }
+}
+
 #[test]
-fn project_to_mdl_rejects_multiple_models() {
+fn project_to_mdl_rejects_multiple_non_macro_models() {
+    // Two ordinary (non-macro) models: MDL has no general multi-model
+    // representation, so this is still rejected.
     let project = make_project(vec![make_model(vec![]), make_model(vec![])]);
     let result = crate::mdl::project_to_mdl(&project);
     assert!(result.is_err());
@@ -1288,6 +1333,40 @@ fn project_to_mdl_rejects_multiple_models() {
         err.to_string().contains("single model"),
         "error should mention single model, got: {}",
         err
+    );
+}
+
+#[test]
+fn project_to_mdl_accepts_main_plus_macro_model() {
+    // A `main` model plus a macro-marked model is accepted: the macro is
+    // emitted as a `:MACRO:` block, not rejected as an extra model.
+    let main = make_model(vec![make_aux(
+        "macro_output",
+        "expression_macro(macro_input, macro_parameter)",
+        None,
+        "",
+    )]);
+    let macro_model = make_macro_model(
+        "expression_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("expression_macro", "input * parameter", None, "")],
+    );
+    let project = make_project(vec![main, macro_model]);
+    let result = crate::mdl::project_to_mdl(&project);
+    assert!(result.is_ok(), "should accept main + macro: {:?}", result);
+    let mdl = result.unwrap();
+    // The macro name/params use the MDL display-name form. With no view to
+    // recover original casing, a canonical ident (`expression_macro`)
+    // renders lowercased with underscores->spaces; this canonicalizes back
+    // to `expression_macro` on re-parse, so the macro round-trips.
+    assert!(
+        mdl.contains(":MACRO: expression macro(input, parameter)"),
+        "expected :MACRO: header, got:\n{mdl}"
+    );
+    assert!(
+        mdl.contains(":END OF MACRO:"),
+        "expected :END OF MACRO: terminator, got:\n{mdl}"
     );
 }
 
@@ -1328,6 +1407,189 @@ fn project_to_mdl_succeeds_single_model() {
     );
     assert!(mdl.contains("x = "));
     assert!(mdl.contains("\\\\\\---///"));
+}
+
+// ---- Phase 6 Task 1: :MACRO: block emission ----
+
+#[test]
+fn macro_block_emitted_before_main_model_and_control() {
+    // The :MACRO: block must appear after {UTF-8} and before the main
+    // model's variables and the .Control section (matching the on-disk
+    // fixtures, which place :MACRO: blocks immediately after {UTF-8}).
+    let main = make_model(vec![make_aux(
+        "macro_output",
+        "expression_macro(macro_input, macro_parameter)",
+        None,
+        "",
+    )]);
+    let macro_model = make_macro_model(
+        "expression_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("expression_macro", "input * parameter", None, "")],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+
+    let utf8 = mdl.find("{UTF-8}").expect("has UTF-8 marker");
+    let macro_hdr = mdl
+        .find(":MACRO: expression macro(input, parameter)")
+        .expect("has :MACRO: header");
+    let macro_end = mdl.find(":END OF MACRO:").expect("has :END OF MACRO:");
+    let control = mdl.find(".Control").expect("has .Control");
+    let main_var = mdl
+        .find("macro output = EXPRESSION MACRO")
+        .expect("has main model var");
+
+    assert!(utf8 < macro_hdr, "UTF-8 before :MACRO:");
+    assert!(
+        macro_hdr < macro_end,
+        ":MACRO: header before :END OF MACRO:"
+    );
+    assert!(
+        macro_end < main_var,
+        ":END OF MACRO: before main model variables"
+    );
+    assert!(macro_end < control, ":END OF MACRO: before .Control");
+    // The body equation is inside the block.
+    let body = mdl
+        .find("expression macro = input * parameter")
+        .expect("has body equation");
+    assert!(
+        macro_hdr < body && body < macro_end,
+        "body equation between header and terminator"
+    );
+}
+
+#[test]
+fn macro_block_excludes_synthesized_port_variables() {
+    // The MacroSpec.parameters port variables are reconstructed from the
+    // header; emitting them as `<param> = 0` body equations would lose
+    // can_be_module_input on re-import, so they MUST NOT appear in the body.
+    let main = make_model(vec![make_aux(
+        "macro_output",
+        "expression_macro(macro_input, macro_parameter)",
+        None,
+        "",
+    )]);
+    let macro_model = make_macro_model(
+        "expression_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("expression_macro", "input * parameter", None, "")],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+
+    let macro_hdr = mdl.find(":MACRO:").unwrap();
+    let macro_end = mdl.find(":END OF MACRO:").unwrap();
+    let block = &mdl[macro_hdr..macro_end];
+    assert!(
+        !block.contains("input = 0") && !block.contains("input=0"),
+        "port variable `input` must not be emitted as a body equation:\n{block}"
+    );
+    assert!(
+        !block.contains("parameter = 0") && !block.contains("parameter=0"),
+        "port variable `parameter` must not be emitted as a body equation:\n{block}"
+    );
+}
+
+#[test]
+fn macro_single_output_invocation_preserved_as_call_text() {
+    // A single-output invocation in the main model is ordinary equation
+    // text and round-trips via the existing per-variable emission path
+    // (the RHS formatter passes unknown calls through verbatim, uppercased).
+    let main = make_model(vec![make_aux(
+        "macro_output",
+        "expression_macro(macro_input, macro_parameter)",
+        None,
+        "",
+    )]);
+    let macro_model = make_macro_model(
+        "expression_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("expression_macro", "input * parameter", None, "")],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+    // The RHS formatter passes the unknown call through verbatim,
+    // uppercased with `_`->space (the `function_unknown_uppercased`
+    // behavior). It canonicalizes back to `expression_macro(...)`.
+    assert!(
+        mdl.contains("EXPRESSION MACRO(macro input, macro parameter)"),
+        "single-output invocation should be preserved as call text:\n{mdl}"
+    );
+}
+
+#[test]
+fn macro_block_emits_multi_equation_body_and_body_stock() {
+    // A macro with a helper variable plus a body stock: both emit through
+    // the ordinary Stock/Aux entry path inside the :MACRO: block.
+    let main = make_model(vec![make_aux(
+        "macro_output",
+        "stocky_macro(macro_input, macro_parameter)",
+        None,
+        "",
+    )]);
+    let macro_model = make_macro_model(
+        "stocky_macro",
+        &["input", "parameter"],
+        &[],
+        vec![
+            make_aux("stocky_macro", "the_stock + helper", None, ""),
+            make_aux("helper", "parameter * 3", Some("myunit"), "a helper"),
+            make_stock("the_stock", "input", Some("widgets"), "a body stock"),
+        ],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+
+    let macro_hdr = mdl.find(":MACRO: stocky macro(input, parameter)").unwrap();
+    let macro_end = mdl.find(":END OF MACRO:").unwrap();
+    let block = &mdl[macro_hdr..macro_end];
+    assert!(
+        block.contains("helper = parameter * 3"),
+        "helper body equation should be in the block:\n{block}"
+    );
+    // `project_to_mdl` converts LF to CRLF, so the entry is `the stock=`
+    // then CRLF + tab + the INTEG reconstruction.
+    assert!(
+        block.contains("the stock=\r\n\tINTEG(0, input)"),
+        "body stock should emit as an INTEG entry in the block:\n{block:?}"
+    );
+}
+
+#[test]
+fn multiple_macro_blocks_emitted_in_project_models_order() {
+    // Two macros emit two back-to-back :MACRO: blocks in project.models
+    // order (stable across passes, which the round-trip pairing relies on).
+    let main = make_model(vec![make_aux("out", "first_macro(a, b)", None, "")]);
+    let first = make_macro_model(
+        "first_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("first_macro", "input * parameter", None, "")],
+    );
+    let second = make_macro_model(
+        "second_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("second_macro", "input / parameter", None, "")],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, first, second])).unwrap();
+
+    let first_hdr = mdl
+        .find(":MACRO: first macro(input, parameter)")
+        .expect("has first macro");
+    let second_hdr = mdl
+        .find(":MACRO: second macro(input, parameter)")
+        .expect("has second macro");
+    assert!(
+        first_hdr < second_hdr,
+        "macros should be emitted in project.models order"
+    );
+    assert_eq!(
+        mdl.matches(":END OF MACRO:").count(),
+        2,
+        "two macros => two :END OF MACRO: terminators:\n{mdl}"
+    );
 }
 
 // ---- Phase 4 Task 2: Sim spec emission ----

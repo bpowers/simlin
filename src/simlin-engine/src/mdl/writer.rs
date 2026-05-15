@@ -2462,11 +2462,74 @@ impl MdlWriter {
     /// is converted from LF to CRLF before returning.
     pub(super) fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
         self.buf.push_str("{UTF-8}\n");
-        let model = &project.models[0];
+        // Macro definitions are top-level `:MACRO:` blocks emitted right
+        // after `{UTF-8}` and before the dimension defs / main-model
+        // variables / `.Control` section -- the position every well-formed
+        // `macro_*` fixture uses (Vensim accepts multiple back-to-back
+        // blocks here). The single non-macro model is the body.
+        self.write_macro_blocks(project);
+        let model = super::main_model(project);
         self.write_equations_section(model, project);
         self.write_sketch_section(&model.views);
         self.write_settings_section(project);
         Ok(self.buf.replace('\n', "\r\n"))
+    }
+
+    /// Emit each macro-marked model as a `:MACRO: ... :END OF MACRO:` block.
+    ///
+    /// The header is reconstructed from the `MacroSpec` (single-output
+    /// `:MACRO: name(p1, p2)`, or the multi-output `:MACRO: name(p1, p2 :
+    /// o1, o2)` form when `additional_outputs` is non-empty). The body is
+    /// every model variable whose ident is *not* a formal parameter -- the
+    /// `MacroSpec.parameters` ports are synthesized on re-import from the
+    /// header (with `can_be_module_input`), so emitting them as `<param> =
+    /// 0` body equations would lose that flag and make the re-imported
+    /// macro treat them as ordinary body variables. Blocks are emitted in
+    /// `project.models` order, which is stable across passes (the
+    /// round-trip harness's zip-index model pairing relies on this).
+    fn write_macro_blocks(&mut self, project: &datamodel::Project) {
+        for model in &project.models {
+            let Some(spec) = model.macro_spec.as_ref() else {
+                continue;
+            };
+
+            // The body equations may carry original casing in the macro
+            // model's own views; fall back to the underbar->space /
+            // quoting helpers (the params/name are canonicalized idents).
+            let display_names = build_display_name_map(&model.views);
+
+            let params = spec
+                .parameters
+                .iter()
+                .map(|p| display_name_for_ident(p, &display_names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let macro_name = display_name_for_ident(&model.name, &display_names);
+            if spec.additional_outputs.is_empty() {
+                writeln!(self.buf, ":MACRO: {macro_name}({params})").unwrap();
+            } else {
+                let outputs = spec
+                    .additional_outputs
+                    .iter()
+                    .map(|o| display_name_for_ident(o, &display_names))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(self.buf, ":MACRO: {macro_name}({params} : {outputs})").unwrap();
+            }
+
+            // Body: every variable that is not a synthesized formal-
+            // parameter port (those are reconstructed from the header).
+            let param_idents: HashSet<&str> = spec.parameters.iter().map(|p| p.as_str()).collect();
+            for var in &model.variables {
+                if param_idents.contains(var.get_ident()) {
+                    continue;
+                }
+                write_variable_entry(&mut self.buf, var, &display_names);
+                self.buf.push('\n');
+            }
+
+            self.buf.push_str("\n:END OF MACRO:\n");
+        }
     }
 
     /// Write sim spec control variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER).
