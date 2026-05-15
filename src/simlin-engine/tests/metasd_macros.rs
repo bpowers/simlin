@@ -330,31 +330,32 @@ const CORPUS: &[CorpusModel] = &[
 // `thyroid_produces_no_macro_attributable_diagnostics` below is the positive
 // regression guard.
 
-/// Compile a macro-using metasd model via the salsa path and return
-/// `(macro_attributable_diagnostics, all_diagnostics, compiled_ok)`.
-fn compile_and_diagnose(path: &str) -> (Vec<Diagnostic>, usize, bool) {
-    let contents =
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-    let dm = open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
-
-    let mut db = SimlinDb::default();
-    let sync_state = sync_from_datamodel_incremental(&mut db, &dm, None);
-    let sync = sync_state.to_sync_result();
-    let compiled_ok = compile_project_incremental(&db, sync.project, "main").is_ok();
-    let diags = collect_all_diagnostics(&db, &sync);
-    let total = diags.len();
-
-    let macro_models: std::collections::BTreeSet<&str> = dm
-        .models
-        .iter()
-        .filter(|m| m.macro_spec.is_some())
-        .map(|m| m.name.as_str())
-        .collect();
-
-    // AC6.4 macro-attributable classifier (see the module doc for why this
-    // is narrower than Task 1's C-LEARN classifier): a project-level
-    // macro-registry build error, or a macro/model name collision.
-    let macro_diags: Vec<Diagnostic> = diags
+/// The narrower AC6.4 macro-attributable classifier (see the module doc
+/// for *why* it is narrower than Task 1's C-LEARN classifier in
+/// `simulate.rs::macro_attributable_diagnostics`): the metasd corpus's
+/// macro bodies legitimately hit unrelated engine gaps (`RANDOM NORMAL`,
+/// `DELAY N` with a non-constant order, ...) that land *inside* a macro
+/// model but are NOT macro-handling failures, so this classifier flags
+/// **only** the two unambiguous macro-handling failures:
+///
+/// 1. a project-level (`model` empty, `variable` `None`) `Model`
+///    `CircularDependency`/`DuplicateMacroName` -- a
+///    `MacroRegistry::build` failure (the #554 cascade class); or
+/// 2. a `BadModelName`/`DuplicateMacroName` on a macro-marked model or
+///    project-level -- a macro/model name collision.
+///
+/// `macro_models` is the set of macro-marked model names (`macro_spec` is
+/// `Some`). Extracted from `compile_and_diagnose` (it was an inline
+/// closure) so it is independently pinnable: `compile_and_diagnose` and
+/// the non-vacuity pin
+/// (`narrower_classifier_flags_registry_error_but_not_in_body_unknown_builtin`)
+/// drive the *same* code, mirroring `simulate.rs`'s named-function +
+/// pin-test structure. Behavior is byte-identical to the former closure.
+fn narrower_macro_attributable_diagnostics(
+    macro_models: &std::collections::BTreeSet<&str>,
+    diags: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    diags
         .into_iter()
         .filter(|d| {
             let code = match &d.error {
@@ -381,7 +382,31 @@ fn compile_and_diagnose(path: &str) -> (Vec<Diagnostic>, usize, bool) {
 
             registry_build_error || name_collision
         })
+        .collect()
+}
+
+/// Compile a macro-using metasd model via the salsa path and return
+/// `(macro_attributable_diagnostics, all_diagnostics, compiled_ok)`.
+fn compile_and_diagnose(path: &str) -> (Vec<Diagnostic>, usize, bool) {
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    let dm = open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+
+    let mut db = SimlinDb::default();
+    let sync_state = sync_from_datamodel_incremental(&mut db, &dm, None);
+    let sync = sync_state.to_sync_result();
+    let compiled_ok = compile_project_incremental(&db, sync.project, "main").is_ok();
+    let diags = collect_all_diagnostics(&db, &sync);
+    let total = diags.len();
+
+    let macro_models: std::collections::BTreeSet<&str> = dm
+        .models
+        .iter()
+        .filter(|m| m.macro_spec.is_some())
+        .map(|m| m.name.as_str())
         .collect();
+
+    let macro_diags = narrower_macro_attributable_diagnostics(&macro_models, diags);
 
     (macro_diags, total, compiled_ok)
 }
@@ -496,6 +521,169 @@ fn thyroid_produces_no_macro_attributable_diagnostics() {
          `module_functions::is_renamed_stdlib_module_builtin` / the shared \
          `is_renamed_builtin_macro_collision` predicate; do not silence. \
          Got: {macro_diags:#?}"
+    );
+}
+
+/// Compile a tiny inline `.mdl` through the SAME real salsa diagnostic
+/// path `compile_and_diagnose` uses, returning the macro-marked model
+/// names and every diagnostic. Used by the non-vacuity pin so it
+/// exercises *real* diagnostics (a genuine registry-build error / a
+/// genuine in-body `UnknownBuiltin`), not synthetic `Diagnostic` structs.
+fn macro_models_and_diags(source: &str) -> (Vec<String>, Vec<Diagnostic>) {
+    let dm = open_vensim(source).expect("inline macro mdl parses");
+    let mut db = SimlinDb::default();
+    let sync_state = sync_from_datamodel_incremental(&mut db, &dm, None);
+    let sync = sync_state.to_sync_result();
+    // Drive the compile so the registry-build / macro-resolution
+    // diagnostics are accumulated (same as `compile_and_diagnose`).
+    let _ = compile_project_incremental(&db, sync.project, "main");
+    let diags = collect_all_diagnostics(&db, &sync);
+    let macro_models: Vec<String> = dm
+        .models
+        .iter()
+        .filter(|m| m.macro_spec.is_some())
+        .map(|m| m.name.clone())
+        .collect();
+    (macro_models, diags)
+}
+
+/// Non-vacuity pin for the *narrower* AC6.4 classifier
+/// (`narrower_macro_attributable_diagnostics`). Unlike `simulate.rs`'s
+/// classifier, this narrower copy had no independent pin --
+/// `thyroid_produces_no_macro_attributable_diagnostics` only exercises
+/// the registry-error-ABSENT path, so the classifier could silently
+/// degrade (stop flagging a real registry-build error, or start flagging
+/// the metasd in-body engine-gap diagnostics it must tolerate) with no
+/// test failing. This asserts BOTH directions against REAL diagnostics
+/// driven through the same salsa path the corpus harness uses:
+///
+/// * **(a) flagged:** a directly-recursive macro
+///   (`RECUR = RECUR(a,b) + 1`) makes `MacroRegistry::build` reject the
+///   set, emitting a project-level `Model` `CircularDependency` (the #554
+///   cascade class). The narrower classifier MUST flag it -- if it did
+///   not (a "flag nothing" mutation), the corpus harness would silently
+///   stop catching the very failure class it exists to catch.
+/// * **(b) NOT flagged:** a macro whose *body* calls an
+///   engine-unimplemented builtin (`B = NOTAFUNCTION(a) + a`, the
+///   `RANDOM NORMAL`-in-`pink_noise` shape) yields an in-body
+///   `UnknownBuiltin` on the macro-marked model -- an *unrelated* engine
+///   gap, identical whether it appears in a macro body or a `main`
+///   equation. The narrower classifier MUST NOT flag it -- if it did (a
+///   "flag everything" mutation, or a widening to Task 1's body-error
+///   rule), every metasd model with such a gap would false-positive and
+///   the expansion tier's "no model excluded" guarantee would collapse.
+///
+/// Genuinely non-vacuous: mutating the classifier body to
+/// `registry_build_error || name_collision || true` makes (b) fail;
+/// mutating it to `false` makes (a) fail (verified by the author and
+/// reverted). The two directions also pin the classifier's *narrowness*
+/// (it must NOT adopt Task 1's macro-body-Error rule -- that is the
+/// documented metasd/C-LEARN difference).
+#[test]
+fn narrower_classifier_flags_registry_error_but_not_in_body_unknown_builtin() {
+    use simlin_engine::db::DiagnosticSeverity;
+
+    const CONTROL_TAIL: &str = "\nINITIAL TIME = 0 ~~|\n\
+         FINAL TIME = 1 ~~|\n\
+         SAVEPER = 1 ~~|\n\
+         TIME STEP = 1 ~~|\n";
+
+    // --- (a) genuine project-level macro-registry-build error ---
+    let recursive = format!(
+        "{{UTF-8}}\n\
+         :MACRO: RECUR(a, b)\n\
+         RECUR = RECUR(a, b) + 1\n\t~\ta\n\t~\tdirectly recursive\n\t~\t|\n\
+         :END OF MACRO:\n\
+         y= RECUR(3, 4) ~~|\n{CONTROL_TAIL}"
+    );
+    let (macro_models_a, diags_a) = macro_models_and_diags(&recursive);
+    let set_a: std::collections::BTreeSet<&str> =
+        macro_models_a.iter().map(String::as_str).collect();
+
+    // Sanity (the pin's premise, asserted so a pipeline change that stops
+    // emitting the registry error surfaces here, not as a silent vacuous
+    // pass): a REAL project-level `Model` `CircularDependency` exists.
+    assert!(
+        diags_a.iter().any(|d| {
+            d.model.is_empty()
+                && d.variable.is_none()
+                && d.severity == DiagnosticSeverity::Error
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Model(e) if e.code == ErrorCode::CircularDependency
+                )
+        }),
+        "premise: a directly-recursive macro must emit a project-level \
+         Model CircularDependency (the registry-build failure); got: \
+         {diags_a:#?}"
+    );
+
+    let flagged_a = narrower_macro_attributable_diagnostics(&set_a, diags_a);
+    assert!(
+        !flagged_a.is_empty(),
+        "(a) the narrower classifier MUST flag a project-level \
+         macro-registry-build error (recursive macro -> \
+         CircularDependency, the #554 cascade class). An empty result \
+         means the classifier degraded to 'flag nothing' -- the corpus \
+         harness would silently stop catching macro-registry failures. \
+         Got: {flagged_a:#?}"
+    );
+
+    // --- (b) in-body engine gap (the metasd RANDOM NORMAL shape) ---
+    // The macro body calls `RANDOM NORMAL`, the *literal* metasd
+    // `pink_noise` shape: recognized by the MDL parser but
+    // engine-unimplemented, so it surfaces as a non-project-level in-body
+    // diagnostic -- an unrelated engine gap, NOT a macro-handling failure
+    // (identical whether it appears in a macro body or a `main` equation).
+    let in_body_gap = format!(
+        "{{UTF-8}}\n\
+         :MACRO: GAP(seed)\n\
+         GAP = RANDOM NORMAL(-6, 6, 0, 1, seed)\n\t~\tdmnl\n\t~\tbody hits the RANDOM NORMAL engine gap\n\t~\t|\n\
+         :END OF MACRO:\n\
+         z= GAP(1) ~~|\n{CONTROL_TAIL}"
+    );
+    let (macro_models_b, diags_b) = macro_models_and_diags(&in_body_gap);
+    let set_b: std::collections::BTreeSet<&str> =
+        macro_models_b.iter().map(String::as_str).collect();
+    assert!(
+        !set_b.is_empty(),
+        "premise: `GAP` must import as a macro-marked model"
+    );
+
+    // Premise: a REAL in-body `UnknownBuiltin` exists ON the macro-marked
+    // model `gap` (NOT project-level) -- the *literal* documented metasd
+    // shape ("an `UnknownBuiltin` inside a macro body is an unrelated
+    // blocker, NOT a macro failure"; module doc lines 58-60). Asserting
+    // the exact shape (not just "some Error") so a pipeline change that
+    // stopped producing it surfaces here, not as a vacuous pass.
+    let has_in_body_unknown_builtin = diags_b.iter().any(|d| {
+        d.severity == DiagnosticSeverity::Error
+            && !(d.model.is_empty() && d.variable.is_none())
+            && set_b.contains(d.model.as_str())
+            && matches!(
+                &d.error,
+                DiagnosticError::Equation(e) if e.code == ErrorCode::UnknownBuiltin
+            )
+    });
+    assert!(
+        has_in_body_unknown_builtin,
+        "premise: the macro body's RANDOM NORMAL call must produce a \
+         non-project-level UnknownBuiltin ON the macro-marked model (the \
+         literal metasd RANDOM-NORMAL-in-a-macro-body shape); got: \
+         {diags_b:#?}"
+    );
+
+    let flagged_b = narrower_macro_attributable_diagnostics(&set_b, diags_b);
+    assert!(
+        flagged_b.is_empty(),
+        "(b) the narrower classifier MUST NOT flag an in-body \
+         UnknownBuiltin (an unrelated engine gap identical in a macro \
+         body or a `main` equation -- the documented reason this \
+         classifier is narrower than Task 1's). A non-empty result means \
+         the classifier degraded to 'flag everything' (or wrongly adopted \
+         Task 1's macro-body-Error rule); every metasd model with such a \
+         gap would false-positive and the expansion tier's no-model-\
+         excluded guarantee would collapse. Got: {flagged_b:#?}"
     );
 }
 

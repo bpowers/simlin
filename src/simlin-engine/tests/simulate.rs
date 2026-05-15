@@ -1444,8 +1444,12 @@ fn simulates_macro_trailing_definition_mdl() {
 // already -- if a `.vdf` is later added, a `.vdf`-aware path would prefer it.
 
 /// macros.AC6.3 -- C-LEARN's `SAMPLE UNTIL` macro (a stock that tracks
-/// `input` until `lastTime`, then holds) computes its defined behavior:
-/// `SAMPLE UNTIL(3, 7, 2)` = `[2, 7, 7, 7, 7, 7]` over t = 0..5.
+/// `input` until `lastTime`, then FREEZES) computes its defined behavior
+/// on a *time-varying* input: `SAMPLE UNTIL(4, 5+RAMP(1,0,10), 99)` =
+/// `[99, 5, 6, 7, 8, 8, 8, 8, 8]` over t = 0..8 -- it tracks the rising
+/// input through t=3, then holds the sampled 8 (distinct from both the
+/// init 99 and every later input 9..13, so the freeze is discriminating;
+/// see the fixture README for the full derivation).
 #[test]
 fn simulates_macro_clearn_sample_until_mdl() {
     simulate_mdl_path(

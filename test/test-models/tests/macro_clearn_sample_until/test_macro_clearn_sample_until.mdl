@@ -6,21 +6,32 @@ SAMPLE UNTIL = INTEG( (1-STEP(1,lastTime))*(input-SAMPLE UNTIL)/TIME STEP$, init
 
 :END OF MACRO:
 last time=
-	3
+	4
 	~	Month
-	~	hold time: STEP(1,lastTime) is 0 before lastTime, 1 at/after
+	~	hold time: STEP(1,lastTime) is 0 before lastTime, 1 at/after.
+		With dt=1 the last ACTIVE flow is at t=3 (3+0.5 > 4 is false),
+		so the sample is FROZEN at SU(4); the gate is 0 from t=4 on.
 	|
 
 the input=
-	7
+	5+RAMP(1, 0, 10)
 	~	dmnl
-	~	constant input the sample tracks until last time
+	~	a TIME-VARYING input the sample tracks until last time, then
+		FREEZES. RAMP(1,0,10) = 0 at t=0 then time for 0<t<10, so
+		the input = 5,6,7,8,9,10,11,12,13 at t=0..8. Because the
+		input keeps RISING after the freeze, the frozen value is
+		genuinely distinct from both the init and every later input
+		-- this is what makes the fixture exercise SAMPLE UNTIL's
+		defining behavior (sample a CHANGING signal, then HOLD it),
+		not just an init->constant first-step jump.
 	|
 
 initial value=
-	2
+	99
 	~	dmnl
-	~	the SAMPLE UNTIL stock's initial value at INITIAL TIME
+	~	the SAMPLE UNTIL stock's initial value at INITIAL TIME (a
+		distinct sentinel: it differs from every sampled/frozen value
+		so a wrong init can never accidentally match)
 	|
 
 sampled=
@@ -36,7 +47,7 @@ sampled=
 		Simulation Control Parameters
 	|
 
-FINAL TIME  = 5
+FINAL TIME  = 8
 	~	Month
 	~	The final time for the simulation.
 	|
@@ -84,5 +95,5 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,1
 41:0
 42:0
 24:0
-25:5
-26:5
+25:8
+26:8

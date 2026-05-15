@@ -76,6 +76,15 @@ required-features = ["file_io"]
 name = "systems_roundtrip"
 required-features = ["file_io"]
 
+# metasd_macros calls load_dat/load_csv in its simulation tier, which are
+# #[cfg(feature = "file_io")]-gated; without this entry Cargo auto-discovers
+# the target unconditionally and `--all-targets` fails to compile when
+# file_io is off (every sibling file_io test below/above is gated the same
+# way).
+[[test]]
+name = "metasd_macros"
+required-features = ["file_io"]
+
 [[test]]
 name = "roundtrip"
 
