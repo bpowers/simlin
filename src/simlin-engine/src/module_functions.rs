@@ -107,11 +107,78 @@ pub(crate) fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
 ///   `:MACRO: INIT(x) ... INIT = INITIAL(x)`).
 ///
 /// Other importer renames (e.g. `INTEGER -> INT`, `VMAX -> MAX`) target
-/// ordinary `is_builtin_fn` builtins or stdlib modules with no special walk()
-/// routing, so a same-named-macro wrap of those is not a false *recursion* in
-/// the same way and is intentionally NOT in this set.
+/// ordinary `is_builtin_fn` builtins with no special walk() routing, so a
+/// same-named-macro wrap of those is not a false *recursion* in the same way
+/// and is intentionally NOT in this set. The renames that resolve to a
+/// *stdlib module* (`DELAY N -> DELAYN`, `SMOOTH N -> SMTHN`, `DELAY FIXED
+/// -> DELAY`, ...) are the same false-recursion class but with a different
+/// termination argument; they live in the companion
+/// [`is_renamed_stdlib_module_builtin`], and both feed the shared
+/// [`is_renamed_builtin_macro_collision`] predicate (#554 follow-up).
 pub(crate) fn is_renamed_opcode_intrinsic(canonical: &str) -> bool {
     matches!(canonical, "init" | "previous")
+}
+
+/// Whether `canonical` names a *stdlib-module-backed* builtin that the Vensim
+/// MDL importer's builtin-rename can collide with a same-canonical-name user
+/// macro -- the #554-follow-up companion of [`is_renamed_opcode_intrinsic`].
+///
+/// Membership is delegated to [`crate::builtins::is_stdlib_module_function`],
+/// the single authoritative predicate for "this canonical name expands to a
+/// `stdlib⁚...` model" (already used by `builtins_visitor`'s
+/// `contains_module_call` and the walk's stdlib path). Delegating -- rather
+/// than hand-maintaining a parallel list -- guarantees this suppression set
+/// cannot drift from the names that actually resolve to a stdlib module: if a
+/// name is ever added to / removed from stdlib-module backing, both the
+/// resolution and this carve-out move together.
+///
+/// Why a *stdlib-module*-specific predicate (cross-ref #554, GH thyroid):
+/// - The MDL importer (`mdl/xmile_compat.rs`) rewrites Vensim `DELAY N(...)`
+///   to the single-token XMILE `DELAYN(...)`, `SMOOTH N(...)` to `SMTHN(...)`,
+///   `DELAY FIXED` to `DELAY`, the `SMOOTH*`/`DELAY1`/`DELAY3` family to
+///   `SMTH*`/`DELAY1`/`DELAY3`, `TREND`/`NPV` upcased. Every one of those
+///   canonical names is recognized by `is_stdlib_module_function` and, after
+///   `rewrite_alias_module_call`, resolves through `stdlib_descriptor` to a
+///   distinct `stdlib⁚{name}` model (`stdlib⁚delay1`, `stdlib⁚smth3`, ...).
+/// - So `:MACRO: DELAYN(...) ... DELAYN = DELAY N(...)`
+///   (test/metasd/thyroid-dynamics/thyroid-2008-d.mdl) stores the datamodel
+///   body `delayn = delayn(...)`: the `delayn` call is the *renamed builtin*,
+///   not genuine self-recursion (Vensim macros cannot recurse and the source
+///   wrote the distinct name `DELAY N`).
+///
+/// TERMINATION (verified against `builtins_visitor::BuiltinVisitor::walk`):
+/// when Part B skips the macro-shadows-everything `resolve_macro` for such a
+/// self-call, the call falls through to `rewrite_alias_module_call` then
+/// `stdlib_descriptor`, producing a `Variable::Module` whose `model_name` is
+/// `"stdlib⁚{name}"`. The U+205A separator is not a legal Vensim identifier
+/// character and the importer never mints that prefix for a user model, so
+/// the stdlib model is necessarily DISTINCT from the user macro's model
+/// (whose name is the macro's own name). The stdlib model body is fixed
+/// stdlib content that never references the user macro, so compiling it does
+/// not re-enter the macro: the expansion terminates. (For the
+/// `systems_rate`/`systems_leak`/`systems_conversion` members of
+/// `is_stdlib_module_function` -- not Vensim builtins, no `stdlib_descriptor`
+/// entry -- the fall-through is a terminating `UnknownBuiltin`, not infinite
+/// recursion, so they are harmless to include and the Vensim importer cannot
+/// produce them as a body call anyway.)
+pub(crate) fn is_renamed_stdlib_module_builtin(canonical: &str) -> bool {
+    crate::builtins::is_stdlib_module_function(canonical)
+}
+
+/// The single shared predicate the #554 / #554-follow-up self-edge
+/// suppression keys off: `canonical` is a Vensim-MDL-importer-renamed builtin
+/// (opcode-backed *or* stdlib-module-backed) that a same-canonical-name user
+/// macro's body can legitimately reference without it being recursion.
+///
+/// Used by BOTH halves so they cannot drift (the #554 design property): Part
+/// A (`collect_called_macros`, here) must not record a false `self -> self`
+/// recursion edge for such a wrap, and Part B
+/// (`builtins_visitor::BuiltinVisitor::walk`) must resolve such a self-call
+/// to the builtin/intrinsic (an opcode for `init`/`previous`, the stdlib
+/// module for `delayn`/`smthn`/...) rather than re-entering the macro
+/// forever. Both terminate (see each member predicate's doc).
+pub(crate) fn is_renamed_builtin_macro_collision(canonical: &str) -> bool {
+    is_renamed_opcode_intrinsic(canonical) || is_renamed_stdlib_module_builtin(canonical)
 }
 
 /// Build a [`ModuleFunctionDescriptor`] for a stdlib module-function.
@@ -287,25 +354,30 @@ impl MacroRegistry {
 /// the macro-call edges out of `enclosing` (the canonical name of the macro
 /// whose body this AST is).
 ///
-/// #554 exception (precisely scoped): a call is NOT recorded as a macro edge
-/// when the called name canonicalizes to `enclosing`'s OWN canonical name AND
-/// that name is an opcode-backed engine intrinsic
-/// ([`is_renamed_opcode_intrinsic`] -- `init`/`previous`). Such a call is the
-/// MDL importer's *renamed builtin* (`INITIAL` -> `INIT`,
-/// `SAMPLE IF TRUE` -> `PREVIOUS`), not genuine self-recursion: Vensim macros
-/// cannot recurse, and the source wrote the distinct builtin name. Resolving
-/// it to the intrinsic terminates (the `builtins_visitor` half, sharing
-/// [`is_renamed_opcode_intrinsic`], makes the same call resolve to the opcode
-/// rather than re-entering the macro), so recording an `enclosing -> enclosing`
-/// self-edge here would be the #554 false positive that fails the *whole*
-/// `MacroRegistry::build` and un-shadows the project's other macros.
+/// #554 (+ follow-up) exception (precisely scoped): a call is NOT recorded as
+/// a macro edge when the called name canonicalizes to `enclosing`'s OWN
+/// canonical name AND that name is a Vensim-MDL-importer-renamed builtin --
+/// opcode-backed (`init`/`previous`) *or* stdlib-module-backed
+/// (`delayn`/`smthn`/`delay`/...) -- per the shared
+/// [`is_renamed_builtin_macro_collision`]. Such a call is the importer's
+/// *renamed builtin* (`INITIAL` -> `INIT`, `SAMPLE IF TRUE` -> `PREVIOUS`,
+/// `DELAY N` -> `DELAYN`, `SMOOTH N` -> `SMTHN`, ...), not genuine
+/// self-recursion: Vensim macros cannot recurse, and the source wrote the
+/// distinct builtin name. Resolving it to the builtin terminates -- the
+/// `builtins_visitor` half, sharing the SAME predicate, makes the call
+/// resolve to the opcode (`init`/`previous`) or the distinct `stdlib⁚...`
+/// module (`delayn`/...) rather than re-entering the macro -- so recording an
+/// `enclosing -> enclosing` self-edge here would be the #554-class false
+/// positive that fails the *whole* `MacroRegistry::build` and un-shadows the
+/// project's other macros (the cascade).
 ///
 /// The suppression is strictly `called-canonical == enclosing AND
-/// is_renamed_opcode_intrinsic(called-canonical)`: a *different* macro that
-/// merely happens to be named after an intrinsic still produces a real edge
-/// (so `init -> previous -> init`, A->B->A by intrinsic names, is still a
-/// rejected cycle), and a genuinely self-recursive *non*-intrinsic macro
-/// (`foo = foo(x)`) still records its self-edge (macros.AC5.2 unweakened).
+/// is_renamed_builtin_macro_collision(called-canonical)`: a *different* macro
+/// that merely happens to be named after a builtin still produces a real edge
+/// (so `init -> previous -> init` and `delayn -> smthn -> delayn`, A->B->A by
+/// builtin names, are still rejected cycles), and a genuinely self-recursive
+/// macro whose name is *not* a renamed builtin (`foo = foo(x,y)`) still
+/// records its self-edge (macros.AC5.2 unweakened).
 fn collect_called_macros(
     expr: &Expr0,
     enclosing: &str,
@@ -319,12 +391,13 @@ fn collect_called_macros(
         Var(_, _) => {}
         App(UntypedBuiltinFn(func, args), _) => {
             let canonical = canonicalize(func);
-            // #554: suppress ONLY the same-named-opcode-intrinsic self-edge.
-            // Any other macro-resolving call (including a self-call of a
-            // non-intrinsic macro, preserving macros.AC5.2) records its edge.
-            let is_renamed_intrinsic_self_wrap =
-                canonical.as_ref() == enclosing && is_renamed_opcode_intrinsic(canonical.as_ref());
-            if !is_renamed_intrinsic_self_wrap && macros.contains_key(canonical.as_ref()) {
+            // #554 (+ follow-up): suppress ONLY the same-named-renamed-builtin
+            // self-edge. Any other macro-resolving call (including a self-call
+            // of a macro whose name is NOT a renamed builtin, preserving
+            // macros.AC5.2) records its edge.
+            let is_renamed_builtin_self_wrap = canonical.as_ref() == enclosing
+                && is_renamed_builtin_macro_collision(canonical.as_ref());
+            if !is_renamed_builtin_self_wrap && macros.contains_key(canonical.as_ref()) {
                 out.insert(canonical.into_owned());
             }
             for arg in args {
@@ -777,6 +850,130 @@ mod tests {
             "init -> previous -> init is a genuine macro cycle and must fail \
              even though both names are intrinsic names (the suppression is \
              self-edge-only)",
+        );
+        assert_eq!(err.code, crate::common::ErrorCode::CircularDependency);
+    }
+
+    // --- #554 follow-up: a macro wrapping a same-canonical-name
+    //     STDLIB-MODULE-backed renamed builtin (the `DELAY N` / thyroid case) -
+    //
+    // The MDL importer rewrites Vensim `DELAY N(input,dt,init,n)` to the XMILE
+    // `DELAYN(input,dt,n,init)` (`mdl/xmile_compat.rs`). So
+    // thyroid-2008-d.mdl's `:MACRO: DELAYN(...) ... DELAYN = DELAY N(...)` is
+    // stored as the datamodel macro body `delayn = delayn(...)`. The `delayn`
+    // call there is the renamed builtin, NOT a recursive call (Vensim macros
+    // cannot recurse and the source wrote the distinct name `DELAY N`).
+    // Recording a `delayn -> delayn` self-edge for it is a #554-class false
+    // positive; it failed the whole `MacroRegistry::build` (the empty registry
+    // then un-shadowed every other macro -- the same cascade as #554).
+    //
+    // UNLIKE #554's `init`/`previous` (opcode-backed, falls through to a
+    // terminal LoadInitial/LoadPrev opcode), `delayn` is stdlib-module-backed:
+    // skipping the macro resolve makes the call fall through to
+    // `rewrite_alias_module_call`/`stdlib_descriptor`, resolving to a
+    // `stdlib⁚delay1`/`stdlib⁚delay3` MODULE -- a DISTINCT fixed model whose
+    // body never references the user `delayn` macro, so it terminates.
+    //
+    // NB: the importer ALREADY collapses Vensim `DELAY N` to the single-token
+    // XMILE `DELAYN` before the datamodel macro body is formed (verified: the
+    // thyroid macro body datamodel `source_text()` is
+    // `DELAYN(Input, DelayTime, Order, Init)`), so the fixture body is the
+    // single token `delayn(a, b)` (canonical `delayn`), NOT `delay n(...)`.
+
+    #[test]
+    fn issue_554_followup_macro_wrapping_same_named_delayn_builtin_builds_ok() {
+        // Exactly the thyroid shape: a macro whose canonical name (`delayn`)
+        // equals a stdlib-module-backed renamed builtin, whose body is
+        // `delayn = delayn(a, b)` (the importer-renamed `DELAY N(...)`; >=2
+        // params per GH#553's 1-arg-call->LOOKUP heuristic), PLUS a sibling
+        // macro. The registry must build (no false `delayn -> delayn`
+        // CircularDependency) and BOTH macros must resolve, proving the
+        // #554-class cascade that blocked thyroid's other macros is gone.
+        let models = vec![
+            plain_model("main"),
+            macro_model("delayn", &["a", "b"], "delayn(a, b)"),
+            macro_model("pipeline", &["input", "delay_time"], "input + delay_time"),
+        ];
+        let registry = MacroRegistry::build(&models).expect(
+            "a macro wrapping the same-named stdlib-module-backed `DELAY N` \
+             builtin is NOT recursive (#554 follow-up): the body's \
+             `delayn(...)` is the importer-renamed `DELAY N(...)` builtin, \
+             which resolves to the stdlib delay module and terminates -- the \
+             registry must build",
+        );
+        assert!(
+            registry.resolve_macro("delayn").is_some(),
+            "the `delayn` macro itself must still be registered"
+        );
+        assert!(
+            registry.resolve_macro("pipeline").is_some(),
+            "the OTHER macro must resolve -- the #554-class false self-edge \
+             must not fail the whole registry and un-shadow sibling macros"
+        );
+    }
+
+    #[test]
+    fn issue_554_followup_macro_wrapping_same_named_smthn_builtin_builds_ok() {
+        // The `smthn` analogue: Vensim `SMOOTH N` -> XMILE `SMTHN`
+        // (`mdl/xmile_compat.rs`), also stdlib-module-backed
+        // (`is_stdlib_module_function` matches `smthn`; resolves to
+        // `stdlib⁚smth1`/`smth3`). A macro named `SMTHN` whose body uses it
+        // is the same renamed-stdlib-module collision class.
+        let models = vec![
+            plain_model("main"),
+            macro_model("smthn", &["a", "b"], "smthn(a, b)"),
+        ];
+        let registry = MacroRegistry::build(&models).expect(
+            "a macro wrapping the same-named stdlib-module-backed `smth n` \
+             builtin is NOT recursive (#554 follow-up)",
+        );
+        assert!(registry.resolve_macro("smthn").is_some());
+    }
+
+    #[test]
+    fn issue_554_followup_does_not_weaken_ac5_2_genuine_self_recursion() {
+        // CRITICAL guard (macros.AC5.2 must stay unweakened): a macro `foo`
+        // whose body is `foo = foo(x, y)` where `foo` is NEITHER an opcode
+        // intrinsic NOR a stdlib-module-backed renamed builtin is GENUINE
+        // self-recursion (Vensim wrote the macro name itself, not a renamed
+        // builtin) and MUST still be a CircularDependency. The #554-follow-up
+        // exception is scoped to the renamed-builtin same-name case only.
+        let models = vec![macro_model("foo", &["x", "y"], "foo(x, y)")];
+        let err = MacroRegistry::build(&models).expect_err(
+            "a genuinely self-recursive non-builtin macro must STILL fail \
+             registry build -- the #554-follow-up exception must not weaken \
+             AC5.2",
+        );
+        assert_eq!(
+            err.code,
+            crate::common::ErrorCode::CircularDependency,
+            "genuine self-recursion must remain CircularDependency"
+        );
+        let details = err.get_details().unwrap_or_default();
+        assert!(
+            details.contains("foo"),
+            "the cycle error must still name the recursive macro: {:?}",
+            details
+        );
+    }
+
+    #[test]
+    fn issue_554_followup_macro_calling_a_different_stdlib_named_macro_is_recursion() {
+        // Scope guard mirroring the opcode-intrinsic one: the suppression is
+        // `call-canonical == enclosing-canonical AND in the renamed-builtin
+        // set`. A macro `delayn` that calls a DIFFERENT macro also named after
+        // a stdlib builtin (`smthn`) is a real macro-to-macro edge
+        // (`delayn -> smthn`); if `smthn` calls `delayn` back, that A->B->A
+        // cycle MUST still be rejected. Only the *self*-edge to the
+        // *same-named* renamed builtin is suppressed.
+        let models = vec![
+            macro_model("delayn", &["x", "y"], "smthn(x, y)"),
+            macro_model("smthn", &["p", "q"], "delayn(p, q)"),
+        ];
+        let err = MacroRegistry::build(&models).expect_err(
+            "delayn -> smthn -> delayn is a genuine macro cycle and must fail \
+             even though both names are stdlib-builtin names (the suppression \
+             is self-edge-only)",
         );
         assert_eq!(err.code, crate::common::ErrorCode::CircularDependency);
     }

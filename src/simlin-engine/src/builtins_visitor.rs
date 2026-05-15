@@ -13,7 +13,7 @@ use crate::common::{
 };
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
 use crate::module_functions::{
-    MacroRegistry, ModuleFunctionDescriptor, is_renamed_opcode_intrinsic, stdlib_descriptor,
+    MacroRegistry, ModuleFunctionDescriptor, is_renamed_builtin_macro_collision, stdlib_descriptor,
 };
 use crate::{datamodel, eqn_err};
 
@@ -169,17 +169,20 @@ pub struct BuiltinVisitor<'a> {
     /// expanding, if any (i.e. the variable being parsed belongs to a
     /// macro-marked model). `None` for ordinary (non-macro-body) variables.
     ///
-    /// #554: when expanding a macro body, a call whose canonical name equals
-    /// this enclosing macro's own canonical name AND is an opcode-backed
-    /// engine intrinsic (`is_renamed_opcode_intrinsic`) must resolve to the
-    /// INTRINSIC, not recurse into the macro. The MDL importer's necessary
-    /// `INITIAL -> INIT` / `SAMPLE IF TRUE -> PREVIOUS` rename makes such a
-    /// body literally read `init = init(x)`; without this exception the
+    /// #554 (+ follow-up): when expanding a macro body, a call whose
+    /// canonical name equals this enclosing macro's own canonical name AND is
+    /// a Vensim-MDL-importer-renamed builtin -- opcode-backed
+    /// (`init`/`previous`) *or* stdlib-module-backed (`delayn`/`smthn`/...),
+    /// per the shared `is_renamed_builtin_macro_collision` -- must resolve to
+    /// the BUILTIN, not recurse into the macro. The importer's necessary
+    /// `INITIAL -> INIT` / `SAMPLE IF TRUE -> PREVIOUS` / `DELAY N -> DELAYN`
+    /// / `SMOOTH N -> SMTHN` rename makes such a body literally read
+    /// `init = init(x)` or `delayn = delayn(...)`; without this exception the
     /// macro-shadows-everything precedence (`resolve_macro` below) would
-    /// re-resolve `init(x)` to the macro forever. `module_functions`'
-    /// `collect_called_macros` suppresses the matching false recursion edge
-    /// using the *same* `is_renamed_opcode_intrinsic` predicate, so the two
-    /// halves agree by construction.
+    /// re-resolve the call to the macro forever (a salsa module-map cycle).
+    /// `module_functions`' `collect_called_macros` suppresses the matching
+    /// false recursion edge using the *same* predicate, so the two halves
+    /// agree by construction.
     enclosing_model: Option<&'a str>,
 }
 
@@ -238,20 +241,23 @@ impl<'a> BuiltinVisitor<'a> {
         self
     }
 
-    /// #554: is `func` (a raw call name) the enclosing macro's own
-    /// same-canonical-name opcode intrinsic -- i.e. the MDL importer's
-    /// renamed `INITIAL`/`SAMPLE IF TRUE` builtin appearing inside the
-    /// like-named macro's body? Such a call must resolve to the intrinsic,
-    /// NOT (recursively) to the macro. Shares `is_renamed_opcode_intrinsic`
-    /// with `module_functions::collect_called_macros` so the recursion-edge
+    /// #554 (+ follow-up): is `func` (a raw call name) the enclosing macro's
+    /// own same-canonical-name renamed builtin -- i.e. the MDL importer's
+    /// renamed `INITIAL`/`SAMPLE IF TRUE` (opcode-backed) or
+    /// `DELAY N`/`SMOOTH N`/... (stdlib-module-backed) builtin appearing
+    /// inside the like-named macro's body? Such a call must resolve to the
+    /// builtin (the opcode for `init`/`previous`, the distinct `stdlib⁚...`
+    /// module for `delayn`/...), NOT (recursively) to the macro. Shares
+    /// `is_renamed_builtin_macro_collision` with
+    /// `module_functions::collect_called_macros` so the recursion-edge
     /// suppression and this expansion exception cannot drift apart.
-    fn is_enclosing_macro_intrinsic_self_call(&self, func: &str) -> bool {
+    fn is_enclosing_macro_renamed_builtin_self_call(&self, func: &str) -> bool {
         let Some(enclosing) = self.enclosing_model else {
             return false;
         };
         let call = canonicalize(func);
         let enclosing = canonicalize(enclosing);
-        call == enclosing && is_renamed_opcode_intrinsic(call.as_ref())
+        call == enclosing && is_renamed_builtin_macro_collision(call.as_ref())
     }
 
     /// Set the module identifiers for PREVIOUS routing.
@@ -592,23 +598,30 @@ impl<'a> BuiltinVisitor<'a> {
                 self.self_allowed = orig_self_allowed;
                 let args = args?;
 
-                // #554 exception to the macro-shadows-everything precedence
-                // below: when expanding a macro body, a call whose canonical
-                // name equals the *enclosing* macro's own canonical name AND
-                // is an opcode-backed engine intrinsic (`init`/`previous`) is
-                // the MDL importer's renamed builtin (`INITIAL` -> `INIT`,
-                // `SAMPLE IF TRUE` -> `PREVIOUS`), NOT a recursive macro call
-                // (Vensim macros cannot recurse; the source wrote the distinct
-                // builtin name). It must resolve to the intrinsic, so we skip
-                // `resolve_macro` and fall through to the PREVIOUS/INIT
-                // intrinsic routing (`init_needs_temp_arg` / `is_builtin_fn`
-                // -> the LoadInitial/LoadPrev opcode) below. Without this an
-                // INVOKED such-macro would infinite-loop: the macro body's
-                // `init(x)` would re-resolve to the macro forever.
-                // `module_functions::collect_called_macros` suppresses the
-                // mirror false recursion edge with the same predicate, so the
-                // registry build *and* this expansion stay consistent (#554).
-                let is_intrinsic_self_call = self.is_enclosing_macro_intrinsic_self_call(&func);
+                // #554 (+ follow-up) exception to the macro-shadows-everything
+                // precedence below: when expanding a macro body, a call whose
+                // canonical name equals the *enclosing* macro's own canonical
+                // name AND is a Vensim-MDL-importer-renamed builtin --
+                // opcode-backed (`init`/`previous`) or stdlib-module-backed
+                // (`delayn`/`smthn`/...) -- is the importer's renamed builtin
+                // (`INITIAL` -> `INIT`, `SAMPLE IF TRUE` -> `PREVIOUS`,
+                // `DELAY N` -> `DELAYN`, `SMOOTH N` -> `SMTHN`), NOT a
+                // recursive macro call (Vensim macros cannot recurse; the
+                // source wrote the distinct builtin name). It must resolve to
+                // the builtin, so we skip `resolve_macro` and fall through:
+                // for `init`/`previous` to the PREVIOUS/INIT intrinsic routing
+                // (-> the LoadInitial/LoadPrev opcode), for `delayn`/... to
+                // `rewrite_alias_module_call` + `stdlib_descriptor` (-> a
+                // DISTINCT `stdlib⁚delay1`/... module whose fixed body never
+                // references the user macro). Without this an INVOKED
+                // such-macro would infinite-loop / form a salsa module-map
+                // cycle: the body's `init(x)` / `delayn(...)` would re-resolve
+                // to the macro forever. `module_functions::collect_called_macros`
+                // suppresses the mirror false recursion edge with the same
+                // shared predicate, so the registry build *and* this expansion
+                // stay consistent (#554 + follow-up).
+                let is_renamed_builtin_self_call =
+                    self.is_enclosing_macro_renamed_builtin_self_call(&func);
 
                 // Macro-shadows-everything precedence (Vensim's rule): a
                 // project macro is resolved here, BEFORE alias
@@ -617,7 +630,7 @@ impl<'a> BuiltinVisitor<'a> {
                 // `RAMP FROM TO` therefore expands as the macro even though
                 // it parsed as `CallKind::Builtin`. `func` is the raw call
                 // name (resolve_macro canonicalizes internally).
-                if !is_intrinsic_self_call
+                if !is_renamed_builtin_self_call
                     && let Some(descriptor) = self.macro_registry.resolve_macro(&func)
                 {
                     let descriptor = descriptor.clone();

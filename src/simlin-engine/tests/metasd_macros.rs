@@ -110,10 +110,13 @@ struct CorpusModel {
 /// The full corpus: every macro-using `.mdl` under `test/metasd/` (the
 /// exact 17-file list, 14 directories). Each entry's `sim` reason and
 /// `heavy` flag is the *measured, verified* status as of Phase 7
-/// (2026-05-15). The expansion tier asserts NONE of these has a
-/// macro-attributable diagnostic; `thyroid-2008-d.mdl` is the one genuine
-/// macro-attributable failure and is tracked + excluded explicitly below
-/// (NOT silently dropped, NOT masked by a weakened assertion).
+/// (2026-05-15). The expansion tier asserts NONE of these -- all 17 -- has a
+/// macro-attributable diagnostic. (Historical note: `thyroid-2008-d.mdl` was
+/// once excluded for a #554-class false-positive `delayn -> delayn`
+/// macro-registry recursion; that bug is FIXED -- see the #554 follow-up,
+/// `module_functions::is_renamed_stdlib_module_builtin` -- and thyroid is now
+/// in the asserted set with the other 16. No model is excluded; the
+/// assertion is not weakened.)
 const CORPUS: &[CorpusModel] = &[
     // -- 12 single-file directories --
     CorpusModel {
@@ -220,12 +223,20 @@ const CORPUS: &[CorpusModel] = &[
     CorpusModel {
         path: "../../test/metasd/thyroid-dynamics/thyroid-2008-d.mdl",
         heavy: false,
+        // The #554-class false-positive `delayn -> delayn` macro-registry
+        // recursion is FIXED (the #554 follow-up extended the shared
+        // renamed-builtin self-edge suppression to the stdlib-module-backed
+        // set -- `module_functions::is_renamed_stdlib_module_builtin`). The
+        // `DELAYN`/`PIPELINE` macros now expand with NO macro-attributable
+        // diagnostic, so this model is in the asserted expansion tier.
         sim: SimTier::Skip(
-            "KNOWN MACRO BUG (escalated, see metasd_expansion_tier doc + \
-             KNOWN_MACRO_BUG below): false-positive `delayn -> delayn` \
-             macro-registry recursion -- a #554-class false positive that \
-             #554 deliberately scoped out for stdlib-module-backed builtins \
-             like DELAY N. NOT simulation-tier-eligible until fixed",
+            "no reference output checked in; also unrelated blocker: the \
+             DELAYN/PIPELINE macro bodies use DELAY N / DELAY MATERIAL with a \
+             non-constant (macro-port) order, an orthogonal pre-existing \
+             stdlib limitation surfacing as a non-macro-attributable in-body \
+             UnknownBuiltin -- same gap as in a main equation. The macro \
+             handling itself is correct (no #554-class cascade); pinned by \
+             macro_expansion_tests::issue_554_followup_thyroid_shape_*",
         ),
     },
     CorpusModel {
@@ -289,45 +300,35 @@ const CORPUS: &[CorpusModel] = &[
     },
 ];
 
-/// The one corpus model with a genuine, *macro-attributable* failure --
-/// excluded from the expansion-tier assertion EXPLICITLY (not silently,
-/// not by weakening the assertion), with the full root cause, so it is
-/// loudly documented and surfaced for the parent to file/confirm a
-/// tracking issue.
-///
-/// ROOT CAUSE (a real macro bug, escalated): `thyroid-2008-d.mdl` defines
-/// `:MACRO: DELAYN(Input,DelayTime,Init,Order)` with body
-/// `DELAYN = DELAY N(Input,DelayTime,Init,Order)`. The MDL importer
-/// canonicalizes the Vensim `DELAY N` builtin to `delayn` (spaces
-/// stripped), so the macro body's builtin call now has the *same canonical
-/// name as the enclosing macro*. `module_functions::collect_called_macros`
-/// then records a `delayn -> delayn` self-edge and `MacroRegistry::build`
-/// fails with a project-level `Model(CircularDependency)`:
-/// `"recursive macro: delayn -> delayn"`. This un-shadows `delayn` /
-/// `pipeline` for the whole project (the #554 cascade shape).
-///
-/// This is structurally identical to the #554 false positive
-/// (`:MACRO: INIT(x) ... INIT = INITIAL(x)`), but #554's fix
-/// (`is_renamed_opcode_intrinsic`) is *deliberately* scoped to the
-/// opcode-backed intrinsics `init`/`previous` only -- its own doc comment
-/// (`module_functions.rs`, "Other importer renames ... target ordinary
-/// builtins or stdlib modules with no special walk() routing ... and is
-/// intentionally NOT in this set") excludes the stdlib-module-backed
-/// `DELAY N` case because the #554 termination argument (the macro body's
-/// call falls through to the LoadInitial/LoadPrev *opcode*) does not
-/// extend to a stdlib-module-backed builtin without additional work in
-/// BOTH #554 halves plus a proof that the macro-body `DELAY N` expansion
-/// terminates against the stdlib module rather than re-entering the
-/// `delayn` macro.
-///
-/// Fixing it is a focused, separate engine change (a #554 follow-up:
-/// extend the renamed-builtin self-call suppression to stdlib-module-backed
-/// builtins, with a termination guarantee), out of scope for this
-/// corpus-harness task. ESCALATED -- the parent should file/confirm a
-/// tracking issue. The expansion-tier assertion below excludes ONLY this
-/// model (the other 16 are asserted), and a dedicated test pins that this
-/// failure is still macro-attributable so a future fix flips it green.
-const KNOWN_MACRO_BUG: &str = "../../test/metasd/thyroid-dynamics/thyroid-2008-d.mdl";
+// Historical note (no longer an open bug): `thyroid-2008-d.mdl`
+// (`:MACRO: DELAYN(...) ... DELAYN = DELAY N(...)`) once produced a genuine
+// macro-attributable failure -- a #554-class false-positive
+// `recursive macro: delayn -> delayn` project-level `CircularDependency`.
+// The MDL importer rewrites the body's Vensim `DELAY N(...)` to the
+// single-token XMILE `DELAYN(...)`, colliding with the enclosing macro's
+// canonical name; `module_functions::collect_called_macros` then recorded a
+// false `delayn -> delayn` self-edge that failed the whole
+// `MacroRegistry::build` and un-shadowed every other macro (`PIPELINE`) --
+// the #554 cascade, but for a *stdlib-module-backed* builtin that #554's
+// `is_renamed_opcode_intrinsic` was deliberately scoped to exclude.
+//
+// FIXED by the #554 follow-up: `module_functions::is_renamed_stdlib_module_builtin`
+// (delegating to `builtins::is_stdlib_module_function`) extends the SHARED
+// self-edge suppression predicate (`is_renamed_builtin_macro_collision`,
+// used by BOTH `collect_called_macros` and `builtins_visitor`'s
+// macro-shadows-everything precedence) to the stdlib-module-backed renamed
+// builtins. Termination: the skipped self-call falls through to
+// `rewrite_alias_module_call`/`stdlib_descriptor` and resolves to a DISTINCT
+// `stdlib⁚delay1`/... module (the U+205A prefix can never name a user
+// model), not back into the macro. So thyroid now expands with NO
+// macro-attributable diagnostic and is in the asserted expansion tier with
+// the other 16 (no model is excluded). The residual in-body `UnknownBuiltin`
+// (DELAY N needs a constant order; thyroid passes a macro-port order) is an
+// orthogonal, pre-existing stdlib limitation -- the same gap a `main`
+// equation hits -- NOT macro-attributable (the harness's narrower AC6.4
+// definition: registry-build error or macro/model name collision).
+// `thyroid_produces_no_macro_attributable_diagnostics` below is the positive
+// regression guard.
 
 /// Compile a macro-using metasd model via the salsa path and return
 /// `(macro_attributable_diagnostics, all_diagnostics, compiled_ok)`.
@@ -388,17 +389,15 @@ fn compile_and_diagnose(path: &str) -> (Vec<Diagnostic>, usize, bool) {
 /// The expansion-tier assertion over a slice of corpus entries: every
 /// model must produce ZERO macro-attributable diagnostics. Accumulates
 /// `(path, formatted-diagnostic)` failures and asserts the vec is empty
-/// (the established corpus-harness pattern). The `KNOWN_MACRO_BUG` entry
-/// is skipped here (asserted separately) so the genuine failure is neither
-/// masked nor allowed to fail the 16 good models.
+/// (the established corpus-harness pattern). ALL corpus entries are
+/// asserted -- no model is excluded (the former `thyroid-2008-d.mdl`
+/// carve-out was retired when the #554 follow-up fixed its false-positive
+/// `delayn -> delayn` recursion; see the historical note above).
 fn run_expansion_tier(entries: impl Iterator<Item = &'static CorpusModel>) {
     let mut failures: Vec<(String, String)> = Vec::new();
     let mut checked = 0usize;
 
     for m in entries {
-        if m.path == KNOWN_MACRO_BUG {
-            continue; // asserted by `thyroid_known_macro_bug_is_macro_attributable`
-        }
         checked += 1;
         let (macro_diags, total, compiled_ok) = compile_and_diagnose(m.path);
         eprintln!(
@@ -467,41 +466,36 @@ fn metasd_expansion_tier_full() {
     run_expansion_tier(CORPUS.iter());
 }
 
-/// The one genuine macro-attributable failure in the corpus
-/// (`thyroid-2008-d.mdl`) MUST still be detected as macro-attributable.
-/// This is the inverse guard: it documents the real (escalated) macro bug
-/// in an executable, non-masking way and will flip to "fixed" exactly when
-/// the #554-follow-up engine fix lands (at which point this test fails,
-/// signalling that the model should move into the passing expansion tier
-/// and its `CORPUS` `SimTier` reason be revisited). See `KNOWN_MACRO_BUG`.
+/// Positive regression guard (inverted premise -- the bug is FIXED):
+/// `thyroid-2008-d.mdl` MUST now produce ZERO macro-attributable
+/// diagnostics. Pre-fix this model was the one genuine macro-attributable
+/// failure in the corpus -- a #554-class false-positive
+/// `recursive macro: delayn -> delayn` project-level `CircularDependency`
+/// from the importer's `DELAY N -> DELAYN` rewrite colliding with the
+/// enclosing macro's name (see the historical note above). The #554
+/// follow-up (`module_functions::is_renamed_stdlib_module_builtin`)
+/// suppresses that false self-edge, so thyroid is now in the asserted
+/// expansion tier; this test additionally pins thyroid *specifically* (so a
+/// regression of the follow-up is caught here with a focused message, not
+/// only in the bulk `metasd_expansion_tier`). It deliberately does NOT
+/// assert `compiled_ok`: the macro handling is correct, but the body's
+/// `DELAY N(...,Order)` with the order a macro *port* still hits the
+/// orthogonal, pre-existing stdlib "order must be a compile-time constant"
+/// limitation -- a non-macro-attributable in-body `UnknownBuiltin` (the same
+/// gap a `main` equation hits), tracked separately.
 #[test]
-fn thyroid_known_macro_bug_is_macro_attributable() {
-    let (macro_diags, _total, compiled_ok) = compile_and_diagnose(KNOWN_MACRO_BUG);
+fn thyroid_produces_no_macro_attributable_diagnostics() {
+    const THYROID: &str = "../../test/metasd/thyroid-dynamics/thyroid-2008-d.mdl";
+    let (macro_diags, _total, _compiled_ok) = compile_and_diagnose(THYROID);
     assert!(
-        !compiled_ok,
-        "thyroid-2008-d unexpectedly compiled -- the #554-class \
-         `delayn -> delayn` false-positive recursion may be FIXED. If so, \
-         remove this test, move thyroid-2008-d into the passing expansion \
-         tier, and update its CORPUS SimTier reason."
-    );
-    let is_delayn_recursion = macro_diags.iter().any(|d| match &d.error {
-        DiagnosticError::Model(e) => {
-            e.code == ErrorCode::CircularDependency
-                && d.model.is_empty()
-                && d.variable.is_none()
-                && e.get_details()
-                    .map(|s| s.contains("delayn"))
-                    .unwrap_or(false)
-        }
-        _ => false,
-    });
-    assert!(
-        is_delayn_recursion,
-        "expected the known macro-attributable `recursive macro: delayn -> \
-         delayn` project-level diagnostic for thyroid-2008-d (the #554-class \
-         false positive for the stdlib-module-backed DELAY N builtin); got \
-         macro-attributable diagnostics: {macro_diags:#?}. If this changed, \
-         the bug's shape changed -- re-investigate, do not silence."
+        macro_diags.is_empty(),
+        "thyroid-2008-d must produce ZERO macro-attributable diagnostics \
+         after the #554 follow-up (the false-positive `delayn -> delayn` \
+         macro-registry recursion is fixed). A non-empty set means the \
+         follow-up regressed -- re-investigate \
+         `module_functions::is_renamed_stdlib_module_builtin` / the shared \
+         `is_renamed_builtin_macro_collision` predicate; do not silence. \
+         Got: {macro_diags:#?}"
     );
 }
 

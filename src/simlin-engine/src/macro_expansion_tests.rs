@@ -798,3 +798,297 @@ y=
         "genuine recursion must still accumulate a CircularDependency diagnostic",
     );
 }
+
+// ── #554 follow-up: macro wrapping a same-canonical-name STDLIB-MODULE-backed
+//    renamed builtin (`DELAY N`; the metasd thyroid-2008-d.mdl case) ──────────
+//
+// The MDL importer rewrites Vensim `DELAY N(input,dt,init,n)` to the
+// single-token XMILE `DELAYN(input,dt,n,init)` (`mdl/xmile_compat.rs`). So
+// thyroid-2008-d.mdl's `:MACRO: DELAYN(Input,DelayTime,Init,Order) ... DELAYN
+// = DELAY N(Input,DelayTime,Init,Order)` stores the datamodel macro body
+// `delayn = delayn(input, delaytime, order, init)`. Pre-fix, the macro
+// recursion check mistook that renamed-builtin call for a recursive `delayn ->
+// delayn` macro edge and failed the WHOLE `MacroRegistry::build` -- the same
+// #554 cascade, but for a *stdlib-module-backed* builtin that #554 was
+// deliberately scoped to exclude (its termination argument -- fall through to
+// the LoadInitial/LoadPrev opcode -- did not cover the stdlib-module case).
+//
+// The follow-up extends the shared self-edge suppression to the
+// stdlib-module-backed renamed-builtin set: skipping the macro resolve makes
+// the body's `delayn(...)` fall through to
+// `rewrite_alias_module_call`/`stdlib_descriptor`, resolving to a DISTINCT
+// `stdlib⁚delay1`/`stdlib⁚delay3` module (never the user `delayn` macro
+// model), so it terminates and computes the stdlib delay behavior.
+
+/// Part A + B together (the precise termination e2e, the stdlib-module
+/// analogue of the `init`/`previous` #554 e2e tests): an INVOKED macro
+/// `DELAYN` whose body wraps its own same-named `DELAY N` with a *literal*
+/// order, alongside a sibling SSHAPE macro, must (1) build the registry with
+/// no false `delayn -> delayn` recursion, (2) NOT infinite-loop / form a
+/// salsa module-map cycle on the invoked wrap-own-builtin macro (the body's
+/// `delayn` resolves to the distinct `stdlib⁚delay1` MODULE, not recursively
+/// to the macro), and (3) leave the sibling macro's call expanding correctly
+/// (the #554-class cascade is gone).
+///
+/// Why the order is a literal in the macro *body*: `DELAY N`'s stdlib
+/// expansion picks `delay1` vs `delay3` from the *value* of the order arg
+/// (`builtins_visitor::rewrite_alias_module_call` requires a compile-time
+/// constant). The faithful thyroid shape passes the order as a macro *port*
+/// (`DELAYN = DELAY N(Input,DelayTime,Init,Order)`), which the macro
+/// *template* cannot resolve to a literal -- an orthogonal, pre-existing
+/// stdlib limitation that surfaces as a non-macro-attributable
+/// `UnknownBuiltin` *inside the macro body* (exactly the "unrelated blocker
+/// in a macro body" the metasd harness tolerates; pinned structurally by the
+/// sibling test below, and tracked separately). To isolate the property
+/// under test here -- the #554-follow-up *termination* (the self-named
+/// `delayn` call resolving to the distinct stdlib module rather than
+/// recursing) -- the body fixes the order to `1`, so the importer-rewritten
+/// body is `delayn(input, delaytime, 1, init)` and
+/// `rewrite_alias_module_call` resolves it to the stdlib `delay1` model. The
+/// macro stays the #554-collision shape (canonical name `delayn`, body calls
+/// `delayn`).
+///
+/// `:MACRO: DELAYN(Input, DelayTime, Init) ... DELAYN = DELAY N(Input,
+/// DelayTime, Init, 1)`; the importer rewrites the body's
+/// `DELAY N(in,dt,init,1)` to `DELAYN(in,dt,1,init)`. Invoked as
+/// `DELAYN(10, 5, 0)` the body is `delayn(10, 5, 1, 0)` -> stdlib `delay1`
+/// as `DELAY1(10, 5, 0)`.
+///
+/// DELAY N is an Nth-order material (Erlang) delay; order 1 is the stdlib
+/// `delay1` model (`stdlib.gen.rs`): a one-stock material delay with
+/// `stock(0) = init*delay_time`, `output = stock/delay_time`,
+/// `stock' = input - output`, integrated by Euler with DT. With input=10,
+/// delay_time=5, init=0, DT=1 over t=0,1,2 (INITIAL TIME 0, FINAL TIME 2,
+/// TIME STEP 1) -- identical arithmetic to the verified
+/// `builtins_visitor::tests::test_arrayed_delay1_numerical_values`:
+///   t=0: stock=0,                output=0/5   = 0
+///   t=1: stock=0 +1*(10-0) =10,  output=10/5  = 2
+///   t=2: stock=10+1*(10-2) =18,  output=18/5  = 3.6
+/// i.e. `wrapped == [0, 2, 3.6]` -- a concrete closed-form expected series
+/// (not merely a structural assertion), proving the body's `delayn(...)`
+/// resolved to the stdlib delay module and computed DELAY N's defined
+/// behavior rather than recursing. Non-vacuity: with the #554-follow-up
+/// extension removed, `compile_mdl` RED-fails here with the
+/// `recursive macro: delayn -> delayn` cascade (Part A) / a salsa
+/// module-map dependency cycle (Part B), exactly as the
+/// `module_functions.rs` RED proof showed.
+#[test]
+fn issue_554_followup_invoked_macro_wrapping_own_delayn_builtin_compiles_and_runs() {
+    let source = mdl(r#":MACRO: DELAYN(Input, DelayTime, Init)
+DELAYN = DELAY N(Input, DelayTime, Init, 1)
+	~	a
+	~	#554 follow-up: body wraps the same-canonical-name DELAY N builtin,
+		which the importer renames to the single-token DELAYN -- NOT recursion
+	|
+
+:END OF MACRO:
+:MACRO: SSHAPE(a, b)
+SSHAPE = a * b
+	~	a
+	~	sibling macro; its name shadows the 3-arg SSHAPE builtin, so a
+		registry-build failure (the #554 cascade) would make this 2-arg
+		call a BadBuiltinArgs
+	|
+
+:END OF MACRO:
+wrapped=
+	DELAYN(10, 5, 0)
+	~
+	~		|
+
+sibling=
+	SSHAPE(4, 5)
+	~
+	~		|
+"#);
+
+    // (1) No macro-registry CircularDependency cascade (Part A: the false
+    // `delayn -> delayn` self-edge is suppressed for the renamed stdlib
+    // builtin, exactly as for `init`/`previous`).
+    assert!(
+        !has_model_error(&diagnostics_for(&source), ErrorCode::CircularDependency),
+        "the #554-class false `delayn -> delayn` recursion must be gone (no \
+         macro-registry CircularDependency); diagnostics: {:?}",
+        diagnostics_for(&source),
+    );
+
+    // (2)+(3) Compiles and runs -- the invoked wrap-own-builtin macro
+    // terminates (the body's `delayn(...)` resolves to the stdlib⁚delay1
+    // MODULE via rewrite_alias_module_call, NOT recursively to the macro) and
+    // the sibling macro expands (no cascade).
+    let wrapped = run_mdl_var(&source, "wrapped");
+    let sibling = run_mdl_var(&source, "sibling");
+
+    // DELAYN(10,5,0) (body order literal 1) == DELAY1(10,5,0): [0, 2, 3.6]
+    // over t=0,1,2 (the body's `delayn` is the renamed DELAY N builtin
+    // resolving to the stdlib delay module, not a recursive macro call).
+    let expected_wrapped = [0.0, 2.0, 3.6];
+    assert_eq!(
+        wrapped.len(),
+        expected_wrapped.len(),
+        "expected one value per step over the t=0,1,2 run: {wrapped:?}",
+    );
+    for (i, (&got, &want)) in wrapped.iter().zip(expected_wrapped.iter()).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-9,
+            "DELAYN(10,5,0) (body order 1 -> stdlib delay1) at step {i} \
+             expected {want} (the body's DELAY N is the renamed builtin \
+             resolving to the stdlib delay module, not a recursive macro \
+             call): got {got}, full series {wrapped:?}",
+        );
+    }
+    // SSHAPE(4,5) = 4*5 = 20 -- proves the sibling macro still shadows the
+    // builtin and expands (the #554-class cascade no longer blocks it).
+    assert!(
+        sibling.iter().all(|&v| (v - 20.0).abs() < 1e-9),
+        "SSHAPE(4,5) = 4*5 = 20 -- the sibling macro must still expand \
+         despite the wrap-own-builtin macro: {sibling:?}",
+    );
+}
+
+/// Part A + B, the *faithful thyroid shape* (the metasd
+/// `thyroid-2008-d.mdl` `:MACRO: DELAYN(Input,DelayTime,Init,Order) ...
+/// DELAYN = DELAY N(Input,DelayTime,Init,Order)` with the order as a macro
+/// *port*), asserted structurally per the task's allowance for when an exact
+/// closed-form run is impractical.
+///
+/// What this pins (the #554-follow-up deliverable for thyroid): the
+/// macro-registry builds with NO false `delayn -> delayn`
+/// `CircularDependency` (the #554-class cascade), the sibling macro still
+/// resolves, and there is NO macro-attributable diagnostic (a registry-build
+/// error or a macro/model name collision), matching the metasd corpus
+/// harness's AC6.4 "macro-attributable" definition. The macro template
+/// body's `DELAY N(...,Order)` -- with the order an unresolved port -- still
+/// surfaces an `UnknownBuiltin` *inside the macro body*
+/// (`rewrite_alias_module_call` needs a compile-time-constant order; a macro
+/// port is not one). That is an orthogonal, pre-existing stdlib limitation,
+/// NOT a macro-handling failure: it is the same gap `DELAY N(x,dt,init,v)`
+/// with a non-constant `v` hits in a plain `main` equation, and it is
+/// exactly the "unrelated blocker in a macro body" class the metasd
+/// expansion tier tolerates (so thyroid PASSES the expansion tier). This
+/// test asserts the macro-attributable set is empty (the property the
+/// follow-up fixes) and explicitly tolerates the orthogonal in-body
+/// `UnknownBuiltin` (tracked separately, surfaced for a tracking issue).
+#[test]
+fn issue_554_followup_thyroid_shape_builds_with_no_macro_attributable_diag() {
+    // The exact thyroid macro shape: order is a macro PORT, not a literal.
+    let source = mdl(r#":MACRO: DELAYN(Input, DelayTime, Init, Order)
+DELAYN = DELAY N(Input, DelayTime, Init, Order)
+	~	a
+	~	faithful thyroid shape: DELAY N order is the macro port `Order`
+	|
+
+:END OF MACRO:
+:MACRO: SSHAPE(a, b)
+SSHAPE = a * b
+	~	a
+	~	sibling macro (would BadBuiltinArgs under the #554 cascade)
+	|
+
+:END OF MACRO:
+wrapped=
+	DELAYN(10, 5, 0, 1)
+	~
+	~		|
+
+sibling=
+	SSHAPE(4, 5)
+	~
+	~		|
+"#);
+
+    let project = open_vensim(&source).expect("MDL must parse");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let diags = collect_all_diagnostics(&db, &sync.to_sync_result());
+
+    let macro_models: std::collections::BTreeSet<&str> = project
+        .models
+        .iter()
+        .filter(|m| m.macro_spec.is_some())
+        .map(|m| m.name.as_str())
+        .collect();
+
+    // The metasd-harness "macro-attributable" classifier (kept in lockstep
+    // with `tests/metasd_macros.rs`): a project-level macro-registry build
+    // error (the #554 cascade class) or a macro/model name collision.
+    let macro_attributable: Vec<&crate::db::Diagnostic> = diags
+        .iter()
+        .filter(|d| {
+            let code = match &d.error {
+                DiagnosticError::Equation(e) => Some(e.code),
+                DiagnosticError::Model(e) => Some(e.code),
+                _ => None,
+            };
+            let is_project_level = d.model.is_empty() && d.variable.is_none();
+            let in_macro_model = macro_models.contains(d.model.as_str());
+            let registry_build_error = is_project_level
+                && matches!(&d.error, DiagnosticError::Model(_))
+                && matches!(
+                    code,
+                    Some(ErrorCode::CircularDependency) | Some(ErrorCode::DuplicateMacroName)
+                );
+            let name_collision = matches!(
+                code,
+                Some(ErrorCode::BadModelName) | Some(ErrorCode::DuplicateMacroName)
+            ) && (in_macro_model || is_project_level);
+            registry_build_error || name_collision
+        })
+        .collect();
+
+    assert!(
+        macro_attributable.is_empty(),
+        "the faithful thyroid shape must produce ZERO macro-attributable \
+         diagnostics after the #554 follow-up (no false `delayn -> delayn` \
+         registry CircularDependency, no macro/model name collision); got: \
+         {macro_attributable:#?}",
+    );
+
+    // Specifically: the #554-class false-positive recursion is gone.
+    assert!(
+        !has_model_error(&diags, ErrorCode::CircularDependency),
+        "no project-level `recursive macro: delayn -> delayn` \
+         CircularDependency; diags: {diags:?}",
+    );
+
+    // Structural: the registry resolves BOTH the wrap-own-builtin macro and
+    // the sibling (proving the cascade that un-shadowed siblings is gone).
+    let registry = crate::module_functions::MacroRegistry::build(&project.models)
+        .expect("registry must build (no false delayn -> delayn recursion)");
+    assert!(
+        registry.resolve_macro("delayn").is_some(),
+        "the `delayn` macro must still be registered"
+    );
+    assert!(
+        registry.resolve_macro("sshape").is_some(),
+        "the sibling `sshape` macro must resolve -- no #554-class cascade"
+    );
+
+    // The ONLY remaining error is the orthogonal, non-macro-attributable
+    // in-body `UnknownBuiltin` (DELAY N with a non-constant/port order):
+    // assert it is confined to the macro body and is NOT one of the
+    // macro-attributable codes (documents the tolerated unrelated blocker).
+    for d in &diags {
+        if d.severity != DiagnosticSeverity::Error {
+            continue;
+        }
+        let code = match &d.error {
+            DiagnosticError::Equation(e) => Some(e.code),
+            DiagnosticError::Model(e) => Some(e.code),
+            _ => None,
+        };
+        assert_eq!(
+            code,
+            Some(ErrorCode::UnknownBuiltin),
+            "the only tolerated Error here is the orthogonal in-body \
+             UnknownBuiltin (DELAY N needs a constant order; the macro port \
+             is not one) -- any other Error means a real regression: {d:?}",
+        );
+        assert!(
+            macro_models.contains(d.model.as_str()),
+            "the tolerated UnknownBuiltin must be inside a macro body \
+             (model={:?}), not project-level/main: {d:?}",
+            d.model,
+        );
+    }
+}
