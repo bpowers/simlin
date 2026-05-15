@@ -64,6 +64,9 @@ enum MacroState<'input> {
     InMacro {
         name: Cow<'input, str>,
         args: Vec<Expr<'input>>,
+        /// Additional `:`-separated outputs from the macro header
+        /// (empty for ordinary single-output macros).
+        outputs: Vec<Expr<'input>>,
         equations: Vec<FullEquation<'input>>,
         loc: Loc,
     },
@@ -297,11 +300,12 @@ impl<'input> EquationReader<'input> {
                 Some(Ok(MdlItem::EqEnd(loc)))
             }
             SectionEnd::GroupStar(name, loc) => Some(Ok(MdlItem::Group(Group { name, loc }))),
-            SectionEnd::MacroStart(name, args, loc) => {
+            SectionEnd::MacroStart(name, args, outputs, loc) => {
                 // Start macro mode
                 self.macro_state = MacroState::InMacro {
                     name,
                     args,
+                    outputs,
                     equations: Vec::new(),
                     loc,
                 };
@@ -314,13 +318,14 @@ impl<'input> EquationReader<'input> {
                     MacroState::InMacro {
                         name,
                         args,
+                        outputs,
                         equations,
                         loc,
                     } => {
                         let macro_def = MacroDef {
                             name,
                             args,
-                            outputs: vec![],
+                            outputs,
                             equations,
                             loc: Loc::merge(loc, end_loc),
                         };
@@ -1302,6 +1307,14 @@ mod tests {
     // Macro tests
     // ========================================================================
 
+    /// Extract the identifier from an `Expr::Var`, panicking otherwise.
+    fn var_name<'a>(e: &'a Expr<'_>) -> &'a str {
+        match e {
+            Expr::Var(name, _, _) => name.as_ref(),
+            other => panic!("expected Expr::Var, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_macro_followed_by_equation() {
         // :MACRO: definition followed by an equation inside it
@@ -1314,6 +1327,37 @@ mod tests {
             Some(Ok(MdlItem::Macro(macro_def))) => {
                 assert_eq!(macro_def.name.as_ref(), "MYFUNC");
                 assert_eq!(macro_def.args.len(), 2);
+                assert_eq!(macro_def.equations.len(), 1);
+                // Regression: single-output macro has no `:` output list.
+                assert!(
+                    macro_def.outputs.is_empty(),
+                    "single-output macro must have empty outputs, got {:?}",
+                    macro_def.outputs
+                );
+            }
+            other => panic!("Expected Macro, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_macro_with_output_list() {
+        // A `:MACRO:` header with a `:` output list, threaded all the way
+        // through the reader into `MacroDef.outputs`.
+        let input =
+            ":MACRO: add3(a, b, c : minval, maxval)\nadd3 = a + b + c ~ ~ |\n:END OF MACRO:";
+        let mut reader = EquationReader::new(input);
+
+        let item = reader.next_item();
+        match item {
+            Some(Ok(MdlItem::Macro(macro_def))) => {
+                assert_eq!(macro_def.name.as_ref(), "add3");
+                assert_eq!(macro_def.args.len(), 3);
+                assert_eq!(var_name(&macro_def.args[0]), "a");
+                assert_eq!(var_name(&macro_def.args[1]), "b");
+                assert_eq!(var_name(&macro_def.args[2]), "c");
+                assert_eq!(macro_def.outputs.len(), 2);
+                assert_eq!(var_name(&macro_def.outputs[0]), "minval");
+                assert_eq!(var_name(&macro_def.outputs[1]), "maxval");
                 assert_eq!(macro_def.equations.len(), 1);
             }
             other => panic!("Expected Macro, got {:?}", other),

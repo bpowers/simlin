@@ -530,8 +530,10 @@ pub enum SectionEnd<'input> {
     EqEnd(Loc),
     /// Group marker with name
     GroupStar(Cow<'input, str>, Loc),
-    /// Macro definition start with name and arguments
-    MacroStart(Cow<'input, str>, Vec<Expr<'input>>, Loc),
+    /// Macro definition start: name, formal input parameters, and the
+    /// optional `:`-separated additional-output list (`add3(a,b,c : min, max)`).
+    /// `outputs` is empty for ordinary single-output macros.
+    MacroStart(Cow<'input, str>, Vec<Expr<'input>>, Vec<Expr<'input>>, Loc),
     /// Macro definition end
     MacroEnd(Loc),
 }

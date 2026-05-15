@@ -527,11 +527,21 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                 } else {
                     self.parse_expr_list()?.into_exprs()
                 };
+                // Optional `:`-separated additional-output list:
+                // `:MACRO: add3(a,b,c : minval, maxval)`. `parse_expr_list`
+                // stops at `:` (it separates only on `,`/`;`), so the token
+                // after the input list is either `)` or `:`.
+                let outputs = if self.peek_kind() == Some(TokenKind::Colon) {
+                    self.advance_pos(); // consume ':'
+                    self.parse_expr_list()?.into_exprs()
+                } else {
+                    vec![]
+                };
                 self.expect(TokenKind::RParen, "')'")?;
                 return Ok((
                     Equation::EmptyRhs(Lhs::empty(loc), loc),
                     None,
-                    SectionEnd::MacroStart(name, args, loc),
+                    SectionEnd::MacroStart(name, args, outputs, loc),
                 ));
             }
             Some(TokenKind::EndOfMacro) => {
@@ -2343,6 +2353,16 @@ mod tests {
         assert!(units.is_none());
     }
 
+    /// Extract the identifier from an `Expr::Var`, panicking otherwise.
+    /// Helper for the macro header/call tests, where `args`/`outputs`/
+    /// `output_bindings` are expected to be plain variable references.
+    fn var_name<'a>(e: &'a Expr<'_>) -> &'a str {
+        match e {
+            Expr::Var(name, _, _) => name.as_ref(),
+            other => panic!("expected Expr::Var, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_parse_macro_start() {
         use crate::mdl::normalizer::TokenNormalizer;
@@ -2353,12 +2373,62 @@ mod tests {
         let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (_, _, section_end) = result.unwrap();
-        if let SectionEnd::MacroStart(name, args, _) = &section_end {
+        if let SectionEnd::MacroStart(name, args, outputs, _) = &section_end {
             assert_eq!(name.as_ref(), "MYFUNC");
             assert_eq!(args.len(), 2);
+            // Regression: the single-output form has no `:` output list.
+            assert!(
+                outputs.is_empty(),
+                "single-output macro must have empty outputs, got {:?}",
+                outputs
+            );
         } else {
             panic!("Expected MacroStart, got {:?}", section_end);
         }
+    }
+
+    #[test]
+    fn test_parse_macro_start_with_outputs() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // The `:` separator splits the formal input list from the
+        // additional-output list (Vensim multi-output macro syntax).
+        let input = ":MACRO: add3(a, b, c : minval, maxval)";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (_, _, section_end) = result.unwrap();
+        if let SectionEnd::MacroStart(name, args, outputs, _) = &section_end {
+            assert_eq!(name.as_ref(), "add3");
+            assert_eq!(args.len(), 3);
+            assert_eq!(var_name(&args[0]), "a");
+            assert_eq!(var_name(&args[1]), "b");
+            assert_eq!(var_name(&args[2]), "c");
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(var_name(&outputs[0]), "minval");
+            assert_eq!(var_name(&outputs[1]), "maxval");
+        } else {
+            panic!("Expected MacroStart, got {:?}", section_end);
+        }
+    }
+
+    #[test]
+    fn test_parse_macro_start_empty_output_list_is_error() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // `parse_expr_list` calls `parse_expr` unconditionally, so a `:`
+        // immediately followed by `)` is a clean parse error on the `)`,
+        // not a panic and not a silently-empty output list.
+        let input = ":MACRO: add3(a : )";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(
+            result.is_err(),
+            "empty `:` output list must be a parse error, got {:?}",
+            result.ok()
+        );
     }
 
     #[test]
