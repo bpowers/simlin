@@ -776,6 +776,7 @@ fn test_model_functions() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             },
             engine::project_io::Model {
                 name: "model2".to_string(),
@@ -862,6 +863,7 @@ fn test_model_functions() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             },
         ],
         dimensions: vec![],

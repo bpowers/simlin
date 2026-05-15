@@ -678,6 +678,7 @@ fn test_project_serialize_null_safety() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             dimensions: vec![],
             units: vec![],

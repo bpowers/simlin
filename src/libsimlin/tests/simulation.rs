@@ -1371,6 +1371,7 @@ fn test_sim_lifecycle() {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         }],
         dimensions: vec![],
         units: vec![],
