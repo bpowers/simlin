@@ -36,6 +36,12 @@ mod db_element_graph_proptest;
 // (`scripts/lint-project.sh` rule 2); `db_analysis` / `db_ltm` reach it via
 // `crate::db_ltm_ir::...`, mirroring how `ltm_agg` consumes `crate::db`.
 mod db_ltm_ir;
+// The per-project macro-registry salsa query (`project_macro_registry`) and
+// the sync-time `macro_registry_build_error`. A sibling of `db` rather than
+// a submodule of `db.rs` so the latter stays under the per-file line cap
+// (`scripts/lint-project.sh` rule 2); `db.rs` reaches it via
+// `crate::db_macro_registry::...`, mirroring `db_ltm_ir`.
+mod db_macro_registry;
 pub mod diagram;
 mod dimensions;
 pub mod errors;
@@ -54,6 +60,8 @@ pub mod ltm_agg;
 pub mod ltm_augment;
 pub mod ltm_finding;
 pub mod ltm_post;
+#[cfg(test)]
+mod macro_expansion_tests;
 pub mod mdl;
 mod model;
 mod module_functions;

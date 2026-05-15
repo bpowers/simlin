@@ -504,7 +504,8 @@ fn print_equations(project: &DatamodelProject, output: Option<PathBuf>) {
 
         let var_names = source_model.variable_names(&db);
         let vars = source_model.variables(&db);
-        let module_ident_context = model_module_ident_context(&db, source_model, vec![]);
+        let module_ident_context =
+            model_module_ident_context(&db, source_model, sync.project, vec![]);
 
         output_file
             .write_fmt(format_args!("% {model_name}\n"))

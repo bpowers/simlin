@@ -875,7 +875,7 @@ pub(super) fn compile_ltm_equation_fragment(
                         .map(|sm| compute_layout(db, *sm, project, false).n_slots)
                         .unwrap_or(1);
 
-                    let module_ctx = model_module_ident_context(db, model, vec![]);
+                    let module_ctx = model_module_ident_context(db, model, project, vec![]);
                     let parent_parsed = parse_source_variable_with_module_context(
                         db,
                         im_meta.parent_source_var,
@@ -2153,7 +2153,7 @@ fn find_model_output_ports(
 
         // Scan dependencies for module·internal_var references
         let other_vars = other_model.variables(db);
-        let module_ctx = super::model_module_ident_context(db, *other_model, vec![]);
+        let module_ctx = super::model_module_ident_context(db, *other_model, project, vec![]);
         for (_, source_var) in other_vars.iter() {
             let deps = super::variable_direct_dependencies(db, *source_var, project);
             for dep in &deps.dt_deps {

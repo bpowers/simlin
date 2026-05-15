@@ -23,6 +23,13 @@ pub struct TestProject {
     pub variables: Vec<Variable>,
     pub units: Vec<datamodel::Unit>,
     pub sim_specs: SimSpecs,
+    /// When `Some`, [`TestProject::build_datamodel`] returns this whole
+    /// `datamodel::Project` verbatim instead of synthesizing a single
+    /// `"main"` model from `variables`. Used to wrap a `convert_mdl`-produced
+    /// multi-model project (e.g. macro-bearing models) so the full
+    /// compile/run/diagnostic assertion surface (`assert_vm_result`,
+    /// `assert_compile_error_vm`) applies unchanged.
+    datamodel_override: Option<Project>,
 }
 
 impl TestProject {
@@ -41,6 +48,22 @@ impl TestProject {
                 sim_method: datamodel::SimMethod::Euler,
                 time_units: Some("Month".to_string()),
             },
+            datamodel_override: None,
+        }
+    }
+
+    /// Wrap an already-built `datamodel::Project` (e.g. from `convert_mdl`)
+    /// so the `TestProject` compile/run/diagnostic helpers apply to it
+    /// directly. The builder methods (`.aux()`, `.stock()`, ...) are not
+    /// meaningful on a wrapped project and are ignored by `build_datamodel`.
+    pub fn from_datamodel(project: Project) -> Self {
+        Self {
+            name: project.name.clone(),
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+            units: Vec::new(),
+            sim_specs: project.sim_specs.clone(),
+            datamodel_override: Some(project),
         }
     }
 
@@ -53,6 +76,7 @@ impl TestProject {
             variables: Vec::new(),
             units: Vec::new(),
             sim_specs,
+            datamodel_override: None,
         }
     }
 
@@ -402,6 +426,9 @@ impl TestProject {
 
     /// Build the datamodel Project
     pub fn build_datamodel(&self) -> Project {
+        if let Some(project) = &self.datamodel_override {
+            return project.clone();
+        }
         Project {
             name: self.name.clone(),
             sim_specs: self.sim_specs.clone(),
@@ -714,7 +741,7 @@ impl TestProject {
 
 /// Extract variable timeseries from simulation results, including
 /// aggregated base-name entries for arrayed variables.
-fn collect_results(results: &crate::Results) -> HashMap<String, Vec<f64>> {
+pub(crate) fn collect_results(results: &crate::Results) -> HashMap<String, Vec<f64>> {
     let mut output: HashMap<String, Vec<f64>> = HashMap::new();
 
     for (name, &offset) in &results.offsets {

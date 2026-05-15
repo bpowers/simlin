@@ -974,7 +974,7 @@ pub fn model_causal_edges(
     project: SourceProject,
 ) -> CausalEdgesResult {
     let source_vars = model.variables(db);
-    let module_ctx = model_module_ident_context(db, model, vec![]);
+    let module_ctx = model_module_ident_context(db, model, project, vec![]);
     let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut stocks = BTreeSet::new();
     let mut dynamic_modules = HashMap::new();
@@ -2126,7 +2126,7 @@ pub(crate) fn reconstruct_model_variables(
     use crate::common::{Canonical, Ident};
 
     let source_vars = model.variables(db);
-    let module_ctx = model_module_ident_context(db, model, vec![]);
+    let module_ctx = model_module_ident_context(db, model, project, vec![]);
     let dims = source_dims_to_datamodel(project.dimensions(db));
     let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
     let models = HashMap::new();
@@ -2170,7 +2170,7 @@ pub(super) fn reconstruct_single_variable(
     use crate::common::{Canonical, Ident};
 
     let source_vars = model.variables(db);
-    let module_ctx = model_module_ident_context(db, model, vec![]);
+    let module_ctx = model_module_ident_context(db, model, project, vec![]);
     let dims = source_dims_to_datamodel(project.dimensions(db));
     let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
     let models = HashMap::new();

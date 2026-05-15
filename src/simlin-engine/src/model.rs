@@ -785,14 +785,18 @@ where
 /// This includes:
 /// - Explicit `datamodel::Variable::Module` variables
 /// - `datamodel::Variable::Aux` and `datamodel::Variable::Flow` variables
-///   whose equations parse to a top-level stdlib function call (e.g. SMTH1,
-///   DELAY, etc.)
+///   whose equations parse to a top-level **module-function** call: a stdlib
+///   function (`SMTH1`, `DELAY`, ...) or a project macro (consulted via the
+///   passed `MacroRegistry`).
 ///
 /// This set is needed so that `PREVIOUS(module_var)` rewrites through a
 /// synthesized scalar helper aux instead of compiling `LoadPrev` directly
-/// against a multi-slot module.
+/// against a multi-slot module. A `y = MYMACRO(...)` caller must be
+/// pre-classified here exactly as a `y = SMTH1(...)` caller is, so the
+/// PREVIOUS/INIT rewrite sees it as module-backed.
 pub(crate) fn collect_module_idents(
     variables: &[datamodel::Variable],
+    macro_registry: &crate::module_functions::MacroRegistry,
 ) -> HashSet<Ident<Canonical>> {
     let mut module_idents = HashSet::new();
     for v in variables {
@@ -804,12 +808,12 @@ pub(crate) fn collect_module_idents(
                 module_idents.insert(Ident::new(&canonicalize(&m.ident)));
             }
             datamodel::Variable::Aux(a) => {
-                if equation_is_stdlib_call(&a.equation) {
+                if equation_is_module_call(&a.equation, macro_registry) {
                     module_idents.insert(Ident::new(&canonicalize(&a.ident)));
                 }
             }
             datamodel::Variable::Flow(f) => {
-                if equation_is_stdlib_call(&f.equation) {
+                if equation_is_module_call(&f.equation, macro_registry) {
                     module_idents.insert(Ident::new(&canonicalize(&f.ident)));
                 }
             }
@@ -819,18 +823,30 @@ pub(crate) fn collect_module_idents(
     module_idents
 }
 
-/// Check if a scalar equation's top-level expression is a stdlib function call.
-///
-/// Uses `is_stdlib_module_function` as the underlying predicate for name
-/// matching.
+/// Check if a scalar equation's top-level expression is a **module-function**
+/// call: a stdlib function (`is_stdlib_module_function`) or a project macro
+/// (resolved via `macro_registry`). A project macro is recognized even when
+/// its name shadows a builtin, since the macro registry is consulted
+/// directly (the actual macro-shadows-builtin precedence is enforced later
+/// in `BuiltinVisitor::walk`).
 ///
 /// This intentionally re-parses the equation text rather than reusing the
 /// already-parsed AST. It runs during `collect_module_idents` (called from
-/// `ModelStage0::new`), before the full per-variable parse in `parse_var`.
-/// The re-parse is cheap (single equation, top-level only) and avoids
-/// threading the parsed AST through an intermediate data structure just
-/// for this early classification step.
-pub(crate) fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
+/// `ModelStage0::new`/`new_cached` and the salsa `module_ident_context`
+/// query), before the full per-variable parse in `parse_var`. The re-parse
+/// is cheap (single equation, top-level only) and avoids threading the
+/// parsed AST through an intermediate data structure just for this early
+/// classification step.
+///
+/// Scope note: this inspects only `Equation::Scalar` and
+/// `Equation::ApplyToAll`; it returns `false` for `Equation::Arrayed` (the
+/// per-element-equation form). A per-element-equation macro call would not be
+/// pre-classified here -- but that exactly matches the pre-existing behavior
+/// for arrayed stdlib calls, so it is not a macro-specific regression.
+pub(crate) fn equation_is_module_call(
+    eqn: &datamodel::Equation,
+    macro_registry: &crate::module_functions::MacroRegistry,
+) -> bool {
     let text = match eqn {
         datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => s.as_str(),
         _ => return false,
@@ -842,6 +858,7 @@ pub(crate) fn equation_is_stdlib_call(eqn: &datamodel::Equation) -> bool {
         Expr0::App(crate::builtins::UntypedBuiltinFn(func, _args), _) => {
             let func_lower = func.to_lowercase();
             crate::builtins::is_stdlib_module_function(&func_lower)
+                || macro_registry.resolve_macro(func).is_some()
         }
         _ => false,
     }
@@ -872,6 +889,12 @@ impl ModelStage0 {
         // persistent slot in prev_values. PREVIOUS(module_input) must first
         // capture the current scalar into a temp helper so LoadPrev reads
         // that helper's slot on the next step.
+        // Test helper: a single model in isolation, so its own macro_spec
+        // (if any) is the registry. A build error here is a test-fixture
+        // bug -- surface it loudly.
+        let macro_registry =
+            crate::module_functions::MacroRegistry::build(std::slice::from_ref(x_model))
+                .expect("test fixture macro set must be valid");
         let module_idents: HashSet<Ident<Canonical>> = if implicit {
             x_model
                 .variables
@@ -879,7 +902,7 @@ impl ModelStage0 {
                 .map(|v| Ident::new(&canonicalize(v.get_ident())))
                 .collect()
         } else {
-            collect_module_idents(&x_model.variables)
+            collect_module_idents(&x_model.variables, &macro_registry)
         };
 
         let mut variable_list: Vec<VariableStage0> = x_model
@@ -954,9 +977,13 @@ impl ModelStage0 {
         let mut variable_list: Vec<VariableStage0> = Vec::new();
 
         // Collect module identifiers for the PREVIOUS/INIT helper rewrite.
-        // For user models, only explicit Module variables and stdlib-call
-        // Aux/Flow variables are multi-slot/module-backed.
-        let module_idents: HashSet<Ident<Canonical>> = collect_module_idents(&x_model.variables);
+        // For user models, only explicit Module variables and module-call
+        // (stdlib or macro) Aux/Flow variables are multi-slot/module-backed.
+        let macro_registry =
+            crate::module_functions::MacroRegistry::build(std::slice::from_ref(x_model))
+                .expect("test fixture macro set must be valid");
+        let module_idents: HashSet<Ident<Canonical>> =
+            collect_module_idents(&x_model.variables, &macro_registry);
         let mut module_ident_list: Vec<String> = module_idents
             .iter()
             .map(|ident| ident.as_str().to_owned())
@@ -1751,7 +1778,8 @@ fn test_collect_module_idents_skips_intrinsic_previous() {
         x_aux("prev_x", "PREVIOUS(x)", None),
         x_aux("prev_x_init", "PREVIOUS(x, 42)", None),
     ];
-    let ids = collect_module_idents(&vars);
+    let registry = crate::module_functions::MacroRegistry::default();
+    let ids = collect_module_idents(&vars, &registry);
     assert!(
         !ids.contains(&Ident::new("prev_x")),
         "1-arg PREVIOUS should stay on the intrinsic opcode path",
@@ -1759,6 +1787,54 @@ fn test_collect_module_idents_skips_intrinsic_previous() {
     assert!(
         !ids.contains(&Ident::new("prev_x_init")),
         "2-arg PREVIOUS should also stay intrinsic",
+    );
+}
+
+/// `equation_is_module_call` (Phase 3 Task 2 signature) returns `true` for
+/// both a macro call and a stdlib call, and `false` for a plain arithmetic
+/// expression. This is the pre-classification predicate that decides whether
+/// a caller variable's ident lands in `module_idents` (so `PREVIOUS(y)`
+/// rewrites correctly when `y = MYMACRO(...)`).
+#[test]
+fn test_equation_is_module_call_recognizes_macros_and_stdlib() {
+    use crate::module_functions::MacroRegistry;
+
+    // A registry containing a single macro `MYMACRO(a, b)`.
+    let macro_model = datamodel::Model {
+        name: "mymacro".to_string(),
+        sim_specs: None,
+        variables: vec![
+            x_aux("mymacro", "a * b", None),
+            x_aux("a", "0", None),
+            x_aux("b", "0", None),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(datamodel::MacroSpec {
+            parameters: vec!["a".to_string(), "b".to_string()],
+            primary_output: "mymacro".to_string(),
+            additional_outputs: vec![],
+        }),
+    };
+    let registry = MacroRegistry::build(&[macro_model]).expect("valid macro project builds");
+
+    let macro_call = datamodel::Equation::Scalar("MYMACRO(a, b)".to_string());
+    assert!(
+        equation_is_module_call(&macro_call, &registry),
+        "a top-level macro call must be recognized as a module call",
+    );
+
+    let stdlib_call = datamodel::Equation::Scalar("SMTH1(x, 5)".to_string());
+    assert!(
+        equation_is_module_call(&stdlib_call, &registry),
+        "a top-level stdlib call must still be recognized as a module call",
+    );
+
+    let arithmetic = datamodel::Equation::Scalar("a + b".to_string());
+    assert!(
+        !equation_is_module_call(&arithmetic, &registry),
+        "a plain arithmetic expression is not a module call",
     );
 }
 
@@ -1780,7 +1856,8 @@ fn test_collect_module_idents_skips_apply_to_all_previous() {
             compat: datamodel::Compat::default(),
         }),
     ];
-    let ids = collect_module_idents(&vars);
+    let registry = crate::module_functions::MacroRegistry::default();
+    let ids = collect_module_idents(&vars, &registry);
     assert!(
         !ids.contains(&Ident::new("prev_x_init")),
         "ApplyToAll equations that invoke PREVIOUS should stay intrinsic",

@@ -776,8 +776,13 @@ pub struct LoopMetadata {
 /// ordinary model whose `variables` are the macro body; this spec names which
 /// body variables are the formal parameters and which are the outputs.
 /// `Model.macro_spec` is `None` for every non-macro model.
+//
+// `salsa::Update` lets `MacroSpec` be carried directly on the `SourceModel`
+// salsa input (mirroring `Compat`), so the per-project macro registry can be
+// a salsa-tracked query keyed on the macro-marked models -- no mirror type
+// and no separate model-level metadata input.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub struct MacroSpec {
     /// Formal parameter names, in positional calling order. Each names a body
     /// variable that a macro invocation binds an argument to.

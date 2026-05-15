@@ -44,8 +44,14 @@ use crate::{datamodel, model_err};
 
 /// The unified answer for "what does this module-function expand into,"
 /// serving both stdlib functions and project macros.
+//
+// `salsa::Update` lets `MacroRegistry` (which holds these) be the return
+// value of the `project_macro_registry` salsa-tracked query. This is a pure
+// data marker (in-place update support), not a side effect -- it does not
+// compromise this module's Functional-Core status, mirroring how
+// `datamodel::MacroSpec`/`Compat` derive it.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub(crate) struct ModuleFunctionDescriptor {
     /// The `datamodel::Model.name` of the target model -- `"stdlib⁚smth1"`
     /// for a stdlib function, or the macro's canonical model name.
@@ -110,7 +116,7 @@ pub(crate) fn stdlib_descriptor(name: &str) -> Option<ModuleFunctionDescriptor> 
 /// project's models. Answers "is this call name a project macro, and if so
 /// what is its [`ModuleFunctionDescriptor`]?".
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq, salsa::Update)]
 pub(crate) struct MacroRegistry {
     /// canonical macro name -> descriptor
     macros: HashMap<String, ModuleFunctionDescriptor>,

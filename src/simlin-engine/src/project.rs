@@ -120,7 +120,8 @@ impl Project {
             } else {
                 vec![]
             };
-            let module_ctx = model_module_ident_context(db, *src_model, extra_module_idents);
+            let module_ctx =
+                model_module_ident_context(db, *src_model, source_project, extra_module_idents);
             let mut var_list: Vec<VariableStage0> = Vec::new();
             let mut implicit_dm: Vec<datamodel::Variable> = Vec::new();
             for (_vname, svar) in src_vars.iter() {
