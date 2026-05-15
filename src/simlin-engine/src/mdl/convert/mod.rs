@@ -10,6 +10,8 @@
 mod dimensions;
 mod external_data;
 mod helpers;
+#[cfg(test)]
+mod macro_tests;
 mod macros;
 mod stocks;
 mod types;
