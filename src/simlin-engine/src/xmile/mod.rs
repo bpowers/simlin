@@ -1151,14 +1151,21 @@ pub fn project_from_reader(reader: &mut dyn BufRead) -> Result<datamodel::Projec
 /// Fallible because a `<macro>` with a non-empty per-macro `<sim_specs>` is
 /// the documented unsupported limitation (a macro running with its own
 /// dt/stop time) and is rejected here with a clear error.
-pub fn convert_file_to_project(file: File) -> Result<datamodel::Project> {
-    let mut project = datamodel::Project::from(file.clone());
+pub fn convert_file_to_project(mut file: File) -> Result<datamodel::Project> {
+    // Move the macros out *before* the `File -> Project` conversion: that
+    // `From` impl consumes `file` by value but never reads `file.macros`
+    // (it populates `project.models` solely from `file.models`). Taking the
+    // macros first lets us pass the rest of the `File` by move instead of
+    // cloning the entire `File` -- which would deep-copy every non-macro
+    // model on every XMILE import -- with byte-identical behavior.
+    let macros = std::mem::take(&mut file.macros);
+    let mut project = datamodel::Project::from(file);
 
     // A macro is a top-level `<macro>` element, a sibling of `<model>`. The
     // bridge between `file.macros` and the macro-marked entries of
     // `project.models` lives here at the File <-> Project level (the macro
     // *body* reuses the per-`Model` `xmile::Variables` conversion).
-    for mac in file.macros {
+    for mac in macros {
         project.models.push(macro_to_datamodel(mac)?);
     }
 

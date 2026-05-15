@@ -261,15 +261,37 @@ impl<'input> ConversionContext<'input> {
                 });
             }
 
+            // Lockstep with the XMILE round-trip
+            // (`reconstruct_macro_invocation` in
+            // `src/simlin-engine/src/xmile/model.rs`): this materializer is the
+            // ONLY producer of multi-output clusters. A `:`-invocation has no
+            // module-level doc/units/compat in the Vensim source, so these are
+            // default -- and the `simlin:macro-invocation` extension carries
+            // no module-level metadata. The `debug_assert!`s below enforce
+            // that invariant *at the producer*: if a future change emits a
+            // non-default module doc/units/compat, the extension element and
+            // its reconstruction must be extended to carry it, or it is
+            // silently lost on the XMILE round-trip.
+            let module_documentation = String::new();
+            let module_units: Option<String> = None;
+            let module_compat = datamodel::Compat::default();
+            debug_assert!(
+                module_documentation.is_empty()
+                    && module_units.is_none()
+                    && module_compat == datamodel::Compat::default(),
+                "multi-output module metadata must stay default to round-trip \
+                 through the simlin:macro-invocation XMILE extension; see \
+                 reconstruct_macro_invocation in src/simlin-engine/src/xmile/model.rs"
+            );
             variables.push(Variable::Module(Module {
                 ident: module_ident.clone(),
                 model_name: macro_model.name.clone(),
-                documentation: String::new(),
-                units: None,
+                documentation: module_documentation,
+                units: module_units,
                 references,
                 ai_state: None,
                 uid: None,
-                compat: datamodel::Compat::default(),
+                compat: module_compat,
             }));
 
             // Primary-output binding aux: replaces the LHS aux. `total` now
@@ -288,19 +310,43 @@ impl<'input> ConversionContext<'input> {
             // One additional-output binding aux per `:`-list entry. The
             // call-site name is the variable ident; the macro's internal
             // output name is what it reads from the module.
+            //
+            // Lockstep with `reconstruct_macro_invocation` in
+            // `src/simlin-engine/src/xmile/model.rs`: unlike the primary-output
+            // binding aux above (which preserves the call-site
+            // doc/units via `primary_doc`/`primary_units`), the `:`-list names
+            // are created by the call and never separately declared, so these
+            // binding auxes have default doc/units/compat and the
+            // `simlin:macro-invocation` extension carries none. The
+            // `debug_assert!` enforces that at the producer: if a future
+            // change gives these a non-default doc/units/compat, the
+            // extension element and its reconstruction must be extended to
+            // carry it, or it is silently lost on the XMILE round-trip.
             for (i, out_ident) in output_idents.iter().enumerate() {
+                let out_documentation = String::new();
+                let out_units: Option<String> = None;
+                let out_compat = datamodel::Compat::default();
+                debug_assert!(
+                    out_documentation.is_empty()
+                        && out_units.is_none()
+                        && out_compat == datamodel::Compat::default(),
+                    "multi-output additional-binding-aux metadata must stay \
+                     default to round-trip through the simlin:macro-invocation \
+                     XMILE extension; see reconstruct_macro_invocation in \
+                     src/simlin-engine/src/xmile/model.rs"
+                );
                 variables.push(Variable::Aux(Aux {
                     ident: out_ident.clone(),
                     equation: Equation::Scalar(format!(
                         "{}.{}",
                         module_ident, spec.additional_outputs[i]
                     )),
-                    documentation: String::new(),
-                    units: None,
+                    documentation: out_documentation,
+                    units: out_units,
                     gf: None,
                     ai_state: None,
                     uid: None,
-                    compat: datamodel::Compat::default(),
+                    compat: out_compat,
                 }));
             }
 

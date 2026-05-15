@@ -183,6 +183,17 @@ fn reconstruct_macro_invocation(inv: &MacroInvocation) -> Vec<datamodel::Variabl
         })
         .collect();
 
+    // Lockstep with the Phase-4 materializer
+    // (`src/simlin-engine/src/mdl/convert/multi_output.rs`): that materializer
+    // is the *only* producer of multi-output clusters, and it emits the
+    // reconstructed module with default `documentation`/`units`/`compat`
+    // (module-level doc/units/compat for a `:`-invocation have no Vensim
+    // source). The `simlin:macro-invocation` extension therefore carries no
+    // module-level metadata, so reconstruction MUST mirror those defaults.
+    // If the materializer ever emits a non-default module doc/units/compat,
+    // the extension element *and* this reconstruction must be extended to
+    // carry it -- otherwise it is silently lost on the XMILE round-trip
+    // (the materializer-side `debug_assert!`s enforce the producer side).
     out.push(datamodel::Variable::Module(datamodel::Module {
         ident: inv.module.clone(),
         model_name: inv.macro_name.clone(),
@@ -204,7 +215,11 @@ fn reconstruct_macro_invocation(inv: &MacroInvocation) -> Vec<datamodel::Variabl
         inv.primary_units.clone(),
     ));
 
-    // One additional-output binding aux per `:`-list entry.
+    // One additional-output binding aux per `:`-list entry. Same lockstep as
+    // the module above: the materializer emits these binding auxes with
+    // default doc/units/compat (the `:`-list names are created by the call,
+    // not separately declared), so the extension carries none and
+    // reconstruction mirrors the defaults.
     for o in &inv.outputs {
         out.push(binding_aux(
             o.binding.clone(),
@@ -231,6 +246,16 @@ fn reconstruct_macro_invocation(inv: &MacroInvocation) -> Vec<datamodel::Variabl
 /// for the macro's primary / additional outputs. Only multi-output macros
 /// (non-empty `additional_outputs`) are extracted -- a single-output macro
 /// invocation has a plain-text equivalent and is never materialized.
+///
+/// First-wins under aliasing: the scalar-equation index keyed below maps an
+/// equation like `"{module}.{primary_output}"` to a *single* aux ident
+/// (`or_insert_with`). If two auxes share that same binding equation -- one
+/// being an alias of the other -- only the first-encountered becomes the
+/// extracted binding and is consumed; any aliases are *not* consumed and
+/// stay in the residual model as ordinary `<aux>`es that reference the
+/// reconstructed module output by name. That still round-trips correctly
+/// (the module output is regenerated on re-import, so the alias resolves),
+/// it is just not folded back into the `simlin:` invocation extension.
 pub(crate) fn extract_macro_invocations(
     mut model: datamodel::Model,
     macro_specs: &std::collections::HashMap<String, datamodel::MacroSpec>,
