@@ -122,6 +122,12 @@ impl ToXml<XmlWriter> for File {
             model.write_xml(writer)?;
         }
 
+        // A <macro> is a top-level sibling of <model>; emit them after the
+        // models, before closing </xmile>.
+        for mac in self.macros.iter() {
+            mac.write_xml(writer)?;
+        }
+
         write_tag_end(writer, "xmile")
     }
 }
@@ -187,6 +193,32 @@ impl From<File> for datamodel::Project {
 
 impl From<datamodel::Project> for File {
     fn from(project: datamodel::Project) -> Self {
+        // Partition models: macro-marked models become top-level <macro>
+        // siblings of <model>; the rest stay as ordinary <model>s.
+        let (macro_models, plain_models): (Vec<_>, Vec<_>) = project
+            .models
+            .into_iter()
+            .partition(|m| m.macro_spec.is_some());
+
+        let macros: Vec<Macro> = macro_models.into_iter().map(Macro::from).collect();
+
+        // The <uses_macros> header option is emitted whenever the project
+        // contains at least one macro. Simlin does not support recursive
+        // macros and emits both attributes as fixed "false" -- a
+        // deterministic emission that keeps the byte-stable round-trip
+        // stable.
+        let options = if macros.is_empty() {
+            None
+        } else {
+            Some(Options {
+                namespace: None,
+                features: Some(vec![Feature::UsesMacros {
+                    recursive_macros: Some(false),
+                    option_filters: Some(false),
+                }]),
+            })
+        };
+
         File {
             version: XMILE_VERSION.to_owned(),
             namespace: XML_NS_HTTP.to_owned(),
@@ -197,7 +229,7 @@ impl From<datamodel::Project> for File {
                     language: Some(PRODUCT_LANG.to_owned()),
                     version: Some(PRODUCT_VERSION.to_owned()),
                 },
-                options: None,
+                options,
                 name: if project.name.is_empty() {
                     None
                 } else {
@@ -240,8 +272,8 @@ impl From<datamodel::Project> for File {
             behavior: None,
             style: None,
             data: None,
-            models: project.models.into_iter().map(Model::from).collect(),
-            macros: vec![],
+            models: plain_models.into_iter().map(Model::from).collect(),
+            macros,
         }
     }
 }
@@ -395,7 +427,126 @@ pub struct MacroAdditionalOutputs {
 impl ToXml<XmlWriter> for MacroAdditionalOutputs {
     fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let attrs = &[("names", self.names.as_str())];
-        write_tag_with_attrs(writer, "simlin:additional-outputs", "", attrs)
+        write_tag_empty_with_attrs(writer, "simlin:additional-outputs", attrs)
+    }
+}
+
+impl ToXml<XmlWriter> for Macro {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
+        // Hand-written, mirroring Model::write_xml. Element order follows the
+        // XMILE spec / xmutil shape: <eqn>, then <parm>s, then <variables>,
+        // then <doc>, then the simlin: additional-outputs extension.
+        let mut attrs = vec![("name", self.name.as_str())];
+        if let Some(ref ns) = self.namespace {
+            attrs.push(("namespace", ns.as_str()));
+        }
+        write_tag_start_with_attrs(writer, "macro", &attrs)?;
+
+        if let Some(ref eqn) = self.eqn {
+            write_tag(writer, "eqn", eqn)?;
+        }
+
+        for parm in self.parms.iter() {
+            if let Some(ref default) = parm.default {
+                let parm_attrs = &[("default", default.as_str())];
+                write_tag_with_attrs(writer, "parm", parm.name.as_str(), parm_attrs)?;
+            } else {
+                write_tag(writer, "parm", parm.name.as_str())?;
+            }
+        }
+
+        write_tag_start(writer, "variables")?;
+        if let Some(Variables { ref variables }) = self.variables {
+            for var in variables.iter() {
+                var.write_xml(writer)?;
+            }
+        }
+        write_tag_end(writer, "variables")?;
+
+        if let Some(ref doc) = self.doc {
+            write_tag(writer, "doc", doc)?;
+        }
+
+        // simlin: additional-outputs extension (Task 3): present only for a
+        // multi-output macro. A single-output macro leaves this `None`, so a
+        // single-output-only project stays standards-clean (AC4.5).
+        if let Some(ref ao) = self.additional_outputs {
+            ao.write_xml(writer)?;
+        }
+
+        write_tag_end(writer, "macro")
+    }
+}
+
+impl From<datamodel::Model> for Macro {
+    /// Convert a macro-marked `datamodel::Model` into an `xmile::Macro`.
+    ///
+    /// The synthesized formal-parameter port variables are excluded from
+    /// `<variables>`: they are reconstructed from the `<parm>`s by
+    /// `Model::new_macro` on re-import, so emitting them in `<variables>` too
+    /// would be redundant and would break round-trip stability.
+    fn from(model: datamodel::Model) -> Self {
+        // A macro model always has a MacroSpec (the partition in
+        // `From<datamodel::Project> for File` only routes macro-marked models
+        // here). Defaulting keeps this total without an unwrap.
+        let spec = model.macro_spec.clone().unwrap_or(datamodel::MacroSpec {
+            parameters: vec![],
+            primary_output: model.name.clone(),
+            additional_outputs: vec![],
+        });
+
+        let parm_set: std::collections::HashSet<String> = spec
+            .parameters
+            .iter()
+            .map(|p| canonicalize(p).into_owned())
+            .collect();
+
+        // Body variables minus the synthesized parameter ports.
+        let body: Vec<Var> = model
+            .variables
+            .into_iter()
+            .filter(|v| !parm_set.contains(canonicalize(v.get_ident()).as_ref()))
+            .map(Var::from)
+            .collect();
+
+        let parms: Vec<Parm> = spec
+            .parameters
+            .iter()
+            .map(|p| Parm {
+                name: p.clone(),
+                default: None,
+            })
+            .collect();
+
+        // The simlin: additional-outputs extension is emitted ONLY for a
+        // multi-output macro (non-empty additional_outputs); a single-output
+        // macro stays standards-clean (AC4.5).
+        let additional_outputs = if spec.additional_outputs.is_empty() {
+            None
+        } else {
+            Some(MacroAdditionalOutputs {
+                names: spec.additional_outputs.join(","),
+            })
+        };
+
+        Macro {
+            name: model.name,
+            parms,
+            // <eqn> holds the primary-output name (the xmutil shape: the
+            // body's primary-output equation is named after the macro).
+            eqn: Some(spec.primary_output),
+            variables: if body.is_empty() {
+                None
+            } else {
+                Some(Variables { variables: body })
+            },
+            // Per-macro <sim_specs> is the documented unsupported limitation;
+            // never emitted.
+            sim_specs: None,
+            doc: None,
+            namespace: None,
+            additional_outputs,
+        }
     }
 }
 
@@ -479,6 +630,22 @@ pub(crate) fn write_tag_end(writer: &mut Writer<XmlWriter>, tag_name: &str) -> R
         .map_err(xml_error)
 }
 
+/// Emit a self-closing element (`<tag .../>`). Unlike
+/// `write_tag_with_attrs(.., "", ..)` (which renders `<tag ..></tag>` under
+/// the indenting writer), this produces the compact self-closing form the
+/// XMILE `<uses_macros>` / `<simlin:additional-outputs>` extensions use.
+pub(crate) fn write_tag_empty_with_attrs(
+    writer: &mut Writer<XmlWriter>,
+    tag_name: &str,
+    attrs: &[(&str, &str)],
+) -> Result<()> {
+    let mut elem = BytesStart::new(tag_name);
+    for attr in attrs.iter() {
+        elem.push_attribute(*attr);
+    }
+    writer.write_event(Event::Empty(elem)).map_err(xml_error)
+}
+
 pub(crate) fn write_tag_text(writer: &mut Writer<XmlWriter>, content: &str) -> Result<()> {
     writer
         .write_event(Event::Text(BytesText::new(content)))
@@ -532,7 +699,56 @@ impl ToXml<XmlWriter> for Header {
             write_tag_with_attrs(writer, "product", name, &attrs)?;
         }
 
+        // options / features. Today the only feature the writer emits is
+        // <uses_macros> (when the project contains a macro); the attributes
+        // are deterministic fixed "false" (Simlin supports neither recursive
+        // macros nor option filters), keeping the byte-stable round-trip
+        // stable.
+        if let Some(Options {
+            features: Some(ref features),
+            ..
+        }) = self.options
+            && !features.is_empty()
+        {
+            write_tag_start(writer, "options")?;
+            for feature in features.iter() {
+                feature.write_xml(writer)?;
+            }
+            write_tag_end(writer, "options")?;
+        }
+
         write_tag_end(writer, "header")
+    }
+}
+
+impl ToXml<XmlWriter> for Feature {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
+        match self {
+            Feature::UsesMacros {
+                recursive_macros,
+                option_filters,
+            } => {
+                let recursive = if recursive_macros.unwrap_or(false) {
+                    "true"
+                } else {
+                    "false"
+                };
+                let opt_filters = if option_filters.unwrap_or(false) {
+                    "true"
+                } else {
+                    "false"
+                };
+                let attrs = &[
+                    ("recursive_macros", recursive),
+                    ("option_filters", opt_filters),
+                ];
+                write_tag_empty_with_attrs(writer, "uses_macros", attrs)
+            }
+            // The other features are not emitted by the writer today; the
+            // round-trip never produces them, so this is unreachable in
+            // practice. Emit nothing rather than panic.
+            _ => Ok(()),
+        }
     }
 }
 
@@ -570,7 +786,13 @@ pub enum Feature {
         invalid_index_value: Option<String>, // e.g. "NaN" or "0"; string for Eq + Hash},
     },
     UsesMacros {
+        // Spec-required attributes (XMILE §2.2). Without the `@` rename
+        // serde would (de)serialize these as child elements, so the reader
+        // and the Task 2 writer (which emits the spec-correct attribute
+        // form) would disagree and the round-trip would be lossy.
+        #[serde(rename = "@recursive_macros")]
         recursive_macros: Option<bool>,
+        #[serde(rename = "@option_filters")]
         option_filters: Option<bool>,
     },
     UsesConveyor {
@@ -1594,6 +1816,172 @@ mod macro_tests {
             msg.contains("sim_specs") || msg.contains("sim specs"),
             "the error must mention sim_specs; got: {:?}",
             err.to_string()
+        );
+    }
+
+    use crate::datamodel::{Aux, Compat, Dt, Model, SimMethod, SimSpecs};
+
+    fn base_sim_specs() -> SimSpecs {
+        SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        }
+    }
+
+    fn aux(ident: &str, eqn: &str) -> Variable {
+        Variable::Aux(Aux {
+            ident: ident.to_string(),
+            equation: Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        })
+    }
+
+    /// A project with one ordinary model invoking a single-output macro
+    /// `mymacro(a, b) = a * b`. The macro-marked model is built via the
+    /// shared `Model::new_macro` so the port synthesis matches the reader.
+    fn single_output_macro_project() -> datamodel::Project {
+        let macro_model = Model::new_macro(
+            "mymacro",
+            &["a".to_string(), "b".to_string()],
+            &[],
+            vec![aux("mymacro", "a * b")],
+        );
+        datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: base_sim_specs(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                datamodel::Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![aux("result", "mymacro(2, 3)")],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                    macro_spec: None,
+                },
+                macro_model,
+            ],
+            source: Default::default(),
+            ai_information: None,
+        }
+    }
+
+    /// macros.AC4.2: a single-output macro-marked model serializes to a
+    /// `<macro name>` element with its `<parm>`s and body, and the
+    /// `<uses_macros recursive_macros="false" option_filters="false"/>`
+    /// header option is emitted.
+    #[test]
+    fn single_output_macro_writes_macro_element_and_uses_macros_option() {
+        let project = single_output_macro_project();
+        let xml = project_to_xmile(&project).expect("must serialize");
+
+        assert!(
+            xml.contains(r#"<macro name="mymacro">"#),
+            "expected a <macro name=\"mymacro\"> element; got:\n{}",
+            xml
+        );
+        assert!(
+            xml.contains("<parm>a</parm>"),
+            "expected <parm>a</parm>; got:\n{}",
+            xml
+        );
+        assert!(
+            xml.contains("<parm>b</parm>"),
+            "expected <parm>b</parm>; got:\n{}",
+            xml
+        );
+        // <eqn> holds the primary output name (the xmutil shape).
+        assert!(
+            xml.contains("<eqn>mymacro</eqn>"),
+            "expected <eqn>mymacro</eqn> (the primary-output name); got:\n{}",
+            xml
+        );
+        // The body equation survives in <variables>.
+        assert!(
+            xml.contains("<eqn>a * b</eqn>"),
+            "expected the body equation <eqn>a * b</eqn>; got:\n{}",
+            xml
+        );
+        assert!(
+            xml.contains(r#"<uses_macros recursive_macros="false" option_filters="false"/>"#),
+            "expected the <uses_macros> header option; got:\n{}",
+            xml
+        );
+    }
+
+    /// macros.AC4.5: a single-output-only macro project exports as
+    /// standards-clean XMILE with no `simlin:` macro-extension element.
+    #[test]
+    fn single_output_macro_emits_no_simlin_macro_extension() {
+        let project = single_output_macro_project();
+        let xml = project_to_xmile(&project).expect("must serialize");
+
+        assert!(
+            !xml.contains("simlin:additional-outputs"),
+            "single-output macro must NOT emit the simlin:additional-outputs \
+             extension; got:\n{}",
+            xml
+        );
+        assert!(
+            !xml.contains("simlin:macro-invocation"),
+            "single-output macro must NOT emit the simlin:macro-invocation \
+             extension; got:\n{}",
+            xml
+        );
+    }
+
+    /// macros.AC4.2: `to_xmile` -> `open_xmile` preserves the macro-marked
+    /// model with the same `MacroSpec` and body.
+    #[test]
+    fn single_output_macro_to_xmile_open_xmile_round_trips() {
+        let project = single_output_macro_project();
+        let xml = project_to_xmile(&project).expect("must serialize");
+        let roundtripped =
+            project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must re-import");
+
+        let m = macro_model(&roundtripped, "mymacro");
+        let spec = m.macro_spec.as_ref().expect("macro_spec survives");
+        assert_eq!(spec.parameters, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(spec.primary_output, "mymacro");
+        assert!(spec.additional_outputs.is_empty());
+
+        let body = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "mymacro")
+            .expect("body var survives");
+        assert_eq!(scalar_eq(body), "a * b");
+
+        // The ordinary model and its invocation are unchanged.
+        let main = roundtripped
+            .models
+            .iter()
+            .find(|m| m.name == "main")
+            .expect("main model survives");
+        assert!(main.macro_spec.is_none());
+        let result = main
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "result")
+            .expect("result var survives");
+        assert_eq!(scalar_eq(result), "mymacro(2, 3)");
+
+        // A second serialization is byte-identical (byte-stable round-trip).
+        let xml2 = project_to_xmile(&roundtripped).expect("must re-serialize");
+        assert_eq!(
+            xml, xml2,
+            "single-output macro round-trip must be byte-stable"
         );
     }
 }
