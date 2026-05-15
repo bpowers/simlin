@@ -507,3 +507,219 @@ y = 2
         "ConvertError Display must be the clear stray-end message"
     );
 }
+
+// --- macros.AC3.1: multi-output invocation materialization -----------------
+//
+// A multi-output invocation `total = ADD3(in1, in2, in3 : the min, the max)`
+// has no plain-text equivalent (a call returns several named values at once),
+// so Phase 4 materializes it at MDL import as an explicit `Variable::Module`
+// (input ports wired to the call arguments) plus one binding `Variable::Aux`
+// per output: the LHS aux reads `<module>.<primary_output>`, and each
+// `:`-list aux reads `<module>.<additional_output>`. The datamodel layer uses
+// an ASCII period as the module-output separator (it canonicalizes to U+00B7
+// only later, at compile-time parse -- see the authoritative Separator note
+// in the phase plan).
+
+const MACRO_MULTI_OUTPUT: &str = include_str!(
+    "../../../../../test/test-models/tests/macro_multi_output/test_macro_multi_output.mdl"
+);
+
+/// Find the (single) `Variable::Module` in a model.
+fn the_module(model: &Model) -> &crate::datamodel::Module {
+    let modules: Vec<&crate::datamodel::Module> = model
+        .variables
+        .iter()
+        .filter_map(|v| match v {
+            Variable::Module(m) => Some(m),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        modules.len(),
+        1,
+        "expected exactly one Variable::Module in model {:?}; variables: {:?}",
+        model.name,
+        model
+            .variables
+            .iter()
+            .map(|v| v.get_ident().to_string())
+            .collect::<Vec<_>>()
+    );
+    modules[0]
+}
+
+#[test]
+fn multi_output_invocation_materializes_module_and_binding_auxes() {
+    // macros.AC3.1: the multi-output invocation materializes as a module
+    // instance; the LHS (`total`) receives the primary output, and the
+    // `:`-list names (`the min` / `the max`) become model variables holding
+    // the additional outputs.
+    let project = convert_mdl(MACRO_MULTI_OUTPUT).expect("macro_multi_output must import");
+
+    // The ADD3 macro still imports as a macro-marked model with the
+    // 2-additional-output `:`-list spec.
+    let _m = assert_macro_shape(&project, "add3", &["a", "b", "c"], &["minval", "maxval"]);
+
+    let main = main_model(&project);
+    assert!(main.macro_spec.is_none(), "\"main\" is not macro-marked");
+
+    // Exactly one Variable::Module, pointing at the ADD3 macro's model.
+    let module = the_module(main);
+    assert_eq!(
+        module.model_name, "add3",
+        "the materialized module must target the ADD3 macro's model"
+    );
+
+    // Its ident is the deterministic, serialization-stable `{lhs}_macro`
+    // form (NOT the `$⁚` compile-time-synthetic prefix).
+    assert_eq!(
+        module.ident, "total_macro",
+        "module ident must be the stable, human-readable `{{lhs}}_macro` form"
+    );
+
+    // Exactly three INPUT ModuleReferences, wiring in1/in2/in3 to the
+    // a/b/c ports (dst is `<module>.<port>`, src is the argument's
+    // canonical name). Outputs are NOT references -- they are realized as
+    // separate binding auxes (compile time strips non-self-prefixed dst).
+    let mut refs: Vec<(String, String)> = module
+        .references
+        .iter()
+        .map(|r| (r.src.clone(), r.dst.clone()))
+        .collect();
+    refs.sort();
+    assert_eq!(
+        refs,
+        vec![
+            ("in1".to_string(), "total_macro.a".to_string()),
+            ("in2".to_string(), "total_macro.b".to_string()),
+            ("in3".to_string(), "total_macro.c".to_string()),
+        ],
+        "exactly the three input ports must be wired (no output references)"
+    );
+
+    // `total` is an Aux reading the module's PRIMARY output (ASCII period
+    // -- the datamodel form).
+    let total = var(main, "total");
+    assert!(
+        matches!(total, Variable::Aux(_)),
+        "the LHS binding must be an Aux, got {:?}",
+        total
+    );
+    assert_eq!(
+        scalar_eq(total),
+        "total_macro.add3",
+        "`total` must read the module's primary output `<module>.add3`"
+    );
+
+    // `the min` / `the max` are Auxes reading the module's ADDITIONAL
+    // outputs. The call-site name becomes the variable ident; the macro's
+    // internal output name (minval/maxval) is what it reads.
+    let the_min = var(main, "the_min");
+    assert!(matches!(the_min, Variable::Aux(_)));
+    assert_eq!(
+        scalar_eq(the_min),
+        "total_macro.minval",
+        "`the min` must read `<module>.minval` (the macro-internal name)"
+    );
+    let the_max = var(main, "the_max");
+    assert!(matches!(the_max, Variable::Aux(_)));
+    assert_eq!(
+        scalar_eq(the_max),
+        "total_macro.maxval",
+        "`the max` must read `<module>.maxval` (the macro-internal name)"
+    );
+
+    // The downstream equation that references the additional outputs is
+    // untouched (proves the `:`-list names are ordinary referenceable
+    // model variables).
+    let spread = var(main, "spread");
+    let spread_eq = scalar_eq(spread).to_lowercase();
+    assert!(
+        spread_eq.contains("the_max") && spread_eq.contains("the_min"),
+        "`spread` must reference the bound additional-output variables, got {:?}",
+        scalar_eq(spread)
+    );
+
+    // No multi-output `Expr::App` survived as plain text: the `total`
+    // equation is the binding reference, not `add3(...)`.
+    assert!(
+        !scalar_eq(total).to_lowercase().contains("add3("),
+        "the multi-output call must NOT survive as plain `add3(...)` text"
+    );
+}
+
+/// Assert `convert_mdl(mdl)` fails with a `ConvertError` whose message names
+/// the macro (`needle`).
+fn assert_multi_output_convert_error_names(mdl: &str, needle: &str) {
+    let err = convert_mdl(mdl).expect_err("a bad multi-output invocation must fail to convert");
+    let msg = err.to_string();
+    assert!(
+        msg.to_lowercase().contains(&needle.to_lowercase()),
+        "the ConvertError must name {:?}; got: {:?}",
+        needle,
+        msg
+    );
+}
+
+#[test]
+fn multi_output_call_to_unknown_macro_is_an_error_naming_it() {
+    // A `:`-list call to a name that is not a known macro must fail with a
+    // ConvertError naming the called name.
+    let mdl = "total = NOPE(a, b : x, y)
+~ ~|
+a = 1
+~ ~|
+b = 2
+~ ~|
+\\\\\\---///
+";
+    assert_multi_output_convert_error_names(mdl, "nope");
+}
+
+#[test]
+fn multi_output_call_with_wrong_argument_count_is_an_error() {
+    // ADD3 has 3 parameters; calling it with 2 args (but the right number
+    // of `:`-outputs) is an arity error naming ADD3.
+    let mdl = ":MACRO: ADD3(a, b, c : minval, maxval)
+ADD3 = a + b + c
+~ ~|
+minval = MIN(a, MIN(b, c))
+~ ~|
+maxval = MAX(a, MAX(b, c))
+~ ~|
+:END OF MACRO:
+total = ADD3(p, q : lo, hi)
+~ ~|
+p = 1
+~ ~|
+q = 2
+~ ~|
+\\\\\\---///
+";
+    assert_multi_output_convert_error_names(mdl, "add3");
+}
+
+#[test]
+fn multi_output_call_with_wrong_output_count_is_an_error() {
+    // ADD3 declares 2 additional outputs; binding only 1 `:`-output (with
+    // the right number of args) is an arity error naming ADD3.
+    let mdl = ":MACRO: ADD3(a, b, c : minval, maxval)
+ADD3 = a + b + c
+~ ~|
+minval = MIN(a, MIN(b, c))
+~ ~|
+maxval = MAX(a, MAX(b, c))
+~ ~|
+:END OF MACRO:
+total = ADD3(p, q, r : lo)
+~ ~|
+p = 1
+~ ~|
+q = 2
+~ ~|
+r = 3
+~ ~|
+\\\\\\---///
+";
+    assert_multi_output_convert_error_names(mdl, "add3");
+}

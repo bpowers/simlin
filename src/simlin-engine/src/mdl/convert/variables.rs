@@ -20,13 +20,21 @@ use crate::mdl::xmile_compat::{quoted_space_to_underbar, space_to_underbar};
 
 use super::ConversionContext;
 use super::helpers::{canonical_name, cartesian_product, extract_metadata, extract_units, get_lhs};
+use super::multi_output::MultiOutputMaterialization;
 use super::types::{ConvertError, SymbolInfo, VariableType};
 use crate::mdl::xmile_compat::format_number;
 
 impl<'input> ConversionContext<'input> {
     /// Build the final Project from collected symbols.
-    pub(super) fn build_project(self) -> Result<Project, ConvertError> {
-        let model = self.build_model("main")?;
+    ///
+    /// `materialization` carries the multi-output macro-invocation
+    /// materialization computed in Pass 6.5 (Module + binding Auxes to add,
+    /// and the LHS symbols whose normal build must be skipped).
+    pub(super) fn build_project(
+        self,
+        materialization: &MultiOutputMaterialization,
+    ) -> Result<Project, ConvertError> {
+        let model = self.build_model("main", materialization)?;
 
         Ok(Project {
             name: String::new(),
@@ -43,17 +51,40 @@ impl<'input> ConversionContext<'input> {
     /// symbols, synthetic flows, groups, and views.
     ///
     /// This is the model-building core extracted from `build_project`: the
-    /// `"main"` model is `build_model("main")`, and a macro body is built as
-    /// `build_model(&macro_name)` on a scoped sub-context. The returned model
+    /// `"main"` model is `build_model("main", &materialization)`, and a macro
+    /// body is built as `build_model(&macro_name, &Default::default())` on a
+    /// scoped sub-context (a macro body cannot contain a multi-output macro
+    /// invocation, so it passes an empty materialization). The returned model
     /// always has `sim_specs: None` and `macro_spec: None`; project-level
     /// fields (sim_specs, dimensions, units) stay in `build_project`, and the
     /// macro path attaches the `MacroSpec` afterward.
-    pub(super) fn build_model(&self, name: &str) -> Result<Model, ConvertError> {
+    ///
+    /// `materialization.skip_symbols` lists the LHS symbols whose selected
+    /// equation is a multi-output macro invocation: their normal build is
+    /// skipped (the multi-output `Expr::App` must never reach
+    /// `build_equation` / the formatter), and `materialization.variables`
+    /// (the Module + binding Auxes) is appended instead.
+    pub(super) fn build_model(
+        &self,
+        name: &str,
+        materialization: &MultiOutputMaterialization,
+    ) -> Result<Model, ConvertError> {
         let mut variables: Vec<Variable> = Vec::with_capacity(self.symbols.len());
 
         for (var_name, info) in &self.symbols {
             // Skip unwanted variables (control vars)
             if info.unwanted {
+                continue;
+            }
+
+            // Skip a symbol whose selected equation is a multi-output macro
+            // invocation -- it is replaced by the materialized Module +
+            // binding Auxes appended below. (Compared on canonical name; the
+            // materializer keys `skip_symbols` on `canonical_name`.)
+            if materialization
+                .skip_symbols
+                .contains(&canonical_name(var_name))
+            {
                 continue;
             }
 
@@ -98,6 +129,12 @@ impl<'input> ConversionContext<'input> {
             });
             variables.push(flow);
         }
+
+        // Append the materialized multi-output macro invocations: one
+        // input-only Variable::Module plus its primary/additional binding
+        // Auxes (and any hoisted expression-argument auxes) per invocation.
+        // Empty for a macro body (no multi-output invocations there).
+        variables.extend(materialization.variables.iter().cloned());
 
         // Sort variables by canonical name for deterministic output
         variables.sort_by_cached_key(|a| canonical_name(a.get_ident()));

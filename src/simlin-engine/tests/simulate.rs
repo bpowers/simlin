@@ -1586,3 +1586,30 @@ TIME STEP = 1 ~~|
         );
     }
 }
+
+// ===========================================================================
+// Phase 4 / Task 1: multi-output (`:`-list) macro invocation
+//
+// A multi-output invocation `total = ADD3(in1, in2, in3 : the min, the max)`
+// materializes at MDL import as a Variable::Module plus binding Auxes (the
+// LHS reads the primary output; the `:`-list names read the additional
+// outputs). The fixture is stockless so every value is constant; its
+// `output.tab` lists `total`, `the min`, `the max`, and the downstream
+// `spread = the max - the min` (which proves macros.AC3.2: the `:`-list names
+// are referenceable by a subsequent equation and carry correct values).
+//
+//   total  = in1 + in2 + in3    = 7 + 2 + 5         = 14
+//   the min = MIN(7, MIN(2, 5)) = 2
+//   the max = MAX(7, MAX(2, 5)) = 7
+//   spread  = the max - the min = 7 - 2             = 5
+// ===========================================================================
+
+/// macros.AC3.1 / macros.AC3.2: the bundled multi-output fixture parses,
+/// materializes, compiles, simulates, and matches its hand-computed
+/// `output.tab` (`total`/`the min`/`the max`/`spread`).
+#[test]
+fn simulates_macro_multi_output_mdl() {
+    simulate_mdl_path(
+        "../../test/test-models/tests/macro_multi_output/test_macro_multi_output.mdl",
+    );
+}

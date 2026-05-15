@@ -13,6 +13,7 @@ mod helpers;
 #[cfg(test)]
 mod macro_tests;
 mod macros;
+mod multi_output;
 mod stocks;
 mod types;
 mod variables;
@@ -238,9 +239,24 @@ impl<'input> ConversionContext<'input> {
         // scoped sub-context per macro body.
         let macro_models = self.build_macro_models()?;
 
+        // Pass 6.5: Materialize every multi-output (`:`-list) macro
+        // invocation in the main model BEFORE build_project's per-symbol loop
+        // formats it. A multi-output `Expr::App` must never reach
+        // `build_equation` / the XMILE formatter (the formatter asserts
+        // `output_bindings.is_empty()`). This needs the macro-marked models'
+        // `MacroSpec`s, which Pass 6 just built; it produces brand-new
+        // datamodel variables (a Module + binding Auxes) and the set of LHS
+        // symbols whose normal build must be skipped.
+        let macro_models_by_name: HashMap<String, &crate::datamodel::Model> = macro_models
+            .iter()
+            .filter(|m| m.macro_spec.is_some())
+            .map(|m| (canonical_name(&m.name), m))
+            .collect();
+        let materialization = self.materialize_multi_output_invocations(&macro_models_by_name)?;
+
         // Pass 7: Build the final project (the "main" model) and attach the
         // macro-marked models alongside it.
-        let mut project = self.build_project()?;
+        let mut project = self.build_project(&materialization)?;
         project.models.extend(macro_models);
         Ok(project)
     }
