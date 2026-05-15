@@ -1,6 +1,6 @@
 # @simlin/diagram
 
-Last verified: 2026-05-11
+Last verified: 2026-05-15
 
 React components for model visualization and editing. Designed as a general-purpose SD model editor toolkit without dependencies on the Simlin app or server API.
 
@@ -29,8 +29,8 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 
 ### Module Logic (Functional Core)
 
-- `module-navigation.ts` -- Module stack types (`ModuleStackEntry`, `NavigateResult`, `BreadcrumbSegment`) and pure functions (`pushModule`, `popModule`, `navigateToLevel`, `breadcrumbSegments`, `currentModelName`). Level 0 = main (root).
-- `module-details-utils.ts` -- Module detail utilities: `countModelInstances`, `wouldCreateCycle` (DFS cycle detection), `getAvailableModels`, `getInputPorts`, `getPublicVariables`
+- `module-navigation.ts` -- Module stack types (`ModuleStackEntry`, `NavigateResult`, `BreadcrumbSegment`) and pure functions (`pushModule`, `popModule`, `navigateToLevel`, `breadcrumbSegments`, `currentModelName`). Level 0 = main (root). Also the model-level gating predicates `isStdlibModel(name)` and `isMacroModel(model)` (true when `model.macroSpec` is set).
+- `module-details-utils.ts` -- Module detail utilities: `countModelInstances`, `wouldCreateCycle` (DFS cycle detection), `getAvailableModels` (excludes macro-marked models -- a macro is materialized by the engine, never a selectable module-reference target; macros.AC6.6), `getInputPorts`, `getPublicVariables`
 - `module-wiring.ts` -- Module reference array manipulation: `addReference`, `removeReference`, `updateReferenceSrc`, `updateReferenceDst`, `getAvailableSrcVariables`
 - `module-warning.ts` -- `anyModuleHasModelReference`: suppresses warning dots when no modules have references yet (new model sketching scenario)
 

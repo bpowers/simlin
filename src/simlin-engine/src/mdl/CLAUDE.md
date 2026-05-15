@@ -29,6 +29,8 @@ For design history and detailed implementation notes, see [docs/design/mdl-parse
 - `stocks.rs` -- Stock/flow linking via is_all_plus_minus algorithm
 - `dimensions.rs` -- Dimension/subscript building with range expansion and `DimensionMapping` construction
 - `external_data.rs` -- GET DIRECT DATA/CONSTANTS/LOOKUPS/SUBSCRIPT resolution via `DataProvider` trait
+- `macros.rs` -- Converts each `:MACRO:` block into a macro-marked `datamodel::Model` (via `datamodel::Model::new_macro`); the conversion pipeline is reused per macro body
+- `multi_output.rs` -- Materializes `:`-list multi-output macro invocations at import (using the Pass-6 macro-marked models' `MacroSpec`s)
 - `types.rs` -- Internal types (`SymbolInfo`, etc.)
 - `helpers.rs` -- Utility functions (units, expressions)
 
@@ -44,7 +46,6 @@ For design history and detailed implementation notes, see [docs/design/mdl-parse
 
 ## Known Gaps
 
-- Macro expansion/inlining (parsing complete, conversion not implemented). C-LEARN model requires this to simulate.
 - Name post-processing (`SpaceToUnderBar`, `MakeViewNamesUnique`)
 - Variable filtering (Time, ARRAY types in views)
 - 26 C-LEARN equivalence diffs (see design doc for root cause analysis)
