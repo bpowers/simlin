@@ -320,6 +320,7 @@ impl<'input> EquationReader<'input> {
                         let macro_def = MacroDef {
                             name,
                             args,
+                            outputs: vec![],
                             equations,
                             loc: Loc::merge(loc, end_loc),
                         };
@@ -744,7 +745,7 @@ mod tests {
         let item = reader.next_item();
         match item {
             Some(Ok(MdlItem::Equation(eq))) => {
-                if let Equation::Regular(_, Expr::App(name, _, args, kind, _)) = &eq.equation {
+                if let Equation::Regular(_, Expr::App(name, _, args, kind, _, _)) = &eq.equation {
                     // Function name is stored as-is from source (uppercase)
                     assert_eq!(name.as_ref(), "MAX");
                     assert_eq!(args.len(), 2);
@@ -765,7 +766,7 @@ mod tests {
         let item = reader.next_item();
         match item {
             Some(Ok(MdlItem::Equation(eq))) => {
-                if let Equation::Regular(_, Expr::App(name, _, args, kind, _)) = &eq.equation {
+                if let Equation::Regular(_, Expr::App(name, _, args, kind, _, _)) = &eq.equation {
                     assert_eq!(name.as_ref(), "RANDOM 0 1");
                     assert_eq!(args.len(), 0);
                     assert!(matches!(kind, CallKind::Builtin));
@@ -784,7 +785,7 @@ mod tests {
         let item = reader.next_item();
         match item {
             Some(Ok(MdlItem::Equation(eq))) => {
-                if let Equation::Regular(_, Expr::App(_, _, args, _, _)) = &eq.equation {
+                if let Equation::Regular(_, Expr::App(_, _, args, _, _, _)) = &eq.equation {
                     assert_eq!(args.len(), 3);
                     assert!(
                         matches!(&args[2], Expr::Literal(lit, _) if lit.as_ref() == "?"),
@@ -807,7 +808,7 @@ mod tests {
         let item = reader.next_item();
         match item {
             Some(Ok(MdlItem::Equation(eq))) => {
-                if let Equation::Regular(lhs, Expr::App(name, _, args, _, _)) = &eq.equation {
+                if let Equation::Regular(lhs, Expr::App(name, _, args, _, _, _)) = &eq.equation {
                     assert_eq!(lhs.name.as_ref(), "Stock");
                     // Function name stored as-is from source (uppercase)
                     assert_eq!(name.as_ref(), "INTEG");

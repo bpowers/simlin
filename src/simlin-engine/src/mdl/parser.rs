@@ -1285,6 +1285,7 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                         subscripts,
                         args,
                         CallKind::Symbol,
+                        vec![],
                         Loc::new(l, r),
                     ))
                 } else {
@@ -1308,6 +1309,7 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                         vec![],
                         vec![],
                         CallKind::Builtin,
+                        vec![],
                         Loc::new(l, r),
                     ));
                 }
@@ -1350,6 +1352,7 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                     vec![],
                     exprs,
                     CallKind::Builtin,
+                    vec![],
                     Loc::new(l, r),
                 ))
             }
@@ -2131,7 +2134,7 @@ mod tests {
         let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
-        if let Equation::Regular(_, Expr::App(name, _, args, kind, _)) = &eq {
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, _, _)) = &eq {
             assert_eq!(name.as_ref(), "MAX");
             assert_eq!(args.len(), 2);
             assert_eq!(*kind, CallKind::Builtin);
@@ -2283,7 +2286,7 @@ mod tests {
         let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
-        if let Equation::Regular(_, Expr::App(_, _, args, _, _)) = &eq {
+        if let Equation::Regular(_, Expr::App(_, _, args, _, _, _)) = &eq {
             assert_eq!(args.len(), 3);
             assert!(matches!(&args[2], Expr::Literal(lit, _) if lit.as_ref() == "?"));
         } else {
@@ -2301,7 +2304,7 @@ mod tests {
         let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
-        if let Equation::Regular(_, Expr::App(name, _, args, _, _)) = &eq {
+        if let Equation::Regular(_, Expr::App(name, _, args, _, _, _)) = &eq {
             assert_eq!(name.as_ref(), "RANDOM 0 1");
             assert_eq!(args.len(), 0);
         } else {
@@ -2413,7 +2416,7 @@ mod tests {
         let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
-        if let Equation::Regular(_, Expr::App(name, _, args, kind, _)) = &eq {
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, _, _)) = &eq {
             assert_eq!(name.as_ref(), "table");
             assert_eq!(args.len(), 1);
             assert_eq!(*kind, CallKind::Symbol);

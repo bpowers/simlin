@@ -63,7 +63,7 @@ pub(super) fn equation_is_stock(eq: &MdlEquation<'_>) -> bool {
 /// Only checks the root expression, allowing parens but not nested in other constructs.
 pub(super) fn is_top_level_integ(expr: &Expr<'_>) -> bool {
     match expr {
-        Expr::App(name, _, _, CallKind::Builtin, _) => eq_lower_space(name, "integ"),
+        Expr::App(name, _, _, CallKind::Builtin, _, _) => eq_lower_space(name, "integ"),
         Expr::Paren(inner, _) => is_top_level_integ(inner),
         _ => false,
     }

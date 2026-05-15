@@ -1285,7 +1285,7 @@ impl<'input> ConversionContext<'input> {
     /// Extract the initial value expression from an INTEG call.
     fn extract_integ_initial<'a>(&self, expr: &'a Expr<'input>) -> Option<&'a Expr<'input>> {
         match expr {
-            Expr::App(name, _, args, CallKind::Builtin, _) if eq_lower_space(name, "integ") => {
+            Expr::App(name, _, args, CallKind::Builtin, _, _) if eq_lower_space(name, "integ") => {
                 // INTEG(rate, initial) - return the initial value
                 if args.len() >= 2 {
                     return Some(&args[1]);
@@ -1304,7 +1304,7 @@ impl<'input> ConversionContext<'input> {
         expr: &'a Expr<'input>,
     ) -> Option<(&'a Expr<'input>, &'a Expr<'input>)> {
         match expr {
-            Expr::App(name, _, args, CallKind::Builtin, _)
+            Expr::App(name, _, args, CallKind::Builtin, _, _)
                 if eq_lower_space(name, "active initial") =>
             {
                 if args.len() >= 2 {

@@ -93,7 +93,11 @@ impl XmileFormatter {
         match expr {
             Expr::Const(value, _) => format_number(*value),
             Expr::Var(name, subscripts, _) => self.format_var_ctx(name, subscripts, ctx),
-            Expr::App(name, subscripts, args, kind, _) => {
+            Expr::App(name, subscripts, args, kind, output_bindings, _) => {
+                debug_assert!(
+                    output_bindings.is_empty(),
+                    "multi-output macro invocations must be materialized by the converter before formatting — see Phase 4"
+                );
                 self.format_call_ctx(name, subscripts, args, *kind, ctx)
             }
             Expr::Op1(op, inner, _) => self.format_unary_ctx(*op, inner, ctx),
@@ -926,6 +930,7 @@ mod tests {
                 Expr::Const(0.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "( IF cond THEN 1 ELSE 0 )");
@@ -939,6 +944,7 @@ mod tests {
             vec![],
             vec![Expr::Var(Cow::Borrowed("x"), vec![], loc())],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "LOG10(x)");
@@ -955,6 +961,7 @@ mod tests {
                 Expr::Const(2.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "(LN(x) / LN(2))");
@@ -968,6 +975,7 @@ mod tests {
             vec![],
             vec![Expr::Var(Cow::Borrowed("input"), vec![], loc())],
             CallKind::Symbol,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "LOOKUP(my_table, input)");
@@ -1025,6 +1033,7 @@ mod tests {
                 Expr::Const(0.5, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "QUANTUM(x, 0.5)");
@@ -1038,6 +1047,7 @@ mod tests {
             vec![],
             vec![],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "UNIFORM(0, 1)");
@@ -1054,6 +1064,7 @@ mod tests {
                 Expr::Var(Cow::Borrowed("b"), vec![], loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "SAFEDIV(a, b)");
@@ -1071,6 +1082,7 @@ mod tests {
                 Expr::Const(1.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "SAFEDIV(a, b, 1)");
@@ -1085,6 +1097,7 @@ mod tests {
             vec![],
             vec![Expr::Const(5.0, loc()), Expr::Const(2.0, loc())],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(
@@ -1109,6 +1122,7 @@ mod tests {
                 Expr::Const(20.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(
@@ -1129,6 +1143,7 @@ mod tests {
                 Expr::Var(Cow::Borrowed("dt"), vec![], loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "t + (dt) * TIME");
@@ -1160,6 +1175,7 @@ mod tests {
                 Expr::Var(Cow::Borrowed("supply"), vec![], loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(
@@ -1196,6 +1212,7 @@ mod tests {
                 Expr::Var(Cow::Borrowed("supply"), vec![], loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(
@@ -1216,6 +1233,7 @@ mod tests {
                 Expr::Var(Cow::Borrowed("y"), vec![], loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "NAN");
@@ -1230,6 +1248,7 @@ mod tests {
             vec![],
             vec![Expr::Var(Cow::Borrowed("x"), vec![], loc())],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "INT(x)");
@@ -1247,6 +1266,7 @@ mod tests {
                 Expr::Const(0.5, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "LOOKUPINV(my_table, 0.5)");
@@ -1296,6 +1316,7 @@ mod tests {
                 Expr::Const(100.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "INIT(a * b, 100)");
@@ -1311,6 +1332,7 @@ mod tests {
             vec![],
             vec![Expr::Var(Cow::Borrowed("arr"), vec![], loc())],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "MAX(arr)");
@@ -1324,6 +1346,7 @@ mod tests {
             vec![],
             vec![Expr::Var(Cow::Borrowed("arr"), vec![], loc())],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "MIN(arr)");
@@ -1341,6 +1364,7 @@ mod tests {
                 Expr::Const(5.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "FORCST(input, 10, 5)");
@@ -1359,6 +1383,7 @@ mod tests {
                 Expr::Const(123.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "NORMALPINK(0, 1, 1, 123)");
@@ -1372,6 +1397,7 @@ mod tests {
             vec![],
             vec![Expr::Var(Cow::Borrowed("x"), vec![], loc())],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "INIT(x)");
@@ -1391,6 +1417,7 @@ mod tests {
                 Expr::Const(1.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         let result = formatter.format_expr(&expr);
@@ -1412,6 +1439,7 @@ mod tests {
                 Expr::Var(Cow::Borrowed("idx"), vec![], loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         let result = formatter.format_expr(&expr);
@@ -1433,6 +1461,7 @@ mod tests {
                 Expr::Const(1.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         let result = formatter.format_expr(&expr);
@@ -1454,6 +1483,7 @@ mod tests {
                 Expr::Var(Cow::Borrowed("order"), vec![], loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         let result = formatter.format_expr(&expr);
@@ -1476,6 +1506,7 @@ mod tests {
                 Expr::Const(0.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         let result = formatter.format_expr(&expr);
@@ -1684,6 +1715,7 @@ mod tests {
             vec![Subscript::Element(Cow::Borrowed("cop"), loc())],
             vec![Expr::Var(Cow::Borrowed("input"), vec![], loc())],
             CallKind::Symbol,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "LOOKUP(my_table[cop], input)");
@@ -1698,6 +1730,7 @@ mod tests {
             vec![Subscript::BangElement(Cow::Borrowed("DimA"), loc())],
             vec![Expr::Var(Cow::Borrowed("input"), vec![], loc())],
             CallKind::Symbol,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "LOOKUP(my_table[*], input)");
@@ -1712,6 +1745,7 @@ mod tests {
             vec![],
             vec![Expr::Var(Cow::Borrowed("input"), vec![], loc())],
             CallKind::Symbol,
+            vec![],
             loc(),
         );
         assert_eq!(formatter.format_expr(&expr), "LOOKUP(my_table, input)");
@@ -1852,6 +1886,7 @@ mod tests {
                 ),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(
@@ -1970,6 +2005,7 @@ mod tests {
                 Expr::Const(15.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         let result = formatter.format_expr(&expr);
@@ -1993,6 +2029,7 @@ mod tests {
                 Expr::Const(0.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(
@@ -2014,6 +2051,7 @@ mod tests {
                 Expr::Const(-1.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(
@@ -2035,6 +2073,7 @@ mod tests {
                 Expr::Const(1.0, loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         assert_eq!(
@@ -2059,6 +2098,7 @@ mod tests {
                 Expr::Var(Cow::Borrowed("mode var"), vec![], loc()),
             ],
             CallKind::Builtin,
+            vec![],
             loc(),
         );
         let result = formatter.format_expr(&expr);

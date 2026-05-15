@@ -113,7 +113,7 @@ impl<'input> ConversionContext<'input> {
 
     fn scan_expr_for_extrapolate(&mut self, expr: &Expr<'_>) {
         match expr {
-            Expr::App(name, _, args, CallKind::Builtin, _) => {
+            Expr::App(name, _, args, CallKind::Builtin, _, _) => {
                 // Only TABXL marks the lookup table as extrapolating.
                 // LOOKUP EXTRAPOLATE performs extrapolation at call time without
                 // permanently marking the table (matching xmutil behavior).
@@ -513,7 +513,7 @@ impl<'input> ConversionContext<'input> {
 
     fn extract_integ_rate_expr<'a>(&self, expr: &'a Expr<'input>) -> Option<&'a Expr<'input>> {
         match expr {
-            Expr::App(name, _, args, CallKind::Builtin, _) if eq_lower_space(name, "integ") => {
+            Expr::App(name, _, args, CallKind::Builtin, _, _) if eq_lower_space(name, "integ") => {
                 if !args.is_empty() {
                     return Some(&args[0]);
                 }
@@ -539,7 +539,7 @@ impl<'input> ConversionContext<'input> {
     /// Extract flows from an INTEG expression's rate argument.
     fn extract_flows_from_integ(&self, expr: &Expr<'_>) -> Option<(Vec<String>, Vec<String>)> {
         match expr {
-            Expr::App(name, _, args, CallKind::Builtin, _) if eq_lower_space(name, "integ") => {
+            Expr::App(name, _, args, CallKind::Builtin, _, _) if eq_lower_space(name, "integ") => {
                 if !args.is_empty() {
                     return self.analyze_rate_expression(&args[0]);
                 }
@@ -659,7 +659,7 @@ impl<'input> ConversionContext<'input> {
     /// Check if an expression is A FUNCTION OF.
     fn is_afo_expr(&self, expr: &Expr<'_>) -> bool {
         match expr {
-            Expr::App(name, _, _, CallKind::Builtin, _) => eq_lower_space(name, "a function of"),
+            Expr::App(name, _, _, CallKind::Builtin, _, _) => eq_lower_space(name, "a function of"),
             Expr::Paren(inner, _) => self.is_afo_expr(inner),
             _ => false,
         }
