@@ -1250,3 +1250,339 @@ fn mark2_mdl_compiles_with_ltm_enabled() {
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM should run to completion");
 }
+
+// ===========================================================================
+// Phase 3 / Task 4: single-output macro simulation fixtures and edge cases
+//
+// Group 1 wires the six bundled `.mdl` macro fixtures into dedicated tests,
+// each running `open_vensim` -> `compile_vm` -> VM -> `ensure_results` against
+// the fixture's `output.tab` (the same pipeline `simulate_mdl_path` runs).
+//
+// Group 2 covers the five single-output behaviors that have no bundled
+// fixture, using a trivial inline `.mdl` string with hand-computed expected
+// values. NOTE (GH #553): a single-argument `NAME(arg)` MDL call is rewritten
+// to `LOOKUP(NAME, arg)` before macro resolution, so every inline macro below
+// uses >= 2 parameters so the call survives MDL import as a macro invocation.
+// ===========================================================================
+
+/// Read a scalar variable's value at simulation step `step` (0-based) from a
+/// `Results`. Panics with a clear message if the variable is absent.
+fn macro_test_value_at(results: &Results, name: &str, step: usize) -> f64 {
+    let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+    let off = *results.offsets.get(&ident).unwrap_or_else(|| {
+        panic!(
+            "variable {name:?} not in results; present: {:?}",
+            results.offsets.keys().collect::<Vec<_>>()
+        )
+    });
+    results.iter().nth(step).unwrap_or_else(|| {
+        panic!(
+            "no step {step} in results (step_count={})",
+            results.step_count
+        )
+    })[off]
+}
+
+/// Parse + compile + run an inline Vensim `.mdl` string through the same VM
+/// path the fixture tests use, returning the `Results`.
+fn run_inline_mdl(mdl: &str) -> Results {
+    let datamodel_project =
+        open_vensim(mdl).unwrap_or_else(|e| panic!("failed to parse inline macro mdl: {e}"));
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
+    vm.into_results()
+}
+
+// --- Group 1: the six bundled `.mdl` fixtures ------------------------------
+
+/// macros.AC2.1: a stockless single-output macro
+/// (`EXPRESSION MACRO(input, parameter) = input * parameter`) simulates and
+/// matches `output.tab` (`macro output = 5 * 1.1 = 5.5`).
+#[test]
+fn simulates_macro_expression_mdl() {
+    simulate_mdl_path("../../test/test-models/tests/macro_expression/test_macro_expression.mdl");
+}
+
+/// macros.AC2.2: a stock-bearing macro
+/// (`EXPRESSION MACRO = INTEG(input, parameter)`) simulates with correct
+/// per-invocation integration across the 11-step `output.tab`
+/// (init 1.1, +5/step: 1.1, 6.1, 11.1, ... 51.1).
+#[test]
+fn simulates_macro_stock_mdl() {
+    simulate_mdl_path("../../test/test-models/tests/macro_stock/test_macro_stock.mdl");
+}
+
+/// macros.AC2.5: a multi-equation macro body with a macro-local helper
+/// (`EXPRESSION MACRO = input * intermediate`, `intermediate = parameter * 3`)
+/// simulates correctly (`5 * (1.1 * 3) = 16.5`). Additionally asserts the
+/// `intermediate` helper does not leak into the `main` model's namespace.
+#[test]
+fn simulates_macro_multi_expression_mdl() {
+    let path =
+        "../../test/test-models/tests/macro_multi_expression/test_macro_multi_expression.mdl";
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+
+    // The `intermediate` helper is a macro-body aux; it must live inside the
+    // macro model, never in `main`. `ensure_results` only checks expected
+    // columns, so we assert namespace isolation explicitly here.
+    let main = datamodel_project
+        .get_model("main")
+        .expect("project must contain a \"main\" model");
+    assert!(
+        main.get_variable("intermediate").is_none(),
+        "the macro-local `intermediate` helper must not leak into `main`; \
+         main variables: {:?}",
+        main.variables
+            .iter()
+            .map(|v| v.get_ident().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for {path}: {e}"));
+    let results = vm.into_results();
+
+    let expected = load_expected_results_for_mdl(path)
+        .unwrap_or_else(|| panic!("no reference data found for {path}"));
+    ensure_results(&expected, &results);
+}
+
+/// macros.AC2.6: a macro that calls another macro
+/// (`EXPRESSION MACRO = SECOND MACRO(input, parameter)`,
+/// `SECOND MACRO = input / parameter`) expands recursively and simulates
+/// (`5 / 1.1 = 4.54545`).
+#[test]
+fn simulates_macro_cross_reference_mdl() {
+    simulate_mdl_path(
+        "../../test/test-models/tests/macro_cross_reference/test_macro_cross_reference.mdl",
+    );
+}
+
+/// Two independent macros in one model: `macro output` uses
+/// `EXPRESSION MACRO` (`5 * 1.1 = 5.5`) and `second macro output` uses
+/// `SECOND MACRO` (`5 / 1.1 = 4.54545`).
+#[test]
+fn simulates_macro_multi_macros_mdl() {
+    simulate_mdl_path(
+        "../../test/test-models/tests/macro_multi_macros/test_macro_multi_macros.mdl",
+    );
+}
+
+/// macros.AC5.5: a macro defined *after* its first use
+/// (`macro output = EXPRESSION MACRO(...)` precedes the `:MACRO:` block)
+/// still resolves and simulates (`5 * 1.1 = 5.5`).
+#[test]
+fn simulates_macro_trailing_definition_mdl() {
+    simulate_mdl_path(
+        "../../test/test-models/tests/macro_trailing_definition/test_macro_trailing_definition.mdl",
+    );
+}
+
+// --- Group 2: focused tests for behaviors with no bundled fixture ----------
+
+/// macros.AC2.3: the same stock-bearing macro invoked at two call sites with
+/// different arguments produces independent per-invocation state -- the two
+/// invocations do not share a stock.
+///
+/// Macro `M(rate, init) = INTEG(rate, init)`.
+///   x = M(1, 0):  Euler dt=1, x[k] = init + rate*k = 0 + 1*k = k
+///   y = M(2, 10): y[k] = 10 + 2*k
+/// (Vensim INTEG: value at step k (t=k) is init + rate*k -- same shape the
+/// `macro_stock` fixture confirms: init 1.1, rate 5 -> 1.1, 6.1, ...).
+/// With INITIAL TIME=0, FINAL TIME=4, TIME STEP=1: 5 steps, t=0..4.
+///   x = [0, 1, 2, 3, 4]   y = [10, 12, 14, 16, 18]
+#[test]
+fn simulates_macro_independent_invocation_state() {
+    let mdl = "\
+{UTF-8}
+:MACRO: M(rate, init)
+M = INTEG(rate, init)
+	~	stock
+	~	per-invocation independent state
+	|
+:END OF MACRO:
+x= M(1, 0) ~~|
+y= M(2, 10) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 4 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl);
+    let expected_x = [0.0, 1.0, 2.0, 3.0, 4.0];
+    let expected_y = [10.0, 12.0, 14.0, 16.0, 18.0];
+    for step in 0..5 {
+        let x = macro_test_value_at(&results, "x", step);
+        let y = macro_test_value_at(&results, "y", step);
+        assert!(
+            (x - expected_x[step]).abs() < 1e-9,
+            "step {step}: x = {x}, expected {} (M(1,0), independent stock)",
+            expected_x[step]
+        );
+        assert!(
+            (y - expected_y[step]).abs() < 1e-9,
+            "step {step}: y = {y}, expected {} (M(2,10), independent stock)",
+            expected_y[step]
+        );
+    }
+}
+
+/// macros.AC2.4: a macro invoked with an expression-valued argument
+/// (`y = M(a + b, t)`) -- the argument is evaluated in the caller's context.
+///
+/// Macro `M(in, p) = in * p`. Constants a=3, b=4, t=5.
+///   y = (a + b) * t = (3 + 4) * 5 = 35   (constant across all steps)
+#[test]
+fn simulates_macro_expression_valued_argument() {
+    let mdl = "\
+{UTF-8}
+:MACRO: M(in, p)
+M = in * p
+	~	product
+	~	expression-valued argument
+	|
+:END OF MACRO:
+a= 3 ~~|
+b= 4 ~~|
+t= 5 ~~|
+y= M(a + b, t) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 3 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl);
+    // (3 + 4) * 5 = 35
+    for step in 0..results.step_count {
+        let y = macro_test_value_at(&results, "y", step);
+        assert!(
+            (y - 35.0).abs() < 1e-9,
+            "step {step}: y = {y}, expected 35 = (a+b)*t evaluated in caller context"
+        );
+    }
+}
+
+/// macros.AC2.7: a macro body referencing global time via the `$` escape
+/// (`Time$`) simulates with the global time values.
+///
+/// Macro `M(base, offset) = base + offset + Time$` (a second parameter is
+/// required so the call is not rewritten to LOOKUP -- GH #553).
+///   y = M(10, 0) = 10 + 0 + Time = 10 + Time
+/// With INITIAL TIME=0, FINAL TIME=4, TIME STEP=1: y[k] = 10 + k.
+#[test]
+fn simulates_macro_time_escape() {
+    // The units slot (the first `~`) is parsed as a unit expression, so it
+    // must not contain a hyphen (`-` is a unit operator); use a plain token.
+    let mdl = "\
+{UTF-8}
+:MACRO: M(base, offset)
+M = base + offset + Time$
+	~	dmnl
+	~	time access from a macro body via the time form of the dollar escape
+	|
+:END OF MACRO:
+y= M(10, 0) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 4 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl);
+    // y = 10 + 0 + Time
+    for step in 0..results.step_count {
+        let time = macro_test_value_at(&results, "time", step);
+        let y = macro_test_value_at(&results, "y", step);
+        assert!(
+            (y - (10.0 + time)).abs() < 1e-9,
+            "step {step}: y = {y}, expected {} = 10 + Time({time})",
+            10.0 + time
+        );
+    }
+}
+
+/// macros.AC2.8: a macro invocation nested inside a larger expression
+/// (`y = c + M(x, t)`) expands and simulates correctly.
+///
+/// Macro `M(a, b) = a * b`. Constants c=100, x=3, t=5.
+///   y = c + M(x, t) = 100 + (3 * 5) = 115   (constant across all steps)
+#[test]
+fn simulates_macro_nested_invocation() {
+    let mdl = "\
+{UTF-8}
+:MACRO: M(a, b)
+M = a * b
+	~	product
+	~	nested invocation inside a larger expression
+	|
+:END OF MACRO:
+c= 100 ~~|
+x= 3 ~~|
+t= 5 ~~|
+y= c + M(x, t) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 3 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl);
+    // 100 + (3 * 5) = 115
+    for step in 0..results.step_count {
+        let y = macro_test_value_at(&results, "y", step);
+        assert!(
+            (y - 115.0).abs() < 1e-9,
+            "step {step}: y = {y}, expected 115 = c + M(x,t)"
+        );
+    }
+}
+
+/// macros.AC5.4 (simulation-level): a macro shadowing the `SSHAPE` builtin is
+/// resolved to the macro, not the builtin, even though the model also uses
+/// other builtins. Task 3 verifies this at expansion level; this confirms it
+/// end-to-end through simulation.
+///
+/// Macro `SSHAPE(x, p) = x + p` (a real `SSHAPE` builtin exists and is a
+/// 3-arg S-curve; a 2-arg call is NOT rewritten to LOOKUP).
+///   y = SSHAPE(3, 4) = 3 + 4 = 7    (macro definition, NOT the builtin)
+///   z = ABS(-7) = 7                 (an unrelated builtin still works)
+#[test]
+fn simulates_macro_shadowing_sshape_builtin() {
+    let mdl = "\
+{UTF-8}
+:MACRO: SSHAPE(x, p)
+SSHAPE = x + p
+	~	shadowing macro
+	~	a project macro shadows the SSHAPE builtin
+	|
+:END OF MACRO:
+y= SSHAPE(3, 4) ~~|
+z= ABS(-7) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl);
+    // The macro defines SSHAPE(x, p) = x + p, so y = 3 + 4 = 7.
+    // The real SSHAPE builtin is a 3-arg S-shaped curve and would NOT
+    // produce 7 for these inputs; getting 7 proves the macro shadowed it.
+    // z = ABS(-7) = 7 confirms unrelated builtins still resolve normally.
+    for step in 0..results.step_count {
+        let y = macro_test_value_at(&results, "y", step);
+        let z = macro_test_value_at(&results, "z", step);
+        assert!(
+            (y - 7.0).abs() < 1e-9,
+            "step {step}: y = {y}, expected 7 = macro SSHAPE(3,4)=3+4 (not the builtin)"
+        );
+        assert!(
+            (z - 7.0).abs() < 1e-9,
+            "step {step}: z = {z}, expected 7 = ABS(-7) (unrelated builtin)"
+        );
+    }
+}
