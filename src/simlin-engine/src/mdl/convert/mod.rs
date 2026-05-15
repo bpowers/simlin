@@ -1238,4 +1238,58 @@ macro parameter = 1.1
             stock.inflows
         );
     }
+
+    #[test]
+    fn test_macro_body_dollar_time_translated() {
+        // macros.AC1.5: `$`-suffixed time references in a macro body import as
+        // the canonical engine time identifiers (not `Time$` / `TIME STEP$`).
+        let mdl = ":MACRO: MYMACRO(input)
+MYMACRO = input * Time$ / TIME STEP$
+~ ~|
+:END OF MACRO:
+x = 5
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let m = find_macro_model(&project, "mymacro");
+        let body = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "mymacro")
+            .expect("macro body aux mymacro");
+        // `Time$` / `TIME STEP$` are rewritten to the canonical engine time
+        // idents (`time` / `time_step`), which the shared XMILE formatter then
+        // renders in its uniform time-name form (`TIME` / `DT`) -- exactly as
+        // it does for an ordinary non-macro equation that references `Time` /
+        // `TIME STEP`. `TIME` and `DT` are the 0-arity engine time builtins
+        // (`DT` is the `time_step` alias); the engine resolves them inside a
+        // module body at any depth. The point of AC1.5 is that no `$`-escape
+        // survives and the references are the canonical engine time vars.
+        let eq = scalar_eq(body);
+        assert_eq!(
+            eq, "input * TIME / DT",
+            "body `$`-time references must translate to the canonical engine \
+             time idents (formatted TIME / DT), got {:?}",
+            eq
+        );
+        assert!(
+            !eq.contains('$'),
+            "body equation {:?} must not retain any `$`-time reference",
+            eq
+        );
+        // Cross-check: a non-macro equation referencing `Time` / `TIME STEP`
+        // formats identically, proving the rewrite produced the same
+        // canonical idents the formatter renders for ordinary time refs.
+        let baseline =
+            convert_mdl("y = input * Time / TIME STEP\n~ ~|\ninput = 1\n~ ~|\n\\\\\\---///\n")
+                .unwrap();
+        let y = baseline.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "y")
+            .expect("y in baseline");
+        assert_eq!(scalar_eq(y), eq);
+    }
 }

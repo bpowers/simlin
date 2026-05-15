@@ -20,7 +20,7 @@ use crate::datamodel::Model;
 use crate::mdl::ast::{Equation as MdlEquation, Expr, FullEquation, Lhs, Loc, MdlItem};
 
 use super::ConversionContext;
-use super::helpers::{macro_param_ident, variable_ident};
+use super::helpers::{macro_param_ident, rewrite_dollar_time, variable_ident};
 use super::types::ConvertError;
 
 impl<'input> ConversionContext<'input> {
@@ -112,7 +112,12 @@ impl<'input> ConversionContext<'input> {
             items.push(synthetic_param_equation(param));
         }
         for eq in equations {
-            items.push(MdlItem::Equation(Box::new(eq.clone())));
+            let mut eq = eq.clone();
+            // Translate `$`-suffixed time references (`Time$`, `TIME STEP$`,
+            // ...) to canonical engine time idents *before* the scoped
+            // conversion formats the equation. Scoped to macro bodies only.
+            rewrite_equation_dollar_time(&mut eq.equation);
+            items.push(MdlItem::Equation(Box::new(eq)));
         }
 
         // The sub-context shares the parent's already-built dimensions,
@@ -139,6 +144,25 @@ impl<'input> ConversionContext<'input> {
         let model = ctx.build_model(macro_name)?;
 
         Ok(model.variables)
+    }
+}
+
+/// Apply [`rewrite_dollar_time`] to every `Expr` carried by a macro body
+/// `MdlEquation` (scoped to macro bodies only -- the global formatter and
+/// non-macro equations are untouched).
+fn rewrite_equation_dollar_time(eq: &mut MdlEquation<'_>) {
+    match eq {
+        MdlEquation::Regular(_, expr) => rewrite_dollar_time(expr),
+        MdlEquation::WithLookup(_, input, _) => rewrite_dollar_time(input),
+        MdlEquation::Data(_, Some(expr)) => rewrite_dollar_time(expr),
+        MdlEquation::EmptyRhs(_, _)
+        | MdlEquation::Implicit(_)
+        | MdlEquation::Lookup(_, _)
+        | MdlEquation::Data(_, None)
+        | MdlEquation::TabbedArray(_, _)
+        | MdlEquation::NumberList(_, _)
+        | MdlEquation::SubscriptDef(_, _)
+        | MdlEquation::Equivalence(_, _, _) => {}
     }
 }
 
