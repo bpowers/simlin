@@ -131,6 +131,16 @@
           "items": {
             "$ref": "#/$defs/ModelGroup"
           }
+        },
+        "macroSpec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MacroSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1130,6 +1140,31 @@
       },
       "required": [
         "name"
+      ]
+    },
+    "MacroSpec": {
+      "description": "Marks a model as a callable macro template and records its calling\nconvention. `Some` on `json::Model.macro_spec` (mirrored from\n[`datamodel::MacroSpec`]) means the model's variables are the macro body;\nthis names which body variables are the formal parameters and outputs.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "primaryOutput": {
+          "type": "string"
+        },
+        "additionalOutputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "parameters",
+        "primaryOutput"
       ]
     },
     "Dimension": {
