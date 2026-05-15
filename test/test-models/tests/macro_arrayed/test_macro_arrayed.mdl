@@ -1,0 +1,87 @@
+{UTF-8}
+:MACRO: SCALE(x, k)
+SCALE = x * k
+	~	dmnl
+	~	stockless arrayed macro: scale the input by a factor
+	|
+
+:END OF MACRO:
+Region: R1, R2, R3
+	~	dmnl
+	~	a small dimension with one constant per element
+	|
+
+inp[Region]=
+	10, 20, 30
+	~	dmnl
+	~	arrayed input, a different constant per element
+	|
+
+factor=
+	3
+	~	dmnl
+	~	scalar scale factor (>= 2 args so the call is not LOOKUP -- GH #553)
+	|
+
+out[Region]=
+	SCALE(inp[Region],factor)
+	~	dmnl
+	~	apply-to-all macro invocation: one independent macro instance per
+		Region element (each computes inp[element] * factor)
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 2
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,inp,150,165,21,8,8,3,0,0,0,0,0,0
+10,2,factor,150,220,28,8,8,3,0,0,0,0,0,0
+10,3,out,383,190,21,8,8,3,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:out
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:2
+26:2

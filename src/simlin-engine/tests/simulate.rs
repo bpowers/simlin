@@ -1613,3 +1613,135 @@ fn simulates_macro_multi_output_mdl() {
         "../../test/test-models/tests/macro_multi_output/test_macro_multi_output.mdl",
     );
 }
+
+// ===========================================================================
+// Phase 4 / Task 2: arrayed (apply-to-all) macro invocation
+//
+// Phase 3 made `instantiate_implicit_modules`'s apply-to-all path
+// macro-aware (`contains_module_call`), so an arrayed macro invocation
+// `out[Region] = SCALE(inp[Region], factor)` rides the EXISTING per-element
+// module-expansion machinery -- one independent synthetic Variable::Module
+// per dimension element -- with no new mechanism. These tests verify that
+// (macros.AC3.4) and the per-element-independent-stock edge (macros.AC3.5).
+//
+// SCALE / ACCUM each take >= 2 parameters: a 1-arg MDL call `NAME(arg)` is
+// rewritten to LOOKUP before macro resolution (GH #553).
+// ===========================================================================
+
+/// macros.AC3.4: the bundled arrayed fixture parses, expands per-element,
+/// compiles, simulates, and matches its hand-computed `output.tab`
+/// (`out[R1]=30`, `out[R2]=60`, `out[R3]=90` = `inp[element] * factor`).
+#[test]
+fn simulates_macro_arrayed_mdl() {
+    simulate_mdl_path("../../test/test-models/tests/macro_arrayed/test_macro_arrayed.mdl");
+}
+
+/// macros.AC3.4 (expansion-level): the arrayed invocation
+/// `out[Region] = SCALE(inp[Region], factor)` must expand into one
+/// *independent* synthetic `Variable::Module` PER `Region` element
+/// (subscript-suffixed idents), not a single shared instance. We assert
+/// this through the full compile pipeline by inspecting the compiled
+/// `Results.offsets`: each per-element macro instance contributes its own
+/// `$⁚out⁚{n}⁚scale⁚{elem}·scale` body-output slot.
+#[test]
+fn arrayed_macro_invocation_expands_one_module_per_element() {
+    let path = "../../test/test-models/tests/macro_arrayed/test_macro_arrayed.mdl";
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
+    let results = vm.into_results();
+
+    // One synthetic macro-instance per Region element: the per-element
+    // module's primary-output body slot is `$⁚out⁚{n}⁚scale⁚{elem}·scale`.
+    // Collect the distinct `{elem}` suffixes.
+    let mut per_element_instances: Vec<String> = results
+        .offsets
+        .keys()
+        .filter_map(|k| {
+            let s = k.as_str();
+            // $⁚out⁚<n>⁚scale⁚<elem>·scale
+            let rest = s.strip_prefix("$\u{205a}out\u{205a}")?;
+            let rest = rest.split_once('\u{205a}')?.1; // drop the `<n>⁚`
+            let elem = rest.strip_prefix("scale\u{205a}")?;
+            let elem = elem.strip_suffix("\u{b7}scale")?;
+            Some(elem.to_string())
+        })
+        .collect();
+    per_element_instances.sort();
+    per_element_instances.dedup();
+    assert_eq!(
+        per_element_instances,
+        vec!["r1".to_string(), "r2".to_string(), "r3".to_string()],
+        "the arrayed SCALE invocation must expand into one independent macro \
+         instance per Region element (subscript-suffixed), not a shared one; \
+         all offsets: {:?}",
+        results
+            .offsets
+            .keys()
+            .map(|k| k.as_str().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // And the arrayed result itself has one slot per element with the
+    // hand-computed value (inp[element] * factor).
+    for (elem, expected) in [("r1", 30.0), ("r2", 60.0), ("r3", 90.0)] {
+        let v = macro_test_value_at(&results, &format!("out[{elem}]"), 0);
+        assert!(
+            (v - expected).abs() < 1e-9,
+            "out[{elem}] = {v}, expected {expected} (inp[{elem}] * factor)"
+        );
+    }
+}
+
+/// macros.AC3.5: an arrayed invocation of a *stock-bearing* macro gives each
+/// dimension element its own persistent stock. Macro
+/// `ACCUM(rate, init) = INTEG(rate, init)`, invoked
+/// `total[Region] = ACCUM(rate[Region], 0)` with `rate = [1, 3]`.
+///
+/// Vensim INTEG: value at step k (t = k) is `init + rate*k`. With
+/// INITIAL TIME=0, FINAL TIME=4, TIME STEP=1 (5 steps, t=0..4):
+///   total[R1] = 0, 1, 2, 3, 4    (its own rate = 1)
+///   total[R2] = 0, 3, 6, 9, 12   (its own rate = 3)
+/// If the elements shared one stock these series could not differ -- each
+/// element integrating its OWN rate proves per-element persistent state.
+#[test]
+fn simulates_arrayed_macro_per_element_independent_stock() {
+    let mdl = "\
+{UTF-8}
+:MACRO: ACCUM(rate, init)
+ACCUM = INTEG(rate, init)
+	~	dmnl
+	~	per-element independent persistent stock
+	|
+:END OF MACRO:
+Region: R1, R2 ~~|
+rate[Region]= 1, 3 ~~|
+total[Region]= ACCUM(rate[Region], 0) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 4 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl);
+    let expected_r1 = [0.0, 1.0, 2.0, 3.0, 4.0];
+    let expected_r2 = [0.0, 3.0, 6.0, 9.0, 12.0];
+    for step in 0..5 {
+        let r1 = macro_test_value_at(&results, "total[r1]", step);
+        let r2 = macro_test_value_at(&results, "total[r2]", step);
+        assert!(
+            (r1 - expected_r1[step]).abs() < 1e-9,
+            "step {step}: total[r1] = {r1}, expected {} (ACCUM with its own rate=1)",
+            expected_r1[step]
+        );
+        assert!(
+            (r2 - expected_r2[step]).abs() < 1e-9,
+            "step {step}: total[r2] = {r2}, expected {} (ACCUM with its own rate=3)",
+            expected_r2[step]
+        );
+    }
+}
