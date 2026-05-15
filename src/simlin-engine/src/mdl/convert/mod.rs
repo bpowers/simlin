@@ -10,6 +10,7 @@
 mod dimensions;
 mod external_data;
 mod helpers;
+mod macros;
 mod stocks;
 mod types;
 mod variables;
@@ -229,8 +230,17 @@ impl<'input> ConversionContext<'input> {
         // Pass 5: Link stocks and flows
         self.link_stocks_and_flows();
 
-        // Pass 6: Build the final project
-        self.build_project()
+        // Pass 6: Convert each :MACRO: definition into a macro-marked Model.
+        // This must run before build_project consumes `self`, since it reads
+        // self.items / dimensions / formatter / data_provider to build a
+        // scoped sub-context per macro body.
+        let macro_models = self.build_macro_models()?;
+
+        // Pass 7: Build the final project (the "main" model) and attach the
+        // macro-marked models alongside it.
+        let mut project = self.build_project()?;
+        project.models.extend(macro_models);
+        Ok(project)
     }
 
     /// Pass 1: Collect all symbols from the parsed items.
@@ -962,6 +972,270 @@ $font
             result.is_err(),
             "GET DIRECT resolution failure should propagate as a conversion error, \
              not silently keep the raw expression"
+        );
+    }
+
+    /// Find the (single) macro-marked model with the given name in a project.
+    fn find_macro_model<'a>(project: &'a Project, name: &str) -> &'a crate::datamodel::Model {
+        project
+            .models
+            .iter()
+            .find(|m| m.name == name && m.macro_spec.is_some())
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected macro-marked model {:?}, models present: {:?}",
+                    name,
+                    project
+                        .models
+                        .iter()
+                        .map(|m| (m.name.clone(), m.macro_spec.is_some()))
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+
+    fn scalar_eq(var: &Variable) -> String {
+        match var.get_equation() {
+            Some(Equation::Scalar(s)) => s.clone(),
+            other => panic!("expected Scalar equation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_macro_imports_as_macro_marked_model() {
+        // macros.AC1.1: a :MACRO: block imports as a macro-marked Model whose
+        // MacroSpec.parameters matches the header input list, with body
+        // variables matching the body equations; the "main" model is
+        // unaffected and the invocation is preserved as equation text.
+        let mdl = ":MACRO: EXPRESSION MACRO(input, parameter)
+EXPRESSION MACRO = input * parameter
+~ ~|
+:END OF MACRO:
+macro output = EXPRESSION MACRO(macro input, macro parameter)
+~ ~|
+macro input = 5
+~ ~|
+macro parameter = 1.1
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let m = find_macro_model(&project, "expression_macro");
+        let spec = m.macro_spec.as_ref().unwrap();
+        assert_eq!(spec.parameters, vec!["input", "parameter"]);
+        assert_eq!(spec.primary_output, "expression_macro");
+        assert!(spec.additional_outputs.is_empty());
+
+        // Body aux exists and references the parameters byte-identically.
+        let body = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "expression_macro")
+            .expect("macro body aux expression_macro");
+        assert!(matches!(body, Variable::Aux(_)));
+        let body_eq = scalar_eq(body);
+        assert!(
+            body_eq.contains("input") && body_eq.contains("parameter"),
+            "body equation {:?} should reference both parameters",
+            body_eq
+        );
+
+        // Synthesized port variables for each formal parameter.
+        for p in &spec.parameters {
+            let port = m
+                .variables
+                .iter()
+                .find(|v| v.get_ident() == p)
+                .unwrap_or_else(|| panic!("port variable {:?} should exist", p));
+            assert!(
+                port.can_be_module_input(),
+                "port {:?} must have can_be_module_input == true",
+                p
+            );
+        }
+
+        // The "main" model is untouched and preserves the invocation.
+        let main = project
+            .models
+            .iter()
+            .find(|m| m.name == "main")
+            .expect("main model");
+        assert!(main.macro_spec.is_none());
+        let inv = main
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "macro_output")
+            .expect("macro_output in main");
+        // The invocation is preserved verbatim as a call (not expanded /
+        // materialized); the MDL formatter keeps the call-site name's
+        // original casing (`EXPRESSION_MACRO(...)`), so compare
+        // case-insensitively.
+        let inv_eq = scalar_eq(inv);
+        assert!(
+            inv_eq.to_lowercase().contains("expression_macro("),
+            "invocation {:?} should be preserved as an EXPRESSION MACRO call",
+            inv_eq
+        );
+    }
+
+    #[test]
+    fn test_macro_with_output_list_imports_additional_outputs() {
+        // macros.AC1.2: a :MACRO: header with a `:` output list imports with
+        // MacroSpec.additional_outputs populated in order; the additional
+        // outputs are NOT synthesized as ports (they are body-computed).
+        // The macro is defined but not invoked: a multi-output *invocation*
+        // (`y = add3(p, q, r : lo, hi)`) is materialized only in Phase 4, so
+        // exercising it here would trip the Phase-1 text-formatter assertion.
+        // The `:`-header import (additional_outputs) is what AC1.2 verifies.
+        let mdl = ":MACRO: add3(a, b, c : minval, maxval)
+add3 = a + b + c
+~ ~|
+minval = MIN(a, MIN(b, c))
+~ ~|
+maxval = MAX(a, MAX(b, c))
+~ ~|
+:END OF MACRO:
+x = 5
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let m = find_macro_model(&project, "add3");
+        let spec = m.macro_spec.as_ref().unwrap();
+        assert_eq!(spec.parameters, vec!["a", "b", "c"]);
+        assert_eq!(spec.additional_outputs, vec!["minval", "maxval"]);
+        assert_eq!(spec.primary_output, "add3");
+
+        // Parameters are synthesized as ports.
+        for p in ["a", "b", "c"] {
+            let port = m
+                .variables
+                .iter()
+                .find(|v| v.get_ident() == p)
+                .unwrap_or_else(|| panic!("port variable {:?} should exist", p));
+            assert!(port.can_be_module_input());
+        }
+
+        // Additional outputs are body-computed, NOT synthesized as ports:
+        // they exist as ordinary body variables (with their real equations),
+        // not as can_be_module_input placeholders.
+        for o in ["minval", "maxval"] {
+            let v = m
+                .variables
+                .iter()
+                .find(|v| v.get_ident() == o)
+                .unwrap_or_else(|| panic!("output variable {:?} should exist", o));
+            assert!(
+                !v.can_be_module_input(),
+                "additional output {:?} must NOT be a synthesized input port",
+                o
+            );
+            let eq = scalar_eq(v);
+            assert_ne!(eq, "0", "output {:?} must keep its body equation", o);
+        }
+    }
+
+    #[test]
+    fn test_uninvoked_macro_is_preserved() {
+        // macros.AC1.7: a macro defined but never invoked still imports as a
+        // valid macro-marked model with the correct MacroSpec and ports.
+        let mdl = ":MACRO: INIT(value)
+INIT = value
+~ ~|
+:END OF MACRO:
+x = 5
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let m = find_macro_model(&project, "init");
+        let spec = m.macro_spec.as_ref().unwrap();
+        assert_eq!(spec.parameters, vec!["value"]);
+        assert_eq!(spec.primary_output, "init");
+        let port = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "value")
+            .expect("port variable value");
+        assert!(port.can_be_module_input());
+        // The body variable still exists.
+        assert!(m.variables.iter().any(|v| v.get_ident() == "init"));
+    }
+
+    #[test]
+    fn test_stock_bodied_macro_synthesizes_flow_port() {
+        // A stock-bodied macro: the body var is a Stock, the INTEG rate
+        // parameter becomes a Flow port and the INTEG initial parameter an
+        // Aux port (both can_be_module_input), and the stock's inflow
+        // resolves to the rate parameter (directly or via a synthetic flow
+        // whose equation is the rate parameter).
+        let mdl = ":MACRO: EXPRESSION MACRO(input, parameter)
+EXPRESSION MACRO = INTEG(input, parameter)
+~ ~|
+:END OF MACRO:
+macro output = EXPRESSION MACRO(macro input, macro parameter)
+~ ~|
+macro input = 5
+~ ~|
+macro parameter = 1.1
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let m = find_macro_model(&project, "expression_macro");
+
+        let body = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "expression_macro")
+            .expect("macro body stock expression_macro");
+        let stock = match body {
+            Variable::Stock(s) => s,
+            other => panic!("expected Stock, got {:?}", other),
+        };
+
+        let input_port = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "input")
+            .expect("input port");
+        assert!(
+            matches!(input_port, Variable::Flow(_)),
+            "input (INTEG rate) port should be a Flow, got {:?}",
+            input_port
+        );
+        assert!(input_port.can_be_module_input());
+
+        let parameter_port = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "parameter")
+            .expect("parameter port");
+        assert!(
+            matches!(parameter_port, Variable::Aux(_)),
+            "parameter (INTEG initial) port should be an Aux, got {:?}",
+            parameter_port
+        );
+        assert!(parameter_port.can_be_module_input());
+
+        // The stock's inflow resolves to `input` directly, or via a synthetic
+        // flow whose equation is `input`.
+        let direct = stock.inflows.iter().any(|f| f == "input");
+        let via_synthetic = stock.inflows.iter().any(|fname| {
+            m.variables.iter().any(|v| {
+                v.get_ident() == fname
+                    && matches!(v.get_equation(), Some(Equation::Scalar(s)) if s == "input")
+            })
+        });
+        assert!(
+            direct || via_synthetic,
+            "stock inflow should resolve to `input` (directly or via synthetic flow), \
+             inflows={:?}",
+            stock.inflows
         );
     }
 }

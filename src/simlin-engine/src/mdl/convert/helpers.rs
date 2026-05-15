@@ -6,13 +6,42 @@
 
 use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs};
 use crate::mdl::builtins::{eq_lower_space, to_lower_space};
-use crate::mdl::xmile_compat::{format_unit_expr, space_to_underbar};
+use crate::mdl::xmile_compat::{format_unit_expr, quoted_space_to_underbar, space_to_underbar};
 
 use super::types::ConvertError;
 
 /// Convert a name to canonical form (lowercase with spaces).
 pub(super) fn canonical_name(name: &str) -> String {
     to_lower_space(name)
+}
+
+/// Canonicalize a raw name to the engine variable-ident form.
+///
+/// This is exactly how a body variable's ident is produced: the symbol table
+/// keys on `to_lower_space` (so the macro body's primary-output equation
+/// `EXPRESSION MACRO = ...` becomes the body variable `expression_macro`) and
+/// `build_variable` then runs `quoted_space_to_underbar` on that canonical
+/// key. Composing the two here keeps `MacroSpec.parameters` /
+/// `primary_output` byte-identical to the body variables they name and to the
+/// synthesized port-variable idents.
+pub(super) fn variable_ident(name: &str) -> String {
+    quoted_space_to_underbar(&to_lower_space(name))
+}
+
+/// Extract the engine variable ident of a macro formal-parameter / output
+/// `Expr`.
+///
+/// A macro header parses its argument and `:`-output lists as expressions;
+/// in a valid macro each is a bare `Expr::Var`. The ident is canonicalized
+/// via [`variable_ident`] so it is byte-identical to how the body equations
+/// reference the parameter and to a synthesized port variable's ident.
+/// Returns `None` for a non-`Var` expression, which signals a malformed
+/// macro header.
+pub(super) fn macro_param_ident(expr: &Expr<'_>) -> Option<String> {
+    match expr {
+        Expr::Var(name, _subscripts, _) => Some(variable_ident(name)),
+        _ => None,
+    }
 }
 
 /// Get the name from an equation's LHS.

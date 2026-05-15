@@ -473,6 +473,15 @@ impl Variable {
             Variable::Module(module) => module.compat.can_be_module_input,
         }
     }
+
+    pub fn set_can_be_module_input(&mut self, value: bool) {
+        match self {
+            Variable::Stock(stock) => stock.compat.can_be_module_input = value,
+            Variable::Flow(flow) => flow.compat.can_be_module_input = value,
+            Variable::Aux(aux) => aux.compat.can_be_module_input = value,
+            Variable::Module(module) => module.compat.can_be_module_input = value,
+        }
+    }
 }
 
 pub mod view_element {
@@ -812,6 +821,116 @@ pub struct Model {
 }
 
 impl Model {
+    /// Build a macro-marked [`Model`] from an already-built body variable
+    /// list, synthesizing any missing formal-parameter port variables and
+    /// attaching the [`MacroSpec`].
+    ///
+    /// This is the shared port-synthesis + `MacroSpec`-construction step used
+    /// by *both* the MDL converter (`mdl/convert/`) and the XMILE reader
+    /// (`xmile/`); only the way `body_variables` is produced differs between
+    /// the two formats.
+    ///
+    /// Contract:
+    /// - `macro_name`, `parameters`, and `additional_outputs` are already
+    ///   canonicalized to the engine ident form used by the body equations
+    ///   (`quoted_space_to_underbar` for the MDL path) so they are
+    ///   byte-identical to how the body references them.
+    /// - For each formal parameter: if a variable with that ident already
+    ///   exists in `body_variables` (e.g. the MDL path prepended a
+    ///   `<param> = 0` equation so the pipeline could assign the right
+    ///   stock/flow/aux kind), its `can_be_module_input` flag is set to
+    ///   `true` in place (the kind is preserved). Otherwise a placeholder
+    ///   port `Variable` is synthesized: a [`Variable::Flow`] if the
+    ///   parameter name appears in any body stock's `inflows`/`outflows`,
+    ///   else a [`Variable::Aux`], with a `"0"` placeholder equation and
+    ///   `can_be_module_input == true`. The flag is *required*: it is how
+    ///   `collect_module_idents` recognizes the port as a module-input slot
+    ///   (a macro model is registered as an ordinary, non-`stdlib⁚`-prefixed
+    ///   sub-model), the same flag an ordinary XMILE submodel sets via
+    ///   `access="input"`.
+    /// - `additional_outputs` are computed by the body and so already have
+    ///   body equations; they are *not* synthesized as ports.
+    /// - `primary_output` is set to `macro_name` without validating that a
+    ///   body equation defines it (a missing primary-output equation
+    ///   surfaces later, in the compiler).
+    pub(crate) fn new_macro(
+        macro_name: &str,
+        parameters: &[String],
+        additional_outputs: &[String],
+        mut body_variables: Vec<Variable>,
+    ) -> Model {
+        // A parameter that the body uses as a stock inflow/outflow must be a
+        // Flow port (mirroring stdlib⁚delay1's `input`); otherwise it is an
+        // Aux port (mirroring stdlib⁚smth1's `input`).
+        let stock_flow_names: std::collections::HashSet<String> = body_variables
+            .iter()
+            .filter_map(|v| match v {
+                Variable::Stock(s) => Some(s),
+                _ => None,
+            })
+            .flat_map(|s| s.inflows.iter().chain(s.outflows.iter()))
+            .map(|n| canonicalize(n).to_string())
+            .collect();
+
+        for param in parameters {
+            let param_canonical = canonicalize(param);
+            if let Some(existing) = body_variables
+                .iter_mut()
+                .find(|v| canonicalize(v.get_ident()) == param_canonical)
+            {
+                // The pipeline already built this port (with the correct
+                // stock/flow/aux kind from a prepended placeholder equation).
+                // It only lacks the module-input flag.
+                existing.set_can_be_module_input(true);
+                continue;
+            }
+
+            let compat = Compat {
+                can_be_module_input: true,
+                ..Compat::default()
+            };
+            let is_flow = stock_flow_names.contains(param_canonical.as_ref());
+            let port = if is_flow {
+                Variable::Flow(Flow {
+                    ident: param.clone(),
+                    equation: Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat,
+                })
+            } else {
+                Variable::Aux(Aux {
+                    ident: param.clone(),
+                    equation: Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat,
+                })
+            };
+            body_variables.push(port);
+        }
+
+        Model {
+            name: macro_name.to_string(),
+            sim_specs: None,
+            variables: body_variables,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: Some(MacroSpec {
+                parameters: parameters.to_vec(),
+                primary_output: macro_name.to_string(),
+                additional_outputs: additional_outputs.to_vec(),
+            }),
+        }
+    }
+
     pub fn get_variable(&self, ident: &str) -> Option<&Variable> {
         let ident = canonicalize(ident);
         self.variables
