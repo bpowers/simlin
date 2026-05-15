@@ -33,6 +33,8 @@
 - [implementation-plans/](implementation-plans/) -- Detailed phase-by-phase implementation plans
   - [implementation-plans/2026-04-05-server-rewrite/](implementation-plans/2026-04-05-server-rewrite/) -- 8-phase plan to build `simlin-serve` and refactor `simlin-mcp` into a shared core library
     - [test-requirements.md](implementation-plans/2026-04-05-server-rewrite/test-requirements.md) -- AC-to-test mapping for execution validation
+  - [implementation-plans/2026-05-13-macros/](implementation-plans/2026-05-13-macros/) -- 7-phase plan implementing Vensim `:MACRO:` support: datamodel/serialization foundation, MDL & XMILE import/export, compile-time expansion, multi-output materialization, and hero-corpus validation
+    - [test-requirements.md](implementation-plans/2026-05-13-macros/test-requirements.md) -- AC-to-test mapping for execution validation
 
 ## Security
 
