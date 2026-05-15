@@ -1289,13 +1289,26 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                         });
                     }
                     let args = self.parse_expr_list()?.into_exprs();
+                    // Optional `:`-separated output bindings of a multi-output
+                    // macro invocation: `total = add3(a, b, c : minv, maxv)`.
+                    // Only the Symbol branch handles this: a `:` in a
+                    // `CallKind::Builtin` call is not valid Vensim, so the
+                    // Function branch deliberately does not parse it.
+                    // `parse_expr_list` stops at `:` (it separates only on
+                    // `,`/`;`), so the token after `args` is either `)` or `:`.
+                    let output_bindings = if self.peek_kind() == Some(TokenKind::Colon) {
+                        self.advance_pos(); // consume ':'
+                        self.parse_expr_list()?.into_exprs()
+                    } else {
+                        vec![]
+                    };
                     let (_, r) = self.expect(TokenKind::RParen, "')'")?;
                     Ok(Expr::App(
                         name,
                         subscripts,
                         args,
                         CallKind::Symbol,
-                        vec![],
+                        output_bindings,
                         Loc::new(l, r),
                     ))
                 } else {
@@ -2492,6 +2505,89 @@ mod tests {
             assert_eq!(*kind, CallKind::Symbol);
         } else {
             panic!("Expected symbol call, got {:?}", eq);
+        }
+    }
+
+    // ========================================================================
+    // Multi-output macro call sites: the `:` separator in argument lists
+    // ========================================================================
+
+    #[test]
+    fn test_parse_macro_call_with_output_bindings() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // A multi-output macro invocation: the `:` splits call arguments
+        // from the post-`:` output bindings.
+        let input = "total = add3(a, b, c : minv, maxv) ~ ~";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (eq, _, _) = result.unwrap();
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, output_bindings, _)) = &eq {
+            assert_eq!(name.as_ref(), "add3");
+            assert_eq!(*kind, CallKind::Symbol);
+            assert_eq!(args.len(), 3);
+            assert_eq!(var_name(&args[0]), "a");
+            assert_eq!(var_name(&args[1]), "b");
+            assert_eq!(var_name(&args[2]), "c");
+            assert_eq!(output_bindings.len(), 2);
+            assert_eq!(var_name(&output_bindings[0]), "minv");
+            assert_eq!(var_name(&output_bindings[1]), "maxv");
+        } else {
+            panic!("Expected symbol call, got {:?}", eq);
+        }
+    }
+
+    #[test]
+    fn test_parse_macro_call_without_output_bindings() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // Regression: an ordinary symbol call has empty `output_bindings`.
+        let input = "y = MYMACRO(a, b) ~ ~";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (eq, _, _) = result.unwrap();
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, output_bindings, _)) = &eq {
+            assert_eq!(name.as_ref(), "MYMACRO");
+            assert_eq!(*kind, CallKind::Symbol);
+            assert_eq!(args.len(), 2);
+            assert!(
+                output_bindings.is_empty(),
+                "ordinary call must have empty output_bindings, got {:?}",
+                output_bindings
+            );
+        } else {
+            panic!("Expected symbol call, got {:?}", eq);
+        }
+    }
+
+    #[test]
+    fn test_parse_macro_call_nested_in_larger_expression() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // A `:` call nested inside a binary expression: the `App` inside
+        // the `Op2` must still carry the output bindings.
+        let input = "y = c + add3(a, b, c : minv, maxv) ~ ~";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (eq, _, _) = result.unwrap();
+        let Equation::Regular(_, Expr::Op2(BinaryOp::Add, _lhs, rhs, _)) = &eq else {
+            panic!("Expected top-level Op2(Add), got {:?}", eq);
+        };
+        if let Expr::App(name, _, args, kind, output_bindings, _) = rhs.as_ref() {
+            assert_eq!(name.as_ref(), "add3");
+            assert_eq!(*kind, CallKind::Symbol);
+            assert_eq!(args.len(), 3);
+            assert_eq!(output_bindings.len(), 2);
+            assert_eq!(var_name(&output_bindings[0]), "minv");
+            assert_eq!(var_name(&output_bindings[1]), "maxv");
+        } else {
+            panic!("Expected App on rhs of Op2, got {:?}", rhs);
         }
     }
 
