@@ -97,7 +97,7 @@ impl XmileFormatter {
             Expr::App(name, subscripts, args, kind, output_bindings, _) => {
                 debug_assert!(
                     output_bindings.is_empty(),
-                    "multi-output macro invocations must be materialized by the converter before formatting — see Phase 4"
+                    "multi-output macro invocations must be materialized by the converter before formatting -- see Phase 4"
                 );
                 self.format_call_ctx(name, subscripts, args, *kind, ctx)
             }
