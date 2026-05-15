@@ -370,8 +370,8 @@ pub fn is_0_arity_builtin_fn(name: &str) -> bool {
 /// expands to a stdlib module: the canonical names in `MODEL_NAMES` plus
 /// the alias forms `delay`, `delayn`, and `smthn`.
 ///
-/// This is the authoritative check shared by `equation_is_stdlib_call()`
-/// (pre-scan name classification) and `contains_stdlib_call()` (walk-time
+/// This is the authoritative check shared by `equation_is_module_call()`
+/// (pre-scan name classification) and `contains_module_call()` (walk-time
 /// A2A expansion decision). Each caller adds its own structural logic on
 /// top (e.g., PREVIOUS arg-count check, INIT inclusion for A2A).
 pub(crate) fn is_stdlib_module_function(func_name: &str) -> bool {
