@@ -1286,12 +1286,28 @@ fn macro_to_datamodel(mac: Macro) -> Result<datamodel::Model> {
 
     // The shared port-synthesis + MacroSpec-construction step. Identical to
     // the MDL path -- only the way `body_variables` is produced differs.
-    Ok(datamodel::Model::new_macro(
+    let mut model = datamodel::Model::new_macro(
         &macro_name,
         &parameters,
         &additional_outputs,
         body_variables,
-    ))
+    );
+
+    // Sort variables by canonical identifier, mirroring the XMILE `<model>`
+    // import path (`From<xmile::Model> for datamodel::Model`). Every other
+    // XMILE-imported model is canonical-ident ordered, and the protobuf
+    // serialization (`From<Model> for project_io::Model`) re-sorts every
+    // model's variables by the same key for deterministic encoding -- so a
+    // protobuf serialize -> deserialize round-trip is identity only for
+    // projects already in that order. `Model::new_macro` appends the
+    // synthesized parameter ports after the body variables, which is not
+    // canonical order, so without this the macro model's protobuf round-trip
+    // is lossy.
+    model
+        .variables
+        .sort_by(|a, b| canonicalize(a.get_ident()).cmp(&canonicalize(b.get_ident())));
+
+    Ok(model)
 }
 
 #[test]
@@ -1819,6 +1835,62 @@ mod macro_tests {
         }
     }
 
+    /// A `<macro>` import must produce a macro-marked model whose variables
+    /// are ordered by canonical ident -- the same invariant the XMILE
+    /// `<model>` import path establishes (`From<xmile::Model> for
+    /// datamodel::Model`). The protobuf serialization
+    /// (`From<Model> for project_io::Model`) sorts every model's variables by
+    /// canonical ident for deterministic encoding, so a protobuf
+    /// serialize -> deserialize round-trip is identity *only* for projects
+    /// already in that order. `Model::new_macro` appends the synthesized
+    /// parameter ports after the body variables, which is not canonical
+    /// order (here the body var `intermediate` would sit before the ports
+    /// `input`/`parameter` while canonical order interleaves them), so
+    /// without the reader sorting the macro model its protobuf round-trip is
+    /// lossy and every wired `.xmile` macro fixture trips
+    /// `assert_eq!(datamodel_project, datamodel_project2)` in
+    /// `simulate_path_with`.
+    #[test]
+    fn macro_import_variables_are_canonical_ident_ordered() {
+        // The macro_multi_expression fixture shape: a helper body var plus a
+        // primary-output body var, two formal-parameter ports synthesized.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header><vendor>test</vendor><product>test</product><name>m</name></header>
+    <sim_specs><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+    <model><variables>
+        <aux name="result"><eqn>EXPRESSION_MACRO(2, 3)</eqn></aux>
+    </variables></model>
+    <macro name="EXPRESSION MACRO">
+        <eqn>EXPRESSION MACRO</eqn>
+        <parm>input</parm>
+        <parm>parameter</parm>
+        <variables>
+            <aux name="EXPRESSION MACRO"><eqn>input*intermediate</eqn></aux>
+            <aux name="intermediate"><eqn>parameter*3</eqn></aux>
+        </variables>
+    </macro>
+</xmile>"#;
+        let project =
+            project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must import");
+
+        let m = macro_model(&project, "expression_macro");
+        let idents: Vec<String> = m
+            .variables
+            .iter()
+            .map(|v| crate::canonicalize(v.get_ident()).into_owned())
+            .collect();
+        let mut sorted = idents.clone();
+        sorted.sort();
+        assert_eq!(
+            idents, sorted,
+            "macro-marked model variables must be ordered by canonical \
+             ident (the invariant the protobuf serialization sort assumes); \
+             got {:?}",
+            idents
+        );
+    }
+
     /// A `<macro>` with a non-empty `<sim_specs>` is the documented
     /// unsupported limitation: conversion returns a clear error.
     #[test]
@@ -2206,9 +2278,23 @@ mod macro_tests {
             "the_max - the_min"
         );
 
-        // Second serialization is byte-identical (byte-stable round-trip).
+        // Byte-stable round-trip: a project produced by the reader (`rt`)
+        // re-serializes and re-parses to a byte-identical XMILE. This is the
+        // exact invariant `simulate_path_with` enforces for wired fixtures
+        // (`serialized_xmile`/`serialized_xmile2` both derive from the
+        // reader's output). We deliberately do NOT compare against the first
+        // `xml`: that was serialized from a hand-built project whose macro
+        // body variables are not in canonical-ident order, whereas every
+        // reader-produced model (`<model>` and, now, `<macro>`) is
+        // canonical-ident ordered so its protobuf round-trip is identity.
         let xml2 = project_to_xmile(&rt).expect("must re-serialize");
-        assert_eq!(xml, xml2, "multi-output round-trip must be byte-stable");
+        let rt2 = project_from_reader(&mut BufReader::new(xml2.as_bytes()))
+            .expect("the re-serialized XMILE must re-import");
+        let xml3 = project_to_xmile(&rt2).expect("must re-serialize again");
+        assert_eq!(
+            xml2, xml3,
+            "a reader-produced multi-output project must round-trip byte-stably"
+        );
     }
 
     /// macros.AC4.4: a multi-output `:`-form `.mdl` survives a cross-format

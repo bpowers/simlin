@@ -24,9 +24,6 @@ static TEST_MODELS: &[&str] = &[
     // "test/test-models/tests/arguments/test_arguments.xmile",
     // "test/test-models/tests/delay_parentheses/test_delay_parentheses.xmile",
     // "test/test-models/tests/delay_pipeline/test_pipeline_delays.xmile",
-    // "test/test-models/tests/macro_expression/test_macro_expression.xmile",
-    // "test/test-models/tests/macro_multi_expression/test_macro_multi_expression.xmile",
-    // "test/test-models/tests/macro_stock/test_macro_stock.xmile",
     // "test/test-models/tests/rounding/test_rounding.xmile",
     // "test/test-models/tests/special_characters/test_special_variable_names.xmile",
     // "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
@@ -70,6 +67,18 @@ static TEST_MODELS: &[&str] = &[
     // "test/test-models/tests/lookups/test_lookups.xmile",
     "test/test-models/tests/lookups_simlin/test_lookups.xmile",
     "test/test-models/tests/lookups_with_expr/test_lookups_with_expr.xmile",
+    // Macro fixtures: each `<macro>` element imports as a macro-marked model
+    // (Phase 5 Task 1 reader), the invocation expands and simulates against
+    // `output.tab` (Phase 3), and `simulate_path_with` re-serializes the
+    // project to XMILE and asserts a byte-stable round-trip (Phase 5 Task 2
+    // writer). `macro_multi_macros` exercises two `<macro>` elements;
+    // `macro_stock` a stock-bearing macro body. (The `.stmx` variants and the
+    // `macro_cross_reference`/`macro_trailing_definition` dirs have no
+    // `<macro>` element, so they are not wired here.)
+    "test/test-models/tests/macro_expression/test_macro_expression.xmile",
+    "test/test-models/tests/macro_multi_expression/test_macro_multi_expression.xmile",
+    "test/test-models/tests/macro_multi_macros/test_macro_multi_macros.xmile",
+    "test/test-models/tests/macro_stock/test_macro_stock.xmile",
     "test/test-models/tests/model_doc/model_doc.xmile",
     "test/test-models/tests/number_handling/test_number_handling.xmile",
     "test/test-models/tests/parentheses/test_parens.xmile",
@@ -1382,6 +1391,111 @@ fn simulates_macro_multi_macros_mdl() {
 fn simulates_macro_trailing_definition_mdl() {
     simulate_mdl_path(
         "../../test/test-models/tests/macro_trailing_definition/test_macro_trailing_definition.mdl",
+    );
+}
+
+/// A macro-marked model's definition, reduced to the parts that must survive
+/// a cross-format conversion: its name, its `MacroSpec`, and its body
+/// variables as `(ident, equation)` pairs sorted by ident (so the comparison
+/// is order-independent).
+#[derive(Debug, Clone, PartialEq)]
+struct MacroDef {
+    name: String,
+    spec: simlin_engine::datamodel::MacroSpec,
+    body: Vec<(String, Option<simlin_engine::datamodel::Equation>)>,
+}
+
+/// Collect every macro-marked model in `project` as a `MacroDef`, sorted by
+/// macro name.
+fn collect_macro_defs(project: &simlin_engine::datamodel::Project) -> Vec<MacroDef> {
+    let mut defs: Vec<MacroDef> = project
+        .models
+        .iter()
+        .filter_map(|m| {
+            m.macro_spec.as_ref().map(|spec| {
+                let mut body: Vec<(String, Option<simlin_engine::datamodel::Equation>)> = m
+                    .variables
+                    .iter()
+                    .map(|v| (v.get_ident().to_string(), v.get_equation().cloned()))
+                    .collect();
+                body.sort_by(|a, b| a.0.cmp(&b.0));
+                MacroDef {
+                    name: m.name.clone(),
+                    spec: spec.clone(),
+                    body,
+                }
+            })
+        })
+        .collect();
+    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    defs
+}
+
+/// macros.AC4.4: a single-output macro survives a cross-format conversion
+/// `.mdl` -> datamodel -> `.xmile` -> datamodel. We `open_vensim` a
+/// single-output macro `.mdl` fixture, convert the resulting
+/// `datamodel::Project` to XMILE via `to_xmile`, re-import it via
+/// `open_xmile`, and assert the macro definition (the macro-marked `Model` +
+/// its `MacroSpec`) and the invocation are preserved -- the
+/// cross-format-round-tripped project's macro models and invocation equations
+/// match those of the directly-imported `.mdl` project.
+#[test]
+fn macro_cross_format_mdl_to_xmile_to_datamodel_preserves_macro() {
+    let path = "../../test/test-models/tests/macro_expression/test_macro_expression.mdl";
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+
+    // .mdl -> datamodel (the reference shape).
+    let from_mdl = open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+
+    // datamodel -> .xmile -> datamodel (the cross-format round-trip).
+    let xmile_str =
+        simlin_engine::to_xmile(&from_mdl).unwrap_or_else(|e| panic!("to_xmile failed: {e}"));
+    let cross_rt = {
+        let mut reader = BufReader::new(xmile_str.as_bytes());
+        simlin_engine::open_xmile(&mut reader)
+            .unwrap_or_else(|e| panic!("open_xmile of the converted XMILE failed: {e}"))
+    };
+
+    let mdl_defs = collect_macro_defs(&from_mdl);
+    let rt_defs = collect_macro_defs(&cross_rt);
+
+    // There IS a macro definition, and it is preserved exactly across the
+    // cross-format conversion (name, MacroSpec, and body equations).
+    assert!(
+        !mdl_defs.is_empty(),
+        "the .mdl fixture must import at least one macro-marked model"
+    );
+    assert_eq!(
+        mdl_defs, rt_defs,
+        "the macro definition (macro-marked Model + MacroSpec + body) must \
+         survive the .mdl -> .xmile -> datamodel cross-format conversion"
+    );
+
+    // The invocation is preserved: the `main` model's invocation aux reads
+    // the same macro call equation before and after the cross-format trip.
+    let invocation_eqn = |p: &simlin_engine::datamodel::Project| -> String {
+        let main = p.get_model("main").expect("project has a `main` model");
+        let v = main
+            .get_variable("macro output")
+            .expect("`main` has the `macro output` invocation variable");
+        match v.get_equation() {
+            Some(simlin_engine::datamodel::Equation::Scalar(s)) => s.clone(),
+            other => panic!("expected a scalar invocation equation, got {other:?}"),
+        }
+    };
+    let mdl_inv = invocation_eqn(&from_mdl);
+    let rt_inv = invocation_eqn(&cross_rt);
+    assert_eq!(
+        mdl_inv, rt_inv,
+        "the macro invocation equation must survive the cross-format \
+         conversion (mdl: {mdl_inv:?}, round-tripped: {rt_inv:?})"
+    );
+    // And it really is an invocation of the imported macro.
+    let macro_name = &mdl_defs[0].name;
+    assert!(
+        mdl_inv.to_lowercase().contains(macro_name.as_str()),
+        "the invocation {mdl_inv:?} must call the macro {macro_name:?}"
     );
 }
 
