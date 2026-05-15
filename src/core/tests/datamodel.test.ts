@@ -29,6 +29,8 @@ import {
   sourceToJson,
   loopMetadataFromJson,
   loopMetadataToJson,
+  macroSpecFromJson,
+  macroSpecToJson,
   modelFromJson,
   modelToJson,
   projectFromJson,
@@ -55,6 +57,7 @@ import type {
   CloudViewElement,
   AuxViewElement,
   LoopMetadata,
+  MacroSpec,
   Model,
   Project,
   Variable,
@@ -588,6 +591,42 @@ describe('LoopMetadata', () => {
 
     const restored = loopMetadataFromJson(json);
     expect(restored.deleted).toBe(true);
+  });
+});
+
+describe('MacroSpec', () => {
+  it('should roundtrip correctly', () => {
+    const spec: MacroSpec = {
+      parameters: ['input', 'gain'],
+      primaryOutput: 'output',
+      additionalOutputs: ['debug_trace'],
+    };
+
+    const json = macroSpecToJson(spec);
+    expect(json.parameters).toEqual(['input', 'gain']);
+    expect(json.primaryOutput).toBe('output');
+    expect(json.additionalOutputs).toEqual(['debug_trace']);
+
+    const restored = macroSpecFromJson(json);
+    expect(restored.parameters).toEqual(['input', 'gain']);
+    expect(restored.primaryOutput).toBe('output');
+    expect(restored.additionalOutputs).toEqual(['debug_trace']);
+  });
+
+  it('should omit empty additionalOutputs', () => {
+    const spec: MacroSpec = {
+      parameters: ['input'],
+      primaryOutput: 'output',
+      additionalOutputs: [],
+    };
+
+    const json = macroSpecToJson(spec);
+    expect(json.parameters).toEqual(['input']);
+    expect(json.primaryOutput).toBe('output');
+    expect(json.additionalOutputs).toBeUndefined();
+
+    const restored = macroSpecFromJson(json);
+    expect(restored.additionalOutputs).toEqual([]);
   });
 });
 

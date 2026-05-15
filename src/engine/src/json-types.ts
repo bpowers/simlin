@@ -333,6 +333,15 @@ export interface JsonLoopMetadata {
 }
 
 /**
+ * Marks a model as a callable macro template and records its calling convention.
+ */
+export interface JsonMacroSpec {
+  parameters: string[];
+  primaryOutput: string;
+  additionalOutputs?: string[];
+}
+
+/**
  * Semantic/organizational group for categorizing model variables.
  * This is distinct from visual diagram groups (JsonGroupViewElement).
  */
@@ -365,6 +374,7 @@ export interface JsonModel {
   views?: JsonView[];
   loopMetadata?: JsonLoopMetadata[];
   groups?: JsonModelGroup[];
+  macroSpec?: JsonMacroSpec;
 }
 
 /**
