@@ -113,20 +113,57 @@ impl<'input> ConversionContext<'input> {
         let settings_parser = PostEquationParser::new(remaining);
         let settings = settings_parser.parse_settings();
 
-        let n_items = items.len();
-        Ok(ConversionContext {
+        Ok(Self::new_from_items(
             items,
-            symbols: HashMap::with_capacity(n_items),
-            dimensions: Vec::new(),
-            equivalences: HashMap::new(),
-            equivalence_original_names: HashMap::new(),
-            sim_specs: SimSpecsBuilder {
+            Vec::new(),
+            XmileFormatter::new(),
+            data_provider,
+            SimSpecsBuilder {
                 sim_method: Some(settings.integration_method),
                 ..SimSpecsBuilder::default()
             },
-            integration_method: settings.integration_method,
-            unit_equivs: settings.unit_equivs,
-            formatter: XmileFormatter::new(),
+            settings.integration_method,
+            settings.unit_equivs,
+            views,
+            settings.file_aliases,
+        ))
+    }
+
+    /// Construct a `ConversionContext` over a caller-supplied item list.
+    ///
+    /// This is the reusable core of `new_with_data`: it does no reader draining
+    /// or settings parsing, so it can also build a *scoped sub-context* for a
+    /// macro body. In that case the caller passes the macro's body equations as
+    /// `items` together with the parent context's already-built `dimensions`,
+    /// `data_provider`, and `formatter` (the macro body defines no dimensions of
+    /// its own, and the formatter's subrange-name state must match the parent's
+    /// so body-equation formatting is identical). The remaining settings-derived
+    /// inputs (`sim_specs`, `integration_method`, `unit_equivs`, `views`,
+    /// `file_aliases`) are irrelevant to a macro body, which the caller signals
+    /// by passing defaults/empties.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::mdl::convert) fn new_from_items(
+        items: Vec<MdlItem<'input>>,
+        dimensions: Vec<Dimension>,
+        formatter: XmileFormatter,
+        data_provider: Option<&'input dyn crate::data_provider::DataProvider>,
+        sim_specs: SimSpecsBuilder,
+        integration_method: SimMethod,
+        unit_equivs: Vec<Unit>,
+        views: Vec<VensimView>,
+        file_aliases: HashMap<String, String>,
+    ) -> Self {
+        let n_items = items.len();
+        ConversionContext {
+            items,
+            symbols: HashMap::with_capacity(n_items),
+            dimensions,
+            equivalences: HashMap::new(),
+            equivalence_original_names: HashMap::new(),
+            sim_specs,
+            integration_method,
+            unit_equivs,
+            formatter,
             synthetic_flows: Vec::new(),
             element_owners: HashMap::new(),
             dimension_elements: HashMap::new(),
@@ -136,8 +173,8 @@ impl<'input> ConversionContext<'input> {
             current_group_index: None,
             views,
             data_provider,
-            file_aliases: settings.file_aliases,
-        })
+            file_aliases,
+        }
     }
 
     /// Convert the MDL to a Project.

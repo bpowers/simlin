@@ -25,10 +25,33 @@ use crate::mdl::xmile_compat::format_number;
 
 impl<'input> ConversionContext<'input> {
     /// Build the final Project from collected symbols.
-    pub(super) fn build_project(mut self) -> Result<Project, ConvertError> {
+    pub(super) fn build_project(self) -> Result<Project, ConvertError> {
+        let model = self.build_model("main")?;
+
+        Ok(Project {
+            name: String::new(),
+            sim_specs: self.sim_specs.build(),
+            dimensions: self.dimensions,
+            units: self.unit_equivs,
+            models: vec![model],
+            source: None,
+            ai_information: None,
+        })
+    }
+
+    /// Build a single `datamodel::Model` (named `name`) from the collected
+    /// symbols, synthetic flows, groups, and views.
+    ///
+    /// This is the model-building core extracted from `build_project`: the
+    /// `"main"` model is `build_model("main")`, and a macro body is built as
+    /// `build_model(&macro_name)` on a scoped sub-context. The returned model
+    /// always has `sim_specs: None` and `macro_spec: None`; project-level
+    /// fields (sim_specs, dimensions, units) stay in `build_project`, and the
+    /// macro path attaches the `MacroSpec` afterward.
+    pub(super) fn build_model(&self, name: &str) -> Result<Model, ConvertError> {
         let mut variables: Vec<Variable> = Vec::with_capacity(self.symbols.len());
 
-        for (name, info) in &self.symbols {
+        for (var_name, info) in &self.symbols {
             // Skip unwanted variables (control vars)
             if info.unwanted {
                 continue;
@@ -47,14 +70,14 @@ impl<'input> ConversionContext<'input> {
 
             // Check if this variable has element-specific equations (x[a]=1; x[b]=2)
             // If so, build an Arrayed equation from all element-specific equations
-            if let Some(var) = self.build_variable_with_elements(name, info)? {
+            if let Some(var) = self.build_variable_with_elements(var_name, info)? {
                 variables.push(var);
             } else {
                 // Fall back to single-equation handling
                 // PurgeAFOEq: If multiple equations and first is A FUNCTION OF or EmptyRhs, skip it
                 let eq = self.select_equation(&info.equations);
                 if let Some(eq) = eq
-                    && let Some(var) = self.build_variable(name, info, eq)?
+                    && let Some(var) = self.build_variable(var_name, info, eq)?
                 {
                     variables.push(var);
                 }
@@ -85,31 +108,21 @@ impl<'input> ConversionContext<'input> {
         // Build views from parsed sketch data
         let views = self.build_views();
 
-        let model = Model {
-            name: "main".to_string(),
+        Ok(Model {
+            name: name.to_string(),
             sim_specs: None,
             variables,
             views,
             loop_metadata: vec![],
             groups,
             macro_spec: None,
-        };
-
-        Ok(Project {
-            name: String::new(),
-            sim_specs: self.sim_specs.build(),
-            dimensions: self.dimensions,
-            units: self.unit_equivs,
-            models: vec![model],
-            source: None,
-            ai_information: None,
         })
     }
 
     /// Build ModelGroup instances from collected group info.
     /// Ensures unique group names that don't conflict with symbol namespace.
     /// Matches xmutil's AdjustGroupNames algorithm (Model.cpp:479-503).
-    fn build_groups(&mut self) -> Vec<ModelGroup> {
+    fn build_groups(&self) -> Vec<ModelGroup> {
         if self.groups.is_empty() {
             return vec![];
         }

@@ -43,6 +43,7 @@ pub struct SubrangeMapping {
 }
 
 /// Formats MDL AST expressions as XMILE-compatible equation strings.
+#[derive(Clone)]
 pub struct XmileFormatter {
     /// Whether to use TIME as STARTTIME reference
     use_xmile_time_names: bool,
