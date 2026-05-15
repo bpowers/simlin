@@ -35,6 +35,327 @@ pub struct XmileLoopMetadata {
     pub uids_text: Option<String>,
 }
 
+/// One input-port wiring of a multi-output macro invocation:
+/// `<simlin:input from="in1" to="a"/>` -- `from` is the argument's source
+/// ident, `to` is the bare macro formal-parameter name.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MacroInvocationInput {
+    #[serde(rename = "@from")]
+    pub from: String,
+    #[serde(rename = "@to")]
+    pub to: String,
+}
+
+/// One additional-output binding of a multi-output macro invocation:
+/// `<simlin:output binding="the_min" output="minval"/>` -- `binding` is the
+/// caller-side variable ident, `output` is the macro-internal output name.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MacroInvocationOutput {
+    #[serde(rename = "@binding")]
+    pub binding: String,
+    #[serde(rename = "@output")]
+    pub output: String,
+}
+
+/// Vendor extension recording a Vensim multi-output (`:`-list) macro
+/// invocation. Standard XMILE `<module>` references a `<model>`, not a
+/// `<macro>`, and has no multi-output-call concept, so the Phase-4
+/// materialized cluster -- an input-only `Variable::Module` plus the LHS
+/// primary-output binding `Aux` and one `Aux` per additional `:`-output --
+/// round-trips through this single element instead of standard
+/// `<module>`/`<aux>`es. Serialized as `<simlin:macro-invocation>` within a
+/// `<model>`. quick-xml strips the `simlin:` prefix on read, so the serde
+/// rename is the namespace-stripped local name.
+///
+/// The reader reconstructs *exactly* the materialized datamodel cluster, so
+/// an XMILE->datamodel->XMILE round-trip is byte-stable.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MacroInvocation {
+    /// The materialized module ident (e.g. `total_macro`).
+    #[serde(rename = "@module")]
+    pub module: String,
+    /// The invoked macro's `Model.name` (e.g. `add3`).
+    #[serde(rename = "@macro")]
+    pub macro_name: String,
+    /// The caller-side LHS variable ident the primary output binds to.
+    #[serde(rename = "@primary-binding")]
+    pub primary_binding: String,
+    /// The macro's primary-output name (its `MacroSpec.primary_output`).
+    #[serde(rename = "@primary-output")]
+    pub primary_output: String,
+    /// Documentation carried on the primary-output binding aux (the original
+    /// invocation's `~`-doc), preserved for fidelity.
+    #[serde(
+        rename = "@primary-doc",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub primary_doc: Option<String>,
+    /// Units carried on the primary-output binding aux, preserved for
+    /// fidelity.
+    #[serde(
+        rename = "@primary-units",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub primary_units: Option<String>,
+    /// Input-port wirings, in positional call order.
+    #[serde(rename = "input", default)]
+    pub inputs: Vec<MacroInvocationInput>,
+    /// Additional-output bindings, in `:`-list declaration order.
+    #[serde(rename = "output", default)]
+    pub outputs: Vec<MacroInvocationOutput>,
+}
+
+impl ToXml<XmlWriter> for MacroInvocation {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
+        let mut attrs: Vec<(&str, &str)> = vec![
+            ("module", self.module.as_str()),
+            ("macro", self.macro_name.as_str()),
+            ("primary-binding", self.primary_binding.as_str()),
+            ("primary-output", self.primary_output.as_str()),
+        ];
+        if let Some(ref doc) = self.primary_doc {
+            attrs.push(("primary-doc", doc.as_str()));
+        }
+        if let Some(ref units) = self.primary_units {
+            attrs.push(("primary-units", units.as_str()));
+        }
+        write_tag_start_with_attrs(writer, "simlin:macro-invocation", &attrs)?;
+
+        for inp in self.inputs.iter() {
+            let attrs = &[("from", inp.from.as_str()), ("to", inp.to.as_str())];
+            super::write_tag_empty_with_attrs(writer, "simlin:input", attrs)?;
+        }
+        for out in self.outputs.iter() {
+            let attrs = &[
+                ("binding", out.binding.as_str()),
+                ("output", out.output.as_str()),
+            ];
+            super::write_tag_empty_with_attrs(writer, "simlin:output", attrs)?;
+        }
+
+        write_tag_end(writer, "simlin:macro-invocation")
+    }
+}
+
+/// A scalar binding `Aux` reading a module output. The module-output
+/// reference uses an ASCII period at the datamodel layer (the authoritative
+/// Phase-4 Separator convention -- `canonicalize()` converts it to U+00B7
+/// only at compile-time parse).
+fn binding_aux(
+    ident: String,
+    module: &str,
+    output: &str,
+    documentation: String,
+    units: Option<String>,
+) -> datamodel::Variable {
+    datamodel::Variable::Aux(datamodel::Aux {
+        ident,
+        equation: datamodel::Equation::Scalar(format!("{}.{}", module, output)),
+        documentation,
+        units,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    })
+}
+
+/// Reconstruct the Phase-4-materialized multi-output invocation cluster from
+/// a `simlin:macro-invocation` extension: the input-only `Variable::Module`,
+/// the primary-output binding `Aux` (the call-site LHS), and one `Aux` per
+/// additional `:`-output. This is the exact inverse of the project-level
+/// extraction (`extract_macro_invocation`), so the datamodel shape -- and
+/// hence the XMILE round-trip -- is byte-stable.
+fn reconstruct_macro_invocation(inv: &MacroInvocation) -> Vec<datamodel::Variable> {
+    let mut out: Vec<datamodel::Variable> = Vec::with_capacity(2 + inv.outputs.len());
+
+    let references: Vec<datamodel::ModuleReference> = inv
+        .inputs
+        .iter()
+        .map(|i| datamodel::ModuleReference {
+            src: i.from.clone(),
+            dst: format!("{}.{}", inv.module, i.to),
+        })
+        .collect();
+
+    out.push(datamodel::Variable::Module(datamodel::Module {
+        ident: inv.module.clone(),
+        model_name: inv.macro_name.clone(),
+        documentation: String::new(),
+        units: None,
+        references,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    }));
+
+    // Primary-output binding aux (the call-site LHS), carrying the
+    // invocation's preserved doc/units.
+    out.push(binding_aux(
+        inv.primary_binding.clone(),
+        &inv.module,
+        &inv.primary_output,
+        inv.primary_doc.clone().unwrap_or_default(),
+        inv.primary_units.clone(),
+    ));
+
+    // One additional-output binding aux per `:`-list entry.
+    for o in &inv.outputs {
+        out.push(binding_aux(
+            o.binding.clone(),
+            &inv.module,
+            &o.output,
+            String::new(),
+            None,
+        ));
+    }
+
+    out
+}
+
+/// Extract every Phase-4-materialized multi-output invocation cluster from a
+/// `datamodel::Model`, given the project's macro registry
+/// (canonical-macro-model-name -> its `MacroSpec`). Returns the residual
+/// `datamodel::Model` (the cluster variables removed) plus the extracted
+/// invocation records. The residual model is then converted by the ordinary
+/// per-model `From<datamodel::Model> for Model` bridge.
+///
+/// A cluster is recognized structurally: a `Variable::Module` whose
+/// `model_name` resolves to a macro-marked model. Its binding auxes are the
+/// `Variable::Aux`es whose scalar equation is exactly `"{module}.{output}"`
+/// for the macro's primary / additional outputs. Only multi-output macros
+/// (non-empty `additional_outputs`) are extracted -- a single-output macro
+/// invocation has a plain-text equivalent and is never materialized.
+pub(crate) fn extract_macro_invocations(
+    mut model: datamodel::Model,
+    macro_specs: &std::collections::HashMap<String, datamodel::MacroSpec>,
+) -> (datamodel::Model, Vec<MacroInvocation>) {
+    use std::collections::HashSet;
+
+    let mut invocations: Vec<MacroInvocation> = Vec::new();
+    // Idents of variables that belong to an extracted cluster (the module
+    // plus its binding auxes); removed from the residual model.
+    let mut consumed: HashSet<String> = HashSet::new();
+
+    // Index the scalar-equation auxes once so a binding lookup is O(1).
+    // Maps the (trimmed) scalar equation text to the aux's ident, doc, and
+    // units. A binding aux's equation is exactly `{module}.{output}`.
+    let mut scalar_auxes: std::collections::HashMap<String, (String, String, Option<String>)> =
+        std::collections::HashMap::new();
+    for v in &model.variables {
+        if let datamodel::Variable::Aux(aux) = v
+            && let datamodel::Equation::Scalar(eq) = &aux.equation
+        {
+            scalar_auxes
+                .entry(eq.trim().to_string())
+                .or_insert_with(|| {
+                    (
+                        aux.ident.clone(),
+                        aux.documentation.clone(),
+                        aux.units.clone(),
+                    )
+                });
+        }
+    }
+
+    for v in &model.variables {
+        let datamodel::Variable::Module(module) = v else {
+            continue;
+        };
+        let macro_key = canonicalize(&module.model_name).into_owned();
+        let Some(spec) = macro_specs.get(&macro_key) else {
+            continue;
+        };
+        // Only *multi-output* macros materialize as a module + bindings;
+        // a single-output invocation stays as plain equation text.
+        if spec.additional_outputs.is_empty() {
+            continue;
+        }
+
+        // Input wirings: dst is `{module}.{param}`; strip the `{module}.`
+        // prefix to recover the bare formal-parameter name.
+        let prefix = format!("{}.", module.ident);
+        let inputs: Vec<MacroInvocationInput> = module
+            .references
+            .iter()
+            .map(|r| MacroInvocationInput {
+                from: r.src.clone(),
+                to: r
+                    .dst
+                    .strip_prefix(&prefix)
+                    .unwrap_or(r.dst.as_str())
+                    .to_string(),
+            })
+            .collect();
+
+        // Primary-output binding: the aux reading `{module}.{primary}`.
+        let primary_key = format!("{}.{}", module.ident, spec.primary_output);
+        let Some((primary_binding, primary_doc, primary_units)) =
+            scalar_auxes.get(&primary_key).cloned()
+        else {
+            // No primary binding found -- not a materialized cluster we can
+            // faithfully round-trip; leave it as a plain <module>.
+            continue;
+        };
+
+        // One additional-output binding per `:`-list entry.
+        let mut outputs: Vec<MacroInvocationOutput> =
+            Vec::with_capacity(spec.additional_outputs.len());
+        let mut all_found = true;
+        for out_name in &spec.additional_outputs {
+            let key = format!("{}.{}", module.ident, out_name);
+            match scalar_auxes.get(&key) {
+                Some((binding, _, _)) => outputs.push(MacroInvocationOutput {
+                    binding: binding.clone(),
+                    output: out_name.clone(),
+                }),
+                None => {
+                    all_found = false;
+                    break;
+                }
+            }
+        }
+        if !all_found {
+            continue;
+        }
+
+        // Mark the module + every binding aux consumed.
+        consumed.insert(module.ident.clone());
+        consumed.insert(primary_binding.clone());
+        for o in &outputs {
+            consumed.insert(o.binding.clone());
+        }
+
+        invocations.push(MacroInvocation {
+            module: module.ident.clone(),
+            macro_name: module.model_name.clone(),
+            primary_binding,
+            primary_output: spec.primary_output.clone(),
+            primary_doc: if primary_doc.is_empty() {
+                None
+            } else {
+                Some(primary_doc)
+            },
+            primary_units,
+            inputs,
+            outputs,
+        });
+    }
+
+    if !consumed.is_empty() {
+        model
+            .variables
+            .retain(|v| !consumed.contains(v.get_ident()));
+    }
+
+    (model, invocations)
+}
+
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Model {
@@ -50,6 +371,13 @@ pub struct Model {
     /// Serde rename uses local name without prefix (quick-xml strips namespace prefixes).
     #[serde(rename = "loop-metadata", default)]
     pub loop_metadata: Option<Vec<XmileLoopMetadata>>,
+    /// Vendor extension: Vensim multi-output (`:`-list) macro invocations.
+    /// Each records a Phase-4-materialized cluster (an input-only
+    /// `Variable::Module` + binding `Aux`es) so it round-trips faithfully.
+    /// Serde rename uses the local name without prefix (quick-xml strips
+    /// namespace prefixes).
+    #[serde(rename = "macro-invocation", default)]
+    pub macro_invocations: Option<Vec<MacroInvocation>>,
 }
 
 impl ToXml<XmlWriter> for Model {
@@ -119,6 +447,12 @@ impl ToXml<XmlWriter> for Model {
             }
         }
 
+        if let Some(ref invocations) = self.macro_invocations {
+            for inv in invocations {
+                inv.write_xml(writer)?;
+            }
+        }
+
         write_tag_end(writer, "model")
     }
 }
@@ -177,26 +511,37 @@ impl From<Model> for datamodel::Model {
             })
             .collect();
 
+        let mut variables: Vec<datamodel::Variable> = match model.variables {
+            Some(Variables {
+                variables: vars, ..
+            }) => vars
+                .into_iter()
+                .filter(|v| !matches!(v, Var::Unhandled))
+                .map(datamodel::Variable::from)
+                .collect(),
+            _ => vec![],
+        };
+
+        // Reconstruct each multi-output macro-invocation cluster (the
+        // input-only `Variable::Module` + the primary-output binding `Aux` +
+        // one `Aux` per additional `:`-output) from its `simlin:`-namespaced
+        // extension. This is the exact inverse of the project-level
+        // extraction, so an XMILE->datamodel->XMILE round-trip is byte-stable.
+        if let Some(ref invocations) = model.macro_invocations {
+            for inv in invocations {
+                variables.extend(reconstruct_macro_invocation(inv));
+            }
+        }
+
+        // Sort variables by canonical identifier for deterministic ordering.
+        variables.sort_by(|a, b| {
+            crate::canonicalize(a.get_ident()).cmp(&crate::canonicalize(b.get_ident()))
+        });
+
         datamodel::Model {
             name: model.name.as_deref().unwrap_or("main").to_string(),
             sim_specs: model.sim_specs.map(datamodel::SimSpecs::from),
-            variables: match model.variables {
-                Some(Variables {
-                    variables: vars, ..
-                }) => {
-                    let mut variables: Vec<datamodel::Variable> = vars
-                        .into_iter()
-                        .filter(|v| !matches!(v, Var::Unhandled))
-                        .map(datamodel::Variable::from)
-                        .collect();
-                    // Sort variables by canonical identifier for deterministic ordering
-                    variables.sort_by(|a, b| {
-                        crate::canonicalize(a.get_ident()).cmp(&crate::canonicalize(b.get_ident()))
-                    });
-                    variables
-                }
-                _ => vec![],
-            },
+            variables,
             views,
             loop_metadata,
             groups,
@@ -288,6 +633,9 @@ impl From<datamodel::Model> for Model {
                 })
             },
             loop_metadata: xmile_loop_metadata,
+            // Populated at the project level (it needs the set of macro
+            // model names); this per-model bridge defaults it to None.
+            macro_invocations: None,
         }
     }
 }

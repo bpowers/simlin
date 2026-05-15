@@ -200,6 +200,19 @@ impl From<datamodel::Project> for File {
             .into_iter()
             .partition(|m| m.macro_spec.is_some());
 
+        // The project's macro registry (canonical macro-model name -> its
+        // MacroSpec). Drives the multi-output-invocation extraction so a
+        // materialized Variable::Module + binding auxes round-trips through
+        // a `simlin:` extension instead of a non-standard <module>.
+        let macro_specs: HashMap<String, datamodel::MacroSpec> = macro_models
+            .iter()
+            .filter_map(|m| {
+                m.macro_spec
+                    .clone()
+                    .map(|spec| (canonicalize(&m.name).into_owned(), spec))
+            })
+            .collect();
+
         let macros: Vec<Macro> = macro_models.into_iter().map(Macro::from).collect();
 
         // The <uses_macros> header option is emitted whenever the project
@@ -272,7 +285,23 @@ impl From<datamodel::Project> for File {
             behavior: None,
             style: None,
             data: None,
-            models: plain_models.into_iter().map(Model::from).collect(),
+            models: plain_models
+                .into_iter()
+                .map(|m| {
+                    // Extract materialized multi-output invocation clusters
+                    // into `simlin:` extension records; the residual model
+                    // (cluster vars removed) converts via the ordinary
+                    // per-model bridge. Both empty when the project has no
+                    // multi-output macros, so non-macro projects are
+                    // unaffected.
+                    let (residual, invocations) = model::extract_macro_invocations(m, &macro_specs);
+                    let mut xmile_model = Model::from(residual);
+                    if !invocations.is_empty() {
+                        xmile_model.macro_invocations = Some(invocations);
+                    }
+                    xmile_model
+                })
+                .collect(),
             macros,
         }
     }
@@ -1982,6 +2011,239 @@ mod macro_tests {
         assert_eq!(
             xml, xml2,
             "single-output macro round-trip must be byte-stable"
+        );
+    }
+
+    use crate::datamodel::{Module, ModuleReference};
+
+    /// A project with a multi-output macro `add3(a,b,c : minval, maxval)` and
+    /// the Phase-4-materialized invocation cluster
+    /// `total = add3(in1,in2,in3 : the min, the max)`.
+    fn multi_output_macro_project() -> datamodel::Project {
+        let macro_model = Model::new_macro(
+            "add3",
+            &["a".to_string(), "b".to_string(), "c".to_string()],
+            &["minval".to_string(), "maxval".to_string()],
+            vec![
+                aux("add3", "a + b + c"),
+                aux("minval", "MIN(a, MIN(b, c))"),
+                aux("maxval", "MAX(a, MAX(b, c))"),
+            ],
+        );
+
+        let module = Variable::Module(Module {
+            ident: "total_macro".to_string(),
+            model_name: "add3".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![
+                ModuleReference {
+                    src: "in1".to_string(),
+                    dst: "total_macro.a".to_string(),
+                },
+                ModuleReference {
+                    src: "in2".to_string(),
+                    dst: "total_macro.b".to_string(),
+                },
+                ModuleReference {
+                    src: "in3".to_string(),
+                    dst: "total_macro.c".to_string(),
+                },
+            ],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        });
+
+        datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: base_sim_specs(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                datamodel::Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![
+                        aux("in1", "7"),
+                        aux("in2", "2"),
+                        aux("in3", "5"),
+                        module,
+                        // primary-output binding (replaces the LHS aux)
+                        aux("total", "total_macro.add3"),
+                        // additional-output bindings
+                        aux("the_min", "total_macro.minval"),
+                        aux("the_max", "total_macro.maxval"),
+                        aux("spread", "the_max - the_min"),
+                    ],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                    macro_spec: None,
+                },
+                macro_model,
+            ],
+            source: Default::default(),
+            ai_information: None,
+        }
+    }
+
+    /// Find the (single) Variable::Module in a model.
+    fn the_module(model: &datamodel::Model) -> &Module {
+        let mods: Vec<&Module> = model
+            .variables
+            .iter()
+            .filter_map(|v| match v {
+                Variable::Module(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            mods.len(),
+            1,
+            "expected exactly one Variable::Module in {:?}; vars: {:?}",
+            model.name,
+            model
+                .variables
+                .iter()
+                .map(|v| v.get_ident().to_string())
+                .collect::<Vec<_>>()
+        );
+        mods[0]
+    }
+
+    /// macros.AC4.5: a multi-output macro triggers BOTH simlin: extensions
+    /// (the additional-outputs on the <macro> and the multi-output
+    /// invocation), and a single-output project triggers NEITHER.
+    #[test]
+    fn multi_output_macro_emits_both_simlin_extensions() {
+        let project = multi_output_macro_project();
+        let xml = project_to_xmile(&project).expect("must serialize");
+
+        assert!(
+            xml.contains(r#"<simlin:additional-outputs names="minval,maxval"/>"#),
+            "multi-output macro must emit the simlin:additional-outputs \
+             extension; got:\n{}",
+            xml
+        );
+        assert!(
+            xml.contains("simlin:macro-invocation"),
+            "multi-output invocation must emit the simlin:macro-invocation \
+             extension; got:\n{}",
+            xml
+        );
+
+        // Contrast: a single-output project emits neither.
+        let single = project_to_xmile(&single_output_macro_project()).unwrap();
+        assert!(!single.contains("simlin:additional-outputs"));
+        assert!(!single.contains("simlin:macro-invocation"));
+    }
+
+    /// macros.AC4.2: a multi-output macro project round-trips through the
+    /// simlin: extensions -- same MacroSpec.additional_outputs, same
+    /// materialized Variable::Module + binding Aux-es, and a second
+    /// serialization is byte-identical.
+    #[test]
+    fn multi_output_macro_round_trips_through_simlin_extensions() {
+        let project = multi_output_macro_project();
+        let xml = project_to_xmile(&project).expect("must serialize");
+        let rt = project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must re-import");
+
+        // The macro keeps its 2-additional-output spec.
+        let m = macro_model(&rt, "add3");
+        let spec = m.macro_spec.as_ref().expect("macro_spec survives");
+        assert_eq!(
+            spec.parameters,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert_eq!(spec.primary_output, "add3");
+        assert_eq!(
+            spec.additional_outputs,
+            vec!["minval".to_string(), "maxval".to_string()],
+            "MacroSpec.additional_outputs must survive the simlin: extension"
+        );
+
+        // The materialized Variable::Module is reconstructed exactly.
+        let main = rt.models.iter().find(|m| m.name == "main").unwrap();
+        let module = the_module(main);
+        assert_eq!(module.ident, "total_macro");
+        assert_eq!(module.model_name, "add3");
+        let mut refs: Vec<(String, String)> = module
+            .references
+            .iter()
+            .map(|r| (r.src.clone(), r.dst.clone()))
+            .collect();
+        refs.sort();
+        assert_eq!(
+            refs,
+            vec![
+                ("in1".to_string(), "total_macro.a".to_string()),
+                ("in2".to_string(), "total_macro.b".to_string()),
+                ("in3".to_string(), "total_macro.c".to_string()),
+            ]
+        );
+
+        // The binding auxes are reconstructed exactly (ASCII period).
+        let total = main.variables.iter().find(|v| v.get_ident() == "total");
+        assert_eq!(
+            scalar_eq(total.expect("total survives")),
+            "total_macro.add3"
+        );
+        let the_min = main.variables.iter().find(|v| v.get_ident() == "the_min");
+        assert_eq!(
+            scalar_eq(the_min.expect("the_min survives")),
+            "total_macro.minval"
+        );
+        let the_max = main.variables.iter().find(|v| v.get_ident() == "the_max");
+        assert_eq!(
+            scalar_eq(the_max.expect("the_max survives")),
+            "total_macro.maxval"
+        );
+        // The unrelated downstream var is untouched.
+        let spread = main.variables.iter().find(|v| v.get_ident() == "spread");
+        assert_eq!(
+            scalar_eq(spread.expect("spread survives")),
+            "the_max - the_min"
+        );
+
+        // Second serialization is byte-identical (byte-stable round-trip).
+        let xml2 = project_to_xmile(&rt).expect("must re-serialize");
+        assert_eq!(xml, xml2, "multi-output round-trip must be byte-stable");
+    }
+
+    /// macros.AC4.4: a multi-output `:`-form `.mdl` survives a cross-format
+    /// conversion `.mdl` -> datamodel -> `.xmile` -> datamodel.
+    #[test]
+    fn multi_output_cross_format_mdl_to_xmile_round_trips() {
+        const MDL: &str = include_str!(
+            "../../../../test/test-models/tests/macro_multi_output/test_macro_multi_output.mdl"
+        );
+        let from_mdl = crate::compat::open_vensim(MDL).expect("macro_multi_output .mdl imports");
+
+        let xml = project_to_xmile(&from_mdl).expect("must serialize to XMILE");
+        let rt = project_from_reader(&mut BufReader::new(xml.as_bytes()))
+            .expect("the XMILE must re-import");
+
+        // The ADD3 macro definition survives with its multi-output spec.
+        let m = macro_model(&rt, "add3");
+        let spec = m.macro_spec.as_ref().expect("macro_spec survives");
+        assert_eq!(
+            spec.parameters,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert_eq!(
+            spec.additional_outputs,
+            vec!["minval".to_string(), "maxval".to_string()]
+        );
+
+        // The invocation survives as the materialized module + bindings.
+        let main = rt.models.iter().find(|m| m.name == "main").unwrap();
+        let module = the_module(main);
+        assert_eq!(module.model_name, "add3");
+        let total = main.variables.iter().find(|v| v.get_ident() == "total");
+        assert_eq!(
+            scalar_eq(total.expect("total survives")),
+            format!("{}.add3", module.ident)
         );
     }
 }
