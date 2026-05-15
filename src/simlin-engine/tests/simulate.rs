@@ -1745,3 +1745,306 @@ TIME STEP = 1 ~~|
         );
     }
 }
+
+// ===========================================================================
+// Phase 4 / Task 3: early validation against the multi-output / arrayed
+// corpus models (THEIL, SSTATS, C-LEARN). Tests only -- a focused early
+// gate; the full tiered corpus harness + Vensim-reference comparison is
+// Phase 7. The two heavy models (the SSTATS COVID model; C-LEARN, ~53k
+// lines) are #[ignore]d with a documented opt-in per the rust.md
+// test-time-budget rules; Theil_2011.mdl compiles+runs in ~40ms so it
+// stays a regular test.
+// ===========================================================================
+
+/// All `Diagnostic`s for a datamodel project, via the salsa pipeline.
+fn collect_project_diagnostics(
+    dm: &simlin_engine::datamodel::Project,
+) -> Vec<simlin_engine::db::Diagnostic> {
+    use simlin_engine::db::{
+        SimlinDb, collect_all_diagnostics, compile_project_incremental,
+        sync_from_datamodel_incremental,
+    };
+    let mut db = SimlinDb::default();
+    let sync_state = sync_from_datamodel_incremental(&mut db, dm, None);
+    let sync = sync_state.to_sync_result();
+    // Drive compilation so the diagnostic accumulators are populated; the
+    // Result is intentionally ignored here (callers inspect diagnostics).
+    let _ = compile_project_incremental(&db, sync.project, "main");
+    collect_all_diagnostics(&db, &sync)
+}
+
+/// Count a model's `Variable::Module`s whose `model_name` is `macro_model`,
+/// plus the binding `Aux`es whose Scalar equation reads `<module>.<output>`
+/// (ASCII period -- the datamodel separator). Returns
+/// `(module_count, binding_aux_count)`.
+fn count_materialized_macro(
+    project: &simlin_engine::datamodel::Project,
+    macro_model: &str,
+) -> (usize, usize) {
+    use simlin_engine::datamodel::{Equation, Variable};
+    let main = project.get_model("main").expect("project has a main model");
+    let module_idents: Vec<String> = main
+        .variables
+        .iter()
+        .filter_map(|v| match v {
+            Variable::Module(m) if m.model_name == macro_model => Some(m.ident.clone()),
+            _ => None,
+        })
+        .collect();
+    let binding_auxes = main
+        .variables
+        .iter()
+        .filter(|v| match v {
+            Variable::Aux(a) => match &a.equation {
+                Equation::Scalar(s) => module_idents
+                    .iter()
+                    .any(|mi| s.starts_with(&format!("{mi}."))),
+                _ => false,
+            },
+            _ => false,
+        })
+        .count();
+    (module_idents.len(), binding_auxes)
+}
+
+/// macros.AC3.3 -- THEIL. The metasd Theil model's 2-input/13-output
+/// `THEIL` multi-output invocation materializes (one `Variable::Module` +
+/// 1 primary + 13 additional binding `Aux`es), compiles, and runs to the
+/// end. ~40ms total, so this is a regular (non-ignored) test.
+#[test]
+fn corpus_theil_multi_output_materializes_and_simulates() {
+    let path = "../../test/metasd/theil-statistics/Theil_2011.mdl";
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    let dm = open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+
+    // THEIL macro imported with the correct 2-input/13-output spec.
+    let theil = dm
+        .models
+        .iter()
+        .find(|m| m.name == "theil" && m.macro_spec.is_some())
+        .expect("THEIL macro must import as a macro-marked model");
+    let spec = theil.macro_spec.as_ref().unwrap();
+    assert_eq!(spec.parameters, vec!["historical", "simulated"]);
+    assert_eq!(
+        spec.additional_outputs.len(),
+        13,
+        "THEIL has 13 `:`-outputs"
+    );
+
+    // The multi-output invocation materialized: one Module + (1 primary +
+    // 13 additional) binding auxes = 14.
+    let (modules, bindings) = count_materialized_macro(&dm, "theil");
+    assert_eq!(modules, 1, "exactly one THEIL module instance");
+    assert_eq!(
+        bindings, 14,
+        "1 primary + 13 additional THEIL binding auxes"
+    );
+
+    // It compiles and runs to the end.
+    let compiled = compile_vm(&dm);
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("THEIL VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("THEIL VM run failed: {e}"));
+    let _ = vm.into_results();
+}
+
+/// macros.AC3.3 -- SSTATS. The metasd COVID model's two
+/// 2-input/10-output `SSTATS` invocations both materialize (each: one
+/// `Variable::Module` + 1 primary + 10 additional binding `Aux`es).
+///
+/// This large real-world COVID model has UNRELATED, non-macro blockers
+/// that prevent it reaching a runnable VM: its `*_data` variables are
+/// unresolved `GET DIRECT/GET XLS DATA` references (no DataProvider /
+/// data files are supplied here), so they compile to
+/// `EmptyEquation`/`UnknownBuiltin` and `compile_project_incremental`
+/// returns `not_simulatable`. Per the phase plan, the assertion is
+/// therefore narrowed to "SSTATS multi-output materialization succeeded
+/// and produced no macro-specific compile diagnostics"; the unrelated
+/// GET-DIRECT-data blocker is reported for Phase-7 tiered-harness scope.
+///
+/// `#[ignore]` (large COVID model).
+// Run with: cargo test --release -- --ignored corpus_sstats_multi_output_materializes
+#[test]
+#[ignore]
+fn corpus_sstats_multi_output_materializes() {
+    let path = "../../test/metasd/covid19-us-homer/homer v8/Covid19US v8.mdl";
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    let dm = open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+
+    // SSTATS macro imported with the correct 2-input/10-output spec.
+    let sstats = dm
+        .models
+        .iter()
+        .find(|m| m.name == "sstats" && m.macro_spec.is_some())
+        .expect("SSTATS macro must import as a macro-marked model");
+    let spec = sstats.macro_spec.as_ref().unwrap();
+    assert_eq!(spec.parameters, vec!["historical", "simulated"]);
+    assert_eq!(
+        spec.additional_outputs.len(),
+        10,
+        "SSTATS has 10 `:`-outputs"
+    );
+
+    // BOTH SSTATS invocations materialized: 2 Module instances, each with
+    // 1 primary + 10 additional binding auxes => 2 modules, 22 bindings.
+    let (modules, bindings) = count_materialized_macro(&dm, "sstats");
+    assert_eq!(
+        modules, 2,
+        "both SSTATS invocations must materialize as module instances"
+    );
+    assert_eq!(
+        bindings, 22,
+        "2 invocations x (1 primary + 10 additional) SSTATS binding auxes"
+    );
+
+    // No macro-specific compile diagnostic (the COVID model's only
+    // blockers are the unrelated unresolved `*_data` GET-DIRECT
+    // references; the SSTATS macro itself must not produce
+    // UnknownBuiltin/BadModelName/BadBuiltinArgs/DuplicateMacroName).
+    use simlin_engine::common::ErrorCode;
+    use simlin_engine::db::DiagnosticError;
+    let macro_codes = [
+        ErrorCode::UnknownBuiltin,
+        ErrorCode::BadModelName,
+        ErrorCode::BadBuiltinArgs,
+        ErrorCode::DuplicateMacroName,
+        ErrorCode::CircularDependency,
+    ];
+    for d in collect_project_diagnostics(&dm) {
+        let code = match &d.error {
+            DiagnosticError::Equation(e) => Some(e.code),
+            DiagnosticError::Model(e) => Some(e.code),
+            _ => None,
+        };
+        if let Some(c) = code
+            && macro_codes.contains(&c)
+        {
+            // The unrelated `*_data` GET-DIRECT references are the only
+            // legitimate UnknownBuiltin/EmptyEquation sources; assert the
+            // diagnostic is on such a variable, not on the SSTATS macro.
+            let var = d.variable.clone().unwrap_or_default();
+            assert!(
+                var.ends_with("_data") || var.contains("_data"),
+                "unexpected macro-specific diagnostic NOT on an unrelated \
+                 `*_data` GET-DIRECT variable: model={} var={:?} {:?}",
+                d.model,
+                d.variable,
+                d.error
+            );
+        }
+    }
+}
+
+/// macros.AC3.3 / the design's "C-LEARN's four macros expand without
+/// macro-specific errors" -- C-LEARN. Its four macros (`SAMPLE UNTIL`,
+/// `SSHAPE`, `RAMP FROM TO`, `INIT`) import as macro-marked models with
+/// the correct `MacroSpec`s.
+///
+/// KNOWN BLOCKER (surfaced by this test, must be tracked): C-LEARN's
+/// uninvoked `INIT(x) = INITIAL(x)` macro trips a FALSE
+/// `recursive macro: init -> init` in `MacroRegistry::build`. The MDL
+/// importer renames the `INITIAL` builtin to `INIT` (the engine's
+/// canonical name for the initial-value intrinsic; `xmile_compat.rs`),
+/// so the stored body becomes `INIT = INIT(x)`. The recursion detector
+/// (`module_functions.rs::collect_called_macros`) then treats the
+/// renamed-builtin `INIT(x)` as a recursive call to the same-named
+/// `init` macro and fails the whole `MacroRegistry::build`, which
+/// CASCADES: with no registry, `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO`
+/// stop shadowing builtins and their call sites then report
+/// `BadBuiltinArgs`/`UnknownBuiltin`. In Vensim the body wrote
+/// `INITIAL` (a distinct name from the macro), so there is no recursion
+/// and C-LEARN runs; the clash is manufactured by the necessary rename.
+/// This contradicts the design's macros.AC6.2 / macros.AC1.7 and must be
+/// fixed at the macro-recursion detector + shadowing precedence; it is
+/// out of Task 3's tests-only scope and is reported for the parent to
+/// file via track-issue (Phase 7 / a macro-followup).
+///
+/// This test asserts only what is verifiable now -- the four macros
+/// IMPORT correctly (the false recursion fires later, at registry build
+/// / compile, not at import) -- and documents the blocker. `#[ignore]`
+/// (C-LEARN is ~53k lines / 1.4 MB; ~4s just to parse).
+// Run with: cargo test --release -- --ignored corpus_clearn_macros_import
+#[test]
+#[ignore]
+fn corpus_clearn_macros_import() {
+    let path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    let dm = open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+
+    // All four C-LEARN macros import as macro-marked models with the
+    // correct MacroSpecs (macros.AC1.7: the uninvoked INIT included).
+    let expect: &[(&str, &[&str])] = &[
+        ("sample_until", &["lasttime", "input", "initval"]),
+        ("sshape", &["xin", "profile"]),
+        (
+            "ramp_from_to",
+            &["xfrom", "xto", "tstart", "tend", "islinear"],
+        ),
+        ("init", &["x"]),
+    ];
+    for (name, params) in expect {
+        let m = dm
+            .models
+            .iter()
+            .find(|m| m.name == *name && m.macro_spec.is_some())
+            .unwrap_or_else(|| {
+                panic!(
+                    "C-LEARN macro {:?} must import as a macro-marked model; \
+                     macro models present: {:?}",
+                    name,
+                    dm.models
+                        .iter()
+                        .filter(|m| m.macro_spec.is_some())
+                        .map(|m| m.name.clone())
+                        .collect::<Vec<_>>()
+                )
+            });
+        let spec = m.macro_spec.as_ref().unwrap();
+        assert_eq!(
+            spec.parameters,
+            params.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            "C-LEARN macro {:?} parameter list",
+            name
+        );
+        assert_eq!(
+            spec.primary_output, *name,
+            "C-LEARN macro {:?} primary output is its own name",
+            name
+        );
+        // All four C-LEARN macros are single-output.
+        assert!(
+            spec.additional_outputs.is_empty(),
+            "C-LEARN macro {:?} is single-output",
+            name
+        );
+    }
+
+    // KNOWN BLOCKER documentation: confirm the false `init -> init`
+    // recursion is exactly the cascade root, so a regression that
+    // changes this surfaces here. (This is asserting the CURRENT, BUGGY
+    // behavior so the test is honest; the fix -- tracked separately --
+    // will turn this into the no-macro-specific-errors assertion the
+    // design's AC6.2 wants.)
+    use simlin_engine::common::ErrorCode;
+    use simlin_engine::db::DiagnosticError;
+    let diags = collect_project_diagnostics(&dm);
+    let has_false_init_recursion = diags.iter().any(|d| match &d.error {
+        DiagnosticError::Model(e) => {
+            e.code == ErrorCode::CircularDependency
+                && e.details
+                    .as_deref()
+                    .is_some_and(|s| s.contains("init -> init"))
+        }
+        _ => false,
+    });
+    assert!(
+        has_false_init_recursion,
+        "expected the documented (tracked) false `recursive macro: \
+         init -> init` blocker -- if this no longer fires, the bug is \
+         fixed and this test must be upgraded to assert NO macro-specific \
+         errors (design macros.AC6.2)"
+    );
+}
