@@ -909,11 +909,41 @@ fn simulates_wrld3_03() {
     assert_eq!(vdf_results.step_count, results.step_count);
 }
 
-// C-LEARN uses Vensim macros (SAMPLE UNTIL, SSHAPE) that the native MDL
-// parser reads but cannot yet expand/inline into the model. Without macro
-// expansion, the macro-generated variables appear as UnknownBuiltin errors
-// and the model is NotSimulatable. Macro expansion is a significant new
-// feature -- parsing is complete but conversion/inlining is not implemented.
+// FULL end-to-end C-LEARN simulation against `Ref.vdf`. Still `#[ignore]`d,
+// but the blocker is NO LONGER macro expansion.
+//
+// After Phases 1-6 + GH #554 (the false `init -> init` macro-registry
+// recursion fix), C-LEARN's four macros (SAMPLE UNTIL, SSHAPE, RAMP FROM TO,
+// INIT) parse, register, and expand with ZERO macro-attributable
+// diagnostics -- this is asserted by `corpus_clearn_macros_import`
+// (macros.AC6.2) and the three `simulates_macro_clearn_*` focused fixtures
+// (macros.AC6.3) exercise each invoked macro's defined behavior. The macro
+// work is DONE.
+//
+// What remains are C-LEARN's *non-macro* blockers, which the design
+// explicitly scopes OUT of the macro work ("tracked separately"):
+// `compile_vm` fails with `NotSimulatable: model 'main' has circular
+// dependencies` before the VM is even constructed. The collected
+// diagnostics (see `corpus_clearn_macros_import`'s compile step) show the
+// concrete non-macro causes, all on the `main` model:
+//   * a model-logic `CircularDependency` on
+//     `main.previous_emissions_intensity_vs_refyr` (NOT the project-level
+//     macro-registry recursion #554 fixed -- this one is attributed to a
+//     real `main` variable);
+//   * `MismatchedDimensions` on `c_in_mixed_layer`,
+//     `heat_in_atmosphere_and_upper_ocean`, `c_in_deep_ocean_net_flow`,
+//     `heat_in_deep_ocean_net_flow` (subscript/dimension issues);
+//   * `UnknownDependency` on `emissions_with_cumulative_constraints` and a
+//     non-time `$` reference surfacing as a `DoesNotExist` on
+//     `"goal_1.5_for_temperature"` (Phase 3's documented-limitation:
+//     deprioritized, surfaces as an ordinary unresolved reference -- NOT a
+//     macro error);
+//   * plus unit-inference warnings (non-fatal).
+// These are tracked separately per the design (the parent should file /
+// confirm tracking issues for the C-LEARN non-macro blockers and full
+// end-to-end C-LEARN simulation -- they are out of scope for the macro
+// work, which is complete). Keep `#[ignore]`d until they are resolved.
+// Run with: cargo test --release -- --ignored simulates_clearn
 #[test]
 #[ignore]
 fn simulates_clearn() {
@@ -1391,6 +1421,57 @@ fn simulates_macro_multi_macros_mdl() {
 fn simulates_macro_trailing_definition_mdl() {
     simulate_mdl_path(
         "../../test/test-models/tests/macro_trailing_definition/test_macro_trailing_definition.mdl",
+    );
+}
+
+// --- macros.AC6.3: focused C-LEARN-macro isolation fixtures ----------------
+//
+// Each of C-LEARN's three *invoked* macros (`SAMPLE UNTIL`, `SSHAPE`,
+// `RAMP FROM TO`) is exercised by a small focused `.mdl` whose `:MACRO:`
+// block is copied VERBATIM from `C-LEARN v77 for Vensim.mdl` and invoked
+// with known constant inputs (>= 2 args so the call is not rewritten to
+// `LOOKUP` -- GH #553). The expected `output.tab` is hand-computed by
+// applying the macro body formula to those inputs (worked out in each
+// fixture's README.md, grounded in the engine's `STEP`/`RAMP`/`INTEG`
+// semantics). C-LEARN's uninvoked `INIT` macro needs no focused model --
+// macros.AC6.2's "parse, register, expand" (`corpus_clearn_macros_import`)
+// covers it (the macros.AC1.7 "defined but never invoked" case).
+//
+// No Vensim DSS reference `.vdf` is checked in for these focused fixtures
+// (authoring one is a documented prerequisite/setup task per the design's
+// "Test prerequisites" note, not implementation work); the formula-derived
+// `output.tab` is the gate. `simulate_mdl_path` prefers `output.tab`/`.dat`
+// already -- if a `.vdf` is later added, a `.vdf`-aware path would prefer it.
+
+/// macros.AC6.3 -- C-LEARN's `SAMPLE UNTIL` macro (a stock that tracks
+/// `input` until `lastTime`, then holds) computes its defined behavior:
+/// `SAMPLE UNTIL(3, 7, 2)` = `[2, 7, 7, 7, 7, 7]` over t = 0..5.
+#[test]
+fn simulates_macro_clearn_sample_until_mdl() {
+    simulate_mdl_path(
+        "../../test/test-models/tests/macro_clearn_sample_until/test_macro_clearn_sample_until.mdl",
+    );
+}
+
+/// macros.AC6.3 -- C-LEARN's `SSHAPE` macro (an S-curve with a macro-local
+/// `input = MIN(1, MAX(0, xin))` clamp) computes its defined behavior on
+/// both `IF THEN ELSE` branches: `SSHAPE(0.8, 2) = 0.92` (upper),
+/// `SSHAPE(0.3, 2) = 0.18` (lower).
+#[test]
+fn simulates_macro_clearn_sshape_mdl() {
+    simulate_mdl_path(
+        "../../test/test-models/tests/macro_clearn_sshape/test_macro_clearn_sshape.mdl",
+    );
+}
+
+/// macros.AC6.3 -- C-LEARN's `RAMP FROM TO` macro (a 7-body-variable
+/// from/to ramp) computes its defined behavior on the linear branch:
+/// `RAMP FROM TO(2, 10, 1, 5, 1)` = `[2, 2, 4, 6, 8, 10, 10]` over
+/// t = 0..6 (a clamped linear ramp from 2 to 10).
+#[test]
+fn simulates_macro_clearn_ramp_from_to_mdl() {
+    simulate_mdl_path(
+        "../../test/test-models/tests/macro_clearn_ramp_from_to/test_macro_clearn_ramp_from_to.mdl",
     );
 }
 
@@ -2082,6 +2163,259 @@ fn corpus_sstats_multi_output_materializes() {
     }
 }
 
+/// Return every *macro-attributable* diagnostic in `diags` for the
+/// already-imported datamodel `dm` -- diagnostics that indicate macro
+/// handling itself (registration, expansion, body compilation) failed, as
+/// opposed to an unrelated non-macro model blocker.
+///
+/// After Phases 1-6 a *correctly* macro-using model produces ZERO
+/// macro-attributable diagnostics: single-output macro invocations are
+/// inlined into the caller and multi-output ones materialize as ordinary
+/// `Variable::Module`s + binding auxes, so the only diagnostics a working
+/// macro pipeline can emit are unrelated (model-logic / unit / dimension)
+/// blockers. There is no macro-specific `ErrorCode`, so a diagnostic is
+/// macro-attributable iff ANY of:
+///
+/// 1. **Macro-registry-build error** -- a project-level (`model` empty,
+///    `variable` `None`) `Model` diagnostic with code `CircularDependency`
+///    or `DuplicateMacroName`. `db_macro_registry::project_macro_registry`
+///    emits this when `MacroRegistry::build` rejects the macro set; an empty
+///    registry then un-shadows every macro builtin (the #554 cascade:
+///    `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO` calls become
+///    `BadBuiltinArgs`/`UnknownBuiltin`). This is distinct from a
+///    *model-logic* circular dependency, which is attributed to a
+///    model/variable.
+/// 2. **Macro-template-body Error** -- an `Error`-severity diagnostic whose
+///    `model` is a macro-marked model's name (its `macro_spec` is `Some`).
+///    The macro body failed to compile/expand. Unit-inference *warnings* on
+///    a macro body (formal-parameter port variables legitimately have no
+///    units) are `Warning` severity and are an allowed non-macro unit-error
+///    blocker, so they are excluded.
+/// 3. **Macro-resolution-failure code** -- a diagnostic whose code is
+///    `UnknownBuiltin`/`BadBuiltinArgs`/`BadModelName`/`DuplicateMacroName`
+///    AND whose `model` is a macro-marked model OR which is project-level. A
+///    bare `UnknownBuiltin`/`UnknownDependency`/`DoesNotExist` on an
+///    ordinary `main` variable (an unrelated builtin, a model-logic
+///    dependency, or Phase 3's deprioritized non-time `$` reference -- which
+///    surfaces as an *ordinary* unresolved-reference diagnostic) is NOT
+///    macro-attributable; the classifier must not mistake it for a macro
+///    error.
+fn macro_attributable_diagnostics<'a>(
+    dm: &simlin_engine::datamodel::Project,
+    diags: &'a [simlin_engine::db::Diagnostic],
+) -> Vec<&'a simlin_engine::db::Diagnostic> {
+    use simlin_engine::common::ErrorCode;
+    use simlin_engine::db::{DiagnosticError, DiagnosticSeverity};
+
+    let macro_models: std::collections::BTreeSet<&str> = dm
+        .models
+        .iter()
+        .filter(|m| m.macro_spec.is_some())
+        .map(|m| m.name.as_str())
+        .collect();
+
+    // Macro-resolution-failure codes: the symptoms of a macro call that did
+    // not resolve to its macro (the registry was empty / the macro name was
+    // not registered), so the call site fell through to builtin/module
+    // resolution and failed there.
+    let resolution_codes = [
+        ErrorCode::UnknownBuiltin,
+        ErrorCode::BadBuiltinArgs,
+        ErrorCode::BadModelName,
+        ErrorCode::DuplicateMacroName,
+    ];
+
+    let code_of = |d: &simlin_engine::db::Diagnostic| match &d.error {
+        DiagnosticError::Equation(e) => Some(e.code),
+        DiagnosticError::Model(e) => Some(e.code),
+        _ => None,
+    };
+    let is_registry_build_error = |d: &simlin_engine::db::Diagnostic| {
+        d.model.is_empty()
+            && d.variable.is_none()
+            && matches!(&d.error, DiagnosticError::Model(_))
+            && matches!(
+                code_of(d),
+                Some(ErrorCode::CircularDependency) | Some(ErrorCode::DuplicateMacroName)
+            )
+    };
+
+    // The #554 cascade is *defined by* a registry-build error: when present,
+    // every macro call un-shadows and fails with a resolution-failure code.
+    // So a resolution-failure code is macro-attributable when it co-occurs
+    // with a registry-build error (the cascade), even on a `main` variable.
+    // Absent a registry error, a lone resolution-failure code on an ordinary
+    // `main` variable is an unrelated builtin/model issue, not a macro error.
+    let registry_error_present = diags.iter().any(&is_registry_build_error);
+
+    diags
+        .iter()
+        .filter(|d| {
+            let code = code_of(d);
+            let is_project_level = d.model.is_empty() && d.variable.is_none();
+            let in_macro_model = macro_models.contains(d.model.as_str());
+
+            // (1) Macro-registry-build error (the #554 cascade class).
+            let registry_build_error = is_registry_build_error(d);
+
+            // (2) Error-severity diagnostic inside a macro template body
+            // (unit *warnings* on a macro body are an allowed non-macro
+            // unit-error blocker -- excluded by the severity check).
+            let macro_body_error = in_macro_model && d.severity == DiagnosticSeverity::Error;
+
+            // (3) Macro-resolution-failure code on a macro model, or
+            // project-level, or co-occurring with a registry-build error
+            // (the #554 cascade). A bare such code on an ordinary `main`
+            // variable with no registry error is an unrelated blocker.
+            let resolution_failure = code.map(|c| resolution_codes.contains(&c)).unwrap_or(false)
+                && (in_macro_model || is_project_level || registry_error_present);
+
+            registry_build_error || macro_body_error || resolution_failure
+        })
+        .collect()
+}
+
+/// The macro-attributable classifier must (a) flag the three macro-error
+/// shapes and (b) NOT flag C-LEARN's allowed non-macro blockers
+/// (model-logic `CircularDependency` on a variable, dimension mismatch,
+/// non-time `$` unresolved reference, a unit *warning* on a macro body).
+/// This pins the classifier so neither the C-LEARN nor the metasd harness
+/// assertion can silently degrade into "flags everything" or "flags
+/// nothing". Uses a real macro-marked datamodel (a tiny inline `.mdl`) so
+/// it is not brittle to `datamodel::Project` struct changes.
+#[test]
+fn macro_attributable_classifier_separates_macro_from_nonmacro() {
+    use simlin_engine::common::{Error, ErrorCode, ErrorKind};
+    use simlin_engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
+
+    // A real macro-marked model named `m` (single-output macro `M`).
+    let dm = open_vensim(
+        "{UTF-8}\n\
+         :MACRO: M(a, b)\n\
+         M = a * b\n\t~\tdmnl\n\t~\t|\n\
+         :END OF MACRO:\n\
+         x= M(2, 3) ~~|\n\
+         INITIAL TIME = 0 ~~|\n\
+         FINAL TIME = 1 ~~|\n\
+         SAVEPER = 1 ~~|\n\
+         TIME STEP = 1 ~~|\n",
+    )
+    .expect("inline macro mdl parses");
+    assert!(
+        dm.models.iter().any(|m| m.macro_spec.is_some()),
+        "fixture must have a macro-marked model"
+    );
+    let macro_model = dm
+        .models
+        .iter()
+        .find(|m| m.macro_spec.is_some())
+        .unwrap()
+        .name
+        .clone();
+
+    let eq = |code: ErrorCode| {
+        DiagnosticError::Equation(simlin_engine::common::EquationError {
+            start: 0,
+            end: 0,
+            code,
+        })
+    };
+    let model_err =
+        |code: ErrorCode| DiagnosticError::Model(Error::new(ErrorKind::Model, code, None));
+
+    // --- (a) The three macro-error shapes MUST be flagged ---
+    let registry_build = Diagnostic {
+        model: String::new(),
+        variable: None,
+        error: model_err(ErrorCode::CircularDependency),
+        severity: DiagnosticSeverity::Error,
+    };
+    let macro_body_error = Diagnostic {
+        model: macro_model.clone(),
+        variable: Some("m".to_string()),
+        error: eq(ErrorCode::UnknownDependency),
+        severity: DiagnosticSeverity::Error,
+    };
+    for d in [&registry_build, &macro_body_error] {
+        let flagged = macro_attributable_diagnostics(&dm, std::slice::from_ref(d));
+        assert_eq!(
+            flagged.len(),
+            1,
+            "this diagnostic must be macro-attributable: {d:?}"
+        );
+    }
+    // The #554 cascade: a registry-build error PLUS the resulting
+    // `UnknownBuiltin` on the macro-invoking `main` variable. Both must be
+    // flagged (the resolution failure is macro-attributable *because* the
+    // registry error is present).
+    let cascade_resolution_failure = Diagnostic {
+        model: "main".to_string(),
+        variable: Some("x".to_string()),
+        error: eq(ErrorCode::UnknownBuiltin),
+        severity: DiagnosticSeverity::Error,
+    };
+    let cascade = [registry_build.clone(), cascade_resolution_failure.clone()];
+    let flagged = macro_attributable_diagnostics(&dm, &cascade);
+    assert_eq!(
+        flagged.len(),
+        2,
+        "the #554 cascade (registry-build error + the resulting \
+         `UnknownBuiltin` on the macro-invoking variable) must BOTH be \
+         macro-attributable; flagged: {flagged:#?}"
+    );
+    // But that same `UnknownBuiltin` on `main.x` ALONE (no registry error)
+    // is an unrelated builtin issue -- NOT macro-attributable.
+    let lone =
+        macro_attributable_diagnostics(&dm, std::slice::from_ref(&cascade_resolution_failure));
+    assert!(
+        lone.is_empty(),
+        "a lone `UnknownBuiltin` on a `main` variable with no registry \
+         error is an unrelated blocker, not macro-attributable: {lone:#?}"
+    );
+
+    // --- (b) C-LEARN's allowed NON-macro blockers must NOT be flagged ---
+    let model_logic_cycle = Diagnostic {
+        model: "main".to_string(),
+        variable: Some("previous_emissions_intensity_vs_refyr".to_string()),
+        error: model_err(ErrorCode::CircularDependency),
+        severity: DiagnosticSeverity::Error,
+    };
+    let dim_mismatch = Diagnostic {
+        model: "main".to_string(),
+        variable: Some("c_in_mixed_layer".to_string()),
+        error: eq(ErrorCode::MismatchedDimensions),
+        severity: DiagnosticSeverity::Error,
+    };
+    // Phase 3's documented limitation: a non-time `$` reference surfaces as
+    // an ordinary unresolved-reference diagnostic on a `main` variable.
+    let non_time_dollar = Diagnostic {
+        model: "main".to_string(),
+        variable: Some("\"goal_1.5_for_temperature\"".to_string()),
+        error: eq(ErrorCode::DoesNotExist),
+        severity: DiagnosticSeverity::Error,
+    };
+    // A unit-inference WARNING on a macro body (formal-parameter port vars
+    // have no units) -- an allowed non-macro unit-error blocker.
+    let macro_body_unit_warning = Diagnostic {
+        model: macro_model.clone(),
+        variable: Some("m".to_string()),
+        error: model_err(ErrorCode::UnitMismatch),
+        severity: DiagnosticSeverity::Warning,
+    };
+    let nonmacro = [
+        model_logic_cycle,
+        dim_mismatch,
+        non_time_dollar,
+        macro_body_unit_warning,
+    ];
+    let flagged = macro_attributable_diagnostics(&dm, &nonmacro);
+    assert!(
+        flagged.is_empty(),
+        "C-LEARN's allowed non-macro blockers must NOT be macro-attributable, \
+         but the classifier flagged: {flagged:#?}"
+    );
+}
+
 /// macros.AC6.2 / macros.AC1.7 -- C-LEARN's four macros (`SAMPLE UNTIL`,
 /// `SSHAPE`, `RAMP FROM TO`, `INIT`) import as macro-marked models with the
 /// correct `MacroSpec`s (including the uninvoked `INIT`, AC1.7), AND the
@@ -2172,38 +2506,33 @@ fn corpus_clearn_macros_import() {
         );
     }
 
-    // #554 (FIXED) regression guard: the macro registry must build with NO
-    // false `recursive macro: init -> init` (and no other macro-registry
-    // `CircularDependency`). Before the fix this fired and CASCADED -- an
-    // empty registry un-shadowed `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO`,
-    // turning every C-LEARN macro call into `BadBuiltinArgs`/`UnknownBuiltin`.
-    // A macro-registry-build error surfaces as a project-level
-    // `DiagnosticError::Model(CircularDependency)` (see
-    // `db_macro_registry::project_macro_registry`); asserting its ABSENCE
-    // proves the #554 macro-attributable cascade is gone. (C-LEARN's
-    // non-macro blockers are out of scope -- we do not assert full compile.)
-    use simlin_engine::common::ErrorCode;
-    use simlin_engine::db::DiagnosticError;
+    // macros.AC6.2: compile C-LEARN via the salsa path, collect every
+    // diagnostic, and assert NO diagnostic is *macro-attributable*. C-LEARN's
+    // known NON-macro blockers (circular deps, dimension mismatches, unit
+    // errors, and a non-time `$` reference -- Phase 3's documented
+    // limitation) are expected and explicitly allowed; the assertion is
+    // specifically that macro handling itself introduced no error. The
+    // classifier (`macro_attributable_diagnostics`, shared with the metasd
+    // corpus harness) catches exactly: a project-level macro-registry build
+    // error (the #554 cascade class -- a registry failure un-shadows
+    // `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO`, turning every call into
+    // `BadBuiltinArgs`/`UnknownBuiltin`), an Error-severity diagnostic inside
+    // a macro template body, and a macro-resolution-failure error code
+    // (`UnknownBuiltin`/`BadBuiltinArgs`/`BadModelName`/`DuplicateMacroName`)
+    // on a macro model or project-level. A bare `UnknownDependency` /
+    // `DoesNotExist` on a `main` variable (the non-time `$` case, model-logic
+    // deps) is NOT macro-attributable -- the classifier deliberately does not
+    // mistake it for a macro error.
     let diags = collect_project_diagnostics(&dm);
-    let macro_registry_cycle: Vec<_> = diags
-        .iter()
-        .filter(|d| match &d.error {
-            // A macro-registry recursion error is project-level (empty
-            // `model`, no `variable`) -- distinct from a model-logic
-            // circular dependency, which is attributed to a model/variable.
-            DiagnosticError::Model(e) => {
-                e.code == ErrorCode::CircularDependency
-                    && d.model.is_empty()
-                    && d.variable.is_none()
-            }
-            _ => false,
-        })
-        .collect();
+    let macro_diags = macro_attributable_diagnostics(&dm, &diags);
     assert!(
-        macro_registry_cycle.is_empty(),
-        "#554 regression: C-LEARN's macro registry must build with no false \
-         recursion (the `INIT = INITIAL(x)` macro must NOT be seen as \
-         `init -> init`); found macro-registry CircularDependency \
-         diagnostic(s): {macro_registry_cycle:?}"
+        macro_diags.is_empty(),
+        "macros.AC6.2: C-LEARN must compile with NO macro-attributable \
+         diagnostic (its non-macro blockers -- circular deps, dim mismatches, \
+         unit errors, the non-time `$` ref -- are out of scope). The #554 fix \
+         removed the false `init -> init` macro-registry recursion and its \
+         `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO` cascade; this guards that \
+         regression. Found {} macro-attributable diagnostic(s): {macro_diags:#?}",
+        macro_diags.len()
     );
 }
