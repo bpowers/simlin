@@ -242,7 +242,13 @@ impl MacroRegistry {
             let from = canonicalize(&model.name).into_owned();
             // A macro could have been dropped from `self.macros` only if it
             // were a duplicate, which `build` already rejected; defensively
-            // skip any model not in the registry rather than panicking.
+            // skip any model not in the registry rather than panicking. This
+            // `continue` fires BEFORE `collect_called_macros` is reached, so
+            // the (impossible) dropped model contributes no edges at all --
+            // no self-edge, and `from` is never used as the #554
+            // `enclosing` self-edge carve-out for it -- which is correct: a
+            // model absent from the registry must not appear in the call
+            // graph.
             if !self.macros.contains_key(&from) {
                 continue;
             }

@@ -656,6 +656,111 @@ sibling=
     );
 }
 
+/// Part A + B together, the `previous` analogue (coverage symmetry with the
+/// `init` test above): a macro whose canonical name is `previous`, whose body
+/// wraps its own same-named `PREVIOUS` intrinsic, INVOKED alongside a sibling
+/// macro, must (1) build the registry with no false `previous -> previous`
+/// recursion, (2) NOT infinite-loop on the invoked wrap-own-intrinsic macro
+/// (it resolves to the `LoadPrev` intrinsic, terminating), and (3) leave the
+/// sibling macro's call expanding correctly (the #554 cascade is gone).
+///
+/// This is the faithful `previous` mirror of the `init` test: the MDL
+/// importer desugars Vensim `SAMPLE IF TRUE(cond,input,init)` to
+/// `... PREVIOUS(SELF, init) ...` (`mdl/xmile_compat.rs`), and the engine's
+/// `Expr1` lowering recognizes only the opcode name `previous`. A user macro
+/// canonically named `PREVIOUS` whose body calls `PREVIOUS(...)` is therefore
+/// the same importer-rename collision as C-LEARN's `INIT = INITIAL(x)`, just
+/// for the other opcode-backed intrinsic in `is_renamed_opcode_intrinsic`.
+/// Before #554's Part B the invoked macro's body `PREVIOUS(x, k)` would
+/// re-resolve to the `previous` macro forever (the registry-build-only
+/// `issue_554_macro_wrapping_same_named_previous_intrinsic_builds_ok` in
+/// `module_functions.rs` exercises Part A; nothing exercised Part B for
+/// `previous` end-to-end until this test).
+///
+/// PREVIOUS's verified signature is `PREVIOUS(input, initial)`: at the first
+/// step the `prev_values` snapshot is not yet valid so it returns `initial`;
+/// thereafter it returns `input`'s previous-timestep value (`vm.rs`'s
+/// `LoadPrev` + `use_prev_fallback`; cross-checked against
+/// `test/previous/output.tab`, e.g. `PREVIOUS(based_on_time, 66.6)` =
+/// `66.6, then the prior TIME`). Here `input` is the constant macro port
+/// `x = 9` and `initial` is `k = 4`, so over the t=0,1,2 run
+/// (INITIAL TIME 0, FINAL TIME 2, TIME STEP 1):
+///   t=0: fallback        => k       = 4
+///   t=1: prev value of x => 9 (const) = 9
+///   t=2: prev value of x => 9 (const) = 9
+/// i.e. `wrapped == [4, 9, 9]`. (`x` is a plain port aux, not module-backed,
+/// so `PREVIOUS(x, k)` compiles straight to `LoadPrev` -- the same intrinsic
+/// path C-LEARN's renamed `SAMPLE IF TRUE` desugar takes.)
+#[test]
+fn issue_554_invoked_macro_wrapping_own_previous_intrinsic_compiles_and_runs() {
+    let source = mdl(r#":MACRO: PREVIOUS(x, k)
+PREVIOUS = PREVIOUS(x, k)
+	~	a
+	~	#554: body wraps the same-canonical-name PREVIOUS intrinsic (the
+		importer's SAMPLE IF TRUE -> PREVIOUS(SELF, init) rename target) --
+		NOT recursion
+	|
+
+:END OF MACRO:
+:MACRO: SSHAPE(a, b)
+SSHAPE = a * b
+	~	a
+	~	sibling macro; its name shadows the 3-arg SSHAPE builtin, so a
+		registry-build failure (the #554 cascade) would make this 2-arg
+		call a BadBuiltinArgs
+	|
+
+:END OF MACRO:
+wrapped=
+	PREVIOUS(9, 4)
+	~
+	~		|
+
+sibling=
+	SSHAPE(4, 5)
+	~
+	~		|
+"#);
+
+    // (1) No macro-registry CircularDependency cascade.
+    assert!(
+        !has_model_error(&diagnostics_for(&source), ErrorCode::CircularDependency),
+        "the #554 false `previous -> previous` recursion must be gone (no \
+         macro-registry CircularDependency); diagnostics: {:?}",
+        diagnostics_for(&source),
+    );
+
+    // (2)+(3) Compiles and runs -- the invoked wrap-own-intrinsic macro
+    // terminates (resolves to the LoadPrev opcode, NOT recursively to the
+    // macro) and the sibling macro expands (no cascade).
+    let wrapped = run_mdl_var(&source, "wrapped");
+    let sibling = run_mdl_var(&source, "sibling");
+
+    // PREVIOUS(x=9, k=4): t=0 => k=4 (fallback, prev_values not yet valid);
+    // t>=1 => x's previous-timestep value = 9 (x is the constant port 9).
+    let expected_wrapped = [4.0, 9.0, 9.0];
+    assert_eq!(
+        wrapped.len(),
+        expected_wrapped.len(),
+        "expected one value per step over the t=0,1,2 run: {wrapped:?}",
+    );
+    for (i, (&got, &want)) in wrapped.iter().zip(expected_wrapped.iter()).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-9,
+            "PREVIOUS(9,4) at step {i} expected {want} (the body's PREVIOUS(x,k) \
+             is the renamed PREVIOUS intrinsic, not a recursive macro call): \
+             got {got}, full series {wrapped:?}",
+        );
+    }
+    // SSHAPE(4,5) = 4*5 = 20 -- proves the sibling macro still shadows the
+    // builtin and expands (the #554 cascade no longer blocks it).
+    assert!(
+        sibling.iter().all(|&v| (v - 20.0).abs() < 1e-9),
+        "SSHAPE(4,5) = 4*5 = 20 -- the sibling macro must still expand \
+         despite the wrap-own-intrinsic macro: {sibling:?}",
+    );
+}
+
 /// macros.AC5.2 end-to-end guard adjacent to the #554 fix: a GENUINELY
 /// self-recursive macro (`FOO = FOO(...)`, `FOO` is NOT an opcode intrinsic)
 /// invoked from `main` must STILL fail to compile with a recursion cycle.
