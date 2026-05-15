@@ -188,13 +188,13 @@ pub struct SourceProject {
     pub model_names: Vec<String>,
     #[returns(ref)]
     pub models: HashMap<String, SourceModel>,
-    /// Macro-registry build error message (`None` when the macro set is
-    /// valid -- the common case). Computed at sync time on the datamodel
-    /// `Vec<Model>`, not here, because `models` is name-keyed and so
-    /// collapses the duplicate / colliding names AC5.3 must detect. See
-    /// `crate::db_macro_registry`.
+    /// `MacroRegistry::build`'s own typed `(ErrorCode, message)` (`None`
+    /// when valid). Computed at sync from the datamodel `Vec<Model>` (not
+    /// here -- `models` is name-keyed, collapsing the AC5.3 duplicate /
+    /// colliding names); the typed code rides through so the downstream
+    /// diagnostic isn't re-tagged from prose. See `crate::db_macro_registry`.
     #[returns(ref)]
-    pub macro_registry_build_error: Option<String>,
+    pub macro_registry_build_error: Option<(crate::common::ErrorCode, String)>,
     /// Whether LTM (Loops That Matter) synthetic variable compilation is
     /// enabled. When true, `compute_layout` allocates slots and
     /// `assemble_module` compiles fragments for LTM variables.
@@ -5956,12 +5956,13 @@ pub fn compile_project_incremental(
     project: SourceProject,
     main_model_name: &str,
 ) -> crate::Result<crate::vm::CompiledSimulation> {
-    // An invalid macro set (AC5.2 cycle / AC5.3 duplicate / collision) is a
-    // project-level failure that must precede per-model processing -- fail
-    // with the registry message rather than a confusing UnknownBuiltin /
-    // unresolved-ref cascade. (Also accumulated as a diagnostic by
-    // `project_macro_registry` for `collect_all_diagnostics`.)
-    if let Some(msg) = &crate::db_macro_registry::project_macro_registry(db, project).build_error {
+    // An invalid macro set (AC5.2 cycle / AC5.3 duplicate / collision) fails
+    // the project-level compile before per-model processing, uniformly as
+    // `NotSimulatable` (the build error's own typed code rides the
+    // diagnostic `project_macro_registry` accumulated -- see that module).
+    if let Some((_code, msg)) =
+        &crate::db_macro_registry::project_macro_registry(db, project).build_error
+    {
         return crate::sim_err!(NotSimulatable, msg.clone());
     }
     match assemble_simulation(db, project, main_model_name) {
