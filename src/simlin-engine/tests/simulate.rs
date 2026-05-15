@@ -1773,10 +1773,31 @@ fn collect_project_diagnostics(
     collect_all_diagnostics(&db, &sync)
 }
 
+/// Pure predicate: is `equation` EXACTLY the `{module_ident}.{output}`
+/// binding form a materialized multi-output aux carries?
+///
+/// Materialization emits `Equation::Scalar(format!("{module_ident}.{output}"))`
+/// verbatim, so the match is exact, not a prefix: split on the FIRST ASCII
+/// `.`; the part before it must equal `module_ident` exactly, and the
+/// remainder must be a single non-empty output segment (non-empty and
+/// containing no further `.`). The first-period split (rather than the
+/// last) plus the "no further period" suffix check together reject a
+/// hypothetical multi-segment reference like `mod.sub.out`; requiring an
+/// exact prefix match rejects an unrelated aux that merely *references* a
+/// module output inside a larger expression (e.g. `mod.out + 1`, or
+/// `other_mod.out`). This avoids the prior `starts_with("{mi}.")`
+/// over-count.
+fn is_module_output_binding(equation: &str, module_ident: &str) -> bool {
+    let Some((prefix, suffix)) = equation.split_once('.') else {
+        return false;
+    };
+    prefix == module_ident && !suffix.is_empty() && !suffix.contains('.')
+}
+
 /// Count a model's `Variable::Module`s whose `model_name` is `macro_model`,
-/// plus the binding `Aux`es whose Scalar equation reads `<module>.<output>`
-/// (ASCII period -- the datamodel separator). Returns
-/// `(module_count, binding_aux_count)`.
+/// plus the binding `Aux`es whose Scalar equation is EXACTLY the
+/// `<module>.<output>` binding form (ASCII period -- the datamodel
+/// separator). Returns `(module_count, binding_aux_count)`.
 fn count_materialized_macro(
     project: &simlin_engine::datamodel::Project,
     macro_model: &str,
@@ -1798,7 +1819,7 @@ fn count_materialized_macro(
             Variable::Aux(a) => match &a.equation {
                 Equation::Scalar(s) => module_idents
                     .iter()
-                    .any(|mi| s.starts_with(&format!("{mi}."))),
+                    .any(|mi| is_module_output_binding(s, mi)),
                 _ => false,
             },
             _ => false,
@@ -1958,8 +1979,10 @@ fn corpus_sstats_multi_output_materializes() {
 /// and C-LEARN runs; the clash is manufactured by the necessary rename.
 /// This contradicts the design's macros.AC6.2 / macros.AC1.7 and must be
 /// fixed at the macro-recursion detector + shadowing precedence; it is
-/// out of Task 3's tests-only scope and is reported for the parent to
-/// file via track-issue (Phase 7 / a macro-followup).
+/// out of Task 3's tests-only scope and is tracked as GitHub issue #554
+/// (Phase 7 / a macro-followup). A future engineer who fixes #554 will
+/// find this pin and must upgrade it to the no-macro-specific-errors
+/// assertion the design's macros.AC6.2 wants.
 ///
 /// This test asserts only what is verifiable now -- the four macros
 /// IMPORT correctly (the false recursion fires later, at registry build
@@ -2025,9 +2048,9 @@ fn corpus_clearn_macros_import() {
     // KNOWN BLOCKER documentation: confirm the false `init -> init`
     // recursion is exactly the cascade root, so a regression that
     // changes this surfaces here. (This is asserting the CURRENT, BUGGY
-    // behavior so the test is honest; the fix -- tracked separately --
-    // will turn this into the no-macro-specific-errors assertion the
-    // design's AC6.2 wants.)
+    // behavior so the test is honest; the fix -- tracked as GitHub issue
+    // #554 -- will turn this into the no-macro-specific-errors assertion
+    // the design's AC6.2 wants.)
     use simlin_engine::common::ErrorCode;
     use simlin_engine::db::DiagnosticError;
     let diags = collect_project_diagnostics(&dm);
@@ -2042,9 +2065,9 @@ fn corpus_clearn_macros_import() {
     });
     assert!(
         has_false_init_recursion,
-        "expected the documented (tracked) false `recursive macro: \
-         init -> init` blocker -- if this no longer fires, the bug is \
-         fixed and this test must be upgraded to assert NO macro-specific \
-         errors (design macros.AC6.2)"
+        "expected the documented false `recursive macro: init -> init` \
+         blocker (tracked as GitHub issue #554) -- if this no longer \
+         fires, #554 is fixed and this test must be upgraded to assert NO \
+         macro-specific errors (design macros.AC6.2)"
     );
 }

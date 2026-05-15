@@ -13,6 +13,18 @@
 //! it (the formatter has a `debug_assert!(output_bindings.is_empty())` -- see
 //! Phase 4).
 //!
+//! A multi-output call is valid only as the *entire* right-hand side of an
+//! equation -- that is the sole position with a well-defined
+//! materialization. The parser nonetheless syntactically accepts the
+//! invalid *nested* form (`y = c + add3(p, q, r : lo, hi)`): the inner
+//! `App` keeps its `output_bindings`. `find_nested_multi_output_call`
+//! enforces the whole-RHS-only rule -- it rejects any `output_bindings`-
+//! bearing `App` in a non-top-level position with a `ConvertError`,
+//! *before* `detect_multi_output_call`. Without it the nested form would
+//! reach the XMILE formatter and panic on the debug-build
+//! `debug_assert!(output_bindings.is_empty())` (and, in a release build,
+//! silently drop the `:`-list outputs).
+//!
 //! A multi-output invocation `total = add3(a, b, c : minv, maxv)` becomes:
 //! - one input-only `Variable::Module` named `{lhs}_macro` (collision-safe,
 //!   serialization-stable -- this is round-tripped, so deliberately NOT the
@@ -104,6 +116,28 @@ impl<'input> ConversionContext<'input> {
             let Some(eq) = self.select_equation(&info.equations) else {
                 continue;
             };
+
+            // Enforce the invariant the whole module relies on: a
+            // multi-output call may appear ONLY as the entire RHS of an
+            // equation (the sole position with a well-defined
+            // materialization). The parser, however, ACCEPTS the invalid
+            // nested form (`y = c + ADD3(p, q, r : lo, hi)`) -- the inner
+            // `Expr::App` keeps its `output_bindings`. Reject any
+            // `output_bindings`-bearing `App` in a NON-top-level position
+            // here, with an actionable diagnostic; otherwise it would slip
+            // past `detect_multi_output_call` (which only matches a
+            // whole-RHS `App`) and reach the XMILE formatter, where it
+            // PANICS on the Phase-2 `debug_assert!(output_bindings
+            // .is_empty())` in a debug build and SILENTLY drops the
+            // `:`-list outputs in a release build.
+            if let Some(nested_macro) = find_nested_multi_output_call(&eq.equation) {
+                return Err(ConvertError::Other(format!(
+                    "multi-output call to `{}` may only appear as the entire \
+                     right-hand side of an equation",
+                    nested_macro
+                )));
+            }
+
             let Some(call) = detect_multi_output_call(key, &eq.equation) else {
                 continue;
             };
@@ -266,8 +300,16 @@ impl<'input> ConversionContext<'input> {
 
 /// If `eq` is a top-level multi-output macro invocation
 /// (`Regular(lhs, App(name, _, args, Symbol, output_bindings, _))` with a
-/// non-empty `output_bindings`), extract it. A multi-output call cannot
-/// legally be a sub-expression, so only the whole RHS is inspected.
+/// non-empty `output_bindings`), extract it.
+///
+/// Only the whole RHS is inspected here: valid Vensim only ever emits a
+/// multi-output call as the entire right-hand side of an equation (the sole
+/// position with a well-defined materialization). The *nested* form is
+/// syntactically accepted by the parser but is invalid; it is rejected with
+/// a `ConvertError` by [`find_nested_multi_output_call`] (run as a guard in
+/// [`ConversionContext::materialize_multi_output_invocations`] *before* this
+/// detection), so by the time a non-`None` result here is materialized the
+/// invariant has already been enforced -- it is no longer merely asserted.
 fn detect_multi_output_call<'a, 'input>(
     symbol_key: &str,
     eq: &'a MdlEquation<'input>,
@@ -287,6 +329,80 @@ fn detect_multi_output_call<'a, 'input>(
         args,
         output_bindings,
     })
+}
+
+/// Find an `Expr::App` with a non-empty `output_bindings` (a multi-output
+/// macro call) anywhere OTHER THAN the top-level RHS position of `eq`,
+/// returning the offending macro's raw name.
+///
+/// A multi-output call is only valid as the *entire* right-hand side of an
+/// equation -- that is the sole position [`detect_multi_output_call`]
+/// matches and the sole one with a well-defined materialization (a Module
+/// plus the primary/additional binding auxes). The parser, however,
+/// syntactically accepts the invalid nested form (`y = c + ADD3(p, q, r :
+/// lo, hi)`): the inner `App` retains its `output_bindings`. This guard
+/// enforces the whole-RHS-only rule that `detect_multi_output_call`'s doc
+/// describes, turning what would otherwise be a debug-build panic (the
+/// Phase-2 `debug_assert!(output_bindings.is_empty())` in the XMILE
+/// formatter) / release-build silent `:`-output loss into a clean
+/// `ConvertError`.
+///
+/// The top-level whole-RHS `App` that legitimately IS a multi-output call is
+/// deliberately NOT flagged: when the RHS root is such an `App`, only its
+/// `args` and `output_bindings` sub-expressions are scanned (a multi-output
+/// call nested *inside an argument* of another multi-output call is still
+/// invalid). For any other RHS root, the entire expression tree is scanned.
+/// A non-`Regular` equation has no expression RHS, so nothing to scan.
+///
+/// The variant coverage mirrors `helpers::rewrite_dollar_time` (the Phase-2
+/// recursion precedent): `Op1`/`Paren` recurse into the inner expr,
+/// `Op2` into both sides, `App` into every arg *and* every output binding;
+/// the leaf variants (`Var`/`Const`/`Literal`/`Na`) terminate.
+fn find_nested_multi_output_call<'a>(eq: &'a MdlEquation<'_>) -> Option<&'a str> {
+    let MdlEquation::Regular(_lhs, expr) = eq else {
+        return None;
+    };
+    match expr {
+        // The whole RHS *is* a multi-output call: this is the legitimate
+        // form `detect_multi_output_call` will materialize. The root App
+        // itself is not an error, but a multi-output call nested inside one
+        // of its arguments or `:`-output expressions still is.
+        Expr::App(_, _, args, CallKind::Symbol, output_bindings, _)
+            if !output_bindings.is_empty() =>
+        {
+            args.iter()
+                .chain(output_bindings.iter())
+                .find_map(find_nested_multi_output_call_in_expr)
+        }
+        // Any other RHS root: a multi-output call anywhere in the tree is a
+        // nested (illegal) occurrence.
+        other => find_nested_multi_output_call_in_expr(other),
+    }
+}
+
+/// Recursively scan an expression subtree for an `Expr::App` with a
+/// non-empty `output_bindings`, returning the offending macro's raw name.
+/// Every position reached here is, by construction, NOT the top-level RHS,
+/// so any such `App` is an illegal nested multi-output call.
+fn find_nested_multi_output_call_in_expr<'a>(expr: &'a Expr<'_>) -> Option<&'a str> {
+    match expr {
+        Expr::App(name, _subscripts, args, kind, output_bindings, _) => {
+            if matches!(kind, CallKind::Symbol) && !output_bindings.is_empty() {
+                return Some(name.as_ref());
+            }
+            // Even an ordinary call's arguments / a non-multi-output App's
+            // children may contain a nested multi-output call.
+            args.iter()
+                .chain(output_bindings.iter())
+                .find_map(find_nested_multi_output_call_in_expr)
+        }
+        Expr::Op1(_, inner, _) | Expr::Paren(inner, _) => {
+            find_nested_multi_output_call_in_expr(inner)
+        }
+        Expr::Op2(_, left, right, _) => find_nested_multi_output_call_in_expr(left)
+            .or_else(|| find_nested_multi_output_call_in_expr(right)),
+        Expr::Var(_, _, _) | Expr::Const(_, _) | Expr::Literal(_, _) | Expr::Na(_) => None,
+    }
 }
 
 /// Documentation string for the materialized primary-output binding aux,

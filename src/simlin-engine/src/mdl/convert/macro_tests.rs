@@ -723,3 +723,52 @@ r = 3
 ";
     assert_multi_output_convert_error_names(mdl, "add3");
 }
+
+#[test]
+fn nested_multi_output_call_is_an_error_naming_the_macro() {
+    // The parser ACCEPTS the invalid nested form (`y = 1 + ADD3(p, q, r :
+    // lo, hi)`) -- the inner `Expr::App` keeps its `output_bindings`. A
+    // multi-output call may ONLY be the entire RHS of an equation: only the
+    // whole-RHS form has a well-defined materialization (one Module + the
+    // primary/additional binding auxes). The nested form has no such
+    // materialization. Before the multi-output guard was added, this slipped
+    // past `detect_multi_output_call` (which matches only a whole-RHS App)
+    // and reached the XMILE formatter, where it PANICKED on the Phase-2
+    // `debug_assert!(output_bindings.is_empty())` in a debug/test build, and
+    // SILENTLY dropped the `:`-list outputs (`lo`/`hi`) in a release build.
+    // The converter must instead reject it with a clean `ConvertError`
+    // naming the macro and conveying the whole-RHS-only rule -- and must NOT
+    // panic.
+    let mdl = ":MACRO: ADD3(a, b, c : minval, maxval)
+ADD3 = a + b + c
+~ ~|
+minval = MIN(a, MIN(b, c))
+~ ~|
+maxval = MAX(a, MAX(b, c))
+~ ~|
+:END OF MACRO:
+y = 1 + ADD3(p, q, r : lo, hi)
+~ ~|
+p = 1
+~ ~|
+q = 2
+~ ~|
+r = 3
+~ ~|
+\\\\\\---///
+";
+    // `expect_err` (inside the helper) is itself the no-panic assertion: if
+    // the nested form panicked (the old debug/test behavior), the test would
+    // abort here instead of returning a clean Err.
+    assert_multi_output_convert_error_names(mdl, "add3");
+
+    // The diagnostic must convey the whole-RHS-only rule so the modeler
+    // knows *why* it was rejected (not merely that something failed).
+    let err = convert_mdl(mdl).expect_err("a nested multi-output call must fail to convert");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("right-hand side") || msg.contains("right hand side"),
+        "the ConvertError must explain the whole-right-hand-side-only rule; got: {:?}",
+        err.to_string()
+    );
+}
