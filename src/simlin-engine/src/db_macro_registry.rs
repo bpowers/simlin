@@ -34,12 +34,14 @@
 //! under the per-file line cap (`scripts/lint-project.sh` rule 2); callers
 //! in the `db` submodules reach it via `crate::db_macro_registry::...`.
 
+use std::collections::HashMap;
+
 use salsa::Accumulator;
 
 use crate::datamodel;
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceProject,
-    reconstruct_variable,
+    SourceVariable, reconstruct_variable,
 };
 
 /// The result of building the per-project macro registry: the (possibly
@@ -181,6 +183,61 @@ pub(crate) fn project_macro_registry(db: &dyn Db, project: SourceProject) -> Mac
         registry,
         build_error: None,
     }
+}
+
+/// Map every body `SourceVariable` of a macro-marked model to that model's
+/// name (#554).
+///
+/// `parse_source_variable_impl` needs "is this variable a macro body, and
+/// which macro?" to thread the enclosing-macro context into
+/// `BuiltinVisitor` (so a macro body's renamed same-named `init`/`previous`
+/// builtin resolves to the intrinsic instead of recursing into the like-named
+/// macro). `SourceVariable.model_name` does NOT answer this -- it is a
+/// *Module* variable's referenced target model (empty for non-Module vars,
+/// see `db::source_variable_from_datamodel`), not the owning model -- and a
+/// per-parse reverse scan of every model would be O(vars x models). This
+/// salsa-tracked query builds the reverse map once per project (memoized;
+/// only macro-marked models contribute, and they are few and small), so the
+/// hot `parse_source_variable_with_module_context` does a single map lookup.
+///
+/// Keyed on `SourceProject`, so it is recomputed only when the project's
+/// models change. Non-macro models contribute nothing, so an ordinary
+/// (macro-free) project yields an empty map and zero per-parse overhead.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn macro_body_owner(
+    db: &dyn Db,
+    project: SourceProject,
+) -> HashMap<SourceVariable, String> {
+    let mut owner: HashMap<SourceVariable, String> = HashMap::new();
+    for source_model in project.models(db).values() {
+        if source_model.macro_spec(db).is_none() {
+            continue;
+        }
+        let model_name = source_model.name(db).clone();
+        for svar in source_model.variables(db).values() {
+            owner.insert(*svar, model_name.clone());
+        }
+    }
+    owner
+}
+
+/// The owning macro model's name when `var` is a body variable of a
+/// macro-marked model, else `None` (#554).
+///
+/// `parse_source_variable_impl` threads this into `BuiltinVisitor` as
+/// `enclosing_model` so the same-named-opcode-intrinsic exception fires: a
+/// macro body's renamed `init`/`previous` builtin (the importer's
+/// `INITIAL`->`INIT` / `SAMPLE IF TRUE`->`PREVIOUS` rename) resolves to the
+/// intrinsic instead of recursing into the like-named macro. This is a thin
+/// reader of the salsa-cached [`macro_body_owner`] map -- `parse` already
+/// memoizes, and `SourceVariable.model_name` cannot answer this (it is a
+/// *Module* variable's referenced target, empty for non-Module vars).
+pub(crate) fn enclosing_macro_for_var(
+    db: &dyn Db,
+    project: SourceProject,
+    var: SourceVariable,
+) -> Option<&str> {
+    macro_body_owner(db, project).get(&var).map(|s| s.as_str())
 }
 
 #[cfg(test)]

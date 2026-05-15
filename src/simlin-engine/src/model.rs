@@ -905,6 +905,11 @@ impl ModelStage0 {
             collect_module_idents(&x_model.variables, &macro_registry)
         };
 
+        // #554: a macro-marked model's body variables get the model name as
+        // `enclosing_model` so a renamed `init`/`previous` builtin inside the
+        // like-named macro resolves to the intrinsic, not the macro.
+        let enclosing_model: Option<&str> =
+            x_model.macro_spec.as_ref().map(|_| x_model.name.as_str());
         let mut variable_list: Vec<VariableStage0> = x_model
             .variables
             .iter()
@@ -917,6 +922,7 @@ impl ModelStage0 {
                     |mi| Ok(Some(mi.clone())),
                     Some(&module_idents),
                     Some(&macro_registry),
+                    enclosing_model,
                 )
             })
             .collect();
@@ -992,6 +998,10 @@ impl ModelStage0 {
         module_ident_list.sort();
         let module_ident_context = db::ModuleIdentContext::new(salsa_db, module_ident_list);
 
+        // #554: macro-body fallback (non-salsa-synced vars) also resolves a
+        // renamed same-named `init`/`previous` to the intrinsic.
+        let enclosing_model: Option<&str> =
+            x_model.macro_spec.as_ref().map(|_| x_model.name.as_str());
         for dm_var in &x_model.variables {
             let canonical_name = canonicalize(dm_var.get_ident());
             if let Some(source_var) = source_vars.get(canonical_name.as_ref()) {
@@ -1012,6 +1022,7 @@ impl ModelStage0 {
                     |mi| Ok(Some(mi.clone())),
                     Some(&module_idents),
                     Some(&macro_registry),
+                    enclosing_model,
                 ));
             }
         }

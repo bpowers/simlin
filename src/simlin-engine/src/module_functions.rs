@@ -80,6 +80,40 @@ pub(crate) fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
     Some(args)
 }
 
+/// Whether `canonical` names an opcode-backed engine *intrinsic* that the
+/// Vensim MDL importer's builtin-rename can collide with a same-canonical-name
+/// user macro.
+///
+/// This set is exactly `{init, previous}`, and it is the SINGLE SOURCE OF
+/// TRUTH shared by the macro-recursion check here (`collect_called_macros`,
+/// which must not record a false `self -> self` edge for such a wrap) and the
+/// `builtins_visitor` macro-expansion precedence (which must resolve such a
+/// call to the intrinsic, not recurse into the macro forever). Keeping one
+/// predicate guarantees the two sites agree by construction.
+///
+/// Why these two names specifically (cross-ref #554):
+/// - `ast/expr1.rs` lowers exactly two opcode-backed intrinsics by name:
+///   `"init"` (`Init`, `LoadInitial`) and `"previous"` (`Previous`,
+///   `LoadPrev`). They are the only builtins with the dedicated
+///   per-call temp-arg routing in `builtins_visitor::BuiltinVisitor::walk`
+///   (`init_needs_temp_arg` / `previous_needs_temp_arg`).
+/// - The MDL importer (`mdl/xmile_compat.rs`) renames the Vensim builtins
+///   `INITIAL` / `ACTIVE INITIAL` / `REINITIAL` to `INIT`, and desugars
+///   `SAMPLE IF TRUE(...)` to `... PREVIOUS(SELF, init)`. Because the engine's
+///   `Expr1` lowering recognizes only the short opcode names (`init`, not
+///   `initial`), this rename is *necessary* -- and it manufactures a name
+///   collision when a user macro is itself canonically named `init` or
+///   `previous` and its body invokes that Vensim builtin (C-LEARN's
+///   `:MACRO: INIT(x) ... INIT = INITIAL(x)`).
+///
+/// Other importer renames (e.g. `INTEGER -> INT`, `VMAX -> MAX`) target
+/// ordinary `is_builtin_fn` builtins or stdlib modules with no special walk()
+/// routing, so a same-named-macro wrap of those is not a false *recursion* in
+/// the same way and is intentionally NOT in this set.
+pub(crate) fn is_renamed_opcode_intrinsic(canonical: &str) -> bool {
+    matches!(canonical, "init" | "previous")
+}
+
 /// Build a [`ModuleFunctionDescriptor`] for a stdlib module-function.
 ///
 /// Called *after* `rewrite_alias_module_call` has normalized aliases, so
@@ -225,7 +259,7 @@ impl MacroRegistry {
                     continue;
                 };
                 let mut called: std::collections::BTreeSet<String> = Default::default();
-                collect_called_macros(&ast, &self.macros, &mut called);
+                collect_called_macros(&ast, &from, &self.macros, &mut called);
                 if let Some(set) = edges.get_mut(&from) {
                     set.extend(called);
                 }
@@ -243,9 +277,32 @@ impl MacroRegistry {
 }
 
 /// Walk an `Expr0` AST and record every `App` whose canonicalized function
-/// name is a key in `macros` (i.e. resolves to a registered macro).
+/// name is a key in `macros` (i.e. resolves to a registered macro), producing
+/// the macro-call edges out of `enclosing` (the canonical name of the macro
+/// whose body this AST is).
+///
+/// #554 exception (precisely scoped): a call is NOT recorded as a macro edge
+/// when the called name canonicalizes to `enclosing`'s OWN canonical name AND
+/// that name is an opcode-backed engine intrinsic
+/// ([`is_renamed_opcode_intrinsic`] -- `init`/`previous`). Such a call is the
+/// MDL importer's *renamed builtin* (`INITIAL` -> `INIT`,
+/// `SAMPLE IF TRUE` -> `PREVIOUS`), not genuine self-recursion: Vensim macros
+/// cannot recurse, and the source wrote the distinct builtin name. Resolving
+/// it to the intrinsic terminates (the `builtins_visitor` half, sharing
+/// [`is_renamed_opcode_intrinsic`], makes the same call resolve to the opcode
+/// rather than re-entering the macro), so recording an `enclosing -> enclosing`
+/// self-edge here would be the #554 false positive that fails the *whole*
+/// `MacroRegistry::build` and un-shadows the project's other macros.
+///
+/// The suppression is strictly `called-canonical == enclosing AND
+/// is_renamed_opcode_intrinsic(called-canonical)`: a *different* macro that
+/// merely happens to be named after an intrinsic still produces a real edge
+/// (so `init -> previous -> init`, A->B->A by intrinsic names, is still a
+/// rejected cycle), and a genuinely self-recursive *non*-intrinsic macro
+/// (`foo = foo(x)`) still records its self-edge (macros.AC5.2 unweakened).
 fn collect_called_macros(
     expr: &Expr0,
+    enclosing: &str,
     macros: &HashMap<String, ModuleFunctionDescriptor>,
     out: &mut std::collections::BTreeSet<String>,
 ) {
@@ -256,36 +313,41 @@ fn collect_called_macros(
         Var(_, _) => {}
         App(UntypedBuiltinFn(func, args), _) => {
             let canonical = canonicalize(func);
-            if macros.contains_key(canonical.as_ref()) {
+            // #554: suppress ONLY the same-named-opcode-intrinsic self-edge.
+            // Any other macro-resolving call (including a self-call of a
+            // non-intrinsic macro, preserving macros.AC5.2) records its edge.
+            let is_renamed_intrinsic_self_wrap =
+                canonical.as_ref() == enclosing && is_renamed_opcode_intrinsic(canonical.as_ref());
+            if !is_renamed_intrinsic_self_wrap && macros.contains_key(canonical.as_ref()) {
                 out.insert(canonical.into_owned());
             }
             for arg in args {
-                collect_called_macros(arg, macros, out);
+                collect_called_macros(arg, enclosing, macros, out);
             }
         }
         Subscript(_, args, _) => {
             for idx in args {
                 match idx {
                     IndexExpr0::Range(l, r, _) => {
-                        collect_called_macros(l, macros, out);
-                        collect_called_macros(r, macros, out);
+                        collect_called_macros(l, enclosing, macros, out);
+                        collect_called_macros(r, enclosing, macros, out);
                     }
-                    IndexExpr0::Expr(e) => collect_called_macros(e, macros, out),
+                    IndexExpr0::Expr(e) => collect_called_macros(e, enclosing, macros, out),
                     IndexExpr0::Wildcard(_)
                     | IndexExpr0::StarRange(_, _)
                     | IndexExpr0::DimPosition(_, _) => {}
                 }
             }
         }
-        Op1(_, r, _) => collect_called_macros(r, macros, out),
+        Op1(_, r, _) => collect_called_macros(r, enclosing, macros, out),
         Op2(_, l, r, _) => {
-            collect_called_macros(l, macros, out);
-            collect_called_macros(r, macros, out);
+            collect_called_macros(l, enclosing, macros, out);
+            collect_called_macros(r, enclosing, macros, out);
         }
         If(cond, t, f, _) => {
-            collect_called_macros(cond, macros, out);
-            collect_called_macros(t, macros, out);
-            collect_called_macros(f, macros, out);
+            collect_called_macros(cond, enclosing, macros, out);
+            collect_called_macros(t, enclosing, macros, out);
+            collect_called_macros(f, enclosing, macros, out);
         }
     }
 }
@@ -589,5 +651,127 @@ mod tests {
             .expect("a non-recursive macro-calls-macro project must build");
         assert!(registry.resolve_macro("a").is_some());
         assert!(registry.resolve_macro("b").is_some());
+    }
+
+    // --- #554: a macro that wraps a same-canonical-name opcode intrinsic ---
+    //
+    // The MDL importer must rename the Vensim `INITIAL` builtin to `INIT`
+    // (`xmile_compat.rs::format_function_name`; the engine's `Expr1` lowering
+    // recognizes only the opcode name `init`, not `initial`). So C-LEARN's
+    // uninvoked `:MACRO: INIT(x) ... INIT = INITIAL(x)` is stored as the
+    // datamodel macro body `init = init(x)`. The `init` call there is the
+    // renamed intrinsic, NOT a recursive call -- Vensim macros cannot recurse
+    // and the source wrote the distinct name `INITIAL`. Recording an
+    // `init -> init` self-edge for it is the #554 false positive; it failed
+    // the whole `MacroRegistry::build` (and the empty registry then un-shadowed
+    // every other macro -- the cascade).
+
+    #[test]
+    fn issue_554_macro_wrapping_same_named_init_intrinsic_builds_ok() {
+        // Exactly the #554 shape: a macro whose canonical name (`init`) equals
+        // an opcode-backed engine intrinsic, whose body is `init = init(x)`
+        // (the importer-renamed `INITIAL(x)`), PLUS another macro. The
+        // registry must build (no false `init -> init` CircularDependency) and
+        // BOTH macros must resolve, proving the cascade that blocked C-LEARN's
+        // other macros (SSHAPE/SAMPLE UNTIL/RAMP FROM TO) is gone.
+        let models = vec![
+            plain_model("main"),
+            macro_model("init", &["x"], "init(x)"),
+            macro_model("sshape", &["xin", "profile"], "xin + profile"),
+        ];
+        let registry = MacroRegistry::build(&models).expect(
+            "a macro wrapping the same-named `init` opcode intrinsic is NOT \
+             recursive (#554): the body's `init(x)` is the importer-renamed \
+             `INITIAL(x)` builtin, which resolves to the intrinsic and \
+             terminates -- the registry must build",
+        );
+        assert!(
+            registry.resolve_macro("init").is_some(),
+            "the `init` macro itself must still be registered"
+        );
+        assert!(
+            registry.resolve_macro("sshape").is_some(),
+            "the OTHER macro must resolve -- the #554 false self-edge must \
+             not fail the whole registry and un-shadow sibling macros"
+        );
+    }
+
+    #[test]
+    fn issue_554_macro_wrapping_same_named_previous_intrinsic_builds_ok() {
+        // The `previous` analogue: Vensim `SAMPLE IF TRUE(cond,input,init)`
+        // desugars to `... PREVIOUS(SELF, init) ...` (`xmile_compat.rs`), so a
+        // macro named `PREVIOUS` whose body uses it stores a same-named
+        // `previous(...)` call. `previous` is the other opcode-backed
+        // intrinsic with dedicated walk() routing, so it is in the same
+        // suppression set as `init`.
+        let models = vec![
+            plain_model("main"),
+            macro_model("previous", &["x"], "previous(x, 0)"),
+        ];
+        let registry = MacroRegistry::build(&models).expect(
+            "a macro wrapping the same-named `previous` opcode intrinsic is \
+             NOT recursive (#554)",
+        );
+        assert!(registry.resolve_macro("previous").is_some());
+    }
+
+    #[test]
+    fn issue_554_exception_does_not_weaken_ac5_2_genuine_self_recursion() {
+        // CRITICAL guard (macros.AC5.2 must stay unweakened): a macro `foo`
+        // whose body is `foo = foo(x)` where `foo` is NOT an opcode intrinsic
+        // is GENUINE self-recursion (Vensim wrote the macro name itself, not a
+        // renamed builtin) and MUST still be a CircularDependency. The #554
+        // exception is scoped to the opcode-intrinsic-same-name case only.
+        let models = vec![macro_model("foo", &["x"], "foo(x)")];
+        let err = MacroRegistry::build(&models).expect_err(
+            "a genuinely self-recursive non-intrinsic macro must STILL fail \
+             registry build -- the #554 exception must not weaken AC5.2",
+        );
+        assert_eq!(
+            err.code,
+            crate::common::ErrorCode::CircularDependency,
+            "genuine self-recursion must remain CircularDependency"
+        );
+        let details = err.get_details().unwrap_or_default();
+        assert!(
+            details.contains("foo"),
+            "the cycle error must still name the recursive macro: {:?}",
+            details
+        );
+    }
+
+    #[test]
+    fn issue_554_exception_does_not_weaken_ac5_2_mutual_recursion() {
+        // The mutual-recursion guard: A -> B -> A by non-intrinsic names must
+        // still be rejected. (A separate guard from the inline `ac5_2_*`
+        // tests, kept adjacent to the #554 exception so a future loosening of
+        // the exception that also breaks mutual recursion is caught here.)
+        let models = vec![
+            macro_model("alpha", &["x"], "beta(x)"),
+            macro_model("beta", &["y"], "alpha(y)"),
+        ];
+        let err = MacroRegistry::build(&models)
+            .expect_err("non-intrinsic mutual recursion must STILL fail");
+        assert_eq!(err.code, crate::common::ErrorCode::CircularDependency);
+    }
+
+    #[test]
+    fn issue_554_macro_calling_a_different_intrinsic_named_macro_is_recursion() {
+        // Scope guard: the exception is `call-canonical == enclosing-canonical
+        // AND in the intrinsic set`. A macro `init` that calls a DIFFERENT
+        // macro which is also named after an intrinsic (`previous`) is a real
+        // macro-to-macro edge (`init -> previous`), and if `previous` calls
+        // `init` back, that A->B->A cycle MUST still be rejected. Only the
+        // *self*-edge to the *same-named* intrinsic is suppressed.
+        let models = vec![
+            macro_model("init", &["x"], "previous(x, 0)"),
+            macro_model("previous", &["y"], "init(y)"),
+        ];
+        let err = MacroRegistry::build(&models).expect_err(
+            "init -> previous -> init is a genuine macro cycle and must fail \
+             even though both names are intrinsic names (the suppression is \
+             self-edge-only)",
+        );
+        assert_eq!(err.code, crate::common::ErrorCode::CircularDependency);
     }
 }

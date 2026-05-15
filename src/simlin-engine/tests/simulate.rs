@@ -2082,36 +2082,39 @@ fn corpus_sstats_multi_output_materializes() {
     }
 }
 
-/// macros.AC3.3 / the design's "C-LEARN's four macros expand without
-/// macro-specific errors" -- C-LEARN. Its four macros (`SAMPLE UNTIL`,
-/// `SSHAPE`, `RAMP FROM TO`, `INIT`) import as macro-marked models with
-/// the correct `MacroSpec`s.
+/// macros.AC6.2 / macros.AC1.7 -- C-LEARN's four macros (`SAMPLE UNTIL`,
+/// `SSHAPE`, `RAMP FROM TO`, `INIT`) import as macro-marked models with the
+/// correct `MacroSpec`s (including the uninvoked `INIT`, AC1.7), AND the
+/// macro registry builds with NO macro-specific errors -- in particular no
+/// false `recursive macro: init -> init` from C-LEARN's
+/// `:MACRO: INIT(x) ... INIT = INITIAL(x)`.
 ///
-/// KNOWN BLOCKER (surfaced by this test, must be tracked): C-LEARN's
-/// uninvoked `INIT(x) = INITIAL(x)` macro trips a FALSE
-/// `recursive macro: init -> init` in `MacroRegistry::build`. The MDL
-/// importer renames the `INITIAL` builtin to `INIT` (the engine's
-/// canonical name for the initial-value intrinsic; `xmile_compat.rs`),
-/// so the stored body becomes `INIT = INIT(x)`. The recursion detector
-/// (`module_functions.rs::collect_called_macros`) then treats the
-/// renamed-builtin `INIT(x)` as a recursive call to the same-named
-/// `init` macro and fails the whole `MacroRegistry::build`, which
-/// CASCADES: with no registry, `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO`
-/// stop shadowing builtins and their call sites then report
-/// `BadBuiltinArgs`/`UnknownBuiltin`. In Vensim the body wrote
-/// `INITIAL` (a distinct name from the macro), so there is no recursion
-/// and C-LEARN runs; the clash is manufactured by the necessary rename.
-/// This contradicts the design's macros.AC6.2 / macros.AC1.7 and must be
-/// fixed at the macro-recursion detector + shadowing precedence; it is
-/// out of Task 3's tests-only scope and is tracked as GitHub issue #554
-/// (Phase 7 / a macro-followup). A future engineer who fixes #554 will
-/// find this pin and must upgrade it to the no-macro-specific-errors
-/// assertion the design's macros.AC6.2 wants.
+/// HISTORY (#554, FIXED): the MDL importer necessarily renames the Vensim
+/// `INITIAL` builtin to `INIT` (`mdl/xmile_compat.rs`; `Expr1` lowering
+/// recognizes only the opcode name `init`, not `initial`), so C-LEARN's
+/// uninvoked macro stores the datamodel body `init = init(x)`. The recursion
+/// detector used to treat that renamed-builtin call as a recursive
+/// `init -> init` macro edge and fail the WHOLE `MacroRegistry::build`,
+/// which CASCADED: with an empty registry, `SSHAPE`/`SAMPLE UNTIL`/
+/// `RAMP FROM TO` stopped shadowing the builtins and their call sites then
+/// reported `BadBuiltinArgs`/`UnknownBuiltin`. A single false positive
+/// blocked ALL of C-LEARN's macro expansion. #554 fixes this in two
+/// coordinated halves sharing `module_functions::is_renamed_opcode_intrinsic`:
+/// `collect_called_macros` no longer records the same-named-opcode-intrinsic
+/// self-edge, and `BuiltinVisitor::walk` resolves such a call to the
+/// intrinsic instead of recursing into the like-named macro. Genuine
+/// recursion (`FOO = FOO(x)`, non-intrinsic) is still rejected
+/// (macros.AC5.2 unweakened) -- see the `issue_554_*` tests in
+/// `src/macro_expansion_tests.rs` and `src/module_functions.rs`.
 ///
-/// This test asserts only what is verifiable now -- the four macros
-/// IMPORT correctly (the false recursion fires later, at registry build
-/// / compile, not at import) -- and documents the blocker. `#[ignore]`
-/// (C-LEARN is ~53k lines / 1.4 MB; ~4s just to parse).
+/// This is the C-LEARN macro-expansion regression guard Phase 7 Task 1
+/// builds on. It asserts the four macros import correctly AND the
+/// #554 macro-attributable cascade is gone (no macro-registry
+/// `CircularDependency`). It deliberately does NOT assert that all of
+/// C-LEARN compiles -- C-LEARN's non-macro blockers (#552, #553, #363,
+/// model-logic deps) remain out of scope -- only that no macro-specific
+/// error from #554 fires. `#[ignore]` (C-LEARN is ~53k lines / 1.4 MB;
+/// ~4s just to parse).
 // Run with: cargo test --release -- --ignored corpus_clearn_macros_import
 #[test]
 #[ignore]
@@ -2169,29 +2172,38 @@ fn corpus_clearn_macros_import() {
         );
     }
 
-    // KNOWN BLOCKER documentation: confirm the false `init -> init`
-    // recursion is exactly the cascade root, so a regression that
-    // changes this surfaces here. (This is asserting the CURRENT, BUGGY
-    // behavior so the test is honest; the fix -- tracked as GitHub issue
-    // #554 -- will turn this into the no-macro-specific-errors assertion
-    // the design's AC6.2 wants.)
+    // #554 (FIXED) regression guard: the macro registry must build with NO
+    // false `recursive macro: init -> init` (and no other macro-registry
+    // `CircularDependency`). Before the fix this fired and CASCADED -- an
+    // empty registry un-shadowed `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO`,
+    // turning every C-LEARN macro call into `BadBuiltinArgs`/`UnknownBuiltin`.
+    // A macro-registry-build error surfaces as a project-level
+    // `DiagnosticError::Model(CircularDependency)` (see
+    // `db_macro_registry::project_macro_registry`); asserting its ABSENCE
+    // proves the #554 macro-attributable cascade is gone. (C-LEARN's
+    // non-macro blockers are out of scope -- we do not assert full compile.)
     use simlin_engine::common::ErrorCode;
     use simlin_engine::db::DiagnosticError;
     let diags = collect_project_diagnostics(&dm);
-    let has_false_init_recursion = diags.iter().any(|d| match &d.error {
-        DiagnosticError::Model(e) => {
-            e.code == ErrorCode::CircularDependency
-                && e.details
-                    .as_deref()
-                    .is_some_and(|s| s.contains("init -> init"))
-        }
-        _ => false,
-    });
+    let macro_registry_cycle: Vec<_> = diags
+        .iter()
+        .filter(|d| match &d.error {
+            // A macro-registry recursion error is project-level (empty
+            // `model`, no `variable`) -- distinct from a model-logic
+            // circular dependency, which is attributed to a model/variable.
+            DiagnosticError::Model(e) => {
+                e.code == ErrorCode::CircularDependency
+                    && d.model.is_empty()
+                    && d.variable.is_none()
+            }
+            _ => false,
+        })
+        .collect();
     assert!(
-        has_false_init_recursion,
-        "expected the documented false `recursive macro: init -> init` \
-         blocker (tracked as GitHub issue #554) -- if this no longer \
-         fires, #554 is fixed and this test must be upgraded to assert NO \
-         macro-specific errors (design macros.AC6.2)"
+        macro_registry_cycle.is_empty(),
+        "#554 regression: C-LEARN's macro registry must build with no false \
+         recursion (the `INIT = INITIAL(x)` macro must NOT be seen as \
+         `init -> init`); found macro-registry CircularDependency \
+         diagnostic(s): {macro_registry_cycle:?}"
     );
 }

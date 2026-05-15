@@ -482,6 +482,9 @@ where
         module_input_mapper,
         None,
         None,
+        // `parse_var` is the no-project-macros convenience path, so there is
+        // never an enclosing macro body here.
+        None,
     )
 }
 
@@ -496,6 +499,12 @@ where
 /// expands into a synthetic `Variable::Module` (and shadows an identically
 /// named builtin/stdlib func). `None` -- the convenience `parse_var` path
 /// and the test sites -- means "no project macros", an empty registry.
+///
+/// `enclosing_model`: the owning model's name when `v` is a macro-marked
+/// model's body variable; `None` for ordinary variables. Threaded to
+/// `instantiate_implicit_modules` for the #554 same-named-opcode-intrinsic
+/// exception (a macro body's renamed `init`/`previous` builtin must resolve
+/// to the intrinsic, not recurse into the like-named macro).
 #[allow(clippy::too_many_arguments)]
 pub fn parse_var_with_module_context<MI, F>(
     dimensions: &[datamodel::Dimension],
@@ -505,6 +514,7 @@ pub fn parse_var_with_module_context<MI, F>(
     module_input_mapper: F,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
     macro_registry: Option<&MacroRegistry>,
+    enclosing_model: Option<&str>,
 ) -> Variable<MI, Expr0>
 where
     MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
@@ -535,6 +545,7 @@ where
                     Some(&dimensions_ctx),
                     module_idents,
                     registry,
+                    enclosing_model,
                 ) {
                     Ok((ast, mut new_vars)) => {
                         implicit_vars.append(&mut new_vars);

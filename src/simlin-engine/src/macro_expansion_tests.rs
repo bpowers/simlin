@@ -320,9 +320,10 @@ fn macro_call_expands_to_synthetic_module_structurally() {
             .expect("non-empty"),
     );
 
-    let (transformed, vars) =
-        crate::builtins_visitor::instantiate_implicit_modules("y", ast, None, None, &registry)
-            .expect("a macro call must expand");
+    let (transformed, vars) = crate::builtins_visitor::instantiate_implicit_modules(
+        "y", ast, None, None, &registry, None,
+    )
+    .expect("a macro call must expand");
 
     let modules: Vec<&crate::datamodel::Module> = vars
         .iter()
@@ -567,4 +568,128 @@ y=
             );
         }
     }
+}
+
+// ── #554: macro wrapping a same-canonical-name opcode intrinsic ────────────
+//
+// The MDL importer MUST rename the Vensim `INITIAL` builtin to `INIT`
+// (`mdl/xmile_compat.rs`; the engine's `Expr1` lowering recognizes only the
+// opcode name `init`, not `initial`). C-LEARN's uninvoked
+// `:MACRO: INIT(x) ... INIT = INITIAL(x)` therefore stores the datamodel
+// body `init = init(x)`. Pre-fix, the macro recursion check mistook that
+// renamed-intrinsic call for a recursive `init -> init` macro edge and failed
+// the WHOLE `MacroRegistry::build`; the empty registry then un-shadowed the
+// project's OTHER macros, so their (correct) calls fell through to the
+// builtins and failed with `BadBuiltinArgs`/`UnknownBuiltin` -- a single
+// false positive blocking all macro expansion.
+//
+// These end-to-end tests reproduce the pattern on a tiny inline `.mdl`
+// (C-LEARN itself is 1.4 MB; its full-corpus guard is the `#[ignore]`d
+// `corpus_clearn_macros_import` in `tests/simulate.rs`). The macros take two
+// params so the invocation is not rewritten to `LOOKUP` (the unrelated #553
+// 1-arg-call heuristic) -- the `INITIAL(x)`->`INIT(x)` rename inside the body
+// (the #554 trigger) is independent of the invocation's arity.
+
+/// Part A + B together: a macro whose body wraps its own same-named `INIT`
+/// intrinsic, INVOKED alongside a sibling macro, must (1) build the registry
+/// with no false `init -> init` recursion, (2) NOT infinite-loop on the
+/// invoked wrap-own-intrinsic macro (it resolves to the `LoadInitial`
+/// intrinsic, terminating), and (3) leave the sibling macro's call expanding
+/// correctly (the #554 cascade is gone). `INITIAL(x)` freezes x's t=0 value;
+/// with constant `x` it equals `x`, so the arithmetic is hand-verifiable.
+#[test]
+fn issue_554_invoked_macro_wrapping_own_init_intrinsic_compiles_and_runs() {
+    let source = mdl(r#":MACRO: INIT(x, k)
+INIT = INITIAL(x) + k
+	~	a
+	~	#554: body wraps the same-canonical-name INITIAL builtin, which the
+		importer renames to INIT -- NOT recursion
+	|
+
+:END OF MACRO:
+:MACRO: SSHAPE(a, b)
+SSHAPE = a * b
+	~	a
+	~	sibling macro; its name shadows the 3-arg SSHAPE builtin, so a
+		registry-build failure (the #554 cascade) would make this 2-arg
+		call a BadBuiltinArgs
+	|
+
+:END OF MACRO:
+wrapped=
+	INIT(7, 3)
+	~
+	~		|
+
+sibling=
+	SSHAPE(4, 5)
+	~
+	~		|
+"#);
+
+    // (1) No macro-registry CircularDependency cascade.
+    assert!(
+        !has_model_error(&diagnostics_for(&source), ErrorCode::CircularDependency),
+        "the #554 false `init -> init` recursion must be gone (no \
+         macro-registry CircularDependency); diagnostics: {:?}",
+        diagnostics_for(&source),
+    );
+
+    // (2)+(3) Compiles and runs -- the invoked wrap-own-intrinsic macro
+    // terminates (resolves to the LoadInitial opcode, NOT recursively to the
+    // macro) and the sibling macro expands (no cascade).
+    let wrapped = run_mdl_var(&source, "wrapped");
+    let sibling = run_mdl_var(&source, "sibling");
+
+    // INITIAL(7) = 7 (frozen at t=0), + k=3 => 10, constant over time.
+    assert!(
+        wrapped.iter().all(|&v| (v - 10.0).abs() < 1e-9),
+        "INIT(7,3) = INITIAL(7)+3 = 10 at every step (the body's INIT(x) is \
+         the renamed INITIAL intrinsic, not a recursive macro call): {wrapped:?}",
+    );
+    // SSHAPE(4,5) = 4*5 = 20 -- proves the sibling macro still shadows the
+    // builtin and expands (the #554 cascade no longer blocks it).
+    assert!(
+        sibling.iter().all(|&v| (v - 20.0).abs() < 1e-9),
+        "SSHAPE(4,5) = 4*5 = 20 -- the sibling macro must still expand \
+         despite the wrap-own-intrinsic macro: {sibling:?}",
+    );
+}
+
+/// macros.AC5.2 end-to-end guard adjacent to the #554 fix: a GENUINELY
+/// self-recursive macro (`FOO = FOO(...)`, `FOO` is NOT an opcode intrinsic)
+/// invoked from `main` must STILL fail to compile with a recursion cycle.
+/// The #554 exception is scoped to the same-named-opcode-intrinsic case only;
+/// real recursion stays rejected (mirrors
+/// `ac5_2_directly_recursive_macro_fails_compile_with_cycle`, kept here so a
+/// regression that over-broadens the #554 carve-out is caught next to it).
+#[test]
+fn issue_554_does_not_weaken_ac5_2_genuine_recursion_end_to_end() {
+    let source = mdl(r#":MACRO: SELFCALL(a, b)
+SELFCALL = SELFCALL(a, b) + 1
+	~	a
+	~	genuine self-recursion (SELFCALL is not an opcode intrinsic)
+	|
+
+:END OF MACRO:
+y=
+	SELFCALL(3, 4)
+	~
+	~		|
+"#);
+
+    let err = compile_mdl(&source).expect_err(
+        "genuine self-recursion of a non-intrinsic macro must STILL fail to \
+         compile -- the #554 exception must not weaken macros.AC5.2",
+    );
+    assert_eq!(err.code, ErrorCode::NotSimulatable);
+    let details = err.get_details().unwrap_or_default();
+    assert!(
+        details.contains("recursive macro") && details.to_lowercase().contains("selfcall"),
+        "the surfaced cycle message must name the recursive macro: {details:?}",
+    );
+    assert!(
+        has_model_error(&diagnostics_for(&source), ErrorCode::CircularDependency),
+        "genuine recursion must still accumulate a CircularDependency diagnostic",
+    );
 }

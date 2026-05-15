@@ -754,8 +754,7 @@ fn parse_source_variable_impl(
 ) -> ParsedVariableResult {
     let relevant_dim_names = variable_relevant_dimensions(db, var);
     let dims: Vec<datamodel::Dimension> = if relevant_dim_names.is_empty() {
-        // Scalar variable -- no dimension dependency, so changing any
-        // project dimension won't invalidate this parse result.
+        // Scalar variable: no dim dependency, so dim changes don't invalidate.
         vec![]
     } else {
         let all_source_dims = project.dimensions(db);
@@ -777,6 +776,7 @@ fn parse_source_variable_impl(
         |mi| Ok(Some(mi.clone())),
         module_idents,
         macro_registry,
+        crate::db_macro_registry::enclosing_macro_for_var(db, project, var), // #554
     );
 
     ParsedVariableResult {

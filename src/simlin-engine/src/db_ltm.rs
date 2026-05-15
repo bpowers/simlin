@@ -94,6 +94,8 @@ pub(super) fn parse_ltm_equation(
         // LTM synthetic equations (link/loop scores) are engine-generated
         // and never contain user macro invocations -> no registry needed.
         None,
+        // ...and are never a macro body, so no #554 enclosing-macro context.
+        None,
     );
 
     ParsedVariableResult {

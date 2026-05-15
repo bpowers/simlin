@@ -12,7 +12,9 @@ use crate::common::{
     canonicalize,
 };
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
-use crate::module_functions::{MacroRegistry, ModuleFunctionDescriptor, stdlib_descriptor};
+use crate::module_functions::{
+    MacroRegistry, ModuleFunctionDescriptor, is_renamed_opcode_intrinsic, stdlib_descriptor,
+};
 use crate::{datamodel, eqn_err};
 
 /// An empty registry used when no project macros are in scope (e.g. the
@@ -163,6 +165,22 @@ pub struct BuiltinVisitor<'a> {
     /// named builtin or stdlib function (Vensim's rule). Defaults to an
     /// empty registry (no project macros) until `with_macro_registry`.
     macro_registry: &'a MacroRegistry,
+    /// The canonical name of the macro model whose body this visitor is
+    /// expanding, if any (i.e. the variable being parsed belongs to a
+    /// macro-marked model). `None` for ordinary (non-macro-body) variables.
+    ///
+    /// #554: when expanding a macro body, a call whose canonical name equals
+    /// this enclosing macro's own canonical name AND is an opcode-backed
+    /// engine intrinsic (`is_renamed_opcode_intrinsic`) must resolve to the
+    /// INTRINSIC, not recurse into the macro. The MDL importer's necessary
+    /// `INITIAL -> INIT` / `SAMPLE IF TRUE -> PREVIOUS` rename makes such a
+    /// body literally read `init = init(x)`; without this exception the
+    /// macro-shadows-everything precedence (`resolve_macro` below) would
+    /// re-resolve `init(x)` to the macro forever. `module_functions`'
+    /// `collect_called_macros` suppresses the matching false recursion edge
+    /// using the *same* `is_renamed_opcode_intrinsic` predicate, so the two
+    /// halves agree by construction.
+    enclosing_model: Option<&'a str>,
 }
 
 impl<'a> BuiltinVisitor<'a> {
@@ -178,6 +196,7 @@ impl<'a> BuiltinVisitor<'a> {
             dimensions_ctx: None,
             module_idents: None,
             macro_registry: &EMPTY_MACRO_REGISTRY,
+            enclosing_model: None,
         }
     }
 
@@ -199,6 +218,7 @@ impl<'a> BuiltinVisitor<'a> {
             dimensions_ctx,
             module_idents: None,
             macro_registry: &EMPTY_MACRO_REGISTRY,
+            enclosing_model: None,
         }
     }
 
@@ -207,6 +227,31 @@ impl<'a> BuiltinVisitor<'a> {
     fn with_macro_registry(mut self, macro_registry: &'a MacroRegistry) -> Self {
         self.macro_registry = macro_registry;
         self
+    }
+
+    /// Set the enclosing macro model name (#554). Pass the owning model's
+    /// name when parsing a macro-marked model's body variable; the
+    /// same-named-opcode-intrinsic exception in `walk()` keys off its
+    /// canonicalization. A no-op (stays `None`) for non-macro-body callers.
+    fn with_enclosing_model(mut self, enclosing_model: Option<&'a str>) -> Self {
+        self.enclosing_model = enclosing_model;
+        self
+    }
+
+    /// #554: is `func` (a raw call name) the enclosing macro's own
+    /// same-canonical-name opcode intrinsic -- i.e. the MDL importer's
+    /// renamed `INITIAL`/`SAMPLE IF TRUE` builtin appearing inside the
+    /// like-named macro's body? Such a call must resolve to the intrinsic,
+    /// NOT (recursively) to the macro. Shares `is_renamed_opcode_intrinsic`
+    /// with `module_functions::collect_called_macros` so the recursion-edge
+    /// suppression and this expansion exception cannot drift apart.
+    fn is_enclosing_macro_intrinsic_self_call(&self, func: &str) -> bool {
+        let Some(enclosing) = self.enclosing_model else {
+            return false;
+        };
+        let call = canonicalize(func);
+        let enclosing = canonicalize(enclosing);
+        call == enclosing && is_renamed_opcode_intrinsic(call.as_ref())
     }
 
     /// Set the module identifiers for PREVIOUS routing.
@@ -547,6 +592,24 @@ impl<'a> BuiltinVisitor<'a> {
                 self.self_allowed = orig_self_allowed;
                 let args = args?;
 
+                // #554 exception to the macro-shadows-everything precedence
+                // below: when expanding a macro body, a call whose canonical
+                // name equals the *enclosing* macro's own canonical name AND
+                // is an opcode-backed engine intrinsic (`init`/`previous`) is
+                // the MDL importer's renamed builtin (`INITIAL` -> `INIT`,
+                // `SAMPLE IF TRUE` -> `PREVIOUS`), NOT a recursive macro call
+                // (Vensim macros cannot recurse; the source wrote the distinct
+                // builtin name). It must resolve to the intrinsic, so we skip
+                // `resolve_macro` and fall through to the PREVIOUS/INIT
+                // intrinsic routing (`init_needs_temp_arg` / `is_builtin_fn`
+                // -> the LoadInitial/LoadPrev opcode) below. Without this an
+                // INVOKED such-macro would infinite-loop: the macro body's
+                // `init(x)` would re-resolve to the macro forever.
+                // `module_functions::collect_called_macros` suppresses the
+                // mirror false recursion edge with the same predicate, so the
+                // registry build *and* this expansion stay consistent (#554).
+                let is_intrinsic_self_call = self.is_enclosing_macro_intrinsic_self_call(&func);
+
                 // Macro-shadows-everything precedence (Vensim's rule): a
                 // project macro is resolved here, BEFORE alias
                 // normalization / modulo / previous / init / is_builtin_fn
@@ -554,7 +617,9 @@ impl<'a> BuiltinVisitor<'a> {
                 // `RAMP FROM TO` therefore expands as the macro even though
                 // it parsed as `CallKind::Builtin`. `func` is the raw call
                 // name (resolve_macro canonicalizes internally).
-                if let Some(descriptor) = self.macro_registry.resolve_macro(&func) {
+                if !is_intrinsic_self_call
+                    && let Some(descriptor) = self.macro_registry.resolve_macro(&func)
+                {
                     let descriptor = descriptor.clone();
                     return self.expand_module_function(&descriptor, &func, args, loc);
                 }
@@ -669,18 +734,26 @@ impl<'a> BuiltinVisitor<'a> {
 /// `contains_module_call`. When `module_idents` is provided,
 /// `PREVIOUS(module_var)` synthesizes a scalar temp arg instead of reading a
 /// flat slot directly.
+///
+/// `enclosing_model` is the owning model's name when `variable_name` is a
+/// macro-marked model's body variable (`None` otherwise). It drives the #554
+/// same-named-opcode-intrinsic exception in `BuiltinVisitor::walk` so a
+/// macro body's renamed-builtin call (`init` inside macro `INIT`) resolves to
+/// the intrinsic instead of recursing into the macro forever.
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,
     dimensions_ctx: Option<&DimensionsContext>,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
     macro_registry: &MacroRegistry,
+    enclosing_model: Option<&str>,
 ) -> std::result::Result<(Ast<Expr0>, Vec<datamodel::Variable>), EquationError> {
     match ast {
         Ast::Scalar(ast) => {
             let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                 .with_module_idents(module_idents)
-                .with_macro_registry(macro_registry);
+                .with_macro_registry(macro_registry)
+                .with_enclosing_model(enclosing_model);
             let transformed = builtin_visitor.walk(ast)?;
             let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
             Ok((Ast::Scalar(transformed), vars))
@@ -703,7 +776,8 @@ pub fn instantiate_implicit_modules(
                         dimensions_ctx,
                     )
                     .with_module_idents(module_idents)
-                    .with_macro_registry(macro_registry);
+                    .with_macro_registry(macro_registry)
+                    .with_enclosing_model(enclosing_model);
                     let transformed_ast = visitor.walk(ast_clone)?;
 
                     elements.insert(subscript_key, transformed_ast);
@@ -715,7 +789,8 @@ pub fn instantiate_implicit_modules(
                 // No module-function calls - original behavior
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                     .with_module_idents(module_idents)
-                    .with_macro_registry(macro_registry);
+                    .with_macro_registry(macro_registry)
+                    .with_enclosing_model(enclosing_model);
                 let transformed = builtin_visitor.walk(ast)?;
                 let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
                 Ok((Ast::ApplyToAll(dimensions, transformed), vars))
@@ -744,7 +819,8 @@ pub fn instantiate_implicit_modules(
                         dimensions_ctx,
                     )
                     .with_module_idents(module_idents)
-                    .with_macro_registry(macro_registry);
+                    .with_macro_registry(macro_registry)
+                    .with_enclosing_model(enclosing_model);
                     let transformed = visitor.walk(equation)?;
                     new_elements.insert(subscript_key, transformed);
                     all_vars.extend(visitor.vars.values().cloned());
@@ -752,7 +828,8 @@ pub fn instantiate_implicit_modules(
                 let transformed_default = if let Some(default_expr) = default_expr {
                     let mut default_visitor = BuiltinVisitor::new(variable_name)
                         .with_module_idents(module_idents)
-                        .with_macro_registry(macro_registry);
+                        .with_macro_registry(macro_registry)
+                        .with_enclosing_model(enclosing_model);
                     let transformed = default_visitor.walk(default_expr)?;
                     all_vars.extend(default_visitor.vars.values().cloned());
                     Some(transformed)
@@ -771,7 +848,8 @@ pub fn instantiate_implicit_modules(
             } else {
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                     .with_module_idents(module_idents)
-                    .with_macro_registry(macro_registry);
+                    .with_macro_registry(macro_registry)
+                    .with_enclosing_model(enclosing_model);
                 let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
                     .into_iter()
                     .map(|(subscript, equation)| {
