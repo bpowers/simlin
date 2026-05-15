@@ -1777,21 +1777,31 @@ fn collect_project_diagnostics(
 /// binding form a materialized multi-output aux carries?
 ///
 /// Materialization emits `Equation::Scalar(format!("{module_ident}.{output}"))`
-/// verbatim, so the match is exact, not a prefix: split on the FIRST ASCII
-/// `.`; the part before it must equal `module_ident` exactly, and the
-/// remainder must be a single non-empty output segment (non-empty and
-/// containing no further `.`). The first-period split (rather than the
-/// last) plus the "no further period" suffix check together reject a
-/// hypothetical multi-segment reference like `mod.sub.out`; requiring an
-/// exact prefix match rejects an unrelated aux that merely *references* a
-/// module output inside a larger expression (e.g. `mod.out + 1`, or
-/// `other_mod.out`). This avoids the prior `starts_with("{mi}.")`
-/// over-count.
+/// verbatim, where `output` is a bare macro-output identifier
+/// (`spec.primary_output` / `spec.additional_outputs[i]`). The match is
+/// therefore exact, not a prefix: split on the FIRST ASCII `.`; the part
+/// before it must equal `module_ident` exactly, and the remainder must be a
+/// *single bare identifier token* -- non-empty and composed solely of
+/// canonical-identifier characters (ASCII alphanumeric or `_`).
+///
+/// The first-period split plus the identifier-only suffix check together
+/// reject anything that is not the verbatim binding text: a hypothetical
+/// multi-segment reference like `mod.sub.out` (the suffix `sub.out`
+/// contains `.`), an unrelated aux that merely *references* a module output
+/// inside a larger expression (`mod.out + 1` -- the suffix `out + 1`
+/// contains spaces and `+`), and a different module's output
+/// (`other_mod.out` -- the prefix is not `module_ident`). This avoids the
+/// prior `starts_with("{mi}.")` over-count while making the predicate as
+/// precise as the materialized form it recognizes.
 fn is_module_output_binding(equation: &str, module_ident: &str) -> bool {
     let Some((prefix, suffix)) = equation.split_once('.') else {
         return false;
     };
-    prefix == module_ident && !suffix.is_empty() && !suffix.contains('.')
+    prefix == module_ident
+        && !suffix.is_empty()
+        && suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Count a model's `Variable::Module`s whose `model_name` is `macro_model`,

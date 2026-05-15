@@ -113,9 +113,6 @@ impl<'input> ConversionContext<'input> {
 
         for key in symbol_keys {
             let info = &self.symbols[key];
-            let Some(eq) = self.select_equation(&info.equations) else {
-                continue;
-            };
 
             // Enforce the invariant the whole module relies on: a
             // multi-output call may appear ONLY as the entire RHS of an
@@ -130,14 +127,44 @@ impl<'input> ConversionContext<'input> {
             // PANICS on the Phase-2 `debug_assert!(output_bindings
             // .is_empty())` in a debug build and SILENTLY drops the
             // `:`-list outputs in a release build.
-            if let Some(nested_macro) = find_nested_multi_output_call(&eq.equation) {
-                return Err(ConvertError::Other(format!(
-                    "multi-output call to `{}` may only appear as the entire \
-                     right-hand side of an equation",
-                    nested_macro
-                )));
+            //
+            // The scan must cover EVERY non-empty equation of the symbol,
+            // not merely `select_equation`'s single representative pick: an
+            // arrayed variable carries one `FullEquation` per element
+            // override (`y[a1] = ...`, `y[a2] = ...`), and
+            // `build_variable_with_elements` formats *all* valid per-element
+            // equations. `select_equation` returns only `non_empty[0]`
+            // (PurgeAFOEq), so a nested multi-output call in a *later*
+            // per-element equation would otherwise bypass the guard and
+            // reach the formatter. Emptiness uses the same `is_empty_rhs`
+            // predicate `select_equation` / `build_variable_with_elements`
+            // filter on, so the guard's coverage matches what the build
+            // pass actually formats.
+            for eq in info
+                .equations
+                .iter()
+                .filter(|eq| !self.is_empty_rhs(&eq.equation))
+            {
+                if let Some(nested_macro) = find_nested_multi_output_call(&eq.equation) {
+                    return Err(ConvertError::Other(format!(
+                        "multi-output call to `{}` may only appear as the entire \
+                         right-hand side of an equation",
+                        nested_macro
+                    )));
+                }
             }
 
+            // The legitimate whole-RHS multi-output detection still keys off
+            // `select_equation`'s single representative pick: that preserves
+            // the cycle-1 scalar materialization behavior exactly (a valid
+            // whole-RHS `total = ADD3(p, q, r : lo, hi)` is the
+            // representative equation and materializes; an arrayed variable
+            // is not a valid multi-output materialization site, and the
+            // all-equations guard above has already rejected any nested
+            // multi-output call in any of its per-element equations).
+            let Some(eq) = self.select_equation(&info.equations) else {
+                continue;
+            };
             let Some(call) = detect_multi_output_call(key, &eq.equation) else {
                 continue;
             };

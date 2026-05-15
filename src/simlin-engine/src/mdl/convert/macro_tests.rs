@@ -772,3 +772,65 @@ r = 3
         err.to_string()
     );
 }
+
+#[test]
+fn nested_multi_output_in_a_later_per_element_equation_is_an_error() {
+    // Defense-in-depth completeness for the nested-multi-output guard. An
+    // arrayed variable has one `FullEquation` per element override
+    // (`y[a1] = ...`, `y[a2] = ...`), all accumulated in
+    // `SymbolInfo::equations`. `select_equation` (the PurgeAFOEq pick) yields
+    // a SINGLE representative -- `non_empty[0]`, i.e. the FIRST per-element
+    // equation -- but `build_variable_with_elements` formats EVERY valid
+    // per-element equation. So if the first per-element equation is clean and
+    // a LATER one nests a multi-output call, scanning only the representative
+    // would let the nested `Expr::App` (with non-empty `output_bindings`)
+    // slip past the guard *and* `detect_multi_output_call` and reach the
+    // XMILE formatter, where it PANICS on the Phase-2
+    // `debug_assert!(output_bindings.is_empty())` in a debug/test build (and
+    // SILENTLY drops the `:`-list outputs in release). This is the exact
+    // failure mode the whole-RHS-only guard exists to eliminate; the guard
+    // must therefore scan every non-empty equation of the symbol, not just
+    // the one `select_equation` picks.
+    //
+    // Fixture: a valid 3-param/2-output ADD3 `:MACRO:`, and an arrayed `y`
+    // over `DimA: a1, a2` whose FIRST per-element equation (`y[a1] = 1`) is
+    // clean and whose SECOND (`y[a2] = 2 + ADD3(p, q, r : lo, hi)`) nests a
+    // multi-output call.
+    let mdl = ":MACRO: ADD3(a, b, c : minval, maxval)
+ADD3 = a + b + c
+~ ~|
+minval = MIN(a, MIN(b, c))
+~ ~|
+maxval = MAX(a, MAX(b, c))
+~ ~|
+:END OF MACRO:
+DimA: a1, a2
+~ ~|
+y[a1] = 1
+~ ~|
+y[a2] = 2 + ADD3(p, q, r : lo, hi)
+~ ~|
+p = 1
+~ ~|
+q = 2
+~ ~|
+r = 3
+~ ~|
+\\\\\\---///
+";
+    // `expect_err` is itself the no-panic assertion: with the guard scanning
+    // only `select_equation`'s single pick (the clean `y[a1] = 1`), the
+    // nested call in the LATER `y[a2]` equation reaches the formatter and
+    // panics on the debug-build `debug_assert!` instead of returning Err.
+    assert_multi_output_convert_error_names(mdl, "add3");
+
+    // Same actionable whole-RHS-only diagnostic as the scalar nested case.
+    let err = convert_mdl(mdl)
+        .expect_err("a nested multi-output call in a later per-element equation must fail");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("right-hand side") || msg.contains("right hand side"),
+        "the ConvertError must explain the whole-right-hand-side-only rule; got: {:?}",
+        err.to_string()
+    );
+}
