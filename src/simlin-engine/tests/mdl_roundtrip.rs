@@ -13,7 +13,6 @@ use simlin_engine::{mdl, xmile};
 // at the equation/semantic level.
 //
 // Excluded categories:
-//   - macros (:MACRO:) -- the writer rejects them
 //   - external data (GET DATA, GET XLS, etc.) -- external file references
 //   - ALLOCATE / INVERT MATRIX -- unsupported builtins
 //   - models with `inf` in unit ranges -- parser limitation
@@ -57,6 +56,15 @@ static TEST_MDL_MODELS: &[&str] = &[
     "test/test-models/tests/game/test_game.mdl",
     "test/test-models/tests/time/test_time.mdl",
     "test/test-models/tests/euler_step_vs_saveper/test_euler_step_vs_saveper.mdl",
+    // macros (:MACRO: blocks + multi-output `:` reconstruction)
+    "test/test-models/tests/macro_expression/test_macro_expression.mdl",
+    "test/test-models/tests/macro_multi_expression/test_macro_multi_expression.mdl",
+    "test/test-models/tests/macro_cross_reference/test_macro_cross_reference.mdl",
+    "test/test-models/tests/macro_multi_macros/test_macro_multi_macros.mdl",
+    "test/test-models/tests/macro_stock/test_macro_stock.mdl",
+    "test/test-models/tests/macro_trailing_definition/test_macro_trailing_definition.mdl",
+    "test/test-models/tests/macro_multi_output/test_macro_multi_output.mdl",
+    "test/test-models/tests/macro_arrayed/test_macro_arrayed.mdl",
     // formatting / whitespace
     "test/test-models/tests/line_breaks/test_line_breaks.mdl",
     "test/test-models/tests/line_continuation/test_line_continuation.mdl",
@@ -176,6 +184,27 @@ fn assert_model_equivalence(
     path: &str,
     i: usize,
 ) -> Option<String> {
+    // A dropped `:MACRO:` block or a malformed `MacroSpec` would otherwise
+    // slip through: the body variables live in the macro model, so a
+    // missing macro model only changes the model *count* (already checked),
+    // but a present-but-wrong `MacroSpec` (bad parameters / outputs) would
+    // not. Comparing `macro_spec` and `name` makes the macro round-trip
+    // actually verified. For the non-macro fixtures these are no-ops (the
+    // `main` model is named `"main"` with `macro_spec: None` on both
+    // passes).
+    if ma.name != mb.name {
+        return Some(format!(
+            "{path}: model[{i}] name differs: {:?} vs {:?}",
+            ma.name, mb.name
+        ));
+    }
+    if ma.macro_spec != mb.macro_spec {
+        return Some(format!(
+            "{path}: model[{i}] ({:?}) macro_spec differs: {:?} vs {:?}",
+            ma.name, ma.macro_spec, mb.macro_spec
+        ));
+    }
+
     if ma.variables.len() != mb.variables.len() {
         return Some(format!(
             "{path}: model[{i}] variable count: {} vs {}",
