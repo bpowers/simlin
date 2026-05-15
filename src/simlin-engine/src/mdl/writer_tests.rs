@@ -1714,6 +1714,146 @@ fn project_to_mdl_accepts_macro_module_variable() {
     );
 }
 
+/// Shared valid fixture for the malformed-cluster rejection tests: a
+/// well-formed Phase-4 multi-output cluster (`total = add3(in1, in2, in3 :
+/// the_min, the_max)`) plus its macro model. Each rejection test breaks
+/// exactly one structural coupling and asserts `project_to_mdl` fails fast
+/// instead of silently dropping the invocation.
+fn add3_spec_and_macro() -> (datamodel::MacroSpec, datamodel::Model) {
+    let spec = datamodel::MacroSpec {
+        parameters: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+        primary_output: "add3".to_owned(),
+        additional_outputs: vec!["minval".to_owned(), "maxval".to_owned()],
+    };
+    let macro_model = make_macro_model(
+        "add3",
+        &["a", "b", "c"],
+        &["minval", "maxval"],
+        vec![
+            make_aux("add3", "a + b + c", Some("dmnl"), ""),
+            make_aux("minval", "MIN(a, MIN(b, c))", None, ""),
+            make_aux("maxval", "MAX(a, MAX(b, c))", None, ""),
+        ],
+    );
+    (spec, macro_model)
+}
+
+#[test]
+fn project_to_mdl_rejects_macro_cluster_missing_primary_binding() {
+    // A macro-backed Variable::Module whose primary-output binding aux was
+    // deleted (e.g. an MCP DeleteVariable patch on a materialized cluster)
+    // is NOT faithfully reconstructable. The writer must reject it, not
+    // silently omit the invocation and leave the surviving binding auxes
+    // referencing a now-nonexistent module (corrupt .mdl).
+    let (spec, macro_model) = add3_spec_and_macro();
+    let cluster = make_multi_output_cluster(
+        "total_macro",
+        "add3",
+        &spec,
+        "total",
+        Some("dmnl"),
+        "doc",
+        &["the_min", "the_max"],
+        vec![
+            module_ref("in1", "total_macro.a"),
+            module_ref("in2", "total_macro.b"),
+            module_ref("in3", "total_macro.c"),
+        ],
+    );
+    // Drop the primary-output binding aux ("total" reads total_macro.add3).
+    let broken: Vec<Variable> = cluster
+        .into_iter()
+        .filter(|v| v.get_ident() != "total")
+        .collect();
+    let project = make_project(vec![make_model(broken), macro_model]);
+    let result = crate::mdl::project_to_mdl(&project);
+    assert!(
+        result.is_err(),
+        "a malformed macro cluster must fail fast, not silently drop the \
+         invocation; got Ok:\n{}",
+        result.unwrap()
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("total_macro") && err.contains("add3"),
+        "error must name the offending module and macro for debuggability, \
+         got: {err}"
+    );
+}
+
+#[test]
+fn project_to_mdl_rejects_macro_cluster_missing_additional_binding() {
+    // One additional-output binding aux deleted/renamed: the cluster can no
+    // longer be reconstructed into the `:`-list form, so it must be
+    // rejected rather than dropped.
+    let (spec, macro_model) = add3_spec_and_macro();
+    let cluster = make_multi_output_cluster(
+        "total_macro",
+        "add3",
+        &spec,
+        "total",
+        Some("dmnl"),
+        "doc",
+        &["the_min", "the_max"],
+        vec![
+            module_ref("in1", "total_macro.a"),
+            module_ref("in2", "total_macro.b"),
+            module_ref("in3", "total_macro.c"),
+        ],
+    );
+    // Drop the first additional-output binding aux (reads total_macro.minval).
+    let broken: Vec<Variable> = cluster
+        .into_iter()
+        .filter(|v| v.get_ident() != "the_min")
+        .collect();
+    let project = make_project(vec![make_model(broken), macro_model]);
+    let result = crate::mdl::project_to_mdl(&project);
+    assert!(
+        result.is_err(),
+        "a cluster missing an additional-output binding must fail fast; \
+         got Ok:\n{}",
+        result.unwrap()
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("total_macro") && err.contains("add3"),
+        "error must name the offending module and macro, got: {err}"
+    );
+}
+
+#[test]
+fn project_to_mdl_rejects_macro_cluster_missing_argument() {
+    // A positional argument wiring (ModuleReference) removed: the call
+    // arity can no longer be faithfully reconstructed. Reject, don't drop.
+    let (spec, macro_model) = add3_spec_and_macro();
+    let cluster = make_multi_output_cluster(
+        "total_macro",
+        "add3",
+        &spec,
+        "total",
+        Some("dmnl"),
+        "doc",
+        &["the_min", "the_max"],
+        // Only two of the three parameter wirings (c is missing).
+        vec![
+            module_ref("in1", "total_macro.a"),
+            module_ref("in2", "total_macro.b"),
+        ],
+    );
+    let project = make_project(vec![make_model(cluster), macro_model]);
+    let result = crate::mdl::project_to_mdl(&project);
+    assert!(
+        result.is_err(),
+        "a cluster missing a positional argument must fail fast; got Ok:\n{}",
+        result.unwrap()
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("total_macro") && err.contains("add3"),
+        "error must name the offending module and macro, got: {err}"
+    );
+}
+
 #[test]
 fn multi_output_reconstruction_uses_positional_param_order_not_reference_order() {
     // Module.references order is NOT guaranteed positional; the

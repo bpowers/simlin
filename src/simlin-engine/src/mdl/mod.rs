@@ -66,9 +66,14 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
         if let Variable::Module(m) = var {
             // A macro-module instance (Phase 4's materialized multi-output
             // cluster) is reconstructed into the `:` call syntax by the
-            // writer, so it is allowed. An ordinary submodule instance is
-            // still rejected (a general MDL module-export overhaul is out
-            // of scope).
+            // writer, so it passes this coarse gate. This is only a
+            // pre-filter on `model_name`: it cannot see whether the
+            // cluster's binding auxes / argument wiring are intact (a
+            // post-import MCP patch can break them), so the writer itself
+            // re-validates and hard-errors on an unreconstructable cluster
+            // rather than silently dropping the invocation. An ordinary
+            // submodule instance is rejected here outright (a general MDL
+            // module-export overhaul is out of scope).
             let is_macro_module = project
                 .models
                 .iter()

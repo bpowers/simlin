@@ -16,7 +16,7 @@ use std::fmt::Write;
 use super::builtins::to_lower_space;
 use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp, Visitor};
 use crate::builtins::UntypedBuiltinFn;
-use crate::common::Result;
+use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::view_element::{self, LinkPolarity, LinkShape};
 use crate::datamodel::{self, DimensionElements, Equation, GraphicalFunction, View, ViewElement};
 use crate::lexer::LexerType;
@@ -1391,10 +1391,22 @@ impl UngroupedEntry<'_> {
 /// `Variable::Module` plus its binding auxes) and the reconstructed
 /// `<lhs> = <macro>(...)` entries to emit instead, paired with their LHS
 /// ident for stable interleaving into the sorted ungrouped section.
+///
+/// `failed` holds one human-readable message per macro-backed
+/// `Variable::Module` that resolves to a macro but whose materialized
+/// cluster is *not* faithfully reconstructable (a binding aux or argument
+/// wiring was deleted/renamed post-import -- e.g. an MCP patch). The caller
+/// MUST treat a non-empty `failed` as a hard error: silently emitting the
+/// rest would drop the invocation and leave the surviving binding auxes
+/// referencing a module that is no longer written -- corrupt `.mdl`. This
+/// mirrors `project_to_mdl`'s ordinary-`Variable::Module` reject gate; a
+/// macro-backed module is only *conditionally* admitted by that gate, on
+/// the assumption -- enforced here -- that its cluster is well-formed.
 #[derive(Default)]
 struct MultiOutputReconstruction {
     suppressed: HashSet<String>,
     entries: Vec<(String, String)>,
+    failed: Vec<String>,
 }
 
 /// Detect every Phase-4-materialized multi-output invocation cluster in
@@ -1424,10 +1436,21 @@ struct MultiOutputReconstruction {
 ///   (its `~`-doc is the original invocation's comment, preserved by
 ///   Phase 4).
 ///
-/// A module missing its primary binding (not a faithfully round-trippable
-/// cluster) is left alone -- it falls through to `write_variable_entry`'s
-/// `Variable::Module(_) => return` (emits nothing), the same harmless
-/// fallback the pre-macro writer relied on.
+/// A module whose `model_name` is *not* a macro is genuinely none of this
+/// function's business and is skipped silently (ordinary submodules are
+/// rejected earlier by `project_to_mdl`'s gate). But a module that *is*
+/// macro-backed yet whose cluster is incomplete (a missing positional
+/// argument, primary binding, or additional-output binding -- the result
+/// of a post-import edit such as an MCP delete/rename patch) is **not**
+/// silently skipped: a faithful `:` reconstruction is impossible, so the
+/// reason is recorded on `MultiOutputReconstruction::failed`. The caller
+/// turns any such failure into a hard error rather than letting the module
+/// fall through to `write_variable_entry`'s `Variable::Module(_) => return`
+/// (which would emit nothing and silently corrupt the `.mdl` -- the
+/// surviving binding auxes would dangle on an unwritten module). The
+/// pre-macro writer relied on that no-op fallback because it never admitted
+/// any `Variable::Module`; the macro gate admits macro-backed ones, so the
+/// writer must now enforce their well-formedness itself.
 fn build_multi_output_reconstructions(
     model: &datamodel::Model,
     project: &datamodel::Project,
@@ -1491,9 +1514,21 @@ fn build_multi_output_reconstructions(
             }
         }
         // A missing positional argument means the cluster is malformed
-        // (an arity the writer cannot faithfully reconstruct); leave the
-        // module to the harmless write_variable_entry fallback.
+        // (an arity the writer cannot faithfully reconstruct). Record it
+        // as a hard failure instead of silently dropping the invocation.
         if args.iter().any(Option::is_none) {
+            let missing: Vec<&str> = spec
+                .parameters
+                .iter()
+                .zip(&args)
+                .filter_map(|(p, a)| a.is_none().then_some(p.as_str()))
+                .collect();
+            result.failed.push(format!(
+                "macro-module `{}` invoking macro `{}`: missing argument \
+                 wiring for parameter(s) {:?}; the materialized multi-output \
+                 cluster was edited and can no longer be exported faithfully",
+                module.ident, module.model_name, missing
+            ));
             continue;
         }
 
@@ -1502,23 +1537,37 @@ fn build_multi_output_reconstructions(
         let Some(&(primary_ident, primary_doc, primary_units)) =
             scalar_auxes.get(primary_key.as_str())
         else {
+            result.failed.push(format!(
+                "macro-module `{}` invoking macro `{}`: no binding aux reads \
+                 `{}` (the primary output `{}`); the materialized \
+                 multi-output cluster is missing its primary binding and \
+                 cannot be reconstructed",
+                module.ident, module.model_name, primary_key, spec.primary_output
+            ));
             continue;
         };
 
         // One additional-output binding per `:`-list entry, in order.
         let mut output_bindings: Vec<&str> = Vec::with_capacity(spec.additional_outputs.len());
-        let mut all_found = true;
+        let mut missing_output: Option<(&str, String)> = None;
         for out_name in &spec.additional_outputs {
             let key = format!("{}.{}", module.ident, out_name);
             match scalar_auxes.get(key.as_str()) {
                 Some(&(binding, _, _)) => output_bindings.push(binding),
                 None => {
-                    all_found = false;
+                    missing_output = Some((out_name.as_str(), key));
                     break;
                 }
             }
         }
-        if !all_found {
+        if let Some((out_name, key)) = missing_output {
+            result.failed.push(format!(
+                "macro-module `{}` invoking macro `{}`: no binding aux reads \
+                 `{}` (additional output `{}`); the materialized multi-output \
+                 cluster is missing an output binding and cannot be \
+                 reconstructed",
+                module.ident, module.model_name, key, out_name
+            ));
             continue;
         }
 
@@ -2668,7 +2717,7 @@ impl MdlWriter {
         // blocks here). The single non-macro model is the body.
         self.write_macro_blocks(project);
         let model = super::main_model(project).expect(super::MAIN_MODEL_EXPECT);
-        self.write_equations_section(model, project);
+        self.write_equations_section(model, project)?;
         self.write_sketch_section(&model.views);
         self.write_settings_section(project);
         Ok(self.buf.replace('\n', "\r\n"))
@@ -2785,7 +2834,11 @@ impl MdlWriter {
     }
 
     /// Write the full equations section: dimensions, grouped variables, sim specs, terminator.
-    fn write_equations_section(&mut self, model: &datamodel::Model, project: &datamodel::Project) {
+    fn write_equations_section(
+        &mut self,
+        model: &datamodel::Model,
+        project: &datamodel::Project,
+    ) -> Result<()> {
         // 1. Dimension definitions
         for dim in &project.dimensions {
             write_dimension_def(&mut self.buf, dim);
@@ -2800,6 +2853,29 @@ impl MdlWriter {
         // entries are emitted with the ungrouped variables (sorted by LHS
         // ident) so the output ordering stays deterministic across passes.
         let reconstruction = build_multi_output_reconstructions(model, project, &display_names);
+
+        // A macro-backed `Variable::Module` whose materialized cluster is
+        // incomplete cannot be reconstructed into `:` call syntax. Emitting
+        // the rest of the model anyway would silently drop the invocation
+        // and leave the surviving binding auxes referencing a module that
+        // is never written -- a corrupt `.mdl`. `project_to_mdl`'s gate
+        // already hard-rejects ordinary `Variable::Module`s for the same
+        // reason; admitting a macro-backed one is conditional on its
+        // cluster being well-formed, which is enforced here (the gate's
+        // is-macro check is only a coarse pre-filter -- it cannot see
+        // whether a binding aux or argument wiring was later edited away).
+        if !reconstruction.failed.is_empty() {
+            return Err(Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some(format!(
+                    "MDL export cannot faithfully reconstruct {} multi-output \
+                     macro invocation(s): {}",
+                    reconstruction.failed.len(),
+                    reconstruction.failed.join("; ")
+                )),
+            ));
+        }
 
         // Build a set of variable idents that belong to any group
         // (skip .Control -- those vars are sim specs emitted separately)
@@ -2883,6 +2959,8 @@ impl MdlWriter {
         // 5. Section terminator
         self.buf
             .push_str("\\\\\\---/// Sketch information - do not modify anything except names\n");
+
+        Ok(())
     }
 
     /// Write the sketch/view section of the MDL file.
