@@ -750,6 +750,7 @@ fn parse_source_variable_impl(
     var: SourceVariable,
     project: SourceProject,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
+    macro_registry: Option<&crate::module_functions::MacroRegistry>,
 ) -> ParsedVariableResult {
     let relevant_dim_names = variable_relevant_dimensions(db, var);
     let dims: Vec<datamodel::Dimension> = if relevant_dim_names.is_empty() {
@@ -775,6 +776,7 @@ fn parse_source_variable_impl(
         units_ctx,
         |mi| Ok(Some(mi.clone())),
         module_idents,
+        macro_registry,
     );
 
     ParsedVariableResult {
@@ -795,7 +797,9 @@ pub fn parse_source_variable_with_module_context<'db>(
         .iter()
         .map(|ident| Ident::new(ident.as_str()))
         .collect();
-    parse_source_variable_impl(db, var, project, Some(&module_idents))
+    // Reaches the BuiltinVisitor so a macro call expands (salsa-cached).
+    let macro_registry = &crate::db_macro_registry::project_macro_registry(db, project).registry;
+    parse_source_variable_impl(db, var, project, Some(&module_idents), Some(macro_registry))
 }
 
 fn module_ident_context_for_model<'db>(

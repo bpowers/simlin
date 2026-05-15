@@ -91,6 +91,9 @@ pub(super) fn parse_ltm_equation(
         units_ctx,
         |mi| Ok(Some(mi.clone())),
         module_idents,
+        // LTM synthetic equations (link/loop scores) are engine-generated
+        // and never contain user macro invocations -> no registry needed.
+        None,
     );
 
     ParsedVariableResult {

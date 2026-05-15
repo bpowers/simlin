@@ -24,16 +24,6 @@
 //! which input ports do the arguments wire to, and which body variable's
 //! value replaces the call expression?".
 
-// Phase 3 Task 1 delivers this resolver as a standalone, fully-tested pure
-// core. Its only callers so far are this file's own unit tests; the compiler
-// wiring that consumes `MacroRegistry`/`stdlib_descriptor` lands in Task 2
-// (`model.rs`/`db.rs` registry threading) and Task 3 (`BuiltinVisitor`
-// descriptor-driven expansion). Until then these `pub(crate)` items have no
-// non-test caller, so allow dead_code module-wide to keep `clippy -D
-// warnings` green; Task 2/3 remove the need for this and a stale-allow lint
-// would then flag it.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use crate::ast::Expr0;

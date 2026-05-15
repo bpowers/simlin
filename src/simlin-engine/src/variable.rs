@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::ast::Loc;
 use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
 use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
-use crate::builtins_visitor::instantiate_implicit_modules;
+use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
 use crate::common::{
     Canonical, CanonicalElementName, DimensionName, EquationError, EquationResult, Ident,
     UnitError, canonicalize,
@@ -18,6 +18,7 @@ use crate::dimensions::{Dimension, DimensionsContext};
 use crate::lexer::LexerType;
 #[cfg(test)]
 use crate::model::ScopeStage0;
+use crate::module_functions::MacroRegistry;
 use crate::units::parse_units;
 use crate::{ErrorCode, eqn_err, units};
 
@@ -480,13 +481,22 @@ where
         units_ctx,
         module_input_mapper,
         None,
+        None,
     )
 }
 
 /// Like `parse_var` but accepts a set of module variable identifiers from
-/// the parent model. When provided, `PREVIOUS(module_var)` in equations will
-/// synthesize a scalar helper aux instead of compiling `LoadPrev` directly
+/// the parent model and the per-project macro registry.
+///
+/// `module_idents`: when provided, `PREVIOUS(module_var)` in equations
+/// synthesizes a scalar helper aux instead of compiling `LoadPrev` directly
 /// against a multi-slot module.
+///
+/// `macro_registry`: when provided, a call resolving to a project macro
+/// expands into a synthetic `Variable::Module` (and shadows an identically
+/// named builtin/stdlib func). `None` -- the convenience `parse_var` path
+/// and the test sites -- means "no project macros", an empty registry.
+#[allow(clippy::too_many_arguments)]
 pub fn parse_var_with_module_context<MI, F>(
     dimensions: &[datamodel::Dimension],
     v: &datamodel::Variable,
@@ -494,11 +504,16 @@ pub fn parse_var_with_module_context<MI, F>(
     units_ctx: &units::Context,
     module_input_mapper: F,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
+    macro_registry: Option<&MacroRegistry>,
 ) -> Variable<MI, Expr0>
 where
     MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
     F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
 {
+    // Resolve the default at use (an empty `'static` registry) rather than
+    // rebinding here -- unifying a borrowed `Some(&'a _)` with the
+    // `&'static` empty default before the parse closure captures it would
+    // force the closure (and hence `'a`) to `'static`.
     // Create DimensionsContext for dimension mapping lookups in builtin expansion
     let dimensions_ctx = DimensionsContext::from(dimensions);
 
@@ -510,8 +525,17 @@ where
         let (ast, mut errors) = parse_equation(eqn, dimensions, is_initial, active_initial);
         let ast = match ast {
             Some(ast) => {
-                match instantiate_implicit_modules(ident, ast, Some(&dimensions_ctx), module_idents)
-                {
+                // The closure (not the bare `fn` pointer) lets the
+                // `&'static` empty default coerce to the parameter's
+                // borrow lifetime instead of forcing it to `'static`.
+                let registry = macro_registry.unwrap_or_else(|| empty_macro_registry());
+                match instantiate_implicit_modules(
+                    ident,
+                    ast,
+                    Some(&dimensions_ctx),
+                    module_idents,
+                    registry,
+                ) {
                     Ok((ast, mut new_vars)) => {
                         implicit_vars.append(&mut new_vars);
                         Some(ast)

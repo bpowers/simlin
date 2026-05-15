@@ -916,6 +916,7 @@ impl ModelStage0 {
                     units_ctx,
                     |mi| Ok(Some(mi.clone())),
                     Some(&module_idents),
+                    Some(&macro_registry),
                 )
             })
             .collect();
@@ -1010,6 +1011,7 @@ impl ModelStage0 {
                     units_ctx,
                     |mi| Ok(Some(mi.clone())),
                     Some(&module_idents),
+                    Some(&macro_registry),
                 ));
             }
         }
