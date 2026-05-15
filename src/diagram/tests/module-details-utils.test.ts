@@ -6,7 +6,7 @@
  * @jest-environment node
  */
 
-import type { Project, Model, Variable, Aux, Stock, Module } from '@simlin/core/datamodel';
+import type { Project, Model, Variable, Aux, Stock, Module, MacroSpec } from '@simlin/core/datamodel';
 
 import {
   countModelInstances,
@@ -15,6 +15,7 @@ import {
   getInputPorts,
   getPublicVariables,
 } from '../module-details-utils';
+import { isMacroModel } from '../module-navigation';
 
 // -- Test fixtures --
 
@@ -71,7 +72,7 @@ function makeModule(ident: string, modelName: string): Module {
   };
 }
 
-function makeModel(name: string, variables: ReadonlyArray<Variable>): Model {
+function makeModel(name: string, variables: ReadonlyArray<Variable>, macroSpec?: MacroSpec): Model {
   const varMap = new Map<string, Variable>();
   for (const v of variables) {
     varMap.set(v.ident, v);
@@ -82,6 +83,7 @@ function makeModel(name: string, variables: ReadonlyArray<Variable>): Model {
     views: [],
     loopMetadata: [],
     groups: [],
+    macroSpec,
   };
 }
 
@@ -289,6 +291,75 @@ describe('getAvailableModels', () => {
     ]);
     const result = getAvailableModels(project, 'main');
     expect(result.projectModels).toContain('delay1');
+  });
+
+  // macros.AC6.6: a macro-marked model is an ordinary project.models
+  // entry after import, but it is a callable macro template -- never a
+  // selectable module-reference target. It must be filtered out of the
+  // model list so it does not appear in the module-reference dropdown.
+  it('excludes macro-marked models but keeps ordinary submodels', () => {
+    const macroSpec: MacroSpec = {
+      parameters: ['input', 'parameter'],
+      primaryOutput: 'expression_macro',
+      additionalOutputs: [],
+    };
+    const project = makeProject([
+      makeModel('main', [makeAux('x')]),
+      makeModel('hares', [makeAux('y')]),
+      // A macro-marked model (e.g. an imported Vensim :MACRO: block) with
+      // synthesized port variables. It must NOT be offered as a module
+      // reference even though it is a normal entry in project.models.
+      makeModel(
+        'expression_macro',
+        [makeAux('input', { canBeModuleInput: true }), makeAux('parameter', { canBeModuleInput: true })],
+        macroSpec,
+      ),
+    ]);
+    const result = getAvailableModels(project, 'main');
+    expect(result.projectModels).toContain('hares');
+    expect(result.projectModels).not.toContain('expression_macro');
+    // And it is not misclassified into stdlibModels either.
+    expect(result.stdlibModels).not.toContain('expression_macro');
+  });
+
+  it('still excludes the macro model when navigating from another model', () => {
+    const macroSpec: MacroSpec = {
+      parameters: ['a'],
+      primaryOutput: 'm',
+      additionalOutputs: [],
+    };
+    const project = makeProject([
+      makeModel('main', [makeAux('x')]),
+      makeModel('hares', [makeAux('y')]),
+      makeModel('m', [makeAux('a', { canBeModuleInput: true })], macroSpec),
+    ]);
+    // From `hares`, `main` and the macro must both be unavailable as a
+    // reference target (main would be fine here, but the macro never is).
+    const result = getAvailableModels(project, 'hares');
+    expect(result.projectModels).toContain('main');
+    expect(result.projectModels).not.toContain('m');
+  });
+});
+
+describe('isMacroModel', () => {
+  it('returns true for a model with a macroSpec', () => {
+    const macroSpec: MacroSpec = {
+      parameters: ['x'],
+      primaryOutput: 'm',
+      additionalOutputs: [],
+    };
+    const model = makeModel('m', [makeAux('x', { canBeModuleInput: true })], macroSpec);
+    expect(isMacroModel(model)).toBe(true);
+  });
+
+  it('returns false for an ordinary model with no macroSpec', () => {
+    const model = makeModel('hares', [makeAux('y')]);
+    expect(isMacroModel(model)).toBe(false);
+  });
+
+  it('returns false for a stdlib model (stdlib models are not macros)', () => {
+    const model = makeModel('stdlib\u{205A}delay1', [makeAux('input', { canBeModuleInput: true })]);
+    expect(isMacroModel(model)).toBe(false);
   });
 });
 

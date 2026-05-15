@@ -4,7 +4,7 @@
 
 // pattern: Functional Core
 
-import type { Rect, UID } from '@simlin/core/datamodel';
+import type { Model, Rect, UID } from '@simlin/core/datamodel';
 
 /**
  * A single entry in the module navigation stack. Each entry stores
@@ -159,4 +159,20 @@ export function isStdlibModel(modelName: string): boolean {
     return STDLIB_MODEL_NAMES.has(modelName.slice(STDLIB_PREFIX.length));
   }
   return false;
+}
+
+/**
+ * Returns true if `model` is a callable macro template (an imported
+ * Vensim `:MACRO:` block / XMILE `<macro>` element). Mirrors
+ * `isStdlibModel` as the model-level gating predicate: a macro-marked
+ * model is an ordinary `project.models` entry after import, but -- like a
+ * stdlib model -- it must never be offered as a selectable
+ * module-reference target. A macro invocation is materialized by the
+ * engine (inlined for single-output macros, a `Variable::Module` + binding
+ * auxes for multi-output ones); the diagram never references a macro
+ * model directly. `@simlin/core`'s `Model` carries the optional
+ * `macroSpec` set exactly when the model is such a template.
+ */
+export function isMacroModel(model: Model): boolean {
+  return model.macroSpec !== undefined;
 }

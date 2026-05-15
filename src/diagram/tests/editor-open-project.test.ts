@@ -248,4 +248,63 @@ describe('Editor.openEngineProject() error handling', () => {
     expect(editor.state.activeProject?.name).toBe('test');
     expect(editor.engineProject).toBe(fakeEngine as unknown as EngineProject);
   });
+
+  // macros.AC6.5: a macro-bearing project must open without crashing.
+  // A macro-marked model is an ordinary `models` entry (it carries a
+  // `macroSpec` plus synthesized formal-parameter port variables); the
+  // open path -- projectFromJson -> setState({ activeProject }) -- must
+  // handle it transparently with no production change. This drives a
+  // project whose `models` includes a macro-marked model alongside `main`
+  // and asserts the open resolves with `activeProject` defined and no
+  // model error.
+  it('opens a macro-bearing project without crashing', async () => {
+    const macroBearingJson = JSON.stringify({
+      name: 'test',
+      simSpecs: { startTime: 0, endTime: 10, dt: '1' },
+      models: [
+        // The macro invocation site lives in `main` as an ordinary aux.
+        {
+          name: 'main',
+          stocks: [],
+          flows: [],
+          auxiliaries: [{ name: 'macro_output', equation: 'expression_macro(5, 1.1)' }],
+        },
+        // The imported macro: a macro-marked model with a macroSpec and
+        // synthesized formal-parameter port variables (input, parameter).
+        {
+          name: 'expression_macro',
+          stocks: [],
+          flows: [],
+          auxiliaries: [
+            { name: 'input', equation: '0' },
+            { name: 'parameter', equation: '0' },
+            { name: 'expression_macro', equation: 'input * parameter' },
+          ],
+          macroSpec: {
+            parameters: ['input', 'parameter'],
+            primaryOutput: 'expression_macro',
+            additionalOutputs: [],
+          },
+        },
+      ],
+    });
+    const fakeEngine = makeFakeEngine({ serializeJson: async () => macroBearingJson });
+    jest.spyOn(EngineProject, 'openProtobuf').mockResolvedValue(fakeEngine as unknown as EngineProject);
+
+    const editor = makeEditor();
+
+    const result = await editor.openEngineProject(new Uint8Array([1, 2, 3]));
+
+    expect(result).toBe(fakeEngine as unknown as EngineProject);
+    expect(editor.state.modelErrors).toHaveLength(0);
+    expect(editor.state.activeProject).toBeDefined();
+    expect(editor.state.activeProject?.name).toBe('test');
+    // The macro-marked model round-tripped through projectFromJson as an
+    // ordinary project.models entry, carrying its macroSpec.
+    const macroModel = editor.state.activeProject?.models.get('expression_macro');
+    expect(macroModel).toBeDefined();
+    expect(macroModel?.macroSpec).toBeDefined();
+    expect(macroModel?.macroSpec?.primaryOutput).toBe('expression_macro');
+    expect(editor.engineProject).toBe(fakeEngine as unknown as EngineProject);
+  });
 });
