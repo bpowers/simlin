@@ -56,6 +56,7 @@ pub mod ltm_finding;
 pub mod ltm_post;
 pub mod mdl;
 mod model;
+mod module_functions;
 mod parser;
 mod patch;
 mod project;

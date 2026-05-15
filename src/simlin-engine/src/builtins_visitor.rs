@@ -11,20 +11,8 @@ use crate::common::{
     canonicalize,
 };
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
+use crate::module_functions::stdlib_args;
 use crate::{datamodel, eqn_err};
-
-fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
-    let args: &'static [&'static str] = match name {
-        "smth1" | "smth3" | "delay" | "delay1" | "delay3" | "trend" => {
-            &["input", "delay_time", "initial_value"]
-        }
-        "npv" => &["stream", "discount_rate", "initial_value", "factor"],
-        _ => {
-            return None;
-        }
-    };
-    Some(args)
-}
 
 /// Check if the expression contains any stdlib function calls that need per-element expansion
 fn contains_stdlib_call(expr: &Expr0) -> bool {
