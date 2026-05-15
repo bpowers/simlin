@@ -564,8 +564,8 @@ fn macro_models_and_diags(source: &str) -> (Vec<String>, Vec<Diagnostic>) {
 ///   not (a "flag nothing" mutation), the corpus harness would silently
 ///   stop catching the very failure class it exists to catch.
 /// * **(b) NOT flagged:** a macro whose *body* calls an
-///   engine-unimplemented builtin (`B = NOTAFUNCTION(a) + a`, the
-///   `RANDOM NORMAL`-in-`pink_noise` shape) yields an in-body
+///   engine-unimplemented builtin (`GAP = RANDOM NORMAL(-6, 6, 0, 1,
+///   seed)`, the literal metasd `pink_noise` shape) yields an in-body
 ///   `UnknownBuiltin` on the macro-marked model -- an *unrelated* engine
 ///   gap, identical whether it appears in a macro body or a `main`
 ///   equation. The narrower classifier MUST NOT flag it -- if it did (a
