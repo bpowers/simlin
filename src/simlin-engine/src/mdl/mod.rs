@@ -61,7 +61,7 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
         ));
     }
 
-    let model = main_model(project);
+    let model = main_model(project).expect(MAIN_MODEL_EXPECT);
     for var in &model.variables {
         if let Variable::Module(m) = var {
             // A macro-module instance (Phase 4's materialized multi-output
@@ -87,18 +87,23 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
     writer.write_project(project)
 }
 
-/// The single non-macro ("main") model of a macro-bearing project. The
-/// single-model invariant is enforced by [`project_to_mdl`]'s reject gate
-/// before the writer is invoked, so the main model always exists; this
-/// helper is the shared lookup so the gate, `write_project`, and
+/// The single non-macro ("main") model of a macro-bearing project, or
+/// `None` if there is no non-macro model.
+///
+/// **Invariant:** every caller must run *after* [`project_to_mdl`]'s reject
+/// gate, which rejects any project whose non-macro model count is not
+/// exactly 1 (the empty-project `0 != 1` case included). Post-gate the
+/// `.find(...)` always matches, so callers `.expect(...)` the result -- a
+/// loud, non-indexing assertion of that invariant rather than a panicking
+/// index. This is the shared lookup so the gate, `write_project`, and
 /// `write_equations_section` all agree on which model is the body.
-pub(crate) fn main_model(project: &Project) -> &crate::datamodel::Model {
-    project
-        .models
-        .iter()
-        .find(|m| m.macro_spec.is_none())
-        .unwrap_or(&project.models[0])
+pub(crate) fn main_model(project: &Project) -> Option<&crate::datamodel::Model> {
+    project.models.iter().find(|m| m.macro_spec.is_none())
 }
+
+/// `.expect` message for [`main_model`]'s post-reject-gate invariant.
+pub(crate) const MAIN_MODEL_EXPECT: &str = "main_model: callers must run after the project_to_mdl reject gate, \
+     which guarantees exactly one non-macro model";
 
 /// Parse a Vensim MDL file into a Project.
 ///

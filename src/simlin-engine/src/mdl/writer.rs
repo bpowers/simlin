@@ -1444,8 +1444,20 @@ fn build_multi_output_reconstructions(
 
     // Index the scalar-equation auxes once: trimmed equation text ->
     // (ident, doc, units). A binding aux's equation is exactly
-    // `{module}.{output}`. First-wins under aliasing (mirrors the XMILE
-    // `extract_macro_invocations` first-wins behavior).
+    // `{module_ident}.{output}`.
+    //
+    // The `or_insert` first-wins is *unreachable for binding-aux
+    // detection*: a module's distinct outputs produce distinct
+    // `{module_ident}.{output}` keys, so the two binding auxes of one
+    // module instance can never collide on a key (a collision would
+    // require two auxes with the byte-identical scalar equation -- an
+    // alias pair -- not two bindings of the same module). The first-wins
+    // choice is retained anyway to intentionally mirror the documented
+    // first-wins behavior of `crate::xmile::model::extract_macro_invocations`
+    // (the Phase-5 XMILE sibling path): under aliasing only the
+    // first-encountered aux becomes the binding; any alias stays an
+    // ordinary aux that references the regenerated module output by name
+    // and still round-trips.
     let mut scalar_auxes: HashMap<&str, (&str, &str, &Option<String>)> = HashMap::new();
     for v in &model.variables {
         if let datamodel::Variable::Aux(aux) = v
@@ -2655,7 +2667,7 @@ impl MdlWriter {
         // `macro_*` fixture uses (Vensim accepts multiple back-to-back
         // blocks here). The single non-macro model is the body.
         self.write_macro_blocks(project);
-        let model = super::main_model(project);
+        let model = super::main_model(project).expect(super::MAIN_MODEL_EXPECT);
         self.write_equations_section(model, project);
         self.write_sketch_section(&model.views);
         self.write_settings_section(project);
