@@ -34,6 +34,9 @@ fi
 
 cd "$REPO_ROOT"
 
+echo "Running pysimlin linting..."
+uv run --directory src/pysimlin ruff check .
+
 echo "Running pysimlin type checking..."
 uv run --directory src/pysimlin mypy simlin/
 

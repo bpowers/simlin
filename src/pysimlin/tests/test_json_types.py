@@ -136,7 +136,11 @@ def stock_strategy(draw: Any) -> Stock:
     nn = draw(st.booleans())
     cbmi = draw(st.booleans())
     is_pub = draw(st.booleans())
-    compat = Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub) if (nn or cbmi or is_pub) else None
+    compat = (
+        Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub)
+        if (nn or cbmi or is_pub)
+        else None
+    )
     return Stock(
         name=draw(ident_strategy()),
         inflows=draw(st.lists(ident_strategy(), min_size=0, max_size=3)),
@@ -158,7 +162,11 @@ def flow_strategy(draw: Any) -> Flow:
     nn = draw(st.booleans())
     cbmi = draw(st.booleans())
     is_pub = draw(st.booleans())
-    compat = Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub) if (nn or cbmi or is_pub) else None
+    compat = (
+        Compat(non_negative=nn, can_be_module_input=cbmi, is_public=is_pub)
+        if (nn or cbmi or is_pub)
+        else None
+    )
 
     return Flow(
         name=draw(ident_strategy()),
@@ -545,9 +553,7 @@ class TestOptionalFieldSerialization:
         # Compat with all-default fields should be omitted
         flow_default = Flow(name="test", compat=Compat())
         result_default = converter.unstructure(flow_default)
-        assert "compat" not in result_default, (
-            "compat with all defaults should be omitted"
-        )
+        assert "compat" not in result_default, "compat with all defaults should be omitted"
 
         # Compat with non-default should be included
         flow_nn = Flow(name="test", compat=Compat(non_negative=True))
@@ -558,9 +564,7 @@ class TestOptionalFieldSerialization:
         """An empty GraphicalFunction should not be elided like Compat."""
         flow = Flow(name="test", graphical_function=GraphicalFunction())
         result = converter.unstructure(flow)
-        assert "graphicalFunction" in result, (
-            "empty GraphicalFunction should not be dropped"
-        )
+        assert "graphicalFunction" in result, "empty GraphicalFunction should not be dropped"
 
 
 class TestLegacyCompatMerge:
