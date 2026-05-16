@@ -1389,6 +1389,61 @@ fn ref_interleaved_b1_only_disjoint_from_b3() {
     }
 }
 
+/// Issue #559 blocker B2 Pattern A (end-to-end symptom + C-LEARN
+/// signature). A 1D stock whose INTEG rate references a higher-rank flow
+/// pinned to one element of the extra dimension
+/// (`stock1d[scenario] = INTEG(fluxatm[scenario] - flux2d[scenario, L1], 0)`,
+/// `flux2d[scenario, layers]`). The native MDL `collect_flows` dropped the
+/// `[scenario, L1]` pin and wired the bare 2D `flux2d` as a named outflow
+/// of the 1D stock, so the dimension checker reported
+/// `mismatched_dimensions` on `stock1d` -- the exact C-LEARN
+/// `c_in_mixed_layer` / `heat_in_atmosphere_and_upper_ocean` shape.
+///
+/// Pre-fix RED: `compile_project_incremental` fails with a
+/// `MismatchedDimensions` diagnostic on `stock1d`. Post-fix GREEN: the
+/// rank-changing subscripted reference falls through to the synthetic
+/// net-flow path (which preserves the 1D `flux2d[scenario, L1]` slice in
+/// the rate), so the model compiles and simulates. `fluxatm`(2) -
+/// `flux2d[*,L1]`(1) = 1 per step into `stock1d` (init 0): [0, 1].
+#[test]
+fn simulates_b2_pattern_a_subscript_pinned_flow() {
+    use simlin_engine::common::ErrorCode;
+    let mdl = "\
+{UTF-8}
+scenario: s1, s2 ~~|
+layers: (L1-L4) ~~|
+flux2d[scenario, layers] = 1 ~~|
+fluxatm[scenario] = 2 ~~|
+stock1d[scenario] = INTEG(fluxatm[scenario] - flux2d[scenario, L1], 0) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (compile_err, diags) = b3_compile_diags(mdl);
+    // The B2-A bug surfaces specifically as MismatchedDimensions on the
+    // 1D stock fed by the mis-wired bare 2D flow (pre-fix RED).
+    assert!(
+        !diags
+            .iter()
+            .any(|d| b3_diag_code(d) == Some(ErrorCode::MismatchedDimensions)),
+        "B2-A: a subscript-pinned higher-rank flow must not produce \
+         MismatchedDimensions on the 1D stock. Diagnostics: {diags:#?}"
+    );
+    assert!(
+        !compile_err,
+        "B2-A: stock1d with a pinned-slice flow must compile (synthetic \
+         net-flow preserves the 1D `flux2d[scenario, L1]` slice). \
+         Diagnostics: {diags:#?}"
+    );
+    // It simulates: stock1d[s] = INTEG(fluxatm(2) - flux2d[s,L1](1)) per
+    // scenario element, init 0 -> [0, 1] over the 2 steps.
+    let r = run_inline_mdl(mdl);
+    assert_eq!(r.step_count, 2);
+    assert_eq!(b3_series(&r, "stock1d[s1]"), vec![0.0, 1.0]);
+    assert_eq!(b3_series(&r, "stock1d[s2]"), vec![0.0, 1.0]);
+}
+
 /// All test models that the monolithic compiler can handle.
 /// The incremental path must also handle these.
 static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[

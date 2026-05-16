@@ -530,33 +530,56 @@ impl<'input> ConversionContext<'input> {
         &self,
         eq: &MdlEquation<'_>,
     ) -> Option<(Vec<String>, Vec<String>)> {
+        // The stock equation's own LHS subscripts (canonicalized). A flow
+        // reference pinned/sliced to a DIFFERENT shape than this is not a
+        // plain named flow (#559 B2-A) -- see `collect_flows`.
+        let stock_lhs_subs: Vec<String> = get_lhs(eq)
+            .map(|lhs| {
+                lhs.subscripts
+                    .iter()
+                    .map(|s| match s {
+                        Subscript::Element(n, _) | Subscript::BangElement(n, _) => {
+                            canonical_name(n)
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         match eq {
-            MdlEquation::Regular(_, expr) => self.extract_flows_from_integ(expr),
+            MdlEquation::Regular(_, expr) => self.extract_flows_from_integ(expr, &stock_lhs_subs),
             _ => None,
         }
     }
 
     /// Extract flows from an INTEG expression's rate argument.
-    fn extract_flows_from_integ(&self, expr: &Expr<'_>) -> Option<(Vec<String>, Vec<String>)> {
+    fn extract_flows_from_integ(
+        &self,
+        expr: &Expr<'_>,
+        stock_lhs_subs: &[String],
+    ) -> Option<(Vec<String>, Vec<String>)> {
         match expr {
             Expr::App(name, _, args, CallKind::Builtin, _, _) if eq_lower_space(name, "integ") => {
                 if !args.is_empty() {
-                    return self.analyze_rate_expression(&args[0]);
+                    return self.analyze_rate_expression(&args[0], stock_lhs_subs);
                 }
                 None
             }
-            Expr::Paren(inner, _) => self.extract_flows_from_integ(inner),
+            Expr::Paren(inner, _) => self.extract_flows_from_integ(inner, stock_lhs_subs),
             _ => None,
         }
     }
 
     /// Analyze a rate expression to identify inflows and outflows.
     /// Uses the is_all_plus_minus algorithm from xmutil.
-    fn analyze_rate_expression(&self, rate: &Expr<'_>) -> Option<(Vec<String>, Vec<String>)> {
+    fn analyze_rate_expression(
+        &self,
+        rate: &Expr<'_>,
+        stock_lhs_subs: &[String],
+    ) -> Option<(Vec<String>, Vec<String>)> {
         let mut inflows = Vec::new();
         let mut outflows = Vec::new();
 
-        if self.collect_flows(rate, true, &mut inflows, &mut outflows) {
+        if self.collect_flows(rate, true, &mut inflows, &mut outflows, stock_lhs_subs) {
             Some((inflows, outflows))
         } else {
             // Complex expression - can't decompose into simple flows
@@ -568,23 +591,60 @@ impl<'input> ConversionContext<'input> {
     /// Returns false if the expression is too complex (contains mul/div/functions),
     /// or if validity checks fail (duplicates, stock-as-flow, unknown symbols).
     ///
-    /// Subscripted flows are allowed to match xmutil's behavior (though xmutil notes
-    /// this has a bug where subscripts aren't properly compared).
+    /// A subscripted flow reference is accepted as a bare named flow ONLY
+    /// when its subscripts equal the stock equation's own LHS subscripts
+    /// (`stock_lhs_subs`, canonicalized). A reference pinned/sliced to a
+    /// different shape -- e.g. `flux2d[scenario, L1]` (a single-`layers`
+    /// slice of a 2-D `[scenario, layers]` flow) feeding a 1-D
+    /// `stock1d[scenario]` -- would, if accepted by bare name, wire the
+    /// full higher-rank variable to a lower-rank stock and the dimension
+    /// checker then reports `MismatchedDimensions` (issue #559 / B2-A:
+    /// C-LEARN `c_in_mixed_layer`, `heat_in_atmosphere_and_upper_ocean`).
+    /// Rejecting it fails the simple decomposition so the caller falls
+    /// through to the synthetic net-flow path, which preserves the exact,
+    /// correctly-ranked sliced rate expression. A reference with NO
+    /// subscripts is unchanged (the implicit same-shape case; genuine
+    /// mismatches are still caught downstream by the dimension checker).
+    /// This replaces the prior xmutil-parity behavior, which deliberately
+    /// matched a documented xmutil bug (subscripts not compared).
     fn collect_flows(
         &self,
         expr: &Expr<'_>,
         positive: bool,
         inflows: &mut Vec<String>,
         outflows: &mut Vec<String>,
+        stock_lhs_subs: &[String],
     ) -> bool {
         match expr {
-            Expr::Var(name, _subscripts, _) => {
+            Expr::Var(name, subscripts, _) => {
                 let canonical = canonical_name(name);
 
-                // Note: xmutil allows subscripted flows and just checks the variable name
-                // without comparing subscripts. This has a known bug (per xmutil comments)
-                // where STOCK[A]=INTEG(FLOW[B],0) and STOCK[B]=INTEG(FLOW[A],0) would both
-                // use FLOW as their flow, even though the subscripts differ.
+                // B2-A (#559): a subscripted flow reference whose subscripts
+                // differ from the stock equation's own LHS subscripts is
+                // pinning/slicing the flow to a shape other than the stock
+                // element it feeds (e.g. `flux2d[scenario, L1]` feeding
+                // `stock1d[scenario]`). Accepting it by bare name would wire
+                // the full higher-rank variable into the lower-rank stock ->
+                // `MismatchedDimensions`. Fail the simple decomposition so
+                // the caller falls through to the synthetic net-flow path,
+                // which preserves the exact (correctly-ranked) sliced rate.
+                // A reference with NO subscripts keeps the prior behavior
+                // (implicit same-shape flow). General: no dimension-name
+                // special-casing -- replaces the old xmutil-parity-with-a-
+                // known-bug behavior (subscripts were not compared).
+                if !subscripts.is_empty() {
+                    let ref_subs: Vec<String> = subscripts
+                        .iter()
+                        .map(|s| match s {
+                            Subscript::Element(n, _) | Subscript::BangElement(n, _) => {
+                                canonical_name(n)
+                            }
+                        })
+                        .collect();
+                    if ref_subs != stock_lhs_subs {
+                        return false;
+                    }
+                }
 
                 // Duplicate check: same variable appearing twice in same direction
                 if positive && inflows.contains(&canonical) {
@@ -624,20 +684,22 @@ impl<'input> ConversionContext<'input> {
                 true
             }
             Expr::Op1(crate::mdl::ast::UnaryOp::Negative, inner, _) => {
-                self.collect_flows(inner, !positive, inflows, outflows)
+                self.collect_flows(inner, !positive, inflows, outflows, stock_lhs_subs)
             }
             Expr::Op1(crate::mdl::ast::UnaryOp::Positive, inner, _) => {
-                self.collect_flows(inner, positive, inflows, outflows)
+                self.collect_flows(inner, positive, inflows, outflows, stock_lhs_subs)
             }
             Expr::Op2(BinaryOp::Add, left, right, _) => {
-                self.collect_flows(left, positive, inflows, outflows)
-                    && self.collect_flows(right, positive, inflows, outflows)
+                self.collect_flows(left, positive, inflows, outflows, stock_lhs_subs)
+                    && self.collect_flows(right, positive, inflows, outflows, stock_lhs_subs)
             }
             Expr::Op2(BinaryOp::Sub, left, right, _) => {
-                self.collect_flows(left, positive, inflows, outflows)
-                    && self.collect_flows(right, !positive, inflows, outflows)
+                self.collect_flows(left, positive, inflows, outflows, stock_lhs_subs)
+                    && self.collect_flows(right, !positive, inflows, outflows, stock_lhs_subs)
             }
-            Expr::Paren(inner, _) => self.collect_flows(inner, positive, inflows, outflows),
+            Expr::Paren(inner, _) => {
+                self.collect_flows(inner, positive, inflows, outflows, stock_lhs_subs)
+            }
             // Anything else (mul, div, functions, constants) means we can't decompose
             _ => false,
         }
@@ -1226,6 +1288,95 @@ rate = 5
         } else {
             panic!("Expected Flow variable");
         }
+    }
+
+    /// Issue #559 blocker B2 Pattern A: a 1D stock whose INTEG rate
+    /// references a higher-rank flow PINNED to a single element of the
+    /// extra dimension (`flux2d[scenario, L1]` feeding a 1D
+    /// `stock1d[scenario]`). `collect_flows` dropped the `[scenario, L1]`
+    /// subscript and wired the BARE 2D `flux2d` as a named outflow of the
+    /// 1D stock; the dimension checker then flags `mismatched_dimensions`
+    /// (the C-LEARN `c_in_mixed_layer` / `heat_in_atmosphere_and_upper_ocean`
+    /// signature). A flow reference whose subscripts change its effective
+    /// rank/shape vs the stock LHS must NOT be accepted as a bare named
+    /// flow -- the decomposition must fall through to the synthetic
+    /// net-flow path, which preserves the pinned-slice rate expression.
+    #[test]
+    fn test_b2_pattern_a_rank_changing_subscripted_flow_synthesizes_net_flow() {
+        let mdl = "scenario: s1, s2
+~ ~|
+layers: (L1-L4)
+~ ~|
+flux2d[scenario, layers] = 1
+~ ~|
+fluxatm[scenario] = 2
+~ ~|
+stock1d[scenario] = INTEG(fluxatm[scenario] - flux2d[scenario, L1], 0)
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).expect("conversion should succeed");
+        let main = &project.models[0];
+        let Some(Variable::Stock(s)) = main.variables.iter().find(|v| v.get_ident() == "stock1d")
+        else {
+            panic!("expected stock1d as a Stock");
+        };
+        // The bare 2D `flux2d` must NOT be wired as a named flow of the 1D
+        // stock (that is the subscript-drop bug; pre-fix outflows==["flux2d"]).
+        assert!(
+            !s.outflows.iter().any(|f| f == "flux2d") && !s.inflows.iter().any(|f| f == "flux2d"),
+            "B2-A: bare 2D `flux2d` must not be a named flow of the 1D \
+             `stock1d` (subscript-pin dropped). inflows={:?} outflows={:?}",
+            s.inflows,
+            s.outflows
+        );
+        // Instead the rank-changing reference forces the synthetic
+        // net-flow path (which keeps `flux2d[scenario, L1]` in the rate).
+        assert!(
+            main.variables
+                .iter()
+                .any(|v| v.get_ident().contains("net_flow")),
+            "B2-A: rank-changing subscripted flow ref must fall through to \
+             a synthetic net-flow; none found. vars={:?}",
+            main.variables
+                .iter()
+                .map(|v| v.get_ident())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// B2 Pattern A control: when flows are the SAME rank/shape as the
+    /// stock LHS (`[scenario]`), they must STILL be wired as named flows.
+    /// The B2-A fix must reject only RANK/SHAPE-CHANGING subscripted refs,
+    /// never legitimate same-rank ones (stable green pre & post fix).
+    #[test]
+    fn test_b2_pattern_a_control_same_rank_flows_stay_named() {
+        let mdl = "scenario: s1, s2
+~ ~|
+fluxatm[scenario] = 2
+~ ~|
+fluxout[scenario] = 1
+~ ~|
+stock1d[scenario] = INTEG(fluxatm[scenario] - fluxout[scenario], 0)
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).expect("conversion should succeed");
+        let main = &project.models[0];
+        let Some(Variable::Stock(s)) = main.variables.iter().find(|v| v.get_ident() == "stock1d")
+        else {
+            panic!("expected stock1d as a Stock");
+        };
+        assert_eq!(s.inflows, vec!["fluxatm"], "same-rank inflow stays named");
+        assert_eq!(s.outflows, vec!["fluxout"], "same-rank outflow stays named");
+        assert!(
+            !main
+                .variables
+                .iter()
+                .any(|v| v.get_ident().contains("net_flow")),
+            "control must NOT synthesize a net-flow (same-rank flows are \
+             legitimately named -- the fix must not over-reject)"
+        );
     }
 
     #[test]
