@@ -314,6 +314,18 @@ class MacroSpec:
     additional_outputs: list[str] = field(default_factory=list)
 
 
+
+@dataclass
+class ModelGroup:
+    """Semantic/organizational group for categorizing model variables."""
+
+    name: str
+    doc: str | None = None
+    parent: str | None = None
+    members: list[str] = field(default_factory=list)
+    run_enabled: bool = False
+
+
 @dataclass
 class Model:
     """A model in the project."""
@@ -327,6 +339,7 @@ class Model:
     views: list[View] = field(default_factory=list)
     loop_metadata: list[LoopMetadata] = field(default_factory=list)
     macro_spec: MacroSpec | None = None
+    groups: list[ModelGroup] = field(default_factory=list)
 
 
 @dataclass
