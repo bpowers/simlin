@@ -1444,6 +1444,62 @@ TIME STEP = 1 ~~|
     assert_eq!(b3_series(&r, "stock1d[s2]"), vec![0.0, 1.0]);
 }
 
+/// Issue #559 blocker B2 Pattern B (end-to-end symptom; C-LEARN
+/// `c_in_deep_ocean_net_flow` / `heat_in_deep_ocean_net_flow` signature).
+/// A 2-D stock over a shift-mapped subrange whose differing per-equation
+/// flow lists force a synthesized `<stock>_net_flow`. `build_synthetic_
+/// flow_equation` cloned the RAW subrange-sliced rate
+/// (`dflux[scenario, upper] - dflux[scenario, lower]`) into every scalar
+/// element key instead of resolving it per element, so the dimension
+/// checker reported `MismatchedDimensions` on `stock2d_net_flow`.
+///
+/// Pre-fix RED: a `MismatchedDimensions` diagnostic on `stock2d_net_flow`.
+/// Post-fix: the synthetic net-flow is resolved per element (parser-level
+/// shape fixed), so that MismatchedDimensions is GONE.
+///
+/// DEFERRED (B1-coupled, B2.md s4): the C-LEARN deep-ocean is a genuine
+/// subscript-shift recurrence (`dflux` depends on the stock) that only
+/// *simulates* once B1's element-level resolution also lands. This
+/// minimal repro's `dflux` is constant, so it has no such cycle; we
+/// therefore assert ONLY the B2-B parser-level symptom removal (no
+/// `MismatchedDimensions` on the synthesized net-flow) and explicitly do
+/// NOT assert deep-ocean simulation *values* here -- that is the deferred
+/// B1-coupled end-to-end check.
+#[test]
+fn simulates_b2_pattern_b_synthetic_net_flow_shape() {
+    use simlin_engine::common::ErrorCode;
+    let mdl = "\
+{UTF-8}
+scenario: s1, s2 ~~|
+layers: (L1-L4) ~~|
+upper: (L1-L3) -> lower ~~|
+lower: (L2-L4) -> upper ~~|
+bottom: L4 ~~|
+dflux[scenario, L1] = 5 ~~|
+dflux[scenario, lower] = 6 ~~|
+stock2d[scenario, upper] = INTEG(dflux[scenario, upper] - dflux[scenario, lower], 0) ~~|
+stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (_compile_err, diags) = b3_compile_diags(mdl);
+    // The B2-B bug surfaces as MismatchedDimensions on the synthesized
+    // `_net_flow` (raw subrange-sliced rate cloned into scalar element
+    // keys). Post-fix that specific symptom is gone.
+    let mismatched: Vec<_> = diags
+        .iter()
+        .filter(|d| b3_diag_code(d) == Some(ErrorCode::MismatchedDimensions))
+        .collect();
+    assert!(
+        mismatched.is_empty(),
+        "B2-B: the synthesized net-flow must be resolved per element so no \
+         MismatchedDimensions remains (parser-level shape fix). Found: \
+         {mismatched:#?}"
+    );
+}
+
 /// All test models that the monolithic compiler can handle.
 /// The incremental path must also handle these.
 static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[

@@ -699,7 +699,13 @@ impl<'input> ConversionContext<'input> {
 
     /// Build an ElementContext for per-element equation substitution.
     /// Maps each LHS dimension to the specific element being computed.
-    fn build_element_context(
+    ///
+    /// Shared with the synthetic-net-flow path
+    /// (`stocks::build_synthetic_flow_equation`, #559 B2-B) so a
+    /// synthesized `<stock>_net_flow` resolves its rate per element with
+    /// the SAME subscript-range-mapping logic the regular arrayed-equation
+    /// path uses, instead of cloning the raw subrange-sliced rate string.
+    pub(super) fn build_element_context(
         &self,
         lhs_subscripts: &[String],
         element_parts: &[&str],

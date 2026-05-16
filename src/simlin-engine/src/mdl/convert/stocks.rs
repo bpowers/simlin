@@ -414,8 +414,12 @@ impl<'input> ConversionContext<'input> {
                 None => continue,
             };
 
-            let rate_str = match self.extract_integ_rate(&eq.equation) {
-                Some(e) => self.formatter.format_expr(e),
+            // Keep the rate EXPRESSION (not a raw formatted string): a
+            // synthetic net-flow must resolve it PER ELEMENT via the same
+            // subscript-range-mapping the regular arrayed-equation path
+            // uses (#559 B2-B), not clone the raw subrange-sliced text.
+            let rate_expr = match self.extract_integ_rate(&eq.equation) {
+                Some(e) => e,
                 None => continue,
             };
 
@@ -424,9 +428,13 @@ impl<'input> ConversionContext<'input> {
                 continue;
             }
 
-            // Expand subscripts to get dimension names and element keys
+            // Expand subscripts to get dimension names and element keys.
+            // `lhs_sub_names` keeps the LHS subscript names (parallel to
+            // `expanded_elements`) so `build_element_context` can map each
+            // cartesian element key back to per-dimension elements.
             let mut dims: Vec<String> = Vec::new();
             let mut expanded_elements: Vec<Vec<String>> = Vec::new();
+            let mut lhs_sub_names: Vec<String> = Vec::new();
 
             for s in &lhs.subscripts {
                 let sub_name = match s {
@@ -436,6 +444,7 @@ impl<'input> ConversionContext<'input> {
                 if let Some((dim, elements)) = self.expand_subscript(sub_name) {
                     dims.push(dim);
                     expanded_elements.push(elements);
+                    lhs_sub_names.push(sub_name.to_string());
                 } else {
                     // Unknown subscript - skip this equation
                     continue;
@@ -469,10 +478,21 @@ impl<'input> ConversionContext<'input> {
                 all_dims = Some(dims);
             }
 
-            // Compute element keys and store rate
+            // Resolve the rate PER ELEMENT through the shared per-element
+            // context (subrange shift-mapping included), mirroring the
+            // regular arrayed-equation conversion path. This replaces the
+            // prior raw `format_expr(rate)` cloned into every key, which
+            // assigned a subrange-sliced expression (e.g.
+            // `dflux[scenario, upper] - dflux[scenario, lower]`) to each
+            // scalar element -> MismatchedDimensions on `<stock>_net_flow`
+            // (#559 B2-B; C-LEARN c_in_deep_ocean_net_flow /
+            // heat_in_deep_ocean_net_flow).
             let element_keys = cartesian_product(&expanded_elements);
             for key in element_keys {
-                element_rates.insert(key, rate_str.clone());
+                let element_parts: Vec<&str> = key.split(',').collect();
+                let ctx = self.build_element_context(&lhs_sub_names, &element_parts);
+                let rate = self.formatter.format_expr_with_context(rate_expr, &ctx);
+                element_rates.insert(key, rate);
             }
         }
 
@@ -1376,6 +1396,94 @@ stock1d[scenario] = INTEG(fluxatm[scenario] - fluxout[scenario], 0)
                 .any(|v| v.get_ident().contains("net_flow")),
             "control must NOT synthesize a net-flow (same-rank flows are \
              legitimately named -- the fix must not over-reject)"
+        );
+    }
+
+    /// Issue #559 blocker B2 Pattern B: a 2-D stock defined per
+    /// shift-mapped subrange whose flow lists differ across equations, so
+    /// the converter synthesizes a `<stock>_net_flow` aux. The bug:
+    /// `build_synthetic_flow_equation` cloned the RAW rate string
+    /// (`dflux[scenario, upper] - dflux[scenario, lower]`) into EVERY
+    /// cartesian element key instead of applying the per-element
+    /// subscript-range-mapping resolution the regular arrayed-equation
+    /// path uses. A subrange-sliced expression assigned to each scalar
+    /// element -> `MismatchedDimensions` on `stock2d_net_flow` (the
+    /// C-LEARN `c_in_deep_ocean_net_flow` / `heat_in_deep_ocean_net_flow`
+    /// signature). The synthesized per-element equations must instead be
+    /// resolved per element (no raw `upper`/`lower` subrange tokens; each
+    /// `upper`-subrange element distinct), exactly as
+    /// `build_element_context` + `format_expr_with_context` produce on the
+    /// regular path. This is the PARSER-level shape assertion; the
+    /// end-to-end deep-ocean *value* check is B1-coupled and deferred (see
+    /// `simulates_b2_pattern_b_*` in tests/simulate.rs and B2.md s4).
+    #[test]
+    fn test_b2_pattern_b_synthetic_net_flow_resolves_per_element() {
+        let mdl = "scenario: s1, s2
+~ ~|
+layers: (L1-L4)
+~ ~|
+upper: (L1-L3) -> lower
+~ ~|
+lower: (L2-L4) -> upper
+~ ~|
+bottom: L4
+~ ~|
+dflux[scenario, L1] = 5
+~ ~|
+dflux[scenario, lower] = 6
+~ ~|
+stock2d[scenario, upper] = INTEG(dflux[scenario, upper] - dflux[scenario, lower], 0)
+~ ~|
+stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).expect("conversion should succeed");
+        let main = &project.models[0];
+        let net_flow = main
+            .variables
+            .iter()
+            .find(|v| v.get_ident().contains("net_flow"))
+            .expect("a synthetic net-flow must be created for stock2d");
+        let Variable::Flow(f) = net_flow else {
+            panic!("expected the synthetic net-flow to be a Flow");
+        };
+        let Equation::Arrayed(_dims, elements, _, _) = &f.equation else {
+            panic!(
+                "expected an Arrayed synthetic net-flow equation, got {:?}",
+                f.equation
+            );
+        };
+
+        // The raw rate carried unresolved subrange dimension names
+        // (`upper`/`lower`). Per-element resolution must replace them with
+        // concrete elements -- NO element rate may still contain the
+        // subrange tokens (pre-fix every `upper` slot is the verbatim
+        // `dflux[scenario, upper] - dflux[scenario, lower]`).
+        for (key, rate, _, _) in elements {
+            for tok in ["upper", "lower"] {
+                assert!(
+                    !rate
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .any(|w| w == tok),
+                    "B2-B: synthetic net-flow element {key:?} still carries \
+                     the unresolved subrange `{tok}` (raw rate cloned, not \
+                     per-element resolved): {rate:?}"
+                );
+            }
+        }
+        // The three `upper`-subrange elements (s1,L1/L2/L3) were identical
+        // clones pre-fix; per-element resolution makes them distinct.
+        let upper_rates: Vec<&String> = elements
+            .iter()
+            .filter(|(k, _, _, _)| matches!(k.as_str(), "s1,L1" | "s1,L2" | "s1,L3"))
+            .map(|(_, r, _, _)| r)
+            .collect();
+        assert_eq!(upper_rates.len(), 3, "expected 3 s1 upper-subrange slots");
+        assert!(
+            upper_rates[0] != upper_rates[1] && upper_rates[1] != upper_rates[2],
+            "B2-B: the `upper`-subrange element rates must be per-element \
+             distinct after resolution, got {upper_rates:?}"
         );
     }
 
