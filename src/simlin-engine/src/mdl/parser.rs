@@ -1291,11 +1291,14 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                     let args = self.parse_expr_list()?.into_exprs();
                     // Optional `:`-separated output bindings of a multi-output
                     // macro invocation: `total = add3(a, b, c : minv, maxv)`.
-                    // Only the Symbol branch handles this: a `:` in a
-                    // `CallKind::Builtin` call is not valid Vensim, so the
-                    // Function branch deliberately does not parse it.
-                    // `parse_expr_list` stops at `:` (it separates only on
-                    // `,`/`;`), so the token after `args` is either `)` or `:`.
+                    // The Function branch parses the SAME `:` form (a
+                    // multi-output macro whose name shadows a builtin
+                    // tokenizes as `Token::Function`), re-tagging it as
+                    // `CallKind::Symbol`; the two branches are kept in
+                    // lockstep so a builtin-named macro is callable wherever
+                    // an ordinary-named one is. `parse_expr_list` stops at `:`
+                    // (it separates only on `,`/`;`), so the token after
+                    // `args` is either `)` or `:`.
                     let output_bindings = if self.peek_kind() == Some(TokenKind::Colon) {
                         self.advance_pos(); // consume ':'
                         self.parse_expr_list()?.into_exprs()
@@ -1369,13 +1372,39 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                     }
                 }
 
+                // A `:` here means this builtin-tokenized name is actually a
+                // MULTI-OUTPUT MACRO invocation whose name shadows a builtin.
+                // The normalizer has no macro-registry awareness, so a call
+                // site `SSHAPE(a, b : lo, hi)` tokenizes `SSHAPE` as
+                // `Token::Function` (it is an MDL builtin) even though a
+                // `:MACRO: SSHAPE(...)` defined it as a macro (design
+                // macros.AC5.4). No Vensim builtin uses `:` call syntax, so a
+                // `:` is unambiguous: parse the output bindings exactly as the
+                // Symbol branch does, and re-tag the call as
+                // `CallKind::Symbol` so the multi-output materializer / macro
+                // resolver treats it as a macro invocation (the kind the
+                // Symbol branch would have produced had the name not
+                // collided with a builtin). `parse_expr_list` separates only
+                // on `,`/`;`, so the args loop above already stopped at the
+                // `:`.
+                let output_bindings = if self.peek_kind() == Some(TokenKind::Colon) {
+                    self.advance_pos(); // consume ':'
+                    self.parse_expr_list()?.into_exprs()
+                } else {
+                    vec![]
+                };
                 let (_, r) = self.expect(TokenKind::RParen, "')'")?;
+                let kind = if output_bindings.is_empty() {
+                    CallKind::Builtin
+                } else {
+                    CallKind::Symbol
+                };
                 Ok(Expr::App(
                     name,
                     vec![],
                     exprs,
-                    CallKind::Builtin,
-                    vec![],
+                    kind,
+                    output_bindings,
                     Loc::new(l, r),
                 ))
             }
@@ -2588,6 +2617,76 @@ mod tests {
             assert_eq!(var_name(&output_bindings[1]), "maxv");
         } else {
             panic!("Expected App on rhs of Op2, got {:?}", rhs);
+        }
+    }
+
+    #[test]
+    fn test_parse_multi_output_macro_call_whose_name_shadows_a_builtin() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // A macro may shadow a builtin (design macros.AC5.4; `:MACRO:`
+        // headers parse such names via `expect_symbol_or_function`). The
+        // normalizer has no macro-registry awareness, so a *call site*
+        // `SSHAPE(...)` tokenizes `SSHAPE` as `Token::Function` (it is an
+        // MDL builtin). Combined with the multi-output `:` form, the
+        // Function branch must still parse the `:`-output bindings -- a `:`
+        // in a call is unambiguously a macro multi-output invocation (no
+        // Vensim builtin uses `:` call syntax), so it re-tags as
+        // `CallKind::Symbol` exactly as the Symbol branch would have.
+        // Before the fix this was a hard parse error, making a multi-output
+        // macro whose name shadows a builtin *definable but uncallable*.
+        let input = "the result = SSHAPE(xin, profile : lo, hi) ~ ~";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(
+            result.is_ok(),
+            "a multi-output call to a builtin-named macro must parse: {:?}",
+            result.unwrap_err()
+        );
+        let (eq, _, _) = result.unwrap();
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, output_bindings, _)) = &eq {
+            assert_eq!(name.as_ref(), "SSHAPE");
+            assert_eq!(
+                *kind,
+                CallKind::Symbol,
+                "a `:`-bearing call is a macro invocation, not a builtin"
+            );
+            assert_eq!(args.len(), 2);
+            assert_eq!(var_name(&args[0]), "xin");
+            assert_eq!(var_name(&args[1]), "profile");
+            assert_eq!(output_bindings.len(), 2);
+            assert_eq!(var_name(&output_bindings[0]), "lo");
+            assert_eq!(var_name(&output_bindings[1]), "hi");
+        } else {
+            panic!("Expected a Symbol-kind App, got {:?}", eq);
+        }
+    }
+
+    #[test]
+    fn test_builtin_call_without_output_bindings_stays_builtin() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // Regression: an ordinary builtin call (no `:`) must remain
+        // `CallKind::Builtin` with empty `output_bindings` -- the fix only
+        // engages when a `:` is actually present.
+        let input = "y = MAX(a, b) ~ ~";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (eq, _, _) = result.unwrap();
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, output_bindings, _)) = &eq {
+            assert_eq!(name.as_ref(), "MAX");
+            assert_eq!(*kind, CallKind::Builtin);
+            assert_eq!(args.len(), 2);
+            assert!(
+                output_bindings.is_empty(),
+                "an ordinary builtin call must have empty output_bindings, got {:?}",
+                output_bindings
+            );
+        } else {
+            panic!("Expected a Builtin-kind App, got {:?}", eq);
         }
     }
 

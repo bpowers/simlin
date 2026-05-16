@@ -323,18 +323,32 @@ impl MacroRegistry {
                 let Some(equation) = var.get_equation() else {
                     continue;
                 };
-                let text = equation.source_text();
-                let Ok(Some(ast)) = Expr0::new(&text, LexerType::Equation) else {
-                    // A body equation that does not parse is a per-variable
-                    // diagnostic surfaced later by the normal compile path;
-                    // it is not the registry's job to report it, and it
-                    // cannot introduce a (resolvable) macro call edge.
-                    continue;
-                };
-                let mut called: std::collections::BTreeSet<String> = Default::default();
-                collect_called_macros(&ast, &from, &self.macros, &mut called);
-                if let Some(set) = edges.get_mut(&from) {
-                    set.extend(called);
+                // Scan each source formula INDIVIDUALLY. An
+                // `Equation::Arrayed` body variable carries one formula per
+                // element (plus an optional EXCEPT default);
+                // `Equation::source_text()` `\n`-joins them, which does NOT
+                // reparse as a single expression -- a single
+                // `Expr0::new(source_text())` would fail and silently drop
+                // EVERY macro-call edge of the variable, so a recursion
+                // cycle whose closing call sits in one per-element arrayed
+                // body equation slipped past this guard and the
+                // depth-limit-free expander then hung / overflowed instead
+                // of reporting `CircularDependency`. Each element formula
+                // parses fine on its own.
+                for formula in equation_formulas(equation) {
+                    let Ok(Some(ast)) = Expr0::new(formula, LexerType::Equation) else {
+                        // A body equation that does not parse is a
+                        // per-variable diagnostic surfaced later by the
+                        // normal compile path; it is not the registry's job
+                        // to report it, and it cannot introduce a
+                        // (resolvable) macro call edge.
+                        continue;
+                    };
+                    let mut called: std::collections::BTreeSet<String> = Default::default();
+                    collect_called_macros(&ast, &from, &self.macros, &mut called);
+                    if let Some(set) = edges.get_mut(&from) {
+                        set.extend(called);
+                    }
                 }
             }
         }
@@ -346,6 +360,30 @@ impl MacroRegistry {
             );
         }
         Ok(())
+    }
+}
+
+/// The individually-parseable source formulas of an equation.
+///
+/// A `Scalar`/`ApplyToAll` equation is one formula. An `Arrayed` equation
+/// is one formula per explicitly-listed element plus any EXCEPT default --
+/// the same pieces `Equation::source_text()` produces, but returned
+/// separately rather than `\n`-joined: the joined form does NOT reparse as
+/// a single expression, so callers that need to parse a body equation (the
+/// macro recursion scan) must walk the formulas one at a time.
+fn equation_formulas(eq: &datamodel::Equation) -> Vec<&str> {
+    match eq {
+        datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => {
+            vec![s.as_str()]
+        }
+        datamodel::Equation::Arrayed(_, elements, default, _) => {
+            let mut formulas: Vec<&str> =
+                elements.iter().map(|(_, eqn, _, _)| eqn.as_str()).collect();
+            if let Some(default_eqn) = default {
+                formulas.push(default_eqn.as_str());
+            }
+            formulas
+        }
     }
 }
 
@@ -562,6 +600,49 @@ mod tests {
         }
     }
 
+    /// A macro-marked model whose single body variable (the primary
+    /// output) is an `Equation::Arrayed` with the given per-element
+    /// formulas. `Equation::source_text()` `\n`-joins these element
+    /// formulas, which is NOT a single parseable expression -- the regression
+    /// the arrayed-body recursion tests exercise.
+    fn macro_model_arrayed_body(name: &str, params: &[&str], elements: &[(&str, &str)]) -> Model {
+        let arrayed = Equation::Arrayed(
+            vec!["d".to_string()],
+            elements
+                .iter()
+                .map(|(el, eqn)| (el.to_string(), eqn.to_string(), None, None))
+                .collect(),
+            None,
+            false,
+        );
+        let mut variables = vec![Variable::Aux(Aux {
+            ident: name.to_string(),
+            equation: arrayed,
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })];
+        for p in params {
+            variables.push(aux(p, "0"));
+        }
+        Model {
+            name: name.to_string(),
+            sim_specs: None,
+            variables,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: Some(MacroSpec {
+                parameters: params.iter().map(|s| s.to_string()).collect(),
+                primary_output: name.to_string(),
+                additional_outputs: vec![],
+            }),
+        }
+    }
+
     // --- stdlib_descriptor ------------------------------------------------
 
     #[test]
@@ -730,6 +811,68 @@ mod tests {
             .expect("a non-recursive macro-calls-macro project must build");
         assert!(registry.resolve_macro("a").is_some());
         assert!(registry.resolve_macro("b").is_some());
+    }
+
+    // --- macros.AC5.2: recursion hidden in an arrayed multi-element body ---
+    //
+    // `Equation::source_text()` joins an `Equation::Arrayed` body
+    // variable's per-element formulas (and any EXCEPT default) with `\n`.
+    // That concatenation is NOT a single parseable expression, so a single
+    // `Expr0::new(source_text())` parse of it failed and the recursion scan
+    // silently dropped EVERY macro-call edge of the variable -- including a
+    // self/mutual call sitting in one element that closes a cycle. The
+    // (depth-limit-free) expander would then hang / overflow instead of the
+    // design's promised `CircularDependency`. Each element formula parses
+    // fine on its own, so the scan must consider them individually.
+
+    #[test]
+    fn ac5_2_self_recursion_in_arrayed_multi_element_body_is_circular_dependency() {
+        // `a`'s body is arrayed with two element equations; the first
+        // element calls `a` -> a self-edge that only a per-element scan
+        // sees (the `\n`-joined `a(x)\nx` does not parse as one expr).
+        let models = vec![macro_model_arrayed_body(
+            "a",
+            &["x"],
+            &[("e1", "a(x)"), ("e2", "x")],
+        )];
+        let err = MacroRegistry::build(&models).expect_err(
+            "a self-call inside one element of an arrayed multi-element \
+             macro body must still be detected as recursion",
+        );
+        assert_eq!(
+            err.code,
+            crate::common::ErrorCode::CircularDependency,
+            "recursion hidden in a per-element arrayed body equation must \
+             be reported as CircularDependency, not silently admitted"
+        );
+    }
+
+    #[test]
+    fn ac5_2_recursion_closed_by_a_later_arrayed_element_is_detected() {
+        // The cycle-closing call sits in the SECOND element equation, so a
+        // fix that only inspected the first element would still miss it:
+        // a -> b, and b's arrayed body calls `a` only in its 2nd element.
+        let models = vec![
+            macro_model("a", &["x"], "b(x)"),
+            macro_model_arrayed_body("b", &["y"], &[("e1", "y + 1"), ("e2", "a(y)")]),
+        ];
+        let err = MacroRegistry::build(&models)
+            .expect_err("a -> b -> a closed by b's 2nd arrayed element must be a cycle");
+        assert_eq!(err.code, crate::common::ErrorCode::CircularDependency);
+    }
+
+    #[test]
+    fn arrayed_multi_element_body_without_recursion_builds_ok() {
+        // The fix must not over-reject: a perfectly valid arrayed
+        // multi-element body with no macro self/mutual call must still
+        // build and resolve.
+        let models = vec![
+            plain_model("main"),
+            macro_model_arrayed_body("a", &["x"], &[("e1", "x + 1"), ("e2", "x * 2")]),
+        ];
+        let registry = MacroRegistry::build(&models)
+            .expect("a non-recursive arrayed multi-element macro body must build");
+        assert!(registry.resolve_macro("a").is_some());
     }
 
     // --- #554: a macro that wraps a same-canonical-name opcode intrinsic ---

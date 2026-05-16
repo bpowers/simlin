@@ -152,6 +152,32 @@ impl<'input> ConversionContext<'input> {
                         nested_macro
                     )));
                 }
+                // A whole-RHS multi-output call whose LHS is SUBSCRIPTED
+                // (`y[a1] = ADD3(p, q, r : lo, hi)`, or the apply-to-all
+                // `y[DimA] = ADD3(...)`). `detect_multi_output_call` keys
+                // its materialization on `canonical_name(symbol_key)` and
+                // never inspects the LHS subscripts, so without this guard
+                // the arrayed `y` was silently materialized as a SCALAR
+                // primary-output binding -- discarding the subscript and
+                // every sibling per-element equation with no diagnostic
+                // (silent model corruption). Arrayed multi-output
+                // invocation has no well-defined single materialization
+                // site and is a documented scoping limitation, so it must
+                // be rejected with the same actionable `ConvertError` the
+                // nested form yields -- not silently scalarized. This must
+                // run over EVERY non-empty equation (not just
+                // `select_equation`'s representative pick) so a subscripted
+                // multi-output call in any per-element equation is caught.
+                if let Some(subscripted_macro) = subscripted_lhs_multi_output_call(&eq.equation) {
+                    return Err(ConvertError::Other(format!(
+                        "multi-output call to `{}` has a subscripted (arrayed) \
+                         left-hand side; a multi-output (`:`-list) macro \
+                         invocation must bind a scalar left-hand side -- an \
+                         arrayed multi-output invocation has no well-defined \
+                         materialization and is not supported",
+                        subscripted_macro
+                    )));
+                }
             }
 
             // The legitimate whole-RHS multi-output detection still keys off
@@ -160,8 +186,9 @@ impl<'input> ConversionContext<'input> {
             // whole-RHS `total = ADD3(p, q, r : lo, hi)` is the
             // representative equation and materializes; an arrayed variable
             // is not a valid multi-output materialization site, and the
-            // all-equations guard above has already rejected any nested
-            // multi-output call in any of its per-element equations).
+            // all-equations guard above has already rejected it -- both the
+            // nested form AND a whole-RHS multi-output call on a subscripted
+            // LHS, in any of its per-element equations).
             let Some(eq) = self.select_equation(&info.equations) else {
                 continue;
             };
@@ -210,7 +237,16 @@ impl<'input> ConversionContext<'input> {
             for binding in call.output_bindings {
                 match binding {
                     Expr::Var(name, subs, _) if subs.is_empty() => {
-                        output_idents.push(quoted_space_to_underbar(name));
+                        // `variable_ident` (= `quoted_space_to_underbar
+                        // (to_lower_space(..))`), the SAME canonicalization
+                        // the `Var` arguments below (line ~`variable_ident
+                        // (name)`) and the LHS ident use. A bare
+                        // `quoted_space_to_underbar(name)` would preserve
+                        // case (`The Min` -> `The_Min`) while every other
+                        // ident in the cluster is lowercased -- inconsistent
+                        // within one materialized cluster and not byte-stable
+                        // across MDL/XMILE export.
+                        output_idents.push(variable_ident(name));
                     }
                     _ => {
                         return Err(ConvertError::Other(format!(
@@ -383,6 +419,14 @@ impl<'input> ConversionContext<'input> {
 /// [`ConversionContext::materialize_multi_output_invocations`] *before* this
 /// detection), so by the time a non-`None` result here is materialized the
 /// invariant has already been enforced -- it is no longer merely asserted.
+///
+/// This deliberately does NOT inspect `Lhs::subscripts`: a subscripted
+/// (arrayed) LHS has no well-defined scalar materialization site and is
+/// rejected up front by [`subscripted_lhs_multi_output_call`] (the
+/// companion whole-RHS-only guard, run in the same pre-scan). Were that
+/// guard absent, the `canonical_name(symbol_key)` keying below would
+/// silently materialize an arrayed `y[..] = M(.. : ..)` as a *scalar*
+/// binding, dropping the subscript and every sibling per-element equation.
 fn detect_multi_output_call<'a, 'input>(
     symbol_key: &str,
     eq: &'a MdlEquation<'input>,
@@ -402,6 +446,40 @@ fn detect_multi_output_call<'a, 'input>(
         args,
         output_bindings,
     })
+}
+
+/// If `eq` is a whole-RHS multi-output macro invocation whose LHS is
+/// SUBSCRIPTED (arrayed), return the offending macro's raw name.
+///
+/// The companion of [`find_nested_multi_output_call`] in enforcing the
+/// whole-RHS-only rule: that guard rejects a multi-output call that is
+/// *not* the entire RHS; this one rejects a call that *is* the entire RHS
+/// but binds a non-scalar (subscripted) LHS -- the per-element
+/// `y[a1] = ADD3(p, q, r : lo, hi)` form and the apply-to-all
+/// `y[DimA] = ADD3(...)` form alike. A `:`-list invocation materializes
+/// into one scalar primary-output binding plus one scalar binding per
+/// additional output; there is no well-defined per-element materialization,
+/// so an arrayed multi-output invocation is a documented scoping
+/// limitation. `detect_multi_output_call` keys materialization on
+/// `canonical_name(symbol_key)` and never reads `Lhs::subscripts`, so
+/// without this guard the arrayed variable was silently materialized as a
+/// scalar -- discarding the subscript and every sibling per-element
+/// equation with no diagnostic. Returning a name here lets the caller
+/// raise the same actionable `ConvertError` the nested form yields.
+fn subscripted_lhs_multi_output_call<'a>(eq: &'a MdlEquation<'_>) -> Option<&'a str> {
+    let MdlEquation::Regular(lhs, expr) = eq else {
+        return None;
+    };
+    if lhs.subscripts.is_empty() {
+        return None;
+    }
+    let Expr::App(name, _subscripts, _args, CallKind::Symbol, output_bindings, _) = expr else {
+        return None;
+    };
+    if output_bindings.is_empty() {
+        return None;
+    }
+    Some(name.as_ref())
 }
 
 /// Find an `Expr::App` with a non-empty `output_bindings` (a multi-output

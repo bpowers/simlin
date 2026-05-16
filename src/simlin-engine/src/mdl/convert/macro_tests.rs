@@ -648,6 +648,108 @@ fn multi_output_invocation_materializes_module_and_binding_auxes() {
     );
 }
 
+#[test]
+fn multi_output_binding_idents_are_canonicalized_like_the_rest_of_the_cluster() {
+    // Serialization-stability regression: a `:`-output binding written with
+    // mixed case / spaces (`The Min`, `The Max`). Every other ident in a
+    // materialized cluster is the lowercased canonical form -- `Var`
+    // arguments use `variable_ident` (= `quoted_space_to_underbar
+    // (to_lower_space(..))`) and the LHS uses `quoted_space_to_underbar
+    // (canonical_name(..))`. The output bindings used a bare
+    // `quoted_space_to_underbar(name)` (NO `to_lower_space`), so `The Min`
+    // minted the case-preserving ident `The_Min` while `total`/`in1` etc.
+    // were lowercased -- inconsistent within one cluster and not
+    // byte-stable across export (the test plan requires byte-stable
+    // MDL/XMILE). The binding ident must be the same canonical form, so
+    // `var(main, "the_min")` (lowercased) must resolve.
+    let mdl = ":MACRO: ADD3(a, b, c : minval, maxval)
+ADD3 = a + b + c
+~ ~|
+minval = MIN(a, MIN(b, c))
+~ ~|
+maxval = MAX(a, MAX(b, c))
+~ ~|
+:END OF MACRO:
+total = ADD3(in1, in2, in3 : The Min, The Max)
+~ ~|
+in1 = 1
+~ ~|
+in2 = 2
+~ ~|
+in3 = 3
+~ ~|
+\\\\\\---///
+";
+    let project = convert_mdl(mdl).expect("a mixed-case :-binding must still import");
+    let main = main_model(&project);
+
+    // The binding aux idents are the lowercased canonical form, matching
+    // every other ident in the cluster. `var` panics if absent, so a
+    // case-preserving `The_Min` ident fails RED here.
+    let the_min = var(main, "the_min");
+    assert_eq!(
+        scalar_eq(the_min),
+        "total_macro.minval",
+        "`The Min` must bind a canonicalized `the_min` aux reading the \
+         module's `minval` output"
+    );
+    let the_max = var(main, "the_max");
+    assert_eq!(scalar_eq(the_max), "total_macro.maxval");
+
+    // And the case-preserving form must NOT exist (no duplicate / drift).
+    assert!(
+        !main
+            .variables
+            .iter()
+            .any(|v| v.get_ident() == "The_Min" || v.get_ident() == "The_Max"),
+        "no case-preserving binding ident may survive: {:?}",
+        main.variables
+            .iter()
+            .map(|v| v.get_ident().to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn multi_output_macro_shadowing_a_builtin_materializes_end_to_end() {
+    // End-to-end companion of the parser-level
+    // `test_parse_multi_output_macro_call_whose_name_shadows_a_builtin`:
+    // a `:MACRO: SSHAPE(...)` whose name shadows an MDL builtin, invoked
+    // with the multi-output `:` form. The call-site `SSHAPE` tokenizes as
+    // `Token::Function`; the parser re-tags the `:`-bearing call as
+    // `CallKind::Symbol`, so `detect_multi_output_call` then resolves it
+    // against the macro registry and materializes the cluster -- proving
+    // the builtin-named multi-output macro is callable, not merely
+    // definable (design macros.AC5.4 + the multi-output form).
+    let mdl = ":MACRO: SSHAPE(a, b : lo, hi)
+SSHAPE = a + b
+~ ~|
+lo = MIN(a, b)
+~ ~|
+hi = MAX(a, b)
+~ ~|
+:END OF MACRO:
+total = SSHAPE(p, q : the_lo, the_hi)
+~ ~|
+p = 1
+~ ~|
+q = 2
+~ ~|
+\\\\\\---///
+";
+    let project =
+        convert_mdl(mdl).expect("a multi-output call to a builtin-named macro must import");
+    let main = main_model(&project);
+    let module = the_module(main);
+    assert_eq!(
+        module.model_name, "sshape",
+        "the materialized module must target the SSHAPE macro's model"
+    );
+    assert_eq!(scalar_eq(var(main, "total")), "total_macro.sshape");
+    assert_eq!(scalar_eq(var(main, "the_lo")), "total_macro.lo");
+    assert_eq!(scalar_eq(var(main, "the_hi")), "total_macro.hi");
+}
+
 /// Assert `convert_mdl(mdl)` fails with a `ConvertError` whose message names
 /// the macro (`needle`).
 fn assert_multi_output_convert_error_names(mdl: &str, needle: &str) {
@@ -833,4 +935,87 @@ r = 3
         "the ConvertError must explain the whole-right-hand-side-only rule; got: {:?}",
         err.to_string()
     );
+}
+
+#[test]
+fn arrayed_per_element_whole_rhs_multi_output_call_is_an_error() {
+    // A WHOLE-RHS multi-output call on a SUBSCRIPTED LHS (`y[a1] = ADD3(p,
+    // q, r : lo, hi)`, sibling `y[a2] = 5`). This is NOT the nested form
+    // (`find_nested_multi_output_call` deliberately does not flag a
+    // whole-RHS App), and `detect_multi_output_call` destructured
+    // `Regular(_lhs, expr)` while IGNORING `_lhs.subscripts`, so the
+    // arrayed `y` was silently materialized as a SCALAR primary-output
+    // binding aux keyed on `y` -- discarding the `[a1]` subscript and the
+    // sibling `y[a2] = 5` element with no diagnostic (silent model
+    // corruption / wrong simulation). Arrayed multi-output invocation is a
+    // documented scoping limitation, so the correct outcome is the same
+    // actionable `ConvertError` every other invalid multi-output shape
+    // produces, NOT silent scalarization.
+    let mdl = ":MACRO: ADD3(a, b, c : minval, maxval)
+ADD3 = a + b + c
+~ ~|
+minval = MIN(a, MIN(b, c))
+~ ~|
+maxval = MAX(a, MAX(b, c))
+~ ~|
+:END OF MACRO:
+DimA: a1, a2
+~ ~|
+y[a1] = ADD3(p, q, r : lo, hi)
+~ ~|
+y[a2] = 5
+~ ~|
+p = 1
+~ ~|
+q = 2
+~ ~|
+r = 3
+~ ~|
+\\\\\\---///
+";
+    // `expect_err` is the regression assertion: the buggy code returned
+    // `Ok` (silently scalarized `y`), so this fails RED until the
+    // subscripted-LHS guard rejects it.
+    assert_multi_output_convert_error_names(mdl, "add3");
+    let err =
+        convert_mdl(mdl).expect_err("a whole-RHS multi-output call on a subscripted LHS must fail");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("arrayed")
+            || msg.contains("subscript")
+            || msg.contains("apply-to-all")
+            || msg.contains("element"),
+        "the ConvertError must explain that an arrayed/subscripted LHS is \
+         not a valid multi-output materialization site; got: {:?}",
+        err.to_string()
+    );
+}
+
+#[test]
+fn arrayed_apply_to_all_whole_rhs_multi_output_call_is_an_error() {
+    // The apply-to-all subscript form (`y[DimA] = ADD3(p, q, r : lo,
+    // hi)`): a single equation whose LHS still carries a `[DimA]`
+    // subscript. Same unenforced invariant -- it must be a clean
+    // `ConvertError`, not a silent scalar materialization.
+    let mdl = ":MACRO: ADD3(a, b, c : minval, maxval)
+ADD3 = a + b + c
+~ ~|
+minval = MIN(a, MIN(b, c))
+~ ~|
+maxval = MAX(a, MAX(b, c))
+~ ~|
+:END OF MACRO:
+DimA: a1, a2
+~ ~|
+y[DimA] = ADD3(p, q, r : lo, hi)
+~ ~|
+p = 1
+~ ~|
+q = 2
+~ ~|
+r = 3
+~ ~|
+\\\\\\---///
+";
+    assert_multi_output_convert_error_names(mdl, "add3");
 }
