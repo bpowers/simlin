@@ -186,6 +186,48 @@ fn hash_u32_slice(vals: &[u32]) -> u64 {
     crate::rapidhash::hash_u32_slice(vals, CIRCUIT_HASH_SEED)
 }
 
+/// Strongly-connected components of an arbitrary `Ident`-keyed adjacency
+/// list, via the uncapped iterative Tarjan over the compact
+/// [`IndexedGraph`] (the D1/F2-hardened primitive
+/// [`IndexedGraph::tarjan_scc`]).
+///
+/// Determinism: each component is sorted by canonical name and the outer
+/// `Vec` is sorted by each component's smallest member, so the result is
+/// byte-stable across runs (no `HashMap` iteration order leaks out).
+///
+/// Size-1 components are included; callers that only want true cycles
+/// filter `len() >= 2`. A node with a self-edge is still a *size-1*
+/// component here (Tarjan does not treat a self-loop as a >=2 SCC), so
+/// callers that care about self-loops must detect them from the adjacency
+/// directly rather than from component size.
+///
+/// `#[cfg(test)]` for now: the Condition-2 dt-phase cycle accessor
+/// (`crate::db_dep_graph::dt_cycle_sccs`) is the only consumer. Task #14 (B1
+/// gate-1) promotes this to an unconditional `pub(crate)` primitive when
+/// it adds the production consumer (B1-design.md §10b(iii)).
+#[cfg(test)]
+pub(crate) fn scc_components(
+    edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+) -> Vec<Vec<Ident<Canonical>>> {
+    let graph = IndexedGraph::from_edges(edges);
+    let mut components: Vec<Vec<Ident<Canonical>>> = graph
+        .tarjan_scc()
+        .into_iter()
+        .map(|scc| {
+            let mut members: Vec<Ident<Canonical>> = scc
+                .into_iter()
+                .map(|idx| graph.nodes[idx as usize].clone())
+                .collect();
+            members.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            members
+        })
+        .collect();
+    // Each component is non-empty (Tarjan never emits an empty SCC), so
+    // `c[0]` is its lexicographically-smallest member.
+    components.sort_by(|a, b| a[0].as_str().cmp(b[0].as_str()));
+    components
+}
+
 impl IndexedGraph {
     /// Build an IndexedGraph from a `CausalGraph`-style adjacency list.
     ///

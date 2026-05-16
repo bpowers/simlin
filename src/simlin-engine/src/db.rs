@@ -10,6 +10,11 @@ use salsa::plumbing::AsId;
 use crate::canonicalize;
 use crate::common::{Canonical, EquationError, Error, Ident, UnitError};
 use crate::datamodel;
+// The dt-phase cycle-relation primitive + `VarInfo` builder live in the
+// sibling `db_dep_graph` module (a top-level module like `db_ltm_ir` /
+// `db_macro_registry`, split out purely for the per-file line cap);
+// `model_dependency_graph_impl`'s `compute_inner` consumes them here.
+use crate::db_dep_graph::{VarInfo, build_var_info, dt_walk_successors};
 
 #[path = "db_ltm.rs"]
 mod db_ltm;
@@ -1137,119 +1142,8 @@ fn model_dependency_graph_impl(
     project: SourceProject,
     module_input_names: &[String],
 ) -> ModelDepGraphResult {
-    let source_vars = model.variables(db);
     let module_input_names = module_input_names.to_vec();
-    let module_ident_context =
-        model_module_ident_context(db, model, project, module_input_names.clone());
-
-    struct VarInfo {
-        is_stock: bool,
-        is_module: bool,
-        dt_deps: BTreeSet<String>,
-        initial_deps: BTreeSet<String>,
-    }
-
-    let mut var_info: HashMap<String, VarInfo> = HashMap::new();
-    let mut all_init_referenced: HashSet<String> = HashSet::new();
-
-    let normalize_dep = |dep: &str| -> String {
-        let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-        if let Some(dot_pos) = effective.find('\u{00B7}') {
-            effective[..dot_pos].to_string()
-        } else {
-            effective.to_string()
-        }
-    };
-    let normalize_deps = |deps: &BTreeSet<String>| -> BTreeSet<String> {
-        deps.iter().map(|d| normalize_dep(d)).collect()
-    };
-
-    let project_models = project.models(db);
-
-    for (name, source_var) in source_vars.iter() {
-        let deps = if module_input_names.is_empty() {
-            variable_direct_dependencies_with_context(
-                db,
-                *source_var,
-                project,
-                module_ident_context,
-            )
-        } else {
-            variable_direct_dependencies_with_context_and_inputs(
-                db,
-                *source_var,
-                project,
-                module_ident_context,
-                module_input_names.clone(),
-            )
-        };
-        let init_only_dt = deps.dt_init_only_referenced_vars.clone();
-        let lagged_dt_previous = deps.dt_previous_referenced_vars.clone();
-        let lagged_initial_previous = deps.initial_previous_referenced_vars.clone();
-        let kind = source_var.kind(db);
-        let mut dt_deps = if kind == SourceVariableKind::Module {
-            deps.dt_deps
-                .iter()
-                .filter(|dep| {
-                    let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-                    if let Some(dot_pos) = effective.find('\u{00B7}') {
-                        let module_name = &effective[..dot_pos];
-                        let var_name = &effective[dot_pos + '\u{00B7}'.len_utf8()..];
-                        let sub_canonical = canonicalize(module_name);
-                        if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                            let sub_vars = sub_model.variables(db);
-                            if let Some(sub_var) = sub_vars.get(var_name) {
-                                return sub_var.kind(db) != SourceVariableKind::Stock;
-                            }
-                        }
-                        true
-                    } else {
-                        true
-                    }
-                })
-                .cloned()
-                .collect()
-        } else {
-            deps.dt_deps.clone()
-        };
-        dt_deps.retain(|dep| !init_only_dt.contains(dep));
-        dt_deps.retain(|dep| !lagged_dt_previous.contains(dep));
-        let mut initial_deps = deps.initial_deps.clone();
-        initial_deps.retain(|dep| !lagged_initial_previous.contains(dep));
-
-        var_info.insert(
-            name.clone(),
-            VarInfo {
-                is_stock: kind == SourceVariableKind::Stock,
-                is_module: kind == SourceVariableKind::Module,
-                dt_deps: normalize_deps(&dt_deps),
-                initial_deps: normalize_deps(&initial_deps),
-            },
-        );
-        all_init_referenced.extend(deps.init_referenced_vars.iter().cloned());
-
-        // Include implicit variables from this variable's deps result.
-        // Since we read this from variable_direct_dependencies (not
-        // parse_source_variable_with_module_context), salsa's backdating
-        // ensures that if the deps + implicit vars haven't changed, this
-        // function is cached.
-        for implicit in &deps.implicit_vars {
-            let mut dt_deps = implicit.dt_deps.clone();
-            dt_deps.retain(|dep| !implicit.dt_init_only_referenced_vars.contains(dep));
-            dt_deps.retain(|dep| !implicit.dt_previous_referenced_vars.contains(dep));
-            let mut initial_deps = implicit.initial_deps.clone();
-            initial_deps.retain(|dep| !implicit.initial_previous_referenced_vars.contains(dep));
-            var_info.insert(
-                implicit.name.clone(),
-                VarInfo {
-                    is_stock: implicit.is_stock,
-                    is_module: implicit.is_module,
-                    dt_deps: normalize_deps(&dt_deps),
-                    initial_deps: normalize_deps(&initial_deps),
-                },
-            );
-        }
-    }
+    let (var_info, all_init_referenced) = build_var_info(db, model, project, &module_input_names);
 
     // Compute transitive dependencies (simplified all_deps without cross-model support)
     let compute_transitive =
@@ -1293,39 +1187,52 @@ fn model_dependency_graph_impl(
 
                 processing.insert(name.to_string());
 
-                let direct = if is_initial {
-                    &info.initial_deps
+                // The successor set this normal node contributes to cycle
+                // detection AND the `all_deps` transitive/ordering map.
+                // In the dt phase it is sourced from the SINGLE shared
+                // dt-phase cycle relation (`dt_walk_successors`); in the
+                // init phase stocks do NOT break the chain (that filter is
+                // dt-only -- `compute_inner`'s `info.is_stock && !is_initial`
+                // sink does not fire here), so the relation is the init
+                // deps filtered only to known vars. Either way this is
+                // exactly the effective set the original
+                // `for dep in direct { if !var_info.contains_key {continue}
+                // if !is_initial && dep_info.is_stock {continue} ... }`
+                // loop iterated, in the same `BTreeSet`-sorted order, so
+                // cycle detection (first back-edge) and the `all_deps`
+                // transitive map are byte-identical. Only the iteration set
+                // is factored out; the stock/module early-returns above and
+                // the `transitive` accumulation below are untouched.
+                let successors: Vec<&str> = if is_initial {
+                    info.initial_deps
+                        .iter()
+                        .filter(|dep| var_info.contains_key(dep.as_str()))
+                        .map(|dep| dep.as_str())
+                        .collect()
                 } else {
-                    &info.dt_deps
+                    dt_walk_successors(var_info, name)
                 };
 
                 let mut transitive = BTreeSet::new();
-                for dep in direct.iter() {
-                    if !var_info.contains_key(dep.as_str()) {
-                        continue; // unknown dep, skip (error reported elsewhere)
-                    }
+                for dep in successors {
+                    transitive.insert(dep.to_string());
 
-                    let dep_info = &var_info[dep.as_str()];
-                    if !is_initial && dep_info.is_stock {
-                        continue; // stock breaks chain in dt phase
-                    }
-
-                    transitive.insert(dep.clone());
-
-                    if processing.contains(dep.as_str()) {
+                    if processing.contains(dep) {
                         return Err(name.to_string()); // circular dependency
                     }
 
-                    if all_deps
-                        .get(dep.as_str())
-                        .and_then(|d| d.as_ref())
-                        .is_none()
-                    {
+                    if all_deps.get(dep).and_then(|d| d.as_ref()).is_none() {
                         compute_inner(var_info, all_deps, processing, dep, is_initial)?;
                     }
 
-                    if !dep_info.is_module
-                        && let Some(Some(dep_deps)) = all_deps.get(dep.as_str())
+                    // `successors` only contains known vars (dt: filtered
+                    // inside `dt_walk_successors`; init: the `contains_key`
+                    // filter above), so this lookup never misses. The
+                    // `!dep_info.is_module` transitive non-absorption guard
+                    // is preserved exactly -- it governs only whether
+                    // `dep`'s transitive set is absorbed, never iteration.
+                    if var_info.get(dep).map(|d| !d.is_module).unwrap_or(false)
+                        && let Some(Some(dep_deps)) = all_deps.get(dep)
                     {
                         transitive.extend(dep_deps.iter().cloned());
                     }

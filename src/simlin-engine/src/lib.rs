@@ -42,6 +42,15 @@ mod db_ltm_ir;
 // (`scripts/lint-project.sh` rule 2); `db.rs` reaches it via
 // `crate::db_macro_registry::...`, mirroring `db_ltm_ir`.
 mod db_macro_registry;
+// The dt-phase dependency-graph cycle relation (`dt_walk_successors`),
+// the shared `VarInfo` builder (`build_var_info`), and the `#[cfg(test)]`
+// Condition-2 SCC accessor. A sibling of `db` rather than a submodule of
+// `db.rs` so the latter stays under the per-file line cap
+// (`scripts/lint-project.sh` rule 2); `db.rs` reaches it via
+// `crate::db_dep_graph::...`, mirroring `db_ltm_ir` / `db_macro_registry`.
+// The same `dt_walk_successors` + Tarjan SCC primitive is what B1's
+// gate-1 (task #14) reuses.
+mod db_dep_graph;
 pub mod diagram;
 mod dimensions;
 pub mod errors;
