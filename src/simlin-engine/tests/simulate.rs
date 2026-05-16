@@ -976,6 +976,69 @@ fn simulates_clearn() {
     ensure_vdf_results(&vdf_results, &results);
 }
 
+/// Issue #559 blocker B4 -- the C-LEARN `"Goal 1.5 for Temperature"` shape.
+///
+/// A Vensim quoted identifier containing a literal period (`"a.b"`,
+/// `"goal 1.5"`) used to make the WHOLE `main` model `NotSimulatable`:
+/// `canonicalize()` was non-idempotent for quoted-period idents (first
+/// pass kept a raw `.`, which `is_canonical()` rejects, so a re-canonical
+/// pass mis-converted the literal period into the `·` module-hierarchy
+/// separator -> the variable's own identity split into a phantom submodule
+/// -> `DoesNotExist`). It tripped even for a *dead* constant referenced by
+/// nobody (the exact C-LEARN case), because it is the variable's own
+/// fragment identity that fails. This is the fast, general regression for
+/// the `common.rs` idempotency fix, run through the same incremental
+/// `compile_vm` path `simulates_clearn` uses. Two faithful shapes:
+///   A. a quoted-period constant *referenced* by a live var, proving its
+///      identity resolves AND is usable in equations (`y = "a.b" + 1`);
+///   B. a *dead* quoted-period constant plus an unrelated live `z`,
+///      proving such a constant no longer poisons compilation and the fix
+///      changes no live output.
+#[test]
+fn simulates_quoted_period_ident_b4() {
+    // A: quoted-period constant referenced by a live variable.
+    let mdl_a = "\
+{UTF-8}
+\"a.b\" = 5 ~~|
+y = \"a.b\" + 1 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl_a);
+    for step in 0..3 {
+        let y = macro_test_value_at(&results, "y", step);
+        assert!(
+            (y - 6.0).abs() < 1e-9,
+            "step {step}: y = {y}, expected 6 (= \"a.b\"(5) + 1); the \
+             quoted-period ident must resolve and be usable"
+        );
+    }
+
+    // B: a DEAD quoted-period constant (the exact C-LEARN
+    // `"Goal 1.5 for Temperature"` shape) plus an unrelated live `z`.
+    // Before the fix this alone made the model NotSimulatable.
+    let mdl_b = "\
+{UTF-8}
+\"goal 1.5\" = 1.5 ~~|
+z = 1 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl_b);
+    for step in 0..3 {
+        let z = macro_test_value_at(&results, "z", step);
+        assert!(
+            (z - 1.0).abs() < 1e-9,
+            "step {step}: z = {z}, expected 1; a dead quoted-period \
+             constant must not make the model NotSimulatable"
+        );
+    }
+}
+
 /// All test models that the monolithic compiler can handle.
 /// The incremental path must also handle these.
 static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
