@@ -215,6 +215,7 @@ fn build_chain_model(n: usize) -> datamodel::Project {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         }],
         source: Default::default(),
         ai_information: None,

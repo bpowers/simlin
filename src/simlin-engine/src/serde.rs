@@ -8,8 +8,9 @@ use crate::common::Result;
 use crate::datamodel::{
     Aux, Compat, DataSource, DataSourceKind, Dimension, DimensionElements, DimensionMapping, Dt,
     Equation, Extension, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
-    LoopMetadata, Model, ModelGroup, Module, ModuleReference, Project, Rect, SimMethod, SimSpecs,
-    Source, Stock, StockFlow, Unit, Variable, View, ViewElement, Visibility, view_element,
+    LoopMetadata, MacroSpec, Model, ModelGroup, Module, ModuleReference, Project, Rect, SimMethod,
+    SimSpecs, Source, Stock, StockFlow, Unit, Variable, View, ViewElement, Visibility,
+    view_element,
 };
 use crate::project_io;
 
@@ -1982,6 +1983,7 @@ impl From<Model> for project_io::Model {
                 .into_iter()
                 .map(project_io::ModelGroup::from)
                 .collect(),
+            macro_spec: model.macro_spec.map(project_io::MacroSpec::from),
         }
     }
 }
@@ -2004,6 +2006,26 @@ impl From<project_io::LoopMetadata> for LoopMetadata {
             deleted: loop_metadata.deleted,
             name: loop_metadata.name,
             description: loop_metadata.description,
+        }
+    }
+}
+
+impl From<MacroSpec> for project_io::MacroSpec {
+    fn from(macro_spec: MacroSpec) -> Self {
+        project_io::MacroSpec {
+            parameters: macro_spec.parameters,
+            primary_output: macro_spec.primary_output,
+            additional_outputs: macro_spec.additional_outputs,
+        }
+    }
+}
+
+impl From<project_io::MacroSpec> for MacroSpec {
+    fn from(macro_spec: project_io::MacroSpec) -> Self {
+        MacroSpec {
+            parameters: macro_spec.parameters,
+            primary_output: macro_spec.primary_output,
+            additional_outputs: macro_spec.additional_outputs,
         }
     }
 }
@@ -2086,6 +2108,7 @@ impl From<project_io::Model> for Model {
                 .map(LoopMetadata::from)
                 .collect(),
             groups: model.groups.into_iter().map(ModelGroup::from).collect(),
+            macro_spec: model.macro_spec.map(MacroSpec::from),
         }
     }
 }
@@ -2122,7 +2145,65 @@ fn test_model_with_loop_metadata_roundtrip() {
             },
         ],
         groups: vec![],
+        macro_spec: None,
     }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = Model::from(project_io::Model::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+/// macros.AC1.4 (protobuf half): a macro-bearing model -- one whose
+/// `macro_spec` is `Some` with non-empty parameters, a primary output, and
+/// additional outputs, plus a body variable -- round-trips losslessly through
+/// `project_io::Model`. The `None` case confirms ordinary models are
+/// unaffected.
+#[test]
+fn test_model_with_macro_spec_roundtrip() {
+    let cases: &[Model] = &[
+        Model {
+            name: "smooth_macro".to_string(),
+            sim_specs: None,
+            variables: vec![Variable::Aux(Aux {
+                ident: "result".to_string(),
+                equation: Equation::Scalar("input * gain".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: Some(1),
+                compat: Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: Some(MacroSpec {
+                parameters: vec!["input".to_string(), "gain".to_string()],
+                primary_output: "result".to_string(),
+                additional_outputs: vec!["residual".to_string()],
+            }),
+        },
+        // A non-macro model must still round-trip with macro_spec: None.
+        Model {
+            name: "ordinary_model".to_string(),
+            sim_specs: None,
+            variables: vec![Variable::Aux(Aux {
+                ident: "x".to_string(),
+                equation: Equation::Scalar("1".to_string()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: Some(1),
+                compat: Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        },
+    ];
     for expected in cases {
         let expected = expected.clone();
         let actual = Model::from(project_io::Model::from(expected.clone()));
@@ -2164,6 +2245,7 @@ fn test_model_with_groups_roundtrip() {
                 run_enabled: true,
             },
         ],
+        macro_spec: None,
     }];
     for expected in cases {
         let expected = expected.clone();
@@ -2412,6 +2494,7 @@ fn make_test_project(variables: Vec<Variable>, dimensions: Vec<Dimension>) -> Pr
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         }],
         source: Default::default(),
         ai_information: None,

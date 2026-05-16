@@ -66,6 +66,7 @@ fn test_apply_deletion_removes_alias_of_deleted_var() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let mut state = LayoutState::new(&model);
 
@@ -132,6 +133,7 @@ fn test_existing_bounding_box_negative_positions() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let mut state = LayoutState::new(&model);
 
@@ -228,6 +230,7 @@ fn test_incremental_flow_endpoints_rebuilt_after_topology_change() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view =
@@ -396,6 +399,7 @@ fn test_incremental_flow_endpoint_stock_to_cloud() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view =
@@ -534,6 +538,7 @@ fn test_incremental_flow_endpoint_cloud_to_stock() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view =
@@ -665,6 +670,7 @@ fn test_incremental_kind_change_aux_to_stock_no_delete() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view =
@@ -775,6 +781,7 @@ fn test_incremental_kind_change_stock_to_aux_no_delete() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view =
@@ -979,6 +986,7 @@ fn test_incremental_kind_change_preserves_display_name() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view =
@@ -1081,6 +1089,7 @@ fn test_apply_deletion_removes_alias_position_from_state() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let mut state = LayoutState::new(&model);
 
@@ -1153,6 +1162,7 @@ fn test_group_uid_does_not_collide_with_variable_uid() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     // Stock comes first so its reverse-mapping is established; then the group
@@ -1231,6 +1241,7 @@ fn test_incremental_new_flow_cloud_positions_recorded() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let initial_project = test_project(initial_model);
@@ -1283,6 +1294,7 @@ fn test_incremental_new_flow_cloud_positions_recorded() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let patched_project = test_project(patched_model);
 
@@ -1406,6 +1418,7 @@ fn test_incremental_kind_change_stock_to_aux_resets_attached_flows() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
 
     let initial_project = test_project(initial_model);
@@ -1782,6 +1795,7 @@ fn test_incremental_new_side_flow_valve_on_pipe() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
@@ -1928,6 +1942,7 @@ fn test_incremental_add_second_side_flow_redistributes_offsets() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
@@ -2117,6 +2132,7 @@ fn test_incremental_remove_chain_reclassifies_cloud_flow() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
@@ -2266,6 +2282,7 @@ fn test_resnap_preserves_vertical_flow_offset() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let mut state = LayoutState::new(&resnap_model);
     state.elements.push(ViewElement::Stock(view_element::Stock {
@@ -2385,6 +2402,7 @@ fn test_incremental_chain_flow_seeded_between_stocks() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
@@ -2559,6 +2577,7 @@ fn test_incremental_redistribute_preserves_visual_order() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let base_view = generate_layout(&initial_project, TEST_MODEL, None).expect("base layout");
@@ -2775,6 +2794,7 @@ fn test_incremental_delete_flow_without_update_stock_flows() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
@@ -2883,6 +2903,7 @@ fn test_layout_two_horizontal_cloud_outflows_spaced() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let project = test_project(model);
     let result = generate_layout(&project, TEST_MODEL, None).unwrap();
@@ -2958,6 +2979,7 @@ fn test_incremental_add_second_chain_preserves_first() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = test_project(initial_model);
     let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");

@@ -41,6 +41,7 @@ fn test_model_dependency_graph_prunes_lagged_deps_for_implicit_helpers() {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         }],
         source: None,
         ai_information: None,

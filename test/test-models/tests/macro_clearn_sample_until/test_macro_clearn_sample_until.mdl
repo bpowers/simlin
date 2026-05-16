@@ -1,0 +1,99 @@
+{UTF-8}
+:MACRO: SAMPLE UNTIL(lastTime,input,initval)
+SAMPLE UNTIL = INTEG( (1-STEP(1,lastTime))*(input-SAMPLE UNTIL)/TIME STEP$, initval)
+	~	input
+	~		|
+
+:END OF MACRO:
+last time=
+	4
+	~	Month
+	~	hold time: STEP(1,lastTime) is 0 before lastTime, 1 at/after.
+		With dt=1 the last ACTIVE flow is at t=3 (3+0.5 > 4 is false),
+		so the sample is FROZEN at SU(4); the gate is 0 from t=4 on.
+	|
+
+the input=
+	5+RAMP(1, 0, 10)
+	~	dmnl
+	~	a TIME-VARYING input the sample tracks until last time, then
+		FREEZES. RAMP(1,0,10) = 0 at t=0 then time for 0<t<10, so
+		the input = 5,6,7,8,9,10,11,12,13 at t=0..8. Because the
+		input keeps RISING after the freeze, the frozen value is
+		genuinely distinct from both the init and every later input
+		-- this is what makes the fixture exercise SAMPLE UNTIL's
+		defining behavior (sample a CHANGING signal, then HOLD it),
+		not just an init->constant first-step jump.
+	|
+
+initial value=
+	99
+	~	dmnl
+	~	the SAMPLE UNTIL stock's initial value at INITIAL TIME (a
+		distinct sentinel: it differs from every sampled/frozen value
+		so a wrong init can never accidentally match)
+	|
+
+sampled=
+	SAMPLE UNTIL(last time, the input, initial value)
+	~	dmnl
+	~	invocation of C-LEARN's SAMPLE UNTIL macro (>= 2 args so the call
+		is not rewritten to LOOKUP -- GH #553)
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 8
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,last time,150,165,28,8,8,3,0,0,0,0,0,0
+10,2,the input,150,200,28,8,8,3,0,0,0,0,0,0
+10,3,initial value,150,235,28,8,8,3,0,0,0,0,0,0
+10,4,sampled,383,200,28,8,8,3,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:sampled
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:8
+26:8

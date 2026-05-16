@@ -561,3 +561,39 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Suspected fix**: Snapshot the set with `[...children]` before iterating; remove the redundant post-loop `delete`.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-08
+
+### 60. No CI feature matrix; a no-`file_io` build break propagated undetected
+
+- **Component**: build / CI (`scripts/pre-commit`, `.github/workflows/`, `src/simlin-engine/Cargo.toml`)
+- **Severity**: medium
+- **Description**: Neither the pre-commit hook nor CI exercises a Cargo **feature matrix** for `simlin-engine`, so the entire class of feature-gating bugs is invisible to the canonical gate. Concretely: during Phase 7c of the Vensim macro epic a subagent added `src/simlin-engine/tests/metasd_macros.rs` (which calls the `file_io`-gated `load_dat`/`load_csv`) WITHOUT the mirroring `[[test]] name = "metasd_macros" required-features = ["file_io"]` entry in `src/simlin-engine/Cargo.toml`. This broke `cargo build -p simlin-engine --all-targets` and `cargo test -p simlin-engine --no-run` whenever `file_io` is *not* enabled (`error[E0425]`, `load_dat`/`load_csv` configured out). The pre-commit "Running Rust checks" step passed throughout because the workspace build pulls `file_io` into scope via cross-crate feature unification (`simlin-cli` requests `simlin-engine/file_io`), so the break survived multiple commits and was caught only by a later manual minimal-feature build. The Cargo.toml fix landed in commit `7cba4ad2` (which itself documents the "fragile cross-crate feature-unification accident" root cause), but the GAP — no feature-matrix gate — remains. simlin-engine features: `file_io`, `schema`, `ai_info`, `debug-derive` (default = `schema, ai_info, debug-derive`), plus `xmutil`. Secondary (workflow, not a separate item): this propagated because multi-agent plan execution structurally trusts the inherited baseline — each subagent verified only its own delta and several built *with* `file_io` and concluded the base was clean; subagents should verify the exact configuration they will later claim green BEFORE starting and STOP if the inherited baseline is already broken. The deterministic fix is the CI matrix.
+- **Suspected fix**: Add a feature-matrix build/test step to the pre-commit hook and/or CI. At minimum `cargo build -p simlin-engine --all-targets --no-default-features` and `--all-features`. Optionally `cargo hack --feature-powerset` (bounded). Keep within the documented test-time budget ([docs/dev/rust.md#test-time-budgets](dev/rust.md)) — a couple of representative configurations (`--no-default-features`, `--all-features`), not the full powerset, is the pragmatic choice given the 3-minute workspace cap.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-15
+
+### 61. CLAUDE.md files decaying from orientation docs into append-only changelogs
+
+- **Component**: docs / process (`src/simlin-engine/CLAUDE.md`; the `project-claude-librarian` / `maintaining-project-context` skill)
+- **Severity**: low
+- **Description**: `src/simlin-engine/CLAUDE.md`'s "Last updated" header has degraded into a single ~2,500-word run-on paragraph spanning two unrelated epics (LTM arrays Phases 1-8 *and* macro Phases 1-7); the `db_ltm.rs` and `ltm_agg.rs` module bullets are multi-hundred-word single paragraphs that read like changelog archaeology rather than orientation. The file's stated purpose is current-state orientation ("maps where functionality lives"; "Keep this file up to date when adding, removing, or reorganizing modules"). Root cause: the `maintaining-project-context` / `project-claude-librarian` skill optimizes *per-delta* accuracy, not whole-file readability, so the aggregate readability degrades a little every epic and nothing ever compacts it. Related but distinct from #407 (which is about pruning verbatim code snippets from `docs/design-plans/`, not CLAUDE.md orientation decay).
+- **Suspected fix**: Introduce an **epic-boundary CLAUDE.md compaction pass** (a distinct step from the librarian's per-delta updates) that relocates historical/changelog narrative into the now-committed design/implementation-plan docs (`docs/design-plans/`, `docs/implementation-plans/`) and trims each CLAUDE.md back to current-state orientation. Could be wired into `finishing-a-development-branch` or a dedicated skill.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-15
+
+### 62. Implementation plans back-load all real-corpus validation into the final phase
+
+- **Component**: process / workflow (the `writing-implementation-plans` / `execute-implementation-plan` skills; `docs/implementation-plans/`)
+- **Severity**: medium
+- **Description**: Implementation plans tend to defer all real-corpus numeric/structural validation to the last phase, which hides latent pre-existing blockers until most dependent work is already layered on top. Concretely, in the Vensim macro epic two latent defects — GH #554 (false `init->init` macro recursion) and a #554-class `DELAY N`->`delayn` variant — *blocked acceptance criteria* but only surfaced in Phase 7, the first phase to exercise the renamed-builtin / stdlib-module-collision path against real models (C-LEARN, metasd), after five phases of dependent work. A cheap corpus smoke run against the Phase 1-2 datamodel would have surfaced #554 far earlier and reduced rework risk. A second symptom: discovering a known *bug-class* of latent blockers mid-plan triggered serial stop-and-ask round-trips even though both #554-class decisions were the same class with the same answer.
+- **Suspected fix**: Future implementation plans should **interleave an early, cheap real-corpus smoke validation** (run against the earliest phase that produces a runnable artifact) rather than back-loading all corpus validation into the last phase; and plans should **pre-authorize fixing a known bug-class of latent blockers** discovered during corpus validation, to avoid serial stop-and-ask round-trips for what is provably one decision. This is guidance for the plan-authoring skills, not a code change.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-15
+
+### 63. Implementation-plan directory committed only at branch finish, untracked during execution
+
+- **Component**: process / workflow (the `writing-implementation-plans` / `execute-implementation-plan` / `finishing-a-development-branch` skills; `docs/implementation-plans/`)
+- **Severity**: low
+- **Description**: For the Vensim macro epic, the design plan was committed at the branch's merge-base (`86cc7fcb`), but the 8-file `docs/implementation-plans/2026-05-13-macros/` directory (phase_01..07 + test-requirements.md) that drove 40+ commits stayed **untracked in git** for the entire execution and was only committed at the very end (`d44d32fa`, "doc: add Vensim macro support implementation plan") during the finishing step. Consequences: reviewers of intermediate commits had no in-repo plan to check the work against, and a lost or compacted session could have lost the plan entirely (it existed only in the working tree). Distinct from #407 (which is about pruning *stale* plan content post-merge, not about *when* the plan enters version control).
+- **Suspected fix**: Commit the implementation plan at the **start** of execution — the `starting-an-implementation-plan` / `executing-an-implementation-plan` step should commit `docs/implementation-plans/<plan>/` before the first task subagent runs — rather than rescuing it at the `finishing-a-development-branch` step. Optionally add a guard in the execute step that refuses to start if the plan directory is untracked.
+- **Owner**: unassigned
+- **Last reviewed**: 2026-05-15

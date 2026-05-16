@@ -527,11 +527,21 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                 } else {
                     self.parse_expr_list()?.into_exprs()
                 };
+                // Optional `:`-separated additional-output list:
+                // `:MACRO: add3(a,b,c : minval, maxval)`. `parse_expr_list`
+                // stops at `:` (it separates only on `,`/`;`), so the token
+                // after the input list is either `)` or `:`.
+                let outputs = if self.peek_kind() == Some(TokenKind::Colon) {
+                    self.advance_pos(); // consume ':'
+                    self.parse_expr_list()?.into_exprs()
+                } else {
+                    vec![]
+                };
                 self.expect(TokenKind::RParen, "')'")?;
                 return Ok((
                     Equation::EmptyRhs(Lhs::empty(loc), loc),
                     None,
-                    SectionEnd::MacroStart(name, args, loc),
+                    SectionEnd::MacroStart(name, args, outputs, loc),
                 ));
             }
             Some(TokenKind::EndOfMacro) => {
@@ -1279,12 +1289,29 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                         });
                     }
                     let args = self.parse_expr_list()?.into_exprs();
+                    // Optional `:`-separated output bindings of a multi-output
+                    // macro invocation: `total = add3(a, b, c : minv, maxv)`.
+                    // The Function branch parses the SAME `:` form (a
+                    // multi-output macro whose name shadows a builtin
+                    // tokenizes as `Token::Function`), re-tagging it as
+                    // `CallKind::Symbol`; the two branches are kept in
+                    // lockstep so a builtin-named macro is callable wherever
+                    // an ordinary-named one is. `parse_expr_list` stops at `:`
+                    // (it separates only on `,`/`;`), so the token after
+                    // `args` is either `)` or `:`.
+                    let output_bindings = if self.peek_kind() == Some(TokenKind::Colon) {
+                        self.advance_pos(); // consume ':'
+                        self.parse_expr_list()?.into_exprs()
+                    } else {
+                        vec![]
+                    };
                     let (_, r) = self.expect(TokenKind::RParen, "')'")?;
                     Ok(Expr::App(
                         name,
                         subscripts,
                         args,
                         CallKind::Symbol,
+                        output_bindings,
                         Loc::new(l, r),
                     ))
                 } else {
@@ -1308,6 +1335,7 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                         vec![],
                         vec![],
                         CallKind::Builtin,
+                        vec![],
                         Loc::new(l, r),
                     ));
                 }
@@ -1344,12 +1372,39 @@ impl<'input, 'tokens> Parser<'input, 'tokens> {
                     }
                 }
 
+                // A `:` here means this builtin-tokenized name is actually a
+                // MULTI-OUTPUT MACRO invocation whose name shadows a builtin.
+                // The normalizer has no macro-registry awareness, so a call
+                // site `SSHAPE(a, b : lo, hi)` tokenizes `SSHAPE` as
+                // `Token::Function` (it is an MDL builtin) even though a
+                // `:MACRO: SSHAPE(...)` defined it as a macro (design
+                // macros.AC5.4). No Vensim builtin uses `:` call syntax, so a
+                // `:` is unambiguous: parse the output bindings exactly as the
+                // Symbol branch does, and re-tag the call as
+                // `CallKind::Symbol` so the multi-output materializer / macro
+                // resolver treats it as a macro invocation (the kind the
+                // Symbol branch would have produced had the name not
+                // collided with a builtin). `parse_expr_list` separates only
+                // on `,`/`;`, so the args loop above already stopped at the
+                // `:`.
+                let output_bindings = if self.peek_kind() == Some(TokenKind::Colon) {
+                    self.advance_pos(); // consume ':'
+                    self.parse_expr_list()?.into_exprs()
+                } else {
+                    vec![]
+                };
                 let (_, r) = self.expect(TokenKind::RParen, "')'")?;
+                let kind = if output_bindings.is_empty() {
+                    CallKind::Builtin
+                } else {
+                    CallKind::Symbol
+                };
                 Ok(Expr::App(
                     name,
                     vec![],
                     exprs,
-                    CallKind::Builtin,
+                    kind,
+                    output_bindings,
                     Loc::new(l, r),
                 ))
             }
@@ -2131,7 +2186,7 @@ mod tests {
         let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
-        if let Equation::Regular(_, Expr::App(name, _, args, kind, _)) = &eq {
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, _, _)) = &eq {
             assert_eq!(name.as_ref(), "MAX");
             assert_eq!(args.len(), 2);
             assert_eq!(*kind, CallKind::Builtin);
@@ -2283,7 +2338,7 @@ mod tests {
         let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
-        if let Equation::Regular(_, Expr::App(_, _, args, _, _)) = &eq {
+        if let Equation::Regular(_, Expr::App(_, _, args, _, _, _)) = &eq {
             assert_eq!(args.len(), 3);
             assert!(matches!(&args[2], Expr::Literal(lit, _) if lit.as_ref() == "?"));
         } else {
@@ -2301,7 +2356,7 @@ mod tests {
         let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
-        if let Equation::Regular(_, Expr::App(name, _, args, _, _)) = &eq {
+        if let Equation::Regular(_, Expr::App(name, _, args, _, _, _)) = &eq {
             assert_eq!(name.as_ref(), "RANDOM 0 1");
             assert_eq!(args.len(), 0);
         } else {
@@ -2340,6 +2395,16 @@ mod tests {
         assert!(units.is_none());
     }
 
+    /// Extract the identifier from an `Expr::Var`, panicking otherwise.
+    /// Helper for the macro header/call tests, where `args`/`outputs`/
+    /// `output_bindings` are expected to be plain variable references.
+    fn var_name<'a>(e: &'a Expr<'_>) -> &'a str {
+        match e {
+            Expr::Var(name, _, _) => name.as_ref(),
+            other => panic!("expected Expr::Var, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_parse_macro_start() {
         use crate::mdl::normalizer::TokenNormalizer;
@@ -2350,12 +2415,62 @@ mod tests {
         let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (_, _, section_end) = result.unwrap();
-        if let SectionEnd::MacroStart(name, args, _) = &section_end {
+        if let SectionEnd::MacroStart(name, args, outputs, _) = &section_end {
             assert_eq!(name.as_ref(), "MYFUNC");
             assert_eq!(args.len(), 2);
+            // Regression: the single-output form has no `:` output list.
+            assert!(
+                outputs.is_empty(),
+                "single-output macro must have empty outputs, got {:?}",
+                outputs
+            );
         } else {
             panic!("Expected MacroStart, got {:?}", section_end);
         }
+    }
+
+    #[test]
+    fn test_parse_macro_start_with_outputs() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // The `:` separator splits the formal input list from the
+        // additional-output list (Vensim multi-output macro syntax).
+        let input = ":MACRO: add3(a, b, c : minval, maxval)";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (_, _, section_end) = result.unwrap();
+        if let SectionEnd::MacroStart(name, args, outputs, _) = &section_end {
+            assert_eq!(name.as_ref(), "add3");
+            assert_eq!(args.len(), 3);
+            assert_eq!(var_name(&args[0]), "a");
+            assert_eq!(var_name(&args[1]), "b");
+            assert_eq!(var_name(&args[2]), "c");
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(var_name(&outputs[0]), "minval");
+            assert_eq!(var_name(&outputs[1]), "maxval");
+        } else {
+            panic!("Expected MacroStart, got {:?}", section_end);
+        }
+    }
+
+    #[test]
+    fn test_parse_macro_start_empty_output_list_is_error() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // `parse_expr_list` calls `parse_expr` unconditionally, so a `:`
+        // immediately followed by `)` is a clean parse error on the `)`,
+        // not a panic and not a silently-empty output list.
+        let input = ":MACRO: add3(a : )";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(
+            result.is_err(),
+            "empty `:` output list must be a parse error, got {:?}",
+            result.ok()
+        );
     }
 
     #[test]
@@ -2413,12 +2528,165 @@ mod tests {
         let result = parse(&tokens);
         assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
         let (eq, _, _) = result.unwrap();
-        if let Equation::Regular(_, Expr::App(name, _, args, kind, _)) = &eq {
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, _, _)) = &eq {
             assert_eq!(name.as_ref(), "table");
             assert_eq!(args.len(), 1);
             assert_eq!(*kind, CallKind::Symbol);
         } else {
             panic!("Expected symbol call, got {:?}", eq);
+        }
+    }
+
+    // ========================================================================
+    // Multi-output macro call sites: the `:` separator in argument lists
+    // ========================================================================
+
+    #[test]
+    fn test_parse_macro_call_with_output_bindings() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // A multi-output macro invocation: the `:` splits call arguments
+        // from the post-`:` output bindings.
+        let input = "total = add3(a, b, c : minv, maxv) ~ ~";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (eq, _, _) = result.unwrap();
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, output_bindings, _)) = &eq {
+            assert_eq!(name.as_ref(), "add3");
+            assert_eq!(*kind, CallKind::Symbol);
+            assert_eq!(args.len(), 3);
+            assert_eq!(var_name(&args[0]), "a");
+            assert_eq!(var_name(&args[1]), "b");
+            assert_eq!(var_name(&args[2]), "c");
+            assert_eq!(output_bindings.len(), 2);
+            assert_eq!(var_name(&output_bindings[0]), "minv");
+            assert_eq!(var_name(&output_bindings[1]), "maxv");
+        } else {
+            panic!("Expected symbol call, got {:?}", eq);
+        }
+    }
+
+    #[test]
+    fn test_parse_macro_call_without_output_bindings() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // Regression: an ordinary symbol call has empty `output_bindings`.
+        let input = "y = MYMACRO(a, b) ~ ~";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (eq, _, _) = result.unwrap();
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, output_bindings, _)) = &eq {
+            assert_eq!(name.as_ref(), "MYMACRO");
+            assert_eq!(*kind, CallKind::Symbol);
+            assert_eq!(args.len(), 2);
+            assert!(
+                output_bindings.is_empty(),
+                "ordinary call must have empty output_bindings, got {:?}",
+                output_bindings
+            );
+        } else {
+            panic!("Expected symbol call, got {:?}", eq);
+        }
+    }
+
+    #[test]
+    fn test_parse_macro_call_nested_in_larger_expression() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // A `:` call nested inside a binary expression: the `App` inside
+        // the `Op2` must still carry the output bindings.
+        let input = "y = c + add3(a, b, c : minv, maxv) ~ ~";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (eq, _, _) = result.unwrap();
+        let Equation::Regular(_, Expr::Op2(BinaryOp::Add, _lhs, rhs, _)) = &eq else {
+            panic!("Expected top-level Op2(Add), got {:?}", eq);
+        };
+        if let Expr::App(name, _, args, kind, output_bindings, _) = rhs.as_ref() {
+            assert_eq!(name.as_ref(), "add3");
+            assert_eq!(*kind, CallKind::Symbol);
+            assert_eq!(args.len(), 3);
+            assert_eq!(output_bindings.len(), 2);
+            assert_eq!(var_name(&output_bindings[0]), "minv");
+            assert_eq!(var_name(&output_bindings[1]), "maxv");
+        } else {
+            panic!("Expected App on rhs of Op2, got {:?}", rhs);
+        }
+    }
+
+    #[test]
+    fn test_parse_multi_output_macro_call_whose_name_shadows_a_builtin() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // A macro may shadow a builtin (design macros.AC5.4; `:MACRO:`
+        // headers parse such names via `expect_symbol_or_function`). The
+        // normalizer has no macro-registry awareness, so a *call site*
+        // `SSHAPE(...)` tokenizes `SSHAPE` as `Token::Function` (it is an
+        // MDL builtin). Combined with the multi-output `:` form, the
+        // Function branch must still parse the `:`-output bindings -- a `:`
+        // in a call is unambiguously a macro multi-output invocation (no
+        // Vensim builtin uses `:` call syntax), so it re-tags as
+        // `CallKind::Symbol` exactly as the Symbol branch would have.
+        // Before the fix this was a hard parse error, making a multi-output
+        // macro whose name shadows a builtin *definable but uncallable*.
+        let input = "the result = SSHAPE(xin, profile : lo, hi) ~ ~";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(
+            result.is_ok(),
+            "a multi-output call to a builtin-named macro must parse: {:?}",
+            result.unwrap_err()
+        );
+        let (eq, _, _) = result.unwrap();
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, output_bindings, _)) = &eq {
+            assert_eq!(name.as_ref(), "SSHAPE");
+            assert_eq!(
+                *kind,
+                CallKind::Symbol,
+                "a `:`-bearing call is a macro invocation, not a builtin"
+            );
+            assert_eq!(args.len(), 2);
+            assert_eq!(var_name(&args[0]), "xin");
+            assert_eq!(var_name(&args[1]), "profile");
+            assert_eq!(output_bindings.len(), 2);
+            assert_eq!(var_name(&output_bindings[0]), "lo");
+            assert_eq!(var_name(&output_bindings[1]), "hi");
+        } else {
+            panic!("Expected a Symbol-kind App, got {:?}", eq);
+        }
+    }
+
+    #[test]
+    fn test_builtin_call_without_output_bindings_stays_builtin() {
+        use crate::mdl::normalizer::TokenNormalizer;
+
+        // Regression: an ordinary builtin call (no `:`) must remain
+        // `CallKind::Builtin` with empty `output_bindings` -- the fix only
+        // engages when a `:` is actually present.
+        let input = "y = MAX(a, b) ~ ~";
+        let normalizer = TokenNormalizer::new(input);
+        let tokens = collect_tokens(normalizer);
+        let result = parse(&tokens);
+        assert!(result.is_ok(), "parse failed: {:?}", result.unwrap_err());
+        let (eq, _, _) = result.unwrap();
+        if let Equation::Regular(_, Expr::App(name, _, args, kind, output_bindings, _)) = &eq {
+            assert_eq!(name.as_ref(), "MAX");
+            assert_eq!(*kind, CallKind::Builtin);
+            assert_eq!(args.len(), 2);
+            assert!(
+                output_bindings.is_empty(),
+                "an ordinary builtin call must have empty output_bindings, got {:?}",
+                output_bindings
+            );
+        } else {
+            panic!("Expected a Builtin-kind App, got {:?}", eq);
         }
     }
 

@@ -1,0 +1,406 @@
+{UTF-8}
+:MACRO: TREND2(x,horizon,smoothing time)
+TREND2 = smoothed error/horizon
+	~	x/horizon
+	~	Second order trend estimate for rate of change of input x, with 0 initial \
+		trend
+	|
+
+smoothed error = SMOOTH(error,horizon)
+	~	x
+	~		|
+
+smoothed x = SMOOTH(x,smoothing time)
+	~	x
+	~		|
+
+error = x - smoothed x
+	~	x
+	~		|
+
+:END OF MACRO:
+:MACRO: INIT(x)
+INIT = INITIAL(x)
+	~	x
+	~		|
+
+:END OF MACRO:
+:MACRO: PINK NOISE(mean, std deviation, correlation time, seed)
+PINK NOISE = INTEG(updating pink noise,mean+std deviation*RANDOM NORMAL(-6,6,0,1,seed\
+		))
+	~	mean
+	~	Contributed by Ed Anderson, MIT/U. Texas - Austin
+		Description:  The pink noise molecule described generates a simple random 
+		series with autocorrelation.  This is useful in representing time series, 
+		like rainfall from day to day, in which today's value has some correlation 
+		with what happened yesterday.  This particular formulation will also have 
+		properties such as standard deviation and mean that are insensitive both to 
+		the time step and the correlation (smoothing) time.  Finally, the output as 
+		a whole and the difference in values between any two days is guaranteed to 
+		be Gaussian (normal) in distribution.
+		
+		Behavior:  Pink noise series will have both a historical and a random 
+		component during each period.  The relative "trend-to-noise" ratio is 
+		controlled by the length of the correlation time. As the correlation time 
+		approaches zero, the pink noise output will become more independent of its 
+		historical value and more "noisy."  On the other hand, as the correlation 
+		time approaches infinity, the pink noise output will approximate a 
+		continuous time random walk or Brownian motion.  Displayed above are two 
+		time series with correlation times of 1 and 8 months.  While both series 
+		have approximately the same standard deviation, the 1-month correlation time 
+		series is less smooth from period to period than the 8-month series, which 
+		is characterized by "sustained" swings in a given direction.  Note that this 
+		behavior will be independent of the time-step.
+		
+		The "pink" in pink noise refers to the power spectrum of the output.  A time 
+		series in which each period's observation is independent of the past is 
+		characterized by a flat or "white" power spectrum.  Smoothing a time series 
+		attenuates the higher or "bluer" frequencies of the power spectrum, leaving 
+		the lower or "redder" frequencies relatively stronger in the output.
+		
+		Caveats:  This assumes the use of Euler integration with a time step of no 
+		more than 1/4 of the correlation time.  Very long correlation times should be 
+		avoided also as the multiplication in the scaled white noise will become 
+		progressively less accurate.
+		
+		Technical Notes:  This particular form of pink noise is superior to that of 
+		Britting presented in Richardson and Pugh (1981) because the Gaussian 
+		(Normal) distribution of the output does not depend on the Central Limit 
+		Theorem.  (Dynamo did not have a Gaussian random number generator and hence 
+		R&P had to invoke the CLM to get a normal distribution.)  Rather, this 
+		molecule's normal output is a result of the observations being a sum of 
+		Gaussian draws.  Hence, the series over short intervals should better 
+		approximate normality than the macro in R&P. 
+		
+		MEAN: This is the desired mean for the pink noise.
+		STD DEVIATION: This is the desired standard deviation for the pink noise.
+		CORRELATION TIME: This is the smooth time for the noise, or for the more technically \
+		minded this is the inverse of the filter's cut-off frequency in radians.
+		
+		Updated by Tom Fiddaman, 2010, to include a random initial value,
+		correct units, and use TIME STEP$ keyword
+	|
+
+updating pink noise = gap/correlation time
+	~	mean/correlation time
+	~		|
+
+gap = scaled white noise-PINK NOISE
+	~	mean
+	~		|
+
+scaled white noise =mean+white noise*std deviation*SQRT((2-time step$/correlation time
+)/(time step$/correlation time))
+	~	mean
+	~	This adjusts the standard deviation of the white noise to compensate for the time \
+		step and the
+		         correlation time to produce the appropriate pink noise std \
+		deviation.
+	|
+
+white noise = RANDOM NORMAL(-6,6,0,1,seed)
+	~	dmnl
+	~	This is an independent, identically distributed random quantity drawn every time \
+		step.  The distribution is gaussian with mean = 0 and variance = 1.
+		Note that RANDOM NORMAL is truncated +/- 6 standard deviations here.
+		For Vensim 1.62 syntax, remove the arguments to RANDOM NORMAL.
+	|
+
+:END OF MACRO:
+Smoothing Time=
+	5
+	~	Month
+	~		|
+
+Horizon=
+	20
+	~	Month
+	~		|
+
+Flow Trend=
+	TREND2(Measured Flow,Horizon,Smoothing Time)
+	~	drips/(Month*Month)
+	~		|
+
+Stock Trend=
+	TREND2(Measured Stock,Horizon,Smoothing Time)
+	~	drips/Month
+	~		|
+
+Lagged Measured Flow=
+	DELAY FIXED(Measured Flow,TIME STEP*"Lag #",Measured Flow)
+	~	drips/Month
+	~		|
+
+"Lag #"=
+	1
+	~	dmnl [1,5,1]
+	~		|
+
+Initial Stock=
+	0
+	~	drips
+	~		|
+
+Fractional Outflow Rate=
+	0
+	~	fraction/Month [0,?]
+	~		|
+
+Outflow=
+	Stock*Fractional Outflow Rate
+	~	drips/Month
+	~		|
+
+Flow Abs Error SD=
+	0
+	~	drips/Month [0,?]
+	~		|
+
+Measured Stock=
+	Stock*EXP(Stock Frac Measurement Error SD*RANDOM NORMAL(-6,6,0,1,0))
+	+Stock Abs Error SD*RANDOM NORMAL(-6,6,0,1,0)
+	~	drips
+	~		|
+
+Measured Flow=
+	Flow*EXP(Flow Frac Measurement Error SD*RANDOM NORMAL(-6,6,0,1,0))
+	+Flow Abs Error SD*RANDOM NORMAL(-6,6,0,1,0)
+	~	drips/Month
+	~		|
+
+Stock Abs Error SD=
+	0
+	~	drips [0,?]
+	~		|
+
+Stock= INTEG (
+	Flow+Noise-Outflow,
+		Initial Stock)
+	~	drips
+	~		|
+
+Base Flow=
+	1
+	~	drips/Month
+	~		|
+
+Correlation Time=
+	1
+	~	Month [1,100]
+	~		|
+
+Driving Noise SD=
+	0
+	~	drips/Month [0,?]
+	~	Standard deviation of driving noise.
+	|
+
+Flow=
+	Base Flow + STEP(Flow Step, Step Time) + RAMP( Slope , Ramp Time , FINAL TIME )
+	+ Random Flow SD*PINK NOISE(0,1,Correlation Time,0)
+	~	drips/Month
+	~		|
+
+Flow Frac Measurement Error SD=
+	0
+	~	fraction [0,?]
+	~		|
+
+Flow Step=
+	0
+	~	drips/Month
+	~		|
+
+Noise=
+	Driving Noise SD*RANDOM NORMAL(-6,6,0,1,0)
+	~	drips/Month
+	~		|
+
+NOISE SEED=
+	1
+	~	dmnl [1,10000,1]
+	~		|
+
+Ramp Time=
+	20
+	~	Month
+	~		|
+
+Random Flow SD=
+	0
+	~	drips/Month [0,1]
+	~		|
+
+Slope=
+	0
+	~	drips/Month/Month
+	~		|
+
+Step Time=
+	10
+	~	Month [0,100]
+	~		|
+
+Stock 1st Difference=
+	Measured Stock-SMOOTH(Measured Stock,TIME STEP)
+	~	drips
+	~		|
+
+Stock Frac Measurement Error SD=
+	0
+	~	fraction [0,?]
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Arial|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,Stock,501,274,40,20,3,3,0,0,0,0,0,0
+12,2,48,289,274,10,8,0,3,0,0,-1,0,0,0
+1,3,5,1,4,0,0,22,1,0,0,0-0-0,|12||0-0-0,1|(423,274)|
+1,4,5,2,100,0,0,22,1,0,0,0-0-0,|12||0-0-0,1|(336,274)|
+11,5,48,380,274,6,8,34,3,0,0,1,0,0,0
+10,6,Flow,380,293,18,11,40,3,0,2,-1,0,0,0,0-0-0,0-0-0,|12||0-128-0
+12,7,48,499,421,10,8,0,3,16,2,-1,0,0,0,0-0-0,0-0-0,|12||128-0-128
+1,8,10,1,4,16,0,22,1,0,0,0-0-0,|12||0-0-0,1|(497,320)|
+1,9,10,7,100,16,0,22,1,0,0,0-0-0,|12||0-0-0,1|(497,386)|
+11,10,48,497,353,8,6,33,3,16,0,4,0,0,0
+10,11,Noise,528,353,23,10,40,3,16,2,-1,0,0,0,0-0-0,0-0-0,|12||128-0-128
+10,12,Measured Stock,503,162,59,10,8,3,13,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0
+10,13,Measured Flow,334,197,56,10,8,3,16,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0
+1,14,5,13,0,16,0,0,1,64,0,0-0-0,|12||0-0-0,1|(361,243)|
+1,15,1,12,0,13,0,0,1,64,0,0-0-0,|12||0-0-0,1|(501,219)|
+10,16,Base Flow,182,296,39,10,8,3,12,2,-1,0,0,0,0-0-0,0-0-0,|12||0-128-0
+1,17,16,6,0,12,0,0,1,64,0,0-0-0,|12||0-0-0,1|(284,294)|
+10,18,Correlation Time,521,500,41,18,8,3,12,2,-1,0,0,0,0-0-0,0-0-0,|12||0-128-0
+1,19,18,6,0,12,0,0,1,64,0,0-0-0,|12||0-0-0,1|(451,398)|
+10,20,FINAL TIME,177,335,55,11,8,2,12,3,-1,0,0,0,128-128-128,0-0-0,|12||0-128-0
+1,21,20,6,0,12,0,0,1,64,0,0-0-0,|12||0-0-0,1|(289,311)|
+10,22,Random Flow SD,420,458,51,18,8,3,12,2,-1,0,0,0,0-0-0,0-0-0,|12||0-128-0
+1,23,22,6,0,12,0,0,1,64,0,0-0-0,|12||0-0-0,1|(400,378)|
+10,24,Flow Step,215,410,37,10,8,3,12,2,-1,0,0,0,0-0-0,0-0-0,|12||0-128-0
+1,25,24,6,0,12,0,0,1,64,0,0-0-0,|12||0-0-0,1|(290,356)|
+10,26,Ramp Time,328,485,43,10,8,3,12,2,-1,0,0,0,0-0-0,0-0-0,|12||0-128-0
+1,27,26,6,0,12,0,0,1,64,0,0-0-0,|12||0-0-0,1|(351,396)|
+10,28,Slope,254,452,23,10,8,3,12,2,-1,0,0,0,0-0-0,0-0-0,|12||0-128-0
+1,29,28,6,0,12,0,0,1,64,0,0-0-0,|12||0-0-0,1|(311,378)|
+10,30,Step Time,191,370,38,10,8,3,12,2,-1,0,0,0,0-0-0,0-0-0,|12||0-128-0
+1,31,30,6,0,12,0,0,1,64,0,0-0-0,|12||0-0-0,1|(282,333)|
+12,32,0,999,182,150,150,3,44,0,0,1,0,0,0
+Stock_vs_Flow
+10,33,Driving Noise SD,599,442,50,18,8,3,16,2,-1,0,0,0,0-0-0,0-0-0,|12||128-0-128
+1,34,33,11,0,16,0,0,1,64,0,0-0-0,|12||0-0-0,1|(564,398)|
+10,35,NOISE SEED,750,499,51,10,8,3,16,0,0,0,0,0
+10,36,Stock Frac Measurement Error SD,723,89,71,27,8,3,16,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0
+1,37,36,12,0,16,0,0,1,64,0,0-0-0,|12||0-0-0,1|(599,129)|
+10,38,Flow Frac Measurement Error SD,142,188,71,27,8,3,13,2,-1,0,0,0,0-0-0,0-0-0,|12||255-0-0
+1,39,38,13,0,16,0,0,1,64,0,0-0-0,|12||0-0-0,1|(238,192)|
+10,40,Stock 1st Difference,746,164,39,18,8,3,16,2,0,0,0,0,0-0-0,0-0-0,|12||255-128-0
+1,41,12,40,0,16,0,0,1,64,0,0-0-0,|12||0-0-0,1|(627,162)|
+10,42,TIME STEP,746,224,50,11,8,2,16,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,43,42,40,0,16,0,0,1,64,0,0-0-0,|12||0-0-0,1|(746,204)|
+12,44,0,999,481,150,150,3,44,0,0,1,0,0,0
+Stock_1st_Difference
+10,45,Lagged Measured Flow,239,126,57,18,8,3,13,2,0,0,0,0,0-0-0,0-0-0,|12||255-128-0
+1,46,13,45,0,13,0,0,1,64,0,0-0-0,|12||0-0-0,1|(297,169)|
+10,47,TIME STEP,103,126,50,11,8,2,13,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,48,47,45,0,13,0,0,1,64,0,0-0-0,|12||0-0-0,1|(160,126)|
+10,49,Flow Abs Error SD,193,246,35,18,8,3,16,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0
+10,50,Stock Abs Error SD,590,81,39,18,8,3,16,2,0,0,0,0,0-0-0,0-0-0,|12||255-0-0
+1,51,49,13,0,16,0,0,1,64,0,0-0-0,|12||0-0-0,1|(259,222)|
+1,52,50,12,0,16,0,0,1,64,0,0-0-0,|12||0-0-0,1|(547,120)|
+12,53,48,698,273,10,8,0,3,8,0,-1,0,0,0
+1,54,56,53,4,8,0,22,1,0,0,0-0-0,|12||0-0-0,1|(654,273)|
+1,55,56,1,100,8,0,22,1,0,0,0-0-0,|12||0-0-0,1|(574,273)|
+11,56,48,614,273,6,8,34,3,8,0,1,0,0,0
+10,57,Outflow,614,292,28,10,40,3,8,0,-1,0,0,0
+10,58,Fractional Outflow Rate,711,352,47,18,8,3,8,0,0,0,0,0
+1,59,58,57,0,8,0,0,1,64,0,0-0-0,|12||0-0-0,1|(661,321)|
+1,60,1,57,1,8,0,0,1,64,0,0-0-0,|12||0-0-0,1|(563,314)|
+10,61,Initial Stock,580,222,42,10,8,3,0,0,-1,0,0,0
+1,62,61,1,0,0,0,0,1,64,1,0-0-0,|12||0-0-0,1|(553,239)|
+10,63,"Lag #",104,78,22,10,8,3,13,2,0,0,0,0,-1--1--1,0-0-0,|12||255-128-0
+1,64,63,45,0,13,0,0,1,64,0,0-0-0,|12||0-0-0,1|(150,94)|
+10,65,Flow Trend,333,81,41,10,8,3,13,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255
+10,66,Stock Trend,462,82,44,10,8,3,13,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255
+1,67,13,65,0,13,0,0,1,64,0,0-0-0,|12||0-0-0,1|(333,145)|
+1,68,12,66,0,13,0,0,1,64,0,0-0-0,|12||0-0-0,1|(485,128)|
+10,69,Horizon,400,120,29,10,8,3,13,2,0,0,0,0,0-0-0,0-0-0,|12||0-0-255
+1,70,69,65,0,13,0,0,1,64,0,0-0-0,|12||0-0-0,1|(372,103)|
+1,71,69,66,0,13,0,0,1,64,0,0-0-0,|12||0-0-0,1|(424,104)|
+10,72,Smoothing Time,392,40,59,10,8,3,0,2,0,0,0,0,0-0-0,0-0-0,|0||0-0-255
+1,73,72,65,0,0,0,0,1,64,0,0-0-0,|0||0-0-0,1|(368,56)|
+1,74,72,66,0,0,0,0,1,64,0,0-0-0,|0||0-0-0,1|(420,57)|
+12,75,0,131,581,79,18,8,7,0,0,-1,0,0,0
+Tom Fiddaman, 2012 - in the public domain
+12,76,0,363,579,98,15,8,135,0,18,-1,0,253,253,-1--1--1,0-0-0,|0|U|0-0-255
+http://models.metasd.com|http://models.metasd.com
+///---\\\
+:GRAPH Stock_vs_Flow
+:TITLE Stock vs Flow
+:X-AXIS Measured Flow
+:DOTS
+:SCALE
+:VAR Measured Stock
+
+:GRAPH Stock_1st_Difference
+:TITLE Stock 1st Difference
+:X-AXIS Lagged Measured Flow
+:DOTS
+:SCALE
+:VAR Stock 1st Difference
+
+:GRAPH Trend_Comparison
+:TITLE Trend Comparison
+:X-DIV 4
+:SCALE
+:VAR Flow Trend
+:SCALE
+:VAR Stock Trend
+:L<%^E!@
+1:RandomFlowNoiseErr.vdf
+9:RandomFlowNoiseErr
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Flow Trend
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+24:0
+25:100
+26:100

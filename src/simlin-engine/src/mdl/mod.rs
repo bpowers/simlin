@@ -42,7 +42,18 @@ pub(crate) const LOOKUP_SENTINEL: &str = "0+0";
 
 /// Convert a Project to Vensim MDL text.
 pub fn project_to_mdl(project: &Project) -> Result<String> {
-    if project.models.len() != 1 {
+    // MDL has no general multi-model representation, but a macro-marked model
+    // is emitted as a `:MACRO:` block (not a separate model), so only the
+    // *non-macro* models are subject to the single-model rule. An ordinary
+    // multi-model XMILE project is still rejected; a macro-bearing project
+    // (one main model plus one or more macro-marked models) is accepted.
+    if project
+        .models
+        .iter()
+        .filter(|m| m.macro_spec.is_none())
+        .count()
+        != 1
+    {
         return Err(Error::new(
             ErrorKind::Import,
             ErrorCode::Generic,
@@ -50,20 +61,54 @@ pub fn project_to_mdl(project: &Project) -> Result<String> {
         ));
     }
 
-    let model = &project.models[0];
+    let model = main_model(project).expect(MAIN_MODEL_EXPECT);
     for var in &model.variables {
-        if matches!(var, Variable::Module(_)) {
-            return Err(Error::new(
-                ErrorKind::Import,
-                ErrorCode::Generic,
-                Some("MDL format does not support Module variables".to_owned()),
-            ));
+        if let Variable::Module(m) = var {
+            // A macro-module instance (Phase 4's materialized multi-output
+            // cluster) is reconstructed into the `:` call syntax by the
+            // writer, so it passes this coarse gate. This is only a
+            // pre-filter on `model_name`: it cannot see whether the
+            // cluster's binding auxes / argument wiring are intact (a
+            // post-import MCP patch can break them), so the writer itself
+            // re-validates and hard-errors on an unreconstructable cluster
+            // rather than silently dropping the invocation. An ordinary
+            // submodule instance is rejected here outright (a general MDL
+            // module-export overhaul is out of scope).
+            let is_macro_module = project
+                .models
+                .iter()
+                .any(|candidate| candidate.macro_spec.is_some() && candidate.name == m.model_name);
+            if !is_macro_module {
+                return Err(Error::new(
+                    ErrorKind::Import,
+                    ErrorCode::Generic,
+                    Some("MDL format does not support Module variables".to_owned()),
+                ));
+            }
         }
     }
 
     let writer = MdlWriter::new();
     writer.write_project(project)
 }
+
+/// The single non-macro ("main") model of a macro-bearing project, or
+/// `None` if there is no non-macro model.
+///
+/// **Invariant:** every caller must run *after* [`project_to_mdl`]'s reject
+/// gate, which rejects any project whose non-macro model count is not
+/// exactly 1 (the empty-project `0 != 1` case included). Post-gate the
+/// `.find(...)` always matches, so callers `.expect(...)` the result -- a
+/// loud, non-indexing assertion of that invariant rather than a panicking
+/// index. This is the shared lookup so the gate, `write_project`, and
+/// `write_equations_section` all agree on which model is the body.
+pub(crate) fn main_model(project: &Project) -> Option<&crate::datamodel::Model> {
+    project.models.iter().find(|m| m.macro_spec.is_none())
+}
+
+/// `.expect` message for [`main_model`]'s post-reject-gate invariant.
+pub(crate) const MAIN_MODEL_EXPECT: &str = "main_model: callers must run after the project_to_mdl reject gate, \
+     which guarantees exactly one non-macro model";
 
 /// Parse a Vensim MDL file into a Project.
 ///

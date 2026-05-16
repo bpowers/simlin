@@ -293,7 +293,10 @@ fn test_block1_word10_high_equals_word11_across_corpus() {
 /// slot count that matches `block1[7]`; the Rust scanner uses a stricter
 /// `min_stride >= 4` rule and misses a chunk of entries on these
 /// specific files. The Python-observed delta (per the memory-regions
-/// audit) is 0 on risk2 and 1 on SCEN01. The Rust under-count is
+/// audit) is 0 on risk2 and 1 on SCEN01; the metasd
+/// `social-network-valuation/optimistic.vdf` and `pessimistic.vdf`
+/// fixtures show the same class of Rust under-count at a much larger
+/// magnitude (delta -23), tracked in GH #549. The Rust under-count is
 /// orthogonal to the format invariant tested here, so we explicitly
 /// exempt those fixtures and track the parser gap separately.
 fn rust_slot_table_undercount_known(path: &Path) -> bool {
@@ -305,7 +308,10 @@ fn rust_slot_table_undercount_known(path: &Path) -> bool {
         .unwrap_or("");
     matches!(
         (parent, file_name),
-        ("econ", "risk2.vdf") | ("WRLD3-03", "SCEN01.VDF")
+        ("econ", "risk2.vdf")
+            | ("WRLD3-03", "SCEN01.VDF")
+            | ("social-network-valuation", "optimistic.vdf")
+            | ("social-network-valuation", "pessimistic.vdf")
     )
 }
 
@@ -330,9 +336,13 @@ fn rust_slot_table_undercount_known(path: &Path) -> bool {
 /// scanner is known to return a short count on `econ/risk2.vdf` and
 /// `WRLD3-03/SCEN01.VDF` because its `min_stride >= 4` rule rejects
 /// valid leading-extra-slot layouts that the Python `vdf_xray` parser
-/// accepts. On those fixtures the format-level invariant still holds
-/// (block1[7] matches the true slot count); we flag the Rust parser
-/// discrepancy separately rather than hide it behind a relaxed bound.
+/// accepts; on those two the format-level invariant still holds
+/// (block1[7] matches the Python-observed slot count). The metasd
+/// `social-network-valuation` `optimistic.vdf` / `pessimistic.vdf` pair
+/// is exempted for the same class of Rust under-count at a larger
+/// magnitude (delta -23), tracked in GH #549. We flag these Rust parser
+/// discrepancies separately rather than hide them behind a relaxed
+/// bound.
 #[test]
 fn test_block1_word7_matches_slot_count_within_small_delta() {
     const ROOTS: &[&str] = &[

@@ -5,7 +5,7 @@
 // pattern: Functional Core
 
 import type { Model, Project, Variable } from '@simlin/core/datamodel';
-import { STDLIB_MODEL_NAMES, STDLIB_PREFIX } from './module-navigation';
+import { STDLIB_MODEL_NAMES, STDLIB_PREFIX, isMacroModel } from './module-navigation';
 
 /**
  * Counts how many module variables across all models in the project
@@ -88,8 +88,17 @@ export function getAvailableModels(
     }
   }
 
-  for (const name of project.models.keys()) {
+  for (const [name, model] of project.models) {
     if (name === currentModelName) {
+      continue;
+    }
+    // macros.AC6.6: a macro-marked model is a callable macro template,
+    // never a selectable module-reference target -- skip it (and defend
+    // the stdlib group in the unlikely case a macro shadows a stdlib
+    // name). The engine materializes macro invocations directly; the
+    // diagram must not let a user point a module at a macro model.
+    if (isMacroModel(model)) {
+      stdlibSet.delete(name);
       continue;
     }
     if (wouldCreateCycle(project, currentModelName, name)) {

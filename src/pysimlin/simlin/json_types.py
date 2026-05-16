@@ -306,6 +306,15 @@ class LoopMetadata:
 
 
 @dataclass
+class MacroSpec:
+    """Marks a model as a callable macro template and records its calling convention."""
+
+    parameters: list[str] = field(default_factory=list)
+    primary_output: str = ""
+    additional_outputs: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Model:
     """A model in the project."""
 
@@ -317,6 +326,7 @@ class Model:
     sim_specs: SimSpecs | None = None
     views: list[View] = field(default_factory=list)
     loop_metadata: list[LoopMetadata] = field(default_factory=list)
+    macro_spec: MacroSpec | None = None
 
 
 @dataclass

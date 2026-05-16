@@ -303,6 +303,14 @@ message LoopMetadata {
   string description = 4;
 }
 
+// Marks a Model as a callable macro template and records its calling
+// convention. See datamodel::MacroSpec.
+message MacroSpec {
+  repeated string parameters = 1;
+  string primary_output = 2;
+  repeated string additional_outputs = 3;
+}
+
 // Semantic/organizational group for categorizing model variables.
 // This is distinct from visual diagram groups (ViewElement.Group).
 // In Vensim, these are called "sectors".
@@ -322,6 +330,10 @@ message Model {
   repeated View views = 4;
   repeated LoopMetadata loop_metadata = 5;
   repeated ModelGroup groups = 6;
+  // Present only when this model is a callable macro template. A singular
+  // proto3 message field is presence-tracked, so prost generates it as
+  // Option<MacroSpec>.
+  MacroSpec macro_spec = 7;
 }
 
 enum SimMethod {

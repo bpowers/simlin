@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, print_eqn};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
@@ -11,46 +12,61 @@ use crate::common::{
     canonicalize,
 };
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
+use crate::module_functions::{
+    MacroRegistry, ModuleFunctionDescriptor, is_renamed_builtin_macro_collision, stdlib_descriptor,
+};
 use crate::{datamodel, eqn_err};
 
-fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
-    let args: &'static [&'static str] = match name {
-        "smth1" | "smth3" | "delay" | "delay1" | "delay3" | "trend" => {
-            &["input", "delay_time", "initial_value"]
-        }
-        "npv" => &["stream", "discount_rate", "initial_value", "factor"],
-        _ => {
-            return None;
-        }
-    };
-    Some(args)
+/// An empty registry used when no project macros are in scope (e.g. the
+/// `BuiltinVisitor::new` / `new_with_subscript_context` constructors before
+/// `with_macro_registry` runs). Lets the `macro_registry` field be a plain
+/// `&MacroRegistry` -- no `Option` handling at the `resolve_macro` call
+/// sites -- while still defaulting to "no macros".
+static EMPTY_MACRO_REGISTRY: LazyLock<MacroRegistry> = LazyLock::new(MacroRegistry::default);
+
+/// The shared empty macro registry, for parse paths with no project macros
+/// in scope (the `parse_var` convenience wrapper and the many test call
+/// sites). Avoids allocating a fresh `MacroRegistry` per parse call.
+pub(crate) fn empty_macro_registry() -> &'static MacroRegistry {
+    &EMPTY_MACRO_REGISTRY
 }
 
-/// Check if the expression contains any stdlib function calls that need per-element expansion
-fn contains_stdlib_call(expr: &Expr0) -> bool {
+/// Check if the expression contains any **module-function** call that needs
+/// per-element expansion in A2A context: a stdlib function, a project macro
+/// (consulted via `macro_registry`), or `init`/`previous` (which may need
+/// per-element temp vars though they create no standalone module).
+///
+/// This is the recognition predicate that gates the `Ast::ApplyToAll` /
+/// `Ast::Arrayed` per-element expansion paths in `instantiate_implicit_modules`.
+/// Macro-awareness is what lets an *arrayed* macro invocation enter the
+/// per-element path (a scalar macro call expands via `walk()`'s `App`-arm
+/// change regardless); Phase 4's arrayed fixtures exercise this end-to-end.
+pub(crate) fn contains_module_call(expr: &Expr0, macro_registry: &MacroRegistry) -> bool {
     use Expr0::*;
     match expr {
         Const(_, _, _) => false,
         Var(_, _) => false,
         App(UntypedBuiltinFn(func, args), _) => {
-            // INIT/PREVIOUS are included because they may need per-element
-            // temp vars in A2A context, though they don't create standalone
-            // stdlib modules.
             if crate::builtins::is_stdlib_module_function(func.as_str())
+                || macro_registry.resolve_macro(func).is_some()
                 || matches!(func.as_str(), "init" | "previous")
             {
                 return true;
             }
-            args.iter().any(contains_stdlib_call)
+            args.iter().any(|a| contains_module_call(a, macro_registry))
         }
         Subscript(_, args, _) => args.iter().any(|idx| match idx {
-            IndexExpr0::Expr(e) => contains_stdlib_call(e),
+            IndexExpr0::Expr(e) => contains_module_call(e, macro_registry),
             _ => false,
         }),
-        Op1(_, r, _) => contains_stdlib_call(r),
-        Op2(_, l, r, _) => contains_stdlib_call(l) || contains_stdlib_call(r),
+        Op1(_, r, _) => contains_module_call(r, macro_registry),
+        Op2(_, l, r, _) => {
+            contains_module_call(l, macro_registry) || contains_module_call(r, macro_registry)
+        }
         If(cond, t, f, _) => {
-            contains_stdlib_call(cond) || contains_stdlib_call(t) || contains_stdlib_call(f)
+            contains_module_call(cond, macro_registry)
+                || contains_module_call(t, macro_registry)
+                || contains_module_call(f, macro_registry)
         }
     }
 }
@@ -143,6 +159,31 @@ pub struct BuiltinVisitor<'a> {
     /// PREVIOUS(module_var) must synthesize a scalar temp arg rather than
     /// reading a flat slot directly, because modules occupy multiple slots.
     module_idents: Option<&'a HashSet<Ident<Canonical>>>,
+    /// The per-project macro registry. A call name that resolves here is
+    /// expanded as a macro -- *before* alias-normalization, `is_builtin_fn`,
+    /// or the stdlib lookup -- so a project macro shadows an identically
+    /// named builtin or stdlib function (Vensim's rule). Defaults to an
+    /// empty registry (no project macros) until `with_macro_registry`.
+    macro_registry: &'a MacroRegistry,
+    /// The canonical name of the macro model whose body this visitor is
+    /// expanding, if any (i.e. the variable being parsed belongs to a
+    /// macro-marked model). `None` for ordinary (non-macro-body) variables.
+    ///
+    /// #554 (+ follow-up): when expanding a macro body, a call whose
+    /// canonical name equals this enclosing macro's own canonical name AND is
+    /// a Vensim-MDL-importer-renamed builtin -- opcode-backed
+    /// (`init`/`previous`) *or* stdlib-module-backed (`delayn`/`smthn`/...),
+    /// per the shared `is_renamed_builtin_macro_collision` -- must resolve to
+    /// the BUILTIN, not recurse into the macro. The importer's necessary
+    /// `INITIAL -> INIT` / `SAMPLE IF TRUE -> PREVIOUS` / `DELAY N -> DELAYN`
+    /// / `SMOOTH N -> SMTHN` rename makes such a body literally read
+    /// `init = init(x)` or `delayn = delayn(...)`; without this exception the
+    /// macro-shadows-everything precedence (`resolve_macro` below) would
+    /// re-resolve the call to the macro forever (a salsa module-map cycle).
+    /// `module_functions`' `collect_called_macros` suppresses the matching
+    /// false recursion edge using the *same* predicate, so the two halves
+    /// agree by construction.
+    enclosing_model: Option<&'a str>,
 }
 
 impl<'a> BuiltinVisitor<'a> {
@@ -157,6 +198,8 @@ impl<'a> BuiltinVisitor<'a> {
             active_subscript: None,
             dimensions_ctx: None,
             module_idents: None,
+            macro_registry: &EMPTY_MACRO_REGISTRY,
+            enclosing_model: None,
         }
     }
 
@@ -177,7 +220,44 @@ impl<'a> BuiltinVisitor<'a> {
             active_subscript: Some(subscript.to_vec()),
             dimensions_ctx,
             module_idents: None,
+            macro_registry: &EMPTY_MACRO_REGISTRY,
+            enclosing_model: None,
         }
+    }
+
+    /// Set the per-project macro registry so macro calls expand (and a
+    /// project macro shadows an identically named builtin / stdlib func).
+    fn with_macro_registry(mut self, macro_registry: &'a MacroRegistry) -> Self {
+        self.macro_registry = macro_registry;
+        self
+    }
+
+    /// Set the enclosing macro model name (#554). Pass the owning model's
+    /// name when parsing a macro-marked model's body variable; the
+    /// same-named-opcode-intrinsic exception in `walk()` keys off its
+    /// canonicalization. A no-op (stays `None`) for non-macro-body callers.
+    fn with_enclosing_model(mut self, enclosing_model: Option<&'a str>) -> Self {
+        self.enclosing_model = enclosing_model;
+        self
+    }
+
+    /// #554 (+ follow-up): is `func` (a raw call name) the enclosing macro's
+    /// own same-canonical-name renamed builtin -- i.e. the MDL importer's
+    /// renamed `INITIAL`/`SAMPLE IF TRUE` (opcode-backed) or
+    /// `DELAY N`/`SMOOTH N`/... (stdlib-module-backed) builtin appearing
+    /// inside the like-named macro's body? Such a call must resolve to the
+    /// builtin (the opcode for `init`/`previous`, the distinct `stdlib⁚...`
+    /// module for `delayn`/...), NOT (recursively) to the macro. Shares
+    /// `is_renamed_builtin_macro_collision` with
+    /// `module_functions::collect_called_macros` so the recursion-edge
+    /// suppression and this expansion exception cannot drift apart.
+    fn is_enclosing_macro_renamed_builtin_self_call(&self, func: &str) -> bool {
+        let Some(enclosing) = self.enclosing_model else {
+            return false;
+        };
+        let call = canonicalize(func);
+        let enclosing = canonicalize(enclosing);
+        call == enclosing && is_renamed_builtin_macro_collision(call.as_ref())
     }
 
     /// Set the module identifiers for PREVIOUS routing.
@@ -374,6 +454,130 @@ impl<'a> BuiltinVisitor<'a> {
         Ok(result)
     }
 
+    /// Expand one module-function call (stdlib *or* macro) into a synthetic
+    /// `Variable::Module` plus hoisted argument `Aux`es, returning the
+    /// replacement expression `Var("<module>·<primary_output>")`.
+    ///
+    /// This is the generalized form of the previously stdlib-hardcoded
+    /// rewrite. The descriptor supplies the three facts that used to be
+    /// inlined: the target `model_name` (was `format!("stdlib⁚{func}")`),
+    /// the ordered `dst` port names (was `stdlib_args`), and the output
+    /// variable whose value replaces the call (was the hardcoded
+    /// `·output`). The synthetic-instance name, A2A subscript-suffix logic,
+    /// and per-argument hoisting are reused verbatim, so for a stdlib
+    /// descriptor (`primary_output == "output"`) the expansion is
+    /// byte-for-byte identical to before.
+    ///
+    /// Arity: a project macro is strict -- `args.len()` must equal
+    /// `descriptor.parameter_ports.len()`, else `BadBuiltinArgs` over the
+    /// call's span. Stdlib functions keep their lenient behavior (a trailing
+    /// port like `SMTH1`'s `initial_value` may be unwired), so no arity
+    /// check is applied when `!descriptor.is_macro`.
+    ///
+    /// `func` is only used to name the synthetic instance/arg vars (kept
+    /// identical to the pre-extraction `$⁚{var}⁚{n}⁚{func}` form); routing
+    /// is entirely descriptor-driven.
+    fn expand_module_function(
+        &mut self,
+        descriptor: &ModuleFunctionDescriptor,
+        func: &str,
+        args: Vec<Expr0>,
+        loc: crate::builtins::Loc,
+    ) -> Result<Expr0, EquationError> {
+        use Expr0::*;
+
+        if descriptor.is_macro && args.len() != descriptor.parameter_ports.len() {
+            // Macro arity is strict; the span covers the whole call so the
+            // diagnostic identifies the macro in context (macros.AC5.1).
+            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+        }
+
+        // In A2A context, add subscript suffix to module name for uniqueness
+        let subscript_suffix = self.subscript_suffix();
+        let module_name = if subscript_suffix.is_empty() {
+            format!("$⁚{}⁚{}⁚{}", self.variable_name, self.n, func)
+        } else {
+            format!(
+                "$⁚{}⁚{}⁚{}⁚{}",
+                self.variable_name, self.n, func, subscript_suffix
+            )
+        };
+
+        let ident_args = args.into_iter().enumerate().map(|(i, arg)| {
+            if let Var(id, _loc) = arg {
+                // In A2A context, substitute dimension refs in simple var references too
+                if self.active_subscript.is_some() {
+                    let substituted = self.substitute_dimension_refs(Var(id.clone(), _loc));
+                    if let Var(new_id, _) = substituted {
+                        return new_id.as_str().to_string();
+                    }
+                }
+                id.as_str().to_string()
+            } else {
+                // In A2A context, substitute dimension refs and add subscript suffix
+                let transformed_arg = if self.active_subscript.is_some() {
+                    self.substitute_dimension_refs(arg)
+                } else {
+                    arg
+                };
+
+                let id = if subscript_suffix.is_empty() {
+                    format!("$⁚{}⁚{}⁚arg{}", self.variable_name, self.n, i)
+                } else {
+                    format!(
+                        "$⁚{}⁚{}⁚arg{}⁚{}",
+                        self.variable_name, self.n, i, subscript_suffix
+                    )
+                };
+                let eqn = print_eqn(&transformed_arg);
+                let x_var = datamodel::Variable::Aux(datamodel::Aux {
+                    ident: id.clone(),
+                    equation: datamodel::Equation::Scalar(eqn),
+                    documentation: "".to_string(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                });
+                self.vars.insert(Ident::new(&id), x_var);
+                id
+            }
+        });
+
+        let references: Vec<_> = ident_args
+            .into_iter()
+            .enumerate()
+            .map(|(i, src)| datamodel::ModuleReference {
+                src,
+                // dst port names come from the descriptor (stdlib_args for a
+                // stdlib func, MacroSpec.parameters for a macro). A macro
+                // call has exactly `parameter_ports.len()` args (checked
+                // above); a stdlib call may legitimately have fewer, wiring
+                // only the leading ports.
+                dst: format!("{}.{}", module_name, descriptor.parameter_ports[i]),
+            })
+            .collect();
+        let x_module = datamodel::Variable::Module(datamodel::Module {
+            ident: module_name.clone(),
+            model_name: descriptor.model_name.clone(),
+            documentation: "".to_string(),
+            units: None,
+            references,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        });
+        // The same U+00B7 (·) middle-dot the previously-hardcoded
+        // `·output` used (the already-canonical compile-time AST separator);
+        // `primary_output` is "output" for stdlib, so stdlib stays identical.
+        let module_output_name = format!("{}\u{b7}{}", module_name, descriptor.primary_output);
+        self.vars.insert(Ident::new(&module_name), x_module);
+
+        self.n += 1;
+        Ok(Var(RawIdent::new_from_str(&module_output_name), loc))
+    }
+
     fn walk(&mut self, expr: Expr0) -> Result<Expr0, EquationError> {
         use Expr0::*;
         use std::mem;
@@ -393,6 +597,46 @@ impl<'a> BuiltinVisitor<'a> {
                     args.into_iter().map(|e| self.walk(e)).collect();
                 self.self_allowed = orig_self_allowed;
                 let args = args?;
+
+                // #554 (+ follow-up) exception to the macro-shadows-everything
+                // precedence below: when expanding a macro body, a call whose
+                // canonical name equals the *enclosing* macro's own canonical
+                // name AND is a Vensim-MDL-importer-renamed builtin --
+                // opcode-backed (`init`/`previous`) or stdlib-module-backed
+                // (`delayn`/`smthn`/...) -- is the importer's renamed builtin
+                // (`INITIAL` -> `INIT`, `SAMPLE IF TRUE` -> `PREVIOUS`,
+                // `DELAY N` -> `DELAYN`, `SMOOTH N` -> `SMTHN`), NOT a
+                // recursive macro call (Vensim macros cannot recurse; the
+                // source wrote the distinct builtin name). It must resolve to
+                // the builtin, so we skip `resolve_macro` and fall through:
+                // for `init`/`previous` to the PREVIOUS/INIT intrinsic routing
+                // (-> the LoadInitial/LoadPrev opcode), for `delayn`/... to
+                // `rewrite_alias_module_call` + `stdlib_descriptor` (-> a
+                // DISTINCT `stdlib⁚delay1`/... module whose fixed body never
+                // references the user macro). Without this an INVOKED
+                // such-macro would infinite-loop / form a salsa module-map
+                // cycle: the body's `init(x)` / `delayn(...)` would re-resolve
+                // to the macro forever. `module_functions::collect_called_macros`
+                // suppresses the mirror false recursion edge with the same
+                // shared predicate, so the registry build *and* this expansion
+                // stay consistent (#554 + follow-up).
+                let is_renamed_builtin_self_call =
+                    self.is_enclosing_macro_renamed_builtin_self_call(&func);
+
+                // Macro-shadows-everything precedence (Vensim's rule): a
+                // project macro is resolved here, BEFORE alias
+                // normalization / modulo / previous / init / is_builtin_fn
+                // / the stdlib lookup. A macro named `SSHAPE` or
+                // `RAMP FROM TO` therefore expands as the macro even though
+                // it parsed as `CallKind::Builtin`. `func` is the raw call
+                // name (resolve_macro canonicalizes internally).
+                if !is_renamed_builtin_self_call
+                    && let Some(descriptor) = self.macro_registry.resolve_macro(&func)
+                {
+                    let descriptor = descriptor.clone();
+                    return self.expand_module_function(&descriptor, &func, args, loc);
+                }
+
                 let (func, args) = rewrite_alias_module_call(func, args, loc)?;
                 // MODULO(x, y) is the function-call form of the MOD binary operator
                 if func == "modulo" && args.len() == 2 {
@@ -452,92 +696,19 @@ impl<'a> BuiltinVisitor<'a> {
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
 
-                // `stdlib_args` is the authoritative per-name lookup: it both
-                // rejects unknown names and returns the input-port spec used
-                // below to wire the synthesized module. Folding the two
-                // lookups into one match also avoids a panic path for
-                // MODEL_NAMES entries without a `stdlib_args` spec (e.g.
-                // `systems_*`) if a user equation ever references them.
-                let Some(stdlib_model_inputs) = stdlib_args(&func) else {
+                // `stdlib_descriptor` is the authoritative per-name lookup:
+                // it both rejects unknown names (UnknownBuiltin still fires
+                // for a name that is neither a macro -- handled above -- nor
+                // an `is_builtin_fn` builtin, nor a stdlib module, satisfying
+                // macros.AC5.6) and supplies the descriptor that drives the
+                // shared module rewrite. Folding the two into one lookup also
+                // avoids a panic path for MODEL_NAMES entries without a
+                // stdlib spec (e.g. `systems_*`) if a user equation ever
+                // references them.
+                let Some(descriptor) = stdlib_descriptor(&func) else {
                     return eqn_err!(UnknownBuiltin, loc.start, loc.end);
                 };
-
-                // In A2A context, add subscript suffix to module name for uniqueness
-                let subscript_suffix = self.subscript_suffix();
-                let module_name = if subscript_suffix.is_empty() {
-                    format!("$⁚{}⁚{}⁚{}", self.variable_name, self.n, func)
-                } else {
-                    format!(
-                        "$⁚{}⁚{}⁚{}⁚{}",
-                        self.variable_name, self.n, func, subscript_suffix
-                    )
-                };
-
-                let ident_args = args.into_iter().enumerate().map(|(i, arg)| {
-                    if let Var(id, _loc) = arg {
-                        // In A2A context, substitute dimension refs in simple var references too
-                        if self.active_subscript.is_some() {
-                            let substituted = self.substitute_dimension_refs(Var(id.clone(), _loc));
-                            if let Var(new_id, _) = substituted {
-                                return new_id.as_str().to_string();
-                            }
-                        }
-                        id.as_str().to_string()
-                    } else {
-                        // In A2A context, substitute dimension refs and add subscript suffix
-                        let transformed_arg = if self.active_subscript.is_some() {
-                            self.substitute_dimension_refs(arg)
-                        } else {
-                            arg
-                        };
-
-                        let id = if subscript_suffix.is_empty() {
-                            format!("$⁚{}⁚{}⁚arg{}", self.variable_name, self.n, i)
-                        } else {
-                            format!(
-                                "$⁚{}⁚{}⁚arg{}⁚{}",
-                                self.variable_name, self.n, i, subscript_suffix
-                            )
-                        };
-                        let eqn = print_eqn(&transformed_arg);
-                        let x_var = datamodel::Variable::Aux(datamodel::Aux {
-                            ident: id.clone(),
-                            equation: datamodel::Equation::Scalar(eqn),
-                            documentation: "".to_string(),
-                            units: None,
-                            gf: None,
-                            ai_state: None,
-                            uid: None,
-                            compat: datamodel::Compat::default(),
-                        });
-                        self.vars.insert(Ident::new(&id), x_var);
-                        id
-                    }
-                });
-
-                let references: Vec<_> = ident_args
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, src)| datamodel::ModuleReference {
-                        src,
-                        dst: format!("{}.{}", module_name, stdlib_model_inputs[i]),
-                    })
-                    .collect();
-                let x_module = datamodel::Variable::Module(datamodel::Module {
-                    ident: module_name.clone(),
-                    model_name: format!("stdlib⁚{func}"),
-                    documentation: "".to_string(),
-                    units: None,
-                    references,
-                    compat: datamodel::Compat::default(),
-                    ai_state: None,
-                    uid: None,
-                });
-                let module_output_name = format!("{module_name}·output");
-                self.vars.insert(Ident::new(&module_name), x_module);
-
-                self.n += 1;
-                Var(RawIdent::new_from_str(&module_output_name), loc)
+                return self.expand_module_function(&descriptor, &func, args, loc);
             }
             Subscript(id, args, loc) => {
                 let args: Result<Vec<IndexExpr0>, EquationError> =
@@ -566,29 +737,44 @@ impl<'a> BuiltinVisitor<'a> {
     }
 }
 
-/// Expand stdlib function calls (SMTH1, DELAY, etc.) and PREVIOUS/INIT
-/// builtins into implicit module instances and opcode-backed builtins.
+/// Expand module-function calls -- stdlib (SMTH1, DELAY, ...) *and* project
+/// macros -- plus PREVIOUS/INIT builtins into implicit module instances and
+/// opcode-backed builtins.
 ///
-/// When `module_idents` is provided, `PREVIOUS(module_var)` synthesizes a
-/// scalar temp arg instead of reading a flat slot directly.
+/// `macro_registry` carries the per-project macros: a call name resolving
+/// there expands as a macro (shadowing an identically named builtin/stdlib
+/// func) and an *arrayed* macro invocation rides the per-element path via
+/// `contains_module_call`. When `module_idents` is provided,
+/// `PREVIOUS(module_var)` synthesizes a scalar temp arg instead of reading a
+/// flat slot directly.
+///
+/// `enclosing_model` is the owning model's name when `variable_name` is a
+/// macro-marked model's body variable (`None` otherwise). It drives the #554
+/// same-named-opcode-intrinsic exception in `BuiltinVisitor::walk` so a
+/// macro body's renamed-builtin call (`init` inside macro `INIT`) resolves to
+/// the intrinsic instead of recursing into the macro forever.
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,
     dimensions_ctx: Option<&DimensionsContext>,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
+    macro_registry: &MacroRegistry,
+    enclosing_model: Option<&str>,
 ) -> std::result::Result<(Ast<Expr0>, Vec<datamodel::Variable>), EquationError> {
     match ast {
         Ast::Scalar(ast) => {
-            let mut builtin_visitor =
-                BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
+            let mut builtin_visitor = BuiltinVisitor::new(variable_name)
+                .with_module_idents(module_idents)
+                .with_macro_registry(macro_registry)
+                .with_enclosing_model(enclosing_model);
             let transformed = builtin_visitor.walk(ast)?;
             let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
             Ok((Ast::Scalar(transformed), vars))
         }
         Ast::ApplyToAll(dimensions, ast) => {
-            // Check if expression contains stdlib calls - if so, expand to per-element
-            if contains_stdlib_call(&ast) && !dimensions.is_empty() {
-                // Expand to per-element modules
+            // Check if expression contains a module-function call (stdlib or
+            // macro) - if so, expand to per-element modules.
+            if contains_module_call(&ast, macro_registry) && !dimensions.is_empty() {
                 let mut all_vars = Vec::new();
                 let mut elements = HashMap::new();
 
@@ -602,7 +788,9 @@ pub fn instantiate_implicit_modules(
                         &subscript,
                         dimensions_ctx,
                     )
-                    .with_module_idents(module_idents);
+                    .with_module_idents(module_idents)
+                    .with_macro_registry(macro_registry)
+                    .with_enclosing_model(enclosing_model);
                     let transformed_ast = visitor.walk(ast_clone)?;
 
                     elements.insert(subscript_key, transformed_ast);
@@ -611,18 +799,24 @@ pub fn instantiate_implicit_modules(
 
                 Ok((Ast::Arrayed(dimensions, elements, None, false), all_vars))
             } else {
-                // No stdlib calls - original behavior
-                let mut builtin_visitor =
-                    BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
+                // No module-function calls - original behavior
+                let mut builtin_visitor = BuiltinVisitor::new(variable_name)
+                    .with_module_idents(module_idents)
+                    .with_macro_registry(macro_registry)
+                    .with_enclosing_model(enclosing_model);
                 let transformed = builtin_visitor.walk(ast)?;
                 let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
                 Ok((Ast::ApplyToAll(dimensions, transformed), vars))
             }
         }
         Ast::Arrayed(dimensions, elements, default_expr, apply_default_to_missing) => {
-            let any_stdlib = elements.values().any(contains_stdlib_call)
-                || default_expr.as_ref().is_some_and(contains_stdlib_call);
-            if any_stdlib && !dimensions.is_empty() {
+            let any_module_call = elements
+                .values()
+                .any(|e| contains_module_call(e, macro_registry))
+                || default_expr
+                    .as_ref()
+                    .is_some_and(|e| contains_module_call(e, macro_registry));
+            if any_module_call && !dimensions.is_empty() {
                 let mut all_vars = Vec::new();
                 let mut new_elements = HashMap::new();
                 for (subscript_key, equation) in elements {
@@ -637,14 +831,18 @@ pub fn instantiate_implicit_modules(
                         &subscript_parts,
                         dimensions_ctx,
                     )
-                    .with_module_idents(module_idents);
+                    .with_module_idents(module_idents)
+                    .with_macro_registry(macro_registry)
+                    .with_enclosing_model(enclosing_model);
                     let transformed = visitor.walk(equation)?;
                     new_elements.insert(subscript_key, transformed);
                     all_vars.extend(visitor.vars.values().cloned());
                 }
                 let transformed_default = if let Some(default_expr) = default_expr {
-                    let mut default_visitor =
-                        BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
+                    let mut default_visitor = BuiltinVisitor::new(variable_name)
+                        .with_module_idents(module_idents)
+                        .with_macro_registry(macro_registry)
+                        .with_enclosing_model(enclosing_model);
                     let transformed = default_visitor.walk(default_expr)?;
                     all_vars.extend(default_visitor.vars.values().cloned());
                     Some(transformed)
@@ -661,8 +859,10 @@ pub fn instantiate_implicit_modules(
                     all_vars,
                 ))
             } else {
-                let mut builtin_visitor =
-                    BuiltinVisitor::new(variable_name).with_module_idents(module_idents);
+                let mut builtin_visitor = BuiltinVisitor::new(variable_name)
+                    .with_module_idents(module_idents)
+                    .with_macro_registry(macro_registry)
+                    .with_enclosing_model(enclosing_model);
                 let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
                     .into_iter()
                     .map(|(subscript, equation)| {

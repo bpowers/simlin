@@ -16,7 +16,7 @@ use std::fmt::Write;
 use super::builtins::to_lower_space;
 use crate::ast::{BinaryOp, Expr0, IndexExpr0, UnaryOp, Visitor};
 use crate::builtins::UntypedBuiltinFn;
-use crate::common::Result;
+use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::view_element::{self, LinkPolarity, LinkShape};
 use crate::datamodel::{self, DimensionElements, Equation, GraphicalFunction, View, ViewElement};
 use crate::lexer::LexerType;
@@ -1365,6 +1365,254 @@ fn write_units_and_comment(buf: &mut String, units: &Option<String>, doc: &str) 
     buf.push_str("\n\t|");
 }
 
+/// One item to emit in the ungrouped-variables section: either an ordinary
+/// model variable or a reconstructed multi-output macro invocation. Both
+/// carry a sort key (the variable's / the LHS's ident) so the whole
+/// section stays alphabetically ordered and deterministic across passes.
+enum UngroupedEntry<'a> {
+    Variable(&'a datamodel::Variable),
+    /// `(lhs_ident, full_entry_text)` -- the entry text is the complete
+    /// `<lhs> = <macro>(<args> : <bindings>)\n\t~\tunits\n\t~\tdoc\n\t|`
+    /// block (no trailing newline; the caller adds it like a normal entry).
+    Reconstructed(&'a str, &'a str),
+}
+
+impl UngroupedEntry<'_> {
+    fn sort_key(&self) -> &str {
+        match self {
+            UngroupedEntry::Variable(v) => v.get_ident(),
+            UngroupedEntry::Reconstructed(lhs, _) => lhs,
+        }
+    }
+}
+
+/// The result of detecting Phase-4-materialized multi-output clusters in a
+/// model: the idents to suppress from normal per-variable emission (each
+/// `Variable::Module` plus its binding auxes) and the reconstructed
+/// `<lhs> = <macro>(...)` entries to emit instead, paired with their LHS
+/// ident for stable interleaving into the sorted ungrouped section.
+///
+/// `failed` holds one human-readable message per macro-backed
+/// `Variable::Module` that resolves to a macro but whose materialized
+/// cluster is *not* faithfully reconstructable (a binding aux or argument
+/// wiring was deleted/renamed post-import -- e.g. an MCP patch). The caller
+/// MUST treat a non-empty `failed` as a hard error: silently emitting the
+/// rest would drop the invocation and leave the surviving binding auxes
+/// referencing a module that is no longer written -- corrupt `.mdl`. This
+/// mirrors `project_to_mdl`'s ordinary-`Variable::Module` reject gate; a
+/// macro-backed module is only *conditionally* admitted by that gate, on
+/// the assumption -- enforced here -- that its cluster is well-formed.
+#[derive(Default)]
+struct MultiOutputReconstruction {
+    suppressed: HashSet<String>,
+    entries: Vec<(String, String)>,
+    failed: Vec<String>,
+}
+
+/// Detect every Phase-4-materialized multi-output invocation cluster in
+/// `model` and reconstruct it into the Vensim `:` call syntax.
+///
+/// A cluster is a `Variable::Module` whose `model_name` resolves to a
+/// macro-marked model in `project.models` (looked up via a `name ->
+/// &MacroSpec` map built here). For each such module:
+///
+/// - **Arguments** are recovered positionally: each `ModuleReference.dst`
+///   is `"{module_ident}.{param}"`; the bare `{param}` is matched against
+///   `MacroSpec.parameters[i]` to get the call position (Phase 4 does NOT
+///   guarantee `Module.references` is in positional order), and `src` is
+///   the argument's name. A reference whose param does not appear in the
+///   spec is skipped defensively.
+/// - **Binding auxes** are the main-model `Variable::Aux`es whose `Scalar`
+///   equation is exactly `"{module_ident}.{output}"` (an ASCII period --
+///   Phase 4's materialized binding-aux equation text is the datamodel
+///   `.` form, not the canonical `·`, since `project_to_mdl` operates on
+///   datamodel equation strings). The aux reading
+///   `{module_ident}.{primary_output}` is the LHS variable; the auxes
+///   reading `{module_ident}.{additional_outputs[j]}` are the `:`-list
+///   output bindings in order `j`.
+/// - The reconstruction is `<lhs> = <MACRO>(<arg1>, ..., <argN> :
+///   <addbind1>, ..., <addbindM>)` plus the standard `~ units ~ doc |`
+///   trailer, using the primary-output binding aux's units/documentation
+///   (its `~`-doc is the original invocation's comment, preserved by
+///   Phase 4).
+///
+/// A module whose `model_name` is *not* a macro is genuinely none of this
+/// function's business and is skipped silently (ordinary submodules are
+/// rejected earlier by `project_to_mdl`'s gate). But a module that *is*
+/// macro-backed yet whose cluster is incomplete (a missing positional
+/// argument, primary binding, or additional-output binding -- the result
+/// of a post-import edit such as an MCP delete/rename patch) is **not**
+/// silently skipped: a faithful `:` reconstruction is impossible, so the
+/// reason is recorded on `MultiOutputReconstruction::failed`. The caller
+/// turns any such failure into a hard error rather than letting the module
+/// fall through to `write_variable_entry`'s `Variable::Module(_) => return`
+/// (which would emit nothing and silently corrupt the `.mdl` -- the
+/// surviving binding auxes would dangle on an unwritten module). The
+/// pre-macro writer relied on that no-op fallback because it never admitted
+/// any `Variable::Module`; the macro gate admits macro-backed ones, so the
+/// writer must now enforce their well-formedness itself.
+fn build_multi_output_reconstructions(
+    model: &datamodel::Model,
+    project: &datamodel::Project,
+    display_names: &HashMap<String, String>,
+) -> MultiOutputReconstruction {
+    let macro_specs: HashMap<&str, &datamodel::MacroSpec> = project
+        .models
+        .iter()
+        .filter_map(|m| m.macro_spec.as_ref().map(|s| (m.name.as_str(), s)))
+        .collect();
+    if macro_specs.is_empty() {
+        return MultiOutputReconstruction::default();
+    }
+
+    // Index the scalar-equation auxes once: trimmed equation text ->
+    // (ident, doc, units). A binding aux's equation is exactly
+    // `{module_ident}.{output}`.
+    //
+    // The `or_insert` first-wins is *unreachable for binding-aux
+    // detection*: a module's distinct outputs produce distinct
+    // `{module_ident}.{output}` keys, so the two binding auxes of one
+    // module instance can never collide on a key (a collision would
+    // require two auxes with the byte-identical scalar equation -- an
+    // alias pair -- not two bindings of the same module). The first-wins
+    // choice is retained anyway to intentionally mirror the documented
+    // first-wins behavior of `crate::xmile::model::extract_macro_invocations`
+    // (the Phase-5 XMILE sibling path): under aliasing only the
+    // first-encountered aux becomes the binding; any alias stays an
+    // ordinary aux that references the regenerated module output by name
+    // and still round-trips.
+    let mut scalar_auxes: HashMap<&str, (&str, &str, &Option<String>)> = HashMap::new();
+    for v in &model.variables {
+        if let datamodel::Variable::Aux(aux) = v
+            && let Equation::Scalar(eq) = &aux.equation
+        {
+            scalar_auxes.entry(eq.trim()).or_insert((
+                aux.ident.as_str(),
+                aux.documentation.as_str(),
+                &aux.units,
+            ));
+        }
+    }
+
+    let mut result = MultiOutputReconstruction::default();
+
+    for v in &model.variables {
+        let datamodel::Variable::Module(module) = v else {
+            continue;
+        };
+        let Some(spec) = macro_specs.get(module.model_name.as_str()) else {
+            continue;
+        };
+
+        // Recover arguments in positional MacroSpec.parameters order.
+        let prefix = format!("{}.", module.ident);
+        let mut args: Vec<Option<&str>> = vec![None; spec.parameters.len()];
+        for r in &module.references {
+            let param = r.dst.strip_prefix(&prefix).unwrap_or(r.dst.as_str());
+            if let Some(pos) = spec.parameters.iter().position(|p| p == param) {
+                args[pos] = Some(r.src.as_str());
+            }
+        }
+        // A missing positional argument means the cluster is malformed
+        // (an arity the writer cannot faithfully reconstruct). Record it
+        // as a hard failure instead of silently dropping the invocation.
+        if args.iter().any(Option::is_none) {
+            let missing: Vec<&str> = spec
+                .parameters
+                .iter()
+                .zip(&args)
+                .filter_map(|(p, a)| a.is_none().then_some(p.as_str()))
+                .collect();
+            result.failed.push(format!(
+                "macro-module `{}` invoking macro `{}`: missing argument \
+                 wiring for parameter(s) {:?}; the materialized multi-output \
+                 cluster was edited and can no longer be exported faithfully",
+                module.ident, module.model_name, missing
+            ));
+            continue;
+        }
+
+        // Primary-output binding: the aux reading `{module}.{primary}`.
+        let primary_key = format!("{}.{}", module.ident, spec.primary_output);
+        let Some(&(primary_ident, primary_doc, primary_units)) =
+            scalar_auxes.get(primary_key.as_str())
+        else {
+            result.failed.push(format!(
+                "macro-module `{}` invoking macro `{}`: no binding aux reads \
+                 `{}` (the primary output `{}`); the materialized \
+                 multi-output cluster is missing its primary binding and \
+                 cannot be reconstructed",
+                module.ident, module.model_name, primary_key, spec.primary_output
+            ));
+            continue;
+        };
+
+        // One additional-output binding per `:`-list entry, in order.
+        let mut output_bindings: Vec<&str> = Vec::with_capacity(spec.additional_outputs.len());
+        let mut missing_output: Option<(&str, String)> = None;
+        for out_name in &spec.additional_outputs {
+            let key = format!("{}.{}", module.ident, out_name);
+            match scalar_auxes.get(key.as_str()) {
+                Some(&(binding, _, _)) => output_bindings.push(binding),
+                None => {
+                    missing_output = Some((out_name.as_str(), key));
+                    break;
+                }
+            }
+        }
+        if let Some((out_name, key)) = missing_output {
+            result.failed.push(format!(
+                "macro-module `{}` invoking macro `{}`: no binding aux reads \
+                 `{}` (additional output `{}`); the materialized multi-output \
+                 cluster is missing an output binding and cannot be \
+                 reconstructed",
+                module.ident, module.model_name, key, out_name
+            ));
+            continue;
+        }
+
+        // Build the reconstructed `<lhs> = <MACRO>(<args> : <bindings>)`.
+        let macro_name = display_name_for_ident(&module.model_name, display_names);
+        let arg_list = args
+            .iter()
+            .map(|a| display_name_for_ident(a.expect("checked above"), display_names))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut call = format!("{macro_name}({arg_list}");
+        if !output_bindings.is_empty() {
+            let binding_list = output_bindings
+                .iter()
+                .map(|b| display_name_for_ident(b, display_names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(call, " : {binding_list}").unwrap();
+        }
+        call.push(')');
+
+        let lhs_name = display_name_for_ident(primary_ident, display_names);
+        let mut entry = String::new();
+        // Match write_single_entry's inline-vs-multiline rule so the
+        // reconstruction formats like any other short equation.
+        let inline_line = format!("{lhs_name} = {call}");
+        if inline_line.len() <= 80 {
+            entry.push_str(&inline_line);
+        } else {
+            write!(entry, "{lhs_name}=\n\t{call}").unwrap();
+        }
+        write_units_and_comment(&mut entry, primary_units, primary_doc);
+
+        // Suppress the module + every binding aux from normal emission.
+        result.suppressed.insert(module.ident.clone());
+        result.suppressed.insert(primary_ident.to_owned());
+        for b in &output_bindings {
+            result.suppressed.insert((*b).to_owned());
+        }
+        result.entries.push((primary_ident.to_owned(), entry));
+    }
+
+    result
+}
+
 /// Write a dimension definition in MDL format.
 ///
 /// Named:   `DimName: Elem1, Elem2, Elem3 ~~|`
@@ -2462,11 +2710,74 @@ impl MdlWriter {
     /// is converted from LF to CRLF before returning.
     pub(super) fn write_project(mut self, project: &datamodel::Project) -> Result<String> {
         self.buf.push_str("{UTF-8}\n");
-        let model = &project.models[0];
-        self.write_equations_section(model, project);
+        // Macro definitions are top-level `:MACRO:` blocks emitted right
+        // after `{UTF-8}` and before the dimension defs / main-model
+        // variables / `.Control` section -- the position every well-formed
+        // `macro_*` fixture uses (Vensim accepts multiple back-to-back
+        // blocks here). The single non-macro model is the body.
+        self.write_macro_blocks(project);
+        let model = super::main_model(project).expect(super::MAIN_MODEL_EXPECT);
+        self.write_equations_section(model, project)?;
         self.write_sketch_section(&model.views);
         self.write_settings_section(project);
         Ok(self.buf.replace('\n', "\r\n"))
+    }
+
+    /// Emit each macro-marked model as a `:MACRO: ... :END OF MACRO:` block.
+    ///
+    /// The header is reconstructed from the `MacroSpec` (single-output
+    /// `:MACRO: name(p1, p2)`, or the multi-output `:MACRO: name(p1, p2 :
+    /// o1, o2)` form when `additional_outputs` is non-empty). The body is
+    /// every model variable whose ident is *not* a formal parameter -- the
+    /// `MacroSpec.parameters` ports are synthesized on re-import from the
+    /// header (with `can_be_module_input`), so emitting them as `<param> =
+    /// 0` body equations would lose that flag and make the re-imported
+    /// macro treat them as ordinary body variables. Blocks are emitted in
+    /// `project.models` order, which is stable across passes (the
+    /// round-trip harness's zip-index model pairing relies on this).
+    fn write_macro_blocks(&mut self, project: &datamodel::Project) {
+        for model in &project.models {
+            let Some(spec) = model.macro_spec.as_ref() else {
+                continue;
+            };
+
+            // The body equations may carry original casing in the macro
+            // model's own views; fall back to the underbar->space /
+            // quoting helpers (the params/name are canonicalized idents).
+            let display_names = build_display_name_map(&model.views);
+
+            let params = spec
+                .parameters
+                .iter()
+                .map(|p| display_name_for_ident(p, &display_names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let macro_name = display_name_for_ident(&model.name, &display_names);
+            if spec.additional_outputs.is_empty() {
+                writeln!(self.buf, ":MACRO: {macro_name}({params})").unwrap();
+            } else {
+                let outputs = spec
+                    .additional_outputs
+                    .iter()
+                    .map(|o| display_name_for_ident(o, &display_names))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(self.buf, ":MACRO: {macro_name}({params} : {outputs})").unwrap();
+            }
+
+            // Body: every variable that is not a synthesized formal-
+            // parameter port (those are reconstructed from the header).
+            let param_idents: HashSet<&str> = spec.parameters.iter().map(|p| p.as_str()).collect();
+            for var in &model.variables {
+                if param_idents.contains(var.get_ident()) {
+                    continue;
+                }
+                write_variable_entry(&mut self.buf, var, &display_names);
+                self.buf.push('\n');
+            }
+
+            self.buf.push_str("\n:END OF MACRO:\n");
+        }
     }
 
     /// Write sim spec control variables (INITIAL TIME, FINAL TIME, TIME STEP, SAVEPER).
@@ -2523,13 +2834,48 @@ impl MdlWriter {
     }
 
     /// Write the full equations section: dimensions, grouped variables, sim specs, terminator.
-    fn write_equations_section(&mut self, model: &datamodel::Model, project: &datamodel::Project) {
+    fn write_equations_section(
+        &mut self,
+        model: &datamodel::Model,
+        project: &datamodel::Project,
+    ) -> Result<()> {
         // 1. Dimension definitions
         for dim in &project.dimensions {
             write_dimension_def(&mut self.buf, dim);
         }
 
         let display_names = build_display_name_map(&model.views);
+
+        // Reconstruct each Phase-4-materialized multi-output cluster
+        // (`<lhs> = <macro>(<args> : <bindings>)`) and collect the idents
+        // that must be suppressed from the normal per-variable emission
+        // (the Variable::Module plus its binding auxes). The reconstructed
+        // entries are emitted with the ungrouped variables (sorted by LHS
+        // ident) so the output ordering stays deterministic across passes.
+        let reconstruction = build_multi_output_reconstructions(model, project, &display_names);
+
+        // A macro-backed `Variable::Module` whose materialized cluster is
+        // incomplete cannot be reconstructed into `:` call syntax. Emitting
+        // the rest of the model anyway would silently drop the invocation
+        // and leave the surviving binding auxes referencing a module that
+        // is never written -- a corrupt `.mdl`. `project_to_mdl`'s gate
+        // already hard-rejects ordinary `Variable::Module`s for the same
+        // reason; admitting a macro-backed one is conditional on its
+        // cluster being well-formed, which is enforced here (the gate's
+        // is-macro check is only a coarse pre-filter -- it cannot see
+        // whether a binding aux or argument wiring was later edited away).
+        if !reconstruction.failed.is_empty() {
+            return Err(Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                Some(format!(
+                    "MDL export cannot faithfully reconstruct {} multi-output \
+                     macro invocation(s): {}",
+                    reconstruction.failed.len(),
+                    reconstruction.failed.join("; ")
+                )),
+            ));
+        }
 
         // Build a set of variable idents that belong to any group
         // (skip .Control -- those vars are sim specs emitted separately)
@@ -2558,6 +2904,9 @@ impl MdlWriter {
             .unwrap();
 
             for member_ident in &group.members {
+                if reconstruction.suppressed.contains(member_ident.as_str()) {
+                    continue;
+                }
                 if let Some(var) = model
                     .variables
                     .iter()
@@ -2569,16 +2918,34 @@ impl MdlWriter {
             }
         }
 
-        // 3. Ungrouped variables (alphabetical by ident for deterministic output)
-        let mut ungrouped: Vec<&datamodel::Variable> = model
+        // 3. Ungrouped variables (alphabetical by ident for deterministic
+        // output). The reconstructed multi-output invocations are
+        // interleaved here by LHS ident so the whole section stays sorted
+        // and deterministic across passes (the round-trip harness's
+        // zip-index model pairing relies on stable ordering).
+        let mut ungrouped: Vec<UngroupedEntry<'_>> = model
             .variables
             .iter()
-            .filter(|v| !grouped_idents.contains(v.get_ident()))
+            .filter(|v| {
+                !grouped_idents.contains(v.get_ident())
+                    && !reconstruction.suppressed.contains(v.get_ident())
+            })
+            .map(UngroupedEntry::Variable)
             .collect();
-        ungrouped.sort_by_key(|v| v.get_ident());
+        for (lhs_ident, text) in &reconstruction.entries {
+            ungrouped.push(UngroupedEntry::Reconstructed(lhs_ident, text));
+        }
+        ungrouped.sort_by(|a, b| a.sort_key().cmp(b.sort_key()));
 
-        for var in ungrouped {
-            write_variable_entry(&mut self.buf, var, &display_names);
+        for entry in ungrouped {
+            match entry {
+                UngroupedEntry::Variable(var) => {
+                    write_variable_entry(&mut self.buf, var, &display_names);
+                }
+                UngroupedEntry::Reconstructed(_, text) => {
+                    self.buf.push_str(text);
+                }
+            }
             self.buf.push('\n');
         }
 
@@ -2592,6 +2959,8 @@ impl MdlWriter {
         // 5. Section terminator
         self.buf
             .push_str("\\\\\\---/// Sketch information - do not modify anything except names\n");
+
+        Ok(())
     }
 
     /// Write the sketch/view section of the MDL file.

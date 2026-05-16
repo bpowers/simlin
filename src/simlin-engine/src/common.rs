@@ -102,6 +102,12 @@ pub enum ErrorCode {
     DimensionInScalarContext,
     BadOverride,
     UnsupportedForSerialization,
+    // NOTE: `ErrorCode` is a pure-Rust runtime type. It is NOT part of
+    // `project_io.proto` / `project_io.gen.rs` (verified by grep: the proto
+    // has no `ErrorCode`), so it is never serialized and new variants may be
+    // appended freely. Keep additions at the END of the enum anyway, to keep
+    // the existing discriminants stable for any in-memory consumers.
+    DuplicateMacroName,
 }
 
 impl fmt::Display for ErrorCode {
@@ -161,6 +167,7 @@ impl fmt::Display for ErrorCode {
             DimensionInScalarContext => "dimension_in_scalar_context",
             BadOverride => "bad_override",
             UnsupportedForSerialization => "unsupported_for_serialization",
+            DuplicateMacroName => "duplicate_macro_name",
         };
 
         write!(f, "{name}")

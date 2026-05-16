@@ -32,6 +32,8 @@ from simlin.json_types import (
     GraphicalFunctionScale,
     JsonModelPatch,
     JsonProjectPatch,
+    MacroSpec,
+    Model,
     Module,
     ModuleReference,
     RenameVariable,
@@ -259,6 +261,71 @@ class TestJsonRoundtrip:
         parsed = json.loads(json_str)
         reconstructed = converter.structure(parsed, Module)
         assert module == reconstructed
+
+
+class TestMacroSpecRoundtrip:
+    """Verifies macros.AC1.4 (Python half): a macro-bearing Model with a
+    populated MacroSpec round-trips losslessly through the json_converter,
+    using camelCase keys."""
+
+    def test_macro_spec_roundtrip(self) -> None:
+        """A Model carrying a populated MacroSpec roundtrips, and the
+        unstructured dict uses camelCase keys."""
+        model = Model(
+            name="smooth_macro",
+            auxiliaries=[Auxiliary(name="output", equation="input * gain")],
+            macro_spec=MacroSpec(
+                parameters=["input", "gain"],
+                primary_output="output",
+                additional_outputs=["debug_trace"],
+            ),
+        )
+
+        json_dict = converter.unstructure(model)
+
+        # The unstructured dict uses camelCase keys.
+        assert "macroSpec" in json_dict
+        macro_dict = json_dict["macroSpec"]
+        assert macro_dict["parameters"] == ["input", "gain"]
+        assert macro_dict["primaryOutput"] == "output"
+        assert macro_dict["additionalOutputs"] == ["debug_trace"]
+        assert "primary_output" not in macro_dict
+        assert "additional_outputs" not in macro_dict
+
+        json_str = json.dumps(json_dict)
+        parsed = json.loads(json_str)
+        reconstructed = converter.structure(parsed, Model)
+
+        assert reconstructed.macro_spec == model.macro_spec
+        assert reconstructed.macro_spec is not None
+        assert reconstructed.macro_spec.parameters == ["input", "gain"]
+        assert reconstructed.macro_spec.primary_output == "output"
+        assert reconstructed.macro_spec.additional_outputs == ["debug_trace"]
+        # The macro body (ordinary variables) round-trips alongside the spec.
+        assert reconstructed.auxiliaries == model.auxiliaries
+
+    def test_macro_spec_omits_empty_additional_outputs(self) -> None:
+        """additionalOutputs is omitted when empty and restored as []."""
+        spec = MacroSpec(parameters=["input"], primary_output="output")
+
+        json_dict = converter.unstructure(spec)
+        assert json_dict["parameters"] == ["input"]
+        assert json_dict["primaryOutput"] == "output"
+        assert "additionalOutputs" not in json_dict
+
+        reconstructed = converter.structure(json_dict, MacroSpec)
+        assert reconstructed.additional_outputs == []
+        assert reconstructed == spec
+
+    def test_model_without_macro_spec_omits_key(self) -> None:
+        """A non-macro Model has no macroSpec key and restores macro_spec=None."""
+        model = Model(name="ordinary", auxiliaries=[Auxiliary(name="x", equation="1")])
+
+        json_dict = converter.unstructure(model)
+        assert "macroSpec" not in json_dict
+
+        reconstructed = converter.structure(json_dict, Model)
+        assert reconstructed.macro_spec is None
 
 
 class TestPatchRoundtrip:

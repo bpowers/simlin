@@ -1274,11 +1274,57 @@ fn make_model(variables: Vec<Variable>) -> datamodel::Model {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
+    }
+}
+
+/// Build a macro-marked `Model` with a `MacroSpec` and synthesized port
+/// variables, exactly as the MDL importer (Phase 2) produces: each formal
+/// parameter is a body `Variable` whose ident equals the parameter name and
+/// whose `compat.can_be_module_input` is `true`. `body` provides the
+/// non-port body equations (e.g. the primary-output equation).
+fn make_macro_model(
+    name: &str,
+    parameters: &[&str],
+    additional_outputs: &[&str],
+    body: Vec<Variable>,
+) -> datamodel::Model {
+    let mut variables = body;
+    for param in parameters {
+        let compat = Compat {
+            can_be_module_input: true,
+            ..Compat::default()
+        };
+        variables.push(Variable::Aux(Aux {
+            ident: (*param).to_owned(),
+            equation: Equation::Scalar("0".to_owned()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat,
+        }));
+    }
+    datamodel::Model {
+        name: name.to_owned(),
+        sim_specs: None,
+        variables,
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(datamodel::MacroSpec {
+            parameters: parameters.iter().map(|p| (*p).to_owned()).collect(),
+            primary_output: name.to_owned(),
+            additional_outputs: additional_outputs.iter().map(|o| (*o).to_owned()).collect(),
+        }),
     }
 }
 
 #[test]
-fn project_to_mdl_rejects_multiple_models() {
+fn project_to_mdl_rejects_multiple_non_macro_models() {
+    // Two ordinary (non-macro) models: MDL has no general multi-model
+    // representation, so this is still rejected.
     let project = make_project(vec![make_model(vec![]), make_model(vec![])]);
     let result = crate::mdl::project_to_mdl(&project);
     assert!(result.is_err());
@@ -1291,7 +1337,314 @@ fn project_to_mdl_rejects_multiple_models() {
 }
 
 #[test]
-fn project_to_mdl_rejects_module_variable() {
+fn project_to_mdl_accepts_main_plus_macro_model() {
+    // A `main` model plus a macro-marked model is accepted: the macro is
+    // emitted as a `:MACRO:` block, not rejected as an extra model.
+    let main = make_model(vec![make_aux(
+        "macro_output",
+        "expression_macro(macro_input, macro_parameter)",
+        None,
+        "",
+    )]);
+    let macro_model = make_macro_model(
+        "expression_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("expression_macro", "input * parameter", None, "")],
+    );
+    let project = make_project(vec![main, macro_model]);
+    let result = crate::mdl::project_to_mdl(&project);
+    assert!(result.is_ok(), "should accept main + macro: {:?}", result);
+    let mdl = result.unwrap();
+    // The macro name/params use the MDL display-name form. With no view to
+    // recover original casing, a canonical ident (`expression_macro`)
+    // renders lowercased with underscores->spaces; this canonicalizes back
+    // to `expression_macro` on re-parse, so the macro round-trips.
+    assert!(
+        mdl.contains(":MACRO: expression macro(input, parameter)"),
+        "expected :MACRO: header, got:\n{mdl}"
+    );
+    assert!(
+        mdl.contains(":END OF MACRO:"),
+        "expected :END OF MACRO: terminator, got:\n{mdl}"
+    );
+}
+
+// `project_to_mdl_rejects_module_variable` was rewritten (per Phase 6
+// Task 2) into `project_to_mdl_rejects_ordinary_module_variable` (an
+// ordinary non-macro Module is still rejected) plus
+// `project_to_mdl_accepts_macro_module_variable` (a macro-module is
+// accepted and reconstructed as a `:` invocation). See those tests below.
+
+#[test]
+fn project_to_mdl_succeeds_single_model() {
+    let var = make_aux("x", "5", Some("Units"), "A constant");
+    let project = make_project(vec![make_model(vec![var])]);
+    let result = crate::mdl::project_to_mdl(&project);
+    assert!(result.is_ok(), "should succeed: {:?}", result);
+    let mdl = result.unwrap();
+    assert!(
+        mdl.starts_with("{UTF-8}\r\n"),
+        "MDL should start with UTF-8 marker, got: {:?}",
+        mdl.lines().next()
+    );
+    assert!(mdl.contains("x = "));
+    assert!(mdl.contains("\\\\\\---///"));
+}
+
+// ---- Phase 6 Task 1: :MACRO: block emission ----
+
+#[test]
+fn macro_block_emitted_before_main_model_and_control() {
+    // The :MACRO: block must appear after {UTF-8} and before the main
+    // model's variables and the .Control section (matching the on-disk
+    // fixtures, which place :MACRO: blocks immediately after {UTF-8}).
+    let main = make_model(vec![make_aux(
+        "macro_output",
+        "expression_macro(macro_input, macro_parameter)",
+        None,
+        "",
+    )]);
+    let macro_model = make_macro_model(
+        "expression_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("expression_macro", "input * parameter", None, "")],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+
+    let utf8 = mdl.find("{UTF-8}").expect("has UTF-8 marker");
+    let macro_hdr = mdl
+        .find(":MACRO: expression macro(input, parameter)")
+        .expect("has :MACRO: header");
+    let macro_end = mdl.find(":END OF MACRO:").expect("has :END OF MACRO:");
+    let control = mdl.find(".Control").expect("has .Control");
+    let main_var = mdl
+        .find("macro output = EXPRESSION MACRO")
+        .expect("has main model var");
+
+    assert!(utf8 < macro_hdr, "UTF-8 before :MACRO:");
+    assert!(
+        macro_hdr < macro_end,
+        ":MACRO: header before :END OF MACRO:"
+    );
+    assert!(
+        macro_end < main_var,
+        ":END OF MACRO: before main model variables"
+    );
+    assert!(macro_end < control, ":END OF MACRO: before .Control");
+    // The body equation is inside the block.
+    let body = mdl
+        .find("expression macro = input * parameter")
+        .expect("has body equation");
+    assert!(
+        macro_hdr < body && body < macro_end,
+        "body equation between header and terminator"
+    );
+}
+
+#[test]
+fn macro_block_excludes_synthesized_port_variables() {
+    // The MacroSpec.parameters port variables are reconstructed from the
+    // header; emitting them as `<param> = 0` body equations would lose
+    // can_be_module_input on re-import, so they MUST NOT appear in the body.
+    let main = make_model(vec![make_aux(
+        "macro_output",
+        "expression_macro(macro_input, macro_parameter)",
+        None,
+        "",
+    )]);
+    let macro_model = make_macro_model(
+        "expression_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("expression_macro", "input * parameter", None, "")],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+
+    let macro_hdr = mdl.find(":MACRO:").unwrap();
+    let macro_end = mdl.find(":END OF MACRO:").unwrap();
+    let block = &mdl[macro_hdr..macro_end];
+    assert!(
+        !block.contains("input = 0") && !block.contains("input=0"),
+        "port variable `input` must not be emitted as a body equation:\n{block}"
+    );
+    assert!(
+        !block.contains("parameter = 0") && !block.contains("parameter=0"),
+        "port variable `parameter` must not be emitted as a body equation:\n{block}"
+    );
+}
+
+#[test]
+fn macro_single_output_invocation_preserved_as_call_text() {
+    // A single-output invocation in the main model is ordinary equation
+    // text and round-trips via the existing per-variable emission path
+    // (the RHS formatter passes unknown calls through verbatim, uppercased).
+    let main = make_model(vec![make_aux(
+        "macro_output",
+        "expression_macro(macro_input, macro_parameter)",
+        None,
+        "",
+    )]);
+    let macro_model = make_macro_model(
+        "expression_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("expression_macro", "input * parameter", None, "")],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+    // The RHS formatter passes the unknown call through verbatim,
+    // uppercased with `_`->space (the `function_unknown_uppercased`
+    // behavior). It canonicalizes back to `expression_macro(...)`.
+    assert!(
+        mdl.contains("EXPRESSION MACRO(macro input, macro parameter)"),
+        "single-output invocation should be preserved as call text:\n{mdl}"
+    );
+}
+
+#[test]
+fn macro_block_emits_multi_equation_body_and_body_stock() {
+    // A macro with a helper variable plus a body stock: both emit through
+    // the ordinary Stock/Aux entry path inside the :MACRO: block.
+    let main = make_model(vec![make_aux(
+        "macro_output",
+        "stocky_macro(macro_input, macro_parameter)",
+        None,
+        "",
+    )]);
+    let macro_model = make_macro_model(
+        "stocky_macro",
+        &["input", "parameter"],
+        &[],
+        vec![
+            make_aux("stocky_macro", "the_stock + helper", None, ""),
+            make_aux("helper", "parameter * 3", Some("myunit"), "a helper"),
+            make_stock("the_stock", "input", Some("widgets"), "a body stock"),
+        ],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+
+    let macro_hdr = mdl.find(":MACRO: stocky macro(input, parameter)").unwrap();
+    let macro_end = mdl.find(":END OF MACRO:").unwrap();
+    let block = &mdl[macro_hdr..macro_end];
+    assert!(
+        block.contains("helper = parameter * 3"),
+        "helper body equation should be in the block:\n{block}"
+    );
+    // `project_to_mdl` converts LF to CRLF, so the entry is `the stock=`
+    // then CRLF + tab + the INTEG reconstruction.
+    assert!(
+        block.contains("the stock=\r\n\tINTEG(0, input)"),
+        "body stock should emit as an INTEG entry in the block:\n{block:?}"
+    );
+}
+
+#[test]
+fn multiple_macro_blocks_emitted_in_project_models_order() {
+    // Two macros emit two back-to-back :MACRO: blocks in project.models
+    // order (stable across passes, which the round-trip pairing relies on).
+    let main = make_model(vec![make_aux("out", "first_macro(a, b)", None, "")]);
+    let first = make_macro_model(
+        "first_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("first_macro", "input * parameter", None, "")],
+    );
+    let second = make_macro_model(
+        "second_macro",
+        &["input", "parameter"],
+        &[],
+        vec![make_aux("second_macro", "input / parameter", None, "")],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, first, second])).unwrap();
+
+    let first_hdr = mdl
+        .find(":MACRO: first macro(input, parameter)")
+        .expect("has first macro");
+    let second_hdr = mdl
+        .find(":MACRO: second macro(input, parameter)")
+        .expect("has second macro");
+    assert!(
+        first_hdr < second_hdr,
+        "macros should be emitted in project.models order"
+    );
+    assert_eq!(
+        mdl.matches(":END OF MACRO:").count(),
+        2,
+        "two macros => two :END OF MACRO: terminators:\n{mdl}"
+    );
+}
+
+// ---- Phase 6 Task 2: multi-output invocation reconstruction ----
+
+/// Build the Phase-4-materialized multi-output cluster for
+/// `<lhs> = <macro>(<args> : <output bindings>)`: an input-only
+/// `Variable::Module` plus a primary-output binding aux and one
+/// additional-output binding aux per `:`-list entry.
+///
+/// `refs` lets a test control the `datamodel::ModuleReference` order (Phase 4
+/// does not guarantee it is positional, so reconstruction must match each
+/// `dst`'s post-`.` segment against `MacroSpec.parameters`); the call
+/// arguments themselves ride on `refs.src`.
+#[allow(clippy::too_many_arguments)]
+fn make_multi_output_cluster(
+    module_ident: &str,
+    macro_name: &str,
+    spec: &datamodel::MacroSpec,
+    primary_binding: &str,
+    primary_units: Option<&str>,
+    primary_doc: &str,
+    output_bindings: &[&str],
+    refs: Vec<datamodel::ModuleReference>,
+) -> Vec<Variable> {
+    let mut vars = Vec::new();
+    vars.push(Variable::Module(datamodel::Module {
+        ident: module_ident.to_owned(),
+        model_name: macro_name.to_owned(),
+        documentation: String::new(),
+        units: None,
+        references: refs,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    }));
+    vars.push(Variable::Aux(Aux {
+        ident: primary_binding.to_owned(),
+        equation: Equation::Scalar(format!("{module_ident}.{}", spec.primary_output)),
+        documentation: primary_doc.to_owned(),
+        units: primary_units.map(|u| u.to_owned()),
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: Compat::default(),
+    }));
+    for (binding, output) in output_bindings.iter().zip(&spec.additional_outputs) {
+        vars.push(Variable::Aux(Aux {
+            ident: (*binding).to_owned(),
+            equation: Equation::Scalar(format!("{module_ident}.{output}")),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        }));
+    }
+    vars
+}
+
+fn module_ref(src: &str, dst: &str) -> datamodel::ModuleReference {
+    datamodel::ModuleReference {
+        src: src.to_owned(),
+        dst: dst.to_owned(),
+    }
+}
+
+#[test]
+fn project_to_mdl_rejects_ordinary_module_variable() {
+    // A Variable::Module whose model_name does NOT resolve to a
+    // macro-marked model is an ordinary submodule instance: still
+    // rejected (a general MDL module-export overhaul is out of scope).
     let module_var = Variable::Module(datamodel::Module {
         ident: "submodel".to_owned(),
         model_name: "inner".to_owned(),
@@ -1314,19 +1667,354 @@ fn project_to_mdl_rejects_module_variable() {
 }
 
 #[test]
-fn project_to_mdl_succeeds_single_model() {
-    let var = make_aux("x", "5", Some("Units"), "A constant");
-    let project = make_project(vec![make_model(vec![var])]);
-    let result = crate::mdl::project_to_mdl(&project);
-    assert!(result.is_ok(), "should succeed: {:?}", result);
+fn project_to_mdl_accepts_macro_module_variable() {
+    // A Variable::Module whose model_name resolves to a macro-marked
+    // model is a Phase-4 materialized macro-module: accepted and
+    // reconstructed as a `:` invocation.
+    let spec = datamodel::MacroSpec {
+        parameters: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+        primary_output: "add3".to_owned(),
+        additional_outputs: vec!["minval".to_owned(), "maxval".to_owned()],
+    };
+    let cluster = make_multi_output_cluster(
+        "total_macro",
+        "add3",
+        &spec,
+        "total",
+        Some("dmnl"),
+        "the invocation doc",
+        &["the_min", "the_max"],
+        vec![
+            module_ref("in1", "total_macro.a"),
+            module_ref("in2", "total_macro.b"),
+            module_ref("in3", "total_macro.c"),
+        ],
+    );
+    let main = make_model(cluster);
+    let macro_model = make_macro_model(
+        "add3",
+        &["a", "b", "c"],
+        &["minval", "maxval"],
+        vec![
+            make_aux("add3", "a + b + c", Some("dmnl"), ""),
+            make_aux("minval", "MIN(a, MIN(b, c))", None, ""),
+            make_aux("maxval", "MAX(a, MAX(b, c))", None, ""),
+        ],
+    );
+    let result = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model]));
+    assert!(
+        result.is_ok(),
+        "macro-module should be accepted: {:?}",
+        result
+    );
     let mdl = result.unwrap();
     assert!(
-        mdl.starts_with("{UTF-8}\r\n"),
-        "MDL should start with UTF-8 marker, got: {:?}",
-        mdl.lines().next()
+        mdl.contains("total = add3(in1, in2, in3 : the min, the max)"),
+        "expected reconstructed `:` invocation, got:\n{mdl}"
     );
-    assert!(mdl.contains("x = "));
-    assert!(mdl.contains("\\\\\\---///"));
+}
+
+/// Shared valid fixture for the malformed-cluster rejection tests: a
+/// well-formed Phase-4 multi-output cluster (`total = add3(in1, in2, in3 :
+/// the_min, the_max)`) plus its macro model. Each rejection test breaks
+/// exactly one structural coupling and asserts `project_to_mdl` fails fast
+/// instead of silently dropping the invocation.
+fn add3_spec_and_macro() -> (datamodel::MacroSpec, datamodel::Model) {
+    let spec = datamodel::MacroSpec {
+        parameters: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+        primary_output: "add3".to_owned(),
+        additional_outputs: vec!["minval".to_owned(), "maxval".to_owned()],
+    };
+    let macro_model = make_macro_model(
+        "add3",
+        &["a", "b", "c"],
+        &["minval", "maxval"],
+        vec![
+            make_aux("add3", "a + b + c", Some("dmnl"), ""),
+            make_aux("minval", "MIN(a, MIN(b, c))", None, ""),
+            make_aux("maxval", "MAX(a, MAX(b, c))", None, ""),
+        ],
+    );
+    (spec, macro_model)
+}
+
+#[test]
+fn project_to_mdl_rejects_macro_cluster_missing_primary_binding() {
+    // A macro-backed Variable::Module whose primary-output binding aux was
+    // deleted (e.g. an MCP DeleteVariable patch on a materialized cluster)
+    // is NOT faithfully reconstructable. The writer must reject it, not
+    // silently omit the invocation and leave the surviving binding auxes
+    // referencing a now-nonexistent module (corrupt .mdl).
+    let (spec, macro_model) = add3_spec_and_macro();
+    let cluster = make_multi_output_cluster(
+        "total_macro",
+        "add3",
+        &spec,
+        "total",
+        Some("dmnl"),
+        "doc",
+        &["the_min", "the_max"],
+        vec![
+            module_ref("in1", "total_macro.a"),
+            module_ref("in2", "total_macro.b"),
+            module_ref("in3", "total_macro.c"),
+        ],
+    );
+    // Drop the primary-output binding aux ("total" reads total_macro.add3).
+    let broken: Vec<Variable> = cluster
+        .into_iter()
+        .filter(|v| v.get_ident() != "total")
+        .collect();
+    let project = make_project(vec![make_model(broken), macro_model]);
+    let result = crate::mdl::project_to_mdl(&project);
+    assert!(
+        result.is_err(),
+        "a malformed macro cluster must fail fast, not silently drop the \
+         invocation; got Ok:\n{}",
+        result.unwrap()
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("total_macro") && err.contains("add3"),
+        "error must name the offending module and macro for debuggability, \
+         got: {err}"
+    );
+}
+
+#[test]
+fn project_to_mdl_rejects_macro_cluster_missing_additional_binding() {
+    // One additional-output binding aux deleted/renamed: the cluster can no
+    // longer be reconstructed into the `:`-list form, so it must be
+    // rejected rather than dropped.
+    let (spec, macro_model) = add3_spec_and_macro();
+    let cluster = make_multi_output_cluster(
+        "total_macro",
+        "add3",
+        &spec,
+        "total",
+        Some("dmnl"),
+        "doc",
+        &["the_min", "the_max"],
+        vec![
+            module_ref("in1", "total_macro.a"),
+            module_ref("in2", "total_macro.b"),
+            module_ref("in3", "total_macro.c"),
+        ],
+    );
+    // Drop the first additional-output binding aux (reads total_macro.minval).
+    let broken: Vec<Variable> = cluster
+        .into_iter()
+        .filter(|v| v.get_ident() != "the_min")
+        .collect();
+    let project = make_project(vec![make_model(broken), macro_model]);
+    let result = crate::mdl::project_to_mdl(&project);
+    assert!(
+        result.is_err(),
+        "a cluster missing an additional-output binding must fail fast; \
+         got Ok:\n{}",
+        result.unwrap()
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("total_macro") && err.contains("add3"),
+        "error must name the offending module and macro, got: {err}"
+    );
+}
+
+#[test]
+fn project_to_mdl_rejects_macro_cluster_missing_argument() {
+    // A positional argument wiring (ModuleReference) removed: the call
+    // arity can no longer be faithfully reconstructed. Reject, don't drop.
+    let (spec, macro_model) = add3_spec_and_macro();
+    let cluster = make_multi_output_cluster(
+        "total_macro",
+        "add3",
+        &spec,
+        "total",
+        Some("dmnl"),
+        "doc",
+        &["the_min", "the_max"],
+        // Only two of the three parameter wirings (c is missing).
+        vec![
+            module_ref("in1", "total_macro.a"),
+            module_ref("in2", "total_macro.b"),
+        ],
+    );
+    let project = make_project(vec![make_model(cluster), macro_model]);
+    let result = crate::mdl::project_to_mdl(&project);
+    assert!(
+        result.is_err(),
+        "a cluster missing a positional argument must fail fast; got Ok:\n{}",
+        result.unwrap()
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("total_macro") && err.contains("add3"),
+        "error must name the offending module and macro, got: {err}"
+    );
+}
+
+#[test]
+fn multi_output_reconstruction_uses_positional_param_order_not_reference_order() {
+    // Module.references order is NOT guaranteed positional; the
+    // reconstruction must order arguments by matching each dst's post-`.`
+    // segment against MacroSpec.parameters, not by reference vec order.
+    let spec = datamodel::MacroSpec {
+        parameters: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+        primary_output: "add3".to_owned(),
+        additional_outputs: vec!["minval".to_owned(), "maxval".to_owned()],
+    };
+    let cluster = make_multi_output_cluster(
+        "total_macro",
+        "add3",
+        &spec,
+        "total",
+        Some("dmnl"),
+        "doc",
+        &["the_min", "the_max"],
+        // Deliberately shuffled: c, a, b instead of a, b, c.
+        vec![
+            module_ref("in3", "total_macro.c"),
+            module_ref("in1", "total_macro.a"),
+            module_ref("in2", "total_macro.b"),
+        ],
+    );
+    let main = make_model(cluster);
+    let macro_model = make_macro_model(
+        "add3",
+        &["a", "b", "c"],
+        &["minval", "maxval"],
+        vec![
+            make_aux("add3", "a + b + c", Some("dmnl"), ""),
+            make_aux("minval", "MIN(a, MIN(b, c))", None, ""),
+            make_aux("maxval", "MAX(a, MAX(b, c))", None, ""),
+        ],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+    // Positional order from MacroSpec.parameters [a, b, c] -> in1, in2, in3.
+    assert!(
+        mdl.contains("total = add3(in1, in2, in3 : the min, the max)"),
+        "args must be in MacroSpec.parameters order regardless of \
+         reference vec order, got:\n{mdl}"
+    );
+}
+
+#[test]
+fn multi_output_reconstruction_suppresses_module_and_binding_auxes() {
+    // The Variable::Module and its binding auxes must NOT also be emitted
+    // as separate <module>/aux entries -- only the reconstructed `:`
+    // invocation line.
+    let spec = datamodel::MacroSpec {
+        parameters: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+        primary_output: "add3".to_owned(),
+        additional_outputs: vec!["minval".to_owned(), "maxval".to_owned()],
+    };
+    let cluster = make_multi_output_cluster(
+        "total_macro",
+        "add3",
+        &spec,
+        "total",
+        Some("dmnl"),
+        "doc",
+        &["the_min", "the_max"],
+        vec![
+            module_ref("in1", "total_macro.a"),
+            module_ref("in2", "total_macro.b"),
+            module_ref("in3", "total_macro.c"),
+        ],
+    );
+    let main = make_model(cluster);
+    let macro_model = make_macro_model(
+        "add3",
+        &["a", "b", "c"],
+        &["minval", "maxval"],
+        vec![
+            make_aux("add3", "a + b + c", Some("dmnl"), ""),
+            make_aux("minval", "MIN(a, MIN(b, c))", None, ""),
+            make_aux("maxval", "MAX(a, MAX(b, c))", None, ""),
+        ],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+    // Count `total` occurrences: the reconstruction is the only LHS use.
+    assert_eq!(
+        mdl.matches("total = add3").count(),
+        1,
+        "exactly one reconstructed invocation:\n{mdl}"
+    );
+    // The binding auxes must not appear as their own `<binding> =
+    // total_macro.<output>` entries (the module-output reference text
+    // would otherwise leak into the main model section).
+    assert!(
+        !mdl.contains("the min = total_macro"),
+        "additional binding aux must be suppressed:\n{mdl}"
+    );
+    assert!(
+        !mdl.contains("the max = total_macro"),
+        "additional binding aux must be suppressed:\n{mdl}"
+    );
+    // The module ident itself must not be emitted as a variable entry in
+    // the main model section (after :END OF MACRO:).
+    let after_macros = &mdl[mdl.rfind(":END OF MACRO:").unwrap()..];
+    assert!(
+        !after_macros.contains("total macro"),
+        "module ident must be suppressed from main model:\n{after_macros}"
+    );
+    // The primary binding aux's units/doc carry onto the reconstruction.
+    // `project_to_mdl` converts LF to CRLF, so the trailer uses `\r\n`.
+    assert!(
+        mdl.contains("total = add3(in1, in2, in3 : the min, the max)\r\n\t~\tdmnl\r\n\t~\tdoc"),
+        "reconstruction trailer should use the primary binding's \
+         units/doc:\n{mdl:?}"
+    );
+}
+
+#[test]
+fn multi_output_reconstruction_handles_expression_hoisted_arg() {
+    // Phase 4 hoists an expression-valued argument into its own aux
+    // (`{module}_arg{i}`); that aux is a normal variable and the
+    // reconstruction simply references it by name as the argument.
+    let spec = datamodel::MacroSpec {
+        parameters: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+        primary_output: "add3".to_owned(),
+        additional_outputs: vec!["minval".to_owned()],
+    };
+    let mut cluster = make_multi_output_cluster(
+        "total_macro",
+        "add3",
+        &spec,
+        "total",
+        None,
+        "",
+        &["the_min"],
+        vec![
+            module_ref("in1", "total_macro.a"),
+            module_ref("total_macro_arg1", "total_macro.b"),
+            module_ref("in3", "total_macro.c"),
+        ],
+    );
+    // The hoisted-arg aux is an ordinary main-model variable.
+    cluster.push(make_aux("total_macro_arg1", "in2 * 2", None, ""));
+    let main = make_model(cluster);
+    let macro_model = make_macro_model(
+        "add3",
+        &["a", "b", "c"],
+        &["minval"],
+        vec![
+            make_aux("add3", "a + b + c", None, ""),
+            make_aux("minval", "MIN(a, MIN(b, c))", None, ""),
+        ],
+    );
+    let mdl = crate::mdl::project_to_mdl(&make_project(vec![main, macro_model])).unwrap();
+    assert!(
+        mdl.contains("total = add3(in1, total macro arg1, in3 : the min)"),
+        "hoisted-arg aux is referenced by name in the reconstruction:\n{mdl}"
+    );
+    // The hoisted-arg aux itself is still emitted (it is not part of the
+    // suppressed cluster).
+    assert!(
+        mdl.contains("total macro arg1 = in2 * 2"),
+        "hoisted-arg aux should still be emitted:\n{mdl}"
+    );
 }
 
 // ---- Phase 4 Task 2: Sim spec emission ----
@@ -1429,6 +2117,7 @@ fn equations_section_full_assembly() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = datamodel::Project {
         name: "test".to_owned(),
@@ -1506,6 +2195,7 @@ fn equations_section_with_groups() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![group],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2146,6 +2836,7 @@ fn sketch_section_in_full_project() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2323,6 +3014,7 @@ fn sketch_roundtrip_sanitizes_multiline_view_title() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2429,6 +3121,7 @@ fn sketch_roundtrip_preserves_flow_endpoints_with_nonadjacent_valve_uid() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2585,6 +3278,7 @@ fn sketch_roundtrip_preserves_causal_links_to_flows_without_sketch_compat() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2725,6 +3419,7 @@ fn sketch_roundtrip_preserves_elements_with_multiline_display_names() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -2989,6 +3684,7 @@ fn full_assembly_has_all_three_sections() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 
@@ -4479,6 +5175,7 @@ fn equation_lhs_casing_in_full_project_roundtrip() {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
     let mdl = crate::mdl::project_to_mdl(&project).expect("MDL write should succeed");
@@ -4537,6 +5234,7 @@ fn grouped_variables_retain_group_order() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![group],
+        macro_spec: None,
     };
     let project = make_project(vec![model]);
 

@@ -209,6 +209,7 @@ fn test_project_apply_patch_upsert_module() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     datamodel.models.push(submodel);
 
@@ -903,6 +904,7 @@ fn test_apply_patch_multiple_models() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
     datamodel.models.push(second_model);
 

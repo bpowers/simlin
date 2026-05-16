@@ -376,6 +376,10 @@ impl From<SdaiModel> for datamodel::Project {
             views,
             loop_metadata,
             groups: vec![],
+            // SDAI is a lossy AI-augmentation bridge format with no macro
+            // concept, so an imported model carries no macro_spec. Correct for
+            // Phase 1; revisit if SDAI ever needs macro awareness.
+            macro_spec: None,
         };
 
         datamodel::Project {
@@ -648,6 +652,12 @@ impl From<datamodel::Project> for SdaiModel {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                // Fallback empty model when the project has no models. SDAI is
+                // a lossy AI-augmentation bridge format with no macro concept,
+                // so any macro_spec on a real model is intentionally not
+                // exported. Correct for Phase 1; revisit if SDAI ever needs
+                // macro awareness.
+                macro_spec: None,
             });
 
         let mut variables = Vec::new();

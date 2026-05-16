@@ -1,0 +1,52 @@
+Energy Technology[source]
+	~	dmnl
+	~	Energy technology level, extracted from a simulation run of full model.
+	|
+
+source:
+	Coal,OilGas,HN,New
+	~	dmnl
+	~	Energy sources.
+	|
+
+Technology Data[source]=
+	Energy Technology[source]
+	~	dmnl
+	~	Technology data, for input as data driver to full model.
+	~	:SUPPLEMENTARY 
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Paramaters
+	|
+
+FINAL TIME  = 2300
+	~	Year
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 1960
+	~	Year
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	Year
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Year
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V160  Do not put anything below this section - it will be ignored
+*View 1
+$Times New Roman|12||0-0-0|0-0-0|0-0-0
+|0,Energy Technology,362,216,49,8,0,0,0,0,0,0,-1--1--1,-1--1--1
+|1,Technology Data,189,216,44,8,0,0,0,0,-1,0,-1--1--1,-1--1--1
+>0,1,0,0,0,0,0,-1--1--1,1|(280,216)|

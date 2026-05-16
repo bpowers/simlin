@@ -545,6 +545,7 @@ pub fn translate(model: &SystemsModel, num_rounds: u64) -> Result<Project> {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
 
     Ok(Project {

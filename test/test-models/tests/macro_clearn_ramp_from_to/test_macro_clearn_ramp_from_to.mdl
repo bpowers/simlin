@@ -1,0 +1,129 @@
+{UTF-8}
+:MACRO: RAMP FROM TO( xfrom, xto, tstart, tend, islinear)
+RAMP FROM TO = IF THEN ELSE( linear,linear ramp,exp ramp)
+	~	xfrom
+	~	Ramp function with different syntax (specifying from-to rather than slope) \
+		and selectable linear or exponential profile.
+	|
+
+linear = IF THEN ELSE( xfrom > 0 :AND: xto > 0, islinear, 1)
+	~	dmnl
+	~	Force linear behavior if endpoints are nonpositive
+	|
+
+linear ramp = xfrom + RAMP(slope,tstart,tend)
+	~	xfrom
+	~		|
+
+exp ramp = IF THEN ELSE(Time$ <= tstart, xfrom
+,IF THEN ELSE( Time$ > tend, xto, xfrom*EXP( rate*(Time$-tstart)) ))
+	~	xfrom
+	~		|
+
+slope = (xto-xfrom)/interval
+	~	xfrom/tstart
+	~		|
+
+rate = IF THEN ELSE( xfrom > 0 :AND: xto > 0, LN(xto/xfrom)/interval, :NA: )
+	~	1/tstart
+	~		|
+
+interval = MAX(tend-tstart,TIME STEP$)
+	~	tstart
+	~		|
+
+:END OF MACRO:
+x from=
+	2
+	~	dmnl
+	~	ramp start value (> 0 so the linear/exp branch is selectable)
+	|
+
+x to=
+	10
+	~	dmnl
+	~	ramp end value (> 0)
+	|
+
+t start=
+	1
+	~	Month
+	~	ramp start time
+	|
+
+t end=
+	5
+	~	Month
+	~	ramp end time
+	|
+
+is linear=
+	1
+	~	dmnl
+	~	1 => take the linear-ramp branch
+	|
+
+ramped=
+	RAMP FROM TO(x from, x to, t start, t end, is linear)
+	~	dmnl
+	~	invocation of C-LEARN's RAMP FROM TO macro, linear branch
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 6
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,x from,150,150,28,8,8,3,0,0,0,0,0,0
+10,2,x to,150,185,28,8,8,3,0,0,0,0,0,0
+10,3,t start,150,220,28,8,8,3,0,0,0,0,0,0
+10,4,t end,150,255,28,8,8,3,0,0,0,0,0,0
+10,5,is linear,150,290,28,8,8,3,0,0,0,0,0,0
+10,6,ramped,420,220,28,8,8,3,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:ramped
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:6
+26:6

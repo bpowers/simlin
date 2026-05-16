@@ -153,6 +153,7 @@ fn make_project(name: &str, variables: Vec<datamodel::Variable>) -> datamodel::P
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         }],
         source: None,
         ai_information: None,

@@ -188,6 +188,13 @@ pub struct SourceProject {
     pub model_names: Vec<String>,
     #[returns(ref)]
     pub models: HashMap<String, SourceModel>,
+    /// `MacroRegistry::build`'s own typed `(ErrorCode, message)` (`None`
+    /// when valid). Computed at sync from the datamodel `Vec<Model>` (not
+    /// here -- `models` is name-keyed, collapsing the AC5.3 duplicate /
+    /// colliding names); the typed code rides through so the downstream
+    /// diagnostic isn't re-tagged from prose. See `crate::db_macro_registry`.
+    #[returns(ref)]
+    pub macro_registry_build_error: Option<(crate::common::ErrorCode, String)>,
     /// Whether LTM (Loops That Matter) synthetic variable compilation is
     /// enabled. When true, `compute_layout` allocates slots and
     /// `assemble_module` compiles fragments for LTM variables.
@@ -209,6 +216,11 @@ pub struct SourceModel {
     /// Per-model sim_specs override (None means use project-level specs)
     #[returns(ref)]
     pub model_sim_specs: Option<SourceSimSpecs>,
+    /// `Some` iff this model is a callable macro template. On the salsa
+    /// input so `project_macro_registry` is keyed on the macro-marked
+    /// models (editing a non-macro variable does not invalidate it).
+    #[returns(ref)]
+    pub macro_spec: Option<datamodel::MacroSpec>,
 }
 
 #[salsa::input]
@@ -738,11 +750,11 @@ fn parse_source_variable_impl(
     var: SourceVariable,
     project: SourceProject,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
+    macro_registry: Option<&crate::module_functions::MacroRegistry>,
 ) -> ParsedVariableResult {
     let relevant_dim_names = variable_relevant_dimensions(db, var);
     let dims: Vec<datamodel::Dimension> = if relevant_dim_names.is_empty() {
-        // Scalar variable -- no dimension dependency, so changing any
-        // project dimension won't invalidate this parse result.
+        // Scalar variable: no dim dependency, so dim changes don't invalidate.
         vec![]
     } else {
         let all_source_dims = project.dimensions(db);
@@ -763,6 +775,8 @@ fn parse_source_variable_impl(
         units_ctx,
         |mi| Ok(Some(mi.clone())),
         module_idents,
+        macro_registry,
+        crate::db_macro_registry::enclosing_macro_for_var(db, project, var), // #554
     );
 
     ParsedVariableResult {
@@ -783,12 +797,15 @@ pub fn parse_source_variable_with_module_context<'db>(
         .iter()
         .map(|ident| Ident::new(ident.as_str()))
         .collect();
-    parse_source_variable_impl(db, var, project, Some(&module_idents))
+    // Reaches the BuiltinVisitor so a macro call expands (salsa-cached).
+    let macro_registry = &crate::db_macro_registry::project_macro_registry(db, project).registry;
+    parse_source_variable_impl(db, var, project, Some(&module_idents), Some(macro_registry))
 }
 
 fn module_ident_context_for_model<'db>(
     db: &'db dyn Db,
     model: SourceModel,
+    project: SourceProject,
     extra_module_idents: &[String],
 ) -> ModuleIdentContext<'db> {
     let source_vars = model.variables(db);
@@ -796,10 +813,15 @@ fn module_ident_context_for_model<'db>(
         .values()
         .map(|source_var| reconstruct_variable(db, *source_var))
         .collect();
-    let mut module_ident_list: Vec<String> = crate::model::collect_module_idents(&dm_vars)
-        .into_iter()
-        .map(|ident| ident.as_str().to_owned())
-        .collect();
+    // Pre-classification must recognize macro calls as module calls too
+    // (so `PREVIOUS(y)` rewrites correctly when `y = MYMACRO(...)`), the
+    // same way it already recognizes `y = SMTH1(...)`.
+    let macro_registry = &crate::db_macro_registry::project_macro_registry(db, project).registry;
+    let mut module_ident_list: Vec<String> =
+        crate::model::collect_module_idents(&dm_vars, macro_registry)
+            .into_iter()
+            .map(|ident| ident.as_str().to_owned())
+            .collect();
     module_ident_list.extend(
         extra_module_idents
             .iter()
@@ -814,9 +836,10 @@ fn module_ident_context_for_model<'db>(
 pub fn model_module_ident_context<'db>(
     db: &'db dyn Db,
     model: SourceModel,
+    project: SourceProject,
     extra_module_idents: Vec<String>,
 ) -> ModuleIdentContext<'db> {
-    module_ident_context_for_model(db, model, &extra_module_idents)
+    module_ident_context_for_model(db, model, project, &extra_module_idents)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
@@ -1009,7 +1032,7 @@ pub fn model_implicit_var_info(
     project: SourceProject,
 ) -> HashMap<String, ImplicitVarMeta> {
     let source_vars = model.variables(db);
-    let module_ident_context = module_ident_context_for_model(db, model, &[]);
+    let module_ident_context = module_ident_context_for_model(db, model, project, &[]);
     let mut result = HashMap::new();
 
     for source_var in source_vars.values() {
@@ -1116,7 +1139,8 @@ fn model_dependency_graph_impl(
 ) -> ModelDepGraphResult {
     let source_vars = model.variables(db);
     let module_input_names = module_input_names.to_vec();
-    let module_ident_context = model_module_ident_context(db, model, module_input_names.clone());
+    let module_ident_context =
+        model_module_ident_context(db, model, project, module_input_names.clone());
 
     struct VarInfo {
         is_stock: bool,
@@ -1672,7 +1696,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     // Helper: build a ModelStage0 from a SourceModel's parsed variables.
     let build_model_s0 = |src_model: &SourceModel, is_stdlib: bool| -> ModelStage0 {
         let src_vars = src_model.variables(db);
-        let module_ctx = model_module_ident_context(db, *src_model, vec![]);
+        let module_ctx = model_module_ident_context(db, *src_model, project, vec![]);
         let mut var_list: Vec<VariableStage0> = Vec::new();
         let mut implicit_dm: Vec<datamodel::Variable> = Vec::new();
         for (_name, svar) in src_vars.iter() {
@@ -2438,6 +2462,7 @@ pub fn sync_from_datamodel<'db>(
             variable_names,
             source_var_map,
             model_sim_specs,
+            dm_model.macro_spec.clone(),
         );
 
         source_model_map.insert(canonical_model_name.clone(), source_model);
@@ -2487,6 +2512,9 @@ pub fn sync_from_datamodel<'db>(
             variable_names,
             source_var_map,
             dm_model.sim_specs.as_ref().map(SourceSimSpecs::from),
+            // Stdlib models are not macros (the registry only tracks
+            // project macros; stdlib lookup goes through `stdlib_descriptor`).
+            None,
         );
         source_model_map.insert(canonical.clone(), source_model);
         models.insert(
@@ -2513,6 +2541,7 @@ pub fn sync_from_datamodel<'db>(
         project.units.iter().map(SourceUnit::from).collect(),
         model_names,
         source_model_map,
+        crate::db_macro_registry::macro_registry_build_error(project),
         false,
         false,
     );
@@ -2745,6 +2774,16 @@ pub fn sync_from_datamodel_incremental(
         source_project.set_units(db).to(new_units);
     }
 
+    // Recompute the macro-registry build error from the datamodel `Vec`
+    // (duplicates / collisions are invisible once models collapse into the
+    // name-keyed map below).
+    let new_macro_build_error = crate::db_macro_registry::macro_registry_build_error(project);
+    if *source_project.macro_registry_build_error(&*db) != new_macro_build_error {
+        source_project
+            .set_macro_registry_build_error(db)
+            .to(new_macro_build_error);
+    }
+
     // model_names updated below after stdlib models are added
 
     // Process models
@@ -2764,6 +2803,12 @@ pub fn sync_from_datamodel_incremental(
             let new_model_sim_specs = dm_model.sim_specs.as_ref().map(SourceSimSpecs::from);
             if *source_model.model_sim_specs(&*db) != new_model_sim_specs {
                 source_model.set_model_sim_specs(db).to(new_model_sim_specs);
+            }
+
+            if *source_model.macro_spec(&*db) != dm_model.macro_spec {
+                source_model
+                    .set_macro_spec(db)
+                    .to(dm_model.macro_spec.clone());
             }
 
             // Process variables
@@ -2855,6 +2900,7 @@ pub fn sync_from_datamodel_incremental(
                 variable_names,
                 source_var_map,
                 model_sim_specs,
+                dm_model.macro_spec.clone(),
             );
 
             new_models.insert(
@@ -2905,6 +2951,8 @@ pub fn sync_from_datamodel_incremental(
                 variable_names,
                 source_var_map,
                 dm_model.sim_specs.as_ref().map(SourceSimSpecs::from),
+                // Stdlib models are not macros.
+                None,
             );
             new_models.insert(
                 canonical,
@@ -3390,7 +3438,8 @@ pub fn compile_var_fragment(
     };
 
     let var_ident = var.ident(db).clone();
-    let module_ident_context = model_module_ident_context(db, model, module_input_names.clone());
+    let module_ident_context =
+        model_module_ident_context(db, model, project, module_input_names.clone());
     let parsed = parse_source_variable_with_module_context(db, var, project, module_ident_context);
 
     // Accumulate unit definition errors from the parsed variable.
@@ -4256,7 +4305,8 @@ fn compile_implicit_var_fragment(
     use crate::compiler::symbolic::{
         CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
     };
-    let module_ident_context = module_ident_context_for_model(db, model, module_input_names);
+    let module_ident_context =
+        module_ident_context_for_model(db, model, project, module_input_names);
     let parsed = parse_source_variable_with_module_context(
         db,
         meta.parent_source_var,
@@ -5584,7 +5634,7 @@ fn enumerate_module_instances_inner(
                 name, sub_model_name,
             ));
         }
-        let module_ident_context = module_ident_context_for_model(db, *source_model, &[]);
+        let module_ident_context = module_ident_context_for_model(db, *source_model, project, &[]);
         let parsed = parse_source_variable_with_module_context(
             db,
             meta.parent_source_var,
@@ -5906,6 +5956,15 @@ pub fn compile_project_incremental(
     project: SourceProject,
     main_model_name: &str,
 ) -> crate::Result<crate::vm::CompiledSimulation> {
+    // An invalid macro set (AC5.2 cycle / AC5.3 duplicate / collision) fails
+    // the project-level compile before per-model processing, uniformly as
+    // `NotSimulatable` (the build error's own typed code rides the
+    // diagnostic `project_macro_registry` accumulated -- see that module).
+    if let Some((_code, msg)) =
+        &crate::db_macro_registry::project_macro_registry(db, project).build_error
+    {
+        return crate::sim_err!(NotSimulatable, msg.clone());
+    }
     match assemble_simulation(db, project, main_model_name) {
         Ok(compiled) => Ok(compiled),
         Err(msg) => crate::sim_err!(NotSimulatable, msg),

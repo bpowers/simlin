@@ -6,13 +6,102 @@
 
 use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs};
 use crate::mdl::builtins::{eq_lower_space, to_lower_space};
-use crate::mdl::xmile_compat::{format_unit_expr, space_to_underbar};
+use crate::mdl::xmile_compat::{format_unit_expr, quoted_space_to_underbar, space_to_underbar};
 
 use super::types::ConvertError;
 
 /// Convert a name to canonical form (lowercase with spaces).
 pub(super) fn canonical_name(name: &str) -> String {
     to_lower_space(name)
+}
+
+/// Canonicalize a raw name to the engine variable-ident form.
+///
+/// This is exactly how a body variable's ident is produced: the symbol table
+/// keys on `to_lower_space` (so the macro body's primary-output equation
+/// `EXPRESSION MACRO = ...` becomes the body variable `expression_macro`) and
+/// `build_variable` then runs `quoted_space_to_underbar` on that canonical
+/// key. Composing the two here keeps `MacroSpec.parameters` /
+/// `primary_output` byte-identical to the body variables they name and to the
+/// synthesized port-variable idents.
+pub(super) fn variable_ident(name: &str) -> String {
+    quoted_space_to_underbar(&to_lower_space(name))
+}
+
+/// Extract the engine variable ident of a macro formal-parameter / output
+/// `Expr`.
+///
+/// A macro header parses its argument and `:`-output lists as expressions;
+/// in a valid macro each is a bare `Expr::Var`. The ident is canonicalized
+/// via [`variable_ident`] so it is byte-identical to how the body equations
+/// reference the parameter and to a synthesized port variable's ident.
+/// Returns `None` for a non-`Var` expression, which signals a malformed
+/// macro header.
+pub(super) fn macro_param_ident(expr: &Expr<'_>) -> Option<String> {
+    match expr {
+        Expr::Var(name, _subscripts, _) => Some(variable_ident(name)),
+        _ => None,
+    }
+}
+
+/// Recursively rewrite Vensim `$`-suffixed *time* references in a macro body
+/// expression to canonical engine time idents.
+///
+/// `Time$`, `TIME STEP$`, `INITIAL TIME$`, `FINAL TIME$` (and `DT$`) are
+/// Vensim's escape, valid only inside a macro body, for reaching the caller's
+/// global time variables. After lexing such a reference is an `Expr::Var`
+/// whose name *includes* the trailing `$`. The engine already resolves the
+/// bare canonical time idents inside a module body at any nesting depth (they
+/// are zero-arity builtins), so the only work is this front-end name
+/// translation; it runs *before* the body equation is formatted.
+///
+/// Scope: only `$`-*time* is translated. A `$`-suffixed reference to a
+/// non-time variable is left untouched (out of Phase 2 scope), as is a bare
+/// `time`/`time step` without the `$` (an ordinary name the engine resolves
+/// itself). The match is on the name lowercased and space-normalized with the
+/// trailing `$` stripped. Recurses through `Op1`/`Op2`/`Paren` and the args
+/// *and* `output_bindings` of `App` so a nested `$`-time reference is caught.
+pub(super) fn rewrite_dollar_time(expr: &mut Expr<'_>) {
+    match expr {
+        Expr::Var(name, _subscripts, _) => {
+            if let Some(canonical) = canonical_dollar_time(name) {
+                *name = std::borrow::Cow::Borrowed(canonical);
+            }
+        }
+        Expr::Op1(_, inner, _) | Expr::Paren(inner, _) => rewrite_dollar_time(inner),
+        Expr::Op2(_, left, right, _) => {
+            rewrite_dollar_time(left);
+            rewrite_dollar_time(right);
+        }
+        Expr::App(_, _, args, _, output_bindings, _) => {
+            for arg in args.iter_mut() {
+                rewrite_dollar_time(arg);
+            }
+            for binding in output_bindings.iter_mut() {
+                rewrite_dollar_time(binding);
+            }
+        }
+        Expr::Const(_, _) | Expr::Literal(_, _) | Expr::Na(_) => {}
+    }
+}
+
+/// If `name` is a Vensim `$`-suffixed time reference, return the canonical
+/// engine ident it maps to; otherwise `None`.
+fn canonical_dollar_time(name: &str) -> Option<&'static str> {
+    let stripped = name.strip_suffix('$')?;
+    if eq_lower_space(stripped, "time") {
+        Some("time")
+    } else if eq_lower_space(stripped, "time step") {
+        Some("time_step")
+    } else if eq_lower_space(stripped, "initial time") {
+        Some("initial_time")
+    } else if eq_lower_space(stripped, "final time") {
+        Some("final_time")
+    } else if eq_lower_space(stripped, "dt") {
+        Some("dt")
+    } else {
+        None
+    }
 }
 
 /// Get the name from an equation's LHS.
@@ -63,7 +152,7 @@ pub(super) fn equation_is_stock(eq: &MdlEquation<'_>) -> bool {
 /// Only checks the root expression, allowing parens but not nested in other constructs.
 pub(super) fn is_top_level_integ(expr: &Expr<'_>) -> bool {
     match expr {
-        Expr::App(name, _, _, CallKind::Builtin, _) => eq_lower_space(name, "integ"),
+        Expr::App(name, _, _, CallKind::Builtin, _, _) => eq_lower_space(name, "integ"),
         Expr::Paren(inner, _) => is_top_level_integ(inner),
         _ => false,
     }
@@ -206,6 +295,7 @@ pub(super) fn extract_metadata(equations: &[FullEquation<'_>]) -> (String, Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mdl::ast::Loc;
 
     #[test]
     fn test_expand_range() {
@@ -250,5 +340,132 @@ mod tests {
         // Scientific notation for very large/small
         assert!(format_number(1e10).contains('e'));
         assert!(format_number(1e-10).contains('e'));
+    }
+
+    fn var(name: &str) -> Expr<'static> {
+        Expr::Var(
+            std::borrow::Cow::Owned(name.to_string()),
+            vec![],
+            Loc::new(0, 0),
+        )
+    }
+
+    fn var_name(expr: &Expr<'_>) -> String {
+        match expr {
+            Expr::Var(n, _, _) => n.to_string(),
+            other => panic!("expected Var, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_dollar_time_scalar_refs() {
+        let mut e = var("Time$");
+        rewrite_dollar_time(&mut e);
+        assert_eq!(var_name(&e), "time");
+
+        let mut e = var("TIME STEP$");
+        rewrite_dollar_time(&mut e);
+        assert_eq!(var_name(&e), "time_step");
+
+        let mut e = var("Initial Time$");
+        rewrite_dollar_time(&mut e);
+        assert_eq!(var_name(&e), "initial_time");
+
+        let mut e = var("FINAL TIME$");
+        rewrite_dollar_time(&mut e);
+        assert_eq!(var_name(&e), "final_time");
+
+        let mut e = var("dt$");
+        rewrite_dollar_time(&mut e);
+        assert_eq!(var_name(&e), "dt");
+    }
+
+    #[test]
+    fn test_rewrite_dollar_time_leaves_non_time_untouched() {
+        // A non-time `$`-suffixed reference is out of Phase 2 scope.
+        let mut e = var("foo$");
+        rewrite_dollar_time(&mut e);
+        assert_eq!(var_name(&e), "foo$");
+
+        // An ordinary (no `$`) reference is untouched.
+        let mut e = var("input");
+        rewrite_dollar_time(&mut e);
+        assert_eq!(var_name(&e), "input");
+
+        // `time` without the `$` escape is an ordinary variable name here and
+        // must not be rewritten (the engine resolves the bare builtin itself).
+        let mut e = var("time");
+        rewrite_dollar_time(&mut e);
+        assert_eq!(var_name(&e), "time");
+    }
+
+    #[test]
+    fn test_rewrite_dollar_time_recurses_nested() {
+        // Shape: c + MYMACRO(Time$, x)
+        let app = Expr::App(
+            std::borrow::Cow::Borrowed("MYMACRO"),
+            vec![],
+            vec![var("Time$"), var("x")],
+            CallKind::Symbol,
+            vec![],
+            Loc::new(0, 0),
+        );
+        let mut e = Expr::Op2(
+            crate::mdl::ast::BinaryOp::Add,
+            Box::new(var("c")),
+            Box::new(app),
+            Loc::new(0, 0),
+        );
+
+        rewrite_dollar_time(&mut e);
+
+        let (left, right) = match &e {
+            Expr::Op2(_, l, r, _) => (l.as_ref(), r.as_ref()),
+            other => panic!("expected Op2, got {:?}", other),
+        };
+        assert_eq!(var_name(left), "c");
+        match right {
+            Expr::App(_, _, args, _, _, _) => {
+                assert_eq!(var_name(&args[0]), "time");
+                assert_eq!(var_name(&args[1]), "x");
+            }
+            other => panic!("expected App, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_dollar_time_recurses_op1_paren_and_output_bindings() {
+        // -(Time$) inside a Paren, plus an App output binding.
+        let mut e = Expr::Op1(
+            crate::mdl::ast::UnaryOp::Negative,
+            Box::new(Expr::Paren(Box::new(var("TIME STEP$")), Loc::new(0, 0))),
+            Loc::new(0, 0),
+        );
+        rewrite_dollar_time(&mut e);
+        let inner = match &e {
+            Expr::Op1(_, b, _) => match b.as_ref() {
+                Expr::Paren(p, _) => p.as_ref(),
+                other => panic!("expected Paren, got {:?}", other),
+            },
+            other => panic!("expected Op1, got {:?}", other),
+        };
+        assert_eq!(var_name(inner), "time_step");
+
+        // Output bindings of an App must also be rewritten.
+        let mut app = Expr::App(
+            std::borrow::Cow::Borrowed("add3"),
+            vec![],
+            vec![var("a")],
+            CallKind::Symbol,
+            vec![var("Final Time$")],
+            Loc::new(0, 0),
+        );
+        rewrite_dollar_time(&mut app);
+        match &app {
+            Expr::App(_, _, _, _, bindings, _) => {
+                assert_eq!(var_name(&bindings[0]), "final_time");
+            }
+            other => panic!("expected App, got {:?}", other),
+        }
     }
 }

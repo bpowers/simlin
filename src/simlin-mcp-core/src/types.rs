@@ -69,6 +69,7 @@ pub fn build_empty_project_with_specs(sim_specs: ejson::SimSpecs) -> datamodel::
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }];
 
     let json_project = ejson::Project {

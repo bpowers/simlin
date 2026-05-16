@@ -1,0 +1,363 @@
+{UTF-8}
+:MACRO: CUBIC SPLINE( t, p0, p1, m0, m1, left extrap, right extrap)
+CUBIC SPLINE=IF THEN ELSE( t<0 :AND: left extrap
+ , p0+t*m0
+ ,IF THEN ELSE( t>=1 :AND: right extrap
+   , p1+(t-1)*m1
+   , IF THEN ELSE( t>=0 :AND: t<1,spline,0)))
+	~	p0
+	~		|
+
+spline=
+	h00*p0 + h10*m0*t int + h01*p1 + h11*m1*t int
+	~	p0
+	~		|
+
+h00=
+	2*t^3-3*t^2+1
+	~	Dmnl
+	~		|
+
+h10=
+	t^3-2*t^2+t
+	~	Dmnl
+	~		|
+
+t int = MIN(1,MAX(0,t))
+	~	Dmnl
+	~		|
+
+h01=
+	-2*t^3+3*t^2
+	~	Dmnl
+	~		|
+
+h11=
+	t^3-t^2
+	~	Dmnl
+	~		|
+
+:END OF MACRO:
+spline y=
+	SUM(spline segment[i prev!])
+	~	dogs
+	~		|
+
+extrapolate[i]=
+	1,0,0,0,1
+	~	Dmnl
+	~		|
+
+spline segment[i prev]=
+	CUBIC SPLINE(location in interval[i prev],target value[i prev],target value[i next]
+	,target slope[i prev],target slope[i next],extrapolate[i prev],extrapolate[i next])
+	~	dogs
+	~		|
+
+location in interval[i prev]=
+	(x-target x[i prev])/(target x[i next]-target x[i prev])
+	~	Dmnl
+	~		|
+
+i prev:
+	(i1-i4) -> i next
+	~	
+	~		|
+
+i middle:
+	(i2-i4)
+	~	
+	~		|
+
+i next:
+	(i2-i5) -> i prev
+	~	
+	~		|
+
+target slope[i]=
+	0,1,0,1,0
+	~	dogs
+	~		|
+
+Padding=
+	0.1
+	~	Dmnl [0,0.2]
+	~	Amount to extend beyond the 0-1 scaled input range
+	|
+
+xmax=
+	1
+	~	Dmnl
+	~		|
+
+type=
+	0
+	~	Dmnl [0,9,1]
+	~	0 a normal lookup function determining y from x.
+		
+		1 the equivalent of LOOKUP AREA
+		
+		2 the equivalent of  LOOKUP BACKWARD
+		
+		3 the equivalent of LOOKUP EXTRAPOLATE
+		
+		4 the equivalent of LOOKUP FORWARD
+		
+		5 the equivalent of LOOKUP INVERT
+		
+		6 the equivalent of LOOKUP SLOPE
+		
+		7 the equivalent of LOOKUP AREA with extrapolation
+		
+		8 the equivalent of LOOKUP INVERT with extrapolation
+		
+		9 the equivalent of LOOKUP SLOPE with extrapolation
+	|
+
+VECTOR LOOKUP y=
+	VECTOR LOOKUP(target value[i1], x , xmin , xmax , type )
+	~	dogs
+	~		|
+
+smooth VECTOR LOOKUP y=
+	SMOOTH3( VECTOR LOOKUP(target value[i1], x offset , xmin , xmax , type ), smoothing time\
+		 )
+	~	dogs
+	~		|
+
+x offset=
+	-Padding + (Time+smoothing time)/(FINAL TIME-INITIAL TIME)*(1+2*Padding)
+	~	Dmnl
+	~		|
+
+smoothing time=
+	8
+	~	years [1,20]
+	~		|
+
+xmin=
+	0
+	~	Dmnl
+	~		|
+
+i:
+	(i1-i5)
+	~	
+	~		|
+
+j<->
+	i
+	~	
+	~		|
+
+********************************************************
+	.Lagrange
+********************************************************~
+	|
+
+y=
+	SUM(target component[i!])
+	~	dogs
+	~		|
+
+target num[i,j]=
+	IF THEN ELSE( i=j, 1, x-target x[j] )
+	~	Dmnl
+	~		|
+
+target denom[i,j]=
+	IF THEN ELSE(i=j, 1, target x[i]-target x[j])
+	~	Dmnl
+	~		|
+
+target component[i]=
+	PROD(target num[i,j!])/PROD(target denom[i,j!])*target value[i]
+	~	dogs
+	~		|
+
+target x[i]=
+	target time[i]/(FINAL TIME-INITIAL TIME)
+	~	Dmnl
+	~		|
+
+x=
+	-Padding + Time/(FINAL TIME-INITIAL TIME)*(1+2*Padding)
+	~	Dmnl
+	~		|
+
+target time[i]=
+	10,30,50,90,100
+	~	Year
+	~		|
+
+target value[i]=
+	2,1,3,5,4
+	~	dogs
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Year
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Year
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Year [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Year [0.0625,1]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,target time,95,274,34,11,8,3,0,0,0,0,0,0
+10,2,target value,341,228,37,11,8,3,0,0,0,0,0,0
+10,3,target num,334,328,34,11,8,3,0,0,0,0,0,0
+10,4,target x,210,277,25,11,8,3,0,0,0,0,0,0
+1,5,1,4,0,0,0,0,0,64,0,-1--1--1,,1|(150,274)|
+1,6,4,3,0,0,0,0,0,64,0,-1--1--1,,1|(264,299)|
+10,7,FINAL TIME,188,185,55,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,8,7,4,0,0,0,0,0,64,0,-1--1--1,,1|(196,224)|
+10,9,INITIAL TIME,131,230,60,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,10,9,4,0,0,0,0,0,64,0,-1--1--1,,1|(163,249)|
+10,11,x,212,387,6,11,8,3,0,0,0,0,0,0
+10,12,FINAL TIME,125,461,55,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,13,12,11,0,0,0,0,0,64,0,-1--1--1,,1|(166,425)|
+10,14,INITIAL TIME,122,407,60,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,15,14,11,0,0,0,0,0,64,0,-1--1--1,,1|(181,393)|
+10,16,Time,105,361,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,17,16,11,0,0,0,0,0,64,0,-1--1--1,,1|(161,374)|
+1,18,11,3,0,0,0,0,0,64,0,-1--1--1,,1|(258,365)|
+10,19,target denom,334,278,42,11,8,3,0,0,0,0,0,0
+1,20,4,19,0,0,0,0,0,64,0,-1--1--1,,1|(256,277)|
+10,21,target component,468,300,55,11,8,3,0,0,0,0,0,0
+1,22,19,21,0,0,0,0,0,64,0,-1--1--1,,1|(387,285)|
+1,23,3,21,0,0,0,0,0,64,0,-1--1--1,,1|(384,317)|
+1,24,2,21,0,0,0,0,0,64,0,-1--1--1,,1|(397,260)|
+10,25,y,609,302,6,11,8,3,0,0,0,0,0,0
+1,26,21,25,0,0,0,0,0,64,0,-1--1--1,,1|(556,300)|
+12,27,0,171,56,74,19,8,7,0,2,-1,0,0,0,-1--1--1,0-0-0,|12||0-128-0
+Interpolating Functions, Tom Fiddaman, 2018
+12,28,0,391,59,75,20,8,135,0,18,-1,0,253,253,-1--1--1,0-0-0,|12|U|0-0-255
+http://metasd.com/models|metasd.com/models
+12,29,0,959,335,255,175,3,188,0,0,1,0,0,0
+Lagrange_Polynomial
+10,30,VECTOR LOOKUP y,439,622,41,19,8,3,0,0,0,0,0,0
+10,31,target value,153,623,46,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,32,31,30,0,0,0,0,0,64,0,-1--1--1,,1|(291,622)|
+10,33,Padding,258,465,27,11,8,3,0,0,-1,0,0,0
+1,34,33,11,0,0,0,0,0,64,0,-1--1--1,,1|(238,431)|
+10,35,type,311,727,15,11,8,3,0,0,-1,0,0,0
+1,36,35,30,0,0,0,0,0,64,0,-1--1--1,,1|(364,682)|
+10,37,xmax,179,763,18,11,8,3,0,0,-1,0,0,0
+1,38,37,30,0,0,0,0,0,64,0,-1--1--1,,1|(293,700)|
+10,39,xmin,171,706,16,11,8,3,0,0,-1,0,0,0
+1,40,39,30,0,0,0,0,0,64,0,-1--1--1,,1|(285,669)|
+10,41,smoothing time,406,987,47,11,8,3,0,0,0,0,0,0
+12,42,0,957,697,255,175,3,188,0,0,1,0,0,0
+VECTOR_LOOKUP
+10,43,smooth VECTOR LOOKUP y,446,890,58,19,8,3,0,0,0,0,0,0
+10,44,x,271,548,15,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,45,44,30,0,0,0,0,0,64,0,-1--1--1,,1|(335,575)|
+1,46,41,43,0,0,0,0,0,64,0,-1--1--1,,1|(421,948)|
+1,47,35,43,0,0,0,0,0,64,0,-1--1--1,,1|(370,799)|
+1,48,37,43,0,0,0,0,0,64,0,-1--1--1,,1|(295,817)|
+1,49,39,43,0,0,0,0,0,64,0,-1--1--1,,1|(296,789)|
+10,50,x offset,259,883,24,11,8,3,0,0,0,0,0,0
+10,51,FINAL TIME,139,954,55,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,52,51,50,0,0,0,0,0,64,0,-1--1--1,,1|(192,922)|
+10,53,INITIAL TIME,136,900,60,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,54,53,50,0,0,0,0,0,64,0,-1--1--1,,1|(208,890)|
+10,55,Time,119,854,26,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,56,55,50,0,0,0,0,0,64,0,-1--1--1,,1|(183,867)|
+1,57,58,50,0,0,0,0,0,64,0,-1--1--1,,1|(267,927)|
+10,58,Padding,274,958,36,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,59,50,43,0,0,0,0,0,64,0,-1--1--1,,1|(328,884)|
+1,60,31,43,0,0,0,0,0,64,0,-1--1--1,,1|(289,747)|
+1,61,41,50,0,0,0,0,0,64,0,-1--1--1,,1|(338,939)|
+10,62,spline segment,535,1192,46,11,8,3,0,0,0,0,0,0
+10,63,x,196,1076,15,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,64,target value,195,1202,46,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,65,target time,77,1135,43,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+10,66,target slope,203,1255,37,11,8,3,0,0,0,0,0,0
+1,67,64,62,0,0,0,0,0,64,0,-1--1--1,,1|(358,1197)|
+1,68,66,62,0,0,0,0,0,64,0,-1--1--1,,1|(357,1225)|
+10,69,location in interval,356,1092,56,11,8,3,0,0,0,0,0,0
+1,70,63,69,0,0,0,0,0,64,0,-1--1--1,,1|(248,1080)|
+10,71,target x,205,1138,34,11,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128
+1,72,71,69,0,0,0,0,0,64,0,-1--1--1,,1|(272,1117)|
+1,73,69,62,1,0,0,0,0,64,0,-1--1--1,,1|(456,1137)|
+10,74,extrapolate,553,1123,36,11,8,3,0,0,0,0,0,0
+1,75,74,62,0,0,0,0,0,64,0,-1--1--1,,1|(545,1150)|
+10,76,spline y,675,1194,25,11,8,3,0,0,0,0,0,0
+1,77,62,76,0,0,0,0,0,64,0,-1--1--1,,1|(608,1192)|
+12,78,0,1015,1068,255,175,3,188,0,0,1,0,0,0
+Cubic_Spline
+///---\\\
+:GRAPH Lagrange_Polynomial
+:TITLE Lagrange Polynomial
+:X-AXIS x
+:X-DIV 1
+:SCALE
+:VAR y
+
+:GRAPH VECTOR_LOOKUP
+:TITLE VECTOR LOOKUP
+:X-AXIS x
+:X-DIV 1
+:SCALE
+:VAR VECTOR LOOKUP y
+:SCALE
+:VAR smooth VECTOR LOOKUP y
+
+:GRAPH Cubic_Spline
+:TITLE Cubic Spline
+:X-AXIS x
+:X-DIV 1
+:SCALE
+:VAR spline y
+:L<%^E!@
+1:spline1.vdf
+9:spline1
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:smooth VECTOR LOOKUP y
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:100
+26:100
+6:i1

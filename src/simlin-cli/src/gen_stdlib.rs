@@ -556,6 +556,8 @@ fn gen_model(model: &Model) -> String {
     let loop_meta: Vec<String> = model.loop_metadata.iter().map(gen_loop_metadata).collect();
     let groups: Vec<String> = model.groups.iter().map(gen_model_group).collect();
 
+    // No stdlib model is a macro template, so macro_spec is always None here.
+    // gen-stdlib does not need to serialize a populated MacroSpec.
     format!(
         "Model {{
         name: \"{}\".to_string(),
@@ -566,6 +568,7 @@ fn gen_model(model: &Model) -> String {
         views: vec![{}],
         loop_metadata: vec![{}],
         groups: vec![{}],
+        macro_spec: None,
     }}",
         escape_string(&model.name),
         gen_option_sim_specs(&model.sim_specs),
@@ -694,6 +697,7 @@ fn npv() -> Model {
         })],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     }
 }
 "#;

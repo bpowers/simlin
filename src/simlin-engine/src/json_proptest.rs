@@ -703,6 +703,21 @@ fn loop_metadata_strategy() -> impl Strategy<Value = LoopMetadata> {
         })
 }
 
+fn macro_spec_strategy() -> impl Strategy<Value = MacroSpec> {
+    (
+        prop::collection::vec(ident_strategy(), 0..3),
+        ident_strategy(),
+        prop::collection::vec(ident_strategy(), 0..2),
+    )
+        .prop_map(
+            |(parameters, primary_output, additional_outputs)| MacroSpec {
+                parameters,
+                primary_output,
+                additional_outputs,
+            },
+        )
+}
+
 fn dimension_strategy() -> impl Strategy<Value = Dimension> {
     prop_oneof![
         // Named dimension: has elements, size = 0
@@ -762,9 +777,10 @@ fn model_strategy() -> BoxedStrategy<Model> {
         // only supports project-level sim_specs, not model-level.
         prop::collection::vec(view_strategy(), 0..1),
         prop::collection::vec(loop_metadata_strategy(), 0..2),
+        prop::option::of(macro_spec_strategy()),
     )
         .prop_map(
-            |(name, stocks, flows, auxiliaries, modules, views, loop_metadata)| Model {
+            |(name, stocks, flows, auxiliaries, modules, views, loop_metadata, macro_spec)| Model {
                 name,
                 stocks,
                 flows,
@@ -774,6 +790,7 @@ fn model_strategy() -> BoxedStrategy<Model> {
                 views,
                 loop_metadata,
                 groups: vec![],
+                macro_spec,
             },
         )
         .boxed()
@@ -1297,6 +1314,7 @@ mod protobuf_roundtrip_tests {
                     description: "Population growth feedback loop".to_string(),
                 }],
                 groups: vec![],
+                macro_spec: None,
             }],
             dimensions: vec![Dimension {
                 name: "regions".to_string(),
@@ -1402,6 +1420,7 @@ mod protobuf_roundtrip_tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             dimensions: vec![
                 Dimension {
@@ -1489,6 +1508,7 @@ mod protobuf_roundtrip_tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             dimensions: vec![],
             units: vec![],
@@ -1535,6 +1555,7 @@ mod protobuf_roundtrip_tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             dimensions: vec![
                 Dimension {
@@ -1594,6 +1615,7 @@ mod protobuf_roundtrip_tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             dimensions: vec![Dimension {
                 name: "items".to_string(),

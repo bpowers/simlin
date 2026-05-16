@@ -37,6 +37,7 @@ from .json_types import (
     LinkPoint,
     LinkViewElement,
     LoopMetadata,
+    MacroSpec,
     Model,
     Module,
     ModuleReference,
@@ -731,6 +732,16 @@ def _create_converter() -> cattrs.Converter:
 
     conv.register_structure_hook(LoopMetadata, structure_loop_metadata)
 
+    # MacroSpec: simple structure
+    def structure_macro_spec(d: dict[str, Any], _: type) -> MacroSpec:
+        return MacroSpec(
+            parameters=d.get("parameters", []),
+            primary_output=d.get("primaryOutput", ""),
+            additional_outputs=d.get("additionalOutputs", []),
+        )
+
+    conv.register_structure_hook(MacroSpec, structure_macro_spec)
+
     # SimSpecs: handle all fields
     def structure_sim_specs(d: dict[str, Any], _: type) -> SimSpecs:
         return SimSpecs(
@@ -773,6 +784,7 @@ def _create_converter() -> cattrs.Converter:
             sim_specs = conv.structure(d["simSpecs"], SimSpecs)
         views = [conv.structure(v, View) for v in d.get("views", [])]
         loop_metadata = [conv.structure(lm, LoopMetadata) for lm in d.get("loopMetadata", [])]
+        macro_spec = conv.structure(d["macroSpec"], MacroSpec) if d.get("macroSpec") else None
         return Model(
             name=d["name"],
             stocks=stocks,
@@ -782,6 +794,7 @@ def _create_converter() -> cattrs.Converter:
             sim_specs=sim_specs,
             views=views,
             loop_metadata=loop_metadata,
+            macro_spec=macro_spec,
         )
 
     conv.register_structure_hook(Model, structure_model)
@@ -807,6 +820,7 @@ def _create_converter() -> cattrs.Converter:
         Dimension: {"name"},
         Unit: {"name"},
         LoopMetadata: {"uids", "name"},
+        MacroSpec: {"parameters", "primary_output"},
         Model: {"name", "stocks", "flows", "auxiliaries"},
         Project: {"name", "sim_specs"},
         JsonModelPatch: {"name"},

@@ -1,0 +1,102 @@
+{UTF-8}
+:MACRO: SSHAPE(xin,profile)
+SSHAPE = IF THEN ELSE( input>0.5, 1-(1-input)^profile*0.5/0.5^profile, input^profile*\
+		0.5/0.5^profile)
+	~	dmnl
+	~	S-shaped response, from 0-1 for input from 0-1. Profile should normally be >=1 \
+		(1=linear; 2=quadratic)
+		Always passes through (0.5, 0.5)
+	|
+
+input = MIN(1,MAX(0,xin))
+	~	xin
+	~		|
+
+:END OF MACRO:
+profile=
+	2
+	~	dmnl
+	~	S-curve profile exponent (2 = quadratic)
+	|
+
+high input=
+	0.8
+	~	dmnl
+	~	a constant > 0.5 so SSHAPE takes the upper IF branch
+	|
+
+low input=
+	0.3
+	~	dmnl
+	~	a constant < 0.5 so SSHAPE takes the lower IF branch
+	|
+
+s high=
+	SSHAPE(high input, profile)
+	~	dmnl
+	~	C-LEARN SSHAPE invocation, upper branch (>= 2 args -- not LOOKUP)
+	|
+
+s low=
+	SSHAPE(low input, profile)
+	~	dmnl
+	~	C-LEARN SSHAPE invocation, lower branch (>= 2 args -- not LOOKUP)
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 2
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,profile,150,150,28,8,8,3,0,0,0,0,0,0
+10,2,high input,150,185,28,8,8,3,0,0,0,0,0,0
+10,3,low input,150,220,28,8,8,3,0,0,0,0,0,0
+10,4,s high,383,170,28,8,8,3,0,0,0,0,0,0
+10,5,s low,383,230,28,8,8,3,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:s high
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:2
+26:2

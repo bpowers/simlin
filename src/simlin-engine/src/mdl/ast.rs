@@ -117,9 +117,12 @@ pub enum Expr<'input> {
     Const(f64, Loc),
     /// Variable reference: `x`, `x[DimA]` (possibly subscripted)
     Var(Cow<'input, str>, Vec<Subscript<'input>>, Loc),
-    /// Call expression: `MAX(a, b)`, `table(x)`, `macro(args)`
+    /// Function/macro application: name, subscripts, args, kind, output bindings, loc.
     ///
-    /// Fields: name, subscripts (for `table[DimA](x)`), args, call kind, loc
+    /// `output_bindings` holds the post-`:` output-binding expressions of a
+    /// Vensim multi-output macro call (`add3(a, b, c : minv, maxv)`); it is
+    /// empty for every ordinary call. The bindings are parsed as expressions
+    /// (expected to be `Var` nodes naming caller variables).
     ///
     /// The `CallKind` indicates whether this came from a known builtin function
     /// or a symbol-based call. For symbol calls:
@@ -130,6 +133,7 @@ pub enum Expr<'input> {
         Vec<Subscript<'input>>,
         Vec<Expr<'input>>,
         CallKind,
+        Vec<Expr<'input>>,
         Loc,
     ),
     /// Unary operator: `-x`, `+x`, `:NOT: x`
@@ -482,12 +486,18 @@ pub struct Group<'input> {
 #[derive(Clone, PartialEq)]
 pub struct MacroDef<'input> {
     pub name: Cow<'input, str>,
-    /// Macro parameters as parsed expressions.
+    /// Formal input parameters (the comma-separated list before any `:`),
+    /// parsed as expressions (typically just `Var` nodes).
     ///
     /// The parser accepts an exprlist for macro arguments. In valid macros,
     /// each should be a simple `Expr::Var` (variable name). During conversion,
     /// these are validated and the names extracted.
     pub args: Vec<Expr<'input>>,
+    /// Additional named outputs from the `:`-list in the header
+    /// (`:MACRO: add3(a,b,c : minval, maxval)`). Empty for ordinary
+    /// single-output macros.
+    pub outputs: Vec<Expr<'input>>,
+    /// Equations within the macro body.
     pub equations: Vec<FullEquation<'input>>,
     pub loc: Loc,
 }
@@ -520,8 +530,10 @@ pub enum SectionEnd<'input> {
     EqEnd(Loc),
     /// Group marker with name
     GroupStar(Cow<'input, str>, Loc),
-    /// Macro definition start with name and arguments
-    MacroStart(Cow<'input, str>, Vec<Expr<'input>>, Loc),
+    /// Macro definition start: name, formal input parameters, and the
+    /// optional `:`-separated additional-output list (`add3(a,b,c : min, max)`).
+    /// `outputs` is empty for ordinary single-output macros.
+    MacroStart(Cow<'input, str>, Vec<Expr<'input>>, Vec<Expr<'input>>, Loc),
     /// Macro definition end
     MacroEnd(Loc),
 }
@@ -754,9 +766,10 @@ mod tests {
                 Expr::Var(Cow::Borrowed("b"), vec![], Loc::new(7, 8)),
             ],
             CallKind::Builtin,
+            vec![],
             Loc::new(0, 9),
         );
-        if let Expr::App(name, _, args, kind, _) = expr {
+        if let Expr::App(name, _, args, kind, _, _) = expr {
             assert_eq!(name.as_ref(), "MAX");
             assert_eq!(args.len(), 2);
             assert_eq!(kind, CallKind::Builtin);
@@ -773,9 +786,10 @@ mod tests {
             vec![],
             vec![Expr::Var(Cow::Borrowed("x"), vec![], Loc::new(10, 11))],
             CallKind::Symbol,
+            vec![],
             Loc::new(0, 12),
         );
-        if let Expr::App(name, _, args, kind, _) = expr {
+        if let Expr::App(name, _, args, kind, _, _) = expr {
             assert_eq!(name.as_ref(), "my_table");
             assert_eq!(args.len(), 1);
             assert_eq!(kind, CallKind::Symbol);
@@ -1030,6 +1044,7 @@ mod tests {
                 Expr::Var(Cow::Borrowed("input"), vec![], Loc::new(8, 13)),
                 Expr::Var(Cow::Borrowed("dt"), vec![], Loc::new(15, 17)),
             ],
+            outputs: vec![],
             equations: vec![],
             loc: Loc::new(0, 50),
         };

@@ -1,0 +1,1870 @@
+{UTF-8}
+********************************************************
+	.scirev8
+********************************************************~
+		"Path Dependence, Competition and Succession in the Dynamics of Scientific \
+		Revolution," John Sterman & Jason Wittenberg. Organization Science Vol. 10 \
+		No. 3, 1999. Translated to Vensim by Tom Fiddaman, 2011. models.metasd.com
+	|
+
+:MACRO: POS(INPUT)
+POS=MAX(INPUT,1e-010)
+	~	INPUT
+	~		|
+
+:END OF MACRO:
+:MACRO: CLIP(true,false,a,b)
+CLIP=IF THEN ELSE(a>=b,true,false)
+	~	true
+	~		|
+
+:END OF MACRO:
+********************************************************
+	.000.Notes
+********************************************************~
+		Notes
+		Translation from DYNAMO was started with the Vensim dyn2ven utility,
+		combining the scirev.dyn and scirev.def files from 
+		http://jsterman.scripts.mit.edu/On-Line_Publications.html#1999Path
+		
+		At the command line:
+		"c:\program files\vensim\dyn2ven" -6 scirev.dyn scirev.def scirev.mdl
+		
+		A few manual changes were made subsequently to fix broken subscript expressions.
+		
+		A few units errors in the original were corrected.
+		
+		A few minor changes were made
+		to eliminate division-by-zero issues with use of NOSNDP.
+		These caused floating point errors in the initial translation.
+		I believe that the issue is that division by zero occurs
+		when NOSNDP (number of strongest non-dominant paradigms) falls
+		to 0. In DYNAMO, these errors may have been tolerated by the compiler
+		because they only occurred when the numerator was also 0,
+		resulting in a 0/0 condition. If that is the case, then this version
+		should be behaviorally faithful to the original. If not,
+		there may be some other cause of the error.
+		
+		Changes of possible significance are indicated with !! in the comment \
+		field.
+	|
+
+********************************************************
+	.100.Params
+********************************************************~
+		100 PARAMETER VALUES
+	|
+
+NP Number of Possible Paradigms= INITIAL(
+	ELMCOUNT(PM))
+	~	Dmnl
+	~	NUMBER OF POSSIBLE PARADIGMS (DIMENSIONLESS)
+	|
+
+LSEED Random Seed for Paradigm Launch=1234
+	~	Dmnl [0,8000,1]
+	~	RANDOM NUMBER SEED FOR PARADIGM LAUNCH (DIMENSIONLESS)
+		!! modified to lower range (inconsequential)
+	|
+
+SSEED Random Seed for Paradigm Strength=12345
+	~	Dmnl [0,80000,1]
+	~	RANDOM NUMBER SEED FOR PARADIGM STRENGTH (DIMENSIONLESS)
+		!! modified to lower range (inconsequential)
+	|
+
+ZDUMTOA Fixed Launch Times[n1]=0 ~~|
+ZDUMTOA Fixed Launch Times[n2]=40 ~~|
+ZDUMTOA Fixed Launch Times[n3]=281.75 ~~|
+ZDUMTOA Fixed Launch Times[n4]=282.75 ~~|
+ZDUMTOA Fixed Launch Times[n5]=291 ~~|
+ZDUMTOA Fixed Launch Times[n6]=298.75 ~~|
+ZDUMTOA Fixed Launch Times[n7]=308 ~~|
+ZDUMTOA Fixed Launch Times[n8]=309.75 ~~|
+ZDUMTOA Fixed Launch Times[n9]=318.75 ~~|
+ZDUMTOA Fixed Launch Times[n10]=319 ~~|
+ZDUMTOA Fixed Launch Times[n11]=319.5 ~~|
+ZDUMTOA Fixed Launch Times[n12]=323.5 ~~|
+ZDUMTOA Fixed Launch Times[n13]=340.75 ~~|
+ZDUMTOA Fixed Launch Times[n14]=364.75 ~~|
+ZDUMTOA Fixed Launch Times[n15]=369 ~~|
+ZDUMTOA Fixed Launch Times[n16]=392 ~~|
+ZDUMTOA Fixed Launch Times[n17]=453.75 ~~|
+ZDUMTOA Fixed Launch Times[n18]=465.75 ~~|
+ZDUMTOA Fixed Launch Times[n19]=520.75 ~~|
+ZDUMTOA Fixed Launch Times[n20]=654.75 ~~|
+ZDUMTOA Fixed Launch Times[n21]=837.5 ~~|
+ZDUMTOA Fixed Launch Times[n22]=851.75 ~~|
+ZDUMTOA Fixed Launch Times[n23]=995.75 ~~|
+ZDUMTOA Fixed Launch Times[n24]=1318 ~~|
+ZDUMTOA Fixed Launch Times[n25]=1500
+	~	Year
+	~	FIXED TIME OF LAUNCH FOR PARADIGMS 1-25 (DIMENSIONLESS)
+		!! units error corrected
+	|
+
+********************************************************
+	.200.Activation
+********************************************************~
+		200 PROBABILITY OF PARADIGM ACTIVATION
+	|
+
+RND Random Number=RANDOM UNIFORM(0,1,LSEED Random Seed for Paradigm Launch)
+	~	Dmnl
+	~	RANDOM NUMBER (DIMENSIONLESS)
+		!! distribution assumed 0-1
+	|
+
+PCNP Probability for Creating New Paradigm=PPCPS Probability of Creation from Solving\
+		*PPSD Dominant Practitioners in Puzzle Solving+PPCAR Probability of Creation from Anomaly Resolution\
+		*PARD Dominant Practitioners in Anomaly Resolution+PPCOA Probability of Creation from Other Activity\
+		*(PDP Practitioners in Dominant Paradigm-PPSD Dominant Practitioners in Puzzle Solving\
+		-PARD Dominant Practitioners in Anomaly Resolution)
+	~	fraction/Year
+	~	PROBABILITY OF CREATING NEW PARADIGM (FRACTION/YEAR)
+	|
+
+PPCPS Probability of Creation from Solving=0
+	~	fraction/(Year*Person)
+	~	PROBABILITY OF PARADIGM CREATION FROM PUZZLE SOLVING (FRACTION/PERSON-YEAR)
+	|
+
+PPCAR Probability of Creation from Anomaly Resolution=0.001
+	~	fraction/(Person*Year)
+	~	PROBABILITY OF PARADIGM CREATION FROM ANOMALY RESOLUTION \
+		(FRACTION/PERSON-YEAR)
+	|
+
+PPCOA Probability of Creation from Other Activity=0.0002
+	~	fraction/(Year*Person)
+	~	PROBABILITY OF PARADIGM CREATION FROM OTHER ACTIVITIES \
+		(FRACTION/PERSON-YEAR)
+	|
+
+PA Probability of Activation=PCNP Probability for Creating New Paradigm*TIME STEP*DFPA Discount for Activation
+	~	fraction
+	~	PROBABILITY OF ACTIVATION (FRACTION/YEAR)
+		!! units error corrected - this actually represents prob(activation) \
+		within current time step, rather than per unit time
+	|
+
+DFPA Discount for Activation=0.2
+	~	Dmnl
+	~	DISCOUNT FOR PROBABILITY OF ACTIVATION (DIMENSIONLESS)
+	|
+
+********************************************************
+	.200.Activation.Launch
+********************************************************~
+		SET UP LOGIC FOR SEQUENTIALLY LAUNCHING PARADIGMS
+	|
+
+N : (n2-n25)
+	~	Dmnl
+	~	ARRAY INDEX FOR PARADIGMS (DIMENSIONLESS)
+	|
+
+"N-1" : (n1-n24) -> N
+	~	Dmnl
+	~	Added to implement DYNAMO array FOR notation for N-1
+	|
+
+X Next Paradigm Launch Switch[PM]= INTEG (
+	CX Increment for Next Paradigm Switch[PM]/TIME STEP,
+		Init X[PM])
+	~	Dmnl
+	~	SWITCH TO INDICATE NEXT PARADIGM TO BE LAUNCHED (DIMENSIONLESS)
+	|
+
+Init X[N] = 0 ~~|
+Init X[n1] = 2
+	~	Dmnl
+	~	!! Added for initialization
+	|
+
+CX Increment for Next Paradigm Switch[n1]=0 ~~|
+CX Increment for Next Paradigm Switch[N]=
+	SPA Switch for Probabilistic Activation*CLIP(0,CLIP(CLIP(1,0,X Next Paradigm Launch Switch\
+		["N-1"],1),0,PA Probability of Activation,RND Random Number),X Next Paradigm Launch Switch\
+		[N],1)
+	+(1-SPA Switch for Probabilistic Activation)*CLIP(0,CLIP(0,CLIP(CLIP(1,0,X Next Paradigm Launch Switch\
+		["N-1"],1),0,CPTHRESH Confidence Threshold for Deterministic Paradigm Launch,CDP Confidence in Dominant Paradigm\
+		),X Next Paradigm Launch Switch[N],1),SUM(SIAP Switch for Active Paradigms[PM!]),MNAP Maximum Nmber of Active Paradigms for Deterministic Launch\
+		)
+	~	Dmnl
+	~	INCREMENTOR FOR SWITCH TO INDICATE NEXT PARADIGM TO BE LAUNCHED \
+		(DIMENSIONLESS)
+	|
+
+PM : (n1-n25)
+	~	Dmnl
+	~	ARRAY INDEX FOR PARADIGMS (DIMENSIONLESS)
+	|
+
+PPSV Practitioners in Puzzle Solving[PM]=PPS Practitioners in Puzzle Solving[PM]*SIDP Switch for Dominant Paradigms\
+		[PM]
+	~	Persons
+	~	ARRAY FOR PRACTITIONERS IN PUZZLE-SOLVING FOR DOMINANT PARADIGMS (PERSONS)
+	|
+
+PPSD Dominant Practitioners in Puzzle Solving=SUM(PPSV Practitioners in Puzzle Solving\
+		[PM!])/NODP Number of Dominant Paradigms
+	~	Persons
+	~	PRACTITIONERS IN PUZZLE-SOLVING FOR DOMINANT PARADIGM (PERSONS)
+	|
+
+PARV Practitioners in Anomaly Resolution[PM]=PAR Practitioners in Anomaly Resolution[\
+		PM]*SIDP Switch for Dominant Paradigms[PM]
+	~	Persons
+	~	ARRAY FOR PRACTITIONERS IN ANOMALY RESOLUTION FORDOMINANT PARADIGMS \
+		(PERSONS)
+	|
+
+PARD Dominant Practitioners in Anomaly Resolution=SUM(PARV Practitioners in Anomaly Resolution\
+		[PM!])/NODP Number of Dominant Paradigms
+	~	Persons
+	~	PRACTITIONERS IN ANOMALY RESOLUTION FOR DOMINANT PARADIGM(PERSONS)
+	|
+
+SIDP Switch for Dominant Paradigms[PM]=IF THEN ELSE(TTPMAX Maximum Trust-TTP Total Trust\
+		[PM] = 0,1,0)
+	~	Dmnl
+	~	SWITCH TO INDICATE DOMINANT PARADIGMS (DIMENSIONLESS)
+	|
+
+TTP Total Trust[PM]=P Practitioners[PM]*SAP Switch to Activate Paradigm[PM]
+	~	Persons
+	~	TOTAL TRUST IN PARADIGM (PERSONS)
+	|
+
+SIAP Switch for Active Paradigms[PM]=
+	IF THEN ELSE(P Practitioners[PM] >= MSPDL Minimum Size for Deterministic Launch,1,0)
+	~	Dmnl
+	~	SWITCH TO INDICATE ACTIVE PARADIGMS (DIMENSIONLESS)
+	|
+
+MNAP Maximum Nmber of Active Paradigms for Deterministic Launch=1.1
+	~	Dmnl
+	~	MAXIMUM NUMBER OF ACTIVE PARADIGMS FOR DETERMINISTIC LAUNCH (DIMENSIONLESS)
+	|
+
+SPA Switch for Probabilistic Activation=1
+	~	Dmnl
+	~	SWITCH FOR PROBABILISTIC ACTIVATION (DIMENSIONLESS)
+	|
+
+CPTHRESH Confidence Threshold for Deterministic Paradigm Launch=0.7
+	~	Dmnl
+	~	CONFIDENCE THRESHOLD FOR DETERMINISTIC PARADIGM ACTIVATION (DIMENSIONLESS)
+	|
+
+MSPDL Minimum Size for Deterministic Launch=2
+	~	Persons
+	~	MINIMUM SIZE OF PARADIGM FOR DETERMINISTIC LAUNCH (DIMENSIONLESS)
+		!! units error corrected
+	|
+
+SAP Switch to Activate Paradigm[PM]=
+	IF THEN ELSE(P Practitioners[PM] >= MSPA Minimum Strength for Activation
+	,(SARL Switch for Random Launch*IF THEN ELSE(X Next Paradigm Launch Switch[PM] >= 1,\
+		1,0)+(1-SARL Switch for Random Launch)*TSAP Switch for Fixed Launch Times[PM])
+	,0)
+	~	Dmnl
+	~	SWITCH TO ACTIVATE PARADIGM (DIMENSIONLESS)
+	|
+
+MSPA Minimum Strength for Activation=0.01
+	~	Persons
+	~	MINIMUM STRENGTH OF PARADIGM FOR ACTIVATION (PERSONS)
+	|
+
+TSAP Switch for Fixed Launch Times[PM]=STEP(1,ZDUMTOA Fixed Launch Times[PM])
+	~	Dmnl
+	~	SWITCH TO ACTIVITATE PARADIGMS FOR FIXED LAUNCH TIMES (DIMENSIONLESS)
+	|
+
+SARL Switch for Random Launch=1
+	~	Dmnl
+	~	SWITCH TO ACTIVATE RANDOM LAUNCH (DIMENSIONLESS)
+	|
+
+TOA Time of Paradigm Activation[PM]= INTEG (
+	DTOA Increment in Activation Time[PM]/TIME STEP,
+		0)
+	~	Year
+	~	TIME OF PARADIGM ACTIVATION (YEARS)
+	|
+
+DTOA Increment in Activation Time[PM]=IF THEN ELSE(RINP Recruitment into New Paradigms\
+		[PM]-NPINP Practitioners in New Paradigm/TIME STEP = 0,Time,0)
+	~	Year
+	~	INCREMENTOR TO TIME OF ACTIVATION (YEARS)
+	|
+
+********************************************************
+	.300.Puzzles
+********************************************************~
+		300 PUZZLE SOLVING
+	|
+
+HSP Historical Solved Puzzles[PM]= INTEG (
+	(SP Solved Puzzles[PM]-HSP Historical Solved Puzzles[PM])/TEHSP Time to Establish Historical Solved Puzzles\
+		,
+		SP Solved Puzzles[PM])
+	~	Puzzles
+	~	HISTORICAL SOLVED PUZZLES (PUZZLES)
+	|
+
+SP Solved Puzzles[PM]= INTEG (
+	PSR Puzzle Solving Rate[PM]+ARESR Anomaly Resolution Rate[PM],
+		ISP Initial Solved Puzzles[PM])
+	~	Puzzles
+	~	INITIAL SOLVED PUZZLES FOR PARADIGMS AFTER  # 1
+	|
+
+ISP Initial Solved Puzzles[N]=
+	1 ~~|
+ISP Initial Solved Puzzles[n1]=1985
+	~	Puzzles
+	~	INITIAL SOLVED PUZZLES IN PARADIGM 1 (PUZZLES)
+	|
+
+PSR Puzzle Solving Rate[PM]=
+	(PPS Practitioners in Puzzle Solving[PM]/ADP Average Difficulty of Puzzles[PM])*SAP Switch to Activate Paradigm\
+		[PM]
+	~	Puzzles/Year
+	~	PUZZLE SOLVING RATE (PUZZLES/YEAR)
+	|
+
+ADP Average Difficulty of Puzzles[PM]=
+	NDP Noral Difficulty of Puzzles*EXP(ED Elasticity of Difficulty wrt Solved Puzzles*LN\
+		(1+(SP Solved Puzzles[PM]/NSP Normal Solved Puzzles[PM])))
+	~	Year*Person/Puzzle
+	~	AVERAGE DIFFICULTY OF PUZZLES (DIMENSIONLESS)
+		!! units error corrected
+	|
+
+NDP Noral Difficulty of Puzzles=2
+	~	Year*Person/Puzzle
+	~	NORMAL DIFFICULTY OF PUZZLES (PERSON-YEARS/PUZZLE)
+	|
+
+ED Elasticity of Difficulty wrt Solved Puzzles=1
+	~	Dmnl
+	~	ELASTICITY OF PUZZLE DIFFICULTY WITH RESPECT TO SOLVED PUZZLES \
+		(DIMENSIONLESS)
+	|
+
+NSPD Normal Solved Puzzles for Paradigm 1=400
+	~	Puzzles
+	~	NORMAL SOLVED PUZZLES FOR PARADIGM 1 (PUZZLES)
+	|
+
+NSP Normal Solved Puzzles[n1]=INITIAL(NSPD Normal Solved Puzzles for Paradigm 1) ~~|
+NSP Normal Solved Puzzles[N]=INITIAL((1-SAIA Switch for Identical Alternatives)*MIN(NSPA Normal Solved Puzzles\
+		*EXP(VSAP Variance in Strength of Paradigms*RANDOM NORMAL(-6,6,0,1,SSEED Random Seed for Paradigm Strength\
+		)
+),MSAP Maximum Strength of Paradigms)+SAIA Switch for Identical Alternatives*NSPA Normal Solved Puzzles\
+		)
+	~	Puzzles
+	~	NORMAL SOLVED PUZZLES FOR PARADIGMS OTHER THAN #1 (PUZZLES)
+	|
+
+NSPA Normal Solved Puzzles=400
+	~	Puzzles
+	~	NORMAL SOLVED PUZZLES BEFORE FACTORS FOR PARADIGMS OTHER THAN #1 (PUZZLES)
+	|
+
+SAIA Switch for Identical Alternatives=1
+	~	Dmnl [0,1,1]
+	~	SWITCH TO ACTIVATE IDENTICAL ALTERNATIVES (DIMENSIONLESS)
+	|
+
+VSAP Variance in Strength of Paradigms=2.5
+	~	Dmnl
+	~	ARIANCE IN STRENGTH OF ALTERNATIVE PARADIGMS (DIMENSIONLESS)
+	|
+
+MSAP Maximum Strength of Paradigms=800
+	~	Puzzles
+	~	MAXIMUM STRENGTH OF ALTERNATIVE PARADIGMS (PUZZLES)
+	|
+
+PPS Practitioners in Puzzle Solving[PM]=
+	P Practitioners[PM]*FPPS Fraction of Practitioners in Puzzle Solving[PM]
+	~	Persons
+	~	PRACTITIONERS IN PUZZLE SOLVING (PERSONS)
+	|
+
+FPPS Fraction of Practitioners in Puzzle Solving[PM]=DFPPS Desired Fraction of Practitioners in Puzzle Solving\
+		[PM]*EUPPS Effect of Unsolved Puzzles on Solving[PM]
+	~	fraction
+	~	RACTION OF PRACTITIONERS IN PUZZLE SOLVING (FRACTION)
+	|
+
+EUPPS Effect of Unsolved Puzzles on Solving[PM]=
+	TEUPPS Table for Effect of Unsolved Puzzles on Solving(PUA Puzzles Under Attack[PM]/\
+		DPUA Desired Puzzles Under Attack[PM])
+	~	Dmnl
+	~	EFFECT OF UNSOLVED PUZZLES ON PUZZLE SOLVING (DIMENSIONLESS)
+	|
+
+TEUPPS Table for Effect of Unsolved Puzzles on Solving(0,0.2,0.4,0.6,0.8,1,0,0.4,0.7,\
+		0.9,0.97,1)
+	~	Dmnl
+	~	ABLE FOR EFFECT OF UNSOLVED PUZZLES ON PUZZLE SOLVING (DIMENSIONLESS)
+	|
+
+PUA Puzzles Under Attack[PM]= INTEG (
+	"PIAR Puzzle Initiation & Abandonment Rate"[PM]-PSR Puzzle Solving Rate[PM]-ARECR Anomaly Recognition Rate\
+		[PM],
+		DPUA Desired Puzzles Under Attack[PM])
+	~	Puzzles
+	~	PUZZLES UNDER ATTACK (PUZZLES)
+	|
+
+"PIAR Puzzle Initiation & Abandonment Rate"[PM]=(PSR Puzzle Solving Rate[PM]+ARECR Anomaly Recognition Rate\
+		[PM]+CPUA Correction for Puzzles Under Attack[PM])*SAP Switch to Activate Paradigm[\
+		PM]
+	~	Puzzles/Year
+	~	PUZZLE INITIATION AND ABANDONMENT RATE (PUZZLES/YEAR)
+	|
+
+CPUA Correction for Puzzles Under Attack[PM]=(DPUA Desired Puzzles Under Attack[PM]-PUA Puzzles Under Attack\
+		[PM])/TAPUA Time to Adjust Puzzles Under Attack
+	~	Puzzles/Year
+	~	CORRECTION FOR PUZZLES UNDER ATTACK (PUZZLES/YEAR)
+	|
+
+TAPUA Time to Adjust Puzzles Under Attack=1
+	~	Year
+	~	TIME TO ADJUST PUZZLES UNDER ATTACK (YEARS)
+	|
+
+DPUA Desired Puzzles Under Attack[PM]=
+	MAX(NPP Normal Puzzles per Practitioner*P Practitioners[PM]*DFPPS Desired Fraction of Practitioners in Puzzle Solving\
+		[PM],1)
+	~	Puzzles
+	~	DESIRED PUZZLES UNDER ATTACK (PUZZLES)
+	|
+
+NPP Normal Puzzles per Practitioner=
+	1
+	~	Puzzles/Person
+	~	NORMAL PUZZLES PER PRACTITIONER (PUZZLES/PRACTITIONER)
+	|
+
+DFPPS Desired Fraction of Practitioners in Puzzle Solving[PM]=FPPSR Fraction of Practitioners in Paradigm Sanctioned Research\
+		[PM]-FPAR Fraction of Practitioners in Anomaly Resolution[PM]
+	~	fraction
+	~	DESIRED FRACTION OF PRACTITIONERS IN PUZZLE SOLVING (FRACTION)
+	|
+
+FPPSR Fraction of Practitioners in Paradigm Sanctioned Research[PM]=TFPPSR Table for Fraction of Practitioners in Paradigm Sanctioned Research\
+		((CP Confidence in Paradigm[PM]-(0))/(1-(0)))
+	~	fraction
+	~	FRACTION OF PRACTITIONERS IN PARADIGM SANCTIONED RESEARCH (FRACTION)
+	|
+
+TFPPSR Table for Fraction of Practitioners in Paradigm Sanctioned Research(0,0.2,0.4,\
+		0.6,0.8,1,0,0.1,0.6,0.85,0.95,1)
+	~	Dmnl
+	~	TABLE FOR FRACTION OF PRACTITIONERS IN PARADIGM SANCTIONED RESEARCH \
+		(DIMENSIONLESS)
+	|
+
+FPAR Fraction of Practitioners in Anomaly Resolution[PM]=FPPSR Fraction of Practitioners in Paradigm Sanctioned Research\
+		[PM]*WPEAR Willingness to Enter Anomaly Resolution*EAPAR Effect of Anomalies on Practitioners in Anomaly Resolution\
+		[PM]
+	~	fraction
+	~	FRACTION OF PRACTITIONERS IN ANOMALY RESOLUTION (FRACTION)
+	|
+
+WPEAR Willingness to Enter Anomaly Resolution=0.25
+	~	fraction
+	~	WILLINGNESS OF PRACTITIONERS TO ENTER ANOMALY RESOLUTION (FRACTION)
+	|
+
+EAPAR Effect of Anomalies on Practitioners in Anomaly Resolution[PM]=TEAPAR Table for Effect of Anomalies on Practitioners in Anomaly Resolution\
+		((RA Relative Anomalies[PM]-(0))/(4-(0)))
+	~	Dmnl
+	~	EFFECT OF ANOMALIES ON PRACTITIONERS IN ANOMALY RESOLUTION (DIMENSIONLESS)
+	|
+
+TEAPAR Table for Effect of Anomalies on Practitioners in Anomaly Resolution(0,0.125,0.25\
+		,0.375,0.5,0.625,0.75,0.875,1,0,0.25,0.45,0.6,0.73,0.85,0.93,0.98,1)
+	~	Dmnl
+	~	TABLE FOR EFFECT OF ANOMALIES ON PRACTITIONERS IN ANOMALY RESOLUTION \
+		(DIMENSIONLESS)
+	|
+
+RA Relative Anomalies[PM]=A Anomalies[PM]/AA Acceptable Anomalies
+	~	Dmnl
+	~	RELATIVE ANOMALIES (DIMENSIONLESS)
+	|
+
+AA Acceptable Anomalies=
+	10
+	~	Puzzles
+	~	ACCEPTABLE ANOMALIES (PUZZLES)
+	|
+
+A Anomalies[PM]= INTEG (
+	ARECR Anomaly Recognition Rate[PM]-ARESR Anomaly Resolution Rate[PM],
+		IA Initial Anomalies[PM])
+	~	Puzzles
+	~	ANOMALIES (PUZZLES)
+	|
+
+IA Initial Anomalies[N]=
+	0 ~~|
+IA Initial Anomalies[n1]=2.75
+	~	Puzzles
+	~	INITIAL ANOMALIES FOR PARADIGM 1 (PUZZLES)
+	|
+
+ARESR Anomaly Resolution Rate[PM]=
+	(PAR Practitioners in Anomaly Resolution[PM]/ADA Average Difficulty of Anomalies[PM]\
+		)*SAP Switch to Activate Paradigm[PM]
+	~	Puzzles/Year
+	~	ANOMALY RESOLUTION RATE (PUZZLES/YEAR)
+	|
+
+PAR Practitioners in Anomaly Resolution[PM]=
+	P Practitioners[PM]*FPAR Fraction of Practitioners in Anomaly Resolution[PM]
+	~	Persons
+	~	PRACTITIONERS IN ANOMALY RESOLUTION (PERSONS)
+	|
+
+ADA Average Difficulty of Anomalies[PM]=
+	RDA Relative Difficulty of Anomalies*POS(ADP Average Difficulty of Puzzles[PM])
+	~	Person*Year/Puzzle
+	~	AVERAGE DIFFICULT OF ANOMALIES (PERSON-YEARS/PUZZLE)
+	|
+
+RDA Relative Difficulty of Anomalies=5
+	~	Dmnl
+	~	RELATIVE DIFFICULTY OF ANOMALIES (DIMENSIONLESS)
+	|
+
+ARECR Anomaly Recognition Rate[PM]=
+	(EPSR Expected Puzzle Solving Rate[PM]*FPRA Fraction of Puzzles Recognized as Anomalies\
+		[PM])*SAP Switch to Activate Paradigm[PM]
+	~	Puzzles/Year
+	~	ANOMALY RECOGNITION RATE (PUZZLES/YEAR)
+	|
+
+EPSR Expected Puzzle Solving Rate[PM]=
+	PPS Practitioners in Puzzle Solving[PM]/POS(DPAR Difficulty of Puzzles for Anomaly Resolution\
+		[PM])
+	~	Puzzles/Year
+	~	EXPECTED PUZZLE SOLVING RATE (PUZZLES/YEAR)
+	|
+
+FPRA Fraction of Puzzles Recognized as Anomalies[PM]=
+	TFPRA Table for Fraction of Puzzles Recognized as Anomalies((1.44*LN(ADP Average Difficulty of Puzzles\
+		[PM]/POS(DPAR Difficulty of Puzzles for Anomaly Resolution[PM]))-(-2))/(2-(-2)))
+	~	fraction
+	~	RACTION OF PUZZLES RECOGNIZED AS ANOMALIES (FRACTION)
+	|
+
+TFPRA Table for Fraction of Puzzles Recognized as Anomalies(0,0.125,0.25,0.375,0.5,0.625\
+		,0.75,0.875,1,0.01,0.02,0.04,0.2,0.5,0.8,0.96,0.98,0.99)
+	~	Dmnl
+	~	ABLE FOR FRACTION OF PUZZLES RECOGNIZED AS ANOMALIES (DIMENSIONLESS)
+	|
+
+RSP Relative Solved Puzzles[PM]=SP Solved Puzzles[PM]/(HSP Historical Solved Puzzles[\
+		PM]*(1+EGSP Expected Growth in Solved Puzzles*TEHSP Time to Establish Historical Solved Puzzles\
+		))
+	~	Dmnl
+	~	RELATIVE SOLVED PUZZLES (DIMENSIONLESS)
+	|
+
+TEHSP Time to Establish Historical Solved Puzzles=10
+	~	Year
+	~	TIME TO ESTABLISH HISTORICAL SOLVED PUZZLES (YEARS)
+	|
+
+EGSP Expected Growth in Solved Puzzles=0.02
+	~	fraction/Year
+	~	EXPECTED GROWTH IN SOLVED PUZZLES (FRACTION/YEAR)
+	|
+
+ASNDV Anomalies for Strongest Nondominant Paradigms[PM]=A Anomalies[PM]*SISND Switch for Strongest Nondominant Paradigms\
+		[PM]
+	~	Puzzles
+	~	ARRAY FOR ANOMALIES FROM STRONGEST NON-DOMINANT PARADIGMS (PUZZLES)
+	|
+
+SISND Switch for Strongest Nondominant Paradigms[PM]=IF THEN ELSE(P Practitioners[PM]\
+		-PNDMAX Practitioners in Largest Nondominant Paradigm = 0,1,0)
+	~	Dmnl
+	~	SWITCH TO INDICATE STRONGEST NON-DOMINANT PARADIGMS (DIMENSIONLESS)
+	|
+
+ASND Anomalies for Strongest Nondominant Paradigm=
+	IF THEN ELSE( NOSNDP Number of Strongest Nondominant Paradigms>0 :AND: SUM ASNDV/NOSNDP Number of Strongest Nondominant Paradigms\
+		 >= 0.0001
+	,SUM ASNDV/NOSNDP Number of Strongest Nondominant Paradigms
+	,0.0001)
+	~	Puzzles
+	~	ANOMALIES FOR STRONGEST NON-DOMINANT PARADIGM (DIMENSIONLESS)
+		!! units error corrected; "NOSNDP>0 :AND:" added to avoid div/0 condition
+	|
+
+SUM ASNDV = SUM(ASNDV Anomalies for Strongest Nondominant Paradigms[PM!])
+	~	Puzzles
+	~	!! added for debugging ASND; eliminates redundant SUM
+	|
+
+NOSNDP Number of Strongest Nondominant Paradigms=SUM(SISND Switch for Strongest Nondominant Paradigms\
+		[PM!])
+	~	Dmnl
+	~	NUMBER OF STRONGEST NON-DOMINANT PARADIGMS (DIMENSIONLESS)
+	|
+
+SPSNDV Solved Puzzles from Strongest Nondominant Paradigms[PM]=SP Solved Puzzles[PM]*\
+		SISND Switch for Strongest Nondominant Paradigms[PM]
+	~	Puzzles
+	~	ARRAY FOR SOLVED PUZZLES FROM STRONGEST NON-DOMINANT PARADIGMS (PUZZLES)
+	|
+
+SPSND Solved Puzzles for Strongest Nondominant Paradigm=
+	IF THEN ELSE(NOSNDP Number of Strongest Nondominant Paradigms>0 :AND: SUM(SPSNDV Solved Puzzles from Strongest Nondominant Paradigms\
+		[PM!])/NOSNDP Number of Strongest Nondominant Paradigms >=0.0001
+	,SUM(SPSNDV Solved Puzzles from Strongest Nondominant Paradigms[PM!])/NOSNDP Number of Strongest Nondominant Paradigms
+	,0.0001)
+	~	Puzzles
+	~	SOLVED PUZZLES FOR STRONGEST ND PARADIGM (DIMENSIONLESS)
+		!! units error corrected; "NOSNDP>0 :AND:" added to avoid div/0 condition
+	|
+
+SPDV Solved Puzzles in Paradigms[PM]=SP Solved Puzzles[PM]*SIDP Switch for Dominant Paradigms\
+		[PM]
+	~	Puzzles
+	~	ARRAY HOLDING SOLVED PUZZLES IN DOMINANT PARADIGM (PUZZLES)
+	|
+
+SPD Solved Puzzles in Dominant Paradigm=SUM(SPDV Solved Puzzles in Paradigms[PM!])/NODP Number of Dominant Paradigms
+	~	Puzzles
+	~	NUMBER OF SOLVED PUZZLES IN DOMINANT PARADIGM (PUZZLES)
+	|
+
+SPRDP Solved Puzzles Relative to Dominant Paradigm[PM]=SP Solved Puzzles[PM]/POS(DFSP Discount for Solved Puzzles\
+		*SPD Solved Puzzles in Dominant Paradigm)
+	~	Dmnl
+	~	SOLVED PUZZLES RELATIVE TO DOMINANT PARADIGM (DIMENSIONLESS)
+	|
+
+DFSP Discount for Solved Puzzles=1
+	~	Dmnl
+	~	DISCOUNT FOR SOLVED PUZZLES (DIMENSIONLESS)
+	|
+
+ADV Anomalies in Dominant Paradigm[PM]=A Anomalies[PM]*SIDP Switch for Dominant Paradigms\
+		[PM]
+	~	Puzzles
+	~	ARRAY HOLDING ANOMALIES IN DOMINANT PARADIGM (PUZZLES)
+	|
+
+AD Anomalies in Dominant Paradigm=
+	SUM(ADV Anomalies in Dominant Paradigm[PM!])/NODP Number of Dominant Paradigms
+	~	Puzzles
+	~	NUMBER OF ANOMALIES IN DOMINANT PARADIGM  (PUZZLES)
+	|
+
+ARDP Anomalies Relative to Dominant Paradigm[PM]=A Anomalies[PM]/POS(DFA Discount for Anomalies\
+		*AD Anomalies in Dominant Paradigm)
+	~	Dmnl
+	~	ANOMALIES RELATIVE TO DOMINANT PARADIGM (DIMENSIONLESS)
+	|
+
+DFA Discount for Anomalies=1
+	~	Dmnl
+	~	DISCOUNT FOR ANOMALIES (DIMENSIONLESS)
+	|
+
+********************************************************
+	.400.CONFIDENCE
+********************************************************~
+		400 CONFIDENCE
+	|
+
+DPAR Difficulty of Puzzles for Anomaly Resolution[PM]=NDPAR Normal Difficulty for Anomaly Resolution\
+		*ECART Effect of Confidence on Anomaly Resolution[PM]
+	~	Year*Person/Puzzle
+	~	DIFFICULTY OF PUZZLES FOR ANOMALY RESOLUTION (PERSON-YEARS/PUZZLE)
+	|
+
+NDPAR Normal Difficulty for Anomaly Resolution=4
+	~	Year*Person/Puzzle
+	~	NORMAL DIFFICULTY OF PUZZLES FOR ANOMALY RESOLUTION (PERSON-YEARS/PUZZLE)
+	|
+
+ECART Effect of Confidence on Anomaly Resolution[PM]=TECART Table for Effect of Confidence on Anomaly Resolution\
+		((CP Confidence in Paradigm[PM]-(0))/(1-(0)))
+	~	Dmnl
+	~	EFFECT OF CONFIDENCE ON ANOMALY RECOGNITION TIME (DIMENSIONLESS)
+	|
+
+TECART Table for Effect of Confidence on Anomaly Resolution(0,0.1,0.2,0.3,0.4,0.5,0.6\
+		,0.7,0.8,0.9,1,0,0.01,0.1,0.3,0.6,1,1.4,1.9,2.6,4.5,10
+)
+	~	Dmnl
+	~	TABLE FOR EFFECT OF CONFIDENCE ON ANOMALY RECOGNITION TIME (DIMENSIONLESS)
+	|
+
+CP Confidence in Paradigm[PM]= INTEG (
+	CC Change in Confidence[PM],
+		ICPN Initial Confidence in Paradigm 1[PM])
+	~	Confidence Units
+	~	INITIAL CONFIDENCE IN PARADIGM IN NORMAL SCIENCE (CONFIDENCE UNITS)
+	|
+
+ICPN Initial Confidence in Paradigm 1[N]= INITIAL(
+	ICPE Initial Confidence in Emerging Paradigm) ~~|
+ICPN Initial Confidence in Paradigm 1[n1]=0.96
+	~	Confidence Units
+	~	VALUE OF CONFIDENCE IN PARADIGM 1 (CONFIDENCE UNITS)
+	|
+
+ICPE Initial Confidence in Emerging Paradigm=
+	0.5
+	~	Confidence Units
+	~	INITIAL CONFIDENCE IN PARADIGM IN EMERGENCE PHASE (CONFIDENCE UNITS)
+	|
+
+CC Change in Confidence[PM]=
+	(NCC Normal Change in Confidence*ICC Indicated Change in Confidence[PM]*RCC Receptiveness to Change in Confidence\
+		[PM])*SAP Switch to Activate Paradigm[PM]
+	~	Confidence Units/Year
+	~	CHANGE IN CONFIDENCE (CONFIDENCE UNITS/YEAR)
+	|
+
+NCC Normal Change in Confidence=
+	0.003
+	~	Confidence Units/Year
+	~	NORMAL CHANGE IN CONFIDENCE (CONFIDENCE UNITS/YEAR)
+	|
+
+RCC Receptiveness to Change in Confidence[PM]=
+	TRCC Table for Receptiveness to Change in Confidence((CP Confidence in Paradigm[PM]-\
+		(0))/(1-(0)))
+	~	Dmnl
+	~	RECEPTIVENESS TO CHANGE IN CONFIDENCE (DIMENSIONLESS)
+	|
+
+TRCC Table for Receptiveness to Change in Confidence(
+	0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,0,0.3,0.6,0.8,0.95,1,0.95,0.8,0.6,0.3,0)
+	~	Dmnl
+	~	TABLE FOR RECEPTIVENESS TO CHANGE IN CONFIDENCE (DIMENSIONLESS)
+	|
+
+ICC Indicated Change in Confidence[PM]=CA Constant for Anomalies Relative to Expectations\
+		*EAC Effect of Anomalies on Confidence[PM]+CSP Constant for Solved Puzzles Relative to Expectations\
+		*EPC Effect of Progress on Confidence[PM]+CDA Constant for Anomalies Relative to Dominant\
+		*EARDPC Effect of Anomalies Relative to Dominant[PM]+CDSP Constant for Solved Puzzles Relative to Dominant\
+		*ESPRDPC Effect of Solved Puzzles Relative to Dominant Paradigm[PM]+CRAAP Constant for Anomalies Across Paradigms\
+		*ERAAPC Effect of Relative Anomalies Aross Paradigms[PM]*SINDP Switch for Historically NonDominant Paradigms
+[PM]+CRSPAP Constatnt for Solved Puzzles Across Paradigms*ERSPAPC Effect of Relative Solved Puzzles Across Paradigms\
+		[PM]*SINDP Switch for Historically NonDominant Paradigms[PM]
+	~	Dmnl
+	~	INDICATED CHANGE IN CONFIDENCE (DIMENSIONLESS)
+	|
+
+CA Constant for Anomalies Relative to Expectations=1
+	~	Dmnl
+	~	CONSTANT FOR ANOMALIES RELATIVE TO EXPECTATIONS (DIMENSIONLESS)
+	|
+
+CSP Constant for Solved Puzzles Relative to Expectations=1
+	~	Dmnl
+	~	CONST FOR SOLVD PUZZLES RELATIVE TO EXPECTATIONS (DIMENSIONLESS)
+	|
+
+CDA Constant for Anomalies Relative to Dominant=1
+	~	Dmnl
+	~	CONSTANT FOR ANOMALIES RELATIVE TO DOMINANT PARADIGM (DIMENSIONLESS)
+	|
+
+CDSP Constant for Solved Puzzles Relative to Dominant=1.5
+	~	Dmnl
+	~	CONSTANT FOR SOLVED PUZZLES RELATIVE TO DOMINANT PARADIGM (DIMENSIONLESS)
+	|
+
+CRAAP Constant for Anomalies Across Paradigms=1
+	~	Dmnl
+	~	CONSTANT FOR RELATIVE ANOMALIES ACROSS PARADIGMS (DIMENSIONLESS)
+	|
+
+CRSPAP Constatnt for Solved Puzzles Across Paradigms=1.25
+	~	Dmnl
+	~	CONSTANT FOR RELATIVE SP ACROSS PARADIGMS (DIMENSIONLESS)
+	|
+
+SINDP Switch for Historically NonDominant Paradigms[PM]=IF THEN ELSE(SIHDP Switch for Historically Dominant Paradigms\
+		[PM] >= 1,0,1)*SAP Switch to Activate Paradigm[PM]
+	~	Dmnl
+	~	SWITCH TO INDICATE PARADIGMS THAT HAVE NOT BEEN DOMINANT (DIMENSIONLESS)
+	|
+
+SIHDP Switch for Historically Dominant Paradigms[PM]=IF THEN ELSE(HDP Historically Dominant Paradigms\
+		[PM] >= 1,1,0)
+	~	Dmnl
+	~	SWITCH TO INDICATE HISTORICALLY DOMINANT PARADIGMS (DIMENSIONLESS)
+	|
+
+HDP Historically Dominant Paradigms[PM]= INTEG (
+	CHDP Increment to Historically Dominant Paradigms[PM]/TIME STEP,
+		0)
+	~	Dmnl
+	~	ARRAY TO INDICATE HISTORICALLY DOMINANT PARADIGMS (DIMENSIONLESS)
+	|
+
+CHDP Increment to Historically Dominant Paradigms[PM]=
+	SIDP Switch for Dominant Paradigms[PM]
+	~	Dmnl
+	~	INCREMENTOR TO ARRAY INDICATING HISTORICALLY DOMINANT PARADIGMS \
+		(DIMENSIONLESS)
+	|
+
+EAC Effect of Anomalies on Confidence[PM]=TEAC Table for Effect of Anomalies on Confidence\
+		((RA Relative Anomalies[PM]-(0))/(6-(0)))
+	~	Dmnl
+	~	EFFECT OF ANOMALIES ON CONFIDENCE (DIMENSIONLESS)
+	|
+
+TEAC Table for Effect of Anomalies on Confidence(0,0.0833333,0.166667,0.25,0.333333,0.416667\
+		,0.5,0.583333,0.666667,0.75,0.833333,
+0.916667,1,5,2.15,0,-1.2,-2.15,-2.9,-3.4,-3.9,-4.4,-4.8,-5.1,-5.3,-5.4)
+	~	Dmnl
+	~	TABLE FOR EFFECT OF ANOMALIES ON CONFIDENCE (DIMENSIONLESS)
+	|
+
+EPC Effect of Progress on Confidence[PM]=TEPC Table for Effect of Confidence on Progress\
+		((RSP Relative Solved Puzzles[PM]-(0))/(5-(0)))
+	~	Dmnl
+	~	EFFECT OF PROGRESS ON CONFIDENCE (DIMENSIONLESS)
+	|
+
+TEPC Table for Effect of Confidence on Progress(0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9\
+		,1,-5,-2.15,0,1.2,2.15,2.9,3.4,3.9,4.2,
+4.4,4.5)
+	~	Dmnl
+	~	TABLE FOR EFFECT OF PROGRESS ON CONFIDENCE (DIMENSIONLESS)
+	|
+
+EARDPC Effect of Anomalies Relative to Dominant[PM]=TARDPC Table for Effect of Anomalies Relative to Dominant Paradigm\
+		((ARDP Anomalies Relative to Dominant Paradigm[PM]-(0))/(6-(0)))
+	~	Dmnl
+	~	EFFECT OF ANOMALIES RELATIVE TO DOMINANT PARADIGM (DIMENSIONLESS)
+	|
+
+TARDPC Table for Effect of Anomalies Relative to Dominant Paradigm(0,0.0833333,0.166667\
+		,0.25,0.333333,0.416667,0.5,0.583333,0.666667,0.75,0.833333,
+0.916667,1,5,2.15,0,-1.2,-2.15,-2.9,-3.4,-3.9,-4.4,-4.8,-5.1,-5.4,-5.7)
+	~	Dmnl
+	~	TABLE FOR EFFECT OF ANOMALIES RELATIVE TO DOMINANT PARADIGM (DIMENSIONLESS)
+	|
+
+ESPRDPC Effect of Solved Puzzles Relative to Dominant Paradigm[PM]=TSPRDPC Table for Effect of Solved Puzzles Relative to Dominant Paradigm\
+		((SPRDP Solved Puzzles Relative to Dominant Paradigm[PM]-(0))/(5-(0)))
+	~	Dmnl
+	~	EFFECT OF SOLVED PUZZLES RELATIVE TO DOMINANT PARADIGM (DIMENSIONLESS)
+	|
+
+TSPRDPC Table for Effect of Solved Puzzles Relative to Dominant Paradigm(0,0.1,0.2,0.3\
+		,0.4,0.5,0.6,0.7,0.8,0.9,1,-5,-2.15,0,1.2,2.15,2.9,3.4,3.9,4.2
+,4.4,4.5)
+	~	Dmnl
+	~	TABLE FOR EFFECT OF SOLVED PUZZLES REALTIVE TO THE DOMINANT PARADIGM \
+		(DIMENSIONLESS)
+	|
+
+RAAP Relative Anomalies Across Paradigms[PM]=A Anomalies[PM]/ASND Anomalies for Strongest Nondominant Paradigm
+	~	Dmnl
+	~	RELATIVE ANOMALIES ACROSS PARADIGMS (DIMENSIONLESS)
+	|
+
+ERAAPC Effect of Relative Anomalies Aross Paradigms[PM]=
+	TRAAPC Table for Effect of Relative Anomalies Aross Paradigms(RAAP Relative Anomalies Across Paradigms\
+		[PM]/2)
+	~	Dmnl
+	~	EFFECT OF RELATIVE ANOMALIES ACROSS PARADIGMS (DIMENSIONLESS)
+	|
+
+TRAAPC Table for Effect of Relative Anomalies Aross Paradigms(0,0.05,0.1,0.15,0.2,0.25\
+		,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,
+0.85,0.9,0.95,1,3.8,3.6,3.4,3.2,3,2.8,2.6,2.4,2.2,2,0,-2,-2.2,-2.4,-2.6,-2.8
+,-3,-3.2,-3.4,-3.6,-3.8)
+	~	Dmnl
+	~	TABLE FOR EFFECT OF RELATIVE ANOMALIES ACROSS PARADIGMS (DIMENSIONLESS)
+	|
+
+RSPAP Relative Solved Puzzles Across Paradigms[PM]=SP Solved Puzzles[PM]/SPSND Solved Puzzles for Strongest Nondominant Paradigm
+	~	Dmnl
+	~	RELATIVE SOLVED PUZZLES ACROSS PARADIGMS (DIMENSIONLESS)
+	|
+
+ERSPAPC Effect of Relative Solved Puzzles Across Paradigms[PM]=TRSPAPC Table for Effect of Relative Solved Puzzles Across Paradigms\
+		((RSPAP Relative Solved Puzzles Across Paradigms[PM]-(0))/(2-(0)))
+	~	Dmnl
+	~	EFFECT OF RELATIVE SOLVED PUZZLES ACROSS PARADIGMS (DIMENSIONLESS)
+	|
+
+TRSPAPC Table for Effect of Relative Solved Puzzles Across Paradigms(0,0.05,0.1,0.15,\
+		0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,
+0.85,0.9,0.95,1,-3.8,-3.6,-3.4,-3.2,-3,-2.8,-2.6,-2.4,-2.2,-2,0,2,2.2,2.4,2.6
+,2.8,3,3.2,3.4,3.6,3.8)
+	~	Dmnl
+	~	TABLE FOR EFFECT OF RELATIVE SOLVED PUZZLES ACROSS PARADIGMS \
+		(DIMENSIONLESS)
+	|
+
+********************************************************
+	.500.PRACTITIONERS
+********************************************************~
+		500 PRACTITIONERS
+	|
+
+FPCP Fraction of Practitioners in Paradigm[PM]=P Practitioners[PM]/TP Total Practitioners
+	~	fraction
+	~	FRACTION OF PRACTITIONERS COMMITTED TO THE PARADIGM (FRACTION)
+	|
+
+TP Total Practitioners=500
+	~	Persons
+	~	TOTAL PRACTITIONERS (PERSONS)
+	|
+
+P Practitioners[PM]= INTEG (
+	RR Recruitment Rate[PM]-DR Defection Rate[PM]-DINP Defection to New Paradigms[PM],
+		P Initial Practitioners[PM])
+	~	Persons
+	~	IN NORMAL SCIENCE ALL PRACTITIONERS ARE IN DOMINANT PARADIGM (PERSONS)
+	|
+
+P Initial Practitioners[N]=
+	0 ~~|
+P Initial Practitioners[n1]=TP Total Practitioners
+	~	Persons
+	~	!! added for initialization
+	|
+
+PDPV Dominant Practitioners[PM]=P Practitioners[PM]*SIDP Switch for Dominant Paradigms\
+		[PM]
+	~	Persons
+	~	ARRAY FOR PRACTITIONERS IN DOMINANT PARADIGMS (PERSONS)
+	|
+
+PDP Practitioners in Dominant Paradigm=SUM(PDPV Dominant Practitioners[PM!])/NODP Number of Dominant Paradigms
+	~	Persons
+	~	PRACTITIONERS IN DOMINANT PARADIGMS (PERSONS)
+	|
+
+RR Recruitment Rate[PM]=
+	TDR Total Defection Rate*FDRP Fraction of Departures Recruited[PM]*SAP Switch to Activate Paradigm\
+		[PM]+RINP Recruitment into New Paradigms[PM]
+	~	Persons/Year
+	~	RECRUITMENT RATE (PERSONS/YEAR)
+	|
+
+RINP Recruitment into New Paradigms[PM]=
+	(1-SARL Switch for Random Launch)*RINPF[PM]+SARL Switch for Random Launch*RINPNF[PM]
+	~	Persons/Year
+	~	RECRUITMENT INTO NEW PARADIGMS (PERSONS/YEAR)
+	|
+
+RINPNF[PM]=IF THEN ELSE(CX Increment for Next Paradigm Switch[PM] >= 1,NPINP Practitioners in New Paradigm\
+		/TIME STEP,0)
+	~	Persons/Year
+	~	RECRUITMENT INTO NEW PARADIGMS FOR NON-FIXED LAUNCH TIMES (PERSONS/YEAR)
+	|
+
+RINPF[PM]=IF THEN ELSE(Time-ZDUMTOA Fixed Launch Times[PM] = 0,NPINP Practitioners in New Paradigm\
+		/TIME STEP,0)
+	~	Persons/Year
+	~	RECRUITMENT INTO NEW PARADIGMS FOR FIXED LAUNCH TIMES (PERSONS/YEAR)
+	|
+
+NPINP Practitioners in New Paradigm=5
+	~	Persons
+	~	NUMBER OF PRACTITIONERS IN NEW PARADIGM (PERSONS)
+	|
+
+TDR Total Defection Rate=
+	SUM(DR Defection Rate[PM!])
+	~	Persons/Year
+	~	TOTAL DEFECTION RATE (PERSONS/YEAR)
+	|
+
+FDRP Fraction of Departures Recruited[PM]=
+	AP Attractiveness of Paradigm[PM]/TAP Total Attractiveness of Paradigms
+	~	fraction
+	~	FRACTION OF DEPARTURES RECRUITED TO A PARADIGM (FRACTION)
+	|
+
+TAP Total Attractiveness of Paradigms=SUM(AP Attractiveness of Paradigm[PM!])
+	~	Persons
+	~	TOTAL ATTRACTIVENESS OF ALL PARADIGMS (PERSONS)
+	|
+
+AP Attractiveness of Paradigm[PM]=IF THEN ELSE(P Practitioners[PM] >= 1,P Practitioners\
+		[PM],0)*(NFDR Normal Fractional Defection Rate/ANFDR Fraction Normally Defecting)*ECAR Effect of Confidence on Attractiveness\
+		[PM]
+	~	Persons
+	~	ATTRACTIVENESS OF PARADIGM (PERSONS)
+	|
+
+ECAR Effect of Confidence on Attractiveness[PM]=ECR Effect of Confidence on Recruitment\
+		[PM]
+	~	Dmnl
+	~	EFFECT OF CONFIDENCE ON ATTRACTIVENESS (DIMENSIONLESS)
+	|
+
+ANFDR Fraction Normally Defecting=SUM(NDR Normal Defection Rate[PM!])/TP Total Practitioners
+	~	fraction/Year
+	~	FRACTION OF ALL PRACTITIONERS WHO NORMALLY DEFECT (FRACTION)
+		!! units error?
+	|
+
+ECR Effect of Confidence on Recruitment[PM]=EXP(SRC Sensitivity of Recruitment to Confidence\
+		*(CP Confidence in Paradigm[PM]-CDP Confidence in Dominant Paradigm))
+	~	Dmnl
+	~	EFFECT OF CONFIDENCE ON RECRUITMENT (DIMENSIONLESS)
+	|
+
+SRC Sensitivity of Recruitment to Confidence=5
+	~	1/Confidence Units
+	~	SENSITIVITY OF RECRUITMENT TO CONFIDENCE (1/CONFIDENCE UNITS)
+	|
+
+CDP Confidence in Dominant Paradigm=SUM(CDPV Confidence in Dominent Paradigms[PM!])/NODP Number of Dominant Paradigms
+	~	Confidence Units
+	~	CONFIDENCE IN THE DOMINANT PARADIGM (CONFIDENCE UNITS)
+	|
+
+CDPV Confidence in Dominent Paradigms[PM]=CP Confidence in Paradigm[PM]*SIDP Switch for Dominant Paradigms\
+		[PM]
+	~	Confidence Units
+	~	ARRAY HOLDING CONFIDENCE IN DOMINANT PARADIGM (CONFIDENCE UNITS)
+	|
+
+DR Defection Rate[PM]=
+	(MIN(MAXDR Maximum Departure Rate[PM],NDR Normal Defection Rate[PM]*ECD Effect of Confidence on Defection\
+		[PM])+P Practitioners[PM]*NRETR Normal Retirement Rate)*SAP Switch to Activate Paradigm\
+		[PM]
+	~	Persons/Year
+	~	DEFECTION RATE (PERSONS/YEAR)
+	|
+
+MAXDR Maximum Departure Rate[PM]=MAXFDR Max Fractional Departure Rate*P Practitioners\
+		[PM]
+	~	Persons/Year
+	~	MAXIMUM DEPARTURE RATE [EXCLUSIVE OF RETIREMENT] (PEOPLE/YEAR)
+	|
+
+MAXFDR Max Fractional Departure Rate=0.1
+	~	1/Year
+	~	MAXIMUM FRACTIONAL DEPARTURE RATE (1/YEAR)
+	|
+
+NRETR Normal Retirement Rate=0.025
+	~	1/Year
+	~	NORMAL RETIREMENT RATE (PERSONS/YEAR)
+		!! units error corrected
+	|
+
+NODP Number of Dominant Paradigms=IF THEN ELSE(SUM(SIDP Switch for Dominant Paradigms\
+		[PM!]) >= 1,SUM(SIDP Switch for Dominant Paradigms[PM!]),1)
+	~	Dmnl
+	~	NUMBER OF DOMINANT PARADIGMS (DIMENSIONLESS)
+	|
+
+DINP Defection to New Paradigms[PM]=
+	IF THEN ELSE(TTPMAX Maximum Trust-TTP Total Trust[PM] = 0,SUM(RINP Recruitment into New Paradigms\
+		[PM!])/NODP Number of Dominant Paradigms,0)
+	~	Persons/Year
+	~	EFECTION INTO NEW PARADIGMS (PERSONS/YEAR)
+	|
+
+NDR Normal Defection Rate[PM]=NFDR Normal Fractional Defection Rate*P Practitioners[PM\
+		]
+	~	Persons/Year
+	~	NORMAL DEFECTION RATE (PERSONS/YEAR)
+	|
+
+NFDR Normal Fractional Defection Rate=0.04
+	~	fraction/Year
+	~	NORMAL FRACTIONAL DEFECTION RATE (FRACTION/YEAR)
+	|
+
+ECD Effect of Confidence on Defection[PM]=EXP(-SDC Sensitivity of Defection to Confidence\
+		*(CP Confidence in Paradigm[PM]-CDP Confidence in Dominant Paradigm))
+	~	Dmnl
+	~	EFFECT OF CONFIDENCE ON DEFECTION (DIMENSIONLESS)
+	|
+
+SDC Sensitivity of Defection to Confidence=5
+	~	1/Confidence Units
+	~	SENSITIVITY OF DEFECTION TO CONFIDENCE (1/CONFIDENCE UNITS)
+	|
+
+PND Practitioners in Nondominant Paradigm[PM]=P Practitioners[PM]*SINDP Switch for Historically NonDominant Paradigms\
+		[PM]
+	~	Persons
+	~	PRACTITIONERS IN NON-DOMINANT PARADIGMS (PERSONS)
+	|
+
+PNDMAX Practitioners in Largest Nondominant Paradigm=VMAX(PND Practitioners in Nondominant Paradigm\
+		[PM!])
+	~	Persons
+	~	PRACTITIONERS IN LARGEST NON-DOMINANT PARADIGM (PERSONS)
+	|
+
+TTPMAX Maximum Trust=VMAX(TTP Total Trust[PM!])
+	~	Persons
+	~	MAXIMUM VALUE OF TRUST IN PARADIGM (PERSONS)
+	|
+
+TTPA[PM]=IF THEN ELSE(TTP Total Trust[PM]-TTPMAX Maximum Trust = 0,0,TTP Total Trust[\
+		PM])*SAP Switch to Activate Paradigm[PM]
+	~	Persons
+	~	TRUST IN PARADIGM FOR NON-DOMINANT PARADIGMS (PERSONS)
+	|
+
+TTPAMAX=VMAX(TTPA[PM!])
+	~	Persons
+	~	MAXIMUM TRUST IN A PARADIGM FOR NON-DOMINANT PARADIGMS (PERSONS)
+	|
+
+********************************************************
+	.500.PRACTITIONERS.CROSS-PARADIGM COMPARISONS
+********************************************************~
+		CROSS-PARADIGM COMPARISONS
+	|
+
+CE Cumulative Effort[PM]= INTEG (
+	DCE Change in Cumulative Effort[PM],
+		0)
+	~	Persons
+	~	CUMULATIVE EFFORT (PERSONS) [NOT CURRENTLY USED]
+	~	:SUPPLEMENTARY 
+	|
+
+DCE Change in Cumulative Effort[PM]=P Practitioners[PM]
+	~	Persons/Year
+	~	RATE OF CHANGE OF CUMULATIVE EFFORT (PERSONS/YEAR)
+	|
+
+********************************************************
+	.999.CONTROL DATA
+********************************************************~
+		CONTROL DATA
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Year
+	~		|
+
+TIME STEP  = 0.25
+	~	Year
+	~	SOLUTION INTERVAL (YEARS)
+	|
+
+FINAL TIME  = 2000
+	~	Year
+	~	LENGTH OF SIMULATION (YEARS)
+	|
+
+INITIAL TIME  = 0
+	~	Year
+	~	!! Assumed with FINAL_TIME = LENGTH
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*About
+$192-192-192,0,Arial|10||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+12,1,0,170,120,118,38,8,7,0,24,-1,0,0,0,-1--1--1,0-0-0,|12|B|0-0-0
+Path Dependence, Competition, and Succession in the Dynamics of Scientific Revolution
+12,2,0,170,245,77,24,8,7,0,0,-1,0,0,0
+ORGANIZATION SCIENCE/Vol. 10, No. 3, May–June 1999
+12,3,0,174,191,54,16,8,7,0,0,-1,0,0,0
+John Sterman & Jason Wittenberg
+12,4,0,170,355,74,24,8,7,0,0,-1,0,0,0
+Translated to Vensim by Tom Fiddaman, 2011, updated 2018
+12,5,0,170,400,65,14,8,135,0,18,-1,0,253,253,-1--1--1,0-0-0,|10|U|0-0-255
+http://models.metasd.com|models.metasd.com
+12,6,0,170,305,131,24,8,135,0,18,-1,0,253,253,-1--1--1,0-0-0,|10|U|0-0-255
+http://jsterman.scripts.mit.edu/On-Line_Publications.html#1999Path|http://jsterman.scripts.mit.edu/On-Line_Publications.html#1999Path
+12,7,0,572,225,189,25,8,135,0,0,-1,0,0,0
+See also notes in text view, especially concerning division by zero errors with NOSNDP.
+12,8,0,563,107,207,27,8,135,0,2,-1,0,0,0,-1--1--1,0-0-0,|10||255-0-0
+This version appears to be behaviorally faithful to the original in DYNAMO, but should be regarded as BETA SOFTWARE.
+12,9,0,559,163,165,14,8,135,0,0,-1,0,0,0
+Improvements can be sent to tom@metasd.com.
+12,10,0,445,328,32,32,6,135,0,5,-1,0,6,0,160-160-160,192-192-192,|0||0-0-0
+Control
+12,11,0,549,370,44,44,6,135,0,5,-1,0,2,0,160-160-160,192-192-192,|0||0-0-0
+Practitioners
+12,12,0,660,320,40,40,6,135,0,5,-1,0,3,0,160-160-160,192-192-192,|0||0-0-0
+Confidence
+12,13,0,649,449,38,38,6,135,0,5,-1,0,4,0,160-160-160,192-192-192,|0||0-0-0
+Puzzles
+12,14,0,510,474,41,41,6,135,0,5,-1,0,5,0,160-160-160,192-192-192,|0||0-0-0
+Accounting
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Practitioners
+$192-192-192,0,Arial|10||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,5,0
+10,1,P Practitioners,612,201,40,20,3,3,0,0,-1,0,0,0
+10,2,P Initial Practitioners,608,127,43,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,3,2,1,0,0,0,0,0,64,1,-1--1--1,,1|(608,155)|
+12,4,48,381,205,10,8,0,3,0,0,-1,0,0,0
+1,5,7,1,4,0,0,22,0,0,0,-1--1--1,,1|(528,201)|
+1,6,7,4,100,0,0,22,0,0,0,-1--1--1,,1|(432,201)|
+11,7,48,479,201,6,8,34,3,0,0,1,0,0,0
+10,8,RR Recruitment Rate,479,225,49,16,40,3,0,0,-1,0,0,0
+12,9,48,822,203,10,8,0,3,0,0,-1,0,0,0
+1,10,17,9,4,0,0,22,0,0,0,-1--1--1,,1|(775,203)|
+1,11,17,1,100,0,0,22,0,0,0,-1--1--1,,1|(689,203)|
+12,12,48,589,359,10,8,0,3,0,0,-1,0,0,0
+1,13,15,12,4,0,0,22,0,0,0,-1--1--1,,1|(589,321)|
+1,14,15,1,100,0,0,22,0,0,0,-1--1--1,,1|(589,250)|
+11,15,48,589,285,8,6,33,3,0,0,4,0,0,0
+10,16,DINP Defection to New Paradigms,652,285,55,16,40,3,0,0,-1,0,0,0
+11,17,3228,732,203,6,8,34,3,0,0,1,0,0,0
+10,18,DR Defection Rate,732,220,56,9,40,3,0,0,-1,0,0,0
+10,19,FDRP Fraction of Departures Recruited,325,289,65,16,8,3,0,0,-1,0,0,0
+1,20,19,8,0,0,0,0,0,0,0,-1--1--1,,1|(395,259)|
+1,21,28,8,0,0,0,0,0,0,0,-1--1--1,,1|(540,328)|
+10,22,SAP Switch to Activate Paradigm,349,117,60,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,23,22,8,0,0,0,0,0,0,0,-1--1--1,,1|(408,166)|
+10,24,TDR Total Defection Rate,603,75,45,16,8,3,0,0,-1,0,0,0
+1,25,24,7,1,0,0,0,0,0,0,-1--1--1,,1|(520,127)|
+10,26,NODP Number of Dominant Paradigms,656,464,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,27,26,16,0,0,0,0,0,0,0,-1--1--1,,1|(654,381)|
+10,28,RINP Recruitment into New Paradigms,596,422,70,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,29,28,16,0,0,0,0,0,0,0,-1--1--1,,1|(621,358)|
+10,30,TTP Total Trust,776,432,46,9,8,3,0,0,-1,0,0,0
+1,31,30,16,0,0,0,0,0,0,0,-1--1--1,,1|(721,367)|
+10,32,TTPMAX Maximum Trust,698,375,48,16,8,3,0,0,-1,0,0,0
+1,33,32,16,0,0,0,0,0,0,0,-1--1--1,,1|(678,336)|
+10,34,ECD Effect of Confidence on Defection,893,223,44,24,8,3,0,0,-1,0,0,0
+1,35,34,18,0,0,0,0,0,0,0,-1--1--1,,1|(825,222)|
+10,36,MAXDR Maximum Departure Rate,853,272,56,16,8,3,0,0,-1,0,0,0
+1,37,36,18,0,0,0,0,0,0,0,-1--1--1,,1|(790,245)|
+10,38,NDR Normal Defection Rate,853,382,45,16,8,3,0,0,-1,0,0,0
+1,39,38,18,0,0,0,0,0,0,0,-1--1--1,,1|(794,303)|
+10,40,NRETR Normal Retirement Rate,854,328,50,16,8,3,0,0,-1,0,0,0
+1,41,40,18,0,0,0,0,0,0,0,-1--1--1,,1|(794,275)|
+1,42,1,18,1,0,0,0,0,0,0,-1--1--1,,1|(673,241)|
+10,43,SAP Switch to Activate Paradigm,840,112,64,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,44,43,18,0,0,0,0,0,0,0,-1--1--1,,1|(785,166)|
+1,45,18,24,1,0,0,0,0,0,0,-1--1--1,,1|(699,138)|
+10,46,CDP Confidence in Dominant Paradigm,1022,276,60,16,8,3,0,0,-1,0,0,0
+1,47,46,34,0,0,0,0,0,0,0,-1--1--1,,1|(966,253)|
+10,48,CP Confidence in Paradigm,1029,232,57,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,49,48,34,0,0,0,0,0,0,0,-1--1--1,,1|(961,227)|
+10,50,SDC Sensitivity of Defection to Confidence,1018,163,72,16,8,3,0,0,-1,0,0,0
+1,51,50,34,0,0,0,0,0,0,0,-1--1--1,,1|(967,187)|
+10,52,MAXFDR Max Fractional Departure Rate,991,326,62,24,8,3,0,0,-1,0,0,0
+1,53,52,36,0,0,0,0,0,0,0,-1--1--1,,1|(918,297)|
+1,54,1,36,0,0,0,0,0,0,0,-1--1--1,,1|(718,231)|
+10,55,CDPV Confidence in Dominent Paradigms,1164,272,64,16,8,3,0,0,-1,0,0,0
+1,56,55,46,0,0,0,0,0,0,0,-1--1--1,,1|(1097,273)|
+10,57,NODP Number of Dominant Paradigms,1139,313,64,16,8,3,0,0,-1,0,0,0
+1,58,57,46,0,0,0,0,0,0,0,-1--1--1,,1|(1087,296)|
+1,59,62,57,0,0,0,0,0,0,0,-1--1--1,,1|(1230,301)|
+10,60,CP Confidence in Paradigm,1220,221,57,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,61,60,55,0,0,0,0,0,0,0,-1--1--1,,1|(1197,241)|
+10,62,SIDP Switch for Dominant Paradigms,1313,293,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,63,62,55,0,0,0,0,0,0,0,-1--1--1,,1|(1243,283)|
+10,64,NFDR Normal Fractional Defection Rate,861,570,61,24,8,3,0,0,-1,0,0,0
+1,65,64,38,0,0,0,0,0,0,0,-1--1--1,,1|(856,479)|
+1,66,1,38,0,0,0,0,0,0,0,-1--1--1,,1|(728,289)|
+1,67,30,32,0,0,0,0,0,0,0,-1--1--1,,1|(747,411)|
+1,68,1,30,0,0,0,0,0,0,0,-1--1--1,,1|(693,316)|
+10,69,SAP Switch to Activate Paradigm,786,485,60,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,70,69,30,0,0,0,0,0,0,0,-1--1--1,,1|(781,461)|
+10,71,AP Attractiveness of Paradigm,352,412,55,16,8,3,0,0,-1,0,0,0
+1,72,71,19,0,0,0,0,0,0,0,-1--1--1,,1|(340,357)|
+10,73,TAP Total Attractiveness of Paradigms,227,360,51,24,8,3,0,0,-1,0,0,0
+1,74,73,19,0,0,0,0,0,0,0,-1--1--1,,1|(275,324)|
+1,75,71,73,0,0,0,0,0,0,0,-1--1--1,,1|(302,391)|
+10,76,ANFDR Fraction Normally Defecting,404,479,58,16,8,3,0,0,-1,0,0,0
+1,77,76,71,0,0,0,0,0,0,0,-1--1--1,,1|(382,450)|
+10,78,ECAR Effect of Confidence on Attractiveness,292,474,46,24,8,3,0,0,-1,0,0,0
+1,79,78,71,0,0,0,0,0,0,0,-1--1--1,,1|(320,444)|
+1,80,64,71,0,0,0,0,0,0,0,-1--1--1,,1|(608,492)|
+1,81,1,71,0,0,0,0,0,0,0,-1--1--1,,1|(484,304)|
+10,82,ECR Effect of Confidence on Recruitment,271,544,44,24,8,3,0,0,-1,0,0,0
+1,83,82,78,0,0,0,0,0,0,0,-1--1--1,,1|(279,515)|
+10,84,CP Confidence in Paradigm,229,616,57,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,85,84,82,0,0,0,0,0,0,0,-1--1--1,,1|(243,590)|
+10,86,SRC Sensitivity of Recruitment to Confidence,344,622,55,24,8,3,0,0,-1,0,0,0
+1,87,86,82,0,0,0,0,0,0,0,-1--1--1,,1|(312,588)|
+10,88,TP Total Practitioners,395,543,39,16,8,3,0,0,-1,0,0,0
+1,89,88,76,0,0,0,0,0,0,0,-1--1--1,,1|(398,517)|
+10,90,CDP Confidence in Dominant Paradigm,466,589,65,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,91,NDR Normal Defection Rate,504,528,49,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,92,91,76,0,0,0,0,0,128,0,-1--1--1,,1|(460,507)|
+1,93,90,82,0,0,0,0,0,128,0,-1--1--1,,1|(364,565)|
+12,94,0,987,431,32,32,6,135,0,5,-1,0,6,0,160-160-160,192-192-192,|0||0-0-0
+Control
+12,95,0,1091,473,44,44,6,135,0,5,-1,0,2,0,160-160-160,192-192-192,|0||0-0-0
+Practitioners
+12,96,0,1202,423,40,40,6,135,0,5,-1,0,3,0,160-160-160,192-192-192,|0||0-0-0
+Confidence
+12,97,0,1191,552,38,38,6,135,0,5,-1,0,4,0,160-160-160,192-192-192,|0||0-0-0
+Puzzles
+12,98,0,1052,577,41,41,6,135,0,5,-1,0,5,0,160-160-160,192-192-192,|0||0-0-0
+Accounting
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Confidence
+$192-192-192,0,Arial|10||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,5,0
+10,1,CP Confidence in Paradigm,1127,118,40,20,3,3,0,0,-1,0,0,0
+12,2,48,790,122,10,8,0,3,0,0,-1,0,0,0
+1,3,5,1,4,0,0,22,0,0,0,-1--1--1,,1|(1015,121)|
+1,4,5,2,100,0,0,22,0,0,0,-1--1--1,,1|(866,121)|
+11,5,48,938,121,6,8,34,3,0,0,1,0,0,0
+10,6,CC Change in Confidence,938,151,43,16,40,3,0,0,-1,0,0,0
+10,7,ICC Indicated Change in Confidence,722,194,67,16,8,3,0,0,-1,0,0,0
+1,8,7,6,0,0,0,0,0,0,0,-1--1--1,,1|(835,171)|
+10,9,NCC Normal Change in Confidence,868,236,67,16,8,3,0,0,-1,0,0,0
+1,10,9,6,0,0,0,0,0,0,0,-1--1--1,,1|(898,198)|
+10,11,RCC Receptiveness to Change in Confidence,1038,236,69,16,8,3,0,0,-1,0,0,0
+1,12,11,6,0,0,0,0,0,0,0,-1--1--1,,1|(993,197)|
+10,13,SAP Switch to Activate Paradigm,914,46,64,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,14,13,5,0,0,0,0,0,0,0,-1--1--1,,1|(925,83)|
+10,15,ICPN Initial Confidence in Paradigm 1,1129,42,42,24,8,3,0,0,-1,0,0,0
+1,16,15,1,0,0,0,0,0,64,1,-1--1--1,,1|(1128,75)|
+1,17,1,11,0,0,0,0,0,0,0,-1--1--1,,1|(1085,173)|
+10,18,TRCC Table for Receptiveness to Change in Confidence,1032,325,78,24,8,3,0,0,-1,0,0,0
+1,19,18,11,0,0,0,0,0,0,0,-1--1--1,,1|(1034,283)|
+10,20,CA Constant for Anomalies Relative to Expectations,573,118,66,24,8,3,0,0,-1,0,0,0
+1,21,20,7,0,0,0,0,0,0,0,-1--1--1,,1|(648,156)|
+10,22,CDA Constant for Anomalies Relative to Dominant,387,148,66,24,8,3,0,0,-1,0,0,0
+1,23,22,7,0,0,0,0,0,0,0,-1--1--1,,1|(547,169)|
+10,24,CDSP Constant for Solved Puzzles Relative to Dominant,351,208,73,24,8,3,0,0,-1,0,0,0
+1,25,24,7,0,0,0,0,0,0,0,-1--1--1,,1|(532,201)|
+10,26,CRAAP Constant for Anomalies Across Paradigms,525,276,63,24,8,3,0,0,-1,0,0,0
+1,27,26,7,0,0,0,0,0,0,0,-1--1--1,,1|(626,233)|
+10,28,CRSPAP Constatnt for Solved Puzzles Across Paradigms,369,261,71,24,8,3,0,0,-1,0,0,0
+1,29,28,7,0,0,0,0,0,0,0,-1--1--1,,1|(540,228)|
+10,30,CSP Constant for Solved Puzzles Relative to Expectations,544,330,75,24,8,3,0,0,-1,0,0,0
+1,31,30,7,0,0,0,0,0,0,0,-1--1--1,,1|(632,262)|
+10,32,EAC Effect of Anomalies on Confidence,862,322,42,24,8,3,0,0,-1,0,0,0
+1,33,32,7,0,0,0,0,0,0,0,-1--1--1,,1|(792,258)|
+10,34,EARDPC Effect of Anomalies Relative to Dominant,588,385,66,24,8,3,0,0,-1,0,0,0
+1,35,34,7,0,0,0,0,0,0,0,-1--1--1,,1|(652,291)|
+10,36,EPC Effect of Progress on Confidence,780,372,42,24,8,3,0,0,-1,0,0,0
+1,37,36,7,0,0,0,0,0,0,0,-1--1--1,,1|(752,285)|
+10,38,ERAAPC Effect of Relative Anomalies Aross Paradigms,578,454,78,24,8,3,0,0,-1,0,0,0
+1,39,38,7,0,0,0,0,0,0,0,-1--1--1,,1|(648,326)|
+10,40,ERSPAPC Effect of Relative Solved Puzzles Across Paradigms,917,461,73,24,8,3,0,0,-1,0,0,0
+1,41,40,7,0,0,0,0,0,0,0,-1--1--1,,1|(820,329)|
+10,42,ESPRDPC Effect of Solved Puzzles Relative to Dominant Paradigm,634,570,82,24,8,3,0,0,-1,0,0,0
+1,43,42,7,0,0,0,0,0,0,0,-1--1--1,,1|(676,385)|
+10,44,SINDP Switch for Historically NonDominant Paradigms,732,515,77,24,8,3,0,0,-1,0,0,0
+1,45,44,7,0,0,0,0,0,0,0,-1--1--1,,1|(727,357)|
+10,46,ARDP Anomalies Relative to Dominant Paradigm,425,391,63,24,8,3,0,0,-1,0,0,0
+1,47,46,34,0,0,0,0,0,0,0,-1--1--1,,1|(498,388)|
+10,48,TARDPC Table for Effect of Anomalies Relative to Dominant Paradigm,408,465,82,24,8,3,0,0,-1,0,0,0
+1,49,48,34,0,0,0,0,0,0,0,-1--1--1,,1|(491,427)|
+10,50,RAAP Relative Anomalies Across Paradigms,460,533,56,24,8,3,0,0,-1,0,0,0
+1,51,50,38,0,0,0,0,0,0,0,-1--1--1,,1|(512,497)|
+10,52,TRAAPC Table for Effect of Relative Anomalies Aross Paradigms,560,518,82,24,8,3,0,0,-1,0,0,0
+1,53,52,38,0,0,0,0,0,0,0,-1--1--1,,1|(566,492)|
+10,54,SPRDP Solved Puzzles Relative to Dominant Paradigm,682,694,73,24,8,3,0,0,-1,0,0,0
+1,55,54,42,0,0,0,0,0,0,0,-1--1--1,,1|(660,638)|
+10,56,TSPRDPC Table for Effect of Solved Puzzles Relative to Dominant Paradigm,572,645,87,24,8,3,0,0,-1,0,0,0
+1,57,56,42,0,0,0,0,0,0,0,-1--1--1,,1|(597,612)|
+10,58,RA Relative Anomalies,934,415,40,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,59,58,32,0,0,0,0,0,0,0,-1--1--1,,1|(905,377)|
+10,60,TEAC Table for Effect of Anomalies on Confidence,1012,378,78,16,8,3,0,0,-1,0,0,0
+1,61,60,32,0,0,0,0,0,0,0,-1--1--1,,1|(943,351)|
+10,62,SAP Switch to Activate Paradigm,836,642,60,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,63,62,44,0,0,0,0,0,0,0,-1--1--1,,1|(791,587)|
+10,64,SIHDP Switch for Historically Dominant Paradigms,789,684,65,24,8,3,0,0,-1,0,0,0
+1,65,64,44,0,0,0,0,0,0,0,-1--1--1,,1|(762,606)|
+10,66,HDP Historically Dominant Paradigms,810,748,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,67,66,64,0,0,0,0,0,0,0,-1--1--1,,1|(802,726)|
+10,68,RSPAP Relative Solved Puzzles Across Paradigms,1077,521,72,24,8,3,0,0,-1,0,0,0
+1,69,68,40,0,0,0,0,0,0,0,-1--1--1,,1|(1003,493)|
+10,70,TRSPAPC Table for Effect of Relative Solved Puzzles Across Paradigms,1109,447,87,24,8,3,0,0,-1,0,0,0
+1,71,70,40,0,0,0,0,0,0,0,-1--1--1,,1|(1012,453)|
+10,72,SP Solved Puzzles,1180,620,36,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,73,72,68,0,0,0,0,0,0,0,-1--1--1,,1|(1137,579)|
+10,74,SPSND Solved Puzzles for Strongest Nondominant Paradigm,1259,548,82,24,8,3,0,0,-1,0,0,0
+1,75,74,68,0,0,0,0,0,0,0,-1--1--1,,1|(1169,534)|
+10,76,NOSNDP Number of Strongest Nondominant Paradigms,1377,492,72,24,8,3,0,0,-1,0,0,0
+1,77,76,74,0,0,0,0,0,0,0,-1--1--1,,1|(1324,517)|
+10,78,SPSNDV Solved Puzzles from Strongest Nondominant Paradigms,1334,619,78,24,8,3,0,0,-1,0,0,0
+1,79,78,74,0,0,0,0,0,0,0,-1--1--1,,1|(1301,588)|
+10,80,SISND Switch for Strongest Nondominant Paradigms,1468,553,72,24,8,3,0,0,-1,0,0,0
+1,81,80,76,0,0,0,0,0,0,0,-1--1--1,,1|(1428,526)|
+10,82,P Practitioners,1635,515,53,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,83,82,80,0,0,0,0,0,0,0,-1--1--1,,1|(1574,528)|
+10,84,PNDMAX Practitioners in Largest Nondominant Paradigm,1529,629,77,24,8,3,0,0,-1,0,0,0
+1,85,84,80,0,0,0,0,0,0,0,-1--1--1,,1|(1502,596)|
+10,86,PND Practitioners in Nondominant Paradigm,1685,584,71,16,8,3,0,0,-1,0,0,0
+1,87,86,84,0,0,0,0,0,0,0,-1--1--1,,1|(1624,601)|
+1,88,82,86,0,0,0,0,0,0,0,-1--1--1,,1|(1652,540)|
+10,89,SINDP Switch for Historically NonDominant Paradigms,1798,597,77,24,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,90,89,86,0,0,0,0,0,128,0,-1--1--1,,1|(1745,591)|
+1,91,80,78,0,0,0,0,0,0,0,-1--1--1,,1|(1407,583)|
+1,92,72,78,0,0,0,0,0,0,0,-1--1--1,,1|(1229,619)|
+10,93,RSP Relative Solved Puzzles,883,514,47,16,8,3,0,0,-1,0,0,0
+1,94,93,36,0,0,0,0,0,0,0,-1--1--1,,1|(838,452)|
+10,95,TEPC Table for Effect of Confidence on Progress,785,473,48,25,8,131,0,0,-1,0,0,0
+1,96,95,36,0,0,0,0,0,0,0,-1--1--1,,1|(782,428)|
+10,97,EGSP Expected Growth in Solved Puzzles,999,608,52,24,8,3,0,0,-1,0,0,0
+1,98,97,93,0,0,0,0,0,0,0,-1--1--1,,1|(941,561)|
+10,99,HSP Historical Solved Puzzles,962,653,52,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,100,99,93,0,0,0,0,0,0,0,-1--1--1,,1|(925,589)|
+1,101,72,93,0,0,0,0,0,0,0,-1--1--1,,1|(1042,571)|
+10,102,TEHSP Time to Establish Historical Solved Puzzles,843,573,59,24,8,3,0,0,-1,0,0,0
+1,103,102,93,0,0,0,0,0,0,0,-1--1--1,,1|(861,545)|
+10,104,A Anomalies,276,342,47,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,105,104,46,0,0,0,0,0,0,0,-1--1--1,,1|(325,358)|
+10,106,AD Anomalies in Dominant Paradigm,257,399,60,16,8,3,0,0,-1,0,0,0
+1,107,106,46,0,0,0,0,0,0,0,-1--1--1,,1|(332,395)|
+10,108,DFA Discount for Anomalies,260,448,53,16,8,3,0,0,-1,0,0,0
+1,109,108,46,0,0,0,0,0,0,0,-1--1--1,,1|(327,424)|
+10,110,A Anomalies,288,603,47,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,111,110,50,0,0,0,0,0,0,0,-1--1--1,,1|(350,577)|
+10,112,ASND Anomalies for Strongest Nondominant Paradigm,430,610,72,24,8,3,0,0,-1,0,0,0
+1,113,112,50,0,0,0,0,0,0,0,-1--1--1,,1|(442,578)|
+10,114,SUM ASNDV,357,675,41,9,8,3,0,0,-1,0,0,0
+1,115,114,112,0,0,0,0,0,0,0,-1--1--1,,1|(379,654)|
+10,116,NOSNDP Number of Strongest Nondominant Paradigms,478,691,72,24,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,117,116,112,0,0,0,0,0,128,0,-1--1--1,,1|(457,656)|
+10,118,ASNDV Anomalies for Strongest Nondominant Paradigms,305,735,72,24,8,3,0,0,-1,0,0,0
+1,119,118,114,0,0,0,0,0,0,0,-1--1--1,,1|(332,702)|
+1,120,110,118,0,0,0,0,0,0,0,-1--1--1,,1|(294,654)|
+10,121,SISND Switch for Strongest Nondominant Paradigms,478,755,72,24,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,122,121,118,0,0,0,0,0,128,0,-1--1--1,,1|(398,745)|
+10,123,ADV Anomalies in Dominant Paradigm,136,355,65,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,124,123,106,0,0,0,0,0,0,0,-1--1--1,,1|(189,374)|
+10,125,NODP Number of Dominant Paradigms,140,441,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,126,125,106,0,0,0,0,0,0,0,-1--1--1,,1|(191,422)|
+10,127,DFSP Discount for Solved Puzzles,603,829,57,16,8,3,0,0,-1,0,0,0
+1,128,127,54,0,0,0,0,0,0,0,-1--1--1,,1|(635,771)|
+10,129,SP Solved Puzzles,589,762,36,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,130,129,54,0,0,0,0,0,0,0,-1--1--1,,1|(623,736)|
+10,131,SPD Solved Puzzles in Dominant Paradigm,715,774,68,16,8,3,0,0,-1,0,0,0
+1,132,131,54,0,0,0,0,0,0,0,-1--1--1,,1|(702,744)|
+10,133,NODP Number of Dominant Paradigms,723,840,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,134,133,131,0,0,0,0,0,0,0,-1--1--1,,1|(720,813)|
+10,135,SPDV Solved Puzzles in Paradigms,885,809,67,16,8,3,0,0,-1,0,0,0
+1,136,135,131,0,0,0,0,0,0,0,-1--1--1,,1|(807,793)|
+10,137,SIDP Switch for Dominant Paradigms,1078,798,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,138,137,135,0,0,0,0,0,0,0,-1--1--1,,1|(987,802)|
+10,139,SP Solved Puzzles,1027,844,36,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,140,139,135,0,0,0,0,0,0,0,-1--1--1,,1|(976,832)|
+10,141,ICPE Initial Confidence in Emerging Paradigm,1282,44,74,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,142,141,15,0,0,0,0,0,64,1,-1--1--1,,1|(1196,43)|
+12,143,0,1306,189,32,32,6,135,0,5,-1,0,6,0,160-160-160,192-192-192,|0||0-0-0
+Control
+12,144,0,1410,231,44,44,6,135,0,5,-1,0,2,0,160-160-160,192-192-192,|0||0-0-0
+Practitioners
+12,145,0,1521,181,40,40,6,135,0,5,-1,0,3,0,160-160-160,192-192-192,|0||0-0-0
+Confidence
+12,146,0,1510,310,38,38,6,135,0,5,-1,0,4,0,160-160-160,192-192-192,|0||0-0-0
+Puzzles
+12,147,0,1371,335,41,41,6,135,0,5,-1,0,5,0,160-160-160,192-192-192,|0||0-0-0
+Accounting
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Puzzles
+$192-192-192,0,Arial|10||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,5,0
+10,1,A Anomalies,866,253,40,20,3,3,0,0,-1,0,0,0
+10,2,IA Initial Anomalies,866,188,39,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,3,2,1,0,0,0,0,0,64,1,-1--1--1,,1|(866,213)|
+1,4,8,1,4,0,0,22,0,0,0,-1--1--1,,1|(778,248)|
+1,5,8,23,100,0,0,22,0,0,0,-1--1--1,,1|(640,248)|
+1,6,10,45,4,0,0,22,0,0,0,-1--1--1,,1|(1091,244)|
+1,7,10,1,100,0,0,22,0,0,0,-1--1--1,,1|(949,244)|
+11,8,2172,725,248,6,8,34,3,0,0,1,0,0,0
+10,9,ARECR Anomaly Recognition Rate,725,272,53,16,40,3,0,0,-1,0,0,0
+11,10,1948,999,244,6,8,34,3,0,0,1,0,0,0
+10,11,ARESR Anomaly Resolution Rate,999,268,53,16,40,3,0,0,-1,0,0,0
+10,12,EPSR Expected Puzzle Solving Rate,621,159,61,16,8,3,0,0,-1,0,0,0
+1,13,12,8,0,0,0,0,0,0,0,-1--1--1,,1|(674,204)|
+10,14,FPRA Fraction of Puzzles Recognized as Anomalies,771,163,72,24,8,3,0,0,-1,0,0,0
+1,15,14,8,0,0,0,0,0,0,0,-1--1--1,,1|(746,208)|
+10,16,SAP Switch to Activate Paradigm,765,356,64,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,17,16,9,0,0,0,0,0,0,0,-1--1--1,,1|(747,318)|
+10,18,ADA Average Difficulty of Anomalies,1112,152,68,16,8,3,0,0,-1,0,0,0
+1,19,18,10,0,0,0,0,0,0,0,-1--1--1,,1|(1053,199)|
+10,20,PAR Practitioners in Anomaly Resolution,954,151,70,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,21,20,10,0,0,0,0,0,0,0,-1--1--1,,1|(976,197)|
+1,22,16,11,0,0,0,0,0,0,0,-1--1--1,,1|(878,312)|
+10,23,PUA Puzzles Under Attack,521,253,40,20,3,3,0,0,-1,0,0,0
+10,24,DPUA Desired Puzzles Under Attack,161,524,67,16,8,3,0,0,-1,0,0,0
+1,25,24,23,0,0,0,0,0,64,1,-1--1--1,,1|(332,394)|
+12,26,48,266,251,10,8,0,3,0,0,-1,0,0,0
+1,27,29,23,4,0,0,22,0,0,0,-1--1--1,,1|(431,249)|
+1,28,29,26,100,0,0,22,0,0,0,-1--1--1,,1|(323,249)|
+11,29,48,376,249,6,8,34,3,0,0,1,0,0,0
+10,30,"PIAR Puzzle Initiation & Abandonment Rate",376,273,67,16,40,3,0,0,-1,0,0,0
+1,31,33,45,4,0,0,22,0,0,0,-1--1--1,,1|(522,463)|
+1,32,33,23,100,0,0,22,0,0,0,-1--1--1,,1|(522,309)|
+11,33,1932,522,352,8,6,33,3,0,0,4,0,0,0
+10,34,PSR Puzzle Solving Rate,569,352,39,16,40,3,0,0,-1,0,0,0
+10,35,ADP Average Difficulty of Puzzles,654,415,67,19,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,36,35,34,0,0,0,0,0,0,0,-1--1--1,,1|(615,386)|
+10,37,PPS Practitioners in Puzzle Solving,429,450,62,16,8,3,0,0,-1,0,0,0
+1,38,37,34,0,0,0,0,0,0,0,-1--1--1,,1|(492,405)|
+1,39,16,34,0,0,0,0,0,0,0,-1--1--1,,1|(661,353)|
+10,40,CPUA Correction for Puzzles Under Attack,160,288,67,16,8,3,0,0,-1,0,0,0
+1,41,40,30,0,0,0,0,0,0,0,-1--1--1,,1|(261,281)|
+1,42,16,30,1,0,0,0,0,0,0,-1--1--1,,1|(579,316)|
+1,43,8,29,1,0,0,0,0,64,0,-1--1--1,,1|(528,196)|
+1,44,33,30,1,0,0,0,0,64,0,-1--1--1,,1|(443,329)|
+10,45,SP Solved Puzzles,1091,463,40,20,3,3,0,0,-1,0,0,0
+10,46,ISP Initial Solved Puzzles,1158,515,52,16,8,3,0,0,-1,0,0,0
+1,47,46,45,0,0,0,0,0,64,1,-1--1--1,,1|(1132,495)|
+10,48,ADP Average Difficulty of Puzzles,1202,319,60,16,8,3,0,0,-1,0,0,0
+1,49,48,18,0,0,0,0,0,0,0,-1--1--1,,1|(1160,241)|
+10,50,RDA Relative Difficulty of Anomalies,1273,91,68,16,8,3,0,0,-1,0,0,0
+1,51,50,18,0,0,0,0,0,0,0,-1--1--1,,1|(1199,119)|
+10,52,FPPS Fraction of Practitioners in Puzzle Solving,404,529,69,24,8,3,0,0,-1,0,0,0
+1,53,52,37,0,0,0,0,0,0,0,-1--1--1,,1|(414,492)|
+10,54,P Practitioners,544,533,53,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,55,54,37,0,0,0,0,0,0,0,-1--1--1,,1|(497,499)|
+10,56,DFPPS Desired Fraction of Practitioners in Puzzle Solving,497,626,77,24,8,3,0,0,-1,0,0,0
+1,57,56,52,0,0,0,0,0,0,0,-1--1--1,,1|(455,582)|
+10,58,EUPPS Effect of Unsolved Puzzles on Solving,295,457,64,24,8,3,0,0,-1,0,0,0
+1,59,58,52,0,0,0,0,0,0,0,-1--1--1,,1|(343,489)|
+10,60,FPAR Fraction of Practitioners in Anomaly Resolution,746,615,75,24,8,3,0,0,-1,0,0,0
+1,61,60,56,0,0,0,0,0,0,0,-1--1--1,,1|(629,619)|
+10,62,FPPSR Fraction of Practitioners in Paradigm Sanctioned Research,730,684,77,24,8,3,0,0,-1,0,0,0
+1,63,62,56,0,0,0,0,0,0,0,-1--1--1,,1|(620,656)|
+1,64,24,58,0,0,0,0,0,0,0,-1--1--1,,1|(213,497)|
+1,65,23,58,0,0,0,0,0,0,0,-1--1--1,,1|(415,348)|
+10,66,TEUPPS Table for Effect of Unsolved Puzzles on Solving,211,390,75,24,8,3,0,0,-1,0,0,0
+1,67,66,58,0,0,0,0,0,0,0,-1--1--1,,1|(247,419)|
+10,68,CP Confidence in Paradigm,924,618,57,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,69,68,62,0,0,0,0,0,0,0,-1--1--1,,1|(845,644)|
+10,70,TFPPSR Table for Fraction of Practitioners in Paradigm Sanctioned Research,956,681,89,24,8,3,0,0,-1,0,0,0
+1,71,70,62,0,0,0,0,0,0,0,-1--1--1,,1|(844,682)|
+10,72,EAPAR Effect of Anomalies on Practitioners in Anomaly Resolution,755,553,85,24,8,3,0,0,-1,0,0,0
+1,73,72,60,0,0,0,0,0,0,0,-1--1--1,,1|(751,577)|
+1,74,62,60,0,0,0,0,0,0,0,-1--1--1,,1|(735,656)|
+10,75,WPEAR Willingness to Enter Anomaly Resolution,927,564,71,24,8,3,0,0,-1,0,0,0
+1,76,75,60,0,0,0,0,0,0,0,-1--1--1,,1|(845,586)|
+10,77,RA Relative Anomalies,860,497,36,16,8,3,0,0,-1,0,0,0
+1,78,77,72,0,0,0,0,0,0,0,-1--1--1,,1|(821,517)|
+10,79,TEAPAR Table for Effect of Anomalies on Practitioners in Anomaly Resolution,629,492,90,24,8,3,0,0,-1,0,0,0
+1,80,79,72,0,0,0,0,0,0,0,-1--1--1,,1|(685,519)|
+1,81,1,77,0,0,0,0,0,0,0,-1--1--1,,1|(863,370)|
+10,82,AA Acceptable Anomalies,1002,510,46,16,8,3,0,0,-1,0,0,0
+1,83,82,77,0,0,0,0,0,0,0,-1--1--1,,1|(932,503)|
+10,84,ADP Average Difficulty of Puzzles,725,92,65,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,85,84,14,0,0,0,0,0,0,0,-1--1--1,,1|(741,117)|
+10,86,DPAR Difficulty of Puzzles for Anomaly Resolution,541,102,64,24,8,3,0,0,-1,0,0,0
+1,87,86,14,0,0,0,0,0,0,0,-1--1--1,,1|(645,128)|
+10,88,TFPRA Table for Fraction of Puzzles Recognized as Anomalies,808,40,84,24,8,3,0,0,-1,0,0,0
+1,89,88,14,0,0,0,0,0,0,0,-1--1--1,,1|(791,94)|
+10,90,ECART Effect of Confidence on Anomaly Resolution,392,38,72,24,8,3,0,0,-1,0,0,0
+1,91,90,86,0,0,0,0,0,0,0,-1--1--1,,1|(459,67)|
+10,92,NDPAR Normal Difficulty for Anomaly Resolution,393,131,65,24,8,3,0,0,-1,0,0,0
+1,93,92,86,0,0,0,0,0,0,0,-1--1--1,,1|(460,118)|
+10,94,CP Confidence in Paradigm,247,102,57,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,95,94,90,0,0,0,0,0,0,0,-1--1--1,,1|(303,76)|
+10,96,TECART Table for Effect of Confidence on Anomaly Resolution,194,35,81,24,8,3,0,0,-1,0,0,0
+1,97,96,90,0,0,0,0,0,0,0,-1--1--1,,1|(290,36)|
+1,98,86,12,0,0,0,0,0,0,0,-1--1--1,,1|(580,130)|
+1,99,37,12,0,0,0,0,0,0,0,-1--1--1,,1|(520,310)|
+10,100,ED Elasticity of Difficulty wrt Solved Puzzles,1286,210,59,24,8,3,0,0,-1,0,0,0
+1,101,100,48,0,0,0,0,0,0,0,-1--1--1,,1|(1245,262)|
+10,102,NDP Noral Difficulty of Puzzles,1413,229,60,16,8,3,0,0,-1,0,0,0
+1,103,102,48,0,0,0,0,0,0,0,-1--1--1,,1|(1313,271)|
+10,104,NSP Normal Solved Puzzles,1369,286,47,16,8,3,0,0,-1,0,0,0
+1,105,104,48,0,0,0,0,0,0,0,-1--1--1,,1|(1298,299)|
+1,106,45,48,0,0,0,0,0,0,0,-1--1--1,,1|(1143,394)|
+1,107,56,24,0,0,0,0,0,0,0,-1--1--1,,1|(323,573)|
+10,108,NPP Normal Puzzles per Practitioner,118,581,43,24,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,109,108,24,0,0,0,0,0,0,0,-1--1--1,,1|(137,554)|
+10,110,P Practitioners,233,581,53,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,111,110,24,0,0,0,0,0,0,0,-1--1--1,,1|(207,560)|
+1,112,24,40,1,0,0,0,0,0,0,-1--1--1,,1|(104,415)|
+1,113,23,40,1,0,0,0,0,0,0,-1--1--1,,1|(359,326)|
+10,114,TAPUA Time to Adjust Puzzles Under Attack,155,216,73,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,115,114,40,0,0,0,0,0,0,0,-1--1--1,,1|(156,245)|
+12,116,0,1274,427,32,32,6,135,0,5,-1,0,6,0,160-160-160,192-192-192,|0||0-0-0
+Control
+12,117,0,1378,469,44,44,6,135,0,5,-1,0,2,0,160-160-160,192-192-192,|0||0-0-0
+Practitioners
+12,118,0,1489,419,40,40,6,135,0,5,-1,0,3,0,160-160-160,192-192-192,|0||0-0-0
+Confidence
+12,119,0,1478,548,38,38,6,135,0,5,-1,0,4,0,160-160-160,192-192-192,|0||0-0-0
+Puzzles
+12,120,0,1339,573,41,41,6,135,0,5,-1,0,5,0,160-160-160,192-192-192,|0||0-0-0
+Accounting
+10,121,MSAP Maximum Strength of Paradigms,1369,318,72,16,8,2,1,3,-1,0,0,0,128-128-128,0-0-0,|0||128-128-128
+1,122,121,104,0,1,0,0,0,64,1,-1--1--1,,1|(1369,302)|
+10,123,NSPA Normal Solved Puzzles,1369,318,52,16,8,2,1,3,-1,0,0,0,128-128-128,0-0-0,|0||128-128-128
+1,124,123,104,0,1,0,0,0,64,1,-1--1--1,,1|(1369,302)|
+10,125,NSPD Normal Solved Puzzles for Paradigm 1,1369,318,75,16,8,2,1,3,-1,0,0,0,128-128-128,0-0-0,|0||128-128-128
+1,126,125,104,0,1,0,0,0,64,1,-1--1--1,,1|(1369,302)|
+10,127,SAIA Switch for Identical Alternatives,1369,318,67,16,8,2,1,3,-1,0,0,0,128-128-128,0-0-0,|0||128-128-128
+1,128,127,104,0,1,0,0,0,64,1,-1--1--1,,1|(1369,302)|
+10,129,SSEED Random Seed for Paradigm Strength,1369,318,73,16,8,2,1,3,-1,0,0,0,128-128-128,0-0-0,|0||128-128-128
+1,130,129,104,0,1,0,0,0,64,1,-1--1--1,,1|(1369,302)|
+10,131,VSAP Variance in Strength of Paradigms,1369,318,72,16,8,2,1,3,-1,0,0,0,128-128-128,0-0-0,|0||128-128-128
+1,132,131,104,0,1,0,0,0,64,1,-1--1--1,,1|(1369,302)|
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Accounting
+$192-192-192,0,Arial|10||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,5,0
+10,1,X Next Paradigm Launch Switch,1299,285,40,20,3,3,0,0,-1,0,0,0
+10,2,TIME STEP,1361,365,44,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,3,2,1,0,0,0,0,0,0,0,-1--1--1,,1|(1338,335)|
+10,4,CDP Confidence in Dominant Paradigm,982,305,65,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,5,4,23,0,0,0,0,0,0,0,-1--1--1,,1|(1068,305)|
+10,6,CPTHRESH Confidence Threshold for Deterministic Paradigm Launch,869,356,81,24,8,3,0,0,-1,0,0,0
+1,7,6,23,0,0,0,0,0,0,0,-1--1--1,,1|(1019,331)|
+10,8,MNAP Maximum Nmber of Active Paradigms for Deterministic Launch,1010,391,82,24,8,3,0,0,-1,0,0,0
+1,9,8,23,0,0,0,0,0,0,0,-1--1--1,,1|(1090,348)|
+10,10,PA Probability of Activation,1042,439,52,16,8,3,0,0,-1,0,0,0
+1,11,10,23,0,0,0,0,0,0,0,-1--1--1,,1|(1100,378)|
+10,12,RND Random Number,1309,409,42,16,8,3,0,0,-1,0,0,0
+1,13,12,23,0,0,0,0,0,0,0,-1--1--1,,1|(1245,362)|
+10,14,SIAP Switch for Active Paradigms,1264,466,64,16,8,3,0,0,-1,0,0,0
+1,15,14,23,0,0,0,0,0,0,0,-1--1--1,,1|(1220,392)|
+10,16,SPA Switch for Probabilistic Activation,1165,432,69,16,8,3,0,0,-1,0,0,0
+1,17,16,23,0,0,0,0,0,0,0,-1--1--1,,1|(1166,376)|
+1,18,1,23,1,0,0,0,0,0,0,-1--1--1,,1|(1244,322)|
+12,19,48,1072,290,10,8,0,3,0,0,-1,0,0,0
+1,20,22,1,4,0,0,22,0,0,0,-1--1--1,,1|(1217,290)|
+1,21,22,19,100,0,0,22,0,0,0,-1--1--1,,1|(1123,290)|
+11,22,48,1170,290,6,8,34,3,0,0,1,0,0,0
+10,23,CX Increment for Next Paradigm Switch,1170,307,67,16,40,3,0,0,-1,0,0,0
+10,24,Init X,1297,220,24,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,25,24,1,0,0,0,0,0,64,1,-1--1--1,,1|(1297,240)|
+10,26,CE Cumulative Effort,487,315,40,20,3,3,0,0,-1,0,0,0
+12,27,48,217,316,10,8,0,3,0,0,-1,0,0,0
+1,28,30,26,4,0,0,22,0,0,0,-1--1--1,,1|(394,317)|
+1,29,30,27,100,0,0,22,0,0,0,-1--1--1,,1|(278,317)|
+11,30,48,336,317,6,8,34,3,0,0,1,0,0,0
+10,31,DCE Change in Cumulative Effort,336,341,52,16,40,3,0,0,-1,0,0,0
+10,32,P Practitioners,264,397,53,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,33,32,31,0,0,0,0,0,0,0,-1--1--1,,1|(289,376)|
+10,34,HDP Historically Dominant Paradigms,491,451,40,20,3,3,0,0,-1,0,0,0
+10,35,TIME STEP,494,552,44,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,36,35,34,0,0,0,0,0,0,0,-1--1--1,,1|(492,513)|
+12,37,48,218,450,10,8,0,3,0,0,-1,0,0,0
+1,38,40,34,4,0,0,22,0,0,0,-1--1--1,,1|(397,447)|
+1,39,40,37,100,0,0,22,0,0,0,-1--1--1,,1|(280,447)|
+11,40,48,338,447,6,8,34,3,0,0,1,0,0,0
+10,41,CHDP Increment to Historically Dominant Paradigms,338,479,65,24,40,3,0,0,-1,0,0,0
+10,42,SIDP Switch for Dominant Paradigms,254,537,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,43,42,41,0,0,0,0,0,0,0,-1--1--1,,1|(284,515)|
+10,44,HSP Historical Solved Puzzles,871,447,40,20,3,3,0,0,-1,0,0,0
+10,45,SP Solved Puzzles,660,521,36,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,46,45,50,0,0,0,0,0,0,0,-1--1--1,,1|(691,482)|
+10,47,TEHSP Time to Establish Historical Solved Puzzles,750,526,59,24,8,3,0,0,-1,0,0,0
+1,48,47,50,0,0,0,0,0,0,0,-1--1--1,,1|(735,483)|
+12,49,48,605,446,10,8,0,3,0,0,-1,0,0,0
+11,50,48,723,446,6,8,2,3,0,0,1,0,0,0
+1,51,50,44,4,0,0,22,0,0,0,-1--1--1,,1|(780,446)|
+1,52,50,49,100,0,0,22,0,0,0,-1--1--1,,1|(666,446)|
+1,53,44,50,1,0,0,0,0,64,0,-1--1--1,,1|(802,482)|
+10,54,TOA Time of Paradigm Activation,825,169,40,20,3,3,0,0,-1,0,0,0
+10,55,TIME STEP,827,253,44,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,56,55,54,0,0,0,0,0,0,0,-1--1--1,,1|(826,223)|
+12,57,48,586,167,10,8,0,3,0,0,-1,0,0,0
+1,58,60,54,4,0,0,22,0,0,0,-1--1--1,,1|(740,168)|
+1,59,60,57,100,0,0,22,0,0,0,-1--1--1,,1|(640,168)|
+11,60,48,690,168,6,8,34,3,0,0,1,0,0,0
+10,61,DTOA Increment in Activation Time,690,192,58,16,40,3,0,0,-1,0,0,0
+10,62,NPINP Practitioners in New Paradigm,676,291,61,16,8,3,0,0,-1,0,0,0
+1,63,62,61,0,0,0,0,0,0,0,-1--1--1,,1|(681,248)|
+10,64,RINP Recruitment into New Paradigms,608,251,66,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,65,64,61,0,0,0,0,0,0,0,-1--1--1,,1|(642,225)|
+10,66,Time,735,253,24,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,67,66,61,0,0,0,0,0,0,0,-1--1--1,,1|(719,231)|
+1,68,55,61,0,0,0,0,0,0,0,-1--1--1,,1|(772,228)|
+10,69,DFPA Discount for Activation,979,513,57,16,8,3,0,0,-1,0,0,0
+1,70,69,10,0,0,0,0,0,0,0,-1--1--1,,1|(1005,481)|
+10,71,PCNP Probability for Creating New Paradigm,1058,553,72,16,8,3,0,0,-1,0,0,0
+1,72,71,10,0,0,0,0,0,0,0,-1--1--1,,1|(1051,502)|
+10,73,TIME STEP,1119,518,44,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,74,73,10,0,0,0,0,0,0,0,-1--1--1,,1|(1088,486)|
+10,75,LSEED Random Seed for Paradigm Launch,1423,462,68,16,8,3,0,0,-1,0,0,0
+1,76,75,12,0,0,0,0,0,0,0,-1--1--1,,1|(1372,438)|
+10,77,MSPDL Minimum Size for Deterministic Launch,1233,562,74,16,8,3,0,0,-1,0,0,0
+1,78,77,14,0,0,0,0,0,0,0,-1--1--1,,1|(1245,520)|
+10,79,P Practitioners,1367,552,53,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,80,79,14,0,0,0,0,0,0,0,-1--1--1,,1|(1325,516)|
+10,81,PARD Dominant Practitioners in Anomaly Resolution,907,598,75,24,8,3,0,0,-1,0,0,0
+1,82,81,71,0,0,0,0,0,0,0,-1--1--1,,1|(986,574)|
+10,83,PDP Practitioners in Dominant Paradigm,1005,643,62,16,8,3,0,0,-1,0,0,0
+1,84,83,71,0,0,0,0,0,0,0,-1--1--1,,1|(1027,604)|
+10,85,PPCAR Probability of Creation from Anomaly Resolution,1325,611,70,24,8,3,0,0,-1,0,0,0
+1,86,85,71,0,0,0,0,0,0,0,-1--1--1,,1|(1199,583)|
+10,87,PPCOA Probability of Creation from Other Activity,1306,663,66,24,8,3,0,0,-1,0,0,0
+1,88,87,71,0,0,0,0,0,0,0,-1--1--1,,1|(1179,606)|
+10,89,PPCPS Probability of Creation from Solving,1321,707,66,16,8,3,0,0,-1,0,0,0
+1,90,89,71,0,0,0,0,0,0,0,-1--1--1,,1|(1195,633)|
+10,91,PPSD Dominant Practitioners in Puzzle Solving,1172,672,69,24,8,3,0,0,-1,0,0,0
+1,92,91,71,0,0,0,0,0,0,0,-1--1--1,,1|(1116,613)|
+10,93,NODP Number of Dominant Paradigms,736,644,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,94,93,81,0,0,0,0,0,0,0,-1--1--1,,1|(806,624)|
+10,95,PARV Practitioners in Anomaly Resolution,853,656,67,16,8,3,0,0,-1,0,0,0
+1,96,95,81,0,0,0,0,0,0,0,-1--1--1,,1|(870,636)|
+10,97,PAR Practitioners in Anomaly Resolution,872,724,67,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,98,97,95,0,0,0,0,0,0,0,-1--1--1,,1|(864,696)|
+10,99,SIDP Switch for Dominant Paradigms,741,731,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,100,99,95,0,0,0,0,0,0,0,-1--1--1,,1|(790,697)|
+10,101,NODP Number of Dominant Paradigms,1080,729,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,102,101,83,0,0,0,0,0,0,0,-1--1--1,,1|(1047,691)|
+10,103,PDPV Dominant Practitioners,979,725,50,16,8,3,0,0,-1,0,0,0
+1,104,103,83,0,0,0,0,0,0,0,-1--1--1,,1|(989,690)|
+10,105,P Practitioners,1052,782,53,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,106,105,103,0,0,0,0,0,0,0,-1--1--1,,1|(1025,761)|
+10,107,SIDP Switch for Dominant Paradigms,945,793,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,108,107,103,0,0,0,0,0,0,0,-1--1--1,,1|(958,765)|
+10,109,NODP Number of Dominant Paradigms,1322,745,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,110,109,91,0,0,0,0,0,0,0,-1--1--1,,1|(1261,715)|
+10,111,PPSV Practitioners in Puzzle Solving,1193,735,60,16,8,3,0,0,-1,0,0,0
+1,112,111,91,0,0,0,0,0,0,0,-1--1--1,,1|(1186,714)|
+10,113,PPS Practitioners in Puzzle Solving,1338,800,59,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,114,113,111,0,0,0,0,0,0,0,-1--1--1,,1|(1271,770)|
+10,115,SIDP Switch for Dominant Paradigms,1197,806,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,116,115,111,0,0,0,0,0,0,0,-1--1--1,,1|(1195,777)|
+10,117,FPCP Fraction of Practitioners in Paradigm,321,634,53,24,8,3,0,0,-1,0,0,0
+10,118,P Practitioners,195,666,53,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,119,118,117,0,0,0,0,0,0,0,-1--1--1,,1|(242,653)|
+10,120,TP Total Practitioners,191,612,43,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,121,120,117,0,0,0,0,0,0,0,-1--1--1,,1|(244,620)|
+10,122,SAP Switch to Activate Paradigm,1454,279,56,16,8,3,0,0,-1,0,0,0
+10,123,MSPA Minimum Strength for Activation,1435,199,67,16,8,3,0,0,-1,0,0,0
+1,124,123,122,0,0,0,0,0,0,0,-1--1--1,,1|(1442,232)|
+10,125,P Practitioners,1554,217,53,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+1,126,125,122,0,0,0,0,0,0,0,-1--1--1,,1|(1515,240)|
+10,127,SARL Switch for Random Launch,1549,320,50,16,8,3,0,0,-1,0,0,0
+1,128,127,122,0,0,0,0,0,0,0,-1--1--1,,1|(1507,302)|
+10,129,TSAP Switch for Fixed Launch Times,1476,360,62,16,8,3,0,0,-1,0,0,0
+1,130,129,122,0,0,0,0,0,0,0,-1--1--1,,1|(1466,326)|
+1,131,1,122,0,0,0,0,0,0,0,-1--1--1,,1|(1361,282)|
+10,132,ZDUMTOA Fixed Launch Times,1523,426,52,16,8,3,0,0,-1,0,0,0
+1,133,132,129,0,0,0,0,0,0,0,-1--1--1,,1|(1503,398)|
+10,134,MSAP Maximum Strength of Paradigms,247,775,72,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,135,NSPA Normal Solved Puzzles,398,714,52,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,136,NSPD Normal Solved Puzzles for Paradigm 1,239,714,75,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,137,SAIA Switch for Identical Alternatives,395,837,67,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,138,SSEED Random Seed for Paradigm Strength,242,892,73,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,139,VSAP Variance in Strength of Paradigms,245,840,72,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+12,140,0,250,78,32,32,6,135,0,5,-1,0,6,0,160-160-160,192-192-192,|0||0-0-0
+Control
+12,141,0,354,120,44,44,6,135,0,5,-1,0,2,0,160-160-160,192-192-192,|0||0-0-0
+Practitioners
+12,142,0,465,70,40,40,6,135,0,5,-1,0,3,0,160-160-160,192-192-192,|0||0-0-0
+Confidence
+12,143,0,454,199,38,38,6,135,0,5,-1,0,4,0,160-160-160,192-192-192,|0||0-0-0
+Puzzles
+12,144,0,315,224,41,41,6,135,0,5,-1,0,5,0,160-160-160,192-192-192,|0||0-0-0
+Accounting
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*Control
+$192-192-192,0,Arial|10||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+12,1,0,275,217,239,175,3,188,0,0,1,0,0,0
+Practitioners
+12,2,0,760,217,239,175,3,188,0,0,2,0,0,0
+CDP Confidence in Dominant Paradigm,Graph
+10,3,P Practitioners,281,410,53,9,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,4,CDP Confidence in Dominant Paradigm,766,408,65,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+12,5,0,275,602,239,175,3,188,0,0,1,0,0,0
+Solved_Puzzles
+12,6,0,760,602,239,175,3,188,0,0,2,0,0,0
+SIDP Switch for Dominant Paradigms,Gantt
+10,7,SP Solved Puzzles,280,802,36,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,8,LSEED Random Seed for Paradigm Launch,1119,63,72,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,9,SSEED Random Seed for Paradigm Strength,1120,107,73,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,10,SAIA Switch for Identical Alternatives,1232,108,67,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|10||128-128-128
+10,11,SIDP Switch for Dominant Paradigms,763,797,68,16,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|0||128-128-128
+12,12,0,1080,204,32,32,6,135,0,5,-1,0,6,0,160-160-160,192-192-192,|0||0-0-0
+Control
+12,13,0,1184,246,44,44,6,135,0,5,-1,0,2,0,160-160-160,192-192-192,|0||0-0-0
+Practitioners
+12,14,0,1295,196,40,40,6,135,0,5,-1,0,3,0,160-160-160,192-192-192,|0||0-0-0
+Confidence
+12,15,0,1284,325,38,38,6,135,0,5,-1,0,4,0,160-160-160,192-192-192,|0||0-0-0
+Puzzles
+12,16,0,1145,350,41,41,6,135,0,5,-1,0,5,0,160-160-160,192-192-192,|0||0-0-0
+Accounting
+///---\\\
+:GRAPH Practitioners
+:TITLE Practitioners
+:NO-LEGEND 1
+:SCALE
+:VAR P Practitioners[PM]
+
+:GRAPH Solved_Puzzles
+:TITLE Solved Puzzles
+:NO-LEGEND 1
+:SCALE
+:VAR SP Solved Puzzles[PM]
+:L<%^E!@
+1:scirev8.vdf
+9:scirev8
+22:$,Dollar,Dollars,$s
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Puzzle,Puzzles
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:A Anomalies[PM]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:2000
+26:2000
+6:n1
+6:n10
+6:n11
+6:n12
+6:n13
+6:n14
+6:n15
+6:n16
+6:n17
+6:n18
+6:n19
+6:n2
+6:n20
+6:n21
+6:n22
+6:n23
+6:n24
+6:n25
+6:n3
+6:n4
+6:n5
+6:n6
+6:n7
+6:n8
+6:n9

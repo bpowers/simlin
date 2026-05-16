@@ -478,6 +478,8 @@ pub struct Model {
     pub loop_metadata: Vec<LoopMetadata>,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub groups: Vec<ModelGroup>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub macro_spec: Option<MacroSpec>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -546,6 +548,21 @@ pub struct Unit {
     pub disabled: bool,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub aliases: Vec<String>,
+}
+
+/// Marks a model as a callable macro template and records its calling
+/// convention. `Some` on `json::Model.macro_spec` (mirrored from
+/// [`datamodel::MacroSpec`]) means the model's variables are the macro body;
+/// this names which body variables are the formal parameters and outputs.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct MacroSpec {
+    pub parameters: Vec<String>,
+    pub primary_output: String,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub additional_outputs: Vec<String>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -1210,6 +1227,7 @@ impl From<Model> for datamodel::Model {
                 .map(|lm| lm.into())
                 .collect(),
             groups: model.groups.into_iter().map(|g| g.into()).collect(),
+            macro_spec: model.macro_spec.map(|m| m.into()),
         }
     }
 }
@@ -1267,6 +1285,16 @@ impl From<LoopMetadata> for datamodel::LoopMetadata {
             deleted: loop_metadata.deleted,
             name: loop_metadata.name,
             description: loop_metadata.description,
+        }
+    }
+}
+
+impl From<MacroSpec> for datamodel::MacroSpec {
+    fn from(macro_spec: MacroSpec) -> Self {
+        datamodel::MacroSpec {
+            parameters: macro_spec.parameters,
+            primary_output: macro_spec.primary_output,
+            additional_outputs: macro_spec.additional_outputs,
         }
     }
 }
@@ -1851,6 +1879,7 @@ impl From<datamodel::Model> for Model {
                 .map(|lm| lm.into())
                 .collect(),
             groups: model.groups.into_iter().map(|g| g.into()).collect(),
+            macro_spec: model.macro_spec.map(|m| m.into()),
         }
     }
 }
@@ -1925,6 +1954,16 @@ impl From<datamodel::LoopMetadata> for LoopMetadata {
             deleted: loop_metadata.deleted,
             name: loop_metadata.name,
             description: loop_metadata.description,
+        }
+    }
+}
+
+impl From<datamodel::MacroSpec> for MacroSpec {
+    fn from(macro_spec: datamodel::MacroSpec) -> Self {
+        MacroSpec {
+            parameters: macro_spec.parameters,
+            primary_output: macro_spec.primary_output,
+            additional_outputs: macro_spec.additional_outputs,
         }
     }
 }
@@ -2745,6 +2784,7 @@ mod tests {
             views: vec![],
             loop_metadata: vec![],
             groups: vec![],
+            macro_spec: None,
         };
 
         // Roundtrip
@@ -2781,6 +2821,84 @@ mod tests {
         assert_eq!(json_model3.stocks[0].name, "stock1");
         assert_eq!(json_model3.flows[0].name, "flow1");
         assert_eq!(json_model3.auxiliaries[0].name, "aux1");
+    }
+
+    /// Verifies macros.AC1.4 (JSON half): a macro-bearing `Model` round-trips
+    /// losslessly through `json::Model` -> `datamodel::Model` -> `json::Model`
+    /// -> serialized JSON string -> `json::Model`. Exercises a populated
+    /// `MacroSpec` (non-empty `parameters`, non-empty `primary_output`,
+    /// non-empty `additional_outputs`) plus a body variable (the "macro body").
+    #[test]
+    fn test_macro_spec_roundtrip() {
+        let json_model = Model {
+            name: "smooth_macro".to_string(),
+            stocks: vec![],
+            flows: vec![],
+            auxiliaries: vec![Auxiliary {
+                uid: 1,
+                name: "output".to_string(),
+                equation: "input * gain".to_string(),
+                units: String::new(),
+                graphical_function: None,
+                documentation: String::new(),
+                arrayed_equation: None,
+                compat: None,
+                can_be_module_input: false,
+                is_public: false,
+            }],
+            modules: vec![],
+            sim_specs: None,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: Some(MacroSpec {
+                parameters: vec!["input".to_string(), "gain".to_string()],
+                primary_output: "output".to_string(),
+                additional_outputs: vec!["debug_trace".to_string()],
+            }),
+        };
+
+        // json::Model -> datamodel::Model -> json::Model -> string -> json::Model
+        let dm_model: datamodel::Model = json_model.clone().into();
+        let json_model2: Model = dm_model.clone().into();
+        let json_str = serde_json::to_string(&json_model2).unwrap();
+        let json_model3: Model = serde_json::from_str(&json_str).unwrap();
+
+        // The datamodel layer preserves the spec.
+        let dm_spec = dm_model.macro_spec.as_ref().expect("datamodel macro_spec");
+        assert_eq!(
+            dm_spec.parameters,
+            vec!["input".to_string(), "gain".to_string()]
+        );
+        assert_eq!(dm_spec.primary_output, "output");
+        assert_eq!(dm_spec.additional_outputs, vec!["debug_trace".to_string()]);
+
+        // The fully round-tripped json::Model is identical to the original,
+        // including the macro spec and the body variable.
+        assert_eq!(json_model, json_model3);
+        assert_eq!(json_model.macro_spec, json_model3.macro_spec);
+        assert_eq!(json_model3.auxiliaries.len(), 1);
+
+        // A non-macro model still round-trips and stays None (and the
+        // optional-singular serde idiom omits the key entirely).
+        let plain = Model {
+            name: "plain".to_string(),
+            stocks: vec![],
+            flows: vec![],
+            auxiliaries: vec![],
+            modules: vec![],
+            sim_specs: None,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        };
+        let plain_dm: datamodel::Model = plain.clone().into();
+        assert!(plain_dm.macro_spec.is_none());
+        let plain_str = serde_json::to_string(&plain).unwrap();
+        assert!(!plain_str.contains("macroSpec"));
+        let plain3: Model = serde_json::from_str(&plain_str).unwrap();
+        assert_eq!(plain, plain3);
     }
 
     #[test]
@@ -2834,6 +2952,7 @@ mod tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             dimensions: vec![Dimension {
                 name: "cities".to_string(),
@@ -3955,6 +4074,7 @@ mod tests {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             }],
             dimensions: vec![],
             units: vec![],

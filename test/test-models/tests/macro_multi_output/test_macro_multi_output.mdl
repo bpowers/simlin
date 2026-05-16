@@ -1,0 +1,111 @@
+{UTF-8}
+:MACRO: ADD3(a, b, c : minval, maxval)
+ADD3 = a + b + c
+	~	dmnl
+	~	multi-output macro: primary output is the sum; minval/maxval are
+		additional (`:`-list) outputs computed by the body
+	|
+
+minval = MIN(a, MIN(b, c))
+	~	dmnl
+	~	additional output: the smallest of the three inputs
+	|
+
+maxval = MAX(a, MAX(b, c))
+	~	dmnl
+	~	additional output: the largest of the three inputs
+	|
+
+:END OF MACRO:
+in1=
+	7
+	~	dmnl
+	~	constant input 1
+	|
+
+in2=
+	2
+	~	dmnl
+	~	constant input 2
+	|
+
+in3=
+	5
+	~	dmnl
+	~	constant input 3
+	|
+
+total=
+	ADD3(in1,in2,in3:the min,the max)
+	~	dmnl
+	~	multi-output invocation: total receives the primary output (the
+		sum); `the min` / `the max` are bound to the additional outputs.
+		Note: the `:`-list names are NOT separately declared -- the call
+		creates them (matching real Vensim multi-output models such as
+		THEIL / SSTATS).
+	|
+
+spread=
+	the max - the min
+	~	dmnl
+	~	downstream equation referencing the additional outputs (proves
+		AC3.2: minv/maxv are referenceable by a subsequent equation)
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 2
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,in1,150,165,21,8,8,3,0,0,0,0,0,0
+10,2,in2,150,200,21,8,8,3,0,0,0,0,0,0
+10,3,in3,150,235,21,8,8,3,0,0,0,0,0,0
+10,4,total,383,200,21,8,8,3,0,0,0,0,0,0
+10,5,spread,383,260,28,8,8,3,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:total
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:2
+26:2

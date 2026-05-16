@@ -201,6 +201,13 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
                 SimlinErrorCode::ArrayReferenceNeedsExplicitSubscripts
             }
             engine::ErrorCode::DuplicateVariable => SimlinErrorCode::DuplicateVariable,
+            // A duplicate macro name / macro-vs-model name collision is, at
+            // the FFI granularity, the same user-facing failure as a
+            // duplicate variable (a name defined twice). The precise
+            // `duplicate_macro_name` distinction is preserved in the
+            // engine-level `ErrorCode` and the error's `details` message;
+            // collapsing here avoids a gratuitous C-ABI enum addition.
+            engine::ErrorCode::DuplicateMacroName => SimlinErrorCode::DuplicateVariable,
             engine::ErrorCode::UnknownDependency => SimlinErrorCode::UnknownDependency,
             engine::ErrorCode::VariablesHaveErrors => SimlinErrorCode::VariablesHaveErrors,
             engine::ErrorCode::UnitDefinitionErrors => SimlinErrorCode::UnitDefinitionErrors,

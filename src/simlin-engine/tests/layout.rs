@@ -1883,6 +1883,7 @@ fn test_incremental_add_waste_flow_goes_below() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = datamodel::Project {
         name: "main".to_string(),
@@ -2043,6 +2044,7 @@ fn test_incremental_add_chain_rebuilds_existing_cloud_flow() {
         views: Vec::new(),
         loop_metadata: Vec::new(),
         groups: Vec::new(),
+        macro_spec: None,
     };
     let initial_project = datamodel::Project {
         name: "main".to_string(),

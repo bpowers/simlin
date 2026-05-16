@@ -20,17 +20,71 @@ use crate::mdl::xmile_compat::{quoted_space_to_underbar, space_to_underbar};
 
 use super::ConversionContext;
 use super::helpers::{canonical_name, cartesian_product, extract_metadata, extract_units, get_lhs};
+use super::multi_output::MultiOutputMaterialization;
 use super::types::{ConvertError, SymbolInfo, VariableType};
 use crate::mdl::xmile_compat::format_number;
 
 impl<'input> ConversionContext<'input> {
     /// Build the final Project from collected symbols.
-    pub(super) fn build_project(mut self) -> Result<Project, ConvertError> {
+    ///
+    /// `materialization` carries the multi-output macro-invocation
+    /// materialization computed in Pass 6.5 (Module + binding Auxes to add,
+    /// and the LHS symbols whose normal build must be skipped).
+    pub(super) fn build_project(
+        self,
+        materialization: &MultiOutputMaterialization,
+    ) -> Result<Project, ConvertError> {
+        let model = self.build_model("main", materialization)?;
+
+        Ok(Project {
+            name: String::new(),
+            sim_specs: self.sim_specs.build(),
+            dimensions: self.dimensions,
+            units: self.unit_equivs,
+            models: vec![model],
+            source: None,
+            ai_information: None,
+        })
+    }
+
+    /// Build a single `datamodel::Model` (named `name`) from the collected
+    /// symbols, synthetic flows, groups, and views.
+    ///
+    /// This is the model-building core extracted from `build_project`: the
+    /// `"main"` model is `build_model("main", &materialization)`, and a macro
+    /// body is built as `build_model(&macro_name, &Default::default())` on a
+    /// scoped sub-context (a macro body cannot contain a multi-output macro
+    /// invocation, so it passes an empty materialization). The returned model
+    /// always has `sim_specs: None` and `macro_spec: None`; project-level
+    /// fields (sim_specs, dimensions, units) stay in `build_project`, and the
+    /// macro path attaches the `MacroSpec` afterward.
+    ///
+    /// `materialization.skip_symbols` lists the LHS symbols whose selected
+    /// equation is a multi-output macro invocation: their normal build is
+    /// skipped (the multi-output `Expr::App` must never reach
+    /// `build_equation` / the formatter), and `materialization.variables`
+    /// (the Module + binding Auxes) is appended instead.
+    pub(super) fn build_model(
+        &self,
+        name: &str,
+        materialization: &MultiOutputMaterialization,
+    ) -> Result<Model, ConvertError> {
         let mut variables: Vec<Variable> = Vec::with_capacity(self.symbols.len());
 
-        for (name, info) in &self.symbols {
+        for (var_name, info) in &self.symbols {
             // Skip unwanted variables (control vars)
             if info.unwanted {
+                continue;
+            }
+
+            // Skip a symbol whose selected equation is a multi-output macro
+            // invocation -- it is replaced by the materialized Module +
+            // binding Auxes appended below. (Compared on canonical name; the
+            // materializer keys `skip_symbols` on `canonical_name`.)
+            if materialization
+                .skip_symbols
+                .contains(&canonical_name(var_name))
+            {
                 continue;
             }
 
@@ -47,14 +101,14 @@ impl<'input> ConversionContext<'input> {
 
             // Check if this variable has element-specific equations (x[a]=1; x[b]=2)
             // If so, build an Arrayed equation from all element-specific equations
-            if let Some(var) = self.build_variable_with_elements(name, info)? {
+            if let Some(var) = self.build_variable_with_elements(var_name, info)? {
                 variables.push(var);
             } else {
                 // Fall back to single-equation handling
                 // PurgeAFOEq: If multiple equations and first is A FUNCTION OF or EmptyRhs, skip it
                 let eq = self.select_equation(&info.equations);
                 if let Some(eq) = eq
-                    && let Some(var) = self.build_variable(name, info, eq)?
+                    && let Some(var) = self.build_variable(var_name, info, eq)?
                 {
                     variables.push(var);
                 }
@@ -76,6 +130,12 @@ impl<'input> ConversionContext<'input> {
             variables.push(flow);
         }
 
+        // Append the materialized multi-output macro invocations: one
+        // input-only Variable::Module plus its primary/additional binding
+        // Auxes (and any hoisted expression-argument auxes) per invocation.
+        // Empty for a macro body (no multi-output invocations there).
+        variables.extend(materialization.variables.iter().cloned());
+
         // Sort variables by canonical name for deterministic output
         variables.sort_by_cached_key(|a| canonical_name(a.get_ident()));
 
@@ -85,30 +145,21 @@ impl<'input> ConversionContext<'input> {
         // Build views from parsed sketch data
         let views = self.build_views();
 
-        let model = Model {
-            name: "main".to_string(),
+        Ok(Model {
+            name: name.to_string(),
             sim_specs: None,
             variables,
             views,
             loop_metadata: vec![],
             groups,
-        };
-
-        Ok(Project {
-            name: String::new(),
-            sim_specs: self.sim_specs.build(),
-            dimensions: self.dimensions,
-            units: self.unit_equivs,
-            models: vec![model],
-            source: None,
-            ai_information: None,
+            macro_spec: None,
         })
     }
 
     /// Build ModelGroup instances from collected group info.
     /// Ensures unique group names that don't conflict with symbol namespace.
     /// Matches xmutil's AdjustGroupNames algorithm (Model.cpp:479-503).
-    fn build_groups(&mut self) -> Vec<ModelGroup> {
+    fn build_groups(&self) -> Vec<ModelGroup> {
         if self.groups.is_empty() {
             return vec![];
         }
@@ -1284,7 +1335,7 @@ impl<'input> ConversionContext<'input> {
     /// Extract the initial value expression from an INTEG call.
     fn extract_integ_initial<'a>(&self, expr: &'a Expr<'input>) -> Option<&'a Expr<'input>> {
         match expr {
-            Expr::App(name, _, args, CallKind::Builtin, _) if eq_lower_space(name, "integ") => {
+            Expr::App(name, _, args, CallKind::Builtin, _, _) if eq_lower_space(name, "integ") => {
                 // INTEG(rate, initial) - return the initial value
                 if args.len() >= 2 {
                     return Some(&args[1]);
@@ -1303,7 +1354,7 @@ impl<'input> ConversionContext<'input> {
         expr: &'a Expr<'input>,
     ) -> Option<(&'a Expr<'input>, &'a Expr<'input>)> {
         match expr {
-            Expr::App(name, _, args, CallKind::Builtin, _)
+            Expr::App(name, _, args, CallKind::Builtin, _, _)
                 if eq_lower_space(name, "active initial") =>
             {
                 if args.len() >= 2 {

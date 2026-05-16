@@ -36,6 +36,7 @@ import {
   type JsonFlowPoint,
   type JsonLinkPoint,
   type JsonLoopMetadata,
+  type JsonMacroSpec,
   type JsonModelGroup,
   type JsonSource,
 } from '@simlin/engine';
@@ -1139,6 +1140,33 @@ export function loopMetadataToJson(lm: LoopMetadata): JsonLoopMetadata {
   return result;
 }
 
+// MacroSpec
+
+export interface MacroSpec {
+  readonly parameters: readonly string[];
+  readonly primaryOutput: string;
+  readonly additionalOutputs: readonly string[];
+}
+
+export function macroSpecFromJson(json: JsonMacroSpec): MacroSpec {
+  return {
+    parameters: json.parameters,
+    primaryOutput: json.primaryOutput,
+    additionalOutputs: json.additionalOutputs ?? [],
+  };
+}
+
+export function macroSpecToJson(spec: MacroSpec): JsonMacroSpec {
+  const result: JsonMacroSpec = {
+    parameters: [...spec.parameters],
+    primaryOutput: spec.primaryOutput,
+  };
+  if (spec.additionalOutputs.length > 0) {
+    result.additionalOutputs = [...spec.additionalOutputs];
+  }
+  return result;
+}
+
 // ModelGroup
 
 export interface ModelGroup {
@@ -1184,6 +1212,7 @@ export interface Model {
   readonly views: readonly StockFlowView[];
   readonly loopMetadata: readonly LoopMetadata[];
   readonly groups: readonly ModelGroup[];
+  readonly macroSpec?: MacroSpec;
 }
 
 export function modelFromJson(json: JsonModel): Model {
@@ -1202,6 +1231,7 @@ export function modelFromJson(json: JsonModel): Model {
     views: (json.views ?? []).map((view: JsonView) => stockFlowViewFromJson(view, variables)),
     loopMetadata: (json.loopMetadata ?? []).map((lm: JsonLoopMetadata) => loopMetadataFromJson(lm)),
     groups: (json.groups ?? []).map((g: JsonModelGroup) => modelGroupFromJson(g)),
+    macroSpec: json.macroSpec ? macroSpecFromJson(json.macroSpec) : undefined,
   };
 }
 
@@ -1247,6 +1277,9 @@ export function modelToJson(model: Model): JsonModel {
   }
   if (model.groups.length > 0) {
     result.groups = model.groups.map((g: ModelGroup) => modelGroupToJson(g));
+  }
+  if (model.macroSpec) {
+    result.macroSpec = macroSpecToJson(model.macroSpec);
   }
 
   return result;

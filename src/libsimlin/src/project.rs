@@ -347,6 +347,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
+        macro_spec: None,
     };
 
     // Add to datamodel

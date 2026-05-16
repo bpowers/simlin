@@ -192,6 +192,7 @@ fn test_model_get_latex_equation_module_var_no_ast() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             },
             // Main model with a module variable
             datamodel::Model {
@@ -210,6 +211,7 @@ fn test_model_get_latex_equation_module_var_no_ast() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             },
         ],
         source: Default::default(),
@@ -774,6 +776,7 @@ fn test_model_functions() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             },
             engine::project_io::Model {
                 name: "model2".to_string(),
@@ -860,6 +863,7 @@ fn test_model_functions() {
                 views: vec![],
                 loop_metadata: vec![],
                 groups: vec![],
+                macro_spec: None,
             },
         ],
         dimensions: vec![],

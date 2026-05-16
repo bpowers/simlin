@@ -1,6 +1,6 @@
 # @simlin/core
 
-Last verified: 2026-04-08
+Last verified: 2026-05-15
 
 Shared data models and common utilities used by both frontend and backend TypeScript packages.
 
@@ -19,6 +19,7 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 ## Contracts
 
 - `Stock`, `Flow`, and `Aux` interfaces all carry `canBeModuleInput` and `isPublic` boolean fields. These are read from `compat` in JSON deserialization and written back to `compat` when true. The fields control which variables appear as module input/output ports in the diagram editor.
+- `Model.macroSpec?: MacroSpec` (`parameters`/`primaryOutput`/`additionalOutputs`) is set exactly when the model is a callable macro template (imported `:MACRO:` / XMILE `<macro>`). `macroSpecFromJson`/`macroSpecToJson` round-trip it; `additionalOutputs` is omitted from JSON when empty. Consumers gate macro-marked models out of module-reference UI (`@simlin/diagram`'s `isMacroModel`).
 
 ## Tests
 
