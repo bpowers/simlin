@@ -43,7 +43,7 @@ from simlin.json_types import (
 )
 
 # Load the JSON schema
-SCHEMA_PATH = Path(__file__).parents[3] / "doc" / "simlin-project.schema.json"
+SCHEMA_PATH = Path(__file__).parents[3] / "docs" / "simlin-project.schema.json"
 if SCHEMA_PATH.exists():
     with open(SCHEMA_PATH) as f:
         PROJECT_SCHEMA = json.load(f)
