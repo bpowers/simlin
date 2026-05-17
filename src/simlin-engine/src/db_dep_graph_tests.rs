@@ -11,6 +11,7 @@
 use super::*;
 use crate::datamodel;
 use crate::db::{SimlinDb, sync_from_datamodel};
+use crate::test_common::TestProject;
 
 // ── Task #15: Condition-2 dt-phase cycle introspection harness ──────────
 //
@@ -303,4 +304,132 @@ fn consistency_violation_some_when_self_loop_not_flagged() {
         self_loops: self_loop_a(),
     };
     assert!(dt_cycle_sccs_consistency_violation(&sccs, false).is_some());
+}
+
+// ── §26.1-A Layer-2 (`array_producing_vars`) — §26.13 4-case spine ──────
+//
+// The full §26.5 completeness spine; BOTH positive cases are
+// independently required to falsify the §4-P5-false-GREEN class:
+//   case-1 (POS) top-level-scalar `= VECTOR ELM MAP(...)` — the §15.6
+//     shape the scalar `!is_∧contains_` path does NOT hoist (`App` lives
+//     in `AssignCurr`); falsifies an impl narrowed to the compiler
+//     hoist-set (§26.6 half).
+//   case-2 (POS) array-producing builtin nested so the compiler hoists
+//     it into a separate `AssignTemp` (`App` lives ONLY in the hoisted
+//     `AssignTemp`, NOT in `AssignCurr`/main); falsifies a Layer-2 that
+//     sources only `AssignCurr` and drops hoisted temps (the
+//     incomplete-sourcing false-negative the `&[Expr]` type-enforcement
+//     cannot prevent — it governs only what Layer-1 scans, not what
+//     Layer-2 sources).
+//   case-3 (NEG) plain scalar — soundness.
+//   case-4 (NEG) merely references the VEM var — its OWN lowered `Expr`
+//     has only a `Var` slot read, no `App` (concern-(a)); soundness.
+// VEM shapes are the known-good `tests/compiler_vector.rs` fixtures
+// (`vector_elm_map(source[*], offsets[*])` and the nested
+// `max(vector_elm_map(...), 15)` hoisting form) so the model compiles and
+// the only RED is the assertion (Layer-2 is a stub until its
+// reviewer-confirmed source surface lands as the preceding refactor
+// commit). RED now (stub returns ∅) → GREEN once Layer-2 is implemented.
+#[test]
+fn array_producing_vars_flags_exactly_the_two_positive_cases() {
+    let project = TestProject::new("ap_vars_26_13_fixture")
+        .indexed_dimension("D", 3)
+        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_with_ranges("offsets[D]", vec![("1", "0"), ("2", "2"), ("3", "1")])
+        // case-1 POSITIVE: top-level array-producing (scalar path does
+        // NOT hoist; `App` in `AssignCurr`).
+        .aux("case1_vem", "vector_elm_map(source[*], offsets[*])", None)
+        // case-2 POSITIVE: VEM nested inside `max(...)` -> the compiler
+        // hoists the VEM into a separate `AssignTemp`; `App` lives ONLY
+        // in the hoisted temp, `AssignCurr` reads it back.
+        .array_aux(
+            "case2_hoisted[D]",
+            "max(vector_elm_map(source[*], offsets[*]), 15)",
+        )
+        // case-3 NEGATIVE: plain scalar, no array-producing builtin.
+        .aux("case3_plain", "1 + 2", None)
+        // case-4 NEGATIVE: merely references the VEM var element-wise;
+        // case4_ref's OWN lowered Expr is `Op2(+, Var(off), 1)` -- a slot
+        // read another var filled, NOT an inline array-producing `App`.
+        .array_aux("case4_ref[D]", "case1_vem + 1");
+    let dm = project.build_datamodel();
+
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let got = array_producing_vars(&db, model, result.project);
+
+    let expected: BTreeSet<crate::common::Ident<crate::common::Canonical>> = [
+        crate::common::Ident::new("case1_vem"),
+        crate::common::Ident::new("case2_hoisted"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        got, expected,
+        "array_producing_vars must be EXACTLY {{case1_vem, case2_hoisted}} \
+         (§26.13 4-case spine): both positives flagged (top-level-scalar \
+         AND hoisted-AssignTemp), both negatives not"
+    );
+
+    // ── BINDING lowered-shape asserts (BLOCKING at the §26.1-A impl-gate;
+    // permanent regression guards). Sourced from the SAME engine per-var
+    // production lowering Layer-2 consumes (`var_noninitial_lowered_exprs`
+    // -> `crate::db_var_fragment::lower_var_fragment`), partitioned by
+    // top-level element kind, then the SAME production Layer-1 predicate
+    // applied per partition -- no re-implementation of the
+    // array-producing recursion.
+    use crate::compiler::Expr;
+    let vem_in = |exprs: &[Expr], want_temp: bool| -> bool {
+        let part: Vec<Expr> = exprs
+            .iter()
+            .filter(|e| {
+                if want_temp {
+                    matches!(e, Expr::AssignTemp(..))
+                } else {
+                    matches!(e, Expr::AssignCurr(..))
+                }
+            })
+            .cloned()
+            .collect();
+        crate::compiler::exprs_contain_array_producing_builtin(&part)
+    };
+
+    // case-1 (inverse of case-2): the array-producing `App` must live
+    // INSIDE an `AssignCurr`/main element AND NOT inside ANY hoisted
+    // `AssignTemp`. The §26.45 corrected bare-scalar declaration lowers
+    // to `[AssignCurr(off, App(VEM,…))]` -- the scalar path does NOT
+    // hoist a top-level array-producing builtin -- so this confirms
+    // (i)-CLEAN, §26.6-distinct from case-2 by construction. If `App`
+    // IS in a hoisted `AssignTemp`, the corrected scalar case-1 is
+    // hoisted ⇒ the §26.18-style (ii) uninstantiable escalation
+    // REOPENS: surface it immediately, do NOT paper over.
+    let c1 = var_noninitial_lowered_exprs(&db, model, result.project, "case1_vem");
+    let c1_in_curr = vem_in(&c1, false);
+    let c1_in_temp = vem_in(&c1, true);
+    assert!(
+        c1_in_curr && !c1_in_temp,
+        "case-1 BINDING shape (inverse of case-2): the VECTOR ELM MAP App \
+         must be in an AssignCurr/main element AND NOT in any hoisted \
+         AssignTemp (in_curr={c1_in_curr}, in_temp={c1_in_temp}, \
+         elems={}). in_temp=true ⇒ corrected scalar case-1 IS hoisted ⇒ \
+         the (ii) uninstantiable escalation REOPENS (§26.18-style) -- \
+         surface immediately, do not work around.",
+        c1.len()
+    );
+
+    // case-2 (its own, locked, unchanged by §26.45): the array-producing
+    // `App` must live ONLY in the hoisted `AssignTemp`, NEVER directly
+    // in `AssignCurr` (the `AssignCurr` reads the temp back).
+    let c2 = var_noninitial_lowered_exprs(&db, model, result.project, "case2_hoisted");
+    let c2_in_curr = vem_in(&c2, false);
+    let c2_in_temp = vem_in(&c2, true);
+    assert!(
+        c2_in_temp && !c2_in_curr,
+        "case-2 BINDING shape (locked): the VECTOR ELM MAP App must be \
+         ONLY in a hoisted AssignTemp and NEVER in AssignCurr \
+         (in_curr={c2_in_curr}, in_temp={c2_in_temp}, elems={})",
+        c2.len()
+    );
 }
