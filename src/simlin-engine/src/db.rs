@@ -3134,7 +3134,7 @@ pub fn compute_layout(
 /// Extract compiler::Table data directly from a SourceVariable's graphical
 /// function fields. Used to populate the mini-Module's tables map for
 /// dependency variables that define lookup tables.
-fn extract_tables_from_source_var(
+pub(crate) fn extract_tables_from_source_var(
     db: &dyn Db,
     source_var: &SourceVariable,
 ) -> Vec<crate::compiler::Table> {
@@ -3184,7 +3184,7 @@ fn extract_tables_from_source_var(
 /// with the module's own prefix), strips the module prefix from dst,
 /// and strips leading middots from src in the "main" model (where parent
 /// scope refs are represented as `·var` after canonicalization).
-fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
+pub(crate) fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
     model_name: &str,
     module_var_prefix: &str,
     refs: impl Iterator<Item = (S1, S2)>,
@@ -3212,7 +3212,7 @@ fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
 
 /// Build a dimension-only stub Variable for use in a minimal compilation
 /// context. Only get_dimensions() is called on these by Context.
-fn build_stub_variable(
+pub(crate) fn build_stub_variable(
     db: &dyn Db,
     source_var: &SourceVariable,
     ident: &Ident<Canonical>,
@@ -3266,7 +3266,7 @@ fn build_stub_variable(
 /// Populate sub-model metadata in `all_metadata` for module variable compilation.
 /// Mirrors the monolithic `build_metadata` but works with salsa SourceModel/SourceVariable.
 /// Recursively populates metadata for nested modules.
-fn build_submodel_metadata<'arena>(
+pub(crate) fn build_submodel_metadata<'arena>(
     arena: &'arena bumpalo::Bump,
     db: &dyn Db,
     sub_model: SourceModel,
@@ -3340,626 +3340,75 @@ pub fn compile_var_fragment(
     is_root: bool,
     module_input_names: Vec<String>,
 ) -> Option<VarFragmentResult> {
-    use crate::compiler::symbolic::{
-        CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
-    };
+    use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
+    use crate::db_var_fragment::{LoweredVarFragment, lower_var_fragment};
 
     let var_ident = var.ident(db).clone();
-    let module_ident_context =
-        model_module_ident_context(db, model, project, module_input_names.clone());
-    let parsed = parse_source_variable_with_module_context(db, var, project, module_ident_context);
+    let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
 
-    // Accumulate unit definition errors from the parsed variable.
-    // These are syntax errors in the unit string (e.g., "bad units
-    // here!!!") that are stored in the variable's unit_errors field
-    // during parsing but not checked during compilation.
-    if let Some(unit_errs) = parsed.variable.unit_errors() {
-        let model_name = model.name(db).clone();
-        for err in unit_errs {
-            CompilationDiagnostic(Diagnostic {
-                model: model_name.clone(),
-                variable: Some(var_ident.clone()),
-                error: DiagnosticError::Unit(err),
-                severity: DiagnosticSeverity::Error,
-            })
-            .accumulate(db);
-        }
-    }
-
-    // Check for parse errors -- accumulate each one before bailing out
-    if let Some(errors) = parsed.variable.equation_errors()
-        && !errors.is_empty()
-    {
-        for err in &errors {
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: Some(var.ident(db).clone()),
-                error: DiagnosticError::Equation(err.clone()),
-                severity: DiagnosticSeverity::Error,
-            })
-            .accumulate(db);
-        }
-        return None;
-    }
-
-    // Build metadata from the full, input-agnostic dependency set so both
-    // branches of `if isModuleInput(...)` remain compilable in the mini-context.
-    let deps = variable_direct_dependencies_with_context(db, var, project, module_ident_context);
-
-    // Get project dimensions and build dimension context
+    // Caller-owned, lowering-independent context (built only from
+    // project/variable data, never from the lowered equation).
     let dm_dims = source_dims_to_datamodel(project.dimensions(db));
     let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
     let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
         .iter()
         .map(crate::dimensions::Dimension::from)
         .collect();
-
-    let project_models = project.models(db);
-
-    // Lower the variable for compilation. Module-type variables need
-    // direct construction because lower_variable's resolve_module_input
-    // requires a populated models map.
-    let lowered = if var.kind(db) == SourceVariableKind::Module {
-        let var_name_canonical = canonicalize(&var_ident);
-        let input_prefix = format!("{var_name_canonical}\u{00B7}");
-        let module_inputs = build_module_inputs(
-            model.name(db),
-            &input_prefix,
-            var.module_refs(db)
-                .iter()
-                .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-        );
-        crate::variable::Variable::Module {
-            ident: Ident::new(&var_ident),
-            model_name: Ident::new(var.model_name(db)),
-            units: None,
-            inputs: module_inputs,
-            errors: vec![],
-            unit_errors: vec![],
-        }
-    } else {
-        // Build a minimal ModelStage0 so that ArrayContext::get_dimensions
-        // can resolve dependency dimensions during Expr2 lowering. Without
-        // this, SUM(arr[*] + 1) fails because the Op2's ArrayBounds are
-        // never computed (get_dimensions returns None for dependencies).
-        let model_name_str = model.name(db);
-        let source_vars = model.variables(db);
-        let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> =
-            HashMap::new();
-
-        // Add the current variable
-        stage0_vars.insert(Ident::new(&var_ident), parsed.variable.clone());
-
-        // Add dependency variables so get_dimensions can resolve them
-        let dep_names: BTreeSet<&String> = deps
-            .dt_deps
-            .iter()
-            .chain(deps.initial_deps.iter())
-            .collect();
-        for dep_name in &dep_names {
-            let effective = dep_name
-                .as_str()
-                .strip_prefix('\u{00B7}')
-                .unwrap_or(dep_name.as_str());
-            if effective.contains('\u{00B7}') {
-                continue;
-            }
-            if let Some(dep_sv) = source_vars.get(effective) {
-                let dep_parsed = parse_source_variable_with_module_context(
-                    db,
-                    *dep_sv,
-                    project,
-                    module_ident_context,
-                );
-                stage0_vars.insert(Ident::new(effective), dep_parsed.variable.clone());
-            }
-        }
-
-        let mini_model = crate::model::ModelStage0 {
-            ident: Ident::new(model_name_str),
-            display_name: model_name_str.to_string(),
-            variables: stage0_vars,
-            errors: None,
-            implicit: false,
-        };
-
-        let mut models: HashMap<Ident<Canonical>, &crate::model::ModelStage0> = HashMap::new();
-        models.insert(Ident::new(model_name_str), &mini_model);
-
-        let scope = crate::model::ScopeStage0 {
-            models: &models,
-            dimensions: &dim_context,
-            model_name: model_name_str,
-        };
-        crate::model::lower_variable(&scope, &parsed.variable)
-    };
-
-    // Check for errors introduced during AST lowering (e.g.,
-    // MismatchedDimensions from expr2/expr3 lowering). These are stored
-    // in the lowered variable's errors field but not in the parsed
-    // variable's errors, so we check them separately.
-    if let Some(errors) = lowered.equation_errors()
-        && !errors.is_empty()
-    {
-        for err in &errors {
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: Some(var.ident(db).clone()),
-                error: DiagnosticError::Equation(err.clone()),
-                severity: DiagnosticSeverity::Error,
-            })
-            .accumulate(db);
-        }
-        return None;
-    }
-
-    // Build minimal metadata: only {self} + deps
     let model_name_ident = Ident::new(model.name(db));
-    let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
-    let var_size = variable_size(db, var, project);
-
-    // Arena for sub-model stub variables allocated by build_submodel_metadata
-    let arena = bumpalo::Bump::new();
-
-    // Assign sequential offsets for the minimal context
-    let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
-        HashMap::new();
-    let mut mini_offset = if is_root {
-        crate::vm::IMPLICIT_VAR_COUNT
-    } else {
-        0
-    };
-
-    // Add implicit vars if root
-    if is_root {
-        use std::sync::LazyLock;
-        static IMPLICIT_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_DT: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("dt"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_INITIAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("initial_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_FINAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("final_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        mini_metadata.insert(
-            Ident::new("time"),
-            crate::compiler::VariableMetadata {
-                offset: 0,
-                size: 1,
-                var: &IMPLICIT_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("dt"),
-            crate::compiler::VariableMetadata {
-                offset: 1,
-                size: 1,
-                var: &IMPLICIT_DT,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("initial_time"),
-            crate::compiler::VariableMetadata {
-                offset: 2,
-                size: 1,
-                var: &IMPLICIT_INITIAL_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("final_time"),
-            crate::compiler::VariableMetadata {
-                offset: 3,
-                size: 1,
-                var: &IMPLICIT_FINAL_TIME,
-            },
-        );
-    }
-
-    // Add self
-    mini_metadata.insert(
-        var_ident_canonical.clone(),
-        crate::compiler::VariableMetadata {
-            offset: mini_offset,
-            size: var_size,
-            var: &lowered,
-        },
-    );
-    mini_offset += var_size;
-
-    // Collect all dep names from both dt and initial deps
-    let all_dep_names: BTreeSet<&String> = deps
-        .dt_deps
-        .iter()
-        .chain(deps.initial_deps.iter())
-        .collect();
-
-    // For each dep, build a dimension-only Variable for context.
-    // We need these to live long enough for the metadata references.
-    let source_vars = model.variables(db);
-    let mut dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> = Vec::new();
-
-    // Also add inflows/outflows for stocks (needed by stock update expressions)
-    let mut extra_dep_names: Vec<String> = Vec::new();
-    if var.kind(db) == SourceVariableKind::Stock {
-        for flow_name in var.inflows(db).iter().chain(var.outflows(db).iter()) {
-            let canonical = canonicalize(flow_name).into_owned();
-            if !all_dep_names.contains(&canonical) {
-                extra_dep_names.push(canonical);
-            }
-        }
-    }
-
-    let all_names: Vec<&String> = all_dep_names
-        .iter()
-        .copied()
-        .chain(extra_dep_names.iter())
-        .collect();
-
-    // Track module deps that need module_refs and sub-model metadata
-    let mut extra_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
-    let mut extra_submodels: Vec<(String, SourceModel)> = Vec::new();
-    let implicit_var_info = model_implicit_var_info(db, model, project);
-
-    for dep_name in &all_names {
-        // Skip self and implicit vars
-        if dep_name.as_str() == var_ident.as_str()
-            || matches!(
-                dep_name.as_str(),
-                "time" | "dt" | "initial_time" | "final_time"
-            )
-        {
-            continue;
-        }
-
-        // Handle leading middle-dot (parent model reference in XMILE)
-        let effective_name = dep_name
-            .as_str()
-            .strip_prefix('\u{00B7}')
-            .unwrap_or(dep_name.as_str());
-
-        // Check for composite module output reference (contains middle dot)
-        if let Some(dot_pos) = effective_name.find('\u{00B7}') {
-            let module_var_name = &effective_name[..dot_pos];
-            let module_ident: Ident<Canonical> = Ident::new(module_var_name);
-
-            if mini_metadata.contains_key(&module_ident) {
-                continue;
-            }
-
-            // Look up the module variable in source_vars or implicit vars
-            if let Some(mod_source_var) = source_vars.get(module_var_name) {
-                if mod_source_var.kind(db) == SourceVariableKind::Module {
-                    let mod_model_name = mod_source_var.model_name(db);
-                    let sub_canonical = canonicalize(mod_model_name);
-                    let sub_size = project_models
-                        .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
-                        .unwrap_or(1);
-
-                    // Build Module variable with resolved inputs
-                    let mod_input_prefix = format!("{module_var_name}\u{00B7}");
-                    let module_inputs: Vec<crate::variable::ModuleInput> = mod_source_var
-                        .module_refs(db)
-                        .iter()
-                        .filter_map(|mr| {
-                            let src = canonicalize(&mr.src);
-                            let dst = canonicalize(&mr.dst);
-                            if src.starts_with(&mod_input_prefix) {
-                                return None;
-                            }
-                            let dst_stripped = dst.strip_prefix(&mod_input_prefix)?;
-                            let src_str = if model.name(db) == "main" && src.starts_with('\u{00B7}')
-                            {
-                                &src['\u{00B7}'.len_utf8()..]
-                            } else {
-                                &src
-                            };
-                            Some(crate::variable::ModuleInput {
-                                src: Ident::new(src_str),
-                                dst: Ident::new(dst_stripped),
-                            })
-                        })
-                        .collect();
-
-                    let mod_var = crate::variable::Variable::Module {
-                        ident: module_ident.clone(),
-                        model_name: Ident::new(mod_model_name),
-                        units: None,
-                        inputs: module_inputs.clone(),
-                        errors: vec![],
-                        unit_errors: vec![],
-                    };
-                    dep_variables.push((module_ident.clone(), mod_var, sub_size));
-
-                    // Build module_refs entry
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    extra_module_refs.insert(module_ident, (Ident::new(mod_model_name), input_set));
-
-                    if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                        extra_submodels.push((mod_model_name.to_string(), *sub_model));
-                    }
-                }
-            } else if let Some(meta) = implicit_var_info.get(module_var_name)
-                && meta.is_module
-            {
-                // Implicit module already handled in the implicit_module_vars section below
-            }
-            continue;
-        }
-
-        let dep_ident = Ident::new(effective_name);
-        if mini_metadata.contains_key(&dep_ident) {
-            continue;
-        }
-
-        if let Some(dep_source_var) = source_vars.get(effective_name) {
-            let dep_dims = variable_dimensions(db, *dep_source_var, project);
-            let dep_size = variable_size(db, *dep_source_var, project);
-
-            let dep_var = build_stub_variable(db, dep_source_var, &dep_ident, dep_dims);
-
-            dep_variables.push((dep_ident, dep_var, dep_size));
-        } else if let Some(meta) = implicit_var_info.get(effective_name) {
-            if !meta.is_module {
-                let dep_var = if meta.is_stock {
-                    crate::variable::Variable::Stock {
-                        ident: dep_ident.clone(),
-                        init_ast: None,
-                        eqn: None,
-                        units: None,
-                        inflows: vec![],
-                        outflows: vec![],
-                        non_negative: false,
-                        errors: vec![],
-                        unit_errors: vec![],
-                    }
-                } else {
-                    crate::variable::Variable::Var {
-                        ident: dep_ident.clone(),
-                        ast: None,
-                        init_ast: None,
-                        eqn: None,
-                        units: None,
-                        tables: vec![],
-                        non_negative: false,
-                        is_flow: false,
-                        is_table_only: false,
-                        errors: vec![],
-                        unit_errors: vec![],
-                    }
-                };
-                dep_variables.push((dep_ident, dep_var, meta.size));
-            }
-        } else {
-            // Dependency is not a source variable or implicit variable --
-            // this is an unknown dependency. Look up the source location
-            // from the AST so the error points to the reference site.
-            let loc = parsed
-                .variable
-                .ast()
-                .and_then(|ast| ast.get_var_loc(effective_name))
-                .unwrap_or_default();
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: Some(var.ident(db).clone()),
-                error: DiagnosticError::Equation(crate::common::EquationError {
-                    start: loc.start,
-                    end: loc.end,
-                    code: crate::common::ErrorCode::UnknownDependency,
-                }),
-                severity: DiagnosticSeverity::Error,
-            })
-            .accumulate(db);
-            return None;
-        }
-    }
-
-    // Add dep metadata referencing the stored dep_variables
-    for (dep_ident, dep_var, dep_size) in &dep_variables {
-        if !mini_metadata.contains_key(dep_ident) {
-            mini_metadata.insert(
-                dep_ident.clone(),
-                crate::compiler::VariableMetadata {
-                    offset: mini_offset,
-                    size: *dep_size,
-                    var: dep_var,
-                },
-            );
-            mini_offset += dep_size;
-        }
-    }
-
-    // Add implicit module variables that this variable's AST references.
-    // E.g., INIT(x) creates implicit module $⁚x⁚0⁚init and the variable's
-    // AST references $⁚x⁚0⁚init·output -- the compiler needs the implicit
-    // module in mini_metadata to resolve the sub-model offset.
-    let mut implicit_module_vars: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> =
-        Vec::new();
-    let mut implicit_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
-    let mut implicit_submodels: Vec<(String, SourceModel)> = Vec::new();
-
-    for implicit_dm_var in &parsed.implicit_vars {
-        if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
-            let im_name = canonicalize(dm_module.ident.as_str()).into_owned();
-            let im_ident: Ident<Canonical> = Ident::new(&im_name);
-            if mini_metadata.contains_key(&im_ident) {
-                continue;
-            }
-
-            let sub_canonical = canonicalize(&dm_module.model_name);
-            let sub_size = project_models
-                .get(sub_canonical.as_ref())
-                .map(|sm| compute_layout(db, *sm, project, false).n_slots)
-                .unwrap_or(1);
-
-            let im_var = crate::variable::Variable::Module {
-                ident: im_ident.clone(),
-                model_name: Ident::new(&dm_module.model_name),
-                units: None,
-                inputs: vec![],
-                errors: vec![],
-                unit_errors: vec![],
-            };
-            implicit_module_vars.push((im_ident.clone(), im_var, sub_size));
-
-            // Build module_refs entry for the implicit module, stripping
-            // the module ident prefix from dst (same as resolve_module_input)
-            let im_input_prefix = format!("{im_name}\u{00B7}");
-            let input_set: BTreeSet<Ident<Canonical>> = dm_module
-                .references
-                .iter()
-                .filter_map(|mr| {
-                    let dst_canonical = canonicalize(&mr.dst);
-                    let bare = dst_canonical.strip_prefix(&im_input_prefix)?;
-                    Some(Ident::new(bare))
-                })
-                .collect();
-            implicit_module_refs.insert(im_ident, (Ident::new(&dm_module.model_name), input_set));
-
-            if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                implicit_submodels.push((dm_module.model_name.clone(), *sub_model));
-            }
-        }
-    }
-
-    for (im_ident, im_var, im_size) in &implicit_module_vars {
-        if !mini_metadata.contains_key(im_ident) {
-            mini_metadata.insert(
-                im_ident.clone(),
-                crate::compiler::VariableMetadata {
-                    offset: mini_offset,
-                    size: *im_size,
-                    var: im_var,
-                },
-            );
-            mini_offset += im_size;
-        }
-    }
-
-    // Build the all_metadata map (model_name -> var_name -> metadata)
-    let mut all_metadata: HashMap<
-        Ident<Canonical>,
-        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-    > = HashMap::new();
-    all_metadata.insert(model_name_ident.clone(), mini_metadata);
-
-    // Populate sub-model metadata for implicit and explicit module sub-models
-    for (_sub_name, sub_model) in implicit_submodels.iter().chain(extra_submodels.iter()) {
-        build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
-    }
-
-    // Build the mini VariableLayout for symbolization
-    let mini_layout =
-        crate::compiler::symbolic::layout_from_metadata(&all_metadata, &model_name_ident)
-            .unwrap_or_else(|_| VariableLayout::new(HashMap::new(), 0));
-    let rmap = ReverseOffsetMap::from_layout(&mini_layout);
-
-    // Build tables for compilation -- propagate errors rather than
-    // silently dropping them, which would shift table indices and cause
-    // lookups to read the wrong table at runtime.
-    let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
-    {
-        let gf_tables = lowered.tables();
-        if !gf_tables.is_empty() {
-            let table_results: crate::Result<Vec<crate::compiler::Table>> = gf_tables
-                .iter()
-                .map(|t| crate::compiler::Table::new(&var_ident, t))
-                .collect();
-            match table_results {
-                Ok(ts) if !ts.is_empty() => {
-                    tables.insert(var_ident_canonical.clone(), ts);
-                }
-                Err(table_err) => {
-                    CompilationDiagnostic(Diagnostic {
-                        model: model.name(db).clone(),
-                        variable: Some(var.ident(db).clone()),
-                        error: DiagnosticError::Model(table_err),
-                        severity: DiagnosticSeverity::Error,
-                    })
-                    .accumulate(db);
-                    return None;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Also collect tables from dependency variables that have graphical
-    // functions. When a variable uses LOOKUP(dep, x), the dep's table
-    // data must be in the mini-Module's tables map so the bytecode
-    // compiler can emit the correct Lookup opcodes.
-    for dep_name in &all_names {
-        let effective = dep_name
-            .as_str()
-            .strip_prefix('\u{00B7}')
-            .unwrap_or(dep_name.as_str());
-        if effective.contains('\u{00B7}') {
-            continue;
-        }
-        let dep_canonical: Ident<Canonical> = Ident::new(effective);
-        if tables.contains_key(&dep_canonical) {
-            continue;
-        }
-        if let Some(dep_sv) = source_vars.get(effective) {
-            let dep_tables = extract_tables_from_source_var(db, dep_sv);
-            if !dep_tables.is_empty() {
-                tables.insert(dep_canonical, dep_tables);
-            }
-        }
-    }
-
-    // Build the minimal Module
     let inputs = canonical_module_input_set(&module_input_names);
     let module_models = model_module_map(db, model, project).clone();
+
+    let lowered = lower_var_fragment(
+        db,
+        var,
+        model,
+        project,
+        is_root,
+        &module_input_names,
+        &converted_dims,
+        &dim_context,
+        &model_name_ident,
+        &module_models,
+        &inputs,
+    );
+
+    let (unit_diags, per_phase_lowered, tables, offsets, rmap, mini_offset) = match lowered {
+        LoweredVarFragment::Fatal {
+            unit_diags,
+            fatal_diags,
+        } => {
+            // Non-fatal unit diagnostics were recorded before the fatal
+            // site; replay them first to preserve emission order, then
+            // the fatal diagnostic(s), then bail out (whole-variable None).
+            for diag in unit_diags {
+                CompilationDiagnostic(diag).accumulate(db);
+            }
+            for diag in fatal_diags {
+                CompilationDiagnostic(diag).accumulate(db);
+            }
+            return None;
+        }
+        LoweredVarFragment::Lowered {
+            unit_diags,
+            per_phase_lowered,
+            tables,
+            offsets,
+            rmap,
+            mini_offset,
+        } => (
+            unit_diags,
+            per_phase_lowered,
+            tables,
+            offsets,
+            rmap,
+            mini_offset,
+        ),
+    };
+
+    // Malformed-unit diagnostics are non-fatal: record them and continue.
+    for diag in unit_diags {
+        CompilationDiagnostic(diag).accumulate(db);
+    }
 
     // Determine which runlists this variable belongs to
     let dep_graph = if module_input_names.is_empty() {
@@ -3971,56 +3420,14 @@ pub fn compile_var_fragment(
     let is_module = var.kind(db) == SourceVariableKind::Module;
     let is_module_input = inputs.contains(&var_ident_canonical);
 
-    // We need module_refs for module variables (explicit or implicit)
-    let mut module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = if is_module {
-        let ref_prefix = format!("{var_ident}\u{00B7}");
-        let input_set: BTreeSet<Ident<Canonical>> = var
-            .module_refs(db)
-            .iter()
-            .filter_map(|mr| {
-                let dst_canonical = canonicalize(&mr.dst);
-                let bare = dst_canonical.strip_prefix(&ref_prefix)?;
-                Some(Ident::new(bare))
-            })
-            .collect();
-        let mut refs = HashMap::new();
-        refs.insert(
-            var_ident_canonical.clone(),
-            (Ident::new(var.model_name(db)), input_set),
-        );
-        refs
-    } else {
-        HashMap::new()
-    };
-    module_refs.extend(implicit_module_refs);
-    module_refs.extend(extra_module_refs);
-
-    // For module variables, populate sub-model metadata so the compiler
-    // can generate correct CallModule bytecodes.
-    if is_module {
-        let sub_model_name = var.model_name(db);
-        let sub_canonical = canonicalize(sub_model_name);
-        if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-            build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
-        }
-    }
-
-    // Build Var for each phase this variable participates in
-    let core = crate::compiler::ContextCore {
-        dimensions: &converted_dims,
-        dimensions_ctx: &dim_context,
-        model_name: &model_name_ident,
-        metadata: &all_metadata,
-        module_models: &module_models,
-        inputs: &inputs,
-    };
-
-    let build_var = |is_initial: bool| {
-        crate::compiler::Var::new(
-            &crate::compiler::Context::new(core, &var_ident_canonical, is_initial),
-            &lowered,
-        )
-    };
+    let module_refs = crate::db_var_fragment::build_caller_module_refs(
+        db,
+        var,
+        model,
+        project,
+        is_root,
+        &module_input_names,
+    );
 
     // Compile for each phase and symbolize
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
@@ -4041,17 +3448,7 @@ pub fn compile_var_fragment(
             runlist_initials_by_var,
             runlist_flows: exprs.to_vec(),
             runlist_stocks: vec![],
-            offsets: all_metadata
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.iter()
-                            .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
-                            .collect(),
-                    )
-                })
-                .collect(),
+            offsets: offsets.clone(),
             runlist_order: vec![var_ident_canonical.clone()],
             tables: tables.clone(),
             dimensions: converted_dims.clone(),
@@ -4144,9 +3541,9 @@ pub fn compile_var_fragment(
 
     // Initial phase: stocks and their deps get compiled with is_initial=true
     let initial_bytecodes = if dep_graph.runlist_initials.contains(&var_ident_str) {
-        match build_var(true) {
+        match &per_phase_lowered.initial {
             Ok(var_result) => compile_phase(&var_result.ast),
-            Err(ref err) => {
+            Err(err) => {
                 accumulate_var_compile_error(err);
                 None
             }
@@ -4162,9 +3559,9 @@ pub fn compile_var_fragment(
     // || !var.is_stock()` filter).
     let flow_bytecodes =
         if (!is_stock || is_module_input) && dep_graph.runlist_flows.contains(&var_ident_str) {
-            match build_var(false) {
+            match &per_phase_lowered.noninitial {
                 Ok(var_result) => compile_phase(&var_result.ast),
-                Err(ref err) => {
+                Err(err) => {
                     accumulate_var_compile_error(err);
                     None
                 }
@@ -4176,9 +3573,9 @@ pub fn compile_var_fragment(
     // Stock phase: stocks and modules get compiled with is_initial=false
     let stock_bytecodes =
         if (is_stock || is_module) && dep_graph.runlist_stocks.contains(&var_ident_str) {
-            match build_var(false) {
+            match &per_phase_lowered.noninitial {
                 Ok(var_result) => compile_phase(&var_result.ast),
-                Err(ref err) => {
+                Err(err) => {
                     accumulate_var_compile_error(err);
                     None
                 }

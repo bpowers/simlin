@@ -51,6 +51,7 @@ mod db_macro_registry;
 // The same `dt_walk_successors` + Tarjan SCC primitive is what B1's
 // gate-1 (task #14) reuses.
 mod db_dep_graph;
+mod db_var_fragment;
 pub mod diagram;
 mod dimensions;
 pub mod errors;
