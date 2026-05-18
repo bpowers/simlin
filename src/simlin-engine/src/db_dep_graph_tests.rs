@@ -799,6 +799,93 @@ fn resolve_dt_recurrence_sccs_is_byte_stable_across_runs() {
     );
 }
 
+#[test]
+fn model_dependency_graph_resolved_sccs_is_byte_stable_across_runs() {
+    // AC1.4 at the PRODUCTION-PAYLOAD level. The sibling
+    // `resolve_dt_recurrence_sccs_is_byte_stable_across_runs` pins the
+    // internal Task 5 builder (`DtSccResolution.resolved`); this pins the
+    // *emitted* `model_dependency_graph().resolved_sccs` -- the value that
+    // actually rides on the salsa-tracked `ModelDepGraphResult` and drives
+    // downstream consumers -- proving `ResolvedScc.element_order` (and
+    // `members`) inherits the determinism discipline end-to-end through
+    // the production query, not merely inside the builder. A regression
+    // that leaked HashMap iteration order anywhere on the
+    // identification -> refinement -> emission path would fail here even
+    // if the isolated builder stayed stable.
+    //
+    // Single-variable self-recurrence (`ecc[t1]=1; ecc[t2]=ecc[t1]+1;
+    // ecc[t3]=ecc[t2]+1`): an instrumented dt self-loop whose induced
+    // element graph (ecc,0)->(ecc,1)->(ecc,2) is acyclic and
+    // element-sourceable, so it is emitted as exactly one `ResolvedScc`.
+    let resolved = || {
+        let project = TestProject::new("mdg_byte_stable_fwd")
+            .named_dimension("t", &["t1", "t2", "t3"])
+            .array_with_ranges(
+                "ecc[t]",
+                vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+            );
+        let dm = project.build_datamodel();
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &dm);
+        let model = result.models["main"].source;
+        crate::db::model_dependency_graph(&db, model, result.project)
+            .resolved_sccs
+            .clone()
+    };
+    let first = resolved();
+    let second = resolved();
+    // The emitted payload is non-empty for the resolved self-recurrence;
+    // assert that explicitly so the byte-stability check below cannot pass
+    // vacuously on two empty vectors (which would defeat the obligation).
+    assert_eq!(
+        first.len(),
+        1,
+        "the resolved self-recurrence must emit exactly one ResolvedScc \
+         (a vacuous empty-vs-empty comparison would not prove AC1.4)"
+    );
+    assert_eq!(
+        first.first().map(|scc| scc.element_order.clone()),
+        Some(vec![ecc(0), ecc(1), ecc(2)]),
+        "the emitted per-element run order must be the per-element \
+         topological order"
+    );
+    assert_eq!(
+        first, second,
+        "the emitted model_dependency_graph().resolved_sccs (members + \
+         element_order + phase) must be byte-identical across repeated \
+         compiles on fresh databases"
+    );
+
+    // AC1.3 happy path unaffected: an acyclic CONTROL model has no
+    // offending dt SCC, so the emitted payload is empty -- and it is empty
+    // BOTH times (the determinism discipline must not regress the
+    // zero-extra-work acyclic path into emitting spurious SCCs).
+    let acyclic = || {
+        let project = single_model_project(vec![
+            aux_var("rate", "0.1"),
+            aux_var("growth", "rate * 100"),
+        ]);
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &project);
+        let model = result.models["main"].source;
+        crate::db::model_dependency_graph(&db, model, result.project)
+            .resolved_sccs
+            .clone()
+    };
+    let acyclic_first = acyclic();
+    let acyclic_second = acyclic();
+    assert!(
+        acyclic_first.is_empty(),
+        "an acyclic model emits no ResolvedScc (AC1.3 happy path \
+         unaffected, zero extra work)"
+    );
+    assert_eq!(
+        acyclic_first, acyclic_second,
+        "the acyclic control's empty resolved_sccs must be byte-identical \
+         across repeated compiles (no spurious nondeterministic emission)"
+    );
+}
+
 // ── ResolvedScc / SccPhase salsa-equality wiring ────────────────────────
 //
 // `ResolvedScc` rides on `ModelDepGraphResult`, which is a salsa return
