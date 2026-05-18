@@ -52,17 +52,11 @@ pub(crate) use types::normalize_module_ref;
 
 // Shared SCC primitive over an `Ident`-keyed adjacency list. Used in
 // production by the `db_dep_graph.rs` element-cycle refinement
-// (single-variable self-recurrence resolution in the dt cycle gate),
-// plus the dt-phase cycle accessor
-// (`crate::db_dep_graph::dt_cycle_sccs`). Both this re-export and
-// `indexed::scc_components` were formerly `#[cfg(test)]`-gated for want
-// of a production consumer; that consumer now exists.
-//
-// `#[allow(unused_imports)]`: the re-export is promoted ahead of its
-// production caller. The lib-target-only build sees no use until the
-// `db_dep_graph.rs` element-cycle refinement lands in this same phase
-// (Phase 1 Subcomponent B). Remove the allowance once it is wired in.
-#[allow(unused_imports)]
+// (`resolve_dt_recurrence_sccs` -- single-variable self-recurrence
+// resolution in the dt cycle gate, which calls it over both the
+// whole-variable dt adjacency and each SCC's induced element graph),
+// plus the `#[cfg(test)]` dt-phase cycle accessor
+// (`crate::db_dep_graph::dt_cycle_sccs`).
 pub(crate) use indexed::scc_components;
 
 /// Maximum number of nodes in any single strongly-connected component

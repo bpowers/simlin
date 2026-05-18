@@ -201,19 +201,14 @@ fn hash_u32_slice(vals: &[u32]) -> u64 {
 /// directly rather than from component size.
 ///
 /// Production `pub(crate)` primitive: the `db_dep_graph.rs` element-cycle
-/// refinement (single-variable self-recurrence resolution in the dt cycle
-/// gate) calls it from production code, in addition to the dt-phase cycle
-/// accessor `crate::db_dep_graph::dt_cycle_sccs`. It was formerly
-/// `#[cfg(test)]`-gated for want of a production consumer; that consumer
-/// now exists.
-///
-/// `#[allow(dead_code)]`: this commit promotes the primitive ahead of its
-/// caller. The lib-target-only build has no consumer until the
-/// `db_dep_graph.rs` element-cycle refinement lands in this same phase
-/// (Phase 1 Subcomponent B); the only current call site is the
-/// `#[cfg(test)]` `dt_cycle_sccs`, invisible to the plain lib target.
-/// Remove the allowance once the production caller is wired in.
-#[allow(dead_code)]
+/// refinement (`resolve_dt_recurrence_sccs` /
+/// `refine_scc_to_element_verdict` -- single-variable self-recurrence
+/// resolution in the dt cycle gate) calls it from production code, in
+/// addition to the `#[cfg(test)]` dt-phase cycle accessor
+/// `crate::db_dep_graph::dt_cycle_sccs`. It is consumed twice: once over
+/// the whole-variable dt adjacency to find the offending SCCs, and once
+/// over each SCC's induced `(member, element)` graph to render the
+/// element-acyclicity verdict.
 pub(crate) fn scc_components(
     edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
 ) -> Vec<Vec<Ident<Canonical>>> {

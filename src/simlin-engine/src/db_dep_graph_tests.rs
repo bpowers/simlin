@@ -422,6 +422,226 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
     );
 }
 
+// ── var_phase_lowered_exprs_prod (production lowering accessor) ──────────
+//
+// The production, non-panicking sibling of `var_noninitial_lowered_exprs`:
+// `Some(per-element Vec<Expr>)` for a real-`SourceVariable` (so the
+// element-cycle refinement can source the per-element relation), `None`
+// (loud-safe -- caller keeps `CircularDependency`) when it cannot be
+// element-sourced. A name absent from `model.variables` must return
+// `None`, NOT panic: production code cannot panic, and Phase 1 does not
+// parent-source (Phase 3 does).
+
+#[test]
+fn var_phase_lowered_exprs_prod_some_for_real_arrayed_var() {
+    use crate::compiler::Expr;
+    use crate::db::SccPhase;
+
+    // A simple arrayed real-SourceVariable: 3 declared elements, each a
+    // plain constant. The dt-phase lowering is one `AssignCurr` slot per
+    // element, in declared `SubscriptIterator` order.
+    let project = TestProject::new("vpl_prod_fixture")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges("arr[t]", vec![("t1", "1"), ("t2", "2"), ("t3", "3")]);
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let got = var_phase_lowered_exprs_prod(&db, model, result.project, "arr", SccPhase::Dt)
+        .expect("a real arrayed SourceVariable must be element-sourceable");
+    let assign_curr = got
+        .iter()
+        .filter(|e| matches!(e, Expr::AssignCurr(..)))
+        .count();
+    assert_eq!(
+        assign_curr, 3,
+        "one Expr::AssignCurr slot per declared element (declared order); \
+         got {got:#?}"
+    );
+}
+
+#[test]
+fn var_phase_lowered_exprs_prod_none_for_absent_var_no_panic() {
+    use crate::db::SccPhase;
+
+    let project = TestProject::new("vpl_prod_absent")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges("arr[t]", vec![("t1", "1"), ("t2", "2"), ("t3", "3")]);
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    // A name with no `SourceVariable` must return `None` (Phase 1 does
+    // not parent-source) -- and crucially must NOT panic the way the
+    // `#[cfg(test)]` `var_noninitial_lowered_exprs` does, because this is
+    // production code reachable from the cycle gate.
+    assert!(
+        var_phase_lowered_exprs_prod(
+            &db,
+            model,
+            result.project,
+            "definitely_not_a_var",
+            SccPhase::Dt
+        )
+        .is_none(),
+        "an absent variable must return None (loud-safe), never panic"
+    );
+}
+
+// ── Per-element dt SCC resolution (the cycle-gate refinement) ───────────
+//
+// `resolve_dt_recurrence_sccs` identifies the offending dt SCC(s) over
+// the same shared `dt_walk_successors` relation the engine uses, refines
+// each into an exact `(member, element-offset)` graph from the engine's
+// own production-lowered per-element exprs, and renders a verdict:
+// element-acyclic + element-sourceable single-variable self-recurrence =>
+// resolved (`ResolvedScc`, no `CircularDependency`); a genuine element
+// cycle (same-element self-loop or multi-var element 2-cycle) or a not-
+// element-sourceable / multi-variable SCC => unresolved (loud-safe, keep
+// `CircularDependency`).
+
+fn ecc(i: usize) -> (crate::common::Ident<crate::common::Canonical>, usize) {
+    (crate::common::Ident::new("ecc"), i)
+}
+
+#[test]
+fn resolve_dt_forward_recurrence_is_resolved_in_declared_order() {
+    use crate::db::SccPhase;
+
+    // `ecc[t1]=1; ecc[t2]=ecc[t1]+1; ecc[t3]=ecc[t2]+1`: a single-variable
+    // self-recurrence whose induced element graph
+    // (ecc,0)->(ecc,1)->(ecc,2) is acyclic and well-founded.
+    let project = TestProject::new("fwd_recurrence")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges(
+            "ecc[t]",
+            vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+        );
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let res = resolve_dt_recurrence_sccs(&db, model, result.project);
+    assert!(
+        !res.has_unresolved,
+        "the single-variable self-recurrence is element-acyclic and \
+         element-sourceable: there must be NO unresolved SCC"
+    );
+    assert_eq!(res.resolved.len(), 1, "exactly one resolved SCC (ecc)");
+    let scc = &res.resolved[0];
+    assert_eq!(scc.phase, SccPhase::Dt);
+    assert_eq!(
+        scc.members,
+        [crate::common::Ident::new("ecc")]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+    // Deterministic per-element topological order: t1 has no in-SCC
+    // reader edges; t2 reads t1; t3 reads t2.
+    assert_eq!(
+        scc.element_order,
+        vec![ecc(0), ecc(1), ecc(2)],
+        "element_order must be the per-element topological order"
+    );
+}
+
+#[test]
+fn resolve_dt_same_element_self_cycle_is_unresolved() {
+    // `x[dimA]=x[dimA]+1`: every element reads ITSELF => element
+    // self-loop => element-cyclic => unresolved (AC1.5/AC4.2). Must stay
+    // rejected by construction.
+    let project = TestProject::new("same_elem_self")
+        .named_dimension("dima", &["a1", "a2"])
+        .array_aux("x[dima]", "x[dima] + 1");
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let res = resolve_dt_recurrence_sccs(&db, model, result.project);
+    assert!(
+        res.has_unresolved,
+        "x[dimA]=x[dimA]+1 is a genuine element self-loop and MUST be \
+         unresolved (AC4.2 -- a real cycle stays rejected)"
+    );
+    assert!(
+        res.resolved.is_empty(),
+        "a genuine element self-loop yields no ResolvedScc"
+    );
+}
+
+#[test]
+fn resolve_dt_scalar_two_cycle_is_unresolved() {
+    // `a=b+1; b=a+1`: a scalar 2-cycle / multi-variable SCC. Phase 1
+    // routes multi-variable SCCs to unresolved (Phase 2 resolves them),
+    // and it is also a genuine element 2-cycle => unresolved (AC4.1).
+    let project = single_model_project(vec![aux_var("a", "b + 1"), aux_var("b", "a + 1")]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    let res = resolve_dt_recurrence_sccs(&db, model, result.project);
+    assert!(
+        res.has_unresolved,
+        "a=b+1;b=a+1 is a genuine 2-cycle and MUST be unresolved (AC4.1)"
+    );
+    assert!(
+        res.resolved.is_empty(),
+        "a genuine 2-cycle yields no ResolvedScc"
+    );
+}
+
+#[test]
+fn resolve_dt_acyclic_model_has_no_sccs() {
+    // The AC1.3 happy path: a clean DAG has no offending dt SCC, so the
+    // refinement does zero work and reports nothing (no resolved, none
+    // unresolved).
+    let project = single_model_project(vec![
+        aux_var("rate", "0.1"),
+        aux_var("growth", "rate * 100"),
+    ]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    let res = resolve_dt_recurrence_sccs(&db, model, result.project);
+    assert!(!res.has_unresolved, "a clean DAG has no unresolved SCC");
+    assert!(
+        res.resolved.is_empty(),
+        "a clean DAG has no resolved SCC either (zero extra work)"
+    );
+}
+
+#[test]
+fn resolve_dt_recurrence_sccs_is_byte_stable_across_runs() {
+    // The emitted per-element run order must be byte-identical across
+    // repeated computations on fresh databases (AC1.4 discipline): the
+    // element graph reuses the sorted Tarjan + BTreeSet ordering, so a
+    // regression that leaked HashMap iteration order would fail here.
+    let build = || {
+        let project = TestProject::new("byte_stable_fwd")
+            .named_dimension("t", &["t1", "t2", "t3"])
+            .array_with_ranges(
+                "ecc[t]",
+                vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+            );
+        let dm = project.build_datamodel();
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &dm);
+        let model = result.models["main"].source;
+        resolve_dt_recurrence_sccs(&db, model, result.project).resolved
+    };
+    assert_eq!(
+        build(),
+        build(),
+        "resolved_sccs (members + element_order) must be byte-stable \
+         across repeated compiles"
+    );
+}
+
 // ── ResolvedScc / SccPhase salsa-equality wiring ────────────────────────
 //
 // `ResolvedScc` rides on `ModelDepGraphResult`, which is a salsa return

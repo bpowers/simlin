@@ -1073,29 +1073,36 @@ fn diag_code(d: &simlin_engine::db::Diagnostic) -> Option<simlin_engine::common:
     }
 }
 
-/// Issue #559 -- the C-LEARN
+/// Issue #559 + element-level cycle resolution (Phase 1) -- the C-LEARN
 /// `Emissions with cumulative constraints[COP,tNext] = ... ecc[COP,tPrev]`
 /// self-recurrence shape, minimised to a single self-recurrent variable
-/// with NO cross-variable cycle (`test/sdeverywhere/models/self_recurrence`).
+/// with NO cross-variable cycle (`test/sdeverywhere/models/self_recurrence`):
+/// `ecc[t1]=1; ecc[tNext]=ecc[tPrev]+1` over the subrange `t1..t3`.
 ///
-/// The native MDL converter (`xmile_compat.rs::format_var_ctx`) rewrote a
-/// self-reference (`name == ctx.lhs_var_canonical`) to the literal token
-/// `self`; for a *subscripted* self-reference it emitted `self[..]`. The
-/// engine's `builtins_visitor` Subscript arm never resolves `self`, so
-/// the literal token leaked into dependency analysis as an undefined name
-/// -> `UnknownDependency`, with NO `CircularDependency` present (the
-/// self-leak fires even though there is zero cycle).
+/// Two intents, both verified here:
 ///
-/// The fix (emit the real canonical LHS name instead of `self`) makes the
-/// self-reference an ordinary reference. `ecc[tNext]=ecc[tPrev]+1` then
-/// becomes a now-visible whole-variable self-edge that the whole-variable
-/// cycle gate flags as `CircularDependency`. So after the fix this fixture
-/// is still NotSimulatable (until element-level recurrence resolution
-/// lands, #559), but the `self` token is gone and the failure is the
-/// correct structural cycle, not an undefined-name leak. The test asserts
-/// exactly that transition.
+/// (#559 name-resolution guard) The native MDL converter
+/// (`xmile_compat.rs::format_var_ctx`) rewrote a self-reference
+/// (`name == ctx.lhs_var_canonical`) to the literal token `self`; for a
+/// *subscripted* self-reference it emitted `self[..]`. The engine's
+/// `builtins_visitor` Subscript arm never resolves `self`, so the literal
+/// token leaked into dependency analysis as an undefined name ->
+/// `UnknownDependency`. The fix emits the real canonical LHS name instead,
+/// making the self-reference an ordinary reference; the `self` token must
+/// never leak as `UnknownDependency`/`DoesNotExist` again.
+///
+/// (element-cycle-resolution.AC1.1/AC1.2 target behavior) Once `self`
+/// resolves, `ecc[tNext]=ecc[tPrev]+1` is a whole-variable self-edge whose
+/// *induced element graph* (`ecc[t2]<-ecc[t1]`, `ecc[t3]<-ecc[t2]`) is
+/// acyclic and well-founded. The element-level cycle refinement resolves
+/// it: the model compiles via the incremental path with NO
+/// `CircularDependency` and simulates to the deterministic staggered
+/// series `ecc[t1]=1, ecc[t2]=2, ecc[t3]=3` (constant across both saved
+/// steps -- the recurrence is over the subrange, not over time). FINAL
+/// TIME=1, TIME STEP=1 => 2 saved steps. `self_recurrence/` ships no
+/// `.dat`, so the series is asserted in-test via `element_series`.
 #[test]
-fn self_recurrence_self_token_resolves_to_real_name() {
+fn self_recurrence_resolves_and_no_self_token_leak() {
     use simlin_engine::common::ErrorCode;
 
     let mdl = std::fs::read_to_string(
@@ -1117,32 +1124,43 @@ fn self_recurrence_self_token_resolves_to_real_name() {
         .iter()
         .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency));
 
+    // (AC1.1) The induced element graph is acyclic, so the model now
+    // compiles via the incremental path with no CircularDependency (this
+    // inverts the pre-resolution assertions: it used to be NotSimulatable
+    // with a whole-variable self-edge CircularDependency).
     assert!(
-        compile_err,
-        "self_recurrence.mdl must be NotSimulatable (a genuine \
-         whole-variable self-edge until element-level recurrence \
-         resolution lands)"
+        !compile_err,
+        "self_recurrence.mdl must now compile via the incremental path: \
+         its single-variable self-recurrence has an acyclic induced \
+         element graph and is resolved by the element-cycle refinement. \
+         Diagnostics: {diags:#?}"
     );
-    // The `self` token resolves to the enclosing var, so it no longer
-    // leaks as an unknown dependency. (Before the fix this assertion
-    // failed: `self[tPrev]` leaked as UnknownDependency because the
-    // converter emitted the literal `self` and the builtins_visitor
-    // Subscript arm never resolved it.)
+    assert!(
+        !has_circular,
+        "the single-variable self-recurrence must NOT report \
+         CircularDependency once the element-cycle refinement resolves it \
+         (its induced element graph is acyclic). Diagnostics: {diags:#?}"
+    );
+    // (#559 guard, preserved) The `self` token resolves to the enclosing
+    // var, so it never leaks as an unknown dependency. (Before the #559
+    // fix this assertion failed: `self[tPrev]` leaked as
+    // UnknownDependency because the converter emitted the literal `self`
+    // and the builtins_visitor Subscript arm never resolved it.)
     assert!(
         !self_leak,
         "the literal `self` token still leaks as \
          UnknownDependency/DoesNotExist. The converter must emit the real \
          canonical LHS name, not `self`. Diagnostics: {diags:#?}"
     );
-    // ...and the now-visible `ecc[tNext]=ecc[tPrev]+1` self-edge surfaces
-    // as a structural `CircularDependency`: the cycle only becomes
-    // visible AFTER `self` resolves, and still needs element-level
-    // resolution to actually simulate.
-    assert!(
-        has_circular,
-        "the now-visible whole-var self-edge must surface as \
-         CircularDependency. Diagnostics: {diags:#?}"
-    );
+
+    // (AC1.2) It simulates to the well-founded staggered series
+    // ecc[t1]=1, ecc[t2]=2, ecc[t3]=3 -- constant across both saved steps
+    // (the recurrence is over the subrange, not over time).
+    let r = run_inline_mdl(&mdl);
+    assert_eq!(r.step_count, 2);
+    assert_eq!(element_series(&r, "ecc[t1]"), vec![1.0, 1.0]);
+    assert_eq!(element_series(&r, "ecc[t2]"), vec![2.0, 2.0]);
+    assert_eq!(element_series(&r, "ecc[t3]"), vec![3.0, 3.0]);
 }
 
 /// Genuine-cycle guards: the self-reference fix must NOT weaken real

@@ -1177,6 +1177,26 @@ pub struct ModelDepGraphResult {
     pub resolved_sccs: Vec<ResolvedScc>,
 }
 
+/// Accumulate a model-level `CircularDependency` diagnostic for
+/// `var_name` (the variable the dependency walk reported the back-edge
+/// on). Factored out of `model_dependency_graph_impl` because the
+/// dt-phase, the dt-phase residual-after-resolution, and the init-phase
+/// cycle paths all emit the identical diagnostic; keeping one definition
+/// prevents the four sites from drifting.
+fn cycle_diagnostic(db: &dyn Db, model: SourceModel, var_name: String) {
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: Some(var_name),
+        error: DiagnosticError::Model(crate::common::Error {
+            kind: crate::common::ErrorKind::Model,
+            code: crate::common::ErrorCode::CircularDependency,
+            details: None,
+        }),
+        severity: DiagnosticSeverity::Error,
+    })
+    .accumulate(db);
+}
+
 fn model_dependency_graph_impl(
     db: &dyn Db,
     model: SourceModel,
@@ -1186,144 +1206,233 @@ fn model_dependency_graph_impl(
     let module_input_names = module_input_names.to_vec();
     let (var_info, all_init_referenced) = build_var_info(db, model, project, &module_input_names);
 
-    // Compute transitive dependencies (simplified all_deps without cross-model support)
-    let compute_transitive =
-        |is_initial: bool| -> Result<HashMap<String, BTreeSet<String>>, String> {
-            let mut all_deps: HashMap<String, Option<BTreeSet<String>>> =
-                var_info.keys().map(|k| (k.clone(), None)).collect();
-            let mut processing: BTreeSet<String> = BTreeSet::new();
+    // Compute transitive dependencies (simplified all_deps without
+    // cross-model support).
+    //
+    // `resolvable_self_loops` is the set of variables whose
+    // whole-variable dt self-edge the element-cycle refinement proved is
+    // a *resolvable* single-variable self-recurrence (acyclic induced
+    // element graph). Such a self-edge is NOT a real variable-granularity
+    // ordering constraint -- the member resolves its own elements
+    // internally via its `ResolvedScc.element_order` -- so the back-edge
+    // check breaks ONLY that self-edge. Every other back-edge
+    // (multi-variable SCC, an unresolved or genuine self-loop) is still a
+    // fatal cycle. On the acyclic happy path and the init phase this set
+    // is empty, so the cycle detector is byte-identical to before.
+    let compute_transitive = |is_initial: bool,
+                              resolvable_self_loops: &BTreeSet<String>|
+     -> Result<HashMap<String, BTreeSet<String>>, String> {
+        let mut all_deps: HashMap<String, Option<BTreeSet<String>>> =
+            var_info.keys().map(|k| (k.clone(), None)).collect();
+        let mut processing: BTreeSet<String> = BTreeSet::new();
 
-            fn compute_inner(
-                var_info: &HashMap<String, VarInfo>,
-                all_deps: &mut HashMap<String, Option<BTreeSet<String>>>,
-                processing: &mut BTreeSet<String>,
-                name: &str,
-                is_initial: bool,
-            ) -> Result<(), String> {
-                if all_deps.get(name).and_then(|d| d.as_ref()).is_some() {
-                    return Ok(());
-                }
+        fn compute_inner(
+            var_info: &HashMap<String, VarInfo>,
+            all_deps: &mut HashMap<String, Option<BTreeSet<String>>>,
+            processing: &mut BTreeSet<String>,
+            name: &str,
+            is_initial: bool,
+            resolvable_self_loops: &BTreeSet<String>,
+        ) -> Result<(), String> {
+            if all_deps.get(name).and_then(|d| d.as_ref()).is_some() {
+                return Ok(());
+            }
 
-                let info = match var_info.get(name) {
-                    Some(info) => info,
-                    None => return Ok(()), // unknown variable handled at model level
-                };
+            let info = match var_info.get(name) {
+                Some(info) => info,
+                None => return Ok(()), // unknown variable handled at model level
+            };
 
-                // Stocks break the dependency chain in dt phase
-                if info.is_stock && !is_initial {
-                    all_deps.insert(name.to_string(), Some(BTreeSet::new()));
-                    return Ok(());
-                }
+            // Stocks break the dependency chain in dt phase
+            if info.is_stock && !is_initial {
+                all_deps.insert(name.to_string(), Some(BTreeSet::new()));
+                return Ok(());
+            }
 
-                // Skip modules -- cross-model deps handled at the orchestrator level
-                if info.is_module {
-                    let direct = if is_initial {
-                        &info.initial_deps
-                    } else {
-                        &info.dt_deps
-                    };
-                    all_deps.insert(name.to_string(), Some(direct.clone()));
-                    return Ok(());
-                }
-
-                processing.insert(name.to_string());
-
-                // The successor set this normal node contributes to cycle
-                // detection AND the `all_deps` transitive/ordering map.
-                // In the dt phase it is sourced from the SINGLE shared
-                // dt-phase cycle relation (`dt_walk_successors`); in the
-                // init phase stocks do NOT break the chain (that filter is
-                // dt-only -- `compute_inner`'s `info.is_stock && !is_initial`
-                // sink does not fire here), so the relation is the init
-                // deps filtered only to known vars. Either way this is
-                // exactly the effective set the original
-                // `for dep in direct { if !var_info.contains_key {continue}
-                // if !is_initial && dep_info.is_stock {continue} ... }`
-                // loop iterated, in the same `BTreeSet`-sorted order, so
-                // cycle detection (first back-edge) and the `all_deps`
-                // transitive map are byte-identical. Only the iteration set
-                // is factored out; the stock/module early-returns above and
-                // the `transitive` accumulation below are untouched.
-                let successors: Vec<&str> = if is_initial {
-                    info.initial_deps
-                        .iter()
-                        .filter(|dep| var_info.contains_key(dep.as_str()))
-                        .map(|dep| dep.as_str())
-                        .collect()
+            // Skip modules -- cross-model deps handled at the orchestrator level
+            if info.is_module {
+                let direct = if is_initial {
+                    &info.initial_deps
                 } else {
-                    dt_walk_successors(var_info, name)
+                    &info.dt_deps
                 };
+                all_deps.insert(name.to_string(), Some(direct.clone()));
+                return Ok(());
+            }
 
-                let mut transitive = BTreeSet::new();
-                for dep in successors {
-                    transitive.insert(dep.to_string());
+            processing.insert(name.to_string());
 
-                    if processing.contains(dep) {
-                        return Err(name.to_string()); // circular dependency
+            // The successor set this normal node contributes to cycle
+            // detection AND the `all_deps` transitive/ordering map.
+            // In the dt phase it is sourced from the SINGLE shared
+            // dt-phase cycle relation (`dt_walk_successors`); in the
+            // init phase stocks do NOT break the chain (that filter is
+            // dt-only -- `compute_inner`'s `info.is_stock && !is_initial`
+            // sink does not fire here), so the relation is the init
+            // deps filtered only to known vars. Either way this is
+            // exactly the effective set the original
+            // `for dep in direct { if !var_info.contains_key {continue}
+            // if !is_initial && dep_info.is_stock {continue} ... }`
+            // loop iterated, in the same `BTreeSet`-sorted order, so
+            // cycle detection (first back-edge) and the `all_deps`
+            // transitive map are byte-identical. Only the iteration set
+            // is factored out; the stock/module early-returns above and
+            // the `transitive` accumulation below are untouched.
+            let successors: Vec<&str> = if is_initial {
+                info.initial_deps
+                    .iter()
+                    .filter(|dep| var_info.contains_key(dep.as_str()))
+                    .map(|dep| dep.as_str())
+                    .collect()
+            } else {
+                dt_walk_successors(var_info, name)
+            };
+
+            let mut transitive = BTreeSet::new();
+            for dep in successors {
+                transitive.insert(dep.to_string());
+
+                if processing.contains(dep) {
+                    // A proven-acyclic single-variable
+                    // self-recurrence's whole-variable self-edge
+                    // (`dep == name`, member in
+                    // `resolvable_self_loops`) is resolved internally
+                    // via the member's per-element order: it is NOT a
+                    // fatal cycle and there is nothing to absorb (its
+                    // own transitive set is exactly what this call is
+                    // computing). Every OTHER back-edge -- a
+                    // multi-variable SCC, or any self-loop the
+                    // element-cycle refinement did not resolve --
+                    // still returns the circular-dependency error.
+                    if dep == name && resolvable_self_loops.contains(dep) {
+                        continue;
                     }
-
-                    if all_deps.get(dep).and_then(|d| d.as_ref()).is_none() {
-                        compute_inner(var_info, all_deps, processing, dep, is_initial)?;
-                    }
-
-                    // `successors` only contains known vars (dt: filtered
-                    // inside `dt_walk_successors`; init: the `contains_key`
-                    // filter above), so this lookup never misses. The
-                    // `!dep_info.is_module` transitive non-absorption guard
-                    // is preserved exactly -- it governs only whether
-                    // `dep`'s transitive set is absorbed, never iteration.
-                    if var_info.get(dep).map(|d| !d.is_module).unwrap_or(false)
-                        && let Some(Some(dep_deps)) = all_deps.get(dep)
-                    {
-                        transitive.extend(dep_deps.iter().cloned());
-                    }
+                    return Err(name.to_string()); // circular dependency
                 }
 
-                processing.remove(name);
-                all_deps.insert(name.to_string(), Some(transitive));
-                Ok(())
+                if all_deps.get(dep).and_then(|d| d.as_ref()).is_none() {
+                    compute_inner(
+                        var_info,
+                        all_deps,
+                        processing,
+                        dep,
+                        is_initial,
+                        resolvable_self_loops,
+                    )?;
+                }
+
+                // `successors` only contains known vars (dt: filtered
+                // inside `dt_walk_successors`; init: the `contains_key`
+                // filter above), so this lookup never misses. The
+                // `!dep_info.is_module` transitive non-absorption guard
+                // is preserved exactly -- it governs only whether
+                // `dep`'s transitive set is absorbed, never iteration.
+                if var_info.get(dep).map(|d| !d.is_module).unwrap_or(false)
+                    && let Some(Some(dep_deps)) = all_deps.get(dep)
+                {
+                    transitive.extend(dep_deps.iter().cloned());
+                }
             }
 
-            let names: Vec<String> = var_info.keys().cloned().collect();
-            for name in &names {
-                compute_inner(&var_info, &mut all_deps, &mut processing, name, is_initial)?;
-            }
+            processing.remove(name);
+            all_deps.insert(name.to_string(), Some(transitive));
+            Ok(())
+        }
 
-            Ok(all_deps
-                .into_iter()
-                .map(|(k, v)| (k, v.unwrap_or_default()))
-                .collect())
-        };
+        let names: Vec<String> = var_info.keys().cloned().collect();
+        for name in &names {
+            compute_inner(
+                &var_info,
+                &mut all_deps,
+                &mut processing,
+                name,
+                is_initial,
+                resolvable_self_loops,
+            )?;
+        }
+
+        Ok(all_deps
+            .into_iter()
+            .map(|(k, v)| (k, v.unwrap_or_default()))
+            .collect())
+    };
 
     let mut has_cycle = false;
-    let dt_dependencies = compute_transitive(false).unwrap_or_else(|var_name| {
+    let mut resolved_sccs: Vec<ResolvedScc> = Vec::new();
+
+    let no_resolvable: BTreeSet<String> = BTreeSet::new();
+
+    // First pass with NO resolvable self-loops: the acyclic happy path
+    // returns `Ok` here with zero refinement work (byte-identical to the
+    // pre-Phase-1 behavior). Only a genuine back-edge triggers the
+    // element-cycle refinement below.
+    let dt_first = compute_transitive(false, &no_resolvable);
+
+    // The set of single-variable self-recurrence members whose induced
+    // element graph the refinement proved acyclic in BOTH the dt and init
+    // phases (`refine_scc_to_element_verdict` verifies both, since a
+    // single-variable self-recurrence's self-edge is structurally present
+    // in both relations -- `ecc[tNext]=ecc[tPrev]+1` is `ecc`'s init AST
+    // too). Their self-edge is broken in BOTH `compute_transitive` calls
+    // so the dependency maps / runlists come out correct; the member
+    // stays in the normal per-variable runlist and lowers correctly via
+    // declared-order `SubscriptIterator` (no combined fragment in Phase
+    // 1). Empty unless the dt gate actually found a fully-resolvable
+    // back-edge.
+    let resolvable: BTreeSet<String> = if dt_first.is_err() {
+        let resolution = crate::db_dep_graph::resolve_dt_recurrence_sccs(db, model, project);
+        if !resolution.has_unresolved && !resolution.resolved.is_empty() {
+            let names = resolution
+                .resolved
+                .iter()
+                .flat_map(|s| s.members.iter().map(|m| m.as_str().to_string()))
+                .collect();
+            resolved_sccs = resolution.resolved;
+            names
+        } else {
+            // A genuine cycle remains (multi-variable in Phase 1,
+            // element-cyclic, or not element-sourceable): keep the
+            // conservative `CircularDependency` (loud-safe fallback).
+            BTreeSet::new()
+        }
+    } else {
+        BTreeSet::new()
+    };
+
+    let dt_dependencies = match dt_first {
+        Ok(deps) => deps,
+        Err(first_cycle_var) => {
+            if resolvable.is_empty() {
+                // Unresolved: keep the conservative `CircularDependency`.
+                has_cycle = true;
+                cycle_diagnostic(db, model, first_cycle_var);
+                HashMap::new()
+            } else {
+                // Re-run with the resolved members' self-edges broken
+                // (only at the self-edge; every other back-edge still
+                // errors). A residual genuine cycle is still loud-safe.
+                compute_transitive(false, &resolvable).unwrap_or_else(|var_name| {
+                    has_cycle = true;
+                    resolved_sccs.clear();
+                    cycle_diagnostic(db, model, var_name);
+                    HashMap::new()
+                })
+            }
+        }
+    };
+
+    // The init-phase cycle gate breaks the SAME resolved members'
+    // self-edges (verified element-acyclic in the init phase too by
+    // `refine_scc_to_element_verdict`), so a single-variable
+    // self-recurrence -- whose self-edge is structurally present in the
+    // init relation as well -- does not falsely trip the init cycle gate.
+    // With an empty `resolvable` (the acyclic happy path, or the
+    // loud-safe fallback) this is byte-identical to the original
+    // behavior. Genuine init cycles (a member not init-element-acyclic is
+    // never in `resolvable`) still report `CircularDependency`.
+    let initial_dependencies = compute_transitive(true, &resolvable).unwrap_or_else(|var_name| {
         has_cycle = true;
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(var_name),
-            error: DiagnosticError::Model(crate::common::Error {
-                kind: crate::common::ErrorKind::Model,
-                code: crate::common::ErrorCode::CircularDependency,
-                details: None,
-            }),
-            severity: DiagnosticSeverity::Error,
-        })
-        .accumulate(db);
-        HashMap::new()
-    });
-    let initial_dependencies = compute_transitive(true).unwrap_or_else(|var_name| {
-        has_cycle = true;
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(var_name),
-            error: DiagnosticError::Model(crate::common::Error {
-                kind: crate::common::ErrorKind::Model,
-                code: crate::common::ErrorCode::CircularDependency,
-                details: None,
-            }),
-            severity: DiagnosticSeverity::Error,
-        })
-        .accumulate(db);
+        cycle_diagnostic(db, model, var_name);
         HashMap::new()
     });
 
@@ -1473,14 +1582,16 @@ fn model_dependency_graph_impl(
         runlist_flows,
         runlist_stocks,
         has_cycle,
-        // Phase 1 Subcomponent A scaffolds the field; the element-cycle
-        // refinement in Subcomponent B populates it from the cycle-gate
-        // back-edge path. Until then (and on the acyclic happy path) it
-        // is empty -- zero extra work, no behavior change. This is the
-        // sole `ModelDepGraphResult` construction site (the dt/init
-        // back-edge paths use `unwrap_or_else` and fall through here, so
-        // there is no separate early-return literal to initialize).
-        resolved_sccs: Vec::new(),
+        // Populated by the Phase 1 Subcomponent B element-cycle
+        // refinement when the dt cycle gate's back-edge is fully
+        // explained by resolvable single-variable self-recurrences
+        // (`resolve_dt_recurrence_sccs`); empty on the acyclic happy path
+        // and whenever the conservative loud-safe `CircularDependency`
+        // fallback fires (zero extra work, no behavior change there).
+        // This is the sole `ModelDepGraphResult` construction site (the
+        // dt/init back-edge paths fall through here), so the byte-stable
+        // `resolved` vector flows straight onto the salsa return value.
+        resolved_sccs,
     }
 }
 
