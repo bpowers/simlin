@@ -435,6 +435,111 @@ test name) — pass.
 **Commit:** `engine: interleave members' symbolic segments into one combined PerVarBytecodes`
 <!-- END_TASK_5 -->
 
+<!-- START_TASK_5B -->
+### Task 5b: Consume the resolved multi-member SCC in the dependency graph (SCC-aware back-edge break + contiguous placement)
+
+**Verifies:** element-cycle-resolution.AC2.1, element-cycle-resolution.AC2.2, element-cycle-resolution.AC2.4, element-cycle-resolution.AC4 (loud-safe: genuine multi-variable cycles still rejected)
+
+**Why this task exists (inserted prerequisite — GH #575 re-architecture):**
+Phase 1 / Subcomponent A only ever taught `model_dependency_graph_impl`'s
+`compute_transitive` to break a *self-edge* (`dep == name &&
+resolvable_self_loops.contains(dep)`, `db.rs:~1311`). For a multi-member
+resolved SCC the intra-SCC edges are *cross-edges* (`dep != name`), so the
+guard is false, `compute_transitive` returns `Err`, the `.unwrap_or_else`
+sets `has_cycle = true` and `resolved_sccs.clear()`, and `assemble_module`
+early-returns at `if dep_graph.has_cycle` — Task 4/5's correct verdict +
+combined fragment are unreachable. Tasks 6/7/8 (inject, ref.mdl,
+interleaved.mdl) cannot work until the dependency graph treats a resolved
+multi-member SCC as a single collapsed node. This is the N≥2 analogue of the
+single-variable self-edge consumption Phase 1 added; it was implicitly
+assumed present by the original plan.
+
+**Files:**
+- Modify: `src/simlin-engine/src/db.rs` `model_dependency_graph_impl`
+  (`compute_transitive`/`compute_inner`, the `resolvable`/`resolved_sccs`
+  construction, and the symmetric init block). Locate by name/content;
+  report actual current line numbers.
+- Modify: `src/simlin-engine/src/db_dep_graph.rs` — correct the
+  `resolve_recurrence_sccs` rustdoc (`~:1166-1181`) that currently asserts
+  the false N=1-only premise "the resolved member set only suppresses the
+  resolved members' edges" (CLAUDE.md comment-freshness, same commit).
+
+**Implementation:**
+- Generalize the `resolvable_self_loops: &BTreeSet<String>` parameter
+  threaded through `compute_transitive`/`compute_inner` into an **SCC-aware**
+  structure mapping each resolved member name → a stable SCC id (e.g.
+  `&BTreeMap<String, usize>` or `&HashMap<String, SccId>`), built from
+  `resolution.resolved` (every member of `ResolvedScc` *i* maps to *i*). A
+  single-variable self-recurrence is a **1-member SCC** under this map, so
+  this *unifies and replaces* the N=1 self-edge mechanism — it is not a
+  parallel path.
+- Back-edge handling (the `processing.contains(dep)` site, `db.rs:~1299`):
+  suppress (`continue`, no error) **iff `dep` and `name` are in the SAME
+  resolved SCC** (`map.get(dep).is_some() && map.get(dep) == map.get(name)`).
+  This covers the N=1 self-edge (`dep == name`, 1-member SCC) and N≥2
+  cross-edges (`dep != name`, same SCC) uniformly. Any back-edge NOT within
+  one resolved SCC still `return Err` (loud-safe: genuine cycles, a
+  partially-resolved SCC, or a cross-SCC edge stay `CircularDependency`).
+- Treat the resolved SCC as **one collapsed node** for transitive
+  accumulation so external topological ordering is correct: every member of
+  an SCC must end with the SAME transitive set = the union of all members'
+  *external* (non-SCC) successors and their transitive deps; **no SCC member
+  may appear in another SCC member's transitive set** (else the topo sort
+  re-sees the cycle). The SCC is positioned after its external deps and
+  before its external consumers.
+- Deterministic contiguous placement: members of a resolved SCC must appear
+  in the runlist grouped and in a byte-stable order at the SCC's topological
+  slot, so Task 6's "inject one combined fragment at the first SCC member's
+  slot, skip the rest" lands it in correct relative order. Reuse the existing
+  byte-stable discipline (BTreeSet/sorted; `element_order` is already
+  byte-stable from Task 4); the SCC's runlist position is what matters
+  (Task 6 injects once and skips non-first members).
+- With the SCC-aware break, `compute_transitive(false, &scc_map)` now returns
+  `Ok` for a fully-resolved multi-member SCC, so `resolved_sccs` stays
+  populated and `has_cycle = false`. Apply the **same generalization
+  symmetrically to the init block** (it already mirrors the dt block).
+- Loud-safe: a genuine multi-variable cycle (`a=b+1; b=a+1`;
+  `a[i]=b[i]; b[i]=a[i]`) is NOT in `resolution.resolved` (Task 4's symbolic
+  verdict returns it `Unresolved`), so it is absent from the SCC map, its
+  back-edge still `Err`s ⇒ `has_cycle = true` ⇒ `CircularDependency`. A
+  partially-resolved SCC (`has_unresolved`) keeps the conservative fallback.
+- Honor the documented module-input scoping caveat (GH #573,
+  `db_dep_graph.rs:~1158-1180`) — do not regress it.
+
+**CRITICAL CONSTRAINT:** every Phase 1 + Subcomponent A single-variable
+regression guard MUST stay green **unchanged** (`self_recurrence.mdl`
+end-to-end, `self_recurrence_resolves_and_no_self_token_leak`,
+`genuine_cycles_still_rejected`, all `resolve_dt_*`/`resolve_init_*`,
+`dt_cycle_sccs_*`, byte-stability, `previous_self_reference_still_resolves`).
+N=1 is the 1-member-SCC case of the generalized mechanism and must be
+byte-identical. If a guard needs editing to pass, the generalization changed
+N=1 behavior — STOP and report, do not edit the guard.
+
+**Testing (RED-first, `db_dep_graph_tests.rs`):**
+- A two-member `ref.mdl`-shaped SCC `TestProject` ⇒ `model_dependency_graph`:
+  `has_cycle == false`, `resolved_sccs` contains the `{ce,ecc}` SCC,
+  `dt_dependencies` non-empty and each member carries the SCC's external
+  deps — RED before (today `has_cycle == true`, empty `resolved_sccs`), GREEN
+  after.
+- `interleaved.mdl`-shaped multi-member SCC ⇒ same (`has_cycle == false`,
+  resolved).
+- Genuine multi-variable element 2-cycle `a[i]=b[i]; b[i]=a[i]` and scalar
+  `a=b+1; b=a+1` ⇒ `has_cycle == true`, empty `resolved_sccs` (loud-safe;
+  the load-bearing AC4 assertion).
+- An acyclic control ⇒ unaffected (empty `resolved_sccs`, `has_cycle ==
+  false`).
+- Regression: the single-variable self-recurrence `TestProject` ⇒
+  byte-identical `resolved_sccs`/`element_order`/`has_cycle` to Phase 1.
+
+**Verification:**
+Run: `cargo test -p simlin-engine --features file_io --lib db_dep_graph` —
+RED on the multi-member tests before, GREEN after, entire existing suite
+green unchanged. Then `cargo test -p simlin-engine --features file_io` corpus
+green. Commit via `git commit` (pre-commit full `cargo test` 180s cap; never
+`--no-verify`; on hook failure fix + NEW commit, not `--amend`).
+**Commit:** `engine: consume multi-member resolved SCCs in dependency graph (SCC-aware back-edge break)`
+<!-- END_TASK_5B -->
+
 <!-- START_TASK_6 -->
 ### Task 6: Inject the combined fragment in `assemble_module` (dt + init)
 
