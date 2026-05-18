@@ -1378,14 +1378,30 @@ TIME STEP = 1 ~~|
     assert_eq!(element_series(&r, "y[t3]"), vec![7.0, 7.0, 7.0]);
 }
 
-/// `ref.mdl` and `interleaved.mdl` are pure INTER-variable cycles
-/// (`ecc`<->`ce`) with NO self-reference, so the converter never emits a
-/// `self` token for them. They must report `CircularDependency` and NEVER
-/// `UnknownDependency`/`DoesNotExist`, and the self-reference fix must not
-/// change that: it must not spuriously inject a `self`/undefined-name
-/// leak into an inter-variable-cycle model. (These stay NotSimulatable
-/// pending the still-open element-level cycle resolution, #559; this also
-/// shows why the dedicated `self_recurrence` fixture is needed.)
+/// `ref.mdl` and `interleaved.mdl` are INTER-variable element-acyclic
+/// recurrence SCCs (`ce`<->`ecc` / `a`<->`y`). Phase 2 Task 5b's
+/// SCC-aware back-edge break makes `model_dependency_graph` resolve the
+/// multi-member SCC instead of rejecting it, so they NO LONGER report
+/// `CircularDependency` (that was the Phase 1 / pre-Subcomponent-B
+/// behavior). This Task-5b-scoped invariant guards two things:
+///
+///  1. The cycle-gate verdict changed cleanly: NO `CircularDependency`
+///     for either fixture (the multi-member resolved SCC survives the
+///     dependency graph -- the Task 5b deliverable / Task 6 prerequisite).
+///  2. The AC2.5 leak guard (preserved verbatim from the original Phase 1
+///     intent): the verdict change must NOT spuriously inject a
+///     `self`/undefined-name `UnknownDependency`/`DoesNotExist` leak into
+///     these inter-variable-cycle fixtures.
+///
+/// It deliberately does NOT assert the hand-computed simulation series:
+/// the combined per-element fragment is injected by Task 6, and the
+/// end-to-end `ref.dat`/`interleaved.dat` simulation assertions are
+/// authored by Tasks 7/8; Task 9 (AC2.5) then folds/transitions this
+/// test's intent into the full correct-simulation form. (Deviation
+/// rationale: Task 5b's correctness fix structurally falsifies this
+/// test's `CircularDependency` precondition, so it cannot stay green
+/// unchanged and a green pre-commit forces this minimal,
+/// Task-5b-scoped retarget -- see the executor report.)
 #[test]
 fn ref_interleaved_inter_variable_cycles_report_circular() {
     use simlin_engine::common::ErrorCode;
@@ -1395,16 +1411,14 @@ fn ref_interleaved_inter_variable_cycles_report_circular() {
     ] {
         let mdl =
             std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"));
-        let (compile_err, diags) = compile_diags(&mdl);
+        let (_compile_err, diags) = compile_diags(&mdl);
         assert!(
-            compile_err,
-            "{path}: must be NotSimulatable (inter-variable cycle)"
-        );
-        assert!(
-            diags
+            !diags
                 .iter()
                 .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency)),
-            "{path}: inter-variable-cycle fixture must report \
+            "{path}: Task 5b's SCC-aware back-edge break must let the \
+             element-acyclic multi-member recurrence SCC survive the \
+             dependency graph -- it must NO LONGER report \
              CircularDependency. Diagnostics: {diags:#?}"
         );
         assert!(
@@ -1412,9 +1426,9 @@ fn ref_interleaved_inter_variable_cycles_report_circular() {
                 diag_code(d),
                 Some(ErrorCode::UnknownDependency) | Some(ErrorCode::DoesNotExist)
             )),
-            "{path}: the self-reference fix must NOT inject a \
+            "{path}: the cycle-gate verdict change must NOT inject a \
              `self`/undefined-name leak into a pure inter-variable-cycle \
-             fixture. Diagnostics: {diags:#?}"
+             fixture (AC2.5 leak guard, preserved). Diagnostics: {diags:#?}"
         );
     }
 }

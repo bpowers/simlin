@@ -1766,3 +1766,480 @@ fn var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic() {
         "a real arrayed SourceVariable must yield a symbolic fragment"
     );
 }
+
+// ── Task 5b: multi-member resolved SCC survives the dependency-graph ─────
+// cycle gate (SCC-aware back-edge break + contiguous placement, GH #575)
+//
+// Phase 1 / Subcomponent A only ever taught `compute_transitive` to break
+// a SELF-edge (`dep == name && resolvable_self_loops.contains(dep)`). For a
+// multi-member resolved SCC the intra-SCC edges are CROSS-edges
+// (`dep != name`), so the old guard is false, `compute_transitive` returns
+// `Err`, `.unwrap_or_else` sets `has_cycle = true` and clears
+// `resolved_sccs`, and `assemble_module` early-returns -- Task 4/5's
+// correct verdict is unreachable. These tests pin the SCC-aware break:
+// `resolve_recurrence_sccs` already resolves `{ce,ecc}` / `{a,y}` (Task 4,
+// green), but `model_dependency_graph` must now ALSO report
+// `has_cycle == false` with the SCC in `resolved_sccs` and the SCC's
+// EXTERNAL deps propagated onto every member (the SCC treated as one
+// collapsed node so the topo sort never re-sees the cycle). The
+// genuine-cycle tests are the load-bearing AC4 loud-safe assertions: they
+// MUST fail RED only if the generalization wrongly suppressed a real
+// back-edge.
+
+/// `ce`/`ecc` ref-shaped multi-member recurrence SCC with an EXTERNAL
+/// dependency (`base`, an acyclic upstream aux every `ce` element reads)
+/// and an EXTERNAL consumer (`sink`, reads `ecc`). The `{ce,ecc}` SCC is
+/// element-acyclic (Task 4 resolves it). After the SCC-aware break the
+/// dependency graph must treat `{ce,ecc}` as one collapsed node: both
+/// members end with `base` (and nothing of each other) in their transitive
+/// set, and `sink` (an external consumer) transitively depends on the
+/// whole SCC + `base`.
+fn ce_ecc_with_external_dep_project() -> TestProject {
+    TestProject::new("ce_ecc_with_external_dep")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .aux("base", "7", None)
+        .array_with_ranges(
+            "ce[t]",
+            vec![
+                ("t1", "base"),
+                ("t2", "ecc[t1] + base"),
+                ("t3", "ecc[t2] + base"),
+            ],
+        )
+        .array_with_ranges(
+            "ecc[t]",
+            vec![
+                ("t1", "ce[t1] + 1"),
+                ("t2", "ce[t2] + 1"),
+                ("t3", "ce[t3] + 1"),
+            ],
+        )
+        .aux("sink", "ecc[t1] + ecc[t2] + ecc[t3]", None)
+}
+
+#[test]
+fn model_dep_graph_two_member_ref_scc_resolves_with_external_deps() {
+    // RED before the SCC-aware break: `compute_transitive(false,
+    // &resolvable)` hits the `ce -> ecc` CROSS back-edge (`dep != name`),
+    // the self-edge-only guard is false, it returns `Err`, the
+    // `.unwrap_or_else` sets `has_cycle = true` and clears `resolved_sccs`.
+    // GREEN after: `{ce,ecc}` is one collapsed node, the back-edge is
+    // suppressed (same SCC), so `has_cycle == false`, `resolved_sccs`
+    // carries the `{ce,ecc}` SCC, and every member carries the SCC's
+    // EXTERNAL dep `base` (not each other) in `dt_dependencies`.
+    let project = ce_ecc_with_external_dep_project();
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+
+    assert!(
+        !dep_graph.has_cycle,
+        "an element-acyclic multi-member recurrence SCC must NOT set \
+         has_cycle (the intra-SCC cross-edges are not real \
+         variable-granularity ordering constraints once the SCC is one \
+         collapsed node)"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "exactly one ResolvedScc for the resolved {{ce,ecc}} cluster (got \
+         {:?})",
+        dep_graph.resolved_sccs
+    );
+    assert_eq!(dep_graph.resolved_sccs[0].phase, crate::db::SccPhase::Dt);
+    assert_eq!(
+        dep_graph.resolved_sccs[0].members,
+        [
+            crate::common::Ident::new("ce"),
+            crate::common::Ident::new("ecc"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>(),
+        "the resolved SCC's members are exactly {{ce,ecc}}"
+    );
+
+    // The SCC-as-collapsed-node transitive accumulation: every member ends
+    // with the SAME external transitive set (`base`), and NO member may
+    // appear in another member's transitive set (else the topo sort
+    // re-sees the cycle).
+    let ce_deps = dep_graph
+        .dt_dependencies
+        .get("ce")
+        .expect("ce must have a dt_dependencies entry");
+    let ecc_deps = dep_graph
+        .dt_dependencies
+        .get("ecc")
+        .expect("ecc must have a dt_dependencies entry");
+    assert!(
+        ce_deps.contains("base"),
+        "ce must carry the SCC's external dep `base` transitively (got \
+         {ce_deps:?})"
+    );
+    assert!(
+        ecc_deps.contains("base"),
+        "ecc must carry the SCC's external dep `base` transitively even \
+         though only `ce` reads `base` directly -- the SCC is one \
+         collapsed node so every member shares the union of external deps \
+         (got {ecc_deps:?})"
+    );
+    assert!(
+        !ce_deps.contains("ce") && !ce_deps.contains("ecc"),
+        "no SCC member may appear in `ce`'s transitive set (else the topo \
+         sort re-sees the cycle) (got {ce_deps:?})"
+    );
+    assert!(
+        !ecc_deps.contains("ce") && !ecc_deps.contains("ecc"),
+        "no SCC member may appear in `ecc`'s transitive set (got \
+         {ecc_deps:?})"
+    );
+
+    // An external consumer carries the directly-referenced member plus
+    // the SCC's external deps (the SCC being one collapsed node, depending
+    // on any member transitively pulls in the SCC's member-free external
+    // set). It does NOT carry the non-referenced member `ce`: the
+    // SCC-as-condensed-node runlist placement (asserted below) is what
+    // guarantees the WHOLE SCC precedes `sink`, not injecting every member
+    // into the consumer's dep set. (`sink` references only `ecc`.)
+    let sink_deps = dep_graph
+        .dt_dependencies
+        .get("sink")
+        .expect("sink must have a dt_dependencies entry");
+    assert!(
+        sink_deps.contains("ecc") && sink_deps.contains("base"),
+        "the external consumer `sink` must transitively depend on the \
+         referenced member `ecc` and the SCC's external dep `base` (got \
+         {sink_deps:?})"
+    );
+    assert!(
+        !sink_deps.contains("ce"),
+        "`sink` references only `ecc`, so `ce` (the other SCC member) must \
+         NOT appear in its dep set -- the SCC is one collapsed node and \
+         contiguity is enforced by the runlist condensation, not by \
+         leaking every member into the consumer (got {sink_deps:?})"
+    );
+    let pos = |n: &str| {
+        dep_graph
+            .runlist_flows
+            .iter()
+            .position(|v| v == n)
+            .unwrap_or_else(|| panic!("{n} missing from runlist_flows"))
+    };
+    // Deterministic CONTIGUOUS placement (Task 6 prerequisite): the two
+    // SCC members must be adjacent in the flows runlist, in the SCC's
+    // byte-stable sorted order (`ce` before `ecc`), so Task 6 can inject
+    // ONE combined fragment at the first member's slot and skip the rest.
+    assert_eq!(
+        (pos("ecc") as i64) - (pos("ce") as i64),
+        1,
+        "the SCC members must be CONTIGUOUS in the flows runlist (ce \
+         immediately followed by ecc, the byte-stable sorted order) so \
+         Task 6's inject-at-first-skip-the-rest lands cleanly \
+         (runlist_flows = {:?})",
+        dep_graph.runlist_flows
+    );
+    assert!(
+        pos("base") < pos("ce") && pos("base") < pos("ecc"),
+        "the SCC must be positioned AFTER its external dep `base` \
+         (runlist_flows = {:?})",
+        dep_graph.runlist_flows
+    );
+    assert!(
+        pos("ce") < pos("sink") && pos("ecc") < pos("sink"),
+        "the SCC must be positioned BEFORE its external consumer `sink` \
+         (runlist_flows = {:?})",
+        dep_graph.runlist_flows
+    );
+}
+
+#[test]
+fn model_dep_graph_scc_members_contiguous_with_interposing_external_var() {
+    // CONTIGUITY is load-bearing here: an UNRELATED external var (`mmm`)
+    // sorts alphabetically strictly BETWEEN the two SCC members
+    // (`aaa` < `mmm` < `zzz`). A non-SCC-aware topological sort visits
+    // names in sorted order and would emit `aaa, mmm, zzz` -- the SCC
+    // members NOT adjacent. Only the SCC-condensation in `topo_sort_str`
+    // (emit the whole `{aaa,zzz}` block when either member is first
+    // reached) yields a contiguous `aaa, zzz` run, which Task 6's
+    // inject-combined-fragment-at-first-member-slot requires. `mmm` has no
+    // relation to the SCC, so it may sort before or after the block, but
+    // it must NOT split it.
+    let project = TestProject::new("mdg_scc_contiguity")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .aux("mmm", "42", None)
+        .array_with_ranges(
+            "aaa[t]",
+            vec![("t1", "1"), ("t2", "zzz[t1] + 1"), ("t3", "zzz[t2] + 1")],
+        )
+        .array_with_ranges(
+            "zzz[t]",
+            vec![
+                ("t1", "aaa[t1] + 1"),
+                ("t2", "aaa[t2] + 1"),
+                ("t3", "aaa[t3] + 1"),
+            ],
+        );
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "the element-acyclic {{aaa,zzz}} SCC must NOT set has_cycle"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "exactly one ResolvedScc ({{aaa,zzz}})"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs[0].members,
+        [
+            crate::common::Ident::new("aaa"),
+            crate::common::Ident::new("zzz"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    );
+    let pos = |n: &str| {
+        dep_graph
+            .runlist_flows
+            .iter()
+            .position(|v| v == n)
+            .unwrap_or_else(|| panic!("{n} missing from runlist_flows"))
+    };
+    // The SCC members are CONTIGUOUS in byte-stable sorted order despite
+    // `mmm` sorting alphabetically between them: proves the SCC-
+    // condensation, not mere sorted iteration, drives placement.
+    assert_eq!(
+        (pos("zzz") as i64) - (pos("aaa") as i64),
+        1,
+        "the SCC members must be CONTIGUOUS even though the unrelated \
+         external var `mmm` sorts alphabetically between them -- a \
+         non-SCC-aware topo would emit aaa,mmm,zzz (runlist_flows = {:?})",
+        dep_graph.runlist_flows
+    );
+}
+
+#[test]
+fn model_dep_graph_two_member_ref_scc_resolves_no_external_deps() {
+    // The pure ref.mdl shape (members reference only each other +
+    // constants, no external dep): still `has_cycle == false` with the
+    // `{ce,ecc}` SCC resolved. RED before: the cross back-edge errs.
+    let project = ce_ecc_ref_shaped_project();
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "the bare ref-shaped {{ce,ecc}} SCC (no external dep) must NOT set \
+         has_cycle"
+    );
+    assert_eq!(dep_graph.resolved_sccs.len(), 1);
+    assert_eq!(
+        dep_graph.resolved_sccs[0].members,
+        [
+            crate::common::Ident::new("ce"),
+            crate::common::Ident::new("ecc"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    );
+    // dt_dependencies must be populated (Ok, not the HashMap::new() the
+    // loud-safe error path returns).
+    assert!(
+        !dep_graph.dt_dependencies.is_empty(),
+        "a resolved SCC must yield a populated dt_dependencies map, not \
+         the empty map the loud-safe CircularDependency fallback returns"
+    );
+}
+
+#[test]
+fn model_dep_graph_interleaved_shaped_multi_member_scc_resolves() {
+    // `interleaved.mdl`-shaped: x=1; a[A1]=x; a[A2]=y; y=a[A1];
+    // b[DimA]=a[DimA]. Whole-variable `a`<->`y` is a 2-cycle, but
+    // element-wise x -> a[A1] -> y -> a[A2] is acyclic. The SCC `{a,y}`
+    // has external dep `x` and external consumer `b`. After the SCC-aware
+    // break `model_dependency_graph` must report `has_cycle == false`,
+    // resolve `{a,y}`, and propagate `x` onto both `a` and `y`.
+    let project = TestProject::new("mdg_interleaved_shaped")
+        .named_dimension("dima", &["a1", "a2"])
+        .aux("x", "1", None)
+        .array_with_ranges("a[dima]", vec![("a1", "x"), ("a2", "y")])
+        .aux("y", "a[a1]", None)
+        .array_aux("b[dima]", "a[dima]");
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "x -> a[A1] -> y -> a[A2] is element-acyclic through the a<->y \
+         whole-variable 2-cycle: model_dependency_graph must NOT set \
+         has_cycle"
+    );
+    assert_eq!(dep_graph.resolved_sccs.len(), 1);
+    assert_eq!(
+        dep_graph.resolved_sccs[0].members,
+        [
+            crate::common::Ident::new("a"),
+            crate::common::Ident::new("y"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    );
+    let a_deps = dep_graph.dt_dependencies.get("a").expect("a deps");
+    let y_deps = dep_graph.dt_dependencies.get("y").expect("y deps");
+    assert!(
+        a_deps.contains("x") && y_deps.contains("x"),
+        "both members of the {{a,y}} SCC must carry the external dep `x` \
+         (a={a_deps:?}, y={y_deps:?})"
+    );
+    assert!(
+        !a_deps.contains("a")
+            && !a_deps.contains("y")
+            && !y_deps.contains("a")
+            && !y_deps.contains("y"),
+        "no SCC member may appear in another member's transitive set \
+         (a={a_deps:?}, y={y_deps:?})"
+    );
+}
+
+#[test]
+fn model_dep_graph_genuine_element_two_cycle_stays_circular() {
+    // LOUD-SAFE AC4 (load-bearing). `a[d]=b[d]; b[d]=a[d]` is a genuine
+    // multi-variable element 2-cycle. Task 4 returns it Unresolved, so it
+    // is NOT in `resolution.resolved`, so it is absent from the SCC map,
+    // so its cross back-edge still `Err`s => `has_cycle == true`, empty
+    // `resolved_sccs`. This must NOT regress to a silent resolve when the
+    // self-edge-only break is generalized.
+    let project = TestProject::new("mdg_genuine_elem_two_cycle")
+        .named_dimension("d", &["d1", "d2"])
+        .array_aux("a[d]", "b[d]")
+        .array_aux("b[d]", "a[d]");
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        dep_graph.has_cycle,
+        "a genuine multi-variable element 2-cycle MUST still set \
+         has_cycle (loud-safe: it is absent from the resolved-SCC map so \
+         its back-edge still errs)"
+    );
+    assert!(
+        dep_graph.resolved_sccs.is_empty(),
+        "a genuine element 2-cycle resolves nothing"
+    );
+}
+
+#[test]
+fn model_dep_graph_genuine_scalar_two_cycle_stays_circular() {
+    // LOUD-SAFE AC4 (load-bearing). `a=b+1; b=a+1` is a genuine scalar
+    // 2-cycle. Unresolved by Task 4 => absent from the SCC map => its
+    // cross back-edge still errs => `has_cycle == true`, empty
+    // `resolved_sccs`.
+    let project = single_model_project(vec![aux_var("a", "b + 1"), aux_var("b", "a + 1")]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        dep_graph.has_cycle,
+        "a genuine scalar 2-cycle MUST still set has_cycle (loud-safe)"
+    );
+    assert!(
+        dep_graph.resolved_sccs.is_empty(),
+        "a genuine scalar 2-cycle resolves nothing"
+    );
+}
+
+#[test]
+fn model_dep_graph_acyclic_control_unaffected_by_scc_aware_break() {
+    // An ordinary acyclic model: no back-edge ever fires, so the SCC-aware
+    // generalization is inert -- `has_cycle == false`, `resolved_sccs`
+    // empty, dt_dependencies the normal transitive closure. Pins that the
+    // generalization does ZERO extra work / no behavior change on the
+    // happy path.
+    let project = single_model_project(vec![
+        aux_var("a", "1"),
+        aux_var("b", "a + 1"),
+        aux_var("c", "a + b"),
+    ]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(!dep_graph.has_cycle, "an acyclic model has no cycle");
+    assert!(
+        dep_graph.resolved_sccs.is_empty(),
+        "an acyclic model resolves no SCC (zero refinement work)"
+    );
+    let c_deps = dep_graph.dt_dependencies.get("c").expect("c deps");
+    assert!(
+        c_deps.contains("a") && c_deps.contains("b"),
+        "the normal transitive closure is unchanged (c={c_deps:?})"
+    );
+}
+
+#[test]
+fn model_dep_graph_single_var_self_recurrence_byte_identical_to_phase1() {
+    // N=1 REGRESSION (byte-identical). The single-variable self-recurrence
+    // is the 1-member-SCC case of the generalized mechanism. Its emitted
+    // `resolved_sccs` / `element_order` / `has_cycle` from
+    // `model_dependency_graph` MUST be byte-identical to the Phase 1
+    // shape: exactly one `ResolvedScc { phase: Dt, members: {ecc},
+    // element_order: [(ecc,0),(ecc,1),(ecc,2)] }`, `has_cycle == false`.
+    // The existing Phase 1 guards
+    // (`dt_cycle_sccs_resolved_self_recurrence_has_no_circular`,
+    // `model_dependency_graph_resolved_sccs_is_byte_stable_across_runs`)
+    // assert the same N=1 contract and must ALSO stay green unchanged.
+    let project = TestProject::new("mdg_n1_byte_identical")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges(
+            "ecc[t]",
+            vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+        );
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "the N=1 self-recurrence (1-member SCC) must NOT set has_cycle"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "exactly one ResolvedScc (the 1-member {{ecc}} SCC)"
+    );
+    let scc = &dep_graph.resolved_sccs[0];
+    assert_eq!(scc.phase, crate::db::SccPhase::Dt);
+    assert_eq!(
+        scc.members,
+        [crate::common::Ident::new("ecc")]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        scc.element_order,
+        vec![ecc(0), ecc(1), ecc(2)],
+        "the N=1 element_order must be byte-identical to Phase 1 (the \
+         1-member-SCC case must not change N=1 behavior)"
+    );
+}
