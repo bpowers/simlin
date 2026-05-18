@@ -683,6 +683,23 @@ fn member_elements(exprs: &[crate::compiler::Expr]) -> Option<MemberElements> {
 /// canonical identifier (canonicalization never emits it; the engine's
 /// synthetic separators are `\u{B7}`/`\u{2192}`/`\u{205A}`), so the
 /// encoding is injective.
+///
+/// This is an **opaque graph key**, NOT a canonical identifier. It is
+/// deliberately built with `Ident::from_str_unchecked` even though
+/// `{member}\u{241F}{element:010}` is not a valid canonical identifier
+/// (U+241F is not a canonicalization output), because the value is only
+/// ever used as an opaque map/set key inside `phase_element_order`'s local
+/// element graph -- it is decoded back to `(member, element_index)` via
+/// `split_once('\u{241F}')` and NEVER escapes this module (it is never
+/// stored on a salsa value, compared against a real variable name, or
+/// resolved as an identifier). U+241F is chosen specifically because it is
+/// an injective separator that cannot collide with any real canonical
+/// member name or with the engine's other synthetic separators, so the
+/// `(member, element)` -> key mapping is a bijection on the keys this
+/// graph contains. Using the typed `Ident<Canonical>` wrapper (rather than
+/// a bare `String`) is purely to satisfy `scc_components`' key type; the
+/// canonical-identifier invariant `from_str_unchecked` normally promises
+/// is intentionally not required here.
 fn element_node_key(
     member: &str,
     element: usize,
@@ -710,11 +727,33 @@ enum SccVerdict {
 ///
 /// The graph is built from the engine's OWN production-lowered per-element
 /// `Expr::AssignCurr` exprs for `phase` (`var_phase_lowered_exprs_prod`,
-/// never a re-derivation). Phase semantics (PREVIOUS/lagged reads already
-/// stripped by `build_var_info`, dt stock-breaking) are *inherited* from
-/// `lower_var_fragment`, not re-implemented -- this is deliberately NOT
-/// the LTM `model_element_causal_edges` graph; lagged edges are not
-/// re-added.
+/// never a re-derivation) -- this is deliberately NOT the LTM
+/// `model_element_causal_edges` graph (no lagged/feedback edges are
+/// invented; the only edges are the literal current-value data-flow reads
+/// of the lowered RHS).
+///
+/// **PREVIOUS/lagged-read safety -- where the protection actually is.**
+/// This element graph does NOT inherit PREVIOUS-stripping:
+/// `collect_read_slots` recurses through `Expr::App` via
+/// `BuiltinFn::for_each_expr_ref`, and `for_each_expr_ref` visits BOTH
+/// operands of `Previous(a, b)`, so a `PREVIOUS(x[..], 0)` argument slot
+/// IS collected here as an ordinary current-value read. The reason a
+/// PREVIOUS-only self-recurrence (e.g. `x[tNext]=PREVIOUS(x[tPrev],0)`)
+/// is nonetheless safe is NOT element-graph inheritance -- it is SCC
+/// *identification* upstream (Step A): `build_var_info` strips
+/// `dt_previous_referenced_vars` from `dt_deps` (the
+/// `dt_deps.retain(|dep| !lagged_dt_previous.contains(dep))` near the top
+/// of `build_var_info`), so `dt_walk_successors` reports NO whole-variable
+/// self-edge for a PREVIOUS-only recurrence, so `resolve_dt_recurrence_sccs`
+/// never identifies it as an SCC and this function is never invoked for
+/// it. For any SCC that IS identified, the over-approximation is the
+/// loud-safe direction: `collect_read_slots` deliberately over-collects
+/// (including any PREVIOUS-argument slot it traverses), which can only ADD
+/// an element edge and force a conservative `CircularDependency`, never
+/// DROP one and let a genuine cycle through. See `collect_read_slots`'s
+/// rustdoc for the over-approximation contract this relies on. dt
+/// stock-breaking is genuinely inherited (it is reflected in the lowered
+/// exprs `lower_var_fragment` produces, not re-implemented here).
 fn phase_element_order(
     db: &dyn Db,
     model: SourceModel,
@@ -939,6 +978,25 @@ pub(crate) struct DtSccResolution {
 ///
 /// On the acyclic happy path there is NO offending SCC, so this returns
 /// `{ resolved: [], has_unresolved: false }` with zero refinement work.
+///
+/// **Phase-1 scoping note -- no module-input wiring (NOT neutral).** SCC
+/// identification here builds `var_info` via
+/// `build_var_info(db, model, project, &[])` (empty module inputs), the
+/// same default wiring `dt_cycle_sccs` uses, whereas the real
+/// `model_dependency_graph_impl` path builds `var_info` with the actual
+/// `&module_input_names`. For an input-wired sub-model these relations can
+/// differ, so this identification is *incomplete* (it can miss an SCC that
+/// only manifests once inputs are wired in). Soundness is still preserved
+/// in Phase 1: the resolved member set only suppresses self-edges in the
+/// caller's `compute_transitive`, which re-runs over the real
+/// *with-inputs* `var_info`, and its `.unwrap_or_else` arm clears
+/// `resolved_sccs` + sets `has_cycle` on any residual genuine cycle, so
+/// the worst case is a *missed resolution* (a conservative
+/// `CircularDependency`), never an unsound one. `element_order` is not
+/// consumed in Phase 1. Phase 2 (which consumes `element_order` to build
+/// the combined per-element fragment) MUST plumb the real
+/// `module_input_names` into this identification before relying on it; do
+/// not treat the `&[]` argument as neutral.
 pub(crate) fn resolve_dt_recurrence_sccs(
     db: &dyn Db,
     model: SourceModel,
