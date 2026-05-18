@@ -3568,6 +3568,255 @@ pub(crate) struct VarFragmentResult {
     pub fragment: crate::compiler::symbolic::CompiledVarFragment,
 }
 
+/// `model_name -> (var_name -> (offset, size))`: the per-variable mini-
+/// layout offset map `lower_var_fragment` produces and the minimal
+/// per-phase `crate::compiler::Module` consumes. Structurally identical to
+/// `compiler::VariableOffsetMap` / `db_var_fragment::VarOffsets` (both
+/// private aliases in their modules); named here so the factored
+/// `compile_phase_to_per_var_bytecodes` signature is self-documenting
+/// rather than an inline nested-`HashMap` (which clippy flags as a very
+/// complex type).
+pub(crate) type PerVarOffsetMap =
+    HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
+
+/// Compile one phase's lowered `Vec<Expr>` for a single variable through
+/// its own correct mini-context and symbolize the result into a
+/// layout-independent `PerVarBytecodes`.
+///
+/// This is the exact body of `compile_var_fragment`'s former
+/// `compile_phase` closure, factored out so the element-cycle SCC graph
+/// builder (`crate::db_dep_graph` via `var_phase_symbolic_fragment_prod`)
+/// reuses the *exact* production compile+symbolize path rather than a
+/// re-derivation. `compile_var_fragment` calls this for each phase; the
+/// SCC accessor builds the caller-owned context byte-identically to
+/// `var_phase_lowered_exprs_prod` and calls this with the phase's
+/// production-lowered exprs.
+///
+/// The caller owns and supplies the lowering-independent context
+/// (`offsets`, `rmap`, `tables`, `module_refs`, `mini_offset`,
+/// `converted_dims`, `dim_context`, `model_name_ident`, `inputs`) exactly
+/// as `compile_var_fragment` constructs it. `var_ident_canonical` is the
+/// single-variable runlist-order entry the minimal `Module` is built
+/// around. Returns `None` (loud-safe, never panics) when `exprs` is
+/// empty, the minimal `Module::compile()` fails, or any symbolization
+/// step fails -- exactly the closure's original `None` arms.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_phase_to_per_var_bytecodes(
+    exprs: &[crate::compiler::Expr],
+    offsets: &PerVarOffsetMap,
+    rmap: &crate::compiler::symbolic::ReverseOffsetMap,
+    tables: &HashMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
+    module_refs: &HashMap<Ident<Canonical>, crate::vm::ModuleKey>,
+    mini_offset: usize,
+    converted_dims: &[crate::dimensions::Dimension],
+    dim_context: &crate::dimensions::DimensionsContext,
+    model_name_ident: &Ident<Canonical>,
+    var_ident_canonical: &Ident<Canonical>,
+    inputs: &BTreeSet<Ident<Canonical>>,
+) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
+    use crate::compiler::symbolic::PerVarBytecodes;
+
+    if exprs.is_empty() {
+        return None;
+    }
+
+    // Build a minimal Module for this phase
+    let runlist_initials_by_var = vec![];
+    let module_inputs: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
+    let module = crate::compiler::Module {
+        ident: model_name_ident.clone(),
+        inputs: module_inputs,
+        n_slots: mini_offset,
+        n_temps: 0,
+        temp_sizes: vec![],
+        runlist_initials: vec![],
+        runlist_initials_by_var,
+        runlist_flows: exprs.to_vec(),
+        runlist_stocks: vec![],
+        offsets: offsets.clone(),
+        runlist_order: vec![var_ident_canonical.clone()],
+        tables: tables.clone(),
+        dimensions: converted_dims.to_vec(),
+        dimensions_ctx: dim_context.clone(),
+        module_refs: module_refs.clone(),
+    };
+
+    // Extract temp sizes from expressions
+    let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
+    for expr in exprs {
+        crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
+    }
+    let n_temps = temp_sizes_map.len();
+    let mut temp_sizes: Vec<usize> = vec![0; n_temps];
+    for (id, size) in &temp_sizes_map {
+        if (*id as usize) < temp_sizes.len() {
+            temp_sizes[*id as usize] = *size;
+        }
+    }
+
+    // Update Module with temp info
+    let module = crate::compiler::Module {
+        n_temps,
+        temp_sizes: temp_sizes.clone(),
+        ..module
+    };
+
+    match module.compile() {
+        Ok(compiled) => {
+            // Symbolize the flows bytecode (we put everything in flows)
+            let sym_bc =
+                crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, rmap)
+                    .ok()?;
+
+            let ctx = &*compiled.context;
+            let sym_views: Vec<_> = ctx
+                .static_views
+                .iter()
+                .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, rmap))
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            let sym_mods: Vec<_> = ctx
+                .modules
+                .iter()
+                .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, rmap))
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+
+            let temp_sizes_vec: Vec<(u32, usize)> =
+                temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
+
+            let dim_lists: Vec<Vec<u16>> = ctx
+                .dim_lists
+                .iter()
+                .map(|(n, arr)| arr[..(*n as usize)].to_vec())
+                .collect();
+
+            Some(PerVarBytecodes {
+                symbolic: sym_bc,
+                graphical_functions: ctx.graphical_functions.clone(),
+                module_decls: sym_mods,
+                static_views: sym_views,
+                temp_sizes: temp_sizes_vec,
+                dim_lists,
+            })
+        }
+        Err(_) => None,
+    }
+}
+
+/// A variable's *symbolic* `PerVarBytecodes` for a phase, sourced through
+/// the exact production compile+symbolize path (`lower_var_fragment` +
+/// `compile_phase_to_per_var_bytecodes`), never a re-derivation.
+///
+/// This is the cross-member-comparable substrate the element-cycle SCC
+/// graph builder consumes: every variable reference in the returned
+/// bytecode is a layout-independent
+/// `SymVarRef { name, element_offset }`, so a multi-member recurrence
+/// SCC's induced element graph can be built across members (the fix for
+/// GH #575 -- the prior `Expr::AssignCurr`-mini-slot builder was
+/// structurally incapable of cross-member edges).
+///
+/// Mirrors `crate::db_dep_graph::var_phase_lowered_exprs_prod`
+/// byte-for-byte for context construction (same helpers, same order, the
+/// default no-module-input wiring `build_var_info(.., &[])` uses):
+/// `SccPhase::Dt` selects `per_phase_lowered.noninitial`,
+/// `SccPhase::Initial` selects `.initial`. Returns `None` (the loud-safe
+/// signal -- never panics) on no `SourceVariable`, a per-phase `Var::new`
+/// error, `LoweredVarFragment::Fatal`, or any compile/symbolize failure;
+/// the SCC refinement then keeps the conservative `CircularDependency`.
+/// `var_phase_lowered_exprs_prod` stays in place (Phase 3 still extends
+/// its no-`SourceVariable` arm); this accessor is the new SCC-graph
+/// source.
+pub(crate) fn var_phase_symbolic_fragment_prod(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    var_name: &str,
+    phase: SccPhase,
+) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
+    use crate::db_var_fragment::{LoweredVarFragment, lower_var_fragment};
+
+    let source_vars = model.variables(db);
+    // No `SourceVariable` (an implicit SMOOTH/DELAY/INIT helper, or a
+    // parent-sourced name): like `var_phase_lowered_exprs_prod`, return
+    // `None` (loud-safe), never panic.
+    let sv = source_vars.get(var_name)?;
+    let var_ident_canonical: Ident<Canonical> = Ident::new(var_name);
+
+    // Caller-owned, lowering-independent context, built EXACTLY as
+    // `var_phase_lowered_exprs_prod` / `compile_var_fragment` builds it
+    // (mirror byte-for-byte; same helpers, same order).
+    let dm_dims = source_dims_to_datamodel(project.dimensions(db));
+    let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
+        .iter()
+        .map(crate::dimensions::Dimension::from)
+        .collect();
+    let model_name_ident = Ident::new(model.name(db));
+    let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
+    let module_models = model_module_map(db, model, project).clone();
+
+    let lowered = lower_var_fragment(
+        db,
+        *sv,
+        model,
+        project,
+        true,
+        &[],
+        &converted_dims,
+        &dim_context,
+        &model_name_ident,
+        &module_models,
+        &inputs,
+    );
+
+    let (per_phase_lowered, tables, offsets, rmap, mini_offset) = match lowered {
+        LoweredVarFragment::Lowered {
+            per_phase_lowered,
+            tables,
+            offsets,
+            rmap,
+            mini_offset,
+            ..
+        } => (per_phase_lowered, tables, offsets, rmap, mini_offset),
+        // The variable did not lower at all => `None` (loud-safe).
+        LoweredVarFragment::Fatal { .. } => return None,
+    };
+
+    // The element-cycle SCC identification uses the default no-module-
+    // input wiring, so the module-ref reconstruction must match that
+    // wiring too (mirrors `compile_var_fragment`'s
+    // `build_caller_module_refs(.., &module_input_names)` with empty
+    // inputs).
+    let module_refs =
+        crate::db_var_fragment::build_caller_module_refs(db, *sv, model, project, true, &[]);
+
+    // `SccPhase::Dt` selects the non-initial (dt/flow) lowering;
+    // `SccPhase::Initial` selects the initial lowering -- the same
+    // selection `var_phase_lowered_exprs_prod` makes.
+    let phase_var = match phase {
+        SccPhase::Dt => per_phase_lowered.noninitial,
+        SccPhase::Initial => per_phase_lowered.initial,
+    };
+    // The phase's `Var::new` errored => cannot source its production
+    // lowered exprs => `None` (loud-safe).
+    let var = phase_var.ok()?;
+
+    compile_phase_to_per_var_bytecodes(
+        &var.ast,
+        &offsets,
+        &rmap,
+        &tables,
+        &module_refs,
+        mini_offset,
+        &converted_dims,
+        &dim_context,
+        &model_name_ident,
+        &var_ident_canonical,
+        &inputs,
+    )
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn compile_var_fragment(
     db: &dyn Db,
@@ -3666,94 +3915,26 @@ pub fn compile_var_fragment(
         &module_input_names,
     );
 
-    // Compile for each phase and symbolize
+    // Compile for each phase and symbolize. The closure now delegates to
+    // the factored `compile_phase_to_per_var_bytecodes` so the SCC
+    // element-graph builder reuses the EXACT production compile+symbolize
+    // path (no re-derivation); the per-variable production behavior is
+    // byte-identical to the former inline closure (same minimal `Module`,
+    // same temp extraction, same symbolization, same `None` arms).
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        if exprs.is_empty() {
-            return None;
-        }
-
-        // Build a minimal Module for this phase
-        let runlist_initials_by_var = vec![];
-        let module_inputs: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
-        let module = crate::compiler::Module {
-            ident: model_name_ident.clone(),
-            inputs: module_inputs,
-            n_slots: mini_offset,
-            n_temps: 0,
-            temp_sizes: vec![],
-            runlist_initials: vec![],
-            runlist_initials_by_var,
-            runlist_flows: exprs.to_vec(),
-            runlist_stocks: vec![],
-            offsets: offsets.clone(),
-            runlist_order: vec![var_ident_canonical.clone()],
-            tables: tables.clone(),
-            dimensions: converted_dims.clone(),
-            dimensions_ctx: dim_context.clone(),
-            module_refs: module_refs.clone(),
-        };
-
-        // Extract temp sizes from expressions
-        let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
-        for expr in exprs {
-            crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
-        }
-        let n_temps = temp_sizes_map.len();
-        let mut temp_sizes: Vec<usize> = vec![0; n_temps];
-        for (id, size) in &temp_sizes_map {
-            if (*id as usize) < temp_sizes.len() {
-                temp_sizes[*id as usize] = *size;
-            }
-        }
-
-        // Update Module with temp info
-        let module = crate::compiler::Module {
-            n_temps,
-            temp_sizes: temp_sizes.clone(),
-            ..module
-        };
-
-        match module.compile() {
-            Ok(compiled) => {
-                // Symbolize the flows bytecode (we put everything in flows)
-                let sym_bc =
-                    crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, &rmap)
-                        .ok()?;
-
-                let ctx = &*compiled.context;
-                let sym_views: Vec<_> = ctx
-                    .static_views
-                    .iter()
-                    .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                let sym_mods: Vec<_> = ctx
-                    .modules
-                    .iter()
-                    .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-
-                let temp_sizes_vec: Vec<(u32, usize)> =
-                    temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
-
-                let dim_lists: Vec<Vec<u16>> = ctx
-                    .dim_lists
-                    .iter()
-                    .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                    .collect();
-
-                Some(PerVarBytecodes {
-                    symbolic: sym_bc,
-                    graphical_functions: ctx.graphical_functions.clone(),
-                    module_decls: sym_mods,
-                    static_views: sym_views,
-                    temp_sizes: temp_sizes_vec,
-                    dim_lists,
-                })
-            }
-            Err(_) => None,
-        }
+        compile_phase_to_per_var_bytecodes(
+            exprs,
+            &offsets,
+            &rmap,
+            &tables,
+            &module_refs,
+            mini_offset,
+            &converted_dims,
+            &dim_context,
+            &model_name_ident,
+            &var_ident_canonical,
+            &inputs,
+        )
     };
 
     // Runlists use canonical names, so compare with the canonical form.

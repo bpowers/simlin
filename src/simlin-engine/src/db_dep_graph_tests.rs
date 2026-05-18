@@ -1436,3 +1436,333 @@ fn model_dep_graph_result_equality_observes_resolved_sccs() {
     // (equality is structural over the field, not identity).
     assert_eq!(with_scc, with_scc.clone());
 }
+
+// ── Multi-member symbolic element-graph verdict (GH #575) ───────────────
+//
+// Phase 1's `phase_element_order` built the SCC element graph from raw
+// per-variable mini-slots and is structurally incapable of cross-member
+// edges (GH #575): for any multi-member SCC it produced a wrong order
+// *and* resolved a genuine multi-variable element cycle as acyclic
+// (unsound -- violates the AC4 loud-safe hard rule). Phase 2 Subcomponent
+// B rebuilds the verdict on the cross-member-comparable SYMBOLIC
+// representation (`SymVarRef { name, element_offset }`) and removes the
+// `members.len() != 1` mask, so `resolve_recurrence_sccs` refines
+// multi-member SCCs too. These tests pin the rebuilt behavior; the
+// genuine-element-2-cycle test (`b`) is the load-bearing GH #575
+// unsoundness assertion -- it MUST fail RED before the rebuild (the
+// element cycle was resolved) and pass GREEN after.
+
+/// A two-element named-dim project whose only stateful structure is two
+/// arrayed auxes `ce`/`ecc` in an inter-element recurrence shaped like
+/// `test/sdeverywhere/models/ref/ref.mdl`:
+///   ce[t1]=1; ce[t2]=ecc[t1]+1; ce[t3]=ecc[t2]+1
+///   ecc[t1]=ce[t1]+1; ecc[t2]=ce[t2]+1; ecc[t3]=ce[t3]+1
+/// Whole-variable `ce`<->`ecc` is a 2-cycle, but the induced element
+/// graph
+///   (ce,0) -> (ecc,0); (ce,1) -> (ecc,1); (ce,2) -> (ecc,2);
+///   (ecc,0) -> (ce,1); (ecc,1) -> (ce,2)
+/// is acyclic, so the SCC must resolve in the interleaved per-element
+/// order ce[0],ecc[0],ce[1],ecc[1],ce[2],ecc[2].
+fn ce_ecc_ref_shaped_project() -> TestProject {
+    TestProject::new("ce_ecc_ref_shaped")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges(
+            "ce[t]",
+            vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+        )
+        .array_with_ranges(
+            "ecc[t]",
+            vec![
+                ("t1", "ce[t1] + 1"),
+                ("t2", "ce[t2] + 1"),
+                ("t3", "ce[t3] + 1"),
+            ],
+        )
+}
+
+#[test]
+fn resolve_dt_two_member_ref_shaped_scc_resolves_interleaved() {
+    use crate::db::SccPhase;
+
+    // RED before the symbolic rebuild: `resolve_recurrence_sccs`
+    // short-circuits every multi-member SCC to `has_unresolved` (the
+    // `members.len() != 1` mask + the `multi` short-circuit), so the
+    // `{ce,ecc}` SCC is Unresolved with no `ResolvedScc`. GREEN after: it
+    // resolves with the correct INTERLEAVED element order.
+    let project = ce_ecc_ref_shaped_project();
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(
+        !res.has_unresolved,
+        "the ce/ecc SCC is element-acyclic and element-sourceable: there \
+         must be NO unresolved SCC (GH #575 -- the multi-member mask is \
+         removed and the symbolic builder proves acyclicity)"
+    );
+    assert_eq!(
+        res.resolved.len(),
+        1,
+        "exactly one resolved SCC (the {{ce,ecc}} cluster)"
+    );
+    let scc = &res.resolved[0];
+    assert_eq!(scc.phase, SccPhase::Dt);
+    assert_eq!(
+        scc.members,
+        [
+            crate::common::Ident::new("ce"),
+            crate::common::Ident::new("ecc"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>(),
+        "the resolved SCC's members are exactly {{ce,ecc}}"
+    );
+    // The correct INTERLEAVED per-element topological order: ce[0] has no
+    // in-SCC reader; ecc[0] reads ce[0]; ce[1] reads ecc[0]; ecc[1] reads
+    // ce[1]; ce[2] reads ecc[1]; ecc[2] reads ce[2]. Kahn tie-break sorts
+    // ce before ecc, so the unique order is the strict interleave.
+    let ce = |i: usize| (crate::common::Ident::new("ce"), i);
+    assert_eq!(
+        scc.element_order,
+        vec![ce(0), ecc(0), ce(1), ecc(1), ce(2), ecc(2)],
+        "element_order must be the INTERLEAVED per-element topological \
+         order across the two members (GH #575: zero cross-member edges \
+         would have produced a wrong non-interleaved order)"
+    );
+}
+
+#[test]
+fn resolve_dt_genuine_element_two_cycle_is_unresolved() {
+    use crate::db::SccPhase;
+
+    // THE GH #575 UNSOUNDNESS FIX (load-bearing). `a[d]=b[d]; b[d]=a[d]`
+    // is a genuine multi-variable element 2-cycle: every element `a[i]`
+    // reads `b[i]` and every `b[i]` reads `a[i]`, so the induced element
+    // graph has the 2-cycles (a,i)<->(b,i). It MUST be Unresolved (keep
+    // `CircularDependency`). RED before the rebuild: the old mini-slot
+    // builder built ZERO cross-member edges and resolved this genuine
+    // cycle as acyclic (masked only by the multi-member short-circuit;
+    // with the mask gone and no symbolic rebuild it would silently
+    // miscompile). GREEN after: the symbolic builder finds the element
+    // 2-cycle and returns Unresolved.
+    let project = TestProject::new("genuine_elem_two_cycle")
+        .named_dimension("d", &["d1", "d2"])
+        .array_aux("a[d]", "b[d]")
+        .array_aux("b[d]", "a[d]");
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(
+        res.has_unresolved,
+        "a[d]=b[d];b[d]=a[d] is a genuine element 2-cycle and MUST be \
+         unresolved (GH #575 -- the symbolic builder must NOT resolve a \
+         real circular dependency as acyclic)"
+    );
+    assert!(
+        res.resolved.is_empty(),
+        "a genuine element 2-cycle yields no ResolvedScc"
+    );
+
+    // End-to-end: the genuine cycle still raises CircularDependency.
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        dep_graph.has_cycle,
+        "a genuine multi-variable element 2-cycle still sets has_cycle"
+    );
+    assert!(
+        dep_graph.resolved_sccs.is_empty(),
+        "a genuine multi-variable element 2-cycle resolves nothing"
+    );
+}
+
+#[test]
+fn resolve_dt_genuine_scalar_two_cycle_is_unresolved_via_symbolic_builder() {
+    use crate::db::SccPhase;
+
+    // `a=b+1; b=a+1`: a genuine scalar 2-cycle. This is the N>=2 scalar
+    // case of the symbolic builder: `a` (element 0) reads `b` (element
+    // 0), `b` (element 0) reads `a` (element 0), so the element graph has
+    // the 2-cycle (a,0)<->(b,0) and the verdict MUST be Unresolved. It
+    // must stay rejected by the SAME symbolic builder that resolves the
+    // acyclic ce/ecc case (sibling to the existing Phase 1 guard
+    // `resolve_dt_scalar_two_cycle_is_unresolved`, which must also stay
+    // green unchanged).
+    let project = single_model_project(vec![aux_var("a", "b + 1"), aux_var("b", "a + 1")]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(
+        res.has_unresolved,
+        "a=b+1;b=a+1 is a genuine 2-cycle and MUST be unresolved even \
+         under the symbolic multi-member builder"
+    );
+    assert!(
+        res.resolved.is_empty(),
+        "a genuine scalar 2-cycle yields no ResolvedScc"
+    );
+}
+
+#[test]
+fn resolve_dt_single_var_recurrence_byte_identical_to_phase1() {
+    use crate::db::SccPhase;
+
+    // N=1 REGRESSION: the single-variable forward self-recurrence is just
+    // the N=1 case of the symbolic builder and MUST resolve with the
+    // byte-identical `element_order` Phase 1 produced
+    // ([(ecc,0),(ecc,1),(ecc,2)]). This pins that the rebuild did not
+    // change N=1 behavior (the existing Phase 1 guard
+    // `resolve_dt_forward_recurrence_is_resolved_in_declared_order`
+    // asserts the same thing and must also stay green unchanged).
+    let project = TestProject::new("n1_symbolic_byte_identical")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges(
+            "ecc[t]",
+            vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+        );
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(!res.has_unresolved, "the N=1 self-recurrence resolves");
+    assert_eq!(res.resolved.len(), 1, "exactly one resolved SCC (ecc)");
+    let scc = &res.resolved[0];
+    assert_eq!(scc.phase, SccPhase::Dt);
+    assert_eq!(
+        scc.members,
+        [crate::common::Ident::new("ecc")]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        scc.element_order,
+        vec![ecc(0), ecc(1), ecc(2)],
+        "the N=1 element_order must be byte-identical to Phase 1's \
+         declared-order topological order (no N=1 behavior change)"
+    );
+}
+
+#[test]
+fn resolve_dt_interleaved_shaped_element_acyclic_through_two_cycle_resolves() {
+    use crate::db::SccPhase;
+
+    // `interleaved.mdl`-shaped: x=1; a[A1]=x; a[A2]=y; y=a[A1];
+    // b[DimA]=a[DimA]. Whole-variable `a`<->`y` is a 2-cycle, but element-
+    // wise x -> a[A1] -> y -> a[A2] is acyclic. The symbolic builder must
+    // resolve `{a,y}` with the per-element order a[0],y[0],a[1].
+    let project = TestProject::new("interleaved_shaped")
+        .named_dimension("dima", &["a1", "a2"])
+        .aux("x", "1", None)
+        .array_with_ranges("a[dima]", vec![("a1", "x"), ("a2", "y")])
+        .aux("y", "a[a1]", None)
+        .array_aux("b[dima]", "a[dima]");
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(
+        !res.has_unresolved,
+        "x -> a[A1] -> y -> a[A2] is element-acyclic through the a<->y \
+         whole-variable 2-cycle: there must be NO unresolved SCC"
+    );
+    assert_eq!(res.resolved.len(), 1, "exactly one resolved SCC ({{a,y}})");
+    let scc = &res.resolved[0];
+    assert_eq!(scc.phase, SccPhase::Dt);
+    assert_eq!(
+        scc.members,
+        [
+            crate::common::Ident::new("a"),
+            crate::common::Ident::new("y"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    );
+    // Element graph among {a,y}: (a,0)->(y,0) [y=a[A1]],
+    // (y,0)->(a,1) [a[A2]=y]. (a,0) has indegree 0. Unique topo order:
+    // a[0], y[0], a[1].
+    assert_eq!(
+        scc.element_order,
+        vec![
+            (crate::common::Ident::new("a"), 0usize),
+            (crate::common::Ident::new("y"), 0usize),
+            (crate::common::Ident::new("a"), 1usize),
+        ],
+        "element_order must be the interleaved per-element topological \
+         order a[0],y[0],a[1]"
+    );
+}
+
+#[test]
+fn resolve_dt_unsourceable_member_is_unresolved_no_panic() {
+    use crate::db::SccPhase;
+
+    // Loud-safe: if a member's symbolic fragment cannot be sourced the
+    // verdict must be Unresolved WITHOUT panicking (production code
+    // reachable from the cycle gate must never panic). A genuine scalar
+    // 2-cycle is element-cyclic anyway, so this primarily asserts the
+    // no-panic + Unresolved contract on the symbolic-accessor path. (The
+    // accessor's own `None`-on-absent-var no-panic contract is pinned by
+    // `var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic`.)
+    let project = single_model_project(vec![aux_var("a", "b + 1"), aux_var("b", "a + 1")]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    // Must not panic.
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(res.has_unresolved);
+    assert!(res.resolved.is_empty());
+}
+
+#[test]
+fn var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic() {
+    use crate::db::SccPhase;
+
+    // The new symbolic accessor's loud-safe contract: a name with no
+    // `SourceVariable` returns `None` and crucially must NOT panic the
+    // way the `#[cfg(test)]` `var_noninitial_lowered_exprs` does, because
+    // it is production code reachable from the cycle gate.
+    let project = TestProject::new("vpsf_prod_absent")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges("arr[t]", vec![("t1", "1"), ("t2", "2"), ("t3", "3")]);
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    assert!(
+        crate::db::var_phase_symbolic_fragment_prod(
+            &db,
+            model,
+            result.project,
+            "definitely_not_a_var",
+            SccPhase::Dt,
+        )
+        .is_none(),
+        "an absent variable must return None (loud-safe), never panic"
+    );
+
+    // And it must return Some for a real arrayed variable (sanity: the
+    // accessor's happy path produces a symbolic fragment).
+    assert!(
+        crate::db::var_phase_symbolic_fragment_prod(
+            &db,
+            model,
+            result.project,
+            "arr",
+            SccPhase::Dt,
+        )
+        .is_some(),
+        "a real arrayed SourceVariable must yield a symbolic fragment"
+    );
+}

@@ -572,6 +572,20 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
 /// production code reachable from the cycle gate cannot panic, so this
 /// accessor returns `None` instead. The two share `lower_var_fragment` so
 /// neither re-derives the lowering.
+///
+/// **Currently consumed only by its own `#[cfg(test)]` tests.** Phase 2
+/// Subcomponent B (GH #575) rebuilt the SCC element graph on the
+/// cross-member-comparable *symbolic* representation
+/// (`symbolic_phase_element_order` via `var_phase_symbolic_fragment_prod`),
+/// so the prior `Expr`-based `phase_element_order` consumer of this
+/// accessor was removed. It is intentionally left in place (NOT deleted)
+/// because Phase 3 extends its no-`SourceVariable` arm with parent-
+/// `implicit_vars` sourcing and restores a production consumer; deleting
+/// it now would force Phase 3 to reconstruct the byte-identical
+/// context-mirroring it already gets right. The
+/// `cfg_attr(not(test), allow(dead_code))` suppresses the otherwise-
+/// correct unused warning for the non-test build until then.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn var_phase_lowered_exprs_prod(
     db: &dyn Db,
     model: SourceModel,
@@ -637,124 +651,54 @@ pub(crate) fn var_phase_lowered_exprs_prod(
     }
 }
 
-/// Collect every absolute current-value slot an RHS `Expr` reads.
+/// Enumerate the exact set of *element offsets within `base.name`* that a
+/// symbolic static view addresses.
 ///
-/// Reads come from `Var(off)` (a scalar/element slot), `StaticSubscript(
-/// off, view)` (every slot the view addresses, exactly: `off +
-/// view.offset + Σ coord·stride` over the view's index space), and
-/// `Subscript(off, indices, bounds)` (a *dynamic* subscript -- the index
-/// is not statically pinnable, so conservatively the whole base array's
-/// slot span `off .. off + Π bounds`, plus the index expressions
-/// themselves, which may read other vars). `TempArray*` slots are
-/// scratch storage, not current values, and are NOT reads (the
-/// array-producing-builtin hoist path threads element data through temps,
-/// not through a recurrence cycle).
-///
-/// Over-approximation is the loud-safe direction: an extra read slot can
-/// only ADD an element edge, never drop one, so a genuine cycle is never
-/// missed (AC4 hard rule). The only cost is a possible false "cyclic"
-/// verdict on an otherwise-resolvable case -- the conservative
-/// `CircularDependency` fallback, never a wrong run order.
-fn collect_read_slots(expr: &crate::compiler::Expr, out: &mut BTreeSet<usize>) {
-    use crate::compiler::{Expr, SubscriptIndex};
-    match expr {
-        Expr::Var(off, _) => {
-            out.insert(*off);
-        }
-        Expr::StaticSubscript(off, view, _) => {
-            // Enumerate the exact set of absolute slots the view
-            // addresses (row-major over `dims`, applying `strides` and
-            // the view `offset`). Array sizes are small; this is exact,
-            // not an over-approximation.
-            let ndims = view.dims.len();
-            if ndims == 0 {
-                out.insert(off + view.offset);
-            } else {
-                let total: usize = view.dims.iter().product();
-                for linear in 0..total {
-                    let mut rem = linear;
-                    let mut slot = off + view.offset;
-                    for d in (0..ndims).rev() {
-                        let coord = rem % view.dims[d];
-                        rem /= view.dims[d];
-                        slot = (slot as isize + coord as isize * view.strides[d]) as usize;
-                    }
-                    out.insert(slot);
-                }
-            }
-        }
-        Expr::Subscript(off, indices, bounds, _) => {
-            // Dynamic subscript: the resolved element is not statically
-            // known, so conservatively every slot of the base array is a
-            // potential read.
-            let extent: usize = bounds.iter().product();
-            for s in *off..off + extent.max(1) {
-                out.insert(s);
-            }
-            // The index expressions may themselves read other vars.
-            for idx in indices {
-                match idx {
-                    SubscriptIndex::Single(e) => collect_read_slots(e, out),
-                    SubscriptIndex::Range(lo, hi) => {
-                        collect_read_slots(lo, out);
-                        collect_read_slots(hi, out);
-                    }
-                }
-            }
-        }
-        Expr::Op1(_, inner, _)
-        | Expr::AssignCurr(_, inner)
-        | Expr::AssignNext(_, inner)
-        | Expr::AssignTemp(_, inner, _) => collect_read_slots(inner, out),
-        Expr::Op2(_, lhs, rhs, _) => {
-            collect_read_slots(lhs, out);
-            collect_read_slots(rhs, out);
-        }
-        Expr::If(c, t, f, _) => {
-            collect_read_slots(c, out);
-            collect_read_slots(t, out);
-            collect_read_slots(f, out);
-        }
-        Expr::App(builtin, _) => builtin.for_each_expr_ref(|e| collect_read_slots(e, out)),
-        Expr::EvalModule(_, _, _, args) => {
-            for a in args {
-                collect_read_slots(a, out);
-            }
-        }
-        // Constants, Dt, ModuleInput, and temp-array reads carry no
-        // current-value slot read.
-        Expr::Const(_, _)
-        | Expr::Dt(_)
-        | Expr::ModuleInput(_, _)
-        | Expr::TempArray(_, _, _)
-        | Expr::TempArrayElement(_, _, _, _) => {}
+/// This is the symbolic-space analogue of the prior `Expr`-level
+/// `collect_read_slots`'s `StaticSubscript` enumeration. After
+/// `resolve_static_view`, a `SymbolicStaticView` whose base is
+/// `Var(SymVarRef { name, element_offset })` resolves to absolute slots
+/// `layout_offset(name) + element_offset + view.offset + Σ coord·stride`
+/// (row-major over `dims`, applying `strides`/`offset`). The element
+/// offset *relative to the variable* is therefore
+/// `element_offset + view.offset + Σ coord·stride` -- the layout offset
+/// cancels, which is exactly the layout independence the symbolic layer
+/// provides. The enumeration is **exact** (array sizes are small), so a
+/// genuinely element-acyclic model (e.g. `ref.mdl`) still resolves; an
+/// extra element only ever forces a conservative `CircularDependency`,
+/// never a wrong run order (the loud-safe over-approximation contract the
+/// prior `collect_read_slots` documented, preserved here).
+fn static_view_element_offsets(view: &crate::compiler::symbolic::SymbolicStaticView) -> Vec<usize> {
+    let base_elem = match &view.base {
+        crate::compiler::symbolic::SymStaticViewBase::Var(v) => v.element_offset,
+        // A temp-backed view threads scratch storage, not a current-value
+        // recurrence read (the prior `collect_read_slots` likewise did not
+        // treat `TempArray*` as a read).
+        crate::compiler::symbolic::SymStaticViewBase::Temp(_) => return Vec::new(),
+    };
+    let ndims = view.dims.len();
+    let mut out: Vec<usize> = Vec::new();
+    if ndims == 0 {
+        out.push(base_elem + view.offset as usize);
+        return out;
     }
-}
-
-/// Per-member element layout: the slot of every per-element
-/// `Expr::AssignCurr` in declared (`SubscriptIterator`) order, plus the
-/// member-relative element index of each.
-struct MemberElements {
-    /// `(slot, rhs-as-expr)` for each declared element, in order.
-    elements: Vec<(usize, crate::compiler::Expr)>,
-}
-
-/// Extract a member's per-element `AssignCurr` layout from its
-/// production-lowered `Vec<Expr>`. `None` (loud-safe) when the member is
-/// not element-sourceable or has no `AssignCurr` slots (a malformed or
-/// non-arrayed-as-expected lowering -- keep `CircularDependency`).
-fn member_elements(exprs: &[crate::compiler::Expr]) -> Option<MemberElements> {
-    use crate::compiler::Expr;
-    let mut elements: Vec<(usize, Expr)> = Vec::new();
-    for e in exprs {
-        if let Expr::AssignCurr(slot, rhs) = e {
-            elements.push((*slot, (**rhs).clone()));
+    let total: usize = view.dims.iter().map(|d| *d as usize).product();
+    for linear in 0..total {
+        let mut rem = linear;
+        // The element offset relative to `base.name` (the layout offset
+        // cancels vs. `resolve_static_view`).
+        let mut elem = base_elem as isize + view.offset as isize;
+        for d in (0..ndims).rev() {
+            let dim = view.dims[d] as usize;
+            let coord = rem % dim;
+            rem /= dim;
+            elem += coord as isize * view.strides[d] as isize;
+        }
+        if elem >= 0 {
+            out.push(elem as usize);
         }
     }
-    if elements.is_empty() {
-        return None;
-    }
-    Some(MemberElements { elements })
+    out
 }
 
 /// A `(member, element)` node in the SCC-induced element graph, encoded
@@ -770,8 +714,9 @@ fn member_elements(exprs: &[crate::compiler::Expr]) -> Option<MemberElements> {
 /// deliberately built with `Ident::from_str_unchecked` even though
 /// `{member}\u{241F}{element:010}` is not a valid canonical identifier
 /// (U+241F is not a canonicalization output), because the value is only
-/// ever used as an opaque map/set key inside `phase_element_order`'s local
-/// element graph -- it is decoded back to `(member, element_index)` via
+/// ever used as an opaque map/set key inside
+/// `symbolic_phase_element_order`'s local element graph -- it is decoded
+/// back to `(member, element_index)` via
 /// `split_once('\u{241F}')` and NEVER escapes this module (it is never
 /// stored on a salsa value, compared against a real variable name, or
 /// resolved as an identifier). U+241F is chosen specifically because it is
@@ -794,111 +739,178 @@ enum SccVerdict {
     /// Element-acyclic + every member element-sourceable: resolved with
     /// the deterministic per-element topological order.
     Resolved(crate::db::ResolvedScc),
-    /// Element-cyclic, not element-sourceable, or multi-variable (Phase 1
-    /// only resolves single-variable self-recurrence): keep the
-    /// conservative `CircularDependency`.
+    /// Element-cyclic (a genuine element self-loop or a genuine
+    /// multi-variable element cycle the symbolic builder detects) or not
+    /// element-sourceable: keep the conservative `CircularDependency`.
     Unresolved,
 }
 
-/// Build one SCC's induced per-element graph **for a given phase** and,
-/// if it is element-acyclic and every member is element-sourceable in
-/// that phase, return the deterministic per-element topological order.
-/// `None` means "not resolvable in this phase" (not element-sourceable,
-/// an element self-loop, an element multi-SCC, or a non-contiguous
-/// lowering) -- the loud-safe signal.
+/// Build one SCC's induced per-element graph **for a given phase** from
+/// the cross-member-comparable SYMBOLIC representation and, if it is
+/// element-acyclic and every member is element-sourceable in that phase,
+/// return the deterministic per-element topological order. `None` means
+/// "not resolvable in this phase" (not element-sourceable, an element
+/// self-loop, or an element multi-SCC) -- the loud-safe signal.
 ///
-/// The graph is built from the engine's OWN production-lowered per-element
-/// `Expr::AssignCurr` exprs for `phase` (`var_phase_lowered_exprs_prod`,
-/// never a re-derivation) -- this is deliberately NOT the LTM
-/// `model_element_causal_edges` graph (no lagged/feedback edges are
-/// invented; the only edges are the literal current-value data-flow reads
-/// of the lowered RHS).
+/// **Why symbolic (GH #575).** The prior builder keyed the element graph
+/// on raw `Expr::AssignCurr` operands, which are *per-variable mini-slots*
+/// (`lower_var_fragment` builds a fresh per-variable layout: every
+/// member's own variable sits at `crate::vm::IMPLICIT_VAR_COUNT`, its own
+/// deps after it). Those slots are NOT model-global, so for a multi-member
+/// SCC every member's write-slots collided and every cross-member read
+/// landed on the *reading* member's private dep mini-slots -- ZERO
+/// cross-member edges, a wrong order, and (fatally) a genuine
+/// multi-variable element cycle resolved as acyclic (unsound, masked only
+/// by the old `members.len() != 1` short-circuit). This builder instead
+/// consumes each member's *symbolic* `PerVarBytecodes`
+/// (`var_phase_symbolic_fragment_prod`, the exact production
+/// compile+symbolize path -- never a re-derivation), where every variable
+/// reference is a layout-independent `SymVarRef { name, element_offset }`.
+/// `SymVarRef.name` is the canonical variable name (the mini-layout keys
+/// are `Ident<Canonical>` -- see `layout_from_metadata`), so it is
+/// directly comparable to an SCC member's `Ident<Canonical>`. The N=1 and
+/// N>=2 cases are the same builder; N=1 is byte-identical to before (a
+/// single member's `AssignCurr(member_base+e, rhs)` symbolizes to one
+/// write op with `element_offset == e`, and the reads the prior
+/// `collect_read_slots` mapped to `(member, e')` via the mini-`rmap`
+/// become exactly the symbolic reads with `name == member,
+/// element_offset == e'`; same `element_node_key`, same
+/// `scc_components`, same sorted Kahn => same `element_order`).
+///
+/// The edges are the literal current-value data-flow reads of each
+/// element's symbolic segment -- deliberately NOT the LTM
+/// `model_element_causal_edges` graph (no lagged/feedback edges invented).
 ///
 /// **PREVIOUS/lagged-read safety -- where the protection actually is.**
-/// This element graph does NOT inherit PREVIOUS-stripping:
-/// `collect_read_slots` recurses through `Expr::App` via
-/// `BuiltinFn::for_each_expr_ref`, and `for_each_expr_ref` visits BOTH
-/// operands of `Previous(a, b)`, so a `PREVIOUS(x[..], 0)` argument slot
-/// IS collected here as an ordinary current-value read. The reason a
+/// This graph does NOT inherit PREVIOUS-stripping: a read-opcode list
+/// that includes `SymLoadPrev` is treated as an ordinary current-value
+/// read edge here (exactly as the prior `Expr`-level builder collected the
+/// `PREVIOUS`-argument slot through `for_each_expr_ref`). The reason a
 /// PREVIOUS-only self-recurrence (e.g. `x[tNext]=PREVIOUS(x[tPrev],0)`)
-/// is nonetheless safe is NOT element-graph inheritance -- it is SCC
-/// *identification* upstream (Step A): `build_var_info` strips
-/// `dt_previous_referenced_vars` from `dt_deps` (the
-/// `dt_deps.retain(|dep| !lagged_dt_previous.contains(dep))` near the top
-/// of `build_var_info`), so `dt_walk_successors` reports NO whole-variable
-/// self-edge for a PREVIOUS-only recurrence, so `resolve_recurrence_sccs`
-/// never identifies it as an SCC and this function is never invoked for
-/// it. For any SCC that IS identified, the over-approximation is the
-/// loud-safe direction: `collect_read_slots` deliberately over-collects
-/// (including any PREVIOUS-argument slot it traverses), which can only ADD
-/// an element edge and force a conservative `CircularDependency`, never
-/// DROP one and let a genuine cycle through. See `collect_read_slots`'s
-/// rustdoc for the over-approximation contract this relies on. dt
-/// stock-breaking is genuinely inherited (it is reflected in the lowered
-/// exprs `lower_var_fragment` produces, not re-implemented here).
-fn phase_element_order(
+/// is nonetheless safe is SCC *identification* upstream:
+/// `build_var_info` strips `dt_previous_referenced_vars` from `dt_deps`,
+/// so `dt_walk_successors` reports NO whole-variable self-edge for a
+/// PREVIOUS-only recurrence, so `resolve_recurrence_sccs` never identifies
+/// it as an SCC and this function is never invoked for it. For any SCC
+/// that IS identified, including `SymLoadPrev` as an edge is the loud-safe
+/// over-approximation direction: it can only ADD an element edge and
+/// force a conservative `CircularDependency`, never DROP one and let a
+/// genuine cycle through. dt stock-breaking is genuinely inherited (it is
+/// reflected in the symbolic bytecode `lower_var_fragment` +
+/// `compile_phase_to_per_var_bytecodes` produce, not re-implemented).
+fn symbolic_phase_element_order(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     members: &BTreeSet<Ident<Canonical>>,
     phase: crate::db::SccPhase,
 ) -> Option<Vec<(Ident<Canonical>, usize)>> {
-    // Per member: production lowered exprs for this phase -> per-element
-    // layout. Any `None` => not element-sourceable => unresolved
-    // (loud-safe).
-    let mut layouts: Vec<(Ident<Canonical>, MemberElements)> = Vec::new();
-    for m in members {
-        let exprs = var_phase_lowered_exprs_prod(db, model, project, m.as_str(), phase.clone())?;
-        layouts.push((m.clone(), member_elements(&exprs)?));
-    }
+    use crate::compiler::symbolic::SymbolicOpcode;
 
-    // Reverse map: absolute slot -> (member, element_index). Each member
-    // occupies a contiguous run; `member_base` is the offset of its first
-    // `AssignCurr`, `element_index` = slot - member_base.
-    let mut slot_to_node: HashMap<usize, (Ident<Canonical>, usize)> = HashMap::new();
-    for (member, layout) in &layouts {
-        let member_base = layout.elements[0].0;
-        for (element_index, (slot, _rhs)) in layout.elements.iter().enumerate() {
-            // Element offsets must be the contiguous `member_base + i`
-            // run `SubscriptIterator` emits; a gap means the lowering is
-            // not the simple per-element shape this refinement assumes
-            // (loud-safe: keep `CircularDependency`).
-            if *slot != member_base + element_index {
-                return None;
-            }
-            slot_to_node.insert(*slot, (member.clone(), element_index));
-        }
-    }
+    // The set of member canonical names, for the "is this read an in-SCC
+    // member?" test. `SymVarRef.name` is the canonical variable name
+    // (mini-layout keys are `Ident<Canonical>`), so a member's
+    // `as_str()` compares directly.
+    let member_names: BTreeSet<&str> = members.iter().map(|m| m.as_str()).collect();
 
-    // Build the induced element graph: for each member element (M, e),
-    // every current-value slot its RHS reads that maps to an in-SCC node
-    // (M', e') contributes a data-flow edge (M', e') -> (M, e).
+    // Build the induced element graph by segmenting each member's
+    // symbolic code on its per-element write opcode. For each member
+    // element (M, e), every `SymVarRef` read in its segment whose name is
+    // an in-SCC member (M', e') contributes a data-flow edge
+    // (M', e') -> (M, e). Any member whose symbolic fragment cannot be
+    // sourced => not element-sourceable => unresolved (loud-safe).
     let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
     let mut self_loop = false;
-    for (member, layout) in &layouts {
-        for (element_index, (_slot, rhs)) in layout.elements.iter().enumerate() {
-            let node = element_node_key(member.as_str(), element_index);
-            edges.entry(node.clone()).or_default();
-            let mut read_slots: BTreeSet<usize> = BTreeSet::new();
-            collect_read_slots(rhs, &mut read_slots);
-            // Deterministic successor order: BTreeSet read slots ->
-            // sorted by the read node's encoded key.
-            let mut preds: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-            for s in &read_slots {
-                if let Some((m2, e2)) = slot_to_node.get(s) {
-                    preds.insert(element_node_key(m2.as_str(), *e2));
+    // `members` is a BTreeSet, so this iterates in sorted member order;
+    // combined with the sorted Kahn below the result is byte-stable.
+    for member in members {
+        let frag = crate::db::var_phase_symbolic_fragment_prod(
+            db,
+            model,
+            project,
+            member.as_str(),
+            phase.clone(),
+        )?;
+        let member_name = member.as_str();
+
+        // Reads accumulated since the previous per-element write of THIS
+        // member, as (read-name, read-element) pairs. A read is an
+        // in-SCC edge source only if its name is an SCC member.
+        let mut pending_reads: BTreeSet<(String, usize)> = BTreeSet::new();
+        // True once at least one per-element write of this member has
+        // been seen: a malformed fragment with no write for the member
+        // means it is not element-sourceable in the simple per-element
+        // shape this refinement assumes (loud-safe: keep
+        // `CircularDependency`).
+        let mut saw_write = false;
+
+        for op in &frag.symbolic.code {
+            match op {
+                // ── Per-element WRITE of this member: terminate the
+                // current element segment, define node (member, elem),
+                // and wire every pending in-SCC read as a predecessor.
+                SymbolicOpcode::AssignCurr { var }
+                | SymbolicOpcode::AssignConstCurr { var, .. }
+                | SymbolicOpcode::BinOpAssignCurr { var, .. }
+                    if var.name == member_name =>
+                {
+                    saw_write = true;
+                    let node = element_node_key(member_name, var.element_offset);
+                    edges.entry(node.clone()).or_default();
+                    // Deterministic successor order: BTreeSet pending
+                    // reads -> sorted by the read node's encoded key.
+                    let mut preds: BTreeSet<Ident<Canonical>> = BTreeSet::new();
+                    for (rname, relem) in &pending_reads {
+                        if member_names.contains(rname.as_str()) {
+                            preds.insert(element_node_key(rname, *relem));
+                        }
+                    }
+                    for pred in preds {
+                        if pred == node {
+                            // A node reading its own slot is a size-1 SCC
+                            // Tarjan does NOT surface as a >=2 component,
+                            // so detect element self-loops directly from
+                            // adjacency (mirrors `dt_cycle_sccs`).
+                            self_loop = true;
+                        }
+                        edges.entry(pred).or_default().push(node.clone());
+                    }
+                    pending_reads.clear();
                 }
-            }
-            for pred in preds {
-                if pred == node {
-                    // A node reading its own slot is a size-1 SCC that
-                    // Tarjan does NOT surface as a >=2 component, so
-                    // detect element self-loops directly from adjacency
-                    // (mirrors `dt_cycle_sccs`'s self-loop handling).
-                    self_loop = true;
+                // ── Reads consumed by the current element segment.
+                SymbolicOpcode::LoadVar { var }
+                | SymbolicOpcode::SymLoadPrev { var }
+                | SymbolicOpcode::SymLoadInitial { var }
+                | SymbolicOpcode::LoadSubscript { var }
+                | SymbolicOpcode::PushVarView { var, .. }
+                | SymbolicOpcode::PushVarViewDirect { var, .. } => {
+                    pending_reads.insert((var.name.clone(), var.element_offset));
                 }
-                edges.entry(pred).or_default().push(node.clone());
+                SymbolicOpcode::PushStaticView { view_id } => {
+                    // Resolve the static view's base; if it is a model
+                    // variable, enumerate the EXACT element set it
+                    // addresses (the symbolic-space analogue of the prior
+                    // `collect_read_slots` `StaticSubscript` enumeration,
+                    // so a genuinely element-acyclic model still
+                    // resolves). An out-of-range `view_id` is a malformed
+                    // fragment (loud-safe: unresolved).
+                    let view = frag.static_views.get(*view_id as usize)?;
+                    if let crate::compiler::symbolic::SymStaticViewBase::Var(v) = &view.base {
+                        for elem in static_view_element_offsets(view) {
+                            pending_reads.insert((v.name.clone(), elem));
+                        }
+                    }
+                }
+                // Other write targets (a different member, or `AssignNext`
+                // / `BinOpAssignNext` -- a stock-update, not a per-element
+                // current-value write of THIS member) do not terminate
+                // this member's element segment and carry no read; ignore.
+                _ => {}
             }
+        }
+
+        if !saw_write {
+            return None;
         }
     }
 
@@ -970,9 +982,16 @@ fn phase_element_order(
 /// Refine one offending SCC (`members`) for the given `phase` into its
 /// exact per-element graph and render the element-acyclicity verdict.
 ///
-/// Subcomponent A only resolves the single-variable (self-loop) case; a
-/// multi-variable SCC is `Unresolved` (Phase 2 Subcomponent B's combined-
-/// fragment lowering resolves those).
+/// Subcomponent B (GH #575): N=1 and N>=2 are the SAME builder. The
+/// element graph is built on the cross-member-comparable SYMBOLIC
+/// representation (`symbolic_phase_element_order`), so a multi-member
+/// recurrence SCC whose induced element graph is acyclic and
+/// element-sourceable resolves exactly like the single-variable case, and
+/// a genuine multi-variable element cycle (`a[i]=b[i];b[i]=a[i]`) is
+/// detected and stays `Unresolved` (loud-safe). There is no
+/// `members.len() != 1` short-circuit (the prior mini-slot builder
+/// required one because it could not build cross-member edges and would
+/// have resolved a real cycle as acyclic).
 ///
 /// **`SccPhase::Dt` (the dt path).** A single-variable dt self-recurrence's
 /// whole-variable self-edge appears in BOTH the dt and the init
@@ -1005,9 +1024,10 @@ fn phase_element_order(
 /// SCCs whose members the dt path already resolved before consuming the
 /// init verdict, so `{ecc}` stays a single `phase: Dt` `ResolvedScc`.
 ///
-/// Both branches reuse the same phase-parameterized `phase_element_order`
-/// builder over the engine's own production-lowered per-element exprs --
-/// no init-only re-implementation.
+/// Both branches reuse the same phase-parameterized
+/// `symbolic_phase_element_order` builder over the engine's own
+/// production-compiled symbolic bytecode -- no init-only
+/// re-implementation.
 fn refine_scc_to_element_verdict(
     db: &dyn Db,
     model: SourceModel,
@@ -1017,21 +1037,22 @@ fn refine_scc_to_element_verdict(
 ) -> SccVerdict {
     use crate::db::SccPhase;
 
-    // Subcomponent A scope: only single-variable self-recurrence
-    // resolves. A multi-variable SCC is routed to `CircularDependency`
-    // (Phase 2 Subcomponent B's combined-fragment lowering).
-    if members.len() != 1 {
-        return SccVerdict::Unresolved;
-    }
-
+    // Subcomponent B (GH #575): N=1 and N>=2 are unified. The element
+    // graph is built from the cross-member-comparable SYMBOLIC
+    // representation, so a multi-member SCC is just the N>=2 case of the
+    // same builder -- no `members.len() != 1` short-circuit. (The prior
+    // mini-slot builder forced this short-circuit because it was
+    // structurally incapable of cross-member edges and would otherwise
+    // have resolved a genuine multi-variable element cycle as acyclic.)
     match phase {
         SccPhase::Dt => {
             // The dt induced element graph must be acyclic +
             // element-sourceable.
-            let dt_order = match phase_element_order(db, model, project, members, SccPhase::Dt) {
-                Some(o) => o,
-                None => return SccVerdict::Unresolved,
-            };
+            let dt_order =
+                match symbolic_phase_element_order(db, model, project, members, SccPhase::Dt) {
+                    Some(o) => o,
+                    None => return SccVerdict::Unresolved,
+                };
             // ...AND so must the init induced element graph: a
             // single-variable dt self-recurrence's self-edge is
             // structurally present in the init relation too (same
@@ -1039,7 +1060,9 @@ fn refine_scc_to_element_verdict(
             // reject the model. Only resolve when the recurrence is
             // well-founded in BOTH phases (loud-safe: an
             // init-element-cyclic member stays `CircularDependency`).
-            if phase_element_order(db, model, project, members, SccPhase::Initial).is_none() {
+            if symbolic_phase_element_order(db, model, project, members, SccPhase::Initial)
+                .is_none()
+            {
                 return SccVerdict::Unresolved;
             }
             SccVerdict::Resolved(crate::db::ResolvedScc {
@@ -1055,11 +1078,16 @@ fn refine_scc_to_element_verdict(
             // per-element `AssignCurr` graph, so requiring dt
             // element-acyclicity would spuriously reject it (loud-safe:
             // an init-element-cyclic member stays `CircularDependency`).
-            let init_order =
-                match phase_element_order(db, model, project, members, SccPhase::Initial) {
-                    Some(o) => o,
-                    None => return SccVerdict::Unresolved,
-                };
+            let init_order = match symbolic_phase_element_order(
+                db,
+                model,
+                project,
+                members,
+                SccPhase::Initial,
+            ) {
+                Some(o) => o,
+                None => return SccVerdict::Unresolved,
+            };
             SccVerdict::Resolved(crate::db::ResolvedScc {
                 members: members.clone(),
                 element_order: init_order,
@@ -1073,16 +1101,19 @@ fn refine_scc_to_element_verdict(
 /// induced element graph.
 pub(crate) struct DtSccResolution {
     /// SCCs whose induced element graph the cycle gate proved acyclic and
-    /// element-sourceable (single-variable self-recurrence in
-    /// Subcomponent A). These are excluded from the `CircularDependency`
-    /// accumulation and recorded on `ModelDepGraphResult.resolved_sccs`.
+    /// element-sourceable -- single-variable self-recurrence OR a
+    /// multi-variable recurrence cluster (Subcomponent B / GH #575: both
+    /// route through the same symbolic element-graph verdict). These are
+    /// excluded from the `CircularDependency` accumulation and recorded on
+    /// `ModelDepGraphResult.resolved_sccs`.
     pub(crate) resolved: Vec<crate::db::ResolvedScc>,
     /// `true` iff at least one offending SCC is NOT resolved
-    /// (multi-variable in Subcomponent A, element-cyclic, or not
-    /// element-sourceable). When `false`, every back-edge in this phase
-    /// is fully explained by resolvable self-recurrences and the phase's
-    /// cycle gate must NOT set `has_cycle` / accumulate
-    /// `CircularDependency` (loud-safe: any doubt leaves this `true`).
+    /// (element-cyclic -- including a genuine multi-variable element cycle
+    /// the symbolic builder detects -- or not element-sourceable). When
+    /// `false`, every back-edge in this phase is fully explained by
+    /// resolvable recurrences and the phase's cycle gate must NOT set
+    /// `has_cycle` / accumulate `CircularDependency` (loud-safe: any doubt
+    /// leaves this `true`).
     pub(crate) has_unresolved: bool,
 }
 
@@ -1131,17 +1162,22 @@ pub(crate) struct DtSccResolution {
 /// `model_dependency_graph_impl` path builds `var_info` with the actual
 /// `&module_input_names`. For an input-wired sub-model these relations can
 /// differ, so this identification is *incomplete* (it can miss an SCC that
-/// only manifests once inputs are wired in). Soundness is still preserved
-/// in Subcomponent A: the resolved member set only suppresses self-edges
-/// in the caller's `compute_transitive`, which re-runs over the real
+/// only manifests once inputs are wired in). Soundness is still preserved:
+/// the resolved member set only suppresses the resolved members' edges in
+/// the caller's `compute_transitive`, which re-runs over the real
 /// *with-inputs* `var_info`, and its `.unwrap_or_else` arm clears
 /// `resolved_sccs` + sets `has_cycle` on any residual genuine cycle, so
 /// the worst case is a *missed resolution* (a conservative
-/// `CircularDependency`), never an unsound one. `element_order` is not
-/// consumed in Subcomponent A. Subcomponent B (which consumes
-/// `element_order` to build the combined per-element fragment) MUST plumb
-/// the real `module_input_names` into this identification before relying
-/// on it; do not treat the `&[]` argument as neutral.
+/// `CircularDependency`), never an unsound one. This holds for the
+/// multi-member SCCs Subcomponent B (GH #575) now resolves as well as for
+/// single-variable self-recurrences: the symbolic element-graph verdict
+/// only ever *adds* a conservative reject, and the with-inputs re-run is
+/// the soundness backstop. `element_order` is still NOT consumed here
+/// (it rides on the emitted `ResolvedScc`). Subcomponent B's combined-
+/// fragment injection (Task 6, which consumes `element_order` to build
+/// the combined per-element fragment) MUST plumb the real
+/// `module_input_names` into this identification before relying on the
+/// order; do not treat the `&[]` argument as neutral.
 pub(crate) fn resolve_recurrence_sccs(
     db: &dyn Db,
     model: SourceModel,
@@ -1188,13 +1224,21 @@ pub(crate) fn resolve_recurrence_sccs(
     let mut resolved: Vec<crate::db::ResolvedScc> = Vec::new();
     let mut has_unresolved = false;
 
-    // Multi-variable SCCs: Subcomponent A does not resolve them
-    // (Subcomponent B's combined-fragment lowering does) -- always
-    // unresolved. `refine_scc_to_element_verdict` also returns
-    // `Unresolved` for `members.len() != 1`, so this is consistent; we
-    // short-circuit to avoid pointless refinement work.
-    if !multi.is_empty() {
-        has_unresolved = true;
+    // Multi-variable SCCs (sorted/byte-stable): refine each into its
+    // induced *symbolic* element graph for `phase`. Subcomponent B (the
+    // GH #575 correctness rebuild) resolves a multi-member SCC whose
+    // induced element graph is acyclic and element-sourceable -- the same
+    // verdict path as the single-variable case (N=1 is just the N=1 case
+    // of the same builder). A genuine multi-variable element cycle stays
+    // `Unresolved` (loud-safe), because the symbolic builder's
+    // cross-member `SymVarRef` edges actually detect it (the prior
+    // mini-slot builder built ZERO cross-member edges and would have
+    // resolved a real cycle as acyclic).
+    for members in &multi {
+        match refine_scc_to_element_verdict(db, model, project, members, phase.clone()) {
+            SccVerdict::Resolved(scc) => resolved.push(scc),
+            SccVerdict::Unresolved => has_unresolved = true,
+        }
     }
 
     // Single-variable self-loop SCCs (sorted): refine each into its
