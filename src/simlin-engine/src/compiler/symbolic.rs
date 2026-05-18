@@ -1206,6 +1206,221 @@ impl ContextResourceCounts {
     }
 }
 
+/// The six resource-ID base offsets a single fragment's opcodes are
+/// renumbered by (the result of absorbing that fragment into a
+/// `FragmentMerger`). Pass these straight to `renumber_opcode`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FragmentResourceOffsets {
+    pub lit_offset: u16,
+    pub gf_offset: u16,
+    pub mod_offset: u16,
+    pub view_offset: u16,
+    pub temp_offset: u32,
+    pub dl_offset: u16,
+}
+
+/// Running merge state for combining `PerVarBytecodes` into a single
+/// resource namespace.
+///
+/// This is the shared core of `concatenate_fragments` and the
+/// per-element-granular `combine_scc_fragment` (a multi-member recurrence
+/// SCC's combined fragment). The accounting that must hold across both --
+/// every fragment's literals/GFs/modules/views/temps/dim-lists land in a
+/// disjoint, non-colliding ID range -- is implemented exactly once here so
+/// the two consumers cannot drift. `concatenate_fragments` absorbs each
+/// fragment and immediately renumbers its whole (Ret-stripped) code;
+/// `combine_scc_fragment` absorbs each *member* once and renumbers that
+/// member's per-element segments with the member's offsets, emitting the
+/// segments in the SCC's interleaved `element_order`.
+///
+/// `ctx_base` provides context resource ID offsets inherited from
+/// preceding phases. Literal IDs are always phase-local (each phase's
+/// bytecode has its own literal pool) so they are not affected by
+/// `ctx_base`. When assembling a single phase in isolation, pass
+/// `ContextResourceCounts::default()`.
+pub(crate) struct FragmentMerger {
+    ctx_base: ContextResourceCounts,
+    merged_literals: Vec<f64>,
+    merged_gf: Vec<Vec<(f64, f64)>>,
+    merged_modules: Vec<SymbolicModuleDecl>,
+    merged_views: Vec<SymbolicStaticView>,
+    merged_temp_sizes: Vec<usize>,
+    merged_dim_lists: Vec<(u8, [u16; 4])>,
+}
+
+impl FragmentMerger {
+    pub(crate) fn new(ctx_base: &ContextResourceCounts) -> Self {
+        FragmentMerger {
+            ctx_base: ctx_base.clone(),
+            merged_literals: Vec::new(),
+            merged_gf: Vec::new(),
+            merged_modules: Vec::new(),
+            merged_views: Vec::new(),
+            merged_temp_sizes: Vec::new(),
+            merged_dim_lists: Vec::new(),
+        }
+    }
+
+    /// Absorb one fragment's side-channels into the running merge state
+    /// (literals, GFs, modules, views, temp sizes, dim lists) and return
+    /// the six resource base offsets this fragment's opcodes must be
+    /// renumbered by. This is byte-for-byte the per-fragment prologue of
+    /// the original `concatenate_fragments` loop body (offsets computed
+    /// from the *pre-merge* lengths, then the side-channels appended,
+    /// `Temp`-based static views shifted by this fragment's
+    /// `temp_offset`, dim-lists truncated to 4, temp sizes max-merged).
+    pub(crate) fn absorb(&mut self, frag: &PerVarBytecodes) -> FragmentResourceOffsets {
+        // Literals are phase-local; no ctx_base offset needed.
+        let lit_offset = self.merged_literals.len() as u16;
+        let gf_offset = self.merged_gf.len() as u16 + self.ctx_base.graphical_functions;
+        let mod_offset = self.merged_modules.len() as u16 + self.ctx_base.modules;
+        let view_offset = self.merged_views.len() as u16 + self.ctx_base.views;
+        let temp_offset = self.merged_temp_sizes.len() as u32 + self.ctx_base.temps;
+        let dl_offset = self.merged_dim_lists.len() as u16 + self.ctx_base.dim_lists;
+
+        self.merged_literals
+            .extend_from_slice(&frag.symbolic.literals);
+        self.merged_gf.extend_from_slice(&frag.graphical_functions);
+        self.merged_modules.extend_from_slice(&frag.module_decls);
+        self.merged_views.extend(frag.static_views.iter().map(|sv| {
+            let base = match &sv.base {
+                SymStaticViewBase::Temp(id) => SymStaticViewBase::Temp(*id + temp_offset),
+                other => other.clone(),
+            };
+            SymbolicStaticView { base, ..sv.clone() }
+        }));
+        self.merged_dim_lists
+            .extend(frag.dim_lists.iter().map(|dl| {
+                let n = dl.len().min(4) as u8;
+                let mut arr = [0u16; 4];
+                for (i, &v) in dl.iter().take(4).enumerate() {
+                    arr[i] = v;
+                }
+                (n, arr)
+            }));
+
+        for (id, size) in &frag.temp_sizes {
+            let new_id = *id + temp_offset;
+            if new_id as usize >= self.merged_temp_sizes.len() {
+                self.merged_temp_sizes.resize(new_id as usize + 1, 0);
+            }
+            self.merged_temp_sizes[new_id as usize] =
+                self.merged_temp_sizes[new_id as usize].max(*size);
+        }
+
+        FragmentResourceOffsets {
+            lit_offset,
+            gf_offset,
+            mod_offset,
+            view_offset,
+            temp_offset,
+            dl_offset,
+        }
+    }
+
+    /// Consume the merger and finalize into a `ConcatenatedBytecodes`,
+    /// computing per-temp byte offsets from the max-merged temp sizes.
+    /// `code` is the already-renumbered, Ret-stripped opcode stream;
+    /// a single trailing `Ret` is appended iff `code` is non-empty
+    /// (preserving the original `concatenate_fragments` behavior).
+    fn into_concatenated(self, mut code: Vec<SymbolicOpcode>) -> ConcatenatedBytecodes {
+        if !code.is_empty() {
+            code.push(SymbolicOpcode::Ret);
+        }
+
+        let mut temp_offsets = Vec::with_capacity(self.merged_temp_sizes.len());
+        let mut offset = 0usize;
+        for &size in &self.merged_temp_sizes {
+            temp_offsets.push(offset);
+            offset += size;
+        }
+
+        ConcatenatedBytecodes {
+            bytecode: SymbolicByteCode {
+                literals: self.merged_literals,
+                code,
+            },
+            graphical_functions: self.merged_gf,
+            module_decls: self.merged_modules,
+            static_views: self.merged_views,
+            temp_offsets,
+            temp_total_size: offset,
+            dim_lists: self.merged_dim_lists,
+        }
+    }
+
+    /// Consume the merger and finalize into a `PerVarBytecodes` (the shape
+    /// `combine_scc_fragment` returns -- a combined fragment is itself a
+    /// fragment, re-fed to `concatenate_fragments` at assembly). `code` is
+    /// the already-renumbered opcode stream of the interleaved segments;
+    /// a single trailing `Ret` is appended iff `code` is non-empty.
+    ///
+    /// `temp_sizes`/`dim_lists` are converted back to the `PerVarBytecodes`
+    /// representations: `merged_temp_sizes[i]` becomes `(i, size)` for
+    /// every slot (including zero-size ones, so `from_fragments`'
+    /// `max(id+1)` temp count is preserved), and each truncated dim-list
+    /// `(n, arr)` becomes `arr[..n].to_vec()`. The truncation is
+    /// idempotent on the <=4-element dimension tuples dim-lists hold, so a
+    /// later `concatenate_fragments` pass is unaffected.
+    pub(crate) fn into_per_var_bytecodes(self, mut code: Vec<SymbolicOpcode>) -> PerVarBytecodes {
+        if !code.is_empty() {
+            code.push(SymbolicOpcode::Ret);
+        }
+
+        let temp_sizes: Vec<(u32, usize)> = self
+            .merged_temp_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &size)| (i as u32, size))
+            .collect();
+        let dim_lists: Vec<Vec<u16>> = self
+            .merged_dim_lists
+            .iter()
+            .map(|(n, arr)| arr[..(*n as usize)].to_vec())
+            .collect();
+
+        PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: self.merged_literals,
+                code,
+            },
+            graphical_functions: self.merged_gf,
+            module_decls: self.merged_modules,
+            static_views: self.merged_views,
+            temp_sizes,
+            dim_lists,
+        }
+    }
+}
+
+/// Renumber a single fragment's (Ret-stripped) opcodes by the offsets
+/// returned from `FragmentMerger::absorb`. Shared by both consumers so the
+/// trailing-`Ret` strip and the renumber call site are defined once.
+fn renumber_fragment_code(
+    code: &[SymbolicOpcode],
+    off: &FragmentResourceOffsets,
+    out: &mut Vec<SymbolicOpcode>,
+) -> Result<(), String> {
+    // Strip a trailing Ret -- the merger appends a single Ret at the end.
+    let end = if code.last() == Some(&SymbolicOpcode::Ret) {
+        code.len() - 1
+    } else {
+        code.len()
+    };
+    for op in &code[..end] {
+        out.push(renumber_opcode(
+            op,
+            off.lit_offset,
+            off.gf_offset,
+            off.mod_offset,
+            off.view_offset,
+            off.temp_offset,
+            off.dl_offset,
+        )?);
+    }
+    Ok(())
+}
+
 /// Merge multiple `PerVarBytecodes` into a single stream, renumbering
 /// `LiteralId`, `GraphicalFunctionId`, `ModuleId`, `ViewId`, `TempId`,
 /// and `DimListId` to avoid collisions across fragments.
@@ -1219,93 +1434,15 @@ pub(crate) fn concatenate_fragments(
     fragments: &[&PerVarBytecodes],
     ctx_base: &ContextResourceCounts,
 ) -> Result<ConcatenatedBytecodes, String> {
-    let mut merged_literals: Vec<f64> = Vec::new();
+    let mut merger = FragmentMerger::new(ctx_base);
     let mut merged_code: Vec<SymbolicOpcode> = Vec::new();
-    let mut merged_gf: Vec<Vec<(f64, f64)>> = Vec::new();
-    let mut merged_modules: Vec<SymbolicModuleDecl> = Vec::new();
-    let mut merged_views: Vec<SymbolicStaticView> = Vec::new();
-    let mut merged_temp_sizes: Vec<usize> = Vec::new();
-    let mut merged_dim_lists: Vec<(u8, [u16; 4])> = Vec::new();
 
     for frag in fragments {
-        // Literals are phase-local; no ctx_base offset needed
-        let lit_offset = merged_literals.len() as u16;
-        let gf_offset = merged_gf.len() as u16 + ctx_base.graphical_functions;
-        let mod_offset = merged_modules.len() as u16 + ctx_base.modules;
-        let view_offset = merged_views.len() as u16 + ctx_base.views;
-        let temp_offset = merged_temp_sizes.len() as u32 + ctx_base.temps;
-        let dl_offset = merged_dim_lists.len() as u16 + ctx_base.dim_lists;
-
-        merged_literals.extend_from_slice(&frag.symbolic.literals);
-        merged_gf.extend_from_slice(&frag.graphical_functions);
-        merged_modules.extend_from_slice(&frag.module_decls);
-        merged_views.extend(frag.static_views.iter().map(|sv| {
-            let base = match &sv.base {
-                SymStaticViewBase::Temp(id) => SymStaticViewBase::Temp(*id + temp_offset),
-                other => other.clone(),
-            };
-            SymbolicStaticView { base, ..sv.clone() }
-        }));
-        merged_dim_lists.extend(frag.dim_lists.iter().map(|dl| {
-            let n = dl.len().min(4) as u8;
-            let mut arr = [0u16; 4];
-            for (i, &v) in dl.iter().take(4).enumerate() {
-                arr[i] = v;
-            }
-            (n, arr)
-        }));
-
-        for (id, size) in &frag.temp_sizes {
-            let new_id = *id + temp_offset;
-            if new_id as usize >= merged_temp_sizes.len() {
-                merged_temp_sizes.resize(new_id as usize + 1, 0);
-            }
-            merged_temp_sizes[new_id as usize] = merged_temp_sizes[new_id as usize].max(*size);
-        }
-
-        // Strip trailing Ret from each fragment -- we add a single Ret at the end
-        let code = &frag.symbolic.code;
-        let end = if code.last() == Some(&SymbolicOpcode::Ret) {
-            code.len() - 1
-        } else {
-            code.len()
-        };
-        for op in &code[..end] {
-            merged_code.push(renumber_opcode(
-                op,
-                lit_offset,
-                gf_offset,
-                mod_offset,
-                view_offset,
-                temp_offset,
-                dl_offset,
-            )?);
-        }
+        let off = merger.absorb(frag);
+        renumber_fragment_code(&frag.symbolic.code, &off, &mut merged_code)?;
     }
 
-    if !merged_code.is_empty() {
-        merged_code.push(SymbolicOpcode::Ret);
-    }
-
-    let mut temp_offsets = Vec::with_capacity(merged_temp_sizes.len());
-    let mut offset = 0usize;
-    for &size in &merged_temp_sizes {
-        temp_offsets.push(offset);
-        offset += size;
-    }
-
-    Ok(ConcatenatedBytecodes {
-        bytecode: SymbolicByteCode {
-            literals: merged_literals,
-            code: merged_code,
-        },
-        graphical_functions: merged_gf,
-        module_decls: merged_modules,
-        static_views: merged_views,
-        temp_offsets,
-        temp_total_size: offset,
-        dim_lists: merged_dim_lists,
-    })
+    Ok(merger.into_concatenated(merged_code))
 }
 
 fn checked_add_u8(base: u8, off: u8, label: &str) -> Result<u8, String> {

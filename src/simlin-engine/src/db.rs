@@ -3817,6 +3817,246 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     )
 }
 
+/// Segment one member's symbolic opcode stream into per-element slices,
+/// keyed by `element_offset`.
+///
+/// A per-element slice for element `e` is the run of opcodes up to and
+/// including the **write** opcode whose `var.name == member` and
+/// `var.element_offset == e` (`AssignCurr | AssignConstCurr |
+/// BinOpAssignCurr`). This is the *exact* segmentation
+/// `crate::db_dep_graph::symbolic_phase_element_order` performs to build
+/// the SCC element graph (GH #575) -- the verdict and the combined
+/// fragment MUST agree on segment boundaries or `element_order` would
+/// reference a slice the combiner cannot reproduce, so the two share this
+/// definition's contract.
+///
+/// A trailing `Ret` is stripped first (the combined fragment carries one
+/// terminal `Ret`). Any opcodes after the member's final per-element write
+/// (before the stripped `Ret`) are appended to the last element's slice so
+/// no opcode is silently dropped -- a tail with no write is a malformed
+/// fragment (`Err`).
+///
+/// Loud-safe failures (return `Err`, caller keeps `CircularDependency` --
+/// NEVER a panic, NEVER a silently-malformed slice):
+/// - a duplicate write for the same element (ambiguous segmentation);
+/// - opcodes present but no per-element write at all (not element-
+///   sourceable in the simple per-element shape, mirroring
+///   `symbolic_phase_element_order`'s `saw_write` guard).
+///
+/// **Currently consumed only by `combine_scc_fragment` (in turn only by
+/// its `#[cfg(test)]` tests).** Subcomponent B Task 6 wires
+/// `combine_scc_fragment` into `assemble_module`'s dt + init fragment
+/// collection, restoring a production consumer; the
+/// `cfg_attr(not(test), allow(dead_code))` suppresses the otherwise-
+/// correct unused warning for the non-test build until then (same staged
+/// convention as `var_phase_lowered_exprs_prod`).
+#[cfg_attr(not(test), allow(dead_code))]
+fn segment_member_by_element(
+    member: &str,
+    code: &[crate::compiler::symbolic::SymbolicOpcode],
+) -> Result<HashMap<usize, Vec<crate::compiler::symbolic::SymbolicOpcode>>, String> {
+    use crate::compiler::symbolic::SymbolicOpcode;
+
+    // Strip a trailing Ret -- the combined fragment appends a single Ret.
+    let end = if code.last() == Some(&SymbolicOpcode::Ret) {
+        code.len() - 1
+    } else {
+        code.len()
+    };
+    let body = &code[..end];
+
+    let mut segments: HashMap<usize, Vec<SymbolicOpcode>> = HashMap::new();
+    let mut current: Vec<SymbolicOpcode> = Vec::new();
+    let mut last_written_elem: Option<usize> = None;
+
+    for op in body {
+        current.push(op.clone());
+        let write_elem = match op {
+            SymbolicOpcode::AssignCurr { var }
+            | SymbolicOpcode::AssignConstCurr { var, .. }
+            | SymbolicOpcode::BinOpAssignCurr { var, .. }
+                if var.name == member =>
+            {
+                Some(var.element_offset)
+            }
+            // A write to a *different* member, or AssignNext/
+            // BinOpAssignNext (a stock-update, not a per-element
+            // current-value write of THIS member) does not terminate this
+            // member's element segment -- exactly the
+            // `symbolic_phase_element_order` rule.
+            _ => None,
+        };
+        if let Some(elem) = write_elem {
+            if segments.contains_key(&elem) {
+                return Err(format!(
+                    "SCC member `{member}` has a duplicate per-element \
+                     write for element {elem}; combined fragment cannot \
+                     be unambiguously segmented"
+                ));
+            }
+            segments.insert(elem, std::mem::take(&mut current));
+            last_written_elem = Some(elem);
+        }
+    }
+
+    // Any trailing opcodes after the last write belong to the last
+    // element's segment (dropping them would change semantics). With no
+    // write at all this member is not element-sourceable -- loud-safe.
+    if !current.is_empty() {
+        match last_written_elem {
+            Some(elem) => {
+                segments
+                    .get_mut(&elem)
+                    .expect("last_written_elem indexes an inserted segment")
+                    .extend(current);
+            }
+            None => {
+                return Err(format!(
+                    "SCC member `{member}` has no per-element write \
+                     opcode; not element-sourceable for the combined \
+                     fragment"
+                ));
+            }
+        }
+    }
+
+    Ok(segments)
+}
+
+/// Interleave a multi-member recurrence SCC's per-element symbolic
+/// segments into ONE combined `PerVarBytecodes`, following the SCC's
+/// element-acyclic `element_order`.
+///
+/// `member_fragments` maps each SCC member's canonical name to its
+/// *symbolic* `PerVarBytecodes` for the SCC's phase (obtained by the
+/// caller via `var_phase_symbolic_fragment_prod(.., scc.phase)` -- the
+/// exact production compile+symbolize path, never a re-derivation). The
+/// result is a single fragment whose per-element writes appear in
+/// `scc.element_order`, with each write keeping its **original**
+/// `SymVarRef { name, element_offset }` (only segment ordering changes).
+/// `resolve_module` therefore maps every write to the same model slot it
+/// would have without the SCC, so variable layout offsets and the results
+/// offset map are unchanged and per-variable result series stay
+/// individually addressable (AC2.3).
+///
+/// **This is the per-element-granular generalization of
+/// `concatenate_fragments`.** Resources are MEMBER-scoped, not
+/// element-scoped: each member's fragment is absorbed into the shared
+/// `FragmentMerger` exactly ONCE (in `element_order`'s member
+/// first-encounter order, so the offset assignment is deterministic),
+/// yielding that member's resource base offsets and merging its
+/// side-channels (literals, GFs, modules, views, temps, dim-lists) the
+/// same way `concatenate_fragments` merges a fragment. Every segment of
+/// that member is then renumbered by the member's offsets. The two
+/// consumers share `FragmentMerger`/`renumber_opcode` so the multi-layer
+/// resource accounting cannot drift.
+///
+/// Loud-safe (`Err`, caller keeps `CircularDependency` -- never a panic,
+/// never a malformed fragment):
+/// - a member named in `element_order` has no supplied fragment (the Task
+///   4 accessor returned `None` -- unsourceable);
+/// - a member's fragment cannot be cleanly segmented (missing / duplicate
+///   / no-write element segment -- `segment_member_by_element`);
+/// - an `(member, element)` entry in `element_order` has no matching
+///   segment;
+/// - a resource-ID renumber overflows its target ID type.
+///
+/// **Currently consumed only by its own `#[cfg(test)]` tests.**
+/// Subcomponent B Task 6 wires this into `assemble_module`'s dt + init
+/// fragment-collection loops (skip every `ResolvedScc` member's
+/// per-variable fragment, inject this combined fragment at the first
+/// member's slot), restoring a production consumer. It is intentionally
+/// implemented now (Task 5) with its structural-correctness tests so Task
+/// 6 only does wiring; the `cfg_attr(not(test), allow(dead_code))`
+/// suppresses the otherwise-correct unused warning for the non-test build
+/// until then (same staged convention as `var_phase_lowered_exprs_prod` /
+/// `var_phase_symbolic_fragment_prod`).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn combine_scc_fragment(
+    scc: &ResolvedScc,
+    member_fragments: &HashMap<Ident<Canonical>, crate::compiler::symbolic::PerVarBytecodes>,
+) -> Result<crate::compiler::symbolic::PerVarBytecodes, String> {
+    use crate::compiler::symbolic::{
+        ContextResourceCounts, FragmentMerger, FragmentResourceOffsets, SymbolicOpcode,
+        renumber_opcode,
+    };
+
+    // Absorb each member ONCE, in `element_order`'s member first-encounter
+    // order, so per-member resource offsets are assigned deterministically
+    // (the interleave is a pure reordering => byte-stable output, AC2.3).
+    // The combined fragment is itself a fragment re-fed to
+    // `concatenate_fragments` at assembly, so it is built in an isolated
+    // resource namespace (`ctx_base = default`), exactly as a per-variable
+    // fragment is.
+    let mut merger = FragmentMerger::new(&ContextResourceCounts::default());
+    let mut member_offsets: HashMap<Ident<Canonical>, FragmentResourceOffsets> = HashMap::new();
+    // Per-member, per-element renumbered segments. Keyed by the same
+    // `(member, element)` identity `element_order` carries.
+    let mut renumbered_segments: HashMap<(Ident<Canonical>, usize), Vec<SymbolicOpcode>> =
+        HashMap::new();
+
+    for (member, _elem) in &scc.element_order {
+        if member_offsets.contains_key(member) {
+            continue;
+        }
+        let frag = member_fragments.get(member).ok_or_else(|| {
+            format!(
+                "SCC member `{}` has no supplied symbolic fragment \
+                 (unsourceable); keeping CircularDependency",
+                member.as_str()
+            )
+        })?;
+        // `absorb` merges this member's side-channels and returns its
+        // resource base offsets -- the exact per-fragment prologue
+        // `concatenate_fragments` runs.
+        let off = merger.absorb(frag);
+        member_offsets.insert(member.clone(), off);
+
+        // Segment the member's symbolic code on its per-element write
+        // opcodes (identical contract to the Task 4 verdict builder), then
+        // renumber every opcode of every segment by THIS member's offsets.
+        let segments = segment_member_by_element(member.as_str(), &frag.symbolic.code)?;
+        for (elem, ops) in segments {
+            let mut renumbered = Vec::with_capacity(ops.len());
+            for op in &ops {
+                renumbered.push(renumber_opcode(
+                    op,
+                    off.lit_offset,
+                    off.gf_offset,
+                    off.mod_offset,
+                    off.view_offset,
+                    off.temp_offset,
+                    off.dl_offset,
+                )?);
+            }
+            renumbered_segments.insert((member.clone(), elem), renumbered);
+        }
+    }
+
+    // Emit the renumbered segments in `element_order`. Every entry must
+    // map to exactly one segment (a missing one is loud-safe). Each
+    // segment is consumed exactly once: a duplicate `(member, element)` in
+    // `element_order` (which the Task 4 builder cannot produce -- nodes
+    // are unique) would try to reuse a removed segment and fail loud-safe.
+    let mut combined_code: Vec<SymbolicOpcode> = Vec::new();
+    for (member, elem) in &scc.element_order {
+        let seg = renumbered_segments
+            .remove(&(member.clone(), *elem))
+            .ok_or_else(|| {
+                format!(
+                    "SCC element_order references `{}`[{}] but no such \
+                     per-element segment exists in its fragment; keeping \
+                     CircularDependency",
+                    member.as_str(),
+                    elem
+                )
+            })?;
+        combined_code.extend(seg);
+    }
+
+    Ok(merger.into_per_var_bytecodes(combined_code))
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn compile_var_fragment(
     db: &dyn Db,
@@ -5693,6 +5933,9 @@ pub fn compile_project_incremental(
     }
 }
 
+#[cfg(test)]
+#[path = "db_combined_fragment_tests.rs"]
+mod db_combined_fragment_tests;
 #[cfg(test)]
 #[path = "db_conversion_tests.rs"]
 mod db_conversion_tests;
