@@ -1203,10 +1203,17 @@ TIME STEP = 1 ~~|
 
     // (2) Genuine SAME-element self `x[dimA]=x[dimA]+1` (NOT a shifted
     // subrange): a real same-element self-cycle that MUST stay rejected.
-    // Note: the self-reference fix legitimately changes this from
-    // UnknownDependency (the `self` leak) to CircularDependency (the
-    // resolved self-edge). Do NOT pin UnknownDependency -- assert only
-    // that it stays rejected with a cycle/unknown-class code.
+    // element-cycle-resolution.AC4.2: element-level cycle resolution
+    // resolves the `self` token to the real name (`x`), so every element
+    // reads *itself* (`x[a1]<-x[a1]`, `x[a2]<-x[a2]`). The induced element
+    // graph therefore has an element self-loop -- it is element-cyclic, a
+    // genuine cycle -- so the engine MUST report `CircularDependency`
+    // SPECIFICALLY. This is no longer an `UnknownDependency` leak: that
+    // only happened before the #559 fix, when the literal `self` token
+    // leaked as an undefined name. Pin `CircularDependency` exactly (the
+    // assertion below also forbids any `UnknownDependency`/`DoesNotExist`,
+    // which would now be a name-resolution regression, not the expected
+    // verdict).
     let same_elem = "\
 {UTF-8}
 dimA: a1, a2 ~~|
@@ -1223,16 +1230,24 @@ TIME STEP = 1 ~~|
          NotSimulatable (CLAUDE.md hard rule -- a real cycle)"
     );
     assert!(
-        diags2.iter().any(|d| matches!(
+        diags2
+            .iter()
+            .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency)),
+        "genuine same-element self x[dimA]=x[dimA]+1 must report \
+         CircularDependency SPECIFICALLY (element-cycle-resolution.AC4.2): \
+         every element reads itself, so the induced element graph has an \
+         element self-loop and the element-cycle refinement keeps the \
+         conservative CircularDependency. Diagnostics: {diags2:#?}"
+    );
+    assert!(
+        !diags2.iter().any(|d| matches!(
             diag_code(d),
-            Some(ErrorCode::CircularDependency)
-                | Some(ErrorCode::UnknownDependency)
-                | Some(ErrorCode::DoesNotExist)
+            Some(ErrorCode::UnknownDependency) | Some(ErrorCode::DoesNotExist)
         )),
-        "genuine same-element self must be rejected with a \
-         cycle/undefined-class code (the self-reference fix flips it \
-         unknown->circular -- either is acceptable, but it must NOT \
-         silently compile). Diagnostics: {diags2:#?}"
+        "the `self` token must resolve to the real name `x`; a leaked \
+         UnknownDependency/DoesNotExist here is a #559 name-resolution \
+         regression, not the expected same-element-self-cycle verdict. \
+         Diagnostics: {diags2:#?}"
     );
 }
 
