@@ -200,11 +200,20 @@ fn hash_u32_slice(vals: &[u32]) -> u64 {
 /// callers that care about self-loops must detect them from the adjacency
 /// directly rather than from component size.
 ///
-/// `#[cfg(test)]` because the dt-phase cycle accessor
-/// (`crate::db_dep_graph::dt_cycle_sccs`) is currently its only consumer;
-/// promote to an unconditional `pub(crate)` primitive when a production
-/// consumer is added.
-#[cfg(test)]
+/// Production `pub(crate)` primitive: the `db_dep_graph.rs` element-cycle
+/// refinement (single-variable self-recurrence resolution in the dt cycle
+/// gate) calls it from production code, in addition to the dt-phase cycle
+/// accessor `crate::db_dep_graph::dt_cycle_sccs`. It was formerly
+/// `#[cfg(test)]`-gated for want of a production consumer; that consumer
+/// now exists.
+///
+/// `#[allow(dead_code)]`: this commit promotes the primitive ahead of its
+/// caller. The lib-target-only build has no consumer until the
+/// `db_dep_graph.rs` element-cycle refinement lands in this same phase
+/// (Phase 1 Subcomponent B); the only current call site is the
+/// `#[cfg(test)]` `dt_cycle_sccs`, invisible to the plain lib target.
+/// Remove the allowance once the production caller is wired in.
+#[allow(dead_code)]
 pub(crate) fn scc_components(
     edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
 ) -> Vec<Vec<Ident<Canonical>>> {
