@@ -30,15 +30,47 @@ per-element dt relation builder + verdict, `ResolvedScc`/`SccPhase`/
 
 ## Design deviations (verified — these override the design doc)
 
-1. **`PerVarBytecodes` is post-compile bytecode, NOT `Vec<Expr>`**
-   (`compiler/symbolic.rs:323-337`: `symbolic: SymbolicByteCode` + resource
-   side-channels; no variable ident, no layout offsets). The design's "collect
-   each member's per-element lowered `AssignCurr` slots ... into one synthetic
-   `PerVarBytecodes`" must be reframed: **interleave at the `Vec<Expr>`
-   (lowered `Var.ast`) level, then recompile the combined `Vec<Expr>` through
-   the existing `compile_phase` machinery** (the closure inside
-   `compile_var_fragment`, `db.rs:3433-3520`). The `AssignCurr` slots are not
-   separable post-compile.
+1. **REVISED (supersedes the original deviation #1; see GH #575).
+   `Expr::AssignCurr` operands are per-variable *mini-slots*, NOT
+   cross-member-comparable absolute model slots.** `var_phase_lowered_exprs_prod`
+   → `lower_var_fragment` (`db_var_fragment.rs:532-877`) builds a *fresh
+   per-variable mini-layout*: `mini_offset` starts at
+   `crate::vm::IMPLICIT_VAR_COUNT` (=4 for root), the variable itself is
+   placed first, then its own deps, then implicit vars;
+   `rmap = ReverseOffsetMap::from_layout(&mini_layout)`. So every SCC member's
+   own variable sits at slot 4 in *its own* layout, every member's
+   `AssignCurr` write-slots collide, and a member's cross-member reads land on
+   *that member's private* dep mini-slots. Consequently the original plan's
+   "interleave raw `Vec<Expr>` and recompile through one shared context"
+   mechanism is **unimplementable**, and Phase 1's `phase_element_order` (which
+   keys an element graph on raw `AssignCurr` slots) builds **zero cross-member
+   edges** for any multi-member SCC — it produces a wrong topological order
+   *and* (fatally) resolves a genuine multi-variable element cycle
+   (`a[i]=b[i];b[i]=a[i]`) as acyclic (unsound, violates the AC4 loud-safe
+   hard rule). It is masked today only by the `members.len() != 1`
+   short-circuit in `refine_scc_to_element_verdict` (`db_dep_graph.rs:1023`),
+   which this phase must remove.
+
+   **Both the multi-member verdict AND the combined-fragment interleave must
+   operate at the SYMBOLIC layer.** `compile_var_fragment`'s `compile_phase`
+   closure (`db.rs:~3670-3757`) already compiles a variable's phase exprs
+   through its own correct mini-context and `symbolize_bytecode`s the result
+   into a `PerVarBytecodes { symbolic: SymbolicByteCode, .. }` whose every
+   variable reference is a layout-independent `SymVarRef { name: String,
+   element_offset: usize }` (`compiler/symbolic.rs:37-42`). `SymVarRef` IS the
+   cross-member-comparable identity the verdict and the interleave need.
+   `concatenate_fragments`/`renumber_opcode` (`symbolic.rs:1218-1400`) already
+   merge `&[&PerVarBytecodes]` with per-fragment resource renumbering;
+   `resolve_module` (`symbolic.rs:826-` / the `assemble_module` call site)
+   resolves `SymVarRef` → real model offsets at assembly so variable layout
+   offsets and the results map are unchanged. The plan's "recompile the
+   combined `Vec<Expr>`" is replaced by "compile each member independently
+   (existing `compile_phase`), split each member's `SymbolicByteCode` into
+   per-element segments delimited by its per-element write opcode
+   (`AssignCurr`/`AssignConstCurr`/`BinOpAssignCurr`, element id =
+   `SymVarRef.element_offset`), and interleave the segments in
+   `ResolvedScc.element_order` with per-member resource renumbering — a
+   per-element-granular generalization of `concatenate_fragments`."
 2. **The runlist `Vec<String>` is salsa-owned and immutable at the
    `assemble_module` site** (`db.rs:4303-4307` reads `&ModelDepGraphResult`).
    "Remove members from the per-variable runlist" means **skip SCC members
@@ -233,86 +265,174 @@ Run: `cargo test -p simlin-engine --features file_io` init-phase tests — pass.
 <!-- START_SUBCOMPONENT_B (tasks 4-6) -->
 
 <!-- START_TASK_4 -->
-### Task 4: Combined `Vec<Expr>` interleave (the core transform)
+### Task 4: Symbolic per-member fragment accessor + multi-member symbolic element-graph verdict (the correctness rebuild — GH #575)
 
-**Verifies:** element-cycle-resolution.AC2.1, element-cycle-resolution.AC2.3
+**Verifies:** element-cycle-resolution.AC2.1, element-cycle-resolution.AC2.4, element-cycle-resolution.AC4 (loud-safe: genuine multi-variable element cycles stay rejected)
+
+**Why this task exists:** Phase 1's `phase_element_order` builds the SCC
+element graph from raw per-variable mini-slots and is structurally incapable
+of cross-member edges (GH #575): for any multi-member SCC it produces a wrong
+order *and* resolves a genuine multi-variable element cycle as acyclic
+(unsound). Phase 2 must resolve multi-member SCCs, so the verdict's
+element-graph construction must be rebuilt on the cross-member-comparable
+**symbolic** representation BEFORE the combined fragment (Task 5) can consume
+a correct `ResolvedScc`.
 
 **Files:**
-- Modify: `src/simlin-engine/src/db.rs` (a new `pub(crate)` helper that, given a `ResolvedScc` and its members' production-lowered `Vec<Expr>`, produces one combined `Vec<Expr>`)
+- Modify: `src/simlin-engine/src/db.rs` — add a `pub(crate)` accessor
+  returning a variable's *symbolic* `PerVarBytecodes` for a phase (factor the
+  existing `compile_phase` closure in `compile_var_fragment` so the SCC path
+  reuses the exact production compile+symbolize, never a re-derivation).
+- Modify: `src/simlin-engine/src/db_dep_graph.rs` — replace the mini-slot
+  element-graph construction (`phase_element_order` / `slot_to_node` /
+  `member_elements` / `element_node_key` / the `Expr`-based
+  `collect_read_slots`) with a symbolic builder over `SymVarRef`; remove the
+  `members.len() != 1` guard in `refine_scc_to_element_verdict`
+  (`db_dep_graph.rs:1023`).
 
 **Implementation:**
-For a resolved multi-variable SCC, build one combined `Vec<Expr>` whose
-element writes follow `ResolvedScc.element_order`:
-- For each member, obtain its production-lowered per-element `Vec<Expr>` for
-  the SCC's phase via `var_phase_lowered_exprs_prod` (Phase 1 Task 3).
-- Each member's lowered `Vec<Expr>` is a flat sequence segmented per element
-  as `[pre-exprs..., Expr::AssignCurr(member_base + elem, rhs)]`
-  (`compiler/mod.rs:1651-1683` Arrayed / `:1721-1736` ApplyToAll; element
-  order = `SubscriptIterator` declared order; `Expr::AssignCurr` is
-  `compiler/expr.rs:85`, first operand = absolute slot offset). Split each
-  member's `Vec<Expr>` into per-element slices keyed by the `AssignCurr`
-  offset (the slice for element `e` is the run of exprs up to and including
-  the `AssignCurr` whose offset is `member_base_M + e`).
-- Emit the slices in `ResolvedScc.element_order` order
-  (`Vec<(Ident<Canonical>, usize)>`), concatenated into one combined
-  `Vec<Expr>`. Each `AssignCurr` keeps its original absolute offset operand —
-  only the ordering changes, so variable layout offsets and the results map
-  are unchanged (AC2.3) and per-variable series remain individually
-  addressable.
-- Determinism: `element_order` is already byte-stable (Phase 1 sorted Tarjan
-  tie-break); the interleave is a pure reordering, so the combined `Vec<Expr>`
-  is byte-stable.
+- **Accessor:** add `pub(crate) fn var_phase_symbolic_fragment_prod(db, model,
+  project, var_name, phase: SccPhase) -> Option<PerVarBytecodes>`. It must
+  reuse the *exact* production compile+symbolize path: factor the
+  `compile_phase` closure body out of `compile_var_fragment`
+  (`db.rs:~3670-3757`) into a `pub(crate)` helper taking the caller-owned
+  context (`offsets`, `rmap`, `tables`, `module_refs`, `mini_offset`,
+  `converted_dims`, `dim_context`, `model_name_ident`, `inputs`) + the phase
+  `Vec<Expr>`, returning `Option<PerVarBytecodes>`; the accessor builds that
+  context exactly as `var_phase_lowered_exprs_prod` does (mirror it
+  byte-for-byte; select `per_phase_lowered.noninitial` for `Dt`, `.initial`
+  for `Initial`), then calls the factored helper. `None` is the loud-safe
+  signal (no `SourceVariable`, `Fatal`, `Var::new` error, or compile/
+  symbolize failure) — never panic. `var_phase_lowered_exprs_prod` stays
+  (Phase 3 still extends its no-`SourceVariable` arm); the symbolic accessor
+  is the new SCC-graph source.
+- **Symbolic element graph (replaces `phase_element_order`):** for each SCC
+  member, get its symbolic `PerVarBytecodes` for the phase. Walk
+  `symbolic.code`:
+  - A per-element **write** is `SymbolicOpcode::AssignCurr { var } |
+    AssignConstCurr { var, .. } | BinOpAssignCurr { var, .. }` where
+    `var.name == member`. It defines node `(var.name.clone(),
+    var.element_offset)` and terminates the current element segment.
+  - The **reads** consumed by that element are the `SymVarRef`s in the
+    opcodes since the previous write (inclusive of this write's own operand
+    sub-expression already flattened into preceding stack ops):
+    `LoadVar{var} | SymLoadPrev{var} | SymLoadInitial{var} |
+    LoadSubscript{var} | PushVarView{var,..} | PushVarViewDirect{var,..}`,
+    and `PushStaticView{view_id}` → resolve `static_views[view_id].base`; if
+    `SymStaticViewBase::Var(v)` enumerate the exact element set the view
+    addresses (mirror Phase 1 `collect_read_slots`'s `StaticSubscript`
+    dims/strides/offset enumeration, but in symbolic space — exact, not an
+    over-approximation, so genuinely element-acyclic models like `ref.mdl`
+    still resolve). Reuse/adapt the existing
+    `sym_var_refs_in_bytecode` enumeration shape (`symbolic.rs:767-782`) but
+    split read-opcodes vs the write terminal and add the static-view base
+    resolution.
+  - For every read `SymVarRef { name, element_offset }` whose `name` is an
+    SCC member, add edge `(name, element_offset) -> (write.name,
+    write.element_offset)`. Over-approximation remains the loud-safe
+    direction (preserve Phase 1's documented `collect_read_slots` contract:
+    an extra edge only forces a conservative `CircularDependency`, never a
+    wrong order; `SymLoadPrev` is included as an edge exactly as the
+    `Expr`-level `Previous`-arg was — PREVIOUS-only recurrences stay
+    protected upstream by `build_var_info`'s `dt_previous` strip at SCC
+    *identification*, unchanged).
+  - Node identity is the `(canonical-name, element_offset)` pair encoded
+    byte-stably for `crate::ltm::scc_components` (keep the existing injective
+    `element_node_key` U+241F scheme — it is already an opaque graph key — or
+    an equivalent; `name` is a real canonical variable name here so it is
+    well-formed). Element self-loop or element multi-SCC ⇒ `None`
+    (unresolved, loud-safe). Acyclic ⇒ deterministic topological order over
+    `(member, element)` (same sorted Kahn/tie-break discipline as Phase 1,
+    so byte-stable).
+- **Unify N=1 and N≥2.** `refine_scc_to_element_verdict` drops the
+  `members.len() != 1` short-circuit and calls the symbolic builder for all
+  SCCs; single-variable self-recurrence is just the N=1 case of the same
+  builder. The `SccPhase::Dt`/`Initial` branch structure (Dt requires
+  init-element-acyclicity too; Initial is init-only) is preserved exactly.
+  All Phase 1 + Subcomponent A single-member regression guards
+  (`self_recurrence_resolves_and_no_self_token_leak`,
+  `genuine_cycles_still_rejected`, `resolve_dt_*`, `resolve_init_*`,
+  `dt_cycle_sccs_*`, byte-stability) MUST stay green unchanged — they encode
+  the correct single-member behavior.
 
-**Testing:**
-`db.rs` in-module `#[cfg(test)]`: given a hand-built two-member SCC with known
-per-element lowered exprs and a known `element_order`, assert the combined
-`Vec<Expr>` is exactly the slices in `element_order`, every original
-`AssignCurr` offset preserved, no expr dropped/duplicated.
+**Testing (RED-first, `db_dep_graph_tests.rs`):**
+- A two-member `ref.mdl`-shaped SCC (`ce`/`ecc`, `ce[tNext]=ecc[tPrev]+1;
+  ecc[tNext]=ce[tNext]+1`) ⇒ `Resolved` with the correct **interleaved**
+  `element_order` (ce[0],ecc[0],ce[1],ecc[1],…) — RED before the rebuild
+  (today it is short-circuited `Unresolved`), GREEN after.
+- A genuine multi-variable element 2-cycle (`a[i]=b[i]; b[i]=a[i]`) ⇒
+  `Unresolved` (the GH #575 unsoundness fix — this is the load-bearing
+  correctness assertion; it must fail RED if the symbolic builder is wrong).
+- A genuine scalar 2-cycle (`a=b+1; b=a+1`) ⇒ `Unresolved`.
+- Single-variable forward self-recurrence ⇒ `Resolved`, byte-identical
+  `element_order` to Phase 1 (regression: N=1 unchanged).
+- `interleaved.mdl`-shaped element-acyclic-through-2-cycle ⇒ `Resolved`.
+- A member whose symbolic fragment is unsourceable ⇒ `Unresolved`, no panic.
 
 **Verification:**
-Run: `cargo test -p simlin-engine --features file_io combined_exprs` (new
-test name) — pass.
-**Commit:** `engine: combined Vec<Expr> interleave for multi-variable SCCs`
+Run: `cargo test -p simlin-engine --features file_io --lib db_dep_graph` —
+RED on the new multi-member + unsoundness tests before, GREEN after, and the
+entire existing `db_dep_graph` suite still green (no single-member
+regression).
+**Commit:** `engine: rebuild SCC element-graph verdict on symbolic refs (multi-member, GH #575)`
 <!-- END_TASK_4 -->
 
 <!-- START_TASK_5 -->
-### Task 5: Compile the combined `Vec<Expr>` into one `PerVarBytecodes`
+### Task 5: Interleave members' symbolic per-element segments into one combined `PerVarBytecodes`
 
 **Verifies:** element-cycle-resolution.AC2.1, element-cycle-resolution.AC2.3
 
 **Files:**
-- Modify: `src/simlin-engine/src/db.rs` (reuse the `compile_phase` machinery — the closure inside `compile_var_fragment` at `db.rs:3433-3520` — to turn the Task 4 combined `Vec<Expr>` into one `PerVarBytecodes`; factor `compile_phase` into a callable form if needed)
+- Modify: `src/simlin-engine/src/db.rs` (a new `pub(crate)` helper that, given a `ResolvedScc` and its members' symbolic `PerVarBytecodes` from the Task 4 accessor, produces one combined `PerVarBytecodes`)
 
 **Implementation:**
-`compile_phase` (`db.rs:3433-3520`) wraps an `&[Expr]` in a minimal
-`crate::compiler::Module` (`runlist_flows: exprs.to_vec()`, `db.rs:3449`),
-calls `module.compile()` (`db.rs:3479`), `symbolize_bytecode` (`db.rs:3482`),
-and assembles a `PerVarBytecodes` (`db.rs:3509-3516`). It closes over
-per-variable state (`offsets`, `rmap`, `tables`, `module_refs`,
-`mini_offset`, `converted_dims`, `dim_context`, `model_name_ident`,
-`inputs`). For a combined SCC fragment, that context must be the **union/
-shared** context valid for all SCC members (the members share one model;
-their offsets are absolute model slots, so the same `offsets`/`rmap` apply).
-Extract `compile_phase` into a `pub(crate)` function callable with an
-explicit context + the combined `Vec<Expr>`, returning one `PerVarBytecodes`
-that:
-- writes each member's `member_base + elem` slot (offsets unchanged — AC2.3),
-- ends in a single `Ret` (so `concatenate_fragments`'s trailing-`Ret` strip
-  at `symbolic.rs:1266-1272` works),
-- has self-consistent local resource ids / `temp_sizes` (so the all-phases
-  merge `concatenate_fragments` at `db.rs:4644` and
-  `ContextResourceCounts::from_fragments` accounting stay correct).
+Each member's symbolic `PerVarBytecodes` (Task 4 accessor) is, for an arrayed
+member, a sequence of per-element computations each ending in that element's
+write opcode (`SymbolicOpcode::AssignCurr | AssignConstCurr | BinOpAssignCurr`
+with `var.name == member`, element id = `var.element_offset`). Build one
+combined `PerVarBytecodes` whose element writes follow
+`ResolvedScc.element_order`:
+- **Segment** each member's `symbolic.code` into per-element slices: the slice
+  for element `e` is the run of opcodes up to and including the write opcode
+  whose `var.element_offset == e` (strip any trailing `Ret`). Validate every
+  member element in `element_order` maps to exactly one segment (a missing /
+  duplicate / non-contiguous segment ⇒ loud-safe error, caller keeps
+  `CircularDependency`).
+- **Resources are member-scoped, not element-scoped.** Compute each member's
+  resource base offsets (literals, graphical_functions, module_decls,
+  static_views, temp_sizes, dim_lists) ONCE per member exactly as
+  `concatenate_fragments` (`symbolic.rs:1218-1309`) computes them per
+  fragment, and apply that member's offsets (via the existing
+  `renumber_opcode`, `symbolic.rs:1327-1400`) to every opcode in every
+  segment of that member. Merge the side-channels per member exactly as
+  `concatenate_fragments` does (this is a per-element-granular generalization
+  of `concatenate_fragments`; factor the shared renumber/merge logic rather
+  than duplicating it).
+- **Emit** the renumbered segments in `ResolvedScc.element_order` order,
+  concatenated, followed by a single trailing `SymbolicOpcode::Ret`. Each
+  write keeps its original `SymVarRef { name, element_offset }` (only segment
+  ordering changes), so after `resolve_module` the variable layout offsets
+  and the results map are unchanged (AC2.3) and per-variable series remain
+  individually addressable.
+- Determinism: `element_order` is byte-stable (Task 4 sorted topo);
+  per-member resource offsets are assigned in `element_order`'s member
+  first-encounter order; the interleave is a pure reordering ⇒ the combined
+  `PerVarBytecodes` is byte-stable.
 
 **Testing:**
-`db.rs` `#[cfg(test)]`: compile a known combined `Vec<Expr>` for a two-member
-SCC; assert the resulting `PerVarBytecodes` is a well-formed fragment (single
-trailing `Ret`; resource side-channels present). Behavior is fully exercised
-end-to-end by Task 7 (`ref.mdl`) — keep this unit test focused on fragment
-well-formedness, not numeric output (that is the end-to-end test's job).
+`db.rs` in-module `#[cfg(test)]`: given a hand-built two-member SCC with known
+member symbolic `PerVarBytecodes` and a known `element_order`, assert the
+combined `PerVarBytecodes`: segments appear in `element_order`; every member
+element's write `SymVarRef` is present exactly once with its original
+`name`/`element_offset`; exactly one trailing `Ret`; per-member resource ids
+correctly renumbered (no collision across members); side-channels merged.
+Numeric correctness is the Task 7/8 end-to-end job — keep this unit focused on
+structural well-formedness.
 
 **Verification:**
-Run: `cargo test -p simlin-engine --features file_io combined_fragment` — pass.
-**Commit:** `engine: compile combined SCC Vec<Expr> into one PerVarBytecodes`
+Run: `cargo test -p simlin-engine --features file_io combined_fragment` (new
+test name) — pass.
+**Commit:** `engine: interleave members' symbolic segments into one combined PerVarBytecodes`
 <!-- END_TASK_5 -->
 
 <!-- START_TASK_6 -->
@@ -321,34 +441,46 @@ Run: `cargo test -p simlin-engine --features file_io combined_fragment` — pass
 **Verifies:** element-cycle-resolution.AC2.1, element-cycle-resolution.AC2.2, element-cycle-resolution.AC2.3, element-cycle-resolution.AC2.4
 
 **Files:**
-- Modify: `src/simlin-engine/src/db.rs` `assemble_module` fragment-collection loops (`db.rs:4450-4486`) for flows; the init `SymbolicCompiledInitial` path (`db.rs:4583-4635`) per the Task 1 spike mechanism.
+- Modify: `src/simlin-engine/src/db.rs` `assemble_module` fragment-collection
+  loops for flows; the init `SymbolicCompiledInitial` path per the **Task 1
+  spike mechanism** (see `phase_02_spike_findings.md`). Locate the loops by
+  name/content — line numbers shifted from Phase 1/2A edits; the Task 1 spike
+  re-verified current locations (flow-fragment collection ~`db.rs:4615-4633`,
+  init renumber loop ~`db.rs:4739-4795`, `resolve_module` ~`db.rs:4879`).
 
 **Implementation:**
-- Read `dep_graph.resolved_sccs` (Phase 1/Task 3 payload). For each
-  `ResolvedScc`, build the combined `PerVarBytecodes` (Tasks 4+5) for its
-  phase.
-- **Flows (dt):** in the `runlist_flows` collection loop (`db.rs:4465-4473`),
-  **skip** every SCC member's per-variable `flow_bytecodes` push, and at the
-  position of the first SCC member encountered, push the combined fragment's
-  `&PerVarBytecodes` instead. The combined `PerVarBytecodes` must be **owned**
-  somewhere that outlives the `concatenate_fragments` call (the existing
-  vectors hold `&` borrows into `all_fragments`); allocate it in a local that
-  lives to the end of `assemble_module` and push a reference. The runlist
-  `Vec<String>` itself is **not** mutated (it is salsa-owned).
-- **Initials (init):** apply the Task 1 spike's chosen mechanism. If the spike
-  found a representable single-`SymbolicCompiledInitial` combined form, emit
-  it at the first init SCC member's slot and skip the members' per-ident init
-  entries. Per Task 1's HARD GATE, this task is only reached when a
-  representable init mechanism exists (or the user accepted a revised scope) —
-  the loud-safe init fallback is **not** an autonomous path here; if the spike
-  could not find a mechanism the implementation already STOPped at Task 1 and
-  surfaced to the user.
-- `concatenate_fragments` (`symbolic.rs:1218-1309`) stays agnostic and
-  unchanged — the combined fragment is just another `PerVarBytecodes`,
-  mirroring how LTM synthetic fragments are appended (`db.rs:4488-4519`).
-- Variable layout (`compute_layout`, `db.rs:4321`) and `resolve_module`
-  (`db.rs:4719`) are untouched; the combined fragment writes the same
-  member slots, so the results offset map is unchanged (AC2.3).
+- Read `dep_graph.resolved_sccs` (the `ResolvedScc` payload, now correctly
+  populated for multi-member SCCs by the Task 4 rebuild). For each
+  `ResolvedScc`, build the combined `PerVarBytecodes` (Task 5) for its phase
+  via the Task 4 symbolic accessor + Task 5 interleave.
+- **Flows (dt):** in the `runlist_flows` fragment-collection loop, **skip**
+  every dt-`ResolvedScc` member's per-variable `flow_bytecodes` push, and at
+  the position of the first SCC member encountered, push the combined
+  fragment's `&PerVarBytecodes` instead. The combined `PerVarBytecodes` must
+  be **owned** somewhere that outlives the `concatenate_fragments` call (the
+  existing vectors hold `&` borrows into `all_fragments`); allocate it in a
+  local that lives to the end of `assemble_module` and push a reference. The
+  runlist `Vec<String>` itself is **not** mutated (it is salsa-owned).
+- **Initials (init):** apply the Task 1 spike's **validated** mechanism (HARD
+  GATE PASSED, `phase_02_spike_findings.md`): for each init-`ResolvedScc`,
+  emit ONE `SymbolicCompiledInitial` carrying a synthetic ident
+  (`$⁚scc⁚init⁚{n}`) whose bytecode is the Task 5 combined fragment, at the
+  first init SCC member's slot in the `initial_frags` collection loop, and
+  skip the members' per-ident init entries. The spike verified
+  `resolve_module`/`eval_initials` consume `compiled_initials` positionally
+  (ident-agnostic) and that one `SymbolicCompiledInitial` may write multiple
+  members' init slots, so this needs ZERO changes to `resolve_module` /
+  `compute_layout` / the renumber loop / the VM init runner. If during
+  implementation the spike's mechanism is found to genuinely contradict the
+  code (not mere inconvenience), STOP and surface — the loud-safe init
+  fallback is NOT an autonomous path.
+- `concatenate_fragments` stays agnostic and unchanged — the combined
+  fragment is just another `PerVarBytecodes`, mirroring how LTM synthetic
+  fragments are appended.
+- Variable layout (`compute_layout`) and `resolve_module` are untouched; the
+  combined fragment's writes keep their original `SymVarRef`
+  name/element_offset, so `resolve_module` maps them to the same model slots
+  and the results offset map is unchanged (AC2.3).
 
 **Testing:**
 End-to-end via Tasks 7/8 (the real proof). Add a focused `db.rs`
