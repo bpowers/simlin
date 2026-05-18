@@ -1378,6 +1378,33 @@ TIME STEP = 1 ~~|
     assert_eq!(element_series(&r, "y[t3]"), vec![7.0, 7.0, 7.0]);
 }
 
+/// element-cycle-resolution.AC2.1 (Phase 2 Task 7). `ref.mdl` is a
+/// two-variable INTER-element recurrence: `ce[t1]=1;
+/// ce[tNext]=ecc[tPrev]+1; ecc[t1]=ce[t1]+1; ecc[tNext]=ce[tNext]+1` over
+/// the subrange `t1..t3`. Whole-variable `ce`<->`ecc` is a 2-cycle, but
+/// the induced element graph
+///   (ce,0)->(ecc,0); (ce,1)->(ecc,1); (ce,2)->(ecc,2);
+///   (ecc,0)->(ce,1); (ecc,1)->(ce,2)
+/// is acyclic. Before Subcomponent B (the GH #575 symbolic-ref
+/// re-architecture: Task 4 verdict, Task 5 combined fragment, Task 5b
+/// SCC-aware back-edge break, Task 6 injection) this multi-member SCC was
+/// short-circuited to `CircularDependency` and the model did not compile.
+/// Subcomponent B resolves the `{ce,ecc}` SCC, interleaves the members'
+/// per-element segments in topological order, and injects one combined
+/// fragment, so `ref.mdl` now compiles AND simulates to the hand-computed
+/// per-element series shipped in the sibling `ref.dat`:
+///   ce[t1]=1, ce[t2]=3, ce[t3]=5, ecc[t1]=2, ecc[t2]=4, ecc[t3]=6
+/// (constant across both saved steps -- the recurrence is over the
+/// subrange, not over time; FINAL TIME=1, TIME STEP=1 => 2 saved steps).
+/// `simulate_mdl_path` loads `ref.dat` via `load_expected_results_for_mdl`
+/// and compares with `ensure_results`, so this test IS AC2.1: it failed
+/// before Subcomponent B (rejected as `CircularDependency`) and passes
+/// now against `ref.dat`.
+#[test]
+fn ref_mdl_multi_variable_recurrence_simulates() {
+    simulate_mdl_path("../../test/sdeverywhere/models/ref/ref.mdl");
+}
+
 /// `ref.mdl` and `interleaved.mdl` are INTER-variable element-acyclic
 /// recurrence SCCs (`ce`<->`ecc` / `a`<->`y`). Phase 2 Task 5b's
 /// SCC-aware back-edge break makes `model_dependency_graph` resolve the
@@ -1394,9 +1421,10 @@ TIME STEP = 1 ~~|
 ///     these inter-variable-cycle fixtures.
 ///
 /// It deliberately does NOT assert the hand-computed simulation series:
-/// the combined per-element fragment is injected by Task 6, and the
-/// end-to-end `ref.dat`/`interleaved.dat` simulation assertions are
-/// authored by Tasks 7/8; Task 9 (AC2.5) then folds/transitions this
+/// the end-to-end `ref.dat`/`interleaved.dat` simulation assertions are
+/// `ref_mdl_multi_variable_recurrence_simulates` (AC2.1, the dedicated
+/// Task 7 test directly above) and the forthcoming Task 8
+/// `interleaved`-`.dat` test; Task 9 (AC2.5) then folds/transitions this
 /// test's intent into the full correct-simulation form. (Deviation
 /// rationale: Task 5b's correctness fix structurally falsifies this
 /// test's `CircularDependency` precondition, so it cannot stay green
