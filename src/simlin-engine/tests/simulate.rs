@@ -1405,6 +1405,24 @@ fn ref_mdl_multi_variable_recurrence_simulates() {
     simulate_mdl_path("../../test/sdeverywhere/models/ref/ref.mdl");
 }
 
+/// element-cycle-resolution.AC2.2 (Phase 2 Task 8). `interleaved.mdl`:
+/// `x=1; a[A1]=x; a[A2]=y; y=a[A1]; b[DimA]=a[DimA]` (`DimA: A1,A2`).
+/// Whole-variable `a`<->`y` is a 2-cycle, but element-wise
+/// `x -> a[A1] -> y -> a[A2]` is acyclic. Subcomponent B (GH #575)
+/// resolves the multi-member `{a,y}` SCC and evaluates its members in
+/// interleaved per-element order; before Subcomponent B this was rejected
+/// as `CircularDependency` and the model did not compile. Every variable
+/// resolves to `1.0`, so the sibling `interleaved.dat` is all `1.0`
+/// across its 101 saved steps (INITIAL TIME=0, FINAL TIME=100, TIME
+/// STEP=1 => 101 steps). `simulate_mdl_path` loads `interleaved.dat` via
+/// `load_expected_results_for_mdl` and compares the VM output with
+/// `ensure_results`, so this test IS AC2.2: it failed before
+/// Subcomponent B and passes now.
+#[test]
+fn interleaved_mdl_element_interleave_simulates() {
+    simulate_mdl_path("../../test/sdeverywhere/models/interleaved/interleaved.mdl");
+}
+
 /// `ref.mdl` and `interleaved.mdl` are INTER-variable element-acyclic
 /// recurrence SCCs (`ce`<->`ecc` / `a`<->`y`). Phase 2 Task 5b's
 /// SCC-aware back-edge break makes `model_dependency_graph` resolve the
@@ -1422,10 +1440,10 @@ fn ref_mdl_multi_variable_recurrence_simulates() {
 ///
 /// It deliberately does NOT assert the hand-computed simulation series:
 /// the end-to-end `ref.dat`/`interleaved.dat` simulation assertions are
-/// `ref_mdl_multi_variable_recurrence_simulates` (AC2.1, the dedicated
-/// Task 7 test directly above) and the forthcoming Task 8
-/// `interleaved`-`.dat` test; Task 9 (AC2.5) then folds/transitions this
-/// test's intent into the full correct-simulation form. (Deviation
+/// the dedicated `ref_mdl_multi_variable_recurrence_simulates` (AC2.1,
+/// Task 7) and `interleaved_mdl_element_interleave_simulates` (AC2.2,
+/// Task 8) tests directly above; Task 9 (AC2.5) then folds/transitions
+/// this test's intent into the full correct-simulation form. (Deviation
 /// rationale: Task 5b's correctness fix structurally falsifies this
 /// test's `CircularDependency` precondition, so it cannot stay green
 /// unchanged and a green pre-commit forces this minimal,
