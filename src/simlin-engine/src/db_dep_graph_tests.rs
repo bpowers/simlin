@@ -3,27 +3,25 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 //! Tests for the dt-phase dependency-graph cycle-relation primitive and
-//! the `#[cfg(test)]` Condition-2 SCC accessor (Task #15 / B1-design.md
-//! §10b). Moved out of `db_tests.rs` -- alongside the production code in
-//! `db_dep_graph.rs` -- purely to keep both `db.rs` and `db_tests.rs`
-//! under the per-file line cap; the logic is byte-unchanged.
+//! the `#[cfg(test)]` SCC accessor. Live in their own file alongside the
+//! production code in `db_dep_graph.rs` to keep both `db.rs` and
+//! `db_tests.rs` under the per-file line cap.
 
 use super::*;
 use crate::datamodel;
 use crate::db::{SimlinDb, sync_from_datamodel};
 use crate::test_common::TestProject;
 
-// ── Task #15: Condition-2 dt-phase cycle introspection harness ──────────
+// ── dt-phase cycle introspection ────────────────────────────────────────
 //
 // `dt_walk_successors` is the single shared dt-phase cycle-successor
-// relation consumed by BOTH the production cycle detector
-// (`compute_inner` inside `model_dependency_graph_impl`) AND the
+// relation consumed by both the production cycle detector
+// (`compute_inner` inside `model_dependency_graph_impl`) and the
 // `#[cfg(test)]` SCC accessor (`dt_cycle_sccs`). Because there is exactly
-// one definition of the relation, used twice, the introspection gate IS
-// the engine's relation by construction (B1-design.md §10b: this ends the
-// D1/D2/§19 "re-derive the relation and get it subtly wrong" footgun
-// class). These tests pin its stated invariant (§10b(iii)): the successor
-// set `compute_inner` iterates for every node kind --
+// one definition of the relation, used twice, the introspection accessor
+// is the engine's relation by construction -- no re-derivation can drift.
+// These tests pin its invariant: the successor set `compute_inner`
+// iterates for every node kind --
 //   Stock  => empty (dt-phase sink; db.rs stock early-return),
 //   Module => empty (returns before `processing.insert`, so a module is
 //             never on the DFS stack and can never carry a cycle),
@@ -31,7 +29,7 @@ use crate::test_common::TestProject;
 //             (module targets KEPT -- a module has no successors so
 //             Tarjan cannot route a cycle through it; unknown and
 //             stock-targeted deps dropped, matching `compute_inner`),
-//   absent => empty (no panic; B1-primitive rigor).
+//   absent => empty (no panic).
 
 /// Build a bare `VarInfo` for the pure-unit `dt_walk_successors` tests.
 fn vi_for_test(is_stock: bool, is_module: bool, dt_deps: &[&str]) -> VarInfo {
@@ -87,8 +85,8 @@ fn dt_walk_successors_aux_filters_stock_and_unknown_keeps_module() {
 #[test]
 fn dt_walk_successors_absent_name_is_empty() {
     let vinfo: HashMap<String, VarInfo> = HashMap::new();
-    // B1-primitive rigor: a malformed/absent var_info entry must not
-    // panic; it yields no successors.
+    // A malformed/absent var_info entry must not panic; it yields no
+    // successors.
     assert!(dt_walk_successors(&vinfo, "nope").is_empty());
 }
 
@@ -153,11 +151,11 @@ fn dt_cycle_sccs_clean_dag_has_no_sccs_or_self_loops() {
     ]);
     let result = sync_from_datamodel(&db, &project);
     let model = result.models["main"].source;
-    // `dt_cycle_sccs_engine_consistent` STOPs (panics) if the
-    // instrumented dt-SCC set diverges from the engine's REAL
-    // CircularDependency flagging -- so reaching the asserts already
-    // proves the §10b step-4 cross-assert held (clean DAG => no cycle
-    // reported AND no CircularDependency raised).
+    // `dt_cycle_sccs_engine_consistent` panics if the instrumented
+    // dt-SCC set diverges from the engine's real CircularDependency
+    // flagging -- so reaching the asserts already proves the cross-check
+    // held (clean DAG => no cycle reported AND no CircularDependency
+    // raised).
     let sccs = dt_cycle_sccs_engine_consistent(&db, model, result.project);
     assert!(sccs.multi.is_empty(), "clean DAG has no >=2 SCCs");
     assert!(sccs.self_loops.is_empty(), "clean DAG has no self-loops");
@@ -169,9 +167,9 @@ fn dt_cycle_sccs_two_node_cycle_matches_circular_diagnostic() {
     let project = single_model_project(vec![aux_var("a", "b"), aux_var("b", "a")]);
     let result = sync_from_datamodel(&db, &project);
     let model = result.models["main"].source;
-    // Consumes the consistency-checked accessor: the §10b step-4
-    // cross-assert (reported SCC <=> engine CircularDependency) is
-    // enforced INSIDE the accessor; reaching here means it held.
+    // Consumes the consistency-checked accessor: the cross-check
+    // (reported SCC <=> engine CircularDependency) is enforced inside
+    // the accessor; reaching here means it held.
     let sccs = dt_cycle_sccs_engine_consistent(&db, model, result.project);
     let expected: Vec<BTreeSet<crate::common::Ident<crate::common::Canonical>>> = vec![
         [
@@ -194,7 +192,7 @@ fn dt_cycle_sccs_self_reference_is_a_self_loop() {
     let sccs = dt_cycle_sccs_engine_consistent(&db, model, result.project);
     // A direct self-reference is a size-1 SCC that Tarjan does NOT
     // surface as `multi`; it is captured separately as a self-loop.
-    // (The consistency cross-assert -- self-loop <=> CircularDependency
+    // (The consistency cross-check -- self-loop <=> CircularDependency
     // -- was already enforced inside the accessor.)
     assert!(sccs.multi.is_empty(), "a self-loop is not a >=2 SCC");
     assert!(
@@ -205,11 +203,10 @@ fn dt_cycle_sccs_self_reference_is_a_self_loop() {
 
 #[test]
 fn dt_cycle_sccs_is_byte_stable_across_runs() {
-    // §10b step 5: the harness output must be byte-stable across runs
-    // (sorted Vec/BTreeSet, no HashMap-iteration nondeterminism leaking
-    // out) so a diff is meaningful and the reviewer's ACCEPT is
-    // reproducible. A regression that returned raw Tarjan order would
-    // fail this.
+    // The accessor output must be byte-stable across runs (sorted
+    // Vec/BTreeSet, no HashMap-iteration nondeterminism leaking out) so
+    // a diff is meaningful. A regression that returned raw Tarjan order
+    // would fail this.
     let db = SimlinDb::default();
     let project = single_model_project(vec![
         aux_var("a", "b"),
@@ -224,11 +221,11 @@ fn dt_cycle_sccs_is_byte_stable_across_runs() {
     assert_eq!(first, second, "dt_cycle_sccs must be byte-stable");
 }
 
-// §10b step-4 footgun-proofing as a tested invariant (functional core):
-// the pure consistency predicate must flag a divergence between the
-// instrumented dt-SCC set and the engine's real CircularDependency
-// flagging in BOTH directions (an invented false-positive cycle, and a
-// missed/false-negative cycle) and must accept every consistent pairing.
+// The pure consistency predicate as a tested invariant (functional
+// core): it must flag a divergence between the instrumented dt-SCC set
+// and the engine's real CircularDependency flagging in both directions
+// (an invented false-positive cycle, and a missed/false-negative cycle)
+// and must accept every consistent pairing.
 
 fn multi_ab() -> Vec<BTreeSet<crate::common::Ident<crate::common::Canonical>>> {
     vec![
@@ -306,33 +303,26 @@ fn consistency_violation_some_when_self_loop_not_flagged() {
     assert!(dt_cycle_sccs_consistency_violation(&sccs, false).is_some());
 }
 
-// ── §26.1-A Layer-2 (`array_producing_vars`) — §26.13 4-case spine ──────
-//
-// The full §26.5 completeness spine; BOTH positive cases are
-// independently required to falsify the §4-P5-false-GREEN class:
-//   case-1 (POS) top-level-scalar `= VECTOR ELM MAP(...)` — the §15.6
-//     shape the scalar `!is_∧contains_` path does NOT hoist (`App` lives
-//     in `AssignCurr`); falsifies an impl narrowed to the compiler
-//     hoist-set (§26.6 half).
+// `array_producing_vars` membership over four cases. Both positive cases
+// are independently required: each defends `array_producing_vars` against
+// a different way of under-counting.
+//   case-1 (POS) top-level-scalar `= VECTOR ELM MAP(...)` -- the shape
+//     the scalar path does NOT hoist (`App` lives in `AssignCurr`);
+//     guards against an impl narrowed to only the compiler hoist-set.
 //   case-2 (POS) array-producing builtin nested so the compiler hoists
 //     it into a separate `AssignTemp` (`App` lives ONLY in the hoisted
-//     `AssignTemp`, NOT in `AssignCurr`/main); falsifies a Layer-2 that
-//     sources only `AssignCurr` and drops hoisted temps (the
-//     incomplete-sourcing false-negative the `&[Expr]` type-enforcement
-//     cannot prevent — it governs only what Layer-1 scans, not what
-//     Layer-2 sources).
-//   case-3 (NEG) plain scalar — soundness.
-//   case-4 (NEG) merely references the VEM var — its OWN lowered `Expr`
-//     has only a `Var` slot read, no `App` (concern-(a)); soundness.
+//     `AssignTemp`, NOT in `AssignCurr`/main); guards against an impl
+//     that sources only `AssignCurr` and drops hoisted temps.
+//   case-3 (NEG) plain scalar -- soundness.
+//   case-4 (NEG) merely references the VEM var -- its OWN lowered `Expr`
+//     has only a `Var` slot read, no `App`; soundness.
 // VEM shapes are the known-good `tests/compiler_vector.rs` fixtures
 // (`vector_elm_map(source[*], offsets[*])` and the nested
 // `max(vector_elm_map(...), 15)` hoisting form) so the model compiles and
-// the only RED is the assertion (Layer-2 is a stub until its
-// reviewer-confirmed source surface lands as the preceding refactor
-// commit). RED now (stub returns ∅) → GREEN once Layer-2 is implemented.
+// the only thing under test is the membership set.
 #[test]
 fn array_producing_vars_flags_exactly_the_two_positive_cases() {
-    let project = TestProject::new("ap_vars_26_13_fixture")
+    let project = TestProject::new("array_producing_vars_fixture")
         .indexed_dimension("D", 3)
         .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
         .array_with_ranges("offsets[D]", vec![("1", "0"), ("2", "2"), ("3", "1")])
@@ -368,18 +358,18 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
     .collect();
     assert_eq!(
         got, expected,
-        "array_producing_vars must be EXACTLY {{case1_vem, case2_hoisted}} \
-         (§26.13 4-case spine): both positives flagged (top-level-scalar \
-         AND hoisted-AssignTemp), both negatives not"
+        "array_producing_vars must be EXACTLY {{case1_vem, case2_hoisted}}: \
+         both positives flagged (top-level-scalar AND hoisted-AssignTemp), \
+         both negatives not"
     );
 
-    // ── BINDING lowered-shape asserts (BLOCKING at the §26.1-A impl-gate;
-    // permanent regression guards). Sourced from the SAME engine per-var
-    // production lowering Layer-2 consumes (`var_noninitial_lowered_exprs`
-    // -> `crate::db_var_fragment::lower_var_fragment`), partitioned by
-    // top-level element kind, then the SAME production Layer-1 predicate
-    // applied per partition -- no re-implementation of the
-    // array-producing recursion.
+    // Lowered-shape regression guards. Sourced from the same engine
+    // per-variable production lowering `array_producing_vars` consumes
+    // (`var_noninitial_lowered_exprs` ->
+    // `crate::db_var_fragment::lower_var_fragment`), partitioned by
+    // top-level element kind, then the same production predicate
+    // (`exprs_contain_array_producing_builtin`) applied per partition --
+    // no re-implementation of the array-producing recursion.
     use crate::compiler::Expr;
     let vem_in = |exprs: &[Expr], want_temp: bool| -> bool {
         let part: Vec<Expr> = exprs
@@ -397,38 +387,36 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
     };
 
     // case-1 (inverse of case-2): the array-producing `App` must live
-    // INSIDE an `AssignCurr`/main element AND NOT inside ANY hoisted
-    // `AssignTemp`. The §26.45 corrected bare-scalar declaration lowers
-    // to `[AssignCurr(off, App(VEM,…))]` -- the scalar path does NOT
-    // hoist a top-level array-producing builtin -- so this confirms
-    // (i)-CLEAN, §26.6-distinct from case-2 by construction. If `App`
-    // IS in a hoisted `AssignTemp`, the corrected scalar case-1 is
-    // hoisted ⇒ the §26.18-style (ii) uninstantiable escalation
-    // REOPENS: surface it immediately, do NOT paper over.
+    // inside an `AssignCurr`/main element AND NOT inside any hoisted
+    // `AssignTemp`. The bare-scalar declaration lowers to
+    // `[AssignCurr(off, App(VEM,…))]` -- the scalar path does NOT hoist a
+    // top-level array-producing builtin -- so this is distinct from
+    // case-2 by construction. If the `App` is instead in a hoisted
+    // `AssignTemp`, the scalar lowering changed unexpectedly: surface it
+    // immediately, do NOT paper over.
     let c1 = var_noninitial_lowered_exprs(&db, model, result.project, "case1_vem");
     let c1_in_curr = vem_in(&c1, false);
     let c1_in_temp = vem_in(&c1, true);
     assert!(
         c1_in_curr && !c1_in_temp,
-        "case-1 BINDING shape (inverse of case-2): the VECTOR ELM MAP App \
-         must be in an AssignCurr/main element AND NOT in any hoisted \
+        "case-1 shape (inverse of case-2): the VECTOR ELM MAP App must \
+         be in an AssignCurr/main element AND NOT in any hoisted \
          AssignTemp (in_curr={c1_in_curr}, in_temp={c1_in_temp}, \
-         elems={}). in_temp=true ⇒ corrected scalar case-1 IS hoisted ⇒ \
-         the (ii) uninstantiable escalation REOPENS (§26.18-style) -- \
-         surface immediately, do not work around.",
+         elems={}). in_temp=true means the scalar lowering changed \
+         unexpectedly -- surface immediately, do not work around.",
         c1.len()
     );
 
-    // case-2 (its own, locked, unchanged by §26.45): the array-producing
-    // `App` must live ONLY in the hoisted `AssignTemp`, NEVER directly
-    // in `AssignCurr` (the `AssignCurr` reads the temp back).
+    // case-2: the array-producing `App` must live ONLY in the hoisted
+    // `AssignTemp`, never directly in `AssignCurr` (the `AssignCurr`
+    // reads the temp back).
     let c2 = var_noninitial_lowered_exprs(&db, model, result.project, "case2_hoisted");
     let c2_in_curr = vem_in(&c2, false);
     let c2_in_temp = vem_in(&c2, true);
     assert!(
         c2_in_temp && !c2_in_curr,
-        "case-2 BINDING shape (locked): the VECTOR ELM MAP App must be \
-         ONLY in a hoisted AssignTemp and NEVER in AssignCurr \
+        "case-2 shape: the VECTOR ELM MAP App must be ONLY in a hoisted \
+         AssignTemp and NEVER in AssignCurr \
          (in_curr={c2_in_curr}, in_temp={c2_in_temp}, elems={})",
         c2.len()
     );

@@ -188,8 +188,7 @@ fn hash_u32_slice(vals: &[u32]) -> u64 {
 
 /// Strongly-connected components of an arbitrary `Ident`-keyed adjacency
 /// list, via the uncapped iterative Tarjan over the compact
-/// [`IndexedGraph`] (the D1/F2-hardened primitive
-/// [`IndexedGraph::tarjan_scc`]).
+/// [`IndexedGraph`] ([`IndexedGraph::tarjan_scc`]).
 ///
 /// Determinism: each component is sorted by canonical name and the outer
 /// `Vec` is sorted by each component's smallest member, so the result is
@@ -201,10 +200,10 @@ fn hash_u32_slice(vals: &[u32]) -> u64 {
 /// callers that care about self-loops must detect them from the adjacency
 /// directly rather than from component size.
 ///
-/// `#[cfg(test)]` for now: the Condition-2 dt-phase cycle accessor
-/// (`crate::db_dep_graph::dt_cycle_sccs`) is the only consumer. Task #14 (B1
-/// gate-1) promotes this to an unconditional `pub(crate)` primitive when
-/// it adds the production consumer (B1-design.md §10b(iii)).
+/// `#[cfg(test)]` because the dt-phase cycle accessor
+/// (`crate::db_dep_graph::dt_cycle_sccs`) is currently its only consumer;
+/// promote to an unconditional `pub(crate)` primitive when a production
+/// consumer is added.
 #[cfg(test)]
 pub(crate) fn scc_components(
     edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,

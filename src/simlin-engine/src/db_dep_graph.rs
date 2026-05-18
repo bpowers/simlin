@@ -2,17 +2,16 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Dt-phase dependency-graph cycle relation + Condition-2 SCC accessor.
+//! Dt-phase dependency-graph cycle relation + SCC introspection accessor.
 //!
 //! This module owns the single shared definition of the **dt-phase cycle
 //! relation** (`dt_walk_successors`) and the `VarInfo` map builder
 //! (`build_var_info`) that `crate::db::model_dependency_graph_impl`'s
-//! `compute_inner` consumes. `dt_walk_successors` is consumed by BOTH the
-//! production cycle detector AND the `#[cfg(test)]` Condition-2 SCC
-//! introspection accessor (`dt_cycle_sccs`); one definition used twice is
-//! what makes the Condition-2 gate's relation the engine's relation *by
-//! construction* (B1-design.md §10b). The same primitive is what B1's
-//! gate-1 (task #14) reuses, so it is production code, not scaffolding.
+//! `compute_inner` consumes. `dt_walk_successors` is consumed by both the
+//! production cycle detector and the `#[cfg(test)]` SCC introspection
+//! accessor (`dt_cycle_sccs`). Defining the relation once and using it in
+//! both places means the accessor observes the engine's actual cycle
+//! relation rather than a re-derivation that could silently drift from it.
 //!
 //! This is a top-level module (a sibling of `db`, like `db_ltm_ir` /
 //! `db_macro_registry`) rather than a submodule of `db.rs` purely to keep
@@ -36,11 +35,12 @@ use crate::db::{CompilationDiagnostic, DiagnosticError, model_dependency_graph};
 /// Per-variable dependency facts used to build the model dependency
 /// graph.
 ///
-/// Hoisted to module scope (it was a fn-local struct inside
+/// Lives at module scope (rather than fn-local in
 /// `model_dependency_graph_impl`) so the shared `build_var_info` builder
-/// and the `dt_walk_successors` cycle-relation primitive can name it.
-/// `dt_walk_successors` is consumed by BOTH the production cycle detector
-/// and the `#[cfg(test)]` `dt_cycle_sccs` introspection accessor.
+/// and the `dt_walk_successors` cycle-relation primitive can both name
+/// it; `dt_walk_successors` is consumed by both the production cycle
+/// detector and the `#[cfg(test)]` `dt_cycle_sccs` introspection
+/// accessor.
 pub(crate) struct VarInfo {
     pub(crate) is_stock: bool,
     pub(crate) is_module: bool,
@@ -53,13 +53,11 @@ pub(crate) struct VarInfo {
 /// dt phase.
 ///
 /// This is the single shared definition of the dt-phase cycle relation,
-/// consumed by BOTH the production cycle detector (`compute_inner`, dt
-/// branch) AND the `#[cfg(test)]` SCC introspection accessor
-/// (`dt_cycle_sccs`). One definition used twice is what makes the
-/// Condition-2 gate's relation the engine's relation *by construction*
-/// (B1-design.md §10b -- this ends the "re-derive the relation and get it
-/// subtly wrong" footgun class); it is also the gate-1 primitive B1
-/// itself needs, hence production code, not test scaffolding.
+/// consumed by both the production cycle detector (`compute_inner`, dt
+/// branch) and the `#[cfg(test)]` SCC introspection accessor
+/// (`dt_cycle_sccs`). Defining it once and using it in both places is
+/// what makes the accessor's relation the engine's relation by
+/// construction, with no opportunity for a re-derivation to drift.
 ///
 /// Returns `[]` when `name`:
 /// * is absent from `var_info` (a malformed/unknown entry -- no panic;
@@ -109,9 +107,8 @@ pub(crate) fn dt_walk_successors<'a>(
 /// wiring.
 ///
 /// Shared verbatim by `model_dependency_graph_impl` and the
-/// `#[cfg(test)]` `dt_cycle_sccs` accessor so the Condition-2 gate
-/// observes the *exact* `var_info` the engine builds -- never a
-/// reconstruction (B1-design.md §10b).
+/// `#[cfg(test)]` `dt_cycle_sccs` accessor so the accessor observes the
+/// exact `var_info` the engine builds -- never a reconstruction.
 pub(crate) fn build_var_info(
     db: &dyn Db,
     model: SourceModel,
@@ -228,9 +225,9 @@ pub(crate) fn build_var_info(
     (var_info, all_init_referenced)
 }
 
-/// Strongly-connected components of the **real** dt-phase cycle relation
-/// (`dt_walk_successors`), for the Condition-2 verification harness
-/// (B1-design.md §10b).
+/// Strongly-connected components of the real dt-phase cycle relation
+/// (`dt_walk_successors`), for the `#[cfg(test)]` cycle-introspection
+/// accessor.
 ///
 /// `multi` is every SCC of size >= 2 (a true multi-node cycle);
 /// `self_loops` is every node with a direct dt self-edge `v -> v` (a
@@ -247,20 +244,17 @@ pub(crate) struct DtCycleSccs {
 ///
 /// Builds `var_info` via the exact builder `model_dependency_graph_impl`
 /// uses (`build_var_info` -- never a reconstruction) and runs the
-/// uncapped iterative Tarjan (`crate::ltm::scc_components`, the
-/// D1/F2-hardened primitive) over the adjacency defined by
-/// `dt_walk_successors` for every node. Because this accessor and
-/// `compute_inner` consume the *same* `dt_walk_successors`, the reported
-/// SCC set IS the engine's dt-phase cycle relation by construction
-/// (B1-design.md §10b -- nothing is re-derived; one relation, used
-/// twice). The accompanying tests cross-check `multi` against the engine
-/// actually raising `ErrorCode::CircularDependency` (§10b step 4
-/// footgun-proofing).
+/// uncapped iterative Tarjan (`crate::ltm::scc_components`) over the
+/// adjacency defined by `dt_walk_successors` for every node. Because this
+/// accessor and `compute_inner` consume the same `dt_walk_successors`,
+/// the reported SCC set is the engine's dt-phase cycle relation by
+/// construction -- nothing is re-derived. The accompanying tests
+/// cross-check `multi` against the engine actually raising
+/// `ErrorCode::CircularDependency`.
 ///
-/// `#[cfg(test)]` accessor wrapper only: the production consumer of the
-/// same `dt_walk_successors` + Tarjan primitive is B1's gate-1 (task
-/// #14). Uses the default (no module-input) wiring -- the same
-/// `model_dependency_graph` the `simulates_clearn` path compiles.
+/// `#[cfg(test)]` accessor only. Uses the default (no module-input)
+/// wiring -- the same `model_dependency_graph` the `simulates_clearn`
+/// path compiles.
 #[cfg(test)]
 pub(crate) fn dt_cycle_sccs(
     db: &dyn Db,
@@ -298,22 +292,21 @@ pub(crate) fn dt_cycle_sccs(
     DtCycleSccs { multi, self_loops }
 }
 
-/// Pure §10b step-4 consistency predicate (functional core).
+/// Pure consistency predicate (functional core).
 ///
 /// The instrumented dt-phase SCC set is engine-consistent iff "the
-/// instrumentation reports SOME dt cycle" agrees with "the engine raised
+/// instrumentation reports some dt cycle" agrees with "the engine raised
 /// `CircularDependency` on the same compiled model". A dt multi-node SCC
 /// or a dt self-loop necessarily makes `compute_transitive(false)` Err
 /// (=> `CircularDependency`), so a reported cycle must always coincide
 /// with the diagnostic (no invented false positive); and -- under the
-/// harness premise that the init-phase relation is acyclic by
-/// construction (B1-design.md §10a; true for every harness fixture and
-/// asserted for post-B3 C-LEARN by §10c's INITIAL/const-leaf prediction)
-/// -- the converse holds too (no missed cycle).
+/// premise that the init-phase relation is acyclic by construction (true
+/// for every harness fixture) -- the converse holds too (no missed
+/// cycle).
 ///
-/// Returns `Some(reason)` iff the two diverge (=> STOP, do NOT gate: the
-/// instrumentation, or the init-acyclic premise, is wrong --
-/// B1-design.md §10b step 4); `None` iff consistent.
+/// Returns `Some(reason)` iff the two diverge (=> stop, do not gate: the
+/// instrumentation, or the init-acyclic premise, is wrong); `None` iff
+/// consistent.
 #[cfg(test)]
 fn dt_cycle_sccs_consistency_violation(
     sccs: &DtCycleSccs,
@@ -328,25 +321,23 @@ fn dt_cycle_sccs_consistency_violation(
          CircularDependency flagging on the SAME compiled model \
          (instrumented_reports_cycle={instrumented_reports_cycle}, \
          engine_raises_circular={engine_raises_circular}; \
-         multi={:?}, self_loops={:?}). Per B1-design.md §10b step 4 the \
-         instrumentation (or the init-acyclic premise) is wrong -- STOP, \
-         do not gate on a mis-derived relation.",
+         multi={:?}, self_loops={:?}). The instrumentation (or the \
+         init-acyclic premise) is wrong -- stop, do not gate on a \
+         mis-derived relation.",
         sccs.multi, sccs.self_loops
     ))
 }
 
-/// §10b step-4 footgun-proofing made first-class: the dt-phase SCC set,
-/// returned ONLY after it is cross-checked against the engine's REAL
-/// `CircularDependency` flagging on the SAME compiled model.
+/// The dt-phase SCC set, returned only after it is cross-checked against
+/// the engine's real `CircularDependency` flagging on the same compiled
+/// model.
 ///
-/// Panics (STOP -- do not gate on a mis-derived relation) on any
-/// divergence. The §10c/§10d adversarial Condition-2 run consumes THIS
-/// (then layers the array-producing-membership assertion on top), so the
-/// gate's relation is the engine's *by construction* (shared
-/// `dt_walk_successors`) AND cross-checked on every invocation -- the
-/// reviewer's scrutiny-target-ii binding invariant.
+/// Panics (do not gate on a mis-derived relation) on any divergence. A
+/// consumer therefore gets a relation that is the engine's by
+/// construction (shared `dt_walk_successors`) and additionally
+/// cross-checked on every invocation.
 ///
-/// `#[cfg(test)]` accessor wrapper only (like `dt_cycle_sccs`).
+/// `#[cfg(test)]` accessor only (like `dt_cycle_sccs`).
 #[cfg(test)]
 pub(crate) fn dt_cycle_sccs_engine_consistent(
     db: &dyn Db,
@@ -371,45 +362,34 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
     sccs
 }
 
-/// §10b step-3 Layer-2: the set of main-model variables whose OWN
-/// production-lowered per-element `Vec<Expr>` is, or recursively
-/// contains, an array-producing builtin
-/// (VectorElmMap/VectorSortOrder/Rank/AllocateAvailable/AllocateByPriority)
-/// -- the §4-P5 can't-flat-split risk set. Sources each variable's
-/// lowered `Vec<Expr>` from the engine's OWN per-variable production
-/// compile on the SAME salsa-cached `(db, model, project)` state
-/// `dt_cycle_sccs_engine_consistent` observes (constraint §26.4-(c)4,
-/// the binding identical-universe correctness precondition), then applies
-/// the Layer-1 predicate `crate::compiler::exprs_contain_array_producing_builtin`.
-/// Sorted/byte-stable. Identical `(db, model, project)` triple to
-/// `dt_cycle_sccs_engine_consistent` so the §10c/§10d RUN computes
-/// `{multi ∪ self_loops} ∩ array_producing_vars` directly.
+/// The set of main-model variables whose own production-lowered
+/// per-element `Vec<Expr>` is, or recursively contains, an
+/// array-producing builtin
+/// (VectorElmMap/VectorSortOrder/Rank/AllocateAvailable/AllocateByPriority).
 ///
-/// Universe = the IDENTICAL `build_var_info(.., &[])` keyset
-/// `dt_cycle_sccs` iterates (C4-a). Each variable's lowered `Vec<Expr>`
-/// is sourced from the engine's OWN per-variable production lowering via
-/// `var_noninitial_lowered_exprs` (the post-Commit-R
-/// `crate::db_var_fragment::lower_var_fragment` surface; never a
-/// re-derivation -- B1-design.md §10b step 3 / §26.4 C1-provenance), and
-/// the COMPLETE list is fed to the Layer-1 predicate (the `&[Expr]` type
-/// enforces completeness of what Layer-1 scans; sourcing the real
-/// `lower_var_fragment` output enforces completeness of what Layer-2
-/// sources -- the §26.5/§26.6 spine; NEVER a hoist-set subset).
-/// `var_noninitial_lowered_exprs` ABORTs (never silent-skips) on any
-/// universe variable whose production lowered exprs cannot be sourced
-/// (C4-b) -- a silent skip would be the §10c/§10d incomplete-sourcing
-/// false-negative the spine forbids.
+/// The universe is the identical `build_var_info(.., &[])` keyset
+/// `dt_cycle_sccs` iterates, on the same `(db, model, project)` triple,
+/// so a caller can intersect `{multi ∪ self_loops}` with this set over
+/// one shared universe. Each variable's lowered `Vec<Expr>` is sourced
+/// from the engine's own per-variable production lowering via
+/// `var_noninitial_lowered_exprs` (never a re-derivation), and the
+/// complete list is fed to
+/// `crate::compiler::exprs_contain_array_producing_builtin`. Sourcing the
+/// real lowering output -- not a hoist-set subset -- is what makes the
+/// membership test complete: `var_noninitial_lowered_exprs` aborts (never
+/// silent-skips) on any universe variable whose production lowered exprs
+/// cannot be sourced, because a silent skip would under-count and produce
+/// a false negative. Sorted/byte-stable.
 #[cfg(test)]
 pub(crate) fn array_producing_vars(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
 ) -> BTreeSet<Ident<Canonical>> {
-    // C4-a: the IDENTICAL universe `dt_cycle_sccs` uses -- the same
+    // The identical universe `dt_cycle_sccs` uses -- the same
     // `build_var_info(.., &[])` keyset on the same `(db, model, project)`
-    // triple -- so the §10c/§10d RUN intersects `{multi ∪ self_loops}`
-    // and this set over ONE universe (the binding identical-universe
-    // precondition §26.4-(c)4).
+    // triple -- so a caller intersects `{multi ∪ self_loops}` and this
+    // set over one universe.
     let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
 
     let mut out: BTreeSet<Ident<Canonical>> = BTreeSet::new();
@@ -426,40 +406,31 @@ pub(crate) fn array_producing_vars(
 /// `Vec<Expr>` for the canonical `var_name`.
 ///
 /// Sourced via `crate::db_var_fragment::lower_var_fragment` -- the exact
-/// per-variable lowering the production caller `crate::db::compile_var_fragment`
-/// runs -- with the caller-owned, lowering-independent context constructed
-/// byte-identically to that caller (same helpers, same order:
-/// `source_dims_to_datamodel` -> `DimensionsContext`/`Dimension`,
-/// `model.name`, `model_module_map`) and the default no-module-input
-/// wiring `dt_cycle_sccs` uses (`build_var_info(.., &[])` => `is_root =
-/// true`, empty module inputs). This is the engine's real lowering, never
-/// a re-derivation (B1-design.md §10b step 3 / §26.4 C1-provenance; the
-/// §26.30 forward note pins `lower_var_fragment` as the Layer-2 source
-/// surface). The non-initial phase is the dt phase the §10c/§10d RUN
-/// intersects (`dt_cycle_sccs` is the dt-phase relation), so Layer-2
-/// membership is dt-phase-consistent with the cycle set it is
-/// intersected against.
+/// per-variable lowering the production caller
+/// `crate::db::compile_var_fragment` runs -- with the caller-owned,
+/// lowering-independent context constructed byte-identically to that
+/// caller (same helpers, same order: `source_dims_to_datamodel` ->
+/// `DimensionsContext`/`Dimension`, `model.name`, `model_module_map`)
+/// and the default no-module-input wiring `dt_cycle_sccs` uses
+/// (`build_var_info(.., &[])` => `is_root = true`, empty module inputs).
+/// This is the engine's real lowering, never a re-derivation. The
+/// non-initial phase is the dt phase, so membership is
+/// dt-phase-consistent with the cycle set it is intersected against.
 ///
-/// C4-b footgun-proofing: ABORT (panic -- never silent-skip) when a
-/// universe variable's non-initial production lowered exprs cannot be
-/// sourced: no `SourceVariable` (an implicit SMOOTH/DELAY/INIT helper --
-/// it has no `lower_var_fragment` entry; sourcing implicit vars is the
-/// deferred §10c/§10d-RUN concern and is loudly surfaced here rather than
-/// silently mis-classified), `LoweredVarFragment::Fatal` (the variable
+/// Aborts (panics -- never silent-skip) when a universe variable's
+/// non-initial production lowered exprs cannot be sourced: no
+/// `SourceVariable` (an implicit SMOOTH/DELAY/INIT helper -- it has no
+/// `lower_var_fragment` entry), `LoweredVarFragment::Fatal` (the variable
 /// did not lower at all), or the non-initial phase's `Var::new` errored.
 ///
-/// §26.46 Ruling-2 (SPIRIT pinned; the literal "abort only on whole-var
-/// `Fatal`" reading was rejected as unsound): an incompletely-sourced
-/// production `Vec<Expr>` ⇒ `array_producing_vars` misses an
-/// array-producing `App` the COMPLETE lowering would have ⇒ a
-/// false-negative ⇒ `{multi ∪ self_loops} ∩ array_producing_vars`
-/// under-includes ⇒ a §10c/§10d/§4-P5 false-green -- the exact footgun
-/// C4-b exists to prevent. So C4-b MUST abort (loud, never
-/// silent-proceed) on ANY incomplete sourcing for a C4-a-universe
-/// variable, not merely whole-var `Fatal`. The conservative superset
-/// (abort on any phase `Var::new` Err, incl. an initial-only error) is
-/// acceptable/preferred -- strictly safer, with no spurious-abort
-/// downside on a well-formed model.
+/// The abort must fire on *any* incomplete sourcing, not merely a
+/// whole-variable `Fatal`: an incompletely-sourced production `Vec<Expr>`
+/// makes `array_producing_vars` miss an array-producing `App` the
+/// complete lowering would have, a false negative that lets
+/// `{multi ∪ self_loops} ∩ array_producing_vars` under-include. The
+/// conservative superset (abort on any phase `Var::new` Err, including
+/// an initial-only error) is preferred -- strictly safer, with no
+/// spurious-abort downside on a well-formed model.
 #[cfg(test)]
 pub(crate) fn var_noninitial_lowered_exprs(
     db: &dyn Db,
@@ -473,10 +444,9 @@ pub(crate) fn var_noninitial_lowered_exprs(
     let Some(sv) = source_vars.get(var_name) else {
         panic!(
             "array_producing_vars: universe var {var_name:?} has no \
-             SourceVariable (an implicit SMOOTH/DELAY/INIT helper -- \
-             implicit-var sourcing is the deferred §10c/§10d-RUN concern) \
-             -- C4-b ABORT, never silent-skip (a silent skip is the \
-             §10c/§10d incomplete-sourcing false-negative)"
+             SourceVariable (an implicit SMOOTH/DELAY/INIT helper) -- \
+             abort, never silent-skip (a silent skip would under-count \
+             array-producing membership)"
         );
     };
 
@@ -514,13 +484,13 @@ pub(crate) fn var_noninitial_lowered_exprs(
             Err(e) => panic!(
                 "array_producing_vars: universe var {var_name:?} non-initial \
                  Var::new errored ({e:?}) -- cannot source its production \
-                 lowered exprs (C4-b ABORT, never silent-skip)"
+                 lowered exprs (abort, never silent-skip)"
             ),
         },
         LoweredVarFragment::Fatal { .. } => panic!(
             "array_producing_vars: universe var {var_name:?} failed to lower \
              (LoweredVarFragment::Fatal) -- cannot assess array-producing \
-             membership (C4-b ABORT, never silent-skip)"
+             membership (abort, never silent-skip)"
         ),
     }
 }

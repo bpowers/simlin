@@ -118,7 +118,7 @@ impl XmileFormatter {
     ) -> String {
         // A self-reference (the referenced name equals the equation's LHS
         // variable) is emitted as the variable's REAL formatted name, NOT
-        // the literal token `self` (issue #559 / blocker B3).
+        // the literal token `self` (issue #559).
         //
         // xmutil emits `self` for self-references (Variable::OutputComputable
         // parity), but the engine only ever un-rewrites a *bare* `self` back
@@ -145,8 +145,8 @@ impl XmileFormatter {
         // `self_allowed` Var arm continues to resolve it (the SAMPLE IF
         // TRUE MDL round-trip in `writer.rs::recognize_sample_if_true`
         // depends on it). The scalar `x = PREVIOUS(x, 0)` control instead
-        // now resolves via the ordinary `LoadPrev` path (real name, no
-        // `self` token), and stays green.
+        // resolves via the ordinary `LoadPrev` path (real name, no
+        // `self` token).
         let formatted_name = self.format_name(name);
         if subscripts.is_empty() {
             formatted_name
@@ -1958,13 +1958,13 @@ mod tests {
 
     #[test]
     fn test_format_self_reference_emits_real_name() {
-        // Issue #559 / B3: a self-reference now emits the variable's REAL
+        // Issue #559: a self-reference emits the variable's REAL
         // formatted name, NOT the literal token `self`. Previously this
         // emitted `self[layer1]` (xmutil Variable::OutputComputable
         // parity), but a subscripted `self[..]` is an `Expr0::Subscript`
         // the engine never resolved, so it leaked as an undefined
         // dependency. Emitting the real name makes it an ordinary
-        // reference (intentionally updated per B3.md, not silently broken).
+        // reference -- an intentional behavior change, not a silent break.
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
             substitutions: HashMap::new(),

@@ -50,10 +50,11 @@ pub(crate) use graph::assign_loop_ids;
 pub(crate) use partitions::loop_dimension_element_tuples;
 pub(crate) use types::normalize_module_ref;
 
-// Shared SCC primitive over an `Ident`-keyed adjacency list. Currently
-// the Condition-2 dt-phase cycle accessor (`crate::db_dep_graph::dt_cycle_sccs`) is
-// the only consumer; Task #14 (B1 gate-1) promotes both this re-export
-// and `indexed::scc_components` to unconditional `pub(crate)`.
+// Shared SCC primitive over an `Ident`-keyed adjacency list. The
+// dt-phase cycle accessor (`crate::db_dep_graph::dt_cycle_sccs`) is
+// currently its only consumer; promote both this re-export and
+// `indexed::scc_components` to unconditional `pub(crate)` when a
+// production consumer is added.
 #[cfg(test)]
 pub(crate) use indexed::scc_components;
 

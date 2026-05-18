@@ -121,12 +121,15 @@ pub(crate) enum LoweredVarFragment {
 /// metadata map, and the sub-model lists feeding sub-model metadata) and
 /// lowering-*independent* values (`extra_module_refs` /
 /// `implicit_module_refs`, which the caller's `compile_phase` needs).
-/// Both `lower_var_fragment` and the caller's module-ref reconstruction
-/// run the same single walk via `collect_var_dependencies`, so the walk
-/// logic exists exactly once. `unknown_dependency` is `Some` when the
-/// walk hit a reference that is neither a source nor an implicit variable
-/// (the fatal unknown-dependency site); the walk stops there, exactly as
-/// the original early `return None` did.
+/// The walk logic is defined exactly once (`collect_var_dependencies`).
+/// It is invoked from two call sites per variable -- `lower_var_fragment`
+/// and the caller's module-ref reconstruction (`build_caller_module_refs`)
+/// -- but `collect_var_dependencies` is pure over salsa-tracked inputs,
+/// so the second invocation is a memoized cache hit with no
+/// recomputation. `unknown_dependency` is `Some` when the walk hit a
+/// reference that is neither a source nor an implicit variable (the fatal
+/// unknown-dependency site); the walk stops there (a fatal unknown
+/// dependency short-circuits the rest of the walk).
 pub(crate) struct VarDepCollection {
     pub(crate) dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)>,
     pub(crate) extra_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey>,

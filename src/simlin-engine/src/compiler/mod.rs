@@ -1083,14 +1083,15 @@ fn contains_array_producing_builtin(expr: &Expr) -> bool {
     }
 }
 
-/// Test-only exposure of the production recursive array-producing-builtin
-/// predicate (`contains_array_producing_builtin` @~1065 -> private
-/// `is_array_producing_builtin` @~853): true iff ANY element of a
-/// variable's lowered per-element `Expr` list is/contains an
-/// array-producing builtin (VectorElmMap/VectorSortOrder/Rank/
-/// AllocateAvailable/AllocateByPriority), incl. nested as a subexpression
-/// or hoisted into an `AssignTemp`. One definition, used twice
-/// (B1-design.md §10b step 3; reviewer-priors §26.1-A/§26.4).
+/// Test-only wrapper exposing the production recursive
+/// array-producing-builtin predicate (`contains_array_producing_builtin`,
+/// which delegates to the private `is_array_producing_builtin`): true iff
+/// any element of a variable's lowered per-element `Expr` list is, or
+/// contains, an array-producing builtin (VectorElmMap/VectorSortOrder/
+/// Rank/AllocateAvailable/AllocateByPriority), including nested as a
+/// subexpression or hoisted into an `AssignTemp`.
+/// `crate::db_dep_graph::array_producing_vars` reuses this exact
+/// predicate rather than re-implementing the recursion.
 #[cfg(test)]
 pub(crate) fn exprs_contain_array_producing_builtin(exprs: &[Expr]) -> bool {
     exprs.iter().any(contains_array_producing_builtin)
@@ -1115,7 +1116,7 @@ mod exprs_contain_array_producing_builtin_tests {
     #[test]
     fn flags_top_level_array_producing_element() {
         // The scalar-lowering shape `AssignCurr(off, VECTOR ELM MAP(...))`
-        // (the §15.6 top-level case the scalar path does NOT hoist):
+        // -- the top-level case the scalar path does NOT hoist:
         // `contains_ ⊇ is_` catches the top-level `App`.
         let exprs = vec![Expr::AssignCurr(0, Box::new(vem()))];
         assert!(exprs_contain_array_producing_builtin(&exprs));
@@ -1123,10 +1124,10 @@ mod exprs_contain_array_producing_builtin_tests {
 
     #[test]
     fn flags_array_producing_only_in_a_hoisted_assign_temp() {
-        // The §26.13 incomplete-sourcing guard at the Layer-1 boundary:
-        // the `App` lives ONLY in a hoisted `AssignTemp` (a non-first
-        // element); `AssignCurr` reads the temp. `.iter().any` over the
-        // COMPLETE list + the `AssignTemp` recursion must still flag it.
+        // The incomplete-sourcing guard: the `App` lives ONLY in a
+        // hoisted `AssignTemp` (a non-first element); `AssignCurr` reads
+        // the temp. `.iter().any` over the COMPLETE list + the
+        // `AssignTemp` recursion must still flag it.
         let exprs = vec![
             Expr::AssignCurr(
                 0,

@@ -417,7 +417,7 @@ impl<'input> ConversionContext<'input> {
             // Keep the rate EXPRESSION (not a raw formatted string): a
             // synthetic net-flow must resolve it PER ELEMENT via the same
             // subscript-range-mapping the regular arrayed-equation path
-            // uses (#559 B2-B), not clone the raw subrange-sliced text.
+            // uses (#559), not clone the raw subrange-sliced text.
             let rate_expr = match self.extract_integ_rate(&eq.equation) {
                 Some(e) => e,
                 None => continue,
@@ -485,8 +485,8 @@ impl<'input> ConversionContext<'input> {
             // assigned a subrange-sliced expression (e.g.
             // `dflux[scenario, upper] - dflux[scenario, lower]`) to each
             // scalar element -> MismatchedDimensions on `<stock>_net_flow`
-            // (#559 B2-B; C-LEARN c_in_deep_ocean_net_flow /
-            // heat_in_deep_ocean_net_flow).
+            // (#559; e.g. C-LEARN's `c_in_deep_ocean_net_flow` /
+            // `heat_in_deep_ocean_net_flow`).
             let element_keys = cartesian_product(&expanded_elements);
             for key in element_keys {
                 let element_parts: Vec<&str> = key.split(',').collect();
@@ -552,7 +552,7 @@ impl<'input> ConversionContext<'input> {
     ) -> Option<(Vec<String>, Vec<String>)> {
         // The stock equation's own LHS subscripts (canonicalized). A flow
         // reference pinned/sliced to a DIFFERENT shape than this is not a
-        // plain named flow (#559 B2-A) -- see `collect_flows`.
+        // plain named flow (#559) -- see `collect_flows`.
         let stock_lhs_subs: Vec<String> = get_lhs(eq)
             .map(|lhs| {
                 lhs.subscripts
@@ -618,8 +618,8 @@ impl<'input> ConversionContext<'input> {
     /// slice of a 2-D `[scenario, layers]` flow) feeding a 1-D
     /// `stock1d[scenario]` -- would, if accepted by bare name, wire the
     /// full higher-rank variable to a lower-rank stock and the dimension
-    /// checker then reports `MismatchedDimensions` (issue #559 / B2-A:
-    /// C-LEARN `c_in_mixed_layer`, `heat_in_atmosphere_and_upper_ocean`).
+    /// checker then reports `MismatchedDimensions` (issue #559; e.g.
+    /// C-LEARN's `c_in_mixed_layer`, `heat_in_atmosphere_and_upper_ocean`).
     /// Rejecting it fails the simple decomposition so the caller falls
     /// through to the synthetic net-flow path, which preserves the exact,
     /// correctly-ranked sliced rate expression. A reference with NO
@@ -639,7 +639,7 @@ impl<'input> ConversionContext<'input> {
             Expr::Var(name, subscripts, _) => {
                 let canonical = canonical_name(name);
 
-                // B2-A (#559): a subscripted flow reference whose subscripts
+                // #559: a subscripted flow reference whose subscripts
                 // differ from the stock equation's own LHS subscripts is
                 // pinning/slicing the flow to a shape other than the stock
                 // element it feeds (e.g. `flux2d[scenario, L1]` feeding
@@ -1310,19 +1310,19 @@ rate = 5
         }
     }
 
-    /// Issue #559 blocker B2 Pattern A: a 1D stock whose INTEG rate
-    /// references a higher-rank flow PINNED to a single element of the
-    /// extra dimension (`flux2d[scenario, L1]` feeding a 1D
-    /// `stock1d[scenario]`). `collect_flows` dropped the `[scenario, L1]`
-    /// subscript and wired the BARE 2D `flux2d` as a named outflow of the
-    /// 1D stock; the dimension checker then flags `mismatched_dimensions`
-    /// (the C-LEARN `c_in_mixed_layer` / `heat_in_atmosphere_and_upper_ocean`
-    /// signature). A flow reference whose subscripts change its effective
-    /// rank/shape vs the stock LHS must NOT be accepted as a bare named
-    /// flow -- the decomposition must fall through to the synthetic
-    /// net-flow path, which preserves the pinned-slice rate expression.
+    /// Issue #559: a 1D stock whose INTEG rate references a higher-rank
+    /// flow PINNED to a single element of the extra dimension
+    /// (`flux2d[scenario, L1]` feeding a 1D `stock1d[scenario]`).
+    /// `collect_flows` dropped the `[scenario, L1]` subscript and wired
+    /// the BARE 2D `flux2d` as a named outflow of the 1D stock; the
+    /// dimension checker then flags `mismatched_dimensions` (e.g. C-LEARN's
+    /// `c_in_mixed_layer` / `heat_in_atmosphere_and_upper_ocean`). A flow
+    /// reference whose subscripts change its effective rank/shape vs the
+    /// stock LHS must NOT be accepted as a bare named flow -- the
+    /// decomposition must fall through to the synthetic net-flow path,
+    /// which preserves the pinned-slice rate expression.
     #[test]
-    fn test_b2_pattern_a_rank_changing_subscripted_flow_synthesizes_net_flow() {
+    fn test_rank_changing_subscripted_flow_synthesizes_net_flow() {
         let mdl = "scenario: s1, s2
 ~ ~|
 layers: (L1-L4)
@@ -1345,7 +1345,7 @@ stock1d[scenario] = INTEG(fluxatm[scenario] - flux2d[scenario, L1], 0)
         // stock (that is the subscript-drop bug; pre-fix outflows==["flux2d"]).
         assert!(
             !s.outflows.iter().any(|f| f == "flux2d") && !s.inflows.iter().any(|f| f == "flux2d"),
-            "B2-A: bare 2D `flux2d` must not be a named flow of the 1D \
+            "bare 2D `flux2d` must not be a named flow of the 1D \
              `stock1d` (subscript-pin dropped). inflows={:?} outflows={:?}",
             s.inflows,
             s.outflows
@@ -1356,7 +1356,7 @@ stock1d[scenario] = INTEG(fluxatm[scenario] - flux2d[scenario, L1], 0)
             main.variables
                 .iter()
                 .any(|v| v.get_ident().contains("net_flow")),
-            "B2-A: rank-changing subscripted flow ref must fall through to \
+            "rank-changing subscripted flow ref must fall through to \
              a synthetic net-flow; none found. vars={:?}",
             main.variables
                 .iter()
@@ -1365,12 +1365,13 @@ stock1d[scenario] = INTEG(fluxatm[scenario] - flux2d[scenario, L1], 0)
         );
     }
 
-    /// B2 Pattern A control: when flows are the SAME rank/shape as the
-    /// stock LHS (`[scenario]`), they must STILL be wired as named flows.
-    /// The B2-A fix must reject only RANK/SHAPE-CHANGING subscripted refs,
-    /// never legitimate same-rank ones (stable green pre & post fix).
+    /// Control for the rank-changing-flow rejection (#559): when flows
+    /// are the SAME rank/shape as the stock LHS (`[scenario]`), they must
+    /// STILL be wired as named flows. The fix must reject only
+    /// RANK/SHAPE-CHANGING subscripted refs, never legitimate same-rank
+    /// ones.
     #[test]
-    fn test_b2_pattern_a_control_same_rank_flows_stay_named() {
+    fn test_same_rank_subscripted_flows_stay_named() {
         let mdl = "scenario: s1, s2
 ~ ~|
 fluxatm[scenario] = 2
@@ -1399,25 +1400,26 @@ stock1d[scenario] = INTEG(fluxatm[scenario] - fluxout[scenario], 0)
         );
     }
 
-    /// Issue #559 blocker B2 Pattern B: a 2-D stock defined per
-    /// shift-mapped subrange whose flow lists differ across equations, so
-    /// the converter synthesizes a `<stock>_net_flow` aux. The bug:
-    /// `build_synthetic_flow_equation` cloned the RAW rate string
+    /// Issue #559: a 2-D stock defined per shift-mapped subrange whose
+    /// flow lists differ across equations, so the converter synthesizes a
+    /// `<stock>_net_flow` aux. The bug: `build_synthetic_flow_equation`
+    /// cloned the RAW rate string
     /// (`dflux[scenario, upper] - dflux[scenario, lower]`) into EVERY
     /// cartesian element key instead of applying the per-element
     /// subscript-range-mapping resolution the regular arrayed-equation
     /// path uses. A subrange-sliced expression assigned to each scalar
-    /// element -> `MismatchedDimensions` on `stock2d_net_flow` (the
-    /// C-LEARN `c_in_deep_ocean_net_flow` / `heat_in_deep_ocean_net_flow`
-    /// signature). The synthesized per-element equations must instead be
-    /// resolved per element (no raw `upper`/`lower` subrange tokens; each
+    /// element -> `MismatchedDimensions` on `stock2d_net_flow` (e.g.
+    /// C-LEARN's `c_in_deep_ocean_net_flow` / `heat_in_deep_ocean_net_flow`).
+    /// The synthesized per-element equations must instead be resolved per
+    /// element (no raw `upper`/`lower` subrange tokens; each
     /// `upper`-subrange element distinct), exactly as
     /// `build_element_context` + `format_expr_with_context` produce on the
-    /// regular path. This is the PARSER-level shape assertion; the
-    /// end-to-end deep-ocean *value* check is B1-coupled and deferred (see
-    /// `simulates_b2_pattern_b_*` in tests/simulate.rs and B2.md s4).
+    /// regular path. This is the parser-level shape assertion; the
+    /// end-to-end deep-ocean *value* check depends on the still-open
+    /// element-level cycle resolution (#559) and is deferred (see
+    /// `simulates_synthetic_net_flow_shape` in tests/simulate.rs).
     #[test]
-    fn test_b2_pattern_b_synthetic_net_flow_resolves_per_element() {
+    fn test_synthetic_net_flow_resolves_per_element() {
         let mdl = "scenario: s1, s2
 ~ ~|
 layers: (L1-L4)
@@ -1466,7 +1468,7 @@ stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
                     !rate
                         .split(|c: char| !c.is_alphanumeric() && c != '_')
                         .any(|w| w == tok),
-                    "B2-B: synthetic net-flow element {key:?} still carries \
+                    "synthetic net-flow element {key:?} still carries \
                      the unresolved subrange `{tok}` (raw rate cloned, not \
                      per-element resolved): {rate:?}"
                 );
@@ -1482,7 +1484,7 @@ stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
         assert_eq!(upper_rates.len(), 3, "expected 3 s1 upper-subrange slots");
         assert!(
             upper_rates[0] != upper_rates[1] && upper_rates[1] != upper_rates[2],
-            "B2-B: the `upper`-subrange element rates must be per-element \
+            "the `upper`-subrange element rates must be per-element \
              distinct after resolution, got {upper_rates:?}"
         );
     }

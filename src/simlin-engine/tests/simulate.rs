@@ -976,26 +976,25 @@ fn simulates_clearn() {
     ensure_vdf_results(&vdf_results, &results);
 }
 
-/// Issue #559 blocker B4 -- the C-LEARN `"Goal 1.5 for Temperature"` shape.
+/// Issue #559 -- the C-LEARN `"Goal 1.5 for Temperature"` shape.
 ///
 /// A Vensim quoted identifier containing a literal period (`"a.b"`,
-/// `"goal 1.5"`) used to make the WHOLE `main` model `NotSimulatable`:
+/// `"goal 1.5"`) used to make the whole `main` model `NotSimulatable`:
 /// `canonicalize()` was non-idempotent for quoted-period idents (first
 /// pass kept a raw `.`, which `is_canonical()` rejects, so a re-canonical
 /// pass mis-converted the literal period into the `·` module-hierarchy
 /// separator -> the variable's own identity split into a phantom submodule
 /// -> `DoesNotExist`). It tripped even for a *dead* constant referenced by
-/// nobody (the exact C-LEARN case), because it is the variable's own
-/// fragment identity that fails. This is the fast, general regression for
-/// the `common.rs` idempotency fix, run through the same incremental
-/// `compile_vm` path `simulates_clearn` uses. Two faithful shapes:
+/// nobody, because it is the variable's own fragment identity that fails.
+/// Run through the same incremental `compile_vm` path `simulates_clearn`
+/// uses. Two shapes:
 ///   A. a quoted-period constant *referenced* by a live var, proving its
 ///      identity resolves AND is usable in equations (`y = "a.b" + 1`);
 ///   B. a *dead* quoted-period constant plus an unrelated live `z`,
 ///      proving such a constant no longer poisons compilation and the fix
 ///      changes no live output.
 #[test]
-fn simulates_quoted_period_ident_b4() {
+fn simulates_quoted_period_ident() {
     // A: quoted-period constant referenced by a live variable.
     let mdl_a = "\
 {UTF-8}
@@ -1040,7 +1039,7 @@ TIME STEP = 1 ~~|
 }
 
 /// Read a `[t1]/[t2]/[t3]`-style element series out of a `Results`.
-fn b3_series(results: &Results, name: &str) -> Vec<f64> {
+fn element_series(results: &Results, name: &str) -> Vec<f64> {
     let id = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
     let off = *results.offsets.get(&id).unwrap_or_else(|| {
         panic!(
@@ -1055,9 +1054,9 @@ fn b3_series(results: &Results, name: &str) -> Vec<f64> {
 
 /// Compile an inline/loaded Vensim `.mdl` through the incremental path and
 /// return `(compile_is_err, diagnostics)` WITHOUT panicking -- for fixtures
-/// that are intentionally NOT simulatable (B1/B3 recurrence repros), where
+/// that are intentionally NOT simulatable (cycle/recurrence repros), where
 /// we assert the *diagnostic code*, not a simulation result.
-fn b3_compile_diags(mdl: &str) -> (bool, Vec<simlin_engine::db::Diagnostic>) {
+fn compile_diags(mdl: &str) -> (bool, Vec<simlin_engine::db::Diagnostic>) {
     let dm = open_vensim(mdl).unwrap_or_else(|e| panic!("failed to parse mdl: {e}"));
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
@@ -1065,7 +1064,7 @@ fn b3_compile_diags(mdl: &str) -> (bool, Vec<simlin_engine::db::Diagnostic>) {
     (is_err, collect_project_diagnostics(&dm))
 }
 
-fn b3_diag_code(d: &simlin_engine::db::Diagnostic) -> Option<simlin_engine::common::ErrorCode> {
+fn diag_code(d: &simlin_engine::db::Diagnostic) -> Option<simlin_engine::common::ErrorCode> {
     use simlin_engine::db::DiagnosticError;
     match &d.error {
         DiagnosticError::Equation(e) => Some(e.code),
@@ -1074,7 +1073,7 @@ fn b3_diag_code(d: &simlin_engine::db::Diagnostic) -> Option<simlin_engine::comm
     }
 }
 
-/// Issue #559 blocker B3 -- the C-LEARN
+/// Issue #559 -- the C-LEARN
 /// `Emissions with cumulative constraints[COP,tNext] = ... ecc[COP,tPrev]`
 /// self-recurrence shape, minimised to a single self-recurrent variable
 /// with NO cross-variable cycle (`test/sdeverywhere/models/self_recurrence`).
@@ -1082,79 +1081,81 @@ fn b3_diag_code(d: &simlin_engine::db::Diagnostic) -> Option<simlin_engine::comm
 /// The native MDL converter (`xmile_compat.rs::format_var_ctx`) rewrote a
 /// self-reference (`name == ctx.lhs_var_canonical`) to the literal token
 /// `self`; for a *subscripted* self-reference it emitted `self[..]`. The
-/// engine's `builtins_visitor` Subscript arm (~713-718) never resolves
-/// `self`, so the literal token leaked into dependency analysis as an
-/// undefined name -> `UnknownDependency` (B3), with NO `CircularDependency`
-/// present (the empirical proof B3 != B1: B3 fires with zero cycle).
+/// engine's `builtins_visitor` Subscript arm never resolves `self`, so
+/// the literal token leaked into dependency analysis as an undefined name
+/// -> `UnknownDependency`, with NO `CircularDependency` present (the
+/// self-leak fires even though there is zero cycle).
 ///
-/// B3's fix (Option A: emit the real canonical LHS name instead of `self`)
-/// makes the self-reference an ordinary reference. `ecc[tNext]=ecc[tPrev]+1`
-/// then becomes a now-VISIBLE whole-variable self-edge that the (pre-B1)
-/// whole-variable cycle gate flags as `CircularDependency`. So post-B3 this
-/// fixture TRANSITIONS B3->B1: it is STILL NotSimulatable (until B1's
-/// element-level fix lands), but the `self` token is GONE and the failure
-/// is the correct structural cycle, not an undefined-name leak. Asserting
-/// the transition (not full green) is exactly the B3!=B1 proof.
+/// The fix (emit the real canonical LHS name instead of `self`) makes the
+/// self-reference an ordinary reference. `ecc[tNext]=ecc[tPrev]+1` then
+/// becomes a now-visible whole-variable self-edge that the whole-variable
+/// cycle gate flags as `CircularDependency`. So after the fix this fixture
+/// is still NotSimulatable (until element-level recurrence resolution
+/// lands, #559), but the `self` token is gone and the failure is the
+/// correct structural cycle, not an undefined-name leak. The test asserts
+/// exactly that transition.
 #[test]
-fn self_recurrence_b3_self_token_resolves() {
+fn self_recurrence_self_token_resolves_to_real_name() {
     use simlin_engine::common::ErrorCode;
 
     let mdl = std::fs::read_to_string(
         "../../test/sdeverywhere/models/self_recurrence/self_recurrence.mdl",
     )
     .expect("self_recurrence.mdl fixture must exist");
-    let (compile_err, diags) = b3_compile_diags(&mdl);
+    let (compile_err, diags) = compile_diags(&mdl);
 
     // `self_recurrence` has exactly one non-control variable (`ecc`) and
     // self-contained dims, so the ONLY possible unknown is the leaked
     // `self` token.
     let self_leak = diags.iter().any(|d| {
         matches!(
-            b3_diag_code(d),
+            diag_code(d),
             Some(ErrorCode::UnknownDependency) | Some(ErrorCode::DoesNotExist)
         )
     });
     let has_circular = diags
         .iter()
-        .any(|d| b3_diag_code(d) == Some(ErrorCode::CircularDependency));
+        .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency));
 
     assert!(
         compile_err,
         "self_recurrence.mdl must be NotSimulatable (a genuine \
-         whole-variable self-edge until B1's element-level fix lands)"
+         whole-variable self-edge until element-level recurrence \
+         resolution lands)"
     );
-    // POST-B3 (GREEN): the `self` token resolves to the enclosing var, so
-    // it no longer leaks as an unknown dependency. (Pre-fix RED: this
-    // assertion fails because `self[tPrev]` leaks as UnknownDependency --
-    // xmile_compat.rs:122-126 emits the literal `self`, builtins_visitor
-    // Subscript arm 713-718 never resolves it.)
+    // The `self` token resolves to the enclosing var, so it no longer
+    // leaks as an unknown dependency. (Before the fix this assertion
+    // failed: `self[tPrev]` leaked as UnknownDependency because the
+    // converter emitted the literal `self` and the builtins_visitor
+    // Subscript arm never resolved it.)
     assert!(
         !self_leak,
-        "B3 NOT fixed: the literal `self` token still leaks as \
+        "the literal `self` token still leaks as \
          UnknownDependency/DoesNotExist. The converter must emit the real \
          canonical LHS name, not `self`. Diagnostics: {diags:#?}"
     );
     // ...and the now-visible `ecc[tNext]=ecc[tPrev]+1` self-edge surfaces
-    // as the structural B1 `CircularDependency` (the proof B3 != B1: the
-    // cycle only becomes visible AFTER `self` resolves; it then needs B1's
-    // element-level resolution to actually simulate).
+    // as a structural `CircularDependency`: the cycle only becomes
+    // visible AFTER `self` resolves, and still needs element-level
+    // resolution to actually simulate.
     assert!(
         has_circular,
-        "post-B3 the now-visible whole-var self-edge must surface as \
-         CircularDependency (B1). Diagnostics: {diags:#?}"
+        "the now-visible whole-var self-edge must surface as \
+         CircularDependency. Diagnostics: {diags:#?}"
     );
 }
 
-/// Reviewer §10 genuine-cycle GUARDS: B3 (and later B1) must NOT weaken
-/// real cycle detection. These two models have NO well-founded staggered
-/// recurrence -- they are genuine cycles and MUST stay rejected before AND
-/// after B3 (a CLAUDE.md hard rule).
+/// Genuine-cycle guards: the self-reference fix must NOT weaken real
+/// cycle detection. These two models have NO well-founded staggered
+/// recurrence -- they are genuine cycles and MUST stay rejected (a
+/// CLAUDE.md hard rule).
 #[test]
-fn genuine_cycles_still_rejected_b3_guard() {
+fn genuine_cycles_still_rejected() {
     use simlin_engine::common::ErrorCode;
 
     // (1) Scalar 2-cycle `a=b+1; b=a+1`: a true algebraic loop, no `self`
-    // token involved at all -> `CircularDependency`, stable pre/post B3.
+    // token involved at all -> `CircularDependency`, stable before and
+    // after the fix.
     let two_cycle = "\
 {UTF-8}
 a = b + 1 ~~|
@@ -1164,18 +1165,18 @@ FINAL TIME = 1 ~~|
 SAVEPER = 1 ~~|
 TIME STEP = 1 ~~|
 ";
-    let (err1, diags1) = b3_compile_diags(two_cycle);
+    let (err1, diags1) = compile_diags(two_cycle);
     assert!(err1, "scalar 2-cycle a=b+1;b=a+1 must be NotSimulatable");
     assert!(
         diags1
             .iter()
-            .any(|d| b3_diag_code(d) == Some(ErrorCode::CircularDependency)),
+            .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency)),
         "scalar 2-cycle must report CircularDependency (genuine cycle \
          detection must not be weakened). Diagnostics: {diags1:#?}"
     );
     assert!(
         !diags1.iter().any(|d| matches!(
-            b3_diag_code(d),
+            diag_code(d),
             Some(ErrorCode::UnknownDependency) | Some(ErrorCode::DoesNotExist)
         )),
         "scalar 2-cycle has no undefined names; only CircularDependency \
@@ -1184,10 +1185,10 @@ TIME STEP = 1 ~~|
 
     // (2) Genuine SAME-element self `x[dimA]=x[dimA]+1` (NOT a shifted
     // subrange): a real same-element self-cycle that MUST stay rejected.
-    // TRAP (per team-lead): B3 legitimately changes its code from
-    // UnknownDependency (`self` leak) to CircularDependency (resolved
-    // self-edge). Do NOT pin UnknownDependency -- assert only that it
-    // stays rejected with a cycle/unknown-class code.
+    // Note: the self-reference fix legitimately changes this from
+    // UnknownDependency (the `self` leak) to CircularDependency (the
+    // resolved self-edge). Do NOT pin UnknownDependency -- assert only
+    // that it stays rejected with a cycle/unknown-class code.
     let same_elem = "\
 {UTF-8}
 dimA: a1, a2 ~~|
@@ -1197,7 +1198,7 @@ FINAL TIME = 1 ~~|
 SAVEPER = 1 ~~|
 TIME STEP = 1 ~~|
 ";
-    let (err2, diags2) = b3_compile_diags(same_elem);
+    let (err2, diags2) = compile_diags(same_elem);
     assert!(
         err2,
         "genuine same-element self x[dimA]=x[dimA]+1 must stay \
@@ -1205,38 +1206,33 @@ TIME STEP = 1 ~~|
     );
     assert!(
         diags2.iter().any(|d| matches!(
-            b3_diag_code(d),
+            diag_code(d),
             Some(ErrorCode::CircularDependency)
                 | Some(ErrorCode::UnknownDependency)
                 | Some(ErrorCode::DoesNotExist)
         )),
         "genuine same-element self must be rejected with a \
-         cycle/undefined-class code (B3 flips it unknown->circular -- \
-         either is acceptable, but it must NOT silently compile). \
-         Diagnostics: {diags2:#?}"
+         cycle/undefined-class code (the self-reference fix flips it \
+         unknown->circular -- either is acceptable, but it must NOT \
+         silently compile). Diagnostics: {diags2:#?}"
     );
 }
 
-/// Reviewer/B3.md addendum #1 -- the Option-A regression guard for the ONE
-/// self-context that must keep working: a self-reference INSIDE
-/// `PREVIOUS()`. Option A stops emitting the literal `self` in
-/// `xmile_compat.rs::format_var_ctx`; this proves it does not perturb the
-/// self-in-PREVIOUS path.
+/// Regression guard for the one self-context that must keep working: a
+/// self-reference INSIDE `PREVIOUS()`. The #559 fix stops emitting the
+/// literal `self` in `xmile_compat.rs::format_var_ctx`; this proves it
+/// does not perturb the self-in-PREVIOUS path.
 ///
-/// Primary case is the C-LEARN-relevant *shifted subrange* form
-/// `x[t1]=1; x[tNext]=PREVIOUS(x[tPrev],0)` (distinct from selfref's bare
-/// `IF THEN ELSE` and from the `x[a]=x[a]+1` genuine-cycle guard).
-/// MEASURED: pre-fix this FAILS to compile (the synthetic PREVIOUS-helper
-/// fragment is built around the unresolved `self[tPrev]` --
-/// `failed to compile fragments for $⁚x⁚0⁚arg0⁚t2,…`); post-fix Option A
-/// emits the real name `x[tPrev]`, the helper resolves, and it simulates
-/// the well-defined PREVIOUS-shift recurrence. So Option A IMPROVES (not
-/// merely "does not regress") the PREVIOUS self path. The scalar
-/// `x=PREVIOUS(x,0)` sub-case is the simplest stable form (green pre &
-/// post).
+/// Primary case is the *shifted subrange* form
+/// `x[t1]=1; x[tNext]=PREVIOUS(x[tPrev],0)`. Before the fix this failed
+/// to compile -- the synthetic PREVIOUS-helper fragment was built around
+/// the unresolved `self[tPrev]`; after the fix the real name `x[tPrev]`
+/// resolves, the helper compiles, and it simulates the well-defined
+/// PREVIOUS-shift recurrence. The scalar `x=PREVIOUS(x,0)` sub-case is
+/// the simplest stable form.
 #[test]
-fn previous_self_reference_still_resolves_b3_control() {
-    // Sub-case A: scalar self-in-PREVIOUS (simplest; green pre & post).
+fn previous_self_reference_still_resolves() {
+    // Sub-case A: scalar self-in-PREVIOUS (the simplest form).
     let scalar = "\
 {UTF-8}
 x = PREVIOUS(x, 0) ~~|
@@ -1245,17 +1241,17 @@ FINAL TIME = 2 ~~|
 SAVEPER = 1 ~~|
 TIME STEP = 1 ~~|
 ";
-    let (err_s, diags_s) = b3_compile_diags(scalar);
+    let (err_s, diags_s) = compile_diags(scalar);
     assert!(
         !err_s,
-        "scalar x=PREVIOUS(x,0) must stay simulatable after B3. \
+        "scalar x=PREVIOUS(x,0) must stay simulatable after the fix. \
          Diagnostics: {diags_s:#?}"
     );
     assert_eq!(run_inline_mdl(scalar).step_count, 3);
 
-    // Sub-case B (primary): shifted-subrange self-in-PREVIOUS, the
-    // C-LEARN-relevant shape. Must compile AND simulate the exact
-    // PREVIOUS-shift recurrence post-fix.
+    // Sub-case B (primary): shifted-subrange self-in-PREVIOUS. Must
+    // compile AND simulate the exact PREVIOUS-shift recurrence after the
+    // fix.
     let shifted = "\
 {UTF-8}
 Target: (t1-t3)
@@ -1278,33 +1274,32 @@ FINAL TIME = 2 ~~|
 SAVEPER = 1 ~~|
 TIME STEP = 1 ~~|
 ";
-    let (err_b, diags_b) = b3_compile_diags(shifted);
+    let (err_b, diags_b) = compile_diags(shifted);
     assert!(
         !err_b,
-        "shifted-subrange PREVIOUS self-ref must COMPILE post-B3 (Option A \
-         resolves `self[tPrev]` -> `x[tPrev]`, fixing the synthetic \
-         PREVIOUS-helper that failed pre-fix). Diagnostics: {diags_b:#?}"
+        "shifted-subrange PREVIOUS self-ref must COMPILE after the fix \
+         (resolving `self[tPrev]` -> `x[tPrev]` fixes the synthetic \
+         PREVIOUS-helper that failed before). Diagnostics: {diags_b:#?}"
     );
     let r = run_inline_mdl(shifted);
     assert_eq!(r.step_count, 3);
     // x[t1]=1 (base, constant); x[t2]=PREVIOUS(x[t1],0); x[t3]=PREVIOUS(x[t2],0).
     // PREVIOUS = init at t0 else prior-DT value -> the deterministic
-    // staggered-recurrence series (measured):
-    assert_eq!(b3_series(&r, "x[t1]"), vec![1.0, 1.0, 1.0]);
-    assert_eq!(b3_series(&r, "x[t2]"), vec![0.0, 1.0, 1.0]);
-    assert_eq!(b3_series(&r, "x[t3]"), vec![0.0, 0.0, 1.0]);
+    // staggered-recurrence series:
+    assert_eq!(element_series(&r, "x[t1]"), vec![1.0, 1.0, 1.0]);
+    assert_eq!(element_series(&r, "x[t2]"), vec![0.0, 1.0, 1.0]);
+    assert_eq!(element_series(&r, "x[t3]"), vec![0.0, 0.0, 1.0]);
 }
 
-/// Reviewer/B3.md addendum #2 -- the C-LEARN 44x form. `SAMPLE IF TRUE`
-/// expands in the converter to `( IF cond THEN input ELSE PREVIOUS(SELF,
-/// init) )` via a HARD-CODED literal `SELF` in the `"sample if true"` arm
-/// (a DIFFERENT site from the `format_var_ctx` self-reference rewrite that
-/// Option A changes). Option A must NOT perturb this. A real
-/// `SAMPLE IF TRUE(...)` over a subrange must compile AND simulate
-/// correctly post-fix -- and it is stable green pre & post (measured),
-/// proving the two `self` sites are independent.
+/// `SAMPLE IF TRUE` expands in the converter to
+/// `( IF cond THEN input ELSE PREVIOUS(SELF, init) )` via a hard-coded
+/// literal `SELF` in the `"sample if true"` arm -- a *different* site
+/// from the `format_var_ctx` self-reference rewrite the #559 fix changes.
+/// The fix must NOT perturb this: a real `SAMPLE IF TRUE(...)` over a
+/// subrange must still compile AND simulate correctly, proving the two
+/// `self` sites are independent.
 #[test]
-fn sample_if_true_subrange_unaffected_by_b3() {
+fn sample_if_true_subrange_self_template_unaffected() {
     let mdl = "\
 {UTF-8}
 Target: (t1-t3)
@@ -1333,80 +1328,81 @@ FINAL TIME = 2 ~~|
 SAVEPER = 1 ~~|
 TIME STEP = 1 ~~|
 ";
-    let (err, diags) = b3_compile_diags(mdl);
+    let (err, diags) = compile_diags(mdl);
     assert!(
         !err,
-        "real SAMPLE IF TRUE over a subrange must compile post-B3 (Option \
-         A must not touch the hard-coded PREVIOUS(SELF,init) template). \
-         Diagnostics: {diags:#?}"
+        "real SAMPLE IF TRUE over a subrange must compile after the fix \
+         (the fix must not touch the hard-coded PREVIOUS(SELF,init) \
+         template). Diagnostics: {diags:#?}"
     );
     let r = run_inline_mdl(mdl);
     assert_eq!(r.step_count, 3);
     // Time=0,1,2 are all <= k(5) -> condition always true -> output is the
     // sampled input a(7) at every element/step (the SELF/previous branch
     // is never taken; this exercises the template's structure intact).
-    assert_eq!(b3_series(&r, "y[t1]"), vec![7.0, 7.0, 7.0]);
-    assert_eq!(b3_series(&r, "y[t2]"), vec![7.0, 7.0, 7.0]);
-    assert_eq!(b3_series(&r, "y[t3]"), vec![7.0, 7.0, 7.0]);
+    assert_eq!(element_series(&r, "y[t1]"), vec![7.0, 7.0, 7.0]);
+    assert_eq!(element_series(&r, "y[t2]"), vec![7.0, 7.0, 7.0]);
+    assert_eq!(element_series(&r, "y[t3]"), vec![7.0, 7.0, 7.0]);
 }
 
-/// Reviewer/B3.md addendum -- B1/B3 disjointness guard. `ref.mdl` and
-/// `interleaved.mdl` are the B1-only fixtures: pure INTER-variable cycles
-/// (`ecc`<->`ce`), NO self-reference, so the converter never emits a
+/// `ref.mdl` and `interleaved.mdl` are pure INTER-variable cycles
+/// (`ecc`<->`ce`) with NO self-reference, so the converter never emits a
 /// `self` token for them. They must report `CircularDependency` and NEVER
-/// `UnknownDependency`/`DoesNotExist` -- and B3's fix must not change that
-/// (measured byte-identical pre & post via git-stash). This pins that B3
-/// does not spuriously inject `self` into inter-variable-cycle models, and
-/// that clearing them is B1's job, not B3's (keeps B3 != B1 true under the
-/// fix; proves the dedicated `self_recurrence` fixture is necessary).
+/// `UnknownDependency`/`DoesNotExist`, and the self-reference fix must not
+/// change that: it must not spuriously inject a `self`/undefined-name
+/// leak into an inter-variable-cycle model. (These stay NotSimulatable
+/// pending the still-open element-level cycle resolution, #559; this also
+/// shows why the dedicated `self_recurrence` fixture is needed.)
 #[test]
-fn ref_interleaved_b1_only_disjoint_from_b3() {
+fn ref_interleaved_inter_variable_cycles_report_circular() {
     use simlin_engine::common::ErrorCode;
     for path in [
         "../../test/sdeverywhere/models/ref/ref.mdl",
         "../../test/sdeverywhere/models/interleaved/interleaved.mdl",
     ] {
-        let mdl = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("missing B1 fixture {path}: {e}"));
-        let (compile_err, diags) = b3_compile_diags(&mdl);
-        assert!(compile_err, "{path}: must be NotSimulatable (B1 cycle)");
+        let mdl =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"));
+        let (compile_err, diags) = compile_diags(&mdl);
+        assert!(
+            compile_err,
+            "{path}: must be NotSimulatable (inter-variable cycle)"
+        );
         assert!(
             diags
                 .iter()
-                .any(|d| b3_diag_code(d) == Some(ErrorCode::CircularDependency)),
-            "{path}: B1-only fixture must report CircularDependency. \
-             Diagnostics: {diags:#?}"
+                .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency)),
+            "{path}: inter-variable-cycle fixture must report \
+             CircularDependency. Diagnostics: {diags:#?}"
         );
         assert!(
             !diags.iter().any(|d| matches!(
-                b3_diag_code(d),
+                diag_code(d),
                 Some(ErrorCode::UnknownDependency) | Some(ErrorCode::DoesNotExist)
             )),
-            "{path}: B3 must NOT inject a `self`/undefined-name leak into \
-             a pure inter-variable-cycle fixture (B1!=B3 disjointness). \
-             Diagnostics: {diags:#?}"
+            "{path}: the self-reference fix must NOT inject a \
+             `self`/undefined-name leak into a pure inter-variable-cycle \
+             fixture. Diagnostics: {diags:#?}"
         );
     }
 }
 
-/// Issue #559 blocker B2 Pattern A (end-to-end symptom + C-LEARN
-/// signature). A 1D stock whose INTEG rate references a higher-rank flow
-/// pinned to one element of the extra dimension
+/// Issue #559 (end-to-end). A 1D stock whose INTEG rate references a
+/// higher-rank flow pinned to one element of the extra dimension
 /// (`stock1d[scenario] = INTEG(fluxatm[scenario] - flux2d[scenario, L1], 0)`,
 /// `flux2d[scenario, layers]`). The native MDL `collect_flows` dropped the
 /// `[scenario, L1]` pin and wired the bare 2D `flux2d` as a named outflow
 /// of the 1D stock, so the dimension checker reported
-/// `mismatched_dimensions` on `stock1d` -- the exact C-LEARN
-/// `c_in_mixed_layer` / `heat_in_atmosphere_and_upper_ocean` shape.
+/// `mismatched_dimensions` on `stock1d` (e.g. C-LEARN's
+/// `c_in_mixed_layer` / `heat_in_atmosphere_and_upper_ocean`).
 ///
-/// Pre-fix RED: `compile_project_incremental` fails with a
-/// `MismatchedDimensions` diagnostic on `stock1d`. Post-fix GREEN: the
+/// Before the fix `compile_project_incremental` failed with a
+/// `MismatchedDimensions` diagnostic on `stock1d`. After the fix the
 /// rank-changing subscripted reference falls through to the synthetic
 /// net-flow path (which preserves the 1D `flux2d[scenario, L1]` slice in
 /// the rate), so the model compiles and simulates. `fluxatm`(2) -
 /// `flux2d[*,L1]`(1) = 1 per step into `stock1d` (init 0): [0, 1].
 #[test]
-fn simulates_b2_pattern_a_subscript_pinned_flow() {
+fn simulates_subscript_pinned_higher_rank_flow() {
     use simlin_engine::common::ErrorCode;
     let mdl = "\
 {UTF-8}
@@ -1420,19 +1416,19 @@ FINAL TIME = 1 ~~|
 SAVEPER = 1 ~~|
 TIME STEP = 1 ~~|
 ";
-    let (compile_err, diags) = b3_compile_diags(mdl);
-    // The B2-A bug surfaces specifically as MismatchedDimensions on the
-    // 1D stock fed by the mis-wired bare 2D flow (pre-fix RED).
+    let (compile_err, diags) = compile_diags(mdl);
+    // The bug surfaces specifically as MismatchedDimensions on the 1D
+    // stock fed by the mis-wired bare 2D flow.
     assert!(
         !diags
             .iter()
-            .any(|d| b3_diag_code(d) == Some(ErrorCode::MismatchedDimensions)),
-        "B2-A: a subscript-pinned higher-rank flow must not produce \
+            .any(|d| diag_code(d) == Some(ErrorCode::MismatchedDimensions)),
+        "a subscript-pinned higher-rank flow must not produce \
          MismatchedDimensions on the 1D stock. Diagnostics: {diags:#?}"
     );
     assert!(
         !compile_err,
-        "B2-A: stock1d with a pinned-slice flow must compile (synthetic \
+        "stock1d with a pinned-slice flow must compile (synthetic \
          net-flow preserves the 1D `flux2d[scenario, L1]` slice). \
          Diagnostics: {diags:#?}"
     );
@@ -1440,33 +1436,31 @@ TIME STEP = 1 ~~|
     // scenario element, init 0 -> [0, 1] over the 2 steps.
     let r = run_inline_mdl(mdl);
     assert_eq!(r.step_count, 2);
-    assert_eq!(b3_series(&r, "stock1d[s1]"), vec![0.0, 1.0]);
-    assert_eq!(b3_series(&r, "stock1d[s2]"), vec![0.0, 1.0]);
+    assert_eq!(element_series(&r, "stock1d[s1]"), vec![0.0, 1.0]);
+    assert_eq!(element_series(&r, "stock1d[s2]"), vec![0.0, 1.0]);
 }
 
-/// Issue #559 blocker B2 Pattern B (end-to-end symptom; C-LEARN
-/// `c_in_deep_ocean_net_flow` / `heat_in_deep_ocean_net_flow` signature).
-/// A 2-D stock over a shift-mapped subrange whose differing per-equation
-/// flow lists force a synthesized `<stock>_net_flow`. `build_synthetic_
-/// flow_equation` cloned the RAW subrange-sliced rate
-/// (`dflux[scenario, upper] - dflux[scenario, lower]`) into every scalar
-/// element key instead of resolving it per element, so the dimension
-/// checker reported `MismatchedDimensions` on `stock2d_net_flow`.
+/// Issue #559 (end-to-end; e.g. C-LEARN's `c_in_deep_ocean_net_flow` /
+/// `heat_in_deep_ocean_net_flow`). A 2-D stock over a shift-mapped
+/// subrange whose differing per-equation flow lists force a synthesized
+/// `<stock>_net_flow`. `build_synthetic_flow_equation` cloned the RAW
+/// subrange-sliced rate (`dflux[scenario, upper] - dflux[scenario, lower]`)
+/// into every scalar element key instead of resolving it per element, so
+/// the dimension checker reported `MismatchedDimensions` on
+/// `stock2d_net_flow`.
 ///
-/// Pre-fix RED: a `MismatchedDimensions` diagnostic on `stock2d_net_flow`.
-/// Post-fix: the synthetic net-flow is resolved per element (parser-level
-/// shape fixed), so that MismatchedDimensions is GONE.
+/// After the per-element resolution fix, that `MismatchedDimensions` is
+/// gone (the parser-level shape is correct).
 ///
-/// DEFERRED (B1-coupled, B2.md s4): the C-LEARN deep-ocean is a genuine
-/// subscript-shift recurrence (`dflux` depends on the stock) that only
-/// *simulates* once B1's element-level resolution also lands. This
-/// minimal repro's `dflux` is constant, so it has no such cycle; we
-/// therefore assert ONLY the B2-B parser-level symptom removal (no
-/// `MismatchedDimensions` on the synthesized net-flow) and explicitly do
-/// NOT assert deep-ocean simulation *values* here -- that is the deferred
-/// B1-coupled end-to-end check.
+/// The end-to-end deep-ocean *value* check is deferred: the C-LEARN
+/// deep-ocean is a genuine subscript-shift recurrence (`dflux` depends on
+/// the stock) that only *simulates* once element-level cycle resolution
+/// also lands (#559). This minimal repro's `dflux` is constant, so it has
+/// no such cycle; we therefore assert ONLY the parser-level symptom
+/// removal (no `MismatchedDimensions` on the synthesized net-flow) and
+/// explicitly do NOT assert deep-ocean simulation *values* here.
 #[test]
-fn simulates_b2_pattern_b_synthetic_net_flow_shape() {
+fn simulates_synthetic_net_flow_shape() {
     use simlin_engine::common::ErrorCode;
     let mdl = "\
 {UTF-8}
@@ -1484,17 +1478,17 @@ FINAL TIME = 1 ~~|
 SAVEPER = 1 ~~|
 TIME STEP = 1 ~~|
 ";
-    let (_compile_err, diags) = b3_compile_diags(mdl);
-    // The B2-B bug surfaces as MismatchedDimensions on the synthesized
+    let (_compile_err, diags) = compile_diags(mdl);
+    // The bug surfaces as MismatchedDimensions on the synthesized
     // `_net_flow` (raw subrange-sliced rate cloned into scalar element
-    // keys). Post-fix that specific symptom is gone.
+    // keys). After the fix that specific symptom is gone.
     let mismatched: Vec<_> = diags
         .iter()
-        .filter(|d| b3_diag_code(d) == Some(ErrorCode::MismatchedDimensions))
+        .filter(|d| diag_code(d) == Some(ErrorCode::MismatchedDimensions))
         .collect();
     assert!(
         mismatched.is_empty(),
-        "B2-B: the synthesized net-flow must be resolved per element so no \
+        "the synthesized net-flow must be resolved per element so no \
          MismatchedDimensions remains (parser-level shape fix). Found: \
          {mismatched:#?}"
     );
