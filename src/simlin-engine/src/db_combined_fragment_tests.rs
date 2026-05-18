@@ -484,3 +484,174 @@ fn combined_fragment_trailing_non_write_opcodes_join_last_segment() {
         vec![vref("ce", 0), vref("ecc", 0), vref("ce", 1), vref("ecc", 1),]
     );
 }
+
+// ── AC2.3: combined-fragment injection is layout-transparent ────────────
+//
+// End-to-end through `assemble_module` (the Task 6 production consumer).
+// For a resolved multi-variable recurrence SCC (`ref.mdl`-shaped
+// `ce`/`ecc`), the assembled module's per-member write slots must be
+// IDENTICAL to the slots a hypothetical acyclic equivalent gets -- i.e.
+// exactly `compute_layout`'s element-slot range for each member.
+// `compute_layout` is SCC-agnostic by construction (it assigns offsets
+// purely by sorted name + size, never consulting `resolved_sccs`), so it
+// IS the "hypothetical acyclic equivalent" offset map. The combined
+// fragment keeps every write's original `SymVarRef { name,
+// element_offset }`, so `resolve_module` maps each write to the same
+// model slot it would get without the SCC -- per-variable result series
+// stay individually addressable (AC2.3).
+
+use crate::db::{SimlinDb, sync_from_datamodel};
+use crate::test_common::TestProject;
+
+/// A `ref.mdl`-shaped two-variable inter-element recurrence: whole-
+/// variable `ce`<->`ecc` is a 2-cycle, but the induced element graph is
+/// acyclic, so Task 4/5b resolve the `{ce,ecc}` SCC.
+fn ref_shaped_project() -> TestProject {
+    TestProject::new("ref_shaped_assemble")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges(
+            "ce[t]",
+            vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+        )
+        .array_with_ranges(
+            "ecc[t]",
+            vec![
+                ("t1", "ce[t1] + 1"),
+                ("t2", "ce[t2] + 1"),
+                ("t3", "ce[t3] + 1"),
+            ],
+        )
+}
+
+/// `compute_layout`'s contiguous element slot range for `name`.
+fn layout_slots(layout: &crate::compiler::symbolic::VariableLayout, name: &str) -> Vec<usize> {
+    let e = layout
+        .get(name)
+        .unwrap_or_else(|| panic!("`{name}` must be in the layout"));
+    (e.offset..e.offset + e.size).collect()
+}
+
+#[test]
+fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
+    let db = SimlinDb::default();
+    let dm = ref_shaped_project().build_datamodel();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+    let project = result.project;
+
+    // Precondition (Task 5b): the multi-member SCC must be resolved and
+    // the gate must NOT report a cycle, otherwise `assemble_module`
+    // early-returns before injecting anything.
+    let dep_graph = crate::db::model_dependency_graph(&db, model, project);
+    assert!(
+        !dep_graph.has_cycle,
+        "Task 5b precondition: the element-acyclic {{ce,ecc}} SCC must \
+         survive the cycle gate (has_cycle == false)"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "exactly one resolved SCC ({{ce,ecc}}) -- got {:?}",
+        dep_graph.resolved_sccs
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs[0].members,
+        [Ident::new("ce"), Ident::new("ecc")]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(dep_graph.resolved_sccs[0].phase, SccPhase::Dt);
+
+    // The SCC-agnostic "hypothetical acyclic equivalent" offset map.
+    // `compute_layout` is `#[salsa::tracked(returns(ref))]`, so this is
+    // already a `&VariableLayout`.
+    let layout = crate::db::compute_layout(&db, model, project, true);
+    let mut acyclic_ce = layout_slots(layout, "ce");
+    let mut acyclic_ecc = layout_slots(layout, "ecc");
+    acyclic_ce.sort_unstable();
+    acyclic_ecc.sort_unstable();
+    assert_eq!(acyclic_ce.len(), 3, "ce occupies 3 element slots");
+    assert_eq!(acyclic_ecc.len(), 3, "ecc occupies 3 element slots");
+
+    // Assemble the module: Task 6 must inject the combined `{ce,ecc}`
+    // fragment into the flows phase (skipping the per-variable pushes),
+    // its writes keeping their original `(name, element_offset)`.
+    let module = crate::db::assemble_module(&db, model, project, true, &BTreeSet::new())
+        .expect("ref-shaped resolved SCC must assemble (no CircularDependency)");
+
+    // The assembled flows bytecode's AssignCurr target offsets, re-derived
+    // from the resolved bytecode exactly as `resolve_module` does.
+    let flow_offsets =
+        crate::compiler::symbolic::extract_assign_curr_offsets(&module.compiled_flows);
+
+    // AC2.3: every member element slot the acyclic layout assigns is
+    // written by the combined fragment, at EXACTLY that slot -- the
+    // combined fragment is layout-transparent (it neither moves a write
+    // off its layout slot nor drops/duplicates a member element).
+    for slot in acyclic_ce.iter().chain(acyclic_ecc.iter()) {
+        assert!(
+            flow_offsets.contains(slot),
+            "AC2.3: the combined SCC fragment must write member slot \
+             {slot} (ce slots {acyclic_ce:?}, ecc slots {acyclic_ecc:?}); \
+             assembled flow AssignCurr offsets = {flow_offsets:?}"
+        );
+    }
+
+    // The combined fragment writes ONLY the six member slots for the SCC
+    // (no extra/foreign slot, no perturbation). `ce`/`ecc` are the only
+    // flow variables here, so the assembled flows' write set is exactly
+    // the union of the two members' acyclic slot ranges -- proving the
+    // resolution did not shift any other variable's offsets either.
+    let mut expected: Vec<usize> = acyclic_ce
+        .iter()
+        .chain(acyclic_ecc.iter())
+        .copied()
+        .collect();
+    expected.sort_unstable();
+    expected.dedup();
+    assert_eq!(
+        flow_offsets, expected,
+        "AC2.3: the assembled flows must write exactly the acyclic \
+         layout's {{ce,ecc}} slots -- no offset perturbation"
+    );
+
+    // Task 6 behavioral signature (RED before the injection, GREEN
+    // after): the combined fragment is injected, so the assembled flows
+    // bytecode emits the member writes in the SCC's INTERLEAVED
+    // `element_order` -- NOT as two per-variable contiguous blocks. For
+    // this `ref.mdl` shape the verdict order is
+    //   ce[t1] (const) -> ecc[t1]=ce[t1]+1 -> ce[t2]=ecc[t1]+1 ->
+    //   ecc[t2]=ce[t2]+1 -> ce[t3]=ecc[t2]+1 -> ecc[t3]=ce[t3]+1,
+    // i.e. interleaved absolute slots
+    //   [ce0, ecc0, ce1, ecc1, ce2, ecc2].
+    // Before Task 6 each member is pushed as its own fragment, so the
+    // order is the per-variable contiguous [ce0,ce1,ce2, ecc0,ecc1,ecc2]
+    // -- this assertion FAILS RED until the combined fragment is
+    // injected at the first SCC member's runlist slot.
+    let ordered_writes: Vec<usize> = module
+        .compiled_flows
+        .code
+        .iter()
+        .filter_map(|op| match op {
+            crate::bytecode::Opcode::AssignCurr { off }
+            | crate::bytecode::Opcode::AssignConstCurr { off, .. }
+            | crate::bytecode::Opcode::BinOpAssignCurr { off, .. } => Some(*off as usize),
+            _ => None,
+        })
+        .collect();
+    let interleaved = vec![
+        acyclic_ce[0],
+        acyclic_ecc[0],
+        acyclic_ce[1],
+        acyclic_ecc[1],
+        acyclic_ce[2],
+        acyclic_ecc[2],
+    ];
+    assert_eq!(
+        ordered_writes, interleaved,
+        "Task 6: the assembled flows must emit member writes in the SCC's \
+         interleaved element_order (combined fragment injected), not as \
+         two per-variable contiguous blocks. element_order = {:?}",
+        dep_graph.resolved_sccs[0].element_order
+    );
+}

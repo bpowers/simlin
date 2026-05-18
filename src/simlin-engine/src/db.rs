@@ -3353,14 +3353,10 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
 ///   sourceable in the simple per-element shape, mirroring
 ///   `symbolic_phase_element_order`'s `saw_write` guard).
 ///
-/// **Currently consumed only by `combine_scc_fragment` (in turn only by
-/// its `#[cfg(test)]` tests).** Subcomponent B Task 6 wires
-/// `combine_scc_fragment` into `assemble_module`'s dt + init fragment
-/// collection, restoring a production consumer; the
-/// `cfg_attr(not(test), allow(dead_code))` suppresses the otherwise-
-/// correct unused warning for the non-test build until then (same staged
-/// convention as `var_phase_lowered_exprs_prod`).
-#[cfg_attr(not(test), allow(dead_code))]
+/// Consumed by `combine_scc_fragment`, which `assemble_module` invokes
+/// for every resolved recurrence SCC (the Subcomponent B Task 6
+/// production consumer -- the dt flows runlist and the synthetic-ident
+/// init `SymbolicCompiledInitial` path).
 fn segment_member_by_element(
     member: &str,
     code: &[crate::compiler::symbolic::SymbolicOpcode],
@@ -3471,17 +3467,12 @@ fn segment_member_by_element(
 ///   segment;
 /// - a resource-ID renumber overflows its target ID type.
 ///
-/// **Currently consumed only by its own `#[cfg(test)]` tests.**
-/// Subcomponent B Task 6 wires this into `assemble_module`'s dt + init
-/// fragment-collection loops (skip every `ResolvedScc` member's
-/// per-variable fragment, inject this combined fragment at the first
-/// member's slot), restoring a production consumer. It is intentionally
-/// implemented now (Task 5) with its structural-correctness tests so Task
-/// 6 only does wiring; the `cfg_attr(not(test), allow(dead_code))`
-/// suppresses the otherwise-correct unused warning for the non-test build
-/// until then (same staged convention as `var_phase_lowered_exprs_prod` /
-/// `var_phase_symbolic_fragment_prod`).
-#[cfg_attr(not(test), allow(dead_code))]
+/// `assemble_module` (Subcomponent B Task 6) invokes this for every
+/// resolved recurrence SCC: it skips each member's per-variable fragment
+/// in the dt-flows and init collection loops and injects this combined
+/// fragment at the first member's runlist slot (the dt fragment into
+/// `flow_frags`, the init fragment as one synthetic-ident
+/// `SymbolicCompiledInitial`).
 pub(crate) fn combine_scc_fragment(
     scc: &ResolvedScc,
     member_fragments: &HashMap<Ident<Canonical>, crate::compiler::symbolic::PerVarBytecodes>,
@@ -4614,13 +4605,163 @@ pub fn assemble_module(
     let is_module_input =
         |var_name: &str| -> bool { module_inputs.contains(&*canonicalize(var_name)) };
 
+    // ── Combined per-element fragments for resolved recurrence SCCs ─────
+    //
+    // A multi-member (or single-variable) recurrence SCC whose induced
+    // element graph the cycle gate proved acyclic (`dep_graph
+    // .resolved_sccs`, populated by the Task 4 symbolic verdict) is
+    // lowered as ONE combined `PerVarBytecodes` whose per-element writes
+    // follow the SCC's verified `element_order` (Task 5
+    // `combine_scc_fragment`), instead of the members' individual
+    // one-contiguous-block-per-variable fragments -- the latter cannot
+    // express the required cross-member per-element interleaving. Each
+    // member's symbolic fragment is sourced via the EXACT production
+    // compile+symbolize path (`var_phase_symbolic_fragment_prod`, the
+    // Task 4 accessor -- never a re-derivation), so every write keeps its
+    // original `SymVarRef { name, element_offset }`; `resolve_module`
+    // therefore maps each write to the same model slot the acyclic layout
+    // assigns and the results offset map is unchanged (AC2.3).
+    //
+    // Two combined fragments per SCC are built up-front so they OUTLIVE
+    // the `concatenate_fragments` / init-renumber calls below (the
+    // `flow_frags`/`initial_frags` vectors hold `&` borrows into these):
+    //  * the DT combined fragment (sourced from each member's
+    //    `SccPhase::Dt` symbolic fragment), injected into the flows
+    //    runlist -- only `phase == Dt` SCCs (an `Initial`-phase SCC is
+    //    stock-backed and stocks are not flow variables).
+    //  * the INIT combined fragment (sourced from each member's
+    //    `SccPhase::Initial` symbolic fragment), injected into the
+    //    initials runlist via the Task 1 spike's single synthetic-ident
+    //    `SymbolicCompiledInitial` mechanism -- built for EVERY resolved
+    //    SCC (both phases), because a `Dt`-phase aux SCC's members carry
+    //    the SAME recurrence in their init equations and the initials
+    //    runlist groups BOTH phases contiguously (see the
+    //    `build_scc_grouping(false)` runlist comment). The SCC's
+    //    `element_order` (dt order for a `phase: Dt` SCC) is valid for
+    //    the init interleave because a same-equation aux's init and dt
+    //    element graphs are structurally identical; if they ever diverge
+    //    (a member's init fragment cannot be segmented to match
+    //    `element_order`) `combine_scc_fragment` returns a loud-safe
+    //    `Err` and assembly fails with an Assembly diagnostic rather than
+    //    miscompiling.
+    //
+    // Loud-safe: an unsourceable member (`var_phase_symbolic_fragment_prod`
+    // returned `None`) or a `combine_scc_fragment` error accumulates an
+    // Assembly diagnostic and aborts assembly (mirrors the existing
+    // missing-fragment / concatenate-error pattern); the combined
+    // fragment is NEVER silently dropped or partially injected.
+    let resolved_sccs = &dep_graph.resolved_sccs;
+    let combine_scc_for_phase = |scc: &ResolvedScc,
+                                 phase: SccPhase|
+     -> Result<crate::compiler::symbolic::PerVarBytecodes, String> {
+        let mut member_fragments: HashMap<
+            Ident<Canonical>,
+            crate::compiler::symbolic::PerVarBytecodes,
+        > = HashMap::with_capacity(scc.members.len());
+        for member in &scc.members {
+            let frag = var_phase_symbolic_fragment_prod(
+                db,
+                model,
+                project,
+                member.as_str(),
+                phase.clone(),
+            )
+            .ok_or_else(|| {
+                format!(
+                    "resolved recurrence SCC member `{}` has no \
+                         sourceable symbolic fragment for its phase; \
+                         cannot build the combined per-element fragment",
+                    member.as_str()
+                )
+            })?;
+            member_fragments.insert(member.clone(), frag);
+        }
+        combine_scc_fragment(scc, &member_fragments)
+    };
+
+    // DT combined fragments, indexed parallel to `resolved_sccs`
+    // (`None` for an `Initial`-phase SCC -- not a flow). INIT combined
+    // fragments for every SCC. Both owned here to the end of
+    // `assemble_module`.
+    let mut dt_combined: Vec<Option<crate::compiler::symbolic::PerVarBytecodes>> =
+        Vec::with_capacity(resolved_sccs.len());
+    let mut init_combined: Vec<crate::compiler::symbolic::PerVarBytecodes> =
+        Vec::with_capacity(resolved_sccs.len());
+    for scc in resolved_sccs.iter() {
+        let dt = if scc.phase == SccPhase::Dt {
+            Some(combine_scc_for_phase(scc, SccPhase::Dt).inspect_err(|msg| {
+                try_accumulate_diagnostic(
+                    db,
+                    Diagnostic {
+                        model: model_name.clone(),
+                        variable: None,
+                        error: DiagnosticError::Assembly(msg.clone()),
+                        severity: DiagnosticSeverity::Error,
+                    },
+                );
+            })?)
+        } else {
+            None
+        };
+        let init = combine_scc_for_phase(scc, SccPhase::Initial).inspect_err(|msg| {
+            try_accumulate_diagnostic(
+                db,
+                Diagnostic {
+                    model: model_name.clone(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg.clone()),
+                    severity: DiagnosticSeverity::Error,
+                },
+            );
+        })?;
+        dt_combined.push(dt);
+        init_combined.push(init);
+    }
+
+    // Member-name -> resolved-SCC index. A member is in at most one SCC
+    // (the SCCs in `resolved_sccs` are pairwise disjoint -- see
+    // `scc_map_from_resolved`), so this is well-defined.
+    let scc_of_member: HashMap<&str, usize> = resolved_sccs
+        .iter()
+        .enumerate()
+        .flat_map(|(idx, scc)| scc.members.iter().map(move |m| (m.as_str(), idx)))
+        .collect();
+
     // Collect fragments for each phase, tracking missing variables
     let mut initial_frags: Vec<(String, &crate::compiler::symbolic::PerVarBytecodes)> = Vec::new();
     let mut flow_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
     let mut stock_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
     let mut missing_vars: Vec<String> = Vec::new();
 
+    // Track which SCCs have already had their combined fragment injected
+    // in each runlist. Task 5b guarantees a resolved SCC's members are a
+    // contiguous, byte-stable block at the SCC's topological slot, so
+    // "inject at the first member encountered, skip the rest" lands the
+    // combined fragment in the correct relative position. The runlist
+    // `Vec<String>` itself is salsa-owned and NOT mutated (we skip during
+    // collection, never remove).
+    let mut injected_init_sccs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut injected_flow_sccs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
     for var_name in &dep_graph.runlist_initials {
+        if let Some(&scc_idx) = scc_of_member.get(var_name.as_str()) {
+            // A resolved-SCC member: its per-ident init fragment is
+            // SUBSUMED by the SCC's single combined init fragment. Inject
+            // that combined fragment once, at the first member of this
+            // SCC seen in the initials runlist, under a synthetic ident
+            // (`$⁚scc⁚init⁚{n}`). The spike verified `resolve_module` /
+            // `eval_initials` consume `compiled_initials` positionally
+            // (ident-agnostic; offsets re-derived from the bytecode's
+            // `AssignCurr` operands), so one `SymbolicCompiledInitial`
+            // may write every member's init slots.
+            if injected_init_sccs.insert(scc_idx) {
+                let synthetic_ident = format!("$\u{205A}scc\u{205A}init\u{205A}{scc_idx}");
+                initial_frags.push((synthetic_ident, &init_combined[scc_idx]));
+            }
+            // Non-first members (and the first, after injection): skip
+            // the per-ident push entirely.
+            continue;
+        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.initial_bytecodes
         {
@@ -4631,6 +4772,18 @@ pub fn assemble_module(
     }
 
     for var_name in &dep_graph.runlist_flows {
+        if let Some(&scc_idx) = scc_of_member.get(var_name.as_str())
+            && let Some(ref combined) = dt_combined[scc_idx]
+        {
+            // A `phase == Dt` resolved-SCC member: its per-variable flow
+            // fragment is subsumed by the SCC's combined dt fragment.
+            // Push the combined fragment once, at the first member of
+            // this SCC encountered in the flows runlist; skip the rest.
+            if injected_flow_sccs.insert(scc_idx) {
+                flow_frags.push(combined);
+            }
+            continue;
+        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.flow_bytecodes
         {
