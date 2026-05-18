@@ -22,7 +22,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::canonicalize;
 // `Canonical`/`Ident` are used in production by the element-cycle
-// refinement (`resolve_dt_recurrence_sccs` and friends), not only by the
+// refinement (`resolve_recurrence_sccs` and friends), not only by the
 // `#[cfg(test)]` SCC accessors.
 use crate::common::{Canonical, Ident};
 use crate::db::{
@@ -370,7 +370,7 @@ pub(crate) fn dt_cycle_sccs(
 /// > resolved and produces no diagnostic; one that is element-cyclic OR
 /// > not element-sourceable is unresolved and the engine flags it).
 ///
-/// `resolve_dt_recurrence_sccs` resolves an SCC only when *every*
+/// `resolve_recurrence_sccs` resolves an SCC only when *every*
 /// offending SCC is resolvable (`!has_unresolved`), so the engine is
 /// all-or-nothing per model: either `resolved_sccs` covers every
 /// instrumented SCC and no diagnostic is raised, or `resolved_sccs` is
@@ -388,15 +388,22 @@ pub(crate) fn dt_cycle_sccs(
 ///    saw as a cycle (the two relations drifted; the whole reason this
 ///    cross-check exists).
 ///
-/// **Phase-1 scoping note (NOT a permanent invariant):** the
-/// init-phase relation is currently acyclic by construction for every
-/// harness fixture, and `refine_scc_to_element_verdict` resolves only
-/// single-variable self-recurrences whose self-edge happens to be
-/// structurally present in both the dt and init relations. Phase 2
-/// introduces init-cyclic-but-element-acyclic fixtures and init-cycle
-/// resolution; this predicate (and the harness around it) must be
-/// generalized then to consult an init-phase resolved-SCC set as well.
-/// Do not treat the current init-acyclic situation as a guarantee.
+/// **Phase-scoping note.** This predicate cross-checks only the **dt**
+/// path: `sccs` is the dt instrumentation (`dt_cycle_sccs` over
+/// `dt_walk_successors`), so check (2) is scoped to `phase == Dt`
+/// resolved SCCs. Phase 2 Task 3 added `phase: Initial` resolution for
+/// init-only recurrences (a per-element recurrence in a stock's initial
+/// value), which are *structurally distinct* from dt -- a stock breaks
+/// the dt chain, so an init-only SCC is correctly NOT dt-instrumented
+/// and is intentionally excluded from check (2). The init-phase
+/// resolved-SCC set is instead policed by its own structural argument
+/// (the init cycle gate breaks only init-element-acyclic single-variable
+/// members' self-edges; any residual genuine init cycle still raises
+/// `CircularDependency`, exercised directly by the init-phase tests). A
+/// dedicated init-phase *instrumentation* + symmetric cross-check
+/// (mirroring `dt_cycle_sccs`/this predicate for the init relation)
+/// remains a later-task obligation; do not treat the absence of an init
+/// cross-check as a guarantee that the init path needs none.
 ///
 /// Returns `Some(reason)` iff the engine and the refinement diverge on
 /// the same compiled model (=> stop, do not gate: the instrumentation or
@@ -424,7 +431,7 @@ fn dt_cycle_sccs_consistency_violation(
 
     // (1) An instrumented SCC the engine resolved is NOT a cycle; one it
     // did not resolve IS. Because the engine is all-or-nothing per model
-    // (`resolve_dt_recurrence_sccs` resolves nothing unless every
+    // (`resolve_recurrence_sccs` resolves nothing unless every
     // offending SCC is resolvable), "some instrumented SCC is unresolved"
     // is exactly the condition under which the engine raises the
     // diagnostic.
@@ -459,17 +466,34 @@ fn dt_cycle_sccs_consistency_violation(
         ));
     }
 
-    // (2) Every resolved SCC must be one the dt instrumentation actually
-    // surfaced. A `ResolvedScc` whose members are not an instrumented SCC
-    // means the refinement resolved a "cycle" the shared dt relation
-    // never saw -- the two relations drifted.
+    // (2) Every resolved **dt-phase** SCC must be one the dt
+    // instrumentation actually surfaced. A `phase: Dt` `ResolvedScc`
+    // whose members are not an instrumented SCC means the refinement
+    // resolved a dt "cycle" the shared dt relation never saw -- the two
+    // relations drifted.
+    //
+    // This is deliberately scoped to `phase == Dt`. A `phase: Initial`
+    // `ResolvedScc` (Phase 2 Task 3 -- a per-element recurrence in a
+    // stock's initial value) is *structurally distinct* from dt: a
+    // stock breaks the dt chain, so `dt_walk_successors` reports NO dt
+    // SCC for it. Cross-checking an init-only verdict against the dt
+    // instrumentation would falsely flag a correct resolution. The dt
+    // cross-check stays exactly as strong for the dt path (an
+    // un-instrumented `phase: Dt` SCC is still a hard divergence); the
+    // init-phase resolved-SCC set has its own structural argument (the
+    // init cycle gate breaks only init-element-acyclic members'
+    // self-edges; any residual genuine init cycle still raises
+    // `CircularDependency`, exercised by the init-phase tests) and a
+    // dedicated init instrumentation/cross-check is a later-task
+    // obligation.
     if let Some(orphan) = resolved_sccs
         .iter()
+        .filter(|s| s.phase == crate::db::SccPhase::Dt)
         .find(|s| !instrumented.contains(&s.members))
     {
         return Some(format!(
-            "the element-cycle refinement resolved an SCC the shared \
-             dt-phase instrumentation never surfaced as a cycle \
+            "the element-cycle refinement resolved a dt-phase SCC the \
+             shared dt-phase instrumentation never surfaced as a cycle \
              (resolved members={:?}; instrumented multi={:?}, \
              self_loops={:?}). The shared dt relation and the refinement \
              drifted -- stop, do not gate on a mis-derived relation.",
@@ -802,7 +826,7 @@ enum SccVerdict {
 /// `dt_previous_referenced_vars` from `dt_deps` (the
 /// `dt_deps.retain(|dep| !lagged_dt_previous.contains(dep))` near the top
 /// of `build_var_info`), so `dt_walk_successors` reports NO whole-variable
-/// self-edge for a PREVIOUS-only recurrence, so `resolve_dt_recurrence_sccs`
+/// self-edge for a PREVIOUS-only recurrence, so `resolve_recurrence_sccs`
 /// never identifies it as an SCC and this function is never invoked for
 /// it. For any SCC that IS identified, the over-approximation is the
 /// loud-safe direction: `collect_read_slots` deliberately over-collects
@@ -943,101 +967,164 @@ fn phase_element_order(
     Some(order)
 }
 
-/// Refine one offending dt SCC (`members`) into its exact per-element
-/// graph and render the element-acyclicity verdict.
+/// Refine one offending SCC (`members`) for the given `phase` into its
+/// exact per-element graph and render the element-acyclicity verdict.
 ///
-/// Phase 1 only resolves the single-variable (self-loop) case; a
-/// multi-variable SCC is `Unresolved` (Phase 2 resolves them).
+/// Subcomponent A only resolves the single-variable (self-loop) case; a
+/// multi-variable SCC is `Unresolved` (Phase 2 Subcomponent B's combined-
+/// fragment lowering resolves those).
 ///
-/// A single-variable self-recurrence's whole-variable self-edge appears
-/// in BOTH the dt and the init dependency relations (it is the same
-/// equation; e.g. `ecc[tNext]=ecc[tPrev]+1` is `ecc`'s init AST too), so
-/// `model_dependency_graph_impl` runs the cycle gate over both. The dt
-/// SCC is only safe to resolve if the member's induced element graph is
-/// acyclic in **both** phases -- otherwise breaking the dt self-edge
-/// would let the model through while a genuine init cycle is silently
-/// masked. So this verifies element-acyclicity for `SccPhase::Dt` AND
-/// `SccPhase::Initial` (both use the existing per-phase production
-/// lowering); only then is the SCC `Resolved`. (This is NOT Phase 2's
-/// init-cycle resolution -- which targets init cycles structurally
-/// distinct from dt -- it is the minimal correctness extension required
-/// for the *same* single-variable self-recurrence equation to compile,
-/// since its self-edge is structurally present in both relations.) The
-/// emitted `ResolvedScc` carries the dt per-element order and
-/// `phase: SccPhase::Dt`.
+/// **`SccPhase::Dt` (the dt path).** A single-variable dt self-recurrence's
+/// whole-variable self-edge appears in BOTH the dt and the init
+/// dependency relations (it is the *same equation*; e.g.
+/// `ecc[tNext]=ecc[tPrev]+1` is `ecc`'s init AST too), so
+/// `model_dependency_graph_impl` runs the cycle gate over both. Breaking
+/// only the dt self-edge would let the model through while a genuine
+/// *init* cycle on the same equation is silently masked. So the dt
+/// verdict verifies element-acyclicity for `SccPhase::Dt` **and**, as a
+/// precondition, `SccPhase::Initial`; only then is the SCC `Resolved`
+/// with the dt per-element order and `phase: SccPhase::Dt`. This is the
+/// minimal correctness extension for the same-equation aux
+/// self-recurrence, NOT init-cycle resolution.
+///
+/// **`SccPhase::Initial` (the init path -- Phase 2 Task 3).** Targets an
+/// init recurrence that is *structurally distinct* from dt: a stock's
+/// dt-equation is its flow (a stock breaks the dt chain --
+/// `dt_walk_successors` returns `[]`), while its init-equation is its
+/// initial value, so a stock whose initial value is a per-element
+/// recurrence has an init self-loop with **no corresponding dt cycle**.
+/// Here only the **init** induced element graph is relevant: the dt
+/// precondition the `Dt` branch applies would be *wrong* (a stock has no
+/// dt element graph -- its dt lowering is `AssignNext`, not the
+/// per-element `AssignCurr` the element graph reads -- so requiring dt
+/// element-acyclicity would spuriously reject every init-only
+/// recurrence). The init verdict therefore verifies `SccPhase::Initial`
+/// only, and emits the init per-element order with
+/// `phase: SccPhase::Initial`. The both-relations aux self-recurrence is
+/// NOT double-resolved here: `model_dependency_graph_impl` excludes init
+/// SCCs whose members the dt path already resolved before consuming the
+/// init verdict, so `{ecc}` stays a single `phase: Dt` `ResolvedScc`.
+///
+/// Both branches reuse the same phase-parameterized `phase_element_order`
+/// builder over the engine's own production-lowered per-element exprs --
+/// no init-only re-implementation.
 fn refine_scc_to_element_verdict(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     members: &BTreeSet<Ident<Canonical>>,
+    phase: crate::db::SccPhase,
 ) -> SccVerdict {
-    // Phase 1 scope: only single-variable self-recurrence resolves. A
-    // multi-variable SCC is routed to `CircularDependency` (Phase 2).
+    use crate::db::SccPhase;
+
+    // Subcomponent A scope: only single-variable self-recurrence
+    // resolves. A multi-variable SCC is routed to `CircularDependency`
+    // (Phase 2 Subcomponent B's combined-fragment lowering).
     if members.len() != 1 {
         return SccVerdict::Unresolved;
     }
 
-    // The dt induced element graph must be acyclic + element-sourceable.
-    let dt_order = match phase_element_order(db, model, project, members, crate::db::SccPhase::Dt) {
-        Some(o) => o,
-        None => return SccVerdict::Unresolved,
-    };
-    // ...AND so must the init induced element graph: a single-variable
-    // self-recurrence's self-edge is structurally present in the init
-    // relation too, so the init cycle gate would independently reject
-    // the model. Only resolve when the recurrence is well-founded in
-    // BOTH phases (loud-safe: an init-element-cyclic member stays
-    // `CircularDependency`).
-    if phase_element_order(db, model, project, members, crate::db::SccPhase::Initial).is_none() {
-        return SccVerdict::Unresolved;
+    match phase {
+        SccPhase::Dt => {
+            // The dt induced element graph must be acyclic +
+            // element-sourceable.
+            let dt_order = match phase_element_order(db, model, project, members, SccPhase::Dt) {
+                Some(o) => o,
+                None => return SccVerdict::Unresolved,
+            };
+            // ...AND so must the init induced element graph: a
+            // single-variable dt self-recurrence's self-edge is
+            // structurally present in the init relation too (same
+            // equation), so the init cycle gate would independently
+            // reject the model. Only resolve when the recurrence is
+            // well-founded in BOTH phases (loud-safe: an
+            // init-element-cyclic member stays `CircularDependency`).
+            if phase_element_order(db, model, project, members, SccPhase::Initial).is_none() {
+                return SccVerdict::Unresolved;
+            }
+            SccVerdict::Resolved(crate::db::ResolvedScc {
+                members: members.clone(),
+                element_order: dt_order,
+                phase: SccPhase::Dt,
+            })
+        }
+        SccPhase::Initial => {
+            // The init induced element graph must be acyclic +
+            // element-sourceable. NO dt precondition here: an init-only
+            // (stock-backed) recurrence has no dt self-edge and no dt
+            // per-element `AssignCurr` graph, so requiring dt
+            // element-acyclicity would spuriously reject it (loud-safe:
+            // an init-element-cyclic member stays `CircularDependency`).
+            let init_order =
+                match phase_element_order(db, model, project, members, SccPhase::Initial) {
+                    Some(o) => o,
+                    None => return SccVerdict::Unresolved,
+                };
+            SccVerdict::Resolved(crate::db::ResolvedScc {
+                members: members.clone(),
+                element_order: init_order,
+                phase: SccPhase::Initial,
+            })
+        }
     }
-
-    SccVerdict::Resolved(crate::db::ResolvedScc {
-        members: members.clone(),
-        element_order: dt_order,
-        phase: crate::db::SccPhase::Dt,
-    })
 }
 
-/// The outcome of refining every offending dt SCC into its induced
-/// element graph.
+/// The outcome of refining every offending SCC (for one phase) into its
+/// induced element graph.
 pub(crate) struct DtSccResolution {
     /// SCCs whose induced element graph the cycle gate proved acyclic and
-    /// element-sourceable (single-variable self-recurrence in Phase 1).
-    /// These are excluded from the `CircularDependency` accumulation and
-    /// recorded on `ModelDepGraphResult.resolved_sccs`.
+    /// element-sourceable (single-variable self-recurrence in
+    /// Subcomponent A). These are excluded from the `CircularDependency`
+    /// accumulation and recorded on `ModelDepGraphResult.resolved_sccs`.
     pub(crate) resolved: Vec<crate::db::ResolvedScc>,
-    /// `true` iff at least one offending dt SCC is NOT resolved
-    /// (multi-variable in Phase 1, element-cyclic, or not element-
-    /// sourceable). When `false`, every dt back-edge is fully explained
-    /// by resolvable self-recurrences and the dt cycle gate must NOT set
-    /// `has_cycle` / accumulate `CircularDependency` (loud-safe: any
-    /// doubt leaves this `true`).
+    /// `true` iff at least one offending SCC is NOT resolved
+    /// (multi-variable in Subcomponent A, element-cyclic, or not
+    /// element-sourceable). When `false`, every back-edge in this phase
+    /// is fully explained by resolvable self-recurrences and the phase's
+    /// cycle gate must NOT set `has_cycle` / accumulate
+    /// `CircularDependency` (loud-safe: any doubt leaves this `true`).
     pub(crate) has_unresolved: bool,
 }
 
-/// Identify the offending dt SCC(s) over the engine's own shared dt-phase
-/// cycle relation and render each one's element-acyclicity verdict.
+/// Identify the offending SCC(s) for `phase` over the engine's own shared
+/// cycle relation for that phase and render each one's
+/// element-acyclicity verdict.
 ///
-/// *Step A -- SCC identification.* Builds the whole-variable dt adjacency
-/// exactly as `dt_cycle_sccs` does (edges from `dt_walk_successors` over
-/// the shared `build_var_info(.., &[])` universe): multi-variable SCCs
-/// via the promoted `crate::ltm::scc_components` filtered to `len() >= 2`,
+/// *Step A -- SCC identification.* Builds the whole-variable adjacency
+/// for `phase` over the shared `build_var_info(.., &[])` universe: for
+/// `SccPhase::Dt` the edges are `dt_walk_successors` (exactly as
+/// `dt_cycle_sccs` does); for `SccPhase::Initial` they are
+/// `init_walk_successors` (Phase 2 Task 2 -- the exact init-phase
+/// analogue, where a stock is NOT a sink). Multi-variable SCCs via the
+/// promoted `crate::ltm::scc_components` filtered to `len() >= 2`,
 /// single-variable self-loops detected directly from adjacency (Tarjan
-/// reports a self-loop as a size-1 component). Defining the relation once
-/// and consuming it here AND in `compute_inner` makes this the engine's
-/// real dt cycle relation by construction.
+/// reports a self-loop as a size-1 component). Defining each relation
+/// once and consuming it here AND in `compute_inner` makes this the
+/// engine's real cycle relation for the phase by construction.
 ///
 /// *Steps B/C -- per-SCC refinement + verdict* are delegated to
 /// `refine_scc_to_element_verdict` (the exact `(member, element-offset)`
-/// graph from production-lowered exprs). SCCs are iterated in the sorted
-/// `scc_components` / `BTreeSet` order so `resolved` and the downstream
-/// runlist are byte-stable.
+/// graph from the phase's production-lowered exprs). SCCs are iterated in
+/// the sorted `scc_components` / `BTreeSet` order so `resolved` and the
+/// downstream runlist are byte-stable.
 ///
 /// On the acyclic happy path there is NO offending SCC, so this returns
 /// `{ resolved: [], has_unresolved: false }` with zero refinement work.
 ///
-/// **Phase-1 scoping note -- no module-input wiring (NOT neutral).** SCC
+/// **Init vs dt overlap (consumer's responsibility).** A single-variable
+/// aux self-recurrence's self-edge is structurally present in BOTH the dt
+/// and the init relation (same equation), so calling this with
+/// `SccPhase::Initial` would *also* identify and resolve `{ecc}`. To
+/// avoid emitting a duplicate `phase: Initial` `ResolvedScc` for a
+/// member the dt path already resolved, `model_dependency_graph_impl`
+/// excludes init SCCs whose members are already in the dt-resolved set
+/// before consuming the init verdict (and only runs the init resolution
+/// at all when the init cycle gate -- with the dt-resolved set's
+/// self-edges already broken -- still reports a back-edge, i.e. a
+/// *structurally distinct* init-only cycle). This function stays
+/// phase-symmetric and cross-phase-agnostic.
+///
+/// **Scoping note -- no module-input wiring (NOT neutral).** SCC
 /// identification here builds `var_info` via
 /// `build_var_info(db, model, project, &[])` (empty module inputs), the
 /// same default wiring `dt_cycle_sccs` uses, whereas the real
@@ -1045,30 +1132,37 @@ pub(crate) struct DtSccResolution {
 /// `&module_input_names`. For an input-wired sub-model these relations can
 /// differ, so this identification is *incomplete* (it can miss an SCC that
 /// only manifests once inputs are wired in). Soundness is still preserved
-/// in Phase 1: the resolved member set only suppresses self-edges in the
-/// caller's `compute_transitive`, which re-runs over the real
+/// in Subcomponent A: the resolved member set only suppresses self-edges
+/// in the caller's `compute_transitive`, which re-runs over the real
 /// *with-inputs* `var_info`, and its `.unwrap_or_else` arm clears
 /// `resolved_sccs` + sets `has_cycle` on any residual genuine cycle, so
 /// the worst case is a *missed resolution* (a conservative
 /// `CircularDependency`), never an unsound one. `element_order` is not
-/// consumed in Phase 1. Phase 2 (which consumes `element_order` to build
-/// the combined per-element fragment) MUST plumb the real
-/// `module_input_names` into this identification before relying on it; do
-/// not treat the `&[]` argument as neutral.
-pub(crate) fn resolve_dt_recurrence_sccs(
+/// consumed in Subcomponent A. Subcomponent B (which consumes
+/// `element_order` to build the combined per-element fragment) MUST plumb
+/// the real `module_input_names` into this identification before relying
+/// on it; do not treat the `&[]` argument as neutral.
+pub(crate) fn resolve_recurrence_sccs(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
+    phase: crate::db::SccPhase,
 ) -> DtSccResolution {
+    use crate::db::SccPhase;
+
     let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
 
-    // Whole-variable dt adjacency = exactly `dt_walk_successors` for
-    // every node (the same construction `dt_cycle_sccs` performs).
+    // Whole-variable adjacency = exactly the phase's shared cycle
+    // relation for every node (the same construction `dt_cycle_sccs`
+    // performs for dt; the init-phase analogue for init).
     let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> =
         HashMap::with_capacity(var_info.len());
     let mut self_loops: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     for name in var_info.keys() {
-        let succ = dt_walk_successors(&var_info, name);
+        let succ = match phase {
+            SccPhase::Dt => dt_walk_successors(&var_info, name),
+            SccPhase::Initial => init_walk_successors(&var_info, name),
+        };
         if succ.contains(&name.as_str()) {
             self_loops.insert(Ident::from_str_unchecked(name));
         }
@@ -1094,8 +1188,9 @@ pub(crate) fn resolve_dt_recurrence_sccs(
     let mut resolved: Vec<crate::db::ResolvedScc> = Vec::new();
     let mut has_unresolved = false;
 
-    // Multi-variable SCCs: Phase 1 does not resolve them (Phase 2 does)
-    // -- always unresolved. `refine_scc_to_element_verdict` also returns
+    // Multi-variable SCCs: Subcomponent A does not resolve them
+    // (Subcomponent B's combined-fragment lowering does) -- always
+    // unresolved. `refine_scc_to_element_verdict` also returns
     // `Unresolved` for `members.len() != 1`, so this is consistent; we
     // short-circuit to avoid pointless refinement work.
     if !multi.is_empty() {
@@ -1103,10 +1198,10 @@ pub(crate) fn resolve_dt_recurrence_sccs(
     }
 
     // Single-variable self-loop SCCs (sorted): refine each into its
-    // induced element graph and record the verdict.
+    // induced element graph for `phase` and record the verdict.
     for v in &self_loops {
         let members: BTreeSet<Ident<Canonical>> = std::iter::once(v.clone()).collect();
-        match refine_scc_to_element_verdict(db, model, project, &members) {
+        match refine_scc_to_element_verdict(db, model, project, &members, phase.clone()) {
             SccVerdict::Resolved(scc) => resolved.push(scc),
             SccVerdict::Unresolved => has_unresolved = true,
         }

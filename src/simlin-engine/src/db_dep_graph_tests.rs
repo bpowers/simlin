@@ -567,16 +567,52 @@ fn consistency_violation_some_when_resolved_self_loop_still_flagged() {
 }
 
 #[test]
-fn consistency_violation_some_when_resolved_scc_not_instrumented() {
-    // A `ResolvedScc` whose members the dt instrumentation never
-    // surfaced as an SCC => the refinement resolved something the shared
-    // dt relation did not even see as a cycle => the two relations
-    // drifted => STOP (the whole point of the cross-check).
+fn consistency_violation_some_when_resolved_dt_scc_not_instrumented() {
+    // A `phase: Dt` `ResolvedScc` whose members the dt instrumentation
+    // never surfaced as an SCC => the refinement resolved a DT cycle the
+    // shared dt relation did not even see => the two relations drifted
+    // => STOP (the whole point of the cross-check). This must stay
+    // flagged even after Task 3 -- the dt cross-check is unweakened for
+    // the dt path.
     let sccs = DtCycleSccs {
         multi: vec![],
         self_loops: BTreeSet::new(),
     };
     assert!(dt_cycle_sccs_consistency_violation(&sccs, &resolved_a(), false).is_some());
+}
+
+#[test]
+fn consistency_violation_none_for_init_only_resolved_scc_not_dt_instrumented() {
+    // Phase 2 Task 3 generalization: a `phase: Initial` `ResolvedScc`
+    // for an init-only recurrence (a per-element forward recurrence in a
+    // stock's initial value) is BY DESIGN absent from the dt
+    // instrumentation -- a stock breaks the dt chain, so
+    // `dt_walk_successors` reports no dt SCC for it. The dt-phase
+    // consistency cross-check must therefore NOT treat a `phase:
+    // Initial` resolved SCC as a "dt relation drifted" orphan (check 2
+    // is scoped to `phase: Dt` SCCs; the dt instrumentation does not and
+    // should not surface init-only cycles). The contrast with
+    // `consistency_violation_some_when_resolved_dt_scc_not_instrumented`
+    // is exactly the phase: a non-dt-instrumented `phase: Dt` SCC is a
+    // genuine drift; a non-dt-instrumented `phase: Initial` SCC is
+    // correct.
+    let sccs = DtCycleSccs {
+        multi: vec![],
+        self_loops: BTreeSet::new(),
+    };
+    let init_only: Vec<crate::db::ResolvedScc> = vec![crate::db::ResolvedScc {
+        members: [crate::common::Ident::new("s")].into_iter().collect(),
+        element_order: vec![
+            (crate::common::Ident::new("s"), 0usize),
+            (crate::common::Ident::new("s"), 1usize),
+        ],
+        phase: crate::db::SccPhase::Initial,
+    }];
+    assert!(
+        dt_cycle_sccs_consistency_violation(&sccs, &init_only, false).is_none(),
+        "a phase:Initial ResolvedScc that is (correctly) not dt-instrumented \
+         must NOT trip the dt-phase consistency cross-check"
+    );
 }
 
 // `array_producing_vars` membership over four cases. Both positive cases
@@ -768,10 +804,11 @@ fn var_phase_lowered_exprs_prod_none_for_absent_var_no_panic() {
 
 // ── Per-element dt SCC resolution (the cycle-gate refinement) ───────────
 //
-// `resolve_dt_recurrence_sccs` identifies the offending dt SCC(s) over
-// the same shared `dt_walk_successors` relation the engine uses, refines
-// each into an exact `(member, element-offset)` graph from the engine's
-// own production-lowered per-element exprs, and renders a verdict:
+// `resolve_recurrence_sccs(.., SccPhase::Dt)` identifies the offending
+// dt SCC(s) over the same shared `dt_walk_successors` relation the
+// engine uses, refines each into an exact `(member, element-offset)`
+// graph from the engine's own production-lowered per-element exprs, and
+// renders a verdict:
 // element-acyclic + element-sourceable single-variable self-recurrence =>
 // resolved (`ResolvedScc`, no `CircularDependency`); a genuine element
 // cycle (same-element self-loop or multi-var element 2-cycle) or a not-
@@ -800,7 +837,7 @@ fn resolve_dt_forward_recurrence_is_resolved_in_declared_order() {
     let result = sync_from_datamodel(&db, &dm);
     let model = result.models["main"].source;
 
-    let res = resolve_dt_recurrence_sccs(&db, model, result.project);
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
     assert!(
         !res.has_unresolved,
         "the single-variable self-recurrence is element-acyclic and \
@@ -826,6 +863,8 @@ fn resolve_dt_forward_recurrence_is_resolved_in_declared_order() {
 
 #[test]
 fn resolve_dt_same_element_self_cycle_is_unresolved() {
+    use crate::db::SccPhase;
+
     // `x[dimA]=x[dimA]+1`: every element reads ITSELF => element
     // self-loop => element-cyclic => unresolved (AC1.5/AC4.2). Must stay
     // rejected by construction.
@@ -837,7 +876,7 @@ fn resolve_dt_same_element_self_cycle_is_unresolved() {
     let result = sync_from_datamodel(&db, &dm);
     let model = result.models["main"].source;
 
-    let res = resolve_dt_recurrence_sccs(&db, model, result.project);
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
     assert!(
         res.has_unresolved,
         "x[dimA]=x[dimA]+1 is a genuine element self-loop and MUST be \
@@ -851,6 +890,8 @@ fn resolve_dt_same_element_self_cycle_is_unresolved() {
 
 #[test]
 fn resolve_dt_scalar_two_cycle_is_unresolved() {
+    use crate::db::SccPhase;
+
     // `a=b+1; b=a+1`: a scalar 2-cycle / multi-variable SCC. Phase 1
     // routes multi-variable SCCs to unresolved (Phase 2 resolves them),
     // and it is also a genuine element 2-cycle => unresolved (AC4.1).
@@ -859,7 +900,7 @@ fn resolve_dt_scalar_two_cycle_is_unresolved() {
     let result = sync_from_datamodel(&db, &project);
     let model = result.models["main"].source;
 
-    let res = resolve_dt_recurrence_sccs(&db, model, result.project);
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
     assert!(
         res.has_unresolved,
         "a=b+1;b=a+1 is a genuine 2-cycle and MUST be unresolved (AC4.1)"
@@ -872,6 +913,8 @@ fn resolve_dt_scalar_two_cycle_is_unresolved() {
 
 #[test]
 fn resolve_dt_acyclic_model_has_no_sccs() {
+    use crate::db::SccPhase;
+
     // The AC1.3 happy path: a clean DAG has no offending dt SCC, so the
     // refinement does zero work and reports nothing (no resolved, none
     // unresolved).
@@ -883,7 +926,7 @@ fn resolve_dt_acyclic_model_has_no_sccs() {
     let result = sync_from_datamodel(&db, &project);
     let model = result.models["main"].source;
 
-    let res = resolve_dt_recurrence_sccs(&db, model, result.project);
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
     assert!(!res.has_unresolved, "a clean DAG has no unresolved SCC");
     assert!(
         res.resolved.is_empty(),
@@ -893,6 +936,8 @@ fn resolve_dt_acyclic_model_has_no_sccs() {
 
 #[test]
 fn resolve_dt_recurrence_sccs_is_byte_stable_across_runs() {
+    use crate::db::SccPhase;
+
     // The emitted per-element run order must be byte-identical across
     // repeated computations on fresh databases (AC1.4 discipline): the
     // element graph reuses the sorted Tarjan + BTreeSet ordering, so a
@@ -908,7 +953,7 @@ fn resolve_dt_recurrence_sccs_is_byte_stable_across_runs() {
         let db = SimlinDb::default();
         let result = sync_from_datamodel(&db, &dm);
         let model = result.models["main"].source;
-        resolve_dt_recurrence_sccs(&db, model, result.project).resolved
+        resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt).resolved
     };
     assert_eq!(
         build(),
@@ -1002,6 +1047,305 @@ fn model_dependency_graph_resolved_sccs_is_byte_stable_across_runs() {
         acyclic_first, acyclic_second,
         "the acyclic control's empty resolved_sccs must be byte-identical \
          across repeated compiles (no spurious nondeterministic emission)"
+    );
+}
+
+// ── Per-element INIT SCC resolution (the init-phase cycle gate) ─────────
+//
+// `resolve_recurrence_sccs(.., SccPhase::Initial)` is the init-phase
+// analogue of the dt resolution: it identifies the offending init SCC(s)
+// over the shared `init_walk_successors` relation (Task 2), refines each
+// into its exact per-element graph from the engine's own production
+// *init*-lowered exprs (`var_phase_lowered_exprs_prod(.., Initial)`,
+// reused via the phase-parameterized `phase_element_order`), and renders
+// the verdict: element-acyclic + element-sourceable single-variable init
+// self-recurrence => `ResolvedScc { phase: Initial }`; a genuine init
+// element cycle (same-element self-loop) => unresolved (loud-safe, keep
+// `CircularDependency`).
+//
+// The init relation is structurally DISTINCT from dt only for a stock: a
+// stock's dt-equation is its flow (the stock breaks the dt chain --
+// `dt_walk_successors` returns `[]`), while its init-equation is its
+// initial value, so a stock whose initial value is a per-element forward
+// recurrence has an init self-loop with NO corresponding dt cycle. This
+// is the case Phase 1's dt path cannot reach (Phase 1's
+// `refine_scc_to_element_verdict` only verifies init-acyclicity as a
+// *precondition* of resolving a dt self-loop whose self-edge is in BOTH
+// relations -- the aux self-recurrence case). Task 3 generalizes that to
+// an independent init verdict for the init-only (stock-backed) case
+// WITHOUT regressing the aux case (a `{ecc}` already in the dt-resolved
+// set is not re-resolved as a duplicate `phase: Initial` SCC).
+
+/// A single-model datamodel project whose only stateful variable is an
+/// arrayed stock `s[t]` (over a 3-element named dimension `t`) with a
+/// per-element forward INIT recurrence and a trivial constant inflow.
+///
+/// `s`'s init AST references `s` (`s[t2]=s[t1]+1`, ...), so `s` is in its
+/// own `initial_deps` (an init self-loop). Its dt-equation is the flow
+/// `inflow` (a stock breaks the dt chain), so there is NO dt cycle. The
+/// induced per-element INIT graph `(s,0)->(s,1)->(s,2)` is acyclic.
+fn arrayed_init_recurrence_stock_project(init_eqs: Vec<(&str, &str)>) -> datamodel::Project {
+    use crate::datamodel::{Dimension, Equation, Flow, Stock, Variable};
+    let dims = vec!["t".to_string()];
+    let arrayed = init_eqs
+        .into_iter()
+        .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None, None))
+        .collect();
+    datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![Dimension::named(
+            "t".to_string(),
+            vec!["t1".to_string(), "t2".to_string(), "t3".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(Stock {
+                    ident: "s".to_string(),
+                    equation: Equation::Arrayed(dims.clone(), arrayed, None, false),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["inflow".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(Flow {
+                    ident: "inflow".to_string(),
+                    equation: Equation::ApplyToAll(dims, "0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+#[test]
+fn resolve_init_forward_recurrence_behind_stock_is_resolved() {
+    use crate::db::SccPhase;
+
+    // A stock whose INIT equation is a per-element forward recurrence
+    // (`s[t1]=1; s[t2]=s[t1]+1; s[t3]=s[t2]+1`). The stock breaks the dt
+    // chain, so this is an init-ONLY recurrence: it has NO dt cycle, yet
+    // the init relation has a forward element recurrence. Phase 1's dt
+    // path can never reach it (a stock has no dt self-edge); Task 3's
+    // init verdict resolves it.
+    let project = arrayed_init_recurrence_stock_project(vec![
+        ("t1", "1"),
+        ("t2", "s[t1] + 1"),
+        ("t3", "s[t2] + 1"),
+    ]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    // The DT relation must have NO cycle (the stock breaks the dt
+    // chain), so the dt resolution finds nothing.
+    let dt_res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(
+        !dt_res.has_unresolved && dt_res.resolved.is_empty(),
+        "a stock breaks the dt chain: the dt relation is acyclic, so the \
+         dt resolution must find neither resolved nor unresolved SCCs \
+         (got resolved={:?}, has_unresolved={})",
+        dt_res.resolved,
+        dt_res.has_unresolved
+    );
+
+    // The INIT relation has a single-variable forward element recurrence
+    // on `s` whose induced per-element graph is acyclic and
+    // element-sourceable => resolved with phase == Initial.
+    let init_res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Initial);
+    assert!(
+        !init_res.has_unresolved,
+        "the init recurrence is element-acyclic and element-sourceable: \
+         there must be NO unresolved init SCC"
+    );
+    assert_eq!(
+        init_res.resolved.len(),
+        1,
+        "exactly one resolved init SCC (s)"
+    );
+    let scc = &init_res.resolved[0];
+    assert_eq!(
+        scc.phase,
+        SccPhase::Initial,
+        "an init-phase recurrence must carry phase == Initial"
+    );
+    assert_eq!(
+        scc.members,
+        [crate::common::Ident::new("s")]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+    // Deterministic per-element init topological order: t1 has no in-SCC
+    // reader edges; t2 reads t1; t3 reads t2.
+    assert_eq!(
+        scc.element_order,
+        vec![
+            (crate::common::Ident::new("s"), 0usize),
+            (crate::common::Ident::new("s"), 1usize),
+            (crate::common::Ident::new("s"), 2usize),
+        ],
+        "init element_order must be the per-element topological order"
+    );
+}
+
+#[test]
+fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
+    // End-to-end through the production `model_dependency_graph`: the
+    // init-only forward recurrence behind a stock must NOT raise
+    // `CircularDependency`, and the emitted `resolved_sccs` must carry
+    // exactly one `ResolvedScc { phase: Initial }` for `{s}`. dt has no
+    // cycle (stock breaks it).
+    let project = arrayed_init_recurrence_stock_project(vec![
+        ("t1", "1"),
+        ("t2", "s[t1] + 1"),
+        ("t3", "s[t2] + 1"),
+    ]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "an element-acyclic init-only recurrence behind a stock must NOT \
+         set has_cycle"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "exactly one ResolvedScc for the resolved init recurrence"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs[0].phase,
+        crate::db::SccPhase::Initial,
+        "the resolved SCC is an init-phase recurrence"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs[0].members,
+        [crate::common::Ident::new("s")]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+
+    // No CircularDependency diagnostic was accumulated.
+    let diags = crate::db::model_dependency_graph::accumulated::<crate::db::CompilationDiagnostic>(
+        &db,
+        model,
+        result.project,
+    );
+    assert!(
+        !diags.iter().any(|d| matches!(
+            d.0.error,
+            crate::db::DiagnosticError::Model(crate::common::Error {
+                code: crate::common::ErrorCode::CircularDependency,
+                ..
+            })
+        )),
+        "no CircularDependency must be raised for the resolved init-only \
+         recurrence"
+    );
+}
+
+#[test]
+fn init_same_element_self_cycle_behind_stock_is_unresolved() {
+    use crate::db::SccPhase;
+
+    // A stock whose INIT equation is a genuine same-element self-cycle
+    // (`s[t] = s[t] + 1` -- every element reads ITSELF). This is a real
+    // init element self-loop and MUST stay unresolved (loud-safe: keep
+    // `CircularDependency`), exactly as the dt path keeps
+    // `x[dimA]=x[dimA]+1` unresolved.
+    let project = arrayed_init_recurrence_stock_project(vec![
+        ("t1", "s[t1] + 1"),
+        ("t2", "s[t2] + 1"),
+        ("t3", "s[t3] + 1"),
+    ]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    let init_res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Initial);
+    assert!(
+        init_res.has_unresolved,
+        "s[t]=s[t]+1 in the init equation is a genuine element self-loop \
+         and MUST be unresolved (a real cycle stays rejected)"
+    );
+    assert!(
+        init_res.resolved.is_empty(),
+        "a genuine init element self-loop yields no ResolvedScc"
+    );
+
+    // End-to-end: the genuine init cycle is still flagged.
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        dep_graph.has_cycle,
+        "a genuine init element self-cycle still sets has_cycle"
+    );
+    assert!(
+        dep_graph.resolved_sccs.is_empty(),
+        "a genuine init element self-cycle resolves nothing"
+    );
+}
+
+#[test]
+fn dt_self_recurrence_not_double_resolved_as_init_scc() {
+    // REGRESSION GUARD for Phase 1's existing init handling. The aux
+    // self-recurrence `ecc[t1]=1; ecc[t2]=ecc[t1]+1; ecc[t3]=ecc[t2]+1`
+    // has its `ecc -> ecc` self-edge in BOTH the dt and the init
+    // relation. Phase 1's dt path already resolves it (verifying init
+    // element-acyclicity as a precondition) and emits exactly ONE
+    // `ResolvedScc { phase: Dt }`; the shared resolvable set breaks its
+    // init self-edge in the init gate. Task 3's init verdict must NOT
+    // additionally emit a duplicate `ResolvedScc { phase: Initial }` for
+    // `{ecc}` -- the emitted `resolved_sccs` must stay length 1, phase
+    // Dt. (This is the exact "extends, not duplicates Phase 1" contract.)
+    let project = TestProject::new("dt_init_no_double_resolve")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges(
+            "ecc[t]",
+            vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+        );
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "the aux self-recurrence must still resolve (no CircularDependency)"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "the both-relations aux self-recurrence must emit EXACTLY ONE \
+         ResolvedScc -- Task 3's init verdict must not add a duplicate \
+         phase:Initial SCC for a member the dt path already resolved \
+         (got {:?})",
+        dep_graph.resolved_sccs
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs[0].phase,
+        crate::db::SccPhase::Dt,
+        "the single resolved SCC stays the dt-path verdict (phase == Dt), \
+         not re-attributed to Initial"
     );
 }
 

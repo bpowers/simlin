@@ -201,14 +201,14 @@ fn hash_u32_slice(vals: &[u32]) -> u64 {
 /// directly rather than from component size.
 ///
 /// Production `pub(crate)` primitive: the `db_dep_graph.rs` element-cycle
-/// refinement (`resolve_dt_recurrence_sccs` /
+/// refinement (`resolve_recurrence_sccs` /
 /// `refine_scc_to_element_verdict` -- single-variable self-recurrence
-/// resolution in the dt cycle gate) calls it from production code, in
-/// addition to the `#[cfg(test)]` dt-phase cycle accessor
-/// `crate::db_dep_graph::dt_cycle_sccs`. It is consumed twice: once over
-/// the whole-variable dt adjacency to find the offending SCCs, and once
-/// over each SCC's induced `(member, element)` graph to render the
-/// element-acyclicity verdict.
+/// resolution in the dt AND init cycle gates) calls it from production
+/// code, in addition to the `#[cfg(test)]` dt-phase cycle accessor
+/// `crate::db_dep_graph::dt_cycle_sccs`. It is consumed twice per phase:
+/// once over the whole-variable phase adjacency to find the offending
+/// SCCs, and once over each SCC's induced `(member, element)` graph to
+/// render the element-acyclicity verdict.
 pub(crate) fn scc_components(
     edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
 ) -> Vec<Vec<Ident<Canonical>>> {

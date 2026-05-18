@@ -52,10 +52,10 @@ pub(crate) use types::normalize_module_ref;
 
 // Shared SCC primitive over an `Ident`-keyed adjacency list. Used in
 // production by the `db_dep_graph.rs` element-cycle refinement
-// (`resolve_dt_recurrence_sccs` -- single-variable self-recurrence
-// resolution in the dt cycle gate, which calls it over both the
-// whole-variable dt adjacency and each SCC's induced element graph),
-// plus the `#[cfg(test)]` dt-phase cycle accessor
+// (`resolve_recurrence_sccs` -- single-variable self-recurrence
+// resolution in the dt AND init cycle gates, which calls it over both
+// the whole-variable phase adjacency and each SCC's induced element
+// graph), plus the `#[cfg(test)]` dt-phase cycle accessor
 // (`crate::db_dep_graph::dt_cycle_sccs`).
 pub(crate) use indexed::scc_components;
 

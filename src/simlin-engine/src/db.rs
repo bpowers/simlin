@@ -1384,7 +1384,8 @@ fn model_dependency_graph_impl(
     // 1). Empty unless the dt gate actually found a fully-resolvable
     // back-edge.
     let resolvable: BTreeSet<String> = if dt_first.is_err() {
-        let resolution = crate::db_dep_graph::resolve_dt_recurrence_sccs(db, model, project);
+        let resolution =
+            crate::db_dep_graph::resolve_recurrence_sccs(db, model, project, SccPhase::Dt);
         if !resolution.has_unresolved && !resolution.resolved.is_empty() {
             let names = resolution
                 .resolved
@@ -1425,20 +1426,87 @@ fn model_dependency_graph_impl(
         }
     };
 
-    // The init-phase cycle gate breaks the SAME resolved members'
-    // self-edges (verified element-acyclic in the init phase too by
-    // `refine_scc_to_element_verdict`), so a single-variable
-    // self-recurrence -- whose self-edge is structurally present in the
-    // init relation as well -- does not falsely trip the init cycle gate.
-    // With an empty `resolvable` (the acyclic happy path, or the
-    // loud-safe fallback) this is byte-identical to the original
-    // behavior. Genuine init cycles (a member not init-element-acyclic is
-    // never in `resolvable`) still report `CircularDependency`.
-    let initial_dependencies = compute_transitive(true, &resolvable).unwrap_or_else(|var_name| {
-        has_cycle = true;
-        cycle_diagnostic(db, model, var_name);
-        HashMap::new()
-    });
+    // ── Init-phase cycle gate (symmetric to the dt block above) ────────
+    //
+    // First pass with the SAME dt-resolved `resolvable` set: it breaks
+    // the both-relations single-variable aux self-recurrence's init
+    // self-edge (`ecc[tNext]=ecc[tPrev]+1` is `ecc`'s init AST too, and
+    // `refine_scc_to_element_verdict`'s dt verdict already verified
+    // `ecc`'s init element graph is acyclic as a precondition). With an
+    // empty `resolvable` (the acyclic happy path / loud-safe fallback)
+    // this is byte-identical to the original behavior and does ZERO
+    // extra init refinement work.
+    let init_first = compute_transitive(true, &resolvable);
+
+    let initial_dependencies = match init_first {
+        Ok(deps) => deps,
+        Err(first_init_cycle_var) => {
+            // A back-edge remains AFTER the dt-resolved set's init
+            // self-edges are broken => a *structurally distinct*
+            // init-only cycle (e.g. a per-element forward recurrence in
+            // a stock's initial value -- a stock breaks the dt chain so
+            // this never appeared as a dt SCC). Run the init-phase
+            // recurrence resolution (Phase 2 Task 3), reusing the
+            // phase-parameterized builder.
+            let init_resolution =
+                crate::db_dep_graph::resolve_recurrence_sccs(db, model, project, SccPhase::Initial);
+
+            // Exclude init SCCs whose members the dt path already
+            // resolved: a both-relations aux self-recurrence is
+            // identified as an init self-loop too, but re-emitting it as
+            // a `phase: Initial` `ResolvedScc` would DUPLICATE the dt
+            // path's single `phase: Dt` SCC (regressing the Phase 1
+            // self-recurrence behavior). Keep only the structurally
+            // distinct init-only SCCs. (Subcomponent A scope:
+            // `resolve_recurrence_sccs` already routes multi-variable
+            // SCCs to `has_unresolved`; Subcomponent B resolves those.)
+            let init_only_resolved: Vec<ResolvedScc> = if init_resolution.has_unresolved {
+                Vec::new()
+            } else {
+                init_resolution
+                    .resolved
+                    .into_iter()
+                    .filter(|s| !s.members.iter().any(|m| resolvable.contains(m.as_str())))
+                    .collect()
+            };
+
+            if init_only_resolved.is_empty() {
+                // Either a genuine unresolved init cycle (multi-variable
+                // / element-cyclic / not element-sourceable), or every
+                // identified init SCC was already dt-covered yet the
+                // gate still errs (a genuine residual cycle). Loud-safe:
+                // keep the conservative `CircularDependency`.
+                has_cycle = true;
+                cycle_diagnostic(db, model, first_init_cycle_var);
+                HashMap::new()
+            } else {
+                // Break the init-only resolved members' init self-edges
+                // too (in ADDITION to the dt-resolved set's), then
+                // re-run. A residual genuine cycle is still loud-safe
+                // (clear every resolved SCC and flag -- mirrors the dt
+                // re-run's `unwrap_or_else`, honoring the
+                // `resolved_sccs`-empty-on-fallback invariant).
+                let mut init_resolvable = resolvable.clone();
+                for s in &init_only_resolved {
+                    for m in &s.members {
+                        init_resolvable.insert(m.as_str().to_string());
+                    }
+                }
+                match compute_transitive(true, &init_resolvable) {
+                    Ok(deps) => {
+                        resolved_sccs.extend(init_only_resolved);
+                        deps
+                    }
+                    Err(var_name) => {
+                        has_cycle = true;
+                        resolved_sccs.clear();
+                        cycle_diagnostic(db, model, var_name);
+                        HashMap::new()
+                    }
+                }
+            }
+        }
+    };
 
     // Build runlists via topological sort
     let var_names: Vec<String> = {
@@ -1586,11 +1654,16 @@ fn model_dependency_graph_impl(
         runlist_flows,
         runlist_stocks,
         has_cycle,
-        // Populated by the Phase 1 Subcomponent B element-cycle
-        // refinement when the dt cycle gate's back-edge is fully
-        // explained by resolvable single-variable self-recurrences
-        // (`resolve_dt_recurrence_sccs`); empty on the acyclic happy path
-        // and whenever the conservative loud-safe `CircularDependency`
+        // Populated by the element-cycle refinement
+        // (`resolve_recurrence_sccs`) when a cycle gate's back-edge is
+        // fully explained by resolvable single-variable self-recurrences:
+        // the dt path emits `phase: Dt` SCCs, and the symmetric init
+        // path (Phase 2 Task 3) emits `phase: Initial` SCCs for the
+        // structurally-distinct init-only recurrences a stock's initial
+        // value can introduce (the both-relations aux self-recurrence is
+        // NOT double-counted -- the init path excludes members the dt
+        // path already resolved). Empty on the acyclic happy path and
+        // whenever the conservative loud-safe `CircularDependency`
         // fallback fires (zero extra work, no behavior change there).
         // This is the sole `ModelDepGraphResult` construction site (the
         // dt/init back-edge paths fall through here), so the byte-stable
