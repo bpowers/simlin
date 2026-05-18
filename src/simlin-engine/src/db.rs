@@ -1126,6 +1126,39 @@ pub fn model_module_map(
     all_models
 }
 
+/// Which dependency phase a resolved recurrence SCC belongs to.
+///
+/// `model_dependency_graph_impl` runs the cycle gate twice -- once for
+/// the dt-phase relation and once for the init-phase relation. A
+/// `ResolvedScc` records which run proved its element graph acyclic so
+/// the consumer applies the right per-element order. Phase 1 only
+/// produces `Dt` (single-variable dt self-recurrence); `Initial` is
+/// reserved for the Phase 2 init-cycle resolution.
+///
+/// Derives the same trait set as `ModelDepGraphResult` (it is reachable
+/// from a salsa return value, so it must participate in salsa equality).
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub enum SccPhase {
+    Dt,
+    Initial,
+}
+
+/// A recurrence SCC whose induced element graph the cycle gate proved
+/// acyclic. `members` is byte-stable (BTreeSet); `element_order` is the
+/// per-element topological evaluation order `(member, element-offset)`.
+///
+/// Reachable from `ModelDepGraphResult` (a salsa return value), so it
+/// derives the identical trait set -- in particular `PartialEq`/`Eq`/
+/// `salsa::Update` so a change in the resolved-SCC set invalidates the
+/// salsa cache. `Ident<Canonical>` derives `Ord` + `salsa::Update`,
+/// which makes the `BTreeSet`/`Vec` field types well-formed here.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct ResolvedScc {
+    pub members: BTreeSet<Ident<Canonical>>,
+    pub element_order: Vec<(Ident<Canonical>, usize)>,
+    pub phase: SccPhase,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct ModelDepGraphResult {
     pub dt_dependencies: HashMap<String, BTreeSet<String>>,
@@ -1134,6 +1167,14 @@ pub struct ModelDepGraphResult {
     pub runlist_flows: Vec<String>,
     pub runlist_stocks: Vec<String>,
     pub has_cycle: bool,
+    /// Recurrence SCCs whose induced element graph the cycle gate proved
+    /// acyclic and element-sourceable, so they are resolved rather than
+    /// rejected with `CircularDependency`. Empty on the acyclic happy
+    /// path (zero extra work) and whenever the conservative loud-safe
+    /// fallback fires. Populated by the Phase 1 Subcomponent B
+    /// element-cycle refinement; every construction site initializes it
+    /// explicitly (`Vec::new()` on the early-return/error paths).
+    pub resolved_sccs: Vec<ResolvedScc>,
 }
 
 fn model_dependency_graph_impl(
@@ -1432,6 +1473,14 @@ fn model_dependency_graph_impl(
         runlist_flows,
         runlist_stocks,
         has_cycle,
+        // Phase 1 Subcomponent A scaffolds the field; the element-cycle
+        // refinement in Subcomponent B populates it from the cycle-gate
+        // back-edge path. Until then (and on the acyclic happy path) it
+        // is empty -- zero extra work, no behavior change. This is the
+        // sole `ModelDepGraphResult` construction site (the dt/init
+        // back-edge paths use `unwrap_or_else` and fall through here, so
+        // there is no separate early-return literal to initialize).
+        resolved_sccs: Vec::new(),
     }
 }
 

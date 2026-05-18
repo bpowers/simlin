@@ -421,3 +421,91 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
         c2.len()
     );
 }
+
+// ── ResolvedScc / SccPhase salsa-equality wiring ────────────────────────
+//
+// `ResolvedScc` rides on `ModelDepGraphResult`, which is a salsa return
+// value (`#[salsa::tracked(returns(ref))]`). salsa decides whether a
+// downstream query must be re-run by *structural equality* of the
+// returned value, so the new `resolved_sccs` field MUST participate in
+// `PartialEq`/`Eq`/`salsa::Update`. If the derive silently skipped the
+// field (or the field were not wired into the struct), two results that
+// differ ONLY in `resolved_sccs` would compare equal and a model whose
+// only change is its resolved-SCC set would not invalidate the cache --
+// a correctness bug, not a cosmetic one. This test pins that the field
+// is wired and participates in equality; it deliberately does NOT
+// re-test what the compiler already verifies (field presence/types).
+
+/// A `ResolvedScc` with a non-empty member set and a non-trivial
+/// per-element order constructs, and equality distinguishes the two
+/// `SccPhase` variants.
+#[test]
+fn resolved_scc_constructs_and_phase_distinguishes() {
+    use crate::common::Ident;
+    use crate::db::{ResolvedScc, SccPhase};
+
+    let members: BTreeSet<Ident<_>> = [Ident::new("ecc")].into_iter().collect();
+    let element_order = vec![
+        (Ident::new("ecc"), 0usize),
+        (Ident::new("ecc"), 1usize),
+        (Ident::new("ecc"), 2usize),
+    ];
+
+    let dt = ResolvedScc {
+        members: members.clone(),
+        element_order: element_order.clone(),
+        phase: SccPhase::Dt,
+    };
+    let dt_again = ResolvedScc {
+        members: members.clone(),
+        element_order: element_order.clone(),
+        phase: SccPhase::Dt,
+    };
+    let initial = ResolvedScc {
+        members,
+        element_order,
+        phase: SccPhase::Initial,
+    };
+
+    // Structurally-identical `ResolvedScc`s compare equal.
+    assert_eq!(dt, dt_again);
+    // The phase is part of identity (it routes dt vs init resolution).
+    assert_ne!(dt, initial);
+}
+
+/// `resolved_sccs` participates in `ModelDepGraphResult` equality, so
+/// salsa cache invalidation reacts to a change in the resolved-SCC set.
+#[test]
+fn model_dep_graph_result_equality_observes_resolved_sccs() {
+    use crate::common::Ident;
+    use crate::db::{ModelDepGraphResult, ResolvedScc, SccPhase};
+
+    let base = ModelDepGraphResult {
+        dt_dependencies: HashMap::new(),
+        initial_dependencies: HashMap::new(),
+        runlist_initials: Vec::new(),
+        runlist_flows: Vec::new(),
+        runlist_stocks: Vec::new(),
+        has_cycle: false,
+        resolved_sccs: Vec::new(),
+    };
+
+    // A clone with no other change is equal.
+    assert_eq!(base, base.clone());
+
+    // Pushing a `ResolvedScc` makes the result compare unequal: proof
+    // that `resolved_sccs` is wired into the derived `PartialEq`/`Eq`
+    // (and therefore the salsa equality salsa uses for invalidation),
+    // not skipped.
+    let mut with_scc = base.clone();
+    with_scc.resolved_sccs.push(ResolvedScc {
+        members: [Ident::new("ecc")].into_iter().collect(),
+        element_order: vec![(Ident::new("ecc"), 0usize)],
+        phase: SccPhase::Dt,
+    });
+    assert_ne!(base, with_scc);
+
+    // Two results carrying an identical `resolved_sccs` are equal again
+    // (equality is structural over the field, not identity).
+    assert_eq!(with_scc, with_scc.clone());
+}
