@@ -294,50 +294,150 @@ pub(crate) fn dt_cycle_sccs(
     DtCycleSccs { multi, self_loops }
 }
 
-/// Pure consistency predicate (functional core).
+/// Pure consistency predicate (functional core), re-pointed to the
+/// **element-level** cycle-resolution invariant.
 ///
-/// The instrumented dt-phase SCC set is engine-consistent iff "the
-/// instrumentation reports some dt cycle" agrees with "the engine raised
-/// `CircularDependency` on the same compiled model". A dt multi-node SCC
-/// or a dt self-loop necessarily makes `compute_transitive(false)` Err
-/// (=> `CircularDependency`), so a reported cycle must always coincide
-/// with the diagnostic (no invented false positive); and -- under the
-/// premise that the init-phase relation is acyclic by construction (true
-/// for every harness fixture) -- the converse holds too (no missed
-/// cycle).
+/// The old invariant -- "the instrumentation reports some dt cycle" iff
+/// "the engine raised `CircularDependency`" -- became false by design
+/// once the element-cycle refinement landed: a single-variable
+/// self-recurrence (`ecc[tNext]=ecc[tPrev]+1`) is still an instrumented
+/// dt self-loop (the *whole-variable* `dt_walk_successors` relation is
+/// unchanged), yet its induced *element* graph is acyclic, so the engine
+/// resolves it (it appears in `ModelDepGraphResult.resolved_sccs`) and
+/// does **not** raise `CircularDependency`. The re-pointed invariant is:
 ///
-/// Returns `Some(reason)` iff the two diverge (=> stop, do not gate: the
-/// instrumentation, or the init-acyclic premise, is wrong); `None` iff
-/// consistent.
+/// > For each instrumented SCC, the engine raises `CircularDependency`
+/// > iff that SCC is **not** in `resolved_sccs` (an instrumented SCC
+/// > whose induced element graph is acyclic AND element-sourceable is
+/// > resolved and produces no diagnostic; one that is element-cyclic OR
+/// > not element-sourceable is unresolved and the engine flags it).
+///
+/// `resolve_dt_recurrence_sccs` resolves an SCC only when *every*
+/// offending SCC is resolvable (`!has_unresolved`), so the engine is
+/// all-or-nothing per model: either `resolved_sccs` covers every
+/// instrumented SCC and no diagnostic is raised, or `resolved_sccs` is
+/// empty and the diagnostic is raised. Under that behavior the
+/// per-SCC iff collapses to the two checks below, which together are
+/// exactly the re-pointed invariant for every state the engine can
+/// produce:
+///
+/// 1. `engine_raises_circular == any instrumented SCC is NOT in
+///    resolved_sccs` -- catches both an invented cycle the engine
+///    neither resolved nor flagged and a missed cycle the engine flagged
+///    but the instrumentation did not surface.
+/// 2. every `ResolvedScc`'s members ARE an instrumented SCC -- catches
+///    the refinement resolving something the shared dt relation never
+///    saw as a cycle (the two relations drifted; the whole reason this
+///    cross-check exists).
+///
+/// **Phase-1 scoping note (NOT a permanent invariant):** the
+/// init-phase relation is currently acyclic by construction for every
+/// harness fixture, and `refine_scc_to_element_verdict` resolves only
+/// single-variable self-recurrences whose self-edge happens to be
+/// structurally present in both the dt and init relations. Phase 2
+/// introduces init-cyclic-but-element-acyclic fixtures and init-cycle
+/// resolution; this predicate (and the harness around it) must be
+/// generalized then to consult an init-phase resolved-SCC set as well.
+/// Do not treat the current init-acyclic situation as a guarantee.
+///
+/// Returns `Some(reason)` iff the engine and the refinement diverge on
+/// the same compiled model (=> stop, do not gate: the instrumentation or
+/// the refinement is wrong); `None` iff consistent.
 #[cfg(test)]
 fn dt_cycle_sccs_consistency_violation(
     sccs: &DtCycleSccs,
+    resolved_sccs: &[crate::db::ResolvedScc],
     engine_raises_circular: bool,
 ) -> Option<String> {
-    let instrumented_reports_cycle = !sccs.multi.is_empty() || !sccs.self_loops.is_empty();
-    if instrumented_reports_cycle == engine_raises_circular {
-        return None;
+    // Each instrumented SCC as a member set: a multi-node SCC is already
+    // a set; a self-loop `v` is the size-1 SCC `{v}`.
+    let instrumented: Vec<BTreeSet<Ident<Canonical>>> = sccs
+        .multi
+        .iter()
+        .cloned()
+        .chain(
+            sccs.self_loops
+                .iter()
+                .map(|v| std::iter::once(v.clone()).collect()),
+        )
+        .collect();
+    let resolved_member_sets: Vec<&BTreeSet<Ident<Canonical>>> =
+        resolved_sccs.iter().map(|s| &s.members).collect();
+
+    // (1) An instrumented SCC the engine resolved is NOT a cycle; one it
+    // did not resolve IS. Because the engine is all-or-nothing per model
+    // (`resolve_dt_recurrence_sccs` resolves nothing unless every
+    // offending SCC is resolvable), "some instrumented SCC is unresolved"
+    // is exactly the condition under which the engine raises the
+    // diagnostic.
+    let some_instrumented_unresolved = instrumented
+        .iter()
+        .any(|s| !resolved_member_sets.contains(&s));
+    if engine_raises_circular != some_instrumented_unresolved {
+        return Some(format!(
+            "dt-phase SCC instrumentation diverges from the engine's \
+             element-cycle resolution on the SAME compiled model: the \
+             engine {} CircularDependency, but {} instrumented SCC is \
+             absent from resolved_sccs (engine_raises_circular={}, \
+             some_instrumented_unresolved={}; multi={:?}, \
+             self_loops={:?}, resolved_sccs={:?}). The instrumentation \
+             or the element-cycle refinement is wrong -- stop, do not \
+             gate on a mis-derived relation.",
+            if engine_raises_circular {
+                "raised"
+            } else {
+                "did NOT raise"
+            },
+            if some_instrumented_unresolved {
+                "some"
+            } else {
+                "no"
+            },
+            engine_raises_circular,
+            some_instrumented_unresolved,
+            sccs.multi,
+            sccs.self_loops,
+            resolved_sccs,
+        ));
     }
-    Some(format!(
-        "dt-phase SCC instrumentation diverges from the engine's real \
-         CircularDependency flagging on the SAME compiled model \
-         (instrumented_reports_cycle={instrumented_reports_cycle}, \
-         engine_raises_circular={engine_raises_circular}; \
-         multi={:?}, self_loops={:?}). The instrumentation (or the \
-         init-acyclic premise) is wrong -- stop, do not gate on a \
-         mis-derived relation.",
-        sccs.multi, sccs.self_loops
-    ))
+
+    // (2) Every resolved SCC must be one the dt instrumentation actually
+    // surfaced. A `ResolvedScc` whose members are not an instrumented SCC
+    // means the refinement resolved a "cycle" the shared dt relation
+    // never saw -- the two relations drifted.
+    if let Some(orphan) = resolved_sccs
+        .iter()
+        .find(|s| !instrumented.contains(&s.members))
+    {
+        return Some(format!(
+            "the element-cycle refinement resolved an SCC the shared \
+             dt-phase instrumentation never surfaced as a cycle \
+             (resolved members={:?}; instrumented multi={:?}, \
+             self_loops={:?}). The shared dt relation and the refinement \
+             drifted -- stop, do not gate on a mis-derived relation.",
+            orphan.members, sccs.multi, sccs.self_loops
+        ));
+    }
+
+    None
 }
 
 /// The dt-phase SCC set, returned only after it is cross-checked against
-/// the engine's real `CircularDependency` flagging on the same compiled
-/// model.
+/// the engine's real element-cycle resolution on the same compiled model.
 ///
-/// Panics (do not gate on a mis-derived relation) on any divergence. A
-/// consumer therefore gets a relation that is the engine's by
-/// construction (shared `dt_walk_successors`) and additionally
-/// cross-checked on every invocation.
+/// Cross-checks the instrumented SCC set against BOTH the engine's
+/// `CircularDependency` flagging AND its `ModelDepGraphResult
+/// .resolved_sccs` (the element-cycle refinement's verdict), via
+/// `dt_cycle_sccs_consistency_violation`'s re-pointed element-level
+/// invariant: an instrumented SCC is resolved (in `resolved_sccs`, no
+/// diagnostic) iff its induced element graph is acyclic and
+/// element-sourceable; otherwise the engine flags it. Panics (do not gate
+/// on a mis-derived relation) on any divergence. A consumer therefore
+/// gets a relation that is the engine's by construction (shared
+/// `dt_walk_successors`) and additionally cross-checked on every
+/// invocation. (Phase-1 scoping: the init-phase relation is acyclic by
+/// construction for every harness fixture today; Phase 2 generalizes
+/// this -- see `dt_cycle_sccs_consistency_violation`.)
 ///
 /// `#[cfg(test)]` accessor only (like `dt_cycle_sccs`).
 #[cfg(test)]
@@ -347,7 +447,8 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
     project: SourceProject,
 ) -> DtCycleSccs {
     let sccs = dt_cycle_sccs(db, model, project);
-    let _ = model_dependency_graph(db, model, project);
+    let dep_graph = model_dependency_graph(db, model, project);
+    let resolved_sccs = dep_graph.resolved_sccs.clone();
     let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(db, model, project);
     let engine_raises_circular = diags.iter().any(|d| {
         matches!(
@@ -358,7 +459,9 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
             })
         )
     });
-    if let Some(reason) = dt_cycle_sccs_consistency_violation(&sccs, engine_raises_circular) {
+    if let Some(reason) =
+        dt_cycle_sccs_consistency_violation(&sccs, &resolved_sccs, engine_raises_circular)
+    {
         panic!("{reason}");
     }
     sccs

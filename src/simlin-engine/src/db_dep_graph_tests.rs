@@ -221,11 +221,110 @@ fn dt_cycle_sccs_is_byte_stable_across_runs() {
     assert_eq!(first, second, "dt_cycle_sccs must be byte-stable");
 }
 
+#[test]
+fn dt_cycle_sccs_resolved_self_recurrence_has_no_circular() {
+    // The new invariant's headline case: a single-variable
+    // self-recurrence (`ecc[t1]=1; ecc[t2]=ecc[t1]+1; ecc[t3]=ecc[t2]+1`)
+    // is an instrumented dt self-loop (the whole-variable dt relation has
+    // a `ecc -> ecc` self-edge), yet its induced element graph is
+    // element-acyclic and element-sourceable, so the engine resolves it
+    // and does NOT raise `CircularDependency`. The OLD XNOR invariant
+    // would have panicked here ("instrumented self-loop but no
+    // CircularDependency"); the re-pointed invariant treats this as
+    // consistent because the instrumented SCC `{ecc}` is in
+    // `resolved_sccs`. Reaching the asserts proves the cross-check held.
+    let db = SimlinDb::default();
+    let project = TestProject::new("dt_resolved_self_recurrence")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges(
+            "ecc[t]",
+            vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+        );
+    let dm = project.build_datamodel();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+    let sccs = dt_cycle_sccs_engine_consistent(&db, model, result.project);
+    // The whole-variable dt relation flags `ecc` as a self-loop...
+    assert!(
+        sccs.self_loops.contains(&crate::common::Ident::new("ecc")),
+        "the single-variable self-recurrence must still be an \
+         instrumented dt self-loop (the whole-variable relation is \
+         unchanged)"
+    );
+    assert!(
+        sccs.multi.is_empty(),
+        "no >=2 SCC for a single-variable case"
+    );
+    // ...but the engine resolves it (no CircularDependency). Confirm the
+    // diagnostic is absent and a `ResolvedScc` for `{ecc}` was emitted.
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "an element-acyclic single-variable self-recurrence must NOT set \
+         has_cycle"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "exactly one ResolvedScc for the resolved self-recurrence"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs[0].members,
+        [crate::common::Ident::new("ecc")]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+}
+
+#[test]
+fn dt_cycle_sccs_genuine_two_cycle_still_circular() {
+    // `a=b+1; b=a+1`: a genuine scalar 2-cycle / multi-variable SCC.
+    // Phase 1 does not resolve multi-variable SCCs, so it is absent from
+    // `resolved_sccs` and the engine raises `CircularDependency` -- the
+    // re-pointed invariant treats "instrumented multi-SCC, not resolved,
+    // engine raises CircularDependency" as consistent (unchanged genuine-
+    // cycle behavior). Reaching the asserts proves the cross-check held.
+    let db = SimlinDb::default();
+    let project = single_model_project(vec![aux_var("a", "b + 1"), aux_var("b", "a + 1")]);
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+    let sccs = dt_cycle_sccs_engine_consistent(&db, model, result.project);
+    let expected: Vec<BTreeSet<crate::common::Ident<crate::common::Canonical>>> = vec![
+        [
+            crate::common::Ident::new("a"),
+            crate::common::Ident::new("b"),
+        ]
+        .into_iter()
+        .collect(),
+    ];
+    assert_eq!(
+        sccs.multi, expected,
+        "the 2-cycle is an instrumented >=2 SCC"
+    );
+    assert!(sccs.self_loops.is_empty());
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        dep_graph.has_cycle,
+        "a genuine 2-cycle still sets has_cycle (Phase 1 does not resolve \
+         multi-variable SCCs)"
+    );
+    assert!(
+        dep_graph.resolved_sccs.is_empty(),
+        "a genuine 2-cycle resolves nothing"
+    );
+}
+
 // The pure consistency predicate as a tested invariant (functional
-// core): it must flag a divergence between the instrumented dt-SCC set
-// and the engine's real CircularDependency flagging in both directions
-// (an invented false-positive cycle, and a missed/false-negative cycle)
-// and must accept every consistent pairing.
+// core), re-pointed to the element-level invariant: an instrumented SCC
+// whose induced element graph is acyclic AND element-sourceable is in
+// `resolved_sccs` and the engine does NOT raise `CircularDependency`; an
+// instrumented SCC that is element-cyclic OR not element-sourceable is
+// absent from `resolved_sccs` and the engine DOES raise
+// `CircularDependency`. The predicate must accept every consistent
+// pairing and flag every divergence: a resolved SCC the engine still
+// flagged, an unresolved instrumented SCC the engine did NOT flag (a
+// missed cycle), and a `ResolvedScc` whose members the instrumentation
+// never surfaced (the shared dt relation drifted from the refinement).
 
 fn multi_ab() -> Vec<BTreeSet<crate::common::Ident<crate::common::Canonical>>> {
     vec![
@@ -244,63 +343,121 @@ fn self_loop_a() -> BTreeSet<crate::common::Ident<crate::common::Canonical>> {
     s
 }
 
+/// A `ResolvedScc` for the single-variable self-recurrence `{a}` (the
+/// element-acyclic resolved shape Phase 1 produces).
+fn resolved_a() -> Vec<crate::db::ResolvedScc> {
+    vec![crate::db::ResolvedScc {
+        members: self_loop_a(),
+        element_order: vec![(crate::common::Ident::new("a"), 0usize)],
+        phase: crate::db::SccPhase::Dt,
+    }]
+}
+
 #[test]
 fn consistency_violation_none_when_both_clean() {
+    // No instrumented SCC, nothing resolved, no diagnostic: consistent.
     let sccs = DtCycleSccs {
         multi: vec![],
         self_loops: BTreeSet::new(),
     };
-    assert!(dt_cycle_sccs_consistency_violation(&sccs, false).is_none());
+    assert!(dt_cycle_sccs_consistency_violation(&sccs, &[], false).is_none());
 }
 
 #[test]
 fn consistency_violation_none_when_multi_and_circular() {
+    // A multi-variable SCC is not resolved in Phase 1: absent from
+    // `resolved_sccs` AND the engine raises `CircularDependency` =>
+    // consistent (element-cyclic/unresolved => diagnostic).
     let sccs = DtCycleSccs {
         multi: multi_ab(),
         self_loops: BTreeSet::new(),
     };
-    assert!(dt_cycle_sccs_consistency_violation(&sccs, true).is_none());
+    assert!(dt_cycle_sccs_consistency_violation(&sccs, &[], true).is_none());
 }
 
 #[test]
-fn consistency_violation_none_when_self_loop_and_circular() {
+fn consistency_violation_none_when_unresolved_self_loop_and_circular() {
+    // An instrumented self-loop NOT in `resolved_sccs` (genuine
+    // same-element self-cycle or not element-sourceable) + the engine
+    // raises `CircularDependency` => consistent.
     let sccs = DtCycleSccs {
         multi: vec![],
         self_loops: self_loop_a(),
     };
-    assert!(dt_cycle_sccs_consistency_violation(&sccs, true).is_none());
+    assert!(dt_cycle_sccs_consistency_violation(&sccs, &[], true).is_none());
+}
+
+#[test]
+fn consistency_violation_none_when_resolved_self_loop_and_no_circular() {
+    // The new invariant's positive case: an instrumented self-loop that
+    // IS in `resolved_sccs` (element-acyclic single-variable
+    // self-recurrence) AND the engine does NOT raise
+    // `CircularDependency` => consistent (this is exactly the case the
+    // OLD XNOR invariant wrongly rejected).
+    let sccs = DtCycleSccs {
+        multi: vec![],
+        self_loops: self_loop_a(),
+    };
+    assert!(dt_cycle_sccs_consistency_violation(&sccs, &resolved_a(), false).is_none());
 }
 
 #[test]
 fn consistency_violation_some_when_invented_cycle_not_flagged() {
-    // Instrumentation reports a cycle the engine does NOT flag =>
-    // the relation is mis-derived => STOP (do not gate).
+    // Instrumentation reports a multi-SCC the engine does NOT flag and
+    // did NOT resolve => the relation is mis-derived => STOP.
     let sccs = DtCycleSccs {
         multi: multi_ab(),
         self_loops: BTreeSet::new(),
     };
-    assert!(dt_cycle_sccs_consistency_violation(&sccs, false).is_some());
+    assert!(dt_cycle_sccs_consistency_violation(&sccs, &[], false).is_some());
 }
 
 #[test]
 fn consistency_violation_some_when_missed_cycle_flagged() {
     // Engine raises CircularDependency but the instrumentation reports
-    // NO cycle => a missed cycle (or the init-acyclic premise broke)
-    // => STOP.
+    // NO cycle => a missed cycle => STOP.
     let sccs = DtCycleSccs {
         multi: vec![],
         self_loops: BTreeSet::new(),
     };
-    assert!(dt_cycle_sccs_consistency_violation(&sccs, true).is_some());
+    assert!(dt_cycle_sccs_consistency_violation(&sccs, &[], true).is_some());
 }
 
 #[test]
-fn consistency_violation_some_when_self_loop_not_flagged() {
+fn consistency_violation_some_when_unresolved_self_loop_not_flagged() {
+    // An instrumented self-loop that is NOT resolved AND the engine does
+    // NOT raise `CircularDependency` => the instrumented cycle went
+    // neither resolved nor flagged => a missed cycle => STOP.
     let sccs = DtCycleSccs {
         multi: vec![],
         self_loops: self_loop_a(),
     };
-    assert!(dt_cycle_sccs_consistency_violation(&sccs, false).is_some());
+    assert!(dt_cycle_sccs_consistency_violation(&sccs, &[], false).is_some());
+}
+
+#[test]
+fn consistency_violation_some_when_resolved_self_loop_still_flagged() {
+    // The instrumented self-loop IS in `resolved_sccs`, yet the engine
+    // ALSO raised `CircularDependency` for it => the resolution verdict
+    // and the diagnostic disagree on the SAME compiled model => STOP.
+    let sccs = DtCycleSccs {
+        multi: vec![],
+        self_loops: self_loop_a(),
+    };
+    assert!(dt_cycle_sccs_consistency_violation(&sccs, &resolved_a(), true).is_some());
+}
+
+#[test]
+fn consistency_violation_some_when_resolved_scc_not_instrumented() {
+    // A `ResolvedScc` whose members the dt instrumentation never
+    // surfaced as an SCC => the refinement resolved something the shared
+    // dt relation did not even see as a cycle => the two relations
+    // drifted => STOP (the whole point of the cross-check).
+    let sccs = DtCycleSccs {
+        multi: vec![],
+        self_loops: BTreeSet::new(),
+    };
+    assert!(dt_cycle_sccs_consistency_violation(&sccs, &resolved_a(), false).is_some());
 }
 
 // `array_producing_vars` membership over four cases. Both positive cases
