@@ -14,7 +14,7 @@ use crate::datamodel;
 // sibling `db_dep_graph` module (a top-level module like `db_ltm_ir` /
 // `db_macro_registry`, split out purely for the per-file line cap);
 // `model_dependency_graph_impl`'s `compute_inner` consumes them here.
-use crate::db_dep_graph::{VarInfo, build_var_info, dt_walk_successors};
+use crate::db_dep_graph::{VarInfo, build_var_info, dt_walk_successors, init_walk_successors};
 
 #[path = "db_ltm.rs"]
 mod db_ltm;
@@ -1263,27 +1263,31 @@ fn model_dependency_graph_impl(
             processing.insert(name.to_string());
 
             // The successor set this normal node contributes to cycle
-            // detection AND the `all_deps` transitive/ordering map.
-            // In the dt phase it is sourced from the SINGLE shared
-            // dt-phase cycle relation (`dt_walk_successors`); in the
-            // init phase stocks do NOT break the chain (that filter is
-            // dt-only -- `compute_inner`'s `info.is_stock && !is_initial`
-            // sink does not fire here), so the relation is the init
-            // deps filtered only to known vars. Either way this is
-            // exactly the effective set the original
-            // `for dep in direct { if !var_info.contains_key {continue}
-            // if !is_initial && dep_info.is_stock {continue} ... }`
-            // loop iterated, in the same `BTreeSet`-sorted order, so
-            // cycle detection (first back-edge) and the `all_deps`
-            // transitive map are byte-identical. Only the iteration set
-            // is factored out; the stock/module early-returns above and
-            // the `transitive` accumulation below are untouched.
+            // detection AND the `all_deps` transitive/ordering map. It
+            // is sourced from the SINGLE shared cycle relation for the
+            // phase: `dt_walk_successors` (dt) or `init_walk_successors`
+            // (init). In the init phase stocks do NOT break the chain
+            // (that filter is dt-only -- `compute_inner`'s
+            // `info.is_stock && !is_initial` sink does not fire here),
+            // so `init_walk_successors` is the init deps filtered only
+            // to known vars. Either way this is exactly the effective
+            // set the original `for dep in direct { if
+            // !var_info.contains_key {continue} if !is_initial &&
+            // dep_info.is_stock {continue} ... }` loop iterated, in the
+            // same `BTreeSet`-sorted order, so cycle detection (first
+            // back-edge) and the `all_deps` transitive map are
+            // byte-identical. `init_walk_successors`'s defensive
+            // absent/module guards never fire here -- the stock/module
+            // early-returns above already handled those before this
+            // point (the same way `dt_walk_successors`'s guards are
+            // redundant at this call site). Sharing the init relation by
+            // construction means the init-phase per-element recurrence
+            // resolution observes the engine's actual init relation, not
+            // a re-derivation. Only the iteration set is factored out;
+            // the stock/module early-returns above and the `transitive`
+            // accumulation below are untouched.
             let successors: Vec<&str> = if is_initial {
-                info.initial_deps
-                    .iter()
-                    .filter(|dep| var_info.contains_key(dep.as_str()))
-                    .map(|dep| dep.as_str())
-                    .collect()
+                init_walk_successors(var_info, name)
             } else {
                 dt_walk_successors(var_info, name)
             };

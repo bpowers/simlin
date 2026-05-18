@@ -109,6 +109,125 @@ fn dt_walk_successors_order_is_btreeset_sorted() {
     );
 }
 
+// ── init-phase cycle relation (`init_walk_successors`) ──────────────────
+//
+// `init_walk_successors` is the single shared init-phase cycle-successor
+// relation, the exact analogue of `dt_walk_successors` for the init
+// phase. It is consumed by both the production cycle detector
+// (`compute_inner` inside `model_dependency_graph_impl`, init branch)
+// and the init-phase per-element recurrence resolution. These tests pin
+// its invariant per node kind:
+//   Module => empty (the module early-return in `compute_inner` applies
+//             to BOTH phases -- a module is never on the DFS stack so it
+//             can never carry a cycle in either phase),
+//   Stock  => initial_deps filtered to known vars -- a stock is NOT an
+//             init sink (the dt stock sink is `!is_initial`-gated; a
+//             stock is a valid init-relation node, so its init deps and
+//             stock-targeted init deps are KEPT),
+//   Aux    => initial_deps filtered to known vars (unknown deps dropped,
+//             matching the inlined `compute_inner` init logic),
+//   absent => empty (no panic).
+
+/// Build a bare `VarInfo` carrying `initial_deps` for the pure-unit
+/// `init_walk_successors` tests (the dt-only helper `vi_for_test` leaves
+/// `initial_deps` empty).
+fn vi_init_for_test(is_stock: bool, is_module: bool, initial_deps: &[&str]) -> VarInfo {
+    VarInfo {
+        is_stock,
+        is_module,
+        dt_deps: BTreeSet::new(),
+        initial_deps: initial_deps.iter().map(|s| (*s).to_string()).collect(),
+    }
+}
+
+#[test]
+fn init_walk_successors_module_has_no_cycle_successors() {
+    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
+    vinfo.insert("m".to_string(), vi_init_for_test(false, true, &["a"]));
+    vinfo.insert("a".to_string(), vi_init_for_test(false, false, &[]));
+    // The module early-return in `compute_inner` fires before
+    // `processing.insert` in BOTH phases, so a module is never on the
+    // DFS stack and can never carry a cycle in the init phase either:
+    // empty cycle-successor set (mirrors `dt_walk_successors`).
+    assert!(init_walk_successors(&vinfo, "m").is_empty());
+}
+
+#[test]
+fn init_walk_successors_stock_is_not_an_init_sink() {
+    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
+    vinfo.insert("s".to_string(), vi_init_for_test(true, false, &["s", "a"]));
+    vinfo.insert("a".to_string(), vi_init_for_test(false, false, &[]));
+    // A Stock is NOT an init-phase sink: the dt stock sink in
+    // `compute_inner` is `!is_initial`-gated, so in the init phase a
+    // stock's `initial_deps` ARE its cycle successors. A stock whose
+    // init equation references itself (`s` in its own init deps) is a
+    // genuine init self-loop, so `s` MUST appear in its own successor
+    // set (this is exactly what an init-phase recurrence behind a stock
+    // relies on).
+    assert_eq!(init_walk_successors(&vinfo, "s"), vec!["a", "s"]);
+}
+
+#[test]
+fn init_walk_successors_keeps_stock_targeted_deps() {
+    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
+    vinfo.insert(
+        "x".to_string(),
+        vi_init_for_test(false, false, &["the_stock", "aux2"]),
+    );
+    vinfo.insert("the_stock".to_string(), vi_init_for_test(true, false, &[]));
+    vinfo.insert("aux2".to_string(), vi_init_for_test(false, false, &[]));
+    // Unlike `dt_walk_successors` (which drops stock-targeted deps
+    // because a stock breaks the dt chain), the init relation KEEPS a
+    // stock-targeted dep: a stock's initial value is a real init-phase
+    // dependency. NO stock filter on the deps.
+    assert_eq!(init_walk_successors(&vinfo, "x"), vec!["aux2", "the_stock"]);
+}
+
+#[test]
+fn init_walk_successors_filters_unknown_deps() {
+    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
+    vinfo.insert(
+        "x".to_string(),
+        vi_init_for_test(false, false, &["known", "ghost"]),
+    );
+    vinfo.insert("known".to_string(), vi_init_for_test(false, false, &[]));
+    // "ghost" is intentionally absent from var_info.
+    // This is exactly the inlined `compute_inner` init semantics
+    // (`info.initial_deps.iter().filter(|dep|
+    // var_info.contains_key(dep))`): unknown deps dropped, no other
+    // filter.
+    assert_eq!(init_walk_successors(&vinfo, "x"), vec!["known"]);
+}
+
+#[test]
+fn init_walk_successors_absent_name_is_empty() {
+    let vinfo: HashMap<String, VarInfo> = HashMap::new();
+    // A malformed/absent var_info entry must not panic; it yields no
+    // successors (mirrors `dt_walk_successors`; `compute_inner` likewise
+    // early-returns `Ok(())` for an unknown name).
+    assert!(init_walk_successors(&vinfo, "nope").is_empty());
+}
+
+#[test]
+fn init_walk_successors_order_is_btreeset_sorted() {
+    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
+    vinfo.insert(
+        "x".to_string(),
+        vi_init_for_test(false, false, &["zeta", "alpha", "mid"]),
+    );
+    vinfo.insert("zeta".to_string(), vi_init_for_test(false, false, &[]));
+    vinfo.insert("alpha".to_string(), vi_init_for_test(false, false, &[]));
+    vinfo.insert("mid".to_string(), vi_init_for_test(false, false, &[]));
+    // initial_deps is a BTreeSet; the successor list preserves its
+    // sorted iteration order, so init cycle detection and the init SCC
+    // adjacency are byte-stable across runs (same discipline as
+    // `dt_walk_successors`).
+    assert_eq!(
+        init_walk_successors(&vinfo, "x"),
+        vec!["alpha", "mid", "zeta"]
+    );
+}
+
 fn aux_var(ident: &str, eq: &str) -> datamodel::Variable {
     datamodel::Variable::Aux(datamodel::Aux {
         ident: ident.to_string(),

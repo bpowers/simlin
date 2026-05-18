@@ -104,6 +104,64 @@ pub(crate) fn dt_walk_successors<'a>(
         .collect()
 }
 
+/// The init-phase cycle-successor set of `name`: exactly the deps
+/// `compute_inner`'s normal-node loop iterates for cycle detection in the
+/// **init** phase.
+///
+/// This is the single shared definition of the init-phase cycle relation
+/// -- the exact analogue of `dt_walk_successors` -- consumed by both the
+/// production cycle detector (`compute_inner`, init branch) and the
+/// init-phase per-element recurrence resolution. Defining it once and
+/// using it in both places makes the resolution's relation the engine's
+/// relation by construction, with no opportunity for a re-derivation to
+/// drift (the same "single shared relation, never re-derive" pattern
+/// `dt_walk_successors` follows).
+///
+/// Returns `[]` when `name`:
+/// * is absent from `var_info` (a malformed/unknown entry -- no panic;
+///   `compute_inner` likewise early-returns `Ok(())` for an unknown name,
+///   and the dep loop skips unknown deps before recursing),
+/// * is a Module (`compute_inner` returns for a module *before*
+///   `processing.insert` in BOTH phases, so a module is never on the DFS
+///   stack and can never carry a cycle in the init phase either).
+///
+/// Crucially, a **Stock is NOT an init-phase sink** (unlike
+/// `dt_walk_successors`, where `info.is_stock` short-circuits to `[]`):
+/// `compute_inner`'s stock sink is `info.is_stock && !is_initial`, so it
+/// does not fire in the init phase. A stock's initial value is a genuine
+/// init-relation node, so a stock whose init equation references itself
+/// is a real init self-loop and its init deps are its cycle successors.
+///
+/// Otherwise returns `var_info[name].initial_deps` filtered ONLY to deps
+/// `d` with `var_info.contains_key(d)`: unknown deps dropped (error
+/// reported elsewhere) -- **no stock filter and no stock sink** (a
+/// stock-targeted init dep is a real init dependency, kept). This exactly
+/// reproduces the inlined init logic `compute_inner` runs
+/// (`info.initial_deps.iter().filter(|dep|
+/// var_info.contains_key(dep))`). `initial_previous_referenced_vars` are
+/// already absent (stripped when `var_info.initial_deps` is built in
+/// `build_var_info`). Returned slices borrow `var_info`'s `initial_deps`
+/// keys and iterate in `BTreeSet` (sorted) order, so the relation is
+/// byte-stable across runs.
+pub(crate) fn init_walk_successors<'a>(
+    var_info: &'a HashMap<String, VarInfo>,
+    name: &str,
+) -> Vec<&'a str> {
+    let Some(info) = var_info.get(name) else {
+        return Vec::new();
+    };
+    // Only the module early-return applies in the init phase; the stock
+    // sink is dt-only (`!is_initial`-gated in `compute_inner`).
+    if info.is_module {
+        return Vec::new();
+    }
+    info.initial_deps
+        .iter()
+        .filter(|dep| var_info.contains_key(dep.as_str()))
+        .map(|dep| dep.as_str())
+        .collect()
+}
+
 /// Build the per-variable `VarInfo` map (plus the set of variables
 /// referenced by `INIT()`) for `model` under the given module-input
 /// wiring.
