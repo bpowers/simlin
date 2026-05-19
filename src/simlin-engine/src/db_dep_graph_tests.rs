@@ -2108,6 +2108,182 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
     );
 }
 
+// ── AC3.1: a synthetic helper in the recurrence SCC is parent-sourced ────
+//
+// element-cycle-resolution.AC3.1: a well-founded recurrence whose SCC
+// includes a synthetic helper (here an INIT-expr-arg helper synthesized by
+// `make_temp_arg`, `$\u{205A}{parent}\u{205A}{n}\u{205A}arg0\u{205A}{sub}`
+// per design deviation 2) is resolvable when the helper's symbolic
+// `PerVarBytecodes` is sourced from its parent variable's `implicit_vars`,
+// mirroring the production `compile_implicit_var_fragment` chain.
+//
+// This is the Task 2 unit-level proof (the end-to-end simulate proof is
+// Task 3): the focused accessor `var_phase_symbolic_fragment_prod` must
+// return `Some` for the no-`SourceVariable` synthetic-helper node (it is
+// absent from `model.variables` but resolves in `model_implicit_var_info`),
+// and the consumer `symbolic_phase_element_order` must then build the SCC's
+// element graph with the helper node present. RED before the Task 2
+// extension: the helper has no `SourceVariable`, so the accessor returns
+// `None` and `symbolic_phase_element_order`'s `?` short-circuits to `None`
+// (the SCC is unresolved). GREEN after: parent-sourced `Some`, helper node
+// in the element order.
+
+/// `ecc[t]` over `t=[t1,t2,t3]` with `ecc[t1] = INIT(seed * 2)` (an
+/// expression INIT arg -> `make_temp_arg` synthesizes a scalar helper aux,
+/// the canonical `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t1` form) and a
+/// well-founded forward element recurrence `ecc[t2]=ecc[t1]+1`,
+/// `ecc[t3]=ecc[t2]+1`. `seed` is an external constant the helper reads.
+/// The induced element graph over `{ecc, helper}` in the Initial phase is
+/// `(helper,0) -> (ecc,0) -> (ecc,1) -> (ecc,2)` -- acyclic and
+/// element-sourceable iff the helper fragment is parent-sourced.
+fn ecc_with_init_helper_project() -> TestProject {
+    TestProject::new("ecc_init_helper")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .aux("seed", "1", None)
+        .array_with_ranges(
+            "ecc[t]",
+            vec![
+                ("t1", "INIT(seed * 2)"),
+                ("t2", "ecc[t1] + 1"),
+                ("t3", "ecc[t2] + 1"),
+            ],
+        )
+}
+
+/// The single synthetic-helper canonical name for the
+/// `ecc_with_init_helper_project` fixture: the entry in
+/// `model_implicit_var_info` that is absent from `model.variables` and
+/// carries the `$\u{205A}` synthetic-helper prefix (design deviation 2).
+/// Derived from the engine's own `model_implicit_var_info` rather than
+/// hard-coded so the test pins the real synthesized name.
+fn sole_synthetic_helper_name(
+    db: &SimlinDb,
+    model: crate::db::SourceModel,
+    project: crate::db::SourceProject,
+) -> String {
+    let info = crate::db::model_implicit_var_info(db, model, project);
+    let source_vars = model.variables(db);
+    let helpers: Vec<&String> = info
+        .keys()
+        .filter(|name| {
+            source_vars.get(name.as_str()).is_none()
+                && name.starts_with('$')
+                && name.contains('\u{205A}')
+        })
+        .collect();
+    assert_eq!(
+        helpers.len(),
+        1,
+        "fixture must synthesize exactly one `$\u{205A}` helper absent from \
+         model.variables; got {helpers:?} (all implicit: {:?})",
+        info.keys().collect::<Vec<_>>()
+    );
+    helpers[0].clone()
+}
+
+#[test]
+fn synthetic_helper_symbolic_fragment_is_parent_sourced() {
+    use crate::db::SccPhase;
+
+    let dm = ecc_with_init_helper_project().build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let helper = sole_synthetic_helper_name(&db, model, result.project);
+
+    // Sanity: the helper genuinely has NO `SourceVariable` (it is the
+    // no-`SourceVariable` arm Task 2 extends) yet IS the parent's
+    // `implicit_vars` entry the parent-sourcing chain must reach.
+    assert!(
+        model.variables(&db).get(helper.as_str()).is_none(),
+        "the synthetic helper {helper:?} must have no SourceVariable \
+         (it is the parent-sourced arm, not a model variable)"
+    );
+
+    // CORE Task 2 deliverable: the no-`SourceVariable` synthetic-helper
+    // node is sourced from the parent variable's `implicit_vars` and
+    // yields a symbolic `PerVarBytecodes` (the same SymVarRef
+    // layout-independent form every real SCC member produces). RED before
+    // the Task 2 extension: no `SourceVariable` -> `None`.
+    let frag = crate::db::var_phase_symbolic_fragment_prod(
+        &db,
+        model,
+        result.project,
+        helper.as_str(),
+        SccPhase::Initial,
+    );
+    assert!(
+        frag.is_some(),
+        "var_phase_symbolic_fragment_prod must source the synthetic \
+         helper {helper:?} from the parent's implicit_vars and return \
+         Some(PerVarBytecodes) (AC3.1); RED before Task 2: None"
+    );
+    let frag = frag.unwrap();
+    // The fragment must contain a per-element write of the helper itself
+    // (it is the helper's own scalar aux body `seed * 2`), so the
+    // element-graph segmenter can define the helper's element node.
+    use crate::compiler::symbolic::SymbolicOpcode;
+    assert!(
+        frag.symbolic.code.iter().any(|op| matches!(
+            op,
+            SymbolicOpcode::AssignCurr { var }
+                | SymbolicOpcode::AssignConstCurr { var, .. }
+                | SymbolicOpcode::BinOpAssignCurr { var, .. }
+                if var.name == helper.as_str()
+        )),
+        "the parent-sourced helper fragment must write the helper's own \
+         per-element value (so symbolic_phase_element_order can define its \
+         node); ops: {:?}",
+        frag.symbolic.code
+    );
+
+    // CONSUMER: with the helper in the member set alongside the recurrence
+    // variable, `symbolic_phase_element_order` must build the SCC's
+    // element graph WITH the helper node present (the helper is parent-
+    // sourced exactly like a real member). RED before Task 2: the helper
+    // fragment is `None`, so the `?` at the member loop short-circuits the
+    // whole builder to `None` (SCC unresolved).
+    let members: BTreeSet<crate::common::Ident<crate::common::Canonical>> = [
+        crate::common::Ident::new("ecc"),
+        crate::common::Ident::new(helper.as_str()),
+    ]
+    .into_iter()
+    .collect();
+    let order =
+        symbolic_phase_element_order(&db, model, result.project, &members, SccPhase::Initial);
+    assert!(
+        order.is_some(),
+        "symbolic_phase_element_order must build the SCC element graph \
+         once the helper {helper:?} is parent-sourced (RED before Task 2: \
+         helper fragment None -> `?` -> None -> SCC unresolved)"
+    );
+    let order = order.unwrap();
+    let helper_ident = crate::common::Ident::new(helper.as_str());
+    assert!(
+        order.iter().any(|(m, _)| *m == helper_ident),
+        "the helper node {helper:?} must be present in the SCC's \
+         per-element topological order; got {order:?}"
+    );
+    // The order is well-founded: the helper (reading only the external
+    // `seed`) precedes every `ecc` element; the forward recurrence then
+    // orders ecc[0] < ecc[1] < ecc[2].
+    let ecc_ident = crate::common::Ident::new("ecc");
+    let helper_pos = order
+        .iter()
+        .position(|(m, _)| *m == helper_ident)
+        .expect("helper node present (asserted above)");
+    let first_ecc_pos = order
+        .iter()
+        .position(|(m, _)| *m == ecc_ident)
+        .expect("ecc has element nodes in the recurrence SCC");
+    assert!(
+        helper_pos < first_ecc_pos,
+        "the parent-sourced helper (reading only external `seed`) must be \
+         ordered before any `ecc` element; got {order:?}"
+    );
+}
+
 // ── Task 5b: multi-member resolved SCC survives the dependency-graph ─────
 // cycle gate (SCC-aware back-edge break + contiguous placement, GH #575)
 //
