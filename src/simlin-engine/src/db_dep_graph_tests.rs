@@ -1349,6 +1349,290 @@ fn dt_self_recurrence_not_double_resolved_as_init_scc() {
     );
 }
 
+// ── Phase 2 Task 9 (AC2.4): MULTI-member init-only recurrence SCC ───────
+//
+// Subcomponent A's `init_recurrence_behind_stock_*` tests cover a
+// SINGLE-variable (`{s}`) init recurrence behind a stock. AC2.4's
+// combined-fragment init path (the synthetic-ident `SymbolicCompiledInitial`
+// in `assemble_module`, Task 6) is only exercised by a MULTI-member init
+// SCC -- two variables whose INIT relation forms a `ref.mdl`-shaped
+// inter-element recurrence, with a stock breaking the dt chain so the
+// cycle is init-ONLY (no dt SCC). This is the empirical confirmation that
+// the chosen fixture shape produces a `phase: Initial` `ResolvedScc` with
+// >= 2 members (the precondition the `init_recurrence.mdl` end-to-end
+// simulation test in `tests/simulate.rs` relies on), and a permanent
+// regression guard at the datamodel/verdict level.
+
+/// Two arrayed stocks `cs[t]` / `ecs[t]` over a 3-element named dimension
+/// `t`, whose per-element INIT (INTEG initial-value) equations form a
+/// `ref.mdl`-shaped inter-element recurrence ACROSS the two variables:
+///
+///   cs[t1] = 1            ecs[t1] = cs[t1] + 1
+///   cs[t2] = ecs[t1] + 1  ecs[t2] = cs[t2] + 1
+///   cs[t3] = ecs[t2] + 1  ecs[t3] = cs[t3] + 1
+///
+/// Both stocks have a trivial constant inflow `g[t] = 0`, so each stock's
+/// dt-equation is its (acyclic) flow and the stock BREAKS the dt chain
+/// (`dt_walk_successors` returns `[]` for a stock): there is NO dt cycle.
+/// The INIT relation, however, has `cs`'s init referencing `ecs` and
+/// `ecs`'s init referencing `cs` -> a whole-variable init 2-cycle
+/// `{cs,ecs}` whose induced per-element INIT graph
+///   (cs,0)->(ecs,0); (cs,1)->(ecs,1); (cs,2)->(ecs,2);
+///   (ecs,0)->(cs,1); (ecs,1)->(cs,2)
+/// is acyclic. So this is an init-ONLY MULTI-member element-acyclic
+/// recurrence -- exactly AC2.4's combined-fragment init path.
+fn two_stock_init_recurrence_project(
+    cs_init: Vec<(&str, &str)>,
+    ecs_init: Vec<(&str, &str)>,
+) -> datamodel::Project {
+    use crate::datamodel::{Dimension, Equation, Flow, Stock, Variable};
+    let dims = vec!["t".to_string()];
+    let arrayed = |eqs: Vec<(&str, &str)>| {
+        Equation::Arrayed(
+            dims.clone(),
+            eqs.into_iter()
+                .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None, None))
+                .collect(),
+            None,
+            false,
+        )
+    };
+    let stock = |ident: &str, eq: Equation| {
+        Variable::Stock(Stock {
+            ident: ident.to_string(),
+            equation: eq,
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["g".to_string()],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    };
+    datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![Dimension::named(
+            "t".to_string(),
+            vec!["t1".to_string(), "t2".to_string(), "t3".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                stock("cs", arrayed(cs_init)),
+                stock("ecs", arrayed(ecs_init)),
+                Variable::Flow(Flow {
+                    ident: "g".to_string(),
+                    equation: Equation::ApplyToAll(dims, "0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+#[test]
+fn two_stock_init_recurrence_is_resolved_init_only_multi_member() {
+    use crate::db::SccPhase;
+
+    // `ref.mdl`-shaped init recurrence behind two stocks. The stocks
+    // break the dt chain (their dt-equation is the constant flow `g`), so
+    // dt is acyclic; the INIT relation has the multi-member element-acyclic
+    // `{cs,ecs}` recurrence. This is the AC2.4 init-phase, MULTI-member
+    // path (Subcomponent A only covered the single-variable case).
+    let project = two_stock_init_recurrence_project(
+        vec![("t1", "1"), ("t2", "ecs[t1] + 1"), ("t3", "ecs[t2] + 1")],
+        vec![
+            ("t1", "cs[t1] + 1"),
+            ("t2", "cs[t2] + 1"),
+            ("t3", "cs[t3] + 1"),
+        ],
+    );
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    // DT relation: the stocks break the dt chain, the flow `g` is
+    // constant -> NO dt SCC at all.
+    let dt_res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(
+        !dt_res.has_unresolved && dt_res.resolved.is_empty(),
+        "the stocks break the dt chain: the dt relation must have NO SCC \
+         (got resolved={:?}, has_unresolved={})",
+        dt_res.resolved,
+        dt_res.has_unresolved
+    );
+
+    // INIT relation: the `{cs,ecs}` cluster is a MULTI-member init
+    // recurrence whose induced per-element init graph is acyclic and
+    // element-sourceable -> exactly one resolved `phase: Initial` SCC
+    // with BOTH members.
+    let init_res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Initial);
+    assert!(
+        !init_res.has_unresolved,
+        "the init recurrence is element-acyclic and element-sourceable: \
+         there must be NO unresolved init SCC (got has_unresolved=true)"
+    );
+    assert_eq!(
+        init_res.resolved.len(),
+        1,
+        "exactly one resolved init SCC (the {{cs,ecs}} cluster) -- got {:?}",
+        init_res.resolved
+    );
+    let scc = &init_res.resolved[0];
+    assert_eq!(
+        scc.phase,
+        SccPhase::Initial,
+        "an init-phase recurrence must carry phase == Initial"
+    );
+    assert_eq!(
+        scc.members,
+        [
+            crate::common::Ident::new("cs"),
+            crate::common::Ident::new("ecs"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>(),
+        "the resolved init SCC must be MULTI-member ({{cs,ecs}}) -- this \
+         is what exercises AC2.4's combined-fragment init path (a \
+         1-member SCC is already covered by Subcomponent A)"
+    );
+    assert!(
+        scc.members.len() >= 2,
+        "AC2.4 requires a MULTI-member init SCC; got {} member(s)",
+        scc.members.len()
+    );
+    // Deterministic interleaved per-element init topological order. cs[0]
+    // is the only in-SCC source; ecs[0] reads cs[0]; cs[1] reads ecs[0];
+    // ecs[1] reads cs[1]; cs[2] reads ecs[1]; ecs[2] reads cs[2]. The
+    // Kahn tie-break sorts `cs` before `ecs`, so the unique order is the
+    // strict interleave (same discipline as the dt ref.mdl case).
+    assert_eq!(
+        scc.element_order,
+        vec![
+            (crate::common::Ident::new("cs"), 0usize),
+            (crate::common::Ident::new("ecs"), 0usize),
+            (crate::common::Ident::new("cs"), 1usize),
+            (crate::common::Ident::new("ecs"), 1usize),
+            (crate::common::Ident::new("cs"), 2usize),
+            (crate::common::Ident::new("ecs"), 2usize),
+        ],
+        "init element_order must be the per-element topological interleave"
+    );
+}
+
+#[test]
+fn two_stock_init_recurrence_model_dep_graph_resolves_no_circular() {
+    // End-to-end through the production `model_dependency_graph`: the
+    // MULTI-member init-only recurrence behind stocks must NOT raise
+    // `CircularDependency`, and the emitted `resolved_sccs` must carry
+    // exactly one `ResolvedScc { phase: Initial }` for `{cs,ecs}`. This
+    // is the precondition the `init_recurrence.mdl` end-to-end simulation
+    // test relies on, asserted at the production-payload level.
+    let project = two_stock_init_recurrence_project(
+        vec![("t1", "1"), ("t2", "ecs[t1] + 1"), ("t3", "ecs[t2] + 1")],
+        vec![
+            ("t1", "cs[t1] + 1"),
+            ("t2", "cs[t2] + 1"),
+            ("t3", "cs[t3] + 1"),
+        ],
+    );
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "an element-acyclic MULTI-member init-only recurrence behind \
+         stocks must NOT set has_cycle"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "exactly one ResolvedScc for the resolved {{cs,ecs}} init \
+         recurrence (got {:?})",
+        dep_graph.resolved_sccs
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs[0].phase,
+        crate::db::SccPhase::Initial,
+        "the resolved SCC is an init-phase recurrence"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs[0].members,
+        [
+            crate::common::Ident::new("cs"),
+            crate::common::Ident::new("ecs"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    );
+}
+
+#[test]
+fn two_stock_init_genuine_element_cycle_is_unresolved() {
+    use crate::db::SccPhase;
+
+    // Loud-safe (AC4): a GENUINE multi-variable init element cycle
+    // (`cs[t] = ecs[t] + 1; ecs[t] = cs[t] + 1` -- every element of each
+    // stock's init reads the SAME element of the other) behind stocks
+    // must STAY unresolved (keep `CircularDependency`). The stocks still
+    // break the dt chain, so the only cycle is the genuine init element
+    // 2-cycle; the symbolic verdict must reject it.
+    let project = two_stock_init_recurrence_project(
+        vec![
+            ("t1", "ecs[t1] + 1"),
+            ("t2", "ecs[t2] + 1"),
+            ("t3", "ecs[t3] + 1"),
+        ],
+        vec![
+            ("t1", "cs[t1] + 1"),
+            ("t2", "cs[t2] + 1"),
+            ("t3", "cs[t3] + 1"),
+        ],
+    );
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+
+    let init_res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Initial);
+    assert!(
+        init_res.has_unresolved,
+        "a genuine multi-variable init element 2-cycle MUST be unresolved \
+         (loud-safe: real cycles stay rejected)"
+    );
+    assert!(
+        init_res.resolved.is_empty(),
+        "a genuine init element cycle yields no ResolvedScc (got {:?})",
+        init_res.resolved
+    );
+
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        dep_graph.has_cycle,
+        "a genuine multi-variable init element cycle still sets has_cycle"
+    );
+    assert!(
+        dep_graph.resolved_sccs.is_empty(),
+        "a genuine init element cycle resolves nothing"
+    );
+}
+
 // ── ResolvedScc / SccPhase salsa-equality wiring ────────────────────────
 //
 // `ResolvedScc` rides on `ModelDepGraphResult`, which is a salsa return

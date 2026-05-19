@@ -1423,33 +1423,138 @@ fn interleaved_mdl_element_interleave_simulates() {
     simulate_mdl_path("../../test/sdeverywhere/models/interleaved/interleaved.mdl");
 }
 
-/// `ref.mdl` and `interleaved.mdl` are INTER-variable element-acyclic
-/// recurrence SCCs (`ce`<->`ecc` / `a`<->`y`). Phase 2 Task 5b's
-/// SCC-aware back-edge break makes `model_dependency_graph` resolve the
-/// multi-member SCC instead of rejecting it, so they NO LONGER report
-/// `CircularDependency` (that was the Phase 1 / pre-Subcomponent-B
-/// behavior). This Task-5b-scoped invariant guards two things:
+/// element-cycle-resolution.AC2.4 (Phase 2 Task 9, the init-phase proof).
+/// `init_recurrence.mdl` is a NEW fixture exercising the init-phase
+/// combined-fragment path with a MULTI-member init SCC -- the first real
+/// exercise of Task 6's synthetic-ident `SymbolicCompiledInitial` init
+/// injection (`$⁚scc⁚init⁚{n}`) on a multi-member SCC. (Subcomponent A's
+/// `init_recurrence_behind_stock_*` tests already cover the SINGLE-
+/// variable init-recurrence-behind-a-stock case; AC2.4's combined-
+/// fragment init path needs a MULTI-member init SCC.)
 ///
-///  1. The cycle-gate verdict changed cleanly: NO `CircularDependency`
-///     for either fixture (the multi-member resolved SCC survives the
-///     dependency graph -- the Task 5b deliverable / Task 6 prerequisite).
-///  2. The AC2.5 leak guard (preserved verbatim from the original Phase 1
-///     intent): the verdict change must NOT spuriously inject a
-///     `self`/undefined-name `UnknownDependency`/`DoesNotExist` leak into
-///     these inter-variable-cycle fixtures.
+/// Shape: two arrayed stocks `cs[Target]` / `ecs[Target]` over the
+/// subrange `t1..t3`, whose per-element INTEG **initial values** form a
+/// `ref.mdl`-shaped inter-element recurrence ACROSS the two variables
+/// (`cs[t1]=1; cs[tNext]=ecs[tPrev]+1; ecs[t1]=cs[t1]+1;
+/// ecs[tNext]=cs[tNext]+1`), with a constant zero inflow `g[Target]=0`.
+/// Each stock's dt-equation is its (acyclic) flow `g`, so the STOCK
+/// BREAKS the dt chain -- there is NO dt cycle. The INIT relation,
+/// however, has `cs`'s init referencing `ecs` and vice-versa: a
+/// whole-variable init 2-cycle `{cs,ecs}` whose induced per-element INIT
+/// graph is acyclic. So ONLY the init element graph exercises the
+/// combined INIT fragment.
 ///
-/// It deliberately does NOT assert the hand-computed simulation series:
-/// the end-to-end `ref.dat`/`interleaved.dat` simulation assertions are
-/// the dedicated `ref_mdl_multi_variable_recurrence_simulates` (AC2.1,
-/// Task 7) and `interleaved_mdl_element_interleave_simulates` (AC2.2,
-/// Task 8) tests directly above; Task 9 (AC2.5) then folds/transitions
-/// this test's intent into the full correct-simulation form. (Deviation
-/// rationale: Task 5b's correctness fix structurally falsifies this
-/// test's `CircularDependency` precondition, so it cannot stay green
-/// unchanged and a green pre-commit forces this minimal,
-/// Task-5b-scoped retarget -- see the executor report.)
+/// This test FIRST empirically confirms (per the AC2.4 mandate) that the
+/// parsed fixture produces an init-ONLY MULTI-member element SCC -- the
+/// production `model_dependency_graph` payload must carry exactly one
+/// `ResolvedScc { phase: Initial }` with `>= 2` members (`{cs,ecs}`) and
+/// `has_cycle == false` -- then simulates it via `simulate_mdl_path`
+/// against the hand-computed `init_recurrence.dat`. The stocks integrate
+/// a zero flow, so they hold their recurrence-computed initial values
+/// constant across both saved steps (FINAL TIME=1, TIME STEP=1):
+///   cs[t1]=1, cs[t2]=3, cs[t3]=5, ecs[t1]=2, ecs[t2]=4, ecs[t3]=6.
 #[test]
-fn ref_interleaved_inter_variable_cycles_report_circular() {
+fn init_recurrence_mdl_multi_member_init_scc_simulates() {
+    use simlin_engine::common::Ident;
+    use simlin_engine::db::{SccPhase, model_dependency_graph};
+    use std::collections::BTreeSet;
+
+    let path = "../../test/sdeverywhere/models/init_recurrence/init_recurrence.mdl";
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"));
+    let dm = open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+
+    // Empirical AC2.4 confirmation, tied to the REAL fixture: the parsed
+    // MDL must yield an init-ONLY MULTI-member element SCC. If this
+    // produced a 1-member or a dt-phase SCC the fixture would not
+    // exercise the init combined-fragment path at all.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
+    let sync = sync.to_sync_result();
+    let model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, model, sync.project);
+
+    assert!(
+        !dep_graph.has_cycle,
+        "init_recurrence.mdl: the element-acyclic MULTI-member init-only \
+         recurrence behind stocks must NOT set has_cycle (resolved_sccs = \
+         {:?})",
+        dep_graph.resolved_sccs
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "init_recurrence.mdl: exactly one ResolvedScc (the {{cs,ecs}} \
+         init cluster) -- got {:?}",
+        dep_graph.resolved_sccs
+    );
+    let scc = &dep_graph.resolved_sccs[0];
+    assert_eq!(
+        scc.phase,
+        SccPhase::Initial,
+        "init_recurrence.mdl: the resolved SCC MUST be phase == Initial \
+         (a dt-phase SCC would mean the stock did not break the dt chain \
+         and the fixture would not exercise the init combined-fragment \
+         path) -- got {:?}",
+        scc.phase
+    );
+    assert!(
+        scc.members.len() >= 2,
+        "init_recurrence.mdl: AC2.4 requires a MULTI-member init SCC (the \
+         single-variable case is already covered by Subcomponent A); got \
+         {} member(s): {:?}",
+        scc.members.len(),
+        scc.members
+    );
+    assert_eq!(
+        scc.members,
+        [Ident::new("cs"), Ident::new("ecs")]
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        "init_recurrence.mdl: the resolved init SCC's members must be \
+         exactly {{cs,ecs}}"
+    );
+
+    // End-to-end: it compiles AND simulates to the hand-computed
+    // init_recurrence.dat (the combined INIT fragment, injected as one
+    // synthetic-ident SymbolicCompiledInitial, produces the correct
+    // per-element initial values; the zero flow holds them constant).
+    simulate_mdl_path(path);
+}
+
+/// element-cycle-resolution.AC2.5 (Phase 2 Task 9, the transitioned
+/// inter-variable-cycle assertion). `ref.mdl` and `interleaved.mdl` are
+/// INTER-variable element-acyclic recurrence SCCs (`ce`<->`ecc` /
+/// `a`<->`y`). Before Subcomponent B they were rejected with
+/// `CircularDependency`; this test originally asserted exactly that.
+/// Subcomponent B (GH #575) resolves the multi-member SCC and injects one
+/// combined per-element fragment, so the fixtures now compile and
+/// simulate.
+///
+/// Per AC2.5 this test is **transitioned** to its final end state: the
+/// correct-simulation assertion is folded into the dedicated end-to-end
+/// tests `ref_mdl_multi_variable_recurrence_simulates` (AC2.1, vs.
+/// `ref.dat`) and `interleaved_mdl_element_interleave_simulates` (AC2.2,
+/// vs. `interleaved.dat`) above -- those `simulate_mdl_path` tests ARE
+/// the hand-computed-value proof, so re-asserting the series here would
+/// be redundant. This test retains the still-meaningful diagnostic-level
+/// guards the dedicated value tests do not pin:
+///
+///  1. The cycle-gate verdict transitioned correctly: NO
+///     `CircularDependency` for either fixture, and the model compiles
+///     end-to-end (the multi-member resolved SCC survives the dependency
+///     graph -- the exact inverse of the original pre-Subcomponent-B
+///     `CircularDependency` assertion this test made).
+///  2. The AC2.5 leak guard, preserved verbatim from the original Phase 1
+///     intent (the #559-class regression pin): the verdict change must
+///     NOT spuriously inject a `self`/undefined-name
+///     `UnknownDependency`/`DoesNotExist` leak into these
+///     inter-variable-cycle fixtures. `ensure_results` in the value tests
+///     would catch a wrong *number*, but only this guard pins the
+///     specific "the cycle resolution leaked an undefined dependency
+///     name" failure mode.
+#[test]
+fn ref_interleaved_inter_variable_cycles_simulate_no_circular_no_leak() {
     use simlin_engine::common::ErrorCode;
     for path in [
         "../../test/sdeverywhere/models/ref/ref.mdl",
@@ -1457,15 +1562,22 @@ fn ref_interleaved_inter_variable_cycles_report_circular() {
     ] {
         let mdl =
             std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"));
-        let (_compile_err, diags) = compile_diags(&mdl);
+        let (compile_err, diags) = compile_diags(&mdl);
+        assert!(
+            !compile_err,
+            "{path}: Subcomponent B (GH #575) must let the element-acyclic \
+             multi-member recurrence SCC compile end-to-end (correct \
+             simulation is asserted by the dedicated `.dat` tests above). \
+             Diagnostics: {diags:#?}"
+        );
         assert!(
             !diags
                 .iter()
                 .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency)),
-            "{path}: Task 5b's SCC-aware back-edge break must let the \
-             element-acyclic multi-member recurrence SCC survive the \
-             dependency graph -- it must NO LONGER report \
-             CircularDependency. Diagnostics: {diags:#?}"
+            "{path}: the element-acyclic multi-member recurrence SCC must \
+             survive the dependency graph -- it must NO LONGER report \
+             CircularDependency (transitioned from the original \
+             pre-Subcomponent-B assertion). Diagnostics: {diags:#?}"
         );
         assert!(
             !diags.iter().any(|d| matches!(
