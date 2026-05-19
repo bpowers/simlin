@@ -491,7 +491,15 @@ impl<'module> Compiler<'module> {
                 for (i, idx) in indices.iter().enumerate() {
                     match idx {
                         SubscriptIndex::Single(expr) => {
-                            self.walk_expr(expr).unwrap().unwrap();
+                            // Propagate via `?` (matching the sibling walk_expr
+                            // call sites at the LookupForward/Backward and
+                            // PREVIOUS/INIT arms): a recoverable codegen Err here
+                            // -- e.g. a PREVIOUS whose arg survived helper
+                            // rewriting as a non-variable expression
+                            // (NotSimulatable) -- must flow back to the caller
+                            // (db_ltm.rs gracefully drops the un-compilable LTM
+                            // synthetic fragment), never escalate to a panic (#363).
+                            self.walk_expr(expr)?.unwrap();
                             let bounds = bounds[i] as VariableOffset;
                             self.push(Opcode::PushSubscriptIndex { bounds });
                         }
@@ -1588,5 +1596,78 @@ impl<'module> Compiler<'module> {
             compiled_flows,
             compiled_stocks,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Loc;
+    use std::collections::HashMap;
+
+    /// Build a minimal, dimension-free `Module` sufficient to drive `walk_expr`
+    /// on a hand-built `Expr`. The runlists are empty -- the test calls
+    /// `walk_expr` directly, so the only requirement is a well-formed `Module`
+    /// that `Compiler::new` can populate metadata from.
+    fn empty_module() -> Module {
+        Module {
+            ident: Ident::new("test"),
+            inputs: Default::default(),
+            n_slots: 1,
+            n_temps: 0,
+            temp_sizes: vec![],
+            runlist_initials: vec![],
+            runlist_initials_by_var: vec![],
+            runlist_flows: vec![],
+            runlist_stocks: vec![],
+            offsets: HashMap::new(),
+            runlist_order: vec![],
+            tables: HashMap::new(),
+            dimensions: vec![],
+            dimensions_ctx: Default::default(),
+            module_refs: HashMap::new(),
+        }
+    }
+
+    /// A `PREVIOUS(...)` whose argument is not a bare `Expr::Var` (it survived
+    /// helper rewriting as a non-variable expression) is `NotSimulatable`. When
+    /// such a `PREVIOUS` sits inside a `Subscript` index expression, the scalar
+    /// `Subscript` arm of `walk_expr` must *propagate* that recoverable `Err`
+    /// (so a caller like `db_ltm.rs`'s LTM-synthetic-fragment compile can
+    /// gracefully drop the un-compilable fragment), not escalate it to a
+    /// process-killing panic. This pins the converted condition behind #363
+    /// (codegen.rs line 494 was a double-`unwrap` on this `Result`).
+    #[test]
+    fn previous_of_non_var_inside_subscript_index_is_err_not_panic() {
+        let module = empty_module();
+        let mut compiler = Compiler::new(&module);
+
+        // arr[ PREVIOUS(1, 0) ] -- the index is a PREVIOUS of a constant, which
+        // is not a bare variable reference, so the PREVIOUS arm returns
+        // NotSimulatable. Before the fix the enclosing Subscript arm panicked
+        // by unwrapping that Err; after the fix it propagates via `?`.
+        let expr = Expr::Subscript(
+            0,
+            vec![SubscriptIndex::Single(Expr::App(
+                BuiltinFn::Previous(
+                    Box::new(Expr::Const(1.0, Loc::default())),
+                    Box::new(Expr::Const(0.0, Loc::default())),
+                ),
+                Loc::default(),
+            ))],
+            vec![3],
+            Loc::default(),
+        );
+
+        let result = compiler.walk_expr(&expr);
+
+        let err = result.expect_err(
+            "PREVIOUS-of-non-var inside a subscript index must return a typed Err, not Ok",
+        );
+        assert_eq!(
+            err.code,
+            ErrorCode::NotSimulatable,
+            "expected NotSimulatable, got {err:?}"
+        );
     }
 }
