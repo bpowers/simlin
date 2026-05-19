@@ -2663,23 +2663,49 @@ fn expand_maps_to_chains(
     dim_names: &BTreeSet<String>,
     all_dims: &[SourceDimension],
 ) -> BTreeSet<String> {
-    let mut expanded = dim_names.clone();
-    let dim_map: HashMap<&str, &SourceDimension> =
-        all_dims.iter().map(|d| (d.name.as_str(), d)).collect();
+    // Dimension display names (`SourceDimension.name`, the as-written casing)
+    // and mapping targets (`maps_to` / `mappings[].target`, which the MDL/XMILE
+    // importers canonicalize to lowercase) are NOT necessarily the same string,
+    // so every reachability comparison and lookup here must be on the canonical
+    // form. The returned set is keyed by display name (the caller filters the
+    // datamodel dims with `expanded.contains(&d.name)`), so we resolve each
+    // canonical target back through `canonical_to_display` before inserting.
+    let canonical_to_display: HashMap<String, String> = all_dims
+        .iter()
+        .map(|d| (canonicalize(&d.name).into_owned(), d.name.clone()))
+        .collect();
+    let dim_map: HashMap<String, &SourceDimension> = all_dims
+        .iter()
+        .map(|d| (canonicalize(&d.name).into_owned(), d))
+        .collect();
 
+    let mut expanded = dim_names.clone();
     let mut to_visit: Vec<String> = dim_names.iter().cloned().collect();
     while let Some(name) = to_visit.pop() {
+        let name_canon = canonicalize(&name).into_owned();
+
+        // `push_target` resolves a canonical mapping target to the display name
+        // the caller's `expanded.contains(&d.name)` filter expects, falling back
+        // to the canonical string when the target is not itself a declared
+        // dimension (a defensive case the old `==` path also tolerated).
+        let push_target =
+            |expanded: &mut BTreeSet<String>, to_visit: &mut Vec<String>, target_canon: &str| {
+                let display = canonical_to_display
+                    .get(target_canon)
+                    .cloned()
+                    .unwrap_or_else(|| target_canon.to_string());
+                if expanded.insert(display.clone()) {
+                    to_visit.push(display);
+                }
+            };
+
         // Forward: follow maps_to and mappings targets from the current dim.
-        if let Some(dim) = dim_map.get(name.as_str()) {
-            if let Some(ref target) = dim.maps_to
-                && expanded.insert(target.clone())
-            {
-                to_visit.push(target.clone());
+        if let Some(dim) = dim_map.get(&name_canon) {
+            if let Some(ref target) = dim.maps_to {
+                push_target(&mut expanded, &mut to_visit, &canonicalize(target));
             }
             for mapping in &dim.mappings {
-                if expanded.insert(mapping.target.clone()) {
-                    to_visit.push(mapping.target.clone());
-                }
+                push_target(&mut expanded, &mut to_visit, &canonicalize(&mapping.target));
             }
         }
         // Reverse: find any dimension that maps_to (or has a mapping targeting)
@@ -2690,8 +2716,11 @@ fn expand_maps_to_chains(
             let maps_to_current = source_dim
                 .maps_to
                 .as_deref()
-                .is_some_and(|t| t == name.as_str())
-                || source_dim.mappings.iter().any(|m| m.target == name);
+                .is_some_and(|t| canonicalize(t) == name_canon)
+                || source_dim
+                    .mappings
+                    .iter()
+                    .any(|m| canonicalize(&m.target) == name_canon);
             if maps_to_current && expanded.insert(source_dim.name.clone()) {
                 to_visit.push(source_dim.name.clone());
             }
@@ -3956,7 +3985,47 @@ fn lower_implicit_var<'db>(
             dimensions: &dim_context,
             model_name: "",
         };
-        crate::model::lower_variable(&scope, &parsed_implicit)
+        let lowered = crate::model::lower_variable(&scope, &parsed_implicit);
+
+        // Loud-safe (GH #580): `lower_variable` is total -- on a lowering error
+        // (e.g. an un-translatable cross-dimension subscript surviving into a
+        // scalar helper as `DimensionInScalarContext`) it records the error and
+        // discards the AST rather than failing. The pre-lowering check above
+        // only inspects the *parsed* implicit; a lowering-stage error would
+        // otherwise leave a helper with `ast == None` that
+        // `compile_implicit_var_phase_bytecodes` -> `Var::new` rejects as
+        // `EmptyEquation`, surfacing only in the opaque aggregate `missing_vars`
+        // string with no per-variable diagnostic (the real-var path emits one
+        // via `accumulate_var_compile_error`). Mirror that: turn the residual
+        // into a legible per-helper diagnostic carrying the actual error code +
+        // span, then return `None`. Routed through `try_accumulate_diagnostic`
+        // because this whole assembly chain (`compile_project_incremental` ->
+        // `assemble_simulation` -> `assemble_module` -> `compile_implicit_var_*`
+        // -> here) runs OUTSIDE a salsa-tracked function, so a bare
+        // `.accumulate(db)` would panic; the helper accumulates only when a
+        // tracked frame is active and is otherwise a safe no-op (the error then
+        // rides out via the caller's `missing_vars` aggregate), exactly as the
+        // sibling aggregate-`Err` accumulation in `assemble_module` does. This
+        // is a no-op when lowering succeeds (`equation_errors()` is `None`), so
+        // it never perturbs the shared `var_phase_symbolic_fragment_prod`
+        // consumer on the SCC-resolution path -- it fires only on a genuine
+        // residual miscompile.
+        if let Some(errors) = lowered.equation_errors() {
+            for err in errors {
+                try_accumulate_diagnostic(
+                    db,
+                    Diagnostic {
+                        model: model.name(db).clone(),
+                        variable: Some(implicit_name.clone()),
+                        error: DiagnosticError::Equation(err),
+                        severity: DiagnosticSeverity::Error,
+                    },
+                );
+            }
+            return None;
+        }
+
+        lowered
     };
 
     Some((implicit_name, lowered))

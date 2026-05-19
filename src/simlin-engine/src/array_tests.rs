@@ -4923,3 +4923,128 @@ TIME STEP = 1 ~~|
         );
     }
 }
+
+/// Regression tests for GH #580 Bug A: when `make_temp_arg` lifts a per-element
+/// scalar helper out of an `INITIAL(...)`-wrapped apply-to-all parent, a
+/// cross-dimension subscript that is related by a *group* (unequal-cardinality)
+/// mapping must still be translated to a concrete element. Before the fix the
+/// bare full-dimension subscript survived into a scalar helper aux, lowering to
+/// `DimensionInScalarContext` and surfacing as a synthetic
+/// `$⁚<var>⁚0⁚arg0⁚<element>` helper in `compile_project_incremental`'s `Err`.
+#[cfg(test)]
+mod group_mapped_temp_arg_tests {
+    use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+    use crate::open_vensim;
+
+    /// A minimized C-LEARN shape: `Aggregated Regions -> (COP: ...subgroups...)`
+    /// is a heterogeneous group mapping (one source element maps to a
+    /// multi-element subgroup of the target, `len(Small) != len(Big)`). The
+    /// `INITIAL(...)`-wrapped A2A `out[Big]` references `src` by the *full*
+    /// `Small` dimension name, so the helper extractor must resolve each `Big`
+    /// element to the `Small` element whose group contains it.
+    const GROUP_MAPPED_INITIAL_A2A: &str = "\
+{UTF-8}
+Big: e1, e2, e3, e4 ~~|
+BigGroupA: e1, e2 ~~|
+BigGroupB: e3, e4 ~~|
+Small: s1, s2 -> (Big: BigGroupA, BigGroupB) ~~|
+src[Small] = 1, 2 ~~|
+out[Big] = INITIAL(src[Small]) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+
+    #[test]
+    fn group_mapped_initial_a2a_compiles_and_simulates() {
+        let datamodel =
+            open_vensim(GROUP_MAPPED_INITIAL_A2A).expect("MDL should parse to a datamodel project");
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main");
+
+        let compiled = compiled.unwrap_or_else(|e| {
+            panic!(
+                "group-mapped INITIAL-wrapped A2A should compile (GH #580 Bug A); \
+                 got Err: {e:?}"
+            )
+        });
+
+        let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+        vm.run_to_end().expect("VM run should succeed");
+        let results = vm.into_results();
+        let series = crate::test_common::collect_results(&results);
+
+        // out[e] resolves to the `src` value of the `Small` element whose group
+        // contains `e`: BigGroupA={e1,e2}<-s1=1, BigGroupB={e3,e4}<-s2=2.
+        // The flattened apply-to-all slots are `out[e1]`..`out[e4]`.
+        let expect = [
+            ("out[e1]", 1.0),
+            ("out[e2]", 1.0),
+            ("out[e3]", 2.0),
+            ("out[e4]", 2.0),
+        ];
+        for (name, want) in expect {
+            let got = series
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} not in results; have {:?}", series.keys()));
+            assert!(
+                (got[0] - want).abs() < 1e-9,
+                "{name}: expected {want}, got {}",
+                got[0]
+            );
+        }
+    }
+
+    /// Part B (loud-safe companion -- AC7.5 / "no silent miscompile"): when a
+    /// helper lifted out of an `INITIAL(...)`-wrapped A2A parent references a
+    /// dimension that genuinely has *no* mapping to the parent dimension, the
+    /// cross-dimension subscript cannot be element-resolved and lowers to
+    /// `DimensionInScalarContext`. `lower_variable` then discards the helper's
+    /// AST; without the post-lower re-check in `lower_implicit_var` the helper
+    /// would carry an `ast == None` that `Var::new` later rejects as
+    /// `EmptyEquation`. Either way the residual must surface as a **clean,
+    /// named error** -- the failing compile `Err` must name the specific
+    /// `$⁚out⁚…⁚arg0⁚…` helper -- never a silent all-`None` fragment that reads
+    /// a wrong value. (The per-helper `DimensionInScalarContext` diagnostic is
+    /// also accumulated through `try_accumulate_diagnostic`, on the same
+    /// `IN_TRACKED_CONTEXT`-gated path as `assemble_module`'s aggregate `Err`
+    /// diagnostic; surfacing that gated channel through `collect_all_diagnostics`
+    /// is a separate, pre-existing concern.)
+    #[test]
+    fn unresolvable_helper_fails_loudly_not_silently() {
+        use crate::db::{compile_project_incremental, sync_from_datamodel_incremental};
+
+        // `Other` has NO mapping to `Big`, so `out[Big] = INITIAL(other[Other])`
+        // cannot translate the bare `[other]` subscript per `Big` element. This
+        // is the residual shape Part A does NOT resolve (no mapping exists).
+        let mdl = "\
+{UTF-8}
+Big: e1, e2, e3, e4 ~~|
+Other: o1, o2 ~~|
+other[Other] = 1, 2 ~~|
+out[Big] = INITIAL(other[Other]) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+        let datamodel = open_vensim(mdl).expect("MDL should parse to a datamodel project");
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let compile_result = compile_project_incremental(&db, sync.project, "main");
+
+        let err =
+            compile_result.expect_err("an unmappable cross-dimension helper must not compile");
+        let msg = format!("{err:?}");
+        // Loud: the failure must NAME the specific per-element helper of `out`,
+        // not be a silent miscompile into a wrong value or an opaque generic
+        // error with no offending variable.
+        assert!(
+            msg.contains("⁚out⁚") && msg.contains("⁚arg0⁚"),
+            "the compile Err must name the offending `$⁚out⁚…⁚arg0⁚…` helper \
+             (loud, actionable -- AC7.5); got: {msg}"
+        );
+    }
+}
