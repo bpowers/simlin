@@ -3629,3 +3629,161 @@ fn corpus_clearn_macros_import() {
         macro_diags.len()
     );
 }
+
+/// element-cycle-resolution Phase 6 Task 1 -- the C-LEARN incremental
+/// structural value-locking gate (AC7.1, AC7.2, AC7.3, AC7.5).
+///
+/// This is the plan's explicit mid-plan value-locking checkpoint: it locks
+/// "C-LEARN compiles via the incremental path + runs to FINAL TIME + no
+/// all-NaN core series" before Phase 7's numeric tail, now that Phases 1-5
+/// are in (element-level single + multi-variable SCC resolution, the dt+init
+/// combined fragment, the synthetic-helper parent-sourcing safety net, and
+/// the genuine-Vensim VECTOR SORT ORDER / VECTOR ELM MAP corrections all
+/// converge so the false `CircularDependency` no longer gates C-LEARN and
+/// NaN no longer propagates from the VECTOR ops).
+///
+/// - **AC7.1:** parse `C-LEARN v77 for Vensim.mdl`, compile via the
+///   incremental path by calling `compile_project_incremental` *directly*
+///   (not the `compile_vm` `.unwrap()` wrapper) so the `Result` can be
+///   asserted clean rather than panicking. The compile must be `Ok` -- no
+///   fatal `ModelError`, specifically NO `CircularDependency`. Non-fatal
+///   unit-inference warnings are explicitly allowed (out of scope). On a
+///   diagnostic the collected diagnostics are dumped (the
+///   `corpus_clearn_macros_import` inspection idiom) so a regression is
+///   legible.
+/// - **AC7.2:** `Vm::new(...)` then `vm.run_to_end()` runs to FINAL TIME.
+///   Deliberately NOT wrapped in `catch_unwind`: per AC7.5 a post-gate panic
+///   (#363 reproducing) must be a hard, root-caused failure that propagates
+///   with its backtrace, never caught/masked.
+/// - **AC7.3:** define "core series" as the matched offset keyset
+///   `Ref.vdf.offsets ∩ results.offsets` (there is no `Results` series
+///   accessor / "core C-LEARN series" enumeration anywhere, so the matched
+///   set is the principled definition -- it also dovetails Phase 7's AC8.2
+///   NaN guard). Parse `Ref.vdf` via
+///   `VdfFile::parse(...).to_results_via_records()` exactly as
+///   `simulates_clearn` does, intersect the offset keysets, and assert that
+///   for each matched ident at least one step is non-NaN (the
+///   `data[step*step_size+off]` flat-index idiom from `ensure_vdf_results` /
+///   `macro_test_value_at`). Fail listing any entirely-NaN matched idents.
+///
+/// `#[ignore]`d: C-LEARN is ~53k lines / 1.4 MB (~4-5s just to parse on
+/// release, far more to compile+run); it must not run in the capped default
+/// `cargo test` set. All sibling C-LEARN tests follow this convention.
+// Run with: cargo test --release -- --ignored compiles_and_runs_clearn_structural
+#[test]
+#[ignore]
+fn compiles_and_runs_clearn_structural() {
+    use simlin_engine::common::ErrorCode;
+
+    let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+
+    eprintln!("model (vensim mdl): {mdl_path}");
+
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    // AC7.1: compile via the incremental path, calling
+    // `compile_project_incremental` DIRECTLY (not the `compile_vm`
+    // `.unwrap()` wrapper) so the `Result` can be asserted clean rather than
+    // panicking. A fatal `ModelError` -- specifically a `CircularDependency`
+    // -- here is a genuine regression or an unresolved cycle-resolution gap,
+    // so on failure we dump every collected diagnostic (the
+    // `corpus_clearn_macros_import` inspection idiom) to make it legible.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    let compile_result = compile_project_incremental(&db, sync.project, "main");
+
+    if compile_result.is_err() {
+        let diags = collect_project_diagnostics(&datamodel_project);
+        let has_circular = diags
+            .iter()
+            .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency));
+        panic!(
+            "AC7.1: C-LEARN must compile via the incremental path with no \
+             fatal ModelError (specifically NO CircularDependency -- the \
+             element-level cycle resolution of Phases 1-3 must dissolve the \
+             false cycle; non-fatal unit-inference warnings are allowed). \
+             compile_project_incremental returned Err; has_circular_dependency \
+             = {has_circular}. Collected diagnostics: {diags:#?}"
+        );
+    }
+
+    // Even on `Ok`, a `CircularDependency` must never appear among the
+    // collected diagnostics: the whole point of this gate is that the
+    // element-level cycle resolution dissolved C-LEARN's false cycle.
+    let diags = collect_project_diagnostics(&datamodel_project);
+    let circular: Vec<_> = diags
+        .iter()
+        .filter(|d| diag_code(d) == Some(ErrorCode::CircularDependency))
+        .collect();
+    assert!(
+        circular.is_empty(),
+        "AC7.1: C-LEARN must compile with NO CircularDependency diagnostic \
+         (the element-level cycle resolution of Phases 1-3 must dissolve the \
+         false cycle). Found {} CircularDependency diagnostic(s): {circular:#?}",
+        circular.len()
+    );
+
+    let compiled = compile_result.expect("checked Ok above");
+
+    // AC7.2: run to FINAL TIME. NOT wrapped in `catch_unwind` -- per AC7.5 a
+    // post-gate panic (#363 reproducing now that the cycle gate no longer
+    // masks the deeper pipeline) must be a hard, root-caused failure that
+    // propagates with its backtrace, never caught/masked.
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
+    let results = vm.into_results();
+
+    // AC7.3: define "core series" as the matched offset keyset
+    // `Ref.vdf.offsets ∩ results.offsets` and assert no matched series is
+    // entirely NaN after the run. There is no `Results` series accessor /
+    // "core C-LEARN series" enumeration anywhere, so the matched set is the
+    // principled definition (it also dovetails Phase 7's AC8.2 NaN guard).
+    let vdf_path = "../../test/xmutil_test_models/Ref.vdf";
+    let vdf_data_bytes =
+        std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
+    let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
+        .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
+    let vdf_results = vdf_file
+        .to_results_via_records()
+        .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"));
+
+    let step_count = results.step_count;
+    let step_size = results.step_size;
+    let mut matched = 0usize;
+    let mut all_nan: Vec<String> = Vec::new();
+    for ident in vdf_results.offsets.keys() {
+        let Some(&off) = results.offsets.get(ident) else {
+            continue;
+        };
+        matched += 1;
+        let any_non_nan = (0..step_count).any(|s| !results.data[s * step_size + off].is_nan());
+        if !any_non_nan {
+            all_nan.push(ident.to_string());
+        }
+    }
+
+    eprintln!(
+        "C-LEARN structural gate: {matched} core series matched \
+         (Ref.vdf ∩ results) across {step_count} steps"
+    );
+    assert!(
+        matched > 0,
+        "AC7.3: expected a non-empty matched core-series set \
+         (Ref.vdf.offsets ∩ results.offsets); got 0 -- the offset keysets \
+         must overlap for the NaN guard to be meaningful"
+    );
+    all_nan.sort();
+    assert!(
+        all_nan.is_empty(),
+        "AC7.3: every matched core C-LEARN series (Ref.vdf ∩ results) must \
+         have at least one non-NaN step after the run. {} of {matched} \
+         matched series are entirely NaN: {all_nan:#?}",
+        all_nan.len()
+    );
+}
