@@ -292,6 +292,39 @@ fn combined_fragment_renumbers_resources_per_member_no_collision() {
 }
 
 #[test]
+fn combined_fragment_keeps_disjoint_temp_ranges_across_interleaved_segments() {
+    // #583 guard: the plain-phase `concatenate_fragments` RECYCLES fragment
+    // temps into one identity pool (a fragment's temps die at its runlist
+    // segment end, so two fragments' id-0 temps may share slot 0). That
+    // recycle is UNSOUND for `combine_scc_fragment`: its per-element segments
+    // INTERLEAVE per `element_order` (`ce[0] -> ecc[0] -> ce[1] -> ecc[1]`),
+    // so `ce`'s and `ecc`'s temp live ranges OVERLAP -- they must NEVER share
+    // a slot. This pins that `combine_scc_fragment` stays on the disjoint
+    // (sum) temp path even after the plain-phase recycle lands.
+    let frags = two_member_fragments(); // `ce` temp (0,4), `ecc` temp (0,8)
+    let resolved = scc(interleaved_order());
+
+    let combined = combine_scc_fragment(&resolved, &frags).expect("must combine");
+
+    // Both members carry a fragment-local temp id 0. In the combined
+    // fragment they MUST occupy DISTINCT ids (0 and 1), proving the SCC path
+    // did not recycle them onto a shared slot.
+    let mut ids: Vec<u32> = combined.temp_sizes.iter().map(|(tid, _)| *tid).collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        vec![0, 1],
+        "two interleaved members' id-0 temps must get DISJOINT ids 0 and 1 \
+         (not recycled to a shared slot) -- their live ranges overlap"
+    );
+    // The sizes stay per-member (NOT max-merged), since the slots are
+    // distinct: `ce`'s 4 at id 0, `ecc`'s 8 at id 1.
+    let sizes: HashMap<u32, usize> = combined.temp_sizes.iter().copied().collect();
+    assert_eq!(sizes.get(&0), Some(&4), "ce's temp size at its own slot 0");
+    assert_eq!(sizes.get(&1), Some(&8), "ecc's temp size at its own slot 1");
+}
+
+#[test]
 fn combined_fragment_static_view_var_base_survives_verbatim() {
     let frags = two_member_fragments();
     let resolved = scc(interleaved_order());

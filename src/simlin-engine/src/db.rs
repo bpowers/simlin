@@ -5086,12 +5086,25 @@ pub fn assemble_module(
     let initial_counts = ContextResourceCounts::from_fragments(&initial_refs);
     let flow_counts = ContextResourceCounts::from_fragments(&flow_frags);
 
+    // #583: temps are NOT a per-phase-offset resource. The plain-phase
+    // concat recycles every fragment's 0-based temps into ONE shared
+    // identity pool (matching the monolithic `Module::compile` keyed
+    // max-merge over the flattened initials+flows+stocks runlists), so the
+    // `ctx_base.temps` is 0 for EVERY phase -- the pool is not partitioned by
+    // phase. (Summing per phase, as before, drove the renumbered `temp_id`
+    // past `u8::MAX` and diverged `flows_concat` from the all-phases `merged`
+    // temp_offsets table the VM consumes.) Modules/views/dim-lists DO stay
+    // per-phase summed: each is a distinct resource, laid out disjointly
+    // across phases exactly as the all-phases `merged` lays them out.
     let no_base = ContextResourceCounts::default();
-    let flow_base = initial_counts.clone();
+    let flow_base = ContextResourceCounts {
+        temps: 0,
+        ..initial_counts.clone()
+    };
     let stock_base = ContextResourceCounts {
         modules: initial_counts.modules + flow_counts.modules,
         views: initial_counts.views + flow_counts.views,
-        temps: initial_counts.temps + flow_counts.temps,
+        temps: 0,
         dim_lists: initial_counts.dim_lists + flow_counts.dim_lists,
     };
 
@@ -5162,7 +5175,10 @@ pub fn assemble_module(
     let mut compiled_initials: Vec<SymbolicCompiledInitial> = Vec::new();
     let mut init_mod_off: u16 = 0;
     let mut init_view_off: u16 = 0;
-    let mut init_temp_off: u32 = 0;
+    // #583: temps recycle into the shared identity pool (the same pool the
+    // `merged` table below builds), so each initial's temp ids stay
+    // fragment-local (offset 0) -- they are NOT advanced per initial.
+    let init_temp_off: u32 = 0;
     let mut init_dl_off: u16 = 0;
     for (i, (name, bc)) in initial_frags.iter().enumerate() {
         let gf_remap = gf_dedup.remap(i);
@@ -5202,13 +5218,9 @@ pub fn assemble_module(
         });
         init_mod_off += bc.module_decls.len() as u16;
         init_view_off += bc.static_views.len() as u16;
-        let frag_temp_count = bc
-            .temp_sizes
-            .iter()
-            .map(|(id, _)| *id + 1)
-            .max()
-            .unwrap_or(0);
-        init_temp_off += frag_temp_count;
+        // `init_temp_off` is NOT advanced (#583): temps recycle into the
+        // shared identity pool, so every initial's temp ids stay
+        // fragment-local and index the same `merged.temp_offsets` table.
         init_dl_off += bc.dim_lists.len() as u16;
     }
 
