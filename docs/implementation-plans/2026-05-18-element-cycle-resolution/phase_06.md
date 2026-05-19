@@ -199,40 +199,122 @@ Confirm no `catch_unwind` remains in `src/simlin-engine/tests/`
 <!-- END_TASK_2 -->
 
 <!-- START_TASK_3 -->
-### Task 3: Re-verify #363 (root-cause any post-gate panic)
+### Task 3 (EXPANDED — element-level lagged-read strip; then re-verify #363)
 
-**Verifies:** element-cycle-resolution.AC7.2, element-cycle-resolution.AC7.5
+**Verifies:** element-cycle-resolution.AC7.1, element-cycle-resolution.AC7.2, element-cycle-resolution.AC7.5
+
+**Why expanded (Task 1 outcome (b), verified):** Task 1's structural gate
+surfaced a genuine **Phase-1-3 cycle-resolution gap** (NOT a regression, NOT
+numeric, NOT yet #363) blocking the C-LEARN compile: `compile_project_incremental`
+returns `Err` with 2 `CircularDependency` diagnostics on
+`main.previous_emissions_intensity_vs_refyr`, a member of a 22-member
+multi-variable recurrence SCC. `symbolic_phase_element_order` returns `None`
+via the `self_loop` branch because the induced element graph has 105
+element-self-loops, **every one a `SymLoadPrev` (PREVIOUS) read, never a
+`LoadVar`**. Mechanism: C-LEARN's `SAMPLE IF TRUE(cond,input,init)` expands
+(`xmile_compat.rs:359`) to `(IF cond THEN input ELSE PREVIOUS(SELF,init))` — a
+PREVIOUS-wrapped same-element self-reference. `build_var_info` correctly
+strips the *whole-variable* PREVIOUS self-edge (so it is not a `dt_cycle_sccs`
+self-loop), but the 22-member SCC is still legitimately identified via the
+*un-lagged* cross-element chain, so `symbolic_phase_element_order` IS reached,
+and its read-opcode arm (`db_dep_graph.rs:814-821`) lumps `SymLoadPrev` /
+`SymLoadInitial` in with current-value reads — over-collecting the lagged
+self-read into a spurious element-self-loop ⇒ false `CircularDependency`. The
+Phase-1 "loud-safe over-approximation" rustdoc (`db_dep_graph.rs:717-733`)
+deemed this acceptable because it "only forces a conservative
+`CircularDependency`" — but for C-LEARN's legitimately-identified
+multi-variable SCC containing a PREVIOUS-self-ref it is **over-conservative
+and blocks the plan's payoff**.
 
 **Files:**
-- (Conditional) Modify: whichever incremental-pipeline source file panics on C-LEARN post-gate (converting the panic site to a typed `Result::Err`, per #363's prescribed fix). If no panic reproduces: update issue #363 status only.
+- Modify: `src/simlin-engine/src/db_dep_graph.rs` — `symbolic_phase_element_order`
+  read-opcode arm (`~814-821`); the `phase_element_order` PREVIOUS-safety
+  rustdoc (`~717-733`); the `db.rs` `var_phase_symbolic_fragment_prod`
+  loud-safe contract comment (`~3260-3274`) — all in the same commit
+  (CLAUDE.md comment-freshness).
+- Add: a minimized `#[cfg(test)]` fixture/test in `db_dep_graph_tests.rs`.
+- (Conditional, the original Task 3) Modify whichever incremental-pipeline
+  source panics on C-LEARN *post-gate* (convert to typed `Result::Err`).
 
-**Implementation:**
-With the cycle gate resolved (Phases 1-3) and VECTOR ops corrected (Phases
-4-5), run C-LEARN through the incremental pipeline (Task 1 / Task 2 tests)
-under a **debug** build to surface any #363 panic with a backtrace
-(`RUST_BACKTRACE=1`). Two outcomes:
-- **No panic reproduces:** #363 was masked-or-already-fixed; Tasks 1-2 pass as
-  hard (no `catch_unwind`) tests. Comment on GitHub issue #363 that it is
-  re-verified resolved on branch `clearn-hero-model` (do not close unless the
-  user directs; per `CLAUDE.md`, use the `track-issue` agent to record the
-  re-verification outcome).
-- **A panic reproduces:** root-cause it (it is now a hard failure by AC7.5).
-  Convert the panic site to a typed `Result::Err` flowing through
-  `NotSimulatable`/the diagnostic path (#363's prescribed fix), so the
-  pipeline returns a clean error instead of panicking. Add/extend a focused
-  unit test at the converted site if the root cause is isolatable to a small
-  fixture (preferred over relying solely on the heavy C-LEARN test). Then
-  Tasks 1-2 pass.
+**Implementation — Part A (the element-level lagged-read strip, the C-LEARN
+blocker fix):**
+Make the symbolic element graph **inherit `build_var_info`'s per-phase
+PREVIOUS/INIT strip** (the element-level analogue of the variable-level strip
+at `db_dep_graph.rs:261-264` / `:283-287`). The element graph models
+*current-(phase-)timestep evaluation order*; a lagged/snapshot read is not a
+current-timestep ordering edge. Mirror the variable-level strip **exactly and
+phase-awarely** (verify the precise opcode↔strip correspondence against
+`build_var_info` before coding — do not assume):
+- **`SymbolicOpcode::SymLoadPrev`** (PREVIOUS — `prev_values` snapshot, prior
+  timestep): never contributes an element-graph edge, in **either** phase
+  (element-level analogue of `lagged_dt_previous` / `lagged_initial_previous`,
+  both stripped).
+- **`SymbolicOpcode::SymLoadInitial`** (INIT — `initial_values` snapshot):
+  **phase-aware** — in the **`SccPhase::Dt`** graph it contributes **no** edge
+  (analogue of `init_only_dt` / `dt_init_only_referenced_vars` being stripped
+  from `dt_deps`); in the **`SccPhase::Initial`** graph it **DOES** contribute
+  an edge (INIT(x) during init is a genuine init-phase dependency — `build_var_info`
+  strips ONLY `lagged_initial_previous` from `initial_deps`, NOT INIT-refs).
+  Confirm this exact asymmetry against `build_var_info` and document it.
+- `LoadVar` / `LoadSubscript` / `PushVarView` / `PushVarViewDirect` /
+  `PushStaticView`(Var base): unchanged — these are the current-value reads a
+  genuine cycle is made of.
+- **AC4 soundness argument (must be airtight, stated in the rustdoc):** a
+  genuine current-timestep element cycle is a cycle of *current-value* reads;
+  `SymLoadPrev`/`SymLoadInitial`(dt) read a prior/initial snapshot, never the
+  current timestep's value, so excluding them **cannot drop a genuine-cycle
+  edge** (it can only remove a spurious lagged edge). This is the *correct*
+  element relation, not a new over/under-approximation: it makes the element
+  graph match the engine's actual per-phase relation (`build_var_info`),
+  exactly as Phase 1/2 made the SCC relation match the engine's.
+- Rewrite the `db_dep_graph.rs:717-733` rustdoc and the `db.rs:3260-3274`
+  loud-safe contract: the prior "PREVIOUS is over-collected; loud-safe because
+  it only forces conservative `CircularDependency`" claim is **superseded** —
+  state that the element graph now inherits `build_var_info`'s per-phase
+  PREVIOUS/INIT strip (cite the exact `build_var_info` lines), why that is the
+  correct relation, and the AC4 argument.
 
-**Testing:**
-Tasks 1-2 are the integration proof. If a panic is converted to `Err`, add a
-minimal unit test reproducing the converted condition (so coverage does not
-depend on the `#[ignore]`d heavy test).
+**Implementation — Part B (re-verify #363 post-gate):** with Part A landed and
+the gate passing, run C-LEARN through the incremental pipeline (Task 1's test)
+under a **debug** build (`RUST_BACKTRACE=1`). If **no panic** reproduces: #363
+was masked-or-already-fixed; record the re-verification via the `track-issue`
+agent (comment on #363; do not close unless the user directs). If **a panic
+reproduces**: it is now a hard failure (AC7.5) — root-cause it, convert the
+panic site to a typed `Result::Err` through `NotSimulatable`/the diagnostic
+path, add a focused unit test at the converted site.
+
+**Testing (TDD, mandatory):**
+- RED-first: a minimized `#[cfg(test)]` fixture in `db_dep_graph_tests.rs` —
+  a multi-variable SCC where one member is `SAMPLE IF TRUE`-shaped (i.e.
+  `x[tNext] = IF c THEN y[tPrev] ELSE PREVIOUS(x[tNext], init)` with `y`
+  closing the cluster, the C-LEARN shape minimized) — currently RED with a
+  spurious `CircularDependency`; GREEN after Part A. Cover both a dt-phase and
+  (if constructible) an init-phase variant to exercise the `SymLoadInitial`
+  phase-asymmetry.
+- **MANDATORY soundness pins (must stay GREEN unchanged — prove the strip
+  does not mask a genuine cycle):** `genuine_cycles_still_rejected`,
+  `resolve_dt_genuine_element_two_cycle_is_unresolved`,
+  `resolve_dt_scalar_two_cycle_is_unresolved`, the `x[dimA]=x[dimA]+1`
+  same-element self-cycle (AC4.2), `self_recurrence_resolves_and_no_self_token_leak`,
+  `previous_self_reference_still_resolves`, the `ref`/`interleaved`/
+  `init_recurrence`/`helper_recurrence` end-to-end gates, and the full
+  `db_dep_graph` suite. If any requires modification to stay green, the strip
+  is unsound — STOP and report (do not edit a guard to pass).
+- Part B's integration proof is Task 1's `compiles_and_runs_clearn_structural`
+  (left uncommitted in the working tree by the Task 1 dispatch — do **not**
+  commit `simulate.rs` in this Task; use it to verify Part A makes C-LEARN
+  compile+run+not-all-NaN, then the orchestrator sequences the Task 1 commit).
 
 **Verification:**
-Run: `cargo test -p simlin-engine --features file_io --release -- --ignored compiles_and_runs_clearn_structural --nocapture`
-— passes with no panic. Any new unit test green in the default suite.
-**Commit:** `engine: re-verify #363 post-cycle-gate (root-cause any panic)`
+Run the minimized fixture (RED→GREEN) + the full soundness-pin set in the
+default suite. Then `cargo test -p simlin-engine --features file_io --release
+-- --ignored compiles_and_runs_clearn_structural --nocapture` — C-LEARN now
+compiles, runs to FINAL TIME, no all-NaN core series (Part A), no post-gate
+panic (Part B; or the panic is converted to a typed `Err`). Commit only the
+engine fix + unit fixture + rustdoc updates (NOT `simulate.rs`) via
+`git commit` (pre-commit fmt/clippy/non-ignored cargo test 180s cap; NEVER
+`--no-verify`).
+**Commit:** `engine: element-level lagged-read strip in symbolic SCC graph; re-verify #363 (AC7.1, AC7.2, AC7.5)`
 <!-- END_TASK_3 -->
 
 ---
