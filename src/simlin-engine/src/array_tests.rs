@@ -3982,8 +3982,9 @@ mod different_builtin_override_tests {
             .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
             .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
             // Default: vector_elm_map(source[*], offsets[*]) -> [30, 10, 20]
-            // Override element 3: vector_sort_order(source[*], 1) -> [1, 2, 3]
-            // Element 3 should be VSO[2] = 3
+            // Override element 3: vector_sort_order(source[*], 1) -> genuine
+            // 0-based [0, 1, 2] (source already ascending: 10@0, 20@1, 30@2).
+            // Element 3 (slot 2) should be VSO[2] = 2
             .array_with_default_and_overrides(
                 "result[D]",
                 "vector_elm_map(source[*], offsets[*])",
@@ -4007,8 +4008,8 @@ mod different_builtin_override_tests {
             vals[1]
         );
         assert!(
-            (vals[2] - 3.0).abs() < 1e-9,
-            "element 2 (override VSO[2]): expected 3, got {}",
+            (vals[2] - 2.0).abs() < 1e-9,
+            "element 2 (override VSO[2]): expected 2, got {}",
             vals[2]
         );
     }
@@ -4029,8 +4030,8 @@ mod different_builtin_override_tests {
             vals[1]
         );
         assert!(
-            (vals[2] - 3.0).abs() < 1e-9,
-            "element 2 (override VSO[2]): expected 3, got {}",
+            (vals[2] - 2.0).abs() < 1e-9,
+            "element 2 (override VSO[2]): expected 2, got {}",
             vals[2]
         );
     }
@@ -4145,14 +4146,16 @@ mod flag_split_tests {
     #[test]
     fn vector_builtin_promotes_active_dim_ref_monolithic() {
         // vals = [30, 10, 20]
-        // VECTOR SORT ORDER ascending: [2, 3, 1] (rank by sorted position)
+        // VECTOR SORT ORDER ascending yields the genuine-Vensim 0-based
+        // permutation [1, 2, 0]: position i holds the source index of the
+        // i-th smallest element (10@1, 20@2, 30@0).
         let project = TestProject::new("vector_promotes_mono")
             .indexed_dimension("DimA", 3)
             .array_with_ranges("vals[DimA]", vec![("1", "30"), ("2", "10"), ("3", "20")])
             .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result("result", &[2.0, 3.0, 1.0]);
+        project.assert_vm_result("result", &[1.0, 2.0, 0.0]);
     }
 
     #[test]
@@ -4163,7 +4166,7 @@ mod flag_split_tests {
             .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("result", &[2.0, 3.0, 1.0]);
+        project.assert_vm_result_incremental("result", &[1.0, 2.0, 0.0]);
     }
 
     /// Partial MEAN should reduce over one dimension while the other iterates.
@@ -4221,11 +4224,14 @@ mod dimension_dependent_scalar_arg_tests {
         // vals = [10, 30, 20], dir = [-1, 1, 1]
         // result[D] = vector_sort_order(vals[*], dir[D])
         //
-        // Element 0 (dir=-1, descending): sort_order = [2, 3, 1] -> result[0] = 2
-        // Element 1 (dir=1, ascending):   sort_order = [1, 3, 2] -> result[1] = 3
-        // Element 2 (dir=1, ascending):   sort_order = [1, 3, 2] -> result[2] = 2
+        // Genuine-Vensim 0-based VSO (position i = source index of the i-th
+        // element in sorted order):
+        // Element 0 (dir=-1, descending): sort_order = [1, 2, 0] -> result[0] = 1
+        // Element 1 (dir=1, ascending):   sort_order = [0, 2, 1] -> result[1] = 2
+        // Element 2 (dir=1, ascending):   sort_order = [0, 2, 1] -> result[2] = 1
         //
-        // Without fix (all use dir[0]=-1): sort_order = [2, 3, 1] -> result[2] = 1
+        // Without the dim-dependent-arg fix (all use dir[0]=-1, descending):
+        // sort_order = [1, 2, 0] -> result[2] = 0
         TestProject::new(name)
             .indexed_dimension("D", 3)
             .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "30"), ("3", "20")])
@@ -4236,18 +4242,18 @@ mod dimension_dependent_scalar_arg_tests {
     fn assert_vso_dim_dep_results(vals: &[f64]) {
         assert_eq!(vals.len(), 3);
         assert!(
-            (vals[0] - 2.0).abs() < 1e-9,
-            "result[0] (desc): expected 2, got {}",
+            (vals[0] - 1.0).abs() < 1e-9,
+            "result[0] (desc): expected 1, got {}",
             vals[0]
         );
         assert!(
-            (vals[1] - 3.0).abs() < 1e-9,
-            "result[1] (asc): expected 3, got {}",
+            (vals[1] - 2.0).abs() < 1e-9,
+            "result[1] (asc): expected 2, got {}",
             vals[1]
         );
         assert!(
-            (vals[2] - 2.0).abs() < 1e-9,
-            "result[2] (asc): expected 2, got {}",
+            (vals[2] - 1.0).abs() < 1e-9,
+            "result[2] (asc): expected 1, got {}",
             vals[2]
         );
     }
@@ -4281,18 +4287,18 @@ mod dimension_dependent_scalar_arg_tests {
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
-            (vals[0] - 12.0).abs() < 1e-9,
-            "result[0] (10 + desc[0]): expected 12, got {}",
+            (vals[0] - 11.0).abs() < 1e-9,
+            "result[0] (10 + desc[0]): expected 11, got {}",
             vals[0]
         );
         assert!(
-            (vals[1] - 13.0).abs() < 1e-9,
-            "result[1] (10 + asc[1]): expected 13, got {}",
+            (vals[1] - 12.0).abs() < 1e-9,
+            "result[1] (10 + asc[1]): expected 12, got {}",
             vals[1]
         );
         assert!(
-            (vals[2] - 12.0).abs() < 1e-9,
-            "result[2] (10 + asc[2]): expected 12, got {}",
+            (vals[2] - 11.0).abs() < 1e-9,
+            "result[2] (10 + asc[2]): expected 11, got {}",
             vals[2]
         );
     }
@@ -4317,10 +4323,10 @@ mod dimension_dependent_scalar_arg_tests {
         project.assert_compiles_incremental();
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
-        // Element 0 (dir=-1, desc): sort_order = [2, 3, 1] -> result[0] = 2
+        // Element 0 (dir=-1, desc): sort_order = [1, 2, 0] -> result[0] = 1
         assert!(
-            (vals[0] - 2.0).abs() < 1e-9,
-            "result[0] (desc): expected 2, got {}",
+            (vals[0] - 1.0).abs() < 1e-9,
+            "result[0] (desc): expected 1, got {}",
             vals[0]
         );
         // Element 1 (override): 999
@@ -4329,11 +4335,11 @@ mod dimension_dependent_scalar_arg_tests {
             "result[1] (override): expected 999, got {}",
             vals[1]
         );
-        // Element 2 (dir=1, asc): sort_order = [1, 3, 2] -> result[2] = 2
-        // Without fix (desc shared): sort_order = [2, 3, 1] -> result[2] = 1
+        // Element 2 (dir=1, asc): sort_order = [0, 2, 1] -> result[2] = 1
+        // Without the dim-dependent-arg fix (desc shared): [1, 2, 0] -> result[2] = 0
         assert!(
-            (vals[2] - 2.0).abs() < 1e-9,
-            "result[2] (asc): expected 2, got {}",
+            (vals[2] - 1.0).abs() < 1e-9,
+            "result[2] (asc): expected 1, got {}",
             vals[2]
         );
     }

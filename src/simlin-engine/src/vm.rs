@@ -2355,10 +2355,23 @@ impl Vm {
                     }
                 }
 
-                // VectorSortOrder returns 1-based rank indices: rank 1 means "this element
-                // is first in sort order." This matches Vensim's VECTOR SORT ORDER semantics.
-                // The 1-based convention is intentional and differs from VectorElmMap's 0-based
-                // offsets; the asymmetry reflects Vensim's original API design.
+                // VectorSortOrder returns a genuine-Vensim 0-based permutation: result
+                // position `i` holds the 0-based *source index* of the `i`-th element in
+                // sorted order. `direction > 0` (== 1) sorts ascending, otherwise
+                // descending. Ties keep stable source order (Rust's stable `sort_by`);
+                // genuine Vensim leaves tie-breaking unspecified, so a deterministic
+                // stable order does not contradict it.
+                //
+                // Ground truth for the 0-based (not 1-based) convention: real Vensim DSS
+                // 7.3.4 reference output `test/test-models/tests/vector_order/output.tab`
+                // (`SORT ORDER[*]` ranges over `0..n-1` and contains `0`, impossible for a
+                // 1-based permutation) and Ventana Systems' official VECTOR SORT ORDER
+                // reference ("the zero based index number for the elements in sorted
+                // order"). The prior design docs
+                // `docs/design-plans/2026-02-27-vm-vector-ops.md` and
+                // `2026-03-10-close-array-gaps.md:253` encoded a now-disproven 1-based
+                // assumption and are superseded. (RANK below is a distinct opcode and is
+                // correctly 1-based, per the same `output.tab`.)
                 Opcode::VectorSortOrder { write_temp_id } => {
                     let direction = stack.pop().round() as i32;
 
@@ -2370,7 +2383,7 @@ impl Vm {
                         let size = input_view.size();
                         let n_dims = input_view.dims.len();
 
-                        // Collect (value, 1-based-index) pairs
+                        // Collect (value, 0-based-index) pairs
                         let mut indexed: SmallVec<[(f64, usize); 32]> =
                             SmallVec::with_capacity(size);
                         let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
@@ -2383,7 +2396,7 @@ impl Vm {
                                 temp_storage,
                                 context,
                             );
-                            indexed.push((val, i + 1));
+                            indexed.push((val, i));
                             increment_indices(&mut indices, &input_view.dims);
                         }
 
