@@ -564,108 +564,6 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
     sccs
 }
 
-/// The engine's own production-lowered per-element `Vec<Expr>` for
-/// `var_name` in the requested phase, or `None` when it cannot be element-
-/// sourced (no `SourceVariable`, `LoweredVarFragment::Fatal`, or the
-/// phase's `Var::new` errored). `None` is the loud-safe signal: the
-/// element-cycle refinement keeps the conservative `CircularDependency`
-/// rather than emit a wrong run order. Sourced via
-/// `crate::db_var_fragment::lower_var_fragment` -- the exact per-variable
-/// lowering the production caller `crate::db::compile_var_fragment` runs --
-/// never a re-derivation, with the caller-owned, lowering-independent
-/// context constructed byte-identically to that caller (same helpers, same
-/// order) and the default no-module-input wiring `build_var_info(.., &[])`
-/// uses. Phase 3 extends the no-`SourceVariable` arm with parent-
-/// `implicit_vars` sourcing; Phase 1 only needs the real-`SourceVariable`
-/// happy path.
-///
-/// This is the **production** (non-panicking) sibling of the
-/// `#[cfg(test)]` `var_noninitial_lowered_exprs`, which deliberately
-/// *panics* on any incomplete sourcing (it backs `array_producing_vars`,
-/// where a silent skip would under-count -- a false negative). That panic
-/// wrapper is correct for its test-only consumer and is left unchanged;
-/// production code reachable from the cycle gate cannot panic, so this
-/// accessor returns `None` instead. The two share `lower_var_fragment` so
-/// neither re-derives the lowering.
-///
-/// **Currently consumed only by its own `#[cfg(test)]` tests.** Phase 2
-/// Subcomponent B (GH #575) rebuilt the SCC element graph on the
-/// cross-member-comparable *symbolic* representation
-/// (`symbolic_phase_element_order` via `var_phase_symbolic_fragment_prod`),
-/// so the prior `Expr`-based `phase_element_order` consumer of this
-/// accessor was removed. It is intentionally left in place (NOT deleted)
-/// because Phase 3 extends its no-`SourceVariable` arm with parent-
-/// `implicit_vars` sourcing and restores a production consumer; deleting
-/// it now would force Phase 3 to reconstruct the byte-identical
-/// context-mirroring it already gets right. The
-/// `cfg_attr(not(test), allow(dead_code))` suppresses the otherwise-
-/// correct unused warning for the non-test build until then.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn var_phase_lowered_exprs_prod(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-    var_name: &str,
-    phase: crate::db::SccPhase,
-) -> Option<Vec<crate::compiler::Expr>> {
-    use crate::common::Ident;
-    use crate::db_var_fragment::{LoweredVarFragment, lower_var_fragment};
-
-    let source_vars = model.variables(db);
-    // No `SourceVariable` (an implicit SMOOTH/DELAY/INIT helper, or a
-    // parent-sourced name): Phase 1 does not parent-source -- return
-    // `None` (loud-safe), never panic. Phase 3 extends this arm.
-    let sv = source_vars.get(var_name)?;
-
-    // Caller-owned, lowering-independent context, built EXACTLY as
-    // `crate::db::compile_var_fragment` builds it (mirrors the
-    // `#[cfg(test)]` `var_noninitial_lowered_exprs` byte-for-byte).
-    let dm_dims = crate::db::source_dims_to_datamodel(project.dimensions(db));
-    let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
-    let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
-        .iter()
-        .map(crate::dimensions::Dimension::from)
-        .collect();
-    let model_name_ident = Ident::new(model.name(db));
-    let inputs: BTreeSet<Ident<crate::common::Canonical>> = BTreeSet::new();
-    let module_models = crate::db::model_module_map(db, model, project).clone();
-
-    let lowered = lower_var_fragment(
-        db,
-        *sv,
-        model,
-        project,
-        true,
-        &[],
-        &converted_dims,
-        &dim_context,
-        &model_name_ident,
-        &module_models,
-        &inputs,
-    );
-
-    match lowered {
-        LoweredVarFragment::Lowered {
-            per_phase_lowered, ..
-        } => {
-            // `SccPhase::Dt` selects the non-initial (dt/flow) lowering;
-            // `SccPhase::Initial` selects the initial lowering (reserved
-            // for Phase 2's init-cycle resolution, but the accessor
-            // handles it now so the contract is total over `SccPhase`).
-            let phase_var = match phase {
-                crate::db::SccPhase::Dt => per_phase_lowered.noninitial,
-                crate::db::SccPhase::Initial => per_phase_lowered.initial,
-            };
-            // The phase's `Var::new` errored => cannot source its
-            // production lowered exprs => `None` (loud-safe). The test
-            // wrapper panics here instead.
-            phase_var.ok().map(|v| v.ast)
-        }
-        // The variable did not lower at all => `None` (loud-safe).
-        LoweredVarFragment::Fatal { .. } => None,
-    }
-}
-
 /// Enumerate the exact set of *element offsets within `base.name`* that a
 /// symbolic static view addresses.
 ///
@@ -1450,6 +1348,72 @@ pub(crate) fn var_noninitial_lowered_exprs(
              (LoweredVarFragment::Fatal) -- cannot assess array-producing \
              membership (abort, never silent-skip)"
         ),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only set of canonical variable names that
+    /// `crate::db::var_phase_symbolic_fragment_prod` must treat as
+    /// unsourceable (return `None`), scoped by an active
+    /// [`UnsourceableVarsGuard`].
+    ///
+    /// AC3.2 (a genuinely unsourceable in-SCC node falling back to
+    /// `CircularDependency`, loud-safe, no panic) needs an in-cycle node
+    /// that is neither in `source_vars` nor resolvable via
+    /// `model_implicit_var_info`. Constructing such an organic orphan that
+    /// also lands inside an identified recurrence SCC is not deterministic;
+    /// this override is the reliable trigger (design deviation 5 of the
+    /// Phase 3 plan). It forces the SAME loud-safe `None` arm a real
+    /// no-`SourceVariable` node takes, so the regression exercises the real
+    /// production loud-safe chain (`model_dependency_graph` ->
+    /// `symbolic_phase_element_order` -> `var_phase_symbolic_fragment_prod`)
+    /// rather than a unit-level shim.
+    static FORCED_UNSOURCEABLE_VARS: std::cell::RefCell<std::collections::BTreeSet<String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+/// `true` iff an active [`UnsourceableVarsGuard`] has forced `var_name`
+/// (canonical) to the loud-safe `None` arm of
+/// `crate::db::var_phase_symbolic_fragment_prod`. Always `false` in
+/// non-test builds (the call site is itself `#[cfg(test)]`).
+#[cfg(test)]
+pub(crate) fn var_is_forced_unsourceable(var_name: &str) -> bool {
+    FORCED_UNSOURCEABLE_VARS.with(|s| s.borrow().contains(var_name))
+}
+
+/// RAII guard (test-only) that forces a set of variable names to be
+/// treated as unsourceable by `crate::db::var_phase_symbolic_fragment_prod`
+/// for the current thread for the guard's lifetime, restoring the previous
+/// set on drop (so a panicking test does not leak the override to the next
+/// test reusing the thread).
+///
+/// Because `model_dependency_graph` is salsa-memoized, the guard must
+/// outlive every `model_dependency_graph` call in the test whose sourcing
+/// it controls (a later call on the same `db` would otherwise return the
+/// memoized result regardless of the override state -- the same caveat
+/// `AggLoopBudgetGuard` documents).
+#[cfg(test)]
+pub(crate) struct UnsourceableVarsGuard {
+    prev: std::collections::BTreeSet<String>,
+}
+
+#[cfg(test)]
+impl UnsourceableVarsGuard {
+    pub(crate) fn new(var_names: &[&str]) -> Self {
+        let next: std::collections::BTreeSet<String> =
+            var_names.iter().map(|s| (*s).to_string()).collect();
+        let prev = FORCED_UNSOURCEABLE_VARS.with(|s| s.replace(next));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for UnsourceableVarsGuard {
+    fn drop(&mut self) {
+        FORCED_UNSOURCEABLE_VARS.with(|s| {
+            *s.borrow_mut() = std::mem::take(&mut self.prev);
+        });
     }
 }
 

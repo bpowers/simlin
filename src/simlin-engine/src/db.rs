@@ -3098,9 +3098,9 @@ pub(crate) type PerVarOffsetMap =
 /// builder (`crate::db_dep_graph` via `var_phase_symbolic_fragment_prod`)
 /// reuses the *exact* production compile+symbolize path rather than a
 /// re-derivation. `compile_var_fragment` calls this for each phase; the
-/// SCC accessor builds the caller-owned context byte-identically to
-/// `var_phase_lowered_exprs_prod` and calls this with the phase's
-/// production-lowered exprs.
+/// SCC accessor `var_phase_symbolic_fragment_prod` builds the caller-owned
+/// context byte-identically to `compile_var_fragment` and calls this with
+/// the phase's production-lowered exprs.
 ///
 /// The caller owns and supplies the lowering-independent context
 /// (`offsets`, `rmap`, `tables`, `module_refs`, `mini_offset`,
@@ -3224,19 +3224,46 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
 /// `SymVarRef { name, element_offset }`, so a multi-member recurrence
 /// SCC's induced element graph can be built across members (the fix for
 /// GH #575 -- the prior `Expr::AssignCurr`-mini-slot builder was
-/// structurally incapable of cross-member edges).
+/// structurally incapable of cross-member edges). It is the production
+/// element-graph source consumed by `symbolic_phase_element_order` and
+/// `combine_scc_fragment` (the Phase 2 GH #575 rebuild replaced the prior
+/// `Expr`-based accessor entirely).
 ///
-/// Mirrors `crate::db_dep_graph::var_phase_lowered_exprs_prod`
-/// byte-for-byte for context construction (same helpers, same order, the
-/// default no-module-input wiring `build_var_info(.., &[])` uses):
+/// The caller-owned, lowering-independent context is built byte-identically
+/// to `compile_var_fragment` (same helpers, same order, the default
+/// no-module-input wiring `build_var_info(.., &[])` uses):
 /// `SccPhase::Dt` selects `per_phase_lowered.noninitial`,
-/// `SccPhase::Initial` selects `.initial`. Returns `None` (the loud-safe
-/// signal -- never panics) on no `SourceVariable`, a per-phase `Var::new`
-/// error, `LoweredVarFragment::Fatal`, or any compile/symbolize failure;
-/// the SCC refinement then keeps the conservative `CircularDependency`.
-/// `var_phase_lowered_exprs_prod` stays in place (Phase 3 still extends
-/// its no-`SourceVariable` arm); this accessor is the new SCC-graph
-/// source.
+/// `SccPhase::Initial` selects `.initial`.
+///
+/// **Loud-safe contract (the load-bearing invariant -- formalized here).**
+/// This accessor returns `None` -- *never* panics, `expect`s, or `unwrap`s
+/// on a sourcing failure -- on EVERY way a node fails to be
+/// element-sourced:
+/// - no `SourceVariable` (a synthetic INIT/PREVIOUS/SMOOTH/macro-expansion
+///   helper, `$\u{205A}` prefix, absent from `model.variables`): the `?`
+///   on `source_vars.get(var_name)` (Phase 3 Task 2 extends *this* arm
+///   with parent-`implicit_vars` sourcing; until then it is `None`);
+/// - `LoweredVarFragment::Fatal` (the variable did not lower at all):
+///   explicit `return None`;
+/// - the requested phase's `Var::new` errored (`phase_var.ok()?`);
+/// - any `compile_phase_to_per_var_bytecodes` failure (empty exprs, the
+///   minimal `Module::compile()`, or any `symbolize_*` step) -- that
+///   function is itself total-and-`None`-on-failure.
+///
+/// `None` propagates loud-safe and all-or-nothing: any in-SCC node that
+/// cannot be element-sourced makes `symbolic_phase_element_order` return
+/// `None` (its `?` on this call), so `refine_scc_to_element_verdict`
+/// yields `SccVerdict::Unresolved`, `resolve_recurrence_sccs` sets
+/// `has_unresolved`, and `model_dependency_graph_impl` keeps `has_cycle`
+/// and accumulates the `CircularDependency` diagnostic
+/// (`dt_scc_map`/`init_scc_map` stays empty, `resolved_sccs` stays empty).
+/// The model is rejected loudly -- no panic, no silent miscompile, and the
+/// other SCC members are **not** partially resolved (the SCC is rejected
+/// as a unit). This contract is regression-pinned by
+/// `unsourceable_in_scc_node_falls_back_to_circular_no_panic` (AC3.2,
+/// driven through the production `model_dependency_graph` path via the
+/// `#[cfg(test)]` `UnsourceableVarsGuard` override) and
+/// `var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic`.
 pub(crate) fn var_phase_symbolic_fragment_prod(
     db: &dyn Db,
     model: SourceModel,
@@ -3246,16 +3273,32 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
     use crate::db_var_fragment::{LoweredVarFragment, lower_var_fragment};
 
+    // `#[cfg(test)]` only: an active `UnsourceableVarsGuard` forces this
+    // node to take the loud-safe `None` arm, so the AC3.2 regression test
+    // can exercise the genuinely-unsourceable in-SCC path through the
+    // PRODUCTION `model_dependency_graph` chain (an organic orphan that is
+    // neither in `source_vars` nor resolvable via `model_implicit_var_info`
+    // is hard to construct deterministically; this is the reliable
+    // trigger). It returns the SAME `None` a real no-`SourceVariable`
+    // node returns, so the test observes the real loud-safe behavior, not
+    // a shim. No effect in non-test builds.
+    #[cfg(test)]
+    if crate::db_dep_graph::var_is_forced_unsourceable(var_name) {
+        return None;
+    }
+
     let source_vars = model.variables(db);
-    // No `SourceVariable` (an implicit SMOOTH/DELAY/INIT helper, or a
-    // parent-sourced name): like `var_phase_lowered_exprs_prod`, return
-    // `None` (loud-safe), never panic.
+    // No `SourceVariable` (a synthetic INIT/PREVIOUS/SMOOTH/macro-expansion
+    // helper, `$\u{205A}` prefix, absent from `model.variables`): return
+    // `None` (the loud-safe signal -- see the rustdoc's loud-safe
+    // contract), never panic. Phase 3 Task 2 extends this arm with
+    // parent-`implicit_vars` sourcing.
     let sv = source_vars.get(var_name)?;
     let var_ident_canonical: Ident<Canonical> = Ident::new(var_name);
 
     // Caller-owned, lowering-independent context, built EXACTLY as
-    // `var_phase_lowered_exprs_prod` / `compile_var_fragment` builds it
-    // (mirror byte-for-byte; same helpers, same order).
+    // `compile_var_fragment` builds it (mirror byte-for-byte; same
+    // helpers, same order).
     let dm_dims = source_dims_to_datamodel(project.dimensions(db));
     let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
     let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
@@ -3303,7 +3346,7 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
 
     // `SccPhase::Dt` selects the non-initial (dt/flow) lowering;
     // `SccPhase::Initial` selects the initial lowering -- the same
-    // selection `var_phase_lowered_exprs_prod` makes.
+    // selection `compile_var_fragment` makes per phase.
     let phase_var = match phase {
         SccPhase::Dt => per_phase_lowered.noninitial,
         SccPhase::Initial => per_phase_lowered.initial,

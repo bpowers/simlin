@@ -734,74 +734,6 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
     );
 }
 
-// ── var_phase_lowered_exprs_prod (production lowering accessor) ──────────
-//
-// The production, non-panicking sibling of `var_noninitial_lowered_exprs`:
-// `Some(per-element Vec<Expr>)` for a real-`SourceVariable` (so the
-// element-cycle refinement can source the per-element relation), `None`
-// (loud-safe -- caller keeps `CircularDependency`) when it cannot be
-// element-sourced. A name absent from `model.variables` must return
-// `None`, NOT panic: production code cannot panic, and Phase 1 does not
-// parent-source (Phase 3 does).
-
-#[test]
-fn var_phase_lowered_exprs_prod_some_for_real_arrayed_var() {
-    use crate::compiler::Expr;
-    use crate::db::SccPhase;
-
-    // A simple arrayed real-SourceVariable: 3 declared elements, each a
-    // plain constant. The dt-phase lowering is one `AssignCurr` slot per
-    // element, in declared `SubscriptIterator` order.
-    let project = TestProject::new("vpl_prod_fixture")
-        .named_dimension("t", &["t1", "t2", "t3"])
-        .array_with_ranges("arr[t]", vec![("t1", "1"), ("t2", "2"), ("t3", "3")]);
-    let dm = project.build_datamodel();
-    let db = SimlinDb::default();
-    let result = sync_from_datamodel(&db, &dm);
-    let model = result.models["main"].source;
-
-    let got = var_phase_lowered_exprs_prod(&db, model, result.project, "arr", SccPhase::Dt)
-        .expect("a real arrayed SourceVariable must be element-sourceable");
-    let assign_curr = got
-        .iter()
-        .filter(|e| matches!(e, Expr::AssignCurr(..)))
-        .count();
-    assert_eq!(
-        assign_curr, 3,
-        "one Expr::AssignCurr slot per declared element (declared order); \
-         got {got:#?}"
-    );
-}
-
-#[test]
-fn var_phase_lowered_exprs_prod_none_for_absent_var_no_panic() {
-    use crate::db::SccPhase;
-
-    let project = TestProject::new("vpl_prod_absent")
-        .named_dimension("t", &["t1", "t2", "t3"])
-        .array_with_ranges("arr[t]", vec![("t1", "1"), ("t2", "2"), ("t3", "3")]);
-    let dm = project.build_datamodel();
-    let db = SimlinDb::default();
-    let result = sync_from_datamodel(&db, &dm);
-    let model = result.models["main"].source;
-
-    // A name with no `SourceVariable` must return `None` (Phase 1 does
-    // not parent-source) -- and crucially must NOT panic the way the
-    // `#[cfg(test)]` `var_noninitial_lowered_exprs` does, because this is
-    // production code reachable from the cycle gate.
-    assert!(
-        var_phase_lowered_exprs_prod(
-            &db,
-            model,
-            result.project,
-            "definitely_not_a_var",
-            SccPhase::Dt
-        )
-        .is_none(),
-        "an absent variable must return None (loud-safe), never panic"
-    );
-}
-
 // ── Per-element dt SCC resolution (the cycle-gate refinement) ───────────
 //
 // `resolve_recurrence_sccs(.., SccPhase::Dt)` identifies the offending
@@ -1056,8 +988,9 @@ fn model_dependency_graph_resolved_sccs_is_byte_stable_across_runs() {
 // analogue of the dt resolution: it identifies the offending init SCC(s)
 // over the shared `init_walk_successors` relation (Task 2), refines each
 // into its exact per-element graph from the engine's own production
-// *init*-lowered exprs (`var_phase_lowered_exprs_prod(.., Initial)`,
-// reused via the phase-parameterized `phase_element_order`), and renders
+// *init*-phase symbolic fragment
+// (`var_phase_symbolic_fragment_prod(.., Initial)`, reused via the
+// phase-parameterized `symbolic_phase_element_order`), and renders
 // the verdict: element-acyclic + element-sourceable single-variable init
 // self-recurrence => `ResolvedScc { phase: Initial }`; a genuine init
 // element cycle (same-element self-loop) => unresolved (loud-safe, keep
@@ -2048,6 +1981,130 @@ fn var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic() {
         )
         .is_some(),
         "a real arrayed SourceVariable must yield a symbolic fragment"
+    );
+}
+
+// ── AC3.2: a genuinely unsourceable in-SCC node => loud-safe fallback ────
+//
+// element-cycle-resolution.AC3.2: an SCC with an in-cycle node that
+// genuinely cannot be element-sourced falls back to `CircularDependency`
+// -- NO panic, NO silent miscompile (the other members are NOT partially
+// resolved). The canonical organic case is an orphan node that is neither
+// in `source_vars` nor resolvable via `model_implicit_var_info`; the
+// reliable trigger (design deviation 5) is a `#[cfg(test)]` override that
+// forces `var_phase_symbolic_fragment_prod` to yield `None` for a chosen
+// in-SCC node, so the loud-safe path (`CircularDependency`, no panic) is
+// exercised through the PRODUCTION symbolic path (`model_dependency_graph`
+// / `symbolic_phase_element_order` -> `var_phase_symbolic_fragment_prod`),
+// not a unit-level shim.
+
+#[test]
+fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
+    use crate::db::SccPhase;
+    use crate::db_dep_graph::UnsourceableVarsGuard;
+
+    // `ecc[t1]=1; ecc[t2]=ecc[t1]+1; ecc[t3]=ecc[t2]+1`: a single-variable
+    // self-recurrence whose induced element graph (ecc,0)->(ecc,1)->(ecc,2)
+    // is acyclic and well-founded -- WITHOUT a forced-unsourceable node it
+    // resolves cleanly (the positive control below proves the SCC is not
+    // independently cyclic / rejected earlier by an unrelated diagnostic,
+    // so the fallback under the guard is caused ONLY by the forced
+    // unsourceable node).
+    let project = TestProject::new("ac32_unsourceable")
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges(
+            "ecc[t]",
+            vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+        );
+    let dm = project.build_datamodel();
+
+    // Positive control: WITHOUT the guard the recurrence SCC resolves and
+    // the model is NOT rejected (proves the rejection under the guard is
+    // attributable to the forced-unsourceable node, not a pre-existing
+    // genuine cycle or an unrelated diagnostic).
+    {
+        let db = SimlinDb::default();
+        let result = sync_from_datamodel(&db, &dm);
+        let model = result.models["main"].source;
+        let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+        assert!(
+            !dep_graph.has_cycle,
+            "positive control: the well-founded self-recurrence must \
+             resolve when nothing forces a node unsourceable"
+        );
+        assert!(
+            !dep_graph.resolved_sccs.is_empty(),
+            "positive control: the recurrence SCC must be in resolved_sccs"
+        );
+        let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+        assert!(
+            !res.has_unresolved,
+            "positive control: no unresolved SCC without the guard"
+        );
+    }
+
+    // Now force the single in-SCC member `ecc` unsourceable through the
+    // production symbolic accessor. Driving the full production
+    // `model_dependency_graph` exercises the real loud-safe chain:
+    // `var_phase_symbolic_fragment_prod` -> `?`-None ->
+    // `symbolic_phase_element_order` None -> `refine_scc_to_element_verdict`
+    // Unresolved -> `resolve_recurrence_sccs` has_unresolved ->
+    // `model_dependency_graph_impl` keeps `has_cycle` + accumulates
+    // `CircularDependency`, resolved_sccs stays empty (the other members,
+    // if any, are NOT partially resolved).
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    // The guard must outlive every `model_dependency_graph` call it
+    // controls (salsa memoizes the result; a later call on the same `db`
+    // would otherwise return the memoized with-guard result regardless of
+    // guard state -- mirrors the `AggLoopBudgetGuard` salsa caveat).
+    let _guard = UnsourceableVarsGuard::new(&["ecc"]);
+
+    // Must NOT panic.
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        dep_graph.has_cycle,
+        "an unsourceable in-SCC node must fall back to CircularDependency \
+         (has_cycle), never silently miscompile"
+    );
+    assert!(
+        dep_graph.resolved_sccs.is_empty(),
+        "loud-safe: the SCC is NOT partially resolved -- no member is in \
+         resolved_sccs when any in-SCC node is unsourceable"
+    );
+
+    // The fallback must surface the loud `CircularDependency` diagnostic
+    // (the model is rejected, not silently miscompiled).
+    let diags = crate::db::model_dependency_graph::accumulated::<crate::db::CompilationDiagnostic>(
+        &db,
+        model,
+        result.project,
+    );
+    assert!(
+        diags.iter().any(|d| matches!(
+            &d.0.error,
+            crate::db::DiagnosticError::Model(e)
+                if e.code == crate::common::ErrorCode::CircularDependency
+        )),
+        "the loud-safe fallback must accumulate a CircularDependency \
+         diagnostic (model rejected, not silently miscompiled)"
+    );
+
+    // And the focused-accessor contract: the forced-unsourceable member
+    // yields `None` (the `?` loud-safe signal), never a panic.
+    assert!(
+        crate::db::var_phase_symbolic_fragment_prod(
+            &db,
+            model,
+            result.project,
+            "ecc",
+            SccPhase::Dt,
+        )
+        .is_none(),
+        "the forced-unsourceable in-SCC node must yield None (loud-safe), \
+         never panic"
     );
 }
 
