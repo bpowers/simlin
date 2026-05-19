@@ -6,18 +6,34 @@ the helper is sourceable from its parent variable's `implicit_vars`; otherwise
 a loud-safe fallback keeps the `CircularDependency` rejection (no panic, no
 silent miscompile).
 
-**Architecture:** Phase 1 introduced the production accessor
-`var_phase_lowered_exprs_prod` (returns `Option<Vec<Expr>>`; `None` ⇒
-loud-safe fallback to `CircularDependency`). Its Phase-1 no-`SourceVariable`
-arm simply returns `None`. Phase 3 extends that arm: when a graph node has no
-`SourceVariable` (it is a synthetic helper, identified by the `$\u{205A}`
-prefix and absent from `model.variables`), source its per-element lowered
-exprs from the **parent variable's `ParsedVariableResult.implicit_vars`** —
-reusing the exact `model_implicit_var_info → parent → parsed.implicit_vars[index] → lower_variable`
-chain the production function `compile_implicit_var_fragment` already
-implements. Return `None` (loud-safe) only when parent-sourcing also fails.
-The `#[cfg(test)]` `var_noninitial_lowered_exprs` / `array_producing_vars`
-abort/panic contract is left **unchanged** (a false negative there is still
+**Architecture (REVISED for the Phase 2 GH #575 symbolic rebuild — supersedes
+the original `var_phase_lowered_exprs_prod` framing):** Phase 1 introduced
+`var_phase_lowered_exprs_prod` (`Option<Vec<Expr>>`) as the production
+element-graph source. **Phase 2's GH #575 re-architecture replaced it**: the
+SCC element graph (`symbolic_phase_element_order`, `db_dep_graph.rs`) and the
+combined fragment (`combine_scc_fragment`) now consume
+**`var_phase_symbolic_fragment_prod`** (`db.rs:3240`, returns
+`Option<PerVarBytecodes>` — layout-independent symbolic `SymVarRef` bytecode).
+`var_phase_lowered_exprs_prod` has **zero production callers** (only
+`#[cfg(test)]` tests) and carries a now-stale `#[cfg_attr(not(test),
+allow(dead_code))]` whose justification ("Phase 3 restores a production
+consumer") is false. Phase 3 therefore targets the **symbolic** accessor:
+its no-`SourceVariable` arm is `let sv = source_vars.get(var_name)?;`
+(`db.rs:3253`) which already returns `None` (the loud-safe contract — Task 1
+hardens/documents it *there*). Phase 3 extends *that* arm: when a graph node
+has no `SourceVariable` (a synthetic helper, `$\u{205A}` prefix, absent from
+`model.variables`), source its per-element **symbolic `PerVarBytecodes`** from
+the **parent variable's `implicit_vars`**, mirroring the exact
+`model_implicit_var_info → parent → parsed.implicit_vars[index] → parse_var →
+lower_variable → compile → symbolize` chain the production function
+`compile_implicit_var_fragment` (`db.rs:3759`) already implements (it already
+produces a helper's symbolic `PerVarBytecodes`). Return `None` (loud-safe)
+only when parent-sourcing also fails. The now-orphaned
+`var_phase_lowered_exprs_prod` and its `#[cfg(test)]` tests are **removed** in
+Task 1 (dead post-rebuild; the project hard rule prefers simple maintainable
+code over preserving a superseded interface). The `#[cfg(test)]`
+`var_noninitial_lowered_exprs` / `array_producing_vars` abort/panic contract
+is a **separate** pair, left **unchanged** (a false negative there is still
 wrong; its test must pass unchanged — AC3.3). C-LEARN's SCC contains no such
 helpers, so this is general-correctness robustness, not on C-LEARN's critical
 path; implement **fallback-first, then parent-sourcing**.
@@ -35,37 +51,46 @@ the helper-bearing SCC is typically multi-node).
 
 ## Design deviations (verified — these override the design doc)
 
-1. **The parent-sourcing mechanism already exists in production.**
-   `model_implicit_var_info` (`db.rs:1033-1073`, `#[salsa::tracked(returns(ref))]`)
-   returns `HashMap<String, ImplicitVarMeta>` keyed by canonical
-   implicit-var name; `ImplicitVarMeta` (`db.rs:1011-1019`) carries
-   `parent_source_var: SourceVariable` and `index_in_parent: usize`. The
-   production function `compile_implicit_var_fragment` (`db.rs:3600+`)
-   **already** does `parse_source_variable_with_module_context(.., meta.parent_source_var, ..)`
-   (`db.rs:3614-3619`) → `parsed.implicit_vars.get(meta.index_in_parent)`
-   (`db.rs:3620`) → `crate::variable::parse_var` (`db.rs:3633-3639`) →
-   `crate::model::lower_variable` (`db.rs:3650-3693`). Phase 3 **mirrors this
-   chain**, it does NOT invent a new mechanism, and it does **NOT** route
-   helpers through `lower_var_fragment` (that bridge is `SourceVariable`-keyed
-   and structurally cannot lower a helper, which has no `SourceVariable`).
-   `extract_implicit_var_deps` (`db_implicit_deps.rs:21-121`) is the
-   dependency-extraction analog and is a useful model for building the
-   helper's element edges.
+1. **The parent-sourcing mechanism already exists in production AND already
+   produces symbolic `PerVarBytecodes`.** `model_implicit_var_info`
+   (`#[salsa::tracked(returns(ref))]`) returns
+   `HashMap<String, ImplicitVarMeta>` keyed by canonical implicit-var name;
+   `ImplicitVarMeta` carries `parent_source_var: SourceVariable` and
+   `index_in_parent: usize`. The production function
+   `compile_implicit_var_fragment` (`db.rs:3759`, line numbers shifted by the
+   Phase 2 rebuild — locate by name) **already** does
+   `parse_source_variable_with_module_context(.., meta.parent_source_var, ..)`
+   → `parsed.implicit_vars.get(meta.index_in_parent)` →
+   `crate::variable::parse_var` → `crate::model::lower_variable` → compile →
+   `symbolize_bytecode` → a helper `PerVarBytecodes` (it `use`s
+   `PerVarBytecodes, ReverseOffsetMap, VariableLayout`). Phase 3 **mirrors
+   this chain to fill `var_phase_symbolic_fragment_prod`'s no-`SourceVariable`
+   arm**, returning the helper's symbolic `PerVarBytecodes` so
+   `symbolic_phase_element_order` + `combine_scc_fragment` consume it exactly
+   like a real member. It does NOT invent a new mechanism, and it does **NOT**
+   route helpers through `lower_var_fragment` (that bridge is
+   `SourceVariable`-keyed and structurally cannot lower a helper).
+   `extract_implicit_var_deps` (`db_implicit_deps.rs`) is the
+   dependency-extraction analog and a useful reference.
 2. **Synthetic-helper naming prefix is `$` + U+205A (`$\u{205A}`)**, pattern
    `$\u{205A}{parent}\u{205A}{n}\u{205A}{func}` (with optional `\u{205A}arg{i}`
    / `\u{205A}{subscript_suffix}` tail). The design glossary's `$⸢` (U+2E22)
    shorthand is wrong — `$⸢` appears nowhere in `src/simlin-engine/src/`. Use
    `\u{205A}`. A node is a synthetic helper iff `model.variables(db).get(name)`
    is `None` AND it resolves in `model_implicit_var_info`.
-3. **`var_noninitial_lowered_exprs` is `db_dep_graph.rs:435-496`** (file is
-   501 lines; `#[cfg(test)]` attr at line 434), rustdoc rationale
-   `405-433` (not 421-433); `Var::new` Err panic at `484-488`. Behavior
-   matches the design. **It and `array_producing_vars` (`383-403`,
-   `#[cfg(test)]` at 383) have no production callers** — the abort contract
-   and the production parent-sourcing contract are cleanly separable, so
-   AC3.3 is structurally satisfiable: Phase 3 changes only the **production**
-   accessor (`var_phase_lowered_exprs_prod`, added in Phase 1), never the
-   `#[cfg(test)]` panic wrapper.
+3. **`var_noninitial_lowered_exprs` and `array_producing_vars` are a
+   SEPARATE `#[cfg(test)]` pair from `var_phase_lowered_exprs_prod`** (locate
+   by name — Phase 2 shifted `db_dep_graph.rs` substantially and moved
+   `model_dependency_graph_impl` into it). They have no production callers;
+   their abort/panic contract and the production parent-sourcing contract are
+   cleanly separable, so AC3.3 is structurally satisfiable: **Phase 3 changes
+   only the production *symbolic* accessor `var_phase_symbolic_fragment_prod`
+   (`db.rs:3240`)** and *removes* the now-orphaned production-dead
+   `var_phase_lowered_exprs_prod` + its `#[cfg(test)]` tests; it never touches
+   the `array_producing_vars` / `var_noninitial_lowered_exprs`
+   `#[cfg(test)]` panic wrapper, so
+   `array_producing_vars_flags_exactly_the_two_positive_cases` must still pass
+   verbatim (AC3.3).
 4. **AC3.1 has no existing fixture.** No `test/sdeverywhere/models/` model
    combines a shift-mapped subrange recurrence with a PREVIOUS/INIT/SMOOTH
    helper. A new fixture must be authored, and whether the MDL converter
@@ -106,30 +131,37 @@ Same as Phases 1-2: TDD mandatory; `db_dep_graph.rs` unit tests in
 **Verifies:** element-cycle-resolution.AC3.2, element-cycle-resolution.AC3.3
 
 **Files:**
-- Modify: `src/simlin-engine/src/db_dep_graph.rs` `var_phase_lowered_exprs_prod` (added in Phase 1) — make its no-`SourceVariable` / `Fatal` / `Var::new`-Err arms return `None` explicitly and document the loud-safe contract.
-- Do **not** touch `var_noninitial_lowered_exprs` (`db_dep_graph.rs:435-496`) or `array_producing_vars` (`db_dep_graph.rs:383-403`).
+- Modify: `src/simlin-engine/src/db.rs` `var_phase_symbolic_fragment_prod` (`db.rs:3240`) — make its no-`SourceVariable` / `Fatal` / compile-or-symbolize-fail arms return `None` explicitly and document the loud-safe contract (this is the accessor `symbolic_phase_element_order` / `combine_scc_fragment` actually consume).
+- Remove the now production-dead `var_phase_lowered_exprs_prod` (`db_dep_graph.rs`, currently `#[cfg_attr(not(test), allow(dead_code))]`) and its `#[cfg(test)]` tests (`var_phase_lowered_exprs_prod_*` in `db_dep_graph_tests.rs`) — Phase 2's GH #575 rebuild left it with zero production callers and its `allow(dead_code)` justification ("Phase 3 restores a production consumer") is now false; the project hard rule prefers simple maintainable code over preserving a superseded interface. Update any stale doc-comment references that mention it.
+- Do **not** touch `var_noninitial_lowered_exprs` or `array_producing_vars` (the separate `#[cfg(test)]` pair — locate by name).
 
 **Implementation:**
-Phase 1 already returns `None` from `var_phase_lowered_exprs_prod` on
-no-`SourceVariable`. This task hardens and documents that as the explicit
-loud-safe contract before adding parent-sourcing: any in-SCC node that cannot
-be element-sourced ⇒ the element-relation builder treats the whole SCC as
-unresolved ⇒ `model_dependency_graph_impl` keeps `has_cycle` + accumulates
-`CircularDependency` (Phase 1 Task 5 / Phase 2 Task 3 verdict logic). No
-production code path may panic. Confirm the `#[cfg(test)]`
-`var_noninitial_lowered_exprs` panic wrapper and `array_producing_vars` are
-entirely untouched (they have no production callers; their abort contract is
-preserved verbatim).
+`var_phase_symbolic_fragment_prod` already returns `None` on no-`SourceVariable`
+(`let sv = source_vars.get(var_name)?;`, `db.rs:3253`). This task hardens and
+documents that as the explicit loud-safe contract before adding parent-sourcing
+(Task 2): any in-SCC node that cannot be element-sourced ⇒
+`symbolic_phase_element_order` returns `None` ⇒ the SCC is unresolved ⇒
+`model_dependency_graph_impl` keeps `has_cycle` + accumulates
+`CircularDependency` (Phase 1/2 verdict + Task 5b SCC-aware gate). No
+production code path may panic (the `?` is the loud-safe signal, never a
+panic/expect). Then delete the orphaned `var_phase_lowered_exprs_prod` + its
+dead tests as above. Confirm the `#[cfg(test)]` `var_noninitial_lowered_exprs`
+panic wrapper and `array_producing_vars` are entirely untouched (separate
+functions, no production callers; their abort contract preserved verbatim).
 
 **Testing:**
 - AC3.2: `db_dep_graph_tests.rs` — a recurrence SCC where one in-cycle node is
   forced unsourceable (a `#[cfg(test)]` override/stub making the
   parent-sourcing lookup return `None`, or a synthetic orphan node): assert
   the model is rejected with `CircularDependency`, **no panic**, and no silent
-  miscompile (the other members are NOT partially resolved).
+  miscompile (the other members are NOT partially resolved). Drive this
+  through the production symbolic path (`model_dependency_graph` /
+  `symbolic_phase_element_order` → `var_phase_symbolic_fragment_prod`).
 - AC3.3: run the existing `array_producing_vars_flags_exactly_the_two_positive_cases`
-  (`db_dep_graph_tests.rs:323-423`) unchanged — it must still pass (proves
-  the `#[cfg(test)]` abort contract is intact).
+  (locate by name) unchanged — it must still pass (proves the separate
+  `#[cfg(test)]` `array_producing_vars`/`var_noninitial_lowered_exprs` abort
+  contract is intact and was not collaterally affected by removing
+  `var_phase_lowered_exprs_prod`).
 
 **Verification:**
 Run: `cargo test -p simlin-engine --features file_io array_producing_vars` and
@@ -143,40 +175,51 @@ the new loud-safe test — pass.
 **Verifies:** element-cycle-resolution.AC3.1
 
 **Files:**
-- Modify: `src/simlin-engine/src/db_dep_graph.rs` `var_phase_lowered_exprs_prod` — extend the no-`SourceVariable` arm with parent-`implicit_vars` sourcing.
+- Modify: `src/simlin-engine/src/db.rs` `var_phase_symbolic_fragment_prod` (`db.rs:3240`) — extend the no-`SourceVariable` arm with parent-`implicit_vars` sourcing that returns the helper's symbolic `PerVarBytecodes`.
 
 **Implementation:**
-When `model.variables(db).get(var_name)` is `None`, before returning `None`,
-attempt parent-sourcing, mirroring `compile_implicit_var_fragment`
-(`db.rs:3600+`):
+When `model.variables(db).get(var_name)` is `None` (the `?` at `db.rs:3253`),
+instead of returning `None`, attempt parent-sourcing, mirroring
+`compile_implicit_var_fragment` (`db.rs:3759` — locate by name) which already
+performs this exact chain and already produces a helper `PerVarBytecodes`:
 1. `let info = model_implicit_var_info(db, model, project);`
-   (`db.rs:1033-1073`). `let meta = info.get(&canonical(var_name))` — if
-   `None` ⇒ return `None` (loud-safe; genuinely unsourceable).
-2. `let parsed = parse_source_variable_with_module_context(db, meta.parent_source_var, project, <module ident context>);`
-   (`db.rs:793-808`). Use the same module-ident-context construction
-   `compile_implicit_var_fragment` uses.
-3. `let implicit_dm_var = parsed.implicit_vars.get(meta.index_in_parent)` —
-   `None` ⇒ return `None`.
+   `let meta = info.get(&canonical(var_name))` — `None` ⇒ return `None`
+   (loud-safe; genuinely unsourceable — AC3.2).
+2. `module_ident_context_for_model(db, model, project, module_input_names)`
+   then `parse_source_variable_with_module_context(db, meta.parent_source_var,
+   ..)` — use the *same* construction `compile_implicit_var_fragment` uses
+   (it has a `module_ident_context_for_model` helper; reuse it).
+3. `parsed.implicit_vars.get(meta.index_in_parent)` — `None` ⇒ return `None`.
 4. Parse + lower the synthesized `datamodel::Variable` via
-   `crate::variable::parse_var` then `crate::model::lower_variable`
-   (the non-module branch of `compile_implicit_var_fragment:3633-3693`;
-   the module branch constructs a `Variable::Module` directly). On any
-   parse/lower failure ⇒ return `None` (loud-safe).
-5. Extract the requested phase's per-element `Vec<Expr>` (the lowered
-   helper's `AssignCurr` slots) and return `Some(...)`.
+   `crate::variable::parse_var` then `crate::model::lower_variable` (the
+   non-module branch of `compile_implicit_var_fragment`; the module branch
+   constructs a `Variable::Module`). On any parse/lower failure ⇒ `None`
+   (loud-safe).
+5. Compile + `symbolize_bytecode` the requested phase exactly as
+   `compile_implicit_var_fragment` / `compile_phase_to_per_var_bytecodes`
+   does, returning `Some(PerVarBytecodes)` for the helper (same `SymVarRef`
+   layout-independent form every other member produces, so
+   `symbolic_phase_element_order` builds the helper's element edges and
+   `combine_scc_fragment` interleaves its segments exactly like a real
+   member). Prefer factoring/reusing the shared step with
+   `compile_implicit_var_fragment` over duplicating the chain (DRY; "single
+   shared relation, never re-derive").
 - This is reuse of an existing production chain, not a re-derivation. The
-  `#[cfg(test)]` accessors remain untouched.
+  `#[cfg(test)]` `array_producing_vars`/`var_noninitial_lowered_exprs`
+  accessors remain untouched.
 
 **Testing:**
 `db_dep_graph_tests.rs`: a `TestProject` (or the Task 3 fixture) whose
 recurrence SCC includes a synthetic helper — assert
-`var_phase_lowered_exprs_prod` returns `Some` for the helper node (sourced
-from the parent's `implicit_vars`) and that the SCC's element graph is
-buildable. (The end-to-end simulate proof is Task 3.)
+`var_phase_symbolic_fragment_prod` returns `Some(PerVarBytecodes)` for the
+helper node (sourced from the parent's `implicit_vars`) and that
+`symbolic_phase_element_order` builds the SCC's element graph (helper node
+present). (The end-to-end simulate proof is Task 3.) RED-first: before the
+extension the helper ⇒ `None` ⇒ SCC unresolved; after ⇒ `Some` ⇒ resolvable.
 
 **Verification:**
-Run: `cargo test -p simlin-engine --features file_io var_phase_lowered_exprs_prod` — pass.
-**Commit:** `engine: source synthetic-helper element exprs from parent implicit_vars (AC3.1)`
+Run: `cargo test -p simlin-engine --features file_io var_phase_symbolic_fragment_prod` — pass.
+**Commit:** `engine: source synthetic-helper symbolic fragment from parent implicit_vars (AC3.1)`
 <!-- END_TASK_2 -->
 
 <!-- START_TASK_3 -->
