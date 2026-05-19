@@ -5184,3 +5184,136 @@ TIME STEP = 1 ~~|
         }
     }
 }
+
+/// Arrayed (multi-row) VECTOR SORT ORDER must rank WITHIN each iterated source
+/// slice (per-row), 0-based -- not over the whole flattened array. This is the
+/// multi-row generalization of the AC5 / Phase 4 single-row 0-based fix
+/// (GH #585): the single-row case Phase 4 covered is the degenerate case where
+/// the row IS the whole view, so its global flat index already equals its
+/// in-row rank.
+#[cfg(test)]
+mod arrayed_vector_sort_order_per_slice_tests {
+    use crate::test_common::TestProject;
+
+    /// Core fix: `order[D1,D2] = VECTOR SORT ORDER(vals[D1,D2], 1)` must sort
+    /// each D1-row independently and emit a 0-based permutation WITHIN that row
+    /// (`[0, |D2|)`), not the whole-array flat offsets.
+    ///
+    /// vals (row-major [D1,D2], D1=2, D2=3):
+    ///   row 0: [30, 10, 20] -> ascending source order: 10@1, 20@2, 30@0
+    ///          -> per-row 0-based ranks [1, 2, 0]
+    ///   row 1: [ 5, 15,  1] -> ascending source order:  1@2,  5@0, 15@1
+    ///          -> per-row 0-based ranks [2, 0, 1]
+    /// Genuine-Vensim expected (per-row 0-based): [1,2,0, 2,0,1].
+    ///
+    /// The pre-fix VM iterates the whole flattened view and writes the GLOBAL
+    /// flat index, so row 1 (whose flat offsets are 3,4,5) emits the sorted
+    /// global offsets [5,3,4] instead of the in-row ranks [2,0,1]. Row 0
+    /// coincides because there the in-row rank equals the global offset.
+    fn make_multi_row_vso_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D1", 2)
+            .indexed_dimension("D2", 3)
+            .array_with_ranges(
+                "vals[D1,D2]",
+                vec![
+                    ("1,1", "30"),
+                    ("1,2", "10"),
+                    ("1,3", "20"),
+                    ("2,1", "5"),
+                    ("2,2", "15"),
+                    ("2,3", "1"),
+                ],
+            )
+            .array_aux("order[D1,D2]", "VECTOR SORT ORDER(vals[D1,D2], 1)")
+    }
+
+    #[test]
+    fn multi_row_vso_ranks_within_each_row_vm() {
+        let project = make_multi_row_vso_project("multi_row_vso_vm");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("order", &[1.0, 2.0, 0.0, 2.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn multi_row_vso_ranks_within_each_row_monolithic() {
+        let project = make_multi_row_vso_project("multi_row_vso_mono");
+        project.assert_compiles_incremental();
+        project.assert_vm_result("order", &[1.0, 2.0, 0.0, 2.0, 0.0, 1.0]);
+    }
+
+    /// Descending direction for the multi-row case: each row sorted desc,
+    /// 0-based ranks within the row.
+    ///   row 0: [30, 10, 20] desc: 30@0, 20@2, 10@1 -> [0, 2, 1]
+    ///   row 1: [ 5, 15,  1] desc: 15@1,  5@0,  1@2 -> [1, 0, 2]
+    #[test]
+    fn multi_row_vso_descending_within_each_row_vm() {
+        let project = TestProject::new("multi_row_vso_desc_vm")
+            .indexed_dimension("D1", 2)
+            .indexed_dimension("D2", 3)
+            .array_with_ranges(
+                "vals[D1,D2]",
+                vec![
+                    ("1,1", "30"),
+                    ("1,2", "10"),
+                    ("1,3", "20"),
+                    ("2,1", "5"),
+                    ("2,2", "15"),
+                    ("2,3", "1"),
+                ],
+            )
+            .array_aux("order[D1,D2]", "VECTOR SORT ORDER(vals[D1,D2], -1)");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("order", &[0.0, 2.0, 1.0, 1.0, 0.0, 2.0]);
+    }
+
+    /// C-LEARN downstream shape (GH #585): a 2-D VECTOR SORT ORDER result fed
+    /// as the offset argument to a VECTOR ELM MAP whose source is sliced to a
+    /// single column. Mirrors
+    ///   sorted target year[COP,Target] =
+    ///       VECTOR ELM MAP(Effective Target Year[COP,t1], Target Order[COP,Target])
+    /// The per-row 0-based ranks keep every ELM MAP lookup in bounds (no
+    /// OOB -> NaN). With the pre-fix global-flat-index ranks, row 1's offsets
+    /// would index past the single-column source slice -> NaN.
+    ///
+    /// vals[D1,D2] is the VSO source AND the ELM MAP source's parent array.
+    ///   row 0: [30, 10, 20] -> order row 0 (asc) = [1, 2, 0]
+    ///   row 1: [ 5, 15,  1] -> order row 1 (asc) = [2, 0, 1]
+    /// src[D1,e1] = vals[D1,1] (first column): src(row0)=30, src(row1)=5.
+    /// ELM MAP base for each (D1, *) is the flat position of vals[D1, e1]
+    /// (column 0 of row D1); the offset steps the innermost (D2) axis (stride 1
+    /// in row-major [D1,D2]):
+    ///   sorted[D1,d2] = vals_full[base_D1 + order[D1,d2]]
+    ///   row 0 (base 0): order [1,2,0] -> vals_full[1,2,0] = [10, 20, 30]
+    ///   row 1 (base 3): order [2,0,1] -> vals_full[5,3,4] = [ 1,  5, 15]
+    /// Genuine-Vensim expected: [10,20,30, 1,5,15], all finite.
+    #[test]
+    fn vso_feeding_elm_map_single_column_source_no_oob_nan_vm() {
+        let project = TestProject::new("vso_elm_map_clearn_shape_vm")
+            .indexed_dimension("D1", 2)
+            .indexed_dimension("D2", 3)
+            .array_with_ranges(
+                "vals[D1,D2]",
+                vec![
+                    ("1,1", "30"),
+                    ("1,2", "10"),
+                    ("1,3", "20"),
+                    ("2,1", "5"),
+                    ("2,2", "15"),
+                    ("2,3", "1"),
+                ],
+            )
+            .array_aux("order[D1,D2]", "VECTOR SORT ORDER(vals[D1,D2], 1)")
+            .array_aux("sorted[D1,D2]", "VECTOR ELM MAP(vals[D1,1], order[D1,D2])");
+        project.assert_compiles_incremental();
+        let vals = project.vm_result_incremental("sorted");
+        assert_eq!(vals.len(), 6, "expected 6 elements (D1 x D2)");
+        for (i, &got) in vals.iter().enumerate() {
+            assert!(
+                got.is_finite(),
+                "sorted[{i}] must be finite (no OOB->NaN from a per-row 0-based VSO offset); got {got} (full: {vals:?})"
+            );
+        }
+        project.assert_vm_result_incremental("sorted", &[10.0, 20.0, 30.0, 1.0, 5.0, 15.0]);
+    }
+}

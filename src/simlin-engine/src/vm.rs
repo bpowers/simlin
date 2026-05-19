@@ -2318,62 +2318,20 @@ impl Vm {
                     );
                 }
 
-                // VectorSortOrder returns a genuine-Vensim 0-based
-                // permutation: result position `i` holds the 0-based source
-                // index of the `i`-th element in sorted order. `direction ==
-                // 1` sorts ascending, otherwise descending. Ties keep stable
-                // source order (Rust's stable `sort_by`); genuine Vensim
-                // leaves tie-breaking unspecified, so this does not
-                // contradict it. Ground truth for the 0-based (not 1-based)
-                // convention: real Vensim DSS 7.3.4 reference output
-                // `test/test-models/tests/vector_order/output.tab`
-                // (`SORT ORDER[*]` ranges over `0..n-1` and contains `0`,
-                // impossible for a 1-based permutation) and Ventana's
-                // official VECTOR SORT ORDER reference. (RANK below is a
-                // distinct, correctly 1-based opcode, per the same file.)
+                // Genuine-Vensim VECTOR SORT ORDER -- per-iterated-slice
+                // (per-row) 0-based ranks; rule + citations on
+                // `crate::vm_vector_sort_order::vector_sort_order`.
                 Opcode::VectorSortOrder { write_temp_id } => {
                     let direction = stack.pop().round() as i32;
-
                     let input_view = &view_stack[view_stack.len() - 1];
-
-                    if !input_view.is_valid {
-                        Self::fill_temp_nan(temp_storage, context, *write_temp_id);
-                    } else {
-                        let size = input_view.size();
-                        let n_dims = input_view.dims.len();
-
-                        // Collect (value, 0-based-index) pairs
-                        let mut indexed: SmallVec<[(f64, usize); 32]> =
-                            SmallVec::with_capacity(size);
-                        let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
-                        for i in 0..size {
-                            let flat_off = input_view.flat_offset(&indices);
-                            let val = Self::read_view_element(
-                                input_view,
-                                flat_off,
-                                curr,
-                                temp_storage,
-                                context,
-                            );
-                            indexed.push((val, i));
-                            increment_indices(&mut indices, &input_view.dims);
-                        }
-
-                        if direction == 1 {
-                            indexed.sort_by(|a, b| {
-                                a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                        } else {
-                            indexed.sort_by(|a, b| {
-                                b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                        }
-
-                        let temp_off = context.temp_offsets[*write_temp_id as usize];
-                        for (i, &(_, orig_idx)) in indexed.iter().enumerate() {
-                            temp_storage[temp_off + i] = orig_idx as f64;
-                        }
-                    }
+                    crate::vm_vector_sort_order::vector_sort_order(
+                        input_view,
+                        direction,
+                        *write_temp_id,
+                        curr,
+                        temp_storage,
+                        context,
+                    );
                 }
 
                 Opcode::Rank { write_temp_id } => {
