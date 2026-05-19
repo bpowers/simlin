@@ -5,7 +5,13 @@ compiles via the incremental path and runs to FINAL TIME via the VM with no
 panic and no all-NaN core series; issue #363 (incremental-compiler panic on
 C-LEARN) is re-verified now that the cycle gate no longer masks the deeper
 pipeline; the residual test-only `catch_unwind` is retired. (This is the
-explicit mid-plan value-locking checkpoint.)
+explicit mid-plan value-locking checkpoint.) **Tasks 4-5 (added during
+execution — see "Why Tasks 4-5 added"):** clearing the cycle gate (Task 3)
+unmasked **two pre-existing, latent compile bugs orthogonal to cycle
+resolution** (filed as GH #580) that block AC7.1 — fixed here as general engine
+fixes (no model-specific hacks) so Task 1's structural gate can be committed
+passing; the user was surfaced the corrected #575-class scope picture and chose
+"drive both fixes now".
 
 **Architecture:** Add a new `#[ignore]`d structural-gate test in
 `tests/simulate.rs` that parses C-LEARN, compiles it via the incremental path
@@ -15,6 +21,13 @@ TIME, and asserts no core series is entirely NaN. Re-point the existing
 currently *inverted* — a clean compile is a `panic!`) to expect a clean
 compile and remove its `catch_unwind`. If a post-gate panic surfaces, it is a
 hard, root-caused failure (AC7.5 / #363's prescribed fix), never caught.
+Tasks 4-5 fix the two #580 latent compile bugs that the cleared gate exposes:
+a new additive `DimensionsContext` group-mapping resolver wired into
+`substitute_dimension_refs` (Bug A — temp-arg-helper extraction) and an
+arrayed-GF dependency-stub reconstruction in the isolated per-variable recompile
+(Bug B), each with its own fast model-agnostic unit test, the shared
+`dimensions.rs` mapping surface and the SCC element-graph compile path
+regression-pinned.
 
 **Tech Stack:** Rust (`simlin-engine`) integration tests; the incremental
 salsa compile path; `gh` for issue #363 status.
@@ -319,6 +332,280 @@ engine fix + unit fixture + rustdoc updates (NOT `simulate.rs`) via
 
 ---
 
+## Why Tasks 4-5 added (Task 3 / GH #580 outcome — verified, user-approved to drive)
+
+Task 3 Part A fully dissolved C-LEARN's false `CircularDependency`
+(`has_circular_dependency = false`; `model_dependency_graph: has_cycle=false`;
+the 22-member recurrence SCC resolves in both the dt and init phases) and Part
+B re-verified #363 (the incremental-compiler panic does **not** reproduce — a
+clean typed `Err`, recorded on #363, not closed). With the cycle gate clean,
+the C-LEARN incremental compile now reaches assembly and surfaces a **distinct,
+previously-masked** failure: `compile_project_incremental` returns a clean
+`Err(NotSimulatable, "failed to compile fragments for variables: ...")` on ≈150
+names. A deep root-cause investigation (filed as **GH #580**) established this
+is **two independent, pre-existing, latent bugs in the per-variable /
+per-helper isolated-recompile machinery — NOT a Task 3 regression, NOT caused
+by the resolved SCC**: all 150 failing names are *outside* every resolved SCC,
+and the Phase-2 combined-fragment path is never reached for any of them. They
+were masked because the false `CircularDependency` short-circuited
+`compile_project_incremental` *before* `assemble_module`'s fragment loop ever
+ran — so the design's "cycle gate masks the deeper pipeline" thesis held, but
+the deeper failure is these two bugs, not #363's panic.
+
+They block the plan's committed **AC7.1** (C-LEARN compiles `Ok`) and therefore
+AC7.2/AC7.3/AC8.1. The user was surfaced the corrected picture (a #575-class
+decision — these are orthogonal pre-existing bugs, not the re-architecture) and
+**chose "Drive both fixes now"**: fix them as general engine fixes
+(root-cause-first, RED-TDD, no model-specific hacks, per-phase code review),
+then commit Task 1's structural gate passing. Each fix carries its own fast,
+model-agnostic unit test so coverage does not depend on the heavy `#[ignore]`d
+C-LEARN test (mirroring phase_07 Task 4's "any general bug found gets a focused
+unit test" rule). Tasks 4-5 **unblock** AC7.1's test
+(`compiles_and_runs_clearn_structural`); they are newly-surfaced prerequisites,
+not design ACs — test-requirements.md's AC7 row is reconciled at finalization
+with a note (exactly as AC2.4/AC3.1's empirically-built fixtures are).
+
+The two bugs (verified, concrete trace in #580):
+- **Bug A — ≈140 synthetic temp-arg helpers** (`$⁚<var>⁚0⁚arg0⁚<element>`):
+  when `make_temp_arg` lifts a per-element scalar helper out of an
+  `INITIAL(...)`-wrapped **A2A** parent (`FF change start year[COP] =
+  INITIAL(... ff_change_start_year_aggregated[Aggregated Regions] ...)`),
+  `substitute_dimension_refs` (`builtins_visitor.rs:298-403`) fails to
+  translate a **group-mapped** cross-dimension subscript: it tries
+  `translate_via_mapping` (`:345`) and `find_mapping_parent_of` +
+  `translate_to_source_via_mapping` (`:354-365`), but **both bail to `None` on
+  a group / unequal-cardinality mapping** (`translate_to_source_via_mapping`
+  `dimensions.rs:455-457` and `translate_via_mapping` `:513-515` both
+  `return None` when `source_named.elements.len() != target_named.elements.len()`,
+  and a group mapping `Aggregated Regions[Developing B] → COP[{3-element
+  subgroup}]` has no 1:1 `element_map` row for a base COP element inside a
+  subgroup target). So `substitute_dimension_refs` returns the expr
+  **unchanged** (`:368`), the bare `[aggregated_regions]` full-dimension
+  subscript survives into a **scalar** `Aux`, and `lower_variable` → `lower_ast`
+  returns `EquationError{code: DimensionInScalarContext}`, which `lower_variable`
+  (`model.rs`) records into `errors` and **discards the AST** (sets `ast`/
+  `init_ast` to `None`). `lower_implicit_var` (`db.rs:3878`) **only checks the
+  *pre*-lowering `equation_errors()` (`:3908-3913`), never the
+  post-`lower_variable` ones**, so it returns `Some((name, var_with_None_ast))`;
+  `compile_implicit_var_phase_bytecodes` → `compiler::Var::new` then trips
+  `EmptyEquation` → all-`None` bytecodes → `missing_vars`. The originating
+  `DimensionInScalarContext` is **silently swallowed** (no
+  `CompilationDiagnostic`, unlike the real-var path's
+  `accumulate_var_compile_error` at `db.rs:3782`).
+- **Bug B — 6 real arrayed vars** (`global_rs_co2_ff`, `rs_global_ch4/n2o/pfc/sf6`,
+  `rs_ff_co2_ff_aggregated`): the var lowers to a valid non-empty `Expr` AST,
+  but the **isolated minimal-`Module` recompile** fails. `global_rs_co2_ff` &
+  the four `rs_global_*` are `SUM(RS X[COP!](Time/One year))` — a `SUM` reducer
+  over an **arrayed graphical function applied with a dynamic argument** —
+  failing with `Err(Generic, "Cannot push view for expression type ... expected
+  array expression")`; `rs_ff_co2_ff_aggregated` is a `VECTOR SELECT(...)`
+  failing with `Err(BadTable, "range subscripts not supported in lookup
+  tables")`. The dependency-stub / dep-table construction in
+  `db_var_fragment.rs` (`build_stub_variable` `:344`; dep-table collection via
+  `extract_tables_from_source_var` `:946-951`) does not reconstruct the
+  arrayed-GF dependency as a full array-shaped, per-element-table-bearing stub,
+  so `RS X[COP!](x)` does not lower to an array view in the mini-layout the way
+  it does in the whole-model compile. (`compile_phase_to_per_var_bytecodes`
+  `db.rs:3114` shares the same `Var::new` + minimal-`Module` shape — Task 5
+  root-cause-confirms the exact failing call site before fixing, since the 6
+  vars are outside every resolved SCC.)
+
+---
+
+<!-- START_TASK_4 -->
+### Task 4: Bug A — group-mapped subscript translation in temp-arg-helper extraction
+
+**Verifies:** unblocks element-cycle-resolution.AC7.1 (newly-surfaced
+prerequisite — see "Why Tasks 4-5 added"); directly verified by its own focused
+unit tests.
+
+**Files:**
+- Add: `src/simlin-engine/src/dimensions.rs` — a new
+  `DimensionsContext::translate_via_group_mapping` method + its `#[cfg(test)]`
+  unit tests (in the existing `mod tests`).
+- Modify: `src/simlin-engine/src/builtins_visitor.rs:339-367`
+  (`substitute_dimension_refs`) — call the new resolver as a THIRD fallback.
+- Modify: `src/simlin-engine/src/db.rs:3878-3963` (`lower_implicit_var`) — the
+  loud-safe post-lower error re-check (Part B).
+- Add: a focused fixture/test (in `src/simlin-engine/src/array_tests.rs` or a
+  new `#[cfg(test)]` test reachable in the default capped suite).
+
+**Implementation — Part A (the fix; general, no model-specific hack):**
+Add `DimensionsContext::translate_via_group_mapping(active_dim, active_element,
+ref_dim) -> Option<CanonicalElementName>`: given the iterated element
+`active_element` of the active (parent) dimension `active_dim`, and a subscript
+reference to `ref_dim` where `ref_dim` is related to `active_dim` by a **group
+mapping** (one `ref_dim` element maps to a *group* — a subdimension, or a
+multi-element subset — of `active_dim`), return the `ref_dim` element whose
+target group **contains** `active_element`. Resolve the mapping in **either
+direction** (`ref_dim.maps_to == active_dim` or vice-versa), reusing
+`find_mapping_info` / `element_map` (the group rows) and
+`get_subdimension_relation` (`dimensions.rs:541`) to locate the containing
+group — do NOT assume equal cardinality (that is exactly the case the existing
+`translate_via_mapping` / `translate_to_source_via_mapping` reject at
+`dimensions.rs:455-457` / `:513-515`). Wire it into `substitute_dimension_refs`
+as a **third** fallback, AFTER the existing `translate_via_mapping` (`:345`) and
+`find_mapping_parent_of` (`:354-365`) attempts and BEFORE the unchanged-`expr`
+return at `:368`. **Do NOT alter `translate_via_mapping` /
+`translate_to_source_via_mapping` / `find_mapping_parent_of` semantics** — they
+are shared by the LTM mapping consumers (`db_ltm_ir.rs`
+`classify_iterated_dim_shape`'s mapped branch, `ltm_agg.rs`'s mapped-dimension
+carve-out, the `Expr2Context::has_mapping_to` A2A-lowering path); a *new
+additive* method that fires only where the old ones returned `None` keeps that
+surface byte-stable.
+
+**Implementation — Part B (loud-safe companion — no silent miscompile):**
+In `lower_implicit_var` (`db.rs:3878`), AFTER `crate::model::lower_variable`
+(`:3959`), re-check the *lowered* variable's `equation_errors()` (the current
+check at `:3908-3913` only inspects the *pre*-lowering `parsed_implicit`). If
+the lowered var carries errors (its AST was discarded), accumulate a precise
+`CompilationDiagnostic` carrying the real error + span (mirror the real-var
+path's `accumulate_var_compile_error`, `db.rs:3782`) and return `None`. This
+does not itself fix a miscompile; it converts a *residual* un-translatable
+mapping shape from the opaque aggregate `missing_vars` string into a legible
+per-variable `DimensionInScalarContext` diagnostic — so if Part A is incomplete
+for some shape, the failure is loud and actionable (AC7.5 / the "no silent
+miscompile" hard rule), never a silent all-`None` fragment. Verify Part B is a
+no-op when Part A succeeds (the lowered var has no errors).
+
+**Testing (TDD, mandatory):**
+- **RED-first fixture** (exact shape empirically determined during execution —
+  plan convention 4: bounded ≈4-5 attempts + `track-issue` escalation, the AC
+  is not weakened): a minimal model with a **group / unequal-cardinality**
+  dimension mapping and an `INITIAL(...)`-wrapped A2A var whose argument
+  references the mapped dimension by its **full dimension name** (#580
+  investigator sketch — widen the group/cardinality mismatch until it
+  reproduces):
+  ```
+  Big : e1, e2, e3, e4 ~~|
+  Small : s1, s2 -> (Big: BigGroupA, BigGroupB) ~~|
+  BigGroupA : e1, e2 ~~|   BigGroupB : e3, e4 ~~|
+  src[Small] = 1 ~~|
+  out[Big] = INITIAL( src[Small] ) ~~|
+  ```
+  RED: `compile_project_incremental` returns `Err` whose message contains
+  `$⁚out⁚0⁚arg0⁚` (or, with Part B, a `DimensionInScalarContext` on that
+  helper). If it compiles, the mapping is too simple — widen per #580's note
+  (the genuine C-LEARN mapping is heterogeneous: a single base element vs
+  3-element subgroups, `len(ref_dim) ≠ len(active_dim)`); verify by checking
+  the minted helper's printed equation still contains the bare `[small]`
+  subscript. GREEN after Part A: it compiles and simulates to the hand-computed
+  per-`Big`-element series (each `out[e]` = the `src` value of the `Small`
+  element whose group contains `e`).
+- A focused **`dimensions.rs` `#[cfg(test)]`** unit test for
+  `translate_via_group_mapping` directly: group containment in both mapping
+  directions; the equal-cardinality case still delegates unchanged; an
+  unrelated dimension ⇒ `None`.
+- A focused **`lower_implicit_var` Part B** test: a synthetic
+  implicit-var-bearing model whose helper genuinely cannot be element-resolved
+  ⇒ the compile `Err` now names the specific helper + `DimensionInScalarContext`
+  (loud), not only the aggregate `missing_vars`.
+- **MANDATORY soundness pins (must stay GREEN unchanged):** the full
+  `db_dep_graph` suite; `self_recurrence`, `ref`, `interleaved`,
+  `init_recurrence`, `helper_recurrence`, `vector_simple` end-to-end;
+  `genuine_cycles_still_rejected`; `incremental_compilation_covers_all_models`
+  (AC2.6, the 22-model corpus); and — because Part A touches shared
+  `dimensions.rs` — the LTM suites that exercise mapping
+  (`db_ltm_unified_tests`, `db_ltm_module_tests`, `db_element_graph_tests`,
+  `db_ltm_ir_tests`) plus `array_tests` / `compiler_vector`. If ANY LTM /
+  mapping test changes behavior, the new method leaked into a shared path —
+  **STOP and report** (do not edit a guard to pass).
+
+**Verification:**
+Run the RED→GREEN fixture + the focused unit tests + the full soundness-pin set
+in the default capped suite. Then confirm the C-LEARN structural gate progresses
+(the ≈140 synthetic-helper names are gone from the `Err`):
+`cargo test -p simlin-engine --features file_io --release -- --ignored compiles_and_runs_clearn_structural --nocapture`
+(Bug B's 6 real vars may still fail until Task 5 — expected; Task 4's
+done-criterion is the ≈140 synthetic-helper names removed from the `Err`).
+`git commit` (pre-commit fmt/clippy/non-ignored cargo test 180s cap; NEVER
+`--no-verify`).
+**Commit:** `engine: group-mapped subscript translation in temp-arg-helper extraction (#580 Bug A)`
+<!-- END_TASK_4 -->
+
+<!-- START_TASK_5 -->
+### Task 5: Bug B — arrayed-GF dependency stub in the isolated per-variable recompile
+
+**Verifies:** unblocks element-cycle-resolution.AC7.1 (newly-surfaced
+prerequisite — see "Why Tasks 4-5 added"); directly verified by its own focused
+unit tests.
+
+**Files:**
+- Modify: `src/simlin-engine/src/db_var_fragment.rs` — the dependency-stub
+  construction (`build_stub_variable` call site `:344`) and/or the dep-table
+  collection (`:910-952`, via `extract_tables_from_source_var`).
+- (Conditional) Modify: `src/simlin-engine/src/db.rs:3114`
+  (`compile_phase_to_per_var_bytecodes`) and/or the `compiler` array-view /
+  lookup-range handling — only if the root-cause-confirm step points there.
+- Add: a focused fixture/test in `src/simlin-engine/src/array_tests.rs` (or
+  `tests/compiler_vector.rs`).
+
+**Implementation — root-cause-confirm FIRST (RED), then fix (general):**
+1. **Reproduce + isolate** (RED): build the minimal fixture (below), confirm it
+   reproduces `Err(Generic, "Cannot push view for expression type ... expected
+   array expression")` for the `SUM(arrayed-GF(...))` shape AND
+   `Err(BadTable, "range subscripts not supported in lookup tables")` for the
+   `VECTOR SELECT(...)` shape, **via the incremental compile path**. Confirm
+   the **exact** failing call site: #580 attributes it to
+   `compile_phase_to_per_var_bytecodes`'s `module.compile()` (`db.rs:3174`),
+   but the 6 real C-LEARN vars are *outside* every resolved SCC — establish
+   whether the failure is in that path (and how it is reached for non-SCC vars)
+   or in the main `compile_var_fragment` → `lower_var_fragment` → `build_var` →
+   `Var::new` path (which shares the same minimal-`Module` shape). Identify the
+   precise gap vs the whole-model compile: (i) `build_stub_variable` (`:344`)
+   giving the arrayed-GF dependency the wrong dimensions/shape, (ii)
+   `extract_tables_from_source_var` (`:947`) not returning the dep's per-element
+   tables, and/or (iii) the GF dep needing to enter the mini-layout as a
+   genuine array-shaped, per-element-`tables`-bearing `Variable::Var` so a
+   `dep[D!](x)` reference lowers to an **array view** (not a scalar).
+2. **Fix** (no model-specific hack): make the isolated per-variable recompile
+   **view-equivalent to the whole-model compile** for an arrayed graphical
+   function applied with an index inside a reducer — reconstruct the
+   dependency's dimensions AND per-element `tables` in the mini-layout, and
+   handle `VECTOR SELECT` / range-subscript lookup forms instead of rejecting
+   with `BadTable`. General contract: for ANY dependency that is an arrayed
+   graphical function, the stub carries enough shape + table data that
+   `dep[D!](x)` compiles identically to the monolithic path.
+
+**Testing (TDD, mandatory):**
+- **RED-first fixture** (exact shape empirically determined — plan convention
+  4: bounded ≈4-5 attempts + `track-issue` escalation):
+  ```
+  D : a, b, c ~~|
+  g[D]( (0,0),(1,10),(2,20) ) ~~|        ' a genuine per-element arrayed GF
+  drive = TIME ~~|                       ' non-constant index
+  total = SUM( g[D!](drive) ) ~~|
+  ```
+  RED: `compile_project_incremental` returns the `Cannot push view ...` `Err`.
+  Add a `VECTOR SELECT` variant for the `BadTable` case. If the sketch
+  compiles, widen per #580's note (`g` a genuine per-element-`tables` arrayed
+  GF, `drive` strictly non-constant). GREEN after the fix: compiles and
+  simulates to the hand-computed `total` series (`SUM` of the per-element GF
+  outputs at `drive = TIME`).
+- A focused unit test pinning the **isolated-recompile view equivalence**: the
+  arrayed-GF dependency's mini-`Module` produces the same array view as the
+  whole-model compile (assert the compiled bytecode pushes a view, not a
+  scalar).
+- **MANDATORY soundness pins (must stay GREEN unchanged):** `array_tests`,
+  `compiler_vector`, the full `db_dep_graph` suite **and** the recurrence
+  end-to-end gates (`compile_phase_to_per_var_bytecodes` is ALSO the SCC
+  element-graph builder's compile path — a behavior shift there could perturb
+  `symbolic_phase_element_order` verdicts), `genuine_cycles_still_rejected`,
+  and `incremental_compilation_covers_all_models` (AC2.6, the 22-model corpus).
+  If ANY SCC verdict or corpus model changes behavior — **STOP and report**.
+
+**Verification:**
+Run the RED→GREEN fixture + the focused unit test + the full soundness-pin set
+in the default capped suite. Then the C-LEARN structural gate should now be
+fully GREEN (both Bug A and Bug B cleared):
+`cargo test -p simlin-engine --features file_io --release -- --ignored compiles_and_runs_clearn_structural --nocapture`
+— C-LEARN compiles `Ok`, runs to FINAL TIME, no all-NaN core series. `git
+commit` (pre-commit; NEVER `--no-verify`).
+**Commit:** `engine: arrayed-GF dependency stub in isolated per-variable recompile (#580 Bug B)`
+<!-- END_TASK_5 -->
+
+---
+
 ## Phase 6 Done When
 
 - C-LEARN compiles via the incremental path with no fatal `ModelError` (no
@@ -330,6 +617,16 @@ engine fix + unit fixture + rustdoc updates (NOT `simulate.rs`) via
   remains in the engine test suite for C-LEARN (Task 2 — AC7.4).
 - Any post-gate panic is root-caused and converted to a typed error (not
   caught); #363 status re-verified and recorded (Task 3 — AC7.5).
+- The two latent compile bugs the cleared cycle gate unmasked (GH #580) are
+  fixed as general engine fixes, each with its own fast model-agnostic unit
+  test: group-mapped subscript translation in temp-arg-helper extraction
+  (Task 4 — Bug A) and the arrayed-GF dependency stub in the isolated
+  per-variable recompile (Task 5 — Bug B). With both in, no synthetic temp-arg
+  helper or real arrayed var remains in `compile_project_incremental`'s
+  `missing_vars`, so Task 1's structural gate compiles `Ok` (Tasks 4-5 are
+  sequenced BEFORE the Task 1 commit). The shared `dimensions.rs` mapping
+  resolver and the SCC element-graph compile path are regression-pinned (no
+  LTM / cycle-gate behavior change). #580 closes when both land.
 - The default engine suite stays green under the 3-minute `cargo test` cap
   (the new C-LEARN test is `#[ignore]`d / runtime-class).
 <!-- END_PHASE_6 -->
