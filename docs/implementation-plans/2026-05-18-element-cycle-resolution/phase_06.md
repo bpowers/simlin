@@ -16,7 +16,14 @@ unmasked a 3rd distinct, orthogonal pre-existing layer (GH #582 — a
 `GraphicalFunctionId` overflow from missing cross-fragment GF de-duplication in
 `concatenate_fragments`) that still blocks AC7.1; fixed in Task 6 under the
 user's follow-on "drive #582, checkpoint per layer" directive (each further
-unmasked layer is surfaced to the user before being driven).
+unmasked layer is surfaced to the user before being driven). **Task 7 (added
+after a user-authorized forward sweep):** the sweep established that #583 (the
+`TempId` overflow Task 6 unmasked) is the *sole* remaining assembly-path ceiling
+(only two `u8` index types exist; everything else is already `u16`) and is a
+#582-class concat-vs-monolithic **divergence**, NOT genuine-capacity — the
+monolithic path recycles temps to ~21 while the incremental path sums to 243/3233
+and widening produces a runtime OOB. Task 7 fixes it by matching the monolithic
+recycle (not widening).
 
 **Architecture:** Add a new `#[ignore]`d structural-gate test in
 `tests/simulate.rs` that parses C-LEARN, compiles it via the incremental path
@@ -765,6 +772,134 @@ fmt/clippy/non-ignored cargo test 180s cap; NEVER `--no-verify`).
 **Commit:** `engine: cross-fragment graphical-function de-duplication (#582)`
 <!-- END_TASK_6 -->
 
+<!-- START_TASK_7 -->
+### Task 7: #583 — match monolithic temp recycling in fragment concatenation (supersedes "widen TempId")
+
+**Verifies:** unblocks element-cycle-resolution.AC7.1/AC7.2/AC7.3 (the sole
+remaining assembly-path ceiling — the forward sweep confirmed there is no "stack
+of u8 ceilings"); directly verified by its own focused unit tests + the C-LEARN
+structural gate.
+
+**Why added (user-authorized forward-sweep outcome — overturns #583's premise):**
+the user chose to "sweep all remaining assembly-path ceilings at once". The sweep
+(an all-narrow-types-widened-to-u32 + peak-count probe build, fully reverted)
+established: **(1)** only TWO `u8` index types exist — `GraphicalFunctionId`
+(already bounded to ~162 by #582's dedup) and `TempId`; every other index
+(`LiteralId`/`ModuleId`/`ViewId`/`DimId`/`DimListId`/`NameId`/…) is already `u16`
+and nowhere near its limit. **(2)** None serialize to protobuf (bytecode is never
+persisted — widening would be back-compat-safe, but is the WRONG fix). **(3)**
+With everything widened, C-LEARN **compiles `Ok`** and `Vm::new` succeeds — but
+the VM then **panics at `vm.rs:2372`** (`VectorSortOrder` reads `temp_offsets[347]`
+when the table has 243 entries). So widening converts a clean compile `Err` into
+a runtime OOB — proof the temp numbering is **incoherent**, not capacity-limited.
+**(4)** `TempId` is a **concat-vs-monolithic divergence, NOT genuine-capacity**
+(this REFUTES #583's stated premise): monolithic `Module::compile` recycles temps
+via a `HashMap<temp_id,size>` keyed max-merge (`compiler/mod.rs:2720-2740`) and
+needs only **21** slots for C-LEARN; the incremental path SUMS and allocates
+**243** (the `merged` table) / **3233** (`flows_concat` — they DISAGREE, which is
+the runtime OOB). Same class as #582 (incorrect-by-omission in
+`concatenate_fragments`), now for temps.
+
+Two compounding manifestations (both in `compiler/symbolic.rs`, both fixed here):
+- **(1a) the divergence:** `ContextResourceCounts::from_fragments` (`:1256-1272`)
+  explicitly SUMS each fragment's `(max_temp_id+1)` (its own comment at
+  `:1261-1262` says "the total is the sum ... not the global max"); `absorb_non_gf`
+  advances `merged_temp_sizes.len()` per temp-bearing fragment — never recycling.
+  Monolithic max-merges to 21. → 243.
+- **(1b) a plain arithmetic bug:** `absorb_non_gf:1523` is
+  `temp_offset = self.merged_temp_sizes.len() as u32 + self.ctx_base.temps` — the
+  `+ ctx_base.temps` is **re-added on every temp-bearing fragment** (flows
+  `ctx_base.temps=115` × ~28 fragments + Σmaxes ≈ **3232**, the observed
+  `flows_concat` max). The SAME `+ ctx_base.X` re-add is on `:1521`/`:1522`/`:1524`
+  (`mod`/`view`/`dim_list`) — latent only because C-LEARN fragments carry ~0 of
+  each. This is why `flows_concat` (3233, `db.rs:5280 compiled_flows`) ≠ `merged`
+  (243, `db.rs:5414 temp_offsets`) — the two tables the VM consumes disagree.
+
+**Files:**
+- Modify: `src/simlin-engine/src/compiler/symbolic.rs` —
+  `ContextResourceCounts::from_fragments` (`:1256`), `FragmentMerger::absorb_non_gf`
+  (`:1518`, the `:1521-1524` offset arithmetic), `renumber_opcode` /
+  `renumber_fragment_code` (`:1700`/`:1870`, the `temp_off` path + the removable
+  `temp_off > u8::MAX` guard at `:1879`), `into_concatenated` /
+  `into_per_var_bytecodes`.
+- Modify: `src/simlin-engine/src/db.rs` — `assemble_module` per-phase concat
+  arithmetic (`:5081-5305`, esp. phase bases `:5086-5096` and the `merged` vs
+  `flows_concat`/`stocks_concat` reconciliation `:5219`/`:5280`/`:5414`).
+- Add: focused `#[cfg(test)]` unit tests.
+
+**Implementation — root-cause-confirm FIRST (the plan's per-bug diagnosis has been
+wrong 3x; this sweep's monolithic evidence is strong but VERIFY), then fix
+(general, monolithic-matching — do NOT widen):**
+1. **Confirm** the monolithic recycle (`compiler/mod.rs:2720-2740` keyed
+   max-merge → `n_temps=21`) and that a plain-phase concatenated stream's
+   per-fragment temp live ranges are **sequential / non-overlapping** (a fragment's
+   temps are dead once its runlist segment completes — the property monolithic
+   relies on to recycle). Confirm `combine_scc_fragment` (`db.rs:3600-3685`) is
+   DIFFERENT: its members' per-element segments **interleave** per `element_order`,
+   so their temp live ranges **overlap** and must NOT share slots.
+2. **Fix (1b):** `absorb_non_gf` must not re-add `ctx_base.X` per fragment — seed
+   the merger's `merged_X` accounting with `ctx_base.X` ONCE (or compute
+   `offset = ctx_base.X + cumulative_merged`), uniformly for temps AND the
+   `mod`/`view`/`dim_list` siblings (`:1521-1524`), so `flows_concat` ≡ `merged`.
+3. **Fix (1a):** in the **plain-phase** concatenation path
+   (`concatenate_fragments_with_gf` / the `assemble_module` flows/stocks/init
+   concat), **max-merge (recycle)** fragment temps into a shared keyed pool
+   matching `Module::compile`'s `temp_sizes_map` (→ ~21, not 243). **KEEP
+   `combine_scc_fragment` on the disjoint-range (sum) path** — its interleaved
+   per-element segments need non-overlapping temp ranges (a naive shared-slot-0
+   recycle there would miscompile a multi-member recurrence SCC). Thread the
+   distinction explicitly (a flag/param, or two paths). Remove the
+   `temp_off > u8::MAX` guard; **KEEP `TempId = u8`** (after recycle it is ~21; do
+   NOT widen — the probe proved widen yields a runtime OOB; `GraphicalFunctionId`
+   stays `u8` too, bounded by #582's dedup).
+
+**Loud-safe / no silent miscompile (load-bearing):** two temps that are
+simultaneously **live** must NEVER share a slot. In the sequential phase concat
+they are not (segments are ordered; a fragment's temps die at its segment end);
+in `combine_scc_fragment` they ARE (interleaved per `element_order`) — so that
+path stays disjoint. If the sequential-liveness property does NOT hold for some
+phase concat (e.g. a fragment reads a *prior* fragment's temp), STOP and report —
+recycling would be a silent miscompile.
+
+**Testing (TDD, mandatory):**
+- A focused unit test: for a multi-temp-bearing-fragment fixture, the incremental
+  plain-phase temp count **equals** the monolithic `Module::compile` `n_temps`
+  (the recycle is exact), and every renumbered temp opcode resolves in-range.
+- A test pinning `combine_scc_fragment`: a multi-member recurrence SCC whose
+  members each bear a temp still gets **disjoint** temp ranges (no shared slot
+  across interleaved segments) — the SCC-path-stays-summed guard.
+- RED→GREEN: the C-LEARN structural gate goes from `Err(... temp offset 347 ...)`
+  to compiling `Ok` + running to FINAL TIME + not-all-NaN (or the next layer —
+  see Verification).
+- **MANDATORY soundness pins (must stay GREEN unchanged):** `concatenate_fragments`
+  / `FragmentMerger` / `renumber_opcode` are shared with the Phase-2 GH #575
+  `combine_scc_fragment` — so pin the FULL recurrence/cycle suite
+  (`self_recurrence`, `ref`, `interleaved`, `init_recurrence`, `helper_recurrence`,
+  `genuine_cycles_still_rejected`), the full `db_dep_graph` +
+  `db_combined_fragment_tests` suites, `incremental_compilation_covers_all_models`
+  (AC2.6, the 22-model corpus — the strongest gate for a temp-renumber change),
+  `array_tests` / `compiler_vector` (temp-bearing `VectorSortOrder`/`LookupArray`/
+  `AssignTemp`), `cargo test --workspace`, and the full engine lib. If ANY
+  combined-fragment / SCC-verdict / corpus-model / vector-op test changes behavior
+  — **STOP and report** (a temp-recycle collision is a silent miscompile).
+
+**Verification:**
+Run the unit tests + the full soundness-pin set, then:
+`cargo test -p simlin-engine --features file_io --release -- --ignored compiles_and_runs_clearn_structural --nocapture`
+— report the EXACT outcome (compile `Result`, run-to-FINAL-TIME, the
+matched-series not-all-NaN check). **Sweep caveat:** under the probe the VM
+panicked on the incoherent temp table BEFORE `run_to_end` completed, so AC7.2/7.3
+were never exercised — once the temp tables are coherent the VM runs further and
+**may surface a runtime-numeric/NaN layer** (Phase 7's AC8 territory; `MEMORY.md`
+flags VECTOR ELM MAP OOB→NaN and SORT ORDER as risk points). If C-LEARN now
+compiles `Ok` + runs to FINAL TIME + not-all-NaN, AC7.1/7.2/7.3 are MET (the
+orchestrator sequences the Task 1 commit). If a runtime layer surfaces, report it
+PRECISELY (root cause, the `Err`/panic, the site) — do NOT mask it; the
+orchestrator checkpoints with the user per the "checkpoint per layer" directive.
+`git commit` (pre-commit; NEVER `--no-verify`).
+**Commit:** `engine: match monolithic temp recycling in fragment concatenation (#583)`
+<!-- END_TASK_7 -->
+
 ---
 
 ## Phase 6 Done When
@@ -793,10 +928,21 @@ fmt/clippy/non-ignored cargo test 180s cap; NEVER `--no-verify`).
   Bug B's fix unmasked, matching the monolithic `Module::compile` dedup, with
   the combined-SCC-fragment machinery (`FragmentMerger` / `renumber_fragment_code`)
   and the 22-model corpus regression-pinned and the dedup proven value-exact
-  (no wrong-table miscompile). With Tasks 4-6 in, C-LEARN's incremental compile
-  reaches `Ok` and Task 1's structural gate is sequenced for commit. #582 closes
-  when Task 6 lands. (Per the "checkpoint per layer" directive, any *further*
-  latent layer Task 6 unmasks is surfaced to the user before being driven.)
+  (no wrong-table miscompile). #582 closes when Task 6 lands. Task 6 unmasked
+  the sole remaining assembly-path ceiling (#583), addressed in Task 7.
+- Fragment concatenation matches the monolithic `Module::compile` temp recycling
+  (Task 7 — GH #583): the `TempId` overflow is resolved by recycling per-fragment
+  temps into a shared keyed pool (~21, matching monolithic) plus removing the
+  per-fragment `+ ctx_base.temps` re-add — NOT by widening `TempId` (the
+  user-authorized forward sweep proved widening yields a runtime OOB; only
+  `TempId` and `GraphicalFunctionId` are `u8`, both stay `u8`). The interleaved
+  `combine_scc_fragment` (GH #575) path keeps disjoint temp ranges; the 22-model
+  corpus + combined-fragment suite are regression-pinned and the recycle proven
+  collision-free (no silent miscompile). With Tasks 4-7 in, C-LEARN's incremental
+  compile reaches `Ok` and `Vm::new` succeeds; if a runtime-numeric layer then
+  surfaces (AC7.2/7.3 / Phase 7 territory — not exercised under the sweep probe)
+  it is surfaced to the user per the "checkpoint per layer" directive before
+  being driven. #583 closes when Task 7 lands.
 - The default engine suite stays green under the 3-minute `cargo test` cap
   (the new C-LEARN test is `#[ignore]`d / runtime-class).
 <!-- END_PHASE_6 -->
