@@ -996,6 +996,32 @@ pub(crate) fn resolve_opcode(
             full_source_len,
         } => Ok(Opcode::VectorElmMap {
             write_temp_id: *write_temp_id,
+            // `full_source_len` is the source variable's ABSOLUTE element
+            // count (`vm_vector_elm_map`'s full-array-vs-strict-slice
+            // threshold and the out-of-range `[0, full_source_len)` -> NaN
+            // guard). It is NOT a renumber-able resource id like
+            // temp/lit/gf/view/dim_list/module: it is invariant under
+            // `renumber_opcode` and copied through unchanged on fragment
+            // concatenation (see the matching arm in `renumber_opcode`).
+            //
+            // Roundtrip coverage of this invariant lives in the unit tests,
+            // NOT the end-to-end simulate gates, and intentionally so:
+            // `vm_vector_elm_map` only consumes `full_source_len` for those
+            // two purposes, and the genuine-Vensim corpus
+            // (`vector_simple.dat` / `vector.dat`) deliberately has no
+            // out-of-range offset and no shape that flips the full-array
+            // branch, so an inflated `full_source_len` is behaviorally
+            // invisible through `simulates_vector_simple_mdl` /
+            // `simulates_vector_xmile_genuine` (verified: those gates pass
+            // even with `full_source_len` hard-forced to a wrong constant in
+            // `renumber_opcode`). The authoritative regression coverage is
+            // therefore the symbolic path itself:
+            // `test_renumber_vector_builtin_temp_ids` (isolated
+            // `renumber_opcode`) and
+            // `test_vector_elm_map_full_source_len_survives_fragment_roundtrip`
+            // (the full `symbolize` -> `concatenate_fragments` (renumber at a
+            // non-zero temp offset) -> `resolve_bytecode` merge path), which
+            // fail loudly if this field is ever shifted.
             full_source_len: *full_source_len,
         }),
         SymbolicOpcode::VectorSortOrder { write_temp_id } => Ok(Opcode::VectorSortOrder {
@@ -2951,6 +2977,101 @@ mod tests {
             }
             other => panic!("expected AllocateAvailable, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_vector_elm_map_full_source_len_survives_fragment_roundtrip() {
+        // End-to-end belt-and-suspenders for the Phase 5 `full_source_len`
+        // opcode field. `test_renumber_vector_builtin_temp_ids` covers the
+        // isolated `renumber_opcode` call; this exercises the *real merge
+        // path* a compiled model takes -- `symbolize_opcode` ->
+        // `concatenate_fragments` (absorb + `renumber_fragment_code`) ->
+        // `resolve_bytecode` -- with the VECTOR ELM MAP opcode merged AFTER a
+        // temp-contributing fragment so its `write_temp_id` gets a *non-zero*
+        // renumber offset. The invariant under test: `full_source_len` is an
+        // absolute element count, NOT a renumber-able resource id, so it must
+        // come out of symbolize -> concatenate/renumber -> resolve
+        // byte-identical even though `write_temp_id` is offset. If
+        // `full_source_len` were ever (mistakenly) treated like a temp id, it
+        // would be shifted by `frag_a`'s temp count here and this test would
+        // fail; the existing renumber unit test would not catch that
+        // regression because it never drives the fragment merger.
+        const GENUINE_FULL_SOURCE_LEN: u32 = 6; // e.g. d[DimA,DimB] = 3 x 2
+        let original = Opcode::VectorElmMap {
+            write_temp_id: 0,
+            full_source_len: GENUINE_FULL_SOURCE_LEN,
+        };
+
+        // The VectorElmMap opcode carries no variable offset, so an empty
+        // layout (=> empty ReverseOffsetMap) is sufficient for symbolization.
+        let empty_layout = VariableLayout::new(HashMap::new(), 0);
+        let rmap = ReverseOffsetMap::from_layout(&empty_layout);
+        let symbolic_elm_map = symbolize_opcode(&original, &rmap).unwrap();
+
+        // frag_a advances the temp namespace by 2 slots, so frag_b's
+        // VectorElmMap write_temp_id (0) must renumber to 2 after the merge.
+        let frag_a = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![SymbolicOpcode::Ret],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![(0, 4), (1, 8)],
+            dim_lists: vec![],
+        };
+        let frag_b = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![symbolic_elm_map],
+            },
+            graphical_functions: vec![],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![(0, 4)],
+            dim_lists: vec![],
+        };
+
+        let no_base = ContextResourceCounts::default();
+        let merged = concatenate_fragments(&[&frag_a, &frag_b], &no_base).unwrap();
+
+        // Resolve back to concrete bytecode (same empty layout: the
+        // VectorElmMap opcode carries no SymVarRef).
+        let resolved = resolve_bytecode(&merged.bytecode, &empty_layout).unwrap();
+
+        let elm_map = resolved
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Opcode::VectorElmMap {
+                    write_temp_id,
+                    full_source_len,
+                } => Some((*write_temp_id, *full_source_len)),
+                _ => None,
+            })
+            .expect("merged+resolved bytecode should contain a VectorElmMap opcode");
+
+        // The merge path actually ran a non-trivial renumber on this opcode:
+        // frag_a contributed temp ids 0 and 1, so frag_b's write_temp_id 0
+        // became 2. (If this is 0, the merger never renumbered the opcode and
+        // the full_source_len assertion below would prove nothing.)
+        assert_eq!(
+            elm_map.0, 2,
+            "write_temp_id must be offset by frag_a's temp count, proving the \
+             fragment merger renumbered this opcode"
+        );
+        // The invariant: full_source_len is absolute, not renumbered. It must
+        // survive symbolize -> concatenate/renumber -> resolve unchanged even
+        // though write_temp_id was offset by 2.
+        assert_eq!(
+            elm_map.1, GENUINE_FULL_SOURCE_LEN,
+            "full_source_len must survive the symbolize -> fragment-merge -> \
+             resolve round-trip byte-identical (it is an absolute element \
+             count, not a renumber-able resource id); a corrupted value would \
+             feed the VM a wrong full-source extent and break genuine VECTOR \
+             ELM MAP results"
+        );
     }
 
     #[test]

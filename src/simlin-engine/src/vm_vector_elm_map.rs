@@ -60,6 +60,22 @@ pub(crate) fn vector_elm_map(
         .map(|sd| offset_view.dim_ids.iter().position(|od| od == sd))
         .collect();
 
+    // Strict-slice carried-axis invariant: when the source is NOT a full
+    // contiguous array every remaining (carried) source axis must appear in
+    // the offset view's dim_ids, so its `src_indices` slot is driven by the
+    // result element (the `None => 0` arm below is only the structurally
+    // unreachable uncarried-axis fallback for valid lowered shapes -- all
+    // exercised shapes, 1-D promoted, cross-dim `d[DimA,B1]`, and
+    // scalar-broadcast, satisfy this). An unresolved carried axis would
+    // silently read element 0 of that dimension (the silent-wrong
+    // direction), so make it loud in debug builds. Full-array sources skip
+    // this: `base_i` is hard-coded to 0 there and `src_to_off_axis` is
+    // unused.
+    debug_assert!(
+        source_is_full_array || src_to_off_axis.iter().all(Option::is_some),
+        "VECTOR ELM MAP strict-slice: every carried source axis must appear in the offset view's dim_ids; an unresolved carried axis would silently read element 0"
+    );
+
     let offset_size = offset_view.size();
     let mut off_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; offset_view.dims.len()];
     let mut src_indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; source_view.dims.len()];
