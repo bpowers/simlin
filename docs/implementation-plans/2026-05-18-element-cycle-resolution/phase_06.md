@@ -559,6 +559,35 @@ done-criterion is the ≈140 synthetic-helper names removed from the `Err`).
 prerequisite — see "Why Tasks 4-5 added"); directly verified by its own focused
 unit tests.
 
+> **AS-BUILT root-cause correction (verified during execution, commit
+> `ad432fbe` — supersedes the diagnosis below).** The root-cause-confirm step
+> (which this task mandates) **disproved** the prescribed location: `Var::new`
+> succeeds for all 6 vars, the dep's per-element `tables` and dims ARE correctly
+> reconstructed in the mini-layout, and `db_var_fragment.rs::build_stub_variable`
+> / `extract_tables_from_source_var` are NOT the gap. The real bug is a **general
+> engine codegen gap**: a per-element arrayed graphical function applied with an
+> index (`SUM(g[D!](x))`, the `VECTOR SELECT` form) lowers to
+> `App(Lookup(<full array view>, scalar-index))`, and **no codegen path ever
+> materialized that as an array view** (`walk_expr_as_view` fell through →
+> `Cannot push view`; `extract_table_info` rejected the multi-element table base
+> → `BadTable`). Same root cause, two symptoms; never implemented, not
+> cycle-gate-masked. **As-built fix** (the spec's `(Conditional) ... compiler
+> array-view / lookup-range handling` clause): a new layout-independent
+> `Opcode::LookupArray` (mirrors `VectorSortOrder`; symbolize/desymbolize/
+> `renumber_opcode` arms; `symbolic_phase_element_order`'s `_ => {}` catch-all →
+> no SCC verdict can shift, exactly like `Lookup`) + a single `Pass1Context::transform`
+> (`Expr3`) decomposition of the apply into `AssignTemp`/`TempArray` so the
+> surrounding reducer/op consumes an ordinary array view. Files actually touched:
+> `ast/expr3.rs`, `bytecode.rs`, `vm.rs`, `compiler/codegen.rs`, `compiler/symbolic.rs`,
+> `array_tests.rs` (NOT `db_var_fragment.rs` / `db.rs`). The two fixtures and the
+> view-equivalence intent landed as specced. **AC7.1 is still blocked** after
+> this task by a *6th* distinct latent bug this fix unmasked — a
+> `GraphicalFunctionId = u8` overflow in `concatenate_fragments::absorb` (no
+> cross-fragment GF de-duplication; ~165 distinct C-LEARN GF tables duplicate
+> per consumer fragment past 255), tracked separately; **Task 1's `simulate.rs`
+> gate commit is NOT sequenced until that is resolved.** The text below is the
+> original (investigation-path) diagnosis, retained for provenance.
+
 **Files:**
 - Modify: `src/simlin-engine/src/db_var_fragment.rs` — the dependency-stub
   construction (`build_stub_variable` call site `:344`) and/or the dep-table
