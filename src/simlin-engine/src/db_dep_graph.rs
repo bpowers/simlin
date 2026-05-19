@@ -683,6 +683,26 @@ pub(crate) fn var_phase_lowered_exprs_prod(
 /// extra element only ever forces a conservative `CircularDependency`,
 /// never a wrong run order (the loud-safe over-approximation contract the
 /// prior `collect_read_slots` documented, preserved here).
+///
+/// **Why dropping a negative relative offset cannot lose a real edge (the
+/// loud-safe-relevant direction).** The loop computes the variable-
+/// relative offset `relative = element_offset + view.offset + Σ
+/// coord·stride` and keeps it only when `relative >= 0` (the `elem >= 0`
+/// guard). A coordinate the view *legitimately addresses* maps to absolute
+/// slot `entry.offset + relative` where `entry.offset = layout_offset(name)`,
+/// and that slot lies inside `name`'s storage span `[entry.offset,
+/// entry.offset + var_size)` by construction; subtracting `entry.offset`
+/// gives `relative in [0, var_size)`, so `relative >= 0` *always* holds for
+/// an addressable element. A `relative < 0` is therefore an
+/// arithmetically-impossible-to-address coordinate (an out-of-bounds
+/// `offset`/`stride` combination, not a slot any real read touches), so the
+/// guard only discards non-reads -- it can never drop a real data-flow
+/// edge. This is the *opposite* of the loud-safe-violating "drop a real
+/// read" case: an over-counted element is conservative here, and the only
+/// elements dropped are ones the view cannot read at all. (The original
+/// `Expr`-level `collect_read_slots` instead inserted unconditionally via
+/// `as usize`; the explicit `elem >= 0` filter here is the equivalent
+/// addressable-only set, just made explicit in symbolic space.)
 fn static_view_element_offsets(view: &crate::compiler::symbolic::SymbolicStaticView) -> Vec<usize> {
     let base_elem = match &view.base {
         crate::compiler::symbolic::SymStaticViewBase::Var(v) => v.element_offset,
@@ -1193,13 +1213,34 @@ pub(crate) struct DtSccResolution {
 /// holds for the multi-member SCCs Subcomponent B (GH #575) now resolves
 /// as well as for single-variable self-recurrences: the symbolic
 /// element-graph verdict only ever *adds* a conservative reject, and the
-/// with-inputs re-run is the soundness backstop. `element_order` is still
-/// NOT consumed here
-/// (it rides on the emitted `ResolvedScc`). Subcomponent B's combined-
-/// fragment injection (Task 6, which consumes `element_order` to build
-/// the combined per-element fragment) MUST plumb the real
-/// `module_input_names` into this identification before relying on the
-/// order; do not treat the `&[]` argument as neutral.
+/// with-inputs re-run is the soundness backstop.
+///
+/// **As-built decision -- no-input wiring is loud-safe; `module_input_names`
+/// plumbing is deferred (GH #573).** `element_order` is NOT consumed here
+/// (it rides on the emitted `ResolvedScc`); Subcomponent B's combined-
+/// fragment injection (Task 6, `assemble_module` ->
+/// `var_phase_symbolic_fragment_prod`) deliberately consumes the *same*
+/// no-input wiring: the symbolic per-member fragments are lowered with
+/// `lower_var_fragment(.., &[], ..)` / `inputs = BTreeSet::new()` /
+/// `build_caller_module_refs(.., &[])`, matching this SCC identification's
+/// `build_var_info(.., &[])`, so the verdict's `element_order` and the
+/// combined fragment's per-element segmentation agree by construction. The
+/// real `module_input_names` are intentionally NOT plumbed into either
+/// side, because the with-inputs `compute_transitive` re-run is the
+/// soundness backstop for the multi-member (N>=2) SCCs Subcomponent B
+/// resolves *exactly as it is for the N=1 single-variable self-recurrence
+/// case*: that re-run's `.unwrap_or_else` clears `resolved_sccs` and sets
+/// `has_cycle` on any residual genuine cycle (the init re-run has the
+/// symmetric `Err` arm), so the only way the no-input vs with-inputs
+/// wiring can differ for an input-wired sub-model's self/multi-recurrence
+/// is a *conservative* `CircularDependency` (a missed resolution) -- never
+/// a wrong `element_order` or a miscompile. (`ref.mdl` / `interleaved.mdl`
+/// / `init_recurrence.mdl` are all flat root models with no module inputs,
+/// so the corpus is unaffected regardless.) Full `module_input_names`
+/// plumbing into this identification is a deferred item tracked by GH #573;
+/// it is *not* required for soundness given the backstop, so the `&[]`
+/// argument is loud-safe (not neutral, but never unsound) and there is no
+/// outstanding MUST on Task 6.
 pub(crate) fn resolve_recurrence_sccs(
     db: &dyn Db,
     model: SourceModel,

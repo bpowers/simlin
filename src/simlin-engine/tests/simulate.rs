@@ -1527,6 +1527,12 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
 /// INTER-variable element-acyclic recurrence SCCs (`ce`<->`ecc` /
 /// `a`<->`y`). Before Subcomponent B they were rejected with
 /// `CircularDependency`; this test originally asserted exactly that.
+///
+/// Formerly named `ref_interleaved_inter_variable_cycles_report_circular`
+/// (the Phase 1 form that asserted `CircularDependency`); this is the
+/// AC2.5-transitioned successor of that test, renamed in Phase 2 Task 9.
+/// The old name is recorded here so `git blame`/`git log -S` and a plain
+/// grep on either name stay continuous across the rename.
 /// Subcomponent B (GH #575) resolves the multi-member SCC and injects one
 /// combined per-element fragment, so the fixtures now compile and
 /// simulate.
