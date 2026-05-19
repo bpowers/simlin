@@ -655,3 +655,228 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
         dep_graph.resolved_sccs[0].element_order
     );
 }
+
+// ── AC2.3 (Phase 2 Task 10): byte-stable combined fragment ──────────────
+//
+// `combined_fragment_is_byte_stable` (above) pins determinism of the
+// isolated `combine_scc_fragment` builder on HAND-BUILT inputs. This is
+// the PRODUCTION-PAYLOAD obligation: the *assembled* combined fragment
+// (the bytecode that actually rides on the compiled module and drives
+// the VM), the emitted `resolved_sccs`, and each SCC's `element_order`
+// must be byte-identical across two independent compiles on FRESH
+// databases (no HashMap-iteration nondeterminism leaking through the
+// identification -> symbolic verdict -> interleave -> assemble path).
+// A regression that leaked iteration order anywhere on that pipeline
+// would fail here even if the isolated builder stayed stable. Modeled on
+// the existing `model_dependency_graph_resolved_sccs_is_byte_stable_
+// across_runs` discipline, extended to the assembled bytecode.
+
+/// Two arrayed stocks `cs[t]` / `ecs[t]` whose per-element INTEG initial
+/// values form a `ref.mdl`-shaped inter-element recurrence ACROSS the two
+/// variables, with a constant zero inflow `g`. Each stock breaks the dt
+/// chain (its dt-equation is the acyclic flow `g`), so the only cycle is
+/// the MULTI-member INIT recurrence `{cs,ecs}` -- exercising the
+/// synthetic-ident `SymbolicCompiledInitial` combined-init-fragment path
+/// (Task 6). Mirrors the `two_stock_init_recurrence_project` shape
+/// empirically confirmed in `db_dep_graph_tests.rs`; kept self-contained
+/// here so the combined-fragment determinism coverage lives in one file.
+fn two_stock_init_recurrence_datamodel() -> crate::datamodel::Project {
+    use crate::datamodel::{self, Dimension, Equation, Flow, Stock, Variable};
+    let dims = vec!["t".to_string()];
+    let arrayed = |eqs: Vec<(&str, &str)>| {
+        Equation::Arrayed(
+            dims.clone(),
+            eqs.into_iter()
+                .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None, None))
+                .collect(),
+            None,
+            false,
+        )
+    };
+    let stock = |ident: &str, eq: Equation| {
+        Variable::Stock(Stock {
+            ident: ident.to_string(),
+            equation: eq,
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["g".to_string()],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    };
+    datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![Dimension::named(
+            "t".to_string(),
+            vec!["t1".to_string(), "t2".to_string(), "t3".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                stock(
+                    "cs",
+                    arrayed(vec![
+                        ("t1", "1"),
+                        ("t2", "ecs[t1] + 1"),
+                        ("t3", "ecs[t2] + 1"),
+                    ]),
+                ),
+                stock(
+                    "ecs",
+                    arrayed(vec![
+                        ("t1", "cs[t1] + 1"),
+                        ("t2", "cs[t2] + 1"),
+                        ("t3", "cs[t3] + 1"),
+                    ]),
+                ),
+                Variable::Flow(Flow {
+                    ident: "g".to_string(),
+                    equation: Equation::ApplyToAll(dims, "0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Build the combined `PerVarBytecodes` for the single resolved SCC of
+/// `dm`'s `main` model, on a FRESH database, via the EXACT production
+/// path `assemble_module` uses (`var_phase_symbolic_fragment_prod` per
+/// member -> `combine_scc_fragment`). Returns the emitted `resolved_sccs`
+/// and the combined fragment. `assemble_module`'s `compiled_flows` /
+/// `compiled_initials` are lowered `Opcode` streams (no `PartialEq`); the
+/// combined fragment is byte-comparable at THIS symbolic layer (the layer
+/// at which it is actually constructed and injected -- `PerVarBytecodes`
+/// derives `PartialEq`), so this is the precise determinism probe for the
+/// interleave + per-member resource renumber.
+fn fresh_resolved_scc_and_combined_fragment(
+    dm: &crate::datamodel::Project,
+) -> (Vec<ResolvedScc>, crate::compiler::symbolic::PerVarBytecodes) {
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, dm);
+    let model = result.models["main"].source;
+    let project = result.project;
+    let dep_graph = crate::db::model_dependency_graph(&db, model, project);
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "fixture must resolve exactly one SCC (got {:?})",
+        dep_graph.resolved_sccs
+    );
+    let scc = &dep_graph.resolved_sccs[0];
+    // Mirror `assemble_module`'s `combine_scc_for_phase` exactly: each
+    // member's production symbolic fragment for the SCC's phase, then the
+    // per-element-granular interleave.
+    let mut member_fragments: HashMap<
+        Ident<Canonical>,
+        crate::compiler::symbolic::PerVarBytecodes,
+    > = HashMap::with_capacity(scc.members.len());
+    for member in &scc.members {
+        let frag = crate::db::var_phase_symbolic_fragment_prod(
+            &db,
+            model,
+            project,
+            member.as_str(),
+            scc.phase.clone(),
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "member `{}` must have a sourceable fragment",
+                member.as_str()
+            )
+        });
+        member_fragments.insert(member.clone(), frag);
+    }
+    let combined = combine_scc_fragment(scc, &member_fragments)
+        .expect("the resolved SCC must combine into one fragment");
+    (dep_graph.resolved_sccs.clone(), combined)
+}
+
+#[test]
+fn assembled_dt_combined_fragment_is_byte_stable_across_fresh_dbs() {
+    // The DT combined fragment (`ref.mdl`-shaped `{ce,ecc}`): build it
+    // TWICE on independent fresh databases via the exact production path
+    // and assert the emitted `resolved_sccs` (members + element_order +
+    // phase) AND the combined `PerVarBytecodes` (the bytecode that is
+    // injected into the flows phase) are byte-identical. A
+    // nondeterministic interleave or per-member resource renumber would
+    // surface as a fragment diff here.
+    let dm = ref_shaped_project().build_datamodel();
+    let (sccs_a, frag_a) = fresh_resolved_scc_and_combined_fragment(&dm);
+    let (sccs_b, frag_b) = fresh_resolved_scc_and_combined_fragment(&dm);
+
+    // Non-vacuous: the payload is the resolved `{ce,ecc}` dt SCC.
+    assert_eq!(sccs_a[0].phase, SccPhase::Dt);
+    assert_eq!(
+        sccs_a[0].element_order.len(),
+        6,
+        "the dt SCC element_order must be the 6 interleaved (member,elem) \
+         pairs (got {:?})",
+        sccs_a[0].element_order
+    );
+    assert_eq!(
+        sccs_a, sccs_b,
+        "the emitted resolved_sccs (members + element_order + phase) must \
+         be byte-identical across two fresh-DB compiles"
+    );
+    assert_eq!(
+        frag_a, frag_b,
+        "the assembled combined DT fragment (PerVarBytecodes: symbolic \
+         code + literals + all side-channels) must be byte-identical \
+         across two fresh-DB compiles -- a nondeterministic interleave / \
+         per-member resource renumber would diff here (AC2.3)"
+    );
+}
+
+#[test]
+fn assembled_init_combined_fragment_is_byte_stable_across_fresh_dbs() {
+    // The INIT combined fragment (the MULTI-member `{cs,ecs}` init
+    // recurrence behind stocks -- AC2.4's synthetic-ident
+    // `SymbolicCompiledInitial` path): build it TWICE on fresh databases
+    // and assert the emitted `resolved_sccs` (phase Initial) and the
+    // combined init `PerVarBytecodes` are byte-identical. This pins
+    // determinism of the init combined-fragment construction
+    // specifically (a distinct phase from the dt flows path).
+    let dm = two_stock_init_recurrence_datamodel();
+    let (sccs_a, frag_a) = fresh_resolved_scc_and_combined_fragment(&dm);
+    let (sccs_b, frag_b) = fresh_resolved_scc_and_combined_fragment(&dm);
+
+    assert_eq!(
+        sccs_a[0].phase,
+        SccPhase::Initial,
+        "the resolved SCC must be the init-phase {{cs,ecs}} recurrence"
+    );
+    assert!(
+        sccs_a[0].members.len() >= 2,
+        "AC2.4: the init SCC must be MULTI-member (got {:?})",
+        sccs_a[0].members
+    );
+    assert_eq!(
+        sccs_a, sccs_b,
+        "the emitted init resolved_sccs (members + element_order + phase) \
+         must be byte-identical across two fresh-DB compiles"
+    );
+    assert_eq!(
+        frag_a, frag_b,
+        "the assembled combined INIT fragment (PerVarBytecodes, the one \
+         the synthetic-ident SymbolicCompiledInitial carries) must be \
+         byte-identical across two fresh-DB compiles (AC2.3 determinism, \
+         init path)"
+    );
+}
