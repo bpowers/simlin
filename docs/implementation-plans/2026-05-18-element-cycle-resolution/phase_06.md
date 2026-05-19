@@ -30,6 +30,14 @@ NaN/inf) — a macro-`INITIAL()` module output omitted from the initials runlist
 (Task 8, Cluster A) and arrayed `VECTOR SORT ORDER` returning flat global
 indices instead of per-iterated-slice 0-based ranks (Task 9, Cluster B,
 completing the AC5 multi-row case Phase 4 missed) — fixed as general engine fixes.
+**Task 10 (root-cause `:NA:` fix):** the 3rd, deepest NaN cause — the user
+corrected (domain-authoritative) that Vensim `:NA:` is a **finite sentinel
+`-2^109`, NOT NaN**; Simlin's `:NA:`→IEEE-NaN (`xmile_compat.rs:109`/
+`parser/mod.rs:529`) is the engine bug behind the residual all-NaN cascade.
+Task 10 represents `:NA:` as `-2^109` (clearing AC7.3 — the series become finite,
+existence tests gate correctly), keeping the structurally-distinct OOB→NaN /
+empty-reducer→NaN paths untouched; the `-2^109`↔`0` VDF reconciliation for
+AC8.1's 1% match is Phase 7.
 
 **Architecture:** Add a new `#[ignore]`d structural-gate test in
 `tests/simulate.rs` that parses C-LEARN, compiles it via the incremental path
@@ -1049,6 +1057,110 @@ user. `git commit` (NEVER `--no-verify`).
 **Commit:** `engine: arrayed VECTOR SORT ORDER per-slice 0-based ranks (AC5/AC7.3 Cluster B)`
 <!-- END_TASK_9 -->
 
+<!-- START_TASK_10 -->
+### Task 10: represent Vensim `:NA:` as the finite sentinel -2^109, not NaN (root-cause `:NA:` fix)
+
+**Verifies:** element-cycle-resolution.AC7.3 (no core C-LEARN series entirely
+NaN) — the 3rd, deepest NaN cause; directly verified by focused unit tests + the
+C-LEARN gate.
+
+**Why added (USER CORRECTION — domain-authoritative — overturns the prior
+"Simlin is correct" verdict):** the prior investigation concluded the residual
+all-NaN series were a comparison artifact (Simlin correct). **The user corrected
+this:** per the Vensim docs, `:NA:` is **NOT** IEEE NaN — it is a **finite
+sentinel value `-2^109`** (≈ -6.49e32) "used to test for the existence of data."
+So Simlin's `:NA:`→NaN IS an engine bug. A deep combined research + audit
+(web-cited + raw-VDF-byte probe) confirmed:
+- **Vensim `:NA:` = `-2^109`**, an ordinary finite number (NOT absorbing):
+  `IF THEN ELSE(X = :NA:, ...)` is the canonical existence test (ordinary `=`
+  equality-to-the-sentinel, which only works because it's finite); arithmetic
+  computes on `-2^109`; aggregations include it; `:NA:` ≠ NaN/FP-error. (Sources:
+  vensim.com/documentation/na.html, dataequations.html; Ventana forum t=4707.)
+- **Vensim saves `:NA:` → `0.0` to the VDF** (empirical: an exhaustive raw-byte
+  scan of all 2641 `Ref.vdf` data blocks found `-2^109` **0 times**, NaN **0
+  times**; the `:NA:` series are literal `0x00000000`). So Vensim's RUNTIME value
+  is `-2^109` but the SAVED value is `0`.
+- **Simlin is 3-way inconsistent, none correct:** expression `:NA:` → `"NAN"`
+  string (`mdl/xmile_compat.rs:109`) → `Expr0::Const("NaN", f64::NAN)`
+  (`parser/mod.rs:529-535`) → IEEE NaN (the primary bug); data-list `:NA:` →
+  `NA_VALUE = -1e38` (`mdl/parser.rs:51`); Vensim's = `-2^109`. Under NaN, any
+  unguarded arithmetic on a `:NA:` is irreversibly NaN → the 434-series cascade.
+
+**This task (Layer 1) fixes the engine `:NA:` semantics and clears AC7.3**: once
+`:NA:` = `-2^109`, the 434 series are FINITE (not NaN), so "no all-NaN core
+series" passes and the `IF THEN ELSE(X = :NA:, ...)` existence tests gate
+correctly via finite equality. The separate `-2^109` (Simlin runtime) ↔ `0`
+(Vensim VDF) reconciliation needed for **AC8.1's 1% numeric match is Phase 7**
+work (the VDF comparison), NOT this task.
+
+**CRITICAL — keep distinct from legitimate NaN (must NOT change):** Simlin's
+other NaN sources are STRUCTURALLY distinct from `:NA:` and triggered by
+conditions that never involve a `:NA:` literal — empty-view reducers → NaN
+(`vm.rs:2023/2040/2057/2076`, `size()==0`), VECTOR ELM MAP **OOB → NaN**
+(`vm_vector_elm_map.rs:103-112`; the genuine Phase 5 semantics — **and C-LEARN
+line 19481 feeds the non-`:NA:` `Target Value[COP,t1]` slice into ELM MAP, so
+OOB→NaN and `:NA:`→sentinel INTERSECT in this model and MUST stay distinct**),
+range/subscript OOB → NaN (`compiler/context.rs:1778/1795/1890`), lookup/divide
+undefined → NaN. These STAY NaN. Only the `:NA:` literal changes.
+
+**Files:**
+- Add: a single canonical `NA` constant (e.g. `src/simlin-engine/src/common.rs`,
+  `pub const NA: f64 = -6.490371073168535e32;` with a test pinning
+  `NA == -(2.0_f64).powi(109)`).
+- Modify: `src/simlin-engine/src/mdl/xmile_compat.rs:109` (`Expr::Na` → the `NA`
+  numeric literal, not `"NAN"`) and/or `parser/mod.rs:529-535` + the `Expr0`
+  lowering — route expression `:NA:` to `Const(NA)` (the faithful representation:
+  Vensim `:NA:` IS just the number `-2^109`; a dedicated `Expr::Na` node is only
+  warranted if root-cause-confirm shows `Const(NA)`+`approx_eq` mishandles the
+  existence test — verify, prefer the faithful `Const`).
+- Modify: `src/simlin-engine/src/mdl/parser.rs:51` (`NA_VALUE`: `-1e38` → `NA`) +
+  the AST doc comment `mdl/ast.rs:153`.
+- Update (these pin the OLD WRONG value — correcting them IS part of the fix,
+  with a comment; NOT silencing a guard): `mdl/parser.rs:1948/1965/1981`,
+  `mdl/reader.rs:1510/1529/1549` (assert `-1e38` → assert `NA`).
+- Add: focused `#[cfg(test)]` tests.
+
+**Implementation — root-cause-confirm FIRST, then fix (general, Vensim-faithful):**
+1. **Confirm** with minimal probes that `Const(NA)` gives Vensim-correct behavior:
+   `IF THEN ELSE(x = :NA:, a, b)` where x is set to `:NA:` → takes the `a` branch
+   (existence test true via `approx_eq(NA, NA)`); a genuine value → `b`; `:NA:`
+   arithmetic → finite; and that `approx_eq` at magnitude 6.49e32 does NOT
+   spuriously equate `-2^109` with a contaminated `-2^110`. Confirm `Const(NA)` is
+   sufficient (vs a dedicated node).
+2. **Fix:** route BOTH `:NA:` paths (expression + data-list) to the single `NA`
+   sentinel. Do NOT touch the OOB→NaN / empty-reducer→NaN paths.
+
+**Loud-safe / no-regression:** OOB→NaN and empty-reducer→NaN STAY NaN
+(structurally distinct). The `-1e38`/`NaN` → `-2^109` test updates correct the old
+wrong value (legitimate, commented) — distinct from soundness pins that must stay
+byte-identical.
+
+**Testing (TDD, mandatory):**
+- RED-first: a model with the Vensim existence-test idiom
+  `out = IF THEN ELSE(probe = :NA:, fallback, probe)` and `:NA:` arithmetic,
+  asserting Vensim-correct FINITE behavior (not NaN) — RED before (NaN poisons
+  it), GREEN after. Bounded attempts + `track-issue` escalation.
+- The `NA == -2^109` const-pinning test; the updated `-1e38`→`NA` data-list tests
+  (corrected, commented).
+- **MANDATORY soundness pins (must stay GREEN unchanged):** the OOB→NaN tests
+  (`vector_elm_map_tests` `out_of_bounds_*`/`negative_offset_*`, range-subscript
+  OOB), the empty-reducer→NaN tests, the macro/data suites (`macro_expansion_tests`,
+  `metasd_macros`), `mdl/reader` + `mdl_equivalence`,
+  `incremental_compilation_covers_all_models` (22-model corpus), and the full
+  engine lib. If ANY OOB-NaN / empty-reducer-NaN / corpus test changes behavior —
+  STOP and report (the `:NA:` change must NOT bleed into legitimate NaN).
+
+**Verification:**
+Run the tests + soundness pins. Then re-run the C-LEARN structural gate: report
+AC7.1/AC7.2/AC7.3 status and the remaining all-NaN count — AC7.3 should now PASS
+(the 434 `:NA:`-cascade series are finite). A C-LEARN series being `-2^109`
+instead of Vensim's saved `0` is EXPECTED here and is NOT an AC7.3 failure (the
+`-2^109`↔`0` VDF match is Phase 7/AC8.1). If a residual all-NaN tail remains (a
+distinct cause), report it precisely — do NOT mask; the orchestrator checkpoints.
+`git commit` (NEVER `--no-verify`).
+**Commit:** `engine: represent Vensim :NA: as the finite sentinel -2^109, not NaN`
+<!-- END_TASK_10 -->
+
 ---
 
 ## Phase 6 Done When
@@ -1095,11 +1207,16 @@ user. `git commit` (NEVER `--no-verify`).
   engine fixes — a macro-`INITIAL()` module output omitted from the initials
   runlist (Task 8 — Cluster A) and arrayed `VECTOR SORT ORDER` returning flat
   global indices instead of per-iterated-slice 0-based ranks (Task 9 — Cluster B,
-  completing the AC5 multi-row case). The 22-model corpus, the AC5 single-row VSO
-  suite, the macro/init suites, and the recurrence gates are regression-pinned.
-  If a residual NaN tail remains after both (a 3rd cause), it is surfaced to the
-  user per the "checkpoint per layer" directive (the full `Ref.vdf` 1% match is
-  Phase 7's AC8.1).
+  completing the AC5 multi-row case). The 3rd, deepest cause is the `:NA:`
+  mishandling (Task 10 — GH): Vensim `:NA:` is a finite sentinel `-2^109` (NOT
+  NaN, per the user's domain correction), so Simlin's `:NA:`→IEEE-NaN poisons the
+  `IF THEN ELSE(X = :NA:, …)` cascade; Task 10 represents `:NA:` as `-2^109`
+  (series become finite → AC7.3 passes; existence tests gate correctly), keeping
+  the structurally-distinct OOB→NaN / empty-reducer→NaN paths untouched. The
+  22-model corpus, the AC5 single-row VSO suite, the OOB-NaN tests, the macro/init
+  suites, and the recurrence gates are regression-pinned. The `-2^109`↔`0` VDF
+  reconciliation (Simlin runtime vs Vensim's saved value) for the full `Ref.vdf`
+  1% match is Phase 7's AC8.1, not Phase 6.
 - The default engine suite stays green under the 3-minute `cargo test` cap
   (the new C-LEARN test is `#[ignore]`d / runtime-class).
 <!-- END_PHASE_6 -->
