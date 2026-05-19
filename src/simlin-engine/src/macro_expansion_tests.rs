@@ -656,6 +656,73 @@ sibling=
     );
 }
 
+/// #584 (AC7.3 Cluster A): a macro whose primary output is *exactly*
+/// `INITIAL(x)` (compiles to a bare `LoadInitial`) must have that output
+/// written during the parent's initials phase, so a parent reading the
+/// output via `INITIAL()` sees its true t=0 value -- NOT the uninitialized
+/// slot (0 in a clean VM, `inf`/NaN in C-LEARN's reused buffer).
+///
+/// The macro's compiled INITIALS runlist used to OMIT its own `INITIAL()`
+/// primary output (`myinit = INITIAL(x)`): the output was compiled only into
+/// the flows phase, so during the parent's initials the module-output slot
+/// was never written. `y = MYINIT(xin, 0)` reads correctly in the *flows*
+/// phase, but `z = INITIAL(y)` snapshots `y`'s never-written initials slot --
+/// reading 0 (the zeroed data buffer) instead of `xin`'s t=0 value of 5. This
+/// is the clean-room manifestation of the ~177-climate-var C-LEARN inf cascade
+/// (`volumetric_heat_capacity = INITIAL(...)`): same structural defect, the
+/// garbage value differs only because C-LEARN's slot is reused.
+///
+/// `MYINIT(x, k)` takes two params so the invocation is not rewritten to
+/// `LOOKUP` (the unrelated 1-arg-call heuristic); `k` is unused by the body.
+#[test]
+fn issue_584_initial_backed_macro_output_is_written_during_initials() {
+    let source = mdl(r#":MACRO: MYINIT(x, k)
+MYINIT = INITIAL(x)
+	~	a
+	~	#584: primary output is a bare INITIAL -- must be in the macro's
+		INITIALS runlist so a parent reading it during initials sees its
+		true t=0 value, not the never-written (garbage) slot
+	|
+
+:END OF MACRO:
+xin = 5
+	~
+	~		|
+
+y=
+	MYINIT(xin, 0)
+	~
+	~	the module output, read in the flows phase (already correct pre-fix)
+	|
+
+z=
+	INITIAL(y)
+	~
+	~	reads the module output DURING the parent's initials phase -- this
+		is what surfaces the never-written slot
+	|
+"#);
+
+    // y reads the module output in the flows phase, which was always correct.
+    let y = run_mdl_var(&source, "y");
+    assert!(
+        y.iter().all(|&v| (v - 5.0).abs() < 1e-9),
+        "y = MYINIT(xin=5, 0) = INITIAL(5) = 5 at every step: {y:?}",
+    );
+
+    // z reads the module output DURING initials. Pre-fix the macro output's
+    // initials slot was never written, so INITIAL(y) snapshotted garbage (0).
+    // Post-fix the INITIAL-backed output is in the macro's initials runlist,
+    // so z = INITIAL(y) = 5.
+    let z = run_mdl_var(&source, "z");
+    assert!(
+        z.iter().all(|&v| (v - 5.0).abs() < 1e-9),
+        "z = INITIAL(y) must read y's true t=0 value 5 (the INITIAL-backed \
+         macro output must be evaluated during initials, not left as the \
+         never-written/garbage slot): {z:?}",
+    );
+}
+
 /// Part A + B together, the `previous` analogue (coverage symmetry with the
 /// `init` test above): a macro whose canonical name is `previous`, whose body
 /// wraps its own same-named `PREVIOUS` intrinsic, INVOKED alongside a sibling

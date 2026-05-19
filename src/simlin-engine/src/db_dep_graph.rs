@@ -2179,6 +2179,27 @@ pub(crate) fn model_dependency_graph_impl(
     // set. Without this, aux-only models (no stocks/modules) using INIT(x)
     // would have an empty Initials runlist, and initial_values[x_offset]
     // would stay at zero.
+    //
+    // A variable whose value is *fully determined at initialization* -- no
+    // current-value (dt) dependencies, but a non-empty set of initial-time
+    // dependencies -- must ALSO be seeded. This is the structural signature
+    // of an `INITIAL(...)`-backed variable (`v = INITIAL(x)` compiles to a
+    // bare `LoadInitial`; `x` is an init-time dep but not a current-value
+    // one). Such a variable can be a module/macro *primary output* that a
+    // parent reads during the parent's OWN initials phase (e.g. C-LEARN's
+    // `:MACRO: INIT(x) INIT = INITIAL(x)`, invoked as
+    // `volumetric_heat_capacity = INITIAL(...)`); the sub-model's dep graph
+    // is computed in isolation and cannot see that cross-model read. Without
+    // this clause the output is compiled only into the flows phase, its
+    // initials slot is never written, and the parent snapshots the
+    // uninitialized slot (0 in a clean buffer, `inf`/NaN in a reused one) into
+    // `initial_values`, served forever by `LoadInitial` (GH #584). General
+    // principle: any variable whose value comes from `INITIAL()` and is read
+    // during initials must be evaluated in the initials phase; the bounded,
+    // structurally-keyed realization here is the empty-`dt_deps` /
+    // non-empty-`initial_deps` set, whose initials value is provably its true
+    // t=0 value (its init-time deps are themselves pulled into the runlist by
+    // the transitive closure below).
     let runlist_initials = {
         use std::collections::HashSet;
         let needed: HashSet<&String> = var_names
@@ -2186,7 +2207,11 @@ pub(crate) fn model_dependency_graph_impl(
             .filter(|n| {
                 var_info
                     .get(n.as_str())
-                    .map(|i| i.is_stock || i.is_module)
+                    .map(|i| {
+                        i.is_stock
+                            || i.is_module
+                            || (i.dt_deps.is_empty() && !i.initial_deps.is_empty())
+                    })
                     .unwrap_or(false)
                     || all_init_referenced.contains(n.as_str())
             })
