@@ -3584,6 +3584,90 @@ mod vector_elm_map_tests {
             vals[1]
         );
     }
+
+    // AC6.2: cross-dimension source resolves against the FULL source array.
+    //
+    // Genuine Vensim (Ventana's official VECTOR ELM MAP reference + the
+    // real-Vensim ground truth test/sdeverywhere/models/vector/vector.dat):
+    // result element i = source[base_i + round(offset[i])] over the full
+    // source array (last subscript fastest, innermost stride = 1 in the
+    // variable's row-major contiguous storage), where base_i is the flat
+    // position the first-argument element reference establishes; no modulo.
+    //
+    // Fixture (identical shape to vector_simple's f):
+    //   DimA: A1,A2,A3   DimB: B1,B2
+    //   a[DimA] = 0, 1, 1
+    //   d[A1,B1]=1 d[A2,B1]=2 d[A3,B1]=3 d[A1,B2]=4 d[A2,B2]=5 d[A3,B2]=6
+    //   f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA])
+    //
+    // d full storage, row-major declared order d[DimA,DimB], strides=[2,1]:
+    //   idx: 0=d11=1  1=d12=4  2=d21=2  3=d22=5  4=d31=3  5=d32=6
+    // Result iterates DimA x DimB; source free axis = DimA (the ActiveDimRef),
+    // B1 is the collapsed element subscript (DimB index 0, base contribution
+    // 0*stride_DimB = 0); offset a[DimA] broadcasts across DimB.
+    //   A1,* : base = 0*2 + 0 = 0, offset 0 -> flat 0 -> d[0]=1  (genuine f[A1]=1)
+    //   A2,* : base = 1*2 + 0 = 2, offset 1 -> flat 3 -> d[3]=5  (genuine f[A2]=5)
+    //   A3,* : base = 2*2 + 0 = 4, offset 1 -> flat 5 -> d[5]=6  (genuine f[A3]=6)
+    //
+    // The pre-fix VM materialized only the 3-element B1 column (the sliced
+    // source view) with no per-element base, producing f=[1,2,2]; this test
+    // is the AC6.2 spec and fails against the pre-fix VM.
+    #[test]
+    fn cross_dimension_source_resolves_full_array_vm() {
+        let project = TestProject::new("vem_cross_dim_vm")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimB", &["B1", "B2"])
+            .array_with_ranges("a[DimA]", vec![("A1", "0"), ("A2", "1"), ("A3", "1")])
+            .array_with_ranges(
+                "d[DimA,DimB]",
+                vec![
+                    ("A1,B1", "1"),
+                    ("A2,B1", "2"),
+                    ("A3,B1", "3"),
+                    ("A1,B2", "4"),
+                    ("A2,B2", "5"),
+                    ("A3,B2", "6"),
+                ],
+            )
+            .array_aux("f[DimA,DimB]", "vector_elm_map(d[DimA,B1], a[DimA])");
+        let vals = project.vm_result_incremental("f");
+        assert_eq!(vals.len(), 6, "expected 6 elements (DimA x DimB)");
+        // f is row-major [DimA,DimB]: [f(A1,B1), f(A1,B2), f(A2,B1), f(A2,B2),
+        // f(A3,B1), f(A3,B2)] = [1,1,5,5,6,6] (f broadcast across DimB).
+        let expected = [1.0, 1.0, 5.0, 5.0, 6.0, 6.0];
+        for (i, (&got, &want)) in vals.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "f[{i}] (genuine Vensim): expected {want}, got {got} (full vals: {vals:?})"
+            );
+        }
+    }
+
+    // AC6.4 defense-in-depth: a 1-D source[*] argument has base = 0 for all
+    // result elements (no ActiveDimRef element reference), so genuine Vensim
+    // reduces to result[i] = source[round(offset[i])] over the full source.
+    // This is what the pre-fix VM already did for the 1-D shape, so it must
+    // stay byte-identical after the base+full-source correction (the fold
+    // must not regress the 1-D case).
+    #[test]
+    fn one_d_source_base_is_zero_vm() {
+        let project = TestProject::new("vem_1d_base_zero_vm")
+            .indexed_dimension("D", 4)
+            .array_with_ranges(
+                "source[D]",
+                vec![("1", "10"), ("2", "20"), ("3", "30"), ("4", "40")],
+            )
+            .array_with_ranges(
+                "offsets[D]",
+                vec![("1", "3"), ("2", "1"), ("3", "0"), ("4", "2")],
+            )
+            .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
+        let vals = project.vm_result_incremental("result");
+        // base=0 for every element: result[i] = source[offsets[i]]
+        // = [source[3], source[1], source[0], source[2]] = [40,20,10,30].
+        project.assert_vm_result("result", &[40.0, 20.0, 10.0, 30.0]);
+        assert_eq!(vals.len(), 4);
+    }
 }
 
 mod arrayed_except_hoisting_tests {

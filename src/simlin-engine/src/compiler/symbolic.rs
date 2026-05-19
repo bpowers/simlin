@@ -209,6 +209,7 @@ pub(crate) enum SymbolicOpcode {
     VectorSelect {},
     VectorElmMap {
         write_temp_id: TempId,
+        full_source_len: u32,
     },
     VectorSortOrder {
         write_temp_id: TempId,
@@ -621,8 +622,12 @@ pub(crate) fn symbolize_opcode(
         Opcode::ArrayStddev {} => Ok(SymbolicOpcode::ArrayStddev {}),
         Opcode::ArraySize {} => Ok(SymbolicOpcode::ArraySize {}),
         Opcode::VectorSelect {} => Ok(SymbolicOpcode::VectorSelect {}),
-        Opcode::VectorElmMap { write_temp_id } => Ok(SymbolicOpcode::VectorElmMap {
+        Opcode::VectorElmMap {
+            write_temp_id,
+            full_source_len,
+        } => Ok(SymbolicOpcode::VectorElmMap {
             write_temp_id: *write_temp_id,
+            full_source_len: *full_source_len,
         }),
         Opcode::VectorSortOrder { write_temp_id } => Ok(SymbolicOpcode::VectorSortOrder {
             write_temp_id: *write_temp_id,
@@ -986,8 +991,12 @@ pub(crate) fn resolve_opcode(
         SymbolicOpcode::ArrayStddev {} => Ok(Opcode::ArrayStddev {}),
         SymbolicOpcode::ArraySize {} => Ok(Opcode::ArraySize {}),
         SymbolicOpcode::VectorSelect {} => Ok(Opcode::VectorSelect {}),
-        SymbolicOpcode::VectorElmMap { write_temp_id } => Ok(Opcode::VectorElmMap {
+        SymbolicOpcode::VectorElmMap {
+            write_temp_id,
+            full_source_len,
+        } => Ok(Opcode::VectorElmMap {
             write_temp_id: *write_temp_id,
+            full_source_len: *full_source_len,
         }),
         SymbolicOpcode::VectorSortOrder { write_temp_id } => Ok(Opcode::VectorSortOrder {
             write_temp_id: *write_temp_id,
@@ -1549,8 +1558,14 @@ pub(crate) fn renumber_opcode(
             n_sources: *n_sources,
             dest_temp_id: checked_add_u8(*dest_temp_id, temp_off_u8, "TempId")?,
         },
-        SymbolicOpcode::VectorElmMap { write_temp_id } => SymbolicOpcode::VectorElmMap {
+        SymbolicOpcode::VectorElmMap {
+            write_temp_id,
+            full_source_len,
+        } => SymbolicOpcode::VectorElmMap {
             write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
+            // full_source_len is the source variable's absolute element count,
+            // not a temp id -- it is not renumbered on fragment concatenation.
+            full_source_len: *full_source_len,
         },
         SymbolicOpcode::VectorSortOrder { write_temp_id } => SymbolicOpcode::VectorSortOrder {
             write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
@@ -2905,10 +2920,18 @@ mod tests {
         // concatenation, just like LoadTempConst and BeginIter.
         let temp_off: u32 = 5;
 
-        let elm_map = SymbolicOpcode::VectorElmMap { write_temp_id: 0 };
+        let elm_map = SymbolicOpcode::VectorElmMap {
+            write_temp_id: 0,
+            full_source_len: 6,
+        };
         match renumber_opcode(&elm_map, 0, 0, 0, 0, temp_off, 0).unwrap() {
-            SymbolicOpcode::VectorElmMap { write_temp_id } => {
+            SymbolicOpcode::VectorElmMap {
+                write_temp_id,
+                full_source_len,
+            } => {
                 assert_eq!(write_temp_id, 5);
+                // full_source_len passes through unchanged (absolute, not a temp id)
+                assert_eq!(full_source_len, 6);
             }
             other => panic!("expected VectorElmMap, got {:?}", other),
         }

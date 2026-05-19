@@ -15,7 +15,7 @@ use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Results, Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
-use test_helpers::ensure_results;
+use test_helpers::{ensure_results, ensure_results_excluding};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
@@ -196,6 +196,19 @@ fn simulate_path(xmile_path: &str) {
 }
 
 fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
+    simulate_path_with_excluding(xmile_path, compile, &[]);
+}
+
+/// Like [`simulate_path_with`], but carves a set of base-variable names out
+/// of the comparison *and* the compiled model. Each excluded variable is
+/// (a) removed from every datamodel model before compilation -- so a single
+/// not-yet-supported variable does not block the whole model from
+/// compiling -- and (b) skipped in every comparison path (VM, protobuf
+/// round-trip, XMILE round-trip). Every *other* variable stays a hard
+/// genuine-Vensim equality gate. Used to keep `vector.xmile`'s ELM MAP
+/// base/full-source variables (`c`/`f`/`g`) as hard gates while excluding
+/// only `y` (GitHub #578), rather than weakening the whole comparison.
+fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: &[&str]) {
     eprintln!("model: {xmile_path}");
 
     let datamodel_project = {
@@ -206,7 +219,17 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         if let Err(ref err) = datamodel_project {
             eprintln!("model '{xmile_path}' error: {err}");
         }
-        datamodel_project.unwrap()
+        let mut datamodel_project = datamodel_project.unwrap();
+        // Drop excluded variables from every model. An excluded variable is
+        // one we intentionally do not gate on yet (tracked separately); if
+        // it fails to compile it would otherwise abort the whole project
+        // and prevent gating the variables we DO support.
+        for model in &mut datamodel_project.models {
+            model
+                .variables
+                .retain(|v| !excluded.contains(&v.get_ident()));
+        }
+        datamodel_project
     };
 
     // simulate the model using our bytecode VM
@@ -218,7 +241,7 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
     };
 
     let expected = load_expected_results(xmile_path).unwrap();
-    ensure_results(&expected, &results);
+    ensure_results_excluding(&expected, &results, excluded);
 
     // serialize our project through protobufs and ensure we don't see problems
     let results_proto = {
@@ -236,7 +259,7 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         vm.run_to_end().unwrap();
         vm.into_results()
     };
-    ensure_results(&expected, &results_proto);
+    ensure_results_excluding(&expected, &results_proto, excluded);
 
     // serialize our project back to XMILE
     let serialized_xmile = xmile::project_to_xmile(&datamodel_project).unwrap();
@@ -251,7 +274,7 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         vm.run_to_end().unwrap();
         (roundtripped_project, vm.into_results())
     };
-    ensure_results(&expected, &results_xmile);
+    ensure_results_excluding(&expected, &results_xmile, excluded);
 
     // finally ensure that if we re-serialize to XMILE the results are
     // byte-for-byte identical (we aren't losing any information)
@@ -648,12 +671,21 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // array_tests::sum_of_conditional_tests.
     // "test/sdeverywhere/models/sumif/sumif.xmile",
     //
-    // VECTOR ELM MAP cross-dimension source: partially fixed (cross-dim subscripts,
-    // SUM wildcards, AssignTemp wildcards), but several variables still fail:
-    //   - y[DimA] = VECTOR ELM MAP(x[three], (DimA-1)) fails in VM incremental path
-    //   - Additional VECTOR SELECT cross-dimension patterns need compiler work
-    // The vector_simple subset passes via simulates_vector_simple_mdl.
-    // "test/sdeverywhere/models/vector/vector.xmile",
+    // VECTOR ELM MAP now matches genuine Vensim (per-element base + full
+    // source array, out-of-range -> :NA:, no modulo). vector.xmile is
+    // exercised through all three comparison paths by the dedicated
+    // `simulates_vector_xmile_genuine` test below, NOT here: that test keeps
+    // c/f/g (the ELM MAP base/full-source variables) and every other
+    // variable as hard genuine-Vensim gates against
+    // test/sdeverywhere/models/vector/vector.dat, narrowing the comparison
+    // to exclude only two pre-existing, separately-tracked, out-of-scope
+    // variables -- `y` (GitHub #578: scalar-source/expression-offset ELM MAP
+    // does not compile) and `p` (GitHub #576: dormant/unverified 2-D VECTOR
+    // SORT ORDER fixture data; a different builtin, unchanged here). This
+    // list runs an unconditional full comparison, which cannot carve out
+    // those variables; the narrowed gate lives in its own test instead of
+    // weakening every model's comparison.
+    // "test/sdeverywhere/models/vector/vector.xmile",  // -> simulates_vector_xmile_genuine
     //
     // --- Permanently excluded (not test models) ---
     //
@@ -674,6 +706,53 @@ fn simulates_arrayed_models_correctly() {
         let file_path = format!("../../{path}");
         simulate_path(file_path.as_str());
     }
+}
+
+/// Genuine-Vensim regression gate for VECTOR ELM MAP cross-dimension
+/// resolution (element-cycle-resolution.AC6.3 / AC6.2). `vector.xmile` is
+/// compared against the real-Vensim `vector.dat` through all three
+/// `ensure_results` paths (VM, protobuf round-trip, XMILE round-trip).
+///
+/// Every variable is a hard genuine-Vensim equality gate. In particular the
+/// ELM MAP base/full-source variables this phase fixes must match
+/// `vector.dat` exactly: `c[A1..A3] = 10 + VECTOR ELM MAP(b[B1], a[DimA])`
+/// is `11, 12, 12`; `f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA])` is
+/// `1, 5, 6` (broadcast across DimB); and
+/// `g[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], e[DimA,DimB])` is
+/// `1, 4, 5, 2, 3, 6`. So do every non-ELM-MAP variable the model also
+/// exercises (1-D VSO `l`/`m`, VECTOR SELECT `q`/`r`/`s`, reducers
+/// `u`/`v`/`w`, and the rest).
+///
+/// Exactly two variables are carved out, both pre-existing and
+/// separately-tracked gaps unrelated to the ELM MAP base/full-source fix
+/// (per the phase file's "prefer full inclusion; narrow only with a tracked
+/// issue" guidance). First, `y[DimA] = VECTOR ELM MAP(x[three], (DimA-1))`
+/// (GitHub #578): a scalar source plus an arithmetic (expression) offset
+/// from which ELM MAP cannot yet infer a result shape, so `y` does not
+/// compile at all -- a compiler shape-inference gap, NOT the base/stride
+/// numeric bug fixed here; its genuine value `y[A1]=3,y[A2]=4,y[A3]=5` is
+/// in `vector.dat`, and closing #578 lets `y` rejoin this gate. Second,
+/// `p[DimA,DimB] = VECTOR SORT ORDER(o[DimA,DimB], ASCENDING)` (GitHub
+/// #576): a genuinely 2-D VSO whose `vector.dat` `p` block is internally
+/// inconsistent / encodes an sdeverywhere per-row semantic, with
+/// genuine-Vensim multi-dimensional VSO semantics unverified by any live
+/// fixture -- a different builtin (VSO, unchanged by this phase) out of
+/// Phase 5's ELM MAP scope.
+///
+/// Excluded variables are dropped from the compiled model (so #578's
+/// non-compiling `y` cannot abort the project) and skipped in every
+/// comparison; the genuine gate on `c`/`f`/`g` (and all other variables)
+/// is NOT weakened.
+#[test]
+fn simulates_vector_xmile_genuine() {
+    simulate_path_with_excluding(
+        "../../test/sdeverywhere/models/vector/vector.xmile",
+        compile_vm,
+        // y: GitHub #578 (scalar-source/expression-offset ELM MAP compile
+        // gap). p: GitHub #576 (dormant/unverified 2-D VSO fixture data).
+        // Both pre-existing and out of Phase 5's ELM MAP scope.
+        &["y", "p"],
+    );
 }
 
 #[test]

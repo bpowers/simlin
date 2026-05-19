@@ -492,7 +492,7 @@ fn collect_stock_offsets(
 /// Advance a multi-dimensional index in row-major order. Shared by all
 /// vector operation opcodes to iterate over array elements.
 #[inline]
-fn increment_indices(indices: &mut [u16], dims: &[u16]) {
+pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
     for d in (0..indices.len()).rev() {
         indices[d] += 1;
         if indices[d] < dims[d] {
@@ -2298,80 +2298,39 @@ impl Vm {
                     }
                 }
 
-                // VectorElmMap uses 0-based offset indexing: offset 0 means "element at
-                // position 0 of the source array." This matches Vensim's VECTOR ELM MAP
-                // semantics where the offset array contains zero-based indices.
-                Opcode::VectorElmMap { write_temp_id } => {
+                // Genuine-Vensim VECTOR ELM MAP -- rule + citations on
+                // `crate::vm_vector_elm_map::vector_elm_map` (no modulo;
+                // OOB/NaN => `:NA:`).
+                Opcode::VectorElmMap {
+                    write_temp_id,
+                    full_source_len,
+                } => {
                     let offset_view = &view_stack[view_stack.len() - 1];
                     let source_view = &view_stack[view_stack.len() - 2];
-
-                    if !source_view.is_valid || !offset_view.is_valid {
-                        Self::fill_temp_nan(temp_storage, context, *write_temp_id);
-                    } else {
-                        // Collect all source values
-                        let source_size = source_view.size();
-                        let source_n_dims = source_view.dims.len();
-                        let mut source_values: SmallVec<[f64; 32]> =
-                            SmallVec::with_capacity(source_size);
-                        let mut src_indices: SmallVec<[u16; 4]> =
-                            smallvec::smallvec![0; source_n_dims];
-                        for _ in 0..source_size {
-                            let flat_off = source_view.flat_offset(&src_indices);
-                            let val = Self::read_view_element(
-                                source_view,
-                                flat_off,
-                                curr,
-                                temp_storage,
-                                context,
-                            );
-                            source_values.push(val);
-                            increment_indices(&mut src_indices, &source_view.dims);
-                        }
-
-                        // Write mapped results to temp_storage
-                        let temp_off = context.temp_offsets[*write_temp_id as usize];
-                        let offset_size = offset_view.size();
-                        let offset_n_dims = offset_view.dims.len();
-                        let mut off_indices: SmallVec<[u16; 4]> =
-                            smallvec::smallvec![0; offset_n_dims];
-                        for i in 0..offset_size {
-                            let flat_off = offset_view.flat_offset(&off_indices);
-                            let offset_val = Self::read_view_element(
-                                offset_view,
-                                flat_off,
-                                curr,
-                                temp_storage,
-                                context,
-                            );
-                            let idx = offset_val.round();
-                            temp_storage[temp_off + i] =
-                                if idx.is_nan() || idx < 0.0 || idx >= source_values.len() as f64 {
-                                    f64::NAN
-                                } else {
-                                    source_values[idx as usize]
-                                };
-                            increment_indices(&mut off_indices, &offset_view.dims);
-                        }
-                    }
+                    crate::vm_vector_elm_map::vector_elm_map(
+                        source_view,
+                        offset_view,
+                        *write_temp_id,
+                        *full_source_len,
+                        curr,
+                        temp_storage,
+                        context,
+                    );
                 }
 
-                // VectorSortOrder returns a genuine-Vensim 0-based permutation: result
-                // position `i` holds the 0-based *source index* of the `i`-th element in
-                // sorted order. `direction > 0` (== 1) sorts ascending, otherwise
-                // descending. Ties keep stable source order (Rust's stable `sort_by`);
-                // genuine Vensim leaves tie-breaking unspecified, so a deterministic
-                // stable order does not contradict it.
-                //
-                // Ground truth for the 0-based (not 1-based) convention: real Vensim DSS
-                // 7.3.4 reference output `test/test-models/tests/vector_order/output.tab`
-                // (`SORT ORDER[*]` ranges over `0..n-1` and contains `0`, impossible for a
-                // 1-based permutation) and Ventana Systems' official VECTOR SORT ORDER
-                // reference ("the zero based index number for the elements in sorted
-                // order"). The prior design docs
-                // `docs/design-plans/2026-02-27-vm-vector-ops.md` and
-                // `2026-03-10-close-array-gaps.md:253` encoded a now-disproven 1-based
-                // assumption and are superseded. (RANK below is a distinct opcode and is
-                // correctly 1-based, per the same `output.tab`.)
+                // VectorSortOrder returns a genuine-Vensim 0-based
+                // permutation: result position `i` holds the 0-based source
+                // index of the `i`-th element in sorted order. `direction ==
+                // 1` sorts ascending, otherwise descending. Ties keep stable
+                // source order (Rust's stable `sort_by`); genuine Vensim
+                // leaves tie-breaking unspecified, so this does not
+                // contradict it. Ground truth for the 0-based (not 1-based)
+                // convention: real Vensim DSS 7.3.4 reference output
+                // `test/test-models/tests/vector_order/output.tab`
+                // (`SORT ORDER[*]` ranges over `0..n-1` and contains `0`,
+                // impossible for a 1-based permutation) and Ventana's
+                // official VECTOR SORT ORDER reference. (RANK below is a
+                // distinct, correctly 1-based opcode, per the same file.)
                 Opcode::VectorSortOrder { write_temp_id } => {
                     let direction = stack.pop().round() as i32;
 
@@ -2681,7 +2640,7 @@ impl Vm {
     /// iteration index. For non-contiguous or sparse views, the caller must compute
     /// flat_off via `view.flat_offset(&indices)` or `view.offset_for_iter_index(iter_idx)`.
     #[inline]
-    fn read_view_element(
+    pub(crate) fn read_view_element(
         view: &RuntimeView,
         flat_off: usize,
         curr: &[f64],
@@ -2698,7 +2657,11 @@ impl Vm {
 
     /// Fill a temp storage region with NaN. Uses `temp_offsets` to determine
     /// the correct region size, independent of potentially-invalid runtime views.
-    fn fill_temp_nan(temp_storage: &mut [f64], context: &ByteCodeContext, temp_id: TempId) {
+    pub(crate) fn fill_temp_nan(
+        temp_storage: &mut [f64],
+        context: &ByteCodeContext,
+        temp_id: TempId,
+    ) {
         let idx = temp_id as usize;
         let start = context.temp_offsets[idx];
         let end = context

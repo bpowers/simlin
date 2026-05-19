@@ -106,6 +106,7 @@ mod units_infer;
 mod variable;
 pub mod vdf;
 mod vm;
+mod vm_vector_elm_map;
 pub mod xmile;
 
 pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};

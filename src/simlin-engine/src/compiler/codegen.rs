@@ -203,6 +203,39 @@ impl<'module> Compiler<'module> {
         (self.static_views.len() - 1) as ViewId
     }
 
+    /// Total element count of the source *variable* referenced by an
+    /// expression, i.e. the product of its full declared dimensions. This is
+    /// the genuine-Vensim VECTOR ELM MAP out-of-range bound (`:NA:` is
+    /// returned for an offset that would map outside the source variable's
+    /// full storage). Each model variable owns a unique `[offset, offset+size)`
+    /// slot range (offsets are assigned by `i += size`), so the base offset
+    /// uniquely identifies the variable and its full `size`. Falls back to
+    /// the lowered view's element count when the source is not a plain
+    /// variable/subscript reference (e.g. a scalar `Var`), which is the
+    /// correct full extent for those non-sliced shapes.
+    fn full_source_len(&self, source: &Expr) -> u32 {
+        let (base_off, view_len) = match source {
+            Expr::StaticSubscript(off, view, _) => {
+                (Some(*off), view.dims.iter().product::<usize>().max(1))
+            }
+            Expr::Var(off, _) => (Some(*off), 1usize),
+            Expr::TempArray(_, view, _) => (None, view.dims.iter().product::<usize>().max(1)),
+            _ => (None, 1usize),
+        };
+
+        if let Some(base_off) = base_off {
+            let model_offsets = &self.module.offsets[&self.module.ident];
+            if let Some(size) = model_offsets
+                .values()
+                .find(|(off, _)| *off == base_off)
+                .map(|(_, size)| *size)
+            {
+                return size as u32;
+            }
+        }
+        view_len as u32
+    }
+
     /// Convert an ArrayView to a StaticArrayView for a variable
     fn array_view_to_static(&mut self, base_off: usize, view: &ArrayView) -> StaticArrayView {
         // Convert sparse info
@@ -1084,10 +1117,18 @@ impl<'module> Compiler<'module> {
                 if let Expr::App(builtin, _) = rhs.as_ref() {
                     match builtin {
                         BuiltinFn::VectorElmMap(source, offset) => {
+                            // Genuine Vensim resolves the mapping over the
+                            // source *variable's* full storage; capture its
+                            // total element count before the (possibly
+                            // sliced) source view is pushed so the VM can
+                            // apply the out-of-range -> :NA: bound and the
+                            // per-element base correctly.
+                            let full_source_len = self.full_source_len(source);
                             self.walk_expr_as_view(source)?;
                             self.walk_expr_as_view(offset)?;
                             self.push(Opcode::VectorElmMap {
                                 write_temp_id: *id as TempId,
+                                full_source_len,
                             });
                             self.push(Opcode::PopView {});
                             self.push(Opcode::PopView {});

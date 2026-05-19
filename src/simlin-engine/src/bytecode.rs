@@ -814,9 +814,17 @@ pub(crate) enum Opcode {
     /// The result is a single scalar pushed onto the arithmetic stack.
     VectorSelect {},
 
-    /// Element-wise mapping operation; writes full result array to temp_storage.
+    /// Genuine-Vensim VECTOR ELM MAP; writes the full result array to
+    /// temp_storage. `full_source_len` is the source *variable's* total
+    /// element count (product of its full declared dimensions) -- the
+    /// out-of-range bound for the genuine `:NA:` rule. The source variable's
+    /// storage in `curr[]` is contiguous row-major, so the source view's
+    /// `base_off` plus a directly-computed flat index addresses it, and the
+    /// offset steps the innermost (last declared) dimension whose contiguous
+    /// stride is 1.
     VectorElmMap {
         write_temp_id: TempId,
+        full_source_len: u32,
     },
 
     /// Produces an array of sort-order indices; writes to temp_storage.
@@ -1587,7 +1595,11 @@ mod tests {
         assert_eq!((Opcode::VectorSelect {}).stack_effect(), (2, 1));
         // VectorElmMap: reads views, writes to temp_storage, no arithmetic stack effect
         assert_eq!(
-            (Opcode::VectorElmMap { write_temp_id: 0 }).stack_effect(),
+            (Opcode::VectorElmMap {
+                write_temp_id: 0,
+                full_source_len: 0
+            })
+            .stack_effect(),
             (0, 0)
         );
         // VectorSortOrder: pops 1 scalar (direction), writes to temp_storage
