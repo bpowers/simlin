@@ -419,6 +419,35 @@ The two bugs (verified, concrete trace in #580):
 prerequisite — see "Why Tasks 4-5 added"); directly verified by its own focused
 unit tests.
 
+> **AS-BUILT root-cause correction (verified during execution, commit
+> `b25dc06d` — supersedes the diagnosis below).** The root cause prescribed
+> below (`substitute_dimension_refs` + `DimensionsContext::translate_via_mapping`
+> bailing on group cardinality, fixed by a new `translate_via_group_mapping`)
+> was **empirically disproved** before coding: the group `element_map` IS fully
+> expanded and `translate_via_mapping` resolves it correctly *once the mapped
+> dimension is in the per-variable `DimensionsContext`*. The real bug is in
+> **`db.rs::expand_maps_to_chains`** (the salsa-scoping pass): `SourceDimension.name`
+> keeps display casing (`"Aggregated Regions"`) while `maps_to`/`mappings[].target`
+> are stored **canonical** (`"cop"`), and the reachability passes compared them
+> with a raw `==`, so the reverse-mapping pass never pulled the mapped source
+> dimension into the context → `has_mapping_to == false` → bare subscript →
+> `DimensionInScalarContext`. **As-built Part A:** `expand_maps_to_chains`
+> canonicalizes every reachability comparison and resolves each canonical target
+> back to display name before insertion (fixes the reverse direction *and* a
+> latent forward-direction bug for importer-sourced models); `substitute_dimension_refs`
+> / `dimensions.rs` are left **byte-identical**, so the "LTM/mapping leak" worry
+> is structurally impossible. **As-built Part B:** the `lower_implicit_var`
+> post-lower re-check is routed through `try_accumulate_diagnostic` (the bare
+> `.accumulate(db)` the spec names panics outside a `#[salsa::tracked]` frame —
+> the assembly chain is untracked; this also surfaced a distinct pre-existing
+> observability gap, `IN_TRACKED_CONTEXT` never set `true`, tracked separately).
+> The `dimensions.rs` `translate_via_group_mapping` unit test below was replaced
+> by `db_dimension_invalidation_tests.rs::expand_maps_to_chains_tests` (4 tests
+> on the actually-fixed function); the RED→GREEN fixture and the loud-safe Part B
+> test landed as specced. GH #580's root-cause section was corrected accordingly;
+> test-requirements.md's AC7 row is reconciled at finalization. The text below is
+> the original (investigation-path) diagnosis, retained for provenance.
+
 **Files:**
 - Add: `src/simlin-engine/src/dimensions.rs` — a new
   `DimensionsContext::translate_via_group_mapping` method + its `#[cfg(test)]`
