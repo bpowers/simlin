@@ -5048,3 +5048,139 @@ TIME STEP = 1 ~~|
         );
     }
 }
+
+/// Regression tests for GH #580 Bug B: a *per-element arrayed graphical
+/// function* applied with a dynamic index inside an array reducer
+/// (`SUM(g[D!](drive))`) or a vector op (`VECTOR SELECT(sel[D!], g[D!](drive),
+/// ...)`). Each element of `g` carries its own lookup table; `g[D!](drive)`
+/// is therefore an *array* of per-element lookup results (one per element of
+/// `D`, all evaluated at the same scalar index `drive`) that the reducer/vector
+/// op consumes. `Var::new` lowers it to `App(Lookup(<full array view of g>,
+/// drive))`, but neither codegen view path materialized that as an array view:
+/// the reducer path (`walk_expr_as_view`) fell through with `Generic, "Cannot
+/// push view ... expected array expression"` and the scalar/vector path
+/// (`extract_table_info`) rejected the multi-element `StaticSubscript` table
+/// base with `BadTable, "range subscripts not supported in lookup tables"`.
+/// `compile_project_incremental` surfaced both as the opaque
+/// `NotSimulatable, "failed to compile fragments for variables: total"`.
+/// This is the minimized, model-agnostic form of the six C-LEARN vars
+/// (`global_rs_co2_ff`, `rs_global_ch4/n2o/pfc/sf6` -- `SUM(RS X[COP!](Time/One
+/// year))`; `rs_ff_co2_ff_aggregated` -- `VECTOR SELECT(..., RS CO2 FF[COP!](
+/// Time/One year)*..., ...)`). The fix hoists the applied arrayed GF into an
+/// `AssignTemp`/`TempArray` (recognized as array-producing) and emits a
+/// dedicated per-element-lookup opcode (`LookupArray`) that fills the temp,
+/// so the reducer/vector op reads a genuine array view.
+#[cfg(test)]
+mod arrayed_gf_in_reducer_tests {
+    use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+    use crate::open_vensim;
+
+    /// `g[D]` is a genuine per-element arrayed graphical function (three
+    /// distinct tables); `drive = Time` is strictly non-constant; `total =
+    /// SUM(g[D!](drive))` reduces the per-element lookup array. Hand-computed:
+    /// at `Time=0` every `g[ai](0)=0` => 0; at `Time=1` => 10+100+1000=1110;
+    /// at `Time=2` => 20+200+2000=2220.
+    const SUM_OF_ARRAYED_GF: &str = "\
+{UTF-8}
+D: A1, A2, A3 ~~|
+g[A1]( (0,0),(1,10),(2,20) ) ~~|
+g[A2]( (0,0),(1,100),(2,200) ) ~~|
+g[A3]( (0,0),(1,1000),(2,2000) ) ~~|
+drive = Time ~~|
+total = SUM( g[D!](drive) ) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+
+    #[test]
+    fn sum_of_arrayed_gf_compiles_and_simulates() {
+        let datamodel =
+            open_vensim(SUM_OF_ARRAYED_GF).expect("MDL should parse to a datamodel project");
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap_or_else(|e| {
+            panic!(
+                "SUM over an applied per-element arrayed GF should compile \
+                 (GH #580 Bug B); got Err: {e:?}"
+            )
+        });
+
+        let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+        vm.run_to_end().expect("VM run should succeed");
+        let results = vm.into_results();
+        let series = crate::test_common::collect_results(&results);
+
+        let total = series
+            .get("total")
+            .unwrap_or_else(|| panic!("total not in results; have {:?}", series.keys()));
+        // SUM of the per-element GF outputs at drive=Time, one per save step.
+        let expect = [0.0, 1110.0, 2220.0];
+        assert_eq!(
+            total.len(),
+            expect.len(),
+            "expected {} save steps, got {}",
+            expect.len(),
+            total.len()
+        );
+        for (i, (&got, &want)) in total.iter().zip(expect.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "total[{i}]: expected {want}, got {got}"
+            );
+        }
+    }
+
+    /// The `VECTOR SELECT` variant of the same applied-arrayed-GF shape: it
+    /// also routes the `g[D!](drive)` argument through the array-view path.
+    /// `sel = 1,0,1` selects elements A1 and A3; `VSSUM` sums them. At
+    /// `Time=1` => `g[A1](1)+g[A3](1)` = 10+1000 = 1010; at `Time=2` =>
+    /// 20+2000 = 2020; at `Time=0` => 0.
+    const VECTOR_SELECT_OF_ARRAYED_GF: &str = "\
+{UTF-8}
+D: A1, A2, A3 ~~|
+g[A1]( (0,0),(1,10),(2,20) ) ~~|
+g[A2]( (0,0),(1,100),(2,200) ) ~~|
+g[A3]( (0,0),(1,1000),(2,2000) ) ~~|
+sel[D] = 1, 0, 1 ~~|
+drive = Time ~~|
+total = VECTOR SELECT( sel[D!], g[D!](drive), 0, 0, 0 ) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+
+    #[test]
+    fn vector_select_of_arrayed_gf_compiles_and_simulates() {
+        let datamodel = open_vensim(VECTOR_SELECT_OF_ARRAYED_GF)
+            .expect("MDL should parse to a datamodel project");
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap_or_else(|e| {
+            panic!(
+                "VECTOR SELECT over an applied per-element arrayed GF should \
+                 compile (GH #580 Bug B); got Err: {e:?}"
+            )
+        });
+
+        let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+        vm.run_to_end().expect("VM run should succeed");
+        let results = vm.into_results();
+        let series = crate::test_common::collect_results(&results);
+
+        let total = series
+            .get("total")
+            .unwrap_or_else(|| panic!("total not in results; have {:?}", series.keys()));
+        // VSSUM over selected elements {A1, A3} at drive=Time.
+        let expect = [0.0, 1010.0, 2020.0];
+        assert_eq!(total.len(), expect.len());
+        for (i, (&got, &want)) in total.iter().zip(expect.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "total[{i}]: expected {want}, got {got}"
+            );
+        }
+    }
+}

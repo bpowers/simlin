@@ -311,6 +311,66 @@ impl<'module> Compiler<'module> {
         }
     }
 
+    /// Resolve `(base_gf, table_count)` for a *per-element arrayed graphical
+    /// function* whose full array is referenced by `table_expr` (a bare `Var`
+    /// or a whole-array `StaticSubscript`). This is the array counterpart of
+    /// the per-element resolution the scalar `Lookup` codegen does via
+    /// `extract_table_info`, but here the base is intentionally the *whole*
+    /// array (`g[D!]`, `view.size() > 1`) -- the very shape `extract_table_info`
+    /// rejects -- because `LookupArray` evaluates every element's table. The
+    /// table base id and per-element table count come from the same
+    /// `table_base_ids` / `module.tables` maps the scalar lookup uses, so the
+    /// per-element table layout is identical. A `table_expr` that is neither a
+    /// recognised array base nor a GF-bearing variable yields a precise
+    /// `BadTable` (loud-safe: an un-reconstructable arrayed-GF dependency must
+    /// never become a silent stub -- GH #580 / AC7.5).
+    fn arrayed_lookup_table_info(&self, table_expr: &Expr) -> Result<(GraphicalFunctionId, u16)> {
+        let module_offsets = &self.module.offsets[&self.module.ident];
+        let base_off = match table_expr {
+            // Whole-array static subscript: the var's storage starts at `off`
+            // and the view spans the full array (offset 0).
+            Expr::StaticSubscript(off, _, _) => *off,
+            Expr::Var(off, _) => *off,
+            other => {
+                return sim_err!(
+                    BadTable,
+                    format!(
+                        "arrayed graphical-function apply expected a whole-array \
+                         base, got {:?}",
+                        std::mem::discriminant(other)
+                    )
+                );
+            }
+        };
+        let table_ident = module_offsets
+            .iter()
+            .find(|(_, (base, _))| *base == base_off)
+            .map(|(k, _)| k.clone())
+            .ok_or_else(|| {
+                crate::Error::new(
+                    ErrorKind::Simulation,
+                    ErrorCode::BadTable,
+                    Some("could not find arrayed lookup table variable".to_string()),
+                )
+            })?;
+        let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
+            crate::Error::new(
+                ErrorKind::Simulation,
+                ErrorCode::BadTable,
+                Some(format!(
+                    "no graphical function found for arrayed lookup '{table_ident}'"
+                )),
+            )
+        })?;
+        let table_count = self
+            .module
+            .tables
+            .get(&table_ident)
+            .map(|tables| tables.len() as u16)
+            .unwrap_or(1);
+        Ok((base_gf, table_count))
+    }
+
     /// Emit bytecode to push an expression's view onto the view stack.
     /// This is used for array operations that need to iterate over arrays.
     fn walk_expr_as_view(&mut self, expr: &Expr) -> Result<()> {
@@ -1147,6 +1207,37 @@ impl<'module> Compiler<'module> {
                             self.walk_expr_as_view(array)?;
                             self.walk_expr(direction)?.unwrap();
                             self.push(Opcode::Rank {
+                                write_temp_id: *id as TempId,
+                            });
+                            self.push(Opcode::PopView {});
+                            return Ok(None);
+                        }
+                        // Per-element arrayed-GF lookup (GH #580 Bug B):
+                        // `g[D!](index)` where each element of `g` carries its
+                        // own table. The hoisting pass (`mod.rs`) wraps this in
+                        // an `AssignTemp` whose view is the GF array's view, so
+                        // here we push that array as a view (for the element
+                        // count + per-element flat offsets), evaluate the
+                        // shared scalar `index`, and emit `LookupArray` to fill
+                        // the temp -- the array analogue of the scalar `Lookup`
+                        // arm below. The result temp is then consumed as a view
+                        // by the wrapping reducer / vector op.
+                        BuiltinFn::Lookup(table_expr, index, _loc)
+                        | BuiltinFn::LookupForward(table_expr, index, _loc)
+                        | BuiltinFn::LookupBackward(table_expr, index, _loc) => {
+                            let mode = match builtin {
+                                BuiltinFn::LookupForward(_, _, _) => LookupMode::Forward,
+                                BuiltinFn::LookupBackward(_, _, _) => LookupMode::Backward,
+                                _ => LookupMode::Interpolate,
+                            };
+                            let (base_gf, table_count) =
+                                self.arrayed_lookup_table_info(table_expr)?;
+                            self.walk_expr_as_view(table_expr)?;
+                            self.walk_expr(index)?.unwrap();
+                            self.push(Opcode::LookupArray {
+                                base_gf,
+                                table_count,
+                                mode,
                                 write_temp_id: *id as TempId,
                             });
                             self.push(Opcode::PopView {});

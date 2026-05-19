@@ -2422,6 +2422,51 @@ impl Vm {
                     }
                 }
 
+                Opcode::LookupArray {
+                    base_gf,
+                    table_count,
+                    mode,
+                    write_temp_id,
+                } => {
+                    // Per-element arrayed-GF lookup (GH #580 Bug B): for each
+                    // element `i` of the arrayed GF's view, evaluate that
+                    // element's table at the shared scalar `index`. The base
+                    // array's *values* are irrelevant (a graphical function is
+                    // a pure table); the view supplies the element count and
+                    // each element's flat offset into the per-element-table
+                    // run `graphical_functions[base_gf .. base_gf + table_count]`
+                    // (laid out in declared element order by
+                    // `Compiler::table_base_ids`, exactly as the scalar
+                    // `Lookup`'s element offset). An out-of-range element index
+                    // yields NaN, matching the scalar `Lookup` opcode's bound.
+                    let index = stack.pop();
+                    let input_view = &view_stack[view_stack.len() - 1];
+                    let temp_off = context.temp_offsets[*write_temp_id as usize];
+
+                    if !input_view.is_valid {
+                        Self::fill_temp_nan(temp_storage, context, *write_temp_id);
+                    } else {
+                        let size = input_view.size();
+                        let n_dims = input_view.dims.len();
+                        let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
+                        for i in 0..size {
+                            let elem_off = input_view.flat_offset(&indices);
+                            let result = if elem_off >= *table_count as usize {
+                                f64::NAN
+                            } else {
+                                let gf = &context.graphical_functions[*base_gf as usize + elem_off];
+                                match mode {
+                                    LookupMode::Interpolate => lookup(gf, index),
+                                    LookupMode::Forward => lookup_forward(gf, index),
+                                    LookupMode::Backward => lookup_backward(gf, index),
+                                }
+                            };
+                            temp_storage[temp_off + i] = result;
+                            increment_indices(&mut indices, &input_view.dims);
+                        }
+                    }
+                }
+
                 Opcode::AllocateAvailable { write_temp_id } => {
                     let avail = stack.pop();
 

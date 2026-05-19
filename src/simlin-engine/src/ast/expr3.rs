@@ -601,6 +601,33 @@ impl<'a> Pass1Context<'a> {
             // Builtins - check if decomposition is needed for array builtins
             Expr3::App(builtin, bounds, loc) => {
                 let (transformed_builtin, has_a2a) = self.transform_builtin_inner(builtin);
+                // A per-element arrayed-GF apply (`LOOKUP(g[D!], idx)`, GH #580
+                // Bug B) is decomposed into its own `AssignTemp` HERE -- the
+                // single point that catches it wherever it appears (bare in a
+                // reducer arg, or nested inside an `Op2`/`If` that is itself
+                // decomposed): otherwise an enclosing `Op2` would be hoisted
+                // whole, burying the un-decomposable `App(Lookup(<multi-element
+                // array>, idx))` inside a `BeginIter` body that codegen rejects
+                // with `BadTable`. Deferred to pass 2 when the index references
+                // an A2A dimension (it is re-lowered per element and re-hits
+                // this arm with the resolved index). The `AssignTemp`'s bare
+                // `App(Lookup(...))` body is lowered by codegen's dedicated
+                // `LookupArray` opcode.
+                if !has_a2a
+                    && let Some((dims, dim_names)) = arrayed_gf_apply_view(&transformed_builtin)
+                {
+                    let view = match dim_names {
+                        Some(names) => ArrayView::contiguous_with_names(dims, names),
+                        None => ArrayView::contiguous(dims),
+                    };
+                    let temp_id = self.allocate_temp_id();
+                    self.temp_assignments.push(Expr3::AssignTemp(
+                        temp_id,
+                        Box::new(Expr3::App(transformed_builtin, bounds, loc)),
+                        view.clone(),
+                    ));
+                    return (Expr3::TempArray(temp_id, view, loc), false);
+                }
                 (Expr3::App(transformed_builtin, bounds, loc), has_a2a)
             }
 
@@ -1079,11 +1106,47 @@ impl<'a> Pass1Context<'a> {
             | Expr3::TempArray(_, _, _)
             | Expr3::TempArrayElement(_, _, _, _) => false,
             // App might need decomposition if it contains complex args
-            // but the result of the app itself doesn't need further decomposition
+            // but the result of the app itself doesn't need further
+            // decomposition -- the one exception, a per-element arrayed-GF
+            // apply (`LOOKUP(g[D!], idx)`, GH #580 Bug B), is decomposed
+            // up-front in `transform_inner`'s `App` arm, so by the time
+            // `needs_decomposition` runs the apply is already a `TempArray`.
             Expr3::App(_, _, _) => false,
             // Already an assignment - don't re-decompose
             Expr3::AssignTemp(_, _, _) => false,
         }
+    }
+}
+
+/// If `builtin` is a graphical-function lookup whose table base produces a
+/// *multi-element array* -- the per-element arrayed-GF apply `LOOKUP(g[D!],
+/// idx)` (GH #580 Bug B) -- return that base array's dims and (where known)
+/// dim names. A single-element / scalar table base is the ordinary scalar
+/// lookup and returns `None` (no decomposition; the existing per-element path
+/// compiles it). At this `Expr3` stage the wildcard base is an
+/// `Expr3::Subscript` carrying array `ArrayBounds` (not yet a
+/// `StaticSubscript`), so the shape comes from `get_array_bounds()` /
+/// `get_array_view()`.
+fn arrayed_gf_apply_view(builtin: &BuiltinFn<Expr3>) -> Option<(Vec<usize>, Option<Vec<String>>)> {
+    use crate::builtins::BuiltinFn::*;
+    let table = match builtin {
+        Lookup(table, _, _) | LookupForward(table, _, _) | LookupBackward(table, _, _) => table,
+        _ => return None,
+    };
+    let (dims, dim_names) = if let Some(bounds) = table.get_array_bounds() {
+        (
+            bounds.dims().to_vec(),
+            bounds.dim_names().map(|n| n.to_vec()),
+        )
+    } else if let Some(view) = table.get_array_view() {
+        (view.dims.clone(), Some(view.dim_names.clone()))
+    } else {
+        return None;
+    };
+    if dims.iter().product::<usize>() > 1 {
+        Some((dims, dim_names))
+    } else {
+        None
     }
 }
 

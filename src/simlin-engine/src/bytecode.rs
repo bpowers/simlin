@@ -839,6 +839,24 @@ pub(crate) enum Opcode {
         write_temp_id: TempId,
     },
 
+    /// Per-element graphical-function lookup over an arrayed GF (GH #580 Bug B):
+    /// `g[D!](index)` where each element of `g` carries its own lookup table.
+    /// Pops 1 scalar (the shared lookup `index`) from the arithmetic stack and
+    /// reads 1 view (the arrayed GF's full storage) from the view stack; for
+    /// each of the view's `size()` elements `i` it evaluates the table
+    /// `graphical_functions[base_gf + i]` at `index` (the per-element-table
+    /// layout `Compiler::table_base_ids` records -- one table per element, in
+    /// declared order) and writes the result to `temp_storage[write_temp + i]`.
+    /// `table_count` bounds `base_gf + i` (an out-of-range element yields NaN,
+    /// matching the scalar `Lookup` opcode). The result temp is then consumed
+    /// as an array view by the reducer / vector op that wrapped the apply.
+    LookupArray {
+        base_gf: GraphicalFunctionId,
+        table_count: u16,
+        mode: LookupMode,
+        write_temp_id: TempId,
+    },
+
     /// Priority-based allocation; writes result array to temp_storage.
     AllocateAvailable {
         write_temp_id: TempId,
@@ -1010,6 +1028,9 @@ impl Opcode {
             Opcode::VectorElmMap { .. } => (0, 0),
             Opcode::VectorSortOrder { .. } => (1, 0),
             Opcode::Rank { .. } => (1, 0),
+            // LookupArray pops the scalar lookup index, reads the GF view, and
+            // writes the per-element-lookup array to temp_storage.
+            Opcode::LookupArray { .. } => (1, 0),
             Opcode::AllocateAvailable { .. } => (1, 0),
             // AllocateByPriority pops 2 scalars (width, supply) from the stack
             Opcode::AllocateByPriority { .. } => (2, 0),

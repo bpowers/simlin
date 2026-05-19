@@ -217,6 +217,15 @@ pub(crate) enum SymbolicOpcode {
     Rank {
         write_temp_id: TempId,
     },
+    // Per-element arrayed-GF lookup -> temp (GH #580 Bug B). All fields are
+    // layout-independent (GF-table indices + temp id), so it round-trips
+    // through symbolization unchanged, exactly like `Lookup`.
+    LookupArray {
+        base_gf: GraphicalFunctionId,
+        table_count: u16,
+        mode: LookupMode,
+        write_temp_id: TempId,
+    },
     AllocateAvailable {
         write_temp_id: TempId,
     },
@@ -635,6 +644,17 @@ pub(crate) fn symbolize_opcode(
         Opcode::Rank { write_temp_id } => Ok(SymbolicOpcode::Rank {
             write_temp_id: *write_temp_id,
         }),
+        Opcode::LookupArray {
+            base_gf,
+            table_count,
+            mode,
+            write_temp_id,
+        } => Ok(SymbolicOpcode::LookupArray {
+            base_gf: *base_gf,
+            table_count: *table_count,
+            mode: *mode,
+            write_temp_id: *write_temp_id,
+        }),
         Opcode::AllocateAvailable { write_temp_id } => Ok(SymbolicOpcode::AllocateAvailable {
             write_temp_id: *write_temp_id,
         }),
@@ -1028,6 +1048,17 @@ pub(crate) fn resolve_opcode(
             write_temp_id: *write_temp_id,
         }),
         SymbolicOpcode::Rank { write_temp_id } => Ok(Opcode::Rank {
+            write_temp_id: *write_temp_id,
+        }),
+        SymbolicOpcode::LookupArray {
+            base_gf,
+            table_count,
+            mode,
+            write_temp_id,
+        } => Ok(Opcode::LookupArray {
+            base_gf: *base_gf,
+            table_count: *table_count,
+            mode: *mode,
             write_temp_id: *write_temp_id,
         }),
         SymbolicOpcode::AllocateAvailable { write_temp_id } => Ok(Opcode::AllocateAvailable {
@@ -1597,6 +1628,20 @@ pub(crate) fn renumber_opcode(
             write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
         },
         SymbolicOpcode::Rank { write_temp_id } => SymbolicOpcode::Rank {
+            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
+        },
+        // LookupArray carries BOTH a GF-table base (like `Lookup`) and a
+        // result temp id (like the other vector ops), so both are offset on
+        // fragment concatenation.
+        SymbolicOpcode::LookupArray {
+            base_gf,
+            table_count,
+            mode,
+            write_temp_id,
+        } => SymbolicOpcode::LookupArray {
+            base_gf: checked_add_u8(*base_gf, gf_off_u8, "GF ID")?,
+            table_count: *table_count,
+            mode: *mode,
             write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
         },
         SymbolicOpcode::AllocateAvailable { write_temp_id } => SymbolicOpcode::AllocateAvailable {
