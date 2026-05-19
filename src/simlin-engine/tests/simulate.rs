@@ -1522,6 +1522,193 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
     simulate_mdl_path(path);
 }
 
+/// element-cycle-resolution.AC3.1 (Phase 3 Task 3 -- the parent-sourcing
+/// happy-path end-to-end proof). `helper_recurrence.mdl` is a NEW fixture:
+/// a shift-mapped subrange recurrence over `Target: t1..t3` (the
+/// `self_recurrence.mdl` `Target/tNext/tPrev` shape) whose per-element
+/// recurrence body invokes a synthetic helper:
+///
+///   ecc[t1]     = 1
+///   ecc[tNext]  = INITIAL(ecc[tPrev] * 2)
+///
+/// `INITIAL(<expr>)` (Vensim's spelling of XMILE `INIT`) over the shifted
+/// subrange expands element-wise to `ecc[t2] = INITIAL(ecc[t1] * 2)` and
+/// `ecc[t3] = INITIAL(ecc[t2] * 2)`. Because the `INITIAL` argument is an
+/// *expression* (not a bare scalar slot), `builtins_visitor::make_temp_arg`
+/// synthesizes a scalar helper aux per recurrence element -- the canonical
+/// `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t2` /
+/// `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t3` form (design deviation 2):
+/// absent from `model.variables`, present in `model_implicit_var_info`
+/// (its parent is `ecc`). Each helper's argument references `ecc`, and
+/// `ecc`'s init references the helper (`ecc[tNext] = INITIAL($helper)`),
+/// so the helpers land *inside* a MULTI-member init-phase recurrence SCC
+/// `{ecc, $\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t2,
+/// $\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t3}` whose induced per-element
+/// INIT graph is acyclic and well-founded.
+///
+/// This is the deliberately-constructed AC3.1 coverage: the design notes
+/// AC3.1 is the *only* coverage of the parent-`implicit_vars` sourcing
+/// happy path, so the fixture shape was empirically verified (per design
+/// deviation 4) to genuinely push a `$\u{205A}`-prefixed helper into a
+/// *resolved* SCC -- this test re-asserts that here so a future converter
+/// change that stopped synthesizing the in-SCC helper would fail loudly
+/// rather than silently degrade AC3.1 to a no-op.
+///
+/// RED (structural, no destructive git): the synthetic helpers have NO
+/// `SourceVariable` (they are absent from `model.variables`). Without
+/// Phase 3 Task 2's parent-`implicit_vars` sourcing,
+/// `var_phase_symbolic_fragment_prod`'s no-`SourceVariable` arm returns
+/// `None` for each helper (the Task 1 loud-safe contract), so
+/// `symbolic_phase_element_order`'s per-member `?` short-circuits the
+/// whole builder to `None`, the `{ecc, $helper..}` SCC is `Unresolved`,
+/// `has_cycle` stays `true`, and the model is rejected with
+/// `CircularDependency` -- exactly the verdict the committed Task 1 test
+/// `unsourceable_in_scc_node_falls_back_to_circular_no_panic` pins for an
+/// unsourceable in-SCC node, and the verdict every non-helper-resolving
+/// candidate shape produced while this fixture's shape was being
+/// empirically selected. GREEN after Task 2 (committed `cee5d063`): the
+/// helper's symbolic `PerVarBytecodes` is parent-sourced from `ecc`'s
+/// `implicit_vars`, the SCC resolves, `has_cycle == false`, and it
+/// simulates.
+///
+/// The test FIRST empirically confirms (tied to the REAL parsed fixture,
+/// per the AC3.1 mandate) that the dependency graph carries exactly one
+/// `ResolvedScc { phase: Initial }` whose members include a
+/// `$\u{205A}`-prefixed synthetic helper that is genuinely
+/// no-`SourceVariable` (absent from `model.variables`) yet resolves in
+/// `model_implicit_var_info` -- i.e. the fixture genuinely exercises the
+/// Task 2 parent-sourcing path and not merely an ordinary recurrence --
+/// then simulates it via `simulate_mdl_path` against the hand-computed
+/// `helper_recurrence.dat`. The recurrence has no time dependence
+/// (`INITIAL` snapshots t=0; no stocks/PREVIOUS lag), so the values are
+/// constant across both saved steps (INITIAL TIME=0, FINAL TIME=1, TIME
+/// STEP=1 => 2 steps): ecc[t1]=1, ecc[t2]=INITIAL(ecc[t1]*2)=2,
+/// ecc[t3]=INITIAL(ecc[t2]*2)=4.
+#[test]
+fn helper_recurrence_mdl_synthetic_helper_in_scc_simulates() {
+    use simlin_engine::common::ErrorCode;
+    use simlin_engine::db::{SccPhase, model_dependency_graph, model_implicit_var_info};
+
+    let path = "../../test/sdeverywhere/models/helper_recurrence/helper_recurrence.mdl";
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"));
+    let dm = open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
+    let sync = sync.to_sync_result();
+    let model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, model, sync.project);
+
+    // (1) It compiles via the incremental path -- NO false
+    // `CircularDependency`. RED before Task 2: the no-`SourceVariable`
+    // helper is unsourceable -> SCC `Unresolved` -> `has_cycle` true ->
+    // `CircularDependency`.
+    assert!(
+        !dep_graph.has_cycle,
+        "helper_recurrence.mdl: the helper-bearing recurrence must NOT set \
+         has_cycle once the synthetic helper is parent-sourced (AC3.1); \
+         resolved_sccs = {:?}",
+        dep_graph.resolved_sccs
+    );
+    let diags = collect_project_diagnostics(&dm);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency)),
+        "helper_recurrence.mdl: must NOT report CircularDependency once \
+         the synthetic helper is sourced from its parent's implicit_vars \
+         (AC3.1). Diagnostics: {diags:#?}"
+    );
+
+    // (2) Exactly one resolved SCC, init-phase (the `INITIAL()`-driven
+    // recurrence is an init-relation cycle, not a dt one).
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "helper_recurrence.mdl: exactly one ResolvedScc (the \
+         {{ecc, $helper..}} init cluster) -- got {:?}",
+        dep_graph.resolved_sccs
+    );
+    let scc = &dep_graph.resolved_sccs[0];
+    assert_eq!(
+        scc.phase,
+        SccPhase::Initial,
+        "helper_recurrence.mdl: the resolved SCC MUST be phase == Initial \
+         (the recurrence is driven by INITIAL(), an init-phase relation) \
+         -- got {:?}",
+        scc.phase
+    );
+    assert!(
+        scc.members.len() >= 2,
+        "helper_recurrence.mdl: AC3.1 requires the helper to be IN a \
+         MULTI-member SCC alongside `ecc` (a 1-member SCC would mean the \
+         helper is a mere forward dependency, not exercising the \
+         in-SCC parent-sourcing path); got {} member(s): {:?}",
+        scc.members.len(),
+        scc.members
+    );
+
+    // (3) The CORE AC3.1 / Task 2 assertion: the resolved SCC genuinely
+    // contains a `$\u{205A}`-prefixed synthetic-helper member that is
+    // no-`SourceVariable` (absent from `model.variables`) yet resolves in
+    // `model_implicit_var_info`. This is what makes the fixture exercise
+    // the Task 2 parent-`implicit_vars` sourcing path rather than an
+    // ordinary recurrence -- and is exactly the node whose symbolic
+    // fragment is `None` (=> SCC `Unresolved` => `CircularDependency`)
+    // without Task 2 (RED), `Some` (parent-sourced => SCC resolved) with
+    // it (GREEN).
+    let info = model_implicit_var_info(&db, model, sync.project);
+    let source_vars = model.variables(&db);
+    let in_scc_helpers: Vec<&str> = scc
+        .members
+        .iter()
+        .map(|m| m.as_str())
+        .filter(|m| {
+            m.starts_with('$')
+                && m.contains('\u{205A}')
+                && source_vars.get(*m).is_none()
+                && info.contains_key(*m)
+        })
+        .collect();
+    assert!(
+        !in_scc_helpers.is_empty(),
+        "helper_recurrence.mdl: the resolved SCC MUST contain at least one \
+         `$\u{205A}`-prefixed synthetic helper that has NO SourceVariable \
+         (absent from model.variables) yet resolves in \
+         model_implicit_var_info -- this is the node Phase 3 Task 2 \
+         parent-sources; without it the fixture would not exercise the \
+         AC3.1 happy path at all. SCC members: {:?}; implicit_var_info \
+         keys: {:?}",
+        scc.members,
+        info.keys().collect::<Vec<_>>()
+    );
+    // Pin the parent: every in-SCC helper's `model_implicit_var_info`
+    // entry must name `ecc` as its parent_source_var (the variable whose
+    // `implicit_vars` Task 2 reaches), so the parent-sourcing chain the
+    // test exercises is the intended one.
+    for helper in &in_scc_helpers {
+        let meta = &info[*helper];
+        let parent = meta.parent_source_var.ident(&db);
+        assert_eq!(
+            parent.as_str(),
+            "ecc",
+            "in-SCC helper {helper:?} must be parented to `ecc` (the \
+             recurrence variable whose implicit_vars Task 2 sources); \
+             got parent {parent:?}"
+        );
+    }
+
+    // (4) End-to-end: it compiles AND simulates to the hand-computed
+    // helper_recurrence.dat. The synthetic helpers' symbolic
+    // `PerVarBytecodes`, parent-sourced from `ecc`'s `implicit_vars`
+    // (Task 2), are interleaved into the combined SCC fragment exactly
+    // like a real member, producing the well-founded series
+    // ecc[t1]=1, ecc[t2]=2, ecc[t3]=4 held constant across both saved
+    // steps.
+    simulate_mdl_path(path);
+}
+
 /// element-cycle-resolution.AC2.5 (Phase 2 Task 9, the transitioned
 /// inter-variable-cycle assertion). `ref.mdl` and `interleaved.mdl` are
 /// INTER-variable element-acyclic recurrence SCCs (`ce`<->`ecc` /
