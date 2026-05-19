@@ -714,23 +714,58 @@ enum SccVerdict {
 /// element's symbolic segment -- deliberately NOT the LTM
 /// `model_element_causal_edges` graph (no lagged/feedback edges invented).
 ///
-/// **PREVIOUS/lagged-read safety -- where the protection actually is.**
-/// This graph does NOT inherit PREVIOUS-stripping: a read-opcode list
-/// that includes `SymLoadPrev` is treated as an ordinary current-value
-/// read edge here (exactly as the prior `Expr`-level builder collected the
-/// `PREVIOUS`-argument slot through `for_each_expr_ref`). The reason a
-/// PREVIOUS-only self-recurrence (e.g. `x[tNext]=PREVIOUS(x[tPrev],0)`)
-/// is nonetheless safe is SCC *identification* upstream:
-/// `build_var_info` strips `dt_previous_referenced_vars` from `dt_deps`,
-/// so `dt_walk_successors` reports NO whole-variable self-edge for a
-/// PREVIOUS-only recurrence, so `resolve_recurrence_sccs` never identifies
-/// it as an SCC and this function is never invoked for it. For any SCC
-/// that IS identified, including `SymLoadPrev` as an edge is the loud-safe
-/// over-approximation direction: it can only ADD an element edge and
-/// force a conservative `CircularDependency`, never DROP one and let a
-/// genuine cycle through. dt stock-breaking is genuinely inherited (it is
-/// reflected in the symbolic bytecode `lower_var_fragment` +
-/// `compile_phase_to_per_var_bytecodes` produce, not re-implemented).
+/// **PREVIOUS/INIT lagged-read strip -- the element graph inherits
+/// `build_var_info`'s per-phase relation (NOT an over-approximation).**
+/// The element graph models *current-(phase-)timestep evaluation order*.
+/// A lagged/snapshot read is not a current-timestep ordering edge, so the
+/// read-opcode arm inherits `build_var_info`'s exact per-phase
+/// PREVIOUS/INIT strip (the element-level analogue of the variable-level
+/// strip), `phase`-awarely:
+/// - `SymLoadPrev` (PREVIOUS, `prev_values` snapshot, prior timestep):
+///   contributes NO element edge in EITHER phase -- the analogue of
+///   `build_var_info` retaining `dt_deps` against `lagged_dt_previous`
+///   (`deps.dt_previous_referenced_vars`, `db_dep_graph.rs:262`) AND
+///   `initial_deps` against `lagged_initial_previous`
+///   (`deps.initial_previous_referenced_vars`, `:264`).
+/// - `SymLoadInitial` (INIT, `initial_values` snapshot): NO edge in
+///   `SccPhase::Dt` -- the analogue of `dt_deps` being retained against
+///   `init_only_dt` (`deps.dt_init_only_referenced_vars`, `:261`); but
+///   KEEPS the edge in `SccPhase::Initial`, because `build_var_info`
+///   strips ONLY `lagged_initial_previous` from `initial_deps` (`:264`)
+///   and does NOT strip INIT-refs (an `INIT(x)` read during the
+///   initial-value computation is a genuine init-phase ordering edge;
+///   `init_referenced_vars` feeds the Initials runlist, not a strip).
+/// - `LoadVar`/`LoadSubscript`/`PushVarView`/`PushVarViewDirect` and a
+///   `Var`-based `PushStaticView`: current-value reads, kept unchanged --
+///   the reads `build_var_info` never strips.
+///
+/// **Why this is the CORRECT relation, not a new over/under-approximation
+/// (the AC4 soundness argument).** A genuine current-(phase-)timestep
+/// element cycle is, by definition, a cycle of *current-value* reads:
+/// every edge on it is a read of some element's value *in the timestep
+/// being ordered*. `SymLoadPrev` reads the `prev_values` snapshot (a
+/// prior timestep) and `SymLoadInitial` reads the `initial_values`
+/// snapshot (the initial timestep) -- in `SccPhase::Dt` neither is ever
+/// the current dt timestep's value. Excluding them therefore CANNOT drop
+/// an edge that lies on a genuine current-timestep cycle; it removes only
+/// spurious lagged edges. This makes the element graph MATCH the engine's
+/// actual per-phase data-flow relation (`build_var_info`) exactly --
+/// precisely as Phase 1/2 made the SCC relation match the engine's --
+/// rather than the prior loud-safe over-approximation (which collected
+/// `SymLoadPrev`/`SymLoadInitial` as current edges and only "forced a
+/// conservative `CircularDependency`"; that was over-conservative and
+/// blocked C-LEARN's legitimately-identified multi-variable SCC, whose
+/// `SAMPLE IF TRUE`-expanded members carry a PREVIOUS-wrapped same-element
+/// self-read -- 105 spurious element-self-loops, every one a
+/// `SymLoadPrev`). It is also why the upstream identification note still
+/// holds: a *PREVIOUS-only* self-recurrence
+/// (`x[tNext]=PREVIOUS(x[tPrev],0)`) is never even identified as an SCC
+/// (`build_var_info` strips its whole-variable self-edge, so
+/// `dt_walk_successors` reports none); for an SCC that IS identified via
+/// an un-lagged cross-member chain, this strip is what lets its acyclic
+/// current-value element graph resolve. dt stock-breaking is genuinely
+/// inherited (it is reflected in the symbolic bytecode `lower_var_fragment`
+/// + `compile_phase_to_per_var_bytecodes` produce, not re-implemented).
 fn symbolic_phase_element_order(
     db: &dyn Db,
     model: SourceModel,
@@ -810,14 +845,52 @@ fn symbolic_phase_element_order(
                     }
                     pending_reads.clear();
                 }
-                // ── Reads consumed by the current element segment.
+                // ── Current-value reads consumed by the current element
+                // segment. These are the literal current-(phase-)timestep
+                // data-flow reads a genuine element cycle is made of; they
+                // are exactly the reads the variable-level relation keeps
+                // (`build_var_info` never strips a current-value dep).
                 SymbolicOpcode::LoadVar { var }
-                | SymbolicOpcode::SymLoadPrev { var }
-                | SymbolicOpcode::SymLoadInitial { var }
                 | SymbolicOpcode::LoadSubscript { var }
                 | SymbolicOpcode::PushVarView { var, .. }
                 | SymbolicOpcode::PushVarViewDirect { var, .. } => {
                     pending_reads.insert((var.name.clone(), var.element_offset));
+                }
+                // ── PREVIOUS (`prev_values` snapshot, prior timestep):
+                // NEVER a current-timestep ordering edge, in EITHER phase.
+                // This is the element-level analogue of `build_var_info`
+                // stripping `lagged_dt_previous`
+                // (`deps.dt_previous_referenced_vars`) from `dt_deps`
+                // (`db_dep_graph.rs:262`) AND `lagged_initial_previous`
+                // (`deps.initial_previous_referenced_vars`) from
+                // `initial_deps` (`:264`) -- both phases. Contributing no
+                // edge makes the element graph MATCH the engine's actual
+                // per-phase relation; it cannot drop a genuine-cycle edge
+                // because a genuine current-timestep element cycle is a
+                // cycle of *current-value* reads and a `SymLoadPrev` reads
+                // a prior-timestep snapshot, never the current timestep's
+                // value (the AC4 soundness argument; see the fn rustdoc).
+                SymbolicOpcode::SymLoadPrev { .. } => {}
+                // ── INIT (`initial_values` snapshot): PHASE-AWARE. In the
+                // dt graph it is NOT a current-dt ordering edge -- the
+                // element-level analogue of `build_var_info` stripping
+                // `init_only_dt` (`deps.dt_init_only_referenced_vars`)
+                // from `dt_deps` (`db_dep_graph.rs:261`). In the init
+                // graph it IS a genuine init-phase dependency: an INIT(x)
+                // read during the initial-value computation orders x's
+                // initial value before this element, and `build_var_info`
+                // strips ONLY `lagged_initial_previous` from `initial_deps`
+                // (`:264`) -- it does NOT strip INIT-refs (those feed
+                // `init_referenced_vars`, the Initials runlist, not a
+                // strip). Excluding it in `Dt` cannot drop a genuine dt
+                // cycle (same AC4 argument: it is an initial-snapshot read,
+                // not a current-dt-timestep value); keeping it in
+                // `Initial` is required so a genuine init element cycle
+                // through INIT() is still detected.
+                SymbolicOpcode::SymLoadInitial { var } => {
+                    if matches!(phase, crate::db::SccPhase::Initial) {
+                        pending_reads.insert((var.name.clone(), var.element_offset));
+                    }
                 }
                 SymbolicOpcode::PushStaticView { view_id } => {
                     // Resolve the static view's base; if it is a model
@@ -1173,14 +1246,39 @@ pub(crate) fn resolve_recurrence_sccs(
     }
 
     // The offending SCCs, in sorted/byte-stable order: every multi-var
-    // SCC (size >= 2), then every single-variable self-loop. A
-    // multi-variable SCC's members never overlap a self-loop's (a
-    // self-loop is its own size-1 component), so the two are disjoint.
+    // SCC (size >= 2), then every single-variable self-loop.
+    //
+    // Disjointness is NOT automatic. `scc_components` partitions nodes, so
+    // two `multi` SCCs never overlap; but `self_loops` is built
+    // independently from a *direct self-edge* `v -> v`, and a node can
+    // BOTH carry a direct self-edge AND sit in a >= 2 SCC via cross-member
+    // edges (C-LEARN's `emissions_with_cumulative_constraints`: a
+    // `SAMPLE IF TRUE`-shaped variable that whole-variable-references
+    // itself on its non-PREVIOUS path *and* closes the 22-member
+    // recurrence cluster). Tarjan places such a node in its >= 2 component
+    // (it is NOT a standalone size-1 SCC), and its self-edge is then an
+    // *intra-SCC* edge of that larger SCC -- already evaluated in the
+    // SCC's verified per-element `element_order` (Phase 2 Task 5/6), not a
+    // separate recurrence. Re-emitting it as its own 1-member
+    // `ResolvedScc` would (a) double-resolve it and (b) break the
+    // pairwise-disjoint invariant `scc_map_from_resolved` documents and
+    // relies on (its last-write-wins `map.insert` would remap the node to
+    // the 1-member SCC's id, so `same_resolved_scc` would no longer
+    // suppress the genuine intra-cluster back-edges incident to it -> a
+    // false residual `CircularDependency`; the C-LEARN blocker's true
+    // root cause, unmasked once Part A let the >= 2 SCC resolve). So a
+    // `self_loops` entry that is already a `multi` member is filtered out
+    // here: the >= 2 SCC subsumes it.
     let multi: Vec<BTreeSet<Ident<Canonical>>> = crate::ltm::scc_components(&edges)
         .into_iter()
         .filter(|c| c.len() >= 2)
         .map(|c| c.into_iter().collect())
         .collect();
+    let multi_members: BTreeSet<&str> = multi
+        .iter()
+        .flat_map(|c| c.iter().map(|m| m.as_str()))
+        .collect();
+    self_loops.retain(|v| !multi_members.contains(v.as_str()));
 
     let mut resolved: Vec<crate::db::ResolvedScc> = Vec::new();
     let mut has_unresolved = false;

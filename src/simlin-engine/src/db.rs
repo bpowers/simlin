@@ -3229,6 +3229,20 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
 /// `combine_scc_fragment` (the Phase 2 GH #575 rebuild replaced the prior
 /// `Expr`-based accessor entirely).
 ///
+/// This accessor returns the *whole* per-phase symbolic stream verbatim
+/// (PREVIOUS/INIT reads included). Which opcodes become element-graph
+/// *edges* is the consumer's concern: `symbolic_phase_element_order`'s
+/// read-opcode arm inherits `build_var_info`'s exact per-phase
+/// PREVIOUS/INIT strip (`SymLoadPrev` -> no edge in either phase;
+/// `SymLoadInitial` -> no edge in `Dt`, edge in `Initial`; current-value
+/// reads kept), so the element graph MATCHES the engine's actual
+/// per-phase data-flow relation rather than over-collecting lagged reads.
+/// See that function's rustdoc for the AC4 soundness argument and the
+/// exact `db_dep_graph.rs` `build_var_info` line citations. The loud-safe
+/// contract documented *here* is a distinct concern -- it is about a
+/// node failing to be element-*sourced* (always `None`, never a panic),
+/// not about which sourced opcodes are ordering edges.
+///
 /// The caller-owned, lowering-independent context is built byte-identically
 /// to `compile_var_fragment` (same helpers, same order, the default
 /// no-module-input wiring `build_var_info(.., &[])` uses):

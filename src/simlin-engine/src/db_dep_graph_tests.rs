@@ -2760,3 +2760,275 @@ fn model_dep_graph_single_var_self_recurrence_byte_identical_to_phase1() {
          1-member-SCC case must not change N=1 behavior)"
     );
 }
+
+// ── Element-level lagged-read strip (the C-LEARN compile blocker) ───────
+//
+// C-LEARN's `SAMPLE IF TRUE(cond,input,init)` expands
+// (`mdl/xmile_compat.rs:358-366`) to
+// `( IF cond THEN input ELSE PREVIOUS(SELF, init) )`. The hard-coded
+// literal `SELF` is a *bare* `Var` inside `PREVIOUS()`, so the
+// `self_allowed` Var arm (`builtins_visitor.rs`) un-rewrites it to the
+// enclosing variable's bare name; arg0 is a bare non-module Var, so
+// `previous_needs_temp_arg` is false and it stays `PREVIOUS(<self>, init)`
+// -> a direct `LoadPrev` -> `SymLoadPrev` reading THIS element's own slot
+// (verified by dumping the production symbolic fragment: the `sit_x[1]`
+// segment contains `SymLoadPrev(sit_x[1])`). A *subscripted* self-ref
+// (`PREVIOUS(x[e],..)`) would instead be temp-arg-rewritten into a
+// synthetic helper whose read is a CURRENT-value edge -- a structurally
+// different (and already-resolving) shape; the bare form is the genuine
+// C-LEARN shape and the one this fixture uses.
+//
+// When such a variable sits in a genuinely identified multi-variable
+// recurrence SCC (the un-lagged cross-member chain closes the cluster, so
+// `resolve_recurrence_sccs` IS reached), the same-element `SymLoadPrev`
+// is, before Part A, mis-collected by `symbolic_phase_element_order`'s
+// read-opcode arm as a current-value edge -> a spurious
+// `(member,e)->(member,e)` element self-loop -> `self_loop` -> `None` -> a
+// false `CircularDependency` (the verified C-LEARN root cause: 105
+// element-self-loops, every one a `SymLoadPrev`). After Part A the element
+// graph inherits `build_var_info`'s per-phase PREVIOUS/INIT strip
+// (`db_dep_graph.rs` real-var :261-264 / implicit :283-287; `SymLoadPrev`
+// is the element-level analogue of `dt_previous_referenced_vars` /
+// `initial_previous_referenced_vars`, stripped in BOTH phases), so the
+// lagged self-read contributes no edge and the (acyclic, current-value)
+// element graph resolves -- exactly as the variable-level relation already
+// does for the whole-variable PREVIOUS self-edge.
+
+/// A two-element `ref.mdl`-shaped project whose only stateful structure is
+/// the minimized C-LEARN `SAMPLE IF TRUE` blocker: a 2-member
+/// whole-variable recurrence SCC `{sit_x, closer}` where `sit_x` carries
+/// the `SAMPLE IF TRUE`-expanded body with the hard-coded bare `SELF`
+/// (rendered here as the bare self-name `PREVIOUS(sit_x, 0)`, exactly what
+/// `SELF` un-rewrites to):
+///
+///   cond[t1]=1; cond[t2]=1                         (constant; NOT in SCC)
+///   sit_x[t1] = cond[t1]                           (base element)
+///   sit_x[t2] = IF cond[t2] THEN closer[t1] ELSE PREVIOUS(sit_x, 0)
+///   closer[t1] = sit_x[t1] + 1
+///   closer[t2] = sit_x[t2] + 1
+///
+/// Whole-variable `sit_x`<->`closer` is a genuine 2-cycle (`sit_x` reads
+/// `closer` via the THEN branch; `closer` reads `sit_x`), so the SCC IS
+/// identified. The production symbolic fragment for `sit_x` (verified) is
+///   [LoadVar(cond[0]), AssignCurr(sit_x[0]),
+///    LoadVar(closer[0]), LoadConstant, SymLoadPrev(sit_x[1]),
+///      LoadVar(cond[1]), SetCond, If, AssignCurr(sit_x[1]), Ret]
+/// and for `closer`
+///   [LoadVar(sit_x[0]), .., BinOpAssignCurr(closer[0]),
+///    LoadVar(sit_x[1]), .., BinOpAssignCurr(closer[1]), Ret].
+/// The CURRENT-VALUE induced element graph is therefore
+///   (sit_x,0) -> (closer,0); (sit_x,1) -> (closer,1);
+///   (closer,0) -> (sit_x,1)
+/// which is acyclic (a well-founded staggered recurrence). The ONLY thing
+/// that makes it appear cyclic before Part A is the `SymLoadPrev(sit_x[1])`
+/// SAME-element lagged self-read in the `sit_x[1]` segment being
+/// mis-collected as a current-value edge -> spurious
+/// `(sit_x,1)->(sit_x,1)` self-loop. After Part A that lagged read
+/// contributes no edge and the SCC resolves in the per-element
+/// topological order sit_x[0],closer[0],sit_x[1],closer[1].
+fn sample_if_true_shaped_scc_project() -> TestProject {
+    TestProject::new("sample_if_true_shaped_scc")
+        .named_dimension("t", &["t1", "t2"])
+        .array_with_ranges("cond[t]", vec![("t1", "1"), ("t2", "1")])
+        .array_with_ranges(
+            "sit_x[t]",
+            vec![
+                ("t1", "cond[t1]"),
+                ("t2", "IF cond[t2] THEN closer[t1] ELSE PREVIOUS(sit_x, 0)"),
+            ],
+        )
+        .array_with_ranges(
+            "closer[t]",
+            vec![("t1", "sit_x[t1] + 1"), ("t2", "sit_x[t2] + 1")],
+        )
+}
+
+#[test]
+fn resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read() {
+    use crate::db::SccPhase;
+
+    // RED before Part A: the `SymLoadPrev(sit_x[1])` same-element lagged
+    // self-read in the `sit_x[1]` segment is mis-collected as a
+    // current-value element edge, minting a spurious
+    // `(sit_x,1)->(sit_x,1)` self-loop, so `symbolic_phase_element_order`
+    // returns `None` via the `self_loop` branch and
+    // `resolve_recurrence_sccs` reports `has_unresolved` with no
+    // `ResolvedScc` (the false C-LEARN `CircularDependency`). GREEN after
+    // Part A: `SymLoadPrev` contributes no element edge, so the (acyclic,
+    // current-value-only) element graph resolves.
+    let project = sample_if_true_shaped_scc_project();
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(
+        !res.has_unresolved,
+        "the SAMPLE IF TRUE-shaped {{sit_x,closer}} SCC is element-acyclic \
+         once the PREVIOUS same-element lagged self-read is excluded from \
+         the element graph (it is a prior-timestep snapshot, not a \
+         current-timestep ordering edge -- the element-level analogue of \
+         `build_var_info` stripping `dt_previous_referenced_vars`): there \
+         MUST be no unresolved SCC"
+    );
+    assert_eq!(
+        res.resolved.len(),
+        1,
+        "exactly one resolved SCC (the {{sit_x,closer}} cluster)"
+    );
+    let scc = &res.resolved[0];
+    assert_eq!(scc.phase, SccPhase::Dt);
+    assert_eq!(
+        scc.members,
+        [
+            crate::common::Ident::new("closer"),
+            crate::common::Ident::new("sit_x"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>(),
+        "the resolved SCC's members are exactly {{sit_x,closer}}"
+    );
+    // Current-value element edges (PREVIOUS self-read excluded):
+    // (sit_x,0)->(closer,0); (sit_x,1)->(closer,1); (closer,0)->(sit_x,1).
+    // Only (sit_x,0) has indegree 0. Kahn drains
+    // sit_x[0] -> closer[0] -> sit_x[1] -> closer[1] (the unique order;
+    // the encoded-key tie-break never has to choose -- the frontier is a
+    // single node at every step).
+    let closer = |i: usize| (crate::common::Ident::new("closer"), i);
+    let sit_x = |i: usize| (crate::common::Ident::new("sit_x"), i);
+    assert_eq!(
+        scc.element_order,
+        vec![sit_x(0), closer(0), sit_x(1), closer(1)],
+        "element_order must be the per-element topological order with the \
+         PREVIOUS same-element lagged self-read excluded (a spurious \
+         self-loop would have produced `None`/unresolved instead)"
+    );
+
+    // End-to-end: the SCC survives the production dependency-graph gate
+    // with no `CircularDependency` (the C-LEARN blocker, minimized).
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "the SAMPLE IF TRUE-shaped SCC must NOT set has_cycle once the \
+         element-level lagged-read strip lands (the false C-LEARN \
+         CircularDependency)"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "exactly one ResolvedScc survives the gate"
+    );
+}
+
+// ── Self-loop subsumed by a multi-member SCC (the true C-LEARN blocker) ─
+//
+// `resolve_recurrence_sccs` builds `self_loops` from a *direct* whole-
+// variable self-edge `v -> v` INDEPENDENTLY of the `scc_components`
+// partition. A variable that BOTH self-references on a current path AND
+// participates in a >= 2 SCC via cross-member edges lands in `multi` (its
+// >= 2 component) *and* in `self_loops`. Tarjan does NOT make it a
+// standalone size-1 SCC -- its self-edge is an intra-SCC edge of the
+// larger SCC, already evaluated in that SCC's verified per-element
+// `element_order`. Before the disjointness filter, `resolve_recurrence_sccs`
+// emitted TWO overlapping `ResolvedScc`s (the >= 2 SCC and the bogus
+// 1-member self-loop SCC). `scc_map_from_resolved`'s last-write-wins
+// `map.insert` then remapped the shared member to the 1-member SCC's id,
+// so `same_resolved_scc` no longer suppressed the genuine intra-cluster
+// back-edges incident to it, and `model_dependency_graph` reported a
+// false residual `CircularDependency` with `resolved_sccs` cleared. This
+// is C-LEARN's actual compile blocker (`emissions_with_cumulative_constraints`
+// is exactly this shape), unmasked once the element-level lagged-read
+// strip let the 22-member SCC's element graph resolve. This fixture is
+// that shape minimized -- WITHOUT PREVIOUS, isolating the disjointness
+// bug from the lagged-read strip.
+
+/// A two-element project with a 2-member recurrence SCC `{a, b}` where `a`
+/// ALSO has a direct whole-variable self-edge (a current self-reference),
+/// so `a` is in BOTH the `multi` >= 2 SCC and the `self_loops` set:
+///
+///   a[t1] = 1
+///   a[t2] = a[t1] + b[t1]      (current self-ref `a[t1]` -> a in dt_deps(a);
+///                               cross-member `b[t1]` closes the cluster)
+///   b[t1] = a[t1] + 1
+///   b[t2] = a[t2] + 1
+///
+/// Whole-variable `a`<->`b` is a 2-cycle (`a` reads `b`, `b` reads `a`) so
+/// `{a,b}` is a `multi` SCC; `a` additionally has the direct self-edge
+/// `a -> a` (from `a[t2] = a[t1] + ...`) so it is also a `self_loops`
+/// entry. The current-value induced element graph
+///   (a,0)->(a,1); (b,0)->(a,1); (a,0)->(b,0); (a,1)->(b,1)
+/// is acyclic, so the `{a,b}` SCC resolves. The bug is purely the
+/// double-emission of `a` as a separate 1-member self-loop SCC corrupting
+/// `scc_map_from_resolved`.
+fn self_loop_inside_multi_scc_project() -> TestProject {
+    TestProject::new("self_loop_inside_multi_scc")
+        .named_dimension("t", &["t1", "t2"])
+        .array_with_ranges("a[t]", vec![("t1", "1"), ("t2", "a[t1] + b[t1]")])
+        .array_with_ranges("b[t]", vec![("t1", "a[t1] + 1"), ("t2", "a[t2] + 1")])
+}
+
+#[test]
+fn resolve_dt_self_loop_subsumed_by_multi_scc_resolves_no_duplicate() {
+    use crate::db::SccPhase;
+
+    // RED before the disjointness filter: `a` is emitted as BOTH a member
+    // of the resolved 2-member `{a,b}` SCC and a separate resolved
+    // 1-member `{a}` self-loop SCC, so `res.resolved.len() == 2` with a
+    // shared member, `scc_map_from_resolved` corrupts, and
+    // `model_dependency_graph` reports `has_cycle == true` with
+    // `resolved_sccs` cleared (the false C-LEARN residual
+    // `CircularDependency`). GREEN after: `a` is filtered out of
+    // `self_loops` because it is already a `multi` member, so exactly one
+    // `ResolvedScc` `{a,b}` is produced and the gate resolves it.
+    let project = self_loop_inside_multi_scc_project();
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let res = resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt);
+    assert!(
+        !res.has_unresolved,
+        "the {{a,b}} SCC is element-acyclic and element-sourceable: no \
+         unresolved SCC"
+    );
+    assert_eq!(
+        res.resolved.len(),
+        1,
+        "EXACTLY ONE resolved SCC: the 2-member {{a,b}} cluster. `a`'s \
+         direct self-edge is an intra-SCC edge of {{a,b}}, NOT a separate \
+         1-member self-loop SCC -- emitting both double-resolves `a` and \
+         corrupts the pairwise-disjoint invariant `scc_map_from_resolved` \
+         relies on"
+    );
+    let scc = &res.resolved[0];
+    assert_eq!(scc.phase, SccPhase::Dt);
+    assert_eq!(
+        scc.members,
+        [
+            crate::common::Ident::new("a"),
+            crate::common::Ident::new("b"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>(),
+        "the single resolved SCC's members are exactly {{a,b}}"
+    );
+
+    // End-to-end: the production gate resolves it with NO residual
+    // `CircularDependency` (the minimized C-LEARN blocker).
+    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    assert!(
+        !dep_graph.has_cycle,
+        "a self-edge subsumed by a resolved multi-member SCC must NOT \
+         produce a residual CircularDependency: the >= 2 SCC's combined \
+         per-element fragment already evaluates `a`'s self-edge in the \
+         verified element_order (the C-LEARN blocker's true root cause)"
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "exactly one ResolvedScc survives the gate (no duplicate, no \
+         scc_map corruption)"
+    );
+}
