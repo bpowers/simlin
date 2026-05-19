@@ -1236,13 +1236,14 @@ pub(crate) struct ConcatenatedBytecodes {
     pub dim_lists: Vec<(u8, [u16; 4])>,
 }
 
-/// Resource counts for shared context resources across fragments.
-/// Used to compute base offsets when concatenating multiple phases into
-/// a single resource namespace. Literals are excluded because each phase's
-/// bytecode has its own literal pool.
+/// Flat base offsets for the *non-GF* shared context resources when
+/// concatenating multiple phases into a single resource namespace.
+/// Literals are excluded because each phase's bytecode has its own literal
+/// pool. Graphical functions are excluded because they are content-de-
+/// duplicated (#582) rather than flat-counted -- their per-fragment base
+/// comes from a shared `GfDedup` remap, not a running sum.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ContextResourceCounts {
-    pub graphical_functions: u16,
     pub modules: u16,
     pub views: u16,
     pub temps: u32,
@@ -1250,11 +1251,11 @@ pub(crate) struct ContextResourceCounts {
 }
 
 impl ContextResourceCounts {
-    /// Sum the context resource counts from a set of per-variable fragments.
+    /// Sum the flat (non-GF) context resource counts from a set of
+    /// per-variable fragments.
     pub fn from_fragments(fragments: &[&PerVarBytecodes]) -> Self {
         let mut counts = ContextResourceCounts::default();
         for frag in fragments {
-            counts.graphical_functions += frag.graphical_functions.len() as u16;
             counts.modules += frag.module_decls.len() as u16;
             counts.views += frag.static_views.len() as u16;
             // Each fragment's temps start at 0, so the total is the sum of
@@ -1272,18 +1273,30 @@ impl ContextResourceCounts {
     }
 }
 
-/// The six resource-ID base offsets a single fragment's opcodes are
-/// renumbered by (the result of absorbing that fragment into a
-/// `FragmentMerger`). Pass these straight to `renumber_opcode`.
+/// The five flat resource-ID base offsets a single fragment's non-GF
+/// opcodes are renumbered by (the result of absorbing that fragment into a
+/// `FragmentMerger`). Graphical-function IDs are NOT a flat offset -- they
+/// are content-de-duplicated (#582), so they are remapped per local slot
+/// via the companion `GfRemap` rather than a single base. Pass both to
+/// `renumber_opcode` / `renumber_fragment_code`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FragmentResourceOffsets {
     pub lit_offset: u16,
-    pub gf_offset: u16,
     pub mod_offset: u16,
     pub view_offset: u16,
     pub temp_offset: u32,
     pub dl_offset: u16,
 }
+
+/// Per-fragment local-GF-slot -> global-(deduped)-GF-slot map. Index `i`
+/// holds the `merged_gf` index that this fragment's local
+/// `graphical_functions[i]` was de-duplicated to. Total over `[0, gf_len)`,
+/// so a `Lookup`/`LookupArray` `base_gf` is remapped by a single
+/// `gf_remap[base_gf]` lookup; the whole-list shift in
+/// `FragmentMerger::absorb_gf` guarantees `gf_remap[base + k] ==
+/// gf_remap[base] + k`, so the array-lookup `[base .. base + table_count]`
+/// contract survives the remap.
+pub(crate) type GfRemap = SmallVec<[GraphicalFunctionId; 8]>;
 
 /// Running merge state for combining `PerVarBytecodes` into a single
 /// resource namespace.
@@ -1308,10 +1321,160 @@ pub(crate) struct FragmentMerger {
     ctx_base: ContextResourceCounts,
     merged_literals: Vec<f64>,
     merged_gf: Vec<Vec<(f64, f64)>>,
+    /// Cross-fragment graphical-function de-duplication index (#582). Maps a
+    /// GF *block* -- a maximal contiguous run of one or more lookup tables,
+    /// the granularity the monolithic `Compiler::new` lays out one-per-
+    /// variable -- keyed by its bit-exact content, to the global `merged_gf`
+    /// offset its first occurrence was appended at. A dependency arrayed GF
+    /// referenced by N consumer fragments produces N fragments each carrying
+    /// the *same* block (every consumer re-extracts the dependency's
+    /// `Vec<Table>` -- see `db_var_fragment.rs`); de-duplicating the block
+    /// appends it once and remaps every consumer's `base_gf` by the single
+    /// shared offset, matching the monolithic layout.
+    ///
+    /// A fragment's blocks are the *maximal* contiguous intervals its
+    /// `Lookup`/`LookupArray` opcodes reference (overlapping/nested ranges
+    /// merged -- a fragment can reference a per-element arrayed GF both as
+    /// the whole array `g[D!](x)` => `LookupArray { base, |D| }` and at one
+    /// element `g[e](x)` => `Lookup { base + e, 1 }`, which nest), plus one
+    /// block per maximal *un-referenced* gap (over-collected dependency
+    /// tables -- see `gf_blocks_of_fragment`). The returned per-slot remap
+    /// shifts each maximal block as a unit, so an interior/overlapping
+    /// `base_gf` lands at `block_new_base + (base_gf - block_old_base)` and
+    /// the `[base .. base + table_count]` array-lookup span is preserved.
+    /// Value-exact: a block key is its full content, so two genuinely-
+    /// different blocks NEVER share an offset (which would silently make a
+    /// lookup read the wrong table).
+    gf_block_index: HashMap<GfBlockKey, u16>,
     merged_modules: Vec<SymbolicModuleDecl>,
     merged_views: Vec<SymbolicStaticView>,
     merged_temp_sizes: Vec<usize>,
     merged_dim_lists: Vec<(u8, [u16; 4])>,
+}
+
+/// De-duplication key for one GF *block*: the bit-exact content of every
+/// `(x, y)` point of every table in the block, in order, with a table-
+/// boundary marker between tables so that `[[a],[b,c]]` and `[[a,b],[c]]`
+/// (same flattened points, different table split) never collide. `f64` is
+/// not `Hash`/`Eq`, so points are keyed by `to_bits()`; `-0.0` / `+0.0`
+/// hash distinctly, which is the conservative direction (it can only keep
+/// two blocks apart, never merge genuinely-distinct ones).
+type GfBlockKey = SmallVec<[u64; 16]>;
+
+/// Compute the de-duplication key for one GF block (a table slice).
+fn gf_block_key(tables: &[Vec<(f64, f64)>]) -> GfBlockKey {
+    let mut key: GfBlockKey = SmallVec::new();
+    for table in tables {
+        // Boundary marker: the table's point count, tagged in the high
+        // bits so no `to_bits()` point pair can forge a boundary at it.
+        key.push(0xFFFF_FFFF_0000_0000 | table.len() as u64);
+        for (x, y) in table {
+            key.push(x.to_bits());
+            key.push(y.to_bits());
+        }
+    }
+    key
+}
+
+/// Reconstruct the GF *block* layout of a single fragment as a list of
+/// `(start, len)` blocks covering `[0, gf_len)` exactly, sorted by `start`
+/// (#582).
+///
+/// Each `Lookup`/`LookupArray` `base_gf` addresses a run of `table_count`
+/// tables starting at `base_gf`, and `base_gf` is always an originating
+/// variable's block start (the monolithic `Compiler::new` only ever emits a
+/// `base_gf` from its one-per-variable `table_base_ids` map). Within a
+/// fragment one such run can be *nested* inside another: a per-element
+/// arrayed GF `g` is read both as the whole array (`LookupArray { base, |D|
+/// }`) and at one element (`Lookup { base + e, 1 }` -- fully inside the
+/// array's range). The whole-array run is the real block; the nested
+/// element run is a sub-reference, NOT a separate block (splitting the
+/// block at the element boundary could scatter the array across the deduped
+/// table and miscompile the `[base .. base + table_count]` array lookup).
+/// Distinct variables' blocks are laid out *disjointly* by `Compiler::new`,
+/// so opcode runs are only ever disjoint or nested -- never partially
+/// overlapping. The blocks are therefore the *maximal-by-inclusion* opcode
+/// runs (nested runs dropped), plus one block per maximal *un-referenced*
+/// gap (over-collected dependency tables `db_var_fragment.rs` gathered but
+/// no opcode reads -- never read, so an imperfect gap boundary cannot
+/// miscompile, only mildly affect the deduped count).
+///
+/// `Err` only if a run extends past `gf_len` or two runs partially overlap
+/// (a corrupt fragment the engine never produces); loud-safe.
+fn gf_blocks_of_fragment(frag: &PerVarBytecodes) -> Result<Vec<(usize, usize)>, String> {
+    let gf_len = frag.graphical_functions.len();
+    if gf_len == 0 {
+        return Ok(Vec::new());
+    }
+    // Collect the distinct opcode runs.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for op in &frag.symbolic.code {
+        let (base, count) = match op {
+            SymbolicOpcode::Lookup {
+                base_gf,
+                table_count,
+                ..
+            }
+            | SymbolicOpcode::LookupArray {
+                base_gf,
+                table_count,
+                ..
+            } => (*base_gf as usize, *table_count as usize),
+            _ => continue,
+        };
+        if count == 0 {
+            continue;
+        }
+        let end = base
+            .checked_add(count)
+            .filter(|&e| e <= gf_len)
+            .ok_or_else(|| {
+                format!(
+                    "GF run [{base}, {base}+{count}) extends past \
+                     graphical_functions length {gf_len}"
+                )
+            })?;
+        if !runs.contains(&(base, end)) {
+            runs.push((base, end));
+        }
+    }
+    // Keep only the maximal-by-inclusion runs (drop a run strictly
+    // contained in another), and verify the survivors are pairwise disjoint
+    // (partial overlap is corrupt). Sorting by (start, Reverse(end)) puts a
+    // container immediately before the runs it contains.
+    runs.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    let mut maximal: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in runs {
+        match maximal.last() {
+            Some(&(_, prev_end)) if end <= prev_end => {
+                // Nested inside the previous (wider, same-or-earlier start)
+                // run -- a sub-reference, not a separate block.
+                continue;
+            }
+            Some(&(_, prev_end)) if start < prev_end => {
+                return Err(format!(
+                    "GF runs partially overlap (.. {prev_end}) vs ({start} ..) \
+                     in one fragment"
+                ));
+            }
+            _ => maximal.push((start, end)),
+        }
+    }
+    // Emit the maximal runs as blocks, filling each un-referenced gap
+    // (including before the first / after the last run) with its own block.
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    let mut cursor = 0usize;
+    for (start, end) in maximal {
+        if start > cursor {
+            blocks.push((cursor, start - cursor));
+        }
+        blocks.push((start, end - start));
+        cursor = end;
+    }
+    if cursor < gf_len {
+        blocks.push((cursor, gf_len - cursor));
+    }
+    Ok(blocks)
 }
 
 impl FragmentMerger {
@@ -1320,6 +1483,7 @@ impl FragmentMerger {
             ctx_base: ctx_base.clone(),
             merged_literals: Vec::new(),
             merged_gf: Vec::new(),
+            gf_block_index: HashMap::new(),
             merged_modules: Vec::new(),
             merged_views: Vec::new(),
             merged_temp_sizes: Vec::new(),
@@ -1327,18 +1491,33 @@ impl FragmentMerger {
         }
     }
 
-    /// Absorb one fragment's side-channels into the running merge state
-    /// (literals, GFs, modules, views, temp sizes, dim lists) and return
-    /// the six resource base offsets this fragment's opcodes must be
-    /// renumbered by. This is byte-for-byte the per-fragment prologue of
-    /// the original `concatenate_fragments` loop body (offsets computed
-    /// from the *pre-merge* lengths, then the side-channels appended,
-    /// `Temp`-based static views shifted by this fragment's
-    /// `temp_offset`, dim-lists truncated to 4, temp sizes max-merged).
-    pub(crate) fn absorb(&mut self, frag: &PerVarBytecodes) -> FragmentResourceOffsets {
+    /// Absorb one fragment's side-channels into the running merge state and
+    /// return the five flat non-GF resource base offsets plus the per-slot
+    /// GF remap this fragment's opcodes must be renumbered by. This is
+    /// `absorb_non_gf` followed by `absorb_gf` (see those for the contract);
+    /// it is the form `combine_scc_fragment` and `GfDedup::build` use, where
+    /// the GF dedup and the flat accounting must be driven by the same
+    /// merger.
+    pub(crate) fn absorb(
+        &mut self,
+        frag: &PerVarBytecodes,
+    ) -> Result<(FragmentResourceOffsets, GfRemap), String> {
+        let off = self.absorb_non_gf(frag);
+        let gf_remap = self.absorb_gf(frag)?;
+        Ok((off, gf_remap))
+    }
+
+    /// Absorb one fragment's flat (non-GF) side-channels -- literals,
+    /// modules, views, temp sizes, dim lists -- into the running merge
+    /// state and return the five flat resource base offsets. Offsets are
+    /// computed from the *pre-merge* lengths, then the side-channels are
+    /// appended (`Temp`-based static views shifted by this fragment's
+    /// `temp_offset`, dim-lists truncated to 4, temp sizes max-merged) --
+    /// byte-for-byte the original per-fragment prologue. Graphical functions
+    /// are handled separately by `absorb_gf` (content-de-duplicated, #582).
+    pub(crate) fn absorb_non_gf(&mut self, frag: &PerVarBytecodes) -> FragmentResourceOffsets {
         // Literals are phase-local; no ctx_base offset needed.
         let lit_offset = self.merged_literals.len() as u16;
-        let gf_offset = self.merged_gf.len() as u16 + self.ctx_base.graphical_functions;
         let mod_offset = self.merged_modules.len() as u16 + self.ctx_base.modules;
         let view_offset = self.merged_views.len() as u16 + self.ctx_base.views;
         let temp_offset = self.merged_temp_sizes.len() as u32 + self.ctx_base.temps;
@@ -1346,7 +1525,6 @@ impl FragmentMerger {
 
         self.merged_literals
             .extend_from_slice(&frag.symbolic.literals);
-        self.merged_gf.extend_from_slice(&frag.graphical_functions);
         self.merged_modules.extend_from_slice(&frag.module_decls);
         self.merged_views.extend(frag.static_views.iter().map(|sv| {
             let base = match &sv.base {
@@ -1376,12 +1554,69 @@ impl FragmentMerger {
 
         FragmentResourceOffsets {
             lit_offset,
-            gf_offset,
             mod_offset,
             view_offset,
             temp_offset,
             dl_offset,
         }
+    }
+
+    /// Content-de-duplicate one fragment's graphical-function *blocks* into
+    /// the running `merged_gf` and return the per-slot local->global remap
+    /// (#582).
+    ///
+    /// Each block (`gf_blocks_of_fragment`) is keyed by its bit-exact
+    /// content; a block already present (from a prior fragment -- the common
+    /// case: every consumer of a dependency arrayed GF re-extracts the same
+    /// `Vec<Table>`) reuses its existing global start, otherwise the block
+    /// is appended. The returned `GfRemap` shifts each block as a unit, so a
+    /// `Lookup`/`LookupArray` `base_gf` -- whether the block start or an
+    /// interior element reference -- maps to `block_new_base + (base_gf -
+    /// block_old_base)`, preserving the `[base .. base + table_count]`
+    /// array-lookup span.
+    ///
+    /// Returns `Err` if the *distinct* GF count exceeds
+    /// `GraphicalFunctionId` capacity (`u8::MAX`) -- the genuine-capacity
+    /// case the dedup cannot help; escalate, do not widen the ID width here.
+    pub(crate) fn absorb_gf(&mut self, frag: &PerVarBytecodes) -> Result<GfRemap, String> {
+        let gf_len = frag.graphical_functions.len();
+        if gf_len == 0 {
+            return Ok(GfRemap::new());
+        }
+        let mut gf_remap: GfRemap = smallvec::smallvec![0; gf_len];
+        for (block_start, block_len) in gf_blocks_of_fragment(frag)? {
+            let block = &frag.graphical_functions[block_start..block_start + block_len];
+            let key = gf_block_key(block);
+            let global_start = match self.gf_block_index.get(&key) {
+                Some(&existing) => existing,
+                None => {
+                    let start = self.merged_gf.len();
+                    self.merged_gf.extend_from_slice(block);
+                    // The deduped (distinct) GF count must fit the
+                    // GraphicalFunctionId capacity; if it does not, the
+                    // dedup cannot help (these are genuinely-distinct
+                    // tables) -- fail loud rather than wrap a `base_gf` to a
+                    // wrong table.
+                    if self.merged_gf.len() > u8::MAX as usize + 1 {
+                        return Err(format!(
+                            "distinct graphical function count {} exceeds \
+                             GraphicalFunctionId capacity (u8::MAX = {})",
+                            self.merged_gf.len(),
+                            u8::MAX
+                        ));
+                    }
+                    let start_u16 = start as u16;
+                    self.gf_block_index.insert(key, start_u16);
+                    start_u16
+                }
+            };
+            // Shift the whole block by the same delta, so an interior /
+            // nested `base_gf` lands at `global_start + (local - block_start)`.
+            for k in 0..block_len {
+                gf_remap[block_start + k] = (global_start as usize + k) as GraphicalFunctionId;
+            }
+        }
+        Ok(gf_remap)
     }
 
     /// Consume the merger and finalize into a `ConcatenatedBytecodes`,
@@ -1462,9 +1697,10 @@ impl FragmentMerger {
 /// Renumber a single fragment's (Ret-stripped) opcodes by the offsets
 /// returned from `FragmentMerger::absorb`. Shared by both consumers so the
 /// trailing-`Ret` strip and the renumber call site are defined once.
-fn renumber_fragment_code(
+pub(crate) fn renumber_fragment_code(
     code: &[SymbolicOpcode],
     off: &FragmentResourceOffsets,
+    gf_remap: &[GraphicalFunctionId],
     out: &mut Vec<SymbolicOpcode>,
 ) -> Result<(), String> {
     // Strip a trailing Ret -- the merger appends a single Ret at the end.
@@ -1477,7 +1713,7 @@ fn renumber_fragment_code(
         out.push(renumber_opcode(
             op,
             off.lit_offset,
-            off.gf_offset,
+            gf_remap,
             off.mod_offset,
             off.view_offset,
             off.temp_offset,
@@ -1487,28 +1723,106 @@ fn renumber_fragment_code(
     Ok(())
 }
 
-/// Merge multiple `PerVarBytecodes` into a single stream, renumbering
-/// `LiteralId`, `GraphicalFunctionId`, `ModuleId`, `ViewId`, `TempId`,
-/// and `DimListId` to avoid collisions across fragments.
+/// Merge a single phase's `PerVarBytecodes` into one stream, renumbering
+/// `LiteralId`, `GraphicalFunctionId`, `ModuleId`, `ViewId`, `TempId`, and
+/// `DimListId` to avoid collisions across fragments, with the graphical
+/// functions content-de-duplicated within the call (#582).
 ///
-/// `ctx_base` provides context resource ID offsets inherited from preceding
-/// phases. Literal IDs are always phase-local (each phase's bytecode has
-/// its own literal pool) so they are not affected by `ctx_base`.
-/// When assembling a single phase in isolation, pass
-/// `ContextResourceCounts::default()`.
+/// Assembly's multi-phase path uses `GfDedup::build` +
+/// `concatenate_fragments_with_gf` directly (one shared GF dedup across all
+/// phases); this single-call convenience wrapper -- a `GfDedup::build` over
+/// exactly `fragments` followed by `concatenate_fragments_with_gf` -- is the
+/// focused-unit-test surface for the merge + dedup behavior, so it is
+/// `#[cfg(test)]`.
+#[cfg(test)]
 pub(crate) fn concatenate_fragments(
     fragments: &[&PerVarBytecodes],
     ctx_base: &ContextResourceCounts,
 ) -> Result<ConcatenatedBytecodes, String> {
+    let dedup = GfDedup::build(fragments)?;
+    concatenate_fragments_with_gf(fragments, ctx_base, &dedup, 0)
+}
+
+/// Cross-fragment graphical-function de-duplication result (#582): the one
+/// de-duplicated GF table plus a per-fragment local-slot -> global-slot
+/// remap, one entry per input fragment (by input index). Built once over
+/// the union of all fragments that share a resource namespace, then handed
+/// to every phase's renumber so each phase's `base_gf`s index the same
+/// deduped table -- the only way the dedup stays coherent when the
+/// initials / flows / stocks phases are renumbered separately.
+pub(crate) struct GfDedup {
+    /// The de-duplicated GF tables (the module's final `graphical_functions`).
+    pub tables: Vec<Vec<(f64, f64)>>,
+    /// Per-fragment (by input index) local-slot -> deduped-global-slot map.
+    remaps: Vec<GfRemap>,
+}
+
+impl GfDedup {
+    /// De-duplicate the GF table lists of `fragments` (in order) by
+    /// bit-exact content, matching the monolithic `Compiler::new`'s
+    /// one-list-per-variable layout. Value-exact: genuinely-different lists
+    /// never share an offset. `Err` if the *distinct* GF count exceeds
+    /// `GraphicalFunctionId` capacity (the genuine-capacity case the dedup
+    /// cannot help -- escalate, do not widen the ID width here).
+    pub fn build(fragments: &[&PerVarBytecodes]) -> Result<Self, String> {
+        // Reuse `FragmentMerger`'s GF-dedup machinery on an otherwise-unused
+        // merger so the de-dup logic lives in exactly one place. Only the
+        // GF side-channel is touched (`absorb_gf`); the flat resources are
+        // the per-phase callers' concern.
+        let mut merger = FragmentMerger::new(&ContextResourceCounts::default());
+        let mut remaps = Vec::with_capacity(fragments.len());
+        for frag in fragments {
+            remaps.push(merger.absorb_gf(frag)?);
+        }
+        Ok(GfDedup {
+            tables: merger.merged_gf,
+            remaps,
+        })
+    }
+
+    pub(crate) fn remap(&self, frag_index: usize) -> &[GraphicalFunctionId] {
+        &self.remaps[frag_index]
+    }
+}
+
+/// Renumber `fragments` into one stream, using `dedup` for the (already
+/// computed, possibly cross-phase) GF de-duplication and `ctx_base` +
+/// flat running counts for the other resources. `gf_index_base` is the
+/// position of `fragments[0]` within the fragment slice `dedup` was built
+/// over (0 when `dedup` covers exactly `fragments`; the running phase
+/// offset when one `GfDedup` spans initials + flows + stocks).
+///
+/// The non-GF resource accounting is byte-for-byte the original
+/// `concatenate_fragments` loop -- only the GF base now comes from the
+/// shared deduped remap instead of a flat `gf_off`, so the output is
+/// identical to before for any model whose GF table lists were already
+/// distinct.
+pub(crate) fn concatenate_fragments_with_gf(
+    fragments: &[&PerVarBytecodes],
+    ctx_base: &ContextResourceCounts,
+    dedup: &GfDedup,
+    gf_index_base: usize,
+) -> Result<ConcatenatedBytecodes, String> {
     let mut merger = FragmentMerger::new(ctx_base);
     let mut merged_code: Vec<SymbolicOpcode> = Vec::new();
 
-    for frag in fragments {
-        let off = merger.absorb(frag);
-        renumber_fragment_code(&frag.symbolic.code, &off, &mut merged_code)?;
+    for (i, frag) in fragments.iter().enumerate() {
+        // Only the flat resources are merged here; GF numbering comes from
+        // the shared `dedup` so it is coherent across phases.
+        let off = merger.absorb_non_gf(frag);
+        renumber_fragment_code(
+            &frag.symbolic.code,
+            &off,
+            dedup.remap(gf_index_base + i),
+            &mut merged_code,
+        )?;
     }
 
-    Ok(merger.into_concatenated(merged_code))
+    let mut concatenated = merger.into_concatenated(merged_code);
+    // The merger never touched GF (`absorb_non_gf`), so install the shared
+    // deduped table; every phase reports the same `graphical_functions`.
+    concatenated.graphical_functions = dedup.tables.clone();
+    Ok(concatenated)
 }
 
 fn checked_add_u8(base: u8, off: u8, label: &str) -> Result<u8, String> {
@@ -1523,14 +1837,40 @@ fn checked_add_u8(base: u8, off: u8, label: &str) -> Result<u8, String> {
     })
 }
 
+/// Remap a `Lookup`/`LookupArray` `base_gf` through a fragment's per-slot
+/// GF remap (#582). The whole-list shift in `FragmentMerger::absorb_gf`
+/// guarantees `gf_remap[base + k] == gf_remap[base] + k`, so a single
+/// lookup of `base_gf` suffices and the `table_count` span stays valid. An
+/// out-of-range `base_gf` is a corrupt fragment (loud-safe `Err`, never a
+/// silent wrong-table read).
+fn remap_gf(
+    base_gf: GraphicalFunctionId,
+    gf_remap: &[GraphicalFunctionId],
+) -> Result<GraphicalFunctionId, String> {
+    gf_remap.get(base_gf as usize).copied().ok_or_else(|| {
+        format!(
+            "GF base {} out of range for fragment GF remap of length {}",
+            base_gf,
+            gf_remap.len()
+        )
+    })
+}
+
 /// Renumber resource IDs within a single opcode.
 ///
-/// Returns `Err` if any offset arithmetic would overflow the target ID type
-/// (e.g. temp_off > u8::MAX or gf_off > u8::MAX).
+/// Flat resources (`LiteralId`, `ModuleId`, `ViewId`, `TempId`,
+/// `DimListId`) are offset by the fragment's flat base; `GraphicalFunctionId`
+/// is *content-de-duplicated* (#582), so a `Lookup`/`LookupArray` `base_gf`
+/// is translated through `gf_remap` (the fragment's per-slot local->global
+/// map from `FragmentMerger::absorb_gf`) rather than a flat add.
+///
+/// Returns `Err` if a flat offset would overflow its target ID type
+/// (e.g. `temp_off > u8::MAX`) or if a `base_gf` is out of range for
+/// `gf_remap` (a corrupt fragment).
 pub(crate) fn renumber_opcode(
     op: &SymbolicOpcode,
     lit_off: u16,
-    gf_off: u16,
+    gf_remap: &[GraphicalFunctionId],
     mod_off: u16,
     view_off: u16,
     temp_off: u32,
@@ -1543,15 +1883,7 @@ pub(crate) fn renumber_opcode(
             u8::MAX
         ));
     }
-    if gf_off > u8::MAX as u16 {
-        return Err(format!(
-            "graphical function offset {} exceeds GraphicalFunctionId capacity (u8::MAX = {})",
-            gf_off,
-            u8::MAX
-        ));
-    }
     let temp_off_u8 = temp_off as u8;
-    let gf_off_u8 = gf_off as u8;
     Ok(match op {
         SymbolicOpcode::LoadConstant { id } => SymbolicOpcode::LoadConstant { id: *id + lit_off },
         SymbolicOpcode::AssignConstCurr { var, literal_id } => SymbolicOpcode::AssignConstCurr {
@@ -1563,7 +1895,7 @@ pub(crate) fn renumber_opcode(
             table_count,
             mode,
         } => SymbolicOpcode::Lookup {
-            base_gf: checked_add_u8(*base_gf, gf_off_u8, "GF ID")?,
+            base_gf: remap_gf(*base_gf, gf_remap)?,
             table_count: *table_count,
             mode: *mode,
         },
@@ -1631,15 +1963,16 @@ pub(crate) fn renumber_opcode(
             write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
         },
         // LookupArray carries BOTH a GF-table base (like `Lookup`) and a
-        // result temp id (like the other vector ops), so both are offset on
-        // fragment concatenation.
+        // result temp id (like the other vector ops). The GF base is
+        // content-remapped (the `[base .. base + table_count]` block stays
+        // contiguous after dedup); the temp id is flat-offset.
         SymbolicOpcode::LookupArray {
             base_gf,
             table_count,
             mode,
             write_temp_id,
         } => SymbolicOpcode::LookupArray {
-            base_gf: checked_add_u8(*base_gf, gf_off_u8, "GF ID")?,
+            base_gf: remap_gf(*base_gf, gf_remap)?,
             table_count: *table_count,
             mode: *mode,
             write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
@@ -2768,7 +3101,7 @@ mod tests {
     #[test]
     fn test_renumber_opcode_temp_offset_overflow() {
         let op = SymbolicOpcode::LoadTempDynamic { temp_id: 0 };
-        let err = renumber_opcode(&op, 0, 0, 0, 0, 300, 0).unwrap_err();
+        let err = renumber_opcode(&op, 0, &[], 0, 0, 300, 0).unwrap_err();
         assert!(
             err.contains("TempId capacity"),
             "expected TempId overflow error, got: {}",
@@ -2777,33 +3110,61 @@ mod tests {
     }
 
     #[test]
-    fn test_renumber_opcode_gf_offset_overflow() {
+    fn test_renumber_opcode_gf_base_out_of_range_is_loud() {
+        // #582: the GF base is now content-remapped through a per-fragment
+        // remap (not a flat add). A `base_gf` outside the remap's range is
+        // a corrupt fragment -- it must fail loud rather than silently read
+        // a wrong (or out-of-bounds) table.
         let op = SymbolicOpcode::Lookup {
-            base_gf: 0,
+            base_gf: 3,
             table_count: 1,
             mode: LookupMode::Interpolate,
         };
-        let err = renumber_opcode(&op, 0, 300, 0, 0, 0, 0).unwrap_err();
+        // Remap only covers slots 0..2; base_gf 3 is out of range.
+        let err = renumber_opcode(&op, 0, &[0, 1], 0, 0, 0, 0).unwrap_err();
         assert!(
-            err.contains("GraphicalFunctionId capacity"),
-            "expected GF overflow error, got: {}",
+            err.contains("out of range for fragment GF remap"),
+            "expected out-of-range GF remap error, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_renumber_opcode_gf_remap_translates_base() {
+        // The remap relocates `base_gf` to its deduped global slot; the
+        // happy path must apply it (and leave `table_count` intact).
+        let op = SymbolicOpcode::Lookup {
+            base_gf: 1,
+            table_count: 1,
+            mode: LookupMode::Interpolate,
+        };
+        match renumber_opcode(&op, 0, &[5, 9, 13], 0, 0, 0, 0).unwrap() {
+            SymbolicOpcode::Lookup {
+                base_gf,
+                table_count,
+                ..
+            } => {
+                assert_eq!(base_gf, 9, "base_gf must be remapped via gf_remap[1]");
+                assert_eq!(table_count, 1);
+            }
+            other => panic!("expected Lookup, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_renumber_opcode_at_boundary() {
         // u8::MAX = 255, so temp_off=255 should succeed
         let op = SymbolicOpcode::LoadTempDynamic { temp_id: 0 };
-        assert!(renumber_opcode(&op, 0, 0, 0, 0, 255, 0).is_ok());
+        assert!(renumber_opcode(&op, 0, &[], 0, 0, 255, 0).is_ok());
 
-        // gf_off=255 should succeed
+        // A GF base remapped to 255 (the last valid GraphicalFunctionId)
+        // should succeed.
         let op = SymbolicOpcode::Lookup {
             base_gf: 0,
             table_count: 1,
             mode: LookupMode::Interpolate,
         };
-        assert!(renumber_opcode(&op, 0, 255, 0, 0, 0, 0).is_ok());
+        assert!(renumber_opcode(&op, 0, &[255], 0, 0, 0, 0).is_ok());
     }
 
     // ====================================================================
@@ -2852,29 +3213,37 @@ mod tests {
             dim_lists: vec![],
         };
 
-        // Without base offsets, both fragments get independent numbering
+        // The two fragments carry DIFFERENT GF content, so they stay
+        // distinct: frag_a's GF at 0, frag_b's at 1 (#582 dedup is
+        // value-exact -- different content never collides).
         let no_base = ContextResourceCounts::default();
         let merged_no_base = concatenate_fragments(&[&frag_a, &frag_b], &no_base).unwrap();
-        // frag_a's GF stays at 0, frag_b's GF becomes 1
         assert_eq!(merged_no_base.graphical_functions.len(), 2);
+        match &merged_no_base.bytecode.code[0] {
+            SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 0),
+            other => panic!("expected Lookup, got {:?}", other),
+        }
         match &merged_no_base.bytecode.code[1] {
             SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 1),
             other => panic!("expected Lookup, got {:?}", other),
         }
 
-        // With base offset of 5 GFs (simulating 5 GFs from a preceding phase),
-        // frag_a's GF should be renumbered to 5, frag_b's to 6
+        // GF numbering is INDEPENDENT of the (now GF-free) non-GF
+        // `ctx_base` -- graphical functions are content-de-duplicated and
+        // globally remapped, not flat-offset by a preceding-phase count
+        // (#582). A non-default non-GF base (e.g. 5 preceding modules) must
+        // NOT shift the GF indices.
         let base = ContextResourceCounts {
-            graphical_functions: 5,
+            modules: 5,
             ..ContextResourceCounts::default()
         };
         let merged_with_base = concatenate_fragments(&[&frag_a, &frag_b], &base).unwrap();
         match &merged_with_base.bytecode.code[0] {
-            SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 5),
+            SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 0),
             other => panic!("expected Lookup, got {:?}", other),
         }
         match &merged_with_base.bytecode.code[1] {
-            SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 6),
+            SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 1),
             other => panic!("expected Lookup, got {:?}", other),
         }
     }
@@ -2886,6 +3255,8 @@ mod tests {
                 literals: vec![1.0, 2.0, 3.0],
                 code: vec![SymbolicOpcode::Ret],
             },
+            // GF count is NOT a `ContextResourceCounts` field anymore (#582
+            // dedup), so a GF here must not affect the flat counts below.
             graphical_functions: vec![vec![(0.0, 1.0)], vec![(1.0, 2.0)]],
             module_decls: vec![],
             static_views: vec![],
@@ -2894,7 +3265,6 @@ mod tests {
         };
 
         let counts = ContextResourceCounts::from_fragments(&[&frag]);
-        assert_eq!(counts.graphical_functions, 2);
         assert_eq!(counts.modules, 0);
         assert_eq!(counts.views, 0);
         assert_eq!(counts.temps, 2);
@@ -2995,7 +3365,7 @@ mod tests {
             write_temp_id: 0,
             full_source_len: 6,
         };
-        match renumber_opcode(&elm_map, 0, 0, 0, 0, temp_off, 0).unwrap() {
+        match renumber_opcode(&elm_map, 0, &[], 0, 0, temp_off, 0).unwrap() {
             SymbolicOpcode::VectorElmMap {
                 write_temp_id,
                 full_source_len,
@@ -3008,7 +3378,7 @@ mod tests {
         }
 
         let sort_order = SymbolicOpcode::VectorSortOrder { write_temp_id: 2 };
-        match renumber_opcode(&sort_order, 0, 0, 0, 0, temp_off, 0).unwrap() {
+        match renumber_opcode(&sort_order, 0, &[], 0, 0, temp_off, 0).unwrap() {
             SymbolicOpcode::VectorSortOrder { write_temp_id } => {
                 assert_eq!(write_temp_id, 7);
             }
@@ -3016,7 +3386,7 @@ mod tests {
         }
 
         let alloc = SymbolicOpcode::AllocateAvailable { write_temp_id: 1 };
-        match renumber_opcode(&alloc, 0, 0, 0, 0, temp_off, 0).unwrap() {
+        match renumber_opcode(&alloc, 0, &[], 0, 0, temp_off, 0).unwrap() {
             SymbolicOpcode::AllocateAvailable { write_temp_id } => {
                 assert_eq!(write_temp_id, 6);
             }
@@ -3123,24 +3493,303 @@ mod tests {
     fn test_renumber_opcode_u8_addition_overflow() {
         // temp_off=200 fits in u8, but base temp_id=100 + 200 = 300 overflows u8
         let op = SymbolicOpcode::LoadTempDynamic { temp_id: 100 };
-        let err = renumber_opcode(&op, 0, 0, 0, 0, 200, 0).unwrap_err();
+        let err = renumber_opcode(&op, 0, &[], 0, 0, 200, 0).unwrap_err();
         assert!(
             err.contains("overflow"),
             "expected overflow error, got: {}",
             err
         );
+    }
 
-        // Similarly for GF: gf_off=200, base_gf=100 -> 300 overflows u8
-        let op = SymbolicOpcode::Lookup {
-            base_gf: 100,
-            table_count: 1,
-            mode: LookupMode::Interpolate,
-        };
-        let err = renumber_opcode(&op, 0, 200, 0, 0, 0, 0).unwrap_err();
+    // ====================================================================
+    // #582: cross-fragment graphical-function de-duplication.
+    //
+    // `concatenate_fragments` previously appended every fragment's
+    // `graphical_functions` with no de-duplication (the flat running
+    // `gf_offset = merged_gf.len()`), so a dependency arrayed GF referenced
+    // by N consumer fragments duplicated N times and `renumber_opcode`'s
+    // `gf_off > u8::MAX` guard tripped once the duplicated count crossed
+    // 255 -- even though the *distinct* count is small. The monolithic
+    // `Compiler::new` (codegen.rs) carries each variable's GF list exactly
+    // once (its `module.tables` map is keyed by ident), so the incremental
+    // path was incorrect-by-omission, not merely capacity-limited.
+    // ====================================================================
+
+    /// Build a single-`Lookup` fragment carrying one scalar GF table whose
+    /// content is `data`, with its opcode referencing GF 0.
+    fn gf_lookup_frag(data: Vec<(f64, f64)>) -> PerVarBytecodes {
+        PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![
+                    SymbolicOpcode::Lookup {
+                        base_gf: 0,
+                        table_count: 1,
+                        mode: LookupMode::Interpolate,
+                    },
+                    SymbolicOpcode::Ret,
+                ],
+            },
+            graphical_functions: vec![data],
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![],
+        }
+    }
+
+    #[test]
+    fn test_concatenate_dedups_identical_gf_tables_under_u8_capacity() {
+        // 300 consumer fragments, each referencing the SAME dependency GF
+        // table by content. The pre-fix flat append would push 300 tables
+        // into `merged_gf` and the 256th `base_gf` renumber would overflow
+        // u8 -- exactly the C-LEARN `... exceeds GraphicalFunctionId
+        // capacity` failure. With content de-duplication there is ONE
+        // distinct table, so every `base_gf` resolves to 0 and the result
+        // is well under u8::MAX.
+        let shared = vec![(0.0, 0.0), (1.0, 10.0), (2.0, 20.0)];
+        let frags: Vec<PerVarBytecodes> =
+            (0..300).map(|_| gf_lookup_frag(shared.clone())).collect();
+        let refs: Vec<&PerVarBytecodes> = frags.iter().collect();
+
+        let no_base = ContextResourceCounts::default();
+        let merged = concatenate_fragments(&refs, &no_base)
+            .expect("identical GF tables must de-duplicate, not overflow u8");
+
+        assert_eq!(
+            merged.graphical_functions.len(),
+            1,
+            "300 fragments sharing one GF table must collapse to a single \
+             distinct table"
+        );
+        assert_eq!(merged.graphical_functions[0], shared);
+        // Every fragment's Lookup must resolve to the single deduped table.
+        let lookups: Vec<u8> = merged
+            .bytecode
+            .code
+            .iter()
+            .filter_map(|op| match op {
+                SymbolicOpcode::Lookup { base_gf, .. } => Some(*base_gf),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lookups.len(), 300);
         assert!(
-            err.contains("overflow"),
-            "expected overflow error, got: {}",
-            err
+            lookups.iter().all(|&b| b == 0),
+            "all 300 Lookups must point at the single deduped table index 0"
+        );
+    }
+
+    #[test]
+    fn test_concatenate_keeps_distinct_gf_tables_distinct() {
+        // Value-exactness guard: two tables with DIFFERENT content must
+        // NEVER merge to one index (that would silently make a Lookup read
+        // the wrong table). Three fragments: A and C share content, B is
+        // distinct -> exactly two deduped tables, and A/C point at one, B
+        // at the other.
+        let content_ac = vec![(0.0, 1.0), (1.0, 2.0)];
+        let content_b = vec![(0.0, 1.0), (1.0, 99.0)]; // same x, different y
+        let frag_a = gf_lookup_frag(content_ac.clone());
+        let frag_b = gf_lookup_frag(content_b.clone());
+        let frag_c = gf_lookup_frag(content_ac.clone());
+
+        let no_base = ContextResourceCounts::default();
+        let merged = concatenate_fragments(&[&frag_a, &frag_b, &frag_c], &no_base).unwrap();
+
+        assert_eq!(
+            merged.graphical_functions.len(),
+            2,
+            "distinct-content tables must stay distinct"
+        );
+        let lookups: Vec<u8> = merged
+            .bytecode
+            .code
+            .iter()
+            .filter_map(|op| match op {
+                SymbolicOpcode::Lookup { base_gf, .. } => Some(*base_gf),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lookups.len(), 3);
+        // A and C must resolve to the SAME index; B to a DIFFERENT one.
+        assert_eq!(lookups[0], lookups[2], "A and C share content");
+        assert_ne!(lookups[0], lookups[1], "B is distinct content");
+        // And each resolved index must actually hold that fragment's content.
+        assert_eq!(
+            merged.graphical_functions[lookups[0] as usize], content_ac,
+            "A's resolved table must be A's content"
+        );
+        assert_eq!(
+            merged.graphical_functions[lookups[1] as usize], content_b,
+            "B's resolved table must be B's content (NOT A's)"
+        );
+    }
+
+    #[test]
+    fn test_concatenate_dedups_arrayed_gf_lists_preserving_contiguity() {
+        // A `LookupArray` reads `graphical_functions[base_gf .. base_gf +
+        // table_count]`, so an arrayed GF is a CONTIGUOUS run of tables.
+        // Whole-list de-duplication must keep that run contiguous and in
+        // order: two fragments carrying the same 3-table list collapse to
+        // one shared run; a third fragment carrying a DIFFERENT list gets
+        // its own contiguous run.
+        let list_xy = vec![vec![(0.0, 0.0)], vec![(0.0, 10.0)], vec![(0.0, 20.0)]];
+        let list_z = vec![
+            vec![(0.0, 0.0)],  // shares element 0 content with list_xy
+            vec![(0.0, 99.0)], // diverges at element 1
+            vec![(0.0, 20.0)],
+        ];
+        let arrayed_frag = |list: Vec<Vec<(f64, f64)>>| PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![
+                    SymbolicOpcode::LookupArray {
+                        base_gf: 0,
+                        table_count: 3,
+                        mode: LookupMode::Interpolate,
+                        write_temp_id: 0,
+                    },
+                    SymbolicOpcode::Ret,
+                ],
+            },
+            graphical_functions: list,
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![(0, 3)],
+            dim_lists: vec![],
+        };
+        let fa = arrayed_frag(list_xy.clone());
+        let fb = arrayed_frag(list_xy.clone());
+        let fc = arrayed_frag(list_z.clone());
+
+        let no_base = ContextResourceCounts::default();
+        let merged = concatenate_fragments(&[&fa, &fb, &fc], &no_base).unwrap();
+
+        // list_xy (shared by fa, fb) + list_z (fc) = 2 distinct 3-table
+        // runs = 6 tables, NOT the pre-fix 9.
+        assert_eq!(
+            merged.graphical_functions.len(),
+            6,
+            "two distinct 3-table lists must dedup to 6 tables, contiguity \
+             preserved"
+        );
+        let bases: Vec<u8> = merged
+            .bytecode
+            .code
+            .iter()
+            .filter_map(|op| match op {
+                SymbolicOpcode::LookupArray { base_gf, .. } => Some(*base_gf),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bases.len(), 3);
+        assert_eq!(bases[0], bases[1], "fa and fb share the list");
+        assert_ne!(bases[0], bases[2], "fc's list diverges");
+        // Each resolved run must be exactly that fragment's list, in order
+        // (the contiguity contract `LookupArray` depends on).
+        let read_run = |base: u8| -> Vec<Vec<(f64, f64)>> {
+            (0..3)
+                .map(|k| merged.graphical_functions[base as usize + k].clone())
+                .collect()
+        };
+        assert_eq!(read_run(bases[0]), list_xy);
+        assert_eq!(read_run(bases[2]), list_z);
+    }
+
+    #[test]
+    fn test_concatenate_dedups_overlapping_element_and_whole_array_refs() {
+        // A single fragment can reference a per-element arrayed GF BOTH as
+        // the whole array (`LookupArray { base_gf: 0, table_count: 3 }`) and
+        // at a specific element (`Lookup { base_gf: 1, table_count: 1 }`) --
+        // the `base_gf` ranges overlap/nest. The whole-list shift must
+        // relocate BOTH refs by the same offset so the element ref still
+        // lands inside the relocated array. (This is the
+        // `lookup/lookup.xmile`-shape that a naive disjoint-block dedup
+        // mis-rejected as "overlapping blocks".)
+        let arrayed_list = vec![vec![(0.0, 0.0)], vec![(0.0, 10.0)], vec![(0.0, 20.0)]];
+        let overlap_frag = PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: vec![
+                    SymbolicOpcode::LookupArray {
+                        base_gf: 0,
+                        table_count: 3,
+                        mode: LookupMode::Interpolate,
+                        write_temp_id: 0,
+                    },
+                    SymbolicOpcode::Lookup {
+                        base_gf: 1, // element 1 of the SAME arrayed GF
+                        table_count: 1,
+                        mode: LookupMode::Interpolate,
+                    },
+                    SymbolicOpcode::Ret,
+                ],
+            },
+            graphical_functions: arrayed_list.clone(),
+            module_decls: vec![],
+            static_views: vec![],
+            temp_sizes: vec![(0, 3)],
+            dim_lists: vec![],
+        };
+        // A preceding fragment with one distinct table forces a non-zero
+        // shift, so the relocation is actually exercised.
+        let prefix = gf_lookup_frag(vec![(5.0, 5.0)]);
+
+        let no_base = ContextResourceCounts::default();
+        let merged = concatenate_fragments(&[&prefix, &overlap_frag], &no_base)
+            .expect("overlapping element/whole-array refs must not be rejected");
+
+        // prefix (1 table) + the 3-table arrayed list = 4 tables, none
+        // dropped, none mis-detected as overlapping.
+        assert_eq!(merged.graphical_functions.len(), 4);
+        let (array_base, elem_base) = {
+            let mut array_base = None;
+            let mut elem_base = None;
+            for op in &merged.bytecode.code {
+                match op {
+                    SymbolicOpcode::LookupArray { base_gf, .. } => array_base = Some(*base_gf),
+                    SymbolicOpcode::Lookup { base_gf, .. } => elem_base = Some(*base_gf),
+                    _ => {}
+                }
+            }
+            (array_base.unwrap(), elem_base.unwrap())
+        };
+        // The array was shifted to start at 1 (after the prefix table); the
+        // element ref must remain its +1 interior offset (now 2).
+        assert_eq!(array_base, 1, "arrayed GF shifted past the prefix table");
+        assert_eq!(
+            elem_base, 2,
+            "the element ref must stay at array_base + 1 after the whole-list shift"
+        );
+        // The relocated run must hold the arrayed list verbatim, and the
+        // element ref must index its element 1.
+        assert_eq!(
+            merged.graphical_functions[array_base as usize..array_base as usize + 3].to_vec(),
+            arrayed_list
+        );
+        assert_eq!(
+            merged.graphical_functions[elem_base as usize],
+            arrayed_list[1]
+        );
+    }
+
+    #[test]
+    fn test_concatenate_genuinely_distinct_gf_over_capacity_fails_loud() {
+        // If a model genuinely has MORE than `GraphicalFunctionId::MAX + 1`
+        // (256) *distinct* GF tables, de-duplication cannot help -- the ID
+        // width truly cannot address them. That must fail with a clear
+        // capacity error (the escalation case), NEVER silently wrap a
+        // `base_gf` to a wrong table.
+        let frags: Vec<PerVarBytecodes> = (0..300)
+            .map(|i| gf_lookup_frag(vec![(0.0, i as f64), (1.0, (i + 1) as f64)]))
+            .collect();
+        let refs: Vec<&PerVarBytecodes> = frags.iter().collect();
+        let err = concatenate_fragments(&refs, &ContextResourceCounts::default())
+            .expect_err("300 genuinely-distinct GF tables exceed u8 capacity");
+        assert!(
+            err.contains("distinct graphical function count")
+                && err.contains("GraphicalFunctionId capacity"),
+            "expected a loud distinct-GF-capacity error, got: {err}"
         );
     }
 }

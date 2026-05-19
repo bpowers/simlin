@@ -3614,14 +3614,14 @@ pub(crate) fn combine_scc_fragment(
     // resource namespace (`ctx_base = default`), exactly as a per-variable
     // fragment is.
     let mut merger = FragmentMerger::new(&ContextResourceCounts::default());
-    let mut member_offsets: HashMap<Ident<Canonical>, FragmentResourceOffsets> = HashMap::new();
+    let mut absorbed: HashMap<Ident<Canonical>, FragmentResourceOffsets> = HashMap::new();
     // Per-member, per-element renumbered segments. Keyed by the same
     // `(member, element)` identity `element_order` carries.
     let mut renumbered_segments: HashMap<(Ident<Canonical>, usize), Vec<SymbolicOpcode>> =
         HashMap::new();
 
     for (member, _elem) in &scc.element_order {
-        if member_offsets.contains_key(member) {
+        if absorbed.contains_key(member) {
             continue;
         }
         let frag = member_fragments.get(member).ok_or_else(|| {
@@ -3631,15 +3631,17 @@ pub(crate) fn combine_scc_fragment(
                 member.as_str()
             )
         })?;
-        // `absorb` merges this member's side-channels and returns its
-        // resource base offsets -- the exact per-fragment prologue
-        // `concatenate_fragments` runs.
-        let off = merger.absorb(frag);
-        member_offsets.insert(member.clone(), off);
+        // `absorb` merges this member's side-channels (de-duplicating its
+        // GF blocks against the running merge -- #582) and returns its flat
+        // resource base offsets plus the per-slot GF remap -- the exact
+        // per-fragment prologue `concatenate_fragments` runs.
+        let (off, gf_remap) = merger.absorb(frag)?;
+        absorbed.insert(member.clone(), off);
 
         // Segment the member's symbolic code on its per-element write
         // opcodes (identical contract to the Task 4 verdict builder), then
-        // renumber every opcode of every segment by THIS member's offsets.
+        // renumber every opcode of every segment by THIS member's offsets
+        // and GF remap.
         let segments = segment_member_by_element(member.as_str(), &frag.symbolic.code)?;
         for (elem, ops) in segments {
             let mut renumbered = Vec::with_capacity(ops.len());
@@ -3647,7 +3649,7 @@ pub(crate) fn combine_scc_fragment(
                 renumbered.push(renumber_opcode(
                     op,
                     off.lit_offset,
-                    off.gf_offset,
+                    &gf_remap,
                     off.mod_offset,
                     off.view_offset,
                     off.temp_offset,
@@ -4672,7 +4674,7 @@ pub fn assemble_module(
 ) -> Result<crate::bytecode::CompiledModule, String> {
     use crate::compiler::symbolic::{
         ContextResourceCounts, SymbolicCompiledInitial, SymbolicCompiledModule,
-        concatenate_fragments, resolve_module,
+        concatenate_fragments_with_gf, resolve_module,
     };
 
     let module_input_names: Vec<String> = module_inputs
@@ -5087,14 +5089,30 @@ pub fn assemble_module(
     let no_base = ContextResourceCounts::default();
     let flow_base = initial_counts.clone();
     let stock_base = ContextResourceCounts {
-        graphical_functions: initial_counts.graphical_functions + flow_counts.graphical_functions,
         modules: initial_counts.modules + flow_counts.modules,
         views: initial_counts.views + flow_counts.views,
         temps: initial_counts.temps + flow_counts.temps,
         dim_lists: initial_counts.dim_lists + flow_counts.dim_lists,
     };
 
-    let flows_concat = concatenate_fragments(&flow_frags, &flow_base).inspect_err(|msg| {
+    // #582: graphical functions are content-de-duplicated across ALL
+    // fragments of the model (one block per distinct table, matching the
+    // monolithic `Compiler::new`), so -- unlike the flat literal/module/
+    // view/temp/dim-list resources -- their `base_gf`s cannot be a per-phase
+    // running count. Build the dedup ONCE over the union of every phase's
+    // fragments (in the all-phases order initials, flows, stocks) and feed
+    // each phase the corresponding per-fragment GF remap. A dependency
+    // arrayed GF referenced by hundreds of consumer fragments now lands in
+    // `graphical_functions` exactly once instead of once per consumer,
+    // which both fixes the `GraphicalFunctionId = u8` overflow and matches
+    // the monolithic GF-table layout.
+    let all_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = initial_frags
+        .iter()
+        .map(|(_, bc)| *bc)
+        .chain(flow_frags.iter().copied())
+        .chain(stock_frags.iter().copied())
+        .collect();
+    let gf_dedup = crate::compiler::symbolic::GfDedup::build(&all_frags).inspect_err(|msg| {
         try_accumulate_diagnostic(
             db,
             Diagnostic {
@@ -5105,29 +5123,49 @@ pub fn assemble_module(
             },
         );
     })?;
-    let stocks_concat = concatenate_fragments(&stock_frags, &stock_base).inspect_err(|msg| {
-        try_accumulate_diagnostic(
-            db,
-            Diagnostic {
-                model: model_name.clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg.clone()),
-                severity: DiagnosticSeverity::Error,
-            },
-        );
-    })?;
+    // Phase offsets into `all_frags` so each phase's fragments map to their
+    // remap entry.
+    let n_init = initial_frags.len();
+    let n_flow = flow_frags.len();
+
+    let flows_concat = concatenate_fragments_with_gf(&flow_frags, &flow_base, &gf_dedup, n_init)
+        .inspect_err(|msg| {
+            try_accumulate_diagnostic(
+                db,
+                Diagnostic {
+                    model: model_name.clone(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg.clone()),
+                    severity: DiagnosticSeverity::Error,
+                },
+            );
+        })?;
+    let stocks_concat =
+        concatenate_fragments_with_gf(&stock_frags, &stock_base, &gf_dedup, n_init + n_flow)
+            .inspect_err(|msg| {
+                try_accumulate_diagnostic(
+                    db,
+                    Diagnostic {
+                        model: model_name.clone(),
+                        variable: None,
+                        error: DiagnosticError::Assembly(msg.clone()),
+                        severity: DiagnosticSeverity::Error,
+                    },
+                );
+            })?;
 
     // Build SymbolicCompiledInitial for each initial variable, renumbered
     // so context resource IDs (GFs, modules, views, temps, dim_lists) match
     // the all-phases merge. Literal IDs are local to each initial's bytecode
-    // so they get no base offset.
+    // so they get no base offset. The GF base comes from the shared dedup
+    // (initial `i` is `all_frags[i]`); the other resources stay flat.
     let mut compiled_initials: Vec<SymbolicCompiledInitial> = Vec::new();
-    let mut init_gf_off: u16 = 0;
     let mut init_mod_off: u16 = 0;
     let mut init_view_off: u16 = 0;
     let mut init_temp_off: u32 = 0;
     let mut init_dl_off: u16 = 0;
-    for (name, bc) in &initial_frags {
+    for (i, (name, bc)) in initial_frags.iter().enumerate() {
+        let gf_remap = gf_dedup.remap(i);
         let renumbered_code: Vec<crate::compiler::symbolic::SymbolicOpcode> = bc
             .symbolic
             .code
@@ -5136,7 +5174,7 @@ pub fn assemble_module(
                 crate::compiler::symbolic::renumber_opcode(
                     op,
                     0, // literals are local to each initial's bytecode
-                    init_gf_off,
+                    gf_remap,
                     init_mod_off,
                     init_view_off,
                     init_temp_off,
@@ -5162,7 +5200,6 @@ pub fn assemble_module(
                 code: renumbered_code,
             },
         });
-        init_gf_off += bc.graphical_functions.len() as u16;
         init_mod_off += bc.module_decls.len() as u16;
         init_view_off += bc.static_views.len() as u16;
         let frag_temp_count = bc
@@ -5175,24 +5212,22 @@ pub fn assemble_module(
         init_dl_off += bc.dim_lists.len() as u16;
     }
 
-    // Build the all-phases merge for shared context (GFs, modules, views, temps, dim_lists)
-    let all_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = initial_frags
-        .iter()
-        .map(|(_, bc)| *bc)
-        .chain(flow_frags.iter().copied())
-        .chain(stock_frags.iter().copied())
-        .collect();
-    let merged = concatenate_fragments(&all_frags, &no_base).inspect_err(|msg| {
-        try_accumulate_diagnostic(
-            db,
-            Diagnostic {
-                model: model_name.clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg.clone()),
-                severity: DiagnosticSeverity::Error,
-            },
-        );
-    })?;
+    // The all-phases merge for the shared context side-channels (modules,
+    // views, temps, dim_lists); its `graphical_functions` is the dedup's
+    // single table (set by `concatenate_fragments_with_gf`), shared by all
+    // three phases.
+    let merged =
+        concatenate_fragments_with_gf(&all_frags, &no_base, &gf_dedup, 0).inspect_err(|msg| {
+            try_accumulate_diagnostic(
+                db,
+                Diagnostic {
+                    model: model_name.clone(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg.clone()),
+                    severity: DiagnosticSeverity::Error,
+                },
+            );
+        })?;
 
     // Build dimension metadata from project dimensions (mirrors Compiler::populate_dimension_metadata)
     let dm_dims = source_dims_to_datamodel(project.dimensions(db));
