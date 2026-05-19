@@ -11,7 +11,12 @@ unmasked **two pre-existing, latent compile bugs orthogonal to cycle
 resolution** (filed as GH #580) that block AC7.1 — fixed here as general engine
 fixes (no model-specific hacks) so Task 1's structural gate can be committed
 passing; the user was surfaced the corrected #575-class scope picture and chose
-"drive both fixes now".
+"drive both fixes now". **Task 6 (added after Tasks 4-5):** fixing Bug B then
+unmasked a 3rd distinct, orthogonal pre-existing layer (GH #582 — a
+`GraphicalFunctionId` overflow from missing cross-fragment GF de-duplication in
+`concatenate_fragments`) that still blocks AC7.1; fixed in Task 6 under the
+user's follow-on "drive #582, checkpoint per layer" directive (each further
+unmasked layer is surfaced to the user before being driven).
 
 **Architecture:** Add a new `#[ignore]`d structural-gate test in
 `tests/simulate.rs` that parses C-LEARN, compiles it via the incremental path
@@ -662,6 +667,104 @@ commit` (pre-commit; NEVER `--no-verify`).
 **Commit:** `engine: arrayed-GF dependency stub in isolated per-variable recompile (#580 Bug B)`
 <!-- END_TASK_5 -->
 
+<!-- START_TASK_6 -->
+### Task 6: #582 — cross-fragment graphical-function de-duplication in `concatenate_fragments`
+
+**Verifies:** unblocks element-cycle-resolution.AC7.1 (3rd layer unmasked by
+Tasks 4-5); directly verified by its own focused unit test. Added under the
+user's "drive #582, checkpoint per layer" directive after Tasks 4-5 landed.
+
+**Why added (Task 5 outcome, verified — GH #582):** with Bug B fixed
+(`ad432fbe`), C-LEARN's ~6 arrayed-GF-in-reducer fragments now compile and
+their dependency GF tables enter fragment assembly for the first time. That
+exposes a pre-existing **fragment-concatenation-vs-monolithic divergence**:
+`concatenate_fragments`'s `absorb` (`compiler/symbolic.rs:1349`,
+`self.merged_gf.extend_from_slice(&frag.graphical_functions)`) appends every
+fragment's `graphical_functions` with **no de-duplication**, so a dependency
+arrayed GF referenced by N consumer fragments is duplicated N times. C-LEARN
+has only ~165 *distinct* GF tables, but the duplication accumulates past 255 and
+`renumber_opcode`'s `gf_off > u8::MAX` guard (`symbolic.rs:1546-1551`) trips:
+`NotSimulatable: "graphical function offset 493 exceeds GraphicalFunctionId
+capacity (u8::MAX = 255)"` (`GraphicalFunctionId = u8`, `bytecode.rs:21`;
+`Opcode::Lookup`/`LookupArray` `base_gf` renumbered via `checked_add_u8` at
+`symbolic.rs:1566`/`:1642`). The monolithic `Module::compile` **de-duplicates**
+GF tables — so the incremental path is incorrect-by-omission here, not merely
+capacity-limited. 3rd distinct pre-existing latent bug the cleared cycle gate
+exposed (Bug A, Bug B, then this); orthogonal to cycle resolution.
+
+**Files:**
+- Modify: `src/simlin-engine/src/compiler/symbolic.rs` — `concatenate_fragments`
+  / `absorb` (the GF-table merge ~`:1349`) and the GF renumber path
+  (`renumber_opcode` / `renumber_fragment_code`, the `gf_off` arithmetic
+  ~`:1546-1642`).
+- Add: a focused `#[cfg(test)]` unit test (in `compiler/symbolic.rs`'s test
+  module, or `array_tests.rs`).
+
+**Implementation — root-cause-confirm FIRST (the plan's per-bug diagnosis has
+been wrong 3x — verify, do not trust), then fix (general, monolithic-matching):**
+1. **Confirm** (RED): reproduce the overflow with a minimal input — either a
+   synthetic model where one dependency arrayed GF is referenced by enough
+   consumer fragments that the *duplicated* count exceeds `u8::MAX` while the
+   *distinct* count stays well under it, OR a direct `#[cfg(test)]`
+   `concatenate_fragments`/`absorb` unit test with hand-built fragments sharing
+   GF tables (whichever is the cheaper, clearer RED — plan convention 4, bounded
+   ~4-5 attempts + `track-issue` escalation). Confirm the EXACT dedup key the
+   monolithic `Module::compile` uses (GF `Table` value identity? the originating
+   variable ident? read the monolithic path and match it — do not invent a key)
+   and the exact `base_gf`/`gf_off` remap arithmetic the current flat-offset
+   renumber assumes.
+2. **Fix:** de-duplicate GF tables across fragments in `absorb` /
+   `concatenate_fragments`, keyed by the SAME identity the monolithic path uses,
+   and remap each fragment's local `base_gf` references to the deduped global
+   index (the flat running `gf_off` is replaced by a per-fragment local→global
+   GF index map threaded through `renumber_opcode` / `renumber_fragment_code`).
+   After dedup, C-LEARN's ~165 distinct GFs are well under `u8::MAX`, so
+   `GraphicalFunctionId = u8` is retained — **do NOT widen to u16** (the weaker
+   band-aid; if some model has >255 *genuinely distinct* GFs even after dedup,
+   that is a separate concern — file via `track-issue`, do not scope-creep here).
+
+**Loud-safe / no silent miscompile (load-bearing):** the dedup MUST be
+value-exact — two GF tables that are genuinely different must NEVER merge to one
+index (that would silently make a `Lookup`/`LookupArray` read the wrong table).
+The identity key must be the table's full content (or a key the monolithic path
+already proves sufficient). If two fragments carry the same *name* but different
+table content, they must stay distinct (or it is a pre-existing name-collision
+bug — STOP and report, do not paper over it).
+
+**Testing (TDD, mandatory):**
+- RED→GREEN: the minimal overflow reproduction above — RED `... exceeds
+  GraphicalFunctionId capacity ...`; GREEN compiles and (if a runnable model)
+  simulates correctly, with the deduped `merged_gf` length == the distinct GF
+  count and every `Lookup`/`LookupArray` resolving to the correct table.
+- A focused unit test asserting `absorb` / `concatenate_fragments` dedups
+  identical GF tables and remaps `base_gf` correctly, and KEEPS distinct tables
+  distinct (the value-exactness guard).
+- **MANDATORY soundness pins (must stay GREEN unchanged):** `concatenate_fragments`
+  is the SAME machinery the Phase 2 GH #575 combined-SCC-fragment lowering uses
+  (`FragmentMerger` / `renumber_fragment_code`) — so pin the full recurrence /
+  cycle suite (`self_recurrence`, `ref`, `interleaved`, `init_recurrence`,
+  `helper_recurrence`, `genuine_cycles_still_rejected`), the full `db_dep_graph`
+  + `db_combined_fragment_tests` suites, `incremental_compilation_covers_all_models`
+  (AC2.6, the 22-model corpus — the strongest no-regression gate for a GF
+  renumber change), `array_tests` / `compiler_vector` (GF / Lookup coverage),
+  and the full engine lib. If ANY combined-fragment / SCC-verdict / corpus-model
+  / GF-lookup test changes behavior — **STOP and report** (a remap bug is a
+  silent miscompile risk).
+
+**Verification:**
+Run the RED→GREEN reproduction + the focused unit test + the full soundness-pin
+set in the default capped suite. Then run the C-LEARN structural gate:
+`cargo test -p simlin-engine --features file_io --release -- --ignored compiles_and_runs_clearn_structural --nocapture`
+— report the EXACT outcome (compile `Result`, run-to-FINAL-TIME, the
+matched-series not-all-NaN check). If C-LEARN now compiles `Ok` + runs +
+not-all-NaN, AC7.1/7.2/7.3 are met (the orchestrator then sequences the Task 1
+commit). If a further latent layer surfaces, report it PRECISELY (root cause,
+the `Err`/panic, the site) — do NOT mask it; the orchestrator checkpoints with
+the user per the "checkpoint per layer" directive. `git commit` (pre-commit
+fmt/clippy/non-ignored cargo test 180s cap; NEVER `--no-verify`).
+**Commit:** `engine: cross-fragment graphical-function de-duplication (#582)`
+<!-- END_TASK_6 -->
+
 ---
 
 ## Phase 6 Done When
@@ -678,13 +781,22 @@ commit` (pre-commit; NEVER `--no-verify`).
 - The two latent compile bugs the cleared cycle gate unmasked (GH #580) are
   fixed as general engine fixes, each with its own fast model-agnostic unit
   test: group-mapped subscript translation in temp-arg-helper extraction
-  (Task 4 — Bug A) and the arrayed-GF dependency stub in the isolated
-  per-variable recompile (Task 5 — Bug B). With both in, no synthetic temp-arg
-  helper or real arrayed var remains in `compile_project_incremental`'s
-  `missing_vars`, so Task 1's structural gate compiles `Ok` (Tasks 4-5 are
-  sequenced BEFORE the Task 1 commit). The shared `dimensions.rs` mapping
-  resolver and the SCC element-graph compile path are regression-pinned (no
-  LTM / cycle-gate behavior change). #580 closes when both land.
+  (Task 4 — Bug A, as-built: `db.rs::expand_maps_to_chains` canonicalization)
+  and the arrayed-GF-in-reducer codegen gap (Task 5 — Bug B, as-built: the
+  `LookupArray` opcode + `Expr3` decomposition). With both in, no synthetic
+  temp-arg helper or real arrayed var remains in `compile_project_incremental`'s
+  `missing_vars`. The shared `dimensions.rs` mapping resolver and the SCC
+  element-graph compile path are regression-pinned (no LTM / cycle-gate
+  behavior change). #580 closes when both land.
+- Cross-fragment graphical-function de-duplication in `concatenate_fragments`
+  (Task 6 — GH #582) removes the `GraphicalFunctionId = u8` overflow that
+  Bug B's fix unmasked, matching the monolithic `Module::compile` dedup, with
+  the combined-SCC-fragment machinery (`FragmentMerger` / `renumber_fragment_code`)
+  and the 22-model corpus regression-pinned and the dedup proven value-exact
+  (no wrong-table miscompile). With Tasks 4-6 in, C-LEARN's incremental compile
+  reaches `Ok` and Task 1's structural gate is sequenced for commit. #582 closes
+  when Task 6 lands. (Per the "checkpoint per layer" directive, any *further*
+  latent layer Task 6 unmasks is surfaced to the user before being driven.)
 - The default engine suite stays green under the 3-minute `cargo test` cap
   (the new C-LEARN test is `#[ignore]`d / runtime-class).
 <!-- END_PHASE_6 -->
