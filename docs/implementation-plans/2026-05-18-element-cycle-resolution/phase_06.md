@@ -23,7 +23,13 @@ after a user-authorized forward sweep):** the sweep established that #583 (the
 #582-class concat-vs-monolithic **divergence**, NOT genuine-capacity — the
 monolithic path recycles temps to ~21 while the incremental path sums to 243/3233
 and widening produces a runtime OOB. Task 7 fixes it by matching the monolithic
-recycle (not widening).
+recycle (not widening). **Tasks 8-9 (AC7.3 NaN layer):** with C-LEARN
+compiling+running (Tasks 4-7; AC7.1/7.2 met), AC7.3 (no all-NaN core series)
+fails on two SPURIOUS engine bugs (Ref.vdf is finite everywhere Simlin is
+NaN/inf) — a macro-`INITIAL()` module output omitted from the initials runlist
+(Task 8, Cluster A) and arrayed `VECTOR SORT ORDER` returning flat global
+indices instead of per-iterated-slice 0-based ranks (Task 9, Cluster B,
+completing the AC5 multi-row case Phase 4 missed) — fixed as general engine fixes.
 
 **Architecture:** Add a new `#[ignore]`d structural-gate test in
 `tests/simulate.rs` that parses C-LEARN, compiles it via the incremental path
@@ -900,6 +906,149 @@ orchestrator checkpoints with the user per the "checkpoint per layer" directive.
 **Commit:** `engine: match monolithic temp recycling in fragment concatenation (#583)`
 <!-- END_TASK_7 -->
 
+<!-- START_TASK_8 -->
+### Task 8: AC7.3 NaN Cluster A — INITIAL-backed module/macro primary output omitted from the initials runlist
+
+**Verifies:** element-cycle-resolution.AC7.3 (no core C-LEARN series entirely
+NaN); directly verified by its own focused test.
+
+**Why added (root-caused after Task 7 — C-LEARN runs but ~177 climate vars are
+inf/NaN):** with C-LEARN compiling+running (Tasks 4-7; AC7.1/7.2 met), AC7.3
+fails — 708-of-3482 matched core series (939-of-5726 offsets) are entirely NaN.
+A read-only investigation found TWO independent **SPURIOUS** engine bugs (Ref.vdf
+is FINITE at every offset Simlin reports NaN/inf — not genuine model NaN). Cluster
+A (this task, the majority): C-LEARN defines a user macro `:MACRO: INIT(x) → INIT
+= INITIAL(x)` (the MDL importer renames Vensim `INITIAL`→`init`; the macro SHADOWS
+the built-in `init` by macro precedence); ~177 call sites (e.g.
+`volumetric_heat_capacity = INITIAL(...)`, line 12698) compile to invoke this one
+shared macro module. **The bug:** that macro module's compiled **initials runlist
+OMITS its own `INITIAL()` primary output** (`init = INITIAL(x)`, data offset 0) —
+the output is compiled ONLY into the flows phase. During the PARENT's initials
+phase the parent reads the module-output slot, which is **never written during
+initials** → uninitialized garbage (inf), frozen into the `initial_values`
+snapshot (`vm.rs` `run_initials` `copy_from_slice`) and served forever by
+`LoadInitial`. `volumetric_heat_capacity` = **inf** (Simlin) vs **0.1327**
+(Ref.vdf); the input arg evaluates correctly to 0.1327. **(The prior
+runlist-ORDERING hypothesis is DISPROVEN — the outer initials order is correct;
+the defect is runlist INCLUSION: the slot is never written in initials at all.)**
+
+**Files:**
+- Modify: `src/simlin-engine/src/db_dep_graph.rs` — `runlist_initials` (~`:2182-2229`,
+  the `needed`-set inclusion predicate ~`:2182-2193`).
+- (Likely) Modify: `src/simlin-engine/src/db.rs` — the initials-phase gate (`:3828`
+  and `:4084`, `if dep_graph.runlist_initials.contains(&var_ident_str) { ... } else
+  { None }`).
+- Add: a focused `#[cfg(test)]` / integration test.
+
+**Implementation — root-cause-confirm FIRST (plan diagnoses have been wrong;
+verify), then fix (general):**
+1. **Confirm** the mechanism: probe that the macro module's `INITIAL()`-backed
+   primary output (compiles to `LoadInitial`) is absent from `runlist_initials`,
+   so its slot is unwritten during the parent's initials phase and holds garbage.
+   Confirm the current inclusion predicate's criteria and that the macro-output
+   aux falls through.
+2. **Fix:** extend the initials-runlist inclusion predicate so a (module/macro)
+   primary-output variable whose equation compiles to `LoadInitial` (is
+   `INITIAL(...)`) — and is read during a parent's initials phase — is INCLUDED in
+   `runlist_initials` (and the `db.rs` gate admits its initial bytecodes). General:
+   ANY variable read during initials whose value comes from `INITIAL()` must be
+   evaluated in the initials phase. No model-specific / macro-name-specific hack.
+
+**Loud-safe:** do not broaden the initials runlist beyond what is genuinely read
+during initials (over-inclusion could change init ordering/costs). Precise: an
+`INITIAL()`-backed output that IS read in initials.
+
+**Testing (TDD, mandatory):**
+- RED-first fixture (shape empirically determined — plan convention 4, bounded
+  ~4-5 attempts + `track-issue` escalation): a minimal model with a user macro
+  `:MACRO: MYINIT(x) MYINIT = INITIAL(x) :END OF MACRO:` and a parent
+  `y = MYINIT(<expr>)` (or the equivalent module whose primary output is
+  `INITIAL(...)`), asserting `y` simulates to `<expr>`'s initial value (NOT
+  inf/NaN). RED before the fix (inf/NaN), GREEN after.
+- **MANDATORY soundness pins (must stay GREEN unchanged):** the macro suites
+  (`macro_expansion_tests`, `metasd_macros`), the INIT/PREVIOUS + init-recurrence
+  suites (`init_recurrence`, `helper_recurrence`, `previous_self_reference_still_resolves`),
+  the full recurrence/cycle gates, `incremental_compilation_covers_all_models`
+  (AC2.6, 22-model corpus), and the full engine lib. If ANY init-ordering / macro
+  / corpus test changes behavior — STOP and report.
+
+**Verification:**
+Run the fixture + soundness pins. Then re-run the C-LEARN structural gate and
+report how many of the all-NaN offsets are cleared by Cluster A alone (the
+Cluster B / COP-target family remains until Task 9 — expected). `git commit`
+(NEVER `--no-verify`).
+**Commit:** `engine: include INITIAL-backed module outputs in the initials runlist (AC7.3 Cluster A)`
+<!-- END_TASK_8 -->
+
+<!-- START_TASK_9 -->
+### Task 9: AC7.3 NaN Cluster B — arrayed VECTOR SORT ORDER per-iterated-slice 0-based ranks (completes AC5)
+
+**Verifies:** element-cycle-resolution.AC7.3 (no core C-LEARN series entirely
+NaN) + completes element-cycle-resolution.AC5 (VECTOR SORT ORDER genuine-Vensim
+semantics — the multi-row case Phase 4 did not cover); directly verified by its
+own focused unit test.
+
+**Why added (root-caused after Task 7 — the COP-target NaN family):** the second
+spurious-engine-bug cluster (Ref.vdf finite). C-LEARN: `Target Order[COP,Target] =
+VECTOR SORT ORDER(Effective Target Year[COP,Target], ASCENDING)` (line 19565), then
+`sorted target year[COP,Target] = VECTOR ELM MAP(Effective Target Year[COP,t1],
+Target Order[COP,Target])` (line 19486). `Target` = 3 elements, `COP` = 7 rows.
+**The bug:** `Opcode::VectorSortOrder` (`vm.rs` ~`:2334-2377`) returns **GLOBAL
+FLAT indices into the entire [COP,Target] array** instead of **per-iterated-row
+0-based ranks** — for the 7th COP row it emits [18,19,20] instead of [0,1,2]. Then
+`VECTOR ELM MAP` (`vm_vector_elm_map.rs:107`) uses [18,19,20] to index the
+7-element single-column slice `Effective Target Year[COP,t1]` → out-of-bounds →
+NaN. (The ELM MAP OOB→NaN is the CORRECT Phase 5 semantics — the bug is the bad
+indices fed to it.) `target_order[cop_developing_b]` = **[18,19,20]** (Simlin) vs
+**[0,1,2]** (Ref.vdf); `sorted_target_year[cop_developing_b]` = **NaN** vs
+**4000.0**. This is the **multi-row / A2A** VECTOR SORT ORDER case — Phase 4's AC5
+fix corrected the 1-based→0-based output for the single-row case but did not cover
+per-iterated-slice ranks for a multi-dimensional source.
+
+**Files:**
+- Modify: `src/simlin-engine/src/vm.rs` — `Opcode::VectorSortOrder` dispatch
+  (~`:2334-2377`).
+- Add: focused unit tests in `src/simlin-engine/src/array_tests.rs` (and/or
+  `tests/compiler_vector.rs`).
+
+**Implementation — root-cause-confirm FIRST, then fix (general, genuine-Vensim):**
+1. **Confirm** that for a multi-row arrayed source `VectorSortOrder` currently
+   emits flat whole-array offsets rather than per-row 0-based ranks (probe a
+   `[D1,D2]` fixture). Confirm genuine-Vensim semantics: VECTOR SORT ORDER ranks
+   within the **iterated slice** (per-row), 0-based (as Phase 4 established for the
+   single-row case and `MEMORY.md` records).
+2. **Fix:** `VectorSortOrder` must compute ranks relative to the
+   **currently-iterated source slice** (each row's worth of elements), 0-based, so
+   the result is a valid per-row index permutation. General correctness fix for ALL
+   arrayed VSO callers; the single-row case (Phase 4 / AC5) must stay byte-identical.
+
+**Loud-safe:** the result must be a valid per-slice index permutation (every index
+in `[0, slice_len)`), so a downstream `VECTOR ELM MAP` cannot read OOB on a
+well-formed model.
+
+**Testing (TDD, mandatory):**
+- RED-first: a multi-row `order[D1,D2] = VECTOR SORT ORDER(vals[D1,D2], ascending)`
+  fixture where each D1-row's sort must be 0-based WITHIN the row — RED (flat global
+  indices), GREEN (per-row 0-based). Plus the C-LEARN downstream shape
+  (`VECTOR ELM MAP(src[D1,e1], order[D1,D2])`) proving no OOB NaN. Bounded attempts
+  + `track-issue` escalation.
+- **MANDATORY soundness pins (must stay GREEN unchanged — esp. the AC5 single-row
+  suite Phase 4 established):** `array_tests` `vso_*` / `mod flag_split_tests` /
+  `mod dimension_dependent_scalar_arg_tests`, the five `tests/compiler_vector.rs`
+  VSO tests (`vector_sort_order_a2a_*`, `nested_vector_sort_order_inside_sum_*`),
+  `simulates_vector_simple_mdl` (the `l`/`m` columns), `incremental_compilation_covers_all_models`
+  (22-model corpus), and the full engine lib. If ANY single-row VSO / corpus test
+  changes behavior — STOP and report (the fix must not regress Phase 4's AC5).
+
+**Verification:**
+Run the fixtures + soundness pins. Then re-run the C-LEARN structural gate — with
+BOTH Task 8 (Cluster A) and Task 9 (Cluster B) in, report whether AC7.3 now PASSES
+(no matched core series entirely NaN). If a residual NaN tail remains (a 3rd
+cause), report it precisely — do NOT mask; the orchestrator checkpoints with the
+user. `git commit` (NEVER `--no-verify`).
+**Commit:** `engine: arrayed VECTOR SORT ORDER per-slice 0-based ranks (AC5/AC7.3 Cluster B)`
+<!-- END_TASK_9 -->
+
 ---
 
 ## Phase 6 Done When
@@ -939,10 +1088,18 @@ orchestrator checkpoints with the user per the "checkpoint per layer" directive.
   `combine_scc_fragment` (GH #575) path keeps disjoint temp ranges; the 22-model
   corpus + combined-fragment suite are regression-pinned and the recycle proven
   collision-free (no silent miscompile). With Tasks 4-7 in, C-LEARN's incremental
-  compile reaches `Ok` and `Vm::new` succeeds; if a runtime-numeric layer then
-  surfaces (AC7.2/7.3 / Phase 7 territory — not exercised under the sweep probe)
-  it is surfaced to the user per the "checkpoint per layer" directive before
-  being driven. #583 closes when Task 7 lands.
+  compile reaches `Ok` and runs to FINAL TIME (AC7.1, AC7.2 met). #583 closes when
+  Task 7 lands.
+- No core C-LEARN series is entirely NaN (AC7.3): the two SPURIOUS engine bugs
+  the run exposed (Ref.vdf is finite where Simlin is NaN/inf) are fixed as general
+  engine fixes — a macro-`INITIAL()` module output omitted from the initials
+  runlist (Task 8 — Cluster A) and arrayed `VECTOR SORT ORDER` returning flat
+  global indices instead of per-iterated-slice 0-based ranks (Task 9 — Cluster B,
+  completing the AC5 multi-row case). The 22-model corpus, the AC5 single-row VSO
+  suite, the macro/init suites, and the recurrence gates are regression-pinned.
+  If a residual NaN tail remains after both (a 3rd cause), it is surfaced to the
+  user per the "checkpoint per layer" directive (the full `Ref.vdf` 1% match is
+  Phase 7's AC8.1).
 - The default engine suite stays green under the 3-minute `cargo test` cap
   (the new C-LEARN test is `#[ignore]`d / runtime-class).
 <!-- END_PHASE_6 -->
