@@ -150,7 +150,10 @@ pub enum Expr<'input> {
     /// calls. For example, `FUNC(a, b,)` produces args `[a, b, Literal("?")]`.
     /// This matches xmutil's `vpyy_literal_expression("?")` behavior.
     Literal(Cow<'input, str>, Loc),
-    /// `:NA:` constant (-1e38)
+    /// Vensim's `:NA:` constant: the finite "missing data" sentinel `-2^109`
+    /// (see `crate::float::NA`), NOT IEEE NaN. Both lowering paths -- the
+    /// expression formatter (`xmile_compat`) and the data-list number parser --
+    /// route it to that single sentinel.
     Na(Loc),
 }
 

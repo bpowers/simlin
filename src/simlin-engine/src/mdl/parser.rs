@@ -47,8 +47,12 @@ impl std::error::Error for ParseError {}
 // Helpers moved from parser_helpers.rs
 // ============================================================================
 
-/// The sentinel value for :NA: in Vensim.
-const NA_VALUE: f64 = -1e38;
+/// The sentinel value for `:NA:` in Vensim: the finite "missing data" marker
+/// `-2^109` (NOT IEEE NaN -- see `crate::float::NA`). Data-list `:NA:` literals
+/// (e.g. `x = 1, :NA:, 3`) must route to the same sentinel as expression `:NA:`
+/// so the representation is consistent and Vensim-faithful. Previously this was
+/// `-1e38`, an unrelated value that disagreed with the expression path.
+const NA_VALUE: f64 = crate::float::NA;
 
 /// Parse a number string to f64.
 fn parse_number(s: &str, start: usize, end: usize) -> Result<f64, ParseError> {
@@ -1944,6 +1948,11 @@ mod tests {
 
     #[test]
     fn test_extract_number_na() {
+        // `:NA:` extracts as the finite Vensim sentinel `-2^109`, not the old
+        // `-1e38` and not NaN. `NA_VALUE` is `crate::float::NA`; pin the concrete
+        // value here so a regression in the constant is caught.
+        assert_eq!(NA_VALUE, crate::float::NA);
+        assert_eq!(NA_VALUE, -(2.0_f64).powi(109));
         let expr = Expr::Na(loc());
         assert_eq!(extract_number(&expr), Some(NA_VALUE));
     }

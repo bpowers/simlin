@@ -106,7 +106,15 @@ impl XmileFormatter {
                 // But xmutil strips quotes from literals in expression output
                 lit.to_string()
             }
-            Expr::Na(_) => "NAN".to_string(),
+            // Vensim's `:NA:` is the finite "missing data" sentinel (-2^109),
+            // NOT IEEE NaN: it exists so `IF THEN ELSE(x = :NA:, ...)` can test
+            // for data existence via ordinary finite equality, and so arithmetic
+            // on it stays finite. Emit it as the numeric sentinel literal (which
+            // round-trips through the XMILE lexer as a `Const`) rather than the
+            // `NAN` keyword, which would lower to a poisoning NaN. (The `NAN`
+            // literal emitted elsewhere for the `A FUNCTION OF` placeholder is a
+            // separate, structural "no equation" marker and stays NaN.)
+            Expr::Na(_) => format_number(crate::float::NA),
         }
     }
 
@@ -2003,10 +2011,21 @@ mod tests {
     }
 
     #[test]
-    fn test_format_na_emits_nan() {
+    fn test_format_na_emits_finite_sentinel() {
+        // `:NA:` is the finite missing-data sentinel -2^109, not NaN, so the
+        // formatter emits the numeric sentinel literal (which round-trips through
+        // the XMILE lexer as a finite Const) rather than the poisoning `NAN`
+        // keyword. The emitted text must parse back bit-identically to the
+        // sentinel.
         let formatter = XmileFormatter::new();
         let expr = Expr::Na(loc());
-        assert_eq!(formatter.format_expr(&expr), "NAN");
+        let formatted = formatter.format_expr(&expr);
+        assert_eq!(formatted, format_number(crate::float::NA));
+        assert_ne!(formatted, "NAN");
+        assert_eq!(
+            formatted.parse::<f64>().unwrap().to_bits(),
+            crate::float::NA.to_bits()
+        );
     }
 
     #[test]

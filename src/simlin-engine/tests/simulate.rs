@@ -543,6 +543,100 @@ TIME STEP = 1 ~~|
     assert!((get("u[a3]") - 1.0).abs() < 1e-10, "u[A3] should be 1");
 }
 
+/// Vensim `:NA:` is a *finite* sentinel value (`-2^109`, the "missing data"
+/// marker), NOT IEEE NaN. The canonical Vensim idiom is the existence test
+/// `IF THEN ELSE(x = :NA:, fallback, x)`, which only works because `:NA:` is a
+/// finite number ordinary `=` equality can match. Representing it as NaN poisons
+/// every downstream arithmetic expression (NaN is absorbing), which is the engine
+/// bug behind C-LEARN's residual all-NaN cascade.
+///
+/// This test pins the corrected semantics end-to-end through the real
+/// MDL -> XMILE -> compile -> VM pipeline: `probe` produces `:NA:` for `Time > 5`,
+/// the existence test recovers a finite fallback there, and `:NA:` arithmetic
+/// stays finite. Under the old NaN representation `na_plus = :NA: + 10` is NaN,
+/// so this is RED before the fix.
+#[test]
+fn na_existence_test_and_arithmetic_finite() {
+    let mdl = "\
+{UTF-8}
+probe =
+	IF THEN ELSE(Time > 5, :NA:, Time)
+	~~|
+out =
+	IF THEN ELSE(probe = :NA:, -1, probe)
+	~~|
+na_plus =
+	:NA: + 10
+	~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 10 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let datamodel_project =
+        open_vensim(mdl).unwrap_or_else(|e| panic!("failed to parse na test mdl: {e}"));
+
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
+    let results = vm.into_results();
+
+    let off = |name: &str| -> usize {
+        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        results.offsets[&ident]
+    };
+    let at =
+        |name: &str, step: usize| -> f64 { results.data[step * results.step_size + off(name)] };
+
+    // The single canonical Vensim `:NA:` sentinel: a finite number, never NaN.
+    let na = simlin_engine::float::NA;
+    assert!(na.is_finite(), ":NA: sentinel must be finite");
+
+    // 11 saved steps for Time 0..=10.
+    assert_eq!(results.step_count, 11, "expected 11 saved steps");
+
+    for step in 0..results.step_count {
+        let time = at("time", step);
+        let probe = at("probe", step);
+        let out = at("out", step);
+        let na_plus = at("na_plus", step);
+
+        // `:NA:` arithmetic is finite (NaN would poison this -- the core bug).
+        assert!(
+            na_plus.is_finite(),
+            "na_plus (:NA: + 10) must be finite at t={time}, got {na_plus}"
+        );
+        assert!(
+            (na_plus - (na + 10.0)).abs() < 1e-10,
+            "na_plus must equal -2^109 + 10 at t={time}, got {na_plus}"
+        );
+
+        if time > 5.0 {
+            // probe evaluates to the finite :NA: sentinel for Time > 5.
+            assert!(
+                (probe - na).abs() < 1e-10,
+                "probe must be the :NA: sentinel for t={time}, got {probe}"
+            );
+            // The existence test fires: out takes the fallback (-1), finite.
+            assert!(
+                (out - (-1.0)).abs() < 1e-10,
+                "existence test must select fallback (-1) for t={time}, got {out}"
+            );
+        } else {
+            // probe is the genuine Time value; existence test does NOT fire.
+            assert!(
+                (probe - time).abs() < 1e-10,
+                "probe must equal Time for t={time}, got {probe}"
+            );
+            assert!(
+                (out - time).abs() < 1e-10,
+                "out must equal probe (=Time) for t={time}, got {out}"
+            );
+        }
+    }
+}
+
 #[test]
 fn simulates_2d_array() {
     simulate_path(
