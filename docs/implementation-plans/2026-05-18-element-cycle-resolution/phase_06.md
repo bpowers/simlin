@@ -1161,6 +1161,73 @@ distinct cause), report it precisely — do NOT mask; the orchestrator checkpoin
 **Commit:** `engine: represent Vensim :NA: as the finite sentinel -2^109, not NaN`
 <!-- END_TASK_10 -->
 
+<!-- START_TASK_11 -->
+### Task 11: convert the codegen PREVIOUS-subscript panic to a typed Err (#363, AC7.5)
+
+**Verifies:** element-cycle-resolution.AC7.5 (a post-gate panic is root-caused and
+converted to a typed `Result::Err`, not caught) + unblocks AC7.4 (Task 2's
+clean-compile re-point); directly verified by a focused unit test + the
+`clearn_ltm_discovery_compiles` gate.
+
+**Why added (Task 2 outcome — #363 reproduces on the LTM-discovery path):** Task 3
+Part B re-verified #363 on the PLAIN incremental path and found the panic did not
+reproduce. Task 2 (re-pointing `clearn_ltm_discovery_*` to expect a clean compile,
+with LTM discovery ENABLED) surfaced that **#363 DOES reproduce on the
+LTM-discovery synthetic-fragment path**: `compile_project_incremental` PANICS (not
+a clean Err) at `compiler/codegen.rs:494` — `self.walk_expr(expr).unwrap().unwrap()`
+on a recoverable `Err(NotSimulatable, "PREVIOUS requires a variable reference after
+helper rewriting")` (a `PREVIOUS(...)` whose arg sits inside a `Subscript` index,
+not reduced to a bare `Expr::Var`). The sibling arms at `codegen.rs:768/769/795`
+already use `?`. The caller `db_ltm.rs:2083` is ALREADY `Err(_) => None` (it intends
+to gracefully drop an un-compilable LTM synthetic fragment) — so the stray
+`.unwrap().unwrap()` short-circuits the exact `Result` path the caller is poised to
+absorb. Textbook #363 panic-site (a recoverable Err escalated to a process-killing
+panic). The structural gate (no LTM discovery) is unaffected — it passes.
+
+**Files:**
+- Modify: `src/simlin-engine/src/compiler/codegen.rs:494` — `.unwrap().unwrap()` →
+  `?` (match the sibling `:768/769/795` propagation).
+- Add: a focused `#[cfg(test)]` unit test reproducing the converted condition (a
+  `PREVIOUS` of a subscripted/expr arg reaching this codegen arm → a typed `Err`,
+  not a panic).
+
+**Implementation — root-cause-confirm FIRST, then fix (general):**
+1. **Confirm** the exact `walk_expr` return shape + that the siblings (`:768/769/795`)
+   use `?`, so the fix matches them; confirm the Err flows to `db_ltm.rs:2083`'s
+   `Err(_) => None` (graceful drop); confirm no other caller of this arm relies on
+   the panic.
+2. **Fix:** convert the panic site to propagate via `?`. Strictly loud-safe (panic
+   → typed Err; a success is unchanged). The un-scoreable LTM synthetic fragment is
+   then gracefully dropped (the established `model_ltm_fragment_diagnostics` Warning
+   path), so C-LEARN compiles with LTM discovery enabled.
+
+**Loud-safe / no silent miscompile:** panic → typed `Err` is strictly safer (never
+changes a success). The dropped LTM synthetic fragment is the established graceful
+behavior; if it SHOULD have compiled (a deeper PREVIOUS-helper-rewrite gap for a
+subscripted arg), file it via `track-issue` (do NOT expand this task to fix the
+rewrite).
+
+**Testing (TDD, mandatory):**
+- RED-first: a minimal `#[cfg(test)]` fixture whose path hits the
+  `PREVIOUS`-in-subscript arm — RED (panic) before, GREEN (typed Err, gracefully
+  handled) after.
+- **MANDATORY soundness pins (must stay GREEN unchanged):** `codegen.rs:494` is a
+  SHARED codegen arm — pin the full compiler/codegen suites, `array_tests`,
+  `compiler_vector`, the recurrence/cycle gates, `incremental_compilation_covers_all_models`
+  (22-model corpus), `simulate_ltm`, and the full engine lib. If ANY changes
+  behavior, STOP and report (the `?` must only convert panics to Errs, never alter
+  a success).
+
+**Verification:**
+Run the unit test + soundness pins. Then run `clearn_ltm_discovery_compiles` (Task
+2's re-point, uncommitted in the tree): `cargo test -p simlin-engine --features
+xmutil --release -- --ignored clearn_ltm_discovery --nocapture` — must now PASS
+(clean compile, no panic). Commit the codegen fix + unit test (AC7.5), THEN commit
+Task 2's re-point (AC7.4). NEVER `--no-verify`.
+**Commit (AC7.5):** `engine: convert codegen PREVIOUS-subscript panic to typed Err (#363, AC7.5)`
+**Commit (AC7.4, Task 2 re-point):** `engine: re-point clearn LTM-discovery test to clean compile; retire catch_unwind (AC7.4)`
+<!-- END_TASK_11 -->
+
 ---
 
 ## Phase 6 Done When
@@ -1173,7 +1240,13 @@ distinct cause), report it precisely — do NOT mask; the orchestrator checkpoin
   renamed `clearn_*` test expects a clean compile result; no `catch_unwind`
   remains in the engine test suite for C-LEARN (Task 2 — AC7.4).
 - Any post-gate panic is root-caused and converted to a typed error (not
-  caught); #363 status re-verified and recorded (Task 3 — AC7.5).
+  caught); #363 status re-verified and recorded (Task 3 — AC7.5). #363 does NOT
+  reproduce on the plain incremental path (Task 3 Part B), but DOES reproduce on
+  the LTM-discovery synthetic-fragment path (surfaced by Task 2): a recoverable
+  `PREVIOUS`-in-subscript `Err` escalated to a panic by `.unwrap().unwrap()` at
+  `codegen.rs:494` — converted to a propagated typed `Err` in Task 11, letting
+  the existing `db_ltm.rs:2083` `Err(_) => None` gracefully drop the
+  un-scoreable LTM synthetic fragment (AC7.5).
 - The two latent compile bugs the cleared cycle gate unmasked (GH #580) are
   fixed as general engine fixes, each with its own fast model-agnostic unit
   test: group-mapped subscript translation in temp-arg-helper extraction
