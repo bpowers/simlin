@@ -30,6 +30,20 @@ fn is_implicit_module_var(name: &str) -> bool {
     name.starts_with("$\u{205A}")
 }
 
+/// Whether `ident` names an element of one of the excluded base variables.
+/// A base name `"y"` excludes the scalar `y` and every arrayed element
+/// `y[a1]`, `y[a2]`, ... (the `.dat`/results key form), so a single
+/// not-yet-supported variable can be carved out of a comparison without
+/// weakening the gate for every other variable.
+fn is_excluded_var(ident: &str, excluded: &[&str]) -> bool {
+    excluded.iter().any(|&base| {
+        ident == base
+            || ident
+                .strip_prefix(base)
+                .is_some_and(|rest| rest.starts_with('['))
+    })
+}
+
 /// Compare expected results against simulation output.
 ///
 /// Iterates expected variable keys only, so extra variables in `results`
@@ -37,6 +51,15 @@ fn is_implicit_module_var(name: &str) -> bool {
 /// epsilon of 2e-3 for non-Vensim data, with relative comparison for
 /// Vensim-sourced data.
 pub fn ensure_results(expected: &Results, results: &Results) {
+    ensure_results_excluding(expected, results, &[]);
+}
+
+/// Like [`ensure_results`], but skips every expected variable whose base
+/// name is in `excluded` (exact name or `name[...]` element). Used to keep
+/// a genuine-Vensim regression gate hard for every variable *except* a
+/// single, separately-tracked unsupported one -- the comparison stays an
+/// unconditional equality check for all other variables.
+pub fn ensure_results_excluding(expected: &Results, results: &Results, excluded: &[&str]) {
     assert_eq!(expected.step_count, results.step_count);
     assert_eq!(expected.iter().len(), results.iter().len());
 
@@ -45,6 +68,9 @@ pub fn ensure_results(expected: &Results, results: &Results) {
     let mut step = 0;
     for (expected_row, results_row) in expected.iter().zip(results.iter()) {
         for ident in expected.offsets.keys() {
+            if is_excluded_var(ident.as_str(), excluded) {
+                continue;
+            }
             let expected = expected_row[expected.offsets[ident]];
             if !results.offsets.contains_key(ident)
                 && (IGNORABLE_COLS.contains(&ident.as_str())

@@ -3994,25 +3994,34 @@ fn test_sparse_per_element_gfs_preserve_table_indices() {
     let var = sync.models["main"].variables["lookup_var"].source;
 
     // extract_tables_from_source_var must produce exactly 3 tables (one per
-    // element), including an empty placeholder for element B.
-    let tables = extract_tables_from_source_var(&db, &var);
+    // element), including an empty placeholder for element B. The dimension is
+    // declared in sorted order (A, B, C), so the element-name -> dimension-index
+    // mapping is the identity here: index i holds element i's table. This pins
+    // the table CONTENT per slot (not just count/emptiness), so the
+    // per-element-GF mapping fix must be byte-identical for sorted order.
+    let tables = extract_tables_from_source_var(&db, &var, sync.project);
     assert_eq!(
         tables.len(),
         3,
         "should have 3 tables (including empty placeholder for element B), got {}",
         tables.len()
     );
-    assert!(
-        !tables[0].data.is_empty(),
-        "element A should have a non-empty table"
+    // Element A (index 0): x=[0,10], y=[100,200].
+    assert_eq!(
+        tables[0].data,
+        vec![(0.0, 100.0), (10.0, 200.0)],
+        "element A's table must be at index 0 with its own y=[100,200]"
     );
+    // Element B (index 1): empty placeholder.
     assert!(
         tables[1].data.is_empty(),
-        "element B should have an empty placeholder table"
+        "element B should have an empty placeholder table at index 1"
     );
-    assert!(
-        !tables[2].data.is_empty(),
-        "element C should have a non-empty table"
+    // Element C (index 2): x=[0,10], y=[500,600].
+    assert_eq!(
+        tables[2].data,
+        vec![(0.0, 500.0), (10.0, 600.0)],
+        "element C's table must be at index 2 with its own y=[500,600]"
     );
 
     // Ensure the model still compiles successfully through the incremental path.

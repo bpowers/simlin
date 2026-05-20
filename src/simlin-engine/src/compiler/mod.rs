@@ -1083,6 +1083,80 @@ fn contains_array_producing_builtin(expr: &Expr) -> bool {
     }
 }
 
+/// Test-only wrapper exposing the production recursive
+/// array-producing-builtin predicate (`contains_array_producing_builtin`,
+/// which delegates to the private `is_array_producing_builtin`): true iff
+/// any element of a variable's lowered per-element `Expr` list is, or
+/// contains, an array-producing builtin (VectorElmMap/VectorSortOrder/
+/// Rank/AllocateAvailable/AllocateByPriority), including nested as a
+/// subexpression or hoisted into an `AssignTemp`.
+/// `crate::db_dep_graph::array_producing_vars` reuses this exact
+/// predicate rather than re-implementing the recursion.
+#[cfg(test)]
+pub(crate) fn exprs_contain_array_producing_builtin(exprs: &[Expr]) -> bool {
+    exprs.iter().any(contains_array_producing_builtin)
+}
+
+#[cfg(test)]
+mod exprs_contain_array_producing_builtin_tests {
+    use super::*;
+
+    fn vem() -> Expr {
+        // A minimal array-producing builtin call (args are irrelevant to
+        // the predicate; only the `BuiltinFn` discriminant matters).
+        Expr::App(
+            BuiltinFn::VectorElmMap(
+                Box::new(Expr::Const(0.0, Loc::default())),
+                Box::new(Expr::Const(0.0, Loc::default())),
+            ),
+            Loc::default(),
+        )
+    }
+
+    #[test]
+    fn flags_top_level_array_producing_element() {
+        // The scalar-lowering shape `AssignCurr(off, VECTOR ELM MAP(...))`
+        // -- the top-level case the scalar path does NOT hoist:
+        // `contains_ ⊇ is_` catches the top-level `App`.
+        let exprs = vec![Expr::AssignCurr(0, Box::new(vem()))];
+        assert!(exprs_contain_array_producing_builtin(&exprs));
+    }
+
+    #[test]
+    fn flags_array_producing_only_in_a_hoisted_assign_temp() {
+        // The incomplete-sourcing guard: the `App` lives ONLY in a
+        // hoisted `AssignTemp` (a non-first element); `AssignCurr` reads
+        // the temp. `.iter().any` over the COMPLETE list + the
+        // `AssignTemp` recursion must still flag it.
+        let exprs = vec![
+            Expr::AssignCurr(
+                0,
+                Box::new(Expr::TempArray(
+                    0,
+                    ArrayView::contiguous(vec![1]),
+                    Loc::default(),
+                )),
+            ),
+            Expr::AssignTemp(0, Box::new(vem()), ArrayView::contiguous(vec![1])),
+        ];
+        assert!(exprs_contain_array_producing_builtin(&exprs));
+    }
+
+    #[test]
+    fn does_not_flag_plain_exprs() {
+        let exprs = vec![
+            Expr::AssignCurr(0, Box::new(Expr::Const(1.0, Loc::default()))),
+            Expr::AssignCurr(1, Box::new(Expr::Var(0, Loc::default()))),
+        ];
+        assert!(!exprs_contain_array_producing_builtin(&exprs));
+    }
+
+    #[test]
+    fn does_not_flag_empty_list() {
+        assert!(!exprs_contain_array_producing_builtin(&[]));
+    }
+}
+
 fn builtin_contains_array_producing(builtin: &BuiltinFn) -> bool {
     let mut found = false;
     builtin.for_each_expr_ref(|e| {

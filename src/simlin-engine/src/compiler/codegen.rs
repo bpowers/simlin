@@ -203,6 +203,39 @@ impl<'module> Compiler<'module> {
         (self.static_views.len() - 1) as ViewId
     }
 
+    /// Total element count of the source *variable* referenced by an
+    /// expression, i.e. the product of its full declared dimensions. This is
+    /// the genuine-Vensim VECTOR ELM MAP out-of-range bound (`:NA:` is
+    /// returned for an offset that would map outside the source variable's
+    /// full storage). Each model variable owns a unique `[offset, offset+size)`
+    /// slot range (offsets are assigned by `i += size`), so the base offset
+    /// uniquely identifies the variable and its full `size`. Falls back to
+    /// the lowered view's element count when the source is not a plain
+    /// variable/subscript reference (e.g. a scalar `Var`), which is the
+    /// correct full extent for those non-sliced shapes.
+    fn full_source_len(&self, source: &Expr) -> u32 {
+        let (base_off, view_len) = match source {
+            Expr::StaticSubscript(off, view, _) => {
+                (Some(*off), view.dims.iter().product::<usize>().max(1))
+            }
+            Expr::Var(off, _) => (Some(*off), 1usize),
+            Expr::TempArray(_, view, _) => (None, view.dims.iter().product::<usize>().max(1)),
+            _ => (None, 1usize),
+        };
+
+        if let Some(base_off) = base_off {
+            let model_offsets = &self.module.offsets[&self.module.ident];
+            if let Some(size) = model_offsets
+                .values()
+                .find(|(off, _)| *off == base_off)
+                .map(|(_, size)| *size)
+            {
+                return size as u32;
+            }
+        }
+        view_len as u32
+    }
+
     /// Convert an ArrayView to a StaticArrayView for a variable
     fn array_view_to_static(&mut self, base_off: usize, view: &ArrayView) -> StaticArrayView {
         // Convert sparse info
@@ -276,6 +309,66 @@ impl<'module> Compiler<'module> {
             sparse,
             dim_ids,
         }
+    }
+
+    /// Resolve `(base_gf, table_count)` for a *per-element arrayed graphical
+    /// function* whose full array is referenced by `table_expr` (a bare `Var`
+    /// or a whole-array `StaticSubscript`). This is the array counterpart of
+    /// the per-element resolution the scalar `Lookup` codegen does via
+    /// `extract_table_info`, but here the base is intentionally the *whole*
+    /// array (`g[D!]`, `view.size() > 1`) -- the very shape `extract_table_info`
+    /// rejects -- because `LookupArray` evaluates every element's table. The
+    /// table base id and per-element table count come from the same
+    /// `table_base_ids` / `module.tables` maps the scalar lookup uses, so the
+    /// per-element table layout is identical. A `table_expr` that is neither a
+    /// recognised array base nor a GF-bearing variable yields a precise
+    /// `BadTable` (loud-safe: an un-reconstructable arrayed-GF dependency must
+    /// never become a silent stub -- GH #580 / AC7.5).
+    fn arrayed_lookup_table_info(&self, table_expr: &Expr) -> Result<(GraphicalFunctionId, u16)> {
+        let module_offsets = &self.module.offsets[&self.module.ident];
+        let base_off = match table_expr {
+            // Whole-array static subscript: the var's storage starts at `off`
+            // and the view spans the full array (offset 0).
+            Expr::StaticSubscript(off, _, _) => *off,
+            Expr::Var(off, _) => *off,
+            other => {
+                return sim_err!(
+                    BadTable,
+                    format!(
+                        "arrayed graphical-function apply expected a whole-array \
+                         base, got {:?}",
+                        std::mem::discriminant(other)
+                    )
+                );
+            }
+        };
+        let table_ident = module_offsets
+            .iter()
+            .find(|(_, (base, _))| *base == base_off)
+            .map(|(k, _)| k.clone())
+            .ok_or_else(|| {
+                crate::Error::new(
+                    ErrorKind::Simulation,
+                    ErrorCode::BadTable,
+                    Some("could not find arrayed lookup table variable".to_string()),
+                )
+            })?;
+        let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
+            crate::Error::new(
+                ErrorKind::Simulation,
+                ErrorCode::BadTable,
+                Some(format!(
+                    "no graphical function found for arrayed lookup '{table_ident}'"
+                )),
+            )
+        })?;
+        let table_count = self
+            .module
+            .tables
+            .get(&table_ident)
+            .map(|tables| tables.len() as u16)
+            .unwrap_or(1);
+        Ok((base_gf, table_count))
     }
 
     /// Emit bytecode to push an expression's view onto the view stack.
@@ -398,7 +491,15 @@ impl<'module> Compiler<'module> {
                 for (i, idx) in indices.iter().enumerate() {
                     match idx {
                         SubscriptIndex::Single(expr) => {
-                            self.walk_expr(expr).unwrap().unwrap();
+                            // Propagate via `?` (matching the sibling walk_expr
+                            // call sites at the LookupForward/Backward and
+                            // PREVIOUS/INIT arms): a recoverable codegen Err here
+                            // -- e.g. a PREVIOUS whose arg survived helper
+                            // rewriting as a non-variable expression
+                            // (NotSimulatable) -- must flow back to the caller
+                            // (db_ltm.rs gracefully drops the un-compilable LTM
+                            // synthetic fragment), never escalate to a panic (#363).
+                            self.walk_expr(expr)?.unwrap();
                             let bounds = bounds[i] as VariableOffset;
                             self.push(Opcode::PushSubscriptIndex { bounds });
                         }
@@ -1084,10 +1185,18 @@ impl<'module> Compiler<'module> {
                 if let Expr::App(builtin, _) = rhs.as_ref() {
                     match builtin {
                         BuiltinFn::VectorElmMap(source, offset) => {
+                            // Genuine Vensim resolves the mapping over the
+                            // source *variable's* full storage; capture its
+                            // total element count before the (possibly
+                            // sliced) source view is pushed so the VM can
+                            // apply the out-of-range -> :NA: bound and the
+                            // per-element base correctly.
+                            let full_source_len = self.full_source_len(source);
                             self.walk_expr_as_view(source)?;
                             self.walk_expr_as_view(offset)?;
                             self.push(Opcode::VectorElmMap {
                                 write_temp_id: *id as TempId,
+                                full_source_len,
                             });
                             self.push(Opcode::PopView {});
                             self.push(Opcode::PopView {});
@@ -1106,6 +1215,37 @@ impl<'module> Compiler<'module> {
                             self.walk_expr_as_view(array)?;
                             self.walk_expr(direction)?.unwrap();
                             self.push(Opcode::Rank {
+                                write_temp_id: *id as TempId,
+                            });
+                            self.push(Opcode::PopView {});
+                            return Ok(None);
+                        }
+                        // Per-element arrayed-GF lookup (GH #580 Bug B):
+                        // `g[D!](index)` where each element of `g` carries its
+                        // own table. The hoisting pass (`mod.rs`) wraps this in
+                        // an `AssignTemp` whose view is the GF array's view, so
+                        // here we push that array as a view (for the element
+                        // count + per-element flat offsets), evaluate the
+                        // shared scalar `index`, and emit `LookupArray` to fill
+                        // the temp -- the array analogue of the scalar `Lookup`
+                        // arm below. The result temp is then consumed as a view
+                        // by the wrapping reducer / vector op.
+                        BuiltinFn::Lookup(table_expr, index, _loc)
+                        | BuiltinFn::LookupForward(table_expr, index, _loc)
+                        | BuiltinFn::LookupBackward(table_expr, index, _loc) => {
+                            let mode = match builtin {
+                                BuiltinFn::LookupForward(_, _, _) => LookupMode::Forward,
+                                BuiltinFn::LookupBackward(_, _, _) => LookupMode::Backward,
+                                _ => LookupMode::Interpolate,
+                            };
+                            let (base_gf, table_count) =
+                                self.arrayed_lookup_table_info(table_expr)?;
+                            self.walk_expr_as_view(table_expr)?;
+                            self.walk_expr(index)?.unwrap();
+                            self.push(Opcode::LookupArray {
+                                base_gf,
+                                table_count,
+                                mode,
                                 write_temp_id: *id as TempId,
                             });
                             self.push(Opcode::PopView {});
@@ -1456,5 +1596,78 @@ impl<'module> Compiler<'module> {
             compiled_flows,
             compiled_stocks,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Loc;
+    use std::collections::HashMap;
+
+    /// Build a minimal, dimension-free `Module` sufficient to drive `walk_expr`
+    /// on a hand-built `Expr`. The runlists are empty -- the test calls
+    /// `walk_expr` directly, so the only requirement is a well-formed `Module`
+    /// that `Compiler::new` can populate metadata from.
+    fn empty_module() -> Module {
+        Module {
+            ident: Ident::new("test"),
+            inputs: Default::default(),
+            n_slots: 1,
+            n_temps: 0,
+            temp_sizes: vec![],
+            runlist_initials: vec![],
+            runlist_initials_by_var: vec![],
+            runlist_flows: vec![],
+            runlist_stocks: vec![],
+            offsets: HashMap::new(),
+            runlist_order: vec![],
+            tables: HashMap::new(),
+            dimensions: vec![],
+            dimensions_ctx: Default::default(),
+            module_refs: HashMap::new(),
+        }
+    }
+
+    /// A `PREVIOUS(...)` whose argument is not a bare `Expr::Var` (it survived
+    /// helper rewriting as a non-variable expression) is `NotSimulatable`. When
+    /// such a `PREVIOUS` sits inside a `Subscript` index expression, the scalar
+    /// `Subscript` arm of `walk_expr` must *propagate* that recoverable `Err`
+    /// (so a caller like `db_ltm.rs`'s LTM-synthetic-fragment compile can
+    /// gracefully drop the un-compilable fragment), not escalate it to a
+    /// process-killing panic. This pins the converted condition behind #363
+    /// (codegen.rs line 494 was a double-`unwrap` on this `Result`).
+    #[test]
+    fn previous_of_non_var_inside_subscript_index_is_err_not_panic() {
+        let module = empty_module();
+        let mut compiler = Compiler::new(&module);
+
+        // arr[ PREVIOUS(1, 0) ] -- the index is a PREVIOUS of a constant, which
+        // is not a bare variable reference, so the PREVIOUS arm returns
+        // NotSimulatable. Before the fix the enclosing Subscript arm panicked
+        // by unwrapping that Err; after the fix it propagates via `?`.
+        let expr = Expr::Subscript(
+            0,
+            vec![SubscriptIndex::Single(Expr::App(
+                BuiltinFn::Previous(
+                    Box::new(Expr::Const(1.0, Loc::default())),
+                    Box::new(Expr::Const(0.0, Loc::default())),
+                ),
+                Loc::default(),
+            ))],
+            vec![3],
+            Loc::default(),
+        );
+
+        let result = compiler.walk_expr(&expr);
+
+        let err = result.expect_err(
+            "PREVIOUS-of-non-var inside a subscript index must return a typed Err, not Ok",
+        );
+        assert_eq!(
+            err.code,
+            ErrorCode::NotSimulatable,
+            "expected NotSimulatable, got {err:?}"
+        );
     }
 }

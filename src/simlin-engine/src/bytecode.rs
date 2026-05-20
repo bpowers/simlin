@@ -814,9 +814,17 @@ pub(crate) enum Opcode {
     /// The result is a single scalar pushed onto the arithmetic stack.
     VectorSelect {},
 
-    /// Element-wise mapping operation; writes full result array to temp_storage.
+    /// Genuine-Vensim VECTOR ELM MAP; writes the full result array to
+    /// temp_storage. `full_source_len` is the source *variable's* total
+    /// element count (product of its full declared dimensions) -- the
+    /// out-of-range bound for the genuine `:NA:` rule. The source variable's
+    /// storage in `curr[]` is contiguous row-major, so the source view's
+    /// `base_off` plus a directly-computed flat index addresses it, and the
+    /// offset steps the innermost (last declared) dimension whose contiguous
+    /// stride is 1.
     VectorElmMap {
         write_temp_id: TempId,
+        full_source_len: u32,
     },
 
     /// Produces an array of sort-order indices; writes to temp_storage.
@@ -828,6 +836,24 @@ pub(crate) enum Opcode {
     /// Pops 1 scalar (direction: 1=ascending, 0=descending) from the arithmetic stack.
     /// Reads 1 view from the view stack.
     Rank {
+        write_temp_id: TempId,
+    },
+
+    /// Per-element graphical-function lookup over an arrayed GF (GH #580 Bug B):
+    /// `g[D!](index)` where each element of `g` carries its own lookup table.
+    /// Pops 1 scalar (the shared lookup `index`) from the arithmetic stack and
+    /// reads 1 view (the arrayed GF's full storage) from the view stack; for
+    /// each of the view's `size()` elements `i` it evaluates the table
+    /// `graphical_functions[base_gf + i]` at `index` (the per-element-table
+    /// layout `Compiler::table_base_ids` records -- one table per element, in
+    /// declared order) and writes the result to `temp_storage[write_temp + i]`.
+    /// `table_count` bounds `base_gf + i` (an out-of-range element yields NaN,
+    /// matching the scalar `Lookup` opcode). The result temp is then consumed
+    /// as an array view by the reducer / vector op that wrapped the apply.
+    LookupArray {
+        base_gf: GraphicalFunctionId,
+        table_count: u16,
+        mode: LookupMode,
         write_temp_id: TempId,
     },
 
@@ -1002,6 +1028,9 @@ impl Opcode {
             Opcode::VectorElmMap { .. } => (0, 0),
             Opcode::VectorSortOrder { .. } => (1, 0),
             Opcode::Rank { .. } => (1, 0),
+            // LookupArray pops the scalar lookup index, reads the GF view, and
+            // writes the per-element-lookup array to temp_storage.
+            Opcode::LookupArray { .. } => (1, 0),
             Opcode::AllocateAvailable { .. } => (1, 0),
             // AllocateByPriority pops 2 scalars (width, supply) from the stack
             Opcode::AllocateByPriority { .. } => (2, 0),
@@ -1587,7 +1616,11 @@ mod tests {
         assert_eq!((Opcode::VectorSelect {}).stack_effect(), (2, 1));
         // VectorElmMap: reads views, writes to temp_storage, no arithmetic stack effect
         assert_eq!(
-            (Opcode::VectorElmMap { write_temp_id: 0 }).stack_effect(),
+            (Opcode::VectorElmMap {
+                write_temp_id: 0,
+                full_source_len: 0
+            })
+            .stack_effect(),
             (0, 0)
         );
         // VectorSortOrder: pops 1 scalar (direction), writes to temp_storage

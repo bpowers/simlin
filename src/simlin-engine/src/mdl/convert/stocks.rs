@@ -414,8 +414,12 @@ impl<'input> ConversionContext<'input> {
                 None => continue,
             };
 
-            let rate_str = match self.extract_integ_rate(&eq.equation) {
-                Some(e) => self.formatter.format_expr(e),
+            // Keep the rate EXPRESSION (not a raw formatted string): a
+            // synthetic net-flow must resolve it PER ELEMENT via the same
+            // subscript-range-mapping the regular arrayed-equation path
+            // uses (#559), not clone the raw subrange-sliced text.
+            let rate_expr = match self.extract_integ_rate(&eq.equation) {
+                Some(e) => e,
                 None => continue,
             };
 
@@ -424,9 +428,13 @@ impl<'input> ConversionContext<'input> {
                 continue;
             }
 
-            // Expand subscripts to get dimension names and element keys
+            // Expand subscripts to get dimension names and element keys.
+            // `lhs_sub_names` keeps the LHS subscript names (parallel to
+            // `expanded_elements`) so `build_element_context` can map each
+            // cartesian element key back to per-dimension elements.
             let mut dims: Vec<String> = Vec::new();
             let mut expanded_elements: Vec<Vec<String>> = Vec::new();
+            let mut lhs_sub_names: Vec<String> = Vec::new();
 
             for s in &lhs.subscripts {
                 let sub_name = match s {
@@ -436,6 +444,7 @@ impl<'input> ConversionContext<'input> {
                 if let Some((dim, elements)) = self.expand_subscript(sub_name) {
                     dims.push(dim);
                     expanded_elements.push(elements);
+                    lhs_sub_names.push(sub_name.to_string());
                 } else {
                     // Unknown subscript - skip this equation
                     continue;
@@ -469,10 +478,21 @@ impl<'input> ConversionContext<'input> {
                 all_dims = Some(dims);
             }
 
-            // Compute element keys and store rate
+            // Resolve the rate PER ELEMENT through the shared per-element
+            // context (subrange shift-mapping included), mirroring the
+            // regular arrayed-equation conversion path. This replaces the
+            // prior raw `format_expr(rate)` cloned into every key, which
+            // assigned a subrange-sliced expression (e.g.
+            // `dflux[scenario, upper] - dflux[scenario, lower]`) to each
+            // scalar element -> MismatchedDimensions on `<stock>_net_flow`
+            // (#559; e.g. C-LEARN's `c_in_deep_ocean_net_flow` /
+            // `heat_in_deep_ocean_net_flow`).
             let element_keys = cartesian_product(&expanded_elements);
             for key in element_keys {
-                element_rates.insert(key, rate_str.clone());
+                let element_parts: Vec<&str> = key.split(',').collect();
+                let ctx = self.build_element_context(&lhs_sub_names, &element_parts);
+                let rate = self.formatter.format_expr_with_context(rate_expr, &ctx);
+                element_rates.insert(key, rate);
             }
         }
 
@@ -530,33 +550,56 @@ impl<'input> ConversionContext<'input> {
         &self,
         eq: &MdlEquation<'_>,
     ) -> Option<(Vec<String>, Vec<String>)> {
+        // The stock equation's own LHS subscripts (canonicalized). A flow
+        // reference pinned/sliced to a DIFFERENT shape than this is not a
+        // plain named flow (#559) -- see `collect_flows`.
+        let stock_lhs_subs: Vec<String> = get_lhs(eq)
+            .map(|lhs| {
+                lhs.subscripts
+                    .iter()
+                    .map(|s| match s {
+                        Subscript::Element(n, _) | Subscript::BangElement(n, _) => {
+                            canonical_name(n)
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         match eq {
-            MdlEquation::Regular(_, expr) => self.extract_flows_from_integ(expr),
+            MdlEquation::Regular(_, expr) => self.extract_flows_from_integ(expr, &stock_lhs_subs),
             _ => None,
         }
     }
 
     /// Extract flows from an INTEG expression's rate argument.
-    fn extract_flows_from_integ(&self, expr: &Expr<'_>) -> Option<(Vec<String>, Vec<String>)> {
+    fn extract_flows_from_integ(
+        &self,
+        expr: &Expr<'_>,
+        stock_lhs_subs: &[String],
+    ) -> Option<(Vec<String>, Vec<String>)> {
         match expr {
             Expr::App(name, _, args, CallKind::Builtin, _, _) if eq_lower_space(name, "integ") => {
                 if !args.is_empty() {
-                    return self.analyze_rate_expression(&args[0]);
+                    return self.analyze_rate_expression(&args[0], stock_lhs_subs);
                 }
                 None
             }
-            Expr::Paren(inner, _) => self.extract_flows_from_integ(inner),
+            Expr::Paren(inner, _) => self.extract_flows_from_integ(inner, stock_lhs_subs),
             _ => None,
         }
     }
 
     /// Analyze a rate expression to identify inflows and outflows.
     /// Uses the is_all_plus_minus algorithm from xmutil.
-    fn analyze_rate_expression(&self, rate: &Expr<'_>) -> Option<(Vec<String>, Vec<String>)> {
+    fn analyze_rate_expression(
+        &self,
+        rate: &Expr<'_>,
+        stock_lhs_subs: &[String],
+    ) -> Option<(Vec<String>, Vec<String>)> {
         let mut inflows = Vec::new();
         let mut outflows = Vec::new();
 
-        if self.collect_flows(rate, true, &mut inflows, &mut outflows) {
+        if self.collect_flows(rate, true, &mut inflows, &mut outflows, stock_lhs_subs) {
             Some((inflows, outflows))
         } else {
             // Complex expression - can't decompose into simple flows
@@ -568,23 +611,60 @@ impl<'input> ConversionContext<'input> {
     /// Returns false if the expression is too complex (contains mul/div/functions),
     /// or if validity checks fail (duplicates, stock-as-flow, unknown symbols).
     ///
-    /// Subscripted flows are allowed to match xmutil's behavior (though xmutil notes
-    /// this has a bug where subscripts aren't properly compared).
+    /// A subscripted flow reference is accepted as a bare named flow ONLY
+    /// when its subscripts equal the stock equation's own LHS subscripts
+    /// (`stock_lhs_subs`, canonicalized). A reference pinned/sliced to a
+    /// different shape -- e.g. `flux2d[scenario, L1]` (a single-`layers`
+    /// slice of a 2-D `[scenario, layers]` flow) feeding a 1-D
+    /// `stock1d[scenario]` -- would, if accepted by bare name, wire the
+    /// full higher-rank variable to a lower-rank stock and the dimension
+    /// checker then reports `MismatchedDimensions` (issue #559; e.g.
+    /// C-LEARN's `c_in_mixed_layer`, `heat_in_atmosphere_and_upper_ocean`).
+    /// Rejecting it fails the simple decomposition so the caller falls
+    /// through to the synthetic net-flow path, which preserves the exact,
+    /// correctly-ranked sliced rate expression. A reference with NO
+    /// subscripts is unchanged (the implicit same-shape case; genuine
+    /// mismatches are still caught downstream by the dimension checker).
+    /// This replaces the prior xmutil-parity behavior, which deliberately
+    /// matched a documented xmutil bug (subscripts not compared).
     fn collect_flows(
         &self,
         expr: &Expr<'_>,
         positive: bool,
         inflows: &mut Vec<String>,
         outflows: &mut Vec<String>,
+        stock_lhs_subs: &[String],
     ) -> bool {
         match expr {
-            Expr::Var(name, _subscripts, _) => {
+            Expr::Var(name, subscripts, _) => {
                 let canonical = canonical_name(name);
 
-                // Note: xmutil allows subscripted flows and just checks the variable name
-                // without comparing subscripts. This has a known bug (per xmutil comments)
-                // where STOCK[A]=INTEG(FLOW[B],0) and STOCK[B]=INTEG(FLOW[A],0) would both
-                // use FLOW as their flow, even though the subscripts differ.
+                // #559: a subscripted flow reference whose subscripts
+                // differ from the stock equation's own LHS subscripts is
+                // pinning/slicing the flow to a shape other than the stock
+                // element it feeds (e.g. `flux2d[scenario, L1]` feeding
+                // `stock1d[scenario]`). Accepting it by bare name would wire
+                // the full higher-rank variable into the lower-rank stock ->
+                // `MismatchedDimensions`. Fail the simple decomposition so
+                // the caller falls through to the synthetic net-flow path,
+                // which preserves the exact (correctly-ranked) sliced rate.
+                // A reference with NO subscripts keeps the prior behavior
+                // (implicit same-shape flow). General: no dimension-name
+                // special-casing -- replaces the old xmutil-parity-with-a-
+                // known-bug behavior (subscripts were not compared).
+                if !subscripts.is_empty() {
+                    let ref_subs: Vec<String> = subscripts
+                        .iter()
+                        .map(|s| match s {
+                            Subscript::Element(n, _) | Subscript::BangElement(n, _) => {
+                                canonical_name(n)
+                            }
+                        })
+                        .collect();
+                    if ref_subs != stock_lhs_subs {
+                        return false;
+                    }
+                }
 
                 // Duplicate check: same variable appearing twice in same direction
                 if positive && inflows.contains(&canonical) {
@@ -624,20 +704,22 @@ impl<'input> ConversionContext<'input> {
                 true
             }
             Expr::Op1(crate::mdl::ast::UnaryOp::Negative, inner, _) => {
-                self.collect_flows(inner, !positive, inflows, outflows)
+                self.collect_flows(inner, !positive, inflows, outflows, stock_lhs_subs)
             }
             Expr::Op1(crate::mdl::ast::UnaryOp::Positive, inner, _) => {
-                self.collect_flows(inner, positive, inflows, outflows)
+                self.collect_flows(inner, positive, inflows, outflows, stock_lhs_subs)
             }
             Expr::Op2(BinaryOp::Add, left, right, _) => {
-                self.collect_flows(left, positive, inflows, outflows)
-                    && self.collect_flows(right, positive, inflows, outflows)
+                self.collect_flows(left, positive, inflows, outflows, stock_lhs_subs)
+                    && self.collect_flows(right, positive, inflows, outflows, stock_lhs_subs)
             }
             Expr::Op2(BinaryOp::Sub, left, right, _) => {
-                self.collect_flows(left, positive, inflows, outflows)
-                    && self.collect_flows(right, !positive, inflows, outflows)
+                self.collect_flows(left, positive, inflows, outflows, stock_lhs_subs)
+                    && self.collect_flows(right, !positive, inflows, outflows, stock_lhs_subs)
             }
-            Expr::Paren(inner, _) => self.collect_flows(inner, positive, inflows, outflows),
+            Expr::Paren(inner, _) => {
+                self.collect_flows(inner, positive, inflows, outflows, stock_lhs_subs)
+            }
             // Anything else (mul, div, functions, constants) means we can't decompose
             _ => false,
         }
@@ -1226,6 +1308,185 @@ rate = 5
         } else {
             panic!("Expected Flow variable");
         }
+    }
+
+    /// Issue #559: a 1D stock whose INTEG rate references a higher-rank
+    /// flow PINNED to a single element of the extra dimension
+    /// (`flux2d[scenario, L1]` feeding a 1D `stock1d[scenario]`).
+    /// `collect_flows` dropped the `[scenario, L1]` subscript and wired
+    /// the BARE 2D `flux2d` as a named outflow of the 1D stock; the
+    /// dimension checker then flags `mismatched_dimensions` (e.g. C-LEARN's
+    /// `c_in_mixed_layer` / `heat_in_atmosphere_and_upper_ocean`). A flow
+    /// reference whose subscripts change its effective rank/shape vs the
+    /// stock LHS must NOT be accepted as a bare named flow -- the
+    /// decomposition must fall through to the synthetic net-flow path,
+    /// which preserves the pinned-slice rate expression.
+    #[test]
+    fn test_rank_changing_subscripted_flow_synthesizes_net_flow() {
+        let mdl = "scenario: s1, s2
+~ ~|
+layers: (L1-L4)
+~ ~|
+flux2d[scenario, layers] = 1
+~ ~|
+fluxatm[scenario] = 2
+~ ~|
+stock1d[scenario] = INTEG(fluxatm[scenario] - flux2d[scenario, L1], 0)
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).expect("conversion should succeed");
+        let main = &project.models[0];
+        let Some(Variable::Stock(s)) = main.variables.iter().find(|v| v.get_ident() == "stock1d")
+        else {
+            panic!("expected stock1d as a Stock");
+        };
+        // The bare 2D `flux2d` must NOT be wired as a named flow of the 1D
+        // stock (that is the subscript-drop bug; pre-fix outflows==["flux2d"]).
+        assert!(
+            !s.outflows.iter().any(|f| f == "flux2d") && !s.inflows.iter().any(|f| f == "flux2d"),
+            "bare 2D `flux2d` must not be a named flow of the 1D \
+             `stock1d` (subscript-pin dropped). inflows={:?} outflows={:?}",
+            s.inflows,
+            s.outflows
+        );
+        // Instead the rank-changing reference forces the synthetic
+        // net-flow path (which keeps `flux2d[scenario, L1]` in the rate).
+        assert!(
+            main.variables
+                .iter()
+                .any(|v| v.get_ident().contains("net_flow")),
+            "rank-changing subscripted flow ref must fall through to \
+             a synthetic net-flow; none found. vars={:?}",
+            main.variables
+                .iter()
+                .map(|v| v.get_ident())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Control for the rank-changing-flow rejection (#559): when flows
+    /// are the SAME rank/shape as the stock LHS (`[scenario]`), they must
+    /// STILL be wired as named flows. The fix must reject only
+    /// RANK/SHAPE-CHANGING subscripted refs, never legitimate same-rank
+    /// ones.
+    #[test]
+    fn test_same_rank_subscripted_flows_stay_named() {
+        let mdl = "scenario: s1, s2
+~ ~|
+fluxatm[scenario] = 2
+~ ~|
+fluxout[scenario] = 1
+~ ~|
+stock1d[scenario] = INTEG(fluxatm[scenario] - fluxout[scenario], 0)
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).expect("conversion should succeed");
+        let main = &project.models[0];
+        let Some(Variable::Stock(s)) = main.variables.iter().find(|v| v.get_ident() == "stock1d")
+        else {
+            panic!("expected stock1d as a Stock");
+        };
+        assert_eq!(s.inflows, vec!["fluxatm"], "same-rank inflow stays named");
+        assert_eq!(s.outflows, vec!["fluxout"], "same-rank outflow stays named");
+        assert!(
+            !main
+                .variables
+                .iter()
+                .any(|v| v.get_ident().contains("net_flow")),
+            "control must NOT synthesize a net-flow (same-rank flows are \
+             legitimately named -- the fix must not over-reject)"
+        );
+    }
+
+    /// Issue #559: a 2-D stock defined per shift-mapped subrange whose
+    /// flow lists differ across equations, so the converter synthesizes a
+    /// `<stock>_net_flow` aux. The bug: `build_synthetic_flow_equation`
+    /// cloned the RAW rate string
+    /// (`dflux[scenario, upper] - dflux[scenario, lower]`) into EVERY
+    /// cartesian element key instead of applying the per-element
+    /// subscript-range-mapping resolution the regular arrayed-equation
+    /// path uses. A subrange-sliced expression assigned to each scalar
+    /// element -> `MismatchedDimensions` on `stock2d_net_flow` (e.g.
+    /// C-LEARN's `c_in_deep_ocean_net_flow` / `heat_in_deep_ocean_net_flow`).
+    /// The synthesized per-element equations must instead be resolved per
+    /// element (no raw `upper`/`lower` subrange tokens; each
+    /// `upper`-subrange element distinct), exactly as
+    /// `build_element_context` + `format_expr_with_context` produce on the
+    /// regular path. This is the parser-level shape assertion; the
+    /// end-to-end deep-ocean *value* check depends on the still-open
+    /// element-level cycle resolution (#559) and is deferred (see
+    /// `simulates_synthetic_net_flow_shape` in tests/simulate.rs).
+    #[test]
+    fn test_synthetic_net_flow_resolves_per_element() {
+        let mdl = "scenario: s1, s2
+~ ~|
+layers: (L1-L4)
+~ ~|
+upper: (L1-L3) -> lower
+~ ~|
+lower: (L2-L4) -> upper
+~ ~|
+bottom: L4
+~ ~|
+dflux[scenario, L1] = 5
+~ ~|
+dflux[scenario, lower] = 6
+~ ~|
+stock2d[scenario, upper] = INTEG(dflux[scenario, upper] - dflux[scenario, lower], 0)
+~ ~|
+stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0)
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).expect("conversion should succeed");
+        let main = &project.models[0];
+        let net_flow = main
+            .variables
+            .iter()
+            .find(|v| v.get_ident().contains("net_flow"))
+            .expect("a synthetic net-flow must be created for stock2d");
+        let Variable::Flow(f) = net_flow else {
+            panic!("expected the synthetic net-flow to be a Flow");
+        };
+        let Equation::Arrayed(_dims, elements, _, _) = &f.equation else {
+            panic!(
+                "expected an Arrayed synthetic net-flow equation, got {:?}",
+                f.equation
+            );
+        };
+
+        // The raw rate carried unresolved subrange dimension names
+        // (`upper`/`lower`). Per-element resolution must replace them with
+        // concrete elements -- NO element rate may still contain the
+        // subrange tokens (pre-fix every `upper` slot is the verbatim
+        // `dflux[scenario, upper] - dflux[scenario, lower]`).
+        for (key, rate, _, _) in elements {
+            for tok in ["upper", "lower"] {
+                assert!(
+                    !rate
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .any(|w| w == tok),
+                    "synthetic net-flow element {key:?} still carries \
+                     the unresolved subrange `{tok}` (raw rate cloned, not \
+                     per-element resolved): {rate:?}"
+                );
+            }
+        }
+        // The three `upper`-subrange elements (s1,L1/L2/L3) were identical
+        // clones pre-fix; per-element resolution makes them distinct.
+        let upper_rates: Vec<&String> = elements
+            .iter()
+            .filter(|(k, _, _, _)| matches!(k.as_str(), "s1,L1" | "s1,L2" | "s1,L3"))
+            .map(|(_, r, _, _)| r)
+            .collect();
+        assert_eq!(upper_rates.len(), 3, "expected 3 s1 upper-subrange slots");
+        assert!(
+            upper_rates[0] != upper_rates[1] && upper_rates[1] != upper_rates[2],
+            "the `upper`-subrange element rates must be per-element \
+             distinct after resolution, got {upper_rates:?}"
+        );
     }
 
     #[test]

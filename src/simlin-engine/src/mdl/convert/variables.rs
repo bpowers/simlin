@@ -476,7 +476,6 @@ impl<'input> ConversionContext<'input> {
             // default equation text (metadata for the Equation::Arrayed).
             if exp_eq.has_except {
                 let empty_ctx = crate::mdl::xmile_compat::ElementContext {
-                    lhs_var_canonical: canonical_name(name),
                     substitutions: HashMap::new(),
                     subrange_mappings: HashMap::new(),
                 };
@@ -500,16 +499,10 @@ impl<'input> ConversionContext<'input> {
                 );
 
                 // Build per-element context for substitution (only when needed)
-                let var_canonical = canonical_name(name);
                 let ctx = if needs_substitution {
-                    self.build_element_context(
-                        &var_canonical,
-                        &exp_eq.lhs_subscripts,
-                        &element_parts,
-                    )
+                    self.build_element_context(&exp_eq.lhs_subscripts, &element_parts)
                 } else {
                     crate::mdl::xmile_compat::ElementContext {
-                        lhs_var_canonical: var_canonical,
                         substitutions: HashMap::new(),
                         subrange_mappings: HashMap::new(),
                     }
@@ -706,9 +699,14 @@ impl<'input> ConversionContext<'input> {
 
     /// Build an ElementContext for per-element equation substitution.
     /// Maps each LHS dimension to the specific element being computed.
-    fn build_element_context(
+    ///
+    /// Shared with the synthetic-net-flow path
+    /// (`stocks::build_synthetic_flow_equation`, #559) so a synthesized
+    /// `<stock>_net_flow` resolves its rate per element with the SAME
+    /// subscript-range-mapping logic the regular arrayed-equation path
+    /// uses, instead of cloning the raw subrange-sliced rate string.
+    pub(super) fn build_element_context(
         &self,
-        var_canonical: &str,
         lhs_subscripts: &[String],
         element_parts: &[&str],
     ) -> crate::mdl::xmile_compat::ElementContext {
@@ -771,7 +769,6 @@ impl<'input> ConversionContext<'input> {
         }
 
         ElementContext {
-            lhs_var_canonical: var_canonical.to_string(),
             substitutions,
             subrange_mappings,
         }

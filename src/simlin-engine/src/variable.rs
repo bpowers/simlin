@@ -322,37 +322,102 @@ pub(crate) fn parse_table(
     }))
 }
 
+/// Lay out a per-element table list so each element's table lands at the
+/// element's flat **declared dimension index** (row-major across all of
+/// `dims`), regardless of the order `present` was collected in.
+///
+/// The runtime selects a per-element graphical-function table by the flat
+/// array offset (`vm.rs` `Lookup`/`LookupArray`: `graphical_functions[base_gf +
+/// element_offset]`), where `element_offset` is the row-major declared-order
+/// index computed from the subscript at compile time (see
+/// `compiler::codegen` `extract_table_info`). The `Equation::Arrayed` `elems`
+/// Vec, by contrast, can be in any order -- the MDL importer sorts it
+/// alphabetically (`mdl/convert/variables.rs`). So a per-element GF table list
+/// must be re-keyed by element name -> dimension index here, at lowering time,
+/// or every element of a non-alphabetically-declared dimension reads the wrong
+/// element's table. This is a one-time compile-time reorder; the VM hot path
+/// is unchanged (the opcode carries no element name).
+///
+/// `dims` are the variable's resolved dimensions, iterated by `SubscriptIterator`
+/// in the same row-major order the codegen flat offset assumes; `present` maps
+/// each element's comma-joined canonical subscript name to its (already
+/// parsed) table. Elements absent from `present` get `empty()` placeholders so
+/// `tables[element_offset]` stays aligned (a lookup on an empty table is NaN).
+pub(crate) fn reorder_arrayed_element_tables<T>(
+    dims: &[Dimension],
+    present: &HashMap<CanonicalElementName, T>,
+    empty: impl Fn() -> T,
+    clone_table: impl Fn(&T) -> T,
+) -> Vec<T> {
+    crate::dimensions::SubscriptIterator::new(dims)
+        .map(|subscripts| {
+            let key = CanonicalElementName::from_raw(&subscripts.join(","));
+            present.get(&key).map(&clone_table).unwrap_or_else(&empty)
+        })
+        .collect()
+}
+
 /// Build the tables vector from equation and variable-level gf.
-/// For arrayed variables with per-element gfs, tables are built from each element.
-/// For scalar variables or arrayed without per-element gfs, uses variable-level gf.
+/// For arrayed variables with per-element gfs, tables are built from each
+/// element and laid out by the element's declared dimension index (via
+/// [`reorder_arrayed_element_tables`]), NOT by `elems` Vec position. For scalar
+/// variables or arrayed without per-element gfs, uses the variable-level gf.
+///
+/// `dimensions` are the project/model dimension definitions; the arrayed
+/// equation's dimension names are resolved against them to drive the
+/// element-name -> dimension-index reorder.
 fn build_tables(
     gf: &Option<datamodel::GraphicalFunction>,
     equation: &datamodel::Equation,
+    dimensions: &[datamodel::Dimension],
 ) -> (Vec<Table>, Vec<EquationError>) {
-    let mut tables = Vec::new();
     let mut errors = Vec::new();
 
     // Check for per-element gfs in arrayed equation
-    if let datamodel::Equation::Arrayed(_, elements, _, _) = equation {
+    if let datamodel::Equation::Arrayed(dim_names, elements, _, _) = equation {
         let has_element_gfs = elements.iter().any(|(_, _, _, gf)| gf.is_some());
         if has_element_gfs {
-            for (_, _, _, elem_gf) in elements {
+            // Parse each element's table, keyed by the element's canonical
+            // (comma-joined) subscript name. Elements without a GF are simply
+            // absent from the map and get an empty placeholder at their slot.
+            let mut present: HashMap<CanonicalElementName, Table> = HashMap::new();
+            for (subscript, _, _, elem_gf) in elements {
                 match parse_table(elem_gf) {
-                    Ok(Some(table)) => tables.push(table),
-                    Ok(None) => {
-                        // Element has no gf - insert empty placeholder to maintain indexing
-                        // so that table[element_offset] corresponds to the correct element.
-                        // Lookups on empty tables return NaN.
-                        tables.push(Table::empty());
+                    Ok(Some(table)) => {
+                        present.insert(CanonicalElementName::from_raw(subscript), table);
                     }
+                    Ok(None) => {}
                     Err(err) => errors.push(err),
                 }
             }
+
+            // Resolve the equation's dimensions so the reorder maps each
+            // element name to its row-major declared-order flat offset. If the
+            // dimensions cannot be resolved (a separate BadDimensionName error
+            // the model already surfaces), fall back to the original
+            // Vec-positional layout rather than dropping tables.
+            let tables = match get_dimensions(dimensions, dim_names) {
+                Ok(dims) => {
+                    reorder_arrayed_element_tables(&dims, &present, Table::empty, |t: &Table| {
+                        t.clone()
+                    })
+                }
+                Err(_) => elements
+                    .iter()
+                    .map(|(subscript, _, _, _)| {
+                        present
+                            .get(&CanonicalElementName::from_raw(subscript))
+                            .cloned()
+                            .unwrap_or_else(Table::empty)
+                    })
+                    .collect(),
+            };
             return (tables, errors);
         }
     }
 
     // Fall back to variable-level gf
+    let mut tables = Vec::new();
     match parse_table(gf) {
         Ok(Some(table)) => tables.push(table),
         Ok(None) => {}
@@ -622,7 +687,7 @@ where
                     None
                 }
             };
-            let (tables, table_errors) = build_tables(&v.gf, &v.equation);
+            let (tables, table_errors) = build_tables(&v.gf, &v.equation, dimensions);
             errors.extend(table_errors);
             Variable::Var {
                 ident,
@@ -660,7 +725,7 @@ where
                     None
                 }
             };
-            let (tables, table_errors) = build_tables(&v.gf, &v.equation);
+            let (tables, table_errors) = build_tables(&v.gf, &v.equation, dimensions);
             errors.extend(table_errors);
             Variable::Var {
                 ident,

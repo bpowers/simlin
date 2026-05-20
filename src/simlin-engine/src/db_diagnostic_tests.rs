@@ -720,3 +720,211 @@ fn test_ac2_7_assembly_errors_accumulated() {
         "accumulator should contain CircularDependency diagnostic; got: {diags:?}"
     );
 }
+
+// ---- compile_var_fragment per-site diagnostic behavior pins ----
+//
+// `compile_var_fragment` accumulates diagnostics at six distinct sites
+// while lowering a single variable to per-phase bytecode. Three of those
+// sites already have dedicated coverage elsewhere in this file
+// (parse-error via `broken_syntax` in
+// `test_model_all_diagnostics_triggers_all_sources`; lowering-error via
+// `test_ac2_4_mismatched_dimensions`; table-build-error via
+// `test_ac2_2_bad_table_specific_error`). The fixtures below pin the
+// remaining sites so that any refactor of the lowering path is provably
+// diagnostic-behavior-preserving: the malformed-unit-string site (a
+// non-fatal accumulate that does NOT early-return), the
+// unknown-dependency site reached from the dependency walk (a fatal
+// accumulate-then-return), and the per-phase `Var::new` failure site (a
+// per-phase failure where the function still returns a fragment for the
+// phases that did compile).
+
+/// A syntactically malformed unit string surfaces as a `Unit`
+/// diagnostic at Error severity. This is a *unit-string parse* failure
+/// (stored on the parsed variable's `unit_errors`), distinct from the
+/// unit-*checking* dimensional mismatches in
+/// `test_ac2_5_unit_warnings_severity`, which are Warnings. The variable
+/// is otherwise well-formed, so this site accumulates without aborting
+/// the rest of compilation for that variable.
+#[test]
+fn test_compile_var_fragment_malformed_unit_string() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "malformed_unit".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "bad_unit_var".to_string(),
+                equation: datamodel::Equation::Scalar("1".to_string()),
+                documentation: String::new(),
+                units: Some("bad units here!!!".to_string()),
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, &sync);
+
+    let has_unit_error = diags.iter().any(|d| {
+        d.variable.as_deref() == Some("bad_unit_var")
+            && matches!(&d.error, DiagnosticError::Unit(_))
+            && d.severity == DiagnosticSeverity::Error
+    });
+    assert!(
+        has_unit_error,
+        "expected a Unit syntax error at Error severity for 'bad_unit_var'; got: {diags:?}"
+    );
+}
+
+/// A reference to a name that is neither a declared variable nor an
+/// implicit/module variable surfaces as an `UnknownDependency`
+/// equation error. This site is reached from the dependency walk and
+/// aborts compilation of the referencing variable.
+#[test]
+fn test_compile_var_fragment_unknown_dependency() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "unknown_dep".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "x".to_string(),
+                equation: datamodel::Equation::Scalar("undefined_var".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, &sync);
+
+    let has_unknown_dep = diags.iter().any(|d| {
+        d.variable.as_deref() == Some("x")
+            && matches!(
+                &d.error,
+                DiagnosticError::Equation(crate::common::EquationError {
+                    code: crate::common::ErrorCode::UnknownDependency,
+                    ..
+                })
+            )
+    });
+    assert!(
+        has_unknown_dep,
+        "expected UnknownDependency for 'x' referencing undefined_var; got: {diags:?}"
+    );
+}
+
+/// A scalar variable wildcard-subscripted as if it were an array
+/// (`SUM(x[*])` where `x` is scalar) parses, lowers, resolves its
+/// dependency (`x`), and builds no tables -- all the whole-variable
+/// fatal gates pass -- yet `Var::new` fails while resolving the
+/// subscript for the phase being compiled. That per-phase failure is
+/// recorded as an `Equation` diagnostic and the failing phase's bytecode
+/// is dropped, but the function still returns a fragment (it does not
+/// abort the whole variable the way the parse / lowering /
+/// unknown-dependency / table-build sites do). The per-phase accumulate
+/// site stamps `start = end = 0` (it has no AST span for the failure),
+/// which distinguishes it from the span-carrying lowering and
+/// unknown-dependency diagnostics.
+#[test]
+fn test_compile_var_fragment_per_phase_var_new_failure() {
+    let db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "per_phase_failure".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "y".to_string(),
+                    equation: datamodel::Equation::Scalar("SUM(x[*])".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let y_var = sync.models["main"].variables["y"].source;
+
+    // The function still returns a fragment: the per-phase `Var::new`
+    // failure drops only the failing phase's bytecode, it does not abort
+    // the whole variable (unlike the parse / lowering / unknown-dependency
+    // / table-build sites, which return `None`).
+    let frag = compile_var_fragment(&db, y_var, model, sync.project, true, vec![]);
+    assert!(
+        frag.is_some(),
+        "per-phase Var::new failure must still return a fragment (not whole-variable None)"
+    );
+
+    let diags = collect_all_diagnostics(&db, &sync);
+    let has_per_phase_failure = diags.iter().any(|d| {
+        d.variable.as_deref() == Some("y")
+            && d.severity == DiagnosticSeverity::Error
+            && matches!(
+                &d.error,
+                DiagnosticError::Equation(crate::common::EquationError {
+                    start: 0,
+                    end: 0,
+                    ..
+                })
+            )
+    });
+    assert!(
+        has_per_phase_failure,
+        "expected a per-phase Var::new Equation diagnostic (span 0..0) for 'y'; got: {diags:?}"
+    );
+}

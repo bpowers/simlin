@@ -21,9 +21,6 @@ use crate::mdl::builtins::{eq_lower_space, to_lower_space};
 /// current element being expanded. Equivalent to C++ ContextInfo's
 /// pLHSElmsGeneric/pLHSElmsSpecific pair.
 pub struct ElementContext {
-    /// Canonical name of the LHS variable being computed.
-    /// Used to detect self-references and emit "self" instead of the variable name.
-    pub lhs_var_canonical: String,
     /// dimension canonical name -> specific element (space_to_underbar format)
     /// e.g. {"scenario" -> "deterministic", "upper" -> "layer1"}
     pub substitutions: HashMap<String, String>,
@@ -109,7 +106,15 @@ impl XmileFormatter {
                 // But xmutil strips quotes from literals in expression output
                 lit.to_string()
             }
-            Expr::Na(_) => "NAN".to_string(),
+            // Vensim's `:NA:` is the finite "missing data" sentinel (-2^109),
+            // NOT IEEE NaN: it exists so `IF THEN ELSE(x = :NA:, ...)` can test
+            // for data existence via ordinary finite equality, and so arithmetic
+            // on it stays finite. Emit it as the numeric sentinel literal (which
+            // round-trips through the XMILE lexer as a `Const`) rather than the
+            // `NAN` keyword, which would lower to a poisoning NaN. (The `NAN`
+            // literal emitted elsewhere for the `A FUNCTION OF` placeholder is a
+            // separate, structural "no equation" marker and stays NaN.)
+            Expr::Na(_) => format_number(crate::float::NA),
         }
     }
 
@@ -119,17 +124,38 @@ impl XmileFormatter {
         subscripts: &[Subscript<'_>],
         ctx: Option<&ElementContext>,
     ) -> String {
-        // Detect self-references: if this variable is the LHS variable, emit "self"
-        // instead of the variable name, matching xmutil's Variable::OutputComputable behavior.
-        let formatted_name = if let Some(ctx) = ctx {
-            if !ctx.lhs_var_canonical.is_empty() && eq_lower_space(name, &ctx.lhs_var_canonical) {
-                "self".to_string()
-            } else {
-                self.format_name(name)
-            }
-        } else {
-            self.format_name(name)
-        };
+        // A self-reference (the referenced name equals the equation's LHS
+        // variable) is emitted as the variable's REAL formatted name, NOT
+        // the literal token `self` (issue #559).
+        //
+        // xmutil emits `self` for self-references (Variable::OutputComputable
+        // parity), but the engine only ever un-rewrites a *bare* `self` back
+        // to the enclosing variable inside `PREVIOUS()`/`SIZE()` arguments
+        // (`builtins_visitor.rs` `self_allowed` Var arm). A *subscripted*
+        // self-reference -- `self[..]`, the C-LEARN
+        // `Emissions with cumulative constraints[COP,tNext] = ... [COP,tPrev]`
+        // idiom -- is an `Expr0::Subscript`, whose arm never inspects the
+        // identifier, so the literal `self` leaked into dependency analysis
+        // as an undefined name (`UnknownDependency`/`DoesNotExist`), even
+        // with no cycle present. Emitting the real canonical name (with the
+        // resolved subscripts appended below, intact) makes a self-reference
+        // an ordinary reference: a well-founded staggered subrange
+        // recurrence (`X[next]=f(X[prev])`) flows to element-level
+        // resolution, while a genuine same-element self-cycle
+        // (`x[a]=x[a]+1`) is still correctly caught by the cycle gate.
+        //
+        // This is scoped to *ordinary* self-references only. The OTHER
+        // `self` source -- the hard-coded literal `SELF` that builtin
+        // conversion templates emit, e.g. `SAMPLE IF TRUE(c,in,init)` ->
+        // `( IF c THEN in ELSE PREVIOUS(SELF, init) )` (see the
+        // `"sample if true"` arm below) -- is deliberately UNTOUCHED: that
+        // `SELF` is always inside `PREVIOUS()`, so the still-needed
+        // `self_allowed` Var arm continues to resolve it (the SAMPLE IF
+        // TRUE MDL round-trip in `writer.rs::recognize_sample_if_true`
+        // depends on it). The scalar `x = PREVIOUS(x, 0)` control instead
+        // resolves via the ordinary `LoadPrev` path (real name, no
+        // `self` token).
+        let formatted_name = self.format_name(name);
         if subscripts.is_empty() {
             formatted_name
         } else {
@@ -1792,7 +1818,6 @@ mod tests {
         // y[DimA] with context {dima -> a1} should produce y[a1]
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
-            lhs_var_canonical: String::new(),
             substitutions: HashMap::from([("dima".to_string(), "a1".to_string())]),
             subrange_mappings: HashMap::new(),
         };
@@ -1810,7 +1835,6 @@ mod tests {
         // y[DimA, DimB] with context {dima -> a1, dimb -> b2} -> y[a1, b2]
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
-            lhs_var_canonical: String::new(),
             substitutions: HashMap::from([
                 ("dima".to_string(), "a1".to_string()),
                 ("dimb".to_string(), "b2".to_string()),
@@ -1835,7 +1859,6 @@ mod tests {
         // so it shouldn't be in substitutions and should stay as y[a1]
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
-            lhs_var_canonical: String::new(),
             substitutions: HashMap::from([("dima".to_string(), "a1".to_string())]),
             subrange_mappings: HashMap::new(),
         };
@@ -1853,7 +1876,6 @@ mod tests {
         // IF x[DimA] > 0 THEN y[DimA] ELSE z[DimA] with context {dima -> a1}
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
-            lhs_var_canonical: String::new(),
             substitutions: HashMap::from([("dima".to_string(), "a1".to_string())]),
             subrange_mappings: HashMap::new(),
         };
@@ -1914,7 +1936,6 @@ mod tests {
         // for "lower" -> positional resolution through "upper"
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
-            lhs_var_canonical: String::new(),
             substitutions: HashMap::from([("upper".to_string(), "layer1".to_string())]),
             subrange_mappings: HashMap::from([(
                 "lower".to_string(),
@@ -1944,12 +1965,16 @@ mod tests {
     }
 
     #[test]
-    fn test_format_self_reference() {
-        // When the variable references itself, emit "self" instead of the variable name.
-        // This matches xmutil's Variable::OutputComputable behavior (Variable.cpp:326-332).
+    fn test_format_self_reference_emits_real_name() {
+        // Issue #559: a self-reference emits the variable's REAL
+        // formatted name, NOT the literal token `self`. Previously this
+        // emitted `self[layer1]` (xmutil Variable::OutputComputable
+        // parity), but a subscripted `self[..]` is an `Expr0::Subscript`
+        // the engine never resolved, so it leaked as an undefined
+        // dependency. Emitting the real name makes it an ordinary
+        // reference -- an intentional behavior change, not a silent break.
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
-            lhs_var_canonical: "depth at bottom".to_string(),
             substitutions: HashMap::new(),
             subrange_mappings: HashMap::new(),
         };
@@ -1961,7 +1986,7 @@ mod tests {
         );
         assert_eq!(
             formatter.format_expr_with_context(&expr, &ctx),
-            "self[layer1]"
+            "Depth_at_Bottom[layer1]"
         );
     }
 
@@ -1970,7 +1995,6 @@ mod tests {
         // A reference to a different variable should NOT be replaced with "self".
         let formatter = XmileFormatter::new();
         let ctx = ElementContext {
-            lhs_var_canonical: "depth at bottom".to_string(),
             substitutions: HashMap::new(),
             subrange_mappings: HashMap::new(),
         };
@@ -1987,10 +2011,21 @@ mod tests {
     }
 
     #[test]
-    fn test_format_na_emits_nan() {
+    fn test_format_na_emits_finite_sentinel() {
+        // `:NA:` is the finite missing-data sentinel -2^109, not NaN, so the
+        // formatter emits the numeric sentinel literal (which round-trips through
+        // the XMILE lexer as a finite Const) rather than the poisoning `NAN`
+        // keyword. The emitted text must parse back bit-identically to the
+        // sentinel.
         let formatter = XmileFormatter::new();
         let expr = Expr::Na(loc());
-        assert_eq!(formatter.format_expr(&expr), "NAN");
+        let formatted = formatter.format_expr(&expr);
+        assert_eq!(formatted, format_number(crate::float::NA));
+        assert_ne!(formatted, "NAN");
+        assert_eq!(
+            formatted.parse::<f64>().unwrap().to_bits(),
+            crate::float::NA.to_bits()
+        );
     }
 
     #[test]

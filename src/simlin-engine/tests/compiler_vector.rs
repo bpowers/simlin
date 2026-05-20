@@ -24,20 +24,20 @@ fn vector_sort_order_a2a_produces_correct_results() {
         .array_aux("result[D]", "vector_sort_order(vals[*], 1)");
 
     project.assert_compiles_incremental();
-    project.assert_vm_result("result", &[2.0, 3.0, 1.0]);
+    project.assert_vm_result("result", &[1.0, 2.0, 0.0]);
 }
 
 #[test]
 fn vector_sort_order_a2a_produces_correct_values_monolithic() {
     // vals = [30, 10, 20], ascending sort order (1)
-    // sorted ascending: 10, 20, 30 -> original positions (1-based): 2, 3, 1
-    // so result[D1]=2, result[D2]=3, result[D3]=1
+    // sorted ascending: 10, 20, 30 -> genuine-Vensim 0-based source indices: 1, 2, 0
+    // so result[D1]=1, result[D2]=2, result[D3]=0
     let project = TestProject::new("vso_a2a_vals_mono")
         .indexed_dimension("D", 3)
         .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
         .array_aux("result[D]", "vector_sort_order(vals[*], 1)");
 
-    project.assert_vm_result("result", &[2.0, 3.0, 1.0]);
+    project.assert_vm_result("result", &[1.0, 2.0, 0.0]);
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn vector_sort_order_a2a_produces_correct_values_vm() {
         .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
         .array_aux("result[D]", "vector_sort_order(vals[*], 1)");
 
-    project.assert_vm_result("result", &[2.0, 3.0, 1.0]);
+    project.assert_vm_result("result", &[1.0, 2.0, 0.0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -193,13 +193,13 @@ fn nested_vector_elm_map_inside_sum_in_array_context_vm() {
 
 #[test]
 fn nested_vector_sort_order_inside_sum_in_array_context_monolithic() {
-    // vals = [30, 10, 20], vector_sort_order(vals, 1) = [2, 3, 1], SUM = 6
+    // vals = [30, 10, 20], vector_sort_order(vals, 1) = [1, 2, 0], SUM = 3
     let project = TestProject::new("vso_nested_sum_array_context_mono")
         .indexed_dimension("D", 3)
         .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
         .array_aux("result[D]", "sum(vector_sort_order(vals[*], 1))");
 
-    project.assert_vm_result("result", &[6.0, 6.0, 6.0]);
+    project.assert_vm_result("result", &[3.0, 3.0, 3.0]);
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn nested_vector_sort_order_inside_sum_in_array_context_vm() {
         .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
         .array_aux("result[D]", "sum(vector_sort_order(vals[*], 1))");
 
-    project.assert_vm_result("result", &[6.0, 6.0, 6.0]);
+    project.assert_vm_result("result", &[3.0, 3.0, 3.0]);
 }
 
 // ---------------------------------------------------------------------------

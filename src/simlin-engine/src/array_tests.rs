@@ -3584,6 +3584,90 @@ mod vector_elm_map_tests {
             vals[1]
         );
     }
+
+    // AC6.2: cross-dimension source resolves against the FULL source array.
+    //
+    // Genuine Vensim (Ventana's official VECTOR ELM MAP reference + the
+    // real-Vensim ground truth test/sdeverywhere/models/vector/vector.dat):
+    // result element i = source[base_i + round(offset[i])] over the full
+    // source array (last subscript fastest, innermost stride = 1 in the
+    // variable's row-major contiguous storage), where base_i is the flat
+    // position the first-argument element reference establishes; no modulo.
+    //
+    // Fixture (identical shape to vector_simple's f):
+    //   DimA: A1,A2,A3   DimB: B1,B2
+    //   a[DimA] = 0, 1, 1
+    //   d[A1,B1]=1 d[A2,B1]=2 d[A3,B1]=3 d[A1,B2]=4 d[A2,B2]=5 d[A3,B2]=6
+    //   f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA])
+    //
+    // d full storage, row-major declared order d[DimA,DimB], strides=[2,1]:
+    //   idx: 0=d11=1  1=d12=4  2=d21=2  3=d22=5  4=d31=3  5=d32=6
+    // Result iterates DimA x DimB; source free axis = DimA (the ActiveDimRef),
+    // B1 is the collapsed element subscript (DimB index 0, base contribution
+    // 0*stride_DimB = 0); offset a[DimA] broadcasts across DimB.
+    //   A1,* : base = 0*2 + 0 = 0, offset 0 -> flat 0 -> d[0]=1  (genuine f[A1]=1)
+    //   A2,* : base = 1*2 + 0 = 2, offset 1 -> flat 3 -> d[3]=5  (genuine f[A2]=5)
+    //   A3,* : base = 2*2 + 0 = 4, offset 1 -> flat 5 -> d[5]=6  (genuine f[A3]=6)
+    //
+    // The pre-fix VM materialized only the 3-element B1 column (the sliced
+    // source view) with no per-element base, producing f=[1,2,2]; this test
+    // is the AC6.2 spec and fails against the pre-fix VM.
+    #[test]
+    fn cross_dimension_source_resolves_full_array_vm() {
+        let project = TestProject::new("vem_cross_dim_vm")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimB", &["B1", "B2"])
+            .array_with_ranges("a[DimA]", vec![("A1", "0"), ("A2", "1"), ("A3", "1")])
+            .array_with_ranges(
+                "d[DimA,DimB]",
+                vec![
+                    ("A1,B1", "1"),
+                    ("A2,B1", "2"),
+                    ("A3,B1", "3"),
+                    ("A1,B2", "4"),
+                    ("A2,B2", "5"),
+                    ("A3,B2", "6"),
+                ],
+            )
+            .array_aux("f[DimA,DimB]", "vector_elm_map(d[DimA,B1], a[DimA])");
+        let vals = project.vm_result_incremental("f");
+        assert_eq!(vals.len(), 6, "expected 6 elements (DimA x DimB)");
+        // f is row-major [DimA,DimB]: [f(A1,B1), f(A1,B2), f(A2,B1), f(A2,B2),
+        // f(A3,B1), f(A3,B2)] = [1,1,5,5,6,6] (f broadcast across DimB).
+        let expected = [1.0, 1.0, 5.0, 5.0, 6.0, 6.0];
+        for (i, (&got, &want)) in vals.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "f[{i}] (genuine Vensim): expected {want}, got {got} (full vals: {vals:?})"
+            );
+        }
+    }
+
+    // AC6.4 defense-in-depth: a 1-D source[*] argument has base = 0 for all
+    // result elements (no ActiveDimRef element reference), so genuine Vensim
+    // reduces to result[i] = source[round(offset[i])] over the full source.
+    // This is what the pre-fix VM already did for the 1-D shape, so it must
+    // stay byte-identical after the base+full-source correction (the fold
+    // must not regress the 1-D case).
+    #[test]
+    fn one_d_source_base_is_zero_vm() {
+        let project = TestProject::new("vem_1d_base_zero_vm")
+            .indexed_dimension("D", 4)
+            .array_with_ranges(
+                "source[D]",
+                vec![("1", "10"), ("2", "20"), ("3", "30"), ("4", "40")],
+            )
+            .array_with_ranges(
+                "offsets[D]",
+                vec![("1", "3"), ("2", "1"), ("3", "0"), ("4", "2")],
+            )
+            .array_aux("result[D]", "vector_elm_map(source[*], offsets[*])");
+        let vals = project.vm_result_incremental("result");
+        // base=0 for every element: result[i] = source[offsets[i]]
+        // = [source[3], source[1], source[0], source[2]] = [40,20,10,30].
+        project.assert_vm_result("result", &[40.0, 20.0, 10.0, 30.0]);
+        assert_eq!(vals.len(), 4);
+    }
 }
 
 mod arrayed_except_hoisting_tests {
@@ -3982,8 +4066,9 @@ mod different_builtin_override_tests {
             .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
             .array_with_ranges("offsets[D]", vec![("1", "2"), ("2", "0"), ("3", "1")])
             // Default: vector_elm_map(source[*], offsets[*]) -> [30, 10, 20]
-            // Override element 3: vector_sort_order(source[*], 1) -> [1, 2, 3]
-            // Element 3 should be VSO[2] = 3
+            // Override element 3: vector_sort_order(source[*], 1) -> genuine
+            // 0-based [0, 1, 2] (source already ascending: 10@0, 20@1, 30@2).
+            // Element 3 (slot 2) should be VSO[2] = 2
             .array_with_default_and_overrides(
                 "result[D]",
                 "vector_elm_map(source[*], offsets[*])",
@@ -4007,8 +4092,8 @@ mod different_builtin_override_tests {
             vals[1]
         );
         assert!(
-            (vals[2] - 3.0).abs() < 1e-9,
-            "element 2 (override VSO[2]): expected 3, got {}",
+            (vals[2] - 2.0).abs() < 1e-9,
+            "element 2 (override VSO[2]): expected 2, got {}",
             vals[2]
         );
     }
@@ -4029,8 +4114,8 @@ mod different_builtin_override_tests {
             vals[1]
         );
         assert!(
-            (vals[2] - 3.0).abs() < 1e-9,
-            "element 2 (override VSO[2]): expected 3, got {}",
+            (vals[2] - 2.0).abs() < 1e-9,
+            "element 2 (override VSO[2]): expected 2, got {}",
             vals[2]
         );
     }
@@ -4145,14 +4230,16 @@ mod flag_split_tests {
     #[test]
     fn vector_builtin_promotes_active_dim_ref_monolithic() {
         // vals = [30, 10, 20]
-        // VECTOR SORT ORDER ascending: [2, 3, 1] (rank by sorted position)
+        // VECTOR SORT ORDER ascending yields the genuine-Vensim 0-based
+        // permutation [1, 2, 0]: position i holds the source index of the
+        // i-th smallest element (10@1, 20@2, 30@0).
         let project = TestProject::new("vector_promotes_mono")
             .indexed_dimension("DimA", 3)
             .array_with_ranges("vals[DimA]", vec![("1", "30"), ("2", "10"), ("3", "20")])
             .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result("result", &[2.0, 3.0, 1.0]);
+        project.assert_vm_result("result", &[1.0, 2.0, 0.0]);
     }
 
     #[test]
@@ -4163,7 +4250,7 @@ mod flag_split_tests {
             .array_aux("result[DimA]", "VECTOR SORT ORDER(vals[DimA], 1)");
 
         project.assert_compiles_incremental();
-        project.assert_vm_result_incremental("result", &[2.0, 3.0, 1.0]);
+        project.assert_vm_result_incremental("result", &[1.0, 2.0, 0.0]);
     }
 
     /// Partial MEAN should reduce over one dimension while the other iterates.
@@ -4221,11 +4308,14 @@ mod dimension_dependent_scalar_arg_tests {
         // vals = [10, 30, 20], dir = [-1, 1, 1]
         // result[D] = vector_sort_order(vals[*], dir[D])
         //
-        // Element 0 (dir=-1, descending): sort_order = [2, 3, 1] -> result[0] = 2
-        // Element 1 (dir=1, ascending):   sort_order = [1, 3, 2] -> result[1] = 3
-        // Element 2 (dir=1, ascending):   sort_order = [1, 3, 2] -> result[2] = 2
+        // Genuine-Vensim 0-based VSO (position i = source index of the i-th
+        // element in sorted order):
+        // Element 0 (dir=-1, descending): sort_order = [1, 2, 0] -> result[0] = 1
+        // Element 1 (dir=1, ascending):   sort_order = [0, 2, 1] -> result[1] = 2
+        // Element 2 (dir=1, ascending):   sort_order = [0, 2, 1] -> result[2] = 1
         //
-        // Without fix (all use dir[0]=-1): sort_order = [2, 3, 1] -> result[2] = 1
+        // Without the dim-dependent-arg fix (all use dir[0]=-1, descending):
+        // sort_order = [1, 2, 0] -> result[2] = 0
         TestProject::new(name)
             .indexed_dimension("D", 3)
             .array_with_ranges("vals[D]", vec![("1", "10"), ("2", "30"), ("3", "20")])
@@ -4236,18 +4326,18 @@ mod dimension_dependent_scalar_arg_tests {
     fn assert_vso_dim_dep_results(vals: &[f64]) {
         assert_eq!(vals.len(), 3);
         assert!(
-            (vals[0] - 2.0).abs() < 1e-9,
-            "result[0] (desc): expected 2, got {}",
+            (vals[0] - 1.0).abs() < 1e-9,
+            "result[0] (desc): expected 1, got {}",
             vals[0]
         );
         assert!(
-            (vals[1] - 3.0).abs() < 1e-9,
-            "result[1] (asc): expected 3, got {}",
+            (vals[1] - 2.0).abs() < 1e-9,
+            "result[1] (asc): expected 2, got {}",
             vals[1]
         );
         assert!(
-            (vals[2] - 2.0).abs() < 1e-9,
-            "result[2] (asc): expected 2, got {}",
+            (vals[2] - 1.0).abs() < 1e-9,
+            "result[2] (asc): expected 1, got {}",
             vals[2]
         );
     }
@@ -4281,18 +4371,18 @@ mod dimension_dependent_scalar_arg_tests {
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
         assert!(
-            (vals[0] - 12.0).abs() < 1e-9,
-            "result[0] (10 + desc[0]): expected 12, got {}",
+            (vals[0] - 11.0).abs() < 1e-9,
+            "result[0] (10 + desc[0]): expected 11, got {}",
             vals[0]
         );
         assert!(
-            (vals[1] - 13.0).abs() < 1e-9,
-            "result[1] (10 + asc[1]): expected 13, got {}",
+            (vals[1] - 12.0).abs() < 1e-9,
+            "result[1] (10 + asc[1]): expected 12, got {}",
             vals[1]
         );
         assert!(
-            (vals[2] - 12.0).abs() < 1e-9,
-            "result[2] (10 + asc[2]): expected 12, got {}",
+            (vals[2] - 11.0).abs() < 1e-9,
+            "result[2] (10 + asc[2]): expected 11, got {}",
             vals[2]
         );
     }
@@ -4317,10 +4407,10 @@ mod dimension_dependent_scalar_arg_tests {
         project.assert_compiles_incremental();
         let vals = project.vm_result_incremental("result");
         assert_eq!(vals.len(), 3);
-        // Element 0 (dir=-1, desc): sort_order = [2, 3, 1] -> result[0] = 2
+        // Element 0 (dir=-1, desc): sort_order = [1, 2, 0] -> result[0] = 1
         assert!(
-            (vals[0] - 2.0).abs() < 1e-9,
-            "result[0] (desc): expected 2, got {}",
+            (vals[0] - 1.0).abs() < 1e-9,
+            "result[0] (desc): expected 1, got {}",
             vals[0]
         );
         // Element 1 (override): 999
@@ -4329,11 +4419,11 @@ mod dimension_dependent_scalar_arg_tests {
             "result[1] (override): expected 999, got {}",
             vals[1]
         );
-        // Element 2 (dir=1, asc): sort_order = [1, 3, 2] -> result[2] = 2
-        // Without fix (desc shared): sort_order = [2, 3, 1] -> result[2] = 1
+        // Element 2 (dir=1, asc): sort_order = [0, 2, 1] -> result[2] = 1
+        // Without the dim-dependent-arg fix (desc shared): [1, 2, 0] -> result[2] = 0
         assert!(
-            (vals[2] - 2.0).abs() < 1e-9,
-            "result[2] (asc): expected 2, got {}",
+            (vals[2] - 1.0).abs() < 1e-9,
+            "result[2] (asc): expected 1, got {}",
             vals[2]
         );
     }
@@ -4831,5 +4921,399 @@ TIME STEP = 1 ~~|
             has_bad_builtin_args,
             "expected BadBuiltinArgs for result; got: {diags:?}"
         );
+    }
+}
+
+/// Regression tests for GH #580 Bug A: when `make_temp_arg` lifts a per-element
+/// scalar helper out of an `INITIAL(...)`-wrapped apply-to-all parent, a
+/// cross-dimension subscript that is related by a *group* (unequal-cardinality)
+/// mapping must still be translated to a concrete element. Before the fix the
+/// bare full-dimension subscript survived into a scalar helper aux, lowering to
+/// `DimensionInScalarContext` and surfacing as a synthetic
+/// `$⁚<var>⁚0⁚arg0⁚<element>` helper in `compile_project_incremental`'s `Err`.
+#[cfg(test)]
+mod group_mapped_temp_arg_tests {
+    use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+    use crate::open_vensim;
+
+    /// A minimized C-LEARN shape: `Aggregated Regions -> (COP: ...subgroups...)`
+    /// is a heterogeneous group mapping (one source element maps to a
+    /// multi-element subgroup of the target, `len(Small) != len(Big)`). The
+    /// `INITIAL(...)`-wrapped A2A `out[Big]` references `src` by the *full*
+    /// `Small` dimension name, so the helper extractor must resolve each `Big`
+    /// element to the `Small` element whose group contains it.
+    const GROUP_MAPPED_INITIAL_A2A: &str = "\
+{UTF-8}
+Big: e1, e2, e3, e4 ~~|
+BigGroupA: e1, e2 ~~|
+BigGroupB: e3, e4 ~~|
+Small: s1, s2 -> (Big: BigGroupA, BigGroupB) ~~|
+src[Small] = 1, 2 ~~|
+out[Big] = INITIAL(src[Small]) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+
+    #[test]
+    fn group_mapped_initial_a2a_compiles_and_simulates() {
+        let datamodel =
+            open_vensim(GROUP_MAPPED_INITIAL_A2A).expect("MDL should parse to a datamodel project");
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main");
+
+        let compiled = compiled.unwrap_or_else(|e| {
+            panic!(
+                "group-mapped INITIAL-wrapped A2A should compile (GH #580 Bug A); \
+                 got Err: {e:?}"
+            )
+        });
+
+        let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+        vm.run_to_end().expect("VM run should succeed");
+        let results = vm.into_results();
+        let series = crate::test_common::collect_results(&results);
+
+        // out[e] resolves to the `src` value of the `Small` element whose group
+        // contains `e`: BigGroupA={e1,e2}<-s1=1, BigGroupB={e3,e4}<-s2=2.
+        // The flattened apply-to-all slots are `out[e1]`..`out[e4]`.
+        let expect = [
+            ("out[e1]", 1.0),
+            ("out[e2]", 1.0),
+            ("out[e3]", 2.0),
+            ("out[e4]", 2.0),
+        ];
+        for (name, want) in expect {
+            let got = series
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} not in results; have {:?}", series.keys()));
+            assert!(
+                (got[0] - want).abs() < 1e-9,
+                "{name}: expected {want}, got {}",
+                got[0]
+            );
+        }
+    }
+
+    /// Part B (loud-safe companion -- AC7.5 / "no silent miscompile"): when a
+    /// helper lifted out of an `INITIAL(...)`-wrapped A2A parent references a
+    /// dimension that genuinely has *no* mapping to the parent dimension, the
+    /// cross-dimension subscript cannot be element-resolved and lowers to
+    /// `DimensionInScalarContext`. `lower_variable` then discards the helper's
+    /// AST; without the post-lower re-check in `lower_implicit_var` the helper
+    /// would carry an `ast == None` that `Var::new` later rejects as
+    /// `EmptyEquation`. Either way the residual must surface as a **clean,
+    /// named error** -- the failing compile `Err` must name the specific
+    /// `$⁚out⁚…⁚arg0⁚…` helper -- never a silent all-`None` fragment that reads
+    /// a wrong value. (The per-helper `DimensionInScalarContext` diagnostic is
+    /// also accumulated through `try_accumulate_diagnostic`, on the same
+    /// `IN_TRACKED_CONTEXT`-gated path as `assemble_module`'s aggregate `Err`
+    /// diagnostic; surfacing that gated channel through `collect_all_diagnostics`
+    /// is a separate, pre-existing concern.)
+    #[test]
+    fn unresolvable_helper_fails_loudly_not_silently() {
+        use crate::db::{compile_project_incremental, sync_from_datamodel_incremental};
+
+        // `Other` has NO mapping to `Big`, so `out[Big] = INITIAL(other[Other])`
+        // cannot translate the bare `[other]` subscript per `Big` element. This
+        // is the residual shape Part A does NOT resolve (no mapping exists).
+        let mdl = "\
+{UTF-8}
+Big: e1, e2, e3, e4 ~~|
+Other: o1, o2 ~~|
+other[Other] = 1, 2 ~~|
+out[Big] = INITIAL(other[Other]) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+        let datamodel = open_vensim(mdl).expect("MDL should parse to a datamodel project");
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let compile_result = compile_project_incremental(&db, sync.project, "main");
+
+        let err =
+            compile_result.expect_err("an unmappable cross-dimension helper must not compile");
+        let msg = format!("{err:?}");
+        // Loud: the failure must NAME the specific per-element helper of `out`,
+        // not be a silent miscompile into a wrong value or an opaque generic
+        // error with no offending variable.
+        assert!(
+            msg.contains("⁚out⁚") && msg.contains("⁚arg0⁚"),
+            "the compile Err must name the offending `$⁚out⁚…⁚arg0⁚…` helper \
+             (loud, actionable -- AC7.5); got: {msg}"
+        );
+    }
+}
+
+/// Regression tests for GH #580 Bug B: a *per-element arrayed graphical
+/// function* applied with a dynamic index inside an array reducer
+/// (`SUM(g[D!](drive))`) or a vector op (`VECTOR SELECT(sel[D!], g[D!](drive),
+/// ...)`). Each element of `g` carries its own lookup table; `g[D!](drive)`
+/// is therefore an *array* of per-element lookup results (one per element of
+/// `D`, all evaluated at the same scalar index `drive`) that the reducer/vector
+/// op consumes. `Var::new` lowers it to `App(Lookup(<full array view of g>,
+/// drive))`, but neither codegen view path materialized that as an array view:
+/// the reducer path (`walk_expr_as_view`) fell through with `Generic, "Cannot
+/// push view ... expected array expression"` and the scalar/vector path
+/// (`extract_table_info`) rejected the multi-element `StaticSubscript` table
+/// base with `BadTable, "range subscripts not supported in lookup tables"`.
+/// `compile_project_incremental` surfaced both as the opaque
+/// `NotSimulatable, "failed to compile fragments for variables: total"`.
+/// This is the minimized, model-agnostic form of the six C-LEARN vars
+/// (`global_rs_co2_ff`, `rs_global_ch4/n2o/pfc/sf6` -- `SUM(RS X[COP!](Time/One
+/// year))`; `rs_ff_co2_ff_aggregated` -- `VECTOR SELECT(..., RS CO2 FF[COP!](
+/// Time/One year)*..., ...)`). The fix hoists the applied arrayed GF into an
+/// `AssignTemp`/`TempArray` (recognized as array-producing) and emits a
+/// dedicated per-element-lookup opcode (`LookupArray`) that fills the temp,
+/// so the reducer/vector op reads a genuine array view.
+#[cfg(test)]
+mod arrayed_gf_in_reducer_tests {
+    use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+    use crate::open_vensim;
+
+    /// `g[D]` is a genuine per-element arrayed graphical function (three
+    /// distinct tables); `drive = Time` is strictly non-constant; `total =
+    /// SUM(g[D!](drive))` reduces the per-element lookup array. Hand-computed:
+    /// at `Time=0` every `g[ai](0)=0` => 0; at `Time=1` => 10+100+1000=1110;
+    /// at `Time=2` => 20+200+2000=2220.
+    const SUM_OF_ARRAYED_GF: &str = "\
+{UTF-8}
+D: A1, A2, A3 ~~|
+g[A1]( (0,0),(1,10),(2,20) ) ~~|
+g[A2]( (0,0),(1,100),(2,200) ) ~~|
+g[A3]( (0,0),(1,1000),(2,2000) ) ~~|
+drive = Time ~~|
+total = SUM( g[D!](drive) ) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+
+    #[test]
+    fn sum_of_arrayed_gf_compiles_and_simulates() {
+        let datamodel =
+            open_vensim(SUM_OF_ARRAYED_GF).expect("MDL should parse to a datamodel project");
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap_or_else(|e| {
+            panic!(
+                "SUM over an applied per-element arrayed GF should compile \
+                 (GH #580 Bug B); got Err: {e:?}"
+            )
+        });
+
+        let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+        vm.run_to_end().expect("VM run should succeed");
+        let results = vm.into_results();
+        let series = crate::test_common::collect_results(&results);
+
+        let total = series
+            .get("total")
+            .unwrap_or_else(|| panic!("total not in results; have {:?}", series.keys()));
+        // SUM of the per-element GF outputs at drive=Time, one per save step.
+        let expect = [0.0, 1110.0, 2220.0];
+        assert_eq!(
+            total.len(),
+            expect.len(),
+            "expected {} save steps, got {}",
+            expect.len(),
+            total.len()
+        );
+        for (i, (&got, &want)) in total.iter().zip(expect.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "total[{i}]: expected {want}, got {got}"
+            );
+        }
+    }
+
+    /// The `VECTOR SELECT` variant of the same applied-arrayed-GF shape: it
+    /// also routes the `g[D!](drive)` argument through the array-view path.
+    /// `sel = 1,0,1` selects elements A1 and A3; `VSSUM` sums them. At
+    /// `Time=1` => `g[A1](1)+g[A3](1)` = 10+1000 = 1010; at `Time=2` =>
+    /// 20+2000 = 2020; at `Time=0` => 0.
+    const VECTOR_SELECT_OF_ARRAYED_GF: &str = "\
+{UTF-8}
+D: A1, A2, A3 ~~|
+g[A1]( (0,0),(1,10),(2,20) ) ~~|
+g[A2]( (0,0),(1,100),(2,200) ) ~~|
+g[A3]( (0,0),(1,1000),(2,2000) ) ~~|
+sel[D] = 1, 0, 1 ~~|
+drive = Time ~~|
+total = VECTOR SELECT( sel[D!], g[D!](drive), 0, 0, 0 ) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+
+    #[test]
+    fn vector_select_of_arrayed_gf_compiles_and_simulates() {
+        let datamodel = open_vensim(VECTOR_SELECT_OF_ARRAYED_GF)
+            .expect("MDL should parse to a datamodel project");
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap_or_else(|e| {
+            panic!(
+                "VECTOR SELECT over an applied per-element arrayed GF should \
+                 compile (GH #580 Bug B); got Err: {e:?}"
+            )
+        });
+
+        let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
+        vm.run_to_end().expect("VM run should succeed");
+        let results = vm.into_results();
+        let series = crate::test_common::collect_results(&results);
+
+        let total = series
+            .get("total")
+            .unwrap_or_else(|| panic!("total not in results; have {:?}", series.keys()));
+        // VSSUM over selected elements {A1, A3} at drive=Time.
+        let expect = [0.0, 1010.0, 2020.0];
+        assert_eq!(total.len(), expect.len());
+        for (i, (&got, &want)) in total.iter().zip(expect.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "total[{i}]: expected {want}, got {got}"
+            );
+        }
+    }
+}
+
+/// Arrayed (multi-row) VECTOR SORT ORDER must rank WITHIN each iterated source
+/// slice (per-row), 0-based -- not over the whole flattened array. This is the
+/// multi-row generalization of the AC5 / Phase 4 single-row 0-based fix
+/// (GH #585): the single-row case Phase 4 covered is the degenerate case where
+/// the row IS the whole view, so its global flat index already equals its
+/// in-row rank.
+#[cfg(test)]
+mod arrayed_vector_sort_order_per_slice_tests {
+    use crate::test_common::TestProject;
+
+    /// Core fix: `order[D1,D2] = VECTOR SORT ORDER(vals[D1,D2], 1)` must sort
+    /// each D1-row independently and emit a 0-based permutation WITHIN that row
+    /// (`[0, |D2|)`), not the whole-array flat offsets.
+    ///
+    /// vals (row-major [D1,D2], D1=2, D2=3):
+    ///   row 0: [30, 10, 20] -> ascending source order: 10@1, 20@2, 30@0
+    ///          -> per-row 0-based ranks [1, 2, 0]
+    ///   row 1: [ 5, 15,  1] -> ascending source order:  1@2,  5@0, 15@1
+    ///          -> per-row 0-based ranks [2, 0, 1]
+    /// Genuine-Vensim expected (per-row 0-based): [1,2,0, 2,0,1].
+    ///
+    /// The pre-fix VM iterates the whole flattened view and writes the GLOBAL
+    /// flat index, so row 1 (whose flat offsets are 3,4,5) emits the sorted
+    /// global offsets [5,3,4] instead of the in-row ranks [2,0,1]. Row 0
+    /// coincides because there the in-row rank equals the global offset.
+    fn make_multi_row_vso_project(name: &str) -> TestProject {
+        TestProject::new(name)
+            .indexed_dimension("D1", 2)
+            .indexed_dimension("D2", 3)
+            .array_with_ranges(
+                "vals[D1,D2]",
+                vec![
+                    ("1,1", "30"),
+                    ("1,2", "10"),
+                    ("1,3", "20"),
+                    ("2,1", "5"),
+                    ("2,2", "15"),
+                    ("2,3", "1"),
+                ],
+            )
+            .array_aux("order[D1,D2]", "VECTOR SORT ORDER(vals[D1,D2], 1)")
+    }
+
+    #[test]
+    fn multi_row_vso_ranks_within_each_row_vm() {
+        let project = make_multi_row_vso_project("multi_row_vso_vm");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("order", &[1.0, 2.0, 0.0, 2.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn multi_row_vso_ranks_within_each_row_monolithic() {
+        let project = make_multi_row_vso_project("multi_row_vso_mono");
+        project.assert_compiles_incremental();
+        project.assert_vm_result("order", &[1.0, 2.0, 0.0, 2.0, 0.0, 1.0]);
+    }
+
+    /// Descending direction for the multi-row case: each row sorted desc,
+    /// 0-based ranks within the row.
+    ///   row 0: [30, 10, 20] desc: 30@0, 20@2, 10@1 -> [0, 2, 1]
+    ///   row 1: [ 5, 15,  1] desc: 15@1,  5@0,  1@2 -> [1, 0, 2]
+    #[test]
+    fn multi_row_vso_descending_within_each_row_vm() {
+        let project = TestProject::new("multi_row_vso_desc_vm")
+            .indexed_dimension("D1", 2)
+            .indexed_dimension("D2", 3)
+            .array_with_ranges(
+                "vals[D1,D2]",
+                vec![
+                    ("1,1", "30"),
+                    ("1,2", "10"),
+                    ("1,3", "20"),
+                    ("2,1", "5"),
+                    ("2,2", "15"),
+                    ("2,3", "1"),
+                ],
+            )
+            .array_aux("order[D1,D2]", "VECTOR SORT ORDER(vals[D1,D2], -1)");
+        project.assert_compiles_incremental();
+        project.assert_vm_result_incremental("order", &[0.0, 2.0, 1.0, 1.0, 0.0, 2.0]);
+    }
+
+    /// C-LEARN downstream shape (GH #585): a 2-D VECTOR SORT ORDER result fed
+    /// as the offset argument to a VECTOR ELM MAP whose source is sliced to a
+    /// single column. Mirrors
+    ///   sorted target year[COP,Target] =
+    ///       VECTOR ELM MAP(Effective Target Year[COP,t1], Target Order[COP,Target])
+    /// The per-row 0-based ranks keep every ELM MAP lookup in bounds (no
+    /// OOB -> NaN). With the pre-fix global-flat-index ranks, row 1's offsets
+    /// would index past the single-column source slice -> NaN.
+    ///
+    /// vals[D1,D2] is the VSO source AND the ELM MAP source's parent array.
+    ///   row 0: [30, 10, 20] -> order row 0 (asc) = [1, 2, 0]
+    ///   row 1: [ 5, 15,  1] -> order row 1 (asc) = [2, 0, 1]
+    /// src[D1,e1] = vals[D1,1] (first column): src(row0)=30, src(row1)=5.
+    /// ELM MAP base for each (D1, *) is the flat position of vals[D1, e1]
+    /// (column 0 of row D1); the offset steps the innermost (D2) axis (stride 1
+    /// in row-major [D1,D2]):
+    ///   sorted[D1,d2] = vals_full[base_D1 + order[D1,d2]]
+    ///   row 0 (base 0): order [1,2,0] -> vals_full[1,2,0] = [10, 20, 30]
+    ///   row 1 (base 3): order [2,0,1] -> vals_full[5,3,4] = [ 1,  5, 15]
+    /// Genuine-Vensim expected: [10,20,30, 1,5,15], all finite.
+    #[test]
+    fn vso_feeding_elm_map_single_column_source_no_oob_nan_vm() {
+        let project = TestProject::new("vso_elm_map_clearn_shape_vm")
+            .indexed_dimension("D1", 2)
+            .indexed_dimension("D2", 3)
+            .array_with_ranges(
+                "vals[D1,D2]",
+                vec![
+                    ("1,1", "30"),
+                    ("1,2", "10"),
+                    ("1,3", "20"),
+                    ("2,1", "5"),
+                    ("2,2", "15"),
+                    ("2,3", "1"),
+                ],
+            )
+            .array_aux("order[D1,D2]", "VECTOR SORT ORDER(vals[D1,D2], 1)")
+            .array_aux("sorted[D1,D2]", "VECTOR ELM MAP(vals[D1,1], order[D1,D2])");
+        project.assert_compiles_incremental();
+        let vals = project.vm_result_incremental("sorted");
+        assert_eq!(vals.len(), 6, "expected 6 elements (D1 x D2)");
+        for (i, &got) in vals.iter().enumerate() {
+            assert!(
+                got.is_finite(),
+                "sorted[{i}] must be finite (no OOB->NaN from a per-row 0-based VSO offset); got {got} (full: {vals:?})"
+            );
+        }
+        project.assert_vm_result_incremental("sorted", &[10.0, 20.0, 30.0, 1.0, 5.0, 15.0]);
     }
 }

@@ -1121,6 +1121,39 @@ pub fn model_module_map(
     all_models
 }
 
+/// Which dependency phase a resolved recurrence SCC belongs to.
+///
+/// `model_dependency_graph_impl` runs the cycle gate twice -- once for
+/// the dt-phase relation and once for the init-phase relation. A
+/// `ResolvedScc` records which run proved its element graph acyclic so
+/// the consumer applies the right per-element order. Phase 1 only
+/// produces `Dt` (single-variable dt self-recurrence); `Initial` is
+/// reserved for the Phase 2 init-cycle resolution.
+///
+/// Derives the same trait set as `ModelDepGraphResult` (it is reachable
+/// from a salsa return value, so it must participate in salsa equality).
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub enum SccPhase {
+    Dt,
+    Initial,
+}
+
+/// A recurrence SCC whose induced element graph the cycle gate proved
+/// acyclic. `members` is byte-stable (BTreeSet); `element_order` is the
+/// per-element topological evaluation order `(member, element-offset)`.
+///
+/// Reachable from `ModelDepGraphResult` (a salsa return value), so it
+/// derives the identical trait set -- in particular `PartialEq`/`Eq`/
+/// `salsa::Update` so a change in the resolved-SCC set invalidates the
+/// salsa cache. `Ident<Canonical>` derives `Ord` + `salsa::Update`,
+/// which makes the `BTreeSet`/`Vec` field types well-formed here.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct ResolvedScc {
+    pub members: BTreeSet<Ident<Canonical>>,
+    pub element_order: Vec<(Ident<Canonical>, usize)>,
+    pub phase: SccPhase,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct ModelDepGraphResult {
     pub dt_dependencies: HashMap<String, BTreeSet<String>>,
@@ -1129,409 +1162,30 @@ pub struct ModelDepGraphResult {
     pub runlist_flows: Vec<String>,
     pub runlist_stocks: Vec<String>,
     pub has_cycle: bool,
-}
-
-fn model_dependency_graph_impl(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-    module_input_names: &[String],
-) -> ModelDepGraphResult {
-    let source_vars = model.variables(db);
-    let module_input_names = module_input_names.to_vec();
-    let module_ident_context =
-        model_module_ident_context(db, model, project, module_input_names.clone());
-
-    struct VarInfo {
-        is_stock: bool,
-        is_module: bool,
-        dt_deps: BTreeSet<String>,
-        initial_deps: BTreeSet<String>,
-    }
-
-    let mut var_info: HashMap<String, VarInfo> = HashMap::new();
-    let mut all_init_referenced: HashSet<String> = HashSet::new();
-
-    let normalize_dep = |dep: &str| -> String {
-        let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-        if let Some(dot_pos) = effective.find('\u{00B7}') {
-            effective[..dot_pos].to_string()
-        } else {
-            effective.to_string()
-        }
-    };
-    let normalize_deps = |deps: &BTreeSet<String>| -> BTreeSet<String> {
-        deps.iter().map(|d| normalize_dep(d)).collect()
-    };
-
-    let project_models = project.models(db);
-
-    for (name, source_var) in source_vars.iter() {
-        let deps = if module_input_names.is_empty() {
-            variable_direct_dependencies_with_context(
-                db,
-                *source_var,
-                project,
-                module_ident_context,
-            )
-        } else {
-            variable_direct_dependencies_with_context_and_inputs(
-                db,
-                *source_var,
-                project,
-                module_ident_context,
-                module_input_names.clone(),
-            )
-        };
-        let init_only_dt = deps.dt_init_only_referenced_vars.clone();
-        let lagged_dt_previous = deps.dt_previous_referenced_vars.clone();
-        let lagged_initial_previous = deps.initial_previous_referenced_vars.clone();
-        let kind = source_var.kind(db);
-        let mut dt_deps = if kind == SourceVariableKind::Module {
-            deps.dt_deps
-                .iter()
-                .filter(|dep| {
-                    let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-                    if let Some(dot_pos) = effective.find('\u{00B7}') {
-                        let module_name = &effective[..dot_pos];
-                        let var_name = &effective[dot_pos + '\u{00B7}'.len_utf8()..];
-                        let sub_canonical = canonicalize(module_name);
-                        if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                            let sub_vars = sub_model.variables(db);
-                            if let Some(sub_var) = sub_vars.get(var_name) {
-                                return sub_var.kind(db) != SourceVariableKind::Stock;
-                            }
-                        }
-                        true
-                    } else {
-                        true
-                    }
-                })
-                .cloned()
-                .collect()
-        } else {
-            deps.dt_deps.clone()
-        };
-        dt_deps.retain(|dep| !init_only_dt.contains(dep));
-        dt_deps.retain(|dep| !lagged_dt_previous.contains(dep));
-        let mut initial_deps = deps.initial_deps.clone();
-        initial_deps.retain(|dep| !lagged_initial_previous.contains(dep));
-
-        var_info.insert(
-            name.clone(),
-            VarInfo {
-                is_stock: kind == SourceVariableKind::Stock,
-                is_module: kind == SourceVariableKind::Module,
-                dt_deps: normalize_deps(&dt_deps),
-                initial_deps: normalize_deps(&initial_deps),
-            },
-        );
-        all_init_referenced.extend(deps.init_referenced_vars.iter().cloned());
-
-        // Include implicit variables from this variable's deps result.
-        // Since we read this from variable_direct_dependencies (not
-        // parse_source_variable_with_module_context), salsa's backdating
-        // ensures that if the deps + implicit vars haven't changed, this
-        // function is cached.
-        for implicit in &deps.implicit_vars {
-            let mut dt_deps = implicit.dt_deps.clone();
-            dt_deps.retain(|dep| !implicit.dt_init_only_referenced_vars.contains(dep));
-            dt_deps.retain(|dep| !implicit.dt_previous_referenced_vars.contains(dep));
-            let mut initial_deps = implicit.initial_deps.clone();
-            initial_deps.retain(|dep| !implicit.initial_previous_referenced_vars.contains(dep));
-            var_info.insert(
-                implicit.name.clone(),
-                VarInfo {
-                    is_stock: implicit.is_stock,
-                    is_module: implicit.is_module,
-                    dt_deps: normalize_deps(&dt_deps),
-                    initial_deps: normalize_deps(&initial_deps),
-                },
-            );
-        }
-    }
-
-    // Compute transitive dependencies (simplified all_deps without cross-model support)
-    let compute_transitive =
-        |is_initial: bool| -> Result<HashMap<String, BTreeSet<String>>, String> {
-            let mut all_deps: HashMap<String, Option<BTreeSet<String>>> =
-                var_info.keys().map(|k| (k.clone(), None)).collect();
-            let mut processing: BTreeSet<String> = BTreeSet::new();
-
-            fn compute_inner(
-                var_info: &HashMap<String, VarInfo>,
-                all_deps: &mut HashMap<String, Option<BTreeSet<String>>>,
-                processing: &mut BTreeSet<String>,
-                name: &str,
-                is_initial: bool,
-            ) -> Result<(), String> {
-                if all_deps.get(name).and_then(|d| d.as_ref()).is_some() {
-                    return Ok(());
-                }
-
-                let info = match var_info.get(name) {
-                    Some(info) => info,
-                    None => return Ok(()), // unknown variable handled at model level
-                };
-
-                // Stocks break the dependency chain in dt phase
-                if info.is_stock && !is_initial {
-                    all_deps.insert(name.to_string(), Some(BTreeSet::new()));
-                    return Ok(());
-                }
-
-                // Skip modules -- cross-model deps handled at the orchestrator level
-                if info.is_module {
-                    let direct = if is_initial {
-                        &info.initial_deps
-                    } else {
-                        &info.dt_deps
-                    };
-                    all_deps.insert(name.to_string(), Some(direct.clone()));
-                    return Ok(());
-                }
-
-                processing.insert(name.to_string());
-
-                let direct = if is_initial {
-                    &info.initial_deps
-                } else {
-                    &info.dt_deps
-                };
-
-                let mut transitive = BTreeSet::new();
-                for dep in direct.iter() {
-                    if !var_info.contains_key(dep.as_str()) {
-                        continue; // unknown dep, skip (error reported elsewhere)
-                    }
-
-                    let dep_info = &var_info[dep.as_str()];
-                    if !is_initial && dep_info.is_stock {
-                        continue; // stock breaks chain in dt phase
-                    }
-
-                    transitive.insert(dep.clone());
-
-                    if processing.contains(dep.as_str()) {
-                        return Err(name.to_string()); // circular dependency
-                    }
-
-                    if all_deps
-                        .get(dep.as_str())
-                        .and_then(|d| d.as_ref())
-                        .is_none()
-                    {
-                        compute_inner(var_info, all_deps, processing, dep, is_initial)?;
-                    }
-
-                    if !dep_info.is_module
-                        && let Some(Some(dep_deps)) = all_deps.get(dep.as_str())
-                    {
-                        transitive.extend(dep_deps.iter().cloned());
-                    }
-                }
-
-                processing.remove(name);
-                all_deps.insert(name.to_string(), Some(transitive));
-                Ok(())
-            }
-
-            let names: Vec<String> = var_info.keys().cloned().collect();
-            for name in &names {
-                compute_inner(&var_info, &mut all_deps, &mut processing, name, is_initial)?;
-            }
-
-            Ok(all_deps
-                .into_iter()
-                .map(|(k, v)| (k, v.unwrap_or_default()))
-                .collect())
-        };
-
-    let mut has_cycle = false;
-    let dt_dependencies = compute_transitive(false).unwrap_or_else(|var_name| {
-        has_cycle = true;
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(var_name),
-            error: DiagnosticError::Model(crate::common::Error {
-                kind: crate::common::ErrorKind::Model,
-                code: crate::common::ErrorCode::CircularDependency,
-                details: None,
-            }),
-            severity: DiagnosticSeverity::Error,
-        })
-        .accumulate(db);
-        HashMap::new()
-    });
-    let initial_dependencies = compute_transitive(true).unwrap_or_else(|var_name| {
-        has_cycle = true;
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(var_name),
-            error: DiagnosticError::Model(crate::common::Error {
-                kind: crate::common::ErrorKind::Model,
-                code: crate::common::ErrorCode::CircularDependency,
-                details: None,
-            }),
-            severity: DiagnosticSeverity::Error,
-        })
-        .accumulate(db);
-        HashMap::new()
-    });
-
-    // Build runlists via topological sort
-    let var_names: Vec<String> = {
-        let mut names: Vec<String> = var_info.keys().cloned().collect();
-        names.sort_unstable();
-        names
-    };
-
-    let topo_sort_str =
-        |names: Vec<&String>, deps: &HashMap<String, BTreeSet<String>>| -> Vec<String> {
-            use std::collections::HashSet;
-            // Build the allowed set: only variables in the filtered input list
-            // should appear in the output. Dependencies are used solely for
-            // ordering, not for expanding the set.
-            let allowed: HashSet<&str> = names.iter().map(|n| n.as_str()).collect();
-            let mut result: Vec<String> = Vec::new();
-            let mut used: HashSet<String> = HashSet::new();
-
-            fn add(
-                deps: &HashMap<String, BTreeSet<String>>,
-                allowed: &HashSet<&str>,
-                result: &mut Vec<String>,
-                used: &mut HashSet<String>,
-                name: &str,
-            ) {
-                if used.contains(name) {
-                    return;
-                }
-                used.insert(name.to_string());
-                if let Some(d) = deps.get(name) {
-                    for dep in d.iter() {
-                        add(deps, allowed, result, used, dep);
-                    }
-                }
-                // Only include variables that were in the original filtered list
-                if allowed.contains(name) {
-                    result.push(name.to_string());
-                }
-            }
-
-            for name in names {
-                add(deps, &allowed, &mut result, &mut used, name);
-            }
-            result
-        };
-
-    // Initials runlist: stocks, modules, INIT-referenced vars, and their
-    // transitive deps.
-    //
-    // Module variables have their transitive deps short-circuited in
-    // compute_transitive (only direct deps are stored). The deps of those
-    // direct deps (e.g. an implicit intermediate variable depending on a
-    // regular model variable) ARE fully expanded in initial_dependencies.
-    // We must transitively close init_set so that every variable needed
-    // during the initials phase is included in the allowed set for
-    // topo_sort_str.
-    //
-    // Variables referenced by INIT() must also be seeded into the needed
-    // set. Without this, aux-only models (no stocks/modules) using INIT(x)
-    // would have an empty Initials runlist, and initial_values[x_offset]
-    // would stay at zero.
-    let runlist_initials = {
-        use std::collections::HashSet;
-        let needed: HashSet<&String> = var_names
-            .iter()
-            .filter(|n| {
-                var_info
-                    .get(n.as_str())
-                    .map(|i| i.is_stock || i.is_module)
-                    .unwrap_or(false)
-                    || all_init_referenced.contains(n.as_str())
-            })
-            .collect();
-        let mut init_set: HashSet<&String> = needed
-            .iter()
-            .flat_map(|n| {
-                initial_dependencies
-                    .get(n.as_str())
-                    .into_iter()
-                    .flat_map(|deps| deps.iter())
-            })
-            .collect();
-        init_set.extend(needed);
-        // Transitively close: each item added to init_set may itself
-        // have deps that also need to be in the initials runlist.
-        loop {
-            let additional: HashSet<&String> = init_set
-                .iter()
-                .flat_map(|n| {
-                    initial_dependencies
-                        .get(n.as_str())
-                        .into_iter()
-                        .flat_map(|deps| deps.iter())
-                })
-                .filter(|d| !init_set.contains(d))
-                .collect();
-            if additional.is_empty() {
-                break;
-            }
-            init_set.extend(additional);
-        }
-        let init_list: Vec<&String> = init_set.into_iter().collect();
-        topo_sort_str(init_list, &initial_dependencies)
-    };
-
-    // Flows runlist: non-stock variables, modules, AND stock-typed module inputs.
-    // The monolithic path uses `instantiation.contains(id) || !var.is_stock()`
-    // which includes stock-typed module inputs (e.g., a stock declared with
-    // access="input" in XMILE). These need LoadModuleInput -> AssignCurr in
-    // the flows phase to propagate the parent-provided value each timestep.
-    let module_input_set: BTreeSet<String> = module_input_names
-        .iter()
-        .map(|s| canonicalize(s).into_owned())
-        .collect();
-    let runlist_flows = {
-        let flow_names: Vec<&String> = var_names
-            .iter()
-            .filter(|n| {
-                let is_input = module_input_set.contains(canonicalize(n).as_ref());
-                var_info
-                    .get(n.as_str())
-                    .map(|i| is_input || !i.is_stock)
-                    .unwrap_or(false)
-            })
-            .collect();
-        topo_sort_str(flow_names, &dt_dependencies)
-    };
-
-    // Stocks runlist: stocks and modules
-    let runlist_stocks: Vec<String> = var_names
-        .iter()
-        .filter(|n| {
-            var_info
-                .get(n.as_str())
-                .map(|i| i.is_stock || i.is_module)
-                .unwrap_or(false)
-        })
-        .cloned()
-        .collect();
-
-    ModelDepGraphResult {
-        dt_dependencies,
-        initial_dependencies,
-        runlist_initials,
-        runlist_flows,
-        runlist_stocks,
-        has_cycle,
-    }
+    /// Recurrence SCCs whose induced element graph the cycle gate proved
+    /// acyclic and element-sourceable, so they are resolved rather than
+    /// rejected with `CircularDependency`. Empty on the acyclic happy
+    /// path (zero extra work) and whenever the conservative loud-safe
+    /// fallback fires. Populated by the Phase 1 Subcomponent B
+    /// element-cycle refinement; every construction site initializes it
+    /// explicitly (`Vec::new()` on the early-return/error paths).
+    pub resolved_sccs: Vec<ResolvedScc>,
 }
 
 /// Per-model tracked dependency graph for a specific module-input set.
 ///
 /// Models instantiated with different input wiring can have different
 /// dependency sets when `isModuleInput(...)` appears in equations.
+///
+/// The dependency-graph cycle gate itself
+/// (`model_dependency_graph_impl`, the SCC-aware back-edge break, the
+/// collapsed-node transitive accumulation) lives in `db_dep_graph.rs`
+/// alongside the shared cycle relation it consumes
+/// (`dt_walk_successors`/`init_walk_successors`/`build_var_info`/
+/// `resolve_recurrence_sccs`) -- a sibling top-level module, like
+/// `db_ltm_ir`/`db_macro_registry`, only to keep `db.rs` under the
+/// per-file line cap. These thin salsa wrappers stay here because the
+/// `ModelDepGraphResult` salsa input/return types do.
 #[salsa::tracked(returns(ref))]
 pub fn model_dependency_graph_with_inputs(
     db: &dyn Db,
@@ -1539,7 +1193,7 @@ pub fn model_dependency_graph_with_inputs(
     project: SourceProject,
     module_input_names: Vec<String>,
 ) -> ModelDepGraphResult {
-    model_dependency_graph_impl(db, model, project, &module_input_names)
+    crate::db_dep_graph::model_dependency_graph_impl(db, model, project, &module_input_names)
 }
 
 /// Default per-model tracked dependency graph (no module inputs).
@@ -1549,7 +1203,7 @@ pub fn model_dependency_graph(
     model: SourceModel,
     project: SourceProject,
 ) -> ModelDepGraphResult {
-    model_dependency_graph_impl(db, model, project, &[])
+    crate::db_dep_graph::model_dependency_graph_impl(db, model, project, &[])
 }
 
 // ── Diagnostic collection ──────────────────────────────────────────────
@@ -3009,23 +2663,49 @@ fn expand_maps_to_chains(
     dim_names: &BTreeSet<String>,
     all_dims: &[SourceDimension],
 ) -> BTreeSet<String> {
-    let mut expanded = dim_names.clone();
-    let dim_map: HashMap<&str, &SourceDimension> =
-        all_dims.iter().map(|d| (d.name.as_str(), d)).collect();
+    // Dimension display names (`SourceDimension.name`, the as-written casing)
+    // and mapping targets (`maps_to` / `mappings[].target`, which the MDL/XMILE
+    // importers canonicalize to lowercase) are NOT necessarily the same string,
+    // so every reachability comparison and lookup here must be on the canonical
+    // form. The returned set is keyed by display name (the caller filters the
+    // datamodel dims with `expanded.contains(&d.name)`), so we resolve each
+    // canonical target back through `canonical_to_display` before inserting.
+    let canonical_to_display: HashMap<String, String> = all_dims
+        .iter()
+        .map(|d| (canonicalize(&d.name).into_owned(), d.name.clone()))
+        .collect();
+    let dim_map: HashMap<String, &SourceDimension> = all_dims
+        .iter()
+        .map(|d| (canonicalize(&d.name).into_owned(), d))
+        .collect();
 
+    let mut expanded = dim_names.clone();
     let mut to_visit: Vec<String> = dim_names.iter().cloned().collect();
     while let Some(name) = to_visit.pop() {
+        let name_canon = canonicalize(&name).into_owned();
+
+        // `push_target` resolves a canonical mapping target to the display name
+        // the caller's `expanded.contains(&d.name)` filter expects, falling back
+        // to the canonical string when the target is not itself a declared
+        // dimension (a defensive case the old `==` path also tolerated).
+        let push_target =
+            |expanded: &mut BTreeSet<String>, to_visit: &mut Vec<String>, target_canon: &str| {
+                let display = canonical_to_display
+                    .get(target_canon)
+                    .cloned()
+                    .unwrap_or_else(|| target_canon.to_string());
+                if expanded.insert(display.clone()) {
+                    to_visit.push(display);
+                }
+            };
+
         // Forward: follow maps_to and mappings targets from the current dim.
-        if let Some(dim) = dim_map.get(name.as_str()) {
-            if let Some(ref target) = dim.maps_to
-                && expanded.insert(target.clone())
-            {
-                to_visit.push(target.clone());
+        if let Some(dim) = dim_map.get(&name_canon) {
+            if let Some(ref target) = dim.maps_to {
+                push_target(&mut expanded, &mut to_visit, &canonicalize(target));
             }
             for mapping in &dim.mappings {
-                if expanded.insert(mapping.target.clone()) {
-                    to_visit.push(mapping.target.clone());
-                }
+                push_target(&mut expanded, &mut to_visit, &canonicalize(&mapping.target));
             }
         }
         // Reverse: find any dimension that maps_to (or has a mapping targeting)
@@ -3036,8 +2716,11 @@ fn expand_maps_to_chains(
             let maps_to_current = source_dim
                 .maps_to
                 .as_deref()
-                .is_some_and(|t| t == name.as_str())
-                || source_dim.mappings.iter().any(|m| m.target == name);
+                .is_some_and(|t| canonicalize(t) == name_canon)
+                || source_dim
+                    .mappings
+                    .iter()
+                    .any(|m| canonicalize(&m.target) == name_canon);
             if maps_to_current && expanded.insert(source_dim.name.clone()) {
                 to_visit.push(source_dim.name.clone());
             }
@@ -3227,31 +2910,65 @@ pub fn compute_layout(
 /// Extract compiler::Table data directly from a SourceVariable's graphical
 /// function fields. Used to populate the mini-Module's tables map for
 /// dependency variables that define lookup tables.
-fn extract_tables_from_source_var(
+pub(crate) fn extract_tables_from_source_var(
     db: &dyn Db,
     source_var: &SourceVariable,
+    project: SourceProject,
 ) -> Vec<crate::compiler::Table> {
     let ident = source_var.ident(db);
     let eq = source_var.equation(db);
 
     // For arrayed equations with per-element graphical functions, build one
-    // table per element (matching variable.rs build_tables).  Elements without
-    // a GF get an empty placeholder so that table[element_offset] stays aligned.
+    // table per element (matching variable.rs build_tables). Each element's
+    // table is laid out at the element's flat declared dimension index (not
+    // its `elems` Vec position), because the runtime selects a per-element
+    // table by the row-major dimension offset (vm.rs Lookup/LookupArray); see
+    // `crate::variable::reorder_arrayed_element_tables`. Elements without a GF
+    // get an empty placeholder so that table[element_offset] stays aligned.
     if let SourceEquation::Arrayed(_, elements, _, _) = eq {
         let has_element_gfs = elements.iter().any(|e| e.gf.is_some());
         if has_element_gfs {
-            return elements
-                .iter()
-                .map(|e| {
-                    e.gf.as_ref()
-                        .and_then(|gf| {
-                            let dm_gf = source_gf_to_datamodel(gf);
-                            let var_table = crate::variable::parse_table(&Some(dm_gf)).ok()??;
-                            crate::compiler::Table::new(ident, &var_table).ok()
-                        })
-                        .unwrap_or(crate::compiler::Table { data: vec![] })
-                })
-                .collect();
+            // Parse present element tables, keyed by canonical (comma-joined)
+            // subscript name.
+            let mut present: HashMap<crate::common::CanonicalElementName, crate::compiler::Table> =
+                HashMap::new();
+            for e in elements {
+                if let Some(gf) = e.gf.as_ref() {
+                    let dm_gf = source_gf_to_datamodel(gf);
+                    if let Some(var_table) =
+                        crate::variable::parse_table(&Some(dm_gf)).ok().flatten()
+                        && let Ok(table) = crate::compiler::Table::new(ident, &var_table)
+                    {
+                        present.insert(
+                            crate::common::CanonicalElementName::from_raw(&e.subscript),
+                            table,
+                        );
+                    }
+                }
+            }
+
+            // Resolve the variable's dimensions so the reorder maps each
+            // element name to its row-major declared-order flat offset. If the
+            // dimensions cannot be resolved, fall back to the original
+            // Vec-positional layout rather than dropping tables.
+            let dims = variable_dimensions(db, *source_var, project);
+            if dims.is_empty() {
+                return elements
+                    .iter()
+                    .map(|e| {
+                        present
+                            .get(&crate::common::CanonicalElementName::from_raw(&e.subscript))
+                            .cloned()
+                            .unwrap_or(crate::compiler::Table { data: vec![] })
+                    })
+                    .collect();
+            }
+            return crate::variable::reorder_arrayed_element_tables(
+                dims,
+                &present,
+                || crate::compiler::Table { data: vec![] },
+                |t: &crate::compiler::Table| t.clone(),
+            );
         }
     }
 
@@ -3277,7 +2994,7 @@ fn extract_tables_from_source_var(
 /// with the module's own prefix), strips the module prefix from dst,
 /// and strips leading middots from src in the "main" model (where parent
 /// scope refs are represented as `·var` after canonicalization).
-fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
+pub(crate) fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
     model_name: &str,
     module_var_prefix: &str,
     refs: impl Iterator<Item = (S1, S2)>,
@@ -3305,7 +3022,7 @@ fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
 
 /// Build a dimension-only stub Variable for use in a minimal compilation
 /// context. Only get_dimensions() is called on these by Context.
-fn build_stub_variable(
+pub(crate) fn build_stub_variable(
     db: &dyn Db,
     source_var: &SourceVariable,
     ident: &Ident<Canonical>,
@@ -3359,7 +3076,7 @@ fn build_stub_variable(
 /// Populate sub-model metadata in `all_metadata` for module variable compilation.
 /// Mirrors the monolithic `build_metadata` but works with salsa SourceModel/SourceVariable.
 /// Recursively populates metadata for nested modules.
-fn build_submodel_metadata<'arena>(
+pub(crate) fn build_submodel_metadata<'arena>(
     arena: &'arena bumpalo::Bump,
     db: &dyn Db,
     sub_model: SourceModel,
@@ -3424,6 +3141,583 @@ pub(crate) struct VarFragmentResult {
     pub fragment: crate::compiler::symbolic::CompiledVarFragment,
 }
 
+/// `model_name -> (var_name -> (offset, size))`: the per-variable mini-
+/// layout offset map `lower_var_fragment` produces and the minimal
+/// per-phase `crate::compiler::Module` consumes. Structurally identical to
+/// `compiler::VariableOffsetMap` / `db_var_fragment::VarOffsets` (both
+/// private aliases in their modules); named here so the factored
+/// `compile_phase_to_per_var_bytecodes` signature is self-documenting
+/// rather than an inline nested-`HashMap` (which clippy flags as a very
+/// complex type).
+pub(crate) type PerVarOffsetMap =
+    HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
+
+/// Compile one phase's lowered `Vec<Expr>` for a single variable through
+/// its own correct mini-context and symbolize the result into a
+/// layout-independent `PerVarBytecodes`.
+///
+/// This is the exact body of `compile_var_fragment`'s former
+/// `compile_phase` closure, factored out so the element-cycle SCC graph
+/// builder (`crate::db_dep_graph` via `var_phase_symbolic_fragment_prod`)
+/// reuses the *exact* production compile+symbolize path rather than a
+/// re-derivation. `compile_var_fragment` calls this for each phase; the
+/// SCC accessor `var_phase_symbolic_fragment_prod` builds the caller-owned
+/// context byte-identically to `compile_var_fragment` and calls this with
+/// the phase's production-lowered exprs.
+///
+/// The caller owns and supplies the lowering-independent context
+/// (`offsets`, `rmap`, `tables`, `module_refs`, `mini_offset`,
+/// `converted_dims`, `dim_context`, `model_name_ident`, `inputs`) exactly
+/// as `compile_var_fragment` constructs it. `var_ident_canonical` is the
+/// single-variable runlist-order entry the minimal `Module` is built
+/// around. Returns `None` (loud-safe, never panics) when `exprs` is
+/// empty, the minimal `Module::compile()` fails, or any symbolization
+/// step fails -- exactly the closure's original `None` arms.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_phase_to_per_var_bytecodes(
+    exprs: &[crate::compiler::Expr],
+    offsets: &PerVarOffsetMap,
+    rmap: &crate::compiler::symbolic::ReverseOffsetMap,
+    tables: &HashMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
+    module_refs: &HashMap<Ident<Canonical>, crate::vm::ModuleKey>,
+    mini_offset: usize,
+    converted_dims: &[crate::dimensions::Dimension],
+    dim_context: &crate::dimensions::DimensionsContext,
+    model_name_ident: &Ident<Canonical>,
+    var_ident_canonical: &Ident<Canonical>,
+    inputs: &BTreeSet<Ident<Canonical>>,
+) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
+    use crate::compiler::symbolic::PerVarBytecodes;
+
+    if exprs.is_empty() {
+        return None;
+    }
+
+    // Build a minimal Module for this phase
+    let runlist_initials_by_var = vec![];
+    let module_inputs: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
+    let module = crate::compiler::Module {
+        ident: model_name_ident.clone(),
+        inputs: module_inputs,
+        n_slots: mini_offset,
+        n_temps: 0,
+        temp_sizes: vec![],
+        runlist_initials: vec![],
+        runlist_initials_by_var,
+        runlist_flows: exprs.to_vec(),
+        runlist_stocks: vec![],
+        offsets: offsets.clone(),
+        runlist_order: vec![var_ident_canonical.clone()],
+        tables: tables.clone(),
+        dimensions: converted_dims.to_vec(),
+        dimensions_ctx: dim_context.clone(),
+        module_refs: module_refs.clone(),
+    };
+
+    // Extract temp sizes from expressions
+    let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
+    for expr in exprs {
+        crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
+    }
+    let n_temps = temp_sizes_map.len();
+    let mut temp_sizes: Vec<usize> = vec![0; n_temps];
+    for (id, size) in &temp_sizes_map {
+        if (*id as usize) < temp_sizes.len() {
+            temp_sizes[*id as usize] = *size;
+        }
+    }
+
+    // Update Module with temp info
+    let module = crate::compiler::Module {
+        n_temps,
+        temp_sizes: temp_sizes.clone(),
+        ..module
+    };
+
+    match module.compile() {
+        Ok(compiled) => {
+            // Symbolize the flows bytecode (we put everything in flows)
+            let sym_bc =
+                crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, rmap)
+                    .ok()?;
+
+            let ctx = &*compiled.context;
+            let sym_views: Vec<_> = ctx
+                .static_views
+                .iter()
+                .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, rmap))
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            let sym_mods: Vec<_> = ctx
+                .modules
+                .iter()
+                .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, rmap))
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+
+            let temp_sizes_vec: Vec<(u32, usize)> =
+                temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
+
+            let dim_lists: Vec<Vec<u16>> = ctx
+                .dim_lists
+                .iter()
+                .map(|(n, arr)| arr[..(*n as usize)].to_vec())
+                .collect();
+
+            Some(PerVarBytecodes {
+                symbolic: sym_bc,
+                graphical_functions: ctx.graphical_functions.clone(),
+                module_decls: sym_mods,
+                static_views: sym_views,
+                temp_sizes: temp_sizes_vec,
+                dim_lists,
+            })
+        }
+        Err(_) => None,
+    }
+}
+
+/// A variable's *symbolic* `PerVarBytecodes` for a phase, sourced through
+/// the exact production compile+symbolize path (`lower_var_fragment` +
+/// `compile_phase_to_per_var_bytecodes`), never a re-derivation.
+///
+/// This is the cross-member-comparable substrate the element-cycle SCC
+/// graph builder consumes: every variable reference in the returned
+/// bytecode is a layout-independent
+/// `SymVarRef { name, element_offset }`, so a multi-member recurrence
+/// SCC's induced element graph can be built across members (the fix for
+/// GH #575 -- the prior `Expr::AssignCurr`-mini-slot builder was
+/// structurally incapable of cross-member edges). It is the production
+/// element-graph source consumed by `symbolic_phase_element_order` and
+/// `combine_scc_fragment` (the Phase 2 GH #575 rebuild replaced the prior
+/// `Expr`-based accessor entirely).
+///
+/// This accessor returns the *whole* per-phase symbolic stream verbatim
+/// (PREVIOUS/INIT reads included). Which opcodes become element-graph
+/// *edges* is the consumer's concern: `symbolic_phase_element_order`'s
+/// read-opcode arm inherits `build_var_info`'s exact per-phase
+/// PREVIOUS/INIT strip (`SymLoadPrev` -> no edge in either phase;
+/// `SymLoadInitial` -> no edge in `Dt`, edge in `Initial`; current-value
+/// reads kept), so the element graph MATCHES the engine's actual
+/// per-phase data-flow relation rather than over-collecting lagged reads.
+/// See that function's rustdoc for the AC4 soundness argument and the
+/// exact `db_dep_graph.rs` `build_var_info` line citations. The loud-safe
+/// contract documented *here* is a distinct concern -- it is about a
+/// node failing to be element-*sourced* (always `None`, never a panic),
+/// not about which sourced opcodes are ordering edges.
+///
+/// The caller-owned, lowering-independent context is built byte-identically
+/// to `compile_var_fragment` (same helpers, same order, the default
+/// no-module-input wiring `build_var_info(.., &[])` uses):
+/// `SccPhase::Dt` selects `per_phase_lowered.noninitial`,
+/// `SccPhase::Initial` selects `.initial`.
+///
+/// A synthetic helper (`$\u{205A}` prefix, absent from `model.variables`)
+/// that lands in a recurrence SCC is **parent-sourced**: its symbolic
+/// `PerVarBytecodes` is the parent variable's `implicit_vars[index]`
+/// compiled+symbolized through the shared per-phase relation
+/// `compile_implicit_var_phase_bytecodes` (the same chain
+/// `compile_implicit_var_fragment` runs), so the element-graph builder
+/// consumes it exactly like a real member (element-cycle Phase 3 Task 2 /
+/// AC3.1, pinned by `synthetic_helper_symbolic_fragment_is_parent_sourced`).
+///
+/// **Loud-safe contract (the load-bearing invariant -- formalized here).**
+/// This accessor returns `None` -- *never* panics, `expect`s, or `unwrap`s
+/// on a sourcing failure -- on EVERY way a node fails to be
+/// element-sourced:
+/// - no `SourceVariable` AND not a parent-sourceable synthetic helper
+///   (absent from `model_implicit_var_info`, or the shared per-phase
+///   compile failed): `None` (the loud-safe signal -- AC3.2);
+/// - `LoweredVarFragment::Fatal` (the variable did not lower at all):
+///   explicit `return None`;
+/// - the requested phase's `Var::new` errored (`phase_var.ok()?`);
+/// - any `compile_phase_to_per_var_bytecodes` failure (empty exprs, the
+///   minimal `Module::compile()`, or any `symbolize_*` step) -- that
+///   function is itself total-and-`None`-on-failure.
+///
+/// `None` propagates loud-safe and all-or-nothing: any in-SCC node that
+/// cannot be element-sourced makes `symbolic_phase_element_order` return
+/// `None` (its `?` on this call), so `refine_scc_to_element_verdict`
+/// yields `SccVerdict::Unresolved`, `resolve_recurrence_sccs` sets
+/// `has_unresolved`, and `model_dependency_graph_impl` keeps `has_cycle`
+/// and accumulates the `CircularDependency` diagnostic
+/// (`dt_scc_map`/`init_scc_map` stays empty, `resolved_sccs` stays empty).
+/// The model is rejected loudly -- no panic, no silent miscompile, and the
+/// other SCC members are **not** partially resolved (the SCC is rejected
+/// as a unit). This contract is regression-pinned by
+/// `unsourceable_in_scc_node_falls_back_to_circular_no_panic` (AC3.2,
+/// driven through the production `model_dependency_graph` path via the
+/// `#[cfg(test)]` `UnsourceableVarsGuard` override) and
+/// `var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic`.
+pub(crate) fn var_phase_symbolic_fragment_prod(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    var_name: &str,
+    phase: SccPhase,
+) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
+    use crate::db_var_fragment::{LoweredVarFragment, lower_var_fragment};
+
+    // `#[cfg(test)]` only: an active `UnsourceableVarsGuard` forces this
+    // node to take the loud-safe `None` arm, so the AC3.2 regression test
+    // can exercise the genuinely-unsourceable in-SCC path through the
+    // PRODUCTION `model_dependency_graph` chain (an organic orphan that is
+    // neither in `source_vars` nor resolvable via `model_implicit_var_info`
+    // is hard to construct deterministically; this is the reliable
+    // trigger). It returns the SAME `None` a real no-`SourceVariable`
+    // node returns, so the test observes the real loud-safe behavior, not
+    // a shim. No effect in non-test builds.
+    #[cfg(test)]
+    if crate::db_dep_graph::var_is_forced_unsourceable(var_name) {
+        return None;
+    }
+
+    let source_vars = model.variables(db);
+    // No `SourceVariable` (a synthetic INIT/PREVIOUS/SMOOTH/macro-expansion
+    // helper, `$\u{205A}` prefix, absent from `model.variables`): before
+    // the loud-safe `None`, attempt parent-`implicit_vars` sourcing
+    // (element-cycle Phase 3 Task 2 / AC3.1). A synthetic helper that
+    // lands in a recurrence SCC has no `SourceVariable` but DOES resolve
+    // in `model_implicit_var_info`; its symbolic `PerVarBytecodes` is the
+    // parent variable's `implicit_vars[index]` compiled+symbolized through
+    // the SAME shared per-phase relation the production per-variable
+    // assembly uses (`compile_implicit_var_phase_bytecodes` -- the exact
+    // `parent → parsed.implicit_vars[i] → parse_var → lower_variable →
+    // compile → symbolize` chain `compile_implicit_var_fragment` runs), so
+    // the element-graph builder consumes it exactly like a real member
+    // (same layout-independent `SymVarRef` form). The element-cycle SCC
+    // identification uses the default no-module-input root wiring, so
+    // source the helper with `is_root = true`, `module_input_names = &[]`
+    // (matching the real-var arm's `lower_var_fragment(.., true, &[], ..)`
+    // below). Genuinely unsourceable (absent from `model_implicit_var_info`
+    // too, or the shared compile failed) ⇒ `None`, the loud-safe signal
+    // (see the rustdoc's loud-safe contract): the SCC stays unresolved and
+    // `CircularDependency` is kept -- no panic, no silent miscompile
+    // (AC3.2).
+    let Some(sv) = source_vars.get(var_name) else {
+        let canonical_name = canonicalize(var_name).into_owned();
+        let info = model_implicit_var_info(db, model, project);
+        let meta = info.get(&canonical_name)?;
+        let is_initial = matches!(phase, SccPhase::Initial);
+        return compile_implicit_var_phase_bytecodes(
+            db,
+            meta,
+            model,
+            project,
+            true,
+            &[],
+            is_initial,
+        );
+    };
+    let var_ident_canonical: Ident<Canonical> = Ident::new(var_name);
+
+    // Caller-owned, lowering-independent context, built EXACTLY as
+    // `compile_var_fragment` builds it (mirror byte-for-byte; same
+    // helpers, same order).
+    let dm_dims = source_dims_to_datamodel(project.dimensions(db));
+    let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
+        .iter()
+        .map(crate::dimensions::Dimension::from)
+        .collect();
+    let model_name_ident = Ident::new(model.name(db));
+    let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
+    let module_models = model_module_map(db, model, project).clone();
+
+    let lowered = lower_var_fragment(
+        db,
+        *sv,
+        model,
+        project,
+        true,
+        &[],
+        &converted_dims,
+        &dim_context,
+        &model_name_ident,
+        &module_models,
+        &inputs,
+    );
+
+    let (per_phase_lowered, tables, offsets, rmap, mini_offset) = match lowered {
+        LoweredVarFragment::Lowered {
+            per_phase_lowered,
+            tables,
+            offsets,
+            rmap,
+            mini_offset,
+            ..
+        } => (per_phase_lowered, tables, offsets, rmap, mini_offset),
+        // The variable did not lower at all => `None` (loud-safe).
+        LoweredVarFragment::Fatal { .. } => return None,
+    };
+
+    // The element-cycle SCC identification uses the default no-module-
+    // input wiring, so the module-ref reconstruction must match that
+    // wiring too (mirrors `compile_var_fragment`'s
+    // `build_caller_module_refs(.., &module_input_names)` with empty
+    // inputs).
+    let module_refs =
+        crate::db_var_fragment::build_caller_module_refs(db, *sv, model, project, true, &[]);
+
+    // `SccPhase::Dt` selects the non-initial (dt/flow) lowering;
+    // `SccPhase::Initial` selects the initial lowering -- the same
+    // selection `compile_var_fragment` makes per phase.
+    let phase_var = match phase {
+        SccPhase::Dt => per_phase_lowered.noninitial,
+        SccPhase::Initial => per_phase_lowered.initial,
+    };
+    // The phase's `Var::new` errored => cannot source its production
+    // lowered exprs => `None` (loud-safe).
+    let var = phase_var.ok()?;
+
+    compile_phase_to_per_var_bytecodes(
+        &var.ast,
+        &offsets,
+        &rmap,
+        &tables,
+        &module_refs,
+        mini_offset,
+        &converted_dims,
+        &dim_context,
+        &model_name_ident,
+        &var_ident_canonical,
+        &inputs,
+    )
+}
+
+/// Segment one member's symbolic opcode stream into per-element slices,
+/// keyed by `element_offset`.
+///
+/// A per-element slice for element `e` is the run of opcodes up to and
+/// including the **write** opcode whose `var.name == member` and
+/// `var.element_offset == e` (`AssignCurr | AssignConstCurr |
+/// BinOpAssignCurr`). This is the *exact* segmentation
+/// `crate::db_dep_graph::symbolic_phase_element_order` performs to build
+/// the SCC element graph (GH #575) -- the verdict and the combined
+/// fragment MUST agree on segment boundaries or `element_order` would
+/// reference a slice the combiner cannot reproduce, so the two share this
+/// definition's contract.
+///
+/// A trailing `Ret` is stripped first (the combined fragment carries one
+/// terminal `Ret`). Any opcodes after the member's final per-element write
+/// (before the stripped `Ret`) are appended to the last element's slice so
+/// no opcode is silently dropped -- a tail with no write is a malformed
+/// fragment (`Err`).
+///
+/// Loud-safe failures (return `Err`, caller keeps `CircularDependency` --
+/// NEVER a panic, NEVER a silently-malformed slice):
+/// - a duplicate write for the same element (ambiguous segmentation);
+/// - opcodes present but no per-element write at all (not element-
+///   sourceable in the simple per-element shape, mirroring
+///   `symbolic_phase_element_order`'s `saw_write` guard).
+///
+/// Consumed by `combine_scc_fragment`, which `assemble_module` invokes
+/// for every resolved recurrence SCC (the Subcomponent B Task 6
+/// production consumer -- the dt flows runlist and the synthetic-ident
+/// init `SymbolicCompiledInitial` path).
+fn segment_member_by_element(
+    member: &str,
+    code: &[crate::compiler::symbolic::SymbolicOpcode],
+) -> Result<HashMap<usize, Vec<crate::compiler::symbolic::SymbolicOpcode>>, String> {
+    use crate::compiler::symbolic::SymbolicOpcode;
+
+    // Strip a trailing Ret -- the combined fragment appends a single Ret.
+    let end = if code.last() == Some(&SymbolicOpcode::Ret) {
+        code.len() - 1
+    } else {
+        code.len()
+    };
+    let body = &code[..end];
+
+    let mut segments: HashMap<usize, Vec<SymbolicOpcode>> = HashMap::new();
+    let mut current: Vec<SymbolicOpcode> = Vec::new();
+    let mut last_written_elem: Option<usize> = None;
+
+    for op in body {
+        current.push(op.clone());
+        let write_elem = match op {
+            SymbolicOpcode::AssignCurr { var }
+            | SymbolicOpcode::AssignConstCurr { var, .. }
+            | SymbolicOpcode::BinOpAssignCurr { var, .. }
+                if var.name == member =>
+            {
+                Some(var.element_offset)
+            }
+            // A write to a *different* member, or AssignNext/
+            // BinOpAssignNext (a stock-update, not a per-element
+            // current-value write of THIS member) does not terminate this
+            // member's element segment -- exactly the
+            // `symbolic_phase_element_order` rule.
+            _ => None,
+        };
+        if let Some(elem) = write_elem {
+            if segments.contains_key(&elem) {
+                return Err(format!(
+                    "SCC member `{member}` has a duplicate per-element \
+                     write for element {elem}; combined fragment cannot \
+                     be unambiguously segmented"
+                ));
+            }
+            segments.insert(elem, std::mem::take(&mut current));
+            last_written_elem = Some(elem);
+        }
+    }
+
+    // Any trailing opcodes after the last write belong to the last
+    // element's segment (dropping them would change semantics). With no
+    // write at all this member is not element-sourceable -- loud-safe.
+    if !current.is_empty() {
+        match last_written_elem {
+            Some(elem) => {
+                segments
+                    .get_mut(&elem)
+                    .expect("last_written_elem indexes an inserted segment")
+                    .extend(current);
+            }
+            None => {
+                return Err(format!(
+                    "SCC member `{member}` has no per-element write \
+                     opcode; not element-sourceable for the combined \
+                     fragment"
+                ));
+            }
+        }
+    }
+
+    Ok(segments)
+}
+
+/// Interleave a multi-member recurrence SCC's per-element symbolic
+/// segments into ONE combined `PerVarBytecodes`, following the SCC's
+/// element-acyclic `element_order`.
+///
+/// `member_fragments` maps each SCC member's canonical name to its
+/// *symbolic* `PerVarBytecodes` for the SCC's phase (obtained by the
+/// caller via `var_phase_symbolic_fragment_prod(.., scc.phase)` -- the
+/// exact production compile+symbolize path, never a re-derivation). The
+/// result is a single fragment whose per-element writes appear in
+/// `scc.element_order`, with each write keeping its **original**
+/// `SymVarRef { name, element_offset }` (only segment ordering changes).
+/// `resolve_module` therefore maps every write to the same model slot it
+/// would have without the SCC, so variable layout offsets and the results
+/// offset map are unchanged and per-variable result series stay
+/// individually addressable (AC2.3).
+///
+/// **This is the per-element-granular generalization of
+/// `concatenate_fragments`.** Resources are MEMBER-scoped, not
+/// element-scoped: each member's fragment is absorbed into the shared
+/// `FragmentMerger` exactly ONCE (in `element_order`'s member
+/// first-encounter order, so the offset assignment is deterministic),
+/// yielding that member's resource base offsets and merging its
+/// side-channels (literals, GFs, modules, views, temps, dim-lists) the
+/// same way `concatenate_fragments` merges a fragment. Every segment of
+/// that member is then renumbered by the member's offsets. The two
+/// consumers share `FragmentMerger`/`renumber_opcode` so the multi-layer
+/// resource accounting cannot drift.
+///
+/// Loud-safe (`Err`, caller keeps `CircularDependency` -- never a panic,
+/// never a malformed fragment):
+/// - a member named in `element_order` has no supplied fragment (the Task
+///   4 accessor returned `None` -- unsourceable);
+/// - a member's fragment cannot be cleanly segmented (missing / duplicate
+///   / no-write element segment -- `segment_member_by_element`);
+/// - an `(member, element)` entry in `element_order` has no matching
+///   segment;
+/// - a resource-ID renumber overflows its target ID type.
+///
+/// `assemble_module` (Subcomponent B Task 6) invokes this for every
+/// resolved recurrence SCC: it skips each member's per-variable fragment
+/// in the dt-flows and init collection loops and injects this combined
+/// fragment at the first member's runlist slot (the dt fragment into
+/// `flow_frags`, the init fragment as one synthetic-ident
+/// `SymbolicCompiledInitial`).
+pub(crate) fn combine_scc_fragment(
+    scc: &ResolvedScc,
+    member_fragments: &HashMap<Ident<Canonical>, crate::compiler::symbolic::PerVarBytecodes>,
+) -> Result<crate::compiler::symbolic::PerVarBytecodes, String> {
+    use crate::compiler::symbolic::{
+        ContextResourceCounts, FragmentMerger, FragmentResourceOffsets, SymbolicOpcode,
+        renumber_opcode,
+    };
+
+    // Absorb each member ONCE, in `element_order`'s member first-encounter
+    // order, so per-member resource offsets are assigned deterministically
+    // (the interleave is a pure reordering => byte-stable output, AC2.3).
+    // The combined fragment is itself a fragment re-fed to
+    // `concatenate_fragments` at assembly, so it is built in an isolated
+    // resource namespace (`ctx_base = default`), exactly as a per-variable
+    // fragment is.
+    let mut merger = FragmentMerger::new(&ContextResourceCounts::default());
+    let mut absorbed: HashMap<Ident<Canonical>, FragmentResourceOffsets> = HashMap::new();
+    // Per-member, per-element renumbered segments. Keyed by the same
+    // `(member, element)` identity `element_order` carries.
+    let mut renumbered_segments: HashMap<(Ident<Canonical>, usize), Vec<SymbolicOpcode>> =
+        HashMap::new();
+
+    for (member, _elem) in &scc.element_order {
+        if absorbed.contains_key(member) {
+            continue;
+        }
+        let frag = member_fragments.get(member).ok_or_else(|| {
+            format!(
+                "SCC member `{}` has no supplied symbolic fragment \
+                 (unsourceable); keeping CircularDependency",
+                member.as_str()
+            )
+        })?;
+        // `absorb` merges this member's side-channels (de-duplicating its
+        // GF blocks against the running merge -- #582) and returns its flat
+        // resource base offsets plus the per-slot GF remap -- the exact
+        // per-fragment prologue `concatenate_fragments` runs.
+        let (off, gf_remap) = merger.absorb(frag)?;
+        absorbed.insert(member.clone(), off);
+
+        // Segment the member's symbolic code on its per-element write
+        // opcodes (identical contract to the Task 4 verdict builder), then
+        // renumber every opcode of every segment by THIS member's offsets
+        // and GF remap.
+        let segments = segment_member_by_element(member.as_str(), &frag.symbolic.code)?;
+        for (elem, ops) in segments {
+            let mut renumbered = Vec::with_capacity(ops.len());
+            for op in &ops {
+                renumbered.push(renumber_opcode(
+                    op,
+                    off.lit_offset,
+                    &gf_remap,
+                    off.mod_offset,
+                    off.view_offset,
+                    off.temp_offset,
+                    off.dl_offset,
+                )?);
+            }
+            renumbered_segments.insert((member.clone(), elem), renumbered);
+        }
+    }
+
+    // Emit the renumbered segments in `element_order`. Every entry must
+    // map to exactly one segment (a missing one is loud-safe). Each
+    // segment is consumed exactly once: a duplicate `(member, element)` in
+    // `element_order` (which the Task 4 builder cannot produce -- nodes
+    // are unique) would try to reuse a removed segment and fail loud-safe.
+    let mut combined_code: Vec<SymbolicOpcode> = Vec::new();
+    for (member, elem) in &scc.element_order {
+        let seg = renumbered_segments
+            .remove(&(member.clone(), *elem))
+            .ok_or_else(|| {
+                format!(
+                    "SCC element_order references `{}`[{}] but no such \
+                     per-element segment exists in its fragment; keeping \
+                     CircularDependency",
+                    member.as_str(),
+                    elem
+                )
+            })?;
+        combined_code.extend(seg);
+    }
+
+    Ok(merger.into_per_var_bytecodes(combined_code))
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn compile_var_fragment(
     db: &dyn Db,
@@ -3433,626 +3727,75 @@ pub fn compile_var_fragment(
     is_root: bool,
     module_input_names: Vec<String>,
 ) -> Option<VarFragmentResult> {
-    use crate::compiler::symbolic::{
-        CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
-    };
+    use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
+    use crate::db_var_fragment::{LoweredVarFragment, lower_var_fragment};
 
     let var_ident = var.ident(db).clone();
-    let module_ident_context =
-        model_module_ident_context(db, model, project, module_input_names.clone());
-    let parsed = parse_source_variable_with_module_context(db, var, project, module_ident_context);
+    let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
 
-    // Accumulate unit definition errors from the parsed variable.
-    // These are syntax errors in the unit string (e.g., "bad units
-    // here!!!") that are stored in the variable's unit_errors field
-    // during parsing but not checked during compilation.
-    if let Some(unit_errs) = parsed.variable.unit_errors() {
-        let model_name = model.name(db).clone();
-        for err in unit_errs {
-            CompilationDiagnostic(Diagnostic {
-                model: model_name.clone(),
-                variable: Some(var_ident.clone()),
-                error: DiagnosticError::Unit(err),
-                severity: DiagnosticSeverity::Error,
-            })
-            .accumulate(db);
-        }
-    }
-
-    // Check for parse errors -- accumulate each one before bailing out
-    if let Some(errors) = parsed.variable.equation_errors()
-        && !errors.is_empty()
-    {
-        for err in &errors {
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: Some(var.ident(db).clone()),
-                error: DiagnosticError::Equation(err.clone()),
-                severity: DiagnosticSeverity::Error,
-            })
-            .accumulate(db);
-        }
-        return None;
-    }
-
-    // Build metadata from the full, input-agnostic dependency set so both
-    // branches of `if isModuleInput(...)` remain compilable in the mini-context.
-    let deps = variable_direct_dependencies_with_context(db, var, project, module_ident_context);
-
-    // Get project dimensions and build dimension context
+    // Caller-owned, lowering-independent context (built only from
+    // project/variable data, never from the lowered equation).
     let dm_dims = source_dims_to_datamodel(project.dimensions(db));
     let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
     let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
         .iter()
         .map(crate::dimensions::Dimension::from)
         .collect();
-
-    let project_models = project.models(db);
-
-    // Lower the variable for compilation. Module-type variables need
-    // direct construction because lower_variable's resolve_module_input
-    // requires a populated models map.
-    let lowered = if var.kind(db) == SourceVariableKind::Module {
-        let var_name_canonical = canonicalize(&var_ident);
-        let input_prefix = format!("{var_name_canonical}\u{00B7}");
-        let module_inputs = build_module_inputs(
-            model.name(db),
-            &input_prefix,
-            var.module_refs(db)
-                .iter()
-                .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-        );
-        crate::variable::Variable::Module {
-            ident: Ident::new(&var_ident),
-            model_name: Ident::new(var.model_name(db)),
-            units: None,
-            inputs: module_inputs,
-            errors: vec![],
-            unit_errors: vec![],
-        }
-    } else {
-        // Build a minimal ModelStage0 so that ArrayContext::get_dimensions
-        // can resolve dependency dimensions during Expr2 lowering. Without
-        // this, SUM(arr[*] + 1) fails because the Op2's ArrayBounds are
-        // never computed (get_dimensions returns None for dependencies).
-        let model_name_str = model.name(db);
-        let source_vars = model.variables(db);
-        let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> =
-            HashMap::new();
-
-        // Add the current variable
-        stage0_vars.insert(Ident::new(&var_ident), parsed.variable.clone());
-
-        // Add dependency variables so get_dimensions can resolve them
-        let dep_names: BTreeSet<&String> = deps
-            .dt_deps
-            .iter()
-            .chain(deps.initial_deps.iter())
-            .collect();
-        for dep_name in &dep_names {
-            let effective = dep_name
-                .as_str()
-                .strip_prefix('\u{00B7}')
-                .unwrap_or(dep_name.as_str());
-            if effective.contains('\u{00B7}') {
-                continue;
-            }
-            if let Some(dep_sv) = source_vars.get(effective) {
-                let dep_parsed = parse_source_variable_with_module_context(
-                    db,
-                    *dep_sv,
-                    project,
-                    module_ident_context,
-                );
-                stage0_vars.insert(Ident::new(effective), dep_parsed.variable.clone());
-            }
-        }
-
-        let mini_model = crate::model::ModelStage0 {
-            ident: Ident::new(model_name_str),
-            display_name: model_name_str.to_string(),
-            variables: stage0_vars,
-            errors: None,
-            implicit: false,
-        };
-
-        let mut models: HashMap<Ident<Canonical>, &crate::model::ModelStage0> = HashMap::new();
-        models.insert(Ident::new(model_name_str), &mini_model);
-
-        let scope = crate::model::ScopeStage0 {
-            models: &models,
-            dimensions: &dim_context,
-            model_name: model_name_str,
-        };
-        crate::model::lower_variable(&scope, &parsed.variable)
-    };
-
-    // Check for errors introduced during AST lowering (e.g.,
-    // MismatchedDimensions from expr2/expr3 lowering). These are stored
-    // in the lowered variable's errors field but not in the parsed
-    // variable's errors, so we check them separately.
-    if let Some(errors) = lowered.equation_errors()
-        && !errors.is_empty()
-    {
-        for err in &errors {
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: Some(var.ident(db).clone()),
-                error: DiagnosticError::Equation(err.clone()),
-                severity: DiagnosticSeverity::Error,
-            })
-            .accumulate(db);
-        }
-        return None;
-    }
-
-    // Build minimal metadata: only {self} + deps
     let model_name_ident = Ident::new(model.name(db));
-    let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
-    let var_size = variable_size(db, var, project);
-
-    // Arena for sub-model stub variables allocated by build_submodel_metadata
-    let arena = bumpalo::Bump::new();
-
-    // Assign sequential offsets for the minimal context
-    let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
-        HashMap::new();
-    let mut mini_offset = if is_root {
-        crate::vm::IMPLICIT_VAR_COUNT
-    } else {
-        0
-    };
-
-    // Add implicit vars if root
-    if is_root {
-        use std::sync::LazyLock;
-        static IMPLICIT_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_DT: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("dt"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_INITIAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("initial_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_FINAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("final_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        mini_metadata.insert(
-            Ident::new("time"),
-            crate::compiler::VariableMetadata {
-                offset: 0,
-                size: 1,
-                var: &IMPLICIT_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("dt"),
-            crate::compiler::VariableMetadata {
-                offset: 1,
-                size: 1,
-                var: &IMPLICIT_DT,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("initial_time"),
-            crate::compiler::VariableMetadata {
-                offset: 2,
-                size: 1,
-                var: &IMPLICIT_INITIAL_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("final_time"),
-            crate::compiler::VariableMetadata {
-                offset: 3,
-                size: 1,
-                var: &IMPLICIT_FINAL_TIME,
-            },
-        );
-    }
-
-    // Add self
-    mini_metadata.insert(
-        var_ident_canonical.clone(),
-        crate::compiler::VariableMetadata {
-            offset: mini_offset,
-            size: var_size,
-            var: &lowered,
-        },
-    );
-    mini_offset += var_size;
-
-    // Collect all dep names from both dt and initial deps
-    let all_dep_names: BTreeSet<&String> = deps
-        .dt_deps
-        .iter()
-        .chain(deps.initial_deps.iter())
-        .collect();
-
-    // For each dep, build a dimension-only Variable for context.
-    // We need these to live long enough for the metadata references.
-    let source_vars = model.variables(db);
-    let mut dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> = Vec::new();
-
-    // Also add inflows/outflows for stocks (needed by stock update expressions)
-    let mut extra_dep_names: Vec<String> = Vec::new();
-    if var.kind(db) == SourceVariableKind::Stock {
-        for flow_name in var.inflows(db).iter().chain(var.outflows(db).iter()) {
-            let canonical = canonicalize(flow_name).into_owned();
-            if !all_dep_names.contains(&canonical) {
-                extra_dep_names.push(canonical);
-            }
-        }
-    }
-
-    let all_names: Vec<&String> = all_dep_names
-        .iter()
-        .copied()
-        .chain(extra_dep_names.iter())
-        .collect();
-
-    // Track module deps that need module_refs and sub-model metadata
-    let mut extra_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
-    let mut extra_submodels: Vec<(String, SourceModel)> = Vec::new();
-    let implicit_var_info = model_implicit_var_info(db, model, project);
-
-    for dep_name in &all_names {
-        // Skip self and implicit vars
-        if dep_name.as_str() == var_ident.as_str()
-            || matches!(
-                dep_name.as_str(),
-                "time" | "dt" | "initial_time" | "final_time"
-            )
-        {
-            continue;
-        }
-
-        // Handle leading middle-dot (parent model reference in XMILE)
-        let effective_name = dep_name
-            .as_str()
-            .strip_prefix('\u{00B7}')
-            .unwrap_or(dep_name.as_str());
-
-        // Check for composite module output reference (contains middle dot)
-        if let Some(dot_pos) = effective_name.find('\u{00B7}') {
-            let module_var_name = &effective_name[..dot_pos];
-            let module_ident: Ident<Canonical> = Ident::new(module_var_name);
-
-            if mini_metadata.contains_key(&module_ident) {
-                continue;
-            }
-
-            // Look up the module variable in source_vars or implicit vars
-            if let Some(mod_source_var) = source_vars.get(module_var_name) {
-                if mod_source_var.kind(db) == SourceVariableKind::Module {
-                    let mod_model_name = mod_source_var.model_name(db);
-                    let sub_canonical = canonicalize(mod_model_name);
-                    let sub_size = project_models
-                        .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
-                        .unwrap_or(1);
-
-                    // Build Module variable with resolved inputs
-                    let mod_input_prefix = format!("{module_var_name}\u{00B7}");
-                    let module_inputs: Vec<crate::variable::ModuleInput> = mod_source_var
-                        .module_refs(db)
-                        .iter()
-                        .filter_map(|mr| {
-                            let src = canonicalize(&mr.src);
-                            let dst = canonicalize(&mr.dst);
-                            if src.starts_with(&mod_input_prefix) {
-                                return None;
-                            }
-                            let dst_stripped = dst.strip_prefix(&mod_input_prefix)?;
-                            let src_str = if model.name(db) == "main" && src.starts_with('\u{00B7}')
-                            {
-                                &src['\u{00B7}'.len_utf8()..]
-                            } else {
-                                &src
-                            };
-                            Some(crate::variable::ModuleInput {
-                                src: Ident::new(src_str),
-                                dst: Ident::new(dst_stripped),
-                            })
-                        })
-                        .collect();
-
-                    let mod_var = crate::variable::Variable::Module {
-                        ident: module_ident.clone(),
-                        model_name: Ident::new(mod_model_name),
-                        units: None,
-                        inputs: module_inputs.clone(),
-                        errors: vec![],
-                        unit_errors: vec![],
-                    };
-                    dep_variables.push((module_ident.clone(), mod_var, sub_size));
-
-                    // Build module_refs entry
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    extra_module_refs.insert(module_ident, (Ident::new(mod_model_name), input_set));
-
-                    if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                        extra_submodels.push((mod_model_name.to_string(), *sub_model));
-                    }
-                }
-            } else if let Some(meta) = implicit_var_info.get(module_var_name)
-                && meta.is_module
-            {
-                // Implicit module already handled in the implicit_module_vars section below
-            }
-            continue;
-        }
-
-        let dep_ident = Ident::new(effective_name);
-        if mini_metadata.contains_key(&dep_ident) {
-            continue;
-        }
-
-        if let Some(dep_source_var) = source_vars.get(effective_name) {
-            let dep_dims = variable_dimensions(db, *dep_source_var, project);
-            let dep_size = variable_size(db, *dep_source_var, project);
-
-            let dep_var = build_stub_variable(db, dep_source_var, &dep_ident, dep_dims);
-
-            dep_variables.push((dep_ident, dep_var, dep_size));
-        } else if let Some(meta) = implicit_var_info.get(effective_name) {
-            if !meta.is_module {
-                let dep_var = if meta.is_stock {
-                    crate::variable::Variable::Stock {
-                        ident: dep_ident.clone(),
-                        init_ast: None,
-                        eqn: None,
-                        units: None,
-                        inflows: vec![],
-                        outflows: vec![],
-                        non_negative: false,
-                        errors: vec![],
-                        unit_errors: vec![],
-                    }
-                } else {
-                    crate::variable::Variable::Var {
-                        ident: dep_ident.clone(),
-                        ast: None,
-                        init_ast: None,
-                        eqn: None,
-                        units: None,
-                        tables: vec![],
-                        non_negative: false,
-                        is_flow: false,
-                        is_table_only: false,
-                        errors: vec![],
-                        unit_errors: vec![],
-                    }
-                };
-                dep_variables.push((dep_ident, dep_var, meta.size));
-            }
-        } else {
-            // Dependency is not a source variable or implicit variable --
-            // this is an unknown dependency. Look up the source location
-            // from the AST so the error points to the reference site.
-            let loc = parsed
-                .variable
-                .ast()
-                .and_then(|ast| ast.get_var_loc(effective_name))
-                .unwrap_or_default();
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: Some(var.ident(db).clone()),
-                error: DiagnosticError::Equation(crate::common::EquationError {
-                    start: loc.start,
-                    end: loc.end,
-                    code: crate::common::ErrorCode::UnknownDependency,
-                }),
-                severity: DiagnosticSeverity::Error,
-            })
-            .accumulate(db);
-            return None;
-        }
-    }
-
-    // Add dep metadata referencing the stored dep_variables
-    for (dep_ident, dep_var, dep_size) in &dep_variables {
-        if !mini_metadata.contains_key(dep_ident) {
-            mini_metadata.insert(
-                dep_ident.clone(),
-                crate::compiler::VariableMetadata {
-                    offset: mini_offset,
-                    size: *dep_size,
-                    var: dep_var,
-                },
-            );
-            mini_offset += dep_size;
-        }
-    }
-
-    // Add implicit module variables that this variable's AST references.
-    // E.g., INIT(x) creates implicit module $⁚x⁚0⁚init and the variable's
-    // AST references $⁚x⁚0⁚init·output -- the compiler needs the implicit
-    // module in mini_metadata to resolve the sub-model offset.
-    let mut implicit_module_vars: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> =
-        Vec::new();
-    let mut implicit_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
-    let mut implicit_submodels: Vec<(String, SourceModel)> = Vec::new();
-
-    for implicit_dm_var in &parsed.implicit_vars {
-        if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
-            let im_name = canonicalize(dm_module.ident.as_str()).into_owned();
-            let im_ident: Ident<Canonical> = Ident::new(&im_name);
-            if mini_metadata.contains_key(&im_ident) {
-                continue;
-            }
-
-            let sub_canonical = canonicalize(&dm_module.model_name);
-            let sub_size = project_models
-                .get(sub_canonical.as_ref())
-                .map(|sm| compute_layout(db, *sm, project, false).n_slots)
-                .unwrap_or(1);
-
-            let im_var = crate::variable::Variable::Module {
-                ident: im_ident.clone(),
-                model_name: Ident::new(&dm_module.model_name),
-                units: None,
-                inputs: vec![],
-                errors: vec![],
-                unit_errors: vec![],
-            };
-            implicit_module_vars.push((im_ident.clone(), im_var, sub_size));
-
-            // Build module_refs entry for the implicit module, stripping
-            // the module ident prefix from dst (same as resolve_module_input)
-            let im_input_prefix = format!("{im_name}\u{00B7}");
-            let input_set: BTreeSet<Ident<Canonical>> = dm_module
-                .references
-                .iter()
-                .filter_map(|mr| {
-                    let dst_canonical = canonicalize(&mr.dst);
-                    let bare = dst_canonical.strip_prefix(&im_input_prefix)?;
-                    Some(Ident::new(bare))
-                })
-                .collect();
-            implicit_module_refs.insert(im_ident, (Ident::new(&dm_module.model_name), input_set));
-
-            if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                implicit_submodels.push((dm_module.model_name.clone(), *sub_model));
-            }
-        }
-    }
-
-    for (im_ident, im_var, im_size) in &implicit_module_vars {
-        if !mini_metadata.contains_key(im_ident) {
-            mini_metadata.insert(
-                im_ident.clone(),
-                crate::compiler::VariableMetadata {
-                    offset: mini_offset,
-                    size: *im_size,
-                    var: im_var,
-                },
-            );
-            mini_offset += im_size;
-        }
-    }
-
-    // Build the all_metadata map (model_name -> var_name -> metadata)
-    let mut all_metadata: HashMap<
-        Ident<Canonical>,
-        HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-    > = HashMap::new();
-    all_metadata.insert(model_name_ident.clone(), mini_metadata);
-
-    // Populate sub-model metadata for implicit and explicit module sub-models
-    for (_sub_name, sub_model) in implicit_submodels.iter().chain(extra_submodels.iter()) {
-        build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
-    }
-
-    // Build the mini VariableLayout for symbolization
-    let mini_layout =
-        crate::compiler::symbolic::layout_from_metadata(&all_metadata, &model_name_ident)
-            .unwrap_or_else(|_| VariableLayout::new(HashMap::new(), 0));
-    let rmap = ReverseOffsetMap::from_layout(&mini_layout);
-
-    // Build tables for compilation -- propagate errors rather than
-    // silently dropping them, which would shift table indices and cause
-    // lookups to read the wrong table at runtime.
-    let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
-    {
-        let gf_tables = lowered.tables();
-        if !gf_tables.is_empty() {
-            let table_results: crate::Result<Vec<crate::compiler::Table>> = gf_tables
-                .iter()
-                .map(|t| crate::compiler::Table::new(&var_ident, t))
-                .collect();
-            match table_results {
-                Ok(ts) if !ts.is_empty() => {
-                    tables.insert(var_ident_canonical.clone(), ts);
-                }
-                Err(table_err) => {
-                    CompilationDiagnostic(Diagnostic {
-                        model: model.name(db).clone(),
-                        variable: Some(var.ident(db).clone()),
-                        error: DiagnosticError::Model(table_err),
-                        severity: DiagnosticSeverity::Error,
-                    })
-                    .accumulate(db);
-                    return None;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Also collect tables from dependency variables that have graphical
-    // functions. When a variable uses LOOKUP(dep, x), the dep's table
-    // data must be in the mini-Module's tables map so the bytecode
-    // compiler can emit the correct Lookup opcodes.
-    for dep_name in &all_names {
-        let effective = dep_name
-            .as_str()
-            .strip_prefix('\u{00B7}')
-            .unwrap_or(dep_name.as_str());
-        if effective.contains('\u{00B7}') {
-            continue;
-        }
-        let dep_canonical: Ident<Canonical> = Ident::new(effective);
-        if tables.contains_key(&dep_canonical) {
-            continue;
-        }
-        if let Some(dep_sv) = source_vars.get(effective) {
-            let dep_tables = extract_tables_from_source_var(db, dep_sv);
-            if !dep_tables.is_empty() {
-                tables.insert(dep_canonical, dep_tables);
-            }
-        }
-    }
-
-    // Build the minimal Module
     let inputs = canonical_module_input_set(&module_input_names);
     let module_models = model_module_map(db, model, project).clone();
+
+    let lowered = lower_var_fragment(
+        db,
+        var,
+        model,
+        project,
+        is_root,
+        &module_input_names,
+        &converted_dims,
+        &dim_context,
+        &model_name_ident,
+        &module_models,
+        &inputs,
+    );
+
+    let (unit_diags, per_phase_lowered, tables, offsets, rmap, mini_offset) = match lowered {
+        LoweredVarFragment::Fatal {
+            unit_diags,
+            fatal_diags,
+        } => {
+            // Non-fatal unit diagnostics were recorded before the fatal
+            // site; replay them first to preserve emission order, then
+            // the fatal diagnostic(s), then bail out (whole-variable None).
+            for diag in unit_diags {
+                CompilationDiagnostic(diag).accumulate(db);
+            }
+            for diag in fatal_diags {
+                CompilationDiagnostic(diag).accumulate(db);
+            }
+            return None;
+        }
+        LoweredVarFragment::Lowered {
+            unit_diags,
+            per_phase_lowered,
+            tables,
+            offsets,
+            rmap,
+            mini_offset,
+        } => (
+            unit_diags,
+            per_phase_lowered,
+            tables,
+            offsets,
+            rmap,
+            mini_offset,
+        ),
+    };
+
+    // Malformed-unit diagnostics are non-fatal: record them and continue.
+    for diag in unit_diags {
+        CompilationDiagnostic(diag).accumulate(db);
+    }
 
     // Determine which runlists this variable belongs to
     let dep_graph = if module_input_names.is_empty() {
@@ -4064,155 +3807,35 @@ pub fn compile_var_fragment(
     let is_module = var.kind(db) == SourceVariableKind::Module;
     let is_module_input = inputs.contains(&var_ident_canonical);
 
-    // We need module_refs for module variables (explicit or implicit)
-    let mut module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = if is_module {
-        let ref_prefix = format!("{var_ident}\u{00B7}");
-        let input_set: BTreeSet<Ident<Canonical>> = var
-            .module_refs(db)
-            .iter()
-            .filter_map(|mr| {
-                let dst_canonical = canonicalize(&mr.dst);
-                let bare = dst_canonical.strip_prefix(&ref_prefix)?;
-                Some(Ident::new(bare))
-            })
-            .collect();
-        let mut refs = HashMap::new();
-        refs.insert(
-            var_ident_canonical.clone(),
-            (Ident::new(var.model_name(db)), input_set),
-        );
-        refs
-    } else {
-        HashMap::new()
-    };
-    module_refs.extend(implicit_module_refs);
-    module_refs.extend(extra_module_refs);
+    let module_refs = crate::db_var_fragment::build_caller_module_refs(
+        db,
+        var,
+        model,
+        project,
+        is_root,
+        &module_input_names,
+    );
 
-    // For module variables, populate sub-model metadata so the compiler
-    // can generate correct CallModule bytecodes.
-    if is_module {
-        let sub_model_name = var.model_name(db);
-        let sub_canonical = canonicalize(sub_model_name);
-        if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-            build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
-        }
-    }
-
-    // Build Var for each phase this variable participates in
-    let core = crate::compiler::ContextCore {
-        dimensions: &converted_dims,
-        dimensions_ctx: &dim_context,
-        model_name: &model_name_ident,
-        metadata: &all_metadata,
-        module_models: &module_models,
-        inputs: &inputs,
-    };
-
-    let build_var = |is_initial: bool| {
-        crate::compiler::Var::new(
-            &crate::compiler::Context::new(core, &var_ident_canonical, is_initial),
-            &lowered,
-        )
-    };
-
-    // Compile for each phase and symbolize
+    // Compile for each phase and symbolize. The closure now delegates to
+    // the factored `compile_phase_to_per_var_bytecodes` so the SCC
+    // element-graph builder reuses the EXACT production compile+symbolize
+    // path (no re-derivation); the per-variable production behavior is
+    // byte-identical to the former inline closure (same minimal `Module`,
+    // same temp extraction, same symbolization, same `None` arms).
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        if exprs.is_empty() {
-            return None;
-        }
-
-        // Build a minimal Module for this phase
-        let runlist_initials_by_var = vec![];
-        let module_inputs: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
-        let module = crate::compiler::Module {
-            ident: model_name_ident.clone(),
-            inputs: module_inputs,
-            n_slots: mini_offset,
-            n_temps: 0,
-            temp_sizes: vec![],
-            runlist_initials: vec![],
-            runlist_initials_by_var,
-            runlist_flows: exprs.to_vec(),
-            runlist_stocks: vec![],
-            offsets: all_metadata
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.iter()
-                            .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
-                            .collect(),
-                    )
-                })
-                .collect(),
-            runlist_order: vec![var_ident_canonical.clone()],
-            tables: tables.clone(),
-            dimensions: converted_dims.clone(),
-            dimensions_ctx: dim_context.clone(),
-            module_refs: module_refs.clone(),
-        };
-
-        // Extract temp sizes from expressions
-        let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
-        for expr in exprs {
-            crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
-        }
-        let n_temps = temp_sizes_map.len();
-        let mut temp_sizes: Vec<usize> = vec![0; n_temps];
-        for (id, size) in &temp_sizes_map {
-            if (*id as usize) < temp_sizes.len() {
-                temp_sizes[*id as usize] = *size;
-            }
-        }
-
-        // Update Module with temp info
-        let module = crate::compiler::Module {
-            n_temps,
-            temp_sizes: temp_sizes.clone(),
-            ..module
-        };
-
-        match module.compile() {
-            Ok(compiled) => {
-                // Symbolize the flows bytecode (we put everything in flows)
-                let sym_bc =
-                    crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, &rmap)
-                        .ok()?;
-
-                let ctx = &*compiled.context;
-                let sym_views: Vec<_> = ctx
-                    .static_views
-                    .iter()
-                    .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                let sym_mods: Vec<_> = ctx
-                    .modules
-                    .iter()
-                    .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-
-                let temp_sizes_vec: Vec<(u32, usize)> =
-                    temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
-
-                let dim_lists: Vec<Vec<u16>> = ctx
-                    .dim_lists
-                    .iter()
-                    .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                    .collect();
-
-                Some(PerVarBytecodes {
-                    symbolic: sym_bc,
-                    graphical_functions: ctx.graphical_functions.clone(),
-                    module_decls: sym_mods,
-                    static_views: sym_views,
-                    temp_sizes: temp_sizes_vec,
-                    dim_lists,
-                })
-            }
-            Err(_) => None,
-        }
+        compile_phase_to_per_var_bytecodes(
+            exprs,
+            &offsets,
+            &rmap,
+            &tables,
+            &module_refs,
+            mini_offset,
+            &converted_dims,
+            &dim_context,
+            &model_name_ident,
+            &var_ident_canonical,
+            &inputs,
+        )
     };
 
     // Runlists use canonical names, so compare with the canonical form.
@@ -4237,9 +3860,9 @@ pub fn compile_var_fragment(
 
     // Initial phase: stocks and their deps get compiled with is_initial=true
     let initial_bytecodes = if dep_graph.runlist_initials.contains(&var_ident_str) {
-        match build_var(true) {
+        match &per_phase_lowered.initial {
             Ok(var_result) => compile_phase(&var_result.ast),
-            Err(ref err) => {
+            Err(err) => {
                 accumulate_var_compile_error(err);
                 None
             }
@@ -4255,9 +3878,9 @@ pub fn compile_var_fragment(
     // || !var.is_stock()` filter).
     let flow_bytecodes =
         if (!is_stock || is_module_input) && dep_graph.runlist_flows.contains(&var_ident_str) {
-            match build_var(false) {
+            match &per_phase_lowered.noninitial {
                 Ok(var_result) => compile_phase(&var_result.ast),
-                Err(ref err) => {
+                Err(err) => {
                     accumulate_var_compile_error(err);
                     None
                 }
@@ -4269,9 +3892,9 @@ pub fn compile_var_fragment(
     // Stock phase: stocks and modules get compiled with is_initial=false
     let stock_bytecodes =
         if (is_stock || is_module) && dep_graph.runlist_stocks.contains(&var_ident_str) {
-            match build_var(false) {
+            match &per_phase_lowered.noninitial {
                 Ok(var_result) => compile_phase(&var_result.ast),
-                Err(ref err) => {
+                Err(err) => {
                     accumulate_var_compile_error(err);
                     None
                 }
@@ -4290,23 +3913,40 @@ pub fn compile_var_fragment(
     })
 }
 
-/// Compile a single implicit variable (generated by SMOOTH/DELAY/TREND builtins)
-/// to symbolic bytecodes. Not a tracked function -- the parent variable's
-/// parse result already provides salsa caching.
-fn compile_implicit_var_fragment(
-    db: &dyn Db,
+/// The genuinely-shared prefix of synthetic-helper sourcing: resolve a
+/// model's implicit variable from its parent's `implicit_vars`, parse it,
+/// and lower it to a `crate::variable::Variable`.
+///
+/// This is the *single shared relation* (DRY -- "never re-derive") for
+/// "given an `ImplicitVarMeta`, produce the helper's parsed + lowered
+/// form". It is the exact `model_implicit_var_info`-fed chain
+/// `parent → parsed.implicit_vars[index] → parse_var → lower_variable`
+/// (the non-module branch builds via `lower_variable`; the module branch
+/// constructs a `Variable::Module` directly because `lower_variable` with
+/// an empty models map fails `resolve_module_input`). It is consumed by
+/// both `compile_implicit_var_fragment` (the production per-variable
+/// fragment compiler) and `var_phase_symbolic_fragment_prod`'s
+/// no-`SourceVariable` arm (element-cycle Phase 3 Task 2 / AC3.1:
+/// parent-sourcing a synthetic helper that lands in a recurrence SCC), so
+/// the accessor's relation is the engine's relation by construction.
+///
+/// Returns the helper's canonical name and the lowered variable. The
+/// parent's `ParsedVariableResult` is intentionally NOT returned: callers
+/// that also need it re-call the salsa-`returns(ref)`-cached
+/// `parse_source_variable_with_module_context` (a cache hit -- a borrow,
+/// zero clone), exactly as the pre-extraction code did. Loud-safe `None`
+/// (never panics): the implicit index is absent, the module branch's
+/// datamodel variable is not actually a `Module`, or the implicit var has
+/// equation errors. (`lower_variable` itself is total -- any lowering
+/// error surfaces as a `LoweredVarFragment::Fatal` / `Var::new` error
+/// downstream, not here.)
+fn lower_implicit_var<'db>(
+    db: &'db dyn Db,
     meta: &ImplicitVarMeta,
     model: SourceModel,
     project: SourceProject,
-    is_root: bool,
-    dep_graph: &ModelDepGraphResult,
-    module_input_names: &[String],
-) -> Option<VarFragmentResult> {
-    use crate::compiler::symbolic::{
-        CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
-    };
-    let module_ident_context =
-        module_ident_context_for_model(db, model, project, module_input_names);
+    module_ident_context: ModuleIdentContext<'db>,
+) -> Option<(String, crate::variable::Variable)> {
     let parsed = parse_source_variable_with_module_context(
         db,
         meta.parent_source_var,
@@ -4318,10 +3958,6 @@ fn compile_implicit_var_fragment(
 
     let dm_dims = project_datamodel_dims(db, project);
     let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
-    let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
-        .iter()
-        .map(crate::dimensions::Dimension::from)
-        .collect();
 
     let units_ctx = project_units_context(db, project);
 
@@ -4385,8 +4021,194 @@ fn compile_implicit_var_fragment(
             dimensions: &dim_context,
             model_name: "",
         };
-        crate::model::lower_variable(&scope, &parsed_implicit)
+        let lowered = crate::model::lower_variable(&scope, &parsed_implicit);
+
+        // Loud-safe (GH #580): `lower_variable` is total -- on a lowering error
+        // (e.g. an un-translatable cross-dimension subscript surviving into a
+        // scalar helper as `DimensionInScalarContext`) it records the error and
+        // discards the AST rather than failing. The pre-lowering check above
+        // only inspects the *parsed* implicit; a lowering-stage error would
+        // otherwise leave a helper with `ast == None` that
+        // `compile_implicit_var_phase_bytecodes` -> `Var::new` rejects as
+        // `EmptyEquation`, surfacing only in the opaque aggregate `missing_vars`
+        // string with no per-variable diagnostic (the real-var path emits one
+        // via `accumulate_var_compile_error`). Mirror that: turn the residual
+        // into a legible per-helper diagnostic carrying the actual error code +
+        // span, then return `None`. Routed through `try_accumulate_diagnostic`
+        // because this whole assembly chain (`compile_project_incremental` ->
+        // `assemble_simulation` -> `assemble_module` -> `compile_implicit_var_*`
+        // -> here) runs OUTSIDE a salsa-tracked function, so a bare
+        // `.accumulate(db)` would panic; the helper accumulates only when a
+        // tracked frame is active and is otherwise a safe no-op (the error then
+        // rides out via the caller's `missing_vars` aggregate), exactly as the
+        // sibling aggregate-`Err` accumulation in `assemble_module` does. This
+        // is a no-op when lowering succeeds (`equation_errors()` is `None`), so
+        // it never perturbs the shared `var_phase_symbolic_fragment_prod`
+        // consumer on the SCC-resolution path -- it fires only on a genuine
+        // residual miscompile.
+        if let Some(errors) = lowered.equation_errors() {
+            for err in errors {
+                try_accumulate_diagnostic(
+                    db,
+                    Diagnostic {
+                        model: model.name(db).clone(),
+                        variable: Some(implicit_name.clone()),
+                        error: DiagnosticError::Equation(err),
+                        severity: DiagnosticSeverity::Error,
+                    },
+                );
+            }
+            return None;
+        }
+
+        lowered
     };
+
+    Some((implicit_name, lowered))
+}
+
+/// Compile a single implicit variable (generated by SMOOTH/DELAY/TREND builtins)
+/// to symbolic bytecodes. Not a tracked function -- the parent variable's
+/// parse result already provides salsa caching.
+fn compile_implicit_var_fragment(
+    db: &dyn Db,
+    meta: &ImplicitVarMeta,
+    model: SourceModel,
+    project: SourceProject,
+    is_root: bool,
+    dep_graph: &ModelDepGraphResult,
+    module_input_names: &[String],
+) -> Option<VarFragmentResult> {
+    use crate::compiler::symbolic::CompiledVarFragment;
+
+    // The implicit var's canonical name (the runlist-gate key). Resolve it
+    // through the shared prefix so this and the per-phase compile agree on
+    // the name by construction. `None` here is the same loud-safe signal
+    // the per-phase compile returns (absent implicit index / equation
+    // errors).
+    let module_ident_context =
+        module_ident_context_for_model(db, model, project, module_input_names);
+    let (implicit_name, _lowered) =
+        lower_implicit_var(db, meta, model, project, module_ident_context)?;
+    let var_ident_str = canonicalize(&implicit_name).into_owned();
+
+    // Runlist-gated phase selection (unchanged output behavior): the
+    // Initial phase is compiled only for implicit vars in
+    // `runlist_initials`; the non-initial phase feeds `flow_bytecodes`
+    // (non-stock) or `stock_bytecodes` (stock/module), each gated by the
+    // corresponding runlist. The per-phase compile builds its own context;
+    // it is invoked at most for the gated phases (≤2), so the only cost
+    // vs. the prior single-context build is a bounded extra
+    // map-construction on the ≤2-phase implicit-var sub-path -- the
+    // duplication-free price for a single shared per-phase relation
+    // (`compile_implicit_var_phase_bytecodes`, also consumed by
+    // `var_phase_symbolic_fragment_prod`'s no-`SourceVariable` arm).
+    let phase = |is_initial: bool| {
+        compile_implicit_var_phase_bytecodes(
+            db,
+            meta,
+            model,
+            project,
+            is_root,
+            module_input_names,
+            is_initial,
+        )
+    };
+
+    let initial_bytecodes = if dep_graph.runlist_initials.contains(&var_ident_str) {
+        phase(true)
+    } else {
+        None
+    };
+    let flow_bytecodes = if !meta.is_stock && dep_graph.runlist_flows.contains(&var_ident_str) {
+        phase(false)
+    } else {
+        None
+    };
+    let stock_bytecodes =
+        if (meta.is_stock || meta.is_module) && dep_graph.runlist_stocks.contains(&var_ident_str) {
+            phase(false)
+        } else {
+            None
+        };
+
+    Some(VarFragmentResult {
+        fragment: CompiledVarFragment {
+            ident: implicit_name,
+            initial_bytecodes,
+            flow_bytecodes,
+            stock_bytecodes,
+        },
+    })
+}
+
+/// Build the mini-layout context for one implicit variable and compile a
+/// single phase (`is_initial`) to symbolic `PerVarBytecodes`. NOT a tracked
+/// function -- the parent variable's parse result already provides salsa
+/// caching.
+///
+/// This is the **single shared per-phase relation** for "produce a
+/// synthetic helper's symbolic `PerVarBytecodes`": consumed by
+/// `compile_implicit_var_fragment` (the production per-variable assembly,
+/// runlist-gated) *and* `var_phase_symbolic_fragment_prod`'s
+/// no-`SourceVariable` arm (element-cycle Phase 3 Task 2 / AC3.1 --
+/// parent-sourcing a synthetic helper that lands in a recurrence SCC), so
+/// the element-graph accessor's bytecode is byte-identical to the
+/// production fragment by construction (DRY -- "single shared relation,
+/// never re-derive"). The shared `parent → implicit → parse → lower`
+/// prefix is `lower_implicit_var`; the shared compile+symbolize tail is
+/// `compile_phase_to_per_var_bytecodes` (the exact function the real-var
+/// arm of `var_phase_symbolic_fragment_prod` and `compile_var_fragment`
+/// use). The mini-layout/metadata/dep-collection glue between them is
+/// intrinsic to the implicit-var shape (the `meta.is_module` branch, the
+/// `is_root` implicit-time prelude, the dep-stub/sub-model collection) and
+/// is not separately extractable without restructuring this function.
+///
+/// Loud-safe `None` (never panics): the shared prefix failed (absent
+/// implicit index / equation errors), a graphical-function table failed to
+/// build, the phase's `Var::new` errored, or `Module::compile()` /
+/// symbolization failed -- exactly the original closure's `None` arms.
+#[allow(clippy::too_many_arguments)]
+fn compile_implicit_var_phase_bytecodes(
+    db: &dyn Db,
+    meta: &ImplicitVarMeta,
+    model: SourceModel,
+    project: SourceProject,
+    is_root: bool,
+    module_input_names: &[String],
+    is_initial: bool,
+) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
+    use crate::compiler::symbolic::{ReverseOffsetMap, VariableLayout};
+
+    let module_ident_context =
+        module_ident_context_for_model(db, model, project, module_input_names);
+
+    // Shared parent→implicit→parse→lower prefix (the single relation, also
+    // consumed by `compile_implicit_var_fragment`). `ModuleIdentContext`
+    // is a `Copy` interned handle, so the one context is threaded into
+    // both the shared prefix and the parse below (a single
+    // `module_ident_context_for_model` build, matching the pre-extraction
+    // monolith).
+    let (implicit_name, lowered) =
+        lower_implicit_var(db, meta, model, project, module_ident_context)?;
+    // The parent's parsed result for the module-refs reconstruction /
+    // dep-collection below. `parse_source_variable_with_module_context`
+    // is salsa-`returns(ref)`-cached, so this is a cache-hit borrow (zero
+    // clone) -- `lower_implicit_var` already populated it.
+    let parsed = parse_source_variable_with_module_context(
+        db,
+        meta.parent_source_var,
+        project,
+        module_ident_context,
+    );
+    let implicit_dm_var = parsed.implicit_vars.get(meta.index_in_parent)?;
+
+    let dm_dims = project_datamodel_dims(db, project);
+    let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
+        .iter()
+        .map(crate::dimensions::Dimension::from)
+        .collect();
 
     let model_name_ident = Ident::new(model.name(db));
     let var_ident_canonical: Ident<Canonical> = Ident::new(&implicit_name);
@@ -4780,7 +4602,7 @@ fn compile_implicit_var_fragment(
             continue;
         }
         if let Some(dep_sv) = source_vars.get(effective) {
-            let dep_tables = extract_tables_from_source_var(db, dep_sv);
+            let dep_tables = extract_tables_from_source_var(db, dep_sv, project);
             if !dep_tables.is_empty() {
                 tables.insert(dep_canonical, dep_tables);
             }
@@ -4833,146 +4655,43 @@ fn compile_implicit_var_fragment(
         inputs: &inputs,
     };
 
-    let build_var = |is_initial: bool| {
-        crate::compiler::Var::new(
-            &crate::compiler::Context::new(core, &var_ident_canonical, is_initial),
-            &lowered,
-        )
-    };
+    let var = crate::compiler::Var::new(
+        &crate::compiler::Context::new(core, &var_ident_canonical, is_initial),
+        &lowered,
+    )
+    .ok()?;
 
-    let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        if exprs.is_empty() {
-            return None;
-        }
+    // Offsets in the per-variable form `compile_phase_to_per_var_bytecodes`
+    // expects, built from the mini-layout `all_metadata` exactly as the
+    // former inline `compile_phase` closure built them (so the shared
+    // compile+symbolize tail is byte-identical to the prior per-implicit
+    // behavior -- this replaces the verbatim-duplicate closure with the
+    // single shared relation).
+    let offsets: PerVarOffsetMap = all_metadata
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                v.iter()
+                    .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
+                    .collect(),
+            )
+        })
+        .collect();
 
-        let runlist_initials_by_var = vec![];
-        let module_inputs: HashSet<Ident<Canonical>> = inputs.iter().cloned().collect();
-        let module = crate::compiler::Module {
-            ident: model_name_ident.clone(),
-            inputs: module_inputs,
-            n_slots: mini_offset,
-            n_temps: 0,
-            temp_sizes: vec![],
-            runlist_initials: vec![],
-            runlist_initials_by_var,
-            runlist_flows: exprs.to_vec(),
-            runlist_stocks: vec![],
-            offsets: all_metadata
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.iter()
-                            .map(|(vk, vm)| (vk.clone(), (vm.offset, vm.size)))
-                            .collect(),
-                    )
-                })
-                .collect(),
-            runlist_order: vec![var_ident_canonical.clone()],
-            tables: tables.clone(),
-            dimensions: converted_dims.clone(),
-            dimensions_ctx: dim_context.clone(),
-            module_refs: module_refs.clone(),
-        };
-
-        let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
-        for expr in exprs {
-            crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
-        }
-        let n_temps = temp_sizes_map.len();
-        let mut temp_sizes: Vec<usize> = vec![0; n_temps];
-        for (id, size) in &temp_sizes_map {
-            if (*id as usize) < temp_sizes.len() {
-                temp_sizes[*id as usize] = *size;
-            }
-        }
-
-        let module = crate::compiler::Module {
-            n_temps,
-            temp_sizes: temp_sizes.clone(),
-            ..module
-        };
-
-        match module.compile() {
-            Ok(compiled) => {
-                let sym_bc =
-                    crate::compiler::symbolic::symbolize_bytecode(&compiled.compiled_flows, &rmap)
-                        .ok()?;
-
-                let ctx = &*compiled.context;
-                let sym_views: Vec<_> = ctx
-                    .static_views
-                    .iter()
-                    .map(|sv| crate::compiler::symbolic::symbolize_static_view(sv, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                let sym_mods: Vec<_> = ctx
-                    .modules
-                    .iter()
-                    .map(|md| crate::compiler::symbolic::symbolize_module_decl(md, &rmap))
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-
-                let temp_sizes_vec: Vec<(u32, usize)> =
-                    temp_sizes_map.iter().map(|(&k, &v)| (k, v)).collect();
-
-                let dim_lists: Vec<Vec<u16>> = ctx
-                    .dim_lists
-                    .iter()
-                    .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                    .collect();
-
-                Some(PerVarBytecodes {
-                    symbolic: sym_bc,
-                    graphical_functions: ctx.graphical_functions.clone(),
-                    module_decls: sym_mods,
-                    static_views: sym_views,
-                    temp_sizes: temp_sizes_vec,
-                    dim_lists,
-                })
-            }
-            Err(_) => None,
-        }
-    };
-
-    let var_ident_str = var_ident_canonical.as_str().to_string();
-
-    let initial_bytecodes = if dep_graph.runlist_initials.contains(&var_ident_str) {
-        match build_var(true) {
-            Ok(var_result) => compile_phase(&var_result.ast),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-
-    let flow_bytecodes = if !meta.is_stock && dep_graph.runlist_flows.contains(&var_ident_str) {
-        match build_var(false) {
-            Ok(var_result) => compile_phase(&var_result.ast),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-
-    let stock_bytecodes =
-        if (meta.is_stock || meta.is_module) && dep_graph.runlist_stocks.contains(&var_ident_str) {
-            match build_var(false) {
-                Ok(var_result) => compile_phase(&var_result.ast),
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
-
-    Some(VarFragmentResult {
-        fragment: CompiledVarFragment {
-            ident: implicit_name,
-            initial_bytecodes,
-            flow_bytecodes,
-            stock_bytecodes,
-        },
-    })
+    compile_phase_to_per_var_bytecodes(
+        &var.ast,
+        &offsets,
+        &rmap,
+        &tables,
+        &module_refs,
+        mini_offset,
+        &converted_dims,
+        &dim_context,
+        &model_name_ident,
+        &var_ident_canonical,
+        &inputs,
+    )
 }
 
 /// Assemble a complete CompiledModule from per-variable fragments.
@@ -4989,7 +4708,7 @@ pub fn assemble_module(
 ) -> Result<crate::bytecode::CompiledModule, String> {
     use crate::compiler::symbolic::{
         ContextResourceCounts, SymbolicCompiledInitial, SymbolicCompiledModule,
-        concatenate_fragments, resolve_module,
+        concatenate_fragments_with_gf, resolve_module,
     };
 
     let module_input_names: Vec<String> = module_inputs
@@ -5142,13 +4861,163 @@ pub fn assemble_module(
     let is_module_input =
         |var_name: &str| -> bool { module_inputs.contains(&*canonicalize(var_name)) };
 
+    // ── Combined per-element fragments for resolved recurrence SCCs ─────
+    //
+    // A multi-member (or single-variable) recurrence SCC whose induced
+    // element graph the cycle gate proved acyclic (`dep_graph
+    // .resolved_sccs`, populated by the Task 4 symbolic verdict) is
+    // lowered as ONE combined `PerVarBytecodes` whose per-element writes
+    // follow the SCC's verified `element_order` (Task 5
+    // `combine_scc_fragment`), instead of the members' individual
+    // one-contiguous-block-per-variable fragments -- the latter cannot
+    // express the required cross-member per-element interleaving. Each
+    // member's symbolic fragment is sourced via the EXACT production
+    // compile+symbolize path (`var_phase_symbolic_fragment_prod`, the
+    // Task 4 accessor -- never a re-derivation), so every write keeps its
+    // original `SymVarRef { name, element_offset }`; `resolve_module`
+    // therefore maps each write to the same model slot the acyclic layout
+    // assigns and the results offset map is unchanged (AC2.3).
+    //
+    // Two combined fragments per SCC are built up-front so they OUTLIVE
+    // the `concatenate_fragments` / init-renumber calls below (the
+    // `flow_frags`/`initial_frags` vectors hold `&` borrows into these):
+    //  * the DT combined fragment (sourced from each member's
+    //    `SccPhase::Dt` symbolic fragment), injected into the flows
+    //    runlist -- only `phase == Dt` SCCs (an `Initial`-phase SCC is
+    //    stock-backed and stocks are not flow variables).
+    //  * the INIT combined fragment (sourced from each member's
+    //    `SccPhase::Initial` symbolic fragment), injected into the
+    //    initials runlist via the Task 1 spike's single synthetic-ident
+    //    `SymbolicCompiledInitial` mechanism -- built for EVERY resolved
+    //    SCC (both phases), because a `Dt`-phase aux SCC's members carry
+    //    the SAME recurrence in their init equations and the initials
+    //    runlist groups BOTH phases contiguously (see the
+    //    `build_scc_grouping(false)` runlist comment). The SCC's
+    //    `element_order` (dt order for a `phase: Dt` SCC) is valid for
+    //    the init interleave because a same-equation aux's init and dt
+    //    element graphs are structurally identical; if they ever diverge
+    //    (a member's init fragment cannot be segmented to match
+    //    `element_order`) `combine_scc_fragment` returns a loud-safe
+    //    `Err` and assembly fails with an Assembly diagnostic rather than
+    //    miscompiling.
+    //
+    // Loud-safe: an unsourceable member (`var_phase_symbolic_fragment_prod`
+    // returned `None`) or a `combine_scc_fragment` error accumulates an
+    // Assembly diagnostic and aborts assembly (mirrors the existing
+    // missing-fragment / concatenate-error pattern); the combined
+    // fragment is NEVER silently dropped or partially injected.
+    let resolved_sccs = &dep_graph.resolved_sccs;
+    let combine_scc_for_phase = |scc: &ResolvedScc,
+                                 phase: SccPhase|
+     -> Result<crate::compiler::symbolic::PerVarBytecodes, String> {
+        let mut member_fragments: HashMap<
+            Ident<Canonical>,
+            crate::compiler::symbolic::PerVarBytecodes,
+        > = HashMap::with_capacity(scc.members.len());
+        for member in &scc.members {
+            let frag = var_phase_symbolic_fragment_prod(
+                db,
+                model,
+                project,
+                member.as_str(),
+                phase.clone(),
+            )
+            .ok_or_else(|| {
+                format!(
+                    "resolved recurrence SCC member `{}` has no \
+                         sourceable symbolic fragment for its phase; \
+                         cannot build the combined per-element fragment",
+                    member.as_str()
+                )
+            })?;
+            member_fragments.insert(member.clone(), frag);
+        }
+        combine_scc_fragment(scc, &member_fragments)
+    };
+
+    // DT combined fragments, indexed parallel to `resolved_sccs`
+    // (`None` for an `Initial`-phase SCC -- not a flow). INIT combined
+    // fragments for every SCC. Both owned here to the end of
+    // `assemble_module`.
+    let mut dt_combined: Vec<Option<crate::compiler::symbolic::PerVarBytecodes>> =
+        Vec::with_capacity(resolved_sccs.len());
+    let mut init_combined: Vec<crate::compiler::symbolic::PerVarBytecodes> =
+        Vec::with_capacity(resolved_sccs.len());
+    for scc in resolved_sccs.iter() {
+        let dt = if scc.phase == SccPhase::Dt {
+            Some(combine_scc_for_phase(scc, SccPhase::Dt).inspect_err(|msg| {
+                try_accumulate_diagnostic(
+                    db,
+                    Diagnostic {
+                        model: model_name.clone(),
+                        variable: None,
+                        error: DiagnosticError::Assembly(msg.clone()),
+                        severity: DiagnosticSeverity::Error,
+                    },
+                );
+            })?)
+        } else {
+            None
+        };
+        let init = combine_scc_for_phase(scc, SccPhase::Initial).inspect_err(|msg| {
+            try_accumulate_diagnostic(
+                db,
+                Diagnostic {
+                    model: model_name.clone(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg.clone()),
+                    severity: DiagnosticSeverity::Error,
+                },
+            );
+        })?;
+        dt_combined.push(dt);
+        init_combined.push(init);
+    }
+
+    // Member-name -> resolved-SCC index. A member is in at most one SCC
+    // (the SCCs in `resolved_sccs` are pairwise disjoint -- see
+    // `scc_map_from_resolved`), so this is well-defined.
+    let scc_of_member: HashMap<&str, usize> = resolved_sccs
+        .iter()
+        .enumerate()
+        .flat_map(|(idx, scc)| scc.members.iter().map(move |m| (m.as_str(), idx)))
+        .collect();
+
     // Collect fragments for each phase, tracking missing variables
     let mut initial_frags: Vec<(String, &crate::compiler::symbolic::PerVarBytecodes)> = Vec::new();
     let mut flow_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
     let mut stock_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = Vec::new();
     let mut missing_vars: Vec<String> = Vec::new();
 
+    // Track which SCCs have already had their combined fragment injected
+    // in each runlist. Task 5b guarantees a resolved SCC's members are a
+    // contiguous, byte-stable block at the SCC's topological slot, so
+    // "inject at the first member encountered, skip the rest" lands the
+    // combined fragment in the correct relative position. The runlist
+    // `Vec<String>` itself is salsa-owned and NOT mutated (we skip during
+    // collection, never remove).
+    let mut injected_init_sccs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut injected_flow_sccs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
     for var_name in &dep_graph.runlist_initials {
+        if let Some(&scc_idx) = scc_of_member.get(var_name.as_str()) {
+            // A resolved-SCC member: its per-ident init fragment is
+            // SUBSUMED by the SCC's single combined init fragment. Inject
+            // that combined fragment once, at the first member of this
+            // SCC seen in the initials runlist, under a synthetic ident
+            // (`$⁚scc⁚init⁚{n}`). The spike verified `resolve_module` /
+            // `eval_initials` consume `compiled_initials` positionally
+            // (ident-agnostic; offsets re-derived from the bytecode's
+            // `AssignCurr` operands), so one `SymbolicCompiledInitial`
+            // may write every member's init slots.
+            if injected_init_sccs.insert(scc_idx) {
+                let synthetic_ident = format!("$\u{205A}scc\u{205A}init\u{205A}{scc_idx}");
+                initial_frags.push((synthetic_ident, &init_combined[scc_idx]));
+            }
+            // Non-first members (and the first, after injection): skip
+            // the per-ident push entirely.
+            continue;
+        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.initial_bytecodes
         {
@@ -5159,6 +5028,18 @@ pub fn assemble_module(
     }
 
     for var_name in &dep_graph.runlist_flows {
+        if let Some(&scc_idx) = scc_of_member.get(var_name.as_str())
+            && let Some(ref combined) = dt_combined[scc_idx]
+        {
+            // A `phase == Dt` resolved-SCC member: its per-variable flow
+            // fragment is subsumed by the SCC's combined dt fragment.
+            // Push the combined fragment once, at the first member of
+            // this SCC encountered in the flows runlist; skip the rest.
+            if injected_flow_sccs.insert(scc_idx) {
+                flow_frags.push(combined);
+            }
+            continue;
+        }
         if let Some(result) = all_fragments.get(var_name)
             && let Some(ref bc) = result.fragment.flow_bytecodes
         {
@@ -5239,17 +5120,46 @@ pub fn assemble_module(
     let initial_counts = ContextResourceCounts::from_fragments(&initial_refs);
     let flow_counts = ContextResourceCounts::from_fragments(&flow_frags);
 
+    // #583: temps are NOT a per-phase-offset resource. The plain-phase
+    // concat recycles every fragment's 0-based temps into ONE shared
+    // identity pool (matching the monolithic `Module::compile` keyed
+    // max-merge over the flattened initials+flows+stocks runlists), so the
+    // `ctx_base.temps` is 0 for EVERY phase -- the pool is not partitioned by
+    // phase. (Summing per phase, as before, drove the renumbered `temp_id`
+    // past `u8::MAX` and diverged `flows_concat` from the all-phases `merged`
+    // temp_offsets table the VM consumes.) Modules/views/dim-lists DO stay
+    // per-phase summed: each is a distinct resource, laid out disjointly
+    // across phases exactly as the all-phases `merged` lays them out.
     let no_base = ContextResourceCounts::default();
-    let flow_base = initial_counts.clone();
+    let flow_base = ContextResourceCounts {
+        temps: 0,
+        ..initial_counts.clone()
+    };
     let stock_base = ContextResourceCounts {
-        graphical_functions: initial_counts.graphical_functions + flow_counts.graphical_functions,
         modules: initial_counts.modules + flow_counts.modules,
         views: initial_counts.views + flow_counts.views,
-        temps: initial_counts.temps + flow_counts.temps,
+        temps: 0,
         dim_lists: initial_counts.dim_lists + flow_counts.dim_lists,
     };
 
-    let flows_concat = concatenate_fragments(&flow_frags, &flow_base).inspect_err(|msg| {
+    // #582: graphical functions are content-de-duplicated across ALL
+    // fragments of the model (one block per distinct table, matching the
+    // monolithic `Compiler::new`), so -- unlike the flat literal/module/
+    // view/temp/dim-list resources -- their `base_gf`s cannot be a per-phase
+    // running count. Build the dedup ONCE over the union of every phase's
+    // fragments (in the all-phases order initials, flows, stocks) and feed
+    // each phase the corresponding per-fragment GF remap. A dependency
+    // arrayed GF referenced by hundreds of consumer fragments now lands in
+    // `graphical_functions` exactly once instead of once per consumer,
+    // which both fixes the `GraphicalFunctionId = u8` overflow and matches
+    // the monolithic GF-table layout.
+    let all_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = initial_frags
+        .iter()
+        .map(|(_, bc)| *bc)
+        .chain(flow_frags.iter().copied())
+        .chain(stock_frags.iter().copied())
+        .collect();
+    let gf_dedup = crate::compiler::symbolic::GfDedup::build(&all_frags).inspect_err(|msg| {
         try_accumulate_diagnostic(
             db,
             Diagnostic {
@@ -5260,29 +5170,52 @@ pub fn assemble_module(
             },
         );
     })?;
-    let stocks_concat = concatenate_fragments(&stock_frags, &stock_base).inspect_err(|msg| {
-        try_accumulate_diagnostic(
-            db,
-            Diagnostic {
-                model: model_name.clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg.clone()),
-                severity: DiagnosticSeverity::Error,
-            },
-        );
-    })?;
+    // Phase offsets into `all_frags` so each phase's fragments map to their
+    // remap entry.
+    let n_init = initial_frags.len();
+    let n_flow = flow_frags.len();
+
+    let flows_concat = concatenate_fragments_with_gf(&flow_frags, &flow_base, &gf_dedup, n_init)
+        .inspect_err(|msg| {
+            try_accumulate_diagnostic(
+                db,
+                Diagnostic {
+                    model: model_name.clone(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg.clone()),
+                    severity: DiagnosticSeverity::Error,
+                },
+            );
+        })?;
+    let stocks_concat =
+        concatenate_fragments_with_gf(&stock_frags, &stock_base, &gf_dedup, n_init + n_flow)
+            .inspect_err(|msg| {
+                try_accumulate_diagnostic(
+                    db,
+                    Diagnostic {
+                        model: model_name.clone(),
+                        variable: None,
+                        error: DiagnosticError::Assembly(msg.clone()),
+                        severity: DiagnosticSeverity::Error,
+                    },
+                );
+            })?;
 
     // Build SymbolicCompiledInitial for each initial variable, renumbered
     // so context resource IDs (GFs, modules, views, temps, dim_lists) match
     // the all-phases merge. Literal IDs are local to each initial's bytecode
-    // so they get no base offset.
+    // so they get no base offset. The GF base comes from the shared dedup
+    // (initial `i` is `all_frags[i]`); the other resources stay flat.
     let mut compiled_initials: Vec<SymbolicCompiledInitial> = Vec::new();
-    let mut init_gf_off: u16 = 0;
     let mut init_mod_off: u16 = 0;
     let mut init_view_off: u16 = 0;
-    let mut init_temp_off: u32 = 0;
+    // #583: temps recycle into the shared identity pool (the same pool the
+    // `merged` table below builds), so each initial's temp ids stay
+    // fragment-local (offset 0) -- they are NOT advanced per initial.
+    let init_temp_off: u32 = 0;
     let mut init_dl_off: u16 = 0;
-    for (name, bc) in &initial_frags {
+    for (i, (name, bc)) in initial_frags.iter().enumerate() {
+        let gf_remap = gf_dedup.remap(i);
         let renumbered_code: Vec<crate::compiler::symbolic::SymbolicOpcode> = bc
             .symbolic
             .code
@@ -5291,7 +5224,7 @@ pub fn assemble_module(
                 crate::compiler::symbolic::renumber_opcode(
                     op,
                     0, // literals are local to each initial's bytecode
-                    init_gf_off,
+                    gf_remap,
                     init_mod_off,
                     init_view_off,
                     init_temp_off,
@@ -5317,37 +5250,30 @@ pub fn assemble_module(
                 code: renumbered_code,
             },
         });
-        init_gf_off += bc.graphical_functions.len() as u16;
         init_mod_off += bc.module_decls.len() as u16;
         init_view_off += bc.static_views.len() as u16;
-        let frag_temp_count = bc
-            .temp_sizes
-            .iter()
-            .map(|(id, _)| *id + 1)
-            .max()
-            .unwrap_or(0);
-        init_temp_off += frag_temp_count;
+        // `init_temp_off` is NOT advanced (#583): temps recycle into the
+        // shared identity pool, so every initial's temp ids stay
+        // fragment-local and index the same `merged.temp_offsets` table.
         init_dl_off += bc.dim_lists.len() as u16;
     }
 
-    // Build the all-phases merge for shared context (GFs, modules, views, temps, dim_lists)
-    let all_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = initial_frags
-        .iter()
-        .map(|(_, bc)| *bc)
-        .chain(flow_frags.iter().copied())
-        .chain(stock_frags.iter().copied())
-        .collect();
-    let merged = concatenate_fragments(&all_frags, &no_base).inspect_err(|msg| {
-        try_accumulate_diagnostic(
-            db,
-            Diagnostic {
-                model: model_name.clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg.clone()),
-                severity: DiagnosticSeverity::Error,
-            },
-        );
-    })?;
+    // The all-phases merge for the shared context side-channels (modules,
+    // views, temps, dim_lists); its `graphical_functions` is the dedup's
+    // single table (set by `concatenate_fragments_with_gf`), shared by all
+    // three phases.
+    let merged =
+        concatenate_fragments_with_gf(&all_frags, &no_base, &gf_dedup, 0).inspect_err(|msg| {
+            try_accumulate_diagnostic(
+                db,
+                Diagnostic {
+                    model: model_name.clone(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg.clone()),
+                    severity: DiagnosticSeverity::Error,
+                },
+            );
+        })?;
 
     // Build dimension metadata from project dimensions (mirrors Compiler::populate_dimension_metadata)
     let dm_dims = source_dims_to_datamodel(project.dimensions(db));
@@ -5971,6 +5897,9 @@ pub fn compile_project_incremental(
     }
 }
 
+#[cfg(test)]
+#[path = "db_combined_fragment_tests.rs"]
+mod db_combined_fragment_tests;
 #[cfg(test)]
 #[path = "db_conversion_tests.rs"]
 mod db_conversion_tests;

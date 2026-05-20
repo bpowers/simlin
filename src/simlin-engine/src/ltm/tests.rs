@@ -1320,6 +1320,58 @@ fn test_per_element_gf_link_polarity_fixed_index() {
 }
 
 #[test]
+fn test_per_element_gf_link_polarity_fixed_index_non_sorted_order() {
+    // AC8.1 (LTM polarity twin of the per-element-GF mapping fix): the same
+    // FixedIndex polarity path as `test_per_element_gf_link_polarity_fixed_index`,
+    // but the dimension is declared in NON-alphabetical order (`z_first,
+    // a_second`) while the GF `elems` Vec is built in alphabetical order
+    // (`a_second, z_first`). `polarity.rs` resolves `curve[z_first]` by
+    // `tables.get(dim.get_offset(z_first))` -- get_offset returns z_first's
+    // DECLARED index (0), so the table at compiled index 0 MUST be z_first's
+    // own. Before the per-element-GF mapping fix, `build_tables` lays tables
+    // out by Vec position, so index 0 holds a_second's table and the polarity
+    // is silently the wrong element's direction.
+    //
+    // z_first's table is DECREASING (its link is Negative); a_second's is
+    // INCREASING (Positive). A positional layout would swap them.
+    let curve = per_element_gf_aux(
+        "curve",
+        "region",
+        // GF Vec built ALPHABETICALLY (a_second, z_first) -- the order the MDL
+        // importer's sort produces; differs from the declared order below.
+        &["a_second", "z_first"],
+        vec![
+            continuous_gf(vec![0.0, 1.0, 2.0]), // a_second: increasing
+            continuous_gf(vec![4.0, 2.0, 0.0]), // z_first: decreasing
+        ],
+    );
+    let polarities = link_polarities_for(
+        "region",
+        // Dimension declared NON-alphabetically: z_first (idx 0), a_second (idx 1).
+        &["z_first", "a_second"],
+        vec![
+            curve,
+            x_aux("dose", "5", None),
+            x_aux("effect_z", "lookup(curve[z_first], dose)", None),
+            x_aux("effect_a", "lookup(curve[a_second], dose)", None),
+        ],
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect_z".to_string())],
+        LinkPolarity::Negative,
+        "LOOKUP(curve[z_first], dose) must resolve z_first's OWN (decreasing) \
+         table at its declared index 0 -> Negative; a positional table layout \
+         would read a_second's increasing table -> wrong Positive"
+    );
+    assert_eq!(
+        polarities[&("dose".to_string(), "effect_a".to_string())],
+        LinkPolarity::Positive,
+        "LOOKUP(curve[a_second], dose) must resolve a_second's OWN (increasing) \
+         table at its declared index 1 -> Positive"
+    );
+}
+
+#[test]
 fn test_per_element_gf_link_polarity_one_nonmonotone_element_ignored() {
     // AC7.5: a per-element GF where one element's table is genuinely
     // non-monotone (Boston: y = [0, 1, 0.3, 0.7] -> Unknown from

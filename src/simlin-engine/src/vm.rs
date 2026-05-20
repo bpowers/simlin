@@ -492,7 +492,7 @@ fn collect_stock_offsets(
 /// Advance a multi-dimensional index in row-major order. Shared by all
 /// vector operation opcodes to iterate over array elements.
 #[inline]
-fn increment_indices(indices: &mut [u16], dims: &[u16]) {
+pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
     for d in (0..indices.len()).rev() {
         indices[d] += 1;
         if indices[d] < dims[d] {
@@ -2298,110 +2298,40 @@ impl Vm {
                     }
                 }
 
-                // VectorElmMap uses 0-based offset indexing: offset 0 means "element at
-                // position 0 of the source array." This matches Vensim's VECTOR ELM MAP
-                // semantics where the offset array contains zero-based indices.
-                Opcode::VectorElmMap { write_temp_id } => {
+                // Genuine-Vensim VECTOR ELM MAP -- rule + citations on
+                // `crate::vm_vector_elm_map::vector_elm_map` (no modulo;
+                // OOB/NaN => `:NA:`).
+                Opcode::VectorElmMap {
+                    write_temp_id,
+                    full_source_len,
+                } => {
                     let offset_view = &view_stack[view_stack.len() - 1];
                     let source_view = &view_stack[view_stack.len() - 2];
-
-                    if !source_view.is_valid || !offset_view.is_valid {
-                        Self::fill_temp_nan(temp_storage, context, *write_temp_id);
-                    } else {
-                        // Collect all source values
-                        let source_size = source_view.size();
-                        let source_n_dims = source_view.dims.len();
-                        let mut source_values: SmallVec<[f64; 32]> =
-                            SmallVec::with_capacity(source_size);
-                        let mut src_indices: SmallVec<[u16; 4]> =
-                            smallvec::smallvec![0; source_n_dims];
-                        for _ in 0..source_size {
-                            let flat_off = source_view.flat_offset(&src_indices);
-                            let val = Self::read_view_element(
-                                source_view,
-                                flat_off,
-                                curr,
-                                temp_storage,
-                                context,
-                            );
-                            source_values.push(val);
-                            increment_indices(&mut src_indices, &source_view.dims);
-                        }
-
-                        // Write mapped results to temp_storage
-                        let temp_off = context.temp_offsets[*write_temp_id as usize];
-                        let offset_size = offset_view.size();
-                        let offset_n_dims = offset_view.dims.len();
-                        let mut off_indices: SmallVec<[u16; 4]> =
-                            smallvec::smallvec![0; offset_n_dims];
-                        for i in 0..offset_size {
-                            let flat_off = offset_view.flat_offset(&off_indices);
-                            let offset_val = Self::read_view_element(
-                                offset_view,
-                                flat_off,
-                                curr,
-                                temp_storage,
-                                context,
-                            );
-                            let idx = offset_val.round();
-                            temp_storage[temp_off + i] =
-                                if idx.is_nan() || idx < 0.0 || idx >= source_values.len() as f64 {
-                                    f64::NAN
-                                } else {
-                                    source_values[idx as usize]
-                                };
-                            increment_indices(&mut off_indices, &offset_view.dims);
-                        }
-                    }
+                    crate::vm_vector_elm_map::vector_elm_map(
+                        source_view,
+                        offset_view,
+                        *write_temp_id,
+                        *full_source_len,
+                        curr,
+                        temp_storage,
+                        context,
+                    );
                 }
 
-                // VectorSortOrder returns 1-based rank indices: rank 1 means "this element
-                // is first in sort order." This matches Vensim's VECTOR SORT ORDER semantics.
-                // The 1-based convention is intentional and differs from VectorElmMap's 0-based
-                // offsets; the asymmetry reflects Vensim's original API design.
+                // Genuine-Vensim VECTOR SORT ORDER -- per-iterated-slice
+                // (per-row) 0-based ranks; rule + citations on
+                // `crate::vm_vector_sort_order::vector_sort_order`.
                 Opcode::VectorSortOrder { write_temp_id } => {
                     let direction = stack.pop().round() as i32;
-
                     let input_view = &view_stack[view_stack.len() - 1];
-
-                    if !input_view.is_valid {
-                        Self::fill_temp_nan(temp_storage, context, *write_temp_id);
-                    } else {
-                        let size = input_view.size();
-                        let n_dims = input_view.dims.len();
-
-                        // Collect (value, 1-based-index) pairs
-                        let mut indexed: SmallVec<[(f64, usize); 32]> =
-                            SmallVec::with_capacity(size);
-                        let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
-                        for i in 0..size {
-                            let flat_off = input_view.flat_offset(&indices);
-                            let val = Self::read_view_element(
-                                input_view,
-                                flat_off,
-                                curr,
-                                temp_storage,
-                                context,
-                            );
-                            indexed.push((val, i + 1));
-                            increment_indices(&mut indices, &input_view.dims);
-                        }
-
-                        if direction == 1 {
-                            indexed.sort_by(|a, b| {
-                                a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                        } else {
-                            indexed.sort_by(|a, b| {
-                                b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                        }
-
-                        let temp_off = context.temp_offsets[*write_temp_id as usize];
-                        for (i, &(_, orig_idx)) in indexed.iter().enumerate() {
-                            temp_storage[temp_off + i] = orig_idx as f64;
-                        }
-                    }
+                    crate::vm_vector_sort_order::vector_sort_order(
+                        input_view,
+                        direction,
+                        *write_temp_id,
+                        curr,
+                        temp_storage,
+                        context,
+                    );
                 }
 
                 Opcode::Rank { write_temp_id } => {
@@ -2446,6 +2376,51 @@ impl Vm {
                         let temp_off = context.temp_offsets[*write_temp_id as usize];
                         for (rank_0based, &(_, orig_idx)) in indexed.iter().enumerate() {
                             temp_storage[temp_off + orig_idx] = (rank_0based + 1) as f64;
+                        }
+                    }
+                }
+
+                Opcode::LookupArray {
+                    base_gf,
+                    table_count,
+                    mode,
+                    write_temp_id,
+                } => {
+                    // Per-element arrayed-GF lookup (GH #580 Bug B): for each
+                    // element `i` of the arrayed GF's view, evaluate that
+                    // element's table at the shared scalar `index`. The base
+                    // array's *values* are irrelevant (a graphical function is
+                    // a pure table); the view supplies the element count and
+                    // each element's flat offset into the per-element-table
+                    // run `graphical_functions[base_gf .. base_gf + table_count]`
+                    // (laid out in declared element order by
+                    // `Compiler::table_base_ids`, exactly as the scalar
+                    // `Lookup`'s element offset). An out-of-range element index
+                    // yields NaN, matching the scalar `Lookup` opcode's bound.
+                    let index = stack.pop();
+                    let input_view = &view_stack[view_stack.len() - 1];
+                    let temp_off = context.temp_offsets[*write_temp_id as usize];
+
+                    if !input_view.is_valid {
+                        Self::fill_temp_nan(temp_storage, context, *write_temp_id);
+                    } else {
+                        let size = input_view.size();
+                        let n_dims = input_view.dims.len();
+                        let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
+                        for i in 0..size {
+                            let elem_off = input_view.flat_offset(&indices);
+                            let result = if elem_off >= *table_count as usize {
+                                f64::NAN
+                            } else {
+                                let gf = &context.graphical_functions[*base_gf as usize + elem_off];
+                                match mode {
+                                    LookupMode::Interpolate => lookup(gf, index),
+                                    LookupMode::Forward => lookup_forward(gf, index),
+                                    LookupMode::Backward => lookup_backward(gf, index),
+                                }
+                            };
+                            temp_storage[temp_off + i] = result;
+                            increment_indices(&mut indices, &input_view.dims);
                         }
                     }
                 }
@@ -2668,7 +2643,7 @@ impl Vm {
     /// iteration index. For non-contiguous or sparse views, the caller must compute
     /// flat_off via `view.flat_offset(&indices)` or `view.offset_for_iter_index(iter_idx)`.
     #[inline]
-    fn read_view_element(
+    pub(crate) fn read_view_element(
         view: &RuntimeView,
         flat_off: usize,
         curr: &[f64],
@@ -2685,7 +2660,11 @@ impl Vm {
 
     /// Fill a temp storage region with NaN. Uses `temp_offsets` to determine
     /// the correct region size, independent of potentially-invalid runtime views.
-    fn fill_temp_nan(temp_storage: &mut [f64], context: &ByteCodeContext, temp_id: TempId) {
+    pub(crate) fn fill_temp_nan(
+        temp_storage: &mut [f64],
+        context: &ByteCodeContext,
+        temp_id: TempId,
+    ) {
         let idx = temp_id as usize;
         let start = context.temp_offsets[idx];
         let end = context

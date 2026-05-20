@@ -42,6 +42,14 @@ mod db_ltm_ir;
 // (`scripts/lint-project.sh` rule 2); `db.rs` reaches it via
 // `crate::db_macro_registry::...`, mirroring `db_ltm_ir`.
 mod db_macro_registry;
+// The dt-phase dependency-graph cycle relation (`dt_walk_successors`),
+// the shared `VarInfo` builder (`build_var_info`), and the `#[cfg(test)]`
+// SCC introspection accessor. A sibling of `db` rather than a submodule
+// of `db.rs` so the latter stays under the per-file line cap
+// (`scripts/lint-project.sh` rule 2); `db.rs` reaches it via
+// `crate::db_dep_graph::...`, mirroring `db_ltm_ir` / `db_macro_registry`.
+mod db_dep_graph;
+mod db_var_fragment;
 pub mod diagram;
 mod dimensions;
 pub mod errors;
@@ -67,6 +75,8 @@ mod model;
 mod module_functions;
 mod parser;
 mod patch;
+#[cfg(test)]
+mod per_element_gf_tests;
 mod project;
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[path = "project_io.gen.rs"]
@@ -98,6 +108,8 @@ mod units_infer;
 mod variable;
 pub mod vdf;
 mod vm;
+mod vm_vector_elm_map;
+mod vm_vector_sort_order;
 pub mod xmile;
 
 pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};

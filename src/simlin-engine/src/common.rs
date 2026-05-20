@@ -256,6 +256,36 @@ impl error::Error for Error {}
 pub type Result<T> = result::Result<T, Error>;
 pub type EquationResult<T> = result::Result<T, EquationError>;
 
+/// Reserved sentinel standing in for a *literal period* inside a quoted
+/// identifier in canonical form (U+2024 ONE DOT LEADER).
+///
+/// `canonicalize` must distinguish two uses of `.` in a raw identifier: the
+/// module-hierarchy separator (`model.variable`), which maps to the middle
+/// dot `·` (U+00B7), and a literal period that is part of a quoted name
+/// (`"Goal 1.5 for Temperature"`). A literal period must NOT remain a raw
+/// ASCII `.` in the canonical form: `is_canonical` rejects any `.`, so a
+/// re-canonicalization pass would treat the now-unquoted period as a module
+/// separator and corrupt the identity (issue #559 -- the corrupted
+/// `goal_1·5_…` then splits into a phantom submodule and fails to
+/// resolve with `DoesNotExist`). Mapping it to a dedicated canonical-stable
+/// sentinel that is distinct from `·` makes `canonicalize` idempotent while
+/// preserving the literal-vs-separator distinction. `to_source_repr` (via
+/// `canonical_to_source`) maps it back to `.` so all user-facing/serialized
+/// output is byte-identical to before.
+const LITERAL_PERIOD_SENTINEL: char = '\u{2024}';
+const LITERAL_PERIOD_SENTINEL_STR: &str = "\u{2024}";
+
+/// Inverse of the period handling in [`canonicalize`]: map both the module
+/// separator (`·`) and the literal-period sentinel back to `.` for source /
+/// user-facing output. Borrows when neither is present (the common case).
+fn canonical_to_source(s: &str) -> Cow<'_, str> {
+    if s.contains('·') || s.contains(LITERAL_PERIOD_SENTINEL) {
+        Cow::Owned(s.replace(['·', LITERAL_PERIOD_SENTINEL], "."))
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
 /// Returns true if the string is already in canonical form, meaning no
 /// transformations (trimming, lowercasing, quote stripping, period-to-middle-dot
 /// conversion, whitespace-to-underscore, or backslash unescaping) would change it.
@@ -343,12 +373,23 @@ pub fn canonicalize(name: &str) -> Cow<'_, str> {
             { bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' };
 
         let part = if quoted {
-            Cow::Borrowed(&part[1..bytes.len() - 1])
+            let inner = &part[1..bytes.len() - 1];
+            if inner.contains('.') {
+                // Literal period inside a quoted identifier. Map it to the
+                // canonical-stable sentinel rather than leaving a raw `.`:
+                // a raw `.` is rejected by `is_canonical`, so a re-canonical
+                // pass would treat the now-unquoted period as the `·`
+                // module separator and corrupt the identity (#559).
+                // `canonical_to_source` reverses this back to `.`.
+                Cow::Owned(inner.replace('.', LITERAL_PERIOD_SENTINEL_STR))
+            } else {
+                Cow::Borrowed(inner)
+            }
         } else {
             // Replace periods with middle dots (·) for module hierarchy separators.
             // This allows us to distinguish between:
             // - Module separators: model.variable -> model·variable
-            // - Literal periods in quoted names: "a.b" -> a.b
+            // - Literal periods in quoted names: "a.b" -> a<U+2024>b
             Cow::Owned(part.replace('.', "·"))
         };
 
@@ -364,7 +405,12 @@ pub fn canonicalize(name: &str) -> Cow<'_, str> {
 
 #[test]
 fn test_canonicalize() {
-    assert_eq!("a.b", &*canonicalize("\"a.b\""));
+    // A literal period inside a quoted identifier canonicalizes to the
+    // reserved sentinel (U+2024), NOT a raw `.` -- so the result is itself
+    // canonical and re-canonicalization is a no-op (#559). The module
+    // separator (unquoted `.`) still maps to `·` (line below). Every other
+    // assertion in this test is byte-unchanged by the sentinel fix.
+    assert_eq!("a\u{2024}b", &*canonicalize("\"a.b\""));
     assert_eq!("a/d·b_\\\"c\\\"", &*canonicalize("\"a/d\".\"b \\\"c\\\"\""));
     assert_eq!("a/d·b_c", &*canonicalize("\"a/d\".\"b c\""));
     assert_eq!("a·b_c", &*canonicalize("a.\"b c\""));
@@ -374,6 +420,100 @@ fn test_canonicalize() {
     assert_eq!("å_b", &*canonicalize("Å\nb"));
     assert_eq!("a_b", &*canonicalize("a \n b"));
     assert_eq!("a·b", &*canonicalize("a.b"));
+}
+
+/// Regression for issue #559: a Vensim quoted identifier containing a
+/// literal period (e.g. C-LEARN's `"Goal 1.5 for Temperature"`) must
+/// canonicalize *idempotently*.
+///
+/// Before the fix the first pass strips the quotes and keeps the raw `.`
+/// (`"a.b"` -> `a.b`), but `is_canonical("a.b")` returns false (it rejects
+/// any `.`), so a downstream "ensure canonical" re-pass treats the now
+/// unquoted `a.b` as a module path and mis-converts the literal period into
+/// the U+00B7 module-hierarchy separator (`a·b`). The variable's own
+/// identity then splits at `·` into a phantom submodule and resolution
+/// fails with `DoesNotExist`. The invariant
+/// `canonicalize(canonicalize(x)) == canonicalize(x)` must hold for ALL
+/// inputs, quoted-period names included.
+#[test]
+fn test_canonicalize_idempotent_quoted_period() {
+    for raw in [
+        "\"a.b\"",
+        "\"a.b c\"",
+        "\"Goal 1.5 for Temperature\"",
+        "\"goal_1.5_for_temperature\"",
+        "\"Fig. 3\"",
+        "\"v1.2 target\"",
+    ] {
+        let once = canonicalize(raw).into_owned();
+        let twice = canonicalize(&once).into_owned();
+        assert_eq!(
+            twice, once,
+            "canonicalize not idempotent for {raw:?}: once={once:?}, twice={twice:?}"
+        );
+        // The corrupting outcome specifically: no raw `.` survives, and the
+        // literal period did NOT become the `·` module separator.
+        assert!(
+            !once.contains('.'),
+            "canonical form of {raw:?} still has a raw `.`: {once:?}"
+        );
+        assert!(
+            !once.contains('·'),
+            "literal period in {raw:?} was mis-mapped to the `·` module \
+             separator: {once:?}"
+        );
+        // And it round-trips back to a literal `.` for source/display
+        // output, so user-facing output is unchanged by the fix.
+        let source = canonical_to_source(&once);
+        assert!(
+            source.contains('.') && !source.contains('·'),
+            "source repr of {raw:?} should restore the literal `.`: {source:?}"
+        );
+    }
+}
+
+/// The canonicalize change must ONLY affect identifiers with a literal
+/// period inside quotes (#559). Every other input class -- plain idents,
+/// the `·` module separator, the `⁚` synthetic separator, unicode,
+/// quoted-without-period -- must be byte-for-byte identical to the
+/// pre-fix behavior, and the sentinel must never appear in their
+/// canonical form. The expected values here are exactly the pre-fix
+/// `test_canonicalize` expectations.
+#[test]
+fn test_canonicalize_non_period_idents_byte_unchanged() {
+    let cases: &[(&str, &str)] = &[
+        ("hello_world", "hello_world"),
+        ("Population", "population"),
+        ("a b c", "a_b_c"),
+        // Unquoted period = module-hierarchy separator -> `·` (unchanged).
+        ("a.b", "a·b"),
+        ("model.variable", "model·variable"),
+        // `.` between two quoted parts is still a module separator.
+        ("\"a/d\".\"b c\"", "a/d·b_c"),
+        ("\"a/d\".b", "a/d·b"),
+        ("a.\"b c\"", "a·b_c"),
+        // Quoted, but NO literal period -> just quote-stripped.
+        ("\"quoted\"", "quoted"),
+        ("\"b c\"", "b_c"),
+        // Synthetic separators and unicode are untouched.
+        ("stdlib⁚smth1", "stdlib⁚smth1"),
+        ("model·variable", "model·variable"),
+        ("café", "café"),
+        ("Å\nb", "å_b"),
+    ];
+    for (raw, expected) in cases {
+        let got = canonicalize(raw).into_owned();
+        assert_eq!(
+            &got, expected,
+            "canonicalize({raw:?}) changed: got {got:?}, expected {expected:?}"
+        );
+        assert!(
+            !got.contains(LITERAL_PERIOD_SENTINEL),
+            "sentinel leaked into a non-literal-period ident {raw:?}: {got:?}"
+        );
+        // Idempotent for these too (the invariant is universal).
+        assert_eq!(canonicalize(&got).into_owned(), got);
+    }
 }
 
 #[test]
@@ -390,11 +530,22 @@ fn test_canonicalize_returns_borrowed_when_already_canonical() {
     // trimmed slice when the trimmed content is canonical.
     assert!(matches!(canonicalize("  trimmed  "), Cow::Borrowed(_)));
 
+    // The literal-period sentinel form is itself canonical -> Borrowed.
+    // This is the idempotency fast path the sentinel mapping relies on.
+    assert!(matches!(canonicalize("a\u{2024}b"), Cow::Borrowed(_)));
+    assert!(matches!(
+        canonicalize("goal_1\u{2024}5_for_temperature"),
+        Cow::Borrowed(_)
+    ));
+
     // Non-canonical strings should return Cow::Owned
     assert!(matches!(canonicalize("Hello"), Cow::Owned(_)));
     assert!(matches!(canonicalize("a.b"), Cow::Owned(_)));
     assert!(matches!(canonicalize("a b"), Cow::Owned(_)));
     assert!(matches!(canonicalize("\"quoted\""), Cow::Owned(_)));
+    // A quoted-period ident takes the slow path -> Owned (it then maps to
+    // the sentinel form asserted Borrowed above).
+    assert!(matches!(canonicalize("\"a.b\""), Cow::Owned(_)));
 }
 
 #[test]
@@ -405,6 +556,11 @@ fn test_is_canonical() {
     assert!(is_canonical("stdlib⁚smth1"));
     assert!(is_canonical(""));
     assert!(is_canonical("a_b_c_123"));
+    // The literal-period sentinel (U+2024) is a canonical character: this
+    // is precisely why canonicalize is idempotent for quoted-period idents
+    // (#559). Contrast with the raw `.` rejection asserted below.
+    assert!(is_canonical("a\u{2024}b"));
+    assert!(is_canonical("goal_1\u{2024}5_for_temperature"));
 
     assert!(!is_canonical("Hello"));
     assert!(!is_canonical("a.b"));
@@ -480,7 +636,12 @@ mod canonicalize_invariant_tests {
             let bytes = part.as_bytes();
             let quoted = bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"';
             let part = if quoted {
-                Cow::Borrowed(&part[1..bytes.len() - 1])
+                let inner = &part[1..bytes.len() - 1];
+                if inner.contains('.') {
+                    Cow::Owned(inner.replace('.', super::LITERAL_PERIOD_SENTINEL_STR))
+                } else {
+                    Cow::Borrowed(inner)
+                }
             } else {
                 Cow::Owned(part.replace('.', "\u{00B7}"))
             };
@@ -581,14 +742,18 @@ fn test_canonical_element_name() {
 
 #[test]
 fn test_canonical_ident_with_dots() {
-    // Test that dots outside quotes become middle dots
+    // Dots OUTSIDE quotes are module-hierarchy separators -> `·`.
     assert_eq!("a·d", &*canonicalize("a.d"));
 
-    // Test that quoted identifiers with dots keep them as middle dots after canonicalization
-    assert_eq!("a.d", &*canonicalize("\"a.d\""));
+    // A literal period INSIDE a quoted identifier maps to the reserved
+    // sentinel (U+2024), NOT a raw `.` (which would be re-canonicalized
+    // into the `·` module separator -- #559). It reverses to `.`
+    // via to_source_repr, so user-facing output is byte-unchanged.
+    assert_eq!("a\u{2024}d", &*canonicalize("\"a.d\""));
+    assert_eq!(Ident::<Canonical>::new("\"a.d\"").to_source_repr(), "a.d");
 
-    // Test mixed case
-    assert_eq!("a·b.c", &*canonicalize("a.\"b.c\""));
+    // Mixed: unquoted `.` -> `·`, quoted literal `.` -> sentinel.
+    assert_eq!("a·b\u{2024}c", &*canonicalize("a.\"b.c\""));
 }
 
 #[test]
@@ -627,9 +792,11 @@ fn test_new_ident_basic_operations() {
     assert_eq!(ident2.as_str(), "a·b");
     assert_eq!(ident2.to_source_repr(), "a.b");
 
-    // Test that quoted sections are preserved
+    // A literal period in a quoted ident canonicalizes to the sentinel
+    // (#559) but still renders back to `.` for source/display output.
     let ident3 = Ident::new("\"a.b\"");
-    assert_eq!(ident3.as_str(), "a.b");
+    assert_eq!(ident3.as_str(), "a\u{2024}b");
+    assert_eq!(ident3.to_source_repr(), "a.b");
 }
 
 #[test]
@@ -802,9 +969,10 @@ fn test_display_format_edge_cases() {
     let spaces = canonicalize("   ");
     assert_eq!(&*spaces, "");
 
-    // Test string with mixed dots and quotes
+    // Mixed dots and quotes: unquoted `.` -> `·` (module separator),
+    // quoted literal `.` -> the reserved sentinel (#559).
     let complex = canonicalize("a.\"b.c\".d");
-    assert_eq!(&*complex, "a·b.c·d");
+    assert_eq!(&*complex, "a·b\u{2024}c·d");
 }
 
 #[test]
@@ -1085,11 +1253,7 @@ impl<'a> CanonicalStr<'a> {
     /// Replaces middle dots (·) used internally for module hierarchy separators
     /// back to periods (.) for display in source code or user-facing output.
     pub fn to_source_repr(&self) -> Cow<'_, str> {
-        if self.inner.contains('·') {
-            Cow::Owned(self.inner.replace('·', "."))
-        } else {
-            Cow::Borrowed(self.inner)
-        }
+        canonical_to_source(self.inner)
     }
 
     /// Find and split at the first middle dot, maintaining canonical guarantee
@@ -1204,7 +1368,7 @@ impl Ident<Canonical> {
     /// periods to middle dots to distinguish module separators from literal
     /// periods in quoted identifiers.
     pub fn to_source_repr(&self) -> String {
-        self.inner.replace('·', ".")
+        canonical_to_source(&self.inner).into_owned()
     }
 
     /// Strip a prefix, returning a borrowed view if successful
@@ -1258,11 +1422,7 @@ impl<'a> IdentRef<'a, Canonical> {
     /// Replaces middle dots (·) used internally for module hierarchy separators
     /// back to periods (.) for display in source code or user-facing output.
     pub fn to_source_repr(&self) -> Cow<'a, str> {
-        if self.inner.contains('·') {
-            Cow::Owned(self.inner.replace('·', "."))
-        } else {
-            Cow::Borrowed(self.inner)
-        }
+        canonical_to_source(self.inner)
     }
 }
 

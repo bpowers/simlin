@@ -352,3 +352,120 @@ fn test_dimension_invalidation_maps_to_chain() {
         "AC8.3: variable y[DimA] should be re-parsed when DimB changes (DimA maps_to DimB)"
     );
 }
+
+// ── expand_maps_to_chains: canonical-vs-display reachability (GH #580 Bug A) ──
+
+mod expand_maps_to_chains_tests {
+    use super::super::{
+        SourceDimension, SourceDimensionElements, SourceDimensionMapping, expand_maps_to_chains,
+    };
+    use std::collections::BTreeSet;
+
+    fn named(name: &str, elements: &[&str]) -> SourceDimension {
+        SourceDimension {
+            name: name.to_string(),
+            elements: SourceDimensionElements::Named(
+                elements.iter().map(|s| s.to_string()).collect(),
+            ),
+            maps_to: None,
+            mappings: vec![],
+            parent: None,
+        }
+    }
+
+    /// Reverse reachability: a variable subscripted by the *target* dimension
+    /// must pull the mapping *source* into the set so cross-dimension subscript
+    /// substitution can see it. `SourceDimension.name` keeps the as-written
+    /// display casing while the importers store `mappings[].target` canonical
+    /// (lowercase), so the reverse pass must compare on the canonical form --
+    /// before the GH #580 Bug A fix the raw `==` here dropped the source
+    /// dimension, leaving the bare full-dimension subscript that lowered to
+    /// `DimensionInScalarContext`.
+    #[test]
+    fn reverse_pulls_in_group_mapped_source_despite_case_skew() {
+        // `Small` (display) maps to `big` (canonical target) as a group mapping.
+        let mut small = named("Small", &["s1", "s2"]);
+        small.mappings = vec![SourceDimensionMapping {
+            target: "big".to_string(), // canonical, as the MDL/XMILE importers store it
+            element_map: vec![
+                ("s1".to_string(), "e1".to_string()),
+                ("s1".to_string(), "e2".to_string()),
+                ("s2".to_string(), "e3".to_string()),
+                ("s2".to_string(), "e4".to_string()),
+            ],
+        }];
+        let big = named("Big", &["e1", "e2", "e3", "e4"]);
+        let all = [big, small];
+
+        // A variable declared over `Big` (display casing in its ApplyToAll dims).
+        let relevant: BTreeSet<String> = ["Big".to_string()].into_iter().collect();
+        let expanded = expand_maps_to_chains(&relevant, &all);
+
+        assert!(
+            expanded.contains("Small"),
+            "reverse mapping must pull display-named `Small` into the set even \
+             though its mapping target `big` is canonical; got {expanded:?}"
+        );
+        assert!(expanded.contains("Big"));
+    }
+
+    /// Forward reachability: a variable subscripted by the *source* dimension
+    /// must pull the mapping *target* in, resolved back to its display name so
+    /// the caller's `expanded.contains(&d.name)` filter (display-keyed) matches.
+    #[test]
+    fn forward_pulls_in_target_resolved_to_display_name() {
+        let mut small = named("Small", &["s1", "s2"]);
+        small.mappings = vec![SourceDimensionMapping {
+            target: "big".to_string(),
+            element_map: vec![],
+        }];
+        let big = named("Big", &["e1", "e2"]);
+        let all = [big, small];
+
+        let relevant: BTreeSet<String> = ["Small".to_string()].into_iter().collect();
+        let expanded = expand_maps_to_chains(&relevant, &all);
+
+        assert!(
+            expanded.contains("Big"),
+            "forward mapping must pull the target in under its DISPLAY name `Big` \
+             (not the canonical `big`) so the caller's display-keyed filter \
+             matches; got {expanded:?}"
+        );
+    }
+
+    /// An unrelated dimension (no mapping in either direction) is excluded.
+    #[test]
+    fn unrelated_dimension_is_not_pulled_in() {
+        let small = named("Small", &["s1", "s2"]);
+        let big = named("Big", &["e1", "e2"]);
+        let unrelated = named("Unrelated", &["u1"]);
+        let all = [big, small, unrelated];
+
+        let relevant: BTreeSet<String> = ["Big".to_string()].into_iter().collect();
+        let expanded = expand_maps_to_chains(&relevant, &all);
+
+        assert!(
+            !expanded.contains("Small"),
+            "no mapping relates Small to Big"
+        );
+        assert!(!expanded.contains("Unrelated"));
+        assert_eq!(expanded, relevant);
+    }
+
+    /// The legacy `maps_to` field path is canonicalized on both sides too.
+    #[test]
+    fn reverse_pulls_in_maps_to_source_despite_case_skew() {
+        let mut child = named("Child", &["c1", "c2"]);
+        child.maps_to = Some("parent".to_string()); // canonical
+        let parent = named("Parent", &["p1", "p2"]);
+        let all = [parent, child];
+
+        let relevant: BTreeSet<String> = ["Parent".to_string()].into_iter().collect();
+        let expanded = expand_maps_to_chains(&relevant, &all);
+
+        assert!(
+            expanded.contains("Child"),
+            "reverse `maps_to` must also compare canonically; got {expanded:?}"
+        );
+    }
+}

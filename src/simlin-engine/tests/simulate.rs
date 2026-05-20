@@ -12,10 +12,10 @@ use std::io::BufReader;
 use simlin_engine::FilesystemDataProvider;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::serde::{deserialize, serialize};
-use simlin_engine::{Results, Vm, project_io};
+use simlin_engine::{Method, Results, SimSpecs as Specs, Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
-use test_helpers::ensure_results;
+use test_helpers::{ensure_results, ensure_results_excluding};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
@@ -132,61 +132,515 @@ fn load_expected_results(xmile_path: &str) -> Option<Results> {
     None
 }
 
+/// Minimum fraction of `vdf_expected` variables that must match a `results`
+/// ident before a comparison is considered non-vacuous. Below this floor, the
+/// per-step tolerance loop runs over so few variables that `failures == 0` is
+/// meaningless (the legacy comparator vacuously "passed" a comparison sharing
+/// 0 or 1 ident). Both broad reference models exercise this far above the
+/// floor: `simulates_wrld3_03` already asserts `offsets.len() > 200`, and
+/// C-LEARN's `Ref.vdf` has ~3484 variables, ~3482 of which match a simulation
+/// ident -- so a 10%-of-VDF floor (~348) is comfortably below the true matched
+/// count yet far above 0/1.
+const MIN_MATCHED_FRACTION: f64 = 0.10;
+
+/// Hard floor on matched variables, applied when the VDF reference itself is
+/// small. Keeps the synthetic guard test honest (a one-of-sixteen-matched
+/// comparison must trip even though 16/10 rounds low) without constraining the
+/// real broad-model comparisons, which clear it by orders of magnitude.
+const MIN_MATCHED_ABSOLUTE: usize = 10;
+
+/// Maximum fraction of compared (finite-reference) cells that may be skipped
+/// because either side is IEEE NaN. `build_results` initializes unrecovered
+/// VDF spans to `f64::NAN` (`vdf.rs`), and a simulation defect can emit NaN
+/// columns; a high global NaN-skipped fraction means the comparison is largely
+/// not actually comparing anything. The Vensim `:NA:` sentinel is the *finite*
+/// `-2^109` (never NaN), so legitimate `:NA:` cells flow to the comparator, not
+/// this guard. A correct broad comparison skips ~0% (verified against C-LEARN's
+/// re-measure); 10% is a generous ceiling that still catches a degenerate run.
+const MAX_NAN_SKIPPED_FRACTION: f64 = 0.10;
+
+/// Cross-simulator relative tolerance (1%): VDF stores f32 (~7 digits) and
+/// Vensim's integration may differ slightly from ours.
+const VDF_RTOL: f64 = 0.01;
+
+/// Per-series absolute-floor coefficient for the `isclose` criterion. The
+/// absolute floor is `K_ATOL * peak`, where `peak` is the series' largest
+/// reference magnitude, so a cell whose reference is a literal 0 tolerates
+/// sim jitter up to `K_ATOL * peak` (the pure relative error is ~100% there and
+/// would spuriously fail). Chosen small enough that a genuine >1% divergence on
+/// a meaningful value still fails: at `K_ATOL = 1e-4` a near-zero cell tolerates
+/// 0.01% of the series peak, far below any real divergence (validated against
+/// C-LEARN's re-measure -- the genuine residual stays flagged). This is a
+/// principled correction of the comparison at zero, NOT a relaxation for
+/// meaningful values.
+const K_ATOL: f64 = 1e-4;
+
+/// Whether `ident` names an element of one of the excluded base variables.
+/// A base name `"y"` excludes the scalar `y` and every arrayed element
+/// `y[a1]`, `y[a2]`, ... (the VDF results key form), so a known-residual
+/// variable can be carved out of the comparison without weakening the 1%
+/// gate for any other variable. Mirrors `test_helpers::is_excluded_var`
+/// (the CSV-comparison path) so both gates share identical base-name
+/// semantics. This is a documented, tracked exclusion (every base maps to a
+/// cluster in GH #590 / #591), NOT a tolerance change.
+fn vdf_ident_is_excluded(ident: &str, excluded: &[&str]) -> bool {
+    excluded.iter().any(|&base| {
+        ident == base
+            || ident
+                .strip_prefix(base)
+                .is_some_and(|rest| rest.starts_with('['))
+    })
+}
+
+/// The base-variable name of a (possibly arrayed) VDF results ident: `"y"` for
+/// the scalar `y`, and `"y"` for every element ident `y[a1]`, `y[a2]`, ... .
+/// This is the inverse of [`vdf_ident_is_excluded`]'s base-name match (which
+/// strips a trailing `[elem,...]` subscript), so the set of base names produced
+/// here over the failing idents is exactly the set [`EXPECTED_VDF_RESIDUAL`]
+/// must carve out. Used by `clearn_residual_exactness` to guard that the
+/// exclusion stays neither over- nor under-broad.
+fn vdf_ident_base_name(ident: &str) -> &str {
+    match ident.find('[') {
+        Some(idx) => &ident[..idx],
+        None => ident,
+    }
+}
+
+/// Per-ident comparison outcome, shared by the comparator (`ensure_vdf_results*`)
+/// and the residual diagnostic so both apply byte-identical per-cell logic. The
+/// pass/fail verdict for one matched `Ref.vdf` ident is fully described here.
+#[derive(Default, Clone, Copy)]
+struct VdfIdentStats {
+    /// Cells that exceeded the near-zero-robust 1% tolerance (a real mismatch).
+    failures: u64,
+    /// `:NA:`-sentinel cells reconciled against a near-zero VDF reference.
+    na_reconciled: u64,
+    /// Cells skipped because either side was IEEE NaN.
+    nan_skipped: u64,
+    /// Cells actually compared (neither side NaN).
+    compared: u64,
+    /// True when the series was NaN at *every* step (an all-NaN core series).
+    all_nan: bool,
+    /// Largest per-cell relative error observed (for the diagnostic summary).
+    max_rel_error: f64,
+    /// The step at which `max_rel_error` occurred.
+    max_rel_step: usize,
+}
+
+/// Classify one matched `(vdf_off, sim_off)` ident across all steps, applying
+/// the full `ensure_vdf_results` per-cell contract: per-series peak/`atol`,
+/// NaN-skip accounting, `:NA:`-sentinel reconciliation, and the near-zero-robust
+/// `isclose` tolerance. Returning a struct (rather than mutating shared
+/// accumulators inline) lets the comparator, its exclusion sibling, and the
+/// temporary residual diagnostic agree exactly on which idents fail.
+fn classify_vdf_ident(
+    vdf_expected: &Results,
+    results: &Results,
+    vdf_off: usize,
+    sim_off: usize,
+) -> VdfIdentStats {
+    let na = simlin_engine::float::NA;
+    let step_count = vdf_expected.step_count;
+
+    // Per-series peak reference magnitude drives the absolute floor for the
+    // near-zero-robust `isclose` criterion. Finite reference cells only --
+    // a NaN reference contributes nothing to the series' scale.
+    let mut peak: f64 = 0.0;
+    for step in 0..step_count {
+        let expected = vdf_expected.data[step * vdf_expected.step_size + vdf_off];
+        if expected.is_finite() {
+            peak = peak.max(expected.abs());
+        }
+    }
+    let atol = K_ATOL * peak;
+
+    let mut stats = VdfIdentStats::default();
+    let mut series_nan_skipped: u64 = 0;
+
+    for step in 0..step_count {
+        let expected = vdf_expected.data[step * vdf_expected.step_size + vdf_off];
+        let actual = results.data[step * results.step_size + sim_off];
+
+        if expected.is_nan() || actual.is_nan() {
+            series_nan_skipped += 1;
+            stats.nan_skipped += 1;
+            continue;
+        }
+        stats.compared += 1;
+
+        // `:NA:`-sentinel reconciliation: a SIM `:NA:` cell (the finite
+        // -2^109 sentinel) is Vensim's "missing data", rendered as 0 in the
+        // VDF. Reconcile it against a near-zero reference; flag it as a real
+        // mismatch against a genuinely non-zero reference.
+        if simlin_engine::float::approx_eq(actual, na) {
+            if expected.abs() <= atol {
+                stats.na_reconciled += 1;
+            } else {
+                stats.failures += 1;
+            }
+            continue;
+        }
+
+        // Near-zero-robust isclose: |e - a| <= atol + rtol * max(|e|, |a|).
+        let scale = expected.abs().max(actual.abs());
+        let allowed = atol + VDF_RTOL * scale;
+        let abs_err = (expected - actual).abs();
+
+        // Track a relative error for the diagnostic summary (clamped scale
+        // mirrors the legacy report; the pass/fail decision is isclose).
+        let rel_err = abs_err / scale.max(1e-10);
+        if rel_err > stats.max_rel_error {
+            stats.max_rel_error = rel_err;
+            stats.max_rel_step = step;
+        }
+
+        if abs_err > allowed {
+            stats.failures += 1;
+        }
+    }
+
+    stats.all_nan = step_count > 0 && series_nan_skipped == step_count as u64;
+    stats
+}
+
 /// Compare VDF reference data against simulation results with cross-simulator
-/// tolerance. VDF stores f32 (~7 digits) and Vensim's integration may differ
-/// from ours, so we allow up to 1% relative error.
-/// Variables present in `results` but not in `vdf_expected` are skipped
-/// (they may be internal module variables without VDF entries).
+/// tolerance. See [`ensure_vdf_results_excluding`] for the full contract; this
+/// wrapper excludes nothing (the hard 1% gate applies to every matched var).
 fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
+    ensure_vdf_results_excluding(vdf_expected, results, &[]);
+}
+
+/// Compare VDF reference data against simulation results with cross-simulator
+/// tolerance, skipping every matched ident whose base name is in `excluded`.
+///
+/// Contract (AC8.2 -- this comparator must not vacuously pass):
+/// - **Matched-variable floor:** at least
+///   `max(MIN_MATCHED_ABSOLUTE, MIN_MATCHED_FRACTION * |vdf vars|)` `Ref.vdf`
+///   variables must match a `results` ident *after exclusion*, or the comparison
+///   panics. A near-empty intersection can no longer "pass" by running an empty
+///   loop, and the exclusion set cannot create a vacuous pass by carving the
+///   matched count below the floor.
+/// - **NaN guard:** any matched *core* series that is entirely NaN, or a global
+///   NaN-skipped fraction above `MAX_NAN_SKIPPED_FRACTION`, panics. These are
+///   *additional* failure conditions, never relaxations.
+/// - **`:NA:`-sentinel reconciliation:** Simlin keeps Vensim's `:NA:` as the
+///   finite sentinel `crate::float::NA` (`-2^109`); Vensim renders `:NA:` as 0
+///   in the VDF. So a SIM `:NA:` cell matches a near-zero VDF cell (counted as
+///   reconciled), but a SIM `:NA:` cell against a genuinely non-zero VDF value
+///   is a real mismatch (a spurious `:NA:`) and fails. The engine output is
+///   never mapped `:NA:`->0; only this comparator interprets the sentinel.
+/// - **Near-zero-robust tolerance:** a cell matches when
+///   `|e - a| <= atol + VDF_RTOL * max(|e|, |a|)`, with a per-series absolute
+///   floor `atol = K_ATOL * peak` (`peak` = the series' largest reference
+///   magnitude). This is the standard `isclose` criterion; it fixes the literal-0
+///   relative-error breakdown (~100% for any jitter against a 0 reference) while
+///   keeping a genuine >1% divergence on a meaningful value a failure.
+/// - **Exclusion (`excluded`):** a matched ident whose base name is in `excluded`
+///   is SKIPPED entirely -- it counts toward neither `matched`, the failure
+///   count, nor the NaN guards. This is a TRANSPARENT, documented, tracked
+///   known-residual carve-out (every excluded base maps to a cluster in GH #590 /
+///   #591; see `EXPECTED_VDF_RESIDUAL`), NOT a tolerance loosening: the hard 1%
+///   comparison stays unconditional for every NON-excluded variable, and the
+///   matched floor is checked AFTER exclusion so the carve-out cannot vacuously
+///   pass.
+///
+/// Variables present in `results` but not in `vdf_expected` are skipped (they
+/// may be internal module variables without VDF entries).
+fn ensure_vdf_results_excluding(vdf_expected: &Results, results: &Results, excluded: &[&str]) {
     assert_eq!(vdf_expected.step_count, results.step_count);
 
     let mut matched = 0;
+    let mut excluded_matched = 0;
     let mut max_rel_error: f64 = 0.0;
     let mut max_rel_ident = String::new();
     let mut failures = 0;
+    let mut na_reconciled: u64 = 0;
+    // Global NaN-skip accounting across all matched cells.
+    let mut total_compared: u64 = 0;
+    let mut total_nan_skipped: u64 = 0;
+    // Names of matched core series that were NaN at *every* step.
+    let mut all_nan_series: Vec<String> = Vec::new();
     let step_count = vdf_expected.step_count;
 
     for ident in vdf_expected.offsets.keys() {
         if !results.offsets.contains_key(ident) {
             continue;
         }
+        // Known-residual carve-out: skip an excluded base's idents BEFORE any
+        // accounting so they touch neither the matched floor nor the guards.
+        if vdf_ident_is_excluded(ident.as_str(), excluded) {
+            excluded_matched += 1;
+            continue;
+        }
         let vdf_off = vdf_expected.offsets[ident];
         let sim_off = results.offsets[ident];
         matched += 1;
 
-        for step in 0..step_count {
-            let expected = vdf_expected.data[step * vdf_expected.step_size + vdf_off];
-            let actual = results.data[step * results.step_size + sim_off];
-
-            if expected.is_nan() || actual.is_nan() {
-                continue;
-            }
-
-            let max_val = expected.abs().max(actual.abs()).max(1e-10);
-            let rel_err = (expected - actual).abs() / max_val;
-            if rel_err > max_rel_error {
-                max_rel_error = rel_err;
-                max_rel_ident = format!("{ident} (step {step})");
-            }
-
-            // 1% relative tolerance for cross-simulator comparison
-            if rel_err > 0.01 {
-                failures += 1;
-                if failures <= 5 {
-                    eprintln!(
-                        "FAIL step {step}: {ident}: {expected} (vdf) != {actual} (sim), rel_err={rel_err:.6}"
-                    );
-                }
-            }
+        let stats = classify_vdf_ident(vdf_expected, results, vdf_off, sim_off);
+        na_reconciled += stats.na_reconciled;
+        total_compared += stats.compared;
+        total_nan_skipped += stats.nan_skipped;
+        if stats.all_nan {
+            all_nan_series.push(ident.to_string());
+        }
+        if stats.max_rel_error > max_rel_error {
+            max_rel_error = stats.max_rel_error;
+            max_rel_ident = format!("{ident} (step {})", stats.max_rel_step);
+        }
+        if stats.failures > 0 {
+            failures += stats.failures;
+            eprintln!(
+                "FAIL {ident}: {} cell(s) exceeded tolerance (max rel_err {:.6} at step {})",
+                stats.failures, stats.max_rel_error, stats.max_rel_step
+            );
         }
     }
 
-    eprintln!("VDF comparison: {matched} variables matched across {step_count} time steps");
+    let nan_fraction = if total_compared + total_nan_skipped > 0 {
+        total_nan_skipped as f64 / (total_compared + total_nan_skipped) as f64
+    } else {
+        0.0
+    };
+    eprintln!(
+        "VDF comparison: {matched} variables matched (after exclusion) across {step_count} time steps"
+    );
+    eprintln!(
+        "  excluded (known-residual, tracked in #590/#591) idents skipped: {excluded_matched}"
+    );
+    eprintln!(
+        "  matched floor (checked AFTER exclusion) = max({MIN_MATCHED_ABSOLUTE}, {MIN_MATCHED_FRACTION} * {}) = {}",
+        vdf_expected.offsets.len(),
+        min_matched(vdf_expected.offsets.len())
+    );
     eprintln!("  Max relative error: {max_rel_error:.6} at {max_rel_ident}");
+    eprintln!("  :NA:-sentinel cells reconciled to VDF 0: {na_reconciled}");
+    eprintln!(
+        "  NaN-skipped cells: {total_nan_skipped} of {} compared+skipped ({:.4})",
+        total_compared + total_nan_skipped,
+        nan_fraction
+    );
+
+    // Matched-variable floor (AC8.2): reject a vacuous near-empty comparison.
+    let floor = min_matched(vdf_expected.offsets.len());
+    assert!(
+        matched >= floor,
+        "VDF comparison vacuous: only {matched} of {} VDF variables matched a \
+         simulation ident (floor {floor}); the comparison is not meaningfully \
+         exercising the model",
+        vdf_expected.offsets.len()
+    );
+
+    // NaN guard (AC8.2): an entirely-NaN core series, or an excessive global
+    // NaN-skipped fraction, means the comparison is not actually comparing.
+    assert!(
+        all_nan_series.is_empty(),
+        "VDF comparison degenerate: {} matched core series were entirely NaN \
+         (e.g. {:?}); a NaN column compares nothing",
+        all_nan_series.len(),
+        &all_nan_series[..all_nan_series.len().min(5)]
+    );
+    assert!(
+        nan_fraction <= MAX_NAN_SKIPPED_FRACTION,
+        "VDF comparison degenerate: {:.2}% of matched cells were NaN-skipped \
+         (ceiling {:.2}%); the comparison is largely not comparing anything",
+        nan_fraction * 100.0,
+        MAX_NAN_SKIPPED_FRACTION * 100.0
+    );
+
     if failures > 0 {
-        eprintln!("  {failures} comparisons exceeded 1% tolerance");
+        eprintln!("  {failures} comparisons exceeded tolerance");
         panic!("VDF comparison failed with {failures} tolerance violations");
     }
+}
+
+/// The matched-variable floor for a VDF reference with `vdf_var_count`
+/// variables (see [`MIN_MATCHED_FRACTION`] / [`MIN_MATCHED_ABSOLUTE`]).
+fn min_matched(vdf_var_count: usize) -> usize {
+    MIN_MATCHED_ABSOLUTE.max((vdf_var_count as f64 * MIN_MATCHED_FRACTION) as usize)
+}
+
+/// Build a synthetic [`Results`] from `(name, series)` pairs for the
+/// `ensure_vdf_results` guard test. Each series must have `step_count` values;
+/// columns are laid out densely in argument order (so `step_size == names.len()`).
+#[cfg(test)]
+fn synthetic_results(columns: &[(&str, Vec<f64>)]) -> Results {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let step_count = columns.first().map(|(_, s)| s.len()).unwrap_or(0);
+    for (name, series) in columns {
+        assert_eq!(
+            series.len(),
+            step_count,
+            "synthetic_results: column {name} has {} steps, expected {step_count}",
+            series.len()
+        );
+    }
+    let step_size = columns.len();
+
+    let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+    let mut data = vec![0.0_f64; step_count * step_size];
+    for (col, (name, series)) in columns.iter().enumerate() {
+        offsets.insert(Ident::<Canonical>::new(name), col);
+        for (step, value) in series.iter().enumerate() {
+            data[step * step_size + col] = *value;
+        }
+    }
+
+    Results {
+        offsets,
+        data: data.into_boxed_slice(),
+        step_size,
+        step_count,
+        specs: Specs {
+            start: 0.0,
+            stop: (step_count.max(1) - 1) as f64,
+            dt: 1.0,
+            save_step: 1.0,
+            method: Method::Euler,
+            n_chunks: step_count,
+        },
+        is_vensim: false,
+    }
+}
+
+/// AC8.2: the hardened `ensure_vdf_results` must FAIL (panic), rather than
+/// vacuously pass, on a near-empty or degenerate comparison, while the
+/// user-directed comparator reconciles the legitimate `:NA:`-sentinel and
+/// near-zero cases. Each scenario builds synthetic `Results` literals (no
+/// C-LEARN parse -- fast, runs in the default capped suite) and asserts the
+/// panic/no-panic outcome via `catch_unwind`. This is a legitimate
+/// test-of-a-panicking-assertion (distinct from the production `catch_unwind`
+/// retired in Phase 6): `ensure_vdf_results` signals failure by panicking, so
+/// the only way to assert "it failed" from a sibling test is to catch it.
+#[test]
+fn ensure_vdf_results_rejects_vacuous_comparisons() {
+    // catch_unwind would otherwise dump each intentional panic's backtrace to
+    // stderr, drowning the test log; silence the default hook for the duration.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(run_vacuous_comparison_scenarios);
+    std::panic::set_hook(prev_hook);
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+fn run_vacuous_comparison_scenarios() {
+    let na = simlin_engine::float::NA;
+
+    // A broad VDF reference: many variables, several steps each. The matched
+    // floor is a fraction of this count, so a comparison that shares almost no
+    // idents falls below it.
+    let many = |fill: f64| -> Vec<(&'static str, Vec<f64>)> {
+        let names: &[&str] = &[
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+        ];
+        names
+            .iter()
+            .map(|n| (*n, vec![fill, fill, fill, fill]))
+            .collect()
+    };
+
+    let asserts_panic = |label: &str, expected: &[(&str, Vec<f64>)], sim: &[(&str, Vec<f64>)]| {
+        let e = synthetic_results(expected);
+        let a = synthetic_results(sim);
+        let r = std::panic::catch_unwind(|| ensure_vdf_results(&e, &a));
+        assert!(
+            r.is_err(),
+            "{label}: expected ensure_vdf_results to PANIC, but it passed"
+        );
+    };
+    let asserts_ok = |label: &str, expected: &[(&str, Vec<f64>)], sim: &[(&str, Vec<f64>)]| {
+        let e = synthetic_results(expected);
+        let a = synthetic_results(sim);
+        let r = std::panic::catch_unwind(|| ensure_vdf_results(&e, &a));
+        assert!(
+            r.is_ok(),
+            "{label}: expected ensure_vdf_results to PASS, but it panicked"
+        );
+    };
+
+    // (1) Below-floor: VDF has 16 idents; sim shares only ONE (`alpha`). The
+    //     per-step loop runs for one matched var -- finite, in tolerance -- so
+    //     the legacy `failures == 0` check passes vacuously. The matched-floor
+    //     guard must reject it.
+    asserts_panic(
+        "below-floor (1 of 16 matched)",
+        &many(1.0),
+        &[("alpha", vec![1.0, 1.0, 1.0, 1.0])],
+    );
+
+    // (2) Entirely-NaN core series: every shared ident matches, but one matched
+    //     series is NaN at every step (the `build_results` all-NaN-unrecovered-
+    //     span case). The legacy loop NaN-skips every cell -> `failures == 0`,
+    //     vacuous pass. The NaN guard must reject an all-NaN core series.
+    let mut expected_nan = many(2.0);
+    let mut sim_nan = many(2.0);
+    // Make `alpha`'s sim series entirely NaN.
+    sim_nan[0].1 = vec![f64::NAN; 4];
+    asserts_panic("entirely-NaN core series", &expected_nan, &sim_nan);
+
+    // (3) Excessive NaN-skipped fraction: many matched cells are NaN-skipped
+    //     (here, ~half of all matched cells across vars), even though no single
+    //     series is entirely NaN. The global NaN-skipped-fraction guard must
+    //     reject it.
+    expected_nan = many(2.0);
+    sim_nan = many(2.0);
+    // Push the global NaN-skipped fraction past the threshold by NaN-ing 3 of
+    // 4 steps in 12 of 16 vars (~56% of cells skipped).
+    for (_n, series) in sim_nan.iter_mut().take(12) {
+        series[0] = f64::NAN;
+        series[1] = f64::NAN;
+        series[2] = f64::NAN;
+    }
+    asserts_panic("excessive NaN-skipped fraction", &expected_nan, &sim_nan);
+
+    // (4) Positive control: enough matched vars, all finite, all in tolerance.
+    //     Guards must NOT false-trip.
+    asserts_ok("positive control (well-formed)", &many(3.0), &many(3.0));
+
+    // (5) `:NA:`-sentinel == Vensim 0: SIM is the finite `:NA:` sentinel where
+    //     VDF renders `:NA:` as 0. This must reconcile as a MATCH, not fail.
+    let mut expected_na = many(3.0);
+    let mut sim_na = many(3.0);
+    expected_na[0].1 = vec![0.0; 4]; // VDF renders :NA: as 0
+    sim_na[0].1 = vec![na; 4]; // Simlin keeps the -2^109 sentinel
+    asserts_ok(":NA:-sentinel vs VDF 0 (reconciled)", &expected_na, &sim_na);
+
+    // (6) Spurious `:NA:`: SIM is `:NA:` but VDF has a genuine non-zero value.
+    //     Simlin is spuriously `:NA:` where Vensim has data -- a REAL mismatch
+    //     that must be caught, never silently reconciled.
+    expected_na = many(3.0);
+    sim_na = many(3.0);
+    expected_na[0].1 = vec![42.0; 4]; // VDF genuinely non-zero
+    sim_na[0].1 = vec![na; 4]; // Simlin spuriously :NA:
+    asserts_panic(
+        "spurious :NA: (SIM NA vs VDF nonzero)",
+        &expected_na,
+        &sim_na,
+    );
+
+    // (7a) Near-zero robustness, benign: VDF is a literal 0 and SIM is tiny
+    //      jitter within the per-series absolute floor. The pure relative error
+    //      would be ~100%; the abs+rel criterion must let it pass.
+    let mut expected_nz = many(3.0);
+    let mut sim_nz = many(3.0);
+    // Series whose peak magnitude is ~10; a 1e-6 jitter at the 0 cell is far
+    // below k*peak for any reasonable k. Use a non-zero peak elsewhere so the
+    // per-series abs floor is meaningful.
+    expected_nz[0].1 = vec![10.0, 0.0, 5.0, 0.0];
+    sim_nz[0].1 = vec![10.0, 1e-6, 5.0, -1e-6];
+    asserts_ok("near-zero jitter within abs floor", &expected_nz, &sim_nz);
+
+    // (7b) Near-zero but MEANINGFUL: VDF is 0 yet SIM is a large value (same
+    //      order as the series peak). The abs floor must NOT swallow this -- it
+    //      is a genuine divergence and must fail.
+    expected_nz = many(3.0);
+    sim_nz = many(3.0);
+    expected_nz[0].1 = vec![10.0, 0.0, 5.0, 0.0];
+    sim_nz[0].1 = vec![10.0, 8.0, 5.0, 0.0]; // 8.0 at a cell where VDF is 0
+    asserts_panic("near-zero but meaningful divergence", &expected_nz, &sim_nz);
 }
 
 type CompileFn = fn(&simlin_engine::datamodel::Project) -> simlin_engine::CompiledSimulation;
@@ -196,6 +650,19 @@ fn simulate_path(xmile_path: &str) {
 }
 
 fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
+    simulate_path_with_excluding(xmile_path, compile, &[]);
+}
+
+/// Like [`simulate_path_with`], but carves a set of base-variable names out
+/// of the comparison *and* the compiled model. Each excluded variable is
+/// (a) removed from every datamodel model before compilation -- so a single
+/// not-yet-supported variable does not block the whole model from
+/// compiling -- and (b) skipped in every comparison path (VM, protobuf
+/// round-trip, XMILE round-trip). Every *other* variable stays a hard
+/// genuine-Vensim equality gate. Used to keep `vector.xmile`'s ELM MAP
+/// base/full-source variables (`c`/`f`/`g`) as hard gates while excluding
+/// only `y` (GitHub #578), rather than weakening the whole comparison.
+fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: &[&str]) {
     eprintln!("model: {xmile_path}");
 
     let datamodel_project = {
@@ -206,7 +673,17 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         if let Err(ref err) = datamodel_project {
             eprintln!("model '{xmile_path}' error: {err}");
         }
-        datamodel_project.unwrap()
+        let mut datamodel_project = datamodel_project.unwrap();
+        // Drop excluded variables from every model. An excluded variable is
+        // one we intentionally do not gate on yet (tracked separately); if
+        // it fails to compile it would otherwise abort the whole project
+        // and prevent gating the variables we DO support.
+        for model in &mut datamodel_project.models {
+            model
+                .variables
+                .retain(|v| !excluded.contains(&v.get_ident()));
+        }
+        datamodel_project
     };
 
     // simulate the model using our bytecode VM
@@ -218,7 +695,7 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
     };
 
     let expected = load_expected_results(xmile_path).unwrap();
-    ensure_results(&expected, &results);
+    ensure_results_excluding(&expected, &results, excluded);
 
     // serialize our project through protobufs and ensure we don't see problems
     let results_proto = {
@@ -236,7 +713,7 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         vm.run_to_end().unwrap();
         vm.into_results()
     };
-    ensure_results(&expected, &results_proto);
+    ensure_results_excluding(&expected, &results_proto, excluded);
 
     // serialize our project back to XMILE
     let serialized_xmile = xmile::project_to_xmile(&datamodel_project).unwrap();
@@ -251,7 +728,7 @@ fn simulate_path_with(xmile_path: &str, compile: CompileFn) {
         vm.run_to_end().unwrap();
         (roundtripped_project, vm.into_results())
     };
-    ensure_results(&expected, &results_xmile);
+    ensure_results_excluding(&expected, &results_xmile, excluded);
 
     // finally ensure that if we re-serialize to XMILE the results are
     // byte-for-byte identical (we aren't losing any information)
@@ -520,6 +997,100 @@ TIME STEP = 1 ~~|
     assert!((get("u[a3]") - 1.0).abs() < 1e-10, "u[A3] should be 1");
 }
 
+/// Vensim `:NA:` is a *finite* sentinel value (`-2^109`, the "missing data"
+/// marker), NOT IEEE NaN. The canonical Vensim idiom is the existence test
+/// `IF THEN ELSE(x = :NA:, fallback, x)`, which only works because `:NA:` is a
+/// finite number ordinary `=` equality can match. Representing it as NaN poisons
+/// every downstream arithmetic expression (NaN is absorbing), which is the engine
+/// bug behind C-LEARN's residual all-NaN cascade.
+///
+/// This test pins the corrected semantics end-to-end through the real
+/// MDL -> XMILE -> compile -> VM pipeline: `probe` produces `:NA:` for `Time > 5`,
+/// the existence test recovers a finite fallback there, and `:NA:` arithmetic
+/// stays finite. Under the old NaN representation `na_plus = :NA: + 10` is NaN,
+/// so this is RED before the fix.
+#[test]
+fn na_existence_test_and_arithmetic_finite() {
+    let mdl = "\
+{UTF-8}
+probe =
+	IF THEN ELSE(Time > 5, :NA:, Time)
+	~~|
+out =
+	IF THEN ELSE(probe = :NA:, -1, probe)
+	~~|
+na_plus =
+	:NA: + 10
+	~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 10 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let datamodel_project =
+        open_vensim(mdl).unwrap_or_else(|e| panic!("failed to parse na test mdl: {e}"));
+
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed: {e}"));
+    let results = vm.into_results();
+
+    let off = |name: &str| -> usize {
+        let ident = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+        results.offsets[&ident]
+    };
+    let at =
+        |name: &str, step: usize| -> f64 { results.data[step * results.step_size + off(name)] };
+
+    // The single canonical Vensim `:NA:` sentinel: a finite number, never NaN.
+    let na = simlin_engine::float::NA;
+    assert!(na.is_finite(), ":NA: sentinel must be finite");
+
+    // 11 saved steps for Time 0..=10.
+    assert_eq!(results.step_count, 11, "expected 11 saved steps");
+
+    for step in 0..results.step_count {
+        let time = at("time", step);
+        let probe = at("probe", step);
+        let out = at("out", step);
+        let na_plus = at("na_plus", step);
+
+        // `:NA:` arithmetic is finite (NaN would poison this -- the core bug).
+        assert!(
+            na_plus.is_finite(),
+            "na_plus (:NA: + 10) must be finite at t={time}, got {na_plus}"
+        );
+        assert!(
+            (na_plus - (na + 10.0)).abs() < 1e-10,
+            "na_plus must equal -2^109 + 10 at t={time}, got {na_plus}"
+        );
+
+        if time > 5.0 {
+            // probe evaluates to the finite :NA: sentinel for Time > 5.
+            assert!(
+                (probe - na).abs() < 1e-10,
+                "probe must be the :NA: sentinel for t={time}, got {probe}"
+            );
+            // The existence test fires: out takes the fallback (-1), finite.
+            assert!(
+                (out - (-1.0)).abs() < 1e-10,
+                "existence test must select fallback (-1) for t={time}, got {out}"
+            );
+        } else {
+            // probe is the genuine Time value; existence test does NOT fire.
+            assert!(
+                (probe - time).abs() < 1e-10,
+                "probe must equal Time for t={time}, got {probe}"
+            );
+            assert!(
+                (out - time).abs() < 1e-10,
+                "out must equal probe (=Time) for t={time}, got {out}"
+            );
+        }
+    }
+}
+
 #[test]
 fn simulates_2d_array() {
     simulate_path(
@@ -648,12 +1219,21 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // array_tests::sum_of_conditional_tests.
     // "test/sdeverywhere/models/sumif/sumif.xmile",
     //
-    // VECTOR ELM MAP cross-dimension source: partially fixed (cross-dim subscripts,
-    // SUM wildcards, AssignTemp wildcards), but several variables still fail:
-    //   - y[DimA] = VECTOR ELM MAP(x[three], (DimA-1)) fails in VM incremental path
-    //   - Additional VECTOR SELECT cross-dimension patterns need compiler work
-    // The vector_simple subset passes via simulates_vector_simple_mdl.
-    // "test/sdeverywhere/models/vector/vector.xmile",
+    // VECTOR ELM MAP now matches genuine Vensim (per-element base + full
+    // source array, out-of-range -> :NA:, no modulo). vector.xmile is
+    // exercised through all three comparison paths by the dedicated
+    // `simulates_vector_xmile_genuine` test below, NOT here: that test keeps
+    // c/f/g (the ELM MAP base/full-source variables) and every other
+    // variable as hard genuine-Vensim gates against
+    // test/sdeverywhere/models/vector/vector.dat, narrowing the comparison
+    // to exclude only two pre-existing, separately-tracked, out-of-scope
+    // variables -- `y` (GitHub #578: scalar-source/expression-offset ELM MAP
+    // does not compile) and `p` (GitHub #576: dormant/unverified 2-D VECTOR
+    // SORT ORDER fixture data; a different builtin, unchanged here). This
+    // list runs an unconditional full comparison, which cannot carve out
+    // those variables; the narrowed gate lives in its own test instead of
+    // weakening every model's comparison.
+    // "test/sdeverywhere/models/vector/vector.xmile",  // -> simulates_vector_xmile_genuine
     //
     // --- Permanently excluded (not test models) ---
     //
@@ -674,6 +1254,53 @@ fn simulates_arrayed_models_correctly() {
         let file_path = format!("../../{path}");
         simulate_path(file_path.as_str());
     }
+}
+
+/// Genuine-Vensim regression gate for VECTOR ELM MAP cross-dimension
+/// resolution (element-cycle-resolution.AC6.3 / AC6.2). `vector.xmile` is
+/// compared against the real-Vensim `vector.dat` through all three
+/// `ensure_results` paths (VM, protobuf round-trip, XMILE round-trip).
+///
+/// Every variable is a hard genuine-Vensim equality gate. In particular the
+/// ELM MAP base/full-source variables this phase fixes must match
+/// `vector.dat` exactly: `c[A1..A3] = 10 + VECTOR ELM MAP(b[B1], a[DimA])`
+/// is `11, 12, 12`; `f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA])` is
+/// `1, 5, 6` (broadcast across DimB); and
+/// `g[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], e[DimA,DimB])` is
+/// `1, 4, 5, 2, 3, 6`. So do every non-ELM-MAP variable the model also
+/// exercises (1-D VSO `l`/`m`, VECTOR SELECT `q`/`r`/`s`, reducers
+/// `u`/`v`/`w`, and the rest).
+///
+/// Exactly two variables are carved out, both pre-existing and
+/// separately-tracked gaps unrelated to the ELM MAP base/full-source fix
+/// (per the phase file's "prefer full inclusion; narrow only with a tracked
+/// issue" guidance). First, `y[DimA] = VECTOR ELM MAP(x[three], (DimA-1))`
+/// (GitHub #578): a scalar source plus an arithmetic (expression) offset
+/// from which ELM MAP cannot yet infer a result shape, so `y` does not
+/// compile at all -- a compiler shape-inference gap, NOT the base/stride
+/// numeric bug fixed here; its genuine value `y[A1]=3,y[A2]=4,y[A3]=5` is
+/// in `vector.dat`, and closing #578 lets `y` rejoin this gate. Second,
+/// `p[DimA,DimB] = VECTOR SORT ORDER(o[DimA,DimB], ASCENDING)` (GitHub
+/// #576): a genuinely 2-D VSO whose `vector.dat` `p` block is internally
+/// inconsistent / encodes an sdeverywhere per-row semantic, with
+/// genuine-Vensim multi-dimensional VSO semantics unverified by any live
+/// fixture -- a different builtin (VSO, unchanged by this phase) out of
+/// Phase 5's ELM MAP scope.
+///
+/// Excluded variables are dropped from the compiled model (so #578's
+/// non-compiling `y` cannot abort the project) and skipped in every
+/// comparison; the genuine gate on `c`/`f`/`g` (and all other variables)
+/// is NOT weakened.
+#[test]
+fn simulates_vector_xmile_genuine() {
+    simulate_path_with_excluding(
+        "../../test/sdeverywhere/models/vector/vector.xmile",
+        compile_vm,
+        // y: GitHub #578 (scalar-source/expression-offset ELM MAP compile
+        // gap). p: GitHub #576 (dormant/unverified 2-D VSO fixture data).
+        // Both pre-existing and out of Phase 5's ELM MAP scope.
+        &["y", "p"],
+    );
 }
 
 #[test]
@@ -909,44 +1536,137 @@ fn simulates_wrld3_03() {
     assert_eq!(vdf_results.step_count, results.step_count);
 }
 
-// FULL end-to-end C-LEARN simulation against `Ref.vdf`. Still `#[ignore]`d,
-// but the blocker is NO LONGER macro expansion.
+/// Known-residual C-LEARN base-variable names excluded from the
+/// `simulates_clearn` VDF gate. C-LEARN compiles via the incremental path,
+/// runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
+/// tolerance on ~94.7% of matched idents (3298 of 3482; equivalently ~96.3%
+/// measured per-cell — the per-cell rate the plan's `test-requirements.md`
+/// quotes) after the per-element-GF fix (`61573545`) and the `:NA:`-aware +
+/// near-zero-robust comparator (`8775ae97`). The user-directed decision was to BANK that match and TRACK the
+/// genuine residual rather than chase it to within 1%.
+///
+/// This is a TRANSPARENT, documented, tracked carve-out, NOT a tolerance
+/// loosening: the hard 1% comparison stays unconditional for every NON-excluded
+/// variable, and the matched floor is checked AFTER exclusion (3298 matched vs a
+/// 348 floor, ~9.5x -- the exclusion cannot create a vacuous pass). Each base
+/// below was enumerated by running C-LEARN through the exact `classify_vdf_ident`
+/// comparator logic and collecting the bases with >=1 failing cell; every base
+/// maps to a tracked cluster in GH #590 or #591.
+///
+/// This set is GUARDED for exactness by the committed `clearn_residual_exactness`
+/// regression test (run it to re-derive/verify after an engine change:
+/// `cargo test --release -- --ignored clearn_residual_exactness`). That test
+/// re-runs C-LEARN through the same `classify_vdf_ident` comparator with NO
+/// exclusion and asserts the live failing set equals this list, failing loudly
+/// (with the symmetric difference) if the residual grew (a regression) or shrank
+/// (a fix that should prune the exclusion).
+const EXPECTED_VDF_RESIDUAL: &[&str] = &[
+    // -- GH #590: data / graph-lookup variables import as a literal `0+0`
+    //    (or per-element `0+0 | 0+0 | ...`) stub instead of their lookup/data
+    //    values, so the whole variable is zeroed (relative error 1.0). The
+    //    dominant residual cluster.
+    "global_emissions_from_graph_lookup",
+    "ref_global_emissions_from_graph_lookup",
+    "historical_forestry_lookup",
+    "historical_gdp_lookup",
+    "oc,_bc,_and_bio_aerosol_forcings",
+    "other_forcings_composite_plus_rcp85",
+    "other_forcings_smooth_plus_rcp85",
+    "ozone_precursor_forcings",
+    "rs_ch4",
+    "rs_hfc125",
+    "rs_hfc134a",
+    "rs_hfc143a",
+    "rs_hfc152a",
+    "rs_hfc227ea",
+    "rs_hfc23",
+    "rs_hfc245ca",
+    "rs_hfc32",
+    // -- GH #591 cluster 1: SAMPLE UNTIL / INIT-of-`:NA:` / target-policy
+    //    (COP dimension). A `:NA:`-arithmetic edge and/or SAMPLE UNTIL
+    //    semantics where Vensim performs NA-arithmetic (e.g. `-2*NA` =
+    //    -1.298e33) while Simlin yields a bare `:NA:` sentinel (-6.49e32) or 0.
+    //    `historical_gdp` (the bare twin of the #590 `_lookup`) is here, not
+    //    #590: its non-`:NA:` cells match exactly; only its `-2*NA` cells
+    //    diverge (vdf -1.298e33 vs sim -6.49e32 sentinel).
+    "last_set_target_year",
+    "last_active_target_year",
+    "time_from_target_to_ultimate_target",
+    "target_emissions_for_rate",
+    "ultimate_target_value_from_rate",
+    "depth_at_bottom",
+    "emissions_with_stopped_growth",
+    "historical_gdp",
+    // -- GH #591 cluster 2: genuine numeric tail (meaningful-value divergence,
+    //    not near-zero noise) on the emissions and ocean-diffusion chains. The
+    //    `im_3_*` / `relative_emissions_*` group diverges by rel ~0.247 on
+    //    substantial values; `co2eq_gap_closing_percentage` is a near-zero-ratio
+    //    percentage (large rel, tiny absolute ~1.4e-3); `diffusion_flux` is the
+    //    ocean-diffusion physical variable feeding the SLR sub-model, diverging
+    //    on small magnitudes (vdf 0 vs sim ~1e-8, and ~0.5 rel on ~1e-5 cells)
+    //    -- a member discovered by the exhaustive measurement beyond #591's
+    //    representative list.
+    "im_3_emissions",
+    "im_3_emissions_vs_rs",
+    "im_3_ff_co2",
+    "relative_emissions_to_equity",
+    "relative_emissions_to_equity_target",
+    "co2eq_gap_closing_percentage",
+    "diffusion_flux",
+    // -- GH #591 cluster 3 (other-NaN: Vensim writes literal IEEE NaN while
+    //    Simlin writes the `:NA:` sentinel, e.g. `slr_inches_from_2000`) needs
+    //    NO entry here: the comparator NaN-skips those cells (NaN on either
+    //    side is skipped, not failed) and the late finite steps match within
+    //    tolerance, so no `slr_inches_from_2000`-style base reaches the failure
+    //    set. It is tracked in #591 for the representation gap, not excluded.
+];
+
+// FULL end-to-end C-LEARN simulation against `Ref.vdf`. Un-stubbed (no longer a
+// permanently-skipped placeholder): C-LEARN compiles via the incremental path,
+// runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
+// tolerance on the reconciled ~94.7% of matched idents (~96.3% per-cell). Kept `#[test] #[ignore]`
+// purely for RUNTIME CLASS (C-LEARN is ~53k lines / 1.4 MB, ~5s just to parse on
+// release), so the capped default `cargo test` set stays under the 3-minute cap;
+// run it explicitly via `--ignored` (AC8.3).
 //
-// After Phases 1-6 + GH #554 (the false `init -> init` macro-registry
-// recursion fix), C-LEARN's four macros (SAMPLE UNTIL, SSHAPE, RAMP FROM TO,
-// INIT) parse, register, and expand with ZERO macro-attributable
-// diagnostics -- this is asserted by `corpus_clearn_macros_import`
-// (macros.AC6.2) and the three `simulates_macro_clearn_*` focused fixtures
-// (macros.AC6.3) exercise each invoked macro's defined behavior. The macro
-// work is DONE.
+// History (the formerly-listed blockers are CLEARED on this branch):
+//   * C-LEARN's four macros (SAMPLE UNTIL, SSHAPE, RAMP FROM TO, INIT) parse,
+//     register, and expand with zero macro-attributable diagnostics (the macro
+//     work, asserted by `corpus_clearn_macros_import` and the focused
+//     `simulates_macro_clearn_*` fixtures).
+//   * The previously-fatal `CircularDependency` on
+//     `main.previous_emissions_intensity_vs_refyr` was the FALSE whole-variable
+//     cycle-gate verdict; element-level cycle resolution (Phases 1-2) dissolves
+//     it. The formerly-listed `MismatchedDimensions` / `UnknownDependency` /
+//     `DoesNotExist` blockers (incl. the `"goal 1.5 for temperature"` quoted-
+//     period ident, #559) are likewise cleared.
 //
-// What remains are C-LEARN's *non-macro* blockers, which the design
-// explicitly scopes OUT of the macro work ("tracked separately"):
-// `compile_vm` fails with `NotSimulatable: model 'main' has circular
-// dependencies` before the VM is even constructed. The collected
-// diagnostics (see `corpus_clearn_macros_import`'s compile step) show the
-// concrete non-macro causes, all on the `main` model:
-//   * a model-logic `CircularDependency` on
-//     `main.previous_emissions_intensity_vs_refyr` (NOT the project-level
-//     macro-registry recursion #554 fixed -- this one is attributed to a
-//     real `main` variable);
-//   * `MismatchedDimensions` on `c_in_mixed_layer`,
-//     `heat_in_atmosphere_and_upper_ocean`, `c_in_deep_ocean_net_flow`,
-//     `heat_in_deep_ocean_net_flow` (subscript/dimension issues);
-//   * `UnknownDependency` on `emissions_with_cumulative_constraints` and a
-//     non-time `$` reference surfacing as a `DoesNotExist` on
-//     `"goal_1.5_for_temperature"` (Phase 3's documented-limitation:
-//     deprioritized, surfaces as an ordinary unresolved reference -- NOT a
-//     macro error);
-//   * plus unit-inference warnings (non-fatal).
-// These are tracked separately per the design (the parent should file /
-// confirm tracking issues for the C-LEARN non-macro blockers and full
-// end-to-end C-LEARN simulation -- they are out of scope for the macro
-// work, which is complete). Keep `#[ignore]`d until they are resolved.
+// What remains is a genuine NUMERIC residual (~3.7% of cells), explicitly
+// excluded via `EXPECTED_VDF_RESIDUAL` and tracked in #590 (the dominant `0+0`
+// data/graph-lookup-import cluster) and #591 (SAMPLE UNTIL / INIT-`:NA:` /
+// NA-arithmetic, the `im_3_*` numeric tail, the ocean-diffusion tail, and the
+// NaN-vs-`:NA:` representation gap). The exclusion is a transparent, documented,
+// tracked carve-out -- NOT a tolerance loosening; the hard 1% gate holds for
+// every non-excluded variable and the matched floor is checked after exclusion.
 // Run with: cargo test --release -- --ignored simulates_clearn
 #[test]
 #[ignore]
 fn simulates_clearn() {
+    let (vdf_results, results) = run_clearn_vs_vdf();
+
+    // Hard 1% gate for every NON-excluded variable; the documented, tracked
+    // EXPECTED_VDF_RESIDUAL bases (#590 / #591) are skipped. The matched floor
+    // is enforced AFTER exclusion, so this cannot vacuously pass.
+    ensure_vdf_results_excluding(&vdf_results, &results, EXPECTED_VDF_RESIDUAL);
+}
+
+/// Compile and run C-LEARN end-to-end and parse `Ref.vdf`, returning
+/// `(vdf_results, results)`. Shared by `simulates_clearn` (the 1% gate) and
+/// `clearn_residual_exactness` (the exclusion-exactness guard) so both exercise
+/// the byte-identical `open_vensim` -> `compile_vm` -> `run_to_end` -> parse-VDF
+/// path and compare the same data. Heavy (C-LEARN is ~53k lines / 1.4 MB,
+/// ~5s just to parse on release), so every caller is `#[ignore]`d.
+fn run_clearn_vs_vdf() -> (Results, Results) {
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
 
     eprintln!("model (vensim mdl): {mdl_path}");
@@ -973,7 +1693,992 @@ fn simulates_clearn() {
         .to_results_via_records()
         .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"));
 
-    ensure_vdf_results(&vdf_results, &results);
+    (vdf_results, results)
+}
+
+/// Committed regression guard that `EXPECTED_VDF_RESIDUAL` stays EXACT: it is
+/// the precise set of C-LEARN base variables that the live `classify_vdf_ident`
+/// comparator flags, neither over- nor under-broad. Runs C-LEARN through the
+/// same end-to-end path as `simulates_clearn`, classifies EVERY matched ident
+/// through the SAME comparator (`classify_vdf_ident`) with NO exclusion, and
+/// collects the base name of every ident with a failing cell -- a tolerance
+/// violation or spurious `:NA:` (`stats.failures > 0`) or an entirely-NaN core
+/// series (`stats.all_nan`, which would trip the comparator's NaN guard). That
+/// is exactly the membership `EXPECTED_VDF_RESIDUAL` carves out (a partial-NaN
+/// series is NOT all-NaN and is NOT excluded -- see `EXPECTED_VDF_RESIDUAL`
+/// cluster 3). The global NaN-skipped-fraction guard is a separate aggregate
+/// check enforced by `simulates_clearn` itself, not a per-base membership driver.
+///
+/// Asserts the live set EQUALS `EXPECTED_VDF_RESIDUAL`, failing LOUDLY with the
+/// symmetric difference if the residual GREW (a regression -- new divergence to
+/// investigate, file under #590/#591) or SHRANK (an engine fix -- prune the now-
+/// passing base from the exclusion). Reuses `classify_vdf_ident` (no comparator
+/// duplication). `#[ignore]`d for runtime class like `simulates_clearn`.
+///
+/// Run with:
+/// cargo test --release -- --ignored clearn_residual_exactness
+#[test]
+#[ignore]
+fn clearn_residual_exactness() {
+    use std::collections::BTreeSet;
+
+    let (vdf_expected, results) = run_clearn_vs_vdf();
+    assert_eq!(vdf_expected.step_count, results.step_count);
+
+    // Classify every matched ident with NO exclusion and collect the base name
+    // of each ident that the comparator flags (failing cell or all-NaN core
+    // series) -- exactly the membership EXPECTED_VDF_RESIDUAL must carve out.
+    let mut live_residual: BTreeSet<String> = BTreeSet::new();
+    let mut matched = 0usize;
+    for ident in vdf_expected.offsets.keys() {
+        let Some(&sim_off) = results.offsets.get(ident) else {
+            continue;
+        };
+        matched += 1;
+        let vdf_off = vdf_expected.offsets[ident];
+        let stats = classify_vdf_ident(&vdf_expected, &results, vdf_off, sim_off);
+        if stats.failures > 0 || stats.all_nan {
+            live_residual.insert(vdf_ident_base_name(ident.as_str()).to_string());
+        }
+    }
+
+    let expected_residual: BTreeSet<String> = EXPECTED_VDF_RESIDUAL
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let grew: Vec<&String> = live_residual.difference(&expected_residual).collect();
+    let shrank: Vec<&String> = expected_residual.difference(&live_residual).collect();
+
+    eprintln!(
+        "clearn residual exactness: {matched} idents matched; {} live residual bases vs {} excluded",
+        live_residual.len(),
+        expected_residual.len()
+    );
+    assert!(
+        grew.is_empty() && shrank.is_empty(),
+        "EXPECTED_VDF_RESIDUAL is no longer exact.\n  \
+         Newly-failing bases NOT in the exclusion (regression -- investigate, \
+         track under #590/#591): {grew:?}\n  \
+         Excluded bases that NO LONGER fail (a fix -- prune them from \
+         EXPECTED_VDF_RESIDUAL): {shrank:?}"
+    );
+}
+
+/// Issue #559 -- the C-LEARN `"Goal 1.5 for Temperature"` shape.
+///
+/// A Vensim quoted identifier containing a literal period (`"a.b"`,
+/// `"goal 1.5"`) used to make the whole `main` model `NotSimulatable`:
+/// `canonicalize()` was non-idempotent for quoted-period idents (first
+/// pass kept a raw `.`, which `is_canonical()` rejects, so a re-canonical
+/// pass mis-converted the literal period into the `·` module-hierarchy
+/// separator -> the variable's own identity split into a phantom submodule
+/// -> `DoesNotExist`). It tripped even for a *dead* constant referenced by
+/// nobody, because it is the variable's own fragment identity that fails.
+/// Run through the same incremental `compile_vm` path `simulates_clearn`
+/// uses. Two shapes:
+///   A. a quoted-period constant *referenced* by a live var, proving its
+///      identity resolves AND is usable in equations (`y = "a.b" + 1`);
+///   B. a *dead* quoted-period constant plus an unrelated live `z`,
+///      proving such a constant no longer poisons compilation and the fix
+///      changes no live output.
+#[test]
+fn simulates_quoted_period_ident() {
+    // A: quoted-period constant referenced by a live variable.
+    let mdl_a = "\
+{UTF-8}
+\"a.b\" = 5 ~~|
+y = \"a.b\" + 1 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl_a);
+    for step in 0..3 {
+        let y = macro_test_value_at(&results, "y", step);
+        assert!(
+            (y - 6.0).abs() < 1e-9,
+            "step {step}: y = {y}, expected 6 (= \"a.b\"(5) + 1); the \
+             quoted-period ident must resolve and be usable"
+        );
+    }
+
+    // B: a DEAD quoted-period constant (the exact C-LEARN
+    // `"Goal 1.5 for Temperature"` shape) plus an unrelated live `z`.
+    // Before the fix this alone made the model NotSimulatable.
+    let mdl_b = "\
+{UTF-8}
+\"goal 1.5\" = 1.5 ~~|
+z = 1 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl_b);
+    for step in 0..3 {
+        let z = macro_test_value_at(&results, "z", step);
+        assert!(
+            (z - 1.0).abs() < 1e-9,
+            "step {step}: z = {z}, expected 1; a dead quoted-period \
+             constant must not make the model NotSimulatable"
+        );
+    }
+}
+
+/// Read a `[t1]/[t2]/[t3]`-style element series out of a `Results`.
+fn element_series(results: &Results, name: &str) -> Vec<f64> {
+    let id = simlin_engine::common::Ident::<simlin_engine::common::Canonical>::new(name);
+    let off = *results.offsets.get(&id).unwrap_or_else(|| {
+        panic!(
+            "{name:?} absent; have {:?}",
+            results.offsets.keys().collect::<Vec<_>>()
+        )
+    });
+    (0..results.step_count)
+        .map(|s| results.iter().nth(s).unwrap()[off])
+        .collect()
+}
+
+/// Compile an inline/loaded Vensim `.mdl` through the incremental path and
+/// return `(compile_is_err, diagnostics)` WITHOUT panicking -- for fixtures
+/// that are intentionally NOT simulatable (cycle/recurrence repros), where
+/// we assert the *diagnostic code*, not a simulation result.
+fn compile_diags(mdl: &str) -> (bool, Vec<simlin_engine::db::Diagnostic>) {
+    let dm = open_vensim(mdl).unwrap_or_else(|e| panic!("failed to parse mdl: {e}"));
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
+    let is_err = compile_project_incremental(&db, sync.project, "main").is_err();
+    (is_err, collect_project_diagnostics(&dm))
+}
+
+fn diag_code(d: &simlin_engine::db::Diagnostic) -> Option<simlin_engine::common::ErrorCode> {
+    use simlin_engine::db::DiagnosticError;
+    match &d.error {
+        DiagnosticError::Equation(e) => Some(e.code),
+        DiagnosticError::Model(e) => Some(e.code),
+        _ => None,
+    }
+}
+
+/// Issue #559 + element-level cycle resolution (Phase 1) -- the C-LEARN
+/// `Emissions with cumulative constraints[COP,tNext] = ... ecc[COP,tPrev]`
+/// self-recurrence shape, minimised to a single self-recurrent variable
+/// with NO cross-variable cycle (`test/sdeverywhere/models/self_recurrence`):
+/// `ecc[t1]=1; ecc[tNext]=ecc[tPrev]+1` over the subrange `t1..t3`.
+///
+/// Two intents, both verified here:
+///
+/// (#559 name-resolution guard) The native MDL converter
+/// (`xmile_compat.rs::format_var_ctx`) rewrote a self-reference
+/// (`name == ctx.lhs_var_canonical`) to the literal token `self`; for a
+/// *subscripted* self-reference it emitted `self[..]`. The engine's
+/// `builtins_visitor` Subscript arm never resolves `self`, so the literal
+/// token leaked into dependency analysis as an undefined name ->
+/// `UnknownDependency`. The fix emits the real canonical LHS name instead,
+/// making the self-reference an ordinary reference; the `self` token must
+/// never leak as `UnknownDependency`/`DoesNotExist` again.
+///
+/// (element-cycle-resolution.AC1.1/AC1.2 target behavior) Once `self`
+/// resolves, `ecc[tNext]=ecc[tPrev]+1` is a whole-variable self-edge whose
+/// *induced element graph* (`ecc[t2]<-ecc[t1]`, `ecc[t3]<-ecc[t2]`) is
+/// acyclic and well-founded. The element-level cycle refinement resolves
+/// it: the model compiles via the incremental path with NO
+/// `CircularDependency` and simulates to the deterministic staggered
+/// series `ecc[t1]=1, ecc[t2]=2, ecc[t3]=3` (constant across both saved
+/// steps -- the recurrence is over the subrange, not over time). FINAL
+/// TIME=1, TIME STEP=1 => 2 saved steps. `self_recurrence/` ships no
+/// `.dat`, so the series is asserted in-test via `element_series`.
+#[test]
+fn self_recurrence_resolves_and_no_self_token_leak() {
+    use simlin_engine::common::ErrorCode;
+
+    let mdl = std::fs::read_to_string(
+        "../../test/sdeverywhere/models/self_recurrence/self_recurrence.mdl",
+    )
+    .expect("self_recurrence.mdl fixture must exist");
+    let (compile_err, diags) = compile_diags(&mdl);
+
+    // `self_recurrence` has exactly one non-control variable (`ecc`) and
+    // self-contained dims, so the ONLY possible unknown is the leaked
+    // `self` token.
+    let self_leak = diags.iter().any(|d| {
+        matches!(
+            diag_code(d),
+            Some(ErrorCode::UnknownDependency) | Some(ErrorCode::DoesNotExist)
+        )
+    });
+    let has_circular = diags
+        .iter()
+        .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency));
+
+    // (AC1.1) The induced element graph is acyclic, so the model now
+    // compiles via the incremental path with no CircularDependency (this
+    // inverts the pre-resolution assertions: it used to be NotSimulatable
+    // with a whole-variable self-edge CircularDependency).
+    assert!(
+        !compile_err,
+        "self_recurrence.mdl must now compile via the incremental path: \
+         its single-variable self-recurrence has an acyclic induced \
+         element graph and is resolved by the element-cycle refinement. \
+         Diagnostics: {diags:#?}"
+    );
+    assert!(
+        !has_circular,
+        "the single-variable self-recurrence must NOT report \
+         CircularDependency once the element-cycle refinement resolves it \
+         (its induced element graph is acyclic). Diagnostics: {diags:#?}"
+    );
+    // (#559 guard, preserved) The `self` token resolves to the enclosing
+    // var, so it never leaks as an unknown dependency. (Before the #559
+    // fix this assertion failed: `self[tPrev]` leaked as
+    // UnknownDependency because the converter emitted the literal `self`
+    // and the builtins_visitor Subscript arm never resolved it.)
+    assert!(
+        !self_leak,
+        "the literal `self` token still leaks as \
+         UnknownDependency/DoesNotExist. The converter must emit the real \
+         canonical LHS name, not `self`. Diagnostics: {diags:#?}"
+    );
+
+    // (AC1.2) It simulates to the well-founded staggered series
+    // ecc[t1]=1, ecc[t2]=2, ecc[t3]=3 -- constant across both saved steps
+    // (the recurrence is over the subrange, not over time).
+    let r = run_inline_mdl(&mdl);
+    assert_eq!(r.step_count, 2);
+    assert_eq!(element_series(&r, "ecc[t1]"), vec![1.0, 1.0]);
+    assert_eq!(element_series(&r, "ecc[t2]"), vec![2.0, 2.0]);
+    assert_eq!(element_series(&r, "ecc[t3]"), vec![3.0, 3.0]);
+}
+
+/// Genuine-cycle guards: the self-reference fix must NOT weaken real
+/// cycle detection. These two models have NO well-founded staggered
+/// recurrence -- they are genuine cycles and MUST stay rejected (a
+/// CLAUDE.md hard rule).
+#[test]
+fn genuine_cycles_still_rejected() {
+    use simlin_engine::common::ErrorCode;
+
+    // (1) Scalar 2-cycle `a=b+1; b=a+1`: a true algebraic loop, no `self`
+    // token involved at all -> `CircularDependency`, stable before and
+    // after the fix.
+    let two_cycle = "\
+{UTF-8}
+a = b + 1 ~~|
+b = a + 1 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (err1, diags1) = compile_diags(two_cycle);
+    assert!(err1, "scalar 2-cycle a=b+1;b=a+1 must be NotSimulatable");
+    assert!(
+        diags1
+            .iter()
+            .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency)),
+        "scalar 2-cycle must report CircularDependency (genuine cycle \
+         detection must not be weakened). Diagnostics: {diags1:#?}"
+    );
+    assert!(
+        !diags1.iter().any(|d| matches!(
+            diag_code(d),
+            Some(ErrorCode::UnknownDependency) | Some(ErrorCode::DoesNotExist)
+        )),
+        "scalar 2-cycle has no undefined names; only CircularDependency \
+         is expected. Diagnostics: {diags1:#?}"
+    );
+
+    // (2) Genuine SAME-element self `x[dimA]=x[dimA]+1` (NOT a shifted
+    // subrange): a real same-element self-cycle that MUST stay rejected.
+    // element-cycle-resolution.AC4.2: element-level cycle resolution
+    // resolves the `self` token to the real name (`x`), so every element
+    // reads *itself* (`x[a1]<-x[a1]`, `x[a2]<-x[a2]`). The induced element
+    // graph therefore has an element self-loop -- it is element-cyclic, a
+    // genuine cycle -- so the engine MUST report `CircularDependency`
+    // SPECIFICALLY. This is no longer an `UnknownDependency` leak: that
+    // only happened before the #559 fix, when the literal `self` token
+    // leaked as an undefined name. Pin `CircularDependency` exactly (the
+    // assertion below also forbids any `UnknownDependency`/`DoesNotExist`,
+    // which would now be a name-resolution regression, not the expected
+    // verdict).
+    let same_elem = "\
+{UTF-8}
+dimA: a1, a2 ~~|
+x[dimA] = x[dimA] + 1 ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (err2, diags2) = compile_diags(same_elem);
+    assert!(
+        err2,
+        "genuine same-element self x[dimA]=x[dimA]+1 must stay \
+         NotSimulatable (CLAUDE.md hard rule -- a real cycle)"
+    );
+    assert!(
+        diags2
+            .iter()
+            .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency)),
+        "genuine same-element self x[dimA]=x[dimA]+1 must report \
+         CircularDependency SPECIFICALLY (element-cycle-resolution.AC4.2): \
+         every element reads itself, so the induced element graph has an \
+         element self-loop and the element-cycle refinement keeps the \
+         conservative CircularDependency. Diagnostics: {diags2:#?}"
+    );
+    assert!(
+        !diags2.iter().any(|d| matches!(
+            diag_code(d),
+            Some(ErrorCode::UnknownDependency) | Some(ErrorCode::DoesNotExist)
+        )),
+        "the `self` token must resolve to the real name `x`; a leaked \
+         UnknownDependency/DoesNotExist here is a #559 name-resolution \
+         regression, not the expected same-element-self-cycle verdict. \
+         Diagnostics: {diags2:#?}"
+    );
+}
+
+/// Regression guard for the one self-context that must keep working: a
+/// self-reference INSIDE `PREVIOUS()`. The #559 fix stops emitting the
+/// literal `self` in `xmile_compat.rs::format_var_ctx`; this proves it
+/// does not perturb the self-in-PREVIOUS path.
+///
+/// Primary case is the *shifted subrange* form
+/// `x[t1]=1; x[tNext]=PREVIOUS(x[tPrev],0)`. Before the fix this failed
+/// to compile -- the synthetic PREVIOUS-helper fragment was built around
+/// the unresolved `self[tPrev]`; after the fix the real name `x[tPrev]`
+/// resolves, the helper compiles, and it simulates the well-defined
+/// PREVIOUS-shift recurrence. The scalar `x=PREVIOUS(x,0)` sub-case is
+/// the simplest stable form.
+#[test]
+fn previous_self_reference_still_resolves() {
+    // Sub-case A: scalar self-in-PREVIOUS (the simplest form).
+    let scalar = "\
+{UTF-8}
+x = PREVIOUS(x, 0) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (err_s, diags_s) = compile_diags(scalar);
+    assert!(
+        !err_s,
+        "scalar x=PREVIOUS(x,0) must stay simulatable after the fix. \
+         Diagnostics: {diags_s:#?}"
+    );
+    assert_eq!(run_inline_mdl(scalar).step_count, 3);
+
+    // Sub-case B (primary): shifted-subrange self-in-PREVIOUS. Must
+    // compile AND simulate the exact PREVIOUS-shift recurrence after the
+    // fix.
+    let shifted = "\
+{UTF-8}
+Target: (t1-t3)
+\t~
+\t~\t\t|
+
+tNext: (t2-t3) -> tPrev
+\t~
+\t~\t\t|
+
+tPrev: (t1-t2) -> tNext
+\t~
+\t~\t\t|
+x[t1] = 1 ~~|
+
+x[tNext] = PREVIOUS(x[tPrev], 0) ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (err_b, diags_b) = compile_diags(shifted);
+    assert!(
+        !err_b,
+        "shifted-subrange PREVIOUS self-ref must COMPILE after the fix \
+         (resolving `self[tPrev]` -> `x[tPrev]` fixes the synthetic \
+         PREVIOUS-helper that failed before). Diagnostics: {diags_b:#?}"
+    );
+    let r = run_inline_mdl(shifted);
+    assert_eq!(r.step_count, 3);
+    // x[t1]=1 (base, constant); x[t2]=PREVIOUS(x[t1],0); x[t3]=PREVIOUS(x[t2],0).
+    // PREVIOUS = init at t0 else prior-DT value -> the deterministic
+    // staggered-recurrence series:
+    assert_eq!(element_series(&r, "x[t1]"), vec![1.0, 1.0, 1.0]);
+    assert_eq!(element_series(&r, "x[t2]"), vec![0.0, 1.0, 1.0]);
+    assert_eq!(element_series(&r, "x[t3]"), vec![0.0, 0.0, 1.0]);
+}
+
+/// `SAMPLE IF TRUE` expands in the converter to
+/// `( IF cond THEN input ELSE PREVIOUS(SELF, init) )` via a hard-coded
+/// literal `SELF` in the `"sample if true"` arm -- a *different* site
+/// from the `format_var_ctx` self-reference rewrite the #559 fix changes.
+/// The fix must NOT perturb this: a real `SAMPLE IF TRUE(...)` over a
+/// subrange must still compile AND simulate correctly, proving the two
+/// `self` sites are independent.
+#[test]
+fn sample_if_true_subrange_self_template_unaffected() {
+    let mdl = "\
+{UTF-8}
+Target: (t1-t3)
+\t~
+\t~\t\t|
+
+tNext: (t2-t3) -> tPrev
+\t~
+\t~\t\t|
+
+tPrev: (t1-t2) -> tNext
+\t~
+\t~\t\t|
+k = 5 ~~|
+
+a = 7 ~~|
+
+c = 9 ~~|
+
+y[t1] = SAMPLE IF TRUE(Time <= k, a, c) ~~|
+
+y[tNext] = SAMPLE IF TRUE(Time <= k, a, c) ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 2 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (err, diags) = compile_diags(mdl);
+    assert!(
+        !err,
+        "real SAMPLE IF TRUE over a subrange must compile after the fix \
+         (the fix must not touch the hard-coded PREVIOUS(SELF,init) \
+         template). Diagnostics: {diags:#?}"
+    );
+    let r = run_inline_mdl(mdl);
+    assert_eq!(r.step_count, 3);
+    // Time=0,1,2 are all <= k(5) -> condition always true -> output is the
+    // sampled input a(7) at every element/step (the SELF/previous branch
+    // is never taken; this exercises the template's structure intact).
+    assert_eq!(element_series(&r, "y[t1]"), vec![7.0, 7.0, 7.0]);
+    assert_eq!(element_series(&r, "y[t2]"), vec![7.0, 7.0, 7.0]);
+    assert_eq!(element_series(&r, "y[t3]"), vec![7.0, 7.0, 7.0]);
+}
+
+/// element-cycle-resolution.AC2.1 (Phase 2 Task 7). `ref.mdl` is a
+/// two-variable INTER-element recurrence: `ce[t1]=1;
+/// ce[tNext]=ecc[tPrev]+1; ecc[t1]=ce[t1]+1; ecc[tNext]=ce[tNext]+1` over
+/// the subrange `t1..t3`. Whole-variable `ce`<->`ecc` is a 2-cycle, but
+/// the induced element graph
+///   (ce,0)->(ecc,0); (ce,1)->(ecc,1); (ce,2)->(ecc,2);
+///   (ecc,0)->(ce,1); (ecc,1)->(ce,2)
+/// is acyclic. Before Subcomponent B (the GH #575 symbolic-ref
+/// re-architecture: Task 4 verdict, Task 5 combined fragment, Task 5b
+/// SCC-aware back-edge break, Task 6 injection) this multi-member SCC was
+/// short-circuited to `CircularDependency` and the model did not compile.
+/// Subcomponent B resolves the `{ce,ecc}` SCC, interleaves the members'
+/// per-element segments in topological order, and injects one combined
+/// fragment, so `ref.mdl` now compiles AND simulates to the hand-computed
+/// per-element series shipped in the sibling `ref.dat`:
+///   ce[t1]=1, ce[t2]=3, ce[t3]=5, ecc[t1]=2, ecc[t2]=4, ecc[t3]=6
+/// (constant across both saved steps -- the recurrence is over the
+/// subrange, not over time; FINAL TIME=1, TIME STEP=1 => 2 saved steps).
+/// `simulate_mdl_path` loads `ref.dat` via `load_expected_results_for_mdl`
+/// and compares with `ensure_results`, so this test IS AC2.1: it failed
+/// before Subcomponent B (rejected as `CircularDependency`) and passes
+/// now against `ref.dat`.
+#[test]
+fn ref_mdl_multi_variable_recurrence_simulates() {
+    simulate_mdl_path("../../test/sdeverywhere/models/ref/ref.mdl");
+}
+
+/// element-cycle-resolution.AC2.2 (Phase 2 Task 8). `interleaved.mdl`:
+/// `x=1; a[A1]=x; a[A2]=y; y=a[A1]; b[DimA]=a[DimA]` (`DimA: A1,A2`).
+/// Whole-variable `a`<->`y` is a 2-cycle, but element-wise
+/// `x -> a[A1] -> y -> a[A2]` is acyclic. Subcomponent B (GH #575)
+/// resolves the multi-member `{a,y}` SCC and evaluates its members in
+/// interleaved per-element order; before Subcomponent B this was rejected
+/// as `CircularDependency` and the model did not compile. Every variable
+/// resolves to `1.0`, so the sibling `interleaved.dat` is all `1.0`
+/// across its 101 saved steps (INITIAL TIME=0, FINAL TIME=100, TIME
+/// STEP=1 => 101 steps). `simulate_mdl_path` loads `interleaved.dat` via
+/// `load_expected_results_for_mdl` and compares the VM output with
+/// `ensure_results`, so this test IS AC2.2: it failed before
+/// Subcomponent B and passes now.
+#[test]
+fn interleaved_mdl_element_interleave_simulates() {
+    simulate_mdl_path("../../test/sdeverywhere/models/interleaved/interleaved.mdl");
+}
+
+/// element-cycle-resolution.AC2.4 (Phase 2 Task 9, the init-phase proof).
+/// `init_recurrence.mdl` is a NEW fixture exercising the init-phase
+/// combined-fragment path with a MULTI-member init SCC -- the first real
+/// exercise of Task 6's synthetic-ident `SymbolicCompiledInitial` init
+/// injection (`$⁚scc⁚init⁚{n}`) on a multi-member SCC. (Subcomponent A's
+/// `init_recurrence_behind_stock_*` tests already cover the SINGLE-
+/// variable init-recurrence-behind-a-stock case; AC2.4's combined-
+/// fragment init path needs a MULTI-member init SCC.)
+///
+/// Shape: two arrayed stocks `cs[Target]` / `ecs[Target]` over the
+/// subrange `t1..t3`, whose per-element INTEG **initial values** form a
+/// `ref.mdl`-shaped inter-element recurrence ACROSS the two variables
+/// (`cs[t1]=1; cs[tNext]=ecs[tPrev]+1; ecs[t1]=cs[t1]+1;
+/// ecs[tNext]=cs[tNext]+1`), with a constant zero inflow `g[Target]=0`.
+/// Each stock's dt-equation is its (acyclic) flow `g`, so the STOCK
+/// BREAKS the dt chain -- there is NO dt cycle. The INIT relation,
+/// however, has `cs`'s init referencing `ecs` and vice-versa: a
+/// whole-variable init 2-cycle `{cs,ecs}` whose induced per-element INIT
+/// graph is acyclic. So ONLY the init element graph exercises the
+/// combined INIT fragment.
+///
+/// This test FIRST empirically confirms (per the AC2.4 mandate) that the
+/// parsed fixture produces an init-ONLY MULTI-member element SCC -- the
+/// production `model_dependency_graph` payload must carry exactly one
+/// `ResolvedScc { phase: Initial }` with `>= 2` members (`{cs,ecs}`) and
+/// `has_cycle == false` -- then simulates it via `simulate_mdl_path`
+/// against the hand-computed `init_recurrence.dat`. The stocks integrate
+/// a zero flow, so they hold their recurrence-computed initial values
+/// constant across both saved steps (FINAL TIME=1, TIME STEP=1):
+///   cs[t1]=1, cs[t2]=3, cs[t3]=5, ecs[t1]=2, ecs[t2]=4, ecs[t3]=6.
+#[test]
+fn init_recurrence_mdl_multi_member_init_scc_simulates() {
+    use simlin_engine::common::Ident;
+    use simlin_engine::db::{SccPhase, model_dependency_graph};
+    use std::collections::BTreeSet;
+
+    let path = "../../test/sdeverywhere/models/init_recurrence/init_recurrence.mdl";
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"));
+    let dm = open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+
+    // Empirical AC2.4 confirmation, tied to the REAL fixture: the parsed
+    // MDL must yield an init-ONLY MULTI-member element SCC. If this
+    // produced a 1-member or a dt-phase SCC the fixture would not
+    // exercise the init combined-fragment path at all.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
+    let sync = sync.to_sync_result();
+    let model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, model, sync.project);
+
+    assert!(
+        !dep_graph.has_cycle,
+        "init_recurrence.mdl: the element-acyclic MULTI-member init-only \
+         recurrence behind stocks must NOT set has_cycle (resolved_sccs = \
+         {:?})",
+        dep_graph.resolved_sccs
+    );
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "init_recurrence.mdl: exactly one ResolvedScc (the {{cs,ecs}} \
+         init cluster) -- got {:?}",
+        dep_graph.resolved_sccs
+    );
+    let scc = &dep_graph.resolved_sccs[0];
+    assert_eq!(
+        scc.phase,
+        SccPhase::Initial,
+        "init_recurrence.mdl: the resolved SCC MUST be phase == Initial \
+         (a dt-phase SCC would mean the stock did not break the dt chain \
+         and the fixture would not exercise the init combined-fragment \
+         path) -- got {:?}",
+        scc.phase
+    );
+    assert!(
+        scc.members.len() >= 2,
+        "init_recurrence.mdl: AC2.4 requires a MULTI-member init SCC (the \
+         single-variable case is already covered by Subcomponent A); got \
+         {} member(s): {:?}",
+        scc.members.len(),
+        scc.members
+    );
+    assert_eq!(
+        scc.members,
+        [Ident::new("cs"), Ident::new("ecs")]
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        "init_recurrence.mdl: the resolved init SCC's members must be \
+         exactly {{cs,ecs}}"
+    );
+
+    // End-to-end: it compiles AND simulates to the hand-computed
+    // init_recurrence.dat (the combined INIT fragment, injected as one
+    // synthetic-ident SymbolicCompiledInitial, produces the correct
+    // per-element initial values; the zero flow holds them constant).
+    simulate_mdl_path(path);
+}
+
+/// element-cycle-resolution.AC3.1 (Phase 3 Task 3 -- the parent-sourcing
+/// happy-path end-to-end proof). `helper_recurrence.mdl` is a NEW fixture:
+/// a shift-mapped subrange recurrence over `Target: t1..t3` (the
+/// `self_recurrence.mdl` `Target/tNext/tPrev` shape) whose per-element
+/// recurrence body invokes a synthetic helper:
+///
+///   ecc[t1]     = 1
+///   ecc[tNext]  = INITIAL(ecc[tPrev] * 2)
+///
+/// `INITIAL(<expr>)` (Vensim's spelling of XMILE `INIT`) over the shifted
+/// subrange expands element-wise to `ecc[t2] = INITIAL(ecc[t1] * 2)` and
+/// `ecc[t3] = INITIAL(ecc[t2] * 2)`. Because the `INITIAL` argument is an
+/// *expression* (not a bare scalar slot), `builtins_visitor::make_temp_arg`
+/// synthesizes a scalar helper aux per recurrence element -- the canonical
+/// `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t2` /
+/// `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t3` form (design deviation 2):
+/// absent from `model.variables`, present in `model_implicit_var_info`
+/// (its parent is `ecc`). Each helper's argument references `ecc`, and
+/// `ecc`'s init references the helper (`ecc[tNext] = INITIAL($helper)`),
+/// so the helpers land *inside* a MULTI-member init-phase recurrence SCC
+/// `{ecc, $\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t2,
+/// $\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t3}` whose induced per-element
+/// INIT graph is acyclic and well-founded.
+///
+/// This is the deliberately-constructed AC3.1 coverage: the design notes
+/// AC3.1 is the *only* coverage of the parent-`implicit_vars` sourcing
+/// happy path, so the fixture shape was empirically verified (per design
+/// deviation 4) to genuinely push a `$\u{205A}`-prefixed helper into a
+/// *resolved* SCC -- this test re-asserts that here so a future converter
+/// change that stopped synthesizing the in-SCC helper would fail loudly
+/// rather than silently degrade AC3.1 to a no-op.
+///
+/// RED (structural, no destructive git): the synthetic helpers have NO
+/// `SourceVariable` (they are absent from `model.variables`). Without
+/// Phase 3 Task 2's parent-`implicit_vars` sourcing,
+/// `var_phase_symbolic_fragment_prod`'s no-`SourceVariable` arm returns
+/// `None` for each helper (the Task 1 loud-safe contract), so
+/// `symbolic_phase_element_order`'s per-member `?` short-circuits the
+/// whole builder to `None`, the `{ecc, $helper..}` SCC is `Unresolved`,
+/// `has_cycle` stays `true`, and the model is rejected with
+/// `CircularDependency` -- exactly the verdict the committed Task 1 test
+/// `unsourceable_in_scc_node_falls_back_to_circular_no_panic` pins for an
+/// unsourceable in-SCC node, and the verdict every non-helper-resolving
+/// candidate shape produced while this fixture's shape was being
+/// empirically selected. GREEN after Task 2 (committed `cee5d063`): the
+/// helper's symbolic `PerVarBytecodes` is parent-sourced from `ecc`'s
+/// `implicit_vars`, the SCC resolves, `has_cycle == false`, and it
+/// simulates.
+///
+/// The test FIRST empirically confirms (tied to the REAL parsed fixture,
+/// per the AC3.1 mandate) that the dependency graph carries exactly one
+/// `ResolvedScc { phase: Initial }` whose members include a
+/// `$\u{205A}`-prefixed synthetic helper that is genuinely
+/// no-`SourceVariable` (absent from `model.variables`) yet resolves in
+/// `model_implicit_var_info` -- i.e. the fixture genuinely exercises the
+/// Task 2 parent-sourcing path and not merely an ordinary recurrence --
+/// then simulates it via `simulate_mdl_path` against the hand-computed
+/// `helper_recurrence.dat`. The recurrence has no time dependence
+/// (`INITIAL` snapshots t=0; no stocks/PREVIOUS lag), so the values are
+/// constant across both saved steps (INITIAL TIME=0, FINAL TIME=1, TIME
+/// STEP=1 => 2 steps): ecc[t1]=1, ecc[t2]=INITIAL(ecc[t1]*2)=2,
+/// ecc[t3]=INITIAL(ecc[t2]*2)=4.
+#[test]
+fn helper_recurrence_mdl_synthetic_helper_in_scc_simulates() {
+    use simlin_engine::common::ErrorCode;
+    use simlin_engine::db::{SccPhase, model_dependency_graph, model_implicit_var_info};
+
+    let path = "../../test/sdeverywhere/models/helper_recurrence/helper_recurrence.mdl";
+    let contents =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"));
+    let dm = open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
+    let sync = sync.to_sync_result();
+    let model = sync.models["main"].source;
+    let dep_graph = model_dependency_graph(&db, model, sync.project);
+
+    // (1) It compiles via the incremental path -- NO false
+    // `CircularDependency`. RED before Task 2: the no-`SourceVariable`
+    // helper is unsourceable -> SCC `Unresolved` -> `has_cycle` true ->
+    // `CircularDependency`.
+    assert!(
+        !dep_graph.has_cycle,
+        "helper_recurrence.mdl: the helper-bearing recurrence must NOT set \
+         has_cycle once the synthetic helper is parent-sourced (AC3.1); \
+         resolved_sccs = {:?}",
+        dep_graph.resolved_sccs
+    );
+    let diags = collect_project_diagnostics(&dm);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency)),
+        "helper_recurrence.mdl: must NOT report CircularDependency once \
+         the synthetic helper is sourced from its parent's implicit_vars \
+         (AC3.1). Diagnostics: {diags:#?}"
+    );
+
+    // (2) Exactly one resolved SCC, init-phase (the `INITIAL()`-driven
+    // recurrence is an init-relation cycle, not a dt one).
+    assert_eq!(
+        dep_graph.resolved_sccs.len(),
+        1,
+        "helper_recurrence.mdl: exactly one ResolvedScc (the \
+         {{ecc, $helper..}} init cluster) -- got {:?}",
+        dep_graph.resolved_sccs
+    );
+    let scc = &dep_graph.resolved_sccs[0];
+    assert_eq!(
+        scc.phase,
+        SccPhase::Initial,
+        "helper_recurrence.mdl: the resolved SCC MUST be phase == Initial \
+         (the recurrence is driven by INITIAL(), an init-phase relation) \
+         -- got {:?}",
+        scc.phase
+    );
+    assert!(
+        scc.members.len() >= 2,
+        "helper_recurrence.mdl: AC3.1 requires the helper to be IN a \
+         MULTI-member SCC alongside `ecc` (a 1-member SCC would mean the \
+         helper is a mere forward dependency, not exercising the \
+         in-SCC parent-sourcing path); got {} member(s): {:?}",
+        scc.members.len(),
+        scc.members
+    );
+
+    // (3) The CORE AC3.1 / Task 2 assertion: the resolved SCC genuinely
+    // contains a `$\u{205A}`-prefixed synthetic-helper member that is
+    // no-`SourceVariable` (absent from `model.variables`) yet resolves in
+    // `model_implicit_var_info`. This is what makes the fixture exercise
+    // the Task 2 parent-`implicit_vars` sourcing path rather than an
+    // ordinary recurrence -- and is exactly the node whose symbolic
+    // fragment is `None` (=> SCC `Unresolved` => `CircularDependency`)
+    // without Task 2 (RED), `Some` (parent-sourced => SCC resolved) with
+    // it (GREEN).
+    let info = model_implicit_var_info(&db, model, sync.project);
+    let source_vars = model.variables(&db);
+    let in_scc_helpers: Vec<&str> = scc
+        .members
+        .iter()
+        .map(|m| m.as_str())
+        .filter(|m| {
+            m.starts_with('$')
+                && m.contains('\u{205A}')
+                && source_vars.get(*m).is_none()
+                && info.contains_key(*m)
+        })
+        .collect();
+    assert!(
+        !in_scc_helpers.is_empty(),
+        "helper_recurrence.mdl: the resolved SCC MUST contain at least one \
+         `$\u{205A}`-prefixed synthetic helper that has NO SourceVariable \
+         (absent from model.variables) yet resolves in \
+         model_implicit_var_info -- this is the node Phase 3 Task 2 \
+         parent-sources; without it the fixture would not exercise the \
+         AC3.1 happy path at all. SCC members: {:?}; implicit_var_info \
+         keys: {:?}",
+        scc.members,
+        info.keys().collect::<Vec<_>>()
+    );
+    // Pin the parent: every in-SCC helper's `model_implicit_var_info`
+    // entry must name `ecc` as its parent_source_var (the variable whose
+    // `implicit_vars` Task 2 reaches), so the parent-sourcing chain the
+    // test exercises is the intended one.
+    for helper in &in_scc_helpers {
+        let meta = &info[*helper];
+        let parent = meta.parent_source_var.ident(&db);
+        assert_eq!(
+            parent.as_str(),
+            "ecc",
+            "in-SCC helper {helper:?} must be parented to `ecc` (the \
+             recurrence variable whose implicit_vars Task 2 sources); \
+             got parent {parent:?}"
+        );
+    }
+
+    // (4) End-to-end: it compiles AND simulates to the hand-computed
+    // helper_recurrence.dat. The synthetic helpers' symbolic
+    // `PerVarBytecodes`, parent-sourced from `ecc`'s `implicit_vars`
+    // (Task 2), are interleaved into the combined SCC fragment exactly
+    // like a real member, producing the well-founded series
+    // ecc[t1]=1, ecc[t2]=2, ecc[t3]=4 held constant across both saved
+    // steps.
+    simulate_mdl_path(path);
+}
+
+/// element-cycle-resolution.AC2.5 (Phase 2 Task 9, the transitioned
+/// inter-variable-cycle assertion). `ref.mdl` and `interleaved.mdl` are
+/// INTER-variable element-acyclic recurrence SCCs (`ce`<->`ecc` /
+/// `a`<->`y`). Before Subcomponent B they were rejected with
+/// `CircularDependency`; this test originally asserted exactly that.
+///
+/// Formerly named `ref_interleaved_inter_variable_cycles_report_circular`
+/// (the Phase 1 form that asserted `CircularDependency`); this is the
+/// AC2.5-transitioned successor of that test, renamed in Phase 2 Task 9.
+/// The old name is recorded here so `git blame`/`git log -S` and a plain
+/// grep on either name stay continuous across the rename.
+/// Subcomponent B (GH #575) resolves the multi-member SCC and injects one
+/// combined per-element fragment, so the fixtures now compile and
+/// simulate.
+///
+/// Per AC2.5 this test is **transitioned** to its final end state: the
+/// correct-simulation assertion is folded into the dedicated end-to-end
+/// tests `ref_mdl_multi_variable_recurrence_simulates` (AC2.1, vs.
+/// `ref.dat`) and `interleaved_mdl_element_interleave_simulates` (AC2.2,
+/// vs. `interleaved.dat`) above -- those `simulate_mdl_path` tests ARE
+/// the hand-computed-value proof, so re-asserting the series here would
+/// be redundant. This test retains the still-meaningful diagnostic-level
+/// guards the dedicated value tests do not pin:
+///
+///  1. The cycle-gate verdict transitioned correctly: NO
+///     `CircularDependency` for either fixture, and the model compiles
+///     end-to-end (the multi-member resolved SCC survives the dependency
+///     graph -- the exact inverse of the original pre-Subcomponent-B
+///     `CircularDependency` assertion this test made).
+///  2. The AC2.5 leak guard, preserved verbatim from the original Phase 1
+///     intent (the #559-class regression pin): the verdict change must
+///     NOT spuriously inject a `self`/undefined-name
+///     `UnknownDependency`/`DoesNotExist` leak into these
+///     inter-variable-cycle fixtures. `ensure_results` in the value tests
+///     would catch a wrong *number*, but only this guard pins the
+///     specific "the cycle resolution leaked an undefined dependency
+///     name" failure mode.
+#[test]
+fn ref_interleaved_inter_variable_cycles_simulate_no_circular_no_leak() {
+    use simlin_engine::common::ErrorCode;
+    for path in [
+        "../../test/sdeverywhere/models/ref/ref.mdl",
+        "../../test/sdeverywhere/models/interleaved/interleaved.mdl",
+    ] {
+        let mdl =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {path}: {e}"));
+        let (compile_err, diags) = compile_diags(&mdl);
+        assert!(
+            !compile_err,
+            "{path}: Subcomponent B (GH #575) must let the element-acyclic \
+             multi-member recurrence SCC compile end-to-end (correct \
+             simulation is asserted by the dedicated `.dat` tests above). \
+             Diagnostics: {diags:#?}"
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency)),
+            "{path}: the element-acyclic multi-member recurrence SCC must \
+             survive the dependency graph -- it must NO LONGER report \
+             CircularDependency (transitioned from the original \
+             pre-Subcomponent-B assertion). Diagnostics: {diags:#?}"
+        );
+        assert!(
+            !diags.iter().any(|d| matches!(
+                diag_code(d),
+                Some(ErrorCode::UnknownDependency) | Some(ErrorCode::DoesNotExist)
+            )),
+            "{path}: the cycle-gate verdict change must NOT inject a \
+             `self`/undefined-name leak into a pure inter-variable-cycle \
+             fixture (AC2.5 leak guard, preserved). Diagnostics: {diags:#?}"
+        );
+    }
+}
+
+/// Issue #559 (end-to-end). A 1D stock whose INTEG rate references a
+/// higher-rank flow pinned to one element of the extra dimension
+/// (`stock1d[scenario] = INTEG(fluxatm[scenario] - flux2d[scenario, L1], 0)`,
+/// `flux2d[scenario, layers]`). The native MDL `collect_flows` dropped the
+/// `[scenario, L1]` pin and wired the bare 2D `flux2d` as a named outflow
+/// of the 1D stock, so the dimension checker reported
+/// `mismatched_dimensions` on `stock1d` (e.g. C-LEARN's
+/// `c_in_mixed_layer` / `heat_in_atmosphere_and_upper_ocean`).
+///
+/// Before the fix `compile_project_incremental` failed with a
+/// `MismatchedDimensions` diagnostic on `stock1d`. After the fix the
+/// rank-changing subscripted reference falls through to the synthetic
+/// net-flow path (which preserves the 1D `flux2d[scenario, L1]` slice in
+/// the rate), so the model compiles and simulates. `fluxatm`(2) -
+/// `flux2d[*,L1]`(1) = 1 per step into `stock1d` (init 0): [0, 1].
+#[test]
+fn simulates_subscript_pinned_higher_rank_flow() {
+    use simlin_engine::common::ErrorCode;
+    let mdl = "\
+{UTF-8}
+scenario: s1, s2 ~~|
+layers: (L1-L4) ~~|
+flux2d[scenario, layers] = 1 ~~|
+fluxatm[scenario] = 2 ~~|
+stock1d[scenario] = INTEG(fluxatm[scenario] - flux2d[scenario, L1], 0) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (compile_err, diags) = compile_diags(mdl);
+    // The bug surfaces specifically as MismatchedDimensions on the 1D
+    // stock fed by the mis-wired bare 2D flow.
+    assert!(
+        !diags
+            .iter()
+            .any(|d| diag_code(d) == Some(ErrorCode::MismatchedDimensions)),
+        "a subscript-pinned higher-rank flow must not produce \
+         MismatchedDimensions on the 1D stock. Diagnostics: {diags:#?}"
+    );
+    assert!(
+        !compile_err,
+        "stock1d with a pinned-slice flow must compile (synthetic \
+         net-flow preserves the 1D `flux2d[scenario, L1]` slice). \
+         Diagnostics: {diags:#?}"
+    );
+    // It simulates: stock1d[s] = INTEG(fluxatm(2) - flux2d[s,L1](1)) per
+    // scenario element, init 0 -> [0, 1] over the 2 steps.
+    let r = run_inline_mdl(mdl);
+    assert_eq!(r.step_count, 2);
+    assert_eq!(element_series(&r, "stock1d[s1]"), vec![0.0, 1.0]);
+    assert_eq!(element_series(&r, "stock1d[s2]"), vec![0.0, 1.0]);
+}
+
+/// Issue #559 (end-to-end; e.g. C-LEARN's `c_in_deep_ocean_net_flow` /
+/// `heat_in_deep_ocean_net_flow`). A 2-D stock over a shift-mapped
+/// subrange whose differing per-equation flow lists force a synthesized
+/// `<stock>_net_flow`. `build_synthetic_flow_equation` cloned the RAW
+/// subrange-sliced rate (`dflux[scenario, upper] - dflux[scenario, lower]`)
+/// into every scalar element key instead of resolving it per element, so
+/// the dimension checker reported `MismatchedDimensions` on
+/// `stock2d_net_flow`.
+///
+/// After the per-element resolution fix, that `MismatchedDimensions` is
+/// gone (the parser-level shape is correct).
+///
+/// The end-to-end deep-ocean *value* check is deferred: the C-LEARN
+/// deep-ocean is a genuine subscript-shift recurrence (`dflux` depends on
+/// the stock) that only *simulates* once element-level cycle resolution
+/// also lands (#559). This minimal repro's `dflux` is constant, so it has
+/// no such cycle; we therefore assert ONLY the parser-level symptom
+/// removal (no `MismatchedDimensions` on the synthesized net-flow) and
+/// explicitly do NOT assert deep-ocean simulation *values* here.
+#[test]
+fn simulates_synthetic_net_flow_shape() {
+    use simlin_engine::common::ErrorCode;
+    let mdl = "\
+{UTF-8}
+scenario: s1, s2 ~~|
+layers: (L1-L4) ~~|
+upper: (L1-L3) -> lower ~~|
+lower: (L2-L4) -> upper ~~|
+bottom: L4 ~~|
+dflux[scenario, L1] = 5 ~~|
+dflux[scenario, lower] = 6 ~~|
+stock2d[scenario, upper] = INTEG(dflux[scenario, upper] - dflux[scenario, lower], 0) ~~|
+stock2d[scenario, bottom] = INTEG(dflux[scenario, bottom], 0) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let (_compile_err, diags) = compile_diags(mdl);
+    // The bug surfaces as MismatchedDimensions on the synthesized
+    // `_net_flow` (raw subrange-sliced rate cloned into scalar element
+    // keys). After the fix that specific symptom is gone.
+    let mismatched: Vec<_> = diags
+        .iter()
+        .filter(|d| diag_code(d) == Some(ErrorCode::MismatchedDimensions))
+        .collect();
+    assert!(
+        mismatched.is_empty(),
+        "the synthesized net-flow must be resolved per element so no \
+         MismatchedDimensions remains (parser-level shape fix). Found: \
+         {mismatched:#?}"
+    );
 }
 
 /// All test models that the monolithic compiler can handle.
@@ -2538,5 +4243,163 @@ fn corpus_clearn_macros_import() {
          `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO` cascade; this guards that \
          regression. Found {} macro-attributable diagnostic(s): {macro_diags:#?}",
         macro_diags.len()
+    );
+}
+
+/// element-cycle-resolution Phase 6 Task 1 -- the C-LEARN incremental
+/// structural value-locking gate (AC7.1, AC7.2, AC7.3, AC7.5).
+///
+/// This is the plan's explicit mid-plan value-locking checkpoint: it locks
+/// "C-LEARN compiles via the incremental path + runs to FINAL TIME + no
+/// all-NaN core series" before Phase 7's numeric tail, now that Phases 1-5
+/// are in (element-level single + multi-variable SCC resolution, the dt+init
+/// combined fragment, the synthetic-helper parent-sourcing safety net, and
+/// the genuine-Vensim VECTOR SORT ORDER / VECTOR ELM MAP corrections all
+/// converge so the false `CircularDependency` no longer gates C-LEARN and
+/// NaN no longer propagates from the VECTOR ops).
+///
+/// - **AC7.1:** parse `C-LEARN v77 for Vensim.mdl`, compile via the
+///   incremental path by calling `compile_project_incremental` *directly*
+///   (not the `compile_vm` `.unwrap()` wrapper) so the `Result` can be
+///   asserted clean rather than panicking. The compile must be `Ok` -- no
+///   fatal `ModelError`, specifically NO `CircularDependency`. Non-fatal
+///   unit-inference warnings are explicitly allowed (out of scope). On a
+///   diagnostic the collected diagnostics are dumped (the
+///   `corpus_clearn_macros_import` inspection idiom) so a regression is
+///   legible.
+/// - **AC7.2:** `Vm::new(...)` then `vm.run_to_end()` runs to FINAL TIME.
+///   Deliberately NOT wrapped in `catch_unwind`: per AC7.5 a post-gate panic
+///   (#363 reproducing) must be a hard, root-caused failure that propagates
+///   with its backtrace, never caught/masked.
+/// - **AC7.3:** define "core series" as the matched offset keyset
+///   `Ref.vdf.offsets ∩ results.offsets` (there is no `Results` series
+///   accessor / "core C-LEARN series" enumeration anywhere, so the matched
+///   set is the principled definition -- it also dovetails Phase 7's AC8.2
+///   NaN guard). Parse `Ref.vdf` via
+///   `VdfFile::parse(...).to_results_via_records()` exactly as
+///   `simulates_clearn` does, intersect the offset keysets, and assert that
+///   for each matched ident at least one step is non-NaN (the
+///   `data[step*step_size+off]` flat-index idiom from `ensure_vdf_results` /
+///   `macro_test_value_at`). Fail listing any entirely-NaN matched idents.
+///
+/// `#[ignore]`d: C-LEARN is ~53k lines / 1.4 MB (~4-5s just to parse on
+/// release, far more to compile+run); it must not run in the capped default
+/// `cargo test` set. All sibling C-LEARN tests follow this convention.
+// Run with: cargo test --release -- --ignored compiles_and_runs_clearn_structural
+#[test]
+#[ignore]
+fn compiles_and_runs_clearn_structural() {
+    use simlin_engine::common::ErrorCode;
+
+    let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+
+    eprintln!("model (vensim mdl): {mdl_path}");
+
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    // AC7.1: compile via the incremental path, calling
+    // `compile_project_incremental` DIRECTLY (not the `compile_vm`
+    // `.unwrap()` wrapper) so the `Result` can be asserted clean rather than
+    // panicking. A fatal `ModelError` -- specifically a `CircularDependency`
+    // -- here is a genuine regression or an unresolved cycle-resolution gap,
+    // so on failure we dump every collected diagnostic (the
+    // `corpus_clearn_macros_import` inspection idiom) to make it legible.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
+    let compile_result = compile_project_incremental(&db, sync.project, "main");
+
+    if compile_result.is_err() {
+        let diags = collect_project_diagnostics(&datamodel_project);
+        let has_circular = diags
+            .iter()
+            .any(|d| diag_code(d) == Some(ErrorCode::CircularDependency));
+        panic!(
+            "AC7.1: C-LEARN must compile via the incremental path with no \
+             fatal ModelError (specifically NO CircularDependency -- the \
+             element-level cycle resolution of Phases 1-3 must dissolve the \
+             false cycle; non-fatal unit-inference warnings are allowed). \
+             compile_project_incremental returned Err; has_circular_dependency \
+             = {has_circular}. Collected diagnostics: {diags:#?}"
+        );
+    }
+
+    // Even on `Ok`, a `CircularDependency` must never appear among the
+    // collected diagnostics: the whole point of this gate is that the
+    // element-level cycle resolution dissolved C-LEARN's false cycle.
+    let diags = collect_project_diagnostics(&datamodel_project);
+    let circular: Vec<_> = diags
+        .iter()
+        .filter(|d| diag_code(d) == Some(ErrorCode::CircularDependency))
+        .collect();
+    assert!(
+        circular.is_empty(),
+        "AC7.1: C-LEARN must compile with NO CircularDependency diagnostic \
+         (the element-level cycle resolution of Phases 1-3 must dissolve the \
+         false cycle). Found {} CircularDependency diagnostic(s): {circular:#?}",
+        circular.len()
+    );
+
+    let compiled = compile_result.expect("checked Ok above");
+
+    // AC7.2: run to FINAL TIME. NOT wrapped in `catch_unwind` -- per AC7.5 a
+    // post-gate panic (#363 reproducing now that the cycle gate no longer
+    // masks the deeper pipeline) must be a hard, root-caused failure that
+    // propagates with its backtrace, never caught/masked.
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
+    let results = vm.into_results();
+
+    // AC7.3: define "core series" as the matched offset keyset
+    // `Ref.vdf.offsets ∩ results.offsets` and assert no matched series is
+    // entirely NaN after the run. There is no `Results` series accessor /
+    // "core C-LEARN series" enumeration anywhere, so the matched set is the
+    // principled definition (it also dovetails Phase 7's AC8.2 NaN guard).
+    let vdf_path = "../../test/xmutil_test_models/Ref.vdf";
+    let vdf_data_bytes =
+        std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
+    let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
+        .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
+    let vdf_results = vdf_file
+        .to_results_via_records()
+        .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"));
+
+    let step_count = results.step_count;
+    let step_size = results.step_size;
+    let mut matched = 0usize;
+    let mut all_nan: Vec<String> = Vec::new();
+    for ident in vdf_results.offsets.keys() {
+        let Some(&off) = results.offsets.get(ident) else {
+            continue;
+        };
+        matched += 1;
+        let any_non_nan = (0..step_count).any(|s| !results.data[s * step_size + off].is_nan());
+        if !any_non_nan {
+            all_nan.push(ident.to_string());
+        }
+    }
+
+    eprintln!(
+        "C-LEARN structural gate: {matched} core series matched \
+         (Ref.vdf ∩ results) across {step_count} steps"
+    );
+    assert!(
+        matched > 0,
+        "AC7.3: expected a non-empty matched core-series set \
+         (Ref.vdf.offsets ∩ results.offsets); got 0 -- the offset keysets \
+         must overlap for the NaN guard to be meaningful"
+    );
+    all_nan.sort();
+    assert!(
+        all_nan.is_empty(),
+        "AC7.3: every matched core C-LEARN series (Ref.vdf ∩ results) must \
+         have at least one non-NaN step after the run. {} of {matched} \
+         matched series are entirely NaN: {all_nan:#?}",
+        all_nan.len()
     );
 }

@@ -35,6 +35,8 @@
     - [test-requirements.md](implementation-plans/2026-04-05-server-rewrite/test-requirements.md) -- AC-to-test mapping for execution validation
   - [implementation-plans/2026-05-13-macros/](implementation-plans/2026-05-13-macros/) -- 7-phase plan implementing Vensim `:MACRO:` support: datamodel/serialization foundation, MDL & XMILE import/export, compile-time expansion, multi-output materialization, and hero-corpus validation
     - [test-requirements.md](implementation-plans/2026-05-13-macros/test-requirements.md) -- AC-to-test mapping for execution validation
+  - [implementation-plans/2026-05-18-element-cycle-resolution/](implementation-plans/2026-05-18-element-cycle-resolution/) -- 7-phase plan resolving element-level recurrence cycles so the C-LEARN hero model compiles via the incremental path, runs to FINAL TIME, and matches genuine Vensim within 1%: single/multi-variable SCC element-acyclicity resolution, synthetic-helper sourcing, VECTOR SORT ORDER/ELM MAP genuine semantics, the C-LEARN structural gate (plus a stack of unmasked assembly/import/`:NA:`/per-element-GF fixes), and numeric finalization
+    - [test-requirements.md](implementation-plans/2026-05-18-element-cycle-resolution/test-requirements.md) -- AC-to-test mapping for execution validation
 
 ## Security
 
