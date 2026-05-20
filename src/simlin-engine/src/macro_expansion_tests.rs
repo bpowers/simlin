@@ -483,6 +483,107 @@ y=
     }
 }
 
+/// clearn-residual.AC2.1/AC2.2/AC2.4: a 5-parameter `RAMP FROM TO` macro that
+/// branches on its `islinear` selector must run the branch the caller selects.
+/// This is the discriminating test the existing fixtures lack: the macro's
+/// `exp` branch (here `xfrom + 2*RAMP(...)`, deliberately *double* slope so it
+/// is provably distinct from the linear branch mid-ramp) cannot be reproduced
+/// by the import-time linear rewrite, so with the buggy formatter all three
+/// invocations collapse to the linear value and `y_exp` fails.
+///
+/// Harness control (`CONTROL_TAIL`): INITIAL TIME = 0, FINAL TIME = 2,
+/// TIME STEP = SAVEPER = 1, so the saved steps are Time = {0, 1, 2}. The ramp
+/// window `tstart = 0 .. tend = 2` puts the single interior saved step at
+/// Time = 1, where `RAMP(slope, 0, 2) == slope * (1 - 0) == slope`.
+///
+/// Expected values at Time = 1 (series index 1):
+/// - `y_exp = RAMP FROM TO(10, 110, 0, 2, 0)`: slope = (110-10)/(2-0) = 50;
+///   both endpoints positive so `linear = islinear = 0` -> exp branch:
+///   `10 + 2*50 = 110` (linear branch would be `10 + 50 = 60`).
+/// - `y_lin = RAMP FROM TO(10, 110, 0, 2, 1)`: `linear = 1` -> linear branch:
+///   `10 + 50 = 60`.
+/// - `y_force = RAMP FROM TO(-10, 110, 0, 2, 0)`: slope = (110-(-10))/(2-0) = 60;
+///   `xfrom <= 0` forces `linear = 1` despite `islinear = 0` -> linear branch:
+///   `-10 + 60 = 50` (exp branch would be `-10 + 2*60 = 110`).
+#[test]
+fn macro_ramp_from_to_runs_selected_branch() {
+    let source = mdl(r#":MACRO: RAMP FROM TO(xfrom, xto, tstart, tend, islinear)
+RAMP FROM TO = IF THEN ELSE(linear = 1, linear ramp, exp ramp)
+	~	dmnl
+	~	|
+linear = IF THEN ELSE(xfrom > 0 :AND: xto > 0, islinear, 1)
+	~	dmnl
+	~	|
+slope = (xto - xfrom) / (tend - tstart)
+	~	dmnl
+	~	|
+linear ramp = xfrom + RAMP(slope, tstart, tend)
+	~	dmnl
+	~	|
+exp ramp = xfrom + 2 * RAMP(slope, tstart, tend)
+	~	dmnl
+	~	|
+:END OF MACRO:
+y_exp=
+	RAMP FROM TO(10, 110, 0, 2, 0)
+	~
+	~		|
+
+y_lin=
+	RAMP FROM TO(10, 110, 0, 2, 1)
+	~
+	~		|
+
+y_force=
+	RAMP FROM TO(-10, 110, 0, 2, 0)
+	~
+	~		|
+"#);
+
+    // Time = 1 is series index 1 (saved steps Time = 0, 1, 2).
+    const MID: usize = 1;
+
+    let y_exp = run_mdl_var(&source, "y_exp");
+    let y_lin = run_mdl_var(&source, "y_lin");
+    let y_force = run_mdl_var(&source, "y_force");
+
+    // AC2.1: islinear = 0 with positive endpoints runs the exp branch (110),
+    // which is provably distinct from the linear branch (60). The import-time
+    // linearizer cannot produce 110, so this assertion is the true RED.
+    assert!(
+        (y_exp[MID] - 110.0).abs() < 1e-9,
+        "y_exp at Time=1 expected 110 (exp branch: xfrom + 2*slope), got {}",
+        y_exp[MID]
+    );
+    assert!(
+        (y_exp[MID] - 60.0).abs() > 1e-6,
+        "y_exp at Time=1 must NOT equal the linear value 60; got {} -- the \
+         macro's exp branch did not run (formatter linearized the call)",
+        y_exp[MID]
+    );
+
+    // AC2.2: islinear = 1 runs the linear branch (60), the no-regression value.
+    assert!(
+        (y_lin[MID] - 60.0).abs() < 1e-9,
+        "y_lin at Time=1 expected 60 (linear branch: xfrom + slope), got {}",
+        y_lin[MID]
+    );
+
+    // AC2.4: nonpositive endpoint forces linear = 1 despite islinear = 0, so
+    // the linear branch (50) runs, not the exp branch (110).
+    assert!(
+        (y_force[MID] - 50.0).abs() < 1e-9,
+        "y_force at Time=1 expected 50 (forced-linear branch: xfrom + slope), got {}",
+        y_force[MID]
+    );
+    assert!(
+        (y_force[MID] - 110.0).abs() > 1e-6,
+        "y_force at Time=1 must NOT equal the exp value 110; got {} -- the \
+         forced-linear selector did not take effect",
+        y_force[MID]
+    );
+}
+
 /// macros.AC5.6: a call to a name that is neither a macro, a stdlib
 /// function, nor a builtin must fail the compile with `UnknownBuiltin`.
 #[test]

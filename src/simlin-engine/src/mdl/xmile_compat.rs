@@ -419,19 +419,6 @@ impl XmileFormatter {
                     );
                 }
             }
-            "ramp from to" => {
-                // RAMP FROM TO(y_start, y_end, t_start, t_end) ->
-                // y_start + RAMP((y_end - y_start) / (t_end - t_start), t_start, t_end)
-                if args.len() >= 4 {
-                    let y_start = self.format_expr_ctx(&args[0], ctx);
-                    let y_end = self.format_expr_ctx(&args[1], ctx);
-                    let t_start = self.format_expr_ctx(&args[2], ctx);
-                    let t_end = self.format_expr_ctx(&args[3], ctx);
-                    return format!(
-                        "({y_start}) + RAMP((({y_end}) - ({y_start})) / (({t_end}) - ({t_start})), {t_start}, {t_end})"
-                    );
-                }
-            }
             "modulo" => {
                 // MODULO(x, y) -> (x) MOD (y)
                 if args.len() >= 2 {
@@ -2029,7 +2016,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ramp_from_to_transforms_args() {
+    fn test_ramp_from_to_survives_as_macro_call() {
+        // `RAMP FROM TO` is not a native builtin: a model that uses it must
+        // define a same-named `:MACRO:`, which the compile-time macro-shadows-
+        // everything precedence (`builtins_visitor.rs`) resolves. The formatter
+        // must therefore leave the call intact as `RAMP_FROM_TO(...)` so that
+        // resolution can apply -- it must NOT rewrite it into a hardcoded
+        // linear `(xfrom) + RAMP(slope, tstart, tend)` at import time (which
+        // would discard the macro body and its `islinear` selector).
         let formatter = XmileFormatter::new();
         let expr = Expr::App(
             Cow::Borrowed("ramp from to"),
@@ -2045,12 +2039,29 @@ mod tests {
             loc(),
         );
         let result = formatter.format_expr(&expr);
-        assert!(result.contains("RAMP"), "should contain RAMP: {result}");
+
+        // The call survives as a resolvable `RAMP_FROM_TO(...)` invocation
+        // (canonicalizes to `ramp_from_to` at compile time).
         assert!(
-            !result.starts_with("RAMP_FROM_TO"),
-            "should not be bare RAMP_FROM_TO: {result}"
+            result.starts_with("RAMP_FROM_TO("),
+            "expected the call to survive as RAMP_FROM_TO(...): {result}"
         );
-        assert!(result.contains("100") && result.contains("0"), "{result}");
+
+        // The four argument expressions appear, in order, inside the call.
+        let mut search_from = 0usize;
+        for arg in ["0", "100", "5", "15"] {
+            let rel = result[search_from..]
+                .find(arg)
+                .unwrap_or_else(|| panic!("arg {arg:?} missing or out of order in: {result}"));
+            search_from += rel + arg.len();
+        }
+
+        // No top-level linear rewrite: the linearized form contained a bare
+        // `RAMP(` call (and a `+`). `RAMP_FROM_TO(` does not match `RAMP(`.
+        assert!(
+            !result.contains("RAMP("),
+            "must not be linearized into a bare RAMP(...) call: {result}"
+        );
     }
 
     #[test]
