@@ -944,7 +944,7 @@ pub(crate) fn lower_var_fragment(
             continue;
         }
         if let Some(dep_sv) = source_vars.get(effective) {
-            let dep_tables = extract_tables_from_source_var(db, dep_sv);
+            let dep_tables = extract_tables_from_source_var(db, dep_sv, project);
             if !dep_tables.is_empty() {
                 tables.insert(dep_canonical, dep_tables);
             }

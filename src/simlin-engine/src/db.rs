@@ -2913,28 +2913,62 @@ pub fn compute_layout(
 pub(crate) fn extract_tables_from_source_var(
     db: &dyn Db,
     source_var: &SourceVariable,
+    project: SourceProject,
 ) -> Vec<crate::compiler::Table> {
     let ident = source_var.ident(db);
     let eq = source_var.equation(db);
 
     // For arrayed equations with per-element graphical functions, build one
-    // table per element (matching variable.rs build_tables).  Elements without
-    // a GF get an empty placeholder so that table[element_offset] stays aligned.
+    // table per element (matching variable.rs build_tables). Each element's
+    // table is laid out at the element's flat declared dimension index (not
+    // its `elems` Vec position), because the runtime selects a per-element
+    // table by the row-major dimension offset (vm.rs Lookup/LookupArray); see
+    // `crate::variable::reorder_arrayed_element_tables`. Elements without a GF
+    // get an empty placeholder so that table[element_offset] stays aligned.
     if let SourceEquation::Arrayed(_, elements, _, _) = eq {
         let has_element_gfs = elements.iter().any(|e| e.gf.is_some());
         if has_element_gfs {
-            return elements
-                .iter()
-                .map(|e| {
-                    e.gf.as_ref()
-                        .and_then(|gf| {
-                            let dm_gf = source_gf_to_datamodel(gf);
-                            let var_table = crate::variable::parse_table(&Some(dm_gf)).ok()??;
-                            crate::compiler::Table::new(ident, &var_table).ok()
-                        })
-                        .unwrap_or(crate::compiler::Table { data: vec![] })
-                })
-                .collect();
+            // Parse present element tables, keyed by canonical (comma-joined)
+            // subscript name.
+            let mut present: HashMap<crate::common::CanonicalElementName, crate::compiler::Table> =
+                HashMap::new();
+            for e in elements {
+                if let Some(gf) = e.gf.as_ref() {
+                    let dm_gf = source_gf_to_datamodel(gf);
+                    if let Some(var_table) =
+                        crate::variable::parse_table(&Some(dm_gf)).ok().flatten()
+                        && let Ok(table) = crate::compiler::Table::new(ident, &var_table)
+                    {
+                        present.insert(
+                            crate::common::CanonicalElementName::from_raw(&e.subscript),
+                            table,
+                        );
+                    }
+                }
+            }
+
+            // Resolve the variable's dimensions so the reorder maps each
+            // element name to its row-major declared-order flat offset. If the
+            // dimensions cannot be resolved, fall back to the original
+            // Vec-positional layout rather than dropping tables.
+            let dims = variable_dimensions(db, *source_var, project);
+            if dims.is_empty() {
+                return elements
+                    .iter()
+                    .map(|e| {
+                        present
+                            .get(&crate::common::CanonicalElementName::from_raw(&e.subscript))
+                            .cloned()
+                            .unwrap_or(crate::compiler::Table { data: vec![] })
+                    })
+                    .collect();
+            }
+            return crate::variable::reorder_arrayed_element_tables(
+                dims,
+                &present,
+                || crate::compiler::Table { data: vec![] },
+                |t: &crate::compiler::Table| t.clone(),
+            );
         }
     }
 
@@ -4568,7 +4602,7 @@ fn compile_implicit_var_phase_bytecodes(
             continue;
         }
         if let Some(dep_sv) = source_vars.get(effective) {
-            let dep_tables = extract_tables_from_source_var(db, dep_sv);
+            let dep_tables = extract_tables_from_source_var(db, dep_sv, project);
             if !dep_tables.is_empty() {
                 tables.insert(dep_canonical, dep_tables);
             }

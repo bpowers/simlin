@@ -75,6 +75,8 @@ mod model;
 mod module_functions;
 mod parser;
 mod patch;
+#[cfg(test)]
+mod per_element_gf_tests;
 mod project;
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[path = "project_io.gen.rs"]
