@@ -268,6 +268,97 @@ Run: `git commit -m "engine: C-LEARN matches Ref.vdf within 1% (AC8.1)"` — pre
 **Commit:** `engine: C-LEARN matches Ref.vdf within 1% (AC8.1)`
 <!-- END_TASK_4 -->
 
+<!-- START_TASK_5 -->
+### Task 5: map per-element graphical functions by element name, not Arrayed-Vec position (dominant C-LEARN numeric divergence)
+
+**Verifies:** element-cycle-resolution.AC8.1 (the dominant numeric-divergence root
+cause); directly verified by a new focused unit test + a re-measure of C-LEARN
+vs `Ref.vdf`.
+
+**Execution order:** done FIRST in Phase 7 (before the Tasks 1/2 comparator), per
+the user's "fix the GF-mapping bug first, then re-measure" decision. After it
+lands, RE-MEASURE C-LEARN vs `Ref.vdf` (the diagnostic harness) to confirm the
+cascade collapses and see the true residual, and checkpoint — then proceed with
+Tasks 1/2 (the `:NA:`-aware + near-zero-robust comparator), Task 3 (un-stub), and
+Task 4 (final 1% match).
+
+**Why added (Phase 7 diagnostic — the bounded-numeric-finalization root cause):**
+a measured C-LEARN-vs-`Ref.vdf` categorization found ~71% of matched cells already
+match-or-comparator-reconcilable (58.8% within 1%; 12.5% `:NA:`-sentinel; 0.1%
+near-zero), and the 28% "genuine divergence" (1,314 idents) is a CASCADE from a
+single bug: per-element graphical functions are consumed by their position in the
+`Equation::Arrayed` `elems` Vec (in SORTED element order) instead of by
+**element-name → dimension-index**. For a dimension whose DECLARED element order
+≠ sorted order (C-LEARN's `COP`: `OECD US, OECD EU, G77 China, G77 India,
+Remaining Developed, Remaining Developing A, COP Developing B`), every arrayed GF
+feeds the WRONG element's table to each dimension slot. Concrete evidence:
+`un_population_high[oecd_us]` simulates to `0.0738609` (COP Developing B's table,
+`elems[0]`) instead of `0.0235797` (OECD US's table, which genuine Vensim
+produces); this poisons `population → gdp → per-capita/emissions/HFC/CO2eq` and
+everything downstream. The datamodel content is CORRECT (each `elems[i]` carries
+the right `(ElementName, GF)`); the bug is at lowering/codegen, which must key
+each per-element GF by its `ElementName`'s dimension index, not by `elems` Vec
+position. NOT caught earlier because most test fixtures declare elements in sorted
+order (position == dim-index).
+
+**Files:**
+- Modify: the per-element-GF lowering/codegen mapping — likely
+  `src/simlin-engine/src/compiler/` (`subscript.rs` / `codegen.rs` / `context.rs`)
+  and/or where `Equation::Arrayed`'s per-element `GraphicalFunction` list
+  (`datamodel.rs:~195`, `Vec<(ElementName, ...)>`) is lowered into the per-element
+  table layout. (Root-cause-confirm the exact site.)
+- Add: a focused `#[cfg(test)]` test with a deliberately NON-SORTED declared
+  element order + a per-element GF, asserting each element evaluates ITS OWN table.
+
+**Implementation — root-cause-confirm FIRST (sensitive lowering, broad blast
+radius — VERIFY before touching), then fix (general):**
+0. **Establish the test baseline FIRST (per user direction — broad blast radius):**
+   AUDIT the existing unit coverage of the per-element-GF / arrayed-GF
+   lowering+evaluation surface (`array_tests`, `compiler_vector`, the
+   graphical-function tests, the `benches/`). Identify GAPS, then ADD baseline
+   tests BEFORE the fix so it cannot silently regress: (a) **correctness pins** —
+   sorted-order arrayed GFs (must stay byte-identical; the fix is identity there),
+   per-element GF evaluation by element, and the cross-product of declared-order ×
+   element; (b) **performance**: the fix MUST map elements at LOWERING/compile time
+   (once), NOT via a per-step element-name lookup in the VM hot loop — confirm the
+   mapping site is compile-time, and ensure GF evaluation is not on a hot path that
+   the fix would slow (the `benches/` GF-eval coverage; add/extend a focused
+   compile or per-element-GF micro-benchmark if a regression-detecting test is
+   missing). The committed baseline tests are then the fix's soundness pins.
+1. **Confirm** in the lowering/codegen code exactly where a `Variable::Var`'s
+   per-element `tables` (the arrayed GF) are assigned to dimension element slots.
+   Confirm the bug: the i-th `elems` entry's GF is placed at dimension-index `i`
+   (positional) rather than at the dimension index of its `ElementName`. Build the
+   RED fixture (non-sorted declared order) and confirm it reproduces.
+2. **Fix:** key each per-element GF by `ElementName → dimension index` (the
+   declared dimension order), so element `e`'s slot gets element `e`'s table
+   regardless of the `elems` Vec ordering — done at LOWERING time (a one-time
+   compile-time reorder of the per-element table layout), so the VM hot path is
+   unchanged (no runtime name lookup, no per-step cost). General fix for ALL
+   arrayed GFs; no model-specific hack.
+
+**Loud-safe / no-regression:** this touches every arrayed GF in every model — the
+mandatory soundness pins are paramount.
+
+**Testing (TDD, mandatory):**
+- RED-first: the non-sorted-declared-order arrayed-GF fixture — RED (wrong table)
+  before, GREEN after.
+- **MANDATORY soundness pins (must stay GREEN unchanged):** the FULL array/GF test
+  surface — `array_tests`, `compiler_vector`, all graphical-function tests,
+  `incremental_compilation_covers_all_models` (AC2.6, 22-model corpus), the
+  recurrence/cycle gates, and the full engine lib + integration suites (`simulate`,
+  `simulate_ltm`). A sorted-order GF model MUST stay byte-identical (the fix is
+  identity for sorted order); if any sorted-order case changes, STOP and report.
+  If a non-sorted-order case's numeric output changes, VERIFY it is a CORRECTION
+  toward genuine Vensim, not a regression.
+
+**Verification:**
+Run the fixture + the full soundness-pin set. Then re-measure C-LEARN vs `Ref.vdf`
+and report the new bucket histogram (how much of the 28% divergence collapsed; the
+true remaining residual). `git commit` (NEVER `--no-verify`).
+**Commit:** `engine: map per-element graphical functions by element name, not Arrayed-Vec position (AC8.1)`
+<!-- END_TASK_5 -->
+
 ---
 
 ## Phase 7 Done When
