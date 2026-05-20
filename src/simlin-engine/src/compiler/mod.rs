@@ -1083,6 +1083,79 @@ fn contains_array_producing_builtin(expr: &Expr) -> bool {
     }
 }
 
+/// Pure predicate: a "lookup-only" variable is a standalone graphical-function
+/// holder -- it carries a graphical function (`has_tables`) and its equation is
+/// empty or the MDL lookup sentinel (i.e. there is no functional input
+/// expression to feed the table).
+///
+/// Mirrors `mdl::writer::is_lookup_only_equation`'s "empty or sentinel" rule so
+/// that BOTH an XMILE-sourced lookup-only variable (empty/absent equation +
+/// `gf`) and an MDL-sourced one (`equation == LOOKUP_SENTINEL` + `gf`) are
+/// detected -- the `LOOKUP_SENTINEL` string is MDL-format-internal and is NOT a
+/// stable datamodel contract, so the empty-equation arm is load-bearing, not
+/// redundant.
+///
+/// Returns `false` for WITH LOOKUP (`var = WITH LOOKUP(input, table)`: tables
+/// present but a *real* input equation -- it must keep its `LOOKUP(self,
+/// input)` lowering) and for an ordinary aux (a real equation, no tables). The
+/// `has_tables` guard also keeps an empty-RHS aux (no gf) off this path.
+// `allow(dead_code)`: this commit introduces the detection helper + its unit
+// tests; the immediately-following commit wires it into the scalar/arrayed/A2A
+// lowering sites (the `gf(0)`-vs-literal-`0` uniform-lowering fix). Removed
+// there once the production call sites reference it.
+#[allow(dead_code)]
+fn is_lookup_only(equation: &str, has_tables: bool) -> bool {
+    let trimmed = equation.trim();
+    has_tables && (trimmed.is_empty() || trimmed == crate::mdl::LOOKUP_SENTINEL)
+}
+
+#[cfg(test)]
+mod is_lookup_only_tests {
+    use super::*;
+
+    #[test]
+    fn is_lookup_only_sentinel_equation_with_tables_is_true() {
+        // MDL-sourced lookup-only: `g(<table>)` imports as equation =
+        // LOOKUP_SENTINEL ("0+0") + a graphical function.
+        assert!(is_lookup_only(crate::mdl::LOOKUP_SENTINEL, true));
+    }
+
+    #[test]
+    fn is_lookup_only_empty_equation_with_tables_is_true() {
+        // XMILE-sourced lookup-only: a variable with a `<gf>` but no equation
+        // carries an empty/absent equation rather than the MDL sentinel.
+        assert!(is_lookup_only("", true));
+        // Whitespace-only is equivalent to empty (matches the `.trim()` in
+        // `mdl::writer::is_lookup_only_equation`).
+        assert!(is_lookup_only("   ", true));
+    }
+
+    #[test]
+    fn is_lookup_only_with_lookup_real_input_is_false() {
+        // WITH LOOKUP (`g = WITH LOOKUP(some_input, <table>)`): tables present
+        // but a real input expression. Must NOT be treated as lookup-only --
+        // it keeps `LOOKUP(self, input)` so the index is the user's input
+        // (this is the AC1.4 distinction).
+        assert!(!is_lookup_only("some_input", true));
+    }
+
+    #[test]
+    fn is_lookup_only_ordinary_aux_no_tables_is_false() {
+        // An ordinary aux: a real equation and no graphical function.
+        assert!(!is_lookup_only("3 * x + 1", false));
+    }
+
+    #[test]
+    fn is_lookup_only_sentinel_equation_without_tables_is_false() {
+        // An empty-RHS aux (MdlEquation::EmptyRhs): the sentinel equation but
+        // NO graphical function. `has_tables == false` keeps it off the
+        // lookup-only path even though its equation text matches the sentinel.
+        assert!(!is_lookup_only(crate::mdl::LOOKUP_SENTINEL, false));
+        // The empty-equation, no-tables case is likewise not lookup-only.
+        assert!(!is_lookup_only("", false));
+    }
+}
+
 /// Test-only wrapper exposing the production recursive
 /// array-producing-builtin predicate (`contains_array_producing_builtin`,
 /// which delegates to the private `is_array_producing_builtin`): true iff
