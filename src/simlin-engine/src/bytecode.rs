@@ -285,6 +285,20 @@ impl RuntimeView {
 
         let mut flat = self.offset as usize;
 
+        // Dense fast-path: the overwhelmingly common case is no sparse mappings.
+        // This function is a per-element hot spot (called from the vector-op /
+        // reducer dispatch sites). When `sparse` is empty the sparse_lookup
+        // build below is pure overhead -- every entry would be `None`, so each
+        // `actual_idx` equals `idx` -- making this branch numerically identical
+        // to the general path while skipping the SmallVec allocation/scan and
+        // the per-index Option check.
+        if self.sparse.is_empty() {
+            for (i, &idx) in indices.iter().enumerate() {
+                flat += idx as usize * self.strides[i] as usize;
+            }
+            return flat;
+        }
+
         // Build a quick lookup for sparse dimensions
         let sparse_lookup: SmallVec<[Option<&[u16]>; 4]> = (0..self.dims.len())
             .map(|i| {
