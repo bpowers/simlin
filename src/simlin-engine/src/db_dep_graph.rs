@@ -42,7 +42,7 @@ use crate::common::{Canonical, Ident};
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity,
     ModelDepGraphResult, ResolvedScc, SccPhase, SourceModel, SourceProject, SourceVariableKind,
-    model_module_ident_context, variable_direct_dependencies_with_context,
+    VariableDeps, model_module_ident_context, variable_direct_dependencies_with_context,
     variable_direct_dependencies_with_context_and_inputs,
 };
 
@@ -212,59 +212,115 @@ pub(crate) fn build_var_info(
 
     let project_models = project.models(db);
 
-    for (name, source_var) in source_vars.iter() {
-        let deps = if module_input_names.is_empty() {
-            variable_direct_dependencies_with_context(
-                db,
-                *source_var,
-                project,
-                module_ident_context,
-            )
-        } else {
-            variable_direct_dependencies_with_context_and_inputs(
-                db,
-                *source_var,
-                project,
-                module_ident_context,
-                module_input_names.clone(),
-            )
-        };
+    // Per-variable deps, computed once and reused (salsa-cached). A pre-pass
+    // both seeds the instance->model map below and is reused in the main loop.
+    let var_deps: Vec<(&String, &VariableDeps)> = source_vars
+        .iter()
+        .map(|(name, source_var)| {
+            let deps = if module_input_names.is_empty() {
+                variable_direct_dependencies_with_context(
+                    db,
+                    *source_var,
+                    project,
+                    module_ident_context,
+                )
+            } else {
+                variable_direct_dependencies_with_context_and_inputs(
+                    db,
+                    *source_var,
+                    project,
+                    module_ident_context,
+                    module_input_names.clone(),
+                )
+            };
+            (name, deps)
+        })
+        .collect();
+
+    // Map each module-INSTANCE name to its model name, so a `instance·subvar`
+    // dependency can be resolved to the right submodel. A module instance name
+    // is NOT itself a key in `project_models` (keyed by MODEL name). Both
+    // declared module variables (`source_vars`) AND synthesized/implicit module
+    // instances (e.g. a SMOOTH's `$⁚..⁚smth1⁚<elem>`, which live only in a
+    // variable's `implicit_vars`) must be covered, since the
+    // stock-output-reading consumer references the implicit instance's output.
+    let mut module_instance_model: HashMap<String, String> = source_vars
+        .iter()
+        .filter(|(_, sv)| sv.kind(db) == SourceVariableKind::Module)
+        .map(|(n, sv)| (n.clone(), canonicalize(sv.model_name(db)).into_owned()))
+        .collect();
+    for (_, deps) in &var_deps {
+        for implicit in &deps.implicit_vars {
+            if implicit.is_module
+                && let Some(model_name) = &implicit.model_name
+            {
+                module_instance_model
+                    .insert(implicit.name.clone(), canonicalize(model_name).into_owned());
+            }
+        }
+    }
+
+    for (name, deps) in &var_deps {
         let init_only_dt = deps.dt_init_only_referenced_vars.clone();
         let lagged_dt_previous = deps.dt_previous_referenced_vars.clone();
         let lagged_initial_previous = deps.initial_previous_referenced_vars.clone();
-        let kind = source_var.kind(db);
-        let mut dt_deps = if kind == SourceVariableKind::Module {
-            deps.dt_deps
-                .iter()
-                .filter(|dep| {
-                    let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-                    if let Some(dot_pos) = effective.find('\u{00B7}') {
-                        let module_name = &effective[..dot_pos];
-                        let var_name = &effective[dot_pos + '\u{00B7}'.len_utf8()..];
-                        let sub_canonical = canonicalize(module_name);
-                        if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                            let sub_vars = sub_model.variables(db);
-                            if let Some(sub_var) = sub_vars.get(var_name) {
-                                return sub_var.kind(db) != SourceVariableKind::Stock;
-                            }
-                        }
-                        true
-                    } else {
-                        true
+        let kind = source_vars[name.as_str()].kind(db);
+        // A `submodel·subvar` dependency whose `subvar` is a Stock is read
+        // from the PRIOR timestep in the dt phase (a stock breaks the
+        // dependency chain), so it must NOT impose a same-step ordering edge.
+        // This mirrors the legacy `model.rs::module_output_deps` gate
+        // (`if ctx.is_initial || !output_var.is_stock()` -- the dt-phase case
+        // omits the module dependency for a stock output). It applies to EVERY
+        // reader, not just module variables: a NON-module variable that reads
+        // a stock submodel output (e.g. `v = SMOOTH(...)·output`, the SMOOTH
+        // output being an INTEG stock) must likewise drop the dt edge.
+        // Otherwise `normalize_deps` collapses `submodel·output` to the bare
+        // `submodel` module name and the reader gains a spurious `reader ->
+        // module` dt edge; combined with the module being a sink in the cycle
+        // relation (`dt_walk_successors`) but carrying its input src as a
+        // direct dep in `dt_dependencies`, this forms an ordering cycle invisible
+        // to cycle detection that `topo_sort_str` breaks arbitrarily -- sometimes
+        // emitting the module BEFORE its input, so the module reads a stale input
+        // each flows step (C-LEARN's `emissions_with_stopped_growth` drop-to-0,
+        // #591-c1). The init phase keeps the edge (stocks do not break the chain
+        // there), so only `dt_deps` is filtered.
+        let keep_dt_dep = |dep: &str| -> bool {
+            let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
+            if let Some(dot_pos) = effective.find('\u{00B7}') {
+                let module_name = &effective[..dot_pos];
+                let var_name = &effective[dot_pos + '\u{00B7}'.len_utf8()..];
+                // Resolve `module_name` to a submodel: it is either a module
+                // INSTANCE (the common case -- a synthesized stdlib/macro
+                // instance, keyed by its own ident) or, for a nested-module
+                // reference, already a MODEL name. Try the instance map first,
+                // then fall back to a direct model-name lookup.
+                let sub_canonical = canonicalize(module_name);
+                let sub_model = module_instance_model
+                    .get(module_name)
+                    .and_then(|m| project_models.get(m.as_str()))
+                    .or_else(|| project_models.get(sub_canonical.as_ref()));
+                if let Some(sub_model) = sub_model {
+                    let sub_vars = sub_model.variables(db);
+                    if let Some(sub_var) = sub_vars.get(var_name) {
+                        return sub_var.kind(db) != SourceVariableKind::Stock;
                     }
-                })
-                .cloned()
-                .collect()
-        } else {
-            deps.dt_deps.clone()
+                }
+            }
+            true
         };
+        let mut dt_deps: BTreeSet<String> = deps
+            .dt_deps
+            .iter()
+            .filter(|d| keep_dt_dep(d))
+            .cloned()
+            .collect();
         dt_deps.retain(|dep| !init_only_dt.contains(dep));
         dt_deps.retain(|dep| !lagged_dt_previous.contains(dep));
         let mut initial_deps = deps.initial_deps.clone();
         initial_deps.retain(|dep| !lagged_initial_previous.contains(dep));
 
         var_info.insert(
-            name.clone(),
+            (*name).clone(),
             VarInfo {
                 is_stock: kind == SourceVariableKind::Stock,
                 is_module: kind == SourceVariableKind::Module,
@@ -280,7 +336,14 @@ pub(crate) fn build_var_info(
         // ensures that if the deps + implicit vars haven't changed, this
         // function is cached.
         for implicit in &deps.implicit_vars {
-            let mut dt_deps = implicit.dt_deps.clone();
+            // Same stock-submodel-output dt chain-break as above (an implicit
+            // var can also read a stock submodel output).
+            let mut dt_deps: BTreeSet<String> = implicit
+                .dt_deps
+                .iter()
+                .filter(|d| keep_dt_dep(d))
+                .cloned()
+                .collect();
             dt_deps.retain(|dep| !implicit.dt_init_only_referenced_vars.contains(dep));
             dt_deps.retain(|dep| !implicit.dt_previous_referenced_vars.contains(dep));
             let mut initial_deps = implicit.initial_deps.clone();

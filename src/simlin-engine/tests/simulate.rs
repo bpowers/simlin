@@ -4500,3 +4500,92 @@ fn compiles_and_runs_clearn_structural() {
         all_nan.len()
     );
 }
+
+/// Regression for the synthetic-module flows-phase ordering bug behind
+/// C-LEARN's `emissions_with_stopped_growth` (#591-c1): an arrayed
+/// `SAMPLE IF TRUE(cond, SMOOTH(input, dt), init)` whose SMOOTH `input` has a
+/// CURRENT-value (dt-phase) dependency back on the variable itself.
+///
+/// The desugar is `captured[e] = IF cond THEN smth1·output ELSE PREVIOUS(self,
+/// init)`. With the always-true condition the SMOOTH branch is taken every
+/// step; smoothing a constant yields that constant, so every element must hold
+/// its per-element constant (`base[e]`) at every saved step.
+///
+/// The flows-phase cycle `captured -> smth1·output -> smth1(module) -> input ->
+/// captured` is hidden from CYCLE DETECTION because a module is a sink in the
+/// cycle relation (`dt_walk_successors`), so the model compiles (no
+/// `CircularDependency`). But `captured` reads the SMOOTH *stock* output, which
+/// in the dt phase is a prior-timestep read and must NOT impose a same-step
+/// ordering on the module: before the fix, the salsa runlist
+/// (`db_dep_graph::build_var_info` / `topo_sort_str`) kept a `captured ->
+/// smth1` dt edge anyway (the `·output` stock dep was not chain-broken for a
+/// NON-module reader), creating a false ordering cycle that `topo_sort_str`
+/// broke by emitting the SMOOTH module BEFORE its `input` for SOME elements
+/// (the broken element is HashMap-iteration-order-dependent, hence the bug was
+/// also nondeterministic). Those elements then read a stale (0) input each
+/// flows step and decayed to 0 at t>=1 while holding the correct value at t0 --
+/// exactly the C-LEARN `emissions_with_stopped_growth[cop_developing_b]`
+/// symptom (vdf constant, sim drops to 0 at t>=1). The fix chain-breaks a stock
+/// submodel-output dep for every reader in the dt phase (mirroring the legacy
+/// `model.rs::module_output_deps` `!output_var.is_stock()` gate), so no false
+/// ordering cycle forms and every element is ordered input-before-module.
+///
+/// The `input` is a separate `feedback[cop] = ACTIVE INITIAL(captured*0 + base,
+/// base)`, exactly C-LEARN's shape (its `CO2 FF emissions = ACTIVE INITIAL(...,
+/// RS CO2 FF(...))`): the dt (active) branch carries the feedback on `captured`
+/// that triggers the flows-phase bug, while the init branch's deps are only
+/// `base` -- so there is NO init-time algebraic cycle (C-LEARN's emissions has
+/// none either, which is why its t0 always matched). `captured*0` keeps the
+/// numeric value `base` while preserving the structural dt dependency. `apply`
+/// gates the SMOOTH input through an `IF THEN ELSE` so a hoisted per-element
+/// `arg0` helper is synthesized (the exact C-LEARN shape, where the mis-ordered
+/// node was the `arg0` helper feeding the module). Seven elements (a COP-like
+/// dimension) make the order-dependent break observable.
+#[test]
+fn synthetic_module_feedback_input_ordered_before_module() {
+    let mdl = "\
+{UTF-8}
+cop: e0, e1, e2, e3, e4, e5, e6 ~~|
+apply= 2 ~~|
+base[cop]= 100,200,300,400,500,600,700 ~~|
+feedback[cop]= ACTIVE INITIAL(captured[cop]*0 + base[cop], base[cop]) ~~|
+captured[cop]= SAMPLE IF TRUE(Time <= 100, SMOOTH(IF THEN ELSE(apply=1, 0, feedback[cop]), TIME STEP), 0) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 4 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+
+\\\\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,100,0
+10,1,base,150,165,28,8,8,3,0,0,0,0,0,0
+10,2,captured,150,200,28,8,8,3,0,0,0,0,0,0
+///---\\\\\\
+:L<%^E!@
+1:Current.vdf
+";
+    let results = run_inline_mdl(mdl);
+    // Each element must hold its per-element constant base[e] across every
+    // saved step (smoothing a constant). A mis-ordered module reads a stale 0
+    // input and decays to 0 at t>=1 (correct only at t0).
+    let elems = ["e0", "e1", "e2", "e3", "e4", "e5", "e6"];
+    let expected = [100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0];
+    for (e, want) in elems.iter().zip(expected.iter()) {
+        let series = element_series(&results, &format!("captured[{e}]"));
+        assert_eq!(
+            series.len(),
+            results.step_count,
+            "captured[{e}] should have one value per saved step"
+        );
+        for (step, &got) in series.iter().enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "captured[{e}] must hold the smoothed constant {want} at EVERY \
+                 saved step (the SMOOTH input must be ordered before its module \
+                 each flows step); at step {step} got {got}, full series \
+                 {series:?}"
+            );
+        }
+    }
+}
