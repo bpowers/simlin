@@ -226,6 +226,17 @@ fn main() {
         println!("    {name:<22} {count:>9}  {pct:>5.1}%");
     }
 
+    let fused_total: usize = prof.fused_histogram.values().sum();
+    let mut fhist: Vec<_> = prof.fused_histogram.iter().collect();
+    fhist.sort_by(|a, b| b.1.cmp(a.1));
+    println!("  post-fusion flow+stock stream: {fused_total} opcodes; fused-binop counts:");
+    for (name, count) in fhist
+        .iter()
+        .filter(|(n, _)| n.starts_with("Bin") || n.starts_with("Assign"))
+    {
+        println!("    {name:<22} {count:>9}");
+    }
+
     let mut vm = phase("Vm::new", || Vm::new(compiled.clone()).unwrap());
     println!("  variables (offsets): {}", vm.names_as_strs().len());
 

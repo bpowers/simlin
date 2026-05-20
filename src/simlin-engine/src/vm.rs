@@ -1495,6 +1495,209 @@ impl Vm {
                     let rv = bytecode.literals[*r as usize];
                     stack.push(eval_op2(*op, lv, rv));
                 }
+                // === 3-ADDRESS BINARY OPS WITH GLOBAL OPERANDS (R2 extension) ===
+                // A `_global` operand is read from `curr[g]` directly (an
+                // absolute global slot, NO module_off -- like LoadGlobalVar),
+                // while a plain var operand is `curr[module_off + v]` (like
+                // LoadVar). The operand order `l op r` matches the original load
+                // order (load-bearing for Sub/Div).
+                Opcode::BinGlobalVar { l_global, r, op } => {
+                    let lv = curr[*l_global as usize];
+                    let rv = curr[module_off + *r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinVarGlobal { l, r_global, op } => {
+                    let lv = curr[module_off + *l as usize];
+                    let rv = curr[*r_global as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinGlobalConst { l_global, r, op } => {
+                    let lv = curr[*l_global as usize];
+                    let rv = bytecode.literals[*r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinConstGlobal { l, r_global, op } => {
+                    let lv = bytecode.literals[*l as usize];
+                    let rv = curr[*r_global as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinGlobalGlobal {
+                    l_global,
+                    r_global,
+                    op,
+                } => {
+                    let lv = curr[*l_global as usize];
+                    let rv = curr[*r_global as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinStackGlobal { r_global, op } => {
+                    let lv = stack.pop();
+                    let rv = curr[*r_global as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                // Two constant leaves: still evaluated at run time (the operands
+                // are two distinct interned literals, not a folded result).
+                Opcode::BinConstConst { l, r, op } => {
+                    let lv = bytecode.literals[*l as usize];
+                    let rv = bytecode.literals[*r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                // === 3-ADDRESS FUSED LEAF ASSIGNMENTS (R2 extension) ===
+                // `dst = a op b`, operands read straight from curr[]/literals,
+                // result written straight to curr[]/next[]. The operator is in
+                // the opcode tag, so each arm is one straight-line f64 op with no
+                // `eval_op2` branch. The stack is untouched (the original
+                // sequence pushed two operands and popped both into the store),
+                // so it must already be empty -- the same invariant the
+                // BinOpAssign* arms assert.
+                Opcode::AssignAddVarVarCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] + curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignSubVarVarCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] - curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignMulVarVarCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] * curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignDivVarVarCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] / curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignAddVarVarNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] + curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignSubVarVarNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] - curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignMulVarVarNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] * curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignDivVarVarNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] / curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignAddVarConstCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] + bytecode.literals[*r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignSubVarConstCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] - bytecode.literals[*r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignMulVarConstCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] * bytecode.literals[*r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignDivVarConstCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] / bytecode.literals[*r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignAddVarConstNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] + bytecode.literals[*r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignSubVarConstNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] - bytecode.literals[*r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignMulVarConstNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] * bytecode.literals[*r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignDivVarConstNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        curr[module_off + *l as usize] / bytecode.literals[*r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignAddConstVarCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        bytecode.literals[*l as usize] + curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignSubConstVarCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        bytecode.literals[*l as usize] - curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignMulConstVarCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        bytecode.literals[*l as usize] * curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignDivConstVarCurr { l, r, dst } => {
+                    curr[module_off + *dst as usize] =
+                        bytecode.literals[*l as usize] / curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignAddConstVarNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        bytecode.literals[*l as usize] + curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignSubConstVarNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        bytecode.literals[*l as usize] - curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignMulConstVarNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        bytecode.literals[*l as usize] * curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignDivConstVarNext { l, r, dst } => {
+                    next[module_off + *dst as usize] =
+                        bytecode.literals[*l as usize] / curr[module_off + *r as usize];
+                    debug_assert_eq!(0, stack.len());
+                }
+                // === 2-ADDRESS STACK-LEAF FUSED ASSIGNMENTS (R2 extension) ===
+                // `dst = lhs op b`: pop the pre-existing lhs from the stack,
+                // combine it with the leaf rhs (operator in payload), store. The
+                // pop leaves the stack empty, matching the BinOpAssign* invariant.
+                Opcode::AssignStackVarCurr { dst, b, op } => {
+                    let lhs = stack.pop();
+                    let rhs = curr[module_off + *b as usize];
+                    curr[module_off + *dst as usize] = eval_op2(*op, lhs, rhs);
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignStackVarNext { dst, b, op } => {
+                    let lhs = stack.pop();
+                    let rhs = curr[module_off + *b as usize];
+                    next[module_off + *dst as usize] = eval_op2(*op, lhs, rhs);
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignStackConstCurr { dst, b, op } => {
+                    let lhs = stack.pop();
+                    let rhs = bytecode.literals[*b as usize];
+                    curr[module_off + *dst as usize] = eval_op2(*op, lhs, rhs);
+                    debug_assert_eq!(0, stack.len());
+                }
+                Opcode::AssignStackConstNext { dst, b, op } => {
+                    let lhs = stack.pop();
+                    let rhs = bytecode.literals[*b as usize];
+                    next[module_off + *dst as usize] = eval_op2(*op, lhs, rhs);
+                    debug_assert_eq!(0, stack.len());
+                }
                 Opcode::Apply { func } => {
                     let time = curr[TIME_OFF];
                     let dt = curr[DT_OFF];
@@ -3484,9 +3687,12 @@ mod vm_reset_and_run_initials_tests {
     /// Vm's flow/stock bytecode at construction. Uses subtraction and division
     /// (non-commutative) so a swapped operand encoding in any fused form is a
     /// loud failure rather than a silent miscompile. `a`, `b`, `c` are distinct
-    /// variables (not foldable into a literal), so each expression compiles to
-    /// loads + Op2 that the pass folds into BinVarVar / BinVarConst /
-    /// BinConstVar / BinStackVar / BinStackConst.
+    /// variables (not foldable into a literal).
+    ///
+    /// Post-peephole + post-fusion, a *top-level* leaf binop assignment `x = a
+    /// op b` collapses all the way to one register-style leaf-assign op (the R2
+    /// extension), while the inner subexpression of a nested expression stays a
+    /// pushing `BinVarVar` whose result the outer op consumes from the stack.
     #[test]
     fn test_fused_binops_preserve_operand_order() {
         let tp = TestProject::new("fusion_order")
@@ -3494,12 +3700,12 @@ mod vm_reset_and_run_initials_tests {
             .aux("a", "20", None)
             .aux("b", "5", None)
             .aux("c", "2", None)
-            .aux("vv", "a - b", None) // BinVarVar
-            .aux("dvv", "a / b", None) // BinVarVar, division
-            .aux("vc", "a - 3", None) // BinVarConst
-            .aux("cv", "10 - a", None) // BinConstVar
-            .aux("sv", "(a - b) - c", None) // BinVarVar then BinStackVar
-            .aux("sc", "(a - b) - 4", None); // BinVarVar then BinStackConst
+            .aux("vv", "a - b", None) // AssignSubVarVarCurr (leaf assign)
+            .aux("dvv", "a / b", None) // AssignDivVarVarCurr (leaf assign, division)
+            .aux("vc", "a - 3", None) // AssignSubVarConstCurr (leaf assign)
+            .aux("cv", "10 - a", None) // AssignSubConstVarCurr (leaf assign)
+            .aux("sv", "(a - b) - c", None) // BinVarVar then AssignStackVarCurr
+            .aux("sc", "(a - b) - 4", None); // BinVarVar then AssignStackConstCurr
 
         let compiled = build_compiled(&tp);
         let mut vm = Vm::new(compiled).unwrap();
@@ -3520,6 +3726,157 @@ mod vm_reset_and_run_initials_tests {
         assert_eq!(val("cv"), -10.0, "10 - a");
         assert_eq!(val("sv"), 13.0, "(a - b) - c");
         assert_eq!(val("sc"), 11.0, "(a - b) - 4");
+    }
+
+    /// End-to-end guard for the global-operand and two-constant fused binops
+    /// (the R2 extension capturing the leaf-operand loads the original fusion
+    /// missed). All operators are Sub or Div (non-commutative) so a swapped
+    /// operand encoding in any new fused form is a loud failure, not a silent
+    /// miscompile. Each global appears as a leaf operand of a *pushing*
+    /// subexpression (the outer `- c` is the assigning op) so the fusion emits
+    /// the pushing `BinGlobal*` / `BinConstConst` forms rather than a leaf
+    /// assign. The opcode each equation produces is pinned by a sibling
+    /// `bytecode_profile().fused_histogram` assertion so the test cannot pass
+    /// vacuously through the un-fused path.
+    ///
+    /// At step 0: TIME=10, DT=2 (the sim start time and dt -- both globals,
+    /// loaded via LoadGlobalVar), b=5, c=2, e=1.
+    #[test]
+    fn test_fused_global_and_const_binops_preserve_operand_order() {
+        let tp = TestProject::new("global_fusion_order")
+            .with_sim_time(10.0, 20.0, 2.0)
+            .aux("b", "5", None)
+            .aux("c", "2", None)
+            .aux("e", "1", None)
+            .aux("gv", "(TIME - b) - c", None) // BinGlobalVar(Sub) then stack-leaf
+            .aux("vg", "(b / DT) - c", None) // BinVarGlobal(Div)
+            .aux("gc", "(TIME - 3) - c", None) // BinGlobalConst(Sub)
+            .aux("cg", "(3 / DT) - c", None) // BinConstGlobal(Div)
+            .aux("gg", "(TIME - DT) - c", None) // BinGlobalGlobal(Sub)
+            .aux("cc", "(7 - 3) - c", None) // BinConstConst(Sub)
+            .aux("sg", "((b - c) / DT) - e", None); // BinVarVar then BinStackGlobal(Div)
+
+        let compiled = build_compiled(&tp);
+
+        // Pin the fused shape: every new form must actually be emitted, so the
+        // numeric asserts below exercise the fused dispatch arms (not a fallback).
+        let fused = &compiled.bytecode_profile().fused_histogram;
+        for name in [
+            "BinGlobalVar",
+            "BinVarGlobal",
+            "BinGlobalConst",
+            "BinConstGlobal",
+            "BinGlobalGlobal",
+            "BinConstConst",
+            "BinStackGlobal",
+        ] {
+            assert!(
+                fused.get(name).copied().unwrap_or(0) >= 1,
+                "expected at least one {name} in the fused stream; got {fused:?}"
+            );
+        }
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+        let val = |name: &str| -> f64 {
+            let off = *results
+                .offsets
+                .get(&*canonicalize(name))
+                .unwrap_or_else(|| panic!("missing {name}"));
+            results.data[off] // step 0
+        };
+
+        assert_eq!(val("gv"), 3.0, "(TIME - b) - c = (10 - 5) - 2");
+        assert_eq!(val("vg"), 0.5, "(b / DT) - c = (5 / 2) - 2");
+        assert_eq!(val("gc"), 5.0, "(TIME - 3) - c = (10 - 3) - 2");
+        assert_eq!(val("cg"), -0.5, "(3 / DT) - c = (3 / 2) - 2");
+        assert_eq!(val("gg"), 6.0, "(TIME - DT) - c = (10 - 2) - 2");
+        assert_eq!(val("cc"), 2.0, "(7 - 3) - c = (7 - 3) - 2");
+        assert_eq!(val("sg"), 0.5, "((b - c) / DT) - e = ((5 - 2) / 2) - 1");
+    }
+
+    /// The single most dangerous risk for the global-operand fused binops: a
+    /// `_global` operand MUST read `curr[g]` (an absolute global slot), NOT
+    /// `curr[module_off + g]`. They are the same slot only at the root
+    /// (`module_off == 0`); inside a submodule they differ, so a `module_off + g`
+    /// miscompile is invisible at the root but corrupts every submodule.
+    ///
+    /// This builds a real two-model project: `main` instantiates `sub`, whose
+    /// body computes `gv = (TIME - b) - c` (a `BinGlobalVar`) and
+    /// `vg = (b / DT) - c` (a `BinVarGlobal`) where `module_off > 0`. With
+    /// TIME=10, DT=2 (the sim start/dt globals at curr[0]/curr[1]) and the
+    /// submodule's own b=5, c=2, the correct values are gv=3, vg=0.5. The
+    /// submodule's slots 0/1 hold its own variables (curr[module_off+0/1]), whose
+    /// values differ from the globals, so a `module_off`-relative read would
+    /// produce different numbers.
+    #[test]
+    fn test_global_operand_binop_reads_global_not_module_relative() {
+        use crate::datamodel;
+        use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+        use crate::testutils::{x_aux, x_model, x_module, x_project};
+
+        let sim_specs = datamodel::SimSpecs {
+            start: 10.0,
+            stop: 12.0,
+            dt: datamodel::Dt::Dt(2.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        };
+
+        // `sub` is instantiated by `main`, so its variables live at module_off>0.
+        // `b`/`c` are plain auxes (module_off-relative LoadVar operands); TIME/DT
+        // are globals (LoadGlobalVar operands at curr[0]/curr[1]).
+        let main = x_model("main", vec![x_module("sub", &[], None)]);
+        let sub = x_model(
+            "sub",
+            vec![
+                x_aux("b", "5", None),
+                x_aux("c", "2", None),
+                x_aux("gv", "(TIME - b) - c", None),
+                x_aux("vg", "(b / DT) - c", None),
+            ],
+        );
+        let datamodel = x_project(sim_specs, &[main, sub]);
+
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("two-model project should compile");
+
+        // Confirm the fused global ops were actually emitted (inside the
+        // submodule), so the dispatch path under test is exercised.
+        let fused = &compiled.bytecode_profile().fused_histogram;
+        assert!(
+            fused.get("BinGlobalVar").copied().unwrap_or(0) >= 1,
+            "expected a BinGlobalVar in the submodule's fused stream; got {fused:?}"
+        );
+        assert!(
+            fused.get("BinVarGlobal").copied().unwrap_or(0) >= 1,
+            "expected a BinVarGlobal in the submodule's fused stream; got {fused:?}"
+        );
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+        let series = crate::test_common::collect_results(&results);
+
+        // Submodule variables are reported under their qualified (middot-joined)
+        // `sub·<name>` names. A module_off-relative read of TIME/DT would yield
+        // other numbers.
+        let gv = series
+            .get("sub\u{b7}gv")
+            .unwrap_or_else(|| panic!("missing sub\u{b7}gv; have {:?}", series.keys()));
+        let vg = series.get("sub\u{b7}vg").expect("missing sub\u{b7}vg");
+        assert_eq!(
+            gv[0], 3.0,
+            "(TIME - b) - c = (10 - 5) - 2 -- TIME must be the global, not curr[module_off]"
+        );
+        assert_eq!(
+            vg[0], 0.5,
+            "(b / DT) - c = (5 / 2) - 2 -- DT must be the global, not curr[module_off+1]"
+        );
     }
 
     #[test]
@@ -3845,543 +4202,8 @@ mod vm_reset_and_run_initials_tests {
 }
 
 #[cfg(test)]
-mod set_value_tests {
-    use super::*;
-    use crate::test_common::TestProject;
-
-    /// Model: rate=0.1, scaled_rate=rate*10, stock initial=scaled_rate.
-    /// `rate` and `scaled_rate` are both stock dependencies in the initials.
-    fn rate_model() -> TestProject {
-        TestProject::new("rate_model")
-            .with_sim_time(0.0, 10.0, 1.0)
-            .aux("rate", "0.1", None)
-            .aux("scaled_rate", "rate * 10", None)
-            .flow("inflow", "population * rate", None)
-            .flow("outflow", "population / 80", None)
-            .stock("population", "scaled_rate", &["inflow"], &["outflow"], None)
-    }
-
-    fn build_compiled(tp: &TestProject) -> CompiledSimulation {
-        tp.compile_incremental()
-            .expect("incremental compile should succeed")
-    }
-
-    #[test]
-    fn test_override_constant_flows_through_dependent_initials() {
-        let compiled = build_compiled(&rate_model());
-        let mut vm = Vm::new(compiled).unwrap();
-
-        // Override rate from 0.1 to 0.2
-        vm.set_value(&Ident::new("rate"), 0.2).unwrap();
-        vm.run_initials().unwrap();
-
-        let rate_off = vm.get_offset(&Ident::new("rate")).unwrap();
-        let sr_off = vm.get_offset(&Ident::new("scaled_rate")).unwrap();
-        let pop_off = vm.get_offset(&Ident::new("population")).unwrap();
-
-        assert_eq!(
-            vm.get_value_now(rate_off),
-            0.2,
-            "rate should be overridden to 0.2"
-        );
-        assert_eq!(
-            vm.get_value_now(sr_off),
-            2.0,
-            "scaled_rate = rate*10 = 0.2*10 = 2.0"
-        );
-        assert_eq!(
-            vm.get_value_now(pop_off),
-            2.0,
-            "population initial = scaled_rate = 2.0"
-        );
-    }
-
-    #[test]
-    fn test_override_affects_simulation_results() {
-        let compiled = build_compiled(&rate_model());
-
-        // Run without override
-        let mut vm1 = Vm::new(compiled.clone()).unwrap();
-        vm1.run_to_end().unwrap();
-        let series1 = vm1.get_series(&Ident::new("population")).unwrap();
-
-        // Run with override: higher rate means more growth
-        let mut vm2 = Vm::new(compiled).unwrap();
-        vm2.set_value(&Ident::new("rate"), 0.2).unwrap();
-        vm2.run_to_end().unwrap();
-        let series2 = vm2.get_series(&Ident::new("population")).unwrap();
-
-        assert!(
-            series2.last().unwrap() > series1.last().unwrap(),
-            "higher rate should produce higher final population: {} vs {}",
-            series2.last().unwrap(),
-            series1.last().unwrap()
-        );
-
-        // Verify the override affects flows: rate should be 0.2 throughout
-        let rate_series = vm2.get_series(&Ident::new("rate")).unwrap();
-        for (i, &val) in rate_series.iter().enumerate() {
-            assert!(
-                (val - 0.2).abs() < 1e-10,
-                "rate should be 0.2 at every step, got {} at step {}",
-                val,
-                i
-            );
-        }
-    }
-
-    #[test]
-    fn test_override_persists_across_reset() {
-        let compiled = build_compiled(&rate_model());
-        let mut vm = Vm::new(compiled).unwrap();
-
-        vm.set_value(&Ident::new("rate"), 0.2).unwrap();
-        vm.run_to_end().unwrap();
-        let series_before = vm.get_series(&Ident::new("population")).unwrap();
-
-        vm.reset();
-        vm.run_to_end().unwrap();
-        let series_after = vm.get_series(&Ident::new("population")).unwrap();
-
-        for (i, (a, b)) in series_before.iter().zip(series_after.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-10,
-                "override should persist across reset: step {i}: {a} vs {b}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_clear_values_restores_defaults() {
-        let compiled = build_compiled(&rate_model());
-
-        // Baseline run
-        let mut vm_baseline = Vm::new(compiled.clone()).unwrap();
-        vm_baseline.run_to_end().unwrap();
-        let baseline = vm_baseline.get_series(&Ident::new("population")).unwrap();
-
-        // Run with override
-        let mut vm = Vm::new(compiled).unwrap();
-        vm.set_value(&Ident::new("rate"), 0.5).unwrap();
-        vm.run_to_end().unwrap();
-        let overridden = vm.get_series(&Ident::new("population")).unwrap();
-
-        // Clear and re-run
-        vm.clear_values();
-        vm.reset();
-        vm.run_to_end().unwrap();
-        let restored = vm.get_series(&Ident::new("population")).unwrap();
-
-        // Overridden should differ from baseline
-        assert!(
-            (overridden.last().unwrap() - baseline.last().unwrap()).abs() > 1.0,
-            "overridden should differ from baseline"
-        );
-        // Restored should match baseline
-        for (i, (b, r)) in baseline.iter().zip(restored.iter()).enumerate() {
-            assert!(
-                (b - r).abs() < 1e-10,
-                "after clear_values, should match baseline: step {i}: {b} vs {r}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_multiple_reset_set_value_cycles() {
-        let compiled = build_compiled(&rate_model());
-        let mut vm = Vm::new(compiled).unwrap();
-
-        let mut prev_final = 0.0;
-        for i in 1..=10 {
-            let rate_val = i as f64 * 0.01;
-            vm.set_value(&Ident::new("rate"), rate_val).unwrap();
-            vm.reset();
-            vm.run_to_end().unwrap();
-            let series = vm.get_series(&Ident::new("population")).unwrap();
-            let final_val = *series.last().unwrap();
-            if i > 1 {
-                assert!(
-                    final_val > prev_final,
-                    "final pop should increase with rate: rate={rate_val}, final={final_val}, prev={prev_final}"
-                );
-            }
-            prev_final = final_val;
-        }
-    }
-
-    #[test]
-    fn test_override_nonexistent_variable_returns_error() {
-        let compiled = build_compiled(&rate_model());
-        let mut vm = Vm::new(compiled).unwrap();
-        let result = vm.set_value(&Ident::new("nonexistent_var"), 1.0);
-        assert!(
-            result.is_err(),
-            "overriding nonexistent variable should fail"
-        );
-    }
-
-    #[test]
-    fn test_set_value_returns_correct_offset() {
-        let compiled = build_compiled(&rate_model());
-        let mut vm = Vm::new(compiled).unwrap();
-        let rate_ident = Ident::new("rate");
-
-        let expected_off = vm.get_offset(&rate_ident).unwrap();
-        let returned_off = vm.set_value(&rate_ident, 0.5).unwrap();
-        assert_eq!(
-            returned_off, expected_off,
-            "set_value should return the data-buffer offset of the variable"
-        );
-    }
-
-    #[test]
-    fn test_override_by_offset_out_of_bounds_returns_error() {
-        let compiled = build_compiled(&rate_model());
-        let mut vm = Vm::new(compiled).unwrap();
-        let err = vm.set_value_by_offset(99999, 1.0).unwrap_err();
-        assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
-    }
-
-    #[test]
-    fn test_set_value_non_constant_variable_returns_error() {
-        // `births = pop * birth_rate` is a computed flow, not a simple constant
-        let tp = TestProject::new("non_constant_override")
-            .with_sim_time(0.0, 10.0, 1.0)
-            .aux("birth_rate", "0.1", None)
-            .flow("births", "pop * birth_rate", None)
-            .stock("pop", "100", &["births"], &[], None);
-
-        let compiled = tp.compile_incremental().unwrap();
-        let mut vm = Vm::new(compiled).unwrap();
-
-        // birth_rate IS a simple constant, so set_value should succeed
-        vm.set_value(&Ident::new("birth_rate"), 0.5).unwrap();
-
-        // births is a computed flow (not a constant), so set_value should fail
-        let err = vm.set_value(&Ident::new("births"), 42.0).unwrap_err();
-        assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
-    }
-
-    #[test]
-    fn test_set_value_non_constant_returns_error() {
-        let tp = TestProject::new("non_constant_set")
-            .with_sim_time(0.0, 10.0, 1.0)
-            .aux("rate", "0.1", None)
-            .aux("computed", "rate * 10", None)
-            .flow("inflow", "pop * rate", None)
-            .stock("pop", "100", &["inflow"], &[], None);
-
-        let compiled = tp.compile_incremental().unwrap();
-        let mut vm = Vm::new(compiled).unwrap();
-
-        // "computed" depends on "rate", so it's not a simple constant
-        let err = vm.set_value(&Ident::new("computed"), 5.0).unwrap_err();
-        assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
-
-        // Stocks also cannot be set via set_value
-        let err = vm.set_value(&Ident::new("pop"), 500.0).unwrap_err();
-        assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
-    }
-
-    #[test]
-    fn test_set_value_after_initials_affects_flows_but_not_stock_initials() {
-        let compiled = build_compiled(&rate_model());
-        let mut vm = Vm::new(compiled).unwrap();
-
-        // Run initials first (stock initial = scaled_rate = rate*10 = 1.0)
-        vm.run_initials().unwrap();
-
-        // Set value AFTER initials
-        vm.set_value(&Ident::new("rate"), 0.5).unwrap();
-
-        // The stock initial is already set (from rate=0.1), but flows will use rate=0.5
-        vm.run_to_end().unwrap();
-        let series1 = vm.get_series(&Ident::new("population")).unwrap();
-
-        // Now reset and run - BOTH initials and flows use rate=0.5
-        vm.reset();
-        vm.run_to_end().unwrap();
-        let series2 = vm.get_series(&Ident::new("population")).unwrap();
-
-        // series1 used rate=0.1 for initials but rate=0.5 for flows
-        // series2 used rate=0.5 for both
-        // They should differ (different initial stock values)
-        assert!(
-            (series1[0] - series2[0]).abs() > 0.1,
-            "initial stock values should differ: first={}, second={}",
-            series1[0],
-            series2[0]
-        );
-    }
-
-    #[test]
-    fn test_conflicting_writes_to_same_offset() {
-        let compiled = build_compiled(&rate_model());
-        let mut vm = Vm::new(compiled).unwrap();
-
-        let rate_off = vm.get_offset(&Ident::new("rate")).unwrap();
-
-        // Two writes to the same offset - last one wins
-        vm.set_value_by_offset(rate_off, 0.1).unwrap();
-        vm.set_value_by_offset(rate_off, 0.3).unwrap();
-
-        vm.run_initials().unwrap();
-        assert_eq!(vm.get_value_now(rate_off), 0.3, "last override should win");
-    }
-
-    #[test]
-    fn test_set_value_module_stock_returns_error() {
-        let test_file = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx"
-        );
-        let file_bytes =
-            std::fs::read(test_file).expect("modules_hares_and_foxes test fixture must exist");
-        let mut cursor = std::io::Cursor::new(file_bytes);
-        let project_datamodel = crate::open_xmile(&mut cursor).unwrap();
-        let mut db = crate::db::SimlinDb::default();
-        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project_datamodel, None);
-        let compiled = crate::db::compile_project_incremental(&db, sync.project, "main").unwrap();
-
-        let mut vm = Vm::new(compiled).unwrap();
-        let hares_ident = Ident::new("hares.hares");
-        assert!(
-            vm.get_offset(&hares_ident).is_some(),
-            "hares·hares should exist in offsets"
-        );
-        // Stocks are not simple constants, so set_value should fail
-        let err = vm.set_value(&hares_ident, 500.0).unwrap_err();
-        assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
-    }
-
-    #[test]
-    fn test_override_partial_array() {
-        let tp = TestProject::new("array_override")
-            .with_sim_time(0.0, 1.0, 1.0)
-            .named_dimension("Dim", &["A", "B", "C"])
-            .array_with_ranges("arr[Dim]", vec![("A", "1"), ("B", "2"), ("C", "3")])
-            .aux("total", "arr[A] + arr[B] + arr[C]", None)
-            .flow("inflow", "0", None)
-            .stock("s", "total", &["inflow"], &[], None);
-
-        let compiled = tp.compile_incremental().unwrap();
-        let mut vm = Vm::new(compiled).unwrap();
-
-        let arr_b_ident = Ident::new("arr[b]");
-        let arr_b_off = vm
-            .get_offset(&arr_b_ident)
-            .expect("arr[b] should exist in offsets");
-        vm.set_value_by_offset(arr_b_off, 99.0).unwrap();
-        vm.run_initials().unwrap();
-        assert_eq!(
-            vm.get_value_now(arr_b_off),
-            99.0,
-            "arr[b] should be overridden to 99"
-        );
-        let s_off = vm.get_offset(&Ident::new("s")).unwrap();
-        // total = arr[A]+arr[B]+arr[C] = 1+99+3 = 103
-        assert_eq!(
-            vm.get_value_now(s_off),
-            103.0,
-            "stock should reflect overridden array element: 1+99+3=103"
-        );
-    }
-
-    #[test]
-    fn test_set_value_affects_flow_computation() {
-        // Model where birth_rate is ONLY used in flows (not in stock initial)
-        let tp = TestProject::new("flow_only_constant")
-            .with_sim_time(0.0, 10.0, 1.0)
-            .aux("birth_rate", "0.1", None)
-            .flow("births", "pop * birth_rate", None)
-            .stock("pop", "100", &["births"], &[], None);
-
-        let compiled = tp.compile_incremental().unwrap();
-
-        // Run without override
-        let mut vm1 = Vm::new(compiled.clone()).unwrap();
-        vm1.run_to_end().unwrap();
-        let series1 = vm1.get_series(&Ident::new("pop")).unwrap();
-
-        // Run with override
-        let mut vm2 = Vm::new(compiled).unwrap();
-        vm2.set_value(&Ident::new("birth_rate"), 0.5).unwrap();
-        vm2.run_to_end().unwrap();
-        let series2 = vm2.get_series(&Ident::new("pop")).unwrap();
-
-        // Higher birth_rate should produce higher final population
-        assert!(
-            series2.last().unwrap() > series1.last().unwrap(),
-            "higher birth_rate should produce higher final population: {} vs {}",
-            series2.last().unwrap(),
-            series1.last().unwrap()
-        );
-
-        // Verify birth_rate shows the overridden value
-        let br_series = vm2.get_series(&Ident::new("birth_rate")).unwrap();
-        for (i, &val) in br_series.iter().enumerate() {
-            assert!(
-                (val - 0.5).abs() < 1e-10,
-                "birth_rate should be 0.5 at step {}, got {}",
-                i,
-                val
-            );
-        }
-    }
-
-    #[test]
-    fn test_override_does_not_corrupt_shared_literal() {
-        // Two constants with the same numeric value used to share an interned
-        // literal_id. Now they get distinct slots via push_named_literal.
-        // Overriding one must NOT affect the other.
-        let tp = TestProject::new("shared_literal")
-            .with_sim_time(0.0, 5.0, 1.0)
-            .aux("rate_a", "0.1", None)
-            .aux("rate_b", "0.1", None)
-            .aux("total_rate", "rate_a + rate_b", None)
-            .flow("inflow", "stock_val * total_rate", None)
-            .stock("stock_val", "100", &["inflow"], &[], None);
-
-        let compiled = tp.compile_incremental().unwrap();
-        let mut vm = Vm::new(compiled).unwrap();
-
-        // Override rate_a only, then run the full simulation
-        vm.set_value(&Ident::new("rate_a"), 0.5).unwrap();
-        vm.run_to_end().unwrap();
-
-        let rate_a_series = vm.get_series(&Ident::new("rate_a")).unwrap();
-        let rate_b_series = vm.get_series(&Ident::new("rate_b")).unwrap();
-
-        for (i, &val) in rate_a_series.iter().enumerate() {
-            assert!(
-                (val - 0.5).abs() < 1e-10,
-                "rate_a should be 0.5 at step {i}, got {val}"
-            );
-        }
-        for (i, &val) in rate_b_series.iter().enumerate() {
-            assert!(
-                (val - 0.1).abs() < 1e-10,
-                "rate_b should remain 0.1 at step {i}, got {val} (must not be corrupted by rate_a override)"
-            );
-        }
-    }
-
-    #[test]
-    fn test_override_does_not_corrupt_expression_literal() {
-        // A constant and an expression both use the same numeric value 0.1.
-        // Overriding the constant must not corrupt the expression's literal.
-        let tp = TestProject::new("expr_literal")
-            .with_sim_time(0.0, 5.0, 1.0)
-            .aux("rate", "0.1", None)
-            .aux("scaled", "stock_val * 0.1", None)
-            .flow("inflow", "stock_val * rate + scaled", None)
-            .stock("stock_val", "100", &["inflow"], &[], None);
-
-        let compiled = tp.compile_incremental().unwrap();
-        let mut vm = Vm::new(compiled).unwrap();
-
-        vm.set_value(&Ident::new("rate"), 0.9).unwrap();
-        vm.run_to_end().unwrap();
-
-        let scaled_series = vm.get_series(&Ident::new("scaled")).unwrap();
-        // At t=0, stock_val = 100, so scaled = 100 * 0.1 = 10.0
-        // If the literal 0.1 was corrupted to 0.9, scaled would be 90.0
-        assert!(
-            (scaled_series[0] - 10.0).abs() < 1e-10,
-            "scaled should be 10.0 at t=0 (the 0.1 literal in the expression must not be corrupted), got {}",
-            scaled_series[0]
-        );
-    }
-
-    #[test]
-    fn test_same_valued_constants_get_distinct_literal_ids() {
-        // Two constants with the same numeric value should get distinct literal
-        // slots in their AssignConstCurr opcodes (via push_named_literal).
-        let tp = TestProject::new("distinct_lits")
-            .with_sim_time(0.0, 1.0, 1.0)
-            .aux("rate_a", "0.1", None)
-            .aux("rate_b", "0.1", None)
-            .flow("inflow", "rate_a + rate_b", None)
-            .stock("s", "0", &["inflow"], &[], None);
-
-        let compiled = tp.compile_incremental().unwrap();
-        let root_module = &compiled.modules[&compiled.root];
-
-        // Collect all AssignConstCurr literal_ids from the flows bytecode.
-        let assign_const_lits: Vec<u16> = root_module
-            .compiled_flows
-            .code
-            .iter()
-            .filter_map(|op| {
-                if let Opcode::AssignConstCurr { literal_id, .. } = op {
-                    Some(*literal_id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // rate_a and rate_b each get their own AssignConstCurr with distinct literal_ids.
-        assert!(
-            assign_const_lits.len() >= 2,
-            "expected at least 2 AssignConstCurr opcodes, got {}",
-            assign_const_lits.len()
-        );
-        // All literal_ids should be unique (no sharing).
-        let unique: std::collections::HashSet<u16> = assign_const_lits.iter().copied().collect();
-        assert_eq!(
-            unique.len(),
-            assign_const_lits.len(),
-            "literal_ids should all be distinct, got {:?}",
-            assign_const_lits
-        );
-    }
-
-    #[test]
-    fn test_override_shared_literal_clear_restores_both() {
-        let tp = TestProject::new("shared_clear")
-            .with_sim_time(0.0, 5.0, 1.0)
-            .aux("rate_a", "0.1", None)
-            .aux("rate_b", "0.1", None)
-            .flow("inflow", "rate_a + rate_b", None)
-            .stock("s", "rate_a + rate_b", &["inflow"], &[], None);
-
-        let compiled = tp.compile_incremental().unwrap();
-        let mut vm = Vm::new(compiled).unwrap();
-
-        vm.set_value(&Ident::new("rate_a"), 0.5).unwrap();
-        vm.run_to_end().unwrap();
-
-        let rate_a_series = vm.get_series(&Ident::new("rate_a")).unwrap();
-        let rate_b_series = vm.get_series(&Ident::new("rate_b")).unwrap();
-        assert!(
-            (rate_a_series[0] - 0.5).abs() < 1e-10,
-            "rate_a should be 0.5"
-        );
-        assert!(
-            (rate_b_series[0] - 0.1).abs() < 1e-10,
-            "rate_b should be 0.1"
-        );
-
-        // Clear and re-run
-        vm.clear_values();
-        vm.reset();
-        vm.run_to_end().unwrap();
-
-        let rate_a_restored = vm.get_series(&Ident::new("rate_a")).unwrap();
-        let rate_b_restored = vm.get_series(&Ident::new("rate_b")).unwrap();
-        assert!(
-            (rate_a_restored[0] - 0.1).abs() < 1e-10,
-            "rate_a should be restored to 0.1, got {}",
-            rate_a_restored[0]
-        );
-        assert!(
-            (rate_b_restored[0] - 0.1).abs() < 1e-10,
-            "rate_b should still be 0.1, got {}",
-            rate_b_restored[0]
-        );
-    }
-}
+#[path = "vm_set_value_tests.rs"]
+mod set_value_tests;
 
 #[cfg(test)]
 mod stack_tests {
@@ -4535,10 +4357,17 @@ mod superinstruction_tests {
 
     // -----------------------------------------------------------------------
     // BinOpAssignCurr: e.g. `births = population * birth_rate`
+    //
+    // The peephole pass folds `Op2(Mul); AssignCurr` into `BinOpAssignCurr`, but
+    // the later 3-address fusion (R2 extension) -- which runs on the Vm's
+    // execution copy that `flow_opcodes` reads -- folds the whole leaf assign
+    // `result = rate * 2` (a var times a const) into the register-style
+    // `AssignMulVarConstCurr`. So `BinOpAssignCurr` is the *intermediate* form;
+    // the fused stream carries the operator-specialized leaf assign instead.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_binop_assign_curr_present_in_bytecode() {
+    fn test_binop_assign_curr_fuses_to_leaf_assign() {
         let tp = TestProject::new("binop_model")
             .with_sim_time(0.0, 1.0, 1.0)
             .aux("rate", "0.1", None)
@@ -4548,12 +4377,21 @@ mod superinstruction_tests {
 
         let vm = build_vm(&tp);
         let ops = flow_opcodes(&vm);
-        let has_binop_curr = ops
+        let has_leaf_mul = ops
             .iter()
-            .any(|op| matches!(op, Opcode::BinOpAssignCurr { .. }));
+            .any(|op| matches!(op, Opcode::AssignMulVarConstCurr { .. }));
         assert!(
-            has_binop_curr,
-            "binary operation with assign should produce BinOpAssignCurr"
+            has_leaf_mul,
+            "`result = rate * 2` should fuse to AssignMulVarConstCurr in the \
+             execution stream, got {:?}",
+            ops.iter().map(|o| o.name()).collect::<Vec<_>>()
+        );
+        // The intermediate `BinOpAssignCurr` must NOT survive into the fused
+        // stream for an {Add,Sub,Mul,Div} leaf assign.
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, Opcode::BinOpAssignCurr { .. })),
+            "BinOpAssignCurr should have been superseded by the leaf-assign form"
         );
     }
 
@@ -4974,6 +4812,114 @@ mod superinstruction_tests {
             "s at step 3 should be 33, got {}",
             vm_s[3]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // R2 extension: fused leaf assignments (3->1) and stack-leaf assigns (2->1)
+    // -----------------------------------------------------------------------
+
+    /// Asserts the *actual fused opcodes* of the leaf-assign and stack-leaf-assign
+    /// forms, not just the numeric result. The fused stream lives on the Vm's
+    /// `sliced_sim` execution copy (the one `flow_opcodes` reads). Sub/Div are
+    /// non-commutative, so a swapped `l`/`r` encoding would also change the result.
+    #[test]
+    fn test_fused_leaf_assign_opcodes_present_in_flow_bytecode() {
+        let tp = TestProject::new("leaf_assign_opcodes")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "20", None)
+            .aux("b", "5", None)
+            .aux("c", "2", None)
+            .aux("vv", "a - b", None)
+            .aux("dvv", "a / b", None)
+            .aux("vc", "a - 3", None)
+            .aux("cv", "10 - a", None)
+            .aux("sv", "(a - b) - c", None)
+            .aux("scn", "(a / b) / 2", None);
+
+        let vm = build_vm(&tp);
+        let ops = flow_opcodes(&vm);
+
+        // Leaf-assign forms (3->1) for the top-level binops.
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Opcode::AssignSubVarVarCurr { .. })),
+            "`vv = a - b` should fuse to AssignSubVarVarCurr"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Opcode::AssignDivVarVarCurr { .. })),
+            "`dvv = a / b` should fuse to AssignDivVarVarCurr"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Opcode::AssignSubVarConstCurr { .. })),
+            "`vc = a - 3` should fuse to AssignSubVarConstCurr"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Opcode::AssignSubConstVarCurr { .. })),
+            "`cv = 10 - a` should fuse to AssignSubConstVarCurr"
+        );
+        // Stack-leaf forms (2->1) for the outer op of a nested expression.
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Opcode::AssignStackVarCurr { op: Op2::Sub, .. })),
+            "`sv = (a - b) - c` outer op should fuse to AssignStackVarCurr"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Opcode::AssignStackConstCurr { op: Op2::Div, .. })),
+            "`scn = (a / b) / 2` outer op should fuse to AssignStackConstCurr"
+        );
+
+        let res = tp.run_vm().unwrap();
+        assert_eq!(res["vv"][0], 15.0, "a - b");
+        assert_eq!(res["dvv"][0], 4.0, "a / b");
+        assert_eq!(res["vc"][0], 17.0, "a - 3");
+        assert_eq!(res["cv"][0], -10.0, "10 - a");
+        assert_eq!(res["sv"][0], 13.0, "(a - b) - c");
+        // Discriminating value for stack-leaf Div order: (20/5)/2 = 2, whereas a
+        // swapped 2/(20/5) would be 0.5.
+        assert_eq!(res["scn"][0], 2.0, "(a / b) / 2 = (20/5)/2 = 2");
+    }
+
+    /// Stock integration `stock' = stock + flow * dt` exercises the *Next* family
+    /// of fused assigns in the stock bytecode: guards that a Next variant writes
+    /// `next[]` (not `curr[]`) and the integration is numerically correct.
+    #[test]
+    fn test_fused_leaf_assign_next_in_stock_bytecode() {
+        let tp = TestProject::new("leaf_assign_next")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("inflow", "3", None)
+            .stock("s", "10", &["inflow"], &[], None);
+
+        let vm = build_vm(&tp);
+        let ops = stock_opcodes(&vm);
+        // The update `s' = s + inflow*dt` produces some Next-family assign (the
+        // exact variant depends on emission order; this guards that *a* fused or
+        // unfused Next store is present and the result is exact).
+        let has_next_form = ops.iter().any(|op| {
+            matches!(
+                op,
+                Opcode::AssignStackVarNext { .. }
+                    | Opcode::AssignStackConstNext { .. }
+                    | Opcode::AssignAddVarVarNext { .. }
+                    | Opcode::AssignAddConstVarNext { .. }
+                    | Opcode::AssignAddVarConstNext { .. }
+                    | Opcode::BinOpAssignNext { .. }
+            )
+        });
+        assert!(
+            has_next_form,
+            "stock integration should produce a Next-family assign, got {:?}",
+            ops.iter().map(|o| o.name()).collect::<Vec<_>>()
+        );
+
+        // s(0)=10, s(1)=13, s(2)=16.
+        let res = tp.run_vm().unwrap();
+        assert_eq!(res["s"][0], 10.0);
+        assert_eq!(res["s"][1], 13.0);
+        assert_eq!(res["s"][2], 16.0);
     }
 }
 
