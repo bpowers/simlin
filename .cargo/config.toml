@@ -1,0 +1,17 @@
+# Force the WASM bundle back to size-optimized codegen.
+#
+# `[profile.release]` (in the workspace Cargo.toml) is `opt-level = 3` so native
+# binaries (CLI, server, MCP, pysimlin's libsimlin, C FFI) optimize for speed.
+# The browser WASM bundle is dominated by download size, not CPU, so we override
+# the opt-level for the wasm32 target here. Keying this on the *target* (rather
+# than passing a flag in each build script) means every wasm build path -- the
+# `cargo build --target wasm32-unknown-unknown` in src/engine/build.sh, any
+# future wasm-pack invocation, etc. -- stays size-optimized automatically.
+#
+# Caveat: a `RUSTFLAGS` *environment variable* takes precedence over and replaces
+# these target rustflags (Cargo does not merge the two). Today only the asan test
+# scripts set RUSTFLAGS, and they build for the host, so the wasm bundle is
+# unaffected. Do not set RUSTFLAGS during a wasm release build or it will pick up
+# opt-level 3.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "opt-level=z"]

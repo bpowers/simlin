@@ -37,9 +37,11 @@ def build_libsimlin() -> Path:
     project_root = Path(__file__).parent.parent.parent.parent
     libsimlin_dir = project_root / "libsimlin"
     
-    # Build the library
+    # Build the library. The mimalloc feature swaps in mimalloc as the global
+    # allocator: the engine compile path is allocation-heavy and mimalloc roughly
+    # halves allocator time on native builds (docs/design/engine-performance.md).
     subprocess.run(
-        ["cargo", "build", "--release"],
+        ["cargo", "build", "--release", "--features", "mimalloc"],
         cwd=libsimlin_dir,
         check=True
     )

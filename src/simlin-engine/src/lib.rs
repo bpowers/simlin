@@ -108,6 +108,9 @@ mod units_infer;
 mod variable;
 pub mod vdf;
 mod vm;
+// Bytecode-composition profiling for CompiledSimulation; a diagnostics-only
+// sibling of `vm` kept separate purely for the per-file line cap.
+mod vm_profile;
 mod vm_vector_elm_map;
 mod vm_vector_sort_order;
 pub mod xmile;
@@ -123,6 +126,7 @@ pub use self::variable::{
     DepClassification, Variable, classify_dependencies, identifier_set, previous_referenced_idents,
 };
 pub use self::vm::{CompiledSimulation, Vm};
+pub use self::vm_profile::BytecodeProfile;
 
 // Re-export compat functions at the crate root for convenience
 #[cfg(feature = "xmutil")]

@@ -9,8 +9,8 @@ use smallvec::SmallVec;
 
 use crate::alloc::allocate_available;
 use crate::bytecode::{
-    BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode,
-    ModuleId, Op2, Opcode, RuntimeView, STACK_CAPACITY, TempId,
+    BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode, Op2,
+    Opcode, RuntimeView, STACK_CAPACITY, TempId,
 };
 use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::dimensions::match_dimensions_two_pass;
@@ -169,22 +169,38 @@ impl CompiledSimulation {
     }
 }
 
-/// Per-module compiled initials with the shared ByteCodeContext needed to eval them.
+/// One unique compiled module (a distinct `(model_name, input_set)`), holding
+/// its three phase programs plus the resolved child-module indices for its
+/// `EvalModule` opcodes.
+///
+/// `child_targets[decl_id]` is the index into `CompiledSlicedSimulation.modules`
+/// of the module that `context.modules[decl_id]` instantiates. Resolving these
+/// once at `Vm::new` lets the `EvalModule` opcode do a plain array index in the
+/// hot loop instead of cloning a `(String, BTreeSet<String>)` key and SipHashing
+/// it for a `HashMap` lookup on every module evaluation, every timestep.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
-struct CompiledModuleInitials {
+struct ResolvedModule {
     #[allow(dead_code)]
     ident: Ident<Canonical>,
     context: Arc<ByteCodeContext>,
     initials: Arc<Vec<CompiledInitial>>,
+    flows: Arc<ByteCode>,
+    stocks: Arc<ByteCode>,
+    child_targets: Vec<u32>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 struct CompiledSlicedSimulation {
-    initial_modules: HashMap<ModuleKey, CompiledModuleInitials>,
-    flow_modules: HashMap<ModuleKey, CompiledModuleSlice>,
-    stock_modules: HashMap<ModuleKey, CompiledModuleSlice>,
+    /// All unique compiled modules, indexed by the integer ids stored in
+    /// `child_targets` (and `root_idx`).
+    modules: Vec<ResolvedModule>,
+    root_idx: usize,
+    /// `ModuleKey` -> module index. Used only by the cold `set_value` /
+    /// `clear_values` literal-override paths (which still address modules by
+    /// key via `BytecodeLocation`); never consulted in the hot eval loop.
+    key_to_idx: HashMap<ModuleKey, u32>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -209,7 +225,6 @@ fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64
 #[derive(Clone)]
 pub struct Vm {
     specs: Specs,
-    root: ModuleKey,
     offsets: HashMap<Ident<Canonical>, usize>,
     sliced_sim: CompiledSlicedSimulation,
     n_slots: usize,
@@ -338,27 +353,65 @@ struct EvalState<'a> {
     use_prev_fallback: bool,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
-struct CompiledModuleSlice {
-    #[allow(dead_code)]
-    ident: Ident<Canonical>,
-    context: Arc<ByteCodeContext>,
-    bytecode: Arc<ByteCode>,
-    part: StepPart,
-}
+impl CompiledSlicedSimulation {
+    /// Build the indexed module table from the keyed `CompiledModule` map,
+    /// resolving every module declaration's `(model_name, input_set)` key to a
+    /// child index so the hot eval loop never reconstructs or hashes a key.
+    fn build(modules: &HashMap<ModuleKey, CompiledModule>, root: &ModuleKey) -> Self {
+        // Stable, deterministic ordering so module indices don't depend on
+        // HashMap iteration order.
+        let mut keys: Vec<&ModuleKey> = modules.keys().collect();
+        keys.sort();
 
-impl CompiledModuleSlice {
-    fn new(module: &CompiledModule, part: StepPart) -> Self {
-        CompiledModuleSlice {
-            ident: module.ident.clone(),
-            context: module.context.clone(),
-            bytecode: match part {
-                StepPart::Flows => module.compiled_flows.clone(),
-                StepPart::Stocks => module.compiled_stocks.clone(),
-                StepPart::Initials => unreachable!("initials use CompiledModuleInitials"),
-            },
-            part,
+        let key_to_idx: HashMap<ModuleKey, u32> = keys
+            .iter()
+            .enumerate()
+            .map(|(idx, key)| ((*key).clone(), idx as u32))
+            .collect();
+
+        let resolved: Vec<ResolvedModule> = keys
+            .iter()
+            .map(|key| {
+                let m = &modules[*key];
+                // Resolve each child declaration's key to its module index.
+                let child_targets: Vec<u32> = m
+                    .context
+                    .modules
+                    .iter()
+                    .map(|decl| {
+                        let child_key = make_module_key(&decl.model_name, &decl.input_set);
+                        key_to_idx[&child_key]
+                    })
+                    .collect();
+                // 3-address fusion (R2): fold leaf operand loads into the
+                // binary ops of the per-timestep flows/stocks programs. Done
+                // on the Vm's execution copy (not the cached CompiledModule,
+                // which stays a pure symbolizable artifact) so the fused
+                // opcodes never re-enter the symbolic layer. make_mut clones
+                // the bytecode out of the shared Arc once per Vm; the scan is
+                // linear and cheap relative to a simulation run. Initials run
+                // once and their AssignCurr targets are read elsewhere, so they
+                // are left unfused.
+                let mut flows = m.compiled_flows.clone();
+                let mut stocks = m.compiled_stocks.clone();
+                Arc::make_mut(&mut flows).fuse_three_address();
+                Arc::make_mut(&mut stocks).fuse_three_address();
+                ResolvedModule {
+                    ident: m.ident.clone(),
+                    context: m.context.clone(),
+                    initials: m.compiled_initials.clone(),
+                    flows,
+                    stocks,
+                    child_targets,
+                }
+            })
+            .collect();
+
+        let root_idx = key_to_idx[root] as usize;
+        CompiledSlicedSimulation {
+            modules: resolved,
+            root_idx,
+            key_to_idx,
         }
     }
 }
@@ -541,36 +594,12 @@ impl Vm {
         };
         let rk_scratch = vec![0.0; stock_offsets.len() * 2];
 
+        let sliced_sim = CompiledSlicedSimulation::build(&sim.modules, &sim.root);
+
         Ok(Vm {
             specs: sim.specs,
-            root: sim.root,
             offsets: sim.offsets,
-            sliced_sim: CompiledSlicedSimulation {
-                initial_modules: sim
-                    .modules
-                    .iter()
-                    .map(|(id, m)| {
-                        (
-                            id.clone(),
-                            CompiledModuleInitials {
-                                ident: m.ident.clone(),
-                                context: m.context.clone(),
-                                initials: m.compiled_initials.clone(),
-                            },
-                        )
-                    })
-                    .collect(),
-                flow_modules: sim
-                    .modules
-                    .iter()
-                    .map(|(id, m)| (id.clone(), CompiledModuleSlice::new(m, StepPart::Flows)))
-                    .collect(),
-                stock_modules: sim
-                    .modules
-                    .iter()
-                    .map(|(id, m)| (id.clone(), CompiledModuleSlice::new(m, StepPart::Stocks)))
-                    .collect(),
-            },
+            sliced_sim,
             n_slots,
             n_chunks,
             data: Some(data),
@@ -613,8 +642,7 @@ impl Vm {
         self.stack.clear();
         let mut data = self.data.take().unwrap();
 
-        let module_flows = &self.sliced_sim.flow_modules[&self.root];
-        let module_stocks = &self.sliced_sim.stock_modules[&self.root];
+        let root_idx = self.sliced_sim.root_idx;
 
         self.view_stack.clear();
         self.iter_stack.clear();
@@ -673,14 +701,7 @@ impl Vm {
                     break;
                 }
 
-                Self::eval_step(
-                    &self.sliced_sim,
-                    &mut state,
-                    module_flows,
-                    module_stocks,
-                    curr,
-                    next,
-                );
+                Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                 state.prev_values.copy_from_slice(curr);
                 state.use_prev_fallback = false;
                 self.prev_values_valid = true;
@@ -699,14 +720,7 @@ impl Vm {
                     let saved_time = curr[TIME_OFF];
 
                     // Stage 1: evaluate at (t, y)
-                    Self::eval_step(
-                        &self.sliced_sim,
-                        &mut state,
-                        module_flows,
-                        module_stocks,
-                        curr,
-                        next,
-                    );
+                    Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                     for (i, &off) in stock_offsets.iter().enumerate() {
                         let s1 = next[off] - curr[off];
                         saved[i] = curr[off];
@@ -716,14 +730,7 @@ impl Vm {
                     curr[TIME_OFF] = saved_time + dt * 0.5;
 
                     // Stage 2: evaluate at (t + dt/2, y + s1/2)
-                    Self::eval_step(
-                        &self.sliced_sim,
-                        &mut state,
-                        module_flows,
-                        module_stocks,
-                        curr,
-                        next,
-                    );
+                    Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                     for (i, &off) in stock_offsets.iter().enumerate() {
                         let s2 = next[off] - curr[off];
                         accum[i] += 2.0 * s2;
@@ -731,14 +738,7 @@ impl Vm {
                     }
 
                     // Stage 3: evaluate at (t + dt/2, y + s2/2)
-                    Self::eval_step(
-                        &self.sliced_sim,
-                        &mut state,
-                        module_flows,
-                        module_stocks,
-                        curr,
-                        next,
-                    );
+                    Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                     for (i, &off) in stock_offsets.iter().enumerate() {
                         let s3 = next[off] - curr[off];
                         accum[i] += 2.0 * s3;
@@ -747,14 +747,7 @@ impl Vm {
                     curr[TIME_OFF] = saved_time + dt;
 
                     // Stage 4: evaluate at (t + dt, y + s3)
-                    Self::eval_step(
-                        &self.sliced_sim,
-                        &mut state,
-                        module_flows,
-                        module_stocks,
-                        curr,
-                        next,
-                    );
+                    Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                     for (i, &off) in stock_offsets.iter().enumerate() {
                         let s4 = next[off] - curr[off];
                         accum[i] += s4;
@@ -776,7 +769,8 @@ impl Vm {
                     Self::eval(
                         &self.sliced_sim,
                         &mut state,
-                        module_flows,
+                        root_idx,
+                        StepPart::Flows,
                         0,
                         &[],
                         curr,
@@ -802,14 +796,7 @@ impl Vm {
                     let saved_time = curr[TIME_OFF];
 
                     // Stage 1: evaluate at (t, y)
-                    Self::eval_step(
-                        &self.sliced_sim,
-                        &mut state,
-                        module_flows,
-                        module_stocks,
-                        curr,
-                        next,
-                    );
+                    Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                     for (i, &off) in stock_offsets.iter().enumerate() {
                         let s1 = next[off] - curr[off];
                         saved[i] = curr[off];
@@ -819,14 +806,7 @@ impl Vm {
                     curr[TIME_OFF] = saved_time + dt;
 
                     // Stage 2: evaluate at (t + dt, y + s1)
-                    Self::eval_step(
-                        &self.sliced_sim,
-                        &mut state,
-                        module_flows,
-                        module_stocks,
-                        curr,
-                        next,
-                    );
+                    Self::eval_step(&self.sliced_sim, &mut state, root_idx, curr, next);
                     for (i, &off) in stock_offsets.iter().enumerate() {
                         let s2 = next[off] - curr[off];
                         accum[i] += s2;
@@ -842,7 +822,8 @@ impl Vm {
                     Self::eval(
                         &self.sliced_sim,
                         &mut state,
-                        module_flows,
+                        root_idx,
+                        StepPart::Flows,
                         0,
                         &[],
                         curr,
@@ -914,6 +895,18 @@ impl Vm {
         self.constant_info.contains_key(&off)
     }
 
+    /// Resolve a `ModuleKey` (carried by a `BytecodeLocation` from the
+    /// constant-info map) to its module index. Cold path only -- used by the
+    /// `set_value` / `clear_values` literal-override machinery, never the hot
+    /// eval loop.
+    fn module_idx_for(&self, module_key: &ModuleKey) -> usize {
+        *self
+            .sliced_sim
+            .key_to_idx
+            .get(module_key)
+            .expect("module key must exist") as usize
+    }
+
     /// Read the current value of a literal at a bytecode location.
     fn read_literal(&self, loc: &BytecodeLocation) -> f64 {
         match loc {
@@ -922,32 +915,21 @@ impl Vm {
                 part,
                 literal_id,
             } => {
-                let module = match part {
-                    StepPart::Flows => self
-                        .sliced_sim
-                        .flow_modules
-                        .get(module_key)
-                        .expect("module key must exist"),
-                    StepPart::Stocks => self
-                        .sliced_sim
-                        .stock_modules
-                        .get(module_key)
-                        .expect("module key must exist"),
+                let module = &self.sliced_sim.modules[self.module_idx_for(module_key)];
+                let bytecode = match part {
+                    StepPart::Flows => &module.flows,
+                    StepPart::Stocks => &module.stocks,
                     StepPart::Initials => unreachable!(),
                 };
-                module.bytecode.literals[*literal_id as usize]
+                bytecode.literals[*literal_id as usize]
             }
             BytecodeLocation::Initial {
                 module_key,
                 initial_index,
                 literal_id,
             } => {
-                let initials_module = self
-                    .sliced_sim
-                    .initial_modules
-                    .get(module_key)
-                    .expect("module key must exist");
-                initials_module.initials[*initial_index].bytecode.literals[*literal_id as usize]
+                let module = &self.sliced_sim.modules[self.module_idx_for(module_key)];
+                module.initials[*initial_index].bytecode.literals[*literal_id as usize]
             }
         }
     }
@@ -961,32 +943,23 @@ impl Vm {
                 part,
                 literal_id,
             } => {
-                let module = match part {
-                    StepPart::Flows => self
-                        .sliced_sim
-                        .flow_modules
-                        .get_mut(module_key)
-                        .expect("module key must exist"),
-                    StepPart::Stocks => self
-                        .sliced_sim
-                        .stock_modules
-                        .get_mut(module_key)
-                        .expect("module key must exist"),
+                let idx = self.module_idx_for(module_key);
+                let module = &mut self.sliced_sim.modules[idx];
+                let bytecode = match part {
+                    StepPart::Flows => &mut module.flows,
+                    StepPart::Stocks => &mut module.stocks,
                     StepPart::Initials => unreachable!(),
                 };
-                Arc::make_mut(&mut module.bytecode).literals[*literal_id as usize] = value;
+                Arc::make_mut(bytecode).literals[*literal_id as usize] = value;
             }
             BytecodeLocation::Initial {
                 module_key,
                 initial_index,
                 literal_id,
             } => {
-                let initials_module = self
-                    .sliced_sim
-                    .initial_modules
-                    .get_mut(module_key)
-                    .expect("module key must exist");
-                let initials = Arc::make_mut(&mut initials_module.initials);
+                let idx = self.module_idx_for(module_key);
+                let module = &mut self.sliced_sim.modules[idx];
+                let initials = Arc::make_mut(&mut module.initials);
                 initials[*initial_index].bytecode.literals[*literal_id as usize] = value;
             }
         }
@@ -1130,7 +1103,7 @@ impl Vm {
         Self::eval_initials(
             &self.sliced_sim,
             &mut state,
-            &self.root,
+            self.sliced_sim.root_idx,
             0,
             module_inputs,
             curr,
@@ -1186,48 +1159,20 @@ impl Vm {
         Some(series)
     }
 
-    /// Evaluate a submodule's initials.
-    #[allow(clippy::too_many_arguments)]
-    #[inline(never)]
-    fn eval_module_initials(
-        sliced_sim: &CompiledSlicedSimulation,
-        state: &mut EvalState<'_>,
-        parent_context: &ByteCodeContext,
-        parent_module_off: usize,
-        module_inputs: &[f64],
-        curr: &mut [f64],
-        next: &mut [f64],
-        id: ModuleId,
-    ) {
-        let new_module_decl = &parent_context.modules[id as usize];
-        let module_key = make_module_key(&new_module_decl.model_name, &new_module_decl.input_set);
-        let module_off = parent_module_off + new_module_decl.off;
-
-        Self::eval_initials(
-            sliced_sim,
-            state,
-            &module_key,
-            module_off,
-            module_inputs,
-            curr,
-            next,
-        );
-    }
-
     /// Run all per-variable initials for a module (in dependency order).
     #[allow(clippy::too_many_arguments)]
     fn eval_initials(
         sliced_sim: &CompiledSlicedSimulation,
         state: &mut EvalState<'_>,
-        module_key: &ModuleKey,
+        module_idx: usize,
         module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
     ) {
-        let module_initials = &sliced_sim.initial_modules[module_key];
-        let context = &module_initials.context;
-        for compiled_initial in module_initials.initials.iter() {
+        let module = &sliced_sim.modules[module_idx];
+        let context = &module.context;
+        for compiled_initial in module.initials.iter() {
             Self::eval_bytecode(
                 sliced_sim,
                 state,
@@ -1235,6 +1180,7 @@ impl Vm {
                 &compiled_initial.bytecode,
                 StepPart::Initials,
                 module_off,
+                module_idx,
                 module_inputs,
                 curr,
                 next,
@@ -1244,17 +1190,35 @@ impl Vm {
 
     /// Evaluate one full integration step: compute all flows/auxes then
     /// update all stocks.  Used by each RK stage and the Euler loop.
+    /// Always evaluates the root module (`module_off == 0`).
     #[inline(always)]
     fn eval_step(
         sliced_sim: &CompiledSlicedSimulation,
         state: &mut EvalState<'_>,
-        module_flows: &CompiledModuleSlice,
-        module_stocks: &CompiledModuleSlice,
+        module_idx: usize,
         curr: &mut [f64],
         next: &mut [f64],
     ) {
-        Self::eval(sliced_sim, state, module_flows, 0, &[], curr, next);
-        Self::eval(sliced_sim, state, module_stocks, 0, &[], curr, next);
+        Self::eval(
+            sliced_sim,
+            state,
+            module_idx,
+            StepPart::Flows,
+            0,
+            &[],
+            curr,
+            next,
+        );
+        Self::eval(
+            sliced_sim,
+            state,
+            module_idx,
+            StepPart::Stocks,
+            0,
+            &[],
+            curr,
+            next,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1262,19 +1226,27 @@ impl Vm {
     fn eval(
         sliced_sim: &CompiledSlicedSimulation,
         state: &mut EvalState<'_>,
-        module: &CompiledModuleSlice,
+        module_idx: usize,
+        part: StepPart,
         module_off: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
     ) {
+        let module = &sliced_sim.modules[module_idx];
+        let bytecode = match part {
+            StepPart::Flows => &module.flows,
+            StepPart::Stocks => &module.stocks,
+            StepPart::Initials => unreachable!("initials are evaluated via eval_initials"),
+        };
         Self::eval_bytecode(
             sliced_sim,
             state,
             &module.context,
-            &module.bytecode,
-            module.part,
+            bytecode,
+            part,
             module_off,
+            module_idx,
             module_inputs,
             curr,
             next,
@@ -1289,6 +1261,11 @@ impl Vm {
         bytecode: &ByteCode,
         part: StepPart,
         module_off: usize,
+        // Index of the module currently executing, into
+        // `sliced_sim.modules`. Used to resolve `EvalModule` child targets
+        // without reconstructing/hashing a module key. `context` is
+        // `&sliced_sim.modules[module_idx].context`.
+        module_idx: usize,
         module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
@@ -1416,35 +1393,29 @@ impl Vm {
                         prev_values,
                         use_prev_fallback,
                     };
+                    // Resolve the child module by precomputed index instead of
+                    // reconstructing + SipHashing a (model_name, input_set) key.
+                    let child_module_off = module_off + context.modules[*id as usize].off;
+                    let child_idx =
+                        sliced_sim.modules[module_idx].child_targets[*id as usize] as usize;
                     match part {
                         StepPart::Initials => {
-                            Self::eval_module_initials(
+                            Self::eval_initials(
                                 sliced_sim,
                                 &mut child_state,
-                                context,
-                                module_off,
+                                child_idx,
+                                child_module_off,
                                 &module_inputs,
                                 curr,
                                 next,
-                                *id,
                             );
                         }
                         StepPart::Flows | StepPart::Stocks => {
-                            let new_module_decl = &context.modules[*id as usize];
-                            let module_key = make_module_key(
-                                &new_module_decl.model_name,
-                                &new_module_decl.input_set,
-                            );
-                            let child_module_off = module_off + new_module_decl.off;
-                            let child_module = match part {
-                                StepPart::Flows => &sliced_sim.flow_modules[&module_key],
-                                StepPart::Stocks => &sliced_sim.stock_modules[&module_key],
-                                StepPart::Initials => unreachable!(),
-                            };
                             Self::eval(
                                 sliced_sim,
                                 &mut child_state,
-                                child_module,
+                                child_idx,
+                                part,
                                 child_module_off,
                                 &module_inputs,
                                 curr,
@@ -1494,6 +1465,35 @@ impl Vm {
                     let l = stack.pop();
                     next[module_off + *off as usize] = eval_op2(*op, l, r);
                     debug_assert_eq!(0, stack.len());
+                }
+                // === 3-ADDRESS BINARY OPS (R2) ===
+                // Operands are read straight from curr[]/literals; the *Stack*
+                // forms take the lhs from the arithmetic stack. Each pushes the
+                // result, replacing a Load;Load;Op2 or Load;Op2 sequence.
+                Opcode::BinVarVar { l, r, op } => {
+                    let lv = curr[module_off + *l as usize];
+                    let rv = curr[module_off + *r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinVarConst { l, r, op } => {
+                    let lv = curr[module_off + *l as usize];
+                    let rv = bytecode.literals[*r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinConstVar { l, r, op } => {
+                    let lv = bytecode.literals[*l as usize];
+                    let rv = curr[module_off + *r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinStackVar { r, op } => {
+                    let lv = stack.pop();
+                    let rv = curr[module_off + *r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinStackConst { r, op } => {
+                    let lv = stack.pop();
+                    let rv = bytecode.literals[*r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
                 }
                 Opcode::Apply { func } => {
                     let time = curr[TIME_OFF];
@@ -2679,16 +2679,22 @@ impl Vm {
 
     #[cfg(test)]
     pub fn debug_print_bytecode(&self, _model_name: &str) {
-        let mut module_keys: Vec<_> = self.sliced_sim.initial_modules.keys().collect();
-        module_keys.sort_unstable();
-        for module_key in module_keys {
+        // Iterate modules in key order for stable, readable output.
+        let mut keyed: Vec<(&ModuleKey, usize)> = self
+            .sliced_sim
+            .key_to_idx
+            .iter()
+            .map(|(k, &idx)| (k, idx as usize))
+            .collect();
+        keyed.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        for (module_key, idx) in keyed {
             eprintln!("\n\nCOMPILED MODULE: {:?}", module_key);
 
-            let module_initials = &self.sliced_sim.initial_modules[module_key];
-            let flows_bc = &self.sliced_sim.flow_modules[module_key].bytecode;
-            let stocks_bc = &self.sliced_sim.stock_modules[module_key].bytecode;
+            let module = &self.sliced_sim.modules[idx];
+            let flows_bc = &module.flows;
+            let stocks_bc = &module.stocks;
 
-            for ci in module_initials.initials.iter() {
+            for ci in module.initials.iter() {
                 eprintln!("\ninitial '{}' literals:", ci.ident);
                 for (i, lit) in ci.bytecode.literals.iter().enumerate() {
                     eprintln!("\t{i}: {lit}");
@@ -3455,6 +3461,48 @@ mod vm_reset_and_run_initials_tests {
     fn build_compiled(tp: &TestProject) -> CompiledSimulation {
         tp.compile_incremental()
             .expect("incremental compile should succeed")
+    }
+
+    /// End-to-end guard for the 3-address fusion (R2), which is applied to the
+    /// Vm's flow/stock bytecode at construction. Uses subtraction and division
+    /// (non-commutative) so a swapped operand encoding in any fused form is a
+    /// loud failure rather than a silent miscompile. `a`, `b`, `c` are distinct
+    /// variables (not foldable into a literal), so each expression compiles to
+    /// loads + Op2 that the pass folds into BinVarVar / BinVarConst /
+    /// BinConstVar / BinStackVar / BinStackConst.
+    #[test]
+    fn test_fused_binops_preserve_operand_order() {
+        let tp = TestProject::new("fusion_order")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "20", None)
+            .aux("b", "5", None)
+            .aux("c", "2", None)
+            .aux("vv", "a - b", None) // BinVarVar
+            .aux("dvv", "a / b", None) // BinVarVar, division
+            .aux("vc", "a - 3", None) // BinVarConst
+            .aux("cv", "10 - a", None) // BinConstVar
+            .aux("sv", "(a - b) - c", None) // BinVarVar then BinStackVar
+            .aux("sc", "(a - b) - 4", None); // BinVarVar then BinStackConst
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        let val = |name: &str| -> f64 {
+            let off = *results
+                .offsets
+                .get(&*canonicalize(name))
+                .unwrap_or_else(|| panic!("missing {name}"));
+            results.data[off] // step 0
+        };
+
+        assert_eq!(val("vv"), 15.0, "a - b");
+        assert_eq!(val("dvv"), 4.0, "a / b");
+        assert_eq!(val("vc"), 17.0, "a - 3");
+        assert_eq!(val("cv"), -10.0, "10 - a");
+        assert_eq!(val("sv"), 13.0, "(a - b) - c");
+        assert_eq!(val("sc"), 11.0, "(a - b) - 4");
     }
 
     #[test]
@@ -4435,13 +4483,13 @@ mod superinstruction_tests {
 
     /// Helper: collect all opcodes from the flow bytecode of the root module.
     fn flow_opcodes(vm: &Vm) -> Vec<&Opcode> {
-        let bc = &vm.sliced_sim.flow_modules[&vm.root].bytecode;
+        let bc = &vm.sliced_sim.modules[vm.sliced_sim.root_idx].flows;
         bc.code.iter().collect()
     }
 
     /// Helper: collect all opcodes from the stock bytecode of the root module.
     fn stock_opcodes(vm: &Vm) -> Vec<&Opcode> {
-        let bc = &vm.sliced_sim.stock_modules[&vm.root].bytecode;
+        let bc = &vm.sliced_sim.modules[vm.sliced_sim.root_idx].stocks;
         bc.code.iter().collect()
     }
 

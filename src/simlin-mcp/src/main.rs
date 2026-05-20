@@ -19,6 +19,12 @@
 //! simlin-mcp --version    # print version
 //! ```
 
+// mimalloc on native builds: the engine compile path is allocation-heavy
+// (millions of small, short-lived allocations); mimalloc roughly halves the
+// allocator time vs the system malloc. See docs/design/engine-performance.md.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use rmcp::{ServiceExt, transport::stdio};
 use simlin_mcp::access::FileSystemAccess;
 use simlin_mcp_core::server::{ResourceContent, SimlinMcpServer};

@@ -14,4 +14,8 @@ clap = { version = "4", features = ["derive"] }
 stringreader = "0.1"
 sha2 = "0.10"
 simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["file_io"] }
-simlin = { version = "0.1", path = "../libsimlin" }
+# `mimalloc` installs mimalloc as the process global allocator (this binary runs
+# the allocation-heavy engine compile path). Routed through libsimlin rather than
+# a direct dep + local `#[global_allocator]` so there is exactly one global
+# allocator in this artifact even under `cargo clippy --all-features`.
+simlin = { version = "0.1", path = "../libsimlin", features = ["mimalloc"] }

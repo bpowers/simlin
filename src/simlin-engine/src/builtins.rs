@@ -366,6 +366,30 @@ pub fn is_0_arity_builtin_fn(name: &str) -> bool {
     )
 }
 
+/// ASCII case-insensitive, allocation-free variant of [`is_0_arity_builtin_fn`].
+///
+/// The 0-arity builtin names are all ASCII, so a name containing any non-ASCII
+/// byte cannot match, and ASCII case-folding yields the same membership verdict
+/// as Unicode lowercasing for this fixed ASCII set. Used on the hot parse path
+/// (`Expr0::reify_0_arity_builtins`), which previously allocated a `String` via
+/// `to_lowercase()` for *every* variable reference just to test membership.
+pub fn is_0_arity_builtin_fn_ci(name: &str) -> bool {
+    const NAMES: [&str; 9] = [
+        "inf",
+        "pi",
+        "time",
+        "time_step",
+        "dt",
+        "initial_time",
+        "starttime",
+        "final_time",
+        "stoptime",
+    ];
+    NAMES
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
 /// Returns true if `func_name` (already lowercased) names a function that
 /// expands to a stdlib module: the canonical names in `MODEL_NAMES` plus
 /// the alias forms `delay`, `delayn`, and `smthn`.
@@ -544,6 +568,54 @@ fn test_is_builtin_fn() {
 fn test_is_0_arity_builtin_fn() {
     assert!(!is_0_arity_builtin_fn("lookup"));
     assert!(is_0_arity_builtin_fn("time"));
+}
+
+#[test]
+fn test_is_0_arity_builtin_fn_ci() {
+    const NAMES: [&str; 9] = [
+        "inf",
+        "pi",
+        "time",
+        "time_step",
+        "dt",
+        "initial_time",
+        "starttime",
+        "final_time",
+        "stoptime",
+    ];
+    for name in NAMES {
+        assert!(is_0_arity_builtin_fn_ci(name), "lowercase {name}");
+        assert!(
+            is_0_arity_builtin_fn_ci(&name.to_uppercase()),
+            "uppercase {name}"
+        );
+    }
+    assert!(is_0_arity_builtin_fn_ci("Time"));
+    assert!(is_0_arity_builtin_fn_ci("Final_Time"));
+    assert!(!is_0_arity_builtin_fn_ci("lookup"));
+    assert!(!is_0_arity_builtin_fn_ci("times"));
+    assert!(!is_0_arity_builtin_fn_ci(""));
+    // A non-ASCII name can never match (every builtin name is ASCII).
+    assert!(!is_0_arity_builtin_fn_ci("pï"));
+
+    // Equivalent to to_lowercase() + is_0_arity_builtin_fn for any ASCII input,
+    // which is the behavior the hot-path caller relies on.
+    for s in [
+        "TIME",
+        "Pi",
+        "Dt",
+        "Final_Time",
+        "STOPTIME",
+        "foo",
+        "lookuptable",
+        "timestep",
+    ] {
+        assert_eq!(
+            is_0_arity_builtin_fn_ci(s),
+            is_0_arity_builtin_fn(&s.to_lowercase()),
+            "ci/lowercase mismatch for {s}"
+        );
+    }
 }
 
 #[test]

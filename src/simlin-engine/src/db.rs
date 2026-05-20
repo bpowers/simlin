@@ -3734,8 +3734,11 @@ pub fn compile_var_fragment(
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
 
     // Caller-owned, lowering-independent context (built only from
-    // project/variable data, never from the lowered equation).
-    let dm_dims = source_dims_to_datamodel(project.dimensions(db));
+    // project/variable data, never from the lowered equation). Use the
+    // salsa-cached project dims (returns(ref)) rather than re-running
+    // source_dims_to_datamodel on every variable -- this fragment compiler is
+    // invoked once per variable, and the datamodel dims are project-global.
+    let dm_dims = project_datamodel_dims(db, project);
     let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
     let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
         .iter()
@@ -5337,7 +5340,10 @@ pub fn assemble_module(
         dim_lists: merged.dim_lists,
     };
 
-    // Resolve symbolic -> concrete offsets
+    // Resolve symbolic -> concrete offsets. The CompiledModule stays a pure,
+    // symbolizable artifact (the symbolic roundtrip tests symbolize it again,
+    // and salsa caches it); the 3-address fusion (R2) is applied later, at
+    // Vm::new, to the execution copy of the bytecode.
     resolve_module(&sym_module, layout).inspect_err(|msg| {
         try_accumulate_diagnostic(
             db,

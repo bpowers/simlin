@@ -518,6 +518,17 @@ pub(crate) fn symbolize_opcode(
             op: *op,
             var: rmap.lookup(u32::from(*off))?,
         }),
+        // The 3-address fused binops are created by `ByteCode::fuse_three_address`,
+        // which runs only on FINAL concrete bytecode (after `resolve`), strictly
+        // after symbolization. They therefore never reach this function; seeing
+        // one means the fusion ran before symbolize, which is a compiler bug.
+        Opcode::BinVarVar { .. }
+        | Opcode::BinVarConst { .. }
+        | Opcode::BinConstVar { .. }
+        | Opcode::BinStackVar { .. }
+        | Opcode::BinStackConst { .. } => {
+            unreachable!("3-address fused binop reached symbolize_opcode")
+        }
         Opcode::PushVarView {
             base_off,
             dim_list_id,
@@ -1168,6 +1179,10 @@ pub(crate) fn resolve_module(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
+    // `resolve_module` is a pure symbolic<->concrete primitive (the roundtrip
+    // tests symbolize its output again), so the 3-address fusion (R2) is NOT
+    // applied here -- the production assembler `assemble_module` applies it to
+    // this function's output instead, where the result is never re-symbolized.
     let compiled_flows = resolve_bytecode(&sym.compiled_flows, layout)?;
     let compiled_stocks = resolve_bytecode(&sym.compiled_stocks, layout)?;
 
