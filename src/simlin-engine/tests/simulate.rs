@@ -2498,6 +2498,33 @@ fn helper_recurrence_mdl_synthetic_helper_in_scc_simulates() {
     simulate_mdl_path(path);
 }
 
+/// clearn-residual.AC3.2: an element-wise `INITIAL` recurrence routed through a
+/// trivial passthrough macro (`:MACRO: INIT(x) = INITIAL(x)`) produces the same
+/// correct per-element values as the proven bare-`INITIAL` opcode path
+/// (`helper_recurrence_mdl_synthetic_helper_in_scc_simulates` above).
+///
+/// The `macro_init_recurrence` fixture is `helper_recurrence.mdl` with the
+/// `:MACRO: INIT(x) = INITIAL(x)` block PREPENDED. The recurrence text
+/// (`ecc[tNext] = INITIAL(ecc[tPrev] * 2)`) is unchanged: its `INITIAL(...)` is
+/// renamed to `INIT(...)` at import and now collides with the macro, so the
+/// recurrence routes through the macro instead of the `LoadInitial` opcode.
+///
+/// Expected (identical to `helper_recurrence`): `ecc[t1]=1, ecc[t2]=2,
+/// ecc[t3]=4`, constant across both saved steps (INITIAL TIME=0, FINAL TIME=1,
+/// TIME STEP=1 => 2 steps). `simulate_mdl_path` compares against the sibling
+/// `macro_init_recurrence.dat`, which asserts the user-facing `ecc[..]` series
+/// (`ensure_results` skips the implicit `$\u{205A}` module vars).
+///
+/// RED before the Phase 3 Task 4 call-site collapse: the INIT-macro collision
+/// routes the recurrence through the buggy per-element synthetic module, so the
+/// recurrence drops to 0/`:NA:` at t>=1 rather than holding 1/2/4.
+#[test]
+fn simulates_passthrough_init_macro_element_recurrence() {
+    simulate_mdl_path(
+        "../../test/test-models/tests/macro_init_recurrence/macro_init_recurrence.mdl",
+    );
+}
+
 /// element-cycle-resolution.AC2.5 (Phase 2 Task 9, the transitioned
 /// inter-variable-cycle assertion). `ref.mdl` and `interleaved.mdl` are
 /// INTER-variable element-acyclic recurrence SCCs (`ce`<->`ecc` /
@@ -3334,6 +3361,76 @@ TIME STEP = 1 ~~|
             (y - expected_y[step]).abs() < 1e-9,
             "step {step}: y = {y}, expected {} (M(2,10), independent stock)",
             expected_y[step]
+        );
+    }
+}
+
+/// clearn-residual.AC3.1: a scalar `INITIAL` capture routed through a trivial
+/// passthrough macro (`:MACRO: INIT(x) = INITIAL(x)`) holds its value constant
+/// across every saved step, matching the proven bare-`INITIAL` opcode path.
+///
+/// The MDL importer renames Vensim `INITIAL` -> `INIT`, so `captured =
+/// INIT(growing)` -- written against the `INIT` macro -- and the macro body
+/// `INIT = INITIAL(x)` (stored as `init = init(x)`) collide. `INITIAL(growing)`
+/// where `growing = Time` captures `INITIAL TIME` at t0, so `captured` MUST be
+/// the constant `INITIAL TIME` (here 2) at every saved step.
+///
+/// Control window: INITIAL TIME=2, FINAL TIME=6, TIME STEP=1, SAVEPER=1 => 5
+/// saved steps (t=2,3,4,5,6). `growing` rises 2,3,4,5,6 while `captured` stays
+/// pinned at 2 -- a held-constant capture is distinguishable from the buggy
+/// synthetic-module routing (which drops to 0/`:NA:` or tracks `growing`).
+///
+/// RED before the Phase 3 Task 4 call-site collapse: the INIT-macro collision
+/// routes through the per-element synthetic module and the capture is not held
+/// constant.
+#[test]
+fn simulates_passthrough_init_macro_scalar_capture_is_constant() {
+    // The importer renames Vensim INITIAL to INIT, so BOTH the macro body
+    // (`INIT = INITIAL(x)` -> `init = init(x)`) AND the caller's
+    // `captured = INITIAL(growing)` (-> `init(growing)`) collide with the
+    // like-named renamed builtin -- the #591-c1 shape. The caller must write
+    // the genuine Vensim builtin `INITIAL(...)` (which the importer recognizes
+    // and renames), NOT the post-rename `INIT(...)`: a single-argument
+    // `INIT(arg)` written directly would hit the MDL importer's
+    // 1-arg-call->LOOKUP heuristic (GH #553) and never reach macro resolution.
+    let mdl = "\
+{UTF-8}
+:MACRO: INIT(x)
+INIT = INITIAL(x)
+	~	passthrough macro
+	~	collides with renamed builtin
+	|
+:END OF MACRO:
+growing = Time ~~|
+captured = INITIAL(growing) ~~|
+INITIAL TIME = 2 ~~|
+FINAL TIME = 6 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let results = run_inline_mdl(mdl);
+
+    // INITIAL TIME = 2; growing = Time; captured = INITIAL(growing) frozen at t0.
+    let expected_growing = [2.0, 3.0, 4.0, 5.0, 6.0];
+    let captured = element_series(&results, "captured");
+    assert_eq!(
+        captured.len(),
+        expected_growing.len(),
+        "expected 5 saved steps (t=2..6), got {}",
+        captured.len()
+    );
+    for (step, &g) in expected_growing.iter().enumerate() {
+        let grew = macro_test_value_at(&results, "growing", step);
+        assert!(
+            (grew - g).abs() < 1e-9,
+            "sanity: growing must equal Time ({g}) at step {step}, got {grew}"
+        );
+        // The capture is INITIAL(growing) = INITIAL TIME = 2 at EVERY step.
+        assert!(
+            (captured[step] - 2.0).abs() < 1e-9,
+            "captured = INIT(growing) must be held constant at INITIAL TIME (2) \
+             for every saved step; at step {step} (Time={g}) got {}",
+            captured[step]
         );
     }
 }

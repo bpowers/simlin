@@ -857,8 +857,19 @@ pub(crate) fn equation_is_module_call(
     match &ast {
         Expr0::App(crate::builtins::UntypedBuiltinFn(func, _args), _) => {
             let func_lower = func.to_lowercase();
-            crate::builtins::is_stdlib_module_function(&func_lower)
-                || macro_registry.resolve_macro(func).is_some()
+            // A genuine passthrough macro (`:MACRO: INIT(x) = INITIAL(x)`) is
+            // collapsed at the call site to its opcode (`LoadInitial`), NOT
+            // expanded into a module (#591-c1, `builtins_visitor::walk`). So it
+            // must NOT be pre-classified as module-backed here -- exactly as the
+            // bare builtin it collapses to is not (`is_stdlib_module_function`
+            // is false for `init`). Pre-classifying it as a module would make
+            // `collect_module_idents` mark the variable module-backed while the
+            // walk emits a scalar opcode, and the fragments would fail to
+            // compile. A non-passthrough macro is still a module call.
+            let is_module_macro = macro_registry
+                .resolve_macro(func)
+                .is_some_and(|d| d.passthrough.is_none());
+            crate::builtins::is_stdlib_module_function(&func_lower) || is_module_macro
         }
         _ => false,
     }
