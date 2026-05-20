@@ -697,6 +697,183 @@ pub(crate) enum Opcode {
         op: Op2,
     },
 
+    // === 3-ADDRESS FUSED LEAF ASSIGNMENTS (R2 extension) ===
+    // A leaf assignment `dst = a op b` is, post-`peephole_optimize`,
+    // `LoadX a; LoadX b; BinOpAssign{Curr|Next}(op, dst)` (3 dispatches). These
+    // fold all three into one register-style op that reads its operands straight
+    // from `curr[]`/`literals` and writes the result straight to `curr[]`/`next[]`
+    // -- no stack push or pop at all. Like the 2-operand pushing forms above they
+    // are created only by the late `fuse_three_address` pass on final concrete
+    // bytecode and never enter the symbolic/incremental layer.
+    //
+    // The operator is encoded in the variant tag (one variant per {Add,Sub,Mul,
+    // Div}) rather than an `Op2` payload field. That keeps the payload at 3xu16 =
+    // 6 bytes so `size_of::<Opcode>()` stays at 8; a shared `Op2` field would make
+    // the payload 7 bytes and blow the budget. The four operators cover ~100% of
+    // measured leaf-assign candidates; any other operator is left in its existing
+    // `BinOpAssign{Curr|Next}` form. Encoding the operator in the tag also removes
+    // the per-dispatch `eval_op2` operator branch: each arm is straight-line f64
+    // arithmetic. The operand order is `l op r` matching the original load order,
+    // which is load-bearing for the non-commutative Sub and Div.
+
+    // -- VarVar: `c[dst] = c[l] OP c[r]` (Curr) / `n[dst] = c[l] OP c[r]` (Next) --
+    AssignAddVarVarCurr {
+        l: VariableOffset,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignSubVarVarCurr {
+        l: VariableOffset,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignMulVarVarCurr {
+        l: VariableOffset,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignDivVarVarCurr {
+        l: VariableOffset,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignAddVarVarNext {
+        l: VariableOffset,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignSubVarVarNext {
+        l: VariableOffset,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignMulVarVarNext {
+        l: VariableOffset,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignDivVarVarNext {
+        l: VariableOffset,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+
+    // -- VarConst: `c[dst] = c[l] OP literals[r]` (l is a var, r is a literal) --
+    AssignAddVarConstCurr {
+        l: VariableOffset,
+        r: LiteralId,
+        dst: VariableOffset,
+    },
+    AssignSubVarConstCurr {
+        l: VariableOffset,
+        r: LiteralId,
+        dst: VariableOffset,
+    },
+    AssignMulVarConstCurr {
+        l: VariableOffset,
+        r: LiteralId,
+        dst: VariableOffset,
+    },
+    AssignDivVarConstCurr {
+        l: VariableOffset,
+        r: LiteralId,
+        dst: VariableOffset,
+    },
+    AssignAddVarConstNext {
+        l: VariableOffset,
+        r: LiteralId,
+        dst: VariableOffset,
+    },
+    AssignSubVarConstNext {
+        l: VariableOffset,
+        r: LiteralId,
+        dst: VariableOffset,
+    },
+    AssignMulVarConstNext {
+        l: VariableOffset,
+        r: LiteralId,
+        dst: VariableOffset,
+    },
+    AssignDivVarConstNext {
+        l: VariableOffset,
+        r: LiteralId,
+        dst: VariableOffset,
+    },
+
+    // -- ConstVar: `c[dst] = literals[l] OP c[r]` (l is a literal, r is a var) --
+    AssignAddConstVarCurr {
+        l: LiteralId,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignSubConstVarCurr {
+        l: LiteralId,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignMulConstVarCurr {
+        l: LiteralId,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignDivConstVarCurr {
+        l: LiteralId,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignAddConstVarNext {
+        l: LiteralId,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignSubConstVarNext {
+        l: LiteralId,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignMulConstVarNext {
+        l: LiteralId,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+    AssignDivConstVarNext {
+        l: LiteralId,
+        r: VariableOffset,
+        dst: VariableOffset,
+    },
+
+    // === 2-ADDRESS STACK-LEAF FUSED ASSIGNMENTS (R2 extension) ===
+    // `lhs` is already on the arithmetic stack (a nested subexpression result);
+    // the rhs is a leaf load. Post-peephole this is `LoadX b; BinOpAssign(op, dst)`
+    // (2 dispatches): pop the lhs, combine with the leaf rhs, store. Folds 2->1.
+    // Here the operator stays in the payload (the `{dst, b}` + `op` form is 5
+    // bytes, still within budget) so all operators -- not just {Add,Sub,Mul,Div}
+    // -- are handled by one variant per (Var/Const, Curr/Next) combo.
+    /// Pop `lhs`; `curr[module_off + dst] = lhs op curr[module_off + b]`.
+    AssignStackVarCurr {
+        dst: VariableOffset,
+        b: VariableOffset,
+        op: Op2,
+    },
+    /// Pop `lhs`; `next[module_off + dst] = lhs op curr[module_off + b]`.
+    AssignStackVarNext {
+        dst: VariableOffset,
+        b: VariableOffset,
+        op: Op2,
+    },
+    /// Pop `lhs`; `curr[module_off + dst] = lhs op literals[b]`.
+    AssignStackConstCurr {
+        dst: VariableOffset,
+        b: LiteralId,
+        op: Op2,
+    },
+    /// Pop `lhs`; `next[module_off + dst] = lhs op literals[b]`.
+    AssignStackConstNext {
+        dst: VariableOffset,
+        b: LiteralId,
+        op: Op2,
+    },
+
     // =========================================================================
     // ARRAY SUPPORT (new)
     // =========================================================================
@@ -1039,6 +1216,40 @@ impl Opcode {
             }
             Opcode::BinStackVar { .. } | Opcode::BinStackConst { .. } => (1, 1),
 
+            // 3-address fused leaf assignments read operands from curr/literals
+            // and write straight to curr/next: no arithmetic-stack traffic.
+            Opcode::AssignAddVarVarCurr { .. }
+            | Opcode::AssignSubVarVarCurr { .. }
+            | Opcode::AssignMulVarVarCurr { .. }
+            | Opcode::AssignDivVarVarCurr { .. }
+            | Opcode::AssignAddVarVarNext { .. }
+            | Opcode::AssignSubVarVarNext { .. }
+            | Opcode::AssignMulVarVarNext { .. }
+            | Opcode::AssignDivVarVarNext { .. }
+            | Opcode::AssignAddVarConstCurr { .. }
+            | Opcode::AssignSubVarConstCurr { .. }
+            | Opcode::AssignMulVarConstCurr { .. }
+            | Opcode::AssignDivVarConstCurr { .. }
+            | Opcode::AssignAddVarConstNext { .. }
+            | Opcode::AssignSubVarConstNext { .. }
+            | Opcode::AssignMulVarConstNext { .. }
+            | Opcode::AssignDivVarConstNext { .. }
+            | Opcode::AssignAddConstVarCurr { .. }
+            | Opcode::AssignSubConstVarCurr { .. }
+            | Opcode::AssignMulConstVarCurr { .. }
+            | Opcode::AssignDivConstVarCurr { .. }
+            | Opcode::AssignAddConstVarNext { .. }
+            | Opcode::AssignSubConstVarNext { .. }
+            | Opcode::AssignMulConstVarNext { .. }
+            | Opcode::AssignDivConstVarNext { .. } => (0, 0),
+
+            // Stack-leaf fused assignments pop the pre-existing lhs (1 pop) and
+            // write the combined result to curr/next (no push).
+            Opcode::AssignStackVarCurr { .. }
+            | Opcode::AssignStackVarNext { .. }
+            | Opcode::AssignStackConstCurr { .. }
+            | Opcode::AssignStackConstNext { .. } => (1, 0),
+
             // View stack ops don't touch arithmetic stack
             Opcode::PushVarView { .. }
             | Opcode::PushTempView { .. }
@@ -1134,6 +1345,34 @@ impl Opcode {
             Opcode::BinStackConst { .. } => "BinStackConst",
             Opcode::BinOpAssignCurr { .. } => "BinOpAssignCurr",
             Opcode::BinOpAssignNext { .. } => "BinOpAssignNext",
+            Opcode::AssignAddVarVarCurr { .. } => "AssignAddVarVarCurr",
+            Opcode::AssignSubVarVarCurr { .. } => "AssignSubVarVarCurr",
+            Opcode::AssignMulVarVarCurr { .. } => "AssignMulVarVarCurr",
+            Opcode::AssignDivVarVarCurr { .. } => "AssignDivVarVarCurr",
+            Opcode::AssignAddVarVarNext { .. } => "AssignAddVarVarNext",
+            Opcode::AssignSubVarVarNext { .. } => "AssignSubVarVarNext",
+            Opcode::AssignMulVarVarNext { .. } => "AssignMulVarVarNext",
+            Opcode::AssignDivVarVarNext { .. } => "AssignDivVarVarNext",
+            Opcode::AssignAddVarConstCurr { .. } => "AssignAddVarConstCurr",
+            Opcode::AssignSubVarConstCurr { .. } => "AssignSubVarConstCurr",
+            Opcode::AssignMulVarConstCurr { .. } => "AssignMulVarConstCurr",
+            Opcode::AssignDivVarConstCurr { .. } => "AssignDivVarConstCurr",
+            Opcode::AssignAddVarConstNext { .. } => "AssignAddVarConstNext",
+            Opcode::AssignSubVarConstNext { .. } => "AssignSubVarConstNext",
+            Opcode::AssignMulVarConstNext { .. } => "AssignMulVarConstNext",
+            Opcode::AssignDivVarConstNext { .. } => "AssignDivVarConstNext",
+            Opcode::AssignAddConstVarCurr { .. } => "AssignAddConstVarCurr",
+            Opcode::AssignSubConstVarCurr { .. } => "AssignSubConstVarCurr",
+            Opcode::AssignMulConstVarCurr { .. } => "AssignMulConstVarCurr",
+            Opcode::AssignDivConstVarCurr { .. } => "AssignDivConstVarCurr",
+            Opcode::AssignAddConstVarNext { .. } => "AssignAddConstVarNext",
+            Opcode::AssignSubConstVarNext { .. } => "AssignSubConstVarNext",
+            Opcode::AssignMulConstVarNext { .. } => "AssignMulConstVarNext",
+            Opcode::AssignDivConstVarNext { .. } => "AssignDivConstVarNext",
+            Opcode::AssignStackVarCurr { .. } => "AssignStackVarCurr",
+            Opcode::AssignStackVarNext { .. } => "AssignStackVarNext",
+            Opcode::AssignStackConstCurr { .. } => "AssignStackConstCurr",
+            Opcode::AssignStackConstNext { .. } => "AssignStackConstNext",
             Opcode::PushVarView { .. } => "PushVarView",
             Opcode::PushTempView { .. } => "PushTempView",
             Opcode::PushStaticView { .. } => "PushStaticView",
@@ -1391,45 +1630,6 @@ impl ByteCode {
         }
         max_depth
     }
-
-    /// Estimate the opcode count after a 3-address fusion pass that folds leaf
-    /// operand loads into the binary op that consumes them (R2). Greedy,
-    /// post-peephole semantics: `LoadX; LoadY; Op2` fuses 3->1 (both operands
-    /// are leaf loads) and `LoadX; Op2` fuses 2->1 (one operand is a leaf load,
-    /// the other is already on the stack), where a leaf load is `LoadVar`,
-    /// `LoadGlobalVar`, or `LoadConstant`. Used only to size the win before
-    /// implementing the pass; the real pass must additionally fix up jumps.
-    pub(crate) fn estimate_fused_len(&self) -> usize {
-        fn is_leaf_load(op: &Opcode) -> bool {
-            matches!(
-                op,
-                Opcode::LoadVar { .. } | Opcode::LoadGlobalVar { .. } | Opcode::LoadConstant { .. }
-            )
-        }
-        let code = &self.code;
-        let mut i = 0;
-        let mut emitted = 0;
-        while i < code.len() {
-            if i + 2 < code.len()
-                && is_leaf_load(&code[i])
-                && is_leaf_load(&code[i + 1])
-                && matches!(code[i + 2], Opcode::Op2 { .. })
-            {
-                emitted += 1;
-                i += 3;
-            } else if i + 1 < code.len()
-                && is_leaf_load(&code[i])
-                && matches!(code[i + 1], Opcode::Op2 { .. })
-            {
-                emitted += 1;
-                i += 2;
-            } else {
-                emitted += 1;
-                i += 1;
-            }
-        }
-        emitted
-    }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -1579,9 +1779,22 @@ impl ByteCode {
     }
 
     /// Late 3-address fusion pass (R2): fold the leaf operand load(s) of a
-    /// binary op into the op itself, so `LoadX; LoadY; Op2` becomes one
-    /// `BinXY` (3->1) and `LoadX; Op2` (lhs already on the stack) becomes one
-    /// `BinStackX` (2->1).
+    /// binary op into the op itself.
+    ///
+    /// Two families of pattern, both longest-match-first within their window:
+    /// - Pushing subexpressions: `LoadX; LoadY; Op2` -> one `Bin*` (3->1) and
+    ///   `LoadX; Op2` (lhs already on the stack) -> one `BinStack*` (2->1).
+    /// - Leaf assignments: post-`peephole_optimize` a leaf assign is `LoadX;
+    ///   LoadY; BinOpAssign{Curr|Next}` (the peephole already folded the trailing
+    ///   `Op2; AssignCurr` into `BinOpAssignCurr`). This pass folds the whole
+    ///   thing into one register-style `Assign{Add|Sub|Mul|Div}{combo}{phase}`
+    ///   (3->1) that reads operands from curr/literals and writes straight to
+    ///   curr/next with no stack traffic. The 2-window analogue `LoadX;
+    ///   BinOpAssign` (lhs on the stack) folds into `AssignStack{Var|Const}{phase}`
+    ///   (2->1). The 3-operand forms exist only for {Add,Sub,Mul,Div} (the
+    ///   operator is in the variant tag to keep the opcode within 8 bytes);
+    ///   other operators keep their `BinOpAssign` form. The 2-operand stack-leaf
+    ///   forms keep the operator in the payload so they cover every operator.
     ///
     /// MUST run only on FINAL concrete bytecode -- after `peephole_optimize`
     /// and, for the incremental path, after `resolve` -- because the fused
@@ -1597,6 +1810,62 @@ impl ByteCode {
     pub(crate) fn fuse_three_address(&mut self) {
         if self.code.is_empty() {
             return;
+        }
+
+        // The four operators that have dedicated leaf-assign opcodes. Any other
+        // operator leaves the leaf assign in its `BinOpAssign{Curr|Next}` form.
+        // `is_phase_next` selects the Curr vs Next family. `l`/`r` keep the
+        // original load order (load-bearing for the non-commutative Sub/Div).
+        fn fused_leaf_var_var(op: Op2, is_next: bool, l: u16, r: u16, dst: u16) -> Option<Opcode> {
+            Some(match (op, is_next) {
+                (Op2::Add, false) => Opcode::AssignAddVarVarCurr { l, r, dst },
+                (Op2::Sub, false) => Opcode::AssignSubVarVarCurr { l, r, dst },
+                (Op2::Mul, false) => Opcode::AssignMulVarVarCurr { l, r, dst },
+                (Op2::Div, false) => Opcode::AssignDivVarVarCurr { l, r, dst },
+                (Op2::Add, true) => Opcode::AssignAddVarVarNext { l, r, dst },
+                (Op2::Sub, true) => Opcode::AssignSubVarVarNext { l, r, dst },
+                (Op2::Mul, true) => Opcode::AssignMulVarVarNext { l, r, dst },
+                (Op2::Div, true) => Opcode::AssignDivVarVarNext { l, r, dst },
+                _ => return None,
+            })
+        }
+        fn fused_leaf_var_const(
+            op: Op2,
+            is_next: bool,
+            l: u16,
+            r: u16,
+            dst: u16,
+        ) -> Option<Opcode> {
+            Some(match (op, is_next) {
+                (Op2::Add, false) => Opcode::AssignAddVarConstCurr { l, r, dst },
+                (Op2::Sub, false) => Opcode::AssignSubVarConstCurr { l, r, dst },
+                (Op2::Mul, false) => Opcode::AssignMulVarConstCurr { l, r, dst },
+                (Op2::Div, false) => Opcode::AssignDivVarConstCurr { l, r, dst },
+                (Op2::Add, true) => Opcode::AssignAddVarConstNext { l, r, dst },
+                (Op2::Sub, true) => Opcode::AssignSubVarConstNext { l, r, dst },
+                (Op2::Mul, true) => Opcode::AssignMulVarConstNext { l, r, dst },
+                (Op2::Div, true) => Opcode::AssignDivVarConstNext { l, r, dst },
+                _ => return None,
+            })
+        }
+        fn fused_leaf_const_var(
+            op: Op2,
+            is_next: bool,
+            l: u16,
+            r: u16,
+            dst: u16,
+        ) -> Option<Opcode> {
+            Some(match (op, is_next) {
+                (Op2::Add, false) => Opcode::AssignAddConstVarCurr { l, r, dst },
+                (Op2::Sub, false) => Opcode::AssignSubConstVarCurr { l, r, dst },
+                (Op2::Mul, false) => Opcode::AssignMulConstVarCurr { l, r, dst },
+                (Op2::Div, false) => Opcode::AssignDivConstVarCurr { l, r, dst },
+                (Op2::Add, true) => Opcode::AssignAddConstVarNext { l, r, dst },
+                (Op2::Sub, true) => Opcode::AssignSubConstVarNext { l, r, dst },
+                (Op2::Mul, true) => Opcode::AssignMulConstVarNext { l, r, dst },
+                (Op2::Div, true) => Opcode::AssignDivConstVarNext { l, r, dst },
+                _ => return None,
+            })
         }
 
         // 1. Build set of PCs that are jump targets.
@@ -1621,41 +1890,38 @@ impl ByteCode {
         while i < self.code.len() {
             let new_pc = optimized.len();
 
-            // 3-window: [leaf load, leaf load, Op2]. Both absorbed instructions
-            // (i+1, i+2) must not be jump targets.
-            let three = i + 2 < self.code.len()
-                && !jump_targets[i + 1]
-                && !jump_targets[i + 2]
-                && matches!(self.code[i + 2], Opcode::Op2 { .. });
+            // 3-window: [leaf load, leaf load, <combiner>] where the combiner is
+            // either an `Op2` (a pushing subexpression) or a `BinOpAssign{Curr|
+            // Next}` (a leaf assignment, post-peephole). Both absorbed
+            // instructions (i+1, i+2) must not be jump targets.
+            //
+            // The leaf-assign forms are tried first: a `BinOpAssign` third op
+            // means the whole `dst = a op b` collapses into one register-style
+            // op (3->1) rather than `Bin*` (3->1 pushing) + a separate store.
+            // Only {Add,Sub,Mul,Div} have dedicated leaf-assign opcodes; any
+            // other operator falls through and keeps the existing form.
+            let three = i + 2 < self.code.len() && !jump_targets[i + 1] && !jump_targets[i + 2];
             let fused3 = if three {
-                match (&self.code[i], &self.code[i + 1], &self.code[i + 2]) {
-                    (
-                        Opcode::LoadVar { off: l },
-                        Opcode::LoadVar { off: r },
-                        Opcode::Op2 { op },
-                    ) => Some(Opcode::BinVarVar {
-                        l: *l,
-                        r: *r,
-                        op: *op,
-                    }),
-                    (
-                        Opcode::LoadVar { off: l },
-                        Opcode::LoadConstant { id: r },
-                        Opcode::Op2 { op },
-                    ) => Some(Opcode::BinVarConst {
-                        l: *l,
-                        r: *r,
-                        op: *op,
-                    }),
-                    (
-                        Opcode::LoadConstant { id: l },
-                        Opcode::LoadVar { off: r },
-                        Opcode::Op2 { op },
-                    ) => Some(Opcode::BinConstVar {
-                        l: *l,
-                        r: *r,
-                        op: *op,
-                    }),
+                // Decode the combiner once into two mutually-exclusive options:
+                // `assign3 = (op, dst, is_next)` for a leaf-assign, or
+                // `push3 = op` for a pushing Op2.
+                let (assign3, push3) = match &self.code[i + 2] {
+                    Opcode::BinOpAssignCurr { op, off } => (Some((*op, *off, false)), None),
+                    Opcode::BinOpAssignNext { op, off } => (Some((*op, *off, true)), None),
+                    Opcode::Op2 { op } => (None, Some(*op)),
+                    _ => (None, None),
+                };
+                match (&self.code[i], &self.code[i + 1]) {
+                    // Leaf assignment `dst = a op b` -> one fused op (3->1).
+                    (Opcode::LoadVar { off: l }, Opcode::LoadVar { off: r }) => assign3
+                        .and_then(|(op, dst, n)| fused_leaf_var_var(op, n, *l, *r, dst))
+                        .or_else(|| push3.map(|op| Opcode::BinVarVar { l: *l, r: *r, op })),
+                    (Opcode::LoadVar { off: l }, Opcode::LoadConstant { id: r }) => assign3
+                        .and_then(|(op, dst, n)| fused_leaf_var_const(op, n, *l, *r, dst))
+                        .or_else(|| push3.map(|op| Opcode::BinVarConst { l: *l, r: *r, op })),
+                    (Opcode::LoadConstant { id: l }, Opcode::LoadVar { off: r }) => assign3
+                        .and_then(|(op, dst, n)| fused_leaf_const_var(op, n, *l, *r, dst))
+                        .or_else(|| push3.map(|op| Opcode::BinConstVar { l: *l, r: *r, op })),
                     _ => None,
                 }
             } else {
@@ -1670,18 +1936,39 @@ impl ByteCode {
                 continue;
             }
 
-            // 2-window: [leaf load, Op2] with the lhs already on the stack.
-            let two = i + 1 < self.code.len()
-                && !jump_targets[i + 1]
-                && matches!(self.code[i + 1], Opcode::Op2 { .. });
+            // 2-window: [leaf load, <combiner>] with the lhs already on the
+            // stack. The combiner is either `Op2` (pushing) or `BinOpAssign`
+            // (the stack-leaf assignment `dst = lhs op b`). The stack-leaf form
+            // keeps the operator in its payload, so every operator is handled.
+            let two = i + 1 < self.code.len() && !jump_targets[i + 1];
             let fused2 = if two {
-                match (&self.code[i], &self.code[i + 1]) {
-                    (Opcode::LoadVar { off: r }, Opcode::Op2 { op }) => {
-                        Some(Opcode::BinStackVar { r: *r, op: *op })
-                    }
-                    (Opcode::LoadConstant { id: r }, Opcode::Op2 { op }) => {
-                        Some(Opcode::BinStackConst { r: *r, op: *op })
-                    }
+                // As above: a stack-leaf assign (operator kept in payload) or a
+                // pushing Op2. The stack-leaf form handles every operator.
+                let (assign2, push2) = match &self.code[i + 1] {
+                    Opcode::BinOpAssignCurr { op, off } => (Some((*op, *off, false)), None),
+                    Opcode::BinOpAssignNext { op, off } => (Some((*op, *off, true)), None),
+                    Opcode::Op2 { op } => (None, Some(*op)),
+                    _ => (None, None),
+                };
+                match &self.code[i] {
+                    Opcode::LoadVar { off: b } => assign2
+                        .map(|(op, dst, n)| {
+                            if n {
+                                Opcode::AssignStackVarNext { dst, b: *b, op }
+                            } else {
+                                Opcode::AssignStackVarCurr { dst, b: *b, op }
+                            }
+                        })
+                        .or_else(|| push2.map(|op| Opcode::BinStackVar { r: *b, op })),
+                    Opcode::LoadConstant { id: b } => assign2
+                        .map(|(op, dst, n)| {
+                            if n {
+                                Opcode::AssignStackConstNext { dst, b: *b, op }
+                            } else {
+                                Opcode::AssignStackConstCurr { dst, b: *b, op }
+                            }
+                        })
+                        .or_else(|| push2.map(|op| Opcode::BinStackConst { r: *b, op })),
                     _ => None,
                 }
             } else {
@@ -3540,6 +3827,264 @@ mod tests {
             bc.code[1],
             Opcode::BinStackConst { r: 0, op: Op2::Mul }
         ));
+    }
+
+    // === 3-address fused leaf assignments (R2 extension) ===
+    //
+    // Input here is *post-peephole*: the trailing `Op2; AssignCurr` has already
+    // been folded to `BinOpAssignCurr` (and `...Next`). The leaf-assign fusion
+    // collapses the whole `dst = a op b` to one register-style op.
+
+    #[test]
+    fn test_fuse_leaf_assign_var_var_curr() {
+        // `dst = a - b`: LoadVar; LoadVar; BinOpAssignCurr(Sub) -> one op.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 3 },
+                Opcode::LoadVar { off: 4 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Sub,
+                    off: 9,
+                },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(
+            matches!(
+                bc.code[0],
+                Opcode::AssignSubVarVarCurr { l: 3, r: 4, dst: 9 }
+            ),
+            "got {:?}",
+            bc.code[0].name()
+        );
+    }
+
+    #[test]
+    fn test_fuse_leaf_assign_var_var_next_div_order() {
+        // `dst_next = a / b`: division is non-commutative, so a swapped encoding
+        // is a loud failure. Verify l=a (numerator), r=b (denominator).
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 1 },
+                Opcode::LoadVar { off: 2 },
+                Opcode::BinOpAssignNext {
+                    op: Op2::Div,
+                    off: 5,
+                },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignDivVarVarNext { l: 1, r: 2, dst: 5 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_leaf_assign_var_const_order() {
+        // `dst = a - 5`: var is lhs, const is rhs.
+        let mut bc = ByteCode {
+            literals: vec![5.0],
+            code: vec![
+                Opcode::LoadVar { off: 7 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Sub,
+                    off: 2,
+                },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignSubVarConstCurr { l: 7, r: 0, dst: 2 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_leaf_assign_const_var_order() {
+        // `dst = 10 / a`: const is lhs (numerator literal), var is rhs.
+        let mut bc = ByteCode {
+            literals: vec![10.0],
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadVar { off: 7 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Div,
+                    off: 2,
+                },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::AssignDivConstVarCurr { l: 0, r: 7, dst: 2 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_leaf_assign_non_specialized_op_uses_stack_leaf() {
+        // `dst = a > b`: Gt has no dedicated 3-operand leaf-assign opcode, so the
+        // 3-window can't collapse it to a single op. But the operator-agnostic
+        // 2-window still folds the second load: `LoadVar a` stands alone, then
+        // `LoadVar b; BinOpAssignCurr(Gt)` becomes `AssignStackVarCurr{Gt}` with
+        // the lhs (a) taken from the stack. Net 3->2 (still a dispatch saved).
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Gt,
+                    off: 2,
+                },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::AssignStackVarCurr {
+                dst: 2,
+                b: 1,
+                op: Op2::Gt
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_stack_leaf_assign_order() {
+        // `dst = (a - b) - c`: post-peephole, the inner `a - b` already fused to
+        // BinOpAssign? No -- the inner is a pushing subexpr (`Op2`), the outer is
+        // the assign. So the stream is LoadVar a; LoadVar b; Op2(Sub); LoadVar c;
+        // BinOpAssignCurr(Sub). The triple folds to AssignSub..? No: the triple's
+        // 3rd op is Op2, so it becomes BinVarVar; then [LoadVar c;
+        // BinOpAssignCurr(Sub)] is the stack-leaf 2-window -> AssignStackVarCurr
+        // with lhs = (a-b) on the stack, b = c. Sub is non-commutative: verify
+        // lhs (stack) - rhs (c), not c - (a-b).
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 }, // a
+                Opcode::LoadVar { off: 1 }, // b
+                Opcode::Op2 { op: Op2::Sub },
+                Opcode::LoadVar { off: 2 }, // c
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Sub,
+                    off: 9,
+                },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinVarVar {
+                l: 0,
+                r: 1,
+                op: Op2::Sub
+            }
+        ));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::AssignStackVarCurr {
+                dst: 9,
+                b: 2,
+                op: Op2::Sub
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_stack_leaf_assign_const_next() {
+        // `dst_next = (a - b) / 4`: BinVarVar then AssignStackConstNext.
+        let mut bc = ByteCode {
+            literals: vec![4.0],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Sub },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::BinOpAssignNext {
+                    op: Op2::Div,
+                    off: 9,
+                },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::BinVarVar { .. }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::AssignStackConstNext {
+                dst: 9,
+                b: 0,
+                op: Op2::Div
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_leaf_assign_preserves_max_stack_depth() {
+        // Post-peephole leaf assigns must not change the (zero) net stack effect:
+        // each `LoadX; LoadX; BinOpAssign` is +2 then -2. After fusion the single
+        // op is (0,0). Build a sequence of leaf assigns and a nested one.
+        let mut bc = ByteCode {
+            literals: vec![2.0],
+            code: vec![
+                // x = a - b
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Sub,
+                    off: 4,
+                },
+                // y = (c - d) * 2  (peak depth 2 mid-expression)
+                Opcode::LoadVar { off: 2 },
+                Opcode::LoadVar { off: 3 },
+                Opcode::Op2 { op: Op2::Sub },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Mul,
+                    off: 5,
+                },
+            ],
+        };
+        let before = bc.max_stack_depth();
+        bc.fuse_three_address();
+        // Fusion folds loads into ops, so depth can only stay equal or shrink.
+        assert!(bc.max_stack_depth() <= before);
+        // And the leaf-assign collapsed to a (0,0) op, the stack-leaf assign to
+        // (1,0): the whole stream's peak is now 1 (the BinVarVar push).
+        assert_eq!(bc.max_stack_depth(), 1);
+    }
+
+    #[test]
+    fn test_fuse_leaf_assign_blocked_by_jump_target() {
+        // A jump targets the BinOpAssignCurr (the instruction the triple would
+        // absorb). Fusing would make the jump land mid-fusion, so leave it alone.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Sub,
+                    off: 2,
+                }, // <- jump target
+                Opcode::NextIterOrJump { jump_back: -1 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[2], Opcode::BinOpAssignCurr { .. }));
     }
 
     #[test]

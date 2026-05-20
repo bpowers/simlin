@@ -518,16 +518,48 @@ pub(crate) fn symbolize_opcode(
             op: *op,
             var: rmap.lookup(u32::from(*off))?,
         }),
-        // The 3-address fused binops are created by `ByteCode::fuse_three_address`,
-        // which runs only on FINAL concrete bytecode (after `resolve`), strictly
-        // after symbolization. They therefore never reach this function; seeing
+        // The 3-address fused binops AND the fused leaf assignments are created
+        // by `ByteCode::fuse_three_address`, which runs only on FINAL concrete
+        // bytecode (after `resolve`), strictly after symbolization, and only on
+        // the Vm's private execution copy (never the salsa-cached
+        // CompiledSimulation). They therefore never reach this function; seeing
         // one means the fusion ran before symbolize, which is a compiler bug.
+        // The exhaustive match here is the guarantee no fused opcode can silently
+        // leak into the symbolic/incremental layer.
         Opcode::BinVarVar { .. }
         | Opcode::BinVarConst { .. }
         | Opcode::BinConstVar { .. }
         | Opcode::BinStackVar { .. }
-        | Opcode::BinStackConst { .. } => {
-            unreachable!("3-address fused binop reached symbolize_opcode")
+        | Opcode::BinStackConst { .. }
+        | Opcode::AssignAddVarVarCurr { .. }
+        | Opcode::AssignSubVarVarCurr { .. }
+        | Opcode::AssignMulVarVarCurr { .. }
+        | Opcode::AssignDivVarVarCurr { .. }
+        | Opcode::AssignAddVarVarNext { .. }
+        | Opcode::AssignSubVarVarNext { .. }
+        | Opcode::AssignMulVarVarNext { .. }
+        | Opcode::AssignDivVarVarNext { .. }
+        | Opcode::AssignAddVarConstCurr { .. }
+        | Opcode::AssignSubVarConstCurr { .. }
+        | Opcode::AssignMulVarConstCurr { .. }
+        | Opcode::AssignDivVarConstCurr { .. }
+        | Opcode::AssignAddVarConstNext { .. }
+        | Opcode::AssignSubVarConstNext { .. }
+        | Opcode::AssignMulVarConstNext { .. }
+        | Opcode::AssignDivVarConstNext { .. }
+        | Opcode::AssignAddConstVarCurr { .. }
+        | Opcode::AssignSubConstVarCurr { .. }
+        | Opcode::AssignMulConstVarCurr { .. }
+        | Opcode::AssignDivConstVarCurr { .. }
+        | Opcode::AssignAddConstVarNext { .. }
+        | Opcode::AssignSubConstVarNext { .. }
+        | Opcode::AssignMulConstVarNext { .. }
+        | Opcode::AssignDivConstVarNext { .. }
+        | Opcode::AssignStackVarCurr { .. }
+        | Opcode::AssignStackVarNext { .. }
+        | Opcode::AssignStackConstCurr { .. }
+        | Opcode::AssignStackConstNext { .. } => {
+            unreachable!("3-address fused opcode reached symbolize_opcode")
         }
         Opcode::PushVarView {
             base_off,

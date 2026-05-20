@@ -34,7 +34,12 @@ impl CompiledSimulation {
 
         for module in self.modules.values() {
             p.flow_opcodes += tally(&module.compiled_flows, &mut p.histogram);
-            p.flow_opcodes_after_fusion += module.compiled_flows.estimate_fused_len();
+            // Measure the post-fusion size by running the *actual* fusion pass on
+            // a clone (the pass is what the Vm applies at construction), rather
+            // than a separate estimate that could drift from the real pass.
+            let mut fused = module.compiled_flows.as_ref().clone();
+            fused.fuse_three_address();
+            p.flow_opcodes_after_fusion += fused.code.len();
             p.stock_opcodes += tally(&module.compiled_stocks, &mut p.histogram);
             for ci in module.compiled_initials.iter() {
                 p.n_initials += 1;
