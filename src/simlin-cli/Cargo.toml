@@ -19,3 +19,6 @@ simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["file_
 # a direct dep + local `#[global_allocator]` so there is exactly one global
 # allocator in this artifact even under `cargo clippy --all-features`.
 simlin = { version = "0.1", path = "../libsimlin", features = ["mimalloc"] }
+
+[dev-dependencies]
+tempfile = "3"
