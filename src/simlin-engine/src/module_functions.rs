@@ -1464,13 +1464,35 @@ mod tests {
         // canonicalize(macro_name)) -- the form the importer's rename produces.
         // `INIT = PREVIOUS(x, 0)` is not a self-call (the macro is `init`, the
         // call is `previous`), so it is not the renamed-builtin self-collapse
-        // case.
+        // case. NOTE: `previous(x, 0)` is a TWO-arg call, so this case is
+        // actually rejected at the single-argument gate (3) before gate (5) is
+        // reached; `classify_passthrough_single_arg_non_self_call_name_is_none`
+        // below exercises gate (5) in isolation.
         let result =
             classify_passthrough("init", &["x".to_string()], &[], &body_ast("previous(x, 0)"));
         assert_eq!(
             result, None,
             "a call to a different builtin name than the macro is not a self-call \
              passthrough"
+        );
+    }
+
+    #[test]
+    fn classify_passthrough_single_arg_non_self_call_name_is_none() {
+        // Gate (5) -- the self-call-name check -- in isolation. A single-arg
+        // `previous(x)` body inside an `init`-named macro passes the arity gate
+        // (1/2), the single-call/single-arg gate (3), and the bare-arg gate (4),
+        // so the ONLY thing that can reject it is gate (5):
+        // canonicalize("previous") != canonicalize("init"). (`previous(x)` is one
+        // arg at the `Expr0` level; the unary->`previous(x, 0)` desugar happens
+        // later in `builtins_visitor`, not at parse time.) Without gate (5) this
+        // would mis-collapse a non-self-call macro onto the wrong opcode.
+        let result =
+            classify_passthrough("init", &["x".to_string()], &[], &body_ast("previous(x)"));
+        assert_eq!(
+            result, None,
+            "a single-arg call to a different builtin name than the macro must be \
+             rejected at the self-call-name gate, not collapsed"
         );
     }
 }

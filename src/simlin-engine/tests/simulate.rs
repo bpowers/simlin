@@ -3367,7 +3367,8 @@ TIME STEP = 1 ~~|
 
 /// clearn-residual.AC3.1: a scalar `INITIAL` capture routed through a trivial
 /// passthrough macro (`:MACRO: INIT(x) = INITIAL(x)`) holds its value constant
-/// across every saved step, matching the proven bare-`INITIAL` opcode path.
+/// across every saved step, and the passthrough macro compiles consistently to
+/// the `LoadInitial` opcode (the Task 4 call-site collapse).
 ///
 /// The MDL importer renames Vensim `INITIAL` -> `INIT`, so `captured =
 /// INIT(growing)` -- written against the `INIT` macro -- and the macro body
@@ -3377,12 +3378,22 @@ TIME STEP = 1 ~~|
 ///
 /// Control window: INITIAL TIME=2, FINAL TIME=6, TIME STEP=1, SAVEPER=1 => 5
 /// saved steps (t=2,3,4,5,6). `growing` rises 2,3,4,5,6 while `captured` stays
-/// pinned at 2 -- a held-constant capture is distinguishable from the buggy
-/// synthetic-module routing (which drops to 0/`:NA:` or tracks `growing`).
+/// pinned at 2 -- the AC3.1 user-facing invariant (a held-constant INITIAL
+/// capture, distinguishable from a value that drifts with `growing`).
 ///
-/// RED before the Phase 3 Task 4 call-site collapse: the INIT-macro collision
-/// routes through the per-element synthetic module and the capture is not held
-/// constant.
+/// This test is NOT a value RED->GREEN discriminator for the Task 4
+/// synthetic-module collapse: the synthetic-module path handles a scalar
+/// *non-recurrence* INITIAL-capture correctly and produces the constant
+/// [2,2,2,2,2] even with the collapse neutralized -- the scalar "RED" observed
+/// during implementation was a NotSimulatable compile *inconsistency*
+/// (`collect_module_idents` marking the var module-backed while the walk emits a
+/// scalar opcode), not a wrong value. The bug Task 4 fixes did not affect the
+/// scalar non-recurrence case. What this test validly asserts is (a) the AC3.1
+/// invariant and (b) the compile-consistency the `model.rs::equation_is_module_call`
+/// passthrough-exclusion enables. The genuine value RED->GREEN discriminator is
+/// the element-wise `simulates_passthrough_init_macro_element_recurrence`
+/// (AC3.2), where the synthetic-module routing produces wrong per-element values
+/// (drops to 0/`:NA:` at t>=1) before the collapse.
 #[test]
 fn simulates_passthrough_init_macro_scalar_capture_is_constant() {
     // The importer renames Vensim INITIAL to INIT, so BOTH the macro body

@@ -828,7 +828,11 @@ pub(crate) fn collect_module_idents(
 /// (resolved via `macro_registry`). A project macro is recognized even when
 /// its name shadows a builtin, since the macro registry is consulted
 /// directly (the actual macro-shadows-builtin precedence is enforced later
-/// in `BuiltinVisitor::walk`).
+/// in `BuiltinVisitor::walk`). Caveat: a *genuine passthrough* macro (one the
+/// registry classified `passthrough.is_some()`, which the walk collapses to the
+/// builtin opcode at the call site -- #591-c1) is NOT a module call here, so it
+/// behaves identically to the bare builtin it collapses to (see the inline
+/// comment below).
 ///
 /// This intentionally re-parses the equation text rather than reusing the
 /// already-parsed AST. It runs during `collect_module_idents` (called from
