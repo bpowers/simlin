@@ -2307,7 +2307,20 @@ pub(crate) fn model_dependency_graph_impl(
             }
             init_set.extend(additional);
         }
-        let init_list: Vec<&String> = init_set.into_iter().collect();
+        // `init_set` is a `HashSet`, so its iteration order is a function of
+        // the per-process HashMap RandomState seed, not of the model. Sort
+        // before handing it to `topo_sort_str`, which emits `names` in visit
+        // order and breaks ties (variables with no ordering dependency between
+        // them -- independent constants, stocks, `INITIAL()`/`PREVIOUS()`
+        // helpers) by exactly that order. Without this sort the initials
+        // runlist is HashMap-iteration-order dependent: two compiles of the
+        // SAME model produce different init orderings and therefore different
+        // initial values for any unordered pair (GH #595). The Flows and
+        // Stocks runlists already filter the pre-sorted `var_names`, so they
+        // are deterministic by construction; this matches that contract for
+        // the initials phase.
+        let mut init_list: Vec<&String> = init_set.into_iter().collect();
+        init_list.sort_unstable();
         topo_sort_str(
             init_list,
             &initial_dependencies,

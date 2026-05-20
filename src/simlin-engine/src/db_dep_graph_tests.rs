@@ -3032,3 +3032,190 @@ fn resolve_dt_self_loop_subsumed_by_multi_scc_resolves_no_duplicate() {
          scc_map corruption)"
     );
 }
+
+// ── Initials runlist ordering determinism (GH #595) ─────────────────────
+//
+// The Initials runlist is built by `topo_sort_str(init_list, ..)` where
+// `init_list` is the set of init-phase variables (stocks, modules,
+// INIT()-referenced vars, the empty-dt/non-empty-init `INITIAL()`-backed
+// vars, plus their transitive init deps). `topo_sort_str` emits names in
+// the *visit order of its `names` argument*, breaking ties (variables with
+// no ordering dependency between them) by that argument's order. If
+// `init_list` is materialized from a `HashSet` in iteration order, the
+// runlist becomes HashMap-RandomState dependent: two compiles of the SAME
+// model produce DIFFERENT init orderings, so a `PREVIOUS()`/`INITIAL()`
+// variable can be evaluated before or after an unrelated init helper,
+// yielding nondeterministic initial values (the Flows and Stocks runlists
+// filter the pre-sorted `var_names`, so they were already deterministic).
+//
+// The fix: `init_list` must be a deterministic function of the model
+// alone. The flows/stocks runlists achieve this by filtering the sorted
+// `var_names`; the initials runlist must likewise sort its names before
+// `topo_sort_str`. These tests pin that property without relying on
+// probability: every fresh `SimlinDb` (fresh per-HashMap RandomState
+// seeds) must produce a BYTE-IDENTICAL `runlist_initials`, and the order
+// must equal the topological sort with a stable (sorted-name) tie-break.
+
+/// A model whose Initials runlist contains many variables with NO ordering
+/// dependency between them: independent constant-init stocks, an
+/// `INITIAL()`-backed aux that pins several constants into the init runlist,
+/// and a `PREVIOUS()` aux (whose lagged dep is stripped from both phases, so
+/// it too is unordered relative to its input). With this many unordered init
+/// nodes a HashMap-iteration-order-dependent `init_list` essentially never
+/// repeats the same order across fresh databases.
+fn init_runlist_determinism_fixture() -> datamodel::Project {
+    single_model_project(vec![
+        aux_var("zeta", "1"),
+        aux_var("yankee", "2"),
+        aux_var("xray", "3"),
+        aux_var("whiskey", "4"),
+        aux_var("victor", "5"),
+        aux_var("uniform", "6"),
+        // `INITIAL()` pins each referenced constant into the initials runlist
+        // (an `INIT()`-referenced var) with no ordering edge between them.
+        aux_var(
+            "init_sum",
+            "INIT(zeta) + INIT(yankee) + INIT(xray) + INIT(whiskey) + INIT(victor) + INIT(uniform)",
+        ),
+        // A PREVIOUS aux: its lagged input dep is stripped from dt AND init
+        // deps, so `prev_alpha` is unordered relative to `victor` in the init
+        // runlist -- the exact symptom shape of C-LEARN's
+        // `previous_emissions_for_rate`.
+        aux_var("prev_alpha", "PREVIOUS(victor, 0)"),
+        datamodel::Variable::Stock(datamodel::Stock {
+            ident: "stock_bravo".to_string(),
+            equation: datamodel::Equation::Scalar("10".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+        datamodel::Variable::Stock(datamodel::Stock {
+            ident: "stock_charlie".to_string(),
+            equation: datamodel::Equation::Scalar("20".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+        datamodel::Variable::Stock(datamodel::Stock {
+            ident: "stock_delta".to_string(),
+            equation: datamodel::Equation::Scalar("30".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }),
+    ])
+}
+
+/// Build `runlist_initials` for `init_runlist_determinism_fixture` from a
+/// freshly-seeded database.
+fn init_runlist_once(project: &datamodel::Project) -> Vec<String> {
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, project);
+    let model = result.models["main"].source;
+    let dep = crate::db::model_dependency_graph(&db, model, result.project);
+    dep.runlist_initials.clone()
+}
+
+#[test]
+fn initials_runlist_is_deterministic_across_fresh_databases() {
+    // Each `SimlinDb::default()` gets fresh per-HashMap RandomState seeds. A
+    // HashMap-iteration-order-dependent `init_list` would yield different
+    // runlist orders across these builds; a deterministic build yields one.
+    let project = init_runlist_determinism_fixture();
+    let baseline = init_runlist_once(&project);
+    // Sanity: the fixture must actually populate the initials runlist with
+    // many independent nodes, else the test could pass vacuously.
+    assert!(
+        baseline.len() >= 8,
+        "fixture must put many independent vars in the initials runlist \
+         (got {}): {baseline:?}",
+        baseline.len()
+    );
+    for i in 0..32 {
+        let again = init_runlist_once(&project);
+        assert_eq!(
+            baseline, again,
+            "runlist_initials must be a deterministic function of the model \
+             (fresh-database build {i} diverged -- HashMap-iteration-order \
+             dependence reintroduced in the initials runlist build)"
+        );
+    }
+}
+
+#[test]
+fn initials_runlist_is_sorted_topological_order() {
+    // Pin the deterministic order directly (not just self-consistency): the
+    // initials runlist must equal a stable topological sort with a
+    // sorted-name tie-break. We reconstruct that reference order from the
+    // engine's own `initial_dependencies` so the assertion tracks the real
+    // dependency edges rather than a hard-coded list, and confirm the engine
+    // emits exactly it. A HashMap-order-dependent build would (almost surely)
+    // disagree with this canonical order.
+    let project = init_runlist_determinism_fixture();
+
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &project);
+    let model = result.models["main"].source;
+    let dep = crate::db::model_dependency_graph(&db, model, result.project);
+    let actual = dep.runlist_initials.clone();
+
+    // Reference: visit the runlist's members in sorted order, emitting each
+    // member's (sorted) init deps that are themselves in the runlist before
+    // the member -- a stable Kahn-style topological order with an alphabetical
+    // tie-break. This mirrors `topo_sort_str` fed a *sorted* `names` list.
+    let member_set: std::collections::BTreeSet<String> = actual.iter().cloned().collect();
+    let mut expected: Vec<String> = Vec::new();
+    let mut emitted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    fn emit(
+        name: &str,
+        deps: &std::collections::HashMap<String, std::collections::BTreeSet<String>>,
+        members: &std::collections::BTreeSet<String>,
+        emitted: &mut std::collections::BTreeSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if emitted.contains(name) {
+            return;
+        }
+        emitted.insert(name.to_string());
+        if let Some(ds) = deps.get(name) {
+            for d in ds.iter() {
+                if members.contains(d.as_str()) {
+                    emit(d, deps, members, emitted, out);
+                }
+            }
+        }
+        if members.contains(name) {
+            out.push(name.to_string());
+        }
+    }
+    let mut sorted_members: Vec<&String> = member_set.iter().collect();
+    sorted_members.sort();
+    for m in sorted_members {
+        emit(
+            m,
+            &dep.initial_dependencies,
+            &member_set,
+            &mut emitted,
+            &mut expected,
+        );
+    }
+
+    assert_eq!(
+        actual, expected,
+        "runlist_initials must be the stable (sorted-name tie-break) \
+         topological order; a divergence means the initials runlist build \
+         is not sorting its candidate set before topo_sort_str"
+    );
+}
