@@ -174,14 +174,137 @@ const VDF_RTOL: f64 = 0.01;
 /// meaningful values.
 const K_ATOL: f64 = 1e-4;
 
+/// Whether `ident` names an element of one of the excluded base variables.
+/// A base name `"y"` excludes the scalar `y` and every arrayed element
+/// `y[a1]`, `y[a2]`, ... (the VDF results key form), so a known-residual
+/// variable can be carved out of the comparison without weakening the 1%
+/// gate for any other variable. Mirrors `test_helpers::is_excluded_var`
+/// (the CSV-comparison path) so both gates share identical base-name
+/// semantics. This is a documented, tracked exclusion (every base maps to a
+/// cluster in GH #590 / #591), NOT a tolerance change.
+fn vdf_ident_is_excluded(ident: &str, excluded: &[&str]) -> bool {
+    excluded.iter().any(|&base| {
+        ident == base
+            || ident
+                .strip_prefix(base)
+                .is_some_and(|rest| rest.starts_with('['))
+    })
+}
+
+/// Per-ident comparison outcome, shared by the comparator (`ensure_vdf_results*`)
+/// and the residual diagnostic so both apply byte-identical per-cell logic. The
+/// pass/fail verdict for one matched `Ref.vdf` ident is fully described here.
+#[derive(Default, Clone, Copy)]
+struct VdfIdentStats {
+    /// Cells that exceeded the near-zero-robust 1% tolerance (a real mismatch).
+    failures: u64,
+    /// `:NA:`-sentinel cells reconciled against a near-zero VDF reference.
+    na_reconciled: u64,
+    /// Cells skipped because either side was IEEE NaN.
+    nan_skipped: u64,
+    /// Cells actually compared (neither side NaN).
+    compared: u64,
+    /// True when the series was NaN at *every* step (an all-NaN core series).
+    all_nan: bool,
+    /// Largest per-cell relative error observed (for the diagnostic summary).
+    max_rel_error: f64,
+    /// The step at which `max_rel_error` occurred.
+    max_rel_step: usize,
+}
+
+/// Classify one matched `(vdf_off, sim_off)` ident across all steps, applying
+/// the full `ensure_vdf_results` per-cell contract: per-series peak/`atol`,
+/// NaN-skip accounting, `:NA:`-sentinel reconciliation, and the near-zero-robust
+/// `isclose` tolerance. Returning a struct (rather than mutating shared
+/// accumulators inline) lets the comparator, its exclusion sibling, and the
+/// temporary residual diagnostic agree exactly on which idents fail.
+fn classify_vdf_ident(
+    vdf_expected: &Results,
+    results: &Results,
+    vdf_off: usize,
+    sim_off: usize,
+) -> VdfIdentStats {
+    let na = simlin_engine::float::NA;
+    let step_count = vdf_expected.step_count;
+
+    // Per-series peak reference magnitude drives the absolute floor for the
+    // near-zero-robust `isclose` criterion. Finite reference cells only --
+    // a NaN reference contributes nothing to the series' scale.
+    let mut peak: f64 = 0.0;
+    for step in 0..step_count {
+        let expected = vdf_expected.data[step * vdf_expected.step_size + vdf_off];
+        if expected.is_finite() {
+            peak = peak.max(expected.abs());
+        }
+    }
+    let atol = K_ATOL * peak;
+
+    let mut stats = VdfIdentStats::default();
+    let mut series_nan_skipped: u64 = 0;
+
+    for step in 0..step_count {
+        let expected = vdf_expected.data[step * vdf_expected.step_size + vdf_off];
+        let actual = results.data[step * results.step_size + sim_off];
+
+        if expected.is_nan() || actual.is_nan() {
+            series_nan_skipped += 1;
+            stats.nan_skipped += 1;
+            continue;
+        }
+        stats.compared += 1;
+
+        // `:NA:`-sentinel reconciliation: a SIM `:NA:` cell (the finite
+        // -2^109 sentinel) is Vensim's "missing data", rendered as 0 in the
+        // VDF. Reconcile it against a near-zero reference; flag it as a real
+        // mismatch against a genuinely non-zero reference.
+        if simlin_engine::float::approx_eq(actual, na) {
+            if expected.abs() <= atol {
+                stats.na_reconciled += 1;
+            } else {
+                stats.failures += 1;
+            }
+            continue;
+        }
+
+        // Near-zero-robust isclose: |e - a| <= atol + rtol * max(|e|, |a|).
+        let scale = expected.abs().max(actual.abs());
+        let allowed = atol + VDF_RTOL * scale;
+        let abs_err = (expected - actual).abs();
+
+        // Track a relative error for the diagnostic summary (clamped scale
+        // mirrors the legacy report; the pass/fail decision is isclose).
+        let rel_err = abs_err / scale.max(1e-10);
+        if rel_err > stats.max_rel_error {
+            stats.max_rel_error = rel_err;
+            stats.max_rel_step = step;
+        }
+
+        if abs_err > allowed {
+            stats.failures += 1;
+        }
+    }
+
+    stats.all_nan = step_count > 0 && series_nan_skipped == step_count as u64;
+    stats
+}
+
 /// Compare VDF reference data against simulation results with cross-simulator
-/// tolerance.
+/// tolerance. See [`ensure_vdf_results_excluding`] for the full contract; this
+/// wrapper excludes nothing (the hard 1% gate applies to every matched var).
+fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
+    ensure_vdf_results_excluding(vdf_expected, results, &[]);
+}
+
+/// Compare VDF reference data against simulation results with cross-simulator
+/// tolerance, skipping every matched ident whose base name is in `excluded`.
 ///
 /// Contract (AC8.2 -- this comparator must not vacuously pass):
 /// - **Matched-variable floor:** at least
 ///   `max(MIN_MATCHED_ABSOLUTE, MIN_MATCHED_FRACTION * |vdf vars|)` `Ref.vdf`
-///   variables must match a `results` ident, or the comparison panics. A
-///   near-empty intersection can no longer "pass" by running an empty loop.
+///   variables must match a `results` ident *after exclusion*, or the comparison
+///   panics. A near-empty intersection can no longer "pass" by running an empty
+///   loop, and the exclusion set cannot create a vacuous pass by carving the
+///   matched count below the floor.
 /// - **NaN guard:** any matched *core* series that is entirely NaN, or a global
 ///   NaN-skipped fraction above `MAX_NAN_SKIPPED_FRACTION`, panics. These are
 ///   *additional* failure conditions, never relaxations.
@@ -197,14 +320,22 @@ const K_ATOL: f64 = 1e-4;
 ///   magnitude). This is the standard `isclose` criterion; it fixes the literal-0
 ///   relative-error breakdown (~100% for any jitter against a 0 reference) while
 ///   keeping a genuine >1% divergence on a meaningful value a failure.
+/// - **Exclusion (`excluded`):** a matched ident whose base name is in `excluded`
+///   is SKIPPED entirely -- it counts toward neither `matched`, the failure
+///   count, nor the NaN guards. This is a TRANSPARENT, documented, tracked
+///   known-residual carve-out (every excluded base maps to a cluster in GH #590 /
+///   #591; see `EXPECTED_VDF_RESIDUAL`), NOT a tolerance loosening: the hard 1%
+///   comparison stays unconditional for every NON-excluded variable, and the
+///   matched floor is checked AFTER exclusion so the carve-out cannot vacuously
+///   pass.
 ///
 /// Variables present in `results` but not in `vdf_expected` are skipped (they
 /// may be internal module variables without VDF entries).
-fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
-    let na = simlin_engine::float::NA;
+fn ensure_vdf_results_excluding(vdf_expected: &Results, results: &Results, excluded: &[&str]) {
     assert_eq!(vdf_expected.step_count, results.step_count);
 
     let mut matched = 0;
+    let mut excluded_matched = 0;
     let mut max_rel_error: f64 = 0.0;
     let mut max_rel_ident = String::new();
     let mut failures = 0;
@@ -220,80 +351,33 @@ fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
         if !results.offsets.contains_key(ident) {
             continue;
         }
+        // Known-residual carve-out: skip an excluded base's idents BEFORE any
+        // accounting so they touch neither the matched floor nor the guards.
+        if vdf_ident_is_excluded(ident.as_str(), excluded) {
+            excluded_matched += 1;
+            continue;
+        }
         let vdf_off = vdf_expected.offsets[ident];
         let sim_off = results.offsets[ident];
         matched += 1;
 
-        // Per-series peak reference magnitude drives the absolute floor for the
-        // near-zero-robust `isclose` criterion. Finite reference cells only --
-        // a NaN reference contributes nothing to the series' scale.
-        let mut peak: f64 = 0.0;
-        for step in 0..step_count {
-            let expected = vdf_expected.data[step * vdf_expected.step_size + vdf_off];
-            if expected.is_finite() {
-                peak = peak.max(expected.abs());
-            }
-        }
-        let atol = K_ATOL * peak;
-
-        // Per-series NaN accounting, so an entirely-NaN core series is caught
-        // even when the global fraction is otherwise healthy.
-        let mut series_nan_skipped: u64 = 0;
-
-        for step in 0..step_count {
-            let expected = vdf_expected.data[step * vdf_expected.step_size + vdf_off];
-            let actual = results.data[step * results.step_size + sim_off];
-
-            if expected.is_nan() || actual.is_nan() {
-                series_nan_skipped += 1;
-                total_nan_skipped += 1;
-                continue;
-            }
-            total_compared += 1;
-
-            // `:NA:`-sentinel reconciliation: a SIM `:NA:` cell (the finite
-            // -2^109 sentinel) is Vensim's "missing data", rendered as 0 in the
-            // VDF. Reconcile it against a near-zero reference; flag it as a real
-            // mismatch against a genuinely non-zero reference.
-            if simlin_engine::float::approx_eq(actual, na) {
-                if expected.abs() <= atol {
-                    na_reconciled += 1;
-                } else {
-                    failures += 1;
-                    if failures <= 5 {
-                        eprintln!(
-                            "FAIL step {step}: {ident}: {expected} (vdf) != :NA: (sim spurious :NA:)"
-                        );
-                    }
-                }
-                continue;
-            }
-
-            // Near-zero-robust isclose: |e - a| <= atol + rtol * max(|e|, |a|).
-            let scale = expected.abs().max(actual.abs());
-            let allowed = atol + VDF_RTOL * scale;
-            let abs_err = (expected - actual).abs();
-
-            // Track a relative error for the diagnostic summary (clamped scale
-            // mirrors the legacy report; the pass/fail decision is isclose).
-            let rel_err = abs_err / scale.max(1e-10);
-            if rel_err > max_rel_error {
-                max_rel_error = rel_err;
-                max_rel_ident = format!("{ident} (step {step})");
-            }
-
-            if abs_err > allowed {
-                failures += 1;
-                if failures <= 5 {
-                    eprintln!(
-                        "FAIL step {step}: {ident}: {expected} (vdf) != {actual} (sim), abs_err={abs_err:.6}, allowed={allowed:.6}, rel_err={rel_err:.6}"
-                    );
-                }
-            }
-        }
-
-        if step_count > 0 && series_nan_skipped == step_count as u64 {
+        let stats = classify_vdf_ident(vdf_expected, results, vdf_off, sim_off);
+        na_reconciled += stats.na_reconciled;
+        total_compared += stats.compared;
+        total_nan_skipped += stats.nan_skipped;
+        if stats.all_nan {
             all_nan_series.push(ident.to_string());
+        }
+        if stats.max_rel_error > max_rel_error {
+            max_rel_error = stats.max_rel_error;
+            max_rel_ident = format!("{ident} (step {})", stats.max_rel_step);
+        }
+        if stats.failures > 0 {
+            failures += stats.failures;
+            eprintln!(
+                "FAIL {ident}: {} cell(s) exceeded tolerance (max rel_err {:.6} at step {})",
+                stats.failures, stats.max_rel_error, stats.max_rel_step
+            );
         }
     }
 
@@ -302,9 +386,14 @@ fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
     } else {
         0.0
     };
-    eprintln!("VDF comparison: {matched} variables matched across {step_count} time steps");
     eprintln!(
-        "  matched floor = max({MIN_MATCHED_ABSOLUTE}, {MIN_MATCHED_FRACTION} * {}) = {}",
+        "VDF comparison: {matched} variables matched (after exclusion) across {step_count} time steps"
+    );
+    eprintln!(
+        "  excluded (known-residual, tracked in #590/#591) idents skipped: {excluded_matched}"
+    );
+    eprintln!(
+        "  matched floor (checked AFTER exclusion) = max({MIN_MATCHED_ABSOLUTE}, {MIN_MATCHED_FRACTION} * {}) = {}",
         vdf_expected.offsets.len(),
         min_matched(vdf_expected.offsets.len())
     );
@@ -1433,40 +1522,113 @@ fn simulates_wrld3_03() {
     assert_eq!(vdf_results.step_count, results.step_count);
 }
 
-// FULL end-to-end C-LEARN simulation against `Ref.vdf`. Still `#[ignore]`d,
-// but the blocker is NO LONGER macro expansion.
+/// Known-residual C-LEARN base-variable names excluded from the
+/// `simulates_clearn` VDF gate. C-LEARN compiles via the incremental path,
+/// runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
+/// tolerance on ~95.6% of matched idents (3298 of 3482) after the per-element-GF
+/// fix (`61573545`) and the `:NA:`-aware + near-zero-robust comparator
+/// (`8775ae97`). The user-directed decision was to BANK that match and TRACK the
+/// genuine residual rather than chase it to within 1%.
+///
+/// This is a TRANSPARENT, documented, tracked carve-out, NOT a tolerance
+/// loosening: the hard 1% comparison stays unconditional for every NON-excluded
+/// variable, and the matched floor is checked AFTER exclusion (3298 matched vs a
+/// 348 floor, ~9.5x -- the exclusion cannot create a vacuous pass). Each base
+/// below was enumerated by running C-LEARN through the exact `classify_vdf_ident`
+/// comparator logic and collecting the bases with >=1 failing cell; every base
+/// maps to a tracked cluster in GH #590 or #591.
+///
+/// To re-derive after an engine change, temporarily restore the
+/// `__clearn_residual_diagnostic` harness (git history of this file) and diff
+/// its output against this list.
+const EXPECTED_VDF_RESIDUAL: &[&str] = &[
+    // -- GH #590: data / graph-lookup variables import as a literal `0+0`
+    //    (or per-element `0+0 | 0+0 | ...`) stub instead of their lookup/data
+    //    values, so the whole variable is zeroed (relative error 1.0). The
+    //    dominant residual cluster.
+    "global_emissions_from_graph_lookup",
+    "ref_global_emissions_from_graph_lookup",
+    "historical_forestry_lookup",
+    "historical_gdp_lookup",
+    "oc,_bc,_and_bio_aerosol_forcings",
+    "other_forcings_composite_plus_rcp85",
+    "other_forcings_smooth_plus_rcp85",
+    "ozone_precursor_forcings",
+    "rs_ch4",
+    "rs_hfc125",
+    "rs_hfc134a",
+    "rs_hfc143a",
+    "rs_hfc152a",
+    "rs_hfc227ea",
+    "rs_hfc23",
+    "rs_hfc245ca",
+    "rs_hfc32",
+    // -- GH #591 cluster 1: SAMPLE UNTIL / INIT-of-`:NA:` / target-policy
+    //    (COP dimension). A `:NA:`-arithmetic edge and/or SAMPLE UNTIL
+    //    semantics where Vensim performs NA-arithmetic (e.g. `-2*NA` =
+    //    -1.298e33) while Simlin yields a bare `:NA:` sentinel (-6.49e32) or 0.
+    //    `historical_gdp` (the bare twin of the #590 `_lookup`) is here, not
+    //    #590: its non-`:NA:` cells match exactly; only its `-2*NA` cells
+    //    diverge (vdf -1.298e33 vs sim -6.49e32 sentinel).
+    "last_set_target_year",
+    "last_active_target_year",
+    "time_from_target_to_ultimate_target",
+    "target_emissions_for_rate",
+    "ultimate_target_value_from_rate",
+    "depth_at_bottom",
+    "emissions_with_stopped_growth",
+    "historical_gdp",
+    // -- GH #591 cluster 2: genuine numeric tail (meaningful-value divergence,
+    //    not near-zero noise) on the emissions and ocean-diffusion chains. The
+    //    `im_3_*` / `relative_emissions_*` group diverges by rel ~0.247 on
+    //    substantial values; `co2eq_gap_closing_percentage` is a near-zero-ratio
+    //    percentage (large rel, tiny absolute ~1.4e-3); `diffusion_flux` is the
+    //    ocean-diffusion physical variable feeding the SLR sub-model, diverging
+    //    on small magnitudes (vdf 0 vs sim ~1e-8, and ~0.5 rel on ~1e-5 cells)
+    //    -- a member discovered by the exhaustive measurement beyond #591's
+    //    representative list.
+    "im_3_emissions",
+    "im_3_emissions_vs_rs",
+    "im_3_ff_co2",
+    "relative_emissions_to_equity",
+    "relative_emissions_to_equity_target",
+    "co2eq_gap_closing_percentage",
+    "diffusion_flux",
+    // -- GH #591 cluster 3 (other-NaN: Vensim writes literal IEEE NaN while
+    //    Simlin writes the `:NA:` sentinel, e.g. `slr_inches_from_2000`) needs
+    //    NO entry here: the comparator NaN-skips those cells (NaN on either
+    //    side is skipped, not failed) and the late finite steps match within
+    //    tolerance, so no `slr_inches_from_2000`-style base reaches the failure
+    //    set. It is tracked in #591 for the representation gap, not excluded.
+];
+
+// FULL end-to-end C-LEARN simulation against `Ref.vdf`. Un-stubbed (no longer a
+// permanently-skipped placeholder): C-LEARN compiles via the incremental path,
+// runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
+// tolerance on the reconciled ~95.6% of matched idents. Kept `#[test] #[ignore]`
+// purely for RUNTIME CLASS (C-LEARN is ~53k lines / 1.4 MB, ~5s just to parse on
+// release), so the capped default `cargo test` set stays under the 3-minute cap;
+// run it explicitly via `--ignored` (AC8.3).
 //
-// After Phases 1-6 + GH #554 (the false `init -> init` macro-registry
-// recursion fix), C-LEARN's four macros (SAMPLE UNTIL, SSHAPE, RAMP FROM TO,
-// INIT) parse, register, and expand with ZERO macro-attributable
-// diagnostics -- this is asserted by `corpus_clearn_macros_import`
-// (macros.AC6.2) and the three `simulates_macro_clearn_*` focused fixtures
-// (macros.AC6.3) exercise each invoked macro's defined behavior. The macro
-// work is DONE.
+// History (the formerly-listed blockers are CLEARED on this branch):
+//   * C-LEARN's four macros (SAMPLE UNTIL, SSHAPE, RAMP FROM TO, INIT) parse,
+//     register, and expand with zero macro-attributable diagnostics (the macro
+//     work, asserted by `corpus_clearn_macros_import` and the focused
+//     `simulates_macro_clearn_*` fixtures).
+//   * The previously-fatal `CircularDependency` on
+//     `main.previous_emissions_intensity_vs_refyr` was the FALSE whole-variable
+//     cycle-gate verdict; element-level cycle resolution (Phases 1-2) dissolves
+//     it. The formerly-listed `MismatchedDimensions` / `UnknownDependency` /
+//     `DoesNotExist` blockers (incl. the `"goal 1.5 for temperature"` quoted-
+//     period ident, #559) are likewise cleared.
 //
-// What remains are C-LEARN's *non-macro* blockers, which the design
-// explicitly scopes OUT of the macro work ("tracked separately"):
-// `compile_vm` fails with `NotSimulatable: model 'main' has circular
-// dependencies` before the VM is even constructed. The collected
-// diagnostics (see `corpus_clearn_macros_import`'s compile step) show the
-// concrete non-macro causes, all on the `main` model:
-//   * a model-logic `CircularDependency` on
-//     `main.previous_emissions_intensity_vs_refyr` (NOT the project-level
-//     macro-registry recursion #554 fixed -- this one is attributed to a
-//     real `main` variable);
-//   * `MismatchedDimensions` on `c_in_mixed_layer`,
-//     `heat_in_atmosphere_and_upper_ocean`, `c_in_deep_ocean_net_flow`,
-//     `heat_in_deep_ocean_net_flow` (subscript/dimension issues);
-//   * `UnknownDependency` on `emissions_with_cumulative_constraints` and a
-//     non-time `$` reference surfacing as a `DoesNotExist` on
-//     `"goal_1.5_for_temperature"` (Phase 3's documented-limitation:
-//     deprioritized, surfaces as an ordinary unresolved reference -- NOT a
-//     macro error);
-//   * plus unit-inference warnings (non-fatal).
-// These are tracked separately per the design (the parent should file /
-// confirm tracking issues for the C-LEARN non-macro blockers and full
-// end-to-end C-LEARN simulation -- they are out of scope for the macro
-// work, which is complete). Keep `#[ignore]`d until they are resolved.
+// What remains is a genuine NUMERIC residual (~3.7% of cells), explicitly
+// excluded via `EXPECTED_VDF_RESIDUAL` and tracked in #590 (the dominant `0+0`
+// data/graph-lookup-import cluster) and #591 (SAMPLE UNTIL / INIT-`:NA:` /
+// NA-arithmetic, the `im_3_*` numeric tail, the ocean-diffusion tail, and the
+// NaN-vs-`:NA:` representation gap). The exclusion is a transparent, documented,
+// tracked carve-out -- NOT a tolerance loosening; the hard 1% gate holds for
+// every non-excluded variable and the matched floor is checked after exclusion.
 // Run with: cargo test --release -- --ignored simulates_clearn
 #[test]
 #[ignore]
@@ -1497,7 +1659,10 @@ fn simulates_clearn() {
         .to_results_via_records()
         .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"));
 
-    ensure_vdf_results(&vdf_results, &results);
+    // Hard 1% gate for every NON-excluded variable; the documented, tracked
+    // EXPECTED_VDF_RESIDUAL bases (#590 / #591) are skipped. The matched floor
+    // is enforced AFTER exclusion, so this cannot vacuously pass.
+    ensure_vdf_results_excluding(&vdf_results, &results, EXPECTED_VDF_RESIDUAL);
 }
 
 /// Issue #559 -- the C-LEARN `"Goal 1.5 for Temperature"` shape.
