@@ -136,31 +136,47 @@ there and supplies its own without conflict.
 
 ## Run-side proposals (post-win hot path: `eval_bytecode` 46%, `RuntimeView` ~20%)
 
-### R1. Bounds-check elimination on `curr`/`next` indexing (the user's "unsafe for dcache")
+### R1. Bounds-check elimination on `curr`/`next` indexing — INVESTIGATED, not worth it
 
 The hot opcodes index `curr[module_off + off]`, `next[...]`,
-`bytecode.literals[id]`, and `context.graphical_functions[gf]` with bounds
-checks. `LoadVar` + `AssignCurr` + `LoadConstant` alone are ~52% of executed
-opcodes, so this is a compare+branch on more than half of all dispatches. The
-`Stack` already uses `get_unchecked` justified by `ByteCodeBuilder::finish()`
-statically proving max stack depth < capacity.
+`bytecode.literals[id]`, and `context.graphical_functions[gf]`. Disassembly
+confirms `eval_bytecode` carries 127 `panic_bounds_check` sites, so LLVM is not
+eliding them. An earlier draft of this doc proposed `get_unchecked` here as "the
+biggest code-level run win" — direct measurement disproves that.
 
-Proposal: extend the same proof. At `ByteCodeBuilder::finish()` (or `Vm::new`),
-validate that for every reachable `(module_off, opcode)` the absolute slot index
-is `< n_slots` and every `literal_id`/`gf` index is in range — then use
-`get_unchecked` in the hot arms behind a documented SAFETY invariant. The
-absolute-offset check requires enumerating module instantiation offsets (the
-`child_targets` table from win #1 already gives the module tree), which is a
-finite static walk.
+**Measured ceiling: ~0.** Replacing the bounds checks on the hottest scalar arms
+(`LoadVar`, `LoadConstant`, `LoadGlobalVar`, `AssignCurr`/`Next`,
+`AssignConstCurr`, `BinOpAssignCurr`/`Next`) *and* the dispatch `code[pc]` access
+with `get_unchecked` moved the C-LEARN run by less than run-to-run noise (165–172
+ms across runs, vs ~167 ms checked). On a modern out-of-order core at
+`opt-level=3` an always-in-bounds check is a perfectly-predicted, never-taken
+branch with an out-of-line cold panic path — effectively free. (The ~10% in
+`RuntimeView::flat_offset` is a per-element `SmallVec` rebuild + linear sparse
+search, *not* a bounds check — see R4.)
 
-- Note on framing: the bytecode itself streams linearly and is prefetcher
-  friendly (and already 8 B/opcode, asserted), so **bytecode density is not the
-  dcache problem** — the random-access `curr[]`/`prev[]` slot arrays and the
-  per-op bounds branches are. This is the highest-value run change after the
-  build levers.
-- Effort: medium. Risk: medium — needs an airtight static validation pass; a
-  miss is UB. Mitigate with the same belt-and-suspenders `debug_assert!` the
-  `Stack` uses, plus a fuzz/proptest over offsets.
+**Can safe code eliminate them (the optimizer-coaxing question)?**
+- The dispatch index is *already* check-free in safe code: `while pc <
+  code.len() { match &code[pc] }` — the loop guard dominates the access with the
+  identical bound, so LLVM proves it in range. This is the canonical safe-BCE
+  pattern (the Go equivalent is the elision after `for i := 0; i < len(s);
+  i++`). Confirmed: `get_unchecked` on `code[pc]` made no difference.
+- The data-driven indices cannot be made check-free in safe code. `off` is `u16`
+  opcode data and `module_off` is a runtime module base; the in-range invariant
+  is established by a separate validation pass and is not re-derivable at the
+  access site from types or local control flow. The safe idioms that *do* elide
+  don't fit: sequential iteration / `chunks`/`windows` (this is random access);
+  fixed-size `[T; N]` (n_slots is runtime); power-of-two masking `i & (len-1)`
+  (needs a compile-time-constant power-of-two length); a hoisted `assert!(i <
+  len)` (that *is* the check, relocated — `i` is per-opcode so it can't hoist out
+  of the loop). Removing them would require `unsafe` `get_unchecked` + a static
+  validation pass (the `Stack` pattern), verifiable under miri — and miri detects
+  OOB at runtime, it does not remove checks.
+
+**Decision: do not implement.** `unsafe` in a `#![deny(unsafe_code)]` crate, plus
+a validation pass and a miri burden, is not justified for a sub-noise gain. The
+run's *instruction count*, not its bounds checks, is the lever — that is R2. The
+"bytecode density / dcache" intuition is also a non-issue: the program streams
+linearly (prefetcher-friendly) and is already 8 B/opcode.
 
 ### R2. 3-address / register VM (highest ceiling)
 
@@ -268,11 +284,12 @@ re-derivation. (b) is broader but touches many call sites.
    (`[profile.release] opt-level=3` + `.cargo/config.toml` wasm override;
    `mimalloc` global allocator on the native binaries + libsimlin's opt-in
    feature). WASM stays on `z` and links no mimalloc.
-2. **R1 (bounds-check elimination)** — biggest code-level run win; reuses the
-   `child_targets` static structure.
-3. **R4 (RuntimeView)** — clear win for arrayed/array-heavy models.
-4. **R3 superinstructions** — incremental dispatch wins, low risk.
-5. **C2 / C3** — only if incremental-compile latency still bites after A+B.
-6. **R2 (register VM)** — highest ceiling, largest effort; do last, after the
-   cheaper wins reset the baseline and the bytecode/dispatch structure is
-   otherwise stable.
+2. ~~**R1 (bounds-check elimination)**~~ — INVESTIGATED, dropped: measured
+   sub-noise (~0) ceiling; bounds checks are effectively free at opt-level=3.
+3. **R2 (register VM)** — highest ceiling; the run's instruction count is the
+   real lever (R1 showed the per-op overhead is not bounds checks). Largest
+   effort.
+4. **R4 (RuntimeView)** — clear win for arrayed/array-heavy models; the ~10%
+   `flat_offset` cost is a per-element `SmallVec` rebuild + sparse search.
+5. **R3 superinstructions** — incremental dispatch wins, low risk.
+6. **C2 / C3** — only if incremental-compile latency still bites after A+B.
