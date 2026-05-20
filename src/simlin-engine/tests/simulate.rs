@@ -138,8 +138,9 @@ fn load_expected_results(xmile_path: &str) -> Option<Results> {
 /// meaningless (the legacy comparator vacuously "passed" a comparison sharing
 /// 0 or 1 ident). Both broad reference models exercise this far above the
 /// floor: `simulates_wrld3_03` already asserts `offsets.len() > 200`, and
-/// C-LEARN matches ~3482 of its `Ref.vdf` variables -- so a 10%-of-VDF floor
-/// is comfortably below the true matched count yet far above 0/1.
+/// C-LEARN's `Ref.vdf` has ~3484 variables, ~3482 of which match a simulation
+/// ident -- so a 10%-of-VDF floor (~348) is comfortably below the true matched
+/// count yet far above 0/1.
 const MIN_MATCHED_FRACTION: f64 = 0.10;
 
 /// Hard floor on matched variables, applied when the VDF reference itself is
@@ -189,6 +190,20 @@ fn vdf_ident_is_excluded(ident: &str, excluded: &[&str]) -> bool {
                 .strip_prefix(base)
                 .is_some_and(|rest| rest.starts_with('['))
     })
+}
+
+/// The base-variable name of a (possibly arrayed) VDF results ident: `"y"` for
+/// the scalar `y`, and `"y"` for every element ident `y[a1]`, `y[a2]`, ... .
+/// This is the inverse of [`vdf_ident_is_excluded`]'s base-name match (which
+/// strips a trailing `[elem,...]` subscript), so the set of base names produced
+/// here over the failing idents is exactly the set [`EXPECTED_VDF_RESIDUAL`]
+/// must carve out. Used by `clearn_residual_exactness` to guard that the
+/// exclusion stays neither over- nor under-broad.
+fn vdf_ident_base_name(ident: &str) -> &str {
+    match ident.find('[') {
+        Some(idx) => &ident[..idx],
+        None => ident,
+    }
 }
 
 /// Per-ident comparison outcome, shared by the comparator (`ensure_vdf_results*`)
@@ -572,9 +587,8 @@ fn run_vacuous_comparison_scenarios() {
     //     reject it.
     expected_nan = many(2.0);
     sim_nan = many(2.0);
-    // NaN out two of four steps in roughly half the variables -> ~25% global
-    // skip; push it past the threshold by NaN-ing 3 of 4 steps in 12 of 16
-    // vars (~56% of cells skipped).
+    // Push the global NaN-skipped fraction past the threshold by NaN-ing 3 of
+    // 4 steps in 12 of 16 vars (~56% of cells skipped).
     for (_n, series) in sim_nan.iter_mut().take(12) {
         series[0] = f64::NAN;
         series[1] = f64::NAN;
@@ -1525,7 +1539,7 @@ fn simulates_wrld3_03() {
 /// Known-residual C-LEARN base-variable names excluded from the
 /// `simulates_clearn` VDF gate. C-LEARN compiles via the incremental path,
 /// runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
-/// tolerance on ~95.6% of matched idents (3298 of 3482) after the per-element-GF
+/// tolerance on ~94.7% of matched idents (3298 of 3482) after the per-element-GF
 /// fix (`61573545`) and the `:NA:`-aware + near-zero-robust comparator
 /// (`8775ae97`). The user-directed decision was to BANK that match and TRACK the
 /// genuine residual rather than chase it to within 1%.
@@ -1538,9 +1552,13 @@ fn simulates_wrld3_03() {
 /// comparator logic and collecting the bases with >=1 failing cell; every base
 /// maps to a tracked cluster in GH #590 or #591.
 ///
-/// To re-derive after an engine change, temporarily restore the
-/// `__clearn_residual_diagnostic` harness (git history of this file) and diff
-/// its output against this list.
+/// This set is GUARDED for exactness by the committed `clearn_residual_exactness`
+/// regression test (run it to re-derive/verify after an engine change:
+/// `cargo test --release -- --ignored clearn_residual_exactness`). That test
+/// re-runs C-LEARN through the same `classify_vdf_ident` comparator with NO
+/// exclusion and asserts the live failing set equals this list, failing loudly
+/// (with the symmetric difference) if the residual grew (a regression) or shrank
+/// (a fix that should prune the exclusion).
 const EXPECTED_VDF_RESIDUAL: &[&str] = &[
     // -- GH #590: data / graph-lookup variables import as a literal `0+0`
     //    (or per-element `0+0 | 0+0 | ...`) stub instead of their lookup/data
@@ -1605,7 +1623,7 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
 // FULL end-to-end C-LEARN simulation against `Ref.vdf`. Un-stubbed (no longer a
 // permanently-skipped placeholder): C-LEARN compiles via the incremental path,
 // runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
-// tolerance on the reconciled ~95.6% of matched idents. Kept `#[test] #[ignore]`
+// tolerance on the reconciled ~94.7% of matched idents. Kept `#[test] #[ignore]`
 // purely for RUNTIME CLASS (C-LEARN is ~53k lines / 1.4 MB, ~5s just to parse on
 // release), so the capped default `cargo test` set stays under the 3-minute cap;
 // run it explicitly via `--ignored` (AC8.3).
@@ -1633,6 +1651,21 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
 #[test]
 #[ignore]
 fn simulates_clearn() {
+    let (vdf_results, results) = run_clearn_vs_vdf();
+
+    // Hard 1% gate for every NON-excluded variable; the documented, tracked
+    // EXPECTED_VDF_RESIDUAL bases (#590 / #591) are skipped. The matched floor
+    // is enforced AFTER exclusion, so this cannot vacuously pass.
+    ensure_vdf_results_excluding(&vdf_results, &results, EXPECTED_VDF_RESIDUAL);
+}
+
+/// Compile and run C-LEARN end-to-end and parse `Ref.vdf`, returning
+/// `(vdf_results, results)`. Shared by `simulates_clearn` (the 1% gate) and
+/// `clearn_residual_exactness` (the exclusion-exactness guard) so both exercise
+/// the byte-identical `open_vensim` -> `compile_vm` -> `run_to_end` -> parse-VDF
+/// path and compare the same data. Heavy (C-LEARN is ~53k lines / 1.4 MB,
+/// ~5s just to parse on release), so every caller is `#[ignore]`d.
+fn run_clearn_vs_vdf() -> (Results, Results) {
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
 
     eprintln!("model (vensim mdl): {mdl_path}");
@@ -1659,10 +1692,76 @@ fn simulates_clearn() {
         .to_results_via_records()
         .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"));
 
-    // Hard 1% gate for every NON-excluded variable; the documented, tracked
-    // EXPECTED_VDF_RESIDUAL bases (#590 / #591) are skipped. The matched floor
-    // is enforced AFTER exclusion, so this cannot vacuously pass.
-    ensure_vdf_results_excluding(&vdf_results, &results, EXPECTED_VDF_RESIDUAL);
+    (vdf_results, results)
+}
+
+/// Committed regression guard that `EXPECTED_VDF_RESIDUAL` stays EXACT: it is
+/// the precise set of C-LEARN base variables that the live `classify_vdf_ident`
+/// comparator flags, neither over- nor under-broad. Runs C-LEARN through the
+/// same end-to-end path as `simulates_clearn`, classifies EVERY matched ident
+/// through the SAME comparator (`classify_vdf_ident`) with NO exclusion, and
+/// collects the base name of every ident with a failing cell -- a tolerance
+/// violation or spurious `:NA:` (`stats.failures > 0`) or an entirely-NaN core
+/// series (`stats.all_nan`, which would trip the comparator's NaN guard). That
+/// is exactly the membership `EXPECTED_VDF_RESIDUAL` carves out (a partial-NaN
+/// series is NOT all-NaN and is NOT excluded -- see `EXPECTED_VDF_RESIDUAL`
+/// cluster 3). The global NaN-skipped-fraction guard is a separate aggregate
+/// check enforced by `simulates_clearn` itself, not a per-base membership driver.
+///
+/// Asserts the live set EQUALS `EXPECTED_VDF_RESIDUAL`, failing LOUDLY with the
+/// symmetric difference if the residual GREW (a regression -- new divergence to
+/// investigate, file under #590/#591) or SHRANK (an engine fix -- prune the now-
+/// passing base from the exclusion). Reuses `classify_vdf_ident` (no comparator
+/// duplication). `#[ignore]`d for runtime class like `simulates_clearn`.
+///
+/// Run with:
+/// cargo test --release -- --ignored clearn_residual_exactness
+#[test]
+#[ignore]
+fn clearn_residual_exactness() {
+    use std::collections::BTreeSet;
+
+    let (vdf_expected, results) = run_clearn_vs_vdf();
+    assert_eq!(vdf_expected.step_count, results.step_count);
+
+    // Classify every matched ident with NO exclusion and collect the base name
+    // of each ident that the comparator flags (failing cell or all-NaN core
+    // series) -- exactly the membership EXPECTED_VDF_RESIDUAL must carve out.
+    let mut live_residual: BTreeSet<String> = BTreeSet::new();
+    let mut matched = 0usize;
+    for ident in vdf_expected.offsets.keys() {
+        let Some(&sim_off) = results.offsets.get(ident) else {
+            continue;
+        };
+        matched += 1;
+        let vdf_off = vdf_expected.offsets[ident];
+        let stats = classify_vdf_ident(&vdf_expected, &results, vdf_off, sim_off);
+        if stats.failures > 0 || stats.all_nan {
+            live_residual.insert(vdf_ident_base_name(ident.as_str()).to_string());
+        }
+    }
+
+    let expected_residual: BTreeSet<String> = EXPECTED_VDF_RESIDUAL
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let grew: Vec<&String> = live_residual.difference(&expected_residual).collect();
+    let shrank: Vec<&String> = expected_residual.difference(&live_residual).collect();
+
+    eprintln!(
+        "clearn residual exactness: {matched} idents matched; {} live residual bases vs {} excluded",
+        live_residual.len(),
+        expected_residual.len()
+    );
+    assert!(
+        grew.is_empty() && shrank.is_empty(),
+        "EXPECTED_VDF_RESIDUAL is no longer exact.\n  \
+         Newly-failing bases NOT in the exclusion (regression -- investigate, \
+         track under #590/#591): {grew:?}\n  \
+         Excluded bases that NO LONGER fail (a fix -- prune them from \
+         EXPECTED_VDF_RESIDUAL): {shrank:?}"
+    );
 }
 
 /// Issue #559 -- the C-LEARN `"Goal 1.5 for Temperature"` shape.
