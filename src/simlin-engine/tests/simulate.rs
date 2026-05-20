@@ -12,7 +12,7 @@ use std::io::BufReader;
 use simlin_engine::FilesystemDataProvider;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::serde::{deserialize, serialize};
-use simlin_engine::{Results, Vm, project_io};
+use simlin_engine::{Method, Results, SimSpecs as Specs, Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
 use test_helpers::{ensure_results, ensure_results_excluding};
@@ -132,18 +132,88 @@ fn load_expected_results(xmile_path: &str) -> Option<Results> {
     None
 }
 
+/// Minimum fraction of `vdf_expected` variables that must match a `results`
+/// ident before a comparison is considered non-vacuous. Below this floor, the
+/// per-step tolerance loop runs over so few variables that `failures == 0` is
+/// meaningless (the legacy comparator vacuously "passed" a comparison sharing
+/// 0 or 1 ident). Both broad reference models exercise this far above the
+/// floor: `simulates_wrld3_03` already asserts `offsets.len() > 200`, and
+/// C-LEARN matches ~3482 of its `Ref.vdf` variables -- so a 10%-of-VDF floor
+/// is comfortably below the true matched count yet far above 0/1.
+const MIN_MATCHED_FRACTION: f64 = 0.10;
+
+/// Hard floor on matched variables, applied when the VDF reference itself is
+/// small. Keeps the synthetic guard test honest (a one-of-sixteen-matched
+/// comparison must trip even though 16/10 rounds low) without constraining the
+/// real broad-model comparisons, which clear it by orders of magnitude.
+const MIN_MATCHED_ABSOLUTE: usize = 10;
+
+/// Maximum fraction of compared (finite-reference) cells that may be skipped
+/// because either side is IEEE NaN. `build_results` initializes unrecovered
+/// VDF spans to `f64::NAN` (`vdf.rs`), and a simulation defect can emit NaN
+/// columns; a high global NaN-skipped fraction means the comparison is largely
+/// not actually comparing anything. The Vensim `:NA:` sentinel is the *finite*
+/// `-2^109` (never NaN), so legitimate `:NA:` cells flow to the comparator, not
+/// this guard. A correct broad comparison skips ~0% (verified against C-LEARN's
+/// re-measure); 10% is a generous ceiling that still catches a degenerate run.
+const MAX_NAN_SKIPPED_FRACTION: f64 = 0.10;
+
+/// Cross-simulator relative tolerance (1%): VDF stores f32 (~7 digits) and
+/// Vensim's integration may differ slightly from ours.
+const VDF_RTOL: f64 = 0.01;
+
+/// Per-series absolute-floor coefficient for the `isclose` criterion. The
+/// absolute floor is `K_ATOL * peak`, where `peak` is the series' largest
+/// reference magnitude, so a cell whose reference is a literal 0 tolerates
+/// sim jitter up to `K_ATOL * peak` (the pure relative error is ~100% there and
+/// would spuriously fail). Chosen small enough that a genuine >1% divergence on
+/// a meaningful value still fails: at `K_ATOL = 1e-4` a near-zero cell tolerates
+/// 0.01% of the series peak, far below any real divergence (validated against
+/// C-LEARN's re-measure -- the genuine residual stays flagged). This is a
+/// principled correction of the comparison at zero, NOT a relaxation for
+/// meaningful values.
+const K_ATOL: f64 = 1e-4;
+
 /// Compare VDF reference data against simulation results with cross-simulator
-/// tolerance. VDF stores f32 (~7 digits) and Vensim's integration may differ
-/// from ours, so we allow up to 1% relative error.
-/// Variables present in `results` but not in `vdf_expected` are skipped
-/// (they may be internal module variables without VDF entries).
+/// tolerance.
+///
+/// Contract (AC8.2 -- this comparator must not vacuously pass):
+/// - **Matched-variable floor:** at least
+///   `max(MIN_MATCHED_ABSOLUTE, MIN_MATCHED_FRACTION * |vdf vars|)` `Ref.vdf`
+///   variables must match a `results` ident, or the comparison panics. A
+///   near-empty intersection can no longer "pass" by running an empty loop.
+/// - **NaN guard:** any matched *core* series that is entirely NaN, or a global
+///   NaN-skipped fraction above `MAX_NAN_SKIPPED_FRACTION`, panics. These are
+///   *additional* failure conditions, never relaxations.
+/// - **`:NA:`-sentinel reconciliation:** Simlin keeps Vensim's `:NA:` as the
+///   finite sentinel `crate::float::NA` (`-2^109`); Vensim renders `:NA:` as 0
+///   in the VDF. So a SIM `:NA:` cell matches a near-zero VDF cell (counted as
+///   reconciled), but a SIM `:NA:` cell against a genuinely non-zero VDF value
+///   is a real mismatch (a spurious `:NA:`) and fails. The engine output is
+///   never mapped `:NA:`->0; only this comparator interprets the sentinel.
+/// - **Near-zero-robust tolerance:** a cell matches when
+///   `|e - a| <= atol + VDF_RTOL * max(|e|, |a|)`, with a per-series absolute
+///   floor `atol = K_ATOL * peak` (`peak` = the series' largest reference
+///   magnitude). This is the standard `isclose` criterion; it fixes the literal-0
+///   relative-error breakdown (~100% for any jitter against a 0 reference) while
+///   keeping a genuine >1% divergence on a meaningful value a failure.
+///
+/// Variables present in `results` but not in `vdf_expected` are skipped (they
+/// may be internal module variables without VDF entries).
 fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
+    let na = simlin_engine::float::NA;
     assert_eq!(vdf_expected.step_count, results.step_count);
 
     let mut matched = 0;
     let mut max_rel_error: f64 = 0.0;
     let mut max_rel_ident = String::new();
     let mut failures = 0;
+    let mut na_reconciled: u64 = 0;
+    // Global NaN-skip accounting across all matched cells.
+    let mut total_compared: u64 = 0;
+    let mut total_nan_skipped: u64 = 0;
+    // Names of matched core series that were NaN at *every* step.
+    let mut all_nan_series: Vec<String> = Vec::new();
     let step_count = vdf_expected.step_count;
 
     for ident in vdf_expected.offsets.keys() {
@@ -154,39 +224,320 @@ fn ensure_vdf_results(vdf_expected: &Results, results: &Results) {
         let sim_off = results.offsets[ident];
         matched += 1;
 
+        // Per-series peak reference magnitude drives the absolute floor for the
+        // near-zero-robust `isclose` criterion. Finite reference cells only --
+        // a NaN reference contributes nothing to the series' scale.
+        let mut peak: f64 = 0.0;
+        for step in 0..step_count {
+            let expected = vdf_expected.data[step * vdf_expected.step_size + vdf_off];
+            if expected.is_finite() {
+                peak = peak.max(expected.abs());
+            }
+        }
+        let atol = K_ATOL * peak;
+
+        // Per-series NaN accounting, so an entirely-NaN core series is caught
+        // even when the global fraction is otherwise healthy.
+        let mut series_nan_skipped: u64 = 0;
+
         for step in 0..step_count {
             let expected = vdf_expected.data[step * vdf_expected.step_size + vdf_off];
             let actual = results.data[step * results.step_size + sim_off];
 
             if expected.is_nan() || actual.is_nan() {
+                series_nan_skipped += 1;
+                total_nan_skipped += 1;
+                continue;
+            }
+            total_compared += 1;
+
+            // `:NA:`-sentinel reconciliation: a SIM `:NA:` cell (the finite
+            // -2^109 sentinel) is Vensim's "missing data", rendered as 0 in the
+            // VDF. Reconcile it against a near-zero reference; flag it as a real
+            // mismatch against a genuinely non-zero reference.
+            if simlin_engine::float::approx_eq(actual, na) {
+                if expected.abs() <= atol {
+                    na_reconciled += 1;
+                } else {
+                    failures += 1;
+                    if failures <= 5 {
+                        eprintln!(
+                            "FAIL step {step}: {ident}: {expected} (vdf) != :NA: (sim spurious :NA:)"
+                        );
+                    }
+                }
                 continue;
             }
 
-            let max_val = expected.abs().max(actual.abs()).max(1e-10);
-            let rel_err = (expected - actual).abs() / max_val;
+            // Near-zero-robust isclose: |e - a| <= atol + rtol * max(|e|, |a|).
+            let scale = expected.abs().max(actual.abs());
+            let allowed = atol + VDF_RTOL * scale;
+            let abs_err = (expected - actual).abs();
+
+            // Track a relative error for the diagnostic summary (clamped scale
+            // mirrors the legacy report; the pass/fail decision is isclose).
+            let rel_err = abs_err / scale.max(1e-10);
             if rel_err > max_rel_error {
                 max_rel_error = rel_err;
                 max_rel_ident = format!("{ident} (step {step})");
             }
 
-            // 1% relative tolerance for cross-simulator comparison
-            if rel_err > 0.01 {
+            if abs_err > allowed {
                 failures += 1;
                 if failures <= 5 {
                     eprintln!(
-                        "FAIL step {step}: {ident}: {expected} (vdf) != {actual} (sim), rel_err={rel_err:.6}"
+                        "FAIL step {step}: {ident}: {expected} (vdf) != {actual} (sim), abs_err={abs_err:.6}, allowed={allowed:.6}, rel_err={rel_err:.6}"
                     );
                 }
             }
         }
+
+        if step_count > 0 && series_nan_skipped == step_count as u64 {
+            all_nan_series.push(ident.to_string());
+        }
     }
 
+    let nan_fraction = if total_compared + total_nan_skipped > 0 {
+        total_nan_skipped as f64 / (total_compared + total_nan_skipped) as f64
+    } else {
+        0.0
+    };
     eprintln!("VDF comparison: {matched} variables matched across {step_count} time steps");
+    eprintln!(
+        "  matched floor = max({MIN_MATCHED_ABSOLUTE}, {MIN_MATCHED_FRACTION} * {}) = {}",
+        vdf_expected.offsets.len(),
+        min_matched(vdf_expected.offsets.len())
+    );
     eprintln!("  Max relative error: {max_rel_error:.6} at {max_rel_ident}");
+    eprintln!("  :NA:-sentinel cells reconciled to VDF 0: {na_reconciled}");
+    eprintln!(
+        "  NaN-skipped cells: {total_nan_skipped} of {} compared+skipped ({:.4})",
+        total_compared + total_nan_skipped,
+        nan_fraction
+    );
+
+    // Matched-variable floor (AC8.2): reject a vacuous near-empty comparison.
+    let floor = min_matched(vdf_expected.offsets.len());
+    assert!(
+        matched >= floor,
+        "VDF comparison vacuous: only {matched} of {} VDF variables matched a \
+         simulation ident (floor {floor}); the comparison is not meaningfully \
+         exercising the model",
+        vdf_expected.offsets.len()
+    );
+
+    // NaN guard (AC8.2): an entirely-NaN core series, or an excessive global
+    // NaN-skipped fraction, means the comparison is not actually comparing.
+    assert!(
+        all_nan_series.is_empty(),
+        "VDF comparison degenerate: {} matched core series were entirely NaN \
+         (e.g. {:?}); a NaN column compares nothing",
+        all_nan_series.len(),
+        &all_nan_series[..all_nan_series.len().min(5)]
+    );
+    assert!(
+        nan_fraction <= MAX_NAN_SKIPPED_FRACTION,
+        "VDF comparison degenerate: {:.2}% of matched cells were NaN-skipped \
+         (ceiling {:.2}%); the comparison is largely not comparing anything",
+        nan_fraction * 100.0,
+        MAX_NAN_SKIPPED_FRACTION * 100.0
+    );
+
     if failures > 0 {
-        eprintln!("  {failures} comparisons exceeded 1% tolerance");
+        eprintln!("  {failures} comparisons exceeded tolerance");
         panic!("VDF comparison failed with {failures} tolerance violations");
     }
+}
+
+/// The matched-variable floor for a VDF reference with `vdf_var_count`
+/// variables (see [`MIN_MATCHED_FRACTION`] / [`MIN_MATCHED_ABSOLUTE`]).
+fn min_matched(vdf_var_count: usize) -> usize {
+    MIN_MATCHED_ABSOLUTE.max((vdf_var_count as f64 * MIN_MATCHED_FRACTION) as usize)
+}
+
+/// Build a synthetic [`Results`] from `(name, series)` pairs for the
+/// `ensure_vdf_results` guard test. Each series must have `step_count` values;
+/// columns are laid out densely in argument order (so `step_size == names.len()`).
+#[cfg(test)]
+fn synthetic_results(columns: &[(&str, Vec<f64>)]) -> Results {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let step_count = columns.first().map(|(_, s)| s.len()).unwrap_or(0);
+    for (name, series) in columns {
+        assert_eq!(
+            series.len(),
+            step_count,
+            "synthetic_results: column {name} has {} steps, expected {step_count}",
+            series.len()
+        );
+    }
+    let step_size = columns.len();
+
+    let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+    let mut data = vec![0.0_f64; step_count * step_size];
+    for (col, (name, series)) in columns.iter().enumerate() {
+        offsets.insert(Ident::<Canonical>::new(name), col);
+        for (step, value) in series.iter().enumerate() {
+            data[step * step_size + col] = *value;
+        }
+    }
+
+    Results {
+        offsets,
+        data: data.into_boxed_slice(),
+        step_size,
+        step_count,
+        specs: Specs {
+            start: 0.0,
+            stop: (step_count.max(1) - 1) as f64,
+            dt: 1.0,
+            save_step: 1.0,
+            method: Method::Euler,
+            n_chunks: step_count,
+        },
+        is_vensim: false,
+    }
+}
+
+/// AC8.2: the hardened `ensure_vdf_results` must FAIL (panic), rather than
+/// vacuously pass, on a near-empty or degenerate comparison, while the
+/// user-directed comparator reconciles the legitimate `:NA:`-sentinel and
+/// near-zero cases. Each scenario builds synthetic `Results` literals (no
+/// C-LEARN parse -- fast, runs in the default capped suite) and asserts the
+/// panic/no-panic outcome via `catch_unwind`. This is a legitimate
+/// test-of-a-panicking-assertion (distinct from the production `catch_unwind`
+/// retired in Phase 6): `ensure_vdf_results` signals failure by panicking, so
+/// the only way to assert "it failed" from a sibling test is to catch it.
+#[test]
+fn ensure_vdf_results_rejects_vacuous_comparisons() {
+    // catch_unwind would otherwise dump each intentional panic's backtrace to
+    // stderr, drowning the test log; silence the default hook for the duration.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(run_vacuous_comparison_scenarios);
+    std::panic::set_hook(prev_hook);
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+fn run_vacuous_comparison_scenarios() {
+    let na = simlin_engine::float::NA;
+
+    // A broad VDF reference: many variables, several steps each. The matched
+    // floor is a fraction of this count, so a comparison that shares almost no
+    // idents falls below it.
+    let many = |fill: f64| -> Vec<(&'static str, Vec<f64>)> {
+        let names: &[&str] = &[
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+        ];
+        names
+            .iter()
+            .map(|n| (*n, vec![fill, fill, fill, fill]))
+            .collect()
+    };
+
+    let asserts_panic = |label: &str, expected: &[(&str, Vec<f64>)], sim: &[(&str, Vec<f64>)]| {
+        let e = synthetic_results(expected);
+        let a = synthetic_results(sim);
+        let r = std::panic::catch_unwind(|| ensure_vdf_results(&e, &a));
+        assert!(
+            r.is_err(),
+            "{label}: expected ensure_vdf_results to PANIC, but it passed"
+        );
+    };
+    let asserts_ok = |label: &str, expected: &[(&str, Vec<f64>)], sim: &[(&str, Vec<f64>)]| {
+        let e = synthetic_results(expected);
+        let a = synthetic_results(sim);
+        let r = std::panic::catch_unwind(|| ensure_vdf_results(&e, &a));
+        assert!(
+            r.is_ok(),
+            "{label}: expected ensure_vdf_results to PASS, but it panicked"
+        );
+    };
+
+    // (1) Below-floor: VDF has 16 idents; sim shares only ONE (`alpha`). The
+    //     per-step loop runs for one matched var -- finite, in tolerance -- so
+    //     the legacy `failures == 0` check passes vacuously. The matched-floor
+    //     guard must reject it.
+    asserts_panic(
+        "below-floor (1 of 16 matched)",
+        &many(1.0),
+        &[("alpha", vec![1.0, 1.0, 1.0, 1.0])],
+    );
+
+    // (2) Entirely-NaN core series: every shared ident matches, but one matched
+    //     series is NaN at every step (the `build_results` all-NaN-unrecovered-
+    //     span case). The legacy loop NaN-skips every cell -> `failures == 0`,
+    //     vacuous pass. The NaN guard must reject an all-NaN core series.
+    let mut expected_nan = many(2.0);
+    let mut sim_nan = many(2.0);
+    // Make `alpha`'s sim series entirely NaN.
+    sim_nan[0].1 = vec![f64::NAN; 4];
+    asserts_panic("entirely-NaN core series", &expected_nan, &sim_nan);
+
+    // (3) Excessive NaN-skipped fraction: many matched cells are NaN-skipped
+    //     (here, ~half of all matched cells across vars), even though no single
+    //     series is entirely NaN. The global NaN-skipped-fraction guard must
+    //     reject it.
+    expected_nan = many(2.0);
+    sim_nan = many(2.0);
+    // NaN out two of four steps in roughly half the variables -> ~25% global
+    // skip; push it past the threshold by NaN-ing 3 of 4 steps in 12 of 16
+    // vars (~56% of cells skipped).
+    for (_n, series) in sim_nan.iter_mut().take(12) {
+        series[0] = f64::NAN;
+        series[1] = f64::NAN;
+        series[2] = f64::NAN;
+    }
+    asserts_panic("excessive NaN-skipped fraction", &expected_nan, &sim_nan);
+
+    // (4) Positive control: enough matched vars, all finite, all in tolerance.
+    //     Guards must NOT false-trip.
+    asserts_ok("positive control (well-formed)", &many(3.0), &many(3.0));
+
+    // (5) `:NA:`-sentinel == Vensim 0: SIM is the finite `:NA:` sentinel where
+    //     VDF renders `:NA:` as 0. This must reconcile as a MATCH, not fail.
+    let mut expected_na = many(3.0);
+    let mut sim_na = many(3.0);
+    expected_na[0].1 = vec![0.0; 4]; // VDF renders :NA: as 0
+    sim_na[0].1 = vec![na; 4]; // Simlin keeps the -2^109 sentinel
+    asserts_ok(":NA:-sentinel vs VDF 0 (reconciled)", &expected_na, &sim_na);
+
+    // (6) Spurious `:NA:`: SIM is `:NA:` but VDF has a genuine non-zero value.
+    //     Simlin is spuriously `:NA:` where Vensim has data -- a REAL mismatch
+    //     that must be caught, never silently reconciled.
+    expected_na = many(3.0);
+    sim_na = many(3.0);
+    expected_na[0].1 = vec![42.0; 4]; // VDF genuinely non-zero
+    sim_na[0].1 = vec![na; 4]; // Simlin spuriously :NA:
+    asserts_panic(
+        "spurious :NA: (SIM NA vs VDF nonzero)",
+        &expected_na,
+        &sim_na,
+    );
+
+    // (7a) Near-zero robustness, benign: VDF is a literal 0 and SIM is tiny
+    //      jitter within the per-series absolute floor. The pure relative error
+    //      would be ~100%; the abs+rel criterion must let it pass.
+    let mut expected_nz = many(3.0);
+    let mut sim_nz = many(3.0);
+    // Series whose peak magnitude is ~10; a 1e-6 jitter at the 0 cell is far
+    // below k*peak for any reasonable k. Use a non-zero peak elsewhere so the
+    // per-series abs floor is meaningful.
+    expected_nz[0].1 = vec![10.0, 0.0, 5.0, 0.0];
+    sim_nz[0].1 = vec![10.0, 1e-6, 5.0, -1e-6];
+    asserts_ok("near-zero jitter within abs floor", &expected_nz, &sim_nz);
+
+    // (7b) Near-zero but MEANINGFUL: VDF is 0 yet SIM is a large value (same
+    //      order as the series peak). The abs floor must NOT swallow this -- it
+    //      is a genuine divergence and must fail.
+    expected_nz = many(3.0);
+    sim_nz = many(3.0);
+    expected_nz[0].1 = vec![10.0, 0.0, 5.0, 0.0];
+    sim_nz[0].1 = vec![10.0, 8.0, 5.0, 0.0]; // 8.0 at a cell where VDF is 0
+    asserts_panic("near-zero but meaningful divergence", &expected_nz, &sim_nz);
 }
 
 type CompileFn = fn(&simlin_engine::datamodel::Project) -> simlin_engine::CompiledSimulation;
