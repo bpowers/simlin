@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::builtins::{Loc, UntypedBuiltinFn, is_0_arity_builtin_fn};
+use crate::builtins::{Loc, UntypedBuiltinFn, is_0_arity_builtin_fn_ci};
 use crate::common::{EquationError, RawIdent};
 use crate::lexer::LexerType;
 use std::result::Result as StdResult;
@@ -180,9 +180,13 @@ impl Expr0 {
     fn reify_0_arity_builtins(self) -> Self {
         match self {
             Expr0::Var(ref id, loc) => {
-                // Check for 0-arity builtins using lowercase version
-                let lowercase_id = id.as_str().to_lowercase();
-                if is_0_arity_builtin_fn(&lowercase_id) {
+                // Allocation-free membership test first: the vast majority of
+                // variable references are not 0-arity builtins, so we avoid the
+                // per-reference to_lowercase() heap allocation on the hot parse
+                // path and only materialize the lowercased name in the rare case
+                // a genuine `pi`/`time`/etc. reference must be reified.
+                if is_0_arity_builtin_fn_ci(id.as_str()) {
+                    let lowercase_id = id.as_str().to_lowercase();
                     Expr0::App(UntypedBuiltinFn(lowercase_id, vec![]), loc)
                 } else {
                     self

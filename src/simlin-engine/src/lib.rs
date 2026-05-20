@@ -122,7 +122,7 @@ pub use self::results::{Method, Results, Specs as SimSpecs};
 pub use self::variable::{
     DepClassification, Variable, classify_dependencies, identifier_set, previous_referenced_idents,
 };
-pub use self::vm::{CompiledSimulation, Vm};
+pub use self::vm::{BytecodeProfile, CompiledSimulation, Vm};
 
 // Re-export compat functions at the crate root for convenience
 #[cfg(feature = "xmutil")]

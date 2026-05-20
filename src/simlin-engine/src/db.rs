@@ -3734,8 +3734,11 @@ pub fn compile_var_fragment(
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
 
     // Caller-owned, lowering-independent context (built only from
-    // project/variable data, never from the lowered equation).
-    let dm_dims = source_dims_to_datamodel(project.dimensions(db));
+    // project/variable data, never from the lowered equation). Use the
+    // salsa-cached project dims (returns(ref)) rather than re-running
+    // source_dims_to_datamodel on every variable -- this fragment compiler is
+    // invoked once per variable, and the datamodel dims are project-global.
+    let dm_dims = project_datamodel_dims(db, project);
     let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
     let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
         .iter()
