@@ -720,8 +720,10 @@ impl Var {
                                 exprs.push(Expr::AssignCurr(off, Box::new(main_expr)));
                                 exprs
                             }
+                            // Stocks never carry graphical functions, so they
+                            // are never lookup-only (`false`).
                             Ast::ApplyToAll(dims, ast) => {
-                                expand_a2a_with_hoisting(ctx, dims, ast, off)?
+                                expand_a2a_with_hoisting(ctx, dims, ast, off, false)?
                             }
                             Ast::Arrayed(
                                 dims,
@@ -735,6 +737,7 @@ impl Var {
                                 default_ast.as_ref(),
                                 *apply_default_for_missing,
                                 off,
+                                false,
                             )?,
                         }
                     } else {
@@ -767,7 +770,7 @@ impl Var {
                         }
                     }
                 }
-                Variable::Var { tables, .. } => {
+                Variable::Var { tables, eqn, .. } => {
                     let off = ctx.get_base_offset(&Ident::new(var.ident()))?;
                     let ast = if ctx.is_initial {
                         var.init_ast()
@@ -777,6 +780,12 @@ impl Var {
                     if ast.is_none() {
                         return sim_err!(EmptyEquation, var.ident().to_string());
                     }
+                    // A standalone lookup-only variable (a graphical-function
+                    // holder with no functional input) is lowered uniformly to
+                    // `gf(Time)` across all three shapes below. WITH LOOKUP
+                    // (tables + a real input) keeps its `LOOKUP(self, input)`
+                    // lowering; ordinary auxes are untouched.
+                    let lookup_only = var_is_lookup_only(eqn.as_ref(), !tables.is_empty());
                     match ast.as_ref().unwrap() {
                         Ast::Scalar(ast) => {
                             let mut exprs = ctx.lower(ast)?;
@@ -785,10 +794,19 @@ impl Var {
                                 hoist_nested_array_builtins_in_scalar(main_expr, &mut exprs);
                             let main_expr = if !tables.is_empty() {
                                 let loc = main_expr.get_loc();
+                                // For lookup-only, evaluate the table at the
+                                // determined index (Time) instead of the
+                                // lowered (constant-0) sentinel equation; WITH
+                                // LOOKUP feeds the user's input expression.
+                                let index = if lookup_only {
+                                    lookup_only_index_expr(loc)
+                                } else {
+                                    main_expr
+                                };
                                 Expr::App(
                                     BuiltinFn::Lookup(
                                         Box::new(Expr::Var(off, loc)),
-                                        Box::new(main_expr),
+                                        Box::new(index),
                                         loc,
                                     ),
                                     loc,
@@ -800,7 +818,7 @@ impl Var {
                             exprs
                         }
                         Ast::ApplyToAll(dims, ast) => {
-                            expand_a2a_with_hoisting(ctx, dims, ast, off)?
+                            expand_a2a_with_hoisting(ctx, dims, ast, off, lookup_only)?
                         }
                         Ast::Arrayed(dims, elements, default_ast, apply_default_for_missing) => {
                             expand_arrayed_with_hoisting(
@@ -810,6 +828,7 @@ impl Var {
                                 default_ast.as_ref(),
                                 *apply_default_for_missing,
                                 off,
+                                lookup_only,
                             )?
                         }
                     }
@@ -1099,14 +1118,57 @@ fn contains_array_producing_builtin(expr: &Expr) -> bool {
 /// present but a *real* input equation -- it must keep its `LOOKUP(self,
 /// input)` lowering) and for an ordinary aux (a real equation, no tables). The
 /// `has_tables` guard also keeps an empty-RHS aux (no gf) off this path.
-// `allow(dead_code)`: this commit introduces the detection helper + its unit
-// tests; the immediately-following commit wires it into the scalar/arrayed/A2A
-// lowering sites (the `gf(0)`-vs-literal-`0` uniform-lowering fix). Removed
-// there once the production call sites reference it.
-#[allow(dead_code)]
 fn is_lookup_only(equation: &str, has_tables: bool) -> bool {
+    has_tables && is_empty_or_sentinel(equation)
+}
+
+/// An equation string with no functional content: empty/whitespace-only (the
+/// XMILE lookup-only form) or exactly the MDL lookup sentinel (the MDL form).
+/// The trimmed comparison mirrors `mdl::writer::is_lookup_only_equation`.
+fn is_empty_or_sentinel(equation: &str) -> bool {
     let trimmed = equation.trim();
-    has_tables && (trimmed.is_empty() || trimmed == crate::mdl::LOOKUP_SENTINEL)
+    trimmed.is_empty() || trimmed == crate::mdl::LOOKUP_SENTINEL
+}
+
+/// Whether a whole variable is lookup-only, given its source `datamodel::Equation`
+/// and whether it carries graphical functions (`has_tables`). A scalar/A2A
+/// variable is lookup-only when its single equation is empty/sentinel; an
+/// arrayed (`Equation::Arrayed`) variable is lookup-only when EVERY element
+/// equation (and the EXCEPT default, if any) is empty/sentinel -- i.e. it is a
+/// pure per-element table holder. Returns `false` when the variable has no
+/// equation or no tables.
+fn var_is_lookup_only(eqn: Option<&crate::datamodel::Equation>, has_tables: bool) -> bool {
+    use crate::datamodel::Equation;
+    if !has_tables {
+        return false;
+    }
+    match eqn {
+        // Scalar / A2A: one equation string -- the pure `is_lookup_only` atom.
+        Some(Equation::Scalar(s)) | Some(Equation::ApplyToAll(_, s)) => {
+            is_lookup_only(s, has_tables)
+        }
+        // Arrayed: a pure per-element table holder iff EVERY element equation
+        // (and the EXCEPT default, if any) is empty/sentinel. `has_tables` is
+        // already true here, so the per-element check is just the string
+        // predicate `is_empty_or_sentinel` that the atom is built on.
+        Some(Equation::Arrayed(_, elements, default, _)) => {
+            !elements.is_empty()
+                && elements.iter().all(|(_, e, _, _)| is_empty_or_sentinel(e))
+                && default.as_deref().map(is_empty_or_sentinel).unwrap_or(true)
+        }
+        None => false,
+    }
+}
+
+/// The index expression a standalone lookup-only variable's table is evaluated
+/// at. Determined empirically (Phase 1, #590) to be the current simulation time
+/// -- `gf(Time)` -- matching genuine Vensim for the year-indexed historical
+/// lookup tables that motivate this, and consistent with the importer's
+/// `MdlEquation::Implicit` arm (`mdl/convert/variables.rs`), which already
+/// lowers an unspecified-input gf to `equation = "TIME"`. Centralized here so
+/// the scalar, arrayed, and A2A lowering sites stay in lock-step.
+fn lookup_only_index_expr(loc: Loc) -> Expr {
+    Expr::App(BuiltinFn::Time, loc)
 }
 
 #[cfg(test)]
@@ -1682,8 +1744,42 @@ fn expand_arrayed_with_hoisting(
     default_ast: Option<&crate::ast::Expr2>,
     apply_default_for_missing: bool,
     off: usize,
+    lookup_only: bool,
 ) -> Result<Vec<Expr>> {
     let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
+
+    // A lookup-only arrayed variable is a pure per-element table holder: every
+    // element evaluates ITS OWN table at the determined index (Time). The
+    // per-element table layout (`variable.rs::build_tables` /
+    // `reorder_arrayed_element_tables`) gives `tables.len() == n` keyed by
+    // row-major declared dimension index, so element `i` reads
+    // `graphical_functions[base_gf + i]`. Critically, this wraps `off + i` (the
+    // element's own offset) -- contrast the A2A case in
+    // `expand_a2a_with_hoisting`, which has ONE shared table and must wrap the
+    // BASE offset. `codegen::extract_table_info` derives `elem_off = off+i -
+    // base_off = i` and `table_count = n`, so `i` is always in range. (A
+    // lookup-only equation is a constant sentinel, never an array-producing
+    // builtin, so this never needs the hoisting path below.)
+    if lookup_only {
+        let exprs: Vec<Expr> = SubscriptIterator::new(dims)
+            .enumerate()
+            .map(|(i, _)| {
+                let loc = Loc::default();
+                Expr::AssignCurr(
+                    off + i,
+                    Box::new(Expr::App(
+                        BuiltinFn::Lookup(
+                            Box::new(Expr::Var(off + i, loc)),
+                            Box::new(lookup_only_index_expr(loc)),
+                            loc,
+                        ),
+                        loc,
+                    )),
+                )
+            })
+            .collect();
+        return Ok(exprs);
+    }
 
     // Scan ALL subscript combinations to find any equation that needs hoisting.
     // The first element alone may be a constant override while later elements
@@ -1767,9 +1863,42 @@ fn expand_a2a_with_hoisting(
     dims: &[Dimension],
     ast: &crate::ast::Expr2,
     off: usize,
+    lookup_only: bool,
 ) -> Result<Vec<Expr>> {
-    // Lower once using element 0's subscripts to detect the expression shape.
     let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
+
+    // An apply-to-all lookup-only variable has ONE variable-level table
+    // (`variable.rs::build_tables` falls through to the single-gf branch, so
+    // `tables.len() == 1`) shared by every element. Every element must read
+    // that one table, so the LOOKUP wraps the BASE offset `off`, NOT `off + i`:
+    // `codegen::extract_table_info` derives `elem_off = off - base_off = 0` and
+    // `table_count == 1`, so element_offset 0 is in range for all elements.
+    // Wrapping `off + i` here would make `element_offset == i >= 1 ==
+    // table_count` for i > 0, and the VM's `Lookup` opcode would push NaN. This
+    // is the deliberate inverse of the arrayed per-element case in
+    // `expand_arrayed_with_hoisting` (per-element tables, wrap `off + i`).
+    if lookup_only {
+        let exprs: Vec<Expr> = SubscriptIterator::new(dims)
+            .enumerate()
+            .map(|(i, _)| {
+                let loc = Loc::default();
+                Expr::AssignCurr(
+                    off + i,
+                    Box::new(Expr::App(
+                        BuiltinFn::Lookup(
+                            Box::new(Expr::Var(off, loc)),
+                            Box::new(lookup_only_index_expr(loc)),
+                            loc,
+                        ),
+                        loc,
+                    )),
+                )
+            })
+            .collect();
+        return Ok(exprs);
+    }
+
+    // Lower once using element 0's subscripts to detect the expression shape.
     let first_subscripts: Vec<String> = SubscriptIterator::new(dims).next().unwrap_or_default();
     let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
     let mut first_exprs = first_ctx.lower(ast)?;

@@ -3098,6 +3098,23 @@ mod lookup_tests {
         assert_eq!(0.5, lookup(&table, 0.5));
         assert_eq!(1.5, lookup(&table, 1.5));
     }
+
+    /// AC1.6 regression pin (#590): the regular (Interpolate-mode) `lookup`
+    /// clamps an out-of-range index to the endpoint y-value and returns NaN for
+    /// a NaN index. The lookup-only saved-value fix only changes *which*
+    /// expression is fed to a standalone graphical-function variable's table
+    /// (the index), never the table's clamp/NaN behavior -- this pins that the
+    /// clamp the fix relies on is unchanged.
+    #[test]
+    fn test_regular_lookup_outside_range_clamps_to_endpoints() {
+        let table = test_table(); // x in [0, 2], y = x
+        // Below the first x: clamp to the first y.
+        assert_eq!(0.0, lookup(&table, -5.0));
+        // Above the last x: clamp to the last y.
+        assert_eq!(2.0, lookup(&table, 5.0));
+        // NaN index: NaN result.
+        assert!(lookup(&table, f64::NAN).is_nan());
+    }
 }
 
 #[cfg(test)]

@@ -63,6 +63,8 @@ pub mod json_sdai;
 mod json_sdai_proptest;
 pub mod layout;
 mod lexer;
+#[cfg(test)]
+mod lookup_only_tests;
 pub mod ltm;
 pub mod ltm_agg;
 pub mod ltm_augment;
