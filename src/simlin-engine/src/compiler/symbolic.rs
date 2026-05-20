@@ -1412,8 +1412,12 @@ type GfBlockKey = SmallVec<[u64; 16]>;
 fn gf_block_key(tables: &[Vec<(f64, f64)>]) -> GfBlockKey {
     let mut key: GfBlockKey = SmallVec::new();
     for table in tables {
-        // Boundary marker: the table's point count, tagged in the high
-        // bits so no `to_bits()` point pair can forge a boundary at it.
+        // Boundary marker: the table's point count packed into a NaN bit
+        // pattern (sign set + exponent all-ones). Genuine GF points are
+        // finite, so a finite point's `to_bits()` never equals this marker --
+        // only a NaN point value could collide, and GF data never contains
+        // NaN. Worst case if one ever did: a spurious block *distinction*,
+        // never an over-merge (which is the only unsound direction).
         key.push(0xFFFF_FFFF_0000_0000 | table.len() as u64);
         for (x, y) in table {
             key.push(x.to_bits());
