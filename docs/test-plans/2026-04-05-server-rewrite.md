@@ -1,6 +1,6 @@
 # Server Rewrite — Human Test Plan
 
-This test plan complements the automated tests for the 8-phase server rewrite implemented under [docs/implementation-plans/2026-04-05-server-rewrite/](../implementation-plans/2026-04-05-server-rewrite/). It covers the manual verifications that cannot be automated in CI (browser auto-open, headless behavior, multi-tab live editing, external-editor coexistence, AI client integration).
+This test plan complements the automated tests for the 8-phase server rewrite implemented under `docs/implementation-plans/2026-04-05-server-rewrite/`. It covers the manual verifications that cannot be automated in CI (browser auto-open, headless behavior, multi-tab live editing, external-editor coexistence, AI client integration).
 
 ## Prerequisites
 

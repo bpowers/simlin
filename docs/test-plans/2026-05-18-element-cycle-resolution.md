@@ -1,9 +1,8 @@
 # Test Plan — Element-Level Cycle Resolution (C-LEARN hero model)
 
-Human verification plan for the
-[2026-05-18-element-cycle-resolution](../implementation-plans/2026-05-18-element-cycle-resolution/)
+Human verification plan for the `2026-05-18-element-cycle-resolution`
 implementation plan. Companion to the automated AC→test map in that plan's
-[`test-requirements.md`](../implementation-plans/2026-05-18-element-cycle-resolution/test-requirements.md).
+`test-requirements.md`.
 
 ## Coverage summary
 
