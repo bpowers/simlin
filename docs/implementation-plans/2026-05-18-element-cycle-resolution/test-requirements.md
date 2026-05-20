@@ -323,3 +323,42 @@ the pre-commit hook (`cargo test` under the 180s cap, never `--no-verify`).
 The standard verification command for those is, per phase:
 `cargo test -p simlin-engine --features file_io <name>` followed by
 `git commit` (the pre-commit hook runs the full default `cargo test`).
+
+---
+
+## Finalization reconciliation (2026-05-19)
+
+The 32 design ACs above are all covered as mapped. During execution the
+phases discovered and fixed a stack of **pre-existing, latent bugs** that
+were *masked* by the false `CircularDependency` (and thus not anticipated by
+the design's ACs) but had to be fixed for AC7.1 (C-LEARN compiles `Ok`) and
+AC8.1 (numeric match). These are **newly-surfaced prerequisites**, each with
+its own fast unit test (so coverage does not depend on the heavy `#[ignore]`d
+C-LEARN tests) and each tracked on GitHub — they do **not** map to a design AC
+and are listed here for completeness, not as gaps:
+
+- **Phase 6 (unblocking AC7.1):** #580 Bug A (group-mapped subscript /
+  `expand_maps_to_chains` canonicalization) + Bug B (arrayed-GF-in-reducer
+  `LookupArray` codegen); #582 (cross-fragment GF de-duplication); #583
+  (monolithic temp recycling in fragment concatenation); #584 (INITIAL-backed
+  module output in the initials runlist); #585 (arrayed VECTOR SORT ORDER
+  per-iterated-slice 0-based ranks — also **completes the AC5 multi-row
+  case**, which the design's single-row AC5 did not cover); #363 (codegen
+  PREVIOUS-subscript panic → typed `Err`, AC7.5); the `:NA:` sentinel fix
+  (#586 — Vensim `:NA:` is the finite `-2^109`, not NaN — the AC7.3
+  root cause).
+- **Phase 7 (AC8.1):** the per-element graphical-function element→dimension-index
+  mapping fix (#589 — the dominant numeric divergence) and the `:NA:`-aware +
+  near-zero-robust comparator in `ensure_vdf_results`.
+
+**AC8.1 disposition (user-approved, per phase_07 Task 4's "residual that
+resists a general fix is filed via `track-issue`, not hacked"):** `simulates_clearn`
+passes — C-LEARN matches `Ref.vdf` within the **unchanged** 1% tolerance on
+~96.3% of cells — with the residual (~3.7%) **explicitly excluded and tracked**
+via the documented `EXPECTED_VDF_RESIDUAL` constant (#590 the `0+0`
+data/lookup-import cluster; #591 the SAMPLE UNTIL/INIT-`:NA:` + numeric-tail +
+NaN-vs-`:NA:` clusters). The exclusion is **not** a tolerance loosening: the
+matched-after-exclusion count is 9.5× the `MIN_MATCHED` floor, the 1% gate is
+unconditional for every non-excluded var, and a committed `#[ignore]`d
+`clearn_residual_exactness` test asserts the live failing set equals
+`EXPECTED_VDF_RESIDUAL` (failing loudly if the residual grows *or* shrinks).
