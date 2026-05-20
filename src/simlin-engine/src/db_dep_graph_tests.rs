@@ -3178,6 +3178,12 @@ fn initials_runlist_is_sorted_topological_order() {
     let member_set: std::collections::BTreeSet<String> = actual.iter().cloned().collect();
     let mut expected: Vec<String> = Vec::new();
     let mut emitted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // ASSUMES this fixture's initials runlist is acyclic (no *resolved* init
+    // SCC among the members): a plain DFS post-order matches `topo_sort_str`
+    // only on a DAG. A resolved init SCC would be emitted SCC-contiguous at the
+    // SCC's slot by `topo_sort_str`'s condensation, and this reference
+    // reconstruction would diverge -- such a fixture needs SCC-aware expected
+    // order, not this helper.
     fn emit(
         name: &str,
         deps: &std::collections::HashMap<String, std::collections::BTreeSet<String>>,

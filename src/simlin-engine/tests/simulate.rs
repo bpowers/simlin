@@ -571,11 +571,40 @@ fn classify_vdf_ident_nan_vs_na_skips_without_failing() {
 
     // The membership predicate `clearn_residual_exactness` uses to build the
     // live residual set: this series is excluded from it, so it never needs an
-    // `EXPECTED_VDF_RESIDUAL` carve-out (AC4.5).
+    // `EXPECTED_VDF_RESIDUAL` carve-out (AC4.5). The exclusion holds *because*
+    // the series has a finite tail (like `slr_inches_from_2000`); the test name
+    // names only this partial-NaN / finite-tail case, NOT the general
+    // NaN-vs-:NA: contract.
     let enters_residual = stats.failures > 0 || stats.all_nan;
     assert!(
         !enters_residual,
-        "a NaN-vs-:NA: series must NOT enter the residual failure set"
+        "a partial-NaN (finite-tail) NaN-vs-:NA: series must NOT enter the residual failure set"
+    );
+
+    // Boundary made executable: an ENTIRELY-NaN VDF series (Vensim literal NaN
+    // at every step) is the separately-guarded exception. With no finite cell
+    // to compare, `all_nan` is set and the SAME membership predicate flips true,
+    // so such a series WOULD enter the residual set (it is handled by the
+    // all-NaN guards in `ensure_vdf_results_excluding`, not by this finite-tail
+    // skip path). This pins exactly why the test's scope is the finite-tail case.
+    let all_nan_vdf = synthetic_results(&[(
+        "synthetic_all_nan_series",
+        vec![f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN],
+    )]);
+    let all_na_sim =
+        synthetic_results(&[("synthetic_all_nan_series", vec![na, na, na, na, na, na])]);
+    let all_nan_off =
+        all_nan_vdf.offsets[&simlin_engine::common::Ident::new("synthetic_all_nan_series")];
+    let all_na_sim_off =
+        all_na_sim.offsets[&simlin_engine::common::Ident::new("synthetic_all_nan_series")];
+    let all_nan_stats = classify_vdf_ident(&all_nan_vdf, &all_na_sim, all_nan_off, all_na_sim_off);
+    assert!(
+        all_nan_stats.all_nan,
+        "an entirely-NaN VDF series must be flagged all_nan (the separately-guarded exception)"
+    );
+    assert!(
+        all_nan_stats.failures > 0 || all_nan_stats.all_nan,
+        "an all-NaN series WOULD enter the residual set -- it is NOT covered by the finite-tail skip"
     );
 }
 

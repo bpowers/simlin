@@ -591,6 +591,58 @@ mod standalone_descriptor_tests {
         );
     }
 
+    /// Pins the STOCK-slot guard as the *sole* load-bearing reason a legitimate
+    /// dynamic owner is left untouched.
+    ///
+    /// `legit_dynamic_owner_with_small_f11_is_not_rebound` (above) also exercises
+    /// a dynamic owner, but there the forward link `lookup_word10[f11] == 9` is
+    /// out of OT range, so the "valid forward data OT" guard rejects the re-bind
+    /// *first* and the STOCK-slot guard never decides. This case constructs a
+    /// span where every *other* precondition passes -- it is non-overlapping,
+    /// scalar, its `f[11]` is a valid lookup index, and its forward link resolves
+    /// to a valid in-range owner OT -- so the ONLY condition standing between the
+    /// owner and a (wrong) re-bind is the STOCK-slot requirement: its
+    /// `f[11]`-as-OT-start lands on a DYNAMIC (0x11) slot, not a STOCK (0x08)
+    /// ghost. Removing or broadening that guard would flip this test to a
+    /// non-empty re-bind (verified by mutation), so it enforces the docstring
+    /// promise to preserve legitimate 0x11 owners.
+    #[test]
+    fn legit_dynamic_owner_blocked_only_by_stock_slot_guard() {
+        // OT layout: 0=Time, 1=the dynamic owner's own data slot (where its
+        // f[11]-as-OT-start lands -- DYNAMIC, NOT stock), 2=a second dynamic
+        // owner that the forward link resolves to (a valid in-range data OT).
+        let class_codes = [
+            VDF_SECTION6_OT_CODE_TIME,
+            VDF_SECTION6_OT_CODE_DYNAMIC, // OT 1: owner's f[11]-as-OT-start slot
+            VDF_SECTION6_OT_CODE_DYNAMIC, // OT 2: a valid forward-link data OT
+        ];
+        let ot_count = class_codes.len();
+        // f[11] == 1 indexes lookup record[1], whose word[10] == 2 -- an
+        // in-range owner OT, so the forward-data-OT guards (1 <= fwd < ot_count
+        // and fwd is an owner class) BOTH pass. Only the STOCK-slot guard at
+        // span.start (OT 1, DYNAMIC) can reject.
+        let lookup_word10 = [9usize, 2usize];
+        let n_lookups = lookup_word10.len();
+        let spans = [span(0, "Some Dynamic Owner", 1)];
+        let f11_by_span = [1u32];
+        let overlapping: HashSet<usize> = HashSet::new();
+
+        let rebinds = standalone_descriptor_rebinds(
+            &spans,
+            &f11_by_span,
+            &overlapping,
+            n_lookups,
+            &lookup_word10,
+            &class_codes,
+            ot_count,
+        );
+        assert!(
+            rebinds.is_empty(),
+            "a dynamic owner whose only disqualifier is the non-stock slot must \
+             not be re-bound (the STOCK-slot guard is the sole gate here): {rebinds:?}"
+        );
+    }
+
     /// A standalone descriptor whose forward link `word[10]` points at Time
     /// (OT 0) has no valid evaluated-output OT; it must NOT be re-bound (Time is
     /// never a data owner). Guards the `Ref Global Emissions ... LOOKUP` case.
