@@ -1461,16 +1461,34 @@ pub struct StaticArrayView {
 }
 
 impl StaticArrayView {
-    /// Convert to a RuntimeView for use on the view stack
+    /// Convert to a RuntimeView for use on the view stack.
+    ///
+    /// This runs on every `PushStaticView` (~1M times on a C-LEARN run), so the
+    /// per-field copies are deliberately the cheapest correct construction.
+    ///
+    /// `SmallVec`'s `Clone` (with the `specialization` feature off, as here)
+    /// lowers to `self.as_slice().iter().cloned().collect()` -- an element-wise
+    /// `Extend`, NOT a memcpy -- even for `Copy` elements. For the three
+    /// `Copy`-element vectors we instead call `from_slice`, which copies the
+    /// inline buffer in one `ptr::copy_nonoverlapping`. `sparse`'s element type
+    /// (`RuntimeSparseMapping`) is not `Copy`, but it is empty for every dense
+    /// (non-star-range) view -- the overwhelmingly common case -- so we take a
+    /// free fresh empty `SmallVec` then and only fall back to a real clone for a
+    /// genuinely sparse view.
     pub fn to_runtime_view(&self) -> RuntimeView {
+        let sparse = if self.sparse.is_empty() {
+            SmallVec::new()
+        } else {
+            self.sparse.clone()
+        };
         RuntimeView {
             base_off: self.base_off,
             is_temp: self.is_temp,
-            dims: self.dims.clone(),
-            strides: self.strides.clone(),
+            dims: SmallVec::from_slice(&self.dims),
+            strides: SmallVec::from_slice(&self.strides),
             offset: self.offset,
-            sparse: self.sparse.clone(),
-            dim_ids: self.dim_ids.clone(),
+            sparse,
+            dim_ids: SmallVec::from_slice(&self.dim_ids),
             is_valid: true,
         }
     }
