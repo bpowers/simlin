@@ -181,6 +181,109 @@ pub(crate) fn is_renamed_builtin_macro_collision(canonical: &str) -> bool {
     is_renamed_opcode_intrinsic(canonical) || is_renamed_stdlib_module_builtin(canonical)
 }
 
+/// A *genuine passthrough* macro classification: a single-parameter macro whose
+/// primary-output body is exactly `out = BUILTIN(param)`, where `BUILTIN`
+/// canonicalizes to the same renamed-builtin-collision name as the macro itself
+/// (the self-call shape the MDL importer's `INITIAL` -> `INIT` rename produces:
+/// `:MACRO: INIT(x) = INITIAL(x)` stored as `init = init(x)`).
+///
+/// When present, the call site collapses the macro directly to its proven
+/// opcode (for `init`, `LoadInitial`) by *skipping* `expand_module_function`
+/// and falling through to the existing renamed-builtin intrinsic routing -- the
+/// same fall-through the #554 self-call exception takes inside a macro body,
+/// here generalized to the call site. This avoids the buggy per-element
+/// synthetic module the macro would otherwise expand into.
+//
+// `salsa::Update` so it can ride on `ModuleFunctionDescriptor` (which is held
+// by the salsa-tracked `project_macro_registry` query); a pure data marker, not
+// a side effect, mirroring the descriptor's own derivation rationale.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
+// Constructed only by the unit tests until the next commit threads it onto
+// `ModuleFunctionDescriptor` (Phase 3 Task 3); `-D warnings` would otherwise
+// fail the standalone classifier commit.
+#[allow(dead_code)]
+pub(crate) struct PassthroughBuiltin {
+    /// The canonical name of the renamed builtin the macro collapses to (e.g.
+    /// `"init"`). This equals `canonicalize(macro_name)` and satisfies
+    /// [`is_renamed_builtin_macro_collision`], so the call-site fall-through
+    /// routes the call to the correct opcode/intrinsic.
+    pub canonical_builtin: String,
+}
+
+/// Pure structural classifier (Functional Core, no registry/IO access):
+/// decide whether a macro is a *genuine passthrough* of a renamed builtin --
+/// `Some(PassthroughBuiltin)` iff ALL of:
+///
+/// 1. the macro has exactly one parameter (`parameter_ports.len() == 1`);
+/// 2. the macro has no additional outputs (a multi-output `:`-list macro
+///    delivers more than the primary output, so it cannot collapse to one
+///    opcode);
+/// 3. the primary-output body AST is exactly `App(BUILTIN, [arg])` -- a single
+///    call with a single argument;
+/// 4. `arg` is exactly `Var(the sole parameter)` (the bare parameter, NOT an
+///    expression like `param * 2`, which would do work the collapse drops);
+/// 5. `canonicalize(call) == canonicalize(macro_name)` (a self-call -- the
+///    form the importer's `INITIAL` -> `INIT` rename produces); and
+/// 6. `is_renamed_builtin_macro_collision(canonicalize(call))` is `true`, so
+///    the call-site fall-through to the existing intrinsic routing lands on a
+///    real opcode-backed builtin (`init`/`previous`) or stdlib module rather
+///    than `UnknownBuiltin`.
+///
+/// Otherwise `None`. The strictness of (3)-(6) guarantees the collapse cannot
+/// misfire on a non-passthrough macro that merely shares a builtin name (e.g.
+/// `INIT = INIT(x) + 1`, or `INIT = INIT(x * 2)`): such a macro keeps expanding
+/// as a module.
+// Called only by the unit tests until the next commit wires it into
+// `MacroRegistry::build` (Phase 3 Task 3); see the `PassthroughBuiltin`
+// `#[allow(dead_code)]` note.
+#[allow(dead_code)]
+pub(crate) fn classify_passthrough(
+    macro_name: &str,
+    parameter_ports: &[String],
+    additional_outputs: &[String],
+    primary_output_body_ast: &Expr0,
+) -> Option<PassthroughBuiltin> {
+    // (1) exactly one parameter; (2) no additional outputs.
+    if parameter_ports.len() != 1 || !additional_outputs.is_empty() {
+        return None;
+    }
+    let sole_param = &parameter_ports[0];
+
+    // (3) the body is exactly a single one-argument call.
+    let Expr0::App(UntypedBuiltinFn(call, args), _) = primary_output_body_ast else {
+        return None;
+    };
+    let [arg] = args.as_slice() else {
+        return None;
+    };
+
+    // (4) the single argument is the bare sole parameter (canonical match, so a
+    // case/whitespace variant of the formal parameter still counts).
+    let Expr0::Var(arg_ident, _) = arg else {
+        return None;
+    };
+    if canonicalize(arg_ident.as_str()) != canonicalize(sole_param) {
+        return None;
+    }
+
+    // (5) the call is a self-call: its canonical name equals the macro's.
+    let call_canonical = canonicalize(call);
+    if call_canonical != canonicalize(macro_name) {
+        return None;
+    }
+
+    // (6) the (self-)call name is a renamed-builtin collision, so the call-site
+    // fall-through routes it to a real opcode/intrinsic.
+    if !is_renamed_builtin_macro_collision(call_canonical.as_ref()) {
+        return None;
+    }
+
+    Some(PassthroughBuiltin {
+        canonical_builtin: call_canonical.into_owned(),
+    })
+}
+
 /// Build a [`ModuleFunctionDescriptor`] for a stdlib module-function.
 ///
 /// Called *after* `rewrite_alias_module_call` has normalized aliases, so
@@ -1119,5 +1222,131 @@ mod tests {
              is self-edge-only)",
         );
         assert_eq!(err.code, crate::common::ErrorCode::CircularDependency);
+    }
+
+    // --- classify_passthrough: the pure structural passthrough classifier ---
+    //
+    // A `:MACRO: INIT(x) = INITIAL(x)` collides (after the MDL importer renames
+    // `INITIAL` -> `INIT`) with the opcode-backed `init` intrinsic, so its
+    // datamodel body is `init = init(x)`. Such a *genuine passthrough* macro
+    // (single param; body exactly `out = BUILTIN(param)` where `BUILTIN`
+    // canonicalizes to the same renamed-builtin collision name) is collapsed at
+    // the call site directly to the opcode (LoadInitial), bypassing the buggy
+    // per-element synthetic module. `classify_passthrough` is the pure
+    // structural rule that decides this; it must NOT misfire on a non-passthrough
+    // macro that merely shares a builtin name.
+
+    /// Parse a macro body equation into the `Expr0` AST the classifier expects.
+    fn body_ast(equation: &str) -> Expr0 {
+        Expr0::new(equation, LexerType::Equation)
+            .expect("body equation must parse")
+            .expect("body equation must not be empty")
+    }
+
+    #[test]
+    fn classify_passthrough_init_self_call_is_some_init() {
+        // The exact #591-c1 shape: `INIT = INIT(x)` (single param `x`), the
+        // datamodel form of `:MACRO: INIT(x) = INITIAL(x)` after the importer
+        // rename. `init` is an opcode-backed renamed-builtin collision, so the
+        // call-site fall-through to the `init`->LoadInitial intrinsic routing is
+        // valid -- classify as a passthrough targeting `init`.
+        let result = classify_passthrough("init", &["x".to_string()], &[], &body_ast("init(x)"));
+        assert_eq!(
+            result,
+            Some(PassthroughBuiltin {
+                canonical_builtin: "init".to_string()
+            }),
+            "INIT = INIT(x) is a genuine passthrough to the `init` opcode"
+        );
+    }
+
+    #[test]
+    fn classify_passthrough_op2_body_is_none() {
+        // `INIT = INIT(x) + 1` is NOT a bare passthrough: the body is an Op2,
+        // not a single call, so collapsing it to the opcode would drop the
+        // `+ 1` (AC3.4 negative).
+        let result =
+            classify_passthrough("init", &["x".to_string()], &[], &body_ast("init(x) + 1"));
+        assert_eq!(
+            result, None,
+            "INIT = INIT(x) + 1 is an Op2 body, not a bare passthrough"
+        );
+    }
+
+    #[test]
+    fn classify_passthrough_arg_not_bare_param_is_none() {
+        // `INIT = INIT(x * 2)`: the call's argument is an expression, not the
+        // bare parameter, so the macro does real work the opcode collapse would
+        // discard (AC3.4 negative).
+        let result =
+            classify_passthrough("init", &["x".to_string()], &[], &body_ast("init(x * 2)"));
+        assert_eq!(
+            result, None,
+            "INIT = INIT(x * 2) has an expression argument, not the bare param"
+        );
+    }
+
+    #[test]
+    fn classify_passthrough_two_param_body_is_none() {
+        // A two-parameter macro fails the single-parameter arity gate even when
+        // its body is a single one-argument call.
+        let result = classify_passthrough(
+            "f",
+            &["a".to_string(), "b".to_string()],
+            &[],
+            &body_ast("f(a)"),
+        );
+        assert_eq!(
+            result, None,
+            "a two-parameter macro cannot be a single-arg passthrough"
+        );
+    }
+
+    #[test]
+    fn classify_passthrough_non_collision_builtin_is_none() {
+        // `ABS = ABS(x)`: a single-param, bare-arg self-call, but `abs` is NOT a
+        // renamed-builtin collision (no dedicated opcode/stdlib-module routing
+        // reachable by the call-site fall-through), so the passthrough collapse
+        // would have nowhere valid to land -- must be None.
+        let result = classify_passthrough("abs", &["x".to_string()], &[], &body_ast("abs(x)"));
+        assert_eq!(
+            result, None,
+            "`abs` is not a renamed-builtin collision, so it is not opcode-backed \
+             via the call-site fall-through"
+        );
+    }
+
+    #[test]
+    fn classify_passthrough_multi_output_macro_is_none() {
+        // A multi-output macro (additional outputs present from Vensim's
+        // `:`-list syntax) is NOT collapsible: its call site receives more than
+        // the primary output, so it must keep expanding as a module even if its
+        // primary-output body looks like a bare self-call.
+        let result = classify_passthrough(
+            "init",
+            &["x".to_string()],
+            &["secondary".to_string()],
+            &body_ast("init(x)"),
+        );
+        assert_eq!(
+            result, None,
+            "a multi-output macro must not collapse to a single opcode"
+        );
+    }
+
+    #[test]
+    fn classify_passthrough_different_call_name_is_none() {
+        // The call must be a *self*-call (canonicalize(call) ==
+        // canonicalize(macro_name)) -- the form the importer's rename produces.
+        // `INIT = PREVIOUS(x, 0)` is not a self-call (the macro is `init`, the
+        // call is `previous`), so it is not the renamed-builtin self-collapse
+        // case.
+        let result =
+            classify_passthrough("init", &["x".to_string()], &[], &body_ast("previous(x, 0)"));
+        assert_eq!(
+            result, None,
+            "a call to a different builtin name than the macro is not a self-call \
+             passthrough"
+        );
     }
 }
