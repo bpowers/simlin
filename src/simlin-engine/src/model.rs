@@ -828,11 +828,7 @@ pub(crate) fn collect_module_idents(
 /// (resolved via `macro_registry`). A project macro is recognized even when
 /// its name shadows a builtin, since the macro registry is consulted
 /// directly (the actual macro-shadows-builtin precedence is enforced later
-/// in `BuiltinVisitor::walk`). Caveat: a *genuine passthrough* macro (one the
-/// registry classified `passthrough.is_some()`, which the walk collapses to the
-/// builtin opcode at the call site -- #591-c1) is NOT a module call here, so it
-/// behaves identically to the bare builtin it collapses to (see the inline
-/// comment below).
+/// in `BuiltinVisitor::walk`).
 ///
 /// This intentionally re-parses the equation text rather than reusing the
 /// already-parsed AST. It runs during `collect_module_idents` (called from
@@ -861,18 +857,18 @@ pub(crate) fn equation_is_module_call(
     match &ast {
         Expr0::App(crate::builtins::UntypedBuiltinFn(func, _args), _) => {
             let func_lower = func.to_lowercase();
-            // A genuine passthrough macro (`:MACRO: INIT(x) = INITIAL(x)`) is
-            // collapsed at the call site to its opcode (`LoadInitial`), NOT
-            // expanded into a module (#591-c1, `builtins_visitor::walk`). So it
-            // must NOT be pre-classified as module-backed here -- exactly as the
-            // bare builtin it collapses to is not (`is_stdlib_module_function`
-            // is false for `init`). Pre-classifying it as a module would make
-            // `collect_module_idents` mark the variable module-backed while the
-            // walk emits a scalar opcode, and the fragments would fail to
-            // compile. A non-passthrough macro is still a module call.
-            let is_module_macro = macro_registry
-                .resolve_macro(func)
-                .is_some_and(|d| d.passthrough.is_none());
+            // Any resolvable project macro counts as a module call here,
+            // including a genuine passthrough macro (`:MACRO: INIT(x) =
+            // INITIAL(x)`) that `builtins_visitor::walk` later collapses to a
+            // scalar opcode (#591-c1). Pre-classifying the passthrough caller
+            // as module-backed is benign: the only downstream consumer of this
+            // result is `is_module_backed_ident`, which gates whether a
+            // *referencing* `PREVIOUS`/`INIT` synthesizes a scalar temp arg
+            // (`builtins_visitor.rs`). Since a passthrough caller collapses to
+            // a plain flat-slot variable, that temp-arg copy is value-identical
+            // to reading the slot directly -- so the classification does not
+            // change any observable result either way.
+            let is_module_macro = macro_registry.resolve_macro(func).is_some();
             crate::builtins::is_stdlib_module_function(&func_lower) || is_module_macro
         }
         _ => false,
