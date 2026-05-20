@@ -645,6 +645,44 @@ pub(crate) enum Opcode {
         off: VariableOffset,
     },
 
+    // === 3-ADDRESS BINARY OPS (R2) ===
+    // Fold the leaf operand load(s) of a binary op into the op itself, so a
+    // subexpression `a op b` dispatches once instead of 3 (two loads + Op2) or
+    // twice instead of 2 (one load + Op2). Each pushes its result. `curr[]` is
+    // effectively the register file: these read operands straight from it (or
+    // from `literals`) with no intervening stack push/pop. Created only by the
+    // late `fuse_three_address` pass on final concrete bytecode -- they never
+    // enter the symbolic/incremental layer. A 3-operand `dst = a op b` would
+    // exceed the 8-byte Opcode budget, so the assign stays a separate op.
+    /// Push `curr[module_off + l] op curr[module_off + r]`.
+    BinVarVar {
+        l: VariableOffset,
+        r: VariableOffset,
+        op: Op2,
+    },
+    /// Push `curr[module_off + l] op literals[r]`.
+    BinVarConst {
+        l: VariableOffset,
+        r: LiteralId,
+        op: Op2,
+    },
+    /// Push `literals[l] op curr[module_off + r]`.
+    BinConstVar {
+        l: LiteralId,
+        r: VariableOffset,
+        op: Op2,
+    },
+    /// Pop `lhs`; push `lhs op curr[module_off + r]`.
+    BinStackVar {
+        r: VariableOffset,
+        op: Op2,
+    },
+    /// Pop `lhs`; push `lhs op literals[r]`.
+    BinStackConst {
+        r: LiteralId,
+        op: Op2,
+    },
+
     // =========================================================================
     // ARRAY SUPPORT (new)
     // =========================================================================
@@ -979,6 +1017,14 @@ impl Opcode {
             Opcode::BinOpAssignCurr { .. } => (2, 0), // pops 2, assigns directly
             Opcode::BinOpAssignNext { .. } => (2, 0), // pops 2, assigns directly
 
+            // 3-address binops: the *Var/*Const forms read both operands from
+            // curr/literals and push (0 pops, 1 push); the Stack* forms pop the
+            // lhs and push the result (1 pop, 1 push).
+            Opcode::BinVarVar { .. } | Opcode::BinVarConst { .. } | Opcode::BinConstVar { .. } => {
+                (0, 1)
+            }
+            Opcode::BinStackVar { .. } | Opcode::BinStackConst { .. } => (1, 1),
+
             // View stack ops don't touch arithmetic stack
             Opcode::PushVarView { .. }
             | Opcode::PushTempView { .. }
@@ -1067,6 +1113,11 @@ impl Opcode {
             Opcode::Apply { .. } => "Apply",
             Opcode::Lookup { .. } => "Lookup",
             Opcode::AssignConstCurr { .. } => "AssignConstCurr",
+            Opcode::BinVarVar { .. } => "BinVarVar",
+            Opcode::BinVarConst { .. } => "BinVarConst",
+            Opcode::BinConstVar { .. } => "BinConstVar",
+            Opcode::BinStackVar { .. } => "BinStackVar",
+            Opcode::BinStackConst { .. } => "BinStackConst",
             Opcode::BinOpAssignCurr { .. } => "BinOpAssignCurr",
             Opcode::BinOpAssignNext { .. } => "BinOpAssignNext",
             Opcode::PushVarView { .. } => "PushVarView",
@@ -1326,6 +1377,45 @@ impl ByteCode {
         }
         max_depth
     }
+
+    /// Estimate the opcode count after a 3-address fusion pass that folds leaf
+    /// operand loads into the binary op that consumes them (R2). Greedy,
+    /// post-peephole semantics: `LoadX; LoadY; Op2` fuses 3->1 (both operands
+    /// are leaf loads) and `LoadX; Op2` fuses 2->1 (one operand is a leaf load,
+    /// the other is already on the stack), where a leaf load is `LoadVar`,
+    /// `LoadGlobalVar`, or `LoadConstant`. Used only to size the win before
+    /// implementing the pass; the real pass must additionally fix up jumps.
+    pub(crate) fn estimate_fused_len(&self) -> usize {
+        fn is_leaf_load(op: &Opcode) -> bool {
+            matches!(
+                op,
+                Opcode::LoadVar { .. } | Opcode::LoadGlobalVar { .. } | Opcode::LoadConstant { .. }
+            )
+        }
+        let code = &self.code;
+        let mut i = 0;
+        let mut emitted = 0;
+        while i < code.len() {
+            if i + 2 < code.len()
+                && is_leaf_load(&code[i])
+                && is_leaf_load(&code[i + 1])
+                && matches!(code[i + 2], Opcode::Op2 { .. })
+            {
+                emitted += 1;
+                i += 3;
+            } else if i + 1 < code.len()
+                && is_leaf_load(&code[i])
+                && matches!(code[i + 1], Opcode::Op2 { .. })
+            {
+                emitted += 1;
+                i += 2;
+            } else {
+                emitted += 1;
+                i += 1;
+            }
+        }
+        emitted
+    }
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -1460,6 +1550,145 @@ impl ByteCode {
 
         // 3. Fix up jump offsets.  Iterate original code to find jumps,
         // then use pc_map (indexed by old_pc) for O(1) translation.
+        for (old_pc, op) in self.code.iter().enumerate() {
+            let Some(jump_back) = op.jump_offset() else {
+                continue;
+            };
+            let new_pc = pc_map[old_pc];
+            let old_target = (old_pc as isize + jump_back as isize) as usize;
+            let new_target = pc_map[old_target];
+            let new_jump_back = (new_target as isize - new_pc as isize) as PcOffset;
+            *optimized[new_pc].jump_offset_mut().unwrap() = new_jump_back;
+        }
+
+        self.code = optimized;
+    }
+
+    /// Late 3-address fusion pass (R2): fold the leaf operand load(s) of a
+    /// binary op into the op itself, so `LoadX; LoadY; Op2` becomes one
+    /// `BinXY` (3->1) and `LoadX; Op2` (lhs already on the stack) becomes one
+    /// `BinStackX` (2->1).
+    ///
+    /// MUST run only on FINAL concrete bytecode -- after `peephole_optimize`
+    /// and, for the incremental path, after `resolve` -- because the fused
+    /// opcodes deliberately do not exist in the symbolic/incremental layer.
+    /// Greedy, longest-match-first. Reuses the same jump-target guard and
+    /// old->new PC remap as `peephole_optimize`: a run is only fused when the
+    /// instructions it *absorbs* (the second, and for a triple the third) are
+    /// not jump targets, so no jump can land mid-fusion; a jump to the first
+    /// instruction still lands on the fused opcode at the same new PC.
+    /// Stack-effect-preserving (the fused ops carry the net effect of the
+    /// sequence they replace), so the `max_stack_depth` safety proof is
+    /// unchanged.
+    pub(crate) fn fuse_three_address(&mut self) {
+        if self.code.is_empty() {
+            return;
+        }
+
+        // 1. Build set of PCs that are jump targets.
+        let mut jump_targets = vec![false; self.code.len()];
+        for (pc, op) in self.code.iter().enumerate() {
+            if let Some(offset) = op.jump_offset() {
+                let target = (pc as isize + offset as isize) as usize;
+                assert!(
+                    target < jump_targets.len(),
+                    "jump at pc {pc} targets {target}, out of bounds (len {})",
+                    self.code.len()
+                );
+                jump_targets[target] = true;
+            }
+        }
+
+        // 2. Greedy fuse, building an old_pc -> new_pc map (one entry per
+        //    original instruction) for jump fixup.
+        let mut optimized: Vec<Opcode> = Vec::with_capacity(self.code.len());
+        let mut pc_map: Vec<usize> = Vec::with_capacity(self.code.len() + 1);
+        let mut i = 0;
+        while i < self.code.len() {
+            let new_pc = optimized.len();
+
+            // 3-window: [leaf load, leaf load, Op2]. Both absorbed instructions
+            // (i+1, i+2) must not be jump targets.
+            let three = i + 2 < self.code.len()
+                && !jump_targets[i + 1]
+                && !jump_targets[i + 2]
+                && matches!(self.code[i + 2], Opcode::Op2 { .. });
+            let fused3 = if three {
+                match (&self.code[i], &self.code[i + 1], &self.code[i + 2]) {
+                    (
+                        Opcode::LoadVar { off: l },
+                        Opcode::LoadVar { off: r },
+                        Opcode::Op2 { op },
+                    ) => Some(Opcode::BinVarVar {
+                        l: *l,
+                        r: *r,
+                        op: *op,
+                    }),
+                    (
+                        Opcode::LoadVar { off: l },
+                        Opcode::LoadConstant { id: r },
+                        Opcode::Op2 { op },
+                    ) => Some(Opcode::BinVarConst {
+                        l: *l,
+                        r: *r,
+                        op: *op,
+                    }),
+                    (
+                        Opcode::LoadConstant { id: l },
+                        Opcode::LoadVar { off: r },
+                        Opcode::Op2 { op },
+                    ) => Some(Opcode::BinConstVar {
+                        l: *l,
+                        r: *r,
+                        op: *op,
+                    }),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(op) = fused3 {
+                optimized.push(op);
+                pc_map.push(new_pc); // old i
+                pc_map.push(new_pc); // old i+1
+                pc_map.push(new_pc); // old i+2
+                i += 3;
+                continue;
+            }
+
+            // 2-window: [leaf load, Op2] with the lhs already on the stack.
+            let two = i + 1 < self.code.len()
+                && !jump_targets[i + 1]
+                && matches!(self.code[i + 1], Opcode::Op2 { .. });
+            let fused2 = if two {
+                match (&self.code[i], &self.code[i + 1]) {
+                    (Opcode::LoadVar { off: r }, Opcode::Op2 { op }) => {
+                        Some(Opcode::BinStackVar { r: *r, op: *op })
+                    }
+                    (Opcode::LoadConstant { id: r }, Opcode::Op2 { op }) => {
+                        Some(Opcode::BinStackConst { r: *r, op: *op })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(op) = fused2 {
+                optimized.push(op);
+                pc_map.push(new_pc); // old i
+                pc_map.push(new_pc); // old i+1
+                i += 2;
+                continue;
+            }
+
+            // No fusion: copy as-is.
+            pc_map.push(new_pc);
+            optimized.push(self.code[i]);
+            i += 1;
+        }
+        pc_map.push(optimized.len());
+
+        // 3. Fix up jump offsets via the old_pc -> new_pc map.
         for (old_pc, op) in self.code.iter().enumerate() {
             let Some(jump_back) = op.jump_offset() else {
                 continue;
@@ -3168,6 +3397,224 @@ mod tests {
             assert_eq!(n, 1);
             assert_eq!(ids[0], i);
         }
+    }
+
+    // === 3-address fusion (R2) ===
+
+    #[test]
+    fn test_fuse_var_var() {
+        // a + b -> BinVarVar; the trailing assign is left to the existing
+        // BinOpAssignCurr fusion (a 3-operand op would exceed the 8-byte budget).
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::AssignCurr { off: 2 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinVarVar {
+                l: 0,
+                r: 1,
+                op: Op2::Add
+            }
+        ));
+        assert!(matches!(bc.code[1], Opcode::AssignCurr { off: 2 }));
+    }
+
+    #[test]
+    fn test_fuse_var_const_preserves_operand_order() {
+        // `a - 5`: the var is the lhs, the const the rhs. Sub is non-commutative,
+        // so a swapped encoding would be a silent miscompile.
+        let mut bc = ByteCode {
+            literals: vec![5.0],
+            code: vec![
+                Opcode::LoadVar { off: 7 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::Op2 { op: Op2::Sub },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinVarConst {
+                l: 7,
+                r: 0,
+                op: Op2::Sub
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_const_var_preserves_operand_order() {
+        // `5 - a`: the const is the lhs, the var the rhs.
+        let mut bc = ByteCode {
+            literals: vec![5.0],
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadVar { off: 7 },
+                Opcode::Op2 { op: Op2::Sub },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinConstVar {
+                l: 0,
+                r: 7,
+                op: Op2::Sub
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_greedy_triple_then_stack_var() {
+        // ((a + b) + c): the leaf triple fuses to BinVarVar (greedy prefers the
+        // 3-window), then the outer `+ c` -- whose lhs is on the stack -- fuses
+        // the load of c into a BinStackVar.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::LoadVar { off: 2 },
+                Opcode::Op2 { op: Op2::Add },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinVarVar {
+                l: 0,
+                r: 1,
+                op: Op2::Add
+            }
+        ));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::BinStackVar { r: 2, op: Op2::Add }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_stack_const() {
+        // (a + b) * 2: leaf triple -> BinVarVar; the outer `* 2` (lhs on stack)
+        // -> BinStackConst.
+        let mut bc = ByteCode {
+            literals: vec![2.0],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::Op2 { op: Op2::Mul },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::BinVarVar { .. }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::BinStackConst { r: 0, op: Op2::Mul }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_noop_without_op2_and_empty() {
+        // Nothing to fold into (no Op2): unchanged.
+        let mut bc = ByteCode {
+            literals: vec![1.0],
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::AssignCurr { off: 0 },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::LoadConstant { id: 0 }));
+
+        let mut empty = ByteCode::default();
+        empty.fuse_three_address();
+        assert!(empty.code.is_empty());
+    }
+
+    #[test]
+    fn test_fuse_preserves_max_stack_depth() {
+        // x = (a + b) * (c + d): peak depth 3. Fusion folds loads into ops, so
+        // depth can only stay the same or shrink -- never grow (the Stack-safety
+        // proof must survive fusion).
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::LoadVar { off: 2 },
+                Opcode::LoadVar { off: 3 },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::Op2 { op: Op2::Mul },
+                Opcode::AssignCurr { off: 4 },
+            ],
+        };
+        let before = bc.max_stack_depth();
+        bc.fuse_three_address();
+        assert!(bc.max_stack_depth() <= before);
+    }
+
+    #[test]
+    fn test_fuse_triple_with_jump_target_at_first_instruction() {
+        // A backward jump targets the first instruction of a fusable triple. The
+        // triple still fuses (the fused op replaces the first instruction at the
+        // same PC) and the jump offset is rewritten to land on it.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },               // [0] <- jump target
+                Opcode::LoadVar { off: 1 },               // [1]
+                Opcode::Op2 { op: Op2::Add },             // [2]
+                Opcode::NextIterOrJump { jump_back: -3 }, // [3] -> [0]
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::BinVarVar { .. }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::NextIterOrJump { jump_back: -1 }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_blocked_when_absorbed_instruction_is_jump_target() {
+        // A jump targets the Op2 (the instruction a triple would absorb). Fusing
+        // would make the jump land mid-fusion, so the pass must leave it alone.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },               // [0]
+                Opcode::LoadVar { off: 1 },               // [1]
+                Opcode::Op2 { op: Op2::Add },             // [2] <- jump target
+                Opcode::NextIterOrJump { jump_back: -1 }, // [3] -> [2]
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 4);
+        assert!(matches!(bc.code[0], Opcode::LoadVar { off: 0 }));
+        assert!(matches!(bc.code[1], Opcode::LoadVar { off: 1 }));
+        assert!(matches!(bc.code[2], Opcode::Op2 { op: Op2::Add }));
+        assert!(matches!(
+            bc.code[3],
+            Opcode::NextIterOrJump { jump_back: -1 }
+        ));
     }
 }
 

@@ -200,6 +200,13 @@ fn main() {
         prof.n_initials,
     );
     println!(
+        "  flow opcodes after 3-address fusion (est): {} -> {} ({:.1}% reduction)",
+        prof.flow_opcodes,
+        prof.flow_opcodes_after_fusion,
+        100.0 * (prof.flow_opcodes - prof.flow_opcodes_after_fusion) as f64
+            / prof.flow_opcodes as f64,
+    );
+    println!(
         "  tables: {} literals, {} GFs / {} points, {} temp slots, {} dims, {} static_views, {} dim_lists, {} names, {} modules",
         prof.total_literals,
         prof.graphical_functions,

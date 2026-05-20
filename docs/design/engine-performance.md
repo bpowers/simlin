@@ -178,27 +178,45 @@ run's *instruction count*, not its bounds checks, is the lever — that is R2. T
 "bytecode density / dcache" intuition is also a non-issue: the program streams
 linearly (prefetcher-friendly) and is already 8 B/opcode.
 
-### R2. 3-address / register VM (highest ceiling)
+### R2. 3-address binop fusion — IMPLEMENTED (run −6.8% on C-LEARN)
 
-~70% of executed opcodes are load/store/binop. A stack VM evaluates `a = b + c`
-as `LoadVar b; LoadVar c; Op2 +; AssignCurr a` (4 dispatches); a 3-address form
-is `AddAssignCurr { dst, lhs, rhs }` (1 dispatch). Crucially **the `curr[]` slot
-array is already a register file** — variables live at fixed offsets — so only
-transient subexpression results need scratch registers. The existing
-superinstructions (`BinOpAssignCurr`, `AssignConstCurr`) are a first step in
-exactly this direction.
+~70% of executed opcodes are load/store/binop. A stack VM evaluates `a op b` as
+`LoadX; LoadY; Op2` (3 dispatches); folding the leaf operand loads into the op
+makes it 1. Crucially **the `curr[]` slot array is already the register file** —
+variables live at fixed offsets — so the fused ops read operands straight from
+`curr[]`/`literals` (or pop one from the stack), and the stack carries only
+nested subexpression results.
 
-Proposal: a 3-address opcode set operating directly on slot offsets plus a small
-scratch-register file, with the stack kept only for deep/nested subexpressions.
-SD equations are mostly shallow trees, so scratch-register allocation is a
-tractable linear-scan over each expression DAG (this is the
-"register-allocation-type optimization" the prompt asks about). Expected to
-roughly halve the dispatched instruction count for typical models.
+**Opcode budget forced a 2-operand design.** A full 3-operand `dst = a op b`
+(3×u16 + Op2 = 7-byte payload → 10-byte enum) blows the asserted 8-byte `Opcode`.
+So the fused ops are 2-operand *pushing* forms (≤6 bytes): `BinVarVar`,
+`BinVarConst`, `BinConstVar` (both operands are leaves; fuse `Load; Load; Op2`,
+3→1) and `BinStackVar`, `BinStackConst` (lhs already on the stack; fuse `Load;
+Op2`, 2→1). A leaf *assignment* `dst = a op b` keeps the existing
+`BinOpAssignCurr` for the store (so it stays 3 ops, not 1) — those are a minority
+(`BinOpAssignCurr` ≪ `Op2`).
 
-- Effort: large (codegen + VM rewrite + a register allocator). Risk: high
-  (touches every opcode and the symbolic-bytecode incremental layer). Sequence
-  it *after* R1 and the build levers; prototype the allocator on the flow phase
-  first.
+**Where it runs.** A late `ByteCode::fuse_three_address` pass applied to the Vm's
+flow/stock execution bytecode at `Vm::new`, reusing `peephole_optimize`'s
+jump-target guard + old→new PC remap and preserving `max_stack_depth`. It runs at
+`Vm::new` rather than compile time deliberately: the `CompiledSimulation` stays a
+pure, *symbolizable*, salsa-cached artifact (the symbolic roundtrip tests
+symbolize it; the fused opcodes have no symbolic form), and the `Vm`'s execution
+copy is where the optimization lives. Per-`Vm` fusion is a linear scan, negligible
+vs a run. Initials are left unfused (run once; `extract_assign_curr_offsets` reads
+their `AssignCurr` targets).
+
+**Result.** Flow opcodes 34673 → 26539 on C-LEARN (−23.5%); run 166.8 → 155.4 ms
+(−6.8%). The opcode reduction outweighs the runtime gain because the f64
+arithmetic, stock phase, save/copy, and array machinery (`flat_offset`, R4) are
+untouched — only the scalar *dispatch* shrinks. Scalar-heavy models benefit more
+than array-heavy C-LEARN. Behavior-preserving: full suite + `clearn_residual_
+exactness` pass, with dedicated fusion-pass and operand-order unit tests.
+
+A true register VM with a scratch-register file and a 3-operand instruction set
+(register allocation over each expression DAG) would cut more, but is a large
+codegen rewrite touching the symbolic/incremental layer; the 2-operand fusion
+captures most of the dispatch win at a fraction of the risk.
 
 ### R3. Faster dispatch
 
@@ -286,10 +304,11 @@ re-derivation. (b) is broader but touches many call sites.
    feature). WASM stays on `z` and links no mimalloc.
 2. ~~**R1 (bounds-check elimination)**~~ — INVESTIGATED, dropped: measured
    sub-noise (~0) ceiling; bounds checks are effectively free at opt-level=3.
-3. **R2 (register VM)** — highest ceiling; the run's instruction count is the
-   real lever (R1 showed the per-op overhead is not bounds checks). Largest
-   effort.
-4. **R4 (RuntimeView)** — clear win for arrayed/array-heavy models; the ~10%
-   `flat_offset` cost is a per-element `SmallVec` rebuild + sparse search.
+3. ~~**R2 (3-address binop fusion)**~~ — DONE. Flow opcodes −23.5%, run −6.8% on
+   C-LEARN; a late `fuse_three_address` pass at Vm::new (the `CompiledSimulation`
+   stays symbolizable). A full register VM would cut more but is a large rewrite.
+4. **R4 (RuntimeView)** — now the largest remaining run lever for arrayed models;
+   the ~10% `flat_offset` cost is a per-element `SmallVec` rebuild + sparse
+   search, not bounds checks.
 5. **R3 superinstructions** — incremental dispatch wins, low risk.
 6. **C2 / C3** — only if incremental-compile latency still bites after A+B.

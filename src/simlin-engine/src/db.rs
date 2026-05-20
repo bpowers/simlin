@@ -5340,7 +5340,10 @@ pub fn assemble_module(
         dim_lists: merged.dim_lists,
     };
 
-    // Resolve symbolic -> concrete offsets
+    // Resolve symbolic -> concrete offsets. The CompiledModule stays a pure,
+    // symbolizable artifact (the symbolic roundtrip tests symbolize it again,
+    // and salsa caches it); the 3-address fusion (R2) is applied later, at
+    // Vm::new, to the execution copy of the bytecode.
     resolve_module(&sym_module, layout).inspect_err(|msg| {
         try_accumulate_diagnostic(
             db,

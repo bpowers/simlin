@@ -167,78 +167,8 @@ impl CompiledSimulation {
     pub fn is_constant_offset(&self, off: usize) -> bool {
         self.cached_constant_info.contains_key(&off)
     }
-
-    /// Walk every compiled module's bytecode and tables to produce an aggregate
-    /// composition profile. Intended for profiling/diagnostics (e.g. the
-    /// `clearn_profile` example) -- it answers "how big and what shape is the
-    /// compiled bytecode?" without exposing the private `Opcode` type.
-    pub fn bytecode_profile(&self) -> BytecodeProfile {
-        let mut p = BytecodeProfile {
-            n_modules: self.modules.len(),
-            n_slots_root: self.n_slots(),
-            ..Default::default()
-        };
-
-        let mut tally =
-            |bc: &ByteCode, hist: &mut std::collections::BTreeMap<&'static str, usize>| {
-                p.total_literals += bc.literals.len();
-                for op in bc.code.iter() {
-                    *hist.entry(op.name()).or_insert(0) += 1;
-                }
-                bc.code.len()
-            };
-
-        for module in self.modules.values() {
-            p.flow_opcodes += tally(&module.compiled_flows, &mut p.histogram);
-            p.stock_opcodes += tally(&module.compiled_stocks, &mut p.histogram);
-            for ci in module.compiled_initials.iter() {
-                p.n_initials += 1;
-                p.initial_opcodes += tally(&ci.bytecode, &mut p.histogram);
-            }
-
-            let ctx = &module.context;
-            p.graphical_functions += ctx.graphical_functions.len();
-            p.graphical_function_points += ctx
-                .graphical_functions
-                .iter()
-                .map(|gf| gf.len())
-                .sum::<usize>();
-            p.temp_storage_slots += ctx.temp_total_size;
-            p.dimensions += ctx.dimensions.len();
-            p.static_views += ctx.static_views.len();
-            p.dim_lists += ctx.dim_lists.len();
-            p.names += ctx.names.len();
-        }
-
-        p.total_opcodes = p.flow_opcodes + p.stock_opcodes + p.initial_opcodes;
-        p
-    }
 }
 
-/// Aggregate composition of a compiled simulation's bytecode and side tables.
-/// Produced by [`CompiledSimulation::bytecode_profile`]. `histogram` maps each
-/// opcode variant name to its occurrence count across all modules and phases.
-#[derive(Default, Clone)]
-pub struct BytecodeProfile {
-    pub n_modules: usize,
-    pub n_slots_root: usize,
-    pub total_opcodes: usize,
-    pub flow_opcodes: usize,
-    pub stock_opcodes: usize,
-    pub initial_opcodes: usize,
-    pub n_initials: usize,
-    pub total_literals: usize,
-    pub graphical_functions: usize,
-    pub graphical_function_points: usize,
-    pub temp_storage_slots: usize,
-    pub dimensions: usize,
-    pub static_views: usize,
-    pub dim_lists: usize,
-    pub names: usize,
-    pub histogram: std::collections::BTreeMap<&'static str, usize>,
-}
-
-/// Per-module compiled initials with the shared ByteCodeContext needed to eval them.
 /// One unique compiled module (a distinct `(model_name, input_set)`), holding
 /// its three phase programs plus the resolved child-module indices for its
 /// `EvalModule` opcodes.
@@ -453,12 +383,25 @@ impl CompiledSlicedSimulation {
                         key_to_idx[&child_key]
                     })
                     .collect();
+                // 3-address fusion (R2): fold leaf operand loads into the
+                // binary ops of the per-timestep flows/stocks programs. Done
+                // on the Vm's execution copy (not the cached CompiledModule,
+                // which stays a pure symbolizable artifact) so the fused
+                // opcodes never re-enter the symbolic layer. make_mut clones
+                // the bytecode out of the shared Arc once per Vm; the scan is
+                // linear and cheap relative to a simulation run. Initials run
+                // once and their AssignCurr targets are read elsewhere, so they
+                // are left unfused.
+                let mut flows = m.compiled_flows.clone();
+                let mut stocks = m.compiled_stocks.clone();
+                Arc::make_mut(&mut flows).fuse_three_address();
+                Arc::make_mut(&mut stocks).fuse_three_address();
                 ResolvedModule {
                     ident: m.ident.clone(),
                     context: m.context.clone(),
                     initials: m.compiled_initials.clone(),
-                    flows: m.compiled_flows.clone(),
-                    stocks: m.compiled_stocks.clone(),
+                    flows,
+                    stocks,
                     child_targets,
                 }
             })
@@ -1522,6 +1465,35 @@ impl Vm {
                     let l = stack.pop();
                     next[module_off + *off as usize] = eval_op2(*op, l, r);
                     debug_assert_eq!(0, stack.len());
+                }
+                // === 3-ADDRESS BINARY OPS (R2) ===
+                // Operands are read straight from curr[]/literals; the *Stack*
+                // forms take the lhs from the arithmetic stack. Each pushes the
+                // result, replacing a Load;Load;Op2 or Load;Op2 sequence.
+                Opcode::BinVarVar { l, r, op } => {
+                    let lv = curr[module_off + *l as usize];
+                    let rv = curr[module_off + *r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinVarConst { l, r, op } => {
+                    let lv = curr[module_off + *l as usize];
+                    let rv = bytecode.literals[*r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinConstVar { l, r, op } => {
+                    let lv = bytecode.literals[*l as usize];
+                    let rv = curr[module_off + *r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinStackVar { r, op } => {
+                    let lv = stack.pop();
+                    let rv = curr[module_off + *r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinStackConst { r, op } => {
+                    let lv = stack.pop();
+                    let rv = bytecode.literals[*r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
                 }
                 Opcode::Apply { func } => {
                     let time = curr[TIME_OFF];
@@ -3489,6 +3461,48 @@ mod vm_reset_and_run_initials_tests {
     fn build_compiled(tp: &TestProject) -> CompiledSimulation {
         tp.compile_incremental()
             .expect("incremental compile should succeed")
+    }
+
+    /// End-to-end guard for the 3-address fusion (R2), which is applied to the
+    /// Vm's flow/stock bytecode at construction. Uses subtraction and division
+    /// (non-commutative) so a swapped operand encoding in any fused form is a
+    /// loud failure rather than a silent miscompile. `a`, `b`, `c` are distinct
+    /// variables (not foldable into a literal), so each expression compiles to
+    /// loads + Op2 that the pass folds into BinVarVar / BinVarConst /
+    /// BinConstVar / BinStackVar / BinStackConst.
+    #[test]
+    fn test_fused_binops_preserve_operand_order() {
+        let tp = TestProject::new("fusion_order")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("a", "20", None)
+            .aux("b", "5", None)
+            .aux("c", "2", None)
+            .aux("vv", "a - b", None) // BinVarVar
+            .aux("dvv", "a / b", None) // BinVarVar, division
+            .aux("vc", "a - 3", None) // BinVarConst
+            .aux("cv", "10 - a", None) // BinConstVar
+            .aux("sv", "(a - b) - c", None) // BinVarVar then BinStackVar
+            .aux("sc", "(a - b) - 4", None); // BinVarVar then BinStackConst
+
+        let compiled = build_compiled(&tp);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        let val = |name: &str| -> f64 {
+            let off = *results
+                .offsets
+                .get(&*canonicalize(name))
+                .unwrap_or_else(|| panic!("missing {name}"));
+            results.data[off] // step 0
+        };
+
+        assert_eq!(val("vv"), 15.0, "a - b");
+        assert_eq!(val("dvv"), 4.0, "a / b");
+        assert_eq!(val("vc"), 17.0, "a - 3");
+        assert_eq!(val("cv"), -10.0, "10 - a");
+        assert_eq!(val("sv"), 13.0, "(a - b) - c");
+        assert_eq!(val("sc"), 11.0, "(a - b) - 4");
     }
 
     #[test]
