@@ -257,7 +257,33 @@ impl XmileFormatter {
     ) -> String {
         let canonical = to_lower_space(name);
 
-        // Handle special function transformations
+        // Macro-shadowing audit (clearn-residual.AC2.5).
+        //
+        // Some arms below *restructure* a builtin-named call into a different
+        // expression at import time (e.g. `MODULO(x, y)` -> `(x) MOD (y)`,
+        // `SAMPLE IF TRUE(...)` -> a nested form). That rewrite happens BEFORE
+        // compile-time macro resolution, so if a model defines a `:MACRO:` with
+        // the same name, the rewrite silently pre-empts it: the macro body and
+        // any selector arguments are discarded and the macro never runs. Vensim
+        // semantics are the opposite -- a project macro shadows the like-named
+        // builtin (resolved in `builtins_visitor.rs` before alias/modulo/
+        // builtin handling), so the macro must reach that resolver intact.
+        //
+        // The `ramp from to` arm carried exactly this hazard and was the one
+        // C-LEARN tripped; it has been removed so a `RAMP FROM TO(...)` call
+        // survives import as `RAMP_FROM_TO(...)` and resolves through the macro
+        // path. The other restructuring arms here (notably the multi-word
+        // `sample if true`, plus `pulse`/`pulse train`/`modulo`/`zidz`/`xidz`/
+        // `get data between times`/etc.) carry the SAME latent hazard but are
+        // not currently shadowed by any in-repo model. If a future model
+        // defines a macro with one of those names, that arm must be guarded the
+        // same way (let the call fall through so macro resolution can apply).
+        //
+        // Name-preserving renames are SAFE and need no change: `SSHAPE` is
+        // handled only by `format_function_name` (it is a genuine 3-arg
+        // builtin, not restructured here), so a same-named macro shadows it
+        // cleanly. The `ac5_4_macro_shadows_*` tests pin both the multi-word
+        // (`RAMP FROM TO`) and single-word (`SSHAPE`) shadowing cases.
         match canonical.as_str() {
             "a function of" => {
                 // xmutil emits literal NAN, not NAN(args)
