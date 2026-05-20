@@ -1,7 +1,9 @@
 """Create a new Simlin project and build a simple population model using pysimlin's edit API."""
 
+import itertools
+
 import simlin
-from simlin.json_types import Stock, Flow, Auxiliary
+from simlin.json_types import Auxiliary, Flow, Stock
 
 
 def build_population_project() -> simlin.Project:
@@ -52,7 +54,7 @@ def validate_population_curve(values: list[float]) -> None:
     if len(values) < 3:
         raise RuntimeError("Population series is unexpectedly short")
 
-    if any(b < a for a, b in zip(values, values[1:])):
+    if any(b < a for a, b in itertools.pairwise(values)):
         raise RuntimeError("Population should not decline in this model")
 
     initial = values[0]
@@ -94,7 +96,8 @@ def main() -> None:
 
     print(
         "Population grows from "
-        f"{population_series[0]:.1f} to {population_series[-1]:.1f}, forming an S-shaped trajectory."
+        f"{population_series[0]:.1f} to {population_series[-1]:.1f}, "
+        "forming an S-shaped trajectory."
     )
 
 

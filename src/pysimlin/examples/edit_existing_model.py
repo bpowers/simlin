@@ -2,9 +2,11 @@
 
 import simlin
 
-
 EXAMPLE_XMILE = b"""<?xml version='1.0' encoding='utf-8'?>
-<xmile version=\"1.0\" xmlns=\"http://docs.oasis-open.org/xmile/ns/XMILE/v1.0\" xmlns:isee=\"http://iseesystems.com/XMILE\" xmlns:simlin=\"https://simlin.com/XMILE/v1.0\">
+<xmile version=\"1.0\"
+       xmlns=\"http://docs.oasis-open.org/xmile/ns/XMILE/v1.0\"
+       xmlns:isee=\"http://iseesystems.com/XMILE\"
+       xmlns:simlin=\"https://simlin.com/XMILE/v1.0\">
   <header>
     <name>pysimlin-edit-example</name>
     <vendor>Simlin</vendor>
@@ -51,8 +53,8 @@ def main() -> None:
     """Demonstrate editing a flow equation and verify the change takes effect."""
 
     # Load model from XMILE bytes by writing to temp file first
-    import tempfile
     import os
+    import tempfile
 
     with tempfile.NamedTemporaryFile(suffix=".stmx", delete=False) as f:
         f.write(EXAMPLE_XMILE)

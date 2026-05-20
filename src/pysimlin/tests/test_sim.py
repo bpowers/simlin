@@ -297,7 +297,7 @@ class TestSimAnalysis:
             np.testing.assert_array_equal(nyc, nyc_upper)
 
             # Unknown element -> error mentioning the bad name.
-            with pytest.raises(SimlinRuntimeError, match="Tokyo|tokyo"):
+            with pytest.raises(SimlinRuntimeError, match=r"Tokyo|tokyo"):
                 sim.get_relative_loop_score(arrayed_loop_id, element="Tokyo")
 
             # Wrong dim count via tuple -> error.

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Basic usage examples for the simlin Python package."""
 
-import simlin
-import pandas as pd
 from pathlib import Path
+
+import simlin
 
 
 def load_and_run_model():
@@ -137,7 +137,7 @@ def ltm_analysis():
         print(f"Found {len(loops_with_behavior)} loops with behavior analysis")
 
         # Find most important loop by average importance
-        most_important = max(loops_with_behavior, key=lambda l: l.average_importance() or 0)
+        most_important = max(loops_with_behavior, key=lambda loop: loop.average_importance() or 0)
 
         print(f"\nMost important loop: {most_important.id}")
         print(f"  Polarity: {most_important.polarity}")
@@ -148,7 +148,10 @@ def ltm_analysis():
         if run.dominant_periods:
             print(f"\nFound {len(run.dominant_periods)} dominant periods:")
             for period in run.dominant_periods[:3]:
-                print(f"  t=[{period.start_time:.1f}, {period.end_time:.1f}]: {period.dominant_loops}")
+                print(
+                    f"  t=[{period.start_time:.1f}, {period.end_time:.1f}]: "
+                    f"{period.dominant_loops}"
+                )
     else:
         print("No loops with behavior data (model may not have feedback loops)")
 
@@ -216,14 +219,14 @@ def main():
     """Run all examples."""
     print("Simlin Python Package - Usage Examples")
     print("=" * 60)
-    
+
     # Check if test model exists
     model_path = Path(__file__).parent / "../tests/fixtures/eval_order.stmx"
     if not model_path.exists():
         print(f"Error: Test model not found at {model_path}")
         print("Please ensure you're running from the correct directory")
         return
-    
+
     # Run examples
     try:
         load_and_run_model()
@@ -233,11 +236,11 @@ def main():
         ltm_analysis()
         error_handling()
         model_conversion()
-        
+
         print("\n" + "=" * 60)
         print("All examples completed successfully!")
         print("=" * 60)
-        
+
     except Exception as e:
         print(f"\nError running examples: {e}")
         import traceback

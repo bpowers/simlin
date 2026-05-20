@@ -40,7 +40,7 @@ class TestRenderSvg:
     def test_render_svg_nonexistent_model_raises(self, xmile_model_path) -> None:
         """render_svg should raise for a nonexistent model name."""
         model = simlin.load(xmile_model_path)
-        with pytest.raises(Exception):
+        with pytest.raises(simlin.SimlinRuntimeError):
             model.project.render_svg("nonexistent_model_xyz")
 
 
@@ -101,7 +101,7 @@ class TestRenderPng:
     def test_render_png_nonexistent_model_raises(self, xmile_model_path) -> None:
         """render_png should raise for a nonexistent model name."""
         model = simlin.load(xmile_model_path)
-        with pytest.raises(Exception):
+        with pytest.raises(simlin.SimlinRuntimeError):
             model.project.render_png("nonexistent_model_xyz")
 
     def test_render_png_explicit_model_name(self, xmile_model_path) -> None:

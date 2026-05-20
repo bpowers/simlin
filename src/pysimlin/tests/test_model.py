@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 import simlin
 from simlin import (
-    Model,
-    SimlinCompilationError,
-    SimlinRuntimeError,
     VARTYPE_AUX,
     VARTYPE_FLOW,
     VARTYPE_STOCK,
+    Model,
+    SimlinCompilationError,
+    SimlinRuntimeError,
 )
 from simlin.json_types import Auxiliary as JsonAuxiliary
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture

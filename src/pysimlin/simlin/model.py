@@ -28,12 +28,6 @@ from ._ffi import (
 )
 from .analysis import Link, LinkPolarity, Loop, LoopPolarity
 from .errors import ErrorCode, SimlinRuntimeError
-
-# Variable type bitmask constants, matching SIMLIN_VARTYPE_* from the C FFI.
-VARTYPE_STOCK: int = 1 << 0
-VARTYPE_FLOW: int = 1 << 1
-VARTYPE_AUX: int = 1 << 2
-VARTYPE_MODULE: int = 1 << 3
 from .json_converter import converter
 from .json_types import (
     Auxiliary as JsonAuxiliary,
@@ -80,6 +74,13 @@ if TYPE_CHECKING:
     from .project import Project
     from .run import Run
     from .sim import Sim
+
+
+# Variable type bitmask constants, matching SIMLIN_VARTYPE_* from the C FFI.
+VARTYPE_STOCK: int = 1 << 0
+VARTYPE_FLOW: int = 1 << 1
+VARTYPE_AUX: int = 1 << 2
+VARTYPE_MODULE: int = 1 << 3
 
 
 # Type for variable in the edit context current dict

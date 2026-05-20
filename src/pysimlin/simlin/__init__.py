@@ -25,7 +25,7 @@ from .errors import (
     SimlinRuntimeError,
     error_code_to_string,
 )
-from .model import Model, VARTYPE_AUX, VARTYPE_FLOW, VARTYPE_MODULE, VARTYPE_STOCK
+from .model import VARTYPE_AUX, VARTYPE_FLOW, VARTYPE_MODULE, VARTYPE_STOCK, Model
 from .project import JSON_FORMAT_SDAI, JSON_FORMAT_SIMLIN, Project
 from .run import (
     DominantPeriod,
@@ -110,6 +110,10 @@ def load(path: Union[str, Path]) -> Model:
 __all__ = [
     "JSON_FORMAT_SDAI",
     "JSON_FORMAT_SIMLIN",
+    "VARTYPE_AUX",
+    "VARTYPE_FLOW",
+    "VARTYPE_MODULE",
+    "VARTYPE_STOCK",
     "Aux",
     "DominantPeriod",
     "ErrorCode",
@@ -133,10 +137,6 @@ __all__ = [
     "Stock",
     "TimeSpec",
     "UnitIssue",
-    "VARTYPE_AUX",
-    "VARTYPE_FLOW",
-    "VARTYPE_MODULE",
-    "VARTYPE_STOCK",
     "error_code_to_string",
     "load",
 ]

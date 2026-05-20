@@ -398,11 +398,7 @@ class Sim:
         """Format ``loop_id[e1, e2, ...]`` from a Python element argument."""
         if element is None:
             return loop_id
-        parts: list[str | int]
-        if isinstance(element, tuple):
-            parts = list(element)
-        else:
-            parts = [element]
+        parts: list[str | int] = list(element) if isinstance(element, tuple) else [element]
         formatted = ", ".join(str(p) for p in parts)
         return f"{loop_id}[{formatted}]"
 
