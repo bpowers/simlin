@@ -630,8 +630,40 @@ impl<'a> BuiltinVisitor<'a> {
                 // `RAMP FROM TO` therefore expands as the macro even though
                 // it parsed as `CallKind::Builtin`. `func` is the raw call
                 // name (resolve_macro canonicalizes internally).
-                if !is_renamed_builtin_self_call
-                    && let Some(descriptor) = self.macro_registry.resolve_macro(&func)
+                //
+                // The #554 self-call exception (`is_renamed_builtin_self_call`)
+                // suppresses resolution for a renamed-builtin call inside the
+                // like-named macro's own body, so it routes to the intrinsic
+                // rather than recursing into the macro.
+                let descriptor = if is_renamed_builtin_self_call {
+                    None
+                } else {
+                    self.macro_registry.resolve_macro(&func)
+                };
+
+                // #591-c1: a *genuine passthrough* macro
+                // (`:MACRO: INIT(x) = INITIAL(x)`, stored after the importer's
+                // INITIAL -> INIT rename as `init = init(x)`) is NOT expanded
+                // into a per-element synthetic module (which mis-orders /
+                // mis-propagates its value). Only a NON-passthrough resolved
+                // descriptor expands here; a passthrough descriptor leaves
+                // `func`/`args` untouched and falls through to the
+                // renamed-builtin intrinsic routing below -- exactly as the
+                // #554 self-call exception does inside a macro body, here
+                // generalized from the macro body to the call site.
+                //
+                // The fall-through is sound because of the self-call invariant
+                // the classifier guarantees: `passthrough.is_some()` implies
+                // `canonicalize(call) == canonicalize(macro_name)` AND
+                // `is_renamed_builtin_macro_collision(canonicalize(call))`
+                // (`classify_passthrough`). So `func` here canonicalizes to the
+                // opcode-backed builtin (e.g. `init`) and routes to the right
+                // intrinsic below -- `init` -> `LoadInitial`, with the existing
+                // `make_temp_arg` hoisting for an expression argument
+                // (`init_needs_temp_arg`). The macro body did no work beyond the
+                // bare call, so collapsing to the opcode loses nothing.
+                if let Some(descriptor) = descriptor
+                    && descriptor.passthrough.is_none()
                 {
                     let descriptor = descriptor.clone();
                     return self.expand_module_function(&descriptor, &func, args, loc);

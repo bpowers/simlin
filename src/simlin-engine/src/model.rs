@@ -857,8 +857,19 @@ pub(crate) fn equation_is_module_call(
     match &ast {
         Expr0::App(crate::builtins::UntypedBuiltinFn(func, _args), _) => {
             let func_lower = func.to_lowercase();
-            crate::builtins::is_stdlib_module_function(&func_lower)
-                || macro_registry.resolve_macro(func).is_some()
+            // Any resolvable project macro counts as a module call here,
+            // including a genuine passthrough macro (`:MACRO: INIT(x) =
+            // INITIAL(x)`) that `builtins_visitor::walk` later collapses to a
+            // scalar opcode (#591-c1). Pre-classifying the passthrough caller
+            // as module-backed is benign: the only downstream consumer of this
+            // result is `is_module_backed_ident`, which gates whether a
+            // *referencing* `PREVIOUS`/`INIT` synthesizes a scalar temp arg
+            // (`builtins_visitor.rs`). Since a passthrough caller collapses to
+            // a plain flat-slot variable, that temp-arg copy is value-identical
+            // to reading the slot directly -- so the classification does not
+            // change any observable result either way.
+            let is_module_macro = macro_registry.resolve_macro(func).is_some();
+            crate::builtins::is_stdlib_module_function(&func_lower) || is_module_macro
         }
         _ => false,
     }

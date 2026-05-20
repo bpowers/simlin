@@ -257,7 +257,33 @@ impl XmileFormatter {
     ) -> String {
         let canonical = to_lower_space(name);
 
-        // Handle special function transformations
+        // Macro-shadowing audit (clearn-residual.AC2.5).
+        //
+        // Some arms below *restructure* a builtin-named call into a different
+        // expression at import time (e.g. `MODULO(x, y)` -> `(x) MOD (y)`,
+        // `SAMPLE IF TRUE(...)` -> a nested form). That rewrite happens BEFORE
+        // compile-time macro resolution, so if a model defines a `:MACRO:` with
+        // the same name, the rewrite silently pre-empts it: the macro body and
+        // any selector arguments are discarded and the macro never runs. Vensim
+        // semantics are the opposite -- a project macro shadows the like-named
+        // builtin (resolved in `builtins_visitor.rs` before alias/modulo/
+        // builtin handling), so the macro must reach that resolver intact.
+        //
+        // The `ramp from to` arm carried exactly this hazard and was the one
+        // C-LEARN tripped; it has been removed so a `RAMP FROM TO(...)` call
+        // survives import as `RAMP_FROM_TO(...)` and resolves through the macro
+        // path. The other restructuring arms here (notably the multi-word
+        // `sample if true`, plus `pulse`/`pulse train`/`modulo`/`zidz`/`xidz`/
+        // `get data between times`/etc.) carry the SAME latent hazard but are
+        // not currently shadowed by any in-repo model. If a future model
+        // defines a macro with one of those names, that arm must be guarded the
+        // same way (let the call fall through so macro resolution can apply).
+        //
+        // Name-preserving renames are SAFE and need no change: `SSHAPE` is
+        // handled only by `format_function_name` (it is a genuine 3-arg
+        // builtin, not restructured here), so a same-named macro shadows it
+        // cleanly. The `ac5_4_macro_shadows_*` tests pin both the multi-word
+        // (`RAMP FROM TO`) and single-word (`SSHAPE`) shadowing cases.
         match canonical.as_str() {
             "a function of" => {
                 // xmutil emits literal NAN, not NAN(args)
@@ -416,19 +442,6 @@ impl XmileFormatter {
                         self.format_expr_ctx(&args[1], ctx),
                         self.format_expr_ctx(&args[2], ctx),
                         self.format_expr_ctx(&args[3], ctx)
-                    );
-                }
-            }
-            "ramp from to" => {
-                // RAMP FROM TO(y_start, y_end, t_start, t_end) ->
-                // y_start + RAMP((y_end - y_start) / (t_end - t_start), t_start, t_end)
-                if args.len() >= 4 {
-                    let y_start = self.format_expr_ctx(&args[0], ctx);
-                    let y_end = self.format_expr_ctx(&args[1], ctx);
-                    let t_start = self.format_expr_ctx(&args[2], ctx);
-                    let t_end = self.format_expr_ctx(&args[3], ctx);
-                    return format!(
-                        "({y_start}) + RAMP((({y_end}) - ({y_start})) / (({t_end}) - ({t_start})), {t_start}, {t_end})"
                     );
                 }
             }
@@ -2029,7 +2042,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ramp_from_to_transforms_args() {
+    fn test_ramp_from_to_survives_as_macro_call() {
+        // `RAMP FROM TO` is not a native builtin: a model that uses it must
+        // define a same-named `:MACRO:`, which the compile-time macro-shadows-
+        // everything precedence (`builtins_visitor.rs`) resolves. The formatter
+        // must therefore leave the call intact as `RAMP_FROM_TO(...)` so that
+        // resolution can apply -- it must NOT rewrite it into a hardcoded
+        // linear `(xfrom) + RAMP(slope, tstart, tend)` at import time (which
+        // would discard the macro body and its `islinear` selector).
         let formatter = XmileFormatter::new();
         let expr = Expr::App(
             Cow::Borrowed("ramp from to"),
@@ -2045,12 +2065,29 @@ mod tests {
             loc(),
         );
         let result = formatter.format_expr(&expr);
-        assert!(result.contains("RAMP"), "should contain RAMP: {result}");
+
+        // The call survives as a resolvable `RAMP_FROM_TO(...)` invocation
+        // (canonicalizes to `ramp_from_to` at compile time).
         assert!(
-            !result.starts_with("RAMP_FROM_TO"),
-            "should not be bare RAMP_FROM_TO: {result}"
+            result.starts_with("RAMP_FROM_TO("),
+            "expected the call to survive as RAMP_FROM_TO(...): {result}"
         );
-        assert!(result.contains("100") && result.contains("0"), "{result}");
+
+        // The four argument expressions appear, in order, inside the call.
+        let mut search_from = 0usize;
+        for arg in ["0", "100", "5", "15"] {
+            let rel = result[search_from..]
+                .find(arg)
+                .unwrap_or_else(|| panic!("arg {arg:?} missing or out of order in: {result}"));
+            search_from += rel + arg.len();
+        }
+
+        // No top-level linear rewrite: the linearized form contained a bare
+        // `RAMP(` call (and a `+`). `RAMP_FROM_TO(` does not match `RAMP(`.
+        assert!(
+            !result.contains("RAMP("),
+            "must not be linearized into a bare RAMP(...) call: {result}"
+        );
     }
 
     #[test]

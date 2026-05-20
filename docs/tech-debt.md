@@ -597,3 +597,14 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Suspected fix**: Commit the implementation plan at the **start** of execution — the `starting-an-implementation-plan` / `executing-an-implementation-plan` step should commit `docs/implementation-plans/<plan>/` before the first task subagent runs — rather than rescuing it at the `finishing-a-development-branch` step. Optionally add a guard in the execute step that refuses to start if the plan directory is untracked.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-15
+
+### 64. Doubled `ImportError{generic: ...}` wrapping in user-facing CLI error messages
+
+- **Component**: simlin-engine (`src/simlin-engine/src/common.rs:239-252` `impl fmt::Display for Error`), simlin-cli (`src/simlin-cli/src/main.rs:217` `die!`)
+- **Severity**: low
+- **Description**: The CLI surfaces engine import/parse errors with a verbose, doubled debug-style wrapper. For a model whose `GET DIRECT *` data file is missing, the message is `model '...' error: ImportError{generic: Failed to parse MDL: import error: ImportError{generic: cannot resolve data file 'does_not_exist.csv': No such file or directory (os error 2)}}`. The `ImportError{generic: ...}` wrapper appears **twice** and the inner OS error is nested several layers deep. Root cause: `Error`'s `Display` renders `write!(f, "{}{{{}: {}}}", kind, self.code, details)` (-> `ImportError{generic: <details>}`); when an inner `Error` is stringified into an outer error's `details` (MDL import wrapping a data-resolution `Error`), the prefix nests verbatim and double-wraps. The CLI then prints the whole thing via `die!("model '{}' error: {}", &file_path, err)`. The essential signal (file name + OS cause) is present and correct, so this is cosmetic/developer-experience polish, not a correctness bug. **Pre-existing** (present before the Phase 5 C-LEARN-residual work; the `die!` formatting is unchanged at base SHA `55d62b74`). Distinct from #581 (assembly diagnostics silently discarded), #437 (CLI debug truncation), and #598 (WASM data-supply API).
+- **Measure**: Run `simlin-cli` against an MDL model with an unresolvable `GET DIRECT *` reference (e.g. a sibling `does_not_exist.csv`) and inspect the `model '...' error:` line for the doubled `ImportError{generic:` prefix.
+- **Suspected fix**: Flatten the `Error` `Display` so a nested import error does not re-emit the `ImportError{generic: ...}` prefix (e.g. detect/strip the wrapper when the `details` string is itself a rendered `Error`), or have the CLI walk and render a cleaner error chain rather than printing the raw nested `Display`.
+- **Owner**: unassigned
+- **Discovered**: C-LEARN residual Phase 5 code review (the AC5.3 missing-data-file diagnostic path exercises it)
+- **Last reviewed**: 2026-05-20

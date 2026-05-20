@@ -12,7 +12,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::result::Result as StdResult;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -21,6 +21,7 @@ use simlin::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, format_diagnostic, format_simulation_error,
 };
 use simlin_engine::common::ErrorKind;
+use simlin_engine::data_provider::FilesystemDataProvider;
 use simlin_engine::datamodel::Project as DatamodelProject;
 use simlin_engine::db::{
     PersistentSyncState, SimlinDb, SourceProject, collect_all_diagnostics,
@@ -30,7 +31,9 @@ use simlin_engine::db::{
 };
 use simlin_engine::prost::Message;
 use simlin_engine::{Error, ErrorCode, Result, Results, Vm, datamodel, project_io, serde};
-use simlin_engine::{load_csv, load_dat, open_vensim, open_xmile, to_mdl, to_xmile};
+use simlin_engine::{
+    load_csv, load_dat, open_vensim, open_vensim_with_data, open_xmile, to_mdl, to_xmile,
+};
 
 mod gen_stdlib;
 mod vdf_dump;
@@ -192,7 +195,10 @@ fn open_model(input: &InputArgs) -> (DatamodelProject, Option<VisibleStocks>) {
     let (result, visible) = match format {
         InputFormat::Vensim => {
             let contents = std::fs::read_to_string(&file_path).unwrap();
-            (open_vensim(&contents), None)
+            // `input.path` is the user's intent: `Some` for a named model file
+            // (anchors the external-data root), `None` for stdin (pipe or
+            // `< file`) where no data root can be inferred.
+            (open_vensim_model(input.path.as_deref(), &contents), None)
         }
         InputFormat::Protobuf => {
             let file = File::open(&file_path).unwrap();
@@ -220,6 +226,42 @@ fn open_model(input: &InputArgs) -> (DatamodelProject, Option<VisibleStocks>) {
     match result {
         Ok(project) => (project, visible),
         Err(err) => die!("model '{}' error: {}", &file_path, err),
+    }
+}
+
+/// Parse a Vensim MDL model, resolving any `GET DIRECT *` external-data
+/// references against the filesystem.
+///
+/// `path` carries the user's intent, not filesystem metadata:
+///
+/// - `Some(model_path)` -- the user named a model file on the command line.
+///   Its parent directory roots a [`FilesystemDataProvider`], so a relative
+///   reference like `GET DIRECT CONSTANTS('data/a.csv', ...)` resolves to a
+///   sibling of the model file (matching Vensim's relative-to-model
+///   resolution). A bare filename resolves companions against the CWD.
+/// - `None` -- the model was read from stdin (whether a pipe or a `< file`
+///   redirection). There is no model path to anchor a data root, so no
+///   provider is built and any external-data reference remains unresolved;
+///   the engine reports a clear "no DataProvider configured" error.
+///
+/// Keying on the path argument rather than `is_file()` of stdin's
+/// `/dev/stdin` sentinel matters: under `simlin simulate < model.mdl`,
+/// `/dev/stdin` resolves to a regular file, so an `is_file()` check would
+/// wrongly build a provider rooted at `/dev`.
+fn open_vensim_model(path: Option<&Path>, contents: &str) -> Result<datamodel::Project> {
+    match path {
+        Some(model_path) => {
+            // A bare filename (e.g. `model.mdl`) has an empty parent; its data
+            // companions live in the current directory, so use "." there.
+            let base_dir = match model_path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p,
+                _ => Path::new("."),
+            };
+            let provider = FilesystemDataProvider::new(base_dir);
+            open_vensim_with_data(contents, Some(&provider))
+        }
+        // stdin (pipe or `< file`): no model path to anchor a data root.
+        None => open_vensim(contents),
     }
 }
 
@@ -701,5 +743,119 @@ fn main() {
                 results.print_tsv_comparison(Some(&reference_data));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod open_vensim_model_tests {
+    use super::*;
+    use simlin_engine::common::{Canonical, Ident};
+
+    /// Compile and run a datamodel project to completion, returning the
+    /// first row of results. Mirrors the CLI's non-LTM `run_simulation`
+    /// path so the test exercises the same incremental-salsa pipeline the
+    /// `simulate` subcommand uses.
+    fn run_to_first_row(project: &DatamodelProject) -> Results {
+        let mut db = SimlinDb::default();
+        let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
+        run_simulation(&db, sync_state.project, "main")
+            .unwrap_or_else(|e| panic!("simulation failed: {e}"))
+    }
+
+    fn scalar_value(results: &Results, name: &str) -> f64 {
+        let ident = Ident::<Canonical>::new(name);
+        let off = results.offsets[&ident];
+        results.iter().next().unwrap()[off]
+    }
+
+    /// AC5.1/AC5.2: a `GET DIRECT CONSTANTS` model opened through the CLI's
+    /// `open_vensim_model` resolves its companion CSV (relative to the model
+    /// file) and the resolved value drives simulation.
+    ///
+    /// `directconst.mdl`'s `a = GET DIRECT CONSTANTS('data/a.csv', ',', 'B2')`
+    /// reads cell B2 of `data/a.csv` (`a,\n,2050`), i.e. `2050`. The expected
+    /// `directconst.dat` confirms `a -> 2050`. The assertion is tied to the
+    /// actual CSV contents, not to zero/NaN.
+    #[test]
+    fn resolves_get_direct_constants_from_filesystem() {
+        let path = Path::new("../../test/sdeverywhere/models/directconst/directconst.mdl");
+        let contents = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read fixture {}: {e}", path.display()));
+
+        let project = open_vensim_model(Some(path), &contents)
+            .unwrap_or_else(|e| panic!("open_vensim_model failed: {e}"));
+
+        let results = run_to_first_row(&project);
+        let a = scalar_value(&results, "a");
+        assert!(
+            (a - 2050.0).abs() < 1e-6,
+            "a must resolve to the CSV value 2050 (data/a.csv cell B2), got {a}"
+        );
+    }
+
+    /// AC5.3: a model referencing a missing data file produces a clear,
+    /// file-level diagnostic (the `FilesystemDataProvider` "cannot resolve
+    /// data file" error surfaced through `open_vensim_model`), NOT a silent
+    /// zero or a generic message. The model file is written into a real
+    /// (existing) temp directory so the base-directory canonicalize
+    /// succeeds and the failure is specifically the missing CSV.
+    #[test]
+    fn missing_data_file_yields_clear_diagnostic() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mdl_path = dir.path().join("missing.mdl");
+        let mut f = std::fs::File::create(&mdl_path).unwrap();
+        write!(
+            f,
+            "{{UTF-8}}\n\
+             a = GET DIRECT CONSTANTS('does_not_exist.csv', ',', 'B2') ~~|\n\
+             INITIAL TIME = 0 ~~|\n\
+             FINAL TIME = 1 ~~|\n\
+             TIME STEP = 1 ~~|\n\
+             SAVEPER = TIME STEP ~~|\n"
+        )
+        .unwrap();
+        let contents = std::fs::read_to_string(&mdl_path).unwrap();
+
+        let err = open_vensim_model(Some(&mdl_path), &contents)
+            .expect_err("opening a model with a missing data file must error, not silently zero");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("does_not_exist.csv"),
+            "diagnostic must name the offending file; got: {msg}"
+        );
+        assert!(
+            msg.contains("cannot resolve data file"),
+            "diagnostic must be the file-level 'cannot resolve data file' error, \
+             not a generic message; got: {msg}"
+        );
+    }
+
+    /// Reading a `GET DIRECT` model from stdin (`path == None`) must NOT build
+    /// a `FilesystemDataProvider`: there is no model path to anchor a data
+    /// root, whether stdin is a pipe or a `< file` redirection. The null
+    /// provider surfaces the engine's "no DataProvider configured" error
+    /// rather than silently resolving companions against some unrelated
+    /// directory (the `/dev`-rooted provider an `is_file()` check on the
+    /// `/dev/stdin` sentinel would have wrongly built under `< file`).
+    #[test]
+    fn stdin_get_direct_yields_null_provider_error() {
+        // Reuse the real `GET DIRECT CONSTANTS` fixture's contents, but feed
+        // it through the stdin branch (no path argument).
+        let path = Path::new("../../test/sdeverywhere/models/directconst/directconst.mdl");
+        let contents = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read fixture {}: {e}", path.display()));
+
+        let err = open_vensim_model(None, &contents).expect_err(
+            "stdin (no path) must not build a data provider, so a GET DIRECT \
+             reference must surface the null-provider error",
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no DataProvider configured"),
+            "stdin must use the null provider (no FilesystemDataProvider built); \
+             expected the 'no DataProvider configured' error, got: {msg}"
+        );
     }
 }
