@@ -1539,9 +1539,10 @@ fn simulates_wrld3_03() {
 /// Known-residual C-LEARN base-variable names excluded from the
 /// `simulates_clearn` VDF gate. C-LEARN compiles via the incremental path,
 /// runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
-/// tolerance on ~94.7% of matched idents (3298 of 3482) after the per-element-GF
-/// fix (`61573545`) and the `:NA:`-aware + near-zero-robust comparator
-/// (`8775ae97`). The user-directed decision was to BANK that match and TRACK the
+/// tolerance on ~94.7% of matched idents (3298 of 3482; equivalently ~96.3%
+/// measured per-cell — the per-cell rate the plan's `test-requirements.md`
+/// quotes) after the per-element-GF fix (`61573545`) and the `:NA:`-aware +
+/// near-zero-robust comparator (`8775ae97`). The user-directed decision was to BANK that match and TRACK the
 /// genuine residual rather than chase it to within 1%.
 ///
 /// This is a TRANSPARENT, documented, tracked carve-out, NOT a tolerance
@@ -1623,7 +1624,7 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
 // FULL end-to-end C-LEARN simulation against `Ref.vdf`. Un-stubbed (no longer a
 // permanently-skipped placeholder): C-LEARN compiles via the incremental path,
 // runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
-// tolerance on the reconciled ~94.7% of matched idents. Kept `#[test] #[ignore]`
+// tolerance on the reconciled ~94.7% of matched idents (~96.3% per-cell). Kept `#[test] #[ignore]`
 // purely for RUNTIME CLASS (C-LEARN is ~53k lines / 1.4 MB, ~5s just to parse on
 // release), so the capped default `cargo test` set stays under the 3-minute cap;
 // run it explicitly via `--ignored` (AC8.3).
