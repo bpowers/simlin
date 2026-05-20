@@ -39,6 +39,7 @@ from .json_types import (
     LoopMetadata,
     MacroSpec,
     Model,
+    ModelGroup,
     Module,
     ModuleReference,
     ModuleViewElement,
@@ -773,6 +774,18 @@ def _create_converter() -> cattrs.Converter:
 
     conv.register_structure_hook(View, structure_view)
 
+    # ModelGroup: simple structure (reads camelCase runEnabled)
+    def structure_model_group(d: dict[str, Any], _: type) -> ModelGroup:
+        return ModelGroup(
+            name=d["name"],
+            doc=d.get("doc"),
+            parent=d.get("parent"),
+            members=d.get("members", []),
+            run_enabled=d.get("runEnabled", False),
+        )
+
+    conv.register_structure_hook(ModelGroup, structure_model_group)
+
     # Model: handle all nested types
     def structure_model(d: dict[str, Any], _: type) -> Model:
         stocks = [conv.structure(s, Stock) for s in d.get("stocks", [])]
@@ -784,6 +797,7 @@ def _create_converter() -> cattrs.Converter:
             sim_specs = conv.structure(d["simSpecs"], SimSpecs)
         views = [conv.structure(v, View) for v in d.get("views", [])]
         loop_metadata = [conv.structure(lm, LoopMetadata) for lm in d.get("loopMetadata", [])]
+        groups = [conv.structure(g, ModelGroup) for g in d.get("groups", [])]
         macro_spec = conv.structure(d["macroSpec"], MacroSpec) if d.get("macroSpec") else None
         return Model(
             name=d["name"],
@@ -794,6 +808,7 @@ def _create_converter() -> cattrs.Converter:
             sim_specs=sim_specs,
             views=views,
             loop_metadata=loop_metadata,
+            groups=groups,
             macro_spec=macro_spec,
         )
 
@@ -821,6 +836,7 @@ def _create_converter() -> cattrs.Converter:
         Unit: {"name"},
         LoopMetadata: {"uids", "name"},
         MacroSpec: {"parameters", "primary_output"},
+        ModelGroup: {"name"},
         Model: {"name", "stocks", "flows", "auxiliaries"},
         Project: {"name", "sim_specs"},
         JsonModelPatch: {"name"},

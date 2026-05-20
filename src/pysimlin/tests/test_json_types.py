@@ -34,6 +34,7 @@ from simlin.json_types import (
     JsonProjectPatch,
     MacroSpec,
     Model,
+    ModelGroup,
     Module,
     ModuleReference,
     RenameVariable,
@@ -43,7 +44,7 @@ from simlin.json_types import (
 )
 
 # Load the JSON schema
-SCHEMA_PATH = Path(__file__).parents[3] / "doc" / "simlin-project.schema.json"
+SCHEMA_PATH = Path(__file__).parents[3] / "docs" / "simlin-project.schema.json"
 if SCHEMA_PATH.exists():
     with open(SCHEMA_PATH) as f:
         PROJECT_SCHEMA = json.load(f)
@@ -336,6 +337,67 @@ class TestMacroSpecRoundtrip:
         assert reconstructed.macro_spec is None
 
 
+class TestModelGroupRoundtrip:
+    """Verifies a Model carrying ModelGroups round-trips losslessly through the
+    json_converter, using camelCase keys (runEnabled)."""
+
+    def test_model_group_roundtrip(self) -> None:
+        """A Model with populated ModelGroups roundtrips; the unstructured group
+        dict uses camelCase keys."""
+        model = Model(
+            name="grouped",
+            auxiliaries=[Auxiliary(name="output", equation="1")],
+            groups=[
+                ModelGroup(
+                    name="core",
+                    doc="core dynamics",
+                    parent="root",
+                    members=["output"],
+                    run_enabled=True,
+                )
+            ],
+        )
+
+        json_dict = converter.unstructure(model)
+
+        assert "groups" in json_dict
+        group_dict = json_dict["groups"][0]
+        assert group_dict["name"] == "core"
+        assert group_dict["doc"] == "core dynamics"
+        assert group_dict["parent"] == "root"
+        assert group_dict["members"] == ["output"]
+        assert group_dict["runEnabled"] is True
+        assert "run_enabled" not in group_dict
+
+        json_str = json.dumps(json_dict)
+        parsed = json.loads(json_str)
+        reconstructed = converter.structure(parsed, Model)
+
+        assert reconstructed.groups == model.groups
+        assert reconstructed == model
+
+    def test_model_group_omits_defaults(self) -> None:
+        """Optional ModelGroup fields are omitted when default and restored."""
+        model = Model(name="grouped", groups=[ModelGroup(name="minimal")])
+
+        json_dict = converter.unstructure(model)
+        group_dict = json_dict["groups"][0]
+        assert group_dict == {"name": "minimal"}
+
+        reconstructed = converter.structure(json_dict, Model)
+        assert reconstructed.groups == [ModelGroup(name="minimal")]
+
+    def test_model_without_groups_omits_key(self) -> None:
+        """A Model with no groups omits the key and restores groups=[]."""
+        model = Model(name="ungrouped", auxiliaries=[Auxiliary(name="x", equation="1")])
+
+        json_dict = converter.unstructure(model)
+        assert "groups" not in json_dict
+
+        reconstructed = converter.structure(json_dict, Model)
+        assert reconstructed.groups == []
+
+
 class TestPatchRoundtrip:
     """Tests for patch operation roundtrip."""
 
@@ -462,6 +524,18 @@ class TestSchemaCompliance:
         """Generated Module JSON validates against the schema."""
         json_dict = converter.unstructure(module)
         self._validate_against_def(json_dict, "Module")
+
+    def test_model_group_validates_against_schema(self) -> None:
+        """Generated ModelGroup JSON validates against the schema."""
+        group = ModelGroup(
+            name="core",
+            doc="core dynamics",
+            parent="root",
+            members=["a", "b"],
+            run_enabled=True,
+        )
+        json_dict = converter.unstructure(group)
+        self._validate_against_def(json_dict, "ModelGroup")
 
 
 class TestPatchJsonFormat:
