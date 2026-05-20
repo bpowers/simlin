@@ -1,3 +1,6 @@
+# Normalize Python sources to LF line endings (see issue #596).
+*.py text eol=lf
+
 src/app/scripts/* linguist-vendored
 src/app/config/* linguist-vendored
 src/simlin-engine/src/stdlib.gen.rs linguist-generated=true
