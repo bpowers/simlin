@@ -139,6 +139,14 @@ legitimate test-of-a-panicking-assertion, distinct from the production
   fraction above the threshold ⇒ must panic.
 - **Positive control:** a well-formed comparison with enough matches and
   finite values ⇒ does NOT panic (guards don't false-positive).
+- **Comparator: `:NA:`-sentinel ≡ Vensim 0:** a matched series where the SIM
+  value is `crate::float::NA` (`-2^109`) and the VDF value is `0` ⇒ does NOT
+  panic (reconciled as `:NA:`).
+- **Comparator: spurious `:NA:` is a real mismatch:** SIM = `crate::float::NA`
+  but VDF value is genuinely non-zero ⇒ MUST panic (not silently passed).
+- **Comparator: near-zero robustness:** VDF `0` vs SIM tiny jitter (within the
+  per-series abs floor) ⇒ does NOT panic; VDF `0` vs SIM a meaningfully-large
+  value ⇒ MUST panic (the abs floor must not swallow a genuine divergence).
 
 **Testing:** This test IS the AC8.2 verification. RED now (current
 `ensure_vdf_results` vacuously passes the first three); GREEN after Task 2.
@@ -173,8 +181,31 @@ legitimate test-of-a-panicking-assertion, distinct from the production
   comparison (`simulate.rs:165-180`) and the final
   `failures > 0 ⇒ panic!` (`simulate.rs:186-189`) intact — the guards are
   *additional* failure conditions, never relaxations.
-- Update the doc comment (`simulate.rs:135-139`) to state the floor + NaN
-  guard contract.
+- **`:NA:`-sentinel reconciliation (user-directed comparator):** before the
+  tolerance check, if the SIM value `a` is the Vensim `:NA:` sentinel
+  (`crate::float::NA` = `-2^109`, matched via `approx_eq`/exact bits), the cell is
+  `:NA:` in Simlin; Vensim renders `:NA:` as `0` in the VDF, so: if the VDF value
+  `e` is ≈0 (within the near-zero floor below) ⇒ MATCH (count it reconciled, do
+  not fail); if `e` is genuinely non-zero ⇒ a REAL mismatch (Simlin spuriously
+  `:NA:` where Vensim has a value — must be caught, never silently passed). Do NOT
+  map `:NA:`→0 on the engine/output side (the engine keeps the sentinel); only the
+  comparator interprets it. (After Task 10's `:NA:` fix, `:NA:` cells are finite
+  `-2^109`, never NaN, so they reach the comparator, not the NaN guard.)
+- **Near-zero-robust tolerance (fixes the literal-0 relative-error breakdown):**
+  replace the pure per-cell relative error (`|e-a|/max(|e|,|a|,1e-10)`, which is
+  ~100% whenever `e` is a literal 0 and `a` is any small jitter) with the standard
+  `isclose`-style combined criterion: a cell matches if
+  `|e - a| <= atol + rtol·max(|e|,|a|)`, with `rtol = 0.01` (the existing
+  cross-simulator 1%) and a PER-SERIES absolute floor `atol = k · max_step|e[ident]|`
+  (the series' peak magnitude). Choose `k` empirically (start ~1e-4) so near-zero
+  jitter passes while a genuine >1% divergence on a meaningful value STILL fails
+  (validate against C-LEARN's re-measure — the genuine residual MUST stay flagged;
+  do NOT loosen `k`/the tolerance to force a pass). This is a principled CORRECTION
+  of the comparison at zero, not a relaxation for meaningful values.
+- Update `ensure_vdf_results`'s doc comment (locate by name — the structural-gate
+  test shifted the old `:135-190` line numbers) to state the full contract: the
+  matched-variable floor, the NaN guard, the `:NA:`-sentinel↔0 reconciliation, and
+  the near-zero-robust abs+rel tolerance.
 
 **Testing:** Task 1's guard test now passes (GREEN); the positive control
 still does not panic. Existing callers `simulates_wrld3_03`
