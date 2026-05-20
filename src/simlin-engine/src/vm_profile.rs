@@ -36,10 +36,17 @@ impl CompiledSimulation {
             p.flow_opcodes += tally(&module.compiled_flows, &mut p.histogram);
             // Measure the post-fusion size by running the *actual* fusion pass on
             // a clone (the pass is what the Vm applies at construction), rather
-            // than a separate estimate that could drift from the real pass.
+            // than a separate estimate that could drift from the real pass. The
+            // fused histogram tallies the executed flow+stock stream as the Vm
+            // sees it, so the per-fused-opcode counts (e.g. how many BinGlobal*
+            // / BinConstConst sites fired) are observable.
             let mut fused = module.compiled_flows.as_ref().clone();
             fused.fuse_three_address();
             p.flow_opcodes_after_fusion += fused.code.len();
+            tally(&fused, &mut p.fused_histogram);
+            let mut fused_stocks = module.compiled_stocks.as_ref().clone();
+            fused_stocks.fuse_three_address();
+            tally(&fused_stocks, &mut p.fused_histogram);
             p.stock_opcodes += tally(&module.compiled_stocks, &mut p.histogram);
             for ci in module.compiled_initials.iter() {
                 p.n_initials += 1;
@@ -88,4 +95,8 @@ pub struct BytecodeProfile {
     pub dim_lists: usize,
     pub names: usize,
     pub histogram: BTreeMap<&'static str, usize>,
+    /// Opcode histogram of the *post-fusion* flow+stock stream (the program the
+    /// Vm actually dispatches), so the count of each fused superinstruction
+    /// (BinVarVar, BinGlobal*, BinConstConst, ...) is directly observable.
+    pub fused_histogram: BTreeMap<&'static str, usize>,
 }

@@ -1495,6 +1495,53 @@ impl Vm {
                     let rv = bytecode.literals[*r as usize];
                     stack.push(eval_op2(*op, lv, rv));
                 }
+                // === 3-ADDRESS BINARY OPS WITH GLOBAL OPERANDS (R2 extension) ===
+                // A `_global` operand is read from `curr[g]` directly (an
+                // absolute global slot, NO module_off -- like LoadGlobalVar),
+                // while a plain var operand is `curr[module_off + v]` (like
+                // LoadVar). The operand order `l op r` matches the original load
+                // order (load-bearing for Sub/Div).
+                Opcode::BinGlobalVar { l_global, r, op } => {
+                    let lv = curr[*l_global as usize];
+                    let rv = curr[module_off + *r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinVarGlobal { l, r_global, op } => {
+                    let lv = curr[module_off + *l as usize];
+                    let rv = curr[*r_global as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinGlobalConst { l_global, r, op } => {
+                    let lv = curr[*l_global as usize];
+                    let rv = bytecode.literals[*r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinConstGlobal { l, r_global, op } => {
+                    let lv = bytecode.literals[*l as usize];
+                    let rv = curr[*r_global as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinGlobalGlobal {
+                    l_global,
+                    r_global,
+                    op,
+                } => {
+                    let lv = curr[*l_global as usize];
+                    let rv = curr[*r_global as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                Opcode::BinStackGlobal { r_global, op } => {
+                    let lv = stack.pop();
+                    let rv = curr[*r_global as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
+                // Two constant leaves: still evaluated at run time (the operands
+                // are two distinct interned literals, not a folded result).
+                Opcode::BinConstConst { l, r, op } => {
+                    let lv = bytecode.literals[*l as usize];
+                    let rv = bytecode.literals[*r as usize];
+                    stack.push(eval_op2(*op, lv, rv));
+                }
                 // === 3-ADDRESS FUSED LEAF ASSIGNMENTS (R2 extension) ===
                 // `dst = a op b`, operands read straight from curr[]/literals,
                 // result written straight to curr[]/next[]. The operator is in
@@ -3679,6 +3726,157 @@ mod vm_reset_and_run_initials_tests {
         assert_eq!(val("cv"), -10.0, "10 - a");
         assert_eq!(val("sv"), 13.0, "(a - b) - c");
         assert_eq!(val("sc"), 11.0, "(a - b) - 4");
+    }
+
+    /// End-to-end guard for the global-operand and two-constant fused binops
+    /// (the R2 extension capturing the leaf-operand loads the original fusion
+    /// missed). All operators are Sub or Div (non-commutative) so a swapped
+    /// operand encoding in any new fused form is a loud failure, not a silent
+    /// miscompile. Each global appears as a leaf operand of a *pushing*
+    /// subexpression (the outer `- c` is the assigning op) so the fusion emits
+    /// the pushing `BinGlobal*` / `BinConstConst` forms rather than a leaf
+    /// assign. The opcode each equation produces is pinned by a sibling
+    /// `bytecode_profile().fused_histogram` assertion so the test cannot pass
+    /// vacuously through the un-fused path.
+    ///
+    /// At step 0: TIME=10, DT=2 (the sim start time and dt -- both globals,
+    /// loaded via LoadGlobalVar), b=5, c=2, e=1.
+    #[test]
+    fn test_fused_global_and_const_binops_preserve_operand_order() {
+        let tp = TestProject::new("global_fusion_order")
+            .with_sim_time(10.0, 20.0, 2.0)
+            .aux("b", "5", None)
+            .aux("c", "2", None)
+            .aux("e", "1", None)
+            .aux("gv", "(TIME - b) - c", None) // BinGlobalVar(Sub) then stack-leaf
+            .aux("vg", "(b / DT) - c", None) // BinVarGlobal(Div)
+            .aux("gc", "(TIME - 3) - c", None) // BinGlobalConst(Sub)
+            .aux("cg", "(3 / DT) - c", None) // BinConstGlobal(Div)
+            .aux("gg", "(TIME - DT) - c", None) // BinGlobalGlobal(Sub)
+            .aux("cc", "(7 - 3) - c", None) // BinConstConst(Sub)
+            .aux("sg", "((b - c) / DT) - e", None); // BinVarVar then BinStackGlobal(Div)
+
+        let compiled = build_compiled(&tp);
+
+        // Pin the fused shape: every new form must actually be emitted, so the
+        // numeric asserts below exercise the fused dispatch arms (not a fallback).
+        let fused = &compiled.bytecode_profile().fused_histogram;
+        for name in [
+            "BinGlobalVar",
+            "BinVarGlobal",
+            "BinGlobalConst",
+            "BinConstGlobal",
+            "BinGlobalGlobal",
+            "BinConstConst",
+            "BinStackGlobal",
+        ] {
+            assert!(
+                fused.get(name).copied().unwrap_or(0) >= 1,
+                "expected at least one {name} in the fused stream; got {fused:?}"
+            );
+        }
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+        let val = |name: &str| -> f64 {
+            let off = *results
+                .offsets
+                .get(&*canonicalize(name))
+                .unwrap_or_else(|| panic!("missing {name}"));
+            results.data[off] // step 0
+        };
+
+        assert_eq!(val("gv"), 3.0, "(TIME - b) - c = (10 - 5) - 2");
+        assert_eq!(val("vg"), 0.5, "(b / DT) - c = (5 / 2) - 2");
+        assert_eq!(val("gc"), 5.0, "(TIME - 3) - c = (10 - 3) - 2");
+        assert_eq!(val("cg"), -0.5, "(3 / DT) - c = (3 / 2) - 2");
+        assert_eq!(val("gg"), 6.0, "(TIME - DT) - c = (10 - 2) - 2");
+        assert_eq!(val("cc"), 2.0, "(7 - 3) - c = (7 - 3) - 2");
+        assert_eq!(val("sg"), 0.5, "((b - c) / DT) - e = ((5 - 2) / 2) - 1");
+    }
+
+    /// The single most dangerous risk for the global-operand fused binops: a
+    /// `_global` operand MUST read `curr[g]` (an absolute global slot), NOT
+    /// `curr[module_off + g]`. They are the same slot only at the root
+    /// (`module_off == 0`); inside a submodule they differ, so a `module_off + g`
+    /// miscompile is invisible at the root but corrupts every submodule.
+    ///
+    /// This builds a real two-model project: `main` instantiates `sub`, whose
+    /// body computes `gv = (TIME - b) - c` (a `BinGlobalVar`) and
+    /// `vg = (b / DT) - c` (a `BinVarGlobal`) where `module_off > 0`. With
+    /// TIME=10, DT=2 (the sim start/dt globals at curr[0]/curr[1]) and the
+    /// submodule's own b=5, c=2, the correct values are gv=3, vg=0.5. The
+    /// submodule's slots 0/1 hold its own variables (curr[module_off+0/1]), whose
+    /// values differ from the globals, so a `module_off`-relative read would
+    /// produce different numbers.
+    #[test]
+    fn test_global_operand_binop_reads_global_not_module_relative() {
+        use crate::datamodel;
+        use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+        use crate::testutils::{x_aux, x_model, x_module, x_project};
+
+        let sim_specs = datamodel::SimSpecs {
+            start: 10.0,
+            stop: 12.0,
+            dt: datamodel::Dt::Dt(2.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        };
+
+        // `sub` is instantiated by `main`, so its variables live at module_off>0.
+        // `b`/`c` are plain auxes (module_off-relative LoadVar operands); TIME/DT
+        // are globals (LoadGlobalVar operands at curr[0]/curr[1]).
+        let main = x_model("main", vec![x_module("sub", &[], None)]);
+        let sub = x_model(
+            "sub",
+            vec![
+                x_aux("b", "5", None),
+                x_aux("c", "2", None),
+                x_aux("gv", "(TIME - b) - c", None),
+                x_aux("vg", "(b / DT) - c", None),
+            ],
+        );
+        let datamodel = x_project(sim_specs, &[main, sub]);
+
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("two-model project should compile");
+
+        // Confirm the fused global ops were actually emitted (inside the
+        // submodule), so the dispatch path under test is exercised.
+        let fused = &compiled.bytecode_profile().fused_histogram;
+        assert!(
+            fused.get("BinGlobalVar").copied().unwrap_or(0) >= 1,
+            "expected a BinGlobalVar in the submodule's fused stream; got {fused:?}"
+        );
+        assert!(
+            fused.get("BinVarGlobal").copied().unwrap_or(0) >= 1,
+            "expected a BinVarGlobal in the submodule's fused stream; got {fused:?}"
+        );
+
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+        let series = crate::test_common::collect_results(&results);
+
+        // Submodule variables are reported under their qualified (middot-joined)
+        // `sub·<name>` names. A module_off-relative read of TIME/DT would yield
+        // other numbers.
+        let gv = series
+            .get("sub\u{b7}gv")
+            .unwrap_or_else(|| panic!("missing sub\u{b7}gv; have {:?}", series.keys()));
+        let vg = series.get("sub\u{b7}vg").expect("missing sub\u{b7}vg");
+        assert_eq!(
+            gv[0], 3.0,
+            "(TIME - b) - c = (10 - 5) - 2 -- TIME must be the global, not curr[module_off]"
+        );
+        assert_eq!(
+            vg[0], 0.5,
+            "(b / DT) - c = (5 / 2) - 2 -- DT must be the global, not curr[module_off+1]"
+        );
     }
 
     #[test]

@@ -531,6 +531,13 @@ pub(crate) fn symbolize_opcode(
         | Opcode::BinConstVar { .. }
         | Opcode::BinStackVar { .. }
         | Opcode::BinStackConst { .. }
+        | Opcode::BinGlobalVar { .. }
+        | Opcode::BinVarGlobal { .. }
+        | Opcode::BinGlobalConst { .. }
+        | Opcode::BinConstGlobal { .. }
+        | Opcode::BinGlobalGlobal { .. }
+        | Opcode::BinStackGlobal { .. }
+        | Opcode::BinConstConst { .. }
         | Opcode::AssignAddVarVarCurr { .. }
         | Opcode::AssignSubVarVarCurr { .. }
         | Opcode::AssignMulVarVarCurr { .. }

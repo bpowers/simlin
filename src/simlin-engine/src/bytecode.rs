@@ -697,6 +697,67 @@ pub(crate) enum Opcode {
         op: Op2,
     },
 
+    // === 3-ADDRESS BINARY OPS WITH GLOBAL OPERANDS (R2 extension) ===
+    // Mirror the `Bin*` pushing forms above, but for the leaf operands that are
+    // GLOBALS (TIME / DT / INITIAL_TIME / FINAL_TIME, loaded by `LoadGlobalVar`).
+    // The original `Bin*` forms missed these because no binop fused a global
+    // operand, so a `LoadGlobalVar` operand stayed an unfused load.
+    //
+    // CRITICAL: a `_global` field indexes `curr[g]` directly (an absolute global
+    // slot, NO `module_off` -- exactly like `LoadGlobalVar`), while a plain
+    // var field indexes `curr[module_off + v]` (module-relative, like `LoadVar`).
+    // Inside a submodule (`module_off > 0`) those are different slots; conflating
+    // them is a silent miscompile. The operand order is `l op r` matching the
+    // original load order, load-bearing for the non-commutative Sub/Div.
+    /// Push `curr[l_global] op curr[module_off + r]`.
+    BinGlobalVar {
+        l_global: VariableOffset,
+        r: VariableOffset,
+        op: Op2,
+    },
+    /// Push `curr[module_off + l] op curr[r_global]`.
+    BinVarGlobal {
+        l: VariableOffset,
+        r_global: VariableOffset,
+        op: Op2,
+    },
+    /// Push `curr[l_global] op literals[r]`.
+    BinGlobalConst {
+        l_global: VariableOffset,
+        r: LiteralId,
+        op: Op2,
+    },
+    /// Push `literals[l] op curr[r_global]`.
+    BinConstGlobal {
+        l: LiteralId,
+        r_global: VariableOffset,
+        op: Op2,
+    },
+    /// Push `curr[l_global] op curr[r_global]`.
+    BinGlobalGlobal {
+        l_global: VariableOffset,
+        r_global: VariableOffset,
+        op: Op2,
+    },
+    /// Pop `lhs`; push `lhs op curr[r_global]`.
+    BinStackGlobal {
+        r_global: VariableOffset,
+        op: Op2,
+    },
+
+    // === 3-ADDRESS BINARY OP WITH TWO CONSTANT OPERANDS (R2 extension) ===
+    // The greedy 3-window missed `LoadConstant; LoadConstant; Op2` (both operands
+    // are separate literals) because no `Bin*` form took two constant leaves.
+    // This is NOT compile-time constant folding of the result: the two operands
+    // are distinct interned literals, so we fuse the two loads + the op into one
+    // dispatch that still computes `literals[l] op literals[r]` at run time.
+    /// Push `literals[l] op literals[r]`.
+    BinConstConst {
+        l: LiteralId,
+        r: LiteralId,
+        op: Op2,
+    },
+
     // === 3-ADDRESS FUSED LEAF ASSIGNMENTS (R2 extension) ===
     // A leaf assignment `dst = a op b` is, post-`peephole_optimize`,
     // `LoadX a; LoadX b; BinOpAssign{Curr|Next}(op, dst)` (3 dispatches). These
@@ -1216,6 +1277,18 @@ impl Opcode {
             }
             Opcode::BinStackVar { .. } | Opcode::BinStackConst { .. } => (1, 1),
 
+            // Global-operand pushing forms mirror the var/const forms above: the
+            // two-leaf forms read both operands from curr/literals and push
+            // (0 pops, 1 push); BinStackGlobal pops the lhs and pushes (1, 1).
+            // BinConstConst reads both literals and pushes (0, 1).
+            Opcode::BinGlobalVar { .. }
+            | Opcode::BinVarGlobal { .. }
+            | Opcode::BinGlobalConst { .. }
+            | Opcode::BinConstGlobal { .. }
+            | Opcode::BinGlobalGlobal { .. }
+            | Opcode::BinConstConst { .. } => (0, 1),
+            Opcode::BinStackGlobal { .. } => (1, 1),
+
             // 3-address fused leaf assignments read operands from curr/literals
             // and write straight to curr/next: no arithmetic-stack traffic.
             Opcode::AssignAddVarVarCurr { .. }
@@ -1343,6 +1416,13 @@ impl Opcode {
             Opcode::BinConstVar { .. } => "BinConstVar",
             Opcode::BinStackVar { .. } => "BinStackVar",
             Opcode::BinStackConst { .. } => "BinStackConst",
+            Opcode::BinGlobalVar { .. } => "BinGlobalVar",
+            Opcode::BinVarGlobal { .. } => "BinVarGlobal",
+            Opcode::BinGlobalConst { .. } => "BinGlobalConst",
+            Opcode::BinConstGlobal { .. } => "BinConstGlobal",
+            Opcode::BinGlobalGlobal { .. } => "BinGlobalGlobal",
+            Opcode::BinStackGlobal { .. } => "BinStackGlobal",
+            Opcode::BinConstConst { .. } => "BinConstConst",
             Opcode::BinOpAssignCurr { .. } => "BinOpAssignCurr",
             Opcode::BinOpAssignNext { .. } => "BinOpAssignNext",
             Opcode::AssignAddVarVarCurr { .. } => "AssignAddVarVarCurr",
@@ -1940,6 +2020,51 @@ impl ByteCode {
                     (Opcode::LoadConstant { id: l }, Opcode::LoadVar { off: r }) => assign3
                         .and_then(|(op, dst, n)| fused_leaf_const_var(op, n, *l, *r, dst))
                         .or_else(|| push3.map(|op| Opcode::BinConstVar { l: *l, r: *r, op })),
+                    // Two constant leaves: no leaf-assign form, so this only fuses
+                    // a pushing `Op2`. Computes `literals[l] op literals[r]` at run
+                    // time (NOT compile-time folding -- the operands are two
+                    // distinct interned literals).
+                    (Opcode::LoadConstant { id: l }, Opcode::LoadConstant { id: r }) => {
+                        push3.map(|op| Opcode::BinConstConst { l: *l, r: *r, op })
+                    }
+                    // Global-operand leaf pairs. A global has no dedicated
+                    // leaf-assign opcode, so these fuse only a pushing `Op2`; a
+                    // `BinOpAssign` combiner (push3 == None) falls through to the
+                    // 2-window, which folds the rhs+store and leaves the global
+                    // load as a standalone push. `l_global`/`r_global` index
+                    // `curr[g]` (absolute), the var operand `curr[module_off + v]`.
+                    (Opcode::LoadGlobalVar { off: l }, Opcode::LoadVar { off: r }) => {
+                        push3.map(|op| Opcode::BinGlobalVar {
+                            l_global: *l,
+                            r: *r,
+                            op,
+                        })
+                    }
+                    (Opcode::LoadVar { off: l }, Opcode::LoadGlobalVar { off: r }) => {
+                        push3.map(|op| Opcode::BinVarGlobal {
+                            l: *l,
+                            r_global: *r,
+                            op,
+                        })
+                    }
+                    (Opcode::LoadGlobalVar { off: l }, Opcode::LoadConstant { id: r }) => push3
+                        .map(|op| Opcode::BinGlobalConst {
+                            l_global: *l,
+                            r: *r,
+                            op,
+                        }),
+                    (Opcode::LoadConstant { id: l }, Opcode::LoadGlobalVar { off: r }) => push3
+                        .map(|op| Opcode::BinConstGlobal {
+                            l: *l,
+                            r_global: *r,
+                            op,
+                        }),
+                    (Opcode::LoadGlobalVar { off: l }, Opcode::LoadGlobalVar { off: r }) => push3
+                        .map(|op| Opcode::BinGlobalGlobal {
+                            l_global: *l,
+                            r_global: *r,
+                            op,
+                        }),
                     _ => None,
                 }
             } else {
@@ -1987,6 +2112,13 @@ impl ByteCode {
                             }
                         })
                         .or_else(|| push2.map(|op| Opcode::BinStackConst { r: *b, op })),
+                    // `(lhs on stack) op global`. No global stack-leaf-assign
+                    // opcode exists (the global ops are pushing-only), so a
+                    // `BinOpAssign` combiner (push2 == None) is left unfused: the
+                    // standalone `LoadGlobalVar` then the `BinOpAssign` pops both.
+                    Opcode::LoadGlobalVar { off: b } => {
+                        push2.map(|op| Opcode::BinStackGlobal { r_global: *b, op })
+                    }
                     _ => None,
                 }
             } else {
@@ -4192,6 +4324,275 @@ mod tests {
             bc.code[3],
             Opcode::NextIterOrJump { jump_back: -1 }
         ));
+    }
+
+    // === 3-address fusion with GLOBAL operands and two-constant operands ===
+    //
+    // Globals (TIME/DT/...) load via `LoadGlobalVar`; the fusion now folds them
+    // in operand position. Sub and Div are exercised because they are
+    // non-commutative, so a swapped operand encoding is a loud failure rather
+    // than a silent miscompile.
+
+    #[test]
+    fn test_fuse_global_var_pushing() {
+        // `(g - v)` as a pushing subexpression (third op is Op2). The global is
+        // the lhs leaf, the var the rhs leaf.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadGlobalVar { off: 0 },
+                Opcode::LoadVar { off: 7 },
+                Opcode::Op2 { op: Op2::Sub },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(
+            matches!(
+                bc.code[0],
+                Opcode::BinGlobalVar {
+                    l_global: 0,
+                    r: 7,
+                    op: Op2::Sub
+                }
+            ),
+            "got {}",
+            bc.code[0].name()
+        );
+    }
+
+    #[test]
+    fn test_fuse_var_global_div_order() {
+        // `v / g`: var is the lhs (numerator), global the rhs (denominator).
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 4 },
+                Opcode::LoadGlobalVar { off: 1 },
+                Opcode::Op2 { op: Op2::Div },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinVarGlobal {
+                l: 4,
+                r_global: 1,
+                op: Op2::Div
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_global_const_sub_order() {
+        // `g - 5`: global lhs, const rhs.
+        let mut bc = ByteCode {
+            literals: vec![5.0],
+            code: vec![
+                Opcode::LoadGlobalVar { off: 0 },
+                Opcode::LoadConstant { id: 0 },
+                Opcode::Op2 { op: Op2::Sub },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinGlobalConst {
+                l_global: 0,
+                r: 0,
+                op: Op2::Sub
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_const_global_div_order() {
+        // `10 / g`: const lhs (numerator literal), global rhs (denominator).
+        let mut bc = ByteCode {
+            literals: vec![10.0],
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadGlobalVar { off: 1 },
+                Opcode::Op2 { op: Op2::Div },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinConstGlobal {
+                l: 0,
+                r_global: 1,
+                op: Op2::Div
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_global_global_sub_order() {
+        // `g0 - g1`: both leaves are globals. Distinct offsets verify l/r order.
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadGlobalVar { off: 0 },
+                Opcode::LoadGlobalVar { off: 1 },
+                Opcode::Op2 { op: Op2::Sub },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinGlobalGlobal {
+                l_global: 0,
+                r_global: 1,
+                op: Op2::Sub
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_stack_global() {
+        // `(a - b) / g`: leaf triple -> BinVarVar; the outer `/ g` (lhs on stack)
+        // -> BinStackGlobal. Div is non-commutative: lhs (stack) / rhs (g).
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Sub },
+                Opcode::LoadGlobalVar { off: 1 },
+                Opcode::Op2 { op: Op2::Div },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinVarVar {
+                l: 0,
+                r: 1,
+                op: Op2::Sub
+            }
+        ));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::BinStackGlobal {
+                r_global: 1,
+                op: Op2::Div
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_const_const_sub_order() {
+        // `5 - 2` from two distinct literals: fuses the two loads + Op2 into one
+        // BinConstConst that still computes literals[0] - literals[1] at run time
+        // (NOT compile-time folding -- the operands stay two separate literals).
+        let mut bc = ByteCode {
+            literals: vec![5.0, 2.0],
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
+                Opcode::Op2 { op: Op2::Sub },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinConstConst {
+                l: 0,
+                r: 1,
+                op: Op2::Sub
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_const_const_div_order() {
+        // `10 / 4` from two distinct literals -> BinConstConst with l/r order.
+        let mut bc = ByteCode {
+            literals: vec![10.0, 4.0],
+            code: vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
+                Opcode::Op2 { op: Op2::Div },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 1);
+        assert!(matches!(
+            bc.code[0],
+            Opcode::BinConstConst {
+                l: 0,
+                r: 1,
+                op: Op2::Div
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_global_leaf_assign_falls_through_to_stack_leaf() {
+        // `dst = g - v`: post-peephole this is LoadGlobalVar; LoadVar;
+        // BinOpAssignCurr. There is deliberately NO global *leaf-assign* opcode
+        // (the global forms are pushing-only), so the 3-window does not collapse
+        // it to a single op. The standalone LoadGlobalVar remains and the 2-window
+        // folds the rhs+store into AssignStackVarCurr with the global as the
+        // stack lhs (3->2, still a dispatch saved, and correct).
+        let mut bc = ByteCode {
+            literals: vec![],
+            code: vec![
+                Opcode::LoadGlobalVar { off: 0 },
+                Opcode::LoadVar { off: 7 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Sub,
+                    off: 9,
+                },
+            ],
+        };
+        bc.fuse_three_address();
+        assert_eq!(bc.code.len(), 2);
+        assert!(matches!(bc.code[0], Opcode::LoadGlobalVar { off: 0 }));
+        assert!(matches!(
+            bc.code[1],
+            Opcode::AssignStackVarCurr {
+                dst: 9,
+                b: 7,
+                op: Op2::Sub
+            }
+        ));
+    }
+
+    #[test]
+    fn test_fuse_global_const_const_preserve_max_stack_depth() {
+        // Each new pushing form has the same net stack effect as the Load;Load;Op2
+        // it replaces (+1), so fusion can only keep or shrink the peak depth --
+        // the Stack-safety proof must survive. Mix global, const-const, and
+        // stack-global forms.
+        let mut bc = ByteCode {
+            literals: vec![2.0, 3.0],
+            code: vec![
+                // (g - v) - here a pushing subexpr
+                Opcode::LoadGlobalVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::Op2 { op: Op2::Sub },
+                // ... / g   (lhs on stack -> BinStackGlobal)
+                Opcode::LoadGlobalVar { off: 1 },
+                Opcode::Op2 { op: Op2::Div },
+                // + (2 - 3) (const-const pushing -> BinConstConst, peak +1)
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
+                Opcode::Op2 { op: Op2::Sub },
+                Opcode::Op2 { op: Op2::Add },
+                Opcode::AssignCurr { off: 5 },
+            ],
+        };
+        let before = bc.max_stack_depth();
+        bc.fuse_three_address();
+        assert!(bc.max_stack_depth() <= before);
     }
 }
 
