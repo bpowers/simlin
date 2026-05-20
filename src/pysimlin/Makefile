@@ -1,8 +1,10 @@
 .PHONY: all build test clean install dev lint type-check
 
-# Build the libsimlin library
+# Build the libsimlin library. mimalloc: the engine compile path is
+# allocation-heavy and mimalloc roughly halves allocator time on native builds
+# (see docs/design/engine-performance.md).
 build-lib:
-	cd ../libsimlin && cargo build --release
+	cd ../libsimlin && cargo build --release --features mimalloc
 
 # Build the Python package
 build: build-lib

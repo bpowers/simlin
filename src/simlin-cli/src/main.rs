@@ -2,6 +2,14 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// mimalloc on native builds (the engine compile path is allocation-heavy;
+// mimalloc roughly halves allocator time -- see docs/design/engine-performance.md)
+// comes via the `simlin/mimalloc` feature on the libsimlin dependency, which
+// installs the global allocator. We deliberately do NOT declare a second
+// `#[global_allocator]` here: this binary links libsimlin, and two global
+// allocators in one artifact is a compile error (notably under
+// `cargo clippy --all-features`, which enables libsimlin's feature).
+
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;

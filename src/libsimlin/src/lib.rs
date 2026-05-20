@@ -22,6 +22,17 @@
 //! Shared types (enums, structs, helpers) live here in `lib.rs` and are
 //! imported by the modules via `crate::`.
 
+// Native consumers of this cdylib/staticlib (pysimlin via cffi, C/C++ FFI) opt
+// into mimalloc with the `mimalloc` feature: the engine compile path is
+// allocation-heavy (millions of small, short-lived allocations) and mimalloc
+// roughly halves allocator time vs the system malloc. Never enabled for the
+// wasm32 bundle. See docs/design/engine-performance.md. This is the Rust global
+// allocator and is independent of the `simlin_malloc`/`simlin_free`
+// cross-boundary helpers in `memory`.
+#[cfg(all(feature = "mimalloc", not(target_arch = "wasm32")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::{Error as AnyError, Result};
 use simlin_engine::{self as engine};
 use std::collections::HashMap;
