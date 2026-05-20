@@ -721,7 +721,7 @@ impl Var {
                                 exprs
                             }
                             // Stocks never carry graphical functions, so they
-                            // are never lookup-only (`false`).
+                            // are never lookup-only (`None`).
                             Ast::ApplyToAll(dims, ast) => {
                                 expand_a2a_with_hoisting(ctx, dims, ast, off, false)?
                             }
@@ -737,7 +737,7 @@ impl Var {
                                 default_ast.as_ref(),
                                 *apply_default_for_missing,
                                 off,
-                                false,
+                                None,
                             )?,
                         }
                     } else {
@@ -821,6 +821,24 @@ impl Var {
                             expand_a2a_with_hoisting(ctx, dims, ast, off, lookup_only)?
                         }
                         Ast::Arrayed(dims, elements, default_ast, apply_default_for_missing) => {
+                            // A lookup-only arrayed variable's table layout is
+                            // decided by `variable.rs::build_tables`: per-element
+                            // tables (`tables.len() == n`) ONLY when at least one
+                            // element carries its own gf, otherwise a single
+                            // shared variable-level table (`tables.len() == 1`,
+                            // the same shape A2A always has). The expansion needs
+                            // that distinction to wrap the right LOOKUP offset
+                            // (element-own `off + i` vs shared base `off`), so
+                            // derive it from the actual table count here.
+                            let lookup_only_layout = lookup_only.then(|| {
+                                let element_count: usize =
+                                    dims.iter().map(Dimension::len).product();
+                                if tables.len() == element_count {
+                                    LookupOnlyLayout::PerElement
+                                } else {
+                                    LookupOnlyLayout::Shared
+                                }
+                            });
                             expand_arrayed_with_hoisting(
                                 ctx,
                                 dims,
@@ -828,7 +846,7 @@ impl Var {
                                 default_ast.as_ref(),
                                 *apply_default_for_missing,
                                 off,
-                                lookup_only,
+                                lookup_only_layout,
                             )?
                         }
                     }
@@ -1730,6 +1748,24 @@ fn array_view_from_dims(dims: &[Dimension]) -> ArrayView {
     ArrayView::contiguous_with_names(dim_sizes, dim_names)
 }
 
+/// The graphical-function table layout of a lookup-only arrayed variable, which
+/// determines the LOOKUP offset its expansion must wrap. The two variants mirror
+/// the two layouts `variable.rs::build_tables` can produce for an arrayed
+/// variable, so that an invalid "lookup-only but neither layout" state is
+/// unrepresentable (the caller derives the variant from `tables.len()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LookupOnlyLayout {
+    /// One table per element (`tables.len() == n`), laid out by row-major
+    /// declared dimension index. Produced ONLY when at least one element carries
+    /// its OWN gf. Element `i` reads its own table, so wrap `off + i`.
+    PerElement,
+    /// A single variable-level table shared by every element (`tables.len() ==
+    /// 1`). Produced when the arrayed variable has empty/sentinel element
+    /// equations and one variable-level gf -- the same shape A2A always has. Every
+    /// element reads that one table, so wrap the BASE offset `off`.
+    Shared,
+}
+
 /// Handle the Arrayed expansion, detecting array-producing builtins in
 /// per-element expressions and hoisting them into AssignTemp pre-computations.
 ///
@@ -1737,6 +1773,11 @@ fn array_view_from_dims(dims: &[Dimension]) -> ArrayView {
 /// like VectorElmMap, VectorSortOrder, or AllocateAvailable, the builtin must
 /// be evaluated once for the whole array and stored in temp. Each element then
 /// reads its result via TempArrayElement.
+///
+/// `lookup_only` is `Some(layout)` iff the variable is a standalone
+/// graphical-function holder (every element equation empty/sentinel); the layout
+/// selects the LOOKUP offset (see [`LookupOnlyLayout`]). It is `None` for an
+/// ordinary arrayed variable.
 fn expand_arrayed_with_hoisting(
     ctx: &Context,
     dims: &[Dimension],
@@ -1744,32 +1785,42 @@ fn expand_arrayed_with_hoisting(
     default_ast: Option<&crate::ast::Expr2>,
     apply_default_for_missing: bool,
     off: usize,
-    lookup_only: bool,
+    lookup_only: Option<LookupOnlyLayout>,
 ) -> Result<Vec<Expr>> {
     let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
 
-    // A lookup-only arrayed variable is a pure per-element table holder: every
-    // element evaluates ITS OWN table at the determined index (Time). The
-    // per-element table layout (`variable.rs::build_tables` /
-    // `reorder_arrayed_element_tables`) gives `tables.len() == n` keyed by
-    // row-major declared dimension index, so element `i` reads
-    // `graphical_functions[base_gf + i]`. Critically, this wraps `off + i` (the
-    // element's own offset) -- contrast the A2A case in
-    // `expand_a2a_with_hoisting`, which has ONE shared table and must wrap the
-    // BASE offset. `codegen::extract_table_info` derives `elem_off = off+i -
-    // base_off = i` and `table_count = n`, so `i` is always in range. (A
-    // lookup-only equation is a constant sentinel, never an array-producing
+    // A lookup-only arrayed variable is a pure table holder: every element
+    // evaluates a table at the determined index (Time). WHICH table it reads
+    // depends on the layout `variable.rs::build_tables` chose, so the LOOKUP
+    // offset must match it:
+    //
+    // * `LookupOnlyLayout::PerElement` (`tables.len() == n`): element `i` reads
+    //   its own table, so wrap `off + i`. `codegen::extract_table_info` derives
+    //   `elem_off = off+i - base_off = i` and `table_count = n`, so `i` is always
+    //   in range.
+    // * `LookupOnlyLayout::Shared` (`tables.len() == 1`): every element reads the
+    //   one shared variable-level table, so wrap the BASE offset `off`, exactly
+    //   like `expand_a2a_with_hoisting`: `elem_off = off - base_off = 0` and
+    //   `table_count = 1`, so element_offset 0 is in range for all elements.
+    //   Wrapping `off + i` here would make `element_offset == i >= 1 ==
+    //   table_count` for i > 0, and the VM's `Lookup` opcode would push NaN.
+    //
+    // (A lookup-only equation is a constant sentinel, never an array-producing
     // builtin, so this never needs the hoisting path below.)
-    if lookup_only {
+    if let Some(layout) = lookup_only {
         let exprs: Vec<Expr> = SubscriptIterator::new(dims)
             .enumerate()
             .map(|(i, _)| {
                 let loc = Loc::default();
+                let table_off = match layout {
+                    LookupOnlyLayout::PerElement => off + i,
+                    LookupOnlyLayout::Shared => off,
+                };
                 Expr::AssignCurr(
                     off + i,
                     Box::new(Expr::App(
                         BuiltinFn::Lookup(
-                            Box::new(Expr::Var(off + i, loc)),
+                            Box::new(Expr::Var(table_off, loc)),
                             Box::new(lookup_only_index_expr(loc)),
                             loc,
                         ),

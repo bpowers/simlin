@@ -306,6 +306,79 @@ fn a2a_lookup_only_shares_one_table_at_time() {
     }
 }
 
+/// AC1.2 (layout robustness): an ARRAYED (`Equation::Arrayed`) lookup-only
+/// variable that carries a SINGLE *variable-level* gf (no per-element gfs) must
+/// have every element read that one shared table at `gf(Time)`.
+///
+/// This is the symmetric twin of the A2A bounds hazard. `variable.rs::build_tables`
+/// only produces a per-element table layout (`tables.len() == n`) when at least
+/// one element carries its OWN gf; an `Equation::Arrayed` with empty/sentinel
+/// element equations and a single *variable-level* gf falls through to the
+/// shared-table branch (`tables.len() == 1`), exactly like A2A. So the arrayed
+/// lookup-only lowering must wrap the BASE offset (`elem_off = 0`,
+/// `table_count = 1`) here, NOT `off + i` -- a per-element `off + i` would make
+/// `element_offset == i >= 1 == table_count` for i > 0 and the VM's `Lookup`
+/// opcode would push NaN for every element after the first.
+///
+/// The MDL/XMILE importers never emit this exact shape (they attach per-element
+/// gfs to an arrayed lookup), but `datamodel::Project` is a public compile input
+/// (protobuf/JSON/serde/MCP/pysimlin/libsimlin all preserve it verbatim), so a
+/// directly-constructed project can reach it and must compile correctly.
+#[test]
+fn arrayed_lookup_only_variable_level_gf_shares_one_table_at_time() {
+    // `Equation::Arrayed` with empty/sentinel element equations and NO
+    // per-element gfs, plus a single variable-level gf shared by every element.
+    let arrayed_elements: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<datamodel::GraphicalFunction>,
+    )> = vec![
+        ("P".to_string(), LOOKUP_SENTINEL.to_string(), None, None),
+        ("Q".to_string(), LOOKUP_SENTINEL.to_string(), None, None),
+        ("R".to_string(), LOOKUP_SENTINEL.to_string(), None, None),
+    ];
+
+    let g = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "g".to_string(),
+        equation: datamodel::Equation::Arrayed(
+            vec!["Dim".to_string()],
+            arrayed_elements,
+            None,
+            false,
+        ),
+        documentation: String::new(),
+        units: None,
+        // One variable-level GF, shared by every element (tables.len() == 1).
+        gf: Some(year_gf(7.0, 8.0, 9.0)),
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+
+    let project = project_with(
+        "arrayed_lookup_only_variable_level_gf",
+        vec![datamodel::Dimension::named(
+            "Dim".to_string(),
+            vec!["P".to_string(), "Q".to_string(), "R".to_string()],
+        )],
+        vec![g],
+    );
+
+    let series = run_series(&project);
+    for elem in ["p", "q", "r"] {
+        assert_series_eq(
+            series_of(&series, &format!("g[{elem}]")),
+            &[7.0, 8.0, 9.0],
+            &format!(
+                "arrayed lookup-only element {elem} with a single variable-level gf must \
+                 read the one shared table at gf(Time) (an off+i bounds overflow -> NaN \
+                 for every element after the first)"
+            ),
+        );
+    }
+}
+
 /// AC1.4 (no regression): a graphical-function variable that is *applied* with
 /// an argument elsewhere (`out = LOOKUP(g, idx)` where `idx` is a real input
 /// distinct from Time) still produces the applied value `gf(idx)`. The
