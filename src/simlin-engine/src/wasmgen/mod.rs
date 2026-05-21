@@ -19,6 +19,7 @@
 //! integration loop land in subsequent milestones.
 
 mod expr;
+mod lower;
 mod module;
 
 pub use module::{compile_datamodel_to_wasm, compile_module};
