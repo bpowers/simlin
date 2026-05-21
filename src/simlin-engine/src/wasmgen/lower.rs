@@ -61,10 +61,14 @@
 
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 
-use crate::bytecode::{BuiltinId, ByteCode, GraphicalFunctionId, LookupMode, Op2, Opcode};
+use crate::bytecode::{
+    BuiltinId, ByteCode, ByteCodeContext, GraphicalFunctionId, LookupMode, Op2, Opcode,
+};
 use crate::vm::StepPart;
 
 use super::WasmGenError;
+use super::views::ElementAddr;
+use super::views::{ViewBase, ViewDesc};
 
 /// Bytes per f64 slot.
 const SLOT_SIZE: u32 = 8;
@@ -83,7 +87,7 @@ const GF_DIRECTORY_ENTRY_BYTES: i32 = 8;
 /// chunk); the per-program functions take it as their single `i32` parameter.
 /// In Phase 1 the root is the only module so `module_off` is always 0, but
 /// emitting with it from the start avoids a Phase 7 rewrite.
-pub(crate) struct EmitCtx {
+pub(crate) struct EmitCtx<'a> {
     pub curr_base: u32,
     pub next_base: u32,
     /// Byte offset of the GF directory region (8 bytes/entry, indexed by global
@@ -154,6 +158,17 @@ pub(crate) struct EmitCtx {
     /// semantics can `call` them. The same registry is shared by every
     /// per-program function in a module.
     pub helpers: HelperFns,
+    /// Byte offset of slot 0 of the `temp_storage` region (`temp_total_size`
+    /// f64 wide). The array view machinery addresses temp element `index` of
+    /// temp `temp_id` at `temp_storage_base + (temp_offsets[temp_id] + index)*8`,
+    /// mirroring the VM's `temp_storage[temp_offsets[temp_id] + index]`
+    /// (`vm.rs:584-586`).
+    pub temp_storage_base: u32,
+    /// The module's `ByteCodeContext`, holding the compile-time array tables the
+    /// view opcodes reference by index: `static_views`, `dim_lists`,
+    /// `dimensions`, `subdim_relations`, and `temp_offsets`. Run-invariant and
+    /// shared by every per-program function.
+    pub ctx: &'a ByteCodeContext,
 }
 
 // Reserved global slots (absolute, module-independent), mirroring `crate::vm`.
@@ -728,6 +743,12 @@ pub(crate) fn emit_bytecode(
     // Emit-time stack pointer into `ctx.condition_locals`, mirroring the VM's
     // single `condition` register but generalized to nested `If`s.
     let mut cond_sp: usize = 0;
+    // Compile-time analogue of the VM's runtime `view_stack`: the `Push*View` /
+    // `View*` opcodes push/transform/pop `ViewDesc`s here, and the reducers read
+    // the top descriptor. Because every static view's geometry is known at
+    // compile time, this never materializes anything at runtime -- element
+    // addresses are folded into the emitted reads.
+    let mut view_stack: Vec<ViewDesc> = Vec::new();
     for op in &bc.code {
         match op {
             Opcode::LoadConstant { id } => {
@@ -856,6 +877,127 @@ pub(crate) fn emit_bytecode(
             // (the value being computed); elsewhere read the post-initials
             // `initial_values[module_off+off]` snapshot.
             Opcode::LoadInitial { off } => emit_load_initial(*off, ctx, f),
+
+            // ── View-stack construction (Phase 5 Task 1) ──────────────────
+            // Each opcode pushes/transforms a compile-time `ViewDesc`, mirroring
+            // the VM's `view_stack` arms (`vm.rs:1739-1855`). No wasm is emitted:
+            // the geometry is folded into later element reads.
+            Opcode::PushStaticView { view_id } => {
+                let view = ctx.ctx.get_static_view(*view_id).ok_or_else(|| {
+                    WasmGenError::Unsupported(format!(
+                        "wasmgen: PushStaticView view_id {view_id} out of range"
+                    ))
+                })?;
+                view_stack.push(ViewDesc::from_static(view));
+            }
+            // `PushVarView` builds a full contiguous view over a variable array;
+            // the VM folds `module_off` into the base (`vm.rs:1749`), so the base
+            // is module-relative.
+            Opcode::PushVarView {
+                base_off,
+                dim_list_id,
+            } => {
+                let (dims, dim_ids) = resolve_dim_list_dims(ctx, *dim_list_id)?;
+                view_stack.push(ViewDesc::contiguous(
+                    u32::from(*base_off),
+                    ViewBase::CurrModuleRelative,
+                    dims,
+                    dim_ids,
+                ));
+            }
+            // `PushTempView` builds a full contiguous view over a temp array
+            // (`vm.rs:1757`).
+            Opcode::PushTempView {
+                temp_id,
+                dim_list_id,
+            } => {
+                let (dims, dim_ids) = resolve_dim_list_dims(ctx, *dim_list_id)?;
+                view_stack.push(ViewDesc::contiguous(
+                    u32::from(*temp_id),
+                    ViewBase::Temp,
+                    dims,
+                    dim_ids,
+                ));
+            }
+            // `PushVarViewDirect` builds a contiguous view from raw dim sizes
+            // (dim_ids all 0), the base for a dynamic subscript (`vm.rs:1776`).
+            // Module-relative, like `PushVarView`.
+            Opcode::PushVarViewDirect {
+                base_off,
+                dim_list_id,
+            } => {
+                let (dims, _dim_ids) = resolve_dim_list_raw(ctx, *dim_list_id)?;
+                let n = dims.len();
+                view_stack.push(ViewDesc::contiguous(
+                    u32::from(*base_off),
+                    ViewBase::CurrModuleRelative,
+                    dims,
+                    vec![0u16; n],
+                ));
+            }
+
+            // ── View-stack transforms (Phase 5 Task 1) ────────────────────
+            Opcode::ViewSubscriptConst { dim_idx, index } => {
+                view_top_mut(&mut view_stack)?.apply_single_subscript(*dim_idx as usize, *index);
+            }
+            Opcode::ViewRange {
+                dim_idx,
+                start,
+                end,
+            } => {
+                view_top_mut(&mut view_stack)?.apply_range(*dim_idx as usize, *start, *end);
+            }
+            Opcode::ViewStarRange {
+                dim_idx,
+                subdim_relation_id,
+            } => {
+                let rel = ctx
+                    .ctx
+                    .subdim_relations
+                    .get(*subdim_relation_id as usize)
+                    .ok_or_else(|| {
+                        WasmGenError::Unsupported(format!(
+                            "wasmgen: ViewStarRange subdim_relation_id {subdim_relation_id} \
+                             out of range"
+                        ))
+                    })?;
+                let parent_offsets = rel.parent_offsets.to_vec();
+                let child_dim_id = rel.child_dim_id;
+                view_top_mut(&mut view_stack)?.apply_sparse(
+                    *dim_idx as usize,
+                    parent_offsets,
+                    child_dim_id,
+                );
+            }
+            // `ViewWildcard` is a no-op in the VM (`vm.rs:1839`): the dimension
+            // stays as-is.
+            Opcode::ViewWildcard { dim_idx: _ } => {}
+            Opcode::ViewTranspose {} => {
+                view_top_mut(&mut view_stack)?.transpose();
+            }
+            Opcode::PopView {} => {
+                view_stack.pop().ok_or_else(|| {
+                    WasmGenError::Unsupported("wasmgen: PopView on empty view stack".to_string())
+                })?;
+            }
+            Opcode::DupView {} => {
+                let top = view_top(&view_stack)?.clone();
+                view_stack.push(top);
+            }
+
+            // ── Temp element reads (Phase 5 Task 1) ───────────────────────
+            // `temp_storage[temp_offsets[temp_id] + index]` (`vm.rs:1860`).
+            Opcode::LoadTempConst { temp_id, index } => {
+                let addr = temp_element_byte_addr(ctx, *temp_id, u32::from(*index))?;
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::F64Load(memarg(addr)));
+            }
+            // `temp_storage[temp_offsets[temp_id] + index]` with a runtime index
+            // (`vm.rs:1866`): the VM does `stack.pop().floor() as usize`.
+            Opcode::LoadTempDynamic { temp_id } => {
+                emit_load_temp_dynamic(ctx, *temp_id, f)?;
+            }
+
             Opcode::Ret => {
                 // The caller emits the function's terminating `End`.
             }
@@ -1261,6 +1403,149 @@ fn i32_memarg(offset: u64) -> MemArg {
     }
 }
 
+// ============================================================================
+// Array view stack + reducers (Phase 5 Tasks 1-2)
+// ============================================================================
+
+/// Borrow the top view descriptor, erroring (rather than panicking) on an empty
+/// stack -- malformed bytecode rather than a wrong module.
+fn view_top(view_stack: &[ViewDesc]) -> Result<&ViewDesc, WasmGenError> {
+    view_stack.last().ok_or_else(|| {
+        WasmGenError::Unsupported("wasmgen: view opcode on empty view stack".to_string())
+    })
+}
+
+/// Mutably borrow the top view descriptor for a transform opcode.
+fn view_top_mut(view_stack: &mut [ViewDesc]) -> Result<&mut ViewDesc, WasmGenError> {
+    view_stack.last_mut().ok_or_else(|| {
+        WasmGenError::Unsupported("wasmgen: view transform on empty view stack".to_string())
+    })
+}
+
+/// Resolve a dim-list id to `(dim sizes, dim ids)` for `PushVarView`/
+/// `PushTempView`: each entry is a `DimId`, and the size comes from
+/// `ctx.dimensions[DimId].size` (`vm.rs:1745`).
+fn resolve_dim_list_dims(
+    ctx: &EmitCtx,
+    dim_list_id: u16,
+) -> Result<(Vec<u16>, Vec<u16>), WasmGenError> {
+    let (n_dims, dim_ids) = ctx
+        .ctx
+        .dim_lists
+        .get(dim_list_id as usize)
+        .map(|(n, ids)| (*n as usize, *ids))
+        .ok_or_else(|| {
+            WasmGenError::Unsupported(format!("wasmgen: dim_list_id {dim_list_id} out of range"))
+        })?;
+    let mut dims = Vec::with_capacity(n_dims);
+    for &dim_id in dim_ids.iter().take(n_dims) {
+        let size = ctx
+            .ctx
+            .dimensions
+            .get(dim_id as usize)
+            .map(|d| d.size)
+            .ok_or_else(|| {
+                WasmGenError::Unsupported(format!("wasmgen: DimId {dim_id} out of range"))
+            })?;
+        dims.push(size);
+    }
+    let dim_id_vec = dim_ids[..n_dims].to_vec();
+    Ok((dims, dim_id_vec))
+}
+
+/// Resolve a dim-list id to `(raw sizes, raw ids)` for `PushVarViewDirect`,
+/// where each entry is a literal dimension size, not a `DimId` (`vm.rs:1780`).
+fn resolve_dim_list_raw(
+    ctx: &EmitCtx,
+    dim_list_id: u16,
+) -> Result<(Vec<u16>, Vec<u16>), WasmGenError> {
+    let (n_dims, sizes) = ctx
+        .ctx
+        .dim_lists
+        .get(dim_list_id as usize)
+        .map(|(n, ids)| (*n as usize, *ids))
+        .ok_or_else(|| {
+            WasmGenError::Unsupported(format!("wasmgen: dim_list_id {dim_list_id} out of range"))
+        })?;
+    Ok((sizes[..n_dims].to_vec(), sizes[..n_dims].to_vec()))
+}
+
+/// The absolute byte address of temp element `index` of temp `temp_id`:
+/// `temp_storage_base + (temp_offsets[temp_id] + index) * 8`.
+fn temp_element_byte_addr(ctx: &EmitCtx, temp_id: u8, index: u32) -> Result<u64, WasmGenError> {
+    let temp_off = *ctx.ctx.temp_offsets.get(temp_id as usize).ok_or_else(|| {
+        WasmGenError::Unsupported(format!("wasmgen: temp id {temp_id} out of range"))
+    })? as u64;
+    Ok(u64::from(ctx.temp_storage_base) + (temp_off + u64::from(index)) * u64::from(SLOT_SIZE))
+}
+
+/// Lower `LoadTempDynamic { temp_id }`: pop a runtime index (the VM does
+/// `stack.pop().floor() as usize`), compute the temp element address, and load.
+///
+/// The address is `temp_storage_base + temp_offsets[temp_id]*8 + index*8`; the
+/// constant base/offset ride in the `memarg.offset`, so only `index*8` is
+/// computed at runtime. `i32.trunc_sat_f64_s` of `floor(index)` reproduces the
+/// VM's `floor() as usize` for a non-negative in-range index.
+fn emit_load_temp_dynamic(
+    ctx: &EmitCtx,
+    temp_id: u8,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    use Instruction as Ins;
+    let base = temp_element_byte_addr(ctx, temp_id, 0)?;
+    // index (f64, on top) -> floor -> i32 -> *8 (byte stride)
+    f.instruction(&Ins::F64Floor);
+    f.instruction(&Ins::I32TruncSatF64S);
+    f.instruction(&Ins::I32Const(SLOT_SIZE as i32));
+    f.instruction(&Ins::I32Mul);
+    f.instruction(&Ins::F64Load(memarg(base)));
+    Ok(())
+}
+
+/// Push the f64 value of view element `iter_idx` onto the wasm stack, reading
+/// from the byte address [`ViewDesc::element_addr`] computes. This is the single
+/// element-read primitive the reducers (Task 2) and -- for static/temp/var
+/// views -- the iteration loop (Task 3) build on.
+///
+/// The constant part of the address rides in the `memarg.offset`; the dynamic
+/// part of the wasm address is `module_off * 8` for a module-relative view (0 in
+/// the current single-root scope, but emitted for Phase 7 generality) and a bare
+/// `0` otherwise. A dynamically-subscripted view (Task 4) returns `Unsupported`
+/// here.
+///
+/// Landed with the view machinery (Task 1) as the single element-read primitive;
+/// its first consumer is the array reducer (Task 2), with the iteration loop
+/// (Task 3) and Phase 6 to follow.
+#[allow(dead_code)]
+fn emit_view_element_load(
+    desc: &ViewDesc,
+    iter_idx: usize,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let ElementAddr {
+        const_byte_offset,
+        module_relative,
+    } = desc
+        .element_addr(iter_idx, ctx.curr_base, ctx.temp_storage_base, ctx.ctx)
+        .ok_or_else(|| {
+            WasmGenError::Unsupported(
+                "wasmgen: array element read needs a runtime address \
+                 (dynamically-subscripted view) -- not yet supported"
+                    .to_string(),
+            )
+        })?;
+    if module_relative {
+        // dynamic address = module_off * 8 (the constant `base_off + flat` rides
+        // in the memarg), matching the VM's `curr[module_off + base_off + flat]`.
+        push_module_relative_base(ctx, f);
+    } else {
+        f.instruction(&Instruction::I32Const(0));
+    }
+    f.instruction(&Instruction::F64Load(memarg(const_byte_offset)));
+    Ok(())
+}
+
 /// Push `helper(local)` for a unary `(f64) -> f64` helper: load the f64 local,
 /// then `call`.
 fn emit_call_unary(helper_idx: u32, src: u32, _ctx: &EmitCtx, f: &mut Function) {
@@ -1345,6 +1630,9 @@ mod tests {
         TypeSection, ValType,
     };
 
+    use crate::bytecode::ByteCodeContext;
+    use std::sync::OnceLock;
+
     /// Local layout for the test harness function. The function takes
     /// `module_off` as param 0; the scratch f64 and the condition i32(s) are
     /// declared locals.
@@ -1352,7 +1640,15 @@ mod tests {
     const L_SCRATCH: u32 = 1;
     const L_COND_BASE: u32 = 2;
 
-    fn ctx_with_cond_depth(depth: usize) -> EmitCtx {
+    /// A shared empty `ByteCodeContext` for the scalar-opcode tests, which never
+    /// touch the array tables. Array-view tests build their own context (with
+    /// `static_views`/`temp_offsets`) and an `EmitCtx` borrowing it locally.
+    fn empty_ctx() -> &'static ByteCodeContext {
+        static EMPTY: OnceLock<ByteCodeContext> = OnceLock::new();
+        EMPTY.get_or_init(ByteCodeContext::default)
+    }
+
+    fn ctx_with_cond_depth(depth: usize) -> EmitCtx<'static> {
         EmitCtx {
             curr_base: 0,
             next_base: 4096,
@@ -1378,6 +1674,10 @@ mod tests {
             // module's first function slots), and `build_module` emits exactly
             // these helper bodies ahead of `eval`, so the indices agree.
             helpers: build_helpers().fns,
+            // The scalar-opcode tests place no temp region; the array-view tests
+            // build their own ctx with a real temp base + context.
+            temp_storage_base: 0,
+            ctx: empty_ctx(),
         }
     }
 
@@ -2176,8 +2476,18 @@ mod tests {
 
     #[test]
     fn unsupported_array_opcode_returns_error() {
+        // The array reducers + static view ops are supported as of Phase 5
+        // Tasks 1-2, so this drives the still-unsupported iteration path
+        // (`BeginIter`, Phase 5 Task 3) to confirm an unhandled array opcode
+        // still returns a clean error rather than a wrong module.
         let mut func = Function::new([]);
-        let program = bc(vec![], vec![Opcode::ArraySum {}]);
+        let program = bc(
+            vec![],
+            vec![Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: false,
+            }],
+        );
         let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
         assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
     }
@@ -2193,7 +2503,7 @@ mod tests {
 
     /// A ctx whose GF region bases point at the hand-seeded test regions, so a
     /// `Lookup` opcode reads the directory at `GF_DIR_BASE`.
-    fn ctx_with_gf() -> EmitCtx {
+    fn ctx_with_gf() -> EmitCtx<'static> {
         EmitCtx {
             gf_directory_base: GF_DIR_BASE,
             gf_data_base: GF_DATA_BASE,
@@ -3346,5 +3656,76 @@ mod tests {
         // No conditions: depth 0.
         let none = bc(vec![], vec![Opcode::LoadConstant { id: 0 }]);
         assert_eq!(max_condition_depth(&none), 0);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Phase 5 Task 1: temp-element reads (LoadTempConst / LoadTempDynamic)
+    //
+    // The compile-time view-descriptor stack + the static view ops' addressing
+    // are pinned directly against the VM's `RuntimeView` in `views.rs`'s unit
+    // tests (no wasm or reducer needed); here the LoadTemp opcodes -- which read
+    // `temp_storage` and produce a value on the arithmetic stack -- are run under
+    // DLR-FT to confirm the emitted reads hit the temp region the VM addresses.
+    // ════════════════════════════════════════════════════════════════════════
+
+    // Region base for the temp-storage reads: well past `next_base` (4096) so it
+    // cannot overlap the curr/next chunks.
+    const TEMP_BASE: u32 = 8192;
+
+    /// Build an `EmitCtx` over a real `ByteCodeContext` (so the temp opcodes can
+    /// resolve `temp_offsets`), with `temp_storage_base` set.
+    fn ctx_with_arrays(context: &ByteCodeContext) -> EmitCtx<'_> {
+        EmitCtx {
+            temp_storage_base: TEMP_BASE,
+            ctx: context,
+            ..ctx_with_cond_depth(0)
+        }
+    }
+
+    #[test]
+    fn load_temp_const_reads_temp_storage() {
+        // temp_offsets = [0, 4]; LoadTempConst{temp_id:1, index:2} reads
+        // temp_storage[4 + 2] = temp slot 6 (byte TEMP_BASE + 6*8).
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0, 4], 8);
+        let ctx = ctx_with_arrays(&context);
+        let code = vec![Opcode::LoadTempConst {
+            temp_id: 1,
+            index: 2,
+        }];
+        let seed = vec![(u64::from(TEMP_BASE) + 6 * 8, 42.0)];
+        let got = run(&bc(vec![], code), &ctx, true, 0, &seed, None);
+        assert_eq!(got, 42.0);
+    }
+
+    #[test]
+    fn load_temp_dynamic_reads_temp_storage() {
+        // LoadTempDynamic{temp_id:0} pops a runtime index (floor) and reads
+        // temp_storage[temp_offsets[0] + index]. Push index 3 via a constant.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0], 5);
+        let ctx = ctx_with_arrays(&context);
+        let code = vec![
+            Opcode::LoadConstant { id: 0 }, // index = 3.0
+            Opcode::LoadTempDynamic { temp_id: 0 },
+        ];
+        let seed = vec![(u64::from(TEMP_BASE) + 3 * 8, 77.0)];
+        let got = run(&bc(vec![3.0], code), &ctx, true, 0, &seed, None);
+        assert_eq!(got, 77.0);
+    }
+
+    #[test]
+    fn load_temp_dynamic_floors_fractional_index() {
+        // The VM does `stack.pop().floor() as usize`; index 2.9 -> slot 2.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0], 4);
+        let ctx = ctx_with_arrays(&context);
+        let code = vec![
+            Opcode::LoadConstant { id: 0 },
+            Opcode::LoadTempDynamic { temp_id: 0 },
+        ];
+        let seed = vec![(u64::from(TEMP_BASE) + 2 * 8, 13.0)];
+        let got = run(&bc(vec![2.9], code), &ctx, true, 0, &seed, None);
+        assert_eq!(got, 13.0);
     }
 }

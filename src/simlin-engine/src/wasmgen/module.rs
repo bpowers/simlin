@@ -331,6 +331,22 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         total_bytes
     };
 
+    // The `temp_storage` region follows everything else. It mirrors the VM's
+    // flat `temp_storage` buffer of `temp_total_size` f64 (`vm.rs:584-586`):
+    // element `index` of temp `temp_id` lives at
+    // `temp_storage[temp_offsets[temp_id] + index]`. Array-producing builtins
+    // (`AssignTemp` -> `BeginIter` loops) and the sliced reducers read/write it
+    // through the view machinery. `temp_total_size` is a compile-time
+    // `ByteCodeContext` field, so the region's size is known here.
+    let temp_total_size = u32::try_from(root.context.temp_total_size).map_err(|_| too_large())?;
+    let temp_storage_base = total_bytes;
+    let temp_storage_bytes = temp_total_size
+        .checked_mul(SLOT_SIZE)
+        .ok_or_else(too_large)?;
+    let total_bytes = temp_storage_base
+        .checked_add(temp_storage_bytes)
+        .ok_or_else(too_large)?;
+
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
 
     // save_every mirrors vm.rs::run_to: max(1, round(save_step / dt)).
@@ -366,6 +382,8 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         condition_locals: (0..cond_depth as u32).map(|i| L_COND_BASE + i).collect(),
         apply_locals: lower::apply_locals_for(cond_depth),
         helpers: helper_fns,
+        temp_storage_base,
+        ctx: &root.context,
     };
 
     let initials_fn = emit_initials_fn(root, &make_ctx)?;
@@ -424,9 +442,9 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
 /// Build the `initials` function: every `CompiledInitial`'s bytecode in order,
 /// over the shared slab. The shared condition-local count is the max nesting
 /// depth across all the initials (they run sequentially in one function).
-fn emit_initials_fn(
+fn emit_initials_fn<'a>(
     root: &CompiledModule,
-    make_ctx: &impl Fn(usize, StepPart) -> lower::EmitCtx,
+    make_ctx: &impl Fn(usize, StepPart) -> lower::EmitCtx<'a>,
 ) -> Result<Function, WasmGenError> {
     let cond_depth = root
         .compiled_initials
@@ -446,10 +464,10 @@ fn emit_initials_fn(
 /// Build one opcode-program function from a single `ByteCode`, lowering it as
 /// `step_part` (which `LoadInitial` reads to pick its `curr`-vs-snapshot
 /// branch).
-fn emit_opcode_fn(
+fn emit_opcode_fn<'a>(
     bc: &ByteCode,
     step_part: StepPart,
-    make_ctx: &impl Fn(usize, StepPart) -> lower::EmitCtx,
+    make_ctx: &impl Fn(usize, StepPart) -> lower::EmitCtx<'a>,
 ) -> Result<Function, WasmGenError> {
     let cond_depth = max_condition_depth(bc);
     let ctx = make_ctx(cond_depth, step_part);

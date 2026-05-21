@@ -28,6 +28,7 @@ mod lookup;
 mod lower;
 mod math;
 mod module;
+mod views;
 
 pub use module::{WasmArtifact, WasmLayout, compile_datamodel_to_wasm, compile_simulation};
 
