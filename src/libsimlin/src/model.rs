@@ -85,6 +85,69 @@ unsafe fn write_bytes_to_ffi_output(
     true
 }
 
+/// Compile the model to a self-contained WebAssembly module.
+///
+/// The emitted module exports its own linear `memory` and a `run` function
+/// that executes the whole simulation in one call, writing step-major result
+/// snapshots into a results region of its memory. This is an alternative to
+/// the bytecode VM intended for fast, repeated re-simulation (e.g. interactive
+/// parameter scrubbing): the host instantiates the module once and calls `run`
+/// on every change. Caller must free the output with `simlin_free`.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `out_buffer` and `out_len` must be valid, non-null pointers
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_compile_to_wasm(
+    model: *mut SimlinModel,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return;
+        }
+    };
+
+    // The compiled-model wasm is regenerated from the project's datamodel; it
+    // does not depend on the VM `SimState`, so this works even before a
+    // `SimlinSim` has been created for the model.
+    let project_ref = &*model_ref.project;
+    let datamodel = project_ref.datamodel.lock().unwrap();
+
+    let wasm_bytes =
+        match engine::wasmgen::compile_datamodel_to_wasm(&datamodel, model_ref.model_name.as_str())
+        {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message(format!("wasm code generation failed: {err}")),
+                );
+                return;
+            }
+        };
+
+    write_bytes_to_ffi_output(&wasm_bytes, out_buffer, out_len, out_error, "model wasm");
+}
+
 /// Find a model by name in a locked datamodel.
 pub(crate) fn find_model_in_datamodel<'a>(
     datamodel: &'a MutexGuard<'_, datamodel::Project>,

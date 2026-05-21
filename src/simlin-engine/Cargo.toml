@@ -43,6 +43,12 @@ xmutil = { version = "1", path = "../xmutil", optional = true }
 bumpalo = "3"
 salsa = "0.26"
 
+# WebAssembly code-generation backend (compiles models to wasm as an
+# alternative to the bytecode VM). no_std + alloc only, single transitive
+# dependency (leb128fmt), and builds cleanly to wasm32-unknown-unknown so it
+# is available inside the libsimlin wasm bundle.
+wasm-encoder = { version = "0.244", default-features = false }
+
 rand = { version = "0.9", default-features = false, features = ["std_rng"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -59,6 +65,14 @@ test-generator = { version = "0.3.0", git = "https://github.com/bpowers/test-gen
 ed25519-dalek = "2"
 ssh-key = "0.6"
 tempfile = "3"
+
+# Pure-Rust no_std wasm interpreter used as a correctness oracle: every wasm
+# module the wasmgen backend produces is executed here and checked against the
+# bytecode VM. Git-only (not yet published to crates.io); pinned to a commit.
+# The host `Store` API lives in the `checked` workspace member, not the `wasm`
+# lib crate.
+wasm-interpreter = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a" }
+checked = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a", features = ["linker", "interop"] }
 
 [[test]]
 name = "simulate"

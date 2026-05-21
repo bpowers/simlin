@@ -349,6 +349,24 @@ void simlin_free(uint8_t *ptr);
 // - `s` must be a valid pointer returned by simlin API functions that return strings
 void simlin_free_string(char *s);
 
+// Compile the model to a self-contained WebAssembly module.
+//
+// The emitted module exports its own linear `memory` and a `run` function
+// that executes the whole simulation in one call, writing step-major result
+// snapshots into a results region of its memory. This is an alternative to
+// the bytecode VM intended for fast, repeated re-simulation (e.g. interactive
+// parameter scrubbing): the host instantiates the module once and calls `run`
+// on every change. Caller must free the output with `simlin_free`.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `out_buffer` and `out_len` must be valid, non-null pointers
+// - `out_error` may be null
+void simlin_model_compile_to_wasm(SimlinModel *model,
+                                  uint8_t **out_buffer,
+                                  uintptr_t *out_len,
+                                  SimlinError **out_error);
+
 // Increments the reference count of a model
 //
 // # Safety
