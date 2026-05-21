@@ -295,16 +295,17 @@ fn old_style_alias_to_output_sig_pair_by_file_order() {
 }
 
 /// WRLD3 SCEN01's MDL-declared stdlib-call aliases and its `#FUNC(...)#`
-/// output signatures do NOT pair 1:1. MDL has more aliases than the VDF
-/// has old-style output sigs -- this pins the upper-bound nature of the
-/// pairing claim so a future regression doesn't silently assume 1:1.
+/// output signatures agree in count (12 each) once the full name table is
+/// recovered.
 ///
-/// The root cause is not yet fully characterised: some aliases may map
-/// to SAMPLE/PREVIOUS/INIT forms that do not emit a `#FUNC(args)#`
-/// signature, and some may share a sig via module reuse. This test
-/// documents the observed mismatch rather than enforcing equality.
+/// This previously looked like a non-1:1 mismatch (MDL 12 aliases vs VDF 8
+/// sigs), attributed speculatively to SAMPLE/PREVIOUS/INIT forms or module
+/// reuse. The real cause was the name-parser stopping at the first stale
+/// entry, truncating the table and hiding 4 of the output signatures (GH
+/// #470/#549). With the skip fix the complete table recovers all 12, and the
+/// mismatch disappears -- so the counts match exactly.
 #[test]
-fn wrld3_scen01_alias_to_sig_pairing_is_not_1to1() {
+fn wrld3_scen01_alias_and_output_sig_counts_agree() {
     let vdf_path = "../../test/metasd/WRLD3-03/SCEN01.VDF";
     let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
     if !Path::new(vdf_path).exists() || !Path::new(mdl_path).exists() {
@@ -312,12 +313,6 @@ fn wrld3_scen01_alias_to_sig_pairing_is_not_1to1() {
     }
     let vdf = parse_vdf(vdf_path);
     let output_sigs = vdf.output_signatures();
-    // Observed: 8 old-style `#FUNC(args)#` output sigs on SCEN01.
-    assert!(
-        output_sigs.len() >= 6 && output_sigs.len() <= 10,
-        "SCEN01: output_sigs count pinned near 8, got {}",
-        output_sigs.len()
-    );
 
     let datamodel_project = load_mdl(mdl_path);
     let model = datamodel_project.models.first().unwrap();
@@ -336,11 +331,12 @@ fn wrld3_scen01_alias_to_sig_pairing_is_not_1to1() {
         })
         .filter(|text| equation_starts_with_stdlib_call(text))
         .count();
-    assert!(
-        mdl_alias_count > output_sigs.len(),
-        "WRLD3 SCEN01: MDL has {mdl_alias_count} stdlib-call aliases but \
-         VDF only emits {} output sigs; the 1:1 pairing claim is an upper \
-         bound, not a guarantee",
+    assert_eq!(
+        mdl_alias_count,
+        output_sigs.len(),
+        "WRLD3 SCEN01: the MDL's {mdl_alias_count} stdlib-call aliases should \
+         match the old-style output sigs recovered from the complete name \
+         table (got {})",
         output_sigs.len()
     );
 }

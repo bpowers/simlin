@@ -287,64 +287,27 @@ fn test_block1_word10_high_equals_word11_across_corpus() {
     );
 }
 
-/// Whether the Rust `find_slot_table` scanner is known to under-count
-/// the slot table on this fixture. The Python `tools/vdf_xray.py` parser
-/// consumes a broader leading-extra-slot layout and returns a larger
-/// slot count that matches `block1[7]`; the Rust scanner uses a stricter
-/// `min_stride >= 4` rule and misses a chunk of entries on these
-/// specific files. The Python-observed delta (per the memory-regions
-/// audit) is 0 on risk2 and 1 on SCEN01; the metasd
-/// `social-network-valuation/optimistic.vdf` and `pessimistic.vdf`
-/// fixtures show the same class of Rust under-count at a much larger
-/// magnitude (delta -23), tracked in GH #549. The Rust under-count is
-/// orthogonal to the format invariant tested here, so we explicitly
-/// exempt those fixtures and track the parser gap separately.
-fn rust_slot_table_undercount_known(path: &Path) -> bool {
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let parent = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    matches!(
-        (parent, file_name),
-        ("econ", "risk2.vdf")
-            | ("WRLD3-03", "SCEN01.VDF")
-            | ("social-network-valuation", "optimistic.vdf")
-            | ("social-network-valuation", "pessimistic.vdf")
-    )
-}
-
-/// Pin `block1[7]` as an "actively-written slot count" diagnostic that
-/// is always within 2 of `slot_table.len()` on the `test/` corpus of
-/// simulation VDFs.
+/// Pin the deterministic slot-table decode against `block1[7]` across the
+/// `test/` corpus of simulation VDFs: `slot_table.len()` must equal `block1[7]`
+/// **exactly**, and the table must start at the section-1 `field1` word
+/// pointer.
 ///
-/// This is *not* a pinned equality: the investigation found deltas of 0,
-/// 1, and 2 across the corpus. The bound is diagnostic only, but having
-/// it executable means any regression that breaks the relationship shows
-/// up immediately.
+/// The slot table is decoded structurally (start = section-1 `field1` word
+/// pointer, count = `block1[7]`, followed by a `0x00430000` terminator word
+/// before the name table -- see `vdf::slot_table_from_header`), so this is now
+/// a pinned equality rather than the old +/-2 diagnostic window. The previous
+/// heuristic scanner under-counted on edited files (because the name parser
+/// stopped at the first stale entry) and over-counted by one elsewhere;
+/// `econ/risk2.vdf`, `WRLD3-03/SCEN01.VDF`, and the metasd
+/// `social-network-valuation` pair (GH #470/#549) used to be exempted and now
+/// decode exactly.
 ///
-/// Scope: the assertion runs across the `test/bobby/vdf`,
-/// `test/metasd`, and `test/xmutil_test_models` roots. The zambaqui
-/// third-party corpus is excluded from this test -- the audit notes
-/// `zambaqui/old runs/Pop-6.vdf` has delta=-1, and additional zambaqui
-/// files trigger a deeper Rust slot-finder under-count. Those
-/// discrepancies indicate a Rust parser gap, not a format-level
-/// violation.
-///
-/// A small set of in-scope fixtures is exempted: Rust's slot-table
-/// scanner is known to return a short count on `econ/risk2.vdf` and
-/// `WRLD3-03/SCEN01.VDF` because its `min_stride >= 4` rule rejects
-/// valid leading-extra-slot layouts that the Python `vdf_xray` parser
-/// accepts; on those two the format-level invariant still holds
-/// (block1[7] matches the Python-observed slot count). The metasd
-/// `social-network-valuation` `optimistic.vdf` / `pessimistic.vdf` pair
-/// is exempted for the same class of Rust under-count at a larger
-/// magnitude (delta -23), tracked in GH #549. We flag these Rust parser
-/// discrepancies separately rather than hide them behind a relaxed
-/// bound.
+/// Scope: `test/bobby/vdf`, `test/metasd`, and `test/xmutil_test_models`. The
+/// relationship was verified to hold on every run-file VDF across `test/` and
+/// `third_party/`, but the third-party corpus is excluded here to keep the
+/// test hermetic.
 #[test]
-fn test_block1_word7_matches_slot_count_within_small_delta() {
+fn test_slot_count_matches_block1_word7_exactly() {
     const ROOTS: &[&str] = &[
         "../../test/bobby/vdf",
         "../../test/metasd",
@@ -352,8 +315,6 @@ fn test_block1_word7_matches_slot_count_within_small_delta() {
     ];
 
     let mut checked = 0usize;
-    let mut exempted = 0usize;
-    let mut observed_deltas: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     for root in ROOTS {
         let root_path = Path::new(root);
         if !root_path.exists() {
@@ -372,21 +333,22 @@ fn test_block1_word7_matches_slot_count_within_small_delta() {
             let Some(block1) = read_sec1_block1(&vdf) else {
                 continue;
             };
-            let block1_word7 = block1[7] as i64;
-            let slot_count = vdf.slot_table.len() as i64;
-            let delta = slot_count - block1_word7;
-            if rust_slot_table_undercount_known(&path) {
-                exempted += 1;
-                continue;
-            }
-            observed_deltas.insert(delta);
-            assert!(
-                delta.abs() <= 2,
-                "{}: |slot_count - block1[7]| must be <= 2, got slot_count={} block1[7]={} delta={}",
-                path.display(),
-                slot_count,
+            let block1_word7 = block1[7] as usize;
+            assert_eq!(
+                vdf.slot_table.len(),
                 block1_word7,
-                delta,
+                "{}: slot_table.len() must equal block1[7] exactly",
+                path.display(),
+            );
+            // The deterministic decode must land on the section-1 field1 word
+            // pointer (1-based). A non-zero count guarantees field1 != 0.
+            let sec1 = &vdf.sections[1];
+            let field1_start = sec1.file_offset + 4 * (sec1.field1 as usize - 1);
+            assert_eq!(
+                vdf.slot_table_offset,
+                field1_start,
+                "{}: slot table must start at the field1 word pointer",
+                path.display(),
             );
             checked += 1;
         }
@@ -395,21 +357,6 @@ fn test_block1_word7_matches_slot_count_within_small_delta() {
     assert!(
         checked >= 30,
         "expected to cross-check at least 30 simulation fixtures, got {checked}"
-    );
-    // Exempted fixtures should still be present in the corpus so the
-    // exemption list does not silently become a no-op.
-    assert!(
-        exempted >= 1,
-        "expected at least one exempted fixture to still be tracked; found {exempted}"
-    );
-
-    // Record the observed delta set as part of the test output so that a
-    // regression that shifts the distribution is visible without masking
-    // it behind a strict equality assertion.
-    let deltas: Vec<i64> = observed_deltas.into_iter().collect();
-    assert!(
-        deltas.iter().all(|d| d.abs() <= 2),
-        "observed deltas outside the [-2, 2] diagnostic window: {deltas:?}",
     );
 }
 

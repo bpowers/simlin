@@ -120,10 +120,12 @@ the next section's magic; the last section runs to end-of-file. **Identify
 sections by index, not by `field4`** -- `field4` values vary across files.
 
 `field1` is a 1-based word pointer from the section magic:
-`section.file_offset + 4 * (field1 - 1)`. For section 6 this points at the OT
-class-code array start (`header[0x58] - OT_count`); for section 7 it points at
-`header[0x60]`; for section 5 it points at the section's final word
-(`region_end - 4`).
+`section.file_offset + 4 * (field1 - 1)`. For **section 1** it points at the
+first entry of the slot table (see "Slot table"); for section 6 it points at
+the OT class-code array start (`header[0x58] - OT_count`); for section 7 it
+points at `header[0x60]`; for section 5 it points at the section's final word
+(`region_end - 4`). (In dataset files the record/header area and slot table
+shift into section 0, so section 0's `field1` plays section 1's role.)
 
 | Index | Role |
 |---|---|
@@ -157,6 +159,8 @@ Three words in the preamble are stable cross-corpus invariants:
 - `data[8..12] == count of section-6 lookup mapping records`
 
 Block 1 also satisfies `block1[10] >> 16 == block1[11]` on every observed file.
+**`block1[7]` is the slot count** -- the number of slot-table entries -- on
+every run-file and dataset VDF in the corpus (see "Slot table").
 
 The first variable record starts at `sec1.data_offset() + 204` and records
 follow on 64-byte strides until just before the slot table. A few files leave a
@@ -190,12 +194,28 @@ owner spans form a clean, non-overlapping OT partition.
 
 ### Slot table
 
-An array of N `u32` values located between the last record and the name table,
-one per name table entry. Each value is a byte offset into section-1 data. The
+An array of `N` `u32` values, each a byte offset into section-1 data. The
 pairing is direct: `slot_table[i]` belongs to `names[i]`. (`#`-signature
 internal-helper names sit past the slotted prefix in the name table and have no
-slot-table entry.) The parser finds the table by scanning backward from the
-name table for the largest run of unique, in-range, 4-byte-aligned offsets.
+slot-table entry, so `N <= name_count`.)
+
+The table's location is **fully determined by the header** -- no scan or stride
+heuristic is needed:
+
+- **start** = section 1's `field1` 1-based word pointer
+  (`sec1.file_offset + 4 * (field1 - 1)`);
+- **count** `N` = `block1[7]` (the actively-written slot count);
+- the table is followed by a single `0x00430000` terminator word, then the
+  name-table section magic.
+
+These three facts over-determine each other -- `start + (N + 1) * 4` equals the
+name-table section's file offset on every run-file and dataset VDF in the corpus
+(138 run files + 6 datasets, zero exceptions). A reader can take any two and
+cross-check the third; `vdf::slot_table_from_header` reads `field1` + `block1[7]`
+and verifies the terminator and boundary. (An earlier reader scanned backward
+for "the largest run of unique, in-range, 4-byte-aligned offsets"; that heuristic
+under-counted on edited files whose name table contained stale entries and
+over-counted by one elsewhere. It has been replaced by the structural decode.)
 
 
 ## Section 2: name table
@@ -463,6 +483,38 @@ Reconstructing the result set is a single pass over the section-1 records:
 `VdfFile::to_results_via_records` implements this. The "stocks-first
 alphabetical" ordering visible in the OT array is a consequence of Vensim's
 compiler allocation, not a rule a reader needs.
+
+### Standalone graphical-function ("lookup-only") descriptors
+
+A lookup-only variable is a **graphical function = a table indexed by an
+explicit input** (`y = lookup(input)`). A *bare* lookup -- a table with no
+call site of its own -- is **not a time series**, so Vensim saves no data block
+for it: only a descriptor record exists, with no separate consumer-owner record.
+The overlap-pruning step above never sees it (it collides with nothing), so it
+would otherwise decode at its `f[11]`-as-OT-start ghost slot (a class-`0x08`
+stock slot holding `0`/garbage). The reader recognises it structurally (its
+ghost slots all carry the stock class code -- a lookup is never a stock -- its
+`f[11]` is a valid lookup-record index, and the forward link
+`lookup_record[f[11]].word[10]` is a valid owner OT, with `word[11]` matching the
+descriptor's element count for the arrayed case) and **drops it**, exactly like
+an overlapping descriptor (`record_results::standalone_lookup_only_descriptors`).
+The table's values, where they matter, are carried by the **consumer** variables
+that call it with a real input -- those are ordinary owners the reader emits
+under their own names.
+
+This is why the reader does not (and should not) reconstruct a series for a
+lookup-only variable: the variable's value is `lookup(input)` for whatever input
+the model passes, which the VDF does not store. The forward link only points at
+*a* consumer, and the model defines how that consumer relates to the lookup --
+on `Ref.vdf`: an identity pass-through (`Historical GDP[COP] = IF Time<=cutoff
+THEN Historical GDP LOOKUP(Time/One year) ELSE :NA:`), a unit-scaled copy
+(`RS GDP = RS GDP in trillions(...) * million per trillion dollars`), a fixed-time
+snapshot (`Forestry emissions at start year = Historical forestry LOOKUP(start
+year)`), or one row of a wider 2-D consumer (`rs_hfc125` is the `HFC125` column
+of `RS HFC[COP, HFC type]`). Recovering the lookup variable's own series from any
+of these needs the model, not the VDF. (A `gf(Time)` lowering for such a bare
+lookup is an engine bug -- a table is not generally a function of time; see
+#597.)
 
 ### Worked example: a `SMOOTH1` call
 

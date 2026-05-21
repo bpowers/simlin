@@ -181,15 +181,15 @@ pub(super) fn decoded_record_spans(
 
 /// Result of identifying graphical-function descriptor records.
 ///
-/// `descriptor_indices` are the records (by `rec_idx`) that must NOT be
-/// emitted at their `f[11]`-as-OT-start slot. Two sub-cases:
-/// - **Overlapping descriptors** are dropped entirely: their consuming owner
-///   record exists separately in the same OT component and carries the series.
-/// - **Standalone descriptors** (a lookup-only variable Vensim saves *only* as
-///   a descriptor, no separate consumer-owner record) are re-bound: they
-///   appear additionally in `rebinds` mapping `rec_idx -> forward-link OT`
-///   (`lookup_record[f[11]].word[10]`), and the caller emits them there
-///   instead of dropping them.
+/// `descriptor_indices` are the records (by `rec_idx`) that are dropped -- NOT
+/// emitted at their `f[11]`-as-OT-start slot, because they are graphical-function
+/// definitions (tables), not saved time series. Two sub-cases:
+/// - **Overlapping descriptors**: their consuming owner record exists separately
+///   in the same OT component and carries the series.
+/// - **Standalone descriptors** (a lookup-only variable Vensim saves *only* as a
+///   descriptor, no separate consumer-owner record): a bare lookup is a table,
+///   so it has no series of its own; the consumer variables that call it are
+///   separately-emitted owners. Both sub-cases are simply dropped.
 ///
 /// `used_f10_fallback` records when the descriptor peeling step had to
 /// resort to the highest-`f[10]` tie-break because the lexical
@@ -199,9 +199,6 @@ pub(super) fn decoded_record_spans(
 #[derive(Clone, Debug, Default)]
 pub(super) struct DescriptorIdentification {
     pub(super) descriptor_indices: HashSet<usize>,
-    /// `rec_idx -> forward-link OT` for standalone descriptors re-bound to
-    /// their evaluated-output OT. A subset of `descriptor_indices`.
-    pub(super) rebinds: HashMap<usize, usize>,
     #[allow(dead_code)]
     pub(super) used_f10_fallback: bool,
 }
@@ -371,89 +368,108 @@ pub(super) fn identify_descriptor_records(
     }
 
     // Standalone (non-overlapping) descriptors: a lookup-only variable Vensim
-    // saves only as a descriptor record. The overlap path above never sees it
-    // (it collides with nothing), so it would otherwise decode at its spurious
-    // `f[11]`-as-OT-start ghost slot. Recognise it and re-bind to its
-    // forward-link evaluated-output OT.
-    let lookup_word10: Vec<usize> = vdf
-        .section6_lookup_records()
+    // saves only as a descriptor record (a graphical-function definition). The
+    // overlap path above never sees it (it collides with nothing), so it would
+    // otherwise decode at its spurious `f[11]`-as-OT-start ghost slot. A bare
+    // lookup is a table, not a time series, so recognise it and DROP it -- its
+    // values, where they matter, are carried by the consumer variables that
+    // call it (separately-emitted owners).
+    let lookup_records = vdf.section6_lookup_records();
+    let lookup_word10: Vec<usize> = lookup_records
+        .as_ref()
         .map(|recs| recs.iter().map(|r| r.ot_index()).collect())
+        .unwrap_or_default();
+    let lookup_word11: Vec<usize> = lookup_records
+        .as_ref()
+        .map(|recs| recs.iter().map(|r| r.output_width()).collect())
         .unwrap_or_default();
     let class_codes = vdf.section6_ot_class_codes().unwrap_or_default();
     let f11_by_span: Vec<u32> = spans
         .iter()
         .map(|s| vdf.records[s.rec_idx].fields[11])
         .collect();
-    let rebinds = standalone_descriptor_rebinds(
+    let standalone = standalone_lookup_only_descriptors(
         spans,
         &f11_by_span,
         &overlapping,
         n_lookups,
         &lookup_word10,
+        &lookup_word11,
         &class_codes,
         vdf.offset_table_count,
     );
-    // A re-bound standalone descriptor is also a descriptor: it must not be
-    // emitted at its `f[11]`-as-OT-start slot.
-    descriptor_indices.extend(rebinds.keys().copied());
+    descriptor_indices.extend(standalone);
 
     DescriptorIdentification {
         descriptor_indices,
-        rebinds,
         used_f10_fallback,
     }
 }
 
 /// Identify *standalone* (non-overlapping) graphical-function descriptor
-/// records and compute their forward-link re-bind OT.
+/// records to DROP.
 ///
-/// `identify_descriptor_records` only peels descriptors that sit in an
-/// overlapping OT component, because a descriptor that collides with a real
-/// owner is recognised by the collision. A lookup-only variable that Vensim
-/// saves *only* as a descriptor record (no separate consumer-owner record)
-/// does not overlap anything, so it slips through as an owner and decodes at
-/// its `f[11]`-as-OT-start slot -- a ghost stock slot holding `0`/garbage (see
-/// `docs/design/vdf.md`, "Descriptor pruning"). Its real series is the
-/// forward-linked evaluated-output OT `lookup_record[f[11]].word[10]`.
+/// A bare graphical function is a **table, not a time series**: Vensim saves no
+/// series for it, only a descriptor record whose `f[11]` is a section-6
+/// lookup-record index (not an OT start). `identify_descriptor_records` only
+/// peels descriptors that sit in an *overlapping* OT component (a collision
+/// with their consuming owner reveals them). A lookup-only variable saved
+/// *only* as a descriptor collides with nothing, so it would otherwise decode
+/// at its spurious `f[11]`-as-OT-start ghost slot (a stock slot holding
+/// `0`/garbage; see `docs/design/vdf.md`, "Standalone graphical-function
+/// descriptors"). This recognises such a record and returns its `rec_idx` so
+/// the caller drops it -- exactly like an overlapping descriptor. The table's
+/// values, where they matter, are carried by the consumer variables that call
+/// it (e.g. `Historical GDP[COP] = IF Time<=cutoff THEN Historical GDP
+/// LOOKUP(Time/One year) ELSE :NA:`), which the reader emits as ordinary
+/// owners under their own names.
 ///
-/// This pure function (functional core) recognises such a record and returns
-/// its `rec_idx -> forward OT` re-bind, gated to avoid disturbing legitimate
-/// owners:
+/// This pure function (functional core) detects the descriptor conservatively
+/// to avoid dropping a real owner:
 /// - the span is NOT in `overlapping` (the connected-component peeling path
 ///   owns the overlapping case);
 /// - its `f[11]` (`f11_by_span[i]`) is a valid section-6 lookup-record index
 ///   (`< n_lookups`) -- the structural pre-condition for the forward link;
-/// - its `f[11]`-as-OT-start slot (`span.start`) carries the **stock** class
-///   code (`0x08`). A graphical-function/lookup variable is never a stock, so
-///   landing on a stock slot is the spurious-owner telltale. A legitimate
-///   scalar owner whose `f[11]` is coincidentally `< n_lookups` carries a
-///   non-stock data code (`0x11` dynamic etc.) and is left untouched;
+/// - **every** `f[11]`-as-OT-start ghost slot (`span.start .. span.end`)
+///   carries the **stock** class code (`0x08`). A graphical function is never a
+///   stock, so landing on stock slots is the spurious-owner telltale; a
+///   legitimate non-stock owner whose `f[11]` is coincidentally `< n_lookups`
+///   carries a `0x11` (dynamic) etc. code and is left untouched;
 /// - the forward link `lookup_record[f[11]].word[10]` is a valid data OT
-///   (`1 <= ot < ot_count` with an owner class code -- never Time/0).
+///   (`1 <= ot < ot_count`) with owner class codes across
+///   `[word[10], word[10] + span_len)`, and for an **arrayed** descriptor
+///   (`span_len > 1`) the forward width (`word[11]`) equals the element count.
+///   These confirm `f[11]` really indexes this variable's graphical function
+///   rather than coincidentally landing in the lookup-index range.
 ///
-/// When the forward link is not a valid data OT (e.g. it points at Time/0, the
-/// "no saved consumer" case), the record is NOT re-bound: it has no recoverable
-/// series, and re-binding to Time would be worse than leaving it. Such records
-/// remain a genuine residual.
-fn standalone_descriptor_rebinds(
+/// Not matched here (the model-free reader cannot safely distinguish them from
+/// real owners, so they are left as-is): the `rs_hfc*` family, whose forward
+/// link is a *wider* shared 2-D consumer (`word[11] != span_len`), and a
+/// descriptor whose forward link is Time/`0`. The engine should not be
+/// synthesising a `gf(Time)` series for any of these lookup tables in the first
+/// place; see #597.
+// Functional core: takes pre-extracted slices (the section-6 lookup forward
+// links, OT class codes) rather than `&VdfFile`, so the detection is unit
+// testable on synthetic inputs with no fixture. That decoupling is the reason
+// for the parameter count.
+#[allow(clippy::too_many_arguments)]
+fn standalone_lookup_only_descriptors(
     spans: &[DecodedRecordSpan],
     f11_by_span: &[u32],
     overlapping: &HashSet<usize>,
     n_lookups: usize,
     lookup_word10: &[usize],
+    lookup_word11: &[usize],
     class_codes: &[u8],
     ot_count: usize,
-) -> HashMap<usize, usize> {
-    let mut rebinds = HashMap::new();
+) -> HashSet<usize> {
+    let mut dropped = HashSet::new();
     for (i, span) in spans.iter().enumerate() {
         if overlapping.contains(&i) {
             continue;
         }
-        // Scalar only. An arrayed descriptor re-bound to a single forward OT
-        // would scalarize and lose its element columns; the arrayed lookup-only
-        // case needs element-order info the VDF does not store on disk and is
-        // deferred (see `docs/design/vdf.md` and the C-LEARN residual plan).
-        if span.length() != 1 {
+        let span_len = span.length();
+        if span_len == 0 {
             continue;
         }
         let f11 = match f11_by_span.get(i) {
@@ -464,9 +480,13 @@ fn standalone_descriptor_rebinds(
         if f11 >= n_lookups {
             continue;
         }
-        // The f[11]-as-OT-start slot must be a STOCK slot -- the spurious-owner
-        // telltale. (`span.start` is exactly the `f[11]`-as-OT-start.)
-        if class_codes.get(span.start).copied() != Some(VDF_SECTION6_OT_CODE_STOCK) {
+        // Every f[11]-as-OT-start ghost slot must carry the STOCK class code --
+        // the spurious-owner telltale (a graphical-function/lookup variable is
+        // never a stock). For an arrayed descriptor all `span_len` ghost slots
+        // are checked; for a scalar one this is the single `span.start` slot.
+        let ghost_all_stock = (span.start..span.end)
+            .all(|ot| class_codes.get(ot).copied() == Some(VDF_SECTION6_OT_CODE_STOCK));
+        if !ghost_all_stock {
             continue;
         }
         // Resolve the forward link and require it be a valid data OT.
@@ -477,17 +497,38 @@ fn standalone_descriptor_rebinds(
         if fwd == 0 || fwd >= ot_count {
             continue;
         }
-        let fwd_is_owner = class_codes
-            .get(fwd)
-            .copied()
-            .map(is_owner_ot_class_code)
-            .unwrap_or(false);
-        if !fwd_is_owner {
+        // Confirmation gate for arrayed descriptors: the forward link's output
+        // width (`word[11]`) must equal the descriptor's element count, i.e. the
+        // forward consumer has this variable's exact shape. This is what lets us
+        // be confident `f[11]` indexes this variable's graphical function rather
+        // than coincidentally landing in the lookup-index range -- so it is safe
+        // to drop. A wider shared consumer (the `rs_hfc*` family forwarding to
+        // one 63-wide block) has `width != span_len` and is NOT matched here
+        // (the model-free reader can't safely tell it from an arrayed owner).
+        // Scalar descriptors (no width gate) rely on the forward-link guards.
+        if span_len > 1 {
+            match lookup_word11.get(f11) {
+                Some(&width) if width == span_len => {}
+                _ => continue,
+            }
+        }
+        // The whole forward block must carry real-data owner class codes.
+        if fwd + span_len > ot_count {
             continue;
         }
-        rebinds.insert(span.rec_idx, fwd);
+        let fwd_block_all_owner = (fwd..fwd + span_len).all(|ot| {
+            class_codes
+                .get(ot)
+                .copied()
+                .map(is_owner_ot_class_code)
+                .unwrap_or(false)
+        });
+        if !fwd_block_all_owner {
+            continue;
+        }
+        dropped.insert(span.rec_idx);
     }
-    rebinds
+    dropped
 }
 
 #[cfg(test)]
@@ -514,12 +555,12 @@ mod standalone_descriptor_tests {
 
     /// A standalone graphical-function descriptor whose `f[11]` is a valid
     /// section-6 lookup-record index and whose `f[11]`-as-OT-start lands on a
-    /// STOCK (0x08) ghost slot holding the wrong value must be re-bound to its
-    /// forward link `lookup_record[f[11]].word[10]`, not emitted at the ghost
-    /// slot. Reproduces the `Ref.vdf` standalone-lookup-only mis-decode on a
-    /// minimal synthetic record set (NOT keyed on any C-LEARN name).
+    /// STOCK (0x08) ghost slot must be DROPPED (recognised as a lookup-only
+    /// table), not emitted at the ghost slot. Reproduces the `Ref.vdf`
+    /// standalone-lookup-only mis-decode on a minimal synthetic record set
+    /// (NOT keyed on any C-LEARN name).
     #[test]
-    fn standalone_lookup_descriptor_rebinds_to_forward_link() {
+    fn standalone_lookup_descriptor_is_dropped() {
         // OT layout (class codes): 0=Time, 1=dynamic owner (the real GF output
         // the descriptor must resolve to), 2=stock-coded GHOST slot the
         // descriptor's f[11]-as-OT-start spuriously lands on.
@@ -534,6 +575,7 @@ mod standalone_descriptor_tests {
         // record[1], whose word[10] (evaluated-output OT) == 1.
         let lookup_word10 = [9usize, 1usize];
         let n_lookups = lookup_word10.len();
+        let lookup_word11 = vec![1usize; n_lookups];
 
         // One standalone descriptor span: its f[11] == 1 (a valid lookup
         // index), but as an OT-start it lands on OT 2 (the stock ghost). It is
@@ -542,27 +584,31 @@ mod standalone_descriptor_tests {
         let f11_by_span = [1u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let rebinds = standalone_descriptor_rebinds(
+        let dropped = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
             n_lookups,
             &lookup_word10,
+            &lookup_word11,
             &class_codes,
             ot_count,
         );
 
-        // The descriptor (rec_idx 0) must be re-bound to forward OT 1, NOT left
-        // at its ghost f[11]-as-OT-start slot (OT 2).
-        assert_eq!(rebinds.get(&0).copied(), Some(1));
+        // The descriptor (rec_idx 0) must be dropped (recognised as a
+        // lookup-only table), NOT emitted at its ghost f[11]-as-OT-start slot.
+        assert!(
+            dropped.contains(&0),
+            "lookup-only descriptor must be dropped"
+        );
     }
 
     /// A legitimate scalar owner whose data lives at its `f[11]`-as-OT-start
-    /// slot (a DYNAMIC 0x11 slot) must NOT be re-bound, even if `f[11]` happens
+    /// slot (a DYNAMIC 0x11 slot) must NOT be dropped, even if `f[11]` happens
     /// to be a valid lookup index. This guards the two `Ref.vdf`
     /// `*_conc_change_at_impact_year` owners (class 0x11) the fix must preserve.
     #[test]
-    fn legit_dynamic_owner_with_small_f11_is_not_rebound() {
+    fn legit_dynamic_owner_with_small_f11_is_not_dropped() {
         let class_codes = [
             VDF_SECTION6_OT_CODE_TIME,
             VDF_SECTION6_OT_CODE_DYNAMIC, // OT 1: the owner's real data
@@ -570,41 +616,43 @@ mod standalone_descriptor_tests {
         let ot_count = class_codes.len();
         let lookup_word10 = [9usize, 9usize];
         let n_lookups = lookup_word10.len();
+        let lookup_word11 = vec![1usize; n_lookups];
         // f[11] == 1 is both the owner's OT start (dynamic, holds its data) AND
         // coincidentally a valid lookup index. It must stay an owner.
         let spans = [span(0, "Some Concentration", 1)];
         let f11_by_span = [1u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let rebinds = standalone_descriptor_rebinds(
+        let dropped = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
             n_lookups,
             &lookup_word10,
+            &lookup_word11,
             &class_codes,
             ot_count,
         );
         assert!(
-            rebinds.is_empty(),
-            "a dynamic-coded owner must not be re-bound: {rebinds:?}"
+            dropped.is_empty(),
+            "a dynamic-coded owner must not be dropped: {dropped:?}"
         );
     }
 
     /// Pins the STOCK-slot guard as the *sole* load-bearing reason a legitimate
     /// dynamic owner is left untouched.
     ///
-    /// `legit_dynamic_owner_with_small_f11_is_not_rebound` (above) also exercises
+    /// `legit_dynamic_owner_with_small_f11_is_not_dropped` (above) also exercises
     /// a dynamic owner, but there the forward link `lookup_word10[f11] == 9` is
-    /// out of OT range, so the "valid forward data OT" guard rejects the re-bind
+    /// out of OT range, so the "valid forward data OT" guard rejects the drop
     /// *first* and the STOCK-slot guard never decides. This case constructs a
     /// span where every *other* precondition passes -- it is non-overlapping,
     /// scalar, its `f[11]` is a valid lookup index, and its forward link resolves
     /// to a valid in-range owner OT -- so the ONLY condition standing between the
-    /// owner and a (wrong) re-bind is the STOCK-slot requirement: its
+    /// owner and a (wrong) drop is the STOCK-slot requirement: its
     /// `f[11]`-as-OT-start lands on a DYNAMIC (0x11) slot, not a STOCK (0x08)
     /// ghost. Removing or broadening that guard would flip this test to a
-    /// non-empty re-bind (verified by mutation), so it enforces the docstring
+    /// non-empty drop (verified by mutation), so it enforces the docstring
     /// promise to preserve legitimate 0x11 owners.
     #[test]
     fn legit_dynamic_owner_blocked_only_by_stock_slot_guard() {
@@ -623,31 +671,33 @@ mod standalone_descriptor_tests {
         // span.start (OT 1, DYNAMIC) can reject.
         let lookup_word10 = [9usize, 2usize];
         let n_lookups = lookup_word10.len();
+        let lookup_word11 = vec![1usize; n_lookups];
         let spans = [span(0, "Some Dynamic Owner", 1)];
         let f11_by_span = [1u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let rebinds = standalone_descriptor_rebinds(
+        let dropped = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
             n_lookups,
             &lookup_word10,
+            &lookup_word11,
             &class_codes,
             ot_count,
         );
         assert!(
-            rebinds.is_empty(),
+            dropped.is_empty(),
             "a dynamic owner whose only disqualifier is the non-stock slot must \
-             not be re-bound (the STOCK-slot guard is the sole gate here): {rebinds:?}"
+             not be dropped (the STOCK-slot guard is the sole gate here): {dropped:?}"
         );
     }
 
     /// A standalone descriptor whose forward link `word[10]` points at Time
-    /// (OT 0) has no valid evaluated-output OT; it must NOT be re-bound (Time is
+    /// (OT 0) has no valid evaluated-output OT; it must NOT be dropped (Time is
     /// never a data owner). Guards the `Ref Global Emissions ... LOOKUP` case.
     #[test]
-    fn standalone_descriptor_with_time_forward_link_is_not_rebound() {
+    fn standalone_descriptor_with_time_forward_link_is_not_dropped() {
         let class_codes = [
             VDF_SECTION6_OT_CODE_TIME,
             VDF_SECTION6_OT_CODE_STOCK, // OT 1: ghost stock slot
@@ -656,27 +706,29 @@ mod standalone_descriptor_tests {
         // lookup record[1].word[10] == 0 -> Time, an invalid evaluated output.
         let lookup_word10 = [9usize, 0usize];
         let n_lookups = lookup_word10.len();
+        let lookup_word11 = vec![1usize; n_lookups];
         let spans = [span(0, "Ref graph LOOKUP", 1)];
         let f11_by_span = [1u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let rebinds = standalone_descriptor_rebinds(
+        let dropped = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
             n_lookups,
             &lookup_word10,
+            &lookup_word11,
             &class_codes,
             ot_count,
         );
         assert!(
-            rebinds.is_empty(),
-            "a Time forward-link must not be re-bound: {rebinds:?}"
+            dropped.is_empty(),
+            "a Time forward-link must not be dropped: {dropped:?}"
         );
     }
 
     /// An OVERLAPPING descriptor (already handled by the connected-component
-    /// peeling path) must NOT be re-bound by the standalone path -- it is the
+    /// peeling path) must NOT be dropped by the standalone path -- it is the
     /// existing path's responsibility to drop it in favor of its colliding
     /// consumer owner.
     #[test]
@@ -685,63 +737,118 @@ mod standalone_descriptor_tests {
         let ot_count = class_codes.len();
         let lookup_word10 = [9usize, 1usize];
         let n_lookups = lookup_word10.len();
+        let lookup_word11 = vec![1usize; n_lookups];
         let spans = [span(0, "Overlapping graph", 1)];
         let f11_by_span = [1u32];
         // Mark span 0 as overlapping.
         let mut overlapping: HashSet<usize> = HashSet::new();
         overlapping.insert(0);
 
-        let rebinds = standalone_descriptor_rebinds(
+        let dropped = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
             n_lookups,
             &lookup_word10,
+            &lookup_word11,
             &class_codes,
             ot_count,
         );
         assert!(
-            rebinds.is_empty(),
-            "an overlapping descriptor must be left to the component path: {rebinds:?}"
+            dropped.is_empty(),
+            "an overlapping descriptor must be left to the component path: {dropped:?}"
         );
     }
 
-    /// An ARRAYED descriptor (span length > 1) must NOT be re-bound by the
-    /// scalar standalone path: re-binding it to a single forward OT would
-    /// scalarize and lose its element columns. The arrayed lookup-only case is
-    /// deferred (it needs element-order info the VDF format does not store on
-    /// disk). This guards the deferred C-LEARN `rs_*` / `historical_*_lookup`
-    /// arrayed descriptors against accidental scalarization.
+    /// An ARRAYED standalone descriptor (span length > 1) IS dropped to its
+    /// forward OT-block start when the forward link's output width
+    /// (`word[11]`) equals the descriptor's element count -- the clean case
+    /// where the forward block is this variable's own per-element series. The
+    /// caller emits the block with section-3 element labels. Mirrors the
+    /// `Ref.vdf` `historical_*_lookup` / `rs_ch4` (COP, 7) bases.
     #[test]
-    fn arrayed_standalone_descriptor_is_not_rebound() {
-        // OT layout: 0=Time, 1=dynamic (forward link), 2..5 = stock ghost span.
+    fn arrayed_standalone_descriptor_is_dropped_when_width_matches() {
+        // OT layout: 0=Time, [1,4) = 3 dynamic owners (the forward block the
+        // descriptor should resolve to), [4,7) = 3 stock GHOST slots its
+        // f[11]-as-OT-start spuriously covers.
         let class_codes = [
             VDF_SECTION6_OT_CODE_TIME,
+            VDF_SECTION6_OT_CODE_DYNAMIC,
+            VDF_SECTION6_OT_CODE_DYNAMIC,
             VDF_SECTION6_OT_CODE_DYNAMIC,
             VDF_SECTION6_OT_CODE_STOCK,
             VDF_SECTION6_OT_CODE_STOCK,
             VDF_SECTION6_OT_CODE_STOCK,
         ];
         let ot_count = class_codes.len();
+        // lookup record[1]: word[10] == 1 (forward block start), word[11] == 3
+        // (output width == the descriptor's 3 elements).
         let lookup_word10 = [9usize, 1usize];
+        let lookup_word11 = [0usize, 3usize];
         let n_lookups = lookup_word10.len();
-        // A 3-element arrayed descriptor (start 2, len 3), f[11] == 1.
-        let spans = [span_with_len(0, "RS arrayed graph", 2, 3)];
+        // A 3-element arrayed descriptor over the stock ghost span [4,7).
+        let spans = [span_with_len(0, "RS arrayed graph", 4, 3)];
         let f11_by_span = [1u32];
         let overlapping: HashSet<usize> = HashSet::new();
 
-        let rebinds = standalone_descriptor_rebinds(
+        let dropped = standalone_lookup_only_descriptors(
             &spans,
             &f11_by_span,
             &overlapping,
             n_lookups,
             &lookup_word10,
+            &lookup_word11,
+            &class_codes,
+            ot_count,
+        );
+        // Recognised as a lookup-only table and dropped.
+        assert!(
+            dropped.contains(&0),
+            "arrayed lookup-only descriptor must be dropped"
+        );
+    }
+
+    /// An arrayed descriptor whose forward link points at a WIDER shared
+    /// consumer (`word[11] != span_len`) must NOT be dropped: the forward
+    /// block is not this variable's own series. Pins the width gate as the
+    /// sole disqualifier here -- every other precondition passes. Mirrors the
+    /// `Ref.vdf` `rs_hfc*` family, where eight 7-element descriptors all
+    /// forward-link to one 63-wide consumer block.
+    #[test]
+    fn arrayed_standalone_descriptor_with_wider_shared_consumer_is_not_dropped() {
+        let class_codes = [
+            VDF_SECTION6_OT_CODE_TIME,
+            VDF_SECTION6_OT_CODE_DYNAMIC,
+            VDF_SECTION6_OT_CODE_DYNAMIC,
+            VDF_SECTION6_OT_CODE_DYNAMIC,
+            VDF_SECTION6_OT_CODE_STOCK,
+            VDF_SECTION6_OT_CODE_STOCK,
+            VDF_SECTION6_OT_CODE_STOCK,
+        ];
+        let ot_count = class_codes.len();
+        // Forward block start (OT 1) and an in-range owner block [1,4) are both
+        // fine; ONLY the width mismatch (5 != 3) rejects the drop.
+        let lookup_word10 = [9usize, 1usize];
+        let lookup_word11 = [0usize, 5usize];
+        let n_lookups = lookup_word10.len();
+        let spans = [span_with_len(0, "RS HFC arrayed graph", 4, 3)];
+        let f11_by_span = [1u32];
+        let overlapping: HashSet<usize> = HashSet::new();
+
+        let dropped = standalone_lookup_only_descriptors(
+            &spans,
+            &f11_by_span,
+            &overlapping,
+            n_lookups,
+            &lookup_word10,
+            &lookup_word11,
             &class_codes,
             ot_count,
         );
         assert!(
-            rebinds.is_empty(),
-            "an arrayed descriptor must not be scalar-re-bound: {rebinds:?}"
+            dropped.is_empty(),
+            "an arrayed descriptor with a wider shared consumer must not be \
+             dropped (the width gate is the sole disqualifier here): {dropped:?}"
         );
     }
 }
@@ -959,55 +1066,13 @@ pub(super) fn build_record_result_columns(
         }
     }
 
-    // Emit standalone-descriptor re-binds last, each as one scalar column at
-    // its forward-link evaluated-output OT. These deliberately do NOT consult
-    // `claimed_ot`: the forward OT is frequently a *consumer* OT already owned
-    // by another variable (Vensim stores one evaluated series consumed under
-    // several names), and the lookup-only variable legitimately shares it. The
-    // names are distinct, so this adds a distinct column rather than a
-    // duplicate. Determinism: iterate in `rec_idx` order so a name that maps to
-    // multiple descriptor records resolves to the lowest `rec_idx` consistently.
-    emit_descriptor_rebinds(&spans, &desc_id.rebinds, &mut ordered);
+    // Standalone lookup-only descriptors are graphical-function tables, not
+    // saved series, so `identify_descriptor_records` puts them in
+    // `descriptor_indices` and they are dropped above (never emitted). Their
+    // values, where they matter, are carried by the consumer variables that
+    // call them, which appear here as ordinary owners under their own names.
 
     ordered
-}
-
-/// Emit re-bound standalone descriptors as scalar columns at their forward OT.
-///
-/// One column per distinct canonical name (lowest `rec_idx` wins on the rare
-/// duplicate-name case), pushed onto `ordered`. Skips a name already present
-/// in `ordered` so a re-bind never shadows a real owner column of the same
-/// canonical identity.
-fn emit_descriptor_rebinds(
-    spans: &[DecodedRecordSpan],
-    rebinds: &HashMap<usize, usize>,
-    ordered: &mut Vec<(Ident<Canonical>, usize)>,
-) {
-    let span_by_rec: HashMap<usize, &DecodedRecordSpan> =
-        spans.iter().map(|s| (s.rec_idx, s)).collect();
-    let already: HashSet<Ident<Canonical>> = ordered.iter().map(|(id, _)| id.clone()).collect();
-
-    let mut entries: Vec<(usize, usize)> = rebinds
-        .iter()
-        .map(|(&rec_idx, &fwd_ot)| (rec_idx, fwd_ot))
-        .collect();
-    entries.sort_unstable();
-
-    let mut emitted: HashSet<Ident<Canonical>> = HashSet::new();
-    for (rec_idx, fwd_ot) in entries {
-        let Some(span) = span_by_rec.get(&rec_idx) else {
-            continue;
-        };
-        let key = if span.name.starts_with('#') {
-            Ident::<Canonical>::from_str_unchecked(&span.name)
-        } else {
-            Ident::<Canonical>::new(&span.name)
-        };
-        if already.contains(&key) || !emitted.insert(key.clone()) {
-            continue;
-        }
-        ordered.push((key, fwd_ot));
-    }
 }
 
 /// Append one owner span's columns to `ordered`, marking the OT slots in

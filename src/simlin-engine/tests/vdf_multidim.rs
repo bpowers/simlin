@@ -125,6 +125,54 @@ fn ref_vdf_record_results_use_section3_axis_refs_for_array_labels() {
 }
 
 #[test]
+fn ref_vdf_arrayed_lookup_only_descriptor_is_dropped() {
+    // `historical_gdp_lookup` / `rs_ch4` are arrayed (COP, 7) standalone
+    // graphical-function ("lookup-only") variables. A bare lookup is a *table*,
+    // not a time series: Vensim saves no series for it, only a descriptor
+    // record whose `f[11]` is a section-6 lookup-record index (not an OT start).
+    // The reader must therefore DROP it -- like an overlapping descriptor --
+    // rather than reconstruct a series at its `f[11]`-as-OT-start stock ghost
+    // block or at a forward-linked consumer. The data, where it matters, is
+    // carried by the consumer that actually calls the table (e.g.
+    // `Historical GDP[COP] = IF Time<=cutoff THEN Historical GDP LOOKUP(...) ELSE :NA:`,
+    // `CH4 anthro emissions[COP] = ... RS CH4(Time/One year) * ...`), which is a
+    // normal owner the reader emits under its own name. See GH #597.
+    let ref_vdf = load_ref_vdf();
+    let results = ref_vdf
+        .to_results_via_records()
+        .expect("record-based mapping should produce Ref.vdf columns");
+    let vdf_data = ref_vdf.extract_data().unwrap();
+
+    // The consumers (real owners) are still emitted under their own names, in
+    // declared COP order, carrying the data blocks the lookups feed.
+    for (name, ot) in [
+        ("Historical GDP[OECD US]", 1824),
+        ("Historical GDP[COP Developing B]", 1830),
+        ("CH4 anthro emissions[OECD US]", 911),
+        ("CH4 anthro emissions[COP Developing B]", 917),
+    ] {
+        assert_result_column_matches_ot(&results, &vdf_data, name, ot);
+    }
+
+    // The lookup-only variables themselves are dropped: neither a numeric ghost
+    // column nor a labeled series is emitted for them.
+    for absent in [
+        "historical_gdp_lookup[OECD US]",
+        "historical_gdp_lookup[COP Developing B]",
+        "historical_gdp_lookup[0]",
+        "rs_ch4[OECD US]",
+        "rs_ch4[0]",
+    ] {
+        assert!(
+            !results
+                .offsets
+                .contains_key(&Ident::<Canonical>::new(absent)),
+            "lookup-only variable must be dropped, not emitted as a series: {absent}"
+        );
+    }
+}
+
+#[test]
 fn ref_vdf_record_results_do_not_emit_numeric_array_fallbacks() {
     let ref_vdf = load_ref_vdf();
     let results = ref_vdf
