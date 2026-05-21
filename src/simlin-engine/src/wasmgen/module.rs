@@ -356,6 +356,15 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     // n_slots)` f64 is a safe upper bound. Reserved unconditionally (a model
     // without vector ops simply never reads it); the bound is tiny for scalar
     // models. `vector_scratch_base` is threaded into every `EmitCtx`.
+    //
+    // Sizing invariant: every vector-op *input view*'s logical `size()` is <=
+    // its storage footprint -- a full or sliced var view fits in `n_slots`, a
+    // temp view fits in `temp_total_size` -- so `max(temp_total_size, n_slots)`
+    // bounds the element count any vector op stages, gathers, or sorts. A
+    // *broadcast* view (logical `size()` > footprint, e.g. a 1-D source iterated
+    // over a 2-D output) would violate this, but the vector ops never take one as
+    // a direct argument: broadcasting happens earlier, in the `BeginBroadcastIter`
+    // temp materialization, and a vector op reads the materialized temp.
     let vector_scratch_base = total_bytes;
     let vector_scratch_slots = temp_total_size
         .max(n_slots)

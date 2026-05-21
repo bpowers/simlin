@@ -327,7 +327,10 @@ impl ViewDesc {
     /// Decompose a flat iteration index into per-dimension indices in row-major
     /// order (last dim varies fastest), mirroring the VM's iteration-index
     /// decomposition in `LoadIterViewTop` / `reduce_view` / `increment_indices`.
-    fn decompose_iter_index(dims: &[u16], iter_idx: usize) -> Vec<u16> {
+    ///
+    /// Shared with `vector.rs` (VectorElmMap's sliced-source projection walks the
+    /// same row-major order), so it is `pub(crate)` rather than private.
+    pub(crate) fn decompose_iter_index(dims: &[u16], iter_idx: usize) -> Vec<u16> {
         let n = dims.len();
         let mut indices = vec![0u16; n];
         let mut remaining = iter_idx;

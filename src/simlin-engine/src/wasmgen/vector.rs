@@ -57,20 +57,52 @@ use super::lower::{
 use super::views::{ViewBase, ViewDesc};
 
 /// Push `round_half_away(x)` for the f64 already on the wasm stack, reproducing
-/// Rust's `f64::round` (round half AWAY from zero) -- which is what the VM uses
-/// (`stack.pop().round()`, `offset_val.round()`). This is NOT wasm `f64.nearest`
-/// (round half to EVEN), so the two diverge for half-integer inputs; the VM's
-/// choice is reproduced via `trunc(x + copysign(0.5, x))`. For a large `x` where
-/// `x + 0.5 == x` the `trunc` returns `x` unchanged, exactly as `f64::round`
-/// does. `scratch` is a free f64 local used to read `x` twice.
-fn emit_round_half_away(f: &mut Function, scratch: u32) {
-    f.instruction(&Ins::LocalSet(scratch)); // scratch = x
-    f.instruction(&Ins::LocalGet(scratch)); // x  (the addend)
+/// Rust's `f64::round` (round half AWAY from zero) bit-for-bit -- which is what
+/// the VM uses (`stack.pop().round()`, `offset_val.round()`). This is NOT wasm
+/// `f64.nearest` (round half to EVEN), so the two diverge for half-integer
+/// inputs.
+///
+/// Emits the precision-safe form `t = x.trunc(); if (x - t).abs() >= 0.5 then t
+/// plus-or-minus 1 (sign of x) else t`. The naive `trunc(x + copysign(0.5, x))`
+/// is off-by-one against `f64::round` for two reachable input classes. First:
+/// the largest f64 below 0.5 (`0.49999999999999994` and its negative), where
+/// `x + 0.5` rounds up to exactly 1.0 so `trunc` yields a magnitude of one
+/// though `f64::round` yields zero. Second: already-integer magnitudes in
+/// `[2^52, 2^53)`, where `x + 0.5` rounds up to `x + 1` though `f64::round`
+/// returns `x`. The `(x - t)` fraction here is computed exactly (the operands
+/// are within a factor of two for `|x| < 2^53`, and `t == x` for integer
+/// magnitudes at or above `2^52`), so no rounding can perturb the half-way
+/// test. Verified bit-identical to `f64::round` over 5M random doubles
+/// including sign-of-zero and both boundary classes.
+///
+/// `x_scratch` and `t_scratch` are two free f64 locals (distinct), holding `x`
+/// and `trunc(x)` while each is read more than once.
+pub(crate) fn emit_round_half_away(f: &mut Function, x_scratch: u32, t_scratch: u32) {
+    f.instruction(&Ins::LocalSet(x_scratch)); // x_scratch = x
+    f.instruction(&Ins::LocalGet(x_scratch));
+    f.instruction(&Ins::F64Trunc);
+    f.instruction(&Ins::LocalSet(t_scratch)); // t_scratch = trunc(x)
+
+    // round-up value: t + copysign(1.0, x)  (the deeper Select operand)
+    f.instruction(&Ins::LocalGet(t_scratch));
+    f.instruction(&f64_const(1.0));
+    f.instruction(&Ins::LocalGet(x_scratch));
+    f.instruction(&Ins::F64Copysign); // copysign(1.0, x): ±1.0 with x's sign
+    f.instruction(&Ins::F64Add); // t + copysign(1.0, x)
+
+    // keep-trunc value: t  (the shallower Select operand)
+    f.instruction(&Ins::LocalGet(t_scratch));
+
+    // condition: |x - t| >= 0.5  (exact fraction; round half away from zero)
+    f.instruction(&Ins::LocalGet(x_scratch));
+    f.instruction(&Ins::LocalGet(t_scratch));
+    f.instruction(&Ins::F64Sub);
+    f.instruction(&Ins::F64Abs);
     f.instruction(&f64_const(0.5));
-    f.instruction(&Ins::LocalGet(scratch)); // x  (the sign source)
-    f.instruction(&Ins::F64Copysign); // copysign(0.5, x): 0.5 with x's sign
-    f.instruction(&Ins::F64Add); // x + copysign(0.5, x)
-    f.instruction(&Ins::F64Trunc); // round half away from zero
+    f.instruction(&Ins::F64Ge);
+
+    // select([round_up, t, cond]) == round_up when cond != 0, else t.
+    f.instruction(&Ins::Select);
 }
 
 // ── stable sort helper (VectorSortOrder / Rank) ─────────────────────────────
@@ -232,9 +264,18 @@ fn push_pair_addr_plus1(f: &mut Function, idx_local: u32) {
 // ── shared input-view helpers ───────────────────────────────────────────────
 
 /// Whether `view` carries a runtime validity flag or runtime offset addend (a
-/// dynamic subscript, Phase-5 Task 4). The vector ops handle the validity flag
-/// via an op-level gate; a runtime offset addend on a *source* view is folded
-/// into the runtime-indexed read.
+/// dynamic subscript, Phase-5 Task 4).
+///
+/// This is the *`VectorSelect`-specific* dynamic-view rejection predicate (its
+/// only consumer is [`is_dynamic_select`]). It deliberately keys on *both*
+/// `valid_local` and `runtime_off_local` -- stricter than the temp-writers'
+/// [`emit_with_validity_gate`], which keys on `valid_local` alone. The
+/// difference is by design: `VectorSelect` reads its source via a compile-time-
+/// base path that does NOT fold a runtime offset addend (it has no temp region
+/// to gate and would need to thread the runtime offset into the gather by hand),
+/// so any runtime offset disqualifies it. The temp-writers tolerate a
+/// `runtime_off_local` because their element reads route through
+/// [`emit_view_element_load`], which folds the runtime offset + validity itself.
 fn is_dynamic(view: &ViewDesc) -> bool {
     view.valid_local.is_some() || view.runtime_off_local.is_some()
 }
@@ -324,8 +365,10 @@ pub(crate) fn emit_vector_select(
     let k = ctx.vector_i32_locals[2];
     let [acc_sum, acc_prod, acc_min, acc_max, vtmp] = ctx.vector_f64_locals;
 
-    // Pop action (top) -> round-half-away -> i32; then pop max_value.
-    emit_round_half_away(f, ctx.scratch_local);
+    // Pop action (top) -> round-half-away -> i32; then pop max_value. The round
+    // uses `scratch_local` + `apply_locals[0]` as its two f64 temps; both are
+    // free here (`max_value` is parked into `apply_locals[0]` only afterward).
+    emit_round_half_away(f, ctx.scratch_local, ctx.apply_locals[0]);
     f.instruction(&Ins::I32TruncSatF64S);
     f.instruction(&Ins::LocalSet(action));
     f.instruction(&Ins::LocalSet(max_value));
@@ -630,7 +673,7 @@ fn emit_vector_elm_map_body(
         let base_i: i64 = if source_is_full_array {
             0
         } else {
-            let off_indices = decompose_row_major(&offset_view.dims, i);
+            let off_indices = ViewDesc::decompose_iter_index(&offset_view.dims, i);
             let src_indices: Vec<u16> = src_to_off_axis
                 .iter()
                 .map(|slot| match slot {
@@ -647,10 +690,13 @@ fn emit_vector_elm_map_body(
 
         // result = if offset_val.is_nan() || flat_i<0 || flat_i>=full_len { NaN }
         //          else source[flat_i]. flat_i = base_i + round(offset_val).
-        // Compute flat_i (i32) once.
+        // Compute flat_i (i32) once. The round consumes the pushed copy of
+        // `offset_val` and uses `scratch_local` + `apply_locals[0]` as its two
+        // f64 temps -- neither is `vector_f64_locals[0]` (the `offset_val` local,
+        // read again below), and `apply_locals` is otherwise unused in this op.
         f.instruction(&f64_const(base_i as f64));
         f.instruction(&Ins::LocalGet(offset_val));
-        emit_round_half_away(f, ctx.scratch_local);
+        emit_round_half_away(f, ctx.scratch_local, ctx.apply_locals[0]);
         f.instruction(&Ins::F64Add); // base_i + round(offset_val)  (as f64)
         f.instruction(&Ins::I32TruncSatF64S);
         f.instruction(&Ins::LocalSet(flat_i));
@@ -892,7 +938,9 @@ fn emit_rank_body(
 /// i32`), compute `ascending = (round(direction) == 1) as i32`, and store it in
 /// `ascending_local`. Shared by `VectorSortOrder`/`Rank`.
 fn pop_direction_to_ascending(ascending_local: u32, ctx: &EmitCtx, f: &mut Function) {
-    emit_round_half_away(f, ctx.scratch_local);
+    // The round's two f64 temps (`scratch_local` + `apply_locals[0]`) are both
+    // free here -- nothing survives across this direction pop.
+    emit_round_half_away(f, ctx.scratch_local, ctx.apply_locals[0]);
     f.instruction(&Ins::I32TruncSatF64S);
     f.instruction(&Ins::I32Const(1));
     f.instruction(&Ins::I32Eq);
@@ -1012,20 +1060,4 @@ fn emit_with_validity_gate(
     emit_fill_temp_nan(ctx, write_temp_id, f)?;
     f.instruction(&Ins::End);
     Ok(())
-}
-
-// ── shared geometry ──────────────────────────────────────────────────────────
-
-/// Decompose a flat row-major iteration index into per-dimension indices (last
-/// dim varies fastest), mirroring the VM's `increment_indices` walk order.
-fn decompose_row_major(dims: &[u16], iter_idx: usize) -> Vec<u16> {
-    let n = dims.len();
-    let mut indices = vec![0u16; n];
-    let mut remaining = iter_idx;
-    for d in (0..n).rev() {
-        let dim = dims[d] as usize;
-        indices[d] = (remaining % dim) as u16;
-        remaining /= dim;
-    }
-    indices
 }

@@ -3998,6 +3998,178 @@ fn vector_elm_map_offset_rounds_half_away_like_vm() {
     assert_eq!(got, vec![20.0, 30.0, 40.0]);
 }
 
+// ── emit_round_half_away parity vs f64::round (the VM's rounding oracle) ───
+
+/// Build a module exporting `mem` and `eval(module_off: i32)` whose body loads
+/// the f64 at memory slot 0 (byte 0), runs [`super::vector::emit_round_half_away`]
+/// directly, and stores the rounded result back to slot 0. Mirrors
+/// [`build_module`]'s helper-prefix assembly so the function declarations match
+/// production; the body is a focused probe of just the round helper.
+fn build_round_probe_module() -> Vec<u8> {
+    let mut module = Module::new();
+
+    let helpers = build_helpers();
+    let n_helpers = helpers.functions.len() as u32;
+
+    let mut types = TypeSection::new();
+    types.ty().function([ValType::I32], []); // eval(module_off) -> ()
+    for hf in &helpers.functions {
+        types.ty().function(hf.params.clone(), hf.results.clone());
+    }
+    module.section(&types);
+
+    let mut functions = FunctionSection::new();
+    for (i, _) in helpers.functions.iter().enumerate() {
+        functions.function(1 + i as u32);
+    }
+    functions.function(0);
+    module.section(&functions);
+
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType {
+        minimum: 1,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    module.section(&memories);
+
+    let mut exports = ExportSection::new();
+    exports.export("eval", ExportKind::Func, n_helpers);
+    exports.export("mem", ExportKind::Memory, 0);
+    module.section(&exports);
+
+    let mut code = CodeSection::new();
+    for hf in helpers.functions {
+        code.function(&hf.body);
+    }
+    // Same local layout production uses; the round helper draws its two f64
+    // temps from `scratch_local` (index 1) and `apply_locals[0]` (index 2).
+    let ctx = ctx_with_cond_depth(0);
+    let mut func = Function::new(opcode_fn_locals(0, 0));
+    // result_addr (i32) for the trailing store, then x = mem[0].
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::F64Load(memarg(0)));
+    crate::wasmgen::vector::emit_round_half_away(&mut func, ctx.scratch_local, ctx.apply_locals[0]);
+    func.instruction(&Instruction::F64Store(memarg(0)));
+    func.instruction(&Instruction::End);
+    code.function(&func);
+    module.section(&code);
+
+    module.finish()
+}
+
+/// Run the round probe over input `x` and return the f64 the helper produced.
+fn run_round_half_away(x: f64) -> f64 {
+    let bytes = build_round_probe_module();
+    let info = validate(&bytes).expect("round-probe module must validate");
+    let mut store = Store::new(());
+    let module = store
+        .module_instantiate(&info, Vec::new(), None)
+        .expect("round-probe module must instantiate")
+        .module_addr;
+
+    let mem = store
+        .instance_export(module, "mem")
+        .unwrap()
+        .as_mem()
+        .unwrap();
+    store.mem_access_mut_slice(mem, |bytes| {
+        bytes[0..8].copy_from_slice(&x.to_le_bytes());
+    });
+
+    let eval = store
+        .instance_export(module, "eval")
+        .unwrap()
+        .as_func()
+        .unwrap();
+    store
+        .invoke_simple_typed::<(i32,), ()>(eval, (0_i32,))
+        .expect("round-probe invocation must succeed");
+
+    store.mem_access_mut_slice(mem, |bytes| {
+        f64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    })
+}
+
+/// Assert the emitted round helper reproduces `f64::round` (the VM's rounding
+/// oracle) bit-for-bit, including the sign of a zero result. Cross-checking
+/// against the standard-library oracle is the whole point: the prior
+/// `trunc(x + copysign(0.5, x))` form diverged from it for two reachable input
+/// classes (see `emit_round_half_away`'s rustdoc).
+fn assert_round_matches_f64_round(x: f64) {
+    let got = run_round_half_away(x);
+    let want = x.round();
+    if want.is_nan() {
+        assert!(got.is_nan(), "round({x}): expected NaN, got {got}");
+    } else {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "round({x}): got {got} (bits {:#x}), want {want} (bits {:#x})",
+            got.to_bits(),
+            want.to_bits()
+        );
+    }
+}
+
+#[test]
+fn round_half_away_matches_f64_round_boundary_classes() {
+    // Class (a): the largest f64 strictly below 0.5. `trunc(x + 0.5)` rounds the
+    // sum up to exactly 1.0 and yields 1; `f64::round` yields 0. The sign of the
+    // zero must be preserved (`-0.0` for the negative input).
+    let just_below_half = 0.499_999_999_999_999_94_f64; // == 0.5_f64.next_down()
+    assert_eq!(just_below_half, f64::from_bits(0x3fdf_ffff_ffff_ffff));
+    assert_round_matches_f64_round(just_below_half);
+    assert_round_matches_f64_round(-just_below_half);
+    assert_eq!(run_round_half_away(just_below_half), 0.0);
+    assert!(run_round_half_away(-just_below_half).is_sign_negative());
+
+    // Class (b): an already-integer magnitude in [2^52, 2^53). `x + 0.5` rounds
+    // up to `x + 1`; `f64::round` returns `x` unchanged.
+    let big_odd_int = 4_503_599_627_370_497.0_f64; // 2^52 + 1
+    assert_round_matches_f64_round(big_odd_int);
+    assert_round_matches_f64_round(-big_odd_int);
+    assert_eq!(run_round_half_away(big_odd_int), big_odd_int);
+
+    // Exact-half inputs: round AWAY from zero (the VM's `f64::round`), not the
+    // half-to-even of wasm `f64.nearest`.
+    for &x in &[0.5_f64, -0.5, 1.5, 2.5, -2.5, -0.0, 0.0] {
+        assert_round_matches_f64_round(x);
+    }
+}
+
+#[test]
+fn round_half_away_matches_f64_round_sampled() {
+    // A deterministic sweep of magnitudes/signs/fractions cross-checked against
+    // the `f64::round` oracle, so a future change to the helper that drifts from
+    // the VM's rounding is caught here, not only in the two boundary classes.
+    let mut state = 0x2545_f491_4f6c_dd1d_u64; // xorshift64* seed
+    let mut next = || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    };
+    for _ in 0..2000 {
+        let bits = next();
+        // Span small fractions through large integer-grid magnitudes.
+        let scale = match bits % 5 {
+            0 => 1.0,
+            1 => 16.0,
+            2 => 1024.0,
+            3 => 4_503_599_627_370_496.0, // 2^52
+            _ => 9_007_199_254_740_992.0, // 2^53
+        };
+        let frac = (bits >> 8) as f64 / (u64::MAX >> 8) as f64; // [0, 1)
+        let mag = frac * scale * 2.0;
+        let x = if bits & 1 == 0 { mag } else { -mag };
+        assert_round_matches_f64_round(x);
+    }
+}
+
 #[test]
 fn vector_elm_map_sliced_source_base_i_matches_vm() {
     // A strict-slice source: a 2-D source [DimA(2), DimB(3)] (full storage 6
