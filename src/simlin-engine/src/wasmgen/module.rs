@@ -194,6 +194,7 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         module_off_local: L_MODULE_OFF,
         scratch_local: L_SCRATCH,
         condition_locals: (0..cond_depth as u32).map(|i| L_COND_BASE + i).collect(),
+        apply_locals: lower::apply_locals_for(cond_depth),
         helpers: helper_fns,
     };
 
@@ -277,10 +278,12 @@ fn emit_opcode_fn(
     Ok(f)
 }
 
-/// A fresh opcode-program `Function` with the scratch f64 local plus
-/// `cond_depth` i32 condition locals (param 0 = `module_off`).
+/// A fresh opcode-program `Function` with the scratch f64 local, `cond_depth`
+/// i32 condition locals, and the three `Apply` scratch f64 locals (param 0 =
+/// `module_off`). The exact declaration list lives in [`lower::opcode_fn_locals`]
+/// so it stays in lockstep with [`lower::apply_locals_for`].
 fn new_opcode_fn(cond_depth: usize) -> Function {
-    Function::new([(1, ValType::F64), (cond_depth as u32, ValType::I32)])
+    Function::new(lower::opcode_fn_locals(cond_depth))
 }
 
 /// The stock data-buffer offsets written by the stocks program. After each

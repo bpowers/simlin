@@ -61,7 +61,7 @@
 
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 
-use crate::bytecode::{ByteCode, Op2, Opcode};
+use crate::bytecode::{BuiltinId, ByteCode, Op2, Opcode};
 
 use super::WasmGenError;
 
@@ -102,12 +102,25 @@ pub(crate) struct EmitCtx {
     /// Sized to the program's maximum `If` nesting depth (see
     /// [`max_condition_depth`]).
     pub condition_locals: Vec<u32>,
+    /// Three dedicated scratch f64 local indices `[a, b, c]` for the `Apply`
+    /// opcode, which always pops exactly three operands (codegen pads). They
+    /// are distinct from [`scratch_local`](Self::scratch_local) and the
+    /// [`condition_locals`](Self::condition_locals) so an `Apply` inside an
+    /// `If` arm (sharing the function) cannot clobber the condition register.
+    /// Reserved unconditionally by the function builders (3 unused f64 locals
+    /// in a non-`Apply` function are free).
+    pub apply_locals: [u32; 3],
     /// Function indices of the module's emitted helper functions, so
     /// value-producing opcodes that need the VM's `approx_eq`/transcendental
     /// semantics can `call` them. The same registry is shared by every
     /// per-program function in a module.
     pub helpers: HelperFns,
 }
+
+// Reserved global slots (absolute, module-independent), mirroring `crate::vm`.
+// `Apply` reads `curr[TIME_OFF]` / `curr[DT_OFF]` for the time-driven builtins.
+const TIME_OFF: u16 = 0;
+const DT_OFF: u16 = 1;
 
 pub(crate) fn memarg(addr: u64) -> MemArg {
     MemArg {
@@ -150,33 +163,25 @@ pub(crate) struct HelperFns {
     /// operands live across several uses, exceeding the single assign-scratch
     /// local available to `emit_op2`.
     pub mod_euclid: u32,
+    /// `pulse(time, dt, volume, first_pulse, interval) -> f64`, reproducing the
+    /// VM's `pulse` (`vm.rs:3036`) including its `while` loop. A helper because
+    /// of the loop (an inline expansion would need a wasm `loop`/`br_if` in the
+    /// middle of `Apply`'s operand handling).
+    pub pulse: u32,
     /// Open-coded transcendental helpers (`super::math`), each `(f64) -> f64`
     /// except [`pow`](Self::pow) which is `(f64, f64) -> f64`. The bodies are
     /// emitted in `super::math`; the composed ones (`tan`/`asin`/`acos`/
     /// `log10`/`pow`) `call` the leaf ones by the indices recorded here, so the
-    /// leaves are pushed first in [`build_helpers`].
-    ///
-    /// `dead_code` is allowed only until the lowering that consumes each lands:
-    /// `pow` is wired by `Op2::Exp` (Task 3), the rest by the `Apply` arm
-    /// (Task 4). The `#[cfg(test)]` accuracy harness in `super::math` already
-    /// reads every field, so the allow is for the non-test lib build alone.
-    #[allow(dead_code)]
+    /// leaves are pushed first in [`build_helpers`]. `pow` is consumed by
+    /// `Op2::Exp`; the rest by the `Apply` arm.
     pub exp: u32,
-    #[allow(dead_code)]
     pub ln: u32,
-    #[allow(dead_code)]
     pub sin: u32,
-    #[allow(dead_code)]
     pub cos: u32,
-    #[allow(dead_code)]
     pub tan: u32,
-    #[allow(dead_code)]
     pub atan: u32,
-    #[allow(dead_code)]
     pub asin: u32,
-    #[allow(dead_code)]
     pub acos: u32,
-    #[allow(dead_code)]
     pub log10: u32,
     pub pow: u32,
 }
@@ -233,6 +238,19 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
         body: emit_mod_euclid(),
     });
 
+    let pulse = functions.len() as u32;
+    functions.push(HelperFn {
+        params: vec![
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+        ],
+        results: vec![ValType::F64],
+        body: emit_pulse(),
+    });
+
     // Leaf transcendentals (no inter-helper calls).
     let exp = push_unary(&mut functions, super::math::emit_exp());
     let ln = push_unary(&mut functions, super::math::emit_ln());
@@ -258,6 +276,7 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
         fns: HelperFns {
             approx_eq,
             mod_euclid,
+            pulse,
             exp,
             ln,
             sin,
@@ -441,6 +460,96 @@ fn emit_mod_euclid() -> Function {
     f
 }
 
+// `pulse` helper local layout. Params 0..4 are time/dt/volume/first_pulse/
+// interval; local 5 is the running `next_pulse`.
+const PU_TIME: u32 = 0;
+const PU_DT: u32 = 1;
+const PU_VOLUME: u32 = 2;
+const PU_FIRST: u32 = 3;
+const PU_INTERVAL: u32 = 4;
+const PU_NEXT: u32 = 5;
+
+/// Build the body of `pulse(time, dt, volume, first_pulse, interval) -> f64`,
+/// reproducing the VM's `pulse` (`vm.rs:3036`) including its `while` loop.
+///
+/// ```text
+/// if time < first_pulse { return 0.0 }
+/// next_pulse = first_pulse
+/// loop {                              // while time >= next_pulse
+///     if time < next_pulse { break }
+///     if time < next_pulse + dt { return volume / dt }
+///     if interval <= 0.0 { break }
+///     next_pulse += interval
+/// }
+/// 0.0
+/// ```
+///
+/// The `while time >= next_pulse` head is realized as a `br $exit` when
+/// `time < next_pulse`, inside a `block $exit { loop $top { ... br $top } }`.
+fn emit_pulse() -> Function {
+    use Instruction as Ins;
+    use wasm_encoder::BlockType;
+    let mut f = Function::new([(1, ValType::F64)]);
+
+    // if time < first_pulse { return 0.0 }
+    f.instruction(&Ins::LocalGet(PU_TIME));
+    f.instruction(&Ins::LocalGet(PU_FIRST));
+    f.instruction(&Ins::F64Lt);
+    f.instruction(&Ins::If(BlockType::Empty));
+    f.instruction(&f64_const(0.0));
+    f.instruction(&Ins::Return);
+    f.instruction(&Ins::End);
+
+    // next_pulse = first_pulse
+    f.instruction(&Ins::LocalGet(PU_FIRST));
+    f.instruction(&Ins::LocalSet(PU_NEXT));
+
+    // block $exit { loop $top { ... } }
+    f.instruction(&Ins::Block(BlockType::Empty));
+    f.instruction(&Ins::Loop(BlockType::Empty));
+
+    // while-head: if time < next_pulse { break }  (br depth 1 -> $exit)
+    f.instruction(&Ins::LocalGet(PU_TIME));
+    f.instruction(&Ins::LocalGet(PU_NEXT));
+    f.instruction(&Ins::F64Lt);
+    f.instruction(&Ins::BrIf(1));
+
+    // if time < next_pulse + dt { return volume / dt }
+    f.instruction(&Ins::LocalGet(PU_TIME));
+    f.instruction(&Ins::LocalGet(PU_NEXT));
+    f.instruction(&Ins::LocalGet(PU_DT));
+    f.instruction(&Ins::F64Add);
+    f.instruction(&Ins::F64Lt);
+    f.instruction(&Ins::If(BlockType::Empty));
+    f.instruction(&Ins::LocalGet(PU_VOLUME));
+    f.instruction(&Ins::LocalGet(PU_DT));
+    f.instruction(&Ins::F64Div);
+    f.instruction(&Ins::Return);
+    f.instruction(&Ins::End);
+
+    // else if interval <= 0.0 { break }  (br depth 1 -> $exit)
+    f.instruction(&Ins::LocalGet(PU_INTERVAL));
+    f.instruction(&f64_const(0.0));
+    f.instruction(&Ins::F64Le);
+    f.instruction(&Ins::BrIf(1));
+
+    // else next_pulse += interval ; continue (br depth 0 -> $top)
+    f.instruction(&Ins::LocalGet(PU_NEXT));
+    f.instruction(&Ins::LocalGet(PU_INTERVAL));
+    f.instruction(&Ins::F64Add);
+    f.instruction(&Ins::LocalSet(PU_NEXT));
+    f.instruction(&Ins::Br(0));
+
+    f.instruction(&Ins::End); // end loop
+    f.instruction(&Ins::End); // end block
+
+    // fell out of the loop -> 0.0
+    f.instruction(&f64_const(0.0));
+
+    f.instruction(&Ins::End); // end function
+    f
+}
+
 /// Push `call approx_eq` for two f64 operands already on the wasm stack
 /// (`[a, b]`); leaves an i32 (1 = approximately equal) on the stack. Mirrors a
 /// `crate::float::approx_eq(a, b)` call.
@@ -474,6 +583,35 @@ fn emit_is_truthy(ctx: &EmitCtx, f: &mut Function) {
 /// robust if codegen ever emits a genuinely interleaved pair, and it keeps the
 /// emitter's `SetCond`-pushes-/`If`-pops logic symmetric. The depth is computed
 /// here so the caller can reserve exactly that many wasm locals.
+/// Number of dedicated scratch f64 locals the `Apply` opcode reserves
+/// (`a`/`b`/`c`).
+const APPLY_LOCAL_COUNT: u32 = 3;
+
+/// The local-declaration list for an opcode-program `Function` carrying
+/// `cond_depth` condition locals: one scratch f64, then `cond_depth` i32
+/// condition locals, then [`APPLY_LOCAL_COUNT`] f64 `Apply` scratch locals.
+///
+/// Defined once (and consumed by both `module.rs`'s function builders and the
+/// `#[cfg(test)]` harness) so the declared local *types and order* match the
+/// indices [`apply_locals_for`] hands out. Param 0 is `module_off`.
+pub(crate) fn opcode_fn_locals(cond_depth: usize) -> Vec<(u32, ValType)> {
+    vec![
+        (1, ValType::F64),
+        (cond_depth as u32, ValType::I32),
+        (APPLY_LOCAL_COUNT, ValType::F64),
+    ]
+}
+
+/// The three `Apply` scratch f64 local indices `[a, b, c]` for a function with
+/// `cond_depth` condition locals. They follow param 0 (`module_off`), the
+/// scratch f64 (index 1), and the `cond_depth` i32 condition locals, so they
+/// start at `2 + cond_depth`. Mirrors the declaration order in
+/// [`opcode_fn_locals`].
+pub(crate) fn apply_locals_for(cond_depth: usize) -> [u32; 3] {
+    let base = 2 + cond_depth as u32; // 1 (param) + 1 (scratch) + cond_depth
+    [base, base + 1, base + 2]
+}
+
 pub(crate) fn max_condition_depth(bc: &ByteCode) -> usize {
     let mut depth: usize = 0;
     let mut max_depth: usize = 0;
@@ -626,6 +764,10 @@ pub(crate) fn emit_bytecode(
                 emit_op2(*op, ctx, f)?;
                 emit_assign(ctx.next_base, *off, ctx, f);
             }
+            // `Apply` always pops exactly three operands (codegen pads short
+            // builtins with `LoadConstant 0.0` / `LoadGlobalVar{FINAL_TIME}`),
+            // mirroring the VM (`vm.rs:1701`). See [`emit_apply`].
+            Opcode::Apply { func } => emit_apply(*func, ctx, f),
             Opcode::Ret => {
                 // The caller emits the function's terminating `End`.
             }
@@ -727,6 +869,224 @@ fn emit_cmp(f: &mut Function, cmp: &Instruction) {
     f.instruction(&Instruction::F64ConvertI32U);
 }
 
+/// Lower the `Apply { func }` opcode, mirroring the VM's `apply()`
+/// (`vm.rs:2938`). The three operands are on the wasm stack in push order
+/// `[a, b, c]` (`c` on top, matching the VM popping `c` then `b` then `a`);
+/// they are parked in the dedicated `ctx.apply_locals` so each builtin can read
+/// them any number of times in any order. The result is left on the stack.
+///
+/// `time`/`dt` for the time-driven builtins are read from `curr[TIME_OFF]` /
+/// `curr[DT_OFF]` (absolute global slots, like `LoadGlobalVar`), matching the
+/// VM's `time = curr[TIME_OFF]; dt = curr[DT_OFF]`.
+fn emit_apply(func: BuiltinId, ctx: &EmitCtx, f: &mut Function) {
+    use Instruction as Ins;
+    let [a, b, c] = ctx.apply_locals;
+
+    // Pop the three padded operands. The stack top is `c`, so set c, then b,
+    // then a (the VM pops in the same order).
+    f.instruction(&Ins::LocalSet(c));
+    f.instruction(&Ins::LocalSet(b));
+    f.instruction(&Ins::LocalSet(a));
+
+    let get = |f: &mut Function, l: u32| {
+        f.instruction(&Ins::LocalGet(l));
+    };
+
+    match func {
+        // ── Native f64 instructions on `a` ────────────────────────────────
+        BuiltinId::Abs => {
+            get(f, a);
+            f.instruction(&Ins::F64Abs);
+        }
+        BuiltinId::Sqrt => {
+            get(f, a);
+            f.instruction(&Ins::F64Sqrt);
+        }
+        // `Int = a.floor()` -- floor, NOT trunc (the VM's choice; they differ
+        // for negative arguments).
+        BuiltinId::Int => {
+            get(f, a);
+            f.instruction(&Ins::F64Floor);
+        }
+        // `Max`/`Min` use the wasm instructions per AC7.3. These differ from the
+        // VM's compare form (`if a>b {a} else {b}`) only on NaN/±0; if a corpus
+        // model ever surfaces such a divergence, switch the offending op to the
+        // compare-and-select form.
+        BuiltinId::Max => {
+            get(f, a);
+            get(f, b);
+            f.instruction(&Ins::F64Max);
+        }
+        BuiltinId::Min => {
+            get(f, a);
+            get(f, b);
+            f.instruction(&Ins::F64Min);
+        }
+
+        // ── Compare/arithmetic composed ───────────────────────────────────
+        // `Sign = if a>0 {1} else if a<0 {-1} else {0}`, i.e.
+        // `a>0 ? 1 : (a<0 ? -1 : 0)`, via two selects. wasm `select` yields its
+        // *deeper* operand when the condition is true, so the outer select is
+        // expressed with the inverted test `a<=0` (deeper = inner).
+        BuiltinId::Sign => {
+            // inner = select(-1.0, 0.0, a < 0)  ->  -1 if a<0 else 0
+            f.instruction(&f64_const(-1.0));
+            f.instruction(&f64_const(0.0));
+            get(f, a);
+            f.instruction(&f64_const(0.0));
+            f.instruction(&Ins::F64Lt);
+            f.instruction(&Ins::Select);
+            // result = select(inner, 1.0, a <= 0)  ->  inner if a<=0 else 1
+            f.instruction(&f64_const(1.0));
+            get(f, a);
+            f.instruction(&f64_const(0.0));
+            f.instruction(&Ins::F64Le);
+            f.instruction(&Ins::Select);
+        }
+        // `Quantum = if b==0.0 {a} else {(a/b).trunc()*b}` (exact `==`).
+        BuiltinId::Quantum => {
+            // select(a, (a/b).trunc()*b, b == 0.0)
+            get(f, a);
+            // (a/b).trunc() * b
+            get(f, a);
+            get(f, b);
+            f.instruction(&Ins::F64Div);
+            f.instruction(&Ins::F64Trunc);
+            get(f, b);
+            f.instruction(&Ins::F64Mul);
+            // cond: b == 0.0
+            get(f, b);
+            f.instruction(&f64_const(0.0));
+            f.instruction(&Ins::F64Eq);
+            f.instruction(&Ins::Select);
+        }
+        // `SafeDiv = if b != 0.0 {a/b} else {c}` (exact `!=`, NOT approx).
+        BuiltinId::SafeDiv => {
+            // select(a/b, c, b != 0.0)
+            get(f, a);
+            get(f, b);
+            f.instruction(&Ins::F64Div);
+            get(f, c);
+            get(f, b);
+            f.instruction(&f64_const(0.0));
+            f.instruction(&Ins::F64Ne);
+            f.instruction(&Ins::Select);
+        }
+        // `Sshape = b + (c-b)/(1.0 + exp(-4.0*(2.0*a-1.0)))`.
+        BuiltinId::Sshape => {
+            get(f, b);
+            // (c - b)
+            get(f, c);
+            get(f, b);
+            f.instruction(&Ins::F64Sub);
+            // denom = 1.0 + exp(-4.0 * (2.0*a - 1.0))
+            f.instruction(&f64_const(1.0));
+            // exp arg: -4.0 * (2.0*a - 1.0)
+            f.instruction(&f64_const(-4.0));
+            f.instruction(&f64_const(2.0));
+            get(f, a);
+            f.instruction(&Ins::F64Mul);
+            f.instruction(&f64_const(1.0));
+            f.instruction(&Ins::F64Sub);
+            f.instruction(&Ins::F64Mul);
+            f.instruction(&Ins::Call(ctx.helpers.exp));
+            f.instruction(&Ins::F64Add); // 1.0 + exp(..)
+            f.instruction(&Ins::F64Div); // (c-b) / denom
+            f.instruction(&Ins::F64Add); // b + ..
+        }
+
+        // ── Transcendentals on `a` (Task 2 helpers) ───────────────────────
+        BuiltinId::Exp => emit_call_unary(ctx.helpers.exp, a, ctx, f),
+        BuiltinId::Ln => emit_call_unary(ctx.helpers.ln, a, ctx, f),
+        BuiltinId::Log10 => emit_call_unary(ctx.helpers.log10, a, ctx, f),
+        BuiltinId::Sin => emit_call_unary(ctx.helpers.sin, a, ctx, f),
+        BuiltinId::Cos => emit_call_unary(ctx.helpers.cos, a, ctx, f),
+        BuiltinId::Tan => emit_call_unary(ctx.helpers.tan, a, ctx, f),
+        BuiltinId::Arcsin => emit_call_unary(ctx.helpers.asin, a, ctx, f),
+        BuiltinId::Arccos => emit_call_unary(ctx.helpers.acos, a, ctx, f),
+        BuiltinId::Arctan => emit_call_unary(ctx.helpers.atan, a, ctx, f),
+
+        // ── Time-driven ───────────────────────────────────────────────────
+        // `Step = step(time, dt, a, b) = if time + dt/2 > b {a} else {0.0}`.
+        BuiltinId::Step => {
+            // select(a, 0.0, time + dt/2 > b)
+            get(f, a);
+            f.instruction(&f64_const(0.0));
+            // time + dt/2.0
+            emit_load_global(ctx, f, TIME_OFF);
+            emit_load_global(ctx, f, DT_OFF);
+            f.instruction(&f64_const(2.0));
+            f.instruction(&Ins::F64Div);
+            f.instruction(&Ins::F64Add);
+            get(f, b);
+            f.instruction(&Ins::F64Gt);
+            f.instruction(&Ins::Select);
+        }
+        // `Ramp = ramp(time, slope=a, start=b, end=Some(c))`:
+        //   if time > b { if time >= c { a*(c-b) } else { a*(time-b) } } else 0.
+        // The Apply form always supplies an end time, so `end.is_some()` is true.
+        BuiltinId::Ramp => {
+            // done_value = a * (c - b)
+            get(f, a);
+            get(f, c);
+            get(f, b);
+            f.instruction(&Ins::F64Sub);
+            f.instruction(&Ins::F64Mul);
+            // ramping_value = a * (time - b)
+            get(f, a);
+            emit_load_global(ctx, f, TIME_OFF);
+            get(f, b);
+            f.instruction(&Ins::F64Sub);
+            f.instruction(&Ins::F64Mul);
+            // inner = select(done_value, ramping_value, time >= c)
+            emit_load_global(ctx, f, TIME_OFF);
+            get(f, c);
+            f.instruction(&Ins::F64Ge);
+            f.instruction(&Ins::Select);
+            // result = select(inner, 0.0, time > b)
+            f.instruction(&f64_const(0.0));
+            emit_load_global(ctx, f, TIME_OFF);
+            get(f, b);
+            f.instruction(&Ins::F64Gt);
+            f.instruction(&Ins::Select);
+        }
+        // `Pulse = pulse(time, dt, volume=a, first=b, interval=c)` (helper).
+        BuiltinId::Pulse => {
+            emit_load_global(ctx, f, TIME_OFF);
+            emit_load_global(ctx, f, DT_OFF);
+            get(f, a);
+            get(f, b);
+            get(f, c);
+            f.instruction(&Ins::Call(ctx.helpers.pulse));
+        }
+
+        // ── Constants ─────────────────────────────────────────────────────
+        BuiltinId::Inf => {
+            f.instruction(&f64_const(f64::INFINITY));
+        }
+        BuiltinId::Pi => {
+            f.instruction(&f64_const(std::f64::consts::PI));
+        }
+    }
+}
+
+/// Push `helper(local)` for a unary `(f64) -> f64` helper: load the f64 local,
+/// then `call`.
+fn emit_call_unary(helper_idx: u32, src: u32, _ctx: &EmitCtx, f: &mut Function) {
+    f.instruction(&Instruction::LocalGet(src));
+    f.instruction(&Instruction::Call(helper_idx));
+}
+
+/// Push the absolute (module-independent) global slot `off` from `curr`,
+/// matching `LoadGlobalVar` (slots 0..4 are reserved globals: TIME/DT/...).
+fn emit_load_global(ctx: &EmitCtx, f: &mut Function, off: u16) {
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::F64Load(memarg(slot_byte_offset(
+        ctx.curr_base,
+        off,
+    ))));
+}
+
 /// Name an unsupported opcode without depending on `Debug` (feature-gated via
 /// `debug-derive`).
 fn unsupported_opcode(op: &Opcode) -> String {
@@ -773,6 +1133,7 @@ mod tests {
             module_off_local: L_MODULE_OFF,
             scratch_local: L_SCRATCH,
             condition_locals: (0..depth as u32).map(|i| L_COND_BASE + i).collect(),
+            apply_locals: apply_locals_for(depth),
             // The helper-function indices are deterministic (helpers occupy the
             // module's first function slots), and `build_module` emits exactly
             // these helper bodies ahead of `eval`, so the indices agree.
@@ -838,8 +1199,9 @@ mod tests {
         for hf in helpers.functions {
             code.function(&hf.body);
         }
-        // 1 scratch f64 local, then `cond_depth` i32 condition locals.
-        let mut func = Function::new([(1, ValType::F64), (cond_depth as u32, ValType::I32)]);
+        // 1 scratch f64 local, `cond_depth` i32 condition locals, and the 3
+        // `Apply` scratch f64 locals -- the same layout production uses.
+        let mut func = Function::new(opcode_fn_locals(cond_depth));
         emit_bytecode(bc, ctx, &mut func).expect("lowering should succeed");
         func.instruction(&Instruction::End);
         code.function(&func);
@@ -1535,8 +1897,10 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_apply_returns_error() {
-        use crate::bytecode::BuiltinId;
+    fn apply_lowers_without_error() {
+        // Apply is supported as of Phase 2 Task 4; lowering must succeed where
+        // Phase 1 returned Unsupported. (Numeric parity is covered by the
+        // dedicated per-builtin tests below.)
         let mut func = Function::new([]);
         let program = bc(
             vec![],
@@ -1545,7 +1909,7 @@ mod tests {
             }],
         );
         let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+        assert!(result.is_ok(), "Apply should lower without error");
     }
 
     #[test]
@@ -1939,6 +2303,266 @@ mod tests {
         assert_eq!(if_eval(1.0), 10.0);
         assert_eq!(if_eval(f64::NAN), 10.0); // is_truthy(NaN) is true
         assert_eq!(if_eval(f64::INFINITY), 10.0);
+    }
+
+    // ── Apply: per-builtin parity with the VM's apply() ───────────────────
+
+    /// Run `Apply{func}` over the three operands `(a, b, c)` with `time`/`dt`
+    /// seeded into the reserved global slots (TIME at byte 0, DT at byte 8 of
+    /// `curr`). The program pushes a, b, c then `Apply`, so `c` is on top --
+    /// matching the VM's pop order.
+    fn apply_eval(func: BuiltinId, a: f64, b: f64, c: f64, time: f64, dt: f64) -> f64 {
+        let code = vec![
+            Opcode::LoadConstant { id: 0 },
+            Opcode::LoadConstant { id: 1 },
+            Opcode::LoadConstant { id: 2 },
+            Opcode::Apply { func },
+        ];
+        // Seed TIME (slot 0 -> byte 0) and DT (slot 1 -> byte 8) of curr.
+        value(code, vec![a, b, c], &[(0, time), (8, dt)])
+    }
+
+    /// `step`/`ramp`/`pulse` reproduced verbatim from `vm.rs` so the per-builtin
+    /// tests compare the wasm output to the exact formula the VM's `apply()`
+    /// uses, not to libm.
+    fn vm_step(time: f64, dt: f64, height: f64, step_time: f64) -> f64 {
+        if time + dt / 2.0 > step_time {
+            height
+        } else {
+            0.0
+        }
+    }
+    fn vm_ramp(time: f64, slope: f64, start: f64, end: f64) -> f64 {
+        if time > start {
+            if time >= end {
+                slope * (end - start)
+            } else {
+                slope * (time - start)
+            }
+        } else {
+            0.0
+        }
+    }
+    fn vm_pulse(time: f64, dt: f64, volume: f64, first: f64, interval: f64) -> f64 {
+        if time < first {
+            return 0.0;
+        }
+        let mut next = first;
+        while time >= next {
+            if time < next + dt {
+                return volume / dt;
+            } else if interval <= 0.0 {
+                break;
+            } else {
+                next += interval;
+            }
+        }
+        0.0
+    }
+
+    /// Assert a wasm `Apply` result equals an exact f64 value (for the
+    /// non-transcendental builtins, which the wasm reproduces bit-for-bit).
+    fn assert_apply_exact(func: BuiltinId, a: f64, b: f64, c: f64, time: f64, dt: f64, want: f64) {
+        let got = apply_eval(func, a, b, c, time, dt);
+        if want.is_nan() {
+            assert!(got.is_nan(), "apply result expected NaN, got {got}");
+        } else {
+            assert_eq!(got, want, "apply({a},{b},{c},t={time},dt={dt})");
+        }
+    }
+
+    #[test]
+    fn apply_abs_sqrt_int() {
+        assert_apply_exact(BuiltinId::Abs, -3.5, 0.0, 0.0, 0.0, 1.0, 3.5);
+        assert_apply_exact(BuiltinId::Abs, 3.5, 0.0, 0.0, 0.0, 1.0, 3.5);
+        assert_apply_exact(BuiltinId::Sqrt, 16.0, 0.0, 0.0, 0.0, 1.0, 4.0);
+        // Int is floor, NOT trunc: floor(-2.5) = -3 (trunc would give -2).
+        assert_apply_exact(BuiltinId::Int, -2.5, 0.0, 0.0, 0.0, 1.0, (-2.5f64).floor());
+        assert_apply_exact(BuiltinId::Int, 2.9, 0.0, 0.0, 0.0, 1.0, 2.0);
+        assert_apply_exact(BuiltinId::Int, -2.9, 0.0, 0.0, 0.0, 1.0, -3.0);
+    }
+
+    #[test]
+    fn apply_min_max() {
+        assert_apply_exact(BuiltinId::Max, 3.0, 7.0, 0.0, 0.0, 1.0, 7.0);
+        assert_apply_exact(BuiltinId::Max, 7.0, 3.0, 0.0, 0.0, 1.0, 7.0);
+        assert_apply_exact(BuiltinId::Min, 3.0, 7.0, 0.0, 0.0, 1.0, 3.0);
+        assert_apply_exact(BuiltinId::Min, 7.0, 3.0, 0.0, 0.0, 1.0, 3.0);
+        assert_apply_exact(BuiltinId::Max, -1.0, -5.0, 0.0, 0.0, 1.0, -1.0);
+        assert_apply_exact(BuiltinId::Min, -1.0, -5.0, 0.0, 0.0, 1.0, -5.0);
+    }
+
+    #[test]
+    fn apply_sign() {
+        assert_apply_exact(BuiltinId::Sign, 5.0, 0.0, 0.0, 0.0, 1.0, 1.0);
+        assert_apply_exact(BuiltinId::Sign, -5.0, 0.0, 0.0, 0.0, 1.0, -1.0);
+        // Sign(0) = 0 exactly (the VM's `else` branch).
+        assert_apply_exact(BuiltinId::Sign, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+        assert_apply_exact(BuiltinId::Sign, -0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+    }
+
+    #[test]
+    fn apply_quantum() {
+        // q == 0 -> x (exact ==, returns a unchanged).
+        assert_apply_exact(BuiltinId::Quantum, 3.7, 0.0, 0.0, 0.0, 1.0, 3.7);
+        // q != 0 -> (x/q).trunc() * q.
+        assert_apply_exact(
+            BuiltinId::Quantum,
+            7.0,
+            2.0,
+            0.0,
+            0.0,
+            1.0,
+            (7.0f64 / 2.0).trunc() * 2.0,
+        );
+        assert_apply_exact(
+            BuiltinId::Quantum,
+            -7.0,
+            2.0,
+            0.0,
+            0.0,
+            1.0,
+            (-7.0f64 / 2.0).trunc() * 2.0,
+        );
+        assert_apply_exact(
+            BuiltinId::Quantum,
+            5.5,
+            0.5,
+            0.0,
+            0.0,
+            1.0,
+            (5.5f64 / 0.5).trunc() * 0.5,
+        );
+    }
+
+    #[test]
+    fn apply_safe_div() {
+        // b != 0 -> a/b.
+        assert_apply_exact(BuiltinId::SafeDiv, 6.0, 3.0, 99.0, 0.0, 1.0, 2.0);
+        // b == 0 -> c (the default), via exact `!= 0.0`.
+        assert_apply_exact(BuiltinId::SafeDiv, 6.0, 0.0, 99.0, 0.0, 1.0, 99.0);
+        // A subnormal (non-zero) denominator still divides, NOT falls back.
+        let sub = f64::from_bits(1);
+        assert_apply_exact(BuiltinId::SafeDiv, 6.0, sub, 99.0, 0.0, 1.0, 6.0 / sub);
+        // -0.0 is == 0.0, so it falls back to c (matches the VM's `b != 0.0`).
+        assert_apply_exact(BuiltinId::SafeDiv, 6.0, -0.0, 99.0, 0.0, 1.0, 99.0);
+    }
+
+    #[test]
+    fn apply_sshape() {
+        // b + (c-b)/(1 + exp(-4*(2a-1))), within the exp helper's tolerance.
+        for &a in &[0.0f64, 0.25, 0.5, 0.75, 1.0] {
+            let want = 2.0 + (8.0 - 2.0) / (1.0 + (-4.0 * (2.0 * a - 1.0)).exp());
+            let got = apply_eval(BuiltinId::Sshape, a, 2.0, 8.0, 0.0, 1.0);
+            assert!(
+                (got - want).abs() < 1e-9,
+                "Sshape({a}): got {got}, want {want}",
+            );
+        }
+    }
+
+    #[test]
+    fn apply_transcendentals_match_libm() {
+        // Each transcendental Apply arm calls the Task 2 helper on `a`; assert
+        // it lands within the helpers' documented tolerance of Rust f64.
+        let close = |func: BuiltinId, a: f64, want: f64| {
+            let got = apply_eval(func, a, 0.0, 0.0, 0.0, 1.0);
+            assert!(
+                (got - want).abs() < 1e-8 || (got - want).abs() / want.abs() < 1e-8,
+                "{func:?}({a}): got {got}, want {want}",
+            );
+        };
+        close(BuiltinId::Exp, 1.5, 1.5f64.exp());
+        close(BuiltinId::Ln, 7.0, 7.0f64.ln());
+        close(BuiltinId::Log10, 1000.0, 3.0);
+        close(BuiltinId::Sin, 0.7, 0.7f64.sin());
+        close(BuiltinId::Cos, 0.7, 0.7f64.cos());
+        close(BuiltinId::Tan, 0.7, 0.7f64.tan());
+        close(BuiltinId::Arcsin, 0.5, 0.5f64.asin());
+        close(BuiltinId::Arccos, 0.5, 0.5f64.acos());
+        close(BuiltinId::Arctan, 2.0, 2.0f64.atan());
+    }
+
+    #[test]
+    fn apply_step_across_breakpoint() {
+        // step(time, dt, height=a, step_time=b) = if time+dt/2 > b {a} else 0.
+        let dt = 0.5;
+        for &t in &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0] {
+            let want = vm_step(t, dt, 10.0, 3.0);
+            assert_apply_exact(BuiltinId::Step, 10.0, 3.0, 0.0, t, dt, want);
+        }
+    }
+
+    #[test]
+    fn apply_ramp_across_breakpoints() {
+        // ramp(time, slope=a, start=b, end=c) over its three regimes.
+        for &t in &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0] {
+            let want = vm_ramp(t, 2.0, 2.0, 5.0);
+            assert_apply_exact(BuiltinId::Ramp, 2.0, 2.0, 5.0, t, 1.0, want);
+        }
+    }
+
+    #[test]
+    fn apply_pulse_across_intervals() {
+        // pulse(time, dt, volume=a, first=b, interval=c) across several periods,
+        // including the no-repeat (interval == 0) case.
+        let dt = 1.0;
+        for &t in &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0] {
+            // Repeating pulse: volume 4, first at t=2, every 3.
+            assert_apply_exact(
+                BuiltinId::Pulse,
+                4.0,
+                2.0,
+                3.0,
+                t,
+                dt,
+                vm_pulse(t, dt, 4.0, 2.0, 3.0),
+            );
+            // Single pulse: interval 0 -> fires once at t in [first, first+dt).
+            assert_apply_exact(
+                BuiltinId::Pulse,
+                4.0,
+                2.0,
+                0.0,
+                t,
+                dt,
+                vm_pulse(t, dt, 4.0, 2.0, 0.0),
+            );
+        }
+    }
+
+    #[test]
+    fn apply_inf_pi() {
+        assert_apply_exact(BuiltinId::Inf, 0.0, 0.0, 0.0, 0.0, 1.0, f64::INFINITY);
+        assert_apply_exact(BuiltinId::Pi, 0.0, 0.0, 0.0, 0.0, 1.0, std::f64::consts::PI);
+    }
+
+    #[test]
+    fn apply_inside_if_does_not_clobber_condition() {
+        // An `Apply` in an If arm shares the function with the condition local;
+        // the dedicated apply locals must not collide. Build (codegen-padded
+        // Apply operands): `if cond then ABS(a) else f`, cond truthy.
+        let padded = vec![
+            Opcode::LoadConstant { id: 1 }, // a = -4 (the `then` operand)
+            Opcode::LoadConstant { id: 3 }, // pad b = 0
+            Opcode::LoadConstant { id: 3 }, // pad c = 0
+            Opcode::Apply {
+                func: BuiltinId::Abs,
+            }, // ABS(-4) = 4 -> the `then` value
+            Opcode::LoadConstant { id: 2 }, // f = 99
+            Opcode::LoadConstant { id: 0 }, // cond = 1 (truthy)
+            Opcode::SetCond {},
+            Opcode::If {},
+        ];
+        let got = run(
+            &bc(vec![1.0, -4.0, 99.0, 0.0], padded),
+            &ctx_with_cond_depth(1),
+            true,
+            1,
+            &[],
+            None,
+        );
+        assert_eq!(got, 4.0, "Apply in an If-then arm should yield ABS(-4)=4");
     }
 
     // ── max_condition_depth ───────────────────────────────────────────────
