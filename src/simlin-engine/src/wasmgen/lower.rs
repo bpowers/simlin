@@ -71,13 +71,13 @@ use super::views::ElementAddr;
 use super::views::{ViewBase, ViewDesc};
 
 /// Bytes per f64 slot.
-const SLOT_SIZE: u32 = 8;
+pub(crate) const SLOT_SIZE: u32 = 8;
 /// Alignment exponent for an 8-byte f64 access (log2(8)).
 const F64_ALIGN: u32 = 3;
 /// Bytes per GF directory entry (two i32: data byte offset + point count). Must
 /// match `module.rs`'s `GF_DIRECTORY_ENTRY_BYTES`, the layout the `Lookup`
 /// opcode reads.
-const GF_DIRECTORY_ENTRY_BYTES: i32 = 8;
+pub(crate) const GF_DIRECTORY_ENTRY_BYTES: i32 = 8;
 
 /// Compile-time context for lowering a scalar opcode program over the f64 slab.
 ///
@@ -168,10 +168,33 @@ pub(crate) struct EmitCtx<'a> {
     /// locals (Task 4): the runtime-offset addend and validity flag a
     /// `ViewSubscriptDynamic` / `PushSubscriptIndex` accumulation draws from. The
     /// function's local declarations reserve `count_extra_i32_locals(bc)` i32s
-    /// starting here, past the scratch f64 / condition i32s / `Apply` f64s, so
-    /// these never overlap [`apply_locals`](Self::apply_locals). A program with
-    /// no dynamic subscripts reserves none and this base is unused.
+    /// starting here, past the scratch f64 / condition i32s / `Apply` f64s / the
+    /// fixed vector-op i32 scratch block, so these never overlap
+    /// [`apply_locals`](Self::apply_locals) or
+    /// [`vector_i32_locals`](Self::vector_i32_locals). A program with no dynamic
+    /// subscripts reserves none and this base is unused.
     pub extra_i32_local_base: u32,
+    /// The fixed [`VECTOR_F64_LOCAL_COUNT`] scratch f64 local indices the Phase-6
+    /// vector opcodes draw from (`VectorSelect`'s reduction accumulators, the
+    /// per-element value scratch). Reserved unconditionally by the function
+    /// builders; a non-vector function's unused f64 locals are free.
+    pub vector_f64_locals: [u32; VECTOR_F64_LOCAL_COUNT as usize],
+    /// The fixed [`VECTOR_I32_LOCAL_COUNT`] scratch i32 local indices the Phase-6
+    /// vector opcodes draw from (`VectorSelect`'s action/count/reduce-index,
+    /// `Rank`'s ascending flag + runtime store address, `VectorElmMap`'s runtime
+    /// flat index). Reserved unconditionally by the function builders (a
+    /// non-vector function's unused i32 locals are free) and placed before the
+    /// dynamic-subscript [`extra_i32_local_base`], so it never disturbs the
+    /// `apply_locals` indices.
+    pub vector_i32_locals: [u32; VECTOR_I32_LOCAL_COUNT as usize],
+    /// Byte offset of slot 0 of the vector-op scratch region. `VectorSelect`
+    /// collects its selected expr values here (`size` f64 worst case); the
+    /// `stable_sort` helper (`VectorSortOrder`/`Rank`) sorts `(value, idx)` pairs
+    /// here (`2 * size` f64). The two uses are never live simultaneously within a
+    /// single opcode, so they share the region. Sized by `module.rs` to the
+    /// largest view a vector op could process; the test harness sets a fixed
+    /// high offset within its single memory page.
+    pub vector_scratch_base: u32,
     /// The module's `ByteCodeContext`, holding the compile-time array tables the
     /// view opcodes reference by index: `static_views`, `dim_lists`,
     /// `dimensions`, `subdim_relations`, and `temp_offsets`. Run-invariant and
@@ -651,7 +674,7 @@ fn emit_call_approx_eq(ctx: &EmitCtx, f: &mut Function) {
 /// Push the i32 truthiness of the f64 already on the wasm stack, reproducing the
 /// VM's `is_truthy(n) = !approx_eq(n, 0.0)` (`vm.rs:89`): `approx_eq(n, 0.0)`
 /// gives `is_false`, and `i32.eqz` negates it to `is_truthy`.
-fn emit_is_truthy(ctx: &EmitCtx, f: &mut Function) {
+pub(crate) fn emit_is_truthy(ctx: &EmitCtx, f: &mut Function) {
     f.instruction(&f64_const(0.0));
     emit_call_approx_eq(ctx, f);
     f.instruction(&Instruction::I32Eqz);
@@ -678,34 +701,76 @@ fn emit_is_truthy(ctx: &EmitCtx, f: &mut Function) {
 /// (`a`/`b`/`c`).
 const APPLY_LOCAL_COUNT: u32 = 3;
 
+/// Number of dedicated scratch f64 locals the Phase-6 vector opcodes reserve.
+/// `VectorSelect`'s single-pass reduction needs four running accumulators
+/// (sum/product/min/max) plus one to hold the current value; the other vector
+/// ops draw their f64 scratch from the same block. Reserved unconditionally --
+/// unused f64 locals in a non-vector function are free.
+pub(crate) const VECTOR_F64_LOCAL_COUNT: u32 = 5;
+
+/// Number of dedicated scratch i32 locals the Phase-6 vector opcodes reserve.
+/// `VectorSelect` uses one for the action selector, one for the selected-value
+/// count, and one for its reduce loop index; `Rank` uses one for the
+/// `ascending` flag and one for a runtime store address; `VectorElmMap` uses one
+/// for the runtime flat source index. Three covers every Phase-6 vector op.
+/// Reserved unconditionally -- unused i32 locals in a non-vector function are
+/// free.
+pub(crate) const VECTOR_I32_LOCAL_COUNT: u32 = 3;
+
 /// The local-declaration list for an opcode-program `Function` carrying
 /// `cond_depth` condition locals and `extra_i32` dynamic-subscript scratch
 /// locals: one scratch f64, then `cond_depth` i32 condition locals, then
-/// [`APPLY_LOCAL_COUNT`] f64 `Apply` scratch locals, then `extra_i32` i32 locals
-/// (Task 4 dynamic subscripts; 0 when the program has none).
+/// [`APPLY_LOCAL_COUNT`] f64 `Apply` scratch locals, then
+/// [`VECTOR_F64_LOCAL_COUNT`] f64 vector-op scratch locals, then
+/// [`VECTOR_I32_LOCAL_COUNT`] i32 vector-op scratch locals, then `extra_i32` i32
+/// locals (Task 4 dynamic subscripts; 0 when the program has none).
 ///
 /// Defined once (and consumed by both `module.rs`'s function builders and the
 /// `#[cfg(test)]` harness) so the declared local *types and order* match the
-/// indices [`apply_locals_for`] and [`extra_i32_local_base`] hand out. Param 0
-/// is `module_off`. The extra i32s come *last* so they never disturb the
-/// `apply_locals` indices.
+/// indices [`apply_locals_for`], [`vector_f64_locals_for`],
+/// [`vector_i32_locals_for`], and [`extra_i32_local_base`] hand out. Param 0 is
+/// `module_off`. The vector locals sit at a *fixed* offset (independent of
+/// `extra_i32`) so the dynamic-subscript extra i32s -- placed last -- shift by a
+/// constant and never disturb the `apply_locals` indices.
 pub(crate) fn opcode_fn_locals(cond_depth: usize, extra_i32: u32) -> Vec<(u32, ValType)> {
     vec![
         (1, ValType::F64),
         (cond_depth as u32, ValType::I32),
         (APPLY_LOCAL_COUNT, ValType::F64),
+        (VECTOR_F64_LOCAL_COUNT, ValType::F64),
+        (VECTOR_I32_LOCAL_COUNT, ValType::I32),
         (extra_i32, ValType::I32),
     ]
+}
+
+/// The [`VECTOR_F64_LOCAL_COUNT`] vector-op scratch f64 local indices for a
+/// function with `cond_depth` condition locals. They follow param 0, the scratch
+/// f64 (index 1), the `cond_depth` i32 condition locals, and the
+/// [`APPLY_LOCAL_COUNT`] `Apply` f64s. Threaded into
+/// [`EmitCtx::vector_f64_locals`].
+pub(crate) fn vector_f64_locals_for(cond_depth: usize) -> [u32; VECTOR_F64_LOCAL_COUNT as usize] {
+    let base = 2 + cond_depth as u32 + APPLY_LOCAL_COUNT;
+    [base, base + 1, base + 2, base + 3, base + 4]
+}
+
+/// The [`VECTOR_I32_LOCAL_COUNT`] vector-op scratch i32 local indices for a
+/// function with `cond_depth` condition locals. They follow the
+/// [`VECTOR_F64_LOCAL_COUNT`] vector-op f64s. Threaded into
+/// [`EmitCtx::vector_i32_locals`].
+pub(crate) fn vector_i32_locals_for(cond_depth: usize) -> [u32; VECTOR_I32_LOCAL_COUNT as usize] {
+    let base = 2 + cond_depth as u32 + APPLY_LOCAL_COUNT + VECTOR_F64_LOCAL_COUNT;
+    [base, base + 1, base + 2]
 }
 
 /// First wasm local index of the `extra_i32` dynamic-subscript scratch locals
 /// for a function with `cond_depth` condition locals: past param 0
 /// (`module_off`), the scratch f64 (index 1), the `cond_depth` i32 condition
-/// locals, and the [`APPLY_LOCAL_COUNT`] `Apply` f64s. Threaded into
-/// [`EmitCtx::extra_i32_local_base`] so the dynamic-subscript local allocator
-/// draws from exactly the declared range.
+/// locals, the [`APPLY_LOCAL_COUNT`] `Apply` f64s, the
+/// [`VECTOR_F64_LOCAL_COUNT`] vector-op f64s, and the [`VECTOR_I32_LOCAL_COUNT`]
+/// vector-op i32s. Threaded into [`EmitCtx::extra_i32_local_base`] so the
+/// dynamic-subscript local allocator draws from exactly the declared range.
 pub(crate) fn extra_i32_local_base(cond_depth: usize) -> u32 {
-    2 + cond_depth as u32 + APPLY_LOCAL_COUNT
+    2 + cond_depth as u32 + APPLY_LOCAL_COUNT + VECTOR_F64_LOCAL_COUNT + VECTOR_I32_LOCAL_COUNT
 }
 
 /// The three `Apply` scratch f64 local indices `[a, b, c]` for a function with
@@ -743,7 +808,7 @@ pub(crate) fn max_condition_depth(bc: &ByteCode) -> usize {
 /// Combined with a constant `memarg.offset` of `chunk_base + off*8`, this
 /// addresses `chunk_base + (module_off + off) * 8`, matching the VM's
 /// `curr[module_off + off]` / `next[module_off + off]`.
-fn push_module_relative_base(ctx: &EmitCtx, f: &mut Function) {
+pub(crate) fn push_module_relative_base(ctx: &EmitCtx, f: &mut Function) {
     f.instruction(&Instruction::LocalGet(ctx.module_off_local));
     f.instruction(&Instruction::I32Const(SLOT_SIZE as i32));
     f.instruction(&Instruction::I32Mul);
@@ -1409,6 +1474,55 @@ fn emit_ops(
                 ));
             }
 
+            // ── Vector operations (Phase 6) ───────────────────────────────
+            // Each reads its inputs from the compile-time view stack (top =
+            // last) + the operand stack and writes its result array to its
+            // `write_temp_id` temp region -- except `VectorSelect`, which
+            // reduces to ONE scalar pushed on the stack. The view-stack reads +
+            // unroll-budget charging happen here (where `EmitState` lives); the
+            // wasm emission lives in `super::vector`, mirroring the matching VM
+            // arm element-for-element. The reducers leave the view descriptor on
+            // the stack for the trailing `PopView`, exactly like the Task-2
+            // reducers (the production pattern is `Push*View; <op>; PopView`).
+            Opcode::VectorSelect {} => {
+                // expr_view = top, sel_view = top-1 (vm.rs:2448-2449).
+                let n = state.view_stack.len();
+                if n < 2 {
+                    return Err(WasmGenError::Unsupported(
+                        "wasmgen: VectorSelect needs two views on the stack".to_string(),
+                    ));
+                }
+                let expr_view = state.view_stack[n - 1].clone();
+                let sel_view = state.view_stack[n - 2].clone();
+                // The gather unrolls over `min(sel, expr)` elements.
+                let size = sel_view.size().min(expr_view.size());
+                state.charge_unroll(size)?;
+                super::vector::emit_vector_select(&sel_view, &expr_view, ctx, f)?;
+            }
+            Opcode::VectorElmMap {
+                write_temp_id,
+                full_source_len,
+            } => {
+                // offset_view = top, source_view = top-1 (vm_vector_elm_map.rs).
+                let n = state.view_stack.len();
+                if n < 2 {
+                    return Err(WasmGenError::Unsupported(
+                        "wasmgen: VectorElmMap needs two views on the stack".to_string(),
+                    ));
+                }
+                let offset_view = state.view_stack[n - 1].clone();
+                let source_view = state.view_stack[n - 2].clone();
+                // The per-element map unrolls over the offset view's size.
+                state.charge_unroll(offset_view.size())?;
+                super::vector::emit_vector_elm_map(
+                    &source_view,
+                    &offset_view,
+                    *write_temp_id,
+                    *full_source_len,
+                    ctx,
+                    f,
+                )?;
+            }
             Opcode::Ret => {
                 // The caller emits the function's terminating `End`.
             }
@@ -2247,7 +2361,7 @@ fn push_gf_directory_addr(
 /// A 4-byte (i32) memory access with a static byte `offset` (for reading a GF
 /// directory entry's two i32 fields). The directory is 8-byte aligned, so a
 /// 4-byte access at offset 0 or 4 is naturally aligned.
-fn i32_memarg(offset: u64) -> MemArg {
+pub(crate) fn i32_memarg(offset: u64) -> MemArg {
     MemArg {
         offset,
         align: 2, // log2(4): a 4-byte i32 access
@@ -2324,11 +2438,50 @@ fn resolve_dim_list_raw(ctx: &EmitCtx, dim_list_id: u16) -> Result<Vec<u16>, Was
 
 /// The absolute byte address of temp element `index` of temp `temp_id`:
 /// `temp_storage_base + (temp_offsets[temp_id] + index) * 8`.
-fn temp_element_byte_addr(ctx: &EmitCtx, temp_id: u8, index: u32) -> Result<u64, WasmGenError> {
+pub(crate) fn temp_element_byte_addr(
+    ctx: &EmitCtx,
+    temp_id: u8,
+    index: u32,
+) -> Result<u64, WasmGenError> {
     let temp_off = *ctx.ctx.temp_offsets.get(temp_id as usize).ok_or_else(|| {
         WasmGenError::Unsupported(format!("wasmgen: temp id {temp_id} out of range"))
     })? as u64;
     Ok(u64::from(ctx.temp_storage_base) + (temp_off + u64::from(index)) * u64::from(SLOT_SIZE))
+}
+
+/// Emit the wasm analogue of the VM's `fill_temp_nan` (`vm.rs:2866-2881`): store
+/// IEEE `f64::NAN` (NOT the finite `crate::float::NA` sentinel) into every slot
+/// of temp `temp_id`'s region, `temp_storage[temp_offsets[temp_id] ..
+/// temp_offsets[temp_id + 1]]` (or `.. temp_total_size` for the last temp).
+///
+/// The span is compile-time-known and small (one temp's worth of slots), so the
+/// stores are unrolled. Used by the Phase-6 vector ops (`super::vector`) for the
+/// invalid-input-view branch.
+pub(crate) fn emit_fill_temp_nan(
+    ctx: &EmitCtx,
+    temp_id: u8,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let idx = temp_id as usize;
+    let start = *ctx.ctx.temp_offsets.get(idx).ok_or_else(|| {
+        WasmGenError::Unsupported(format!("wasmgen: temp id {temp_id} out of range"))
+    })?;
+    let end = ctx
+        .ctx
+        .temp_offsets
+        .get(idx + 1)
+        .copied()
+        .unwrap_or(ctx.ctx.temp_total_size);
+    for slot in start..end {
+        // f64.store wants [addr_i32, value_f64]; the per-slot byte offset rides
+        // in the constant memarg, so the dynamic address is a constant 0.
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&f64_const(f64::NAN));
+        f.instruction(&Instruction::F64Store(memarg(
+            u64::from(ctx.temp_storage_base) + (slot as u64) * u64::from(SLOT_SIZE),
+        )));
+    }
+    Ok(())
 }
 
 /// Lower `LoadTempDynamic { temp_id }`: pop a runtime index (the VM does
@@ -2366,9 +2519,9 @@ fn emit_load_temp_dynamic(
 /// here.
 ///
 /// Landed with the view machinery (Task 1) as the single element-read primitive;
-/// its first consumer is the array reducer (Task 2), with the iteration loop
-/// (Task 3) and Phase 6 to follow.
-fn emit_view_element_load(
+/// its first consumer is the array reducer (Task 2), the iteration loop (Task 3)
+/// and the Phase-6 vector ops (`super::vector`).
+pub(crate) fn emit_view_element_load(
     desc: &ViewDesc,
     iter_idx: usize,
     ctx: &EmitCtx,

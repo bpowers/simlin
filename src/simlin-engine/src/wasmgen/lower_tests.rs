@@ -63,12 +63,25 @@ fn ctx_with_cond_depth(depth: usize) -> EmitCtx<'static> {
         // build their own ctx with a real temp base + context.
         temp_storage_base: 0,
         // Dynamic-subscript scratch i32 locals (Task 4) follow the scratch
-        // f64 / condition i32s / Apply f64s; `build_module` declares exactly
-        // `count_extra_i32_locals(bc)` of them at this base.
+        // f64 / condition i32s / Apply f64s / the vector-op scratch blocks;
+        // `build_module` declares exactly `count_extra_i32_locals(bc)` of them
+        // at this base.
         extra_i32_local_base: extra_i32_local_base(depth),
+        // The fixed Phase-6 vector-op scratch local blocks.
+        vector_f64_locals: vector_f64_locals_for(depth),
+        vector_i32_locals: vector_i32_locals_for(depth),
+        // The vector-op scratch region: well past TEMP_BASE (8192) but within
+        // the harness's single 64 KiB memory page, so the small test views'
+        // sort-pair / collected-value staging never collides with temp_storage.
+        vector_scratch_base: VECTOR_SCRATCH_BASE,
         ctx: empty_ctx(),
     }
 }
+
+/// Byte offset of the vector-op scratch region for the test harness. Past
+/// `TEMP_BASE` (8192) and any small test temp region, with ~6000 f64 slots of
+/// headroom before the 64 KiB page end -- ample for the tiny test views.
+const VECTOR_SCRATCH_BASE: u32 = 16384;
 
 fn bc(literals: Vec<f64>, code: Vec<Opcode>) -> ByteCode {
     ByteCode { literals, code }
@@ -2722,10 +2735,12 @@ fn run_invalid_view_reduce(reduce: Opcode) -> f64 {
         ..ctx_with_cond_depth(0)
     };
 
-    // The validity i32 local index: opcode_fn_locals(0) declares param 0 +
-    // 1 scratch f64 + 0 cond + 3 apply f64 = locals 0..5 (indices 1..=4
-    // declared). The next free local index is 5.
-    let valid_local = 5u32;
+    // The validity i32 local index: it is the first index past every standard
+    // opcode-fn local (the scratch f64, the cond i32s, the Apply f64s, and the
+    // Phase-6 vector-op f64/i32 scratch blocks), i.e. exactly where the
+    // dynamic-subscript "extra i32" locals begin. The shim below pushes a single
+    // i32 local at that index for the validity flag.
+    let valid_local = extra_i32_local_base(0);
 
     let mut module = Module::new();
     let helpers = build_helpers();
@@ -3616,4 +3631,397 @@ fn unroll_cap_has_headroom_over_realistic_arrays() {
         MAX_UNROLL_UNITS >= 10_000,
         "the unroll cap must leave ample headroom for realistic arrayed models"
     );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Phase 6 Task 1: VECTOR SELECT + VECTOR ELM MAP
+//
+// `VectorSelect` reduces two views (a selector mask + an expression array) to
+// ONE scalar pushed on the stack. `VectorElmMap` maps a source array through a
+// per-element offset array into a `write_temp_id` temp region. Both are run
+// under DLR-FT and cross-checked against the VM: VectorSelect against a faithful
+// oracle of the `vm.rs:2444-2502` arm, VectorElmMap against the sibling
+// `crate::vm_vector_elm_map::vector_elm_map` function directly.
+// ════════════════════════════════════════════════════════════════════════
+
+/// The VM `VectorSelect` oracle (mirroring `vm.rs:2444-2502`): zip the two views
+/// to the shorter size, collect `expr` where `is_truthy(sel)`, then dispatch the
+/// action (1=min, 2=mean, 3=max, 4=product, else sum) with the empty-selection
+/// fallback to `max_value`.
+fn vm_vector_select_oracle(
+    sel_view: &StaticArrayView,
+    expr_view: &StaticArrayView,
+    sel_data: &[f64],
+    expr_data: &[f64],
+    max_value: f64,
+    action: i32,
+) -> f64 {
+    let sel_rv = sel_view.to_runtime_view();
+    let expr_rv = expr_view.to_runtime_view();
+    let size = sel_rv.size().min(expr_rv.size());
+    let mut selected: Vec<f64> = Vec::new();
+    let mut sel_idx: SmallVec<[u16; 4]> = smallvec::smallvec![0; sel_rv.dims.len()];
+    let mut expr_idx: SmallVec<[u16; 4]> = smallvec::smallvec![0; expr_rv.dims.len()];
+    for _ in 0..size {
+        let sel_off = sel_rv.flat_offset(&sel_idx);
+        let sel_val = sel_data[sel_rv.base_off as usize + sel_off];
+        if crate::vm::is_truthy(sel_val) {
+            let expr_off = expr_rv.flat_offset(&expr_idx);
+            selected.push(expr_data[expr_rv.base_off as usize + expr_off]);
+        }
+        crate::vm::increment_indices(&mut sel_idx, &sel_rv.dims);
+        crate::vm::increment_indices(&mut expr_idx, &expr_rv.dims);
+    }
+    if selected.is_empty() {
+        max_value
+    } else {
+        match action {
+            1 => selected.iter().cloned().fold(f64::INFINITY, f64::min),
+            2 => selected.iter().sum::<f64>() / selected.len() as f64,
+            3 => selected.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+            4 => selected.iter().product(),
+            _ => selected.iter().sum(),
+        }
+    }
+}
+
+/// Run `PushStaticView(sel); PushStaticView(expr); VectorSelect` over a `curr`
+/// slab. The two views are pushed sel-then-expr so `expr_view = top`,
+/// `sel_view = top-1` (matching the VM). `max_value`/`action` are pushed as the
+/// two operands beneath `VectorSelect` (the VM pops `action` then `max_value`).
+#[allow(clippy::too_many_arguments)]
+fn run_vector_select(
+    sel_view: StaticArrayView,
+    expr_view: StaticArrayView,
+    sel_base: u32,
+    expr_base: u32,
+    data: &[f64],
+    max_value: f64,
+    action: f64,
+) -> f64 {
+    let mut context = ByteCodeContext::default();
+    let sel_id = context.add_static_view(sel_view);
+    let expr_id = context.add_static_view(expr_view);
+    let ctx = ctx_with_arrays(&context);
+    let _ = (sel_base, expr_base);
+    let code = vec![
+        Opcode::LoadConstant { id: 0 }, // max_value (pushed first)
+        Opcode::LoadConstant { id: 1 }, // action (pushed second, on top)
+        Opcode::PushStaticView { view_id: sel_id },
+        Opcode::PushStaticView { view_id: expr_id },
+        Opcode::VectorSelect {},
+        Opcode::PopView {},
+        Opcode::PopView {},
+    ];
+    run(
+        &bc(vec![max_value, action], code),
+        &ctx,
+        true,
+        0,
+        &seed_run(0, data),
+        None,
+    )
+}
+
+/// Assert the emitted `VectorSelect` matches the VM oracle for `action`, on the
+/// shared `sel`/`expr` fixture seeded from `data` (sel slots 0..4, expr 4..8).
+fn assert_vector_select_matches(action: f64, max_value: f64) {
+    let sel = dense_view(0, &[4]);
+    let expr = dense_view(4, &[4]);
+    let data = [1.0, 0.0, 1.0, 1.0, 10.0, 20.0, 30.0, 40.0];
+    let got = run_vector_select(sel.clone(), expr.clone(), 0, 4, &data, max_value, action);
+    let want = vm_vector_select_oracle(&sel, &expr, &data, &data, max_value, action.round() as i32);
+    if want.is_nan() {
+        assert!(got.is_nan(), "action {action}: expected NaN, got {got}");
+    } else {
+        assert_eq!(got, want, "action {action}: got {got}, want {want}");
+    }
+}
+
+#[test]
+fn vector_select_sum_matches_vm() {
+    // sel = [1, 0, 1, 1] (mask), expr = [10, 20, 30, 40], action 5 (sum).
+    // Selected = [10, 30, 40] -> 80.
+    assert_vector_select_matches(5.0, -1.0);
+    let sel = dense_view(0, &[4]);
+    let expr = dense_view(4, &[4]);
+    let data = [1.0, 0.0, 1.0, 1.0, 10.0, 20.0, 30.0, 40.0];
+    let got = run_vector_select(sel, expr, 0, 4, &data, -1.0, 5.0);
+    assert_eq!(got, 80.0);
+}
+
+#[test]
+fn vector_select_each_action_matches_vm() {
+    // 1=min, 2=mean, 3=max, 4=product, and a few "else -> sum" actions. The
+    // selected set is [10, 30, 40]: min 10, mean 80/3, max 40, product 12000,
+    // sum 80.
+    for action in [1.0, 2.0, 3.0, 4.0, 0.0, 5.0, 7.0] {
+        assert_vector_select_matches(action, -1.0);
+    }
+}
+
+#[test]
+fn vector_select_empty_selection_returns_max_value() {
+    // An all-false mask selects nothing, so the result is `max_value` for every
+    // action (the VM's `if selected.is_empty() { max_value }`).
+    let sel = dense_view(0, &[4]);
+    let expr = dense_view(4, &[4]);
+    // Mask all zero.
+    let data = [0.0, 0.0, 0.0, 0.0, 10.0, 20.0, 30.0, 40.0];
+    for action in [1.0, 2.0, 3.0, 4.0, 5.0] {
+        let got = run_vector_select(sel.clone(), expr.clone(), 0, 4, &data, 123.5, action);
+        let want = vm_vector_select_oracle(&sel, &expr, &data, &data, 123.5, action.round() as i32);
+        assert_eq!(
+            got, want,
+            "action {action}: empty selection must be max_value"
+        );
+        assert_eq!(got, 123.5);
+    }
+}
+
+#[test]
+fn vector_select_nan_in_mask_is_truthy_like_vm() {
+    // is_truthy(NaN) is true (approx_eq(NaN, 0) is false), so a NaN mask entry
+    // SELECTS its expr value, exactly as the VM does. Mask = [NaN, 0, 1]:
+    // selects expr[0] and expr[2].
+    let sel = dense_view(0, &[3]);
+    let expr = dense_view(3, &[3]);
+    let data = [f64::NAN, 0.0, 1.0, 100.0, 200.0, 300.0];
+    for action in [1.0, 3.0, 5.0] {
+        let got = run_vector_select(sel.clone(), expr.clone(), 3, 3, &data, -1.0, action);
+        let want = vm_vector_select_oracle(&sel, &expr, &data, &data, -1.0, action.round() as i32);
+        assert_eq!(
+            got, want,
+            "action {action}: NaN mask entry must select its expr"
+        );
+    }
+}
+
+#[test]
+fn vector_select_zip_stops_at_shorter_view() {
+    // sel has 4 elements, expr has 2: the VM zips to min(4, 2) = 2, so only the
+    // first two (sel, expr) pairs are considered. Mask [1, 1, ...] selects
+    // expr[0], expr[1]; the trailing sel entries never read a (nonexistent)
+    // expr element.
+    let sel = dense_view(0, &[4]);
+    let expr = dense_view(4, &[2]);
+    let data = [1.0, 1.0, 1.0, 1.0, 7.0, 11.0];
+    let got = run_vector_select(sel.clone(), expr.clone(), 0, 4, &data, -1.0, 5.0);
+    let want = vm_vector_select_oracle(&sel, &expr, &data, &data, -1.0, 5);
+    assert_eq!(got, want);
+    assert_eq!(got, 18.0, "sum of the first two expr values");
+}
+
+#[test]
+fn vector_select_nan_expr_value_ignored_by_minmax_like_vm() {
+    // A selected expr value of NaN is ignored by min/max (the VM folds with
+    // `f64::min`/`f64::max`, which return the non-NaN operand), so wasm `f64.min`/
+    // `f64.max` (NaN-propagating) would diverge -- this pins the faithful
+    // NaN-ignoring fold. Selected = [10, NaN, 40]: min 10, max 40 (NOT NaN);
+    // sum/mean/product DO see the NaN (VM uses `+`/`*`, which propagate).
+    let sel = dense_view(0, &[3]);
+    let expr = dense_view(3, &[3]);
+    let data = [1.0, 1.0, 1.0, 10.0, f64::NAN, 40.0];
+    // min and max must be exactly 10 and 40 (NaN ignored).
+    assert_eq!(
+        run_vector_select(sel.clone(), expr.clone(), 3, 3, &data, -1.0, 1.0),
+        10.0
+    );
+    assert_eq!(
+        run_vector_select(sel.clone(), expr.clone(), 3, 3, &data, -1.0, 3.0),
+        40.0
+    );
+    // sum/product propagate the NaN, matching the VM (cross-checked vs oracle).
+    for action in [2.0, 4.0, 5.0] {
+        assert_vector_select_nan_expr(&sel, &expr, &data, action);
+    }
+}
+
+fn assert_vector_select_nan_expr(
+    sel: &StaticArrayView,
+    expr: &StaticArrayView,
+    data: &[f64],
+    action: f64,
+) {
+    let got = run_vector_select(sel.clone(), expr.clone(), 3, 3, data, -1.0, action);
+    let want = vm_vector_select_oracle(sel, expr, data, data, -1.0, action.round() as i32);
+    if want.is_nan() {
+        assert!(got.is_nan(), "action {action}: expected NaN, got {got}");
+    } else {
+        assert_eq!(got, want, "action {action}");
+    }
+}
+
+// ── VectorElmMap parity vs the sibling VM function ────────────────────────
+
+/// Run `PushStaticView(source); PushStaticView(offset); VectorElmMap` over a
+/// `curr` slab seeded from `data`, writing temp 0, and read back `count` temp
+/// slots. The source view is pushed first (`top-1`), the offset view second
+/// (`top`), matching the VM (`offset_view = top, source_view = top-1`).
+fn run_vector_elm_map(
+    source: StaticArrayView,
+    offset: StaticArrayView,
+    full_source_len: u32,
+    data: &[f64],
+    temp_count: usize,
+    temp_slots: usize,
+) -> Vec<f64> {
+    let mut context = ByteCodeContext::default();
+    context.set_temp_info(vec![0], temp_slots);
+    let src_id = context.add_static_view(source);
+    let off_id = context.add_static_view(offset);
+    let code = vec![
+        Opcode::PushStaticView { view_id: src_id },
+        Opcode::PushStaticView { view_id: off_id },
+        Opcode::VectorElmMap {
+            write_temp_id: 0,
+            full_source_len,
+        },
+        Opcode::PopView {},
+        Opcode::PopView {},
+    ];
+    run_and_read_temps(&context, code, vec![], &seed_run(0, data), temp_count)
+}
+
+/// The VM oracle for `VectorElmMap`: run the sibling
+/// `crate::vm_vector_elm_map::vector_elm_map` over `RuntimeView`s built from the
+/// same static views, reading `curr` from `data`. Returns the written temp 0
+/// slots (`temp_slots` wide).
+fn vm_elm_map_oracle(
+    source: &StaticArrayView,
+    offset: &StaticArrayView,
+    full_source_len: u32,
+    data: &[f64],
+    temp_slots: usize,
+) -> Vec<f64> {
+    let mut context = ByteCodeContext::default();
+    context.set_temp_info(vec![0], temp_slots);
+    let mut temp_storage = vec![0.0f64; temp_slots];
+    crate::vm_vector_elm_map::vector_elm_map(
+        &source.to_runtime_view(),
+        &offset.to_runtime_view(),
+        0,
+        full_source_len,
+        data,
+        &mut temp_storage,
+        &context,
+    );
+    temp_storage
+}
+
+/// Assert the emitted `VectorElmMap` matches the sibling VM function element-for-
+/// element over the `offset_view` size (NaN compares as NaN).
+fn assert_elm_map_matches(
+    source: &StaticArrayView,
+    offset: &StaticArrayView,
+    full_source_len: u32,
+    data: &[f64],
+    temp_slots: usize,
+) {
+    let got = run_vector_elm_map(
+        source.clone(),
+        offset.clone(),
+        full_source_len,
+        data,
+        temp_slots,
+        temp_slots,
+    );
+    let want = vm_elm_map_oracle(source, offset, full_source_len, data, temp_slots);
+    assert_eq!(got.len(), want.len());
+    for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+        if w.is_nan() {
+            assert!(g.is_nan(), "elm_map slot {i}: expected NaN, got {g}");
+        } else {
+            assert_eq!(g, w, "elm_map slot {i}: got {g}, want {w}");
+        }
+    }
+}
+
+#[test]
+fn vector_elm_map_full_array_in_range_matches_vm() {
+    // Full contiguous source [a,b,c,d] in curr slots 0..4; offset [1,3,0,2] in
+    // curr slots 4..8 -> result = source[round(offset[i])] = [b, d, a, c].
+    let source = dense_view(0, &[4]);
+    let offset = dense_view(4, &[4]);
+    let data = [10.0, 20.0, 30.0, 40.0, 1.0, 3.0, 0.0, 2.0];
+    assert_elm_map_matches(&source, &offset, 4, &data, 4);
+    let got = run_vector_elm_map(source, offset, 4, &data, 4, 4);
+    assert_eq!(got, vec![20.0, 40.0, 10.0, 30.0]);
+}
+
+#[test]
+fn vector_elm_map_out_of_range_offset_is_nan() {
+    // An offset that lands outside [0, full_source_len) yields NaN (no modulo).
+    // Source len 3; offsets [0, 5, -1] -> [source[0], NaN, NaN].
+    let source = dense_view(0, &[3]);
+    let offset = dense_view(3, &[3]);
+    let data = [7.0, 8.0, 9.0, 0.0, 5.0, -1.0];
+    assert_elm_map_matches(&source, &offset, 3, &data, 3);
+    let got = run_vector_elm_map(source, offset, 3, &data, 3, 3);
+    assert_eq!(got[0], 7.0);
+    assert!(got[1].is_nan() && got[2].is_nan());
+}
+
+#[test]
+fn vector_elm_map_nan_offset_is_nan() {
+    // A NaN offset yields NaN, regardless of the (would-be) index.
+    let source = dense_view(0, &[3]);
+    let offset = dense_view(3, &[3]);
+    let data = [7.0, 8.0, 9.0, 1.0, f64::NAN, 2.0];
+    assert_elm_map_matches(&source, &offset, 3, &data, 3);
+    let got = run_vector_elm_map(source, offset, 3, &data, 3, 3);
+    assert_eq!(got[0], 8.0);
+    assert!(got[1].is_nan());
+    assert_eq!(got[2], 9.0);
+}
+
+#[test]
+fn vector_elm_map_offset_rounds_half_away_like_vm() {
+    // The VM rounds the offset with `f64::round` (half away from zero), NOT wasm
+    // `f64.nearest` (half to even). Offsets [0.5, 1.5, 2.5] round to [1, 2, 3]
+    // (away from zero), not [0, 2, 2] (to even). Cross-checked vs the sibling.
+    let source = dense_view(0, &[4]);
+    let offset = dense_view(4, &[3]);
+    let data = [10.0, 20.0, 30.0, 40.0, 0.5, 1.5, 2.5];
+    assert_elm_map_matches(&source, &offset, 4, &data, 3);
+    let got = run_vector_elm_map(source, offset, 4, &data, 3, 3);
+    // round(0.5)=1 -> source[1]=20; round(1.5)=2 -> 30; round(2.5)=3 -> 40.
+    assert_eq!(got, vec![20.0, 30.0, 40.0]);
+}
+
+#[test]
+fn vector_elm_map_sliced_source_base_i_matches_vm() {
+    // A strict-slice source: a 2-D source [DimA(2), DimB(3)] (full storage 6
+    // elements in curr 0..6), sliced... here we exercise the carried-axis base_i
+    // projection via a source whose remaining dim shares its dim_id with the
+    // offset view. Source = matrix[A,B] row-major; offset view is 2-D [A,B] with
+    // matching dim_ids, so element (a,b) reads source[base_i(a) + round(off)].
+    //
+    // Build source as [A(2), B(3)] dim_ids [0,1] over storage [0..6], and offset
+    // as [A(2)] dim_id [0] -- but VECTOR ELM MAP needs offset.size() result
+    // slots, so use a 2-D offset matching the result. We model the genuine
+    // shape: source full storage len 6, source view is the full [2,3], offset
+    // [2,3] with the same dim_ids; base_i is 0 (full array) and offset indexes
+    // the whole storage. To exercise a NON-zero base_i we instead slice the
+    // source to a single row and give the offset that row's dim.
+    //
+    // Simpler faithful base_i case: source view = row 1 of a [2,3] matrix
+    // (offset folds in 3), dim_ids [1] (DimB); offset view [3] dim_id [1]. Then
+    // base_i = source.flat_offset([b]) projects DimB, and the result reads
+    // storage[3 + round(off)]. full_source_len = 6.
+    let mut source = dense_view(0, &[3]); // the sliced row: dims [3]
+    source.offset = 3; // row 1 of a [2,3] matrix starts at flat 3
+    source.dim_ids = SmallVec::from_slice(&[1]); // DimB
+    let mut offset = dense_view(6, &[3]);
+    offset.dim_ids = SmallVec::from_slice(&[1]); // DimB, matching the source
+    // Storage: matrix rows [r0: 100,101,102][r1: 200,201,202]; offsets [0,1,2].
+    let data = [100.0, 101.0, 102.0, 200.0, 201.0, 202.0, 0.0, 1.0, 2.0];
+    assert_elm_map_matches(&source, &offset, 6, &data, 3);
+    let got = run_vector_elm_map(source, offset, 6, &data, 3, 3);
+    // base_i for element b is source.flat_offset([b]) = 3 + b; + round(off[b]):
+    //   b=0: 3 + 0 -> storage[3]=200; b=1: 4 + 1 -> storage[5]=202;
+    //   b=2: 5 + 2 = 7 -> OOB (>=6) -> NaN.
+    assert_eq!(got[0], 200.0);
+    assert_eq!(got[1], 202.0);
+    assert!(got[2].is_nan());
 }

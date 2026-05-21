@@ -347,6 +347,27 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         .checked_add(temp_storage_bytes)
         .ok_or_else(too_large)?;
 
+    // The vector-op scratch region follows `temp_storage`. The Phase-6 vector
+    // ops (`VectorSelect`'s collected selected values, `VectorSortOrder`/`Rank`'s
+    // `(value, idx)` sort pairs) stage data here. A sort pair region for a view
+    // of `size` elements needs `2 * size` f64; the largest view a vector op
+    // processes is bounded by the largest temp it writes (`temp_total_size`) and
+    // by the model's slot count (a var-view input), so `2 * max(temp_total_size,
+    // n_slots)` f64 is a safe upper bound. Reserved unconditionally (a model
+    // without vector ops simply never reads it); the bound is tiny for scalar
+    // models. `vector_scratch_base` is threaded into every `EmitCtx`.
+    let vector_scratch_base = total_bytes;
+    let vector_scratch_slots = temp_total_size
+        .max(n_slots)
+        .checked_mul(2)
+        .ok_or_else(too_large)?;
+    let vector_scratch_bytes = vector_scratch_slots
+        .checked_mul(SLOT_SIZE)
+        .ok_or_else(too_large)?;
+    let total_bytes = vector_scratch_base
+        .checked_add(vector_scratch_bytes)
+        .ok_or_else(too_large)?;
+
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
 
     // save_every mirrors vm.rs::run_to: max(1, round(save_step / dt)).
@@ -384,6 +405,9 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         helpers: helper_fns,
         temp_storage_base,
         extra_i32_local_base: lower::extra_i32_local_base(cond_depth),
+        vector_f64_locals: lower::vector_f64_locals_for(cond_depth),
+        vector_i32_locals: lower::vector_i32_locals_for(cond_depth),
+        vector_scratch_base,
         ctx: &root.context,
     };
 
