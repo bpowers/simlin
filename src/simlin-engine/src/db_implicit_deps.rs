@@ -16,6 +16,11 @@ pub struct ImplicitVarDeps {
     pub dt_init_only_referenced_vars: BTreeSet<String>,
     pub dt_previous_referenced_vars: BTreeSet<String>,
     pub initial_previous_referenced_vars: BTreeSet<String>,
+    /// Lookup tables referenced via `LOOKUP(table, x)` -- layout references, not
+    /// data-flow deps. Kept out of `dt_deps`/`initial_deps` (no ordering/causal
+    /// edge) but needed by the implicit-var fragment compiler's metadata +
+    /// tables map (issue #606). Mirrors `VariableDeps::referenced_tables`.
+    pub referenced_tables: BTreeSet<String>,
 }
 
 pub(super) fn extract_implicit_var_deps(
@@ -63,6 +68,8 @@ pub(super) fn extract_implicit_var_deps(
                     dt_init_only_referenced_vars: BTreeSet::new(),
                     dt_previous_referenced_vars: BTreeSet::new(),
                     initial_previous_referenced_vars: BTreeSet::new(),
+                    // A module never references a lookup table via LOOKUP(...).
+                    referenced_tables: BTreeSet::new(),
                 };
             }
 
@@ -115,6 +122,11 @@ pub(super) fn extract_implicit_var_deps(
                 dt_init_only_referenced_vars: dt_classification.init_only,
                 dt_previous_referenced_vars: dt_classification.previous_only,
                 initial_previous_referenced_vars: init_classification.previous_only,
+                referenced_tables: dt_classification
+                    .referenced_tables
+                    .into_iter()
+                    .chain(init_classification.referenced_tables)
+                    .collect(),
             }
         })
         .collect()

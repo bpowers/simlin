@@ -248,6 +248,41 @@ pub struct SourceVariable {
     pub compat: datamodel::Compat,
 }
 
+/// Whether a source variable is a standalone lookup-only table: a
+/// graphical-function holder with an empty-or-sentinel equation and no real
+/// functional input. Such a variable is a *table indexed by an explicit input*
+/// (`y = table(input)`), not a value-bearing variable -- it is excluded from the
+/// runlist and produces no saved series (issue #606). This is the salsa-layer
+/// twin of `crate::variable::var_is_lookup_only`, evaluated over the
+/// `SourceEquation` + `SourceGraphicalFunction` representation; both delegate to
+/// the shared `crate::variable::is_empty_or_sentinel` core (which also accepts
+/// the legacy `"0+0"` sentinel for back-compat).
+///
+/// Salsa-tracked so its `bool` output backdates: callers in tracked contexts
+/// (`build_var_info` -> `model_dependency_graph`, `calc_flattened_offsets`)
+/// must NOT gain a fine-grained dependency on a variable's equation TEXT, which
+/// would invalidate the dependency graph on every unrelated equation edit.
+#[salsa::tracked]
+pub(crate) fn source_var_is_table_only(db: &dyn Db, var: SourceVariable) -> bool {
+    use crate::variable::is_empty_or_sentinel;
+    match var.equation(db) {
+        // Scalar / A2A: one equation string plus a variable-level gf.
+        SourceEquation::Scalar(s) | SourceEquation::ApplyToAll(_, s) => {
+            var.gf(db).is_some() && is_empty_or_sentinel(s)
+        }
+        // Arrayed: a pure per-element table holder iff it has tables (a
+        // variable-level or any per-element gf) and EVERY element equation (and
+        // the EXCEPT default, if any) is empty/sentinel.
+        SourceEquation::Arrayed(_, elements, default, _) => {
+            let has_tables = var.gf(db).is_some() || elements.iter().any(|e| e.gf.is_some());
+            has_tables
+                && !elements.is_empty()
+                && elements.iter().all(|e| is_empty_or_sentinel(&e.equation))
+                && default.as_deref().map(is_empty_or_sentinel).unwrap_or(true)
+        }
+    }
+}
+
 // ── Mirror types for salsa compatibility ───────────────────────────────
 //
 // These types mirror the datamodel types but derive salsa::Update.
@@ -861,6 +896,12 @@ pub struct VariableDeps {
     pub dt_previous_referenced_vars: BTreeSet<String>,
     /// Variables referenced *only* through PREVIOUS(...) in the initial AST.
     pub initial_previous_referenced_vars: BTreeSet<String>,
+    /// Standalone lookup tables referenced via `LOOKUP(table, x)`. These are
+    /// layout references (codegen needs the table's offset for its reverse-map)
+    /// but NOT data-flow dependencies, so they are kept out of `dt_deps` /
+    /// `initial_deps` (no runlist-ordering or causal/LTM edge) and reunited with
+    /// the dep set only by the fragment compiler's metadata/tables build (#606).
+    pub referenced_tables: BTreeSet<String>,
 }
 
 fn canonical_module_input_set(module_input_names: &[String]) -> BTreeSet<Ident<Canonical>> {
@@ -892,6 +933,8 @@ fn variable_direct_dependencies_impl(
                 dt_init_only_referenced_vars: BTreeSet::new(),
                 dt_previous_referenced_vars: BTreeSet::new(),
                 initial_previous_referenced_vars: BTreeSet::new(),
+                // A module never references a lookup table via LOOKUP(...).
+                referenced_tables: BTreeSet::new(),
             }
         }
         _ => {
@@ -945,6 +988,11 @@ fn variable_direct_dependencies_impl(
                 dt_init_only_referenced_vars: dt_classification.init_only,
                 dt_previous_referenced_vars: dt_classification.previous_only,
                 initial_previous_referenced_vars: init_classification.previous_only,
+                referenced_tables: dt_classification
+                    .referenced_tables
+                    .into_iter()
+                    .chain(init_classification.referenced_tables)
+                    .collect(),
             }
         }
     }
@@ -1276,7 +1324,7 @@ fn init_value_equivalence_group(
                 use crate::builtins::{BuiltinContents, walk_builtin_expr};
                 let mut found = false;
                 walk_builtin_expr(builtin, |c| {
-                    if let BuiltinContents::Expr(inner) = c
+                    if let BuiltinContents::Expr(inner) | BuiltinContents::LookupTable(inner) = c
                         && !found
                     {
                         found = find_value_branches(inner, &mut *out);
@@ -4362,6 +4410,10 @@ fn compile_implicit_var_phase_bytecodes(
             .dt_deps
             .iter()
             .chain(iv_deps.initial_deps.iter())
+            // Lookup tables referenced by this implicit var are layout
+            // references, not data-flow deps -- include them so the fragment's
+            // metadata + tables map can resolve `LOOKUP(table, x)` (#606).
+            .chain(iv_deps.referenced_tables.iter())
             .cloned()
             .collect()
     } else {
@@ -5696,28 +5748,33 @@ fn calc_flattened_offsets_incremental(
 
     for ident in &sorted_names {
         let ident_canonical = Ident::new(ident.as_str());
-        let size =
-            if let Some(svar) = source_vars.get(ident.as_str()) {
-                if svar.kind(db) == SourceVariableKind::Module {
-                    let sub_model_name = svar.model_name(db);
-                    let sub_offsets =
-                        calc_flattened_offsets_incremental(db, project, sub_model_name, false);
-                    let mut sub_var_names: Vec<&Ident<Canonical>> = sub_offsets.keys().collect();
-                    sub_var_names.sort_unstable();
-                    for sub_name in &sub_var_names {
-                        let (sub_off, sub_size) = sub_offsets[*sub_name];
-                        offsets.insert(
-                            Ident::join(
-                                &ident_canonical.as_canonical_str(),
-                                &sub_name.as_canonical_str(),
-                            ),
-                            (i + sub_off, sub_size),
-                        );
-                    }
-                    let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
-                    sub_size
-                } else {
-                    let var_sz = variable_size(db, *svar, project);
+        let size = if let Some(svar) = source_vars.get(ident.as_str()) {
+            if svar.kind(db) == SourceVariableKind::Module {
+                let sub_model_name = svar.model_name(db);
+                let sub_offsets =
+                    calc_flattened_offsets_incremental(db, project, sub_model_name, false);
+                let mut sub_var_names: Vec<&Ident<Canonical>> = sub_offsets.keys().collect();
+                sub_var_names.sort_unstable();
+                for sub_name in &sub_var_names {
+                    let (sub_off, sub_size) = sub_offsets[*sub_name];
+                    offsets.insert(
+                        Ident::join(
+                            &ident_canonical.as_canonical_str(),
+                            &sub_name.as_canonical_str(),
+                        ),
+                        (i + sub_off, sub_size),
+                    );
+                }
+                let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
+                sub_size
+            } else {
+                let var_sz = variable_size(db, *svar, project);
+                // A lookup-only table is not a saved output variable: reserve
+                // its layout slot (so these offsets stay in lockstep with
+                // `compute_layout`, whose map codegen's table-identity
+                // reverse-map resolves against) but do NOT expose its name in
+                // this VM/Results map -- it produces no series (issue #606).
+                if !source_var_is_table_only(db, *svar) {
                     if var_sz > 1 {
                         // Array variable: produce per-element offsets
                         let dims = variable_dimensions(db, *svar, project);
@@ -5735,12 +5792,13 @@ fn calc_flattened_offsets_incremental(
                     } else {
                         offsets.insert(ident_canonical.clone(), (i, 1));
                     }
-                    var_sz
                 }
-            } else {
-                offsets.insert(ident_canonical.clone(), (i, 1));
-                1
-            };
+                var_sz
+            }
+        } else {
+            offsets.insert(ident_canonical.clone(), (i, 1));
+            1
+        };
         i += size;
     }
 

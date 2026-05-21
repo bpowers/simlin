@@ -663,8 +663,13 @@ impl<'input> ConversionContext<'input> {
                 }
                 Ok((eq_str, None, None))
             }
+            // A bare lookup table imports as the canonical lookup-only form: an
+            // empty equation + a graphical function (no functional input). It is
+            // a static table indexed by callers, not a value-bearing variable
+            // (issue #606). The legacy `"0+0"` sentinel is still ACCEPTED on read
+            // (see `variable::is_empty_or_sentinel`) for already-serialized models.
             MdlEquation::Lookup(_, table) => Ok((
-                LOOKUP_SENTINEL.to_string(),
+                String::new(),
                 None,
                 Some(self.build_graphical_function(var_name, table)),
             )),
@@ -945,7 +950,8 @@ impl<'input> ConversionContext<'input> {
             }
             MdlEquation::Lookup(lhs, table) => {
                 let gf = self.build_graphical_function(&lhs.name, table);
-                let (equation, compat) = self.make_equation(lhs, "0+0");
+                // Canonical lookup-only form: empty equation + gf (issue #606).
+                let (equation, compat) = self.make_equation(lhs, "");
                 Ok((equation, compat, Some(gf)))
             }
             MdlEquation::WithLookup(lhs, input, table) => {
@@ -2446,8 +2452,9 @@ x = y * 2
     }
 
     #[test]
-    fn test_lookup_only_scalar_emits_0_plus_0() {
-        // A scalar variable defined only with a lookup table should have "0+0" as equation
+    fn test_lookup_only_scalar_emits_empty_equation() {
+        // A scalar variable defined only with a lookup table imports as the
+        // canonical lookup-only form: an empty equation + a gf (issue #606).
         let mdl = "x( (0,0),(1,1) )
 ~ ~|
 \\\\\\---///
@@ -2465,7 +2472,10 @@ x = y * 2
         if let Some(Variable::Aux(a)) = x {
             match &a.equation {
                 Equation::Scalar(eq) => {
-                    assert_eq!(eq, "0+0", "Lookup-only variable should have 0+0 equation");
+                    assert_eq!(
+                        eq, "",
+                        "lookup-only variable should have an empty equation (canonical form)"
+                    );
                 }
                 other => panic!("Expected Scalar equation, got {:?}", other),
             }
@@ -2476,8 +2486,9 @@ x = y * 2
     }
 
     #[test]
-    fn test_lookup_only_arrayed_emits_0_plus_0() {
-        // An arrayed variable with element-specific lookups should have "0+0" for each element
+    fn test_lookup_only_arrayed_emits_empty_equation() {
+        // An arrayed variable with element-specific lookups imports each element
+        // as the canonical lookup-only form: an empty equation + a gf (#606).
         let mdl = "DimA: a1, a2
 ~ ~|
 x[a1]( (0,0),(1,1) )
@@ -2503,8 +2514,8 @@ x[a2]( (0,0),(2,2) )
                     assert_eq!(elements.len(), 2);
                     for (_, eq, _, _) in elements {
                         assert_eq!(
-                            eq, "0+0",
-                            "Lookup-only arrayed element should have 0+0 equation"
+                            eq, "",
+                            "lookup-only arrayed element should have an empty equation"
                         );
                     }
                 }

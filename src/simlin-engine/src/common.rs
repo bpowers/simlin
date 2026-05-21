@@ -108,6 +108,11 @@ pub enum ErrorCode {
     // appended freely. Keep additions at the END of the enum anyway, to keep
     // the existing discriminants stable for any in-memory consumers.
     DuplicateMacroName,
+    /// A standalone lookup-only table (a graphical function with no driving
+    /// input) was referenced bare -- without applying it to an argument. A
+    /// table has no scalar value of its own; it must be called, e.g.
+    /// `LOOKUP(my_table, x)` or `my_table(x)` (issue #606).
+    LookupReferencedWithoutArgument,
 }
 
 impl fmt::Display for ErrorCode {
@@ -168,6 +173,7 @@ impl fmt::Display for ErrorCode {
             BadOverride => "bad_override",
             UnsupportedForSerialization => "unsupported_for_serialization",
             DuplicateMacroName => "duplicate_macro_name",
+            LookupReferencedWithoutArgument => "lookup_referenced_without_argument",
         };
 
         write!(f, "{name}")

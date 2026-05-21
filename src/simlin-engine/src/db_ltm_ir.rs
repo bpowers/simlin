@@ -436,6 +436,10 @@ fn walk_all_in_expr(
                     child_in_reducer,
                     sites,
                 ),
+                // A graphical-function table reference is static data, not a
+                // causal edge: emit no `from -> consumer` reference site for the
+                // table itself (only the index argument carries real edges).
+                BuiltinContents::LookupTable(_) => {}
             });
         }
         Expr2::Op1(_, operand, _, _) => {

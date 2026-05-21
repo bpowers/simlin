@@ -243,6 +243,11 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
             engine::ErrorCode::DimensionInScalarContext => SimlinErrorCode::Generic,
             engine::ErrorCode::BadOverride => SimlinErrorCode::BadOverride,
             engine::ErrorCode::UnsupportedForSerialization => SimlinErrorCode::Generic,
+            // A bare reference to a lookup table (used as a value without an
+            // argument) is, at the FFI granularity, a generic model error; the
+            // precise distinction is preserved in the engine-level `ErrorCode`
+            // and the error's `details` message (issue #606).
+            engine::ErrorCode::LookupReferencedWithoutArgument => SimlinErrorCode::Generic,
         }
     }
 }

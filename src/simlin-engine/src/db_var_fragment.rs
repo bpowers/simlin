@@ -210,11 +210,16 @@ fn collect_var_dependencies(
         existing_keys.insert(Ident::new("final_time"));
     }
 
-    // Collect all dep names from both dt and initial deps
+    // Collect all dep names from both dt and initial deps, plus the lookup
+    // tables this variable references. A table reference is a layout reference
+    // (codegen needs the table's offset for the reverse-map), not a data-flow
+    // dependency, so it lives in `referenced_tables` rather than the dep sets
+    // (issue #606); the fragment metadata still needs it.
     let all_dep_names: BTreeSet<&String> = deps
         .dt_deps
         .iter()
         .chain(deps.initial_deps.iter())
+        .chain(deps.referenced_tables.iter())
         .collect();
 
     // For each dep, build a dimension-only Variable for context.
@@ -589,6 +594,47 @@ pub(crate) fn lower_var_fragment(
     // branches of `if isModuleInput(...)` remain compilable in the mini-context.
     let deps = variable_direct_dependencies_with_context(db, var, project, module_ident_context);
 
+    // A bare reference to a standalone lookup-only table -- the table used as a
+    // value rather than called via `LOOKUP(table, x)` -- has no scalar value of
+    // its own and is rejected (issue #606). After the table-reference /
+    // data-flow-dependency split (`referenced_tables`), a lookup-only table can
+    // ONLY reach `dt_deps` / `initial_deps` via such a bare `Var(table)`
+    // reference (a real call lands in `referenced_tables`), so its presence in
+    // the dependency sets is exactly this error.
+    {
+        let source_vars = model.variables(db);
+        let referenced: BTreeSet<&String> = deps
+            .dt_deps
+            .iter()
+            .chain(deps.initial_deps.iter())
+            .collect();
+        let bare_table_diags: Vec<Diagnostic> = referenced
+            .into_iter()
+            .filter_map(|dep| {
+                let dep_sv = source_vars.get(dep.as_str())?;
+                crate::db::source_var_is_table_only(db, *dep_sv).then(|| Diagnostic {
+                    model: model.name(db).clone(),
+                    variable: Some(var.ident(db).clone()),
+                    error: DiagnosticError::Model(crate::common::Error::new(
+                        crate::common::ErrorKind::Model,
+                        crate::common::ErrorCode::LookupReferencedWithoutArgument,
+                        Some(format!(
+                            "'{dep}' is a lookup table and must be called with an \
+                             argument, e.g. {dep}(x) or LOOKUP({dep}, x)"
+                        )),
+                    )),
+                    severity: DiagnosticSeverity::Error,
+                })
+            })
+            .collect();
+        if !bare_table_diags.is_empty() {
+            return LoweredVarFragment::Fatal {
+                unit_diags,
+                fatal_diags: bare_table_diags,
+            };
+        }
+    }
+
     let project_models = project.models(db);
 
     // Lower the variable for compilation. Module-type variables need
@@ -630,6 +676,7 @@ pub(crate) fn lower_var_fragment(
             .dt_deps
             .iter()
             .chain(deps.initial_deps.iter())
+            .chain(deps.referenced_tables.iter())
             .collect();
         for dep_name in &dep_names {
             let effective = dep_name
@@ -916,6 +963,7 @@ pub(crate) fn lower_var_fragment(
         .dt_deps
         .iter()
         .chain(deps.initial_deps.iter())
+        .chain(deps.referenced_tables.iter())
         .collect();
     let mut extra_dep_names: Vec<String> = Vec::new();
     if var.kind(db) == SourceVariableKind::Stock {

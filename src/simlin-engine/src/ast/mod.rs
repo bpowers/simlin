@@ -671,7 +671,10 @@ impl LatexVisitor {
                 walk_builtin_expr(builtin, |contents| {
                     let arg = match contents {
                         BuiltinContents::Ident(id, _loc) => format!("\\mathrm{{{id}}}"),
-                        BuiltinContents::Expr(expr) => self.walk(expr),
+                        // The lookup table identity is a printed argument too.
+                        BuiltinContents::Expr(expr) | BuiltinContents::LookupTable(expr) => {
+                            self.walk(expr)
+                        }
                     };
                     args.push(arg);
                 });

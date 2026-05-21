@@ -1752,39 +1752,22 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
     // value on a meaningful magnitude. (#595 tracks the remaining deeper init-
     // ordering soundness gap; its nondeterminism half is fixed by `e24b0080`.)
 
-    // ===== lookup-only tables the model-free reader cannot drop (9) =====
+    // ===== lookup-only tables (0): NONE =====
     // A bare graphical function is a *table indexed by an explicit input*, not a
-    // time series. The reader therefore DROPS standalone lookup-only descriptors
-    // rather than reconstruct a series for them
-    // (`record_results::standalone_lookup_only_descriptors`); most of C-LEARN's
-    // lookup-only variables -- `historical_gdp_lookup`, `historical_forestry_lookup`,
-    // `rs_gdp_in_trillions`, `rs_ch4`, `rs_co2_ff`, the ozone/forcings scalars --
-    // are now dropped and gone from this list (their data, where it matters, is
-    // carried by the consumer variables that call them, which are emitted as
-    // ordinary owners). The 9 below are lookup-only tables the model-free reader
-    // cannot safely distinguish from a real owner, so it still emits a ghost
-    // column the comparator flags:
-    //   - rs_hfc* (8): the descriptor forward-links to the WIDER 2-D consumer
-    //     `RS HFC[COP, HFC type]` (forward width 63 != the descriptor's 7), so the
-    //     conservative width gate declines to drop it.
-    //   - ref_global_emissions_from_graph_lookup: its forward link is Time/0, so
-    //     the forward-link guard declines to drop it.
-    // The deeper bug is in the ENGINE: a bare lookup is a table, and lowering it
-    // to `gf(Time)` synthesises a phantom series that the comparator then flags
-    // against these ghosts. Fixing that (so the engine produces no series for a
-    // bare lookup) removes them from the matched set entirely -- tracked by #606
-    // (the engine `gf(Time)` lowering, introduced for #590). #597 is the general
-    // reader fix (drop lookup-only descriptors); these nine evade it only because
-    // the model-free reader can't safely distinguish them from real owners.
-    "rs_hfc125",
-    "rs_hfc134a",
-    "rs_hfc143a",
-    "rs_hfc152a",
-    "rs_hfc227ea",
-    "rs_hfc23",
-    "rs_hfc245ca",
-    "rs_hfc32",
-    "ref_global_emissions_from_graph_lookup",
+    // time series. The engine no longer synthesises a phantom `gf(Time)` series
+    // for a standalone lookup-only table: such a table is not a value-bearing
+    // variable, so it is excluded from the runlist and from the saved output
+    // (#606 RESOLVED; this was the `gf(Time)` lowering introduced for #590). The
+    // VDF reader still emits a ghost column for the few descriptors it cannot
+    // model-free distinguish from a real owner -- the `rs_hfc*` family (whose
+    // descriptor forward-links to the wider 2-D consumer `RS HFC[COP, HFC type]`)
+    // and `ref_global_emissions_from_graph_lookup` (forward link Time/0) -- but
+    // since the engine now produces NO sim series for those idents, the
+    // comparator simply skips them (a VDF ident with no sim counterpart is not a
+    // mismatch), so NONE remain in this carve-out. Their data, where it matters,
+    // is carried by the consumer variables that call them, emitted as ordinary
+    // owners and matched normally.
+
     // ===== benign-near-zero (2): divergence ONLY on near-zero magnitudes =====
     // (cross-simulator f32/integration noise), never on a meaningful value.
     // Tracked in #591 cluster 2.
@@ -1830,14 +1813,13 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
 //     `DoesNotExist` blockers (incl. the `"goal 1.5 for temperature"` quoted-
 //     period ident, #559) are likewise cleared.
 //
-// What remains is a short, fully-attributed residual of 13 base variables
-// (Phases 1-3 reconciled the rest; the reader now DROPS standalone lookup-only
-// descriptors -- bare graphical-function tables, not series -- so most of them
-// leave the comparison entirely), explicitly excluded via `EXPECTED_VDF_RESIDUAL`
-// under a taxonomy: 9 lookup-only tables the model-free reader cannot safely
-// distinguish from a real owner and so still emits a ghost column for (the
-// engine's `gf(Time)` lowering of a bare lookup is the deeper bug, tracked by #606);
-// 2 benign-near-zero; and 2 `:NA:`-arithmetic boundary series (#591). The engine
+// What remains is a short, fully-attributed residual of 4 base variables
+// (Phases 1-3 reconciled the rest; the reader DROPS standalone lookup-only
+// descriptors -- bare graphical-function tables, not series -- and the ENGINE
+// now produces no series at all for a lookup-only table (#606 RESOLVED), so
+// every lookup-only ident leaves the comparison entirely), explicitly excluded
+// via `EXPECTED_VDF_RESIDUAL` under a taxonomy: 2 benign-near-zero; and 2
+// `:NA:`-arithmetic boundary series (#591). The engine
 // is PROVEN correct on all of them; the engine-genuine and NaN-vs-`:NA:`
 // categories are empty (the sole engine-genuine divergence, init-runlist
 // nondeterminism, was fixed in `e24b0080`). The exclusion is a transparent,
