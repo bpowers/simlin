@@ -684,8 +684,10 @@ fn emit_save_advance(
 
     f.instruction(&I::End); // end if
 
-    // Advance: copy the freshly integrated stock values next -> curr.
-    let next_base = n_slots * SLOT_SIZE;
+    // Advance: copy the freshly integrated stock values next -> curr. The
+    // `next` chunk's slot-0 byte base is one chunk past `curr`, i.e. the chunk
+    // stride (`compile_simulation` sets `next_base = stride`).
+    let next_base = regions.stride;
     for &off in stock_offsets {
         f.instruction(&I::I32Const(0));
         f.instruction(&I::I32Const(0));
@@ -729,8 +731,14 @@ fn emit_load_slot(f: &mut Function, base: u32, idx: u32) {
     )));
 }
 
-/// Push the `i32.const 0` store address for slot `idx` of `base`. After this the
-/// caller pushes the f64 value and emits `emit_store_slot_value(base, idx)`.
+/// Push the store *address* half of an RK slot store: a bare `i32.const 0`.
+/// Every RK slot's full byte address (`base + idx*8`) rides in the matching
+/// [`emit_store_slot_value`]'s `memarg.offset`, so the dynamic address is always
+/// the constant 0 -- this half therefore needs no `base`/`idx`. Kept as the
+/// named symmetry partner of `emit_store_slot_value` (which it precedes at every
+/// call site, since `f64.store` consumes `[addr_i32, value_f64]`): inlining only
+/// this half would scatter unexplained `i32.const 0`s whose absolute-addressing
+/// intent is exactly what the pairing documents.
 fn emit_store_slot_addr(f: &mut Function) {
     f.instruction(&I::I32Const(0));
 }
@@ -766,7 +774,9 @@ fn emit_rk4_step(
     regions: &RunRegions,
 ) {
     let (saved, accum) = (regions.rk_saved_base, regions.rk_accum_base);
-    let next_base = regions.n_slots * SLOT_SIZE;
+    // The `next` chunk's slot-0 byte base == the chunk stride (`next` sits one
+    // chunk past `curr`); see `emit_save_advance`.
+    let next_base = regions.stride;
 
     // saved_time = curr[TIME]
     f.instruction(&I::I32Const(0));
@@ -893,7 +903,9 @@ fn emit_rk2_step(
     regions: &RunRegions,
 ) {
     let (saved, accum) = (regions.rk_saved_base, regions.rk_accum_base);
-    let next_base = regions.n_slots * SLOT_SIZE;
+    // The `next` chunk's slot-0 byte base == the chunk stride; see
+    // `emit_save_advance`.
+    let next_base = regions.stride;
 
     // saved_time = curr[TIME]
     f.instruction(&I::I32Const(0));
@@ -1729,6 +1741,123 @@ mod tests {
         assert!(
             (euler - rk2).abs() > 1e-6,
             "RK2 must differ from Euler (euler={euler}, rk2={rk2})"
+        );
+    }
+
+    /// A coupled two-stock Lotka-Volterra (predator-prey) model. Each stock's
+    /// flows read the *other* stock, so a single RK stage's trial-point
+    /// evaluation interleaves both stocks: `prey`'s `predation` outflow reads
+    /// `predator`, and `predator`'s `growth` inflow reads `prey`. This is what
+    /// the single-stock RK tests cannot exercise -- with two stocks the stage
+    /// math walks `stock_offsets` and keeps each stock's `saved[i]`/`accum[i]`
+    /// and trial `curr[off_i]` independent. A loop that aliased the scratch
+    /// across stocks, or iterated `stock_offsets` in an unstable order, would
+    /// corrupt one stock's trajectory and fail the VM-parity check below.
+    ///
+    /// Classic textbook parameters (alpha/beta/gamma/delta) on a short horizon
+    /// with a small dt: the system oscillates, both stay strictly positive, and
+    /// Euler vs RK4/RK2 visibly diverge (asserted by
+    /// `multi_stock_coupled_diverges_euler_vs_rk_in_vm`). 100 steps keeps the
+    /// un-JITed DLR-FT run well under the per-test budget.
+    fn lotka_volterra(
+        name: &str,
+        method: crate::datamodel::SimMethod,
+    ) -> crate::datamodel::Project {
+        crate::test_common::TestProject::new(name)
+            .with_sim_time(0.0, 5.0, 0.05)
+            .with_sim_method(method)
+            .aux("alpha", "1.1", None)
+            .aux("beta", "0.4", None)
+            .aux("gamma", "0.4", None)
+            .aux("delta", "0.1", None)
+            // prey:     d/dt = alpha*prey - beta*prey*predator
+            .stock("prey", "10", &["prey_birth"], &["predation"], None)
+            .flow("prey_birth", "alpha * prey", None)
+            .flow("predation", "beta * prey * predator", None)
+            // predator: d/dt = delta*prey*predator - gamma*predator
+            .stock("predator", "10", &["pred_growth"], &["pred_death"], None)
+            .flow("pred_growth", "delta * prey * predator", None)
+            .flow("pred_death", "gamma * predator", None)
+            .build_datamodel()
+    }
+
+    /// Meaningfulness precondition for the two-stock RK parity tests: the
+    /// coupled model's trajectory is genuinely method-dependent in the VM (the
+    /// oracle) for *both* stocks. Without this, a wasm RK loop that silently
+    /// degraded to Euler -- or never advanced the second stock -- could pass
+    /// `assert_matches_vm` against a coincidentally-identical VM Euler series.
+    #[test]
+    fn multi_stock_coupled_diverges_euler_vs_rk_in_vm() {
+        let last_two = |method| {
+            let datamodel = lotka_volterra("lv_vs_euler", method);
+            let sim = compile_sim(&datamodel, "main");
+            let mut vm = Vm::new(sim).expect("vm");
+            vm.run_to_end().expect("vm run");
+            let results = vm.into_results();
+            let read = |name: &str| {
+                let id = Ident::<Canonical>::from_str_unchecked(name);
+                let off = *results
+                    .offsets
+                    .get(&id)
+                    .unwrap_or_else(|| panic!("{name} offset"));
+                results.data[(results.step_count - 1) * results.step_size + off]
+            };
+            (read("prey"), read("predator"))
+        };
+        let (e_prey, e_pred) = last_two(crate::datamodel::SimMethod::Euler);
+        let (rk4_prey, rk4_pred) = last_two(crate::datamodel::SimMethod::RungeKutta4);
+        let (rk2_prey, rk2_pred) = last_two(crate::datamodel::SimMethod::RungeKutta2);
+        // Both stocks must move under RK4 and RK2 relative to Euler -- proving
+        // the stage math integrates each independently, not just the first.
+        assert!(
+            (e_prey - rk4_prey).abs() > 1e-6 && (e_pred - rk4_pred).abs() > 1e-6,
+            "RK4 must differ from Euler for both stocks \
+             (prey: euler={e_prey} rk4={rk4_prey}; predator: euler={e_pred} rk4={rk4_pred})"
+        );
+        assert!(
+            (e_prey - rk2_prey).abs() > 1e-6 && (e_pred - rk2_pred).abs() > 1e-6,
+            "RK2 must differ from Euler for both stocks \
+             (prey: euler={e_prey} rk2={rk2_prey}; predator: euler={e_pred} rk2={rk2_pred})"
+        );
+    }
+
+    /// Coverage gap closed: a TWO-STOCK COUPLED model under RK4 matches the VM
+    /// per-variable, per-chunk. The phase's other RK tests are single-stock, so
+    /// this is the only check that the four-stage stage math keeps two stocks'
+    /// `saved[i]`/`accum[i]`/`curr[off_i]` independent and iterates
+    /// `stock_offsets` in a stable order across all four stages. `checked >= 2`
+    /// pins that both stocks (not just `prey`) reached parity.
+    #[test]
+    fn compile_simulation_two_stock_coupled_rk4_matches_vm() {
+        let datamodel = lotka_volterra("lv_rk4", crate::datamodel::SimMethod::RungeKutta4);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (two-stock RK4)");
+        let checked = assert_matches_vm(sim, &artifact);
+        // Both stocks plus the four flows and four params all match; pin >= 2 so
+        // the two coupled stocks specifically are among the compared variables.
+        assert!(
+            checked >= 2,
+            "expected to compare both prey + predator, only checked {checked}"
+        );
+        for name in ["prey", "predator"] {
+            assert!(
+                artifact.layout.var_offsets.iter().any(|(n, _)| n == name),
+                "{name} should be in the layout"
+            );
+        }
+    }
+
+    /// The RK2 (Heun) companion to `compile_simulation_two_stock_coupled_rk4_matches_vm`:
+    /// the two-stage trial step over two coupled stocks matches the VM.
+    #[test]
+    fn compile_simulation_two_stock_coupled_rk2_matches_vm() {
+        let datamodel = lotka_volterra("lv_rk2", crate::datamodel::SimMethod::RungeKutta2);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (two-stock RK2)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(
+            checked >= 2,
+            "expected to compare both prey + predator, only checked {checked}"
         );
     }
 
