@@ -942,18 +942,22 @@ fn ensure_wasm_matches_runs_supported_scalar_model() {
     );
 }
 
-/// AC3.1: a model using a not-yet-supported construct (here the `^` operator,
-/// which lowers to the Phase-2 `Op2::Exp` opcode) is SKIPPED, not failed --
+/// AC3.1: a model using a not-yet-supported construct is SKIPPED, not failed --
 /// `compile_simulation` returns `WasmGenError::Unsupported` and the helper
 /// surfaces it as `Skipped(msg)` carrying that message.
+///
+/// The `^` operator (`Op2::Exp`) used to be the example here, but it is
+/// supported as of Phase 2 Task 3; RK4 integration is a stable still-unsupported
+/// construct (`compile_simulation` rejects any non-Euler method until the RK
+/// phase lands), so it now drives the `Skipped` path.
 #[test]
 fn ensure_wasm_matches_skips_unsupported_model() {
     let datamodel = simlin_engine::test_common::TestProject::new("unsupported")
         .with_sim_time(0.0, 5.0, 1.0)
-        .aux("base", "2", None)
-        .aux("powered", "base ^ TIME", None)
-        .stock("acc", "0", &["growth"], &[], None)
-        .flow("growth", "powered", None)
+        .with_sim_method(simlin_engine::datamodel::SimMethod::RungeKutta4)
+        .aux("inflow_rate", "2", None)
+        .stock("level", "0", &["inflow"], &[], None)
+        .flow("inflow", "inflow_rate", None)
         .build_datamodel();
 
     let expected = vm_results(&datamodel);
@@ -966,7 +970,7 @@ fn ensure_wasm_matches_skips_unsupported_model() {
             );
         }
         WasmRunOutcome::Ran => {
-            panic!("a model using the unsupported `^` operator must be Skipped, not Ran")
+            panic!("a model using unsupported RK4 integration must be Skipped, not Ran")
         }
     }
 }

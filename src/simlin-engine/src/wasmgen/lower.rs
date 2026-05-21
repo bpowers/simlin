@@ -39,10 +39,10 @@
 //! only on the VM's private execution copy (`vm.rs:395-398`), so its
 //! `BinVarVar` / `AssignAddVarVarCurr` / ... family never reaches a consumer.
 //!
-//! Anything outside the supported scalar core -- an array/module/lookup opcode,
-//! a not-yet-supported `Op2` (Mod/Exp, deferred to Phase 2 Tasks 2-3), or a
-//! late-fusion superinstruction that somehow appeared -- returns
-//! `WasmGenError::Unsupported` rather than emitting a wrong module.
+//! Anything outside the supported scalar core -- an array/module/lookup opcode
+//! or a late-fusion superinstruction that somehow appeared -- returns
+//! `WasmGenError::Unsupported` rather than emitting a wrong module. (Every
+//! `Op2` variant, including `Mod`/`Exp`, is supported as of Phase 2.)
 //!
 //! ## Emitted helper functions
 //!
@@ -144,6 +144,12 @@ pub(crate) struct HelperFns {
     /// `approx_eq(a: f64, b: f64) -> i32` (1 = approximately equal, else 0),
     /// reproducing `crate::float::approx_eq` (`float_cmp` 0.10 defaults).
     pub approx_eq: u32,
+    /// `mod_euclid(l: f64, r: f64) -> f64`, reproducing `f64::rem_euclid` (the
+    /// VM's `Op2::Mod`): a result in `[0, |r|)`. A self-contained helper (rather
+    /// than an inline sequence) because the euclidean remainder needs both
+    /// operands live across several uses, exceeding the single assign-scratch
+    /// local available to `emit_op2`.
+    pub mod_euclid: u32,
     /// Open-coded transcendental helpers (`super::math`), each `(f64) -> f64`
     /// except [`pow`](Self::pow) which is `(f64, f64) -> f64`. The bodies are
     /// emitted in `super::math`; the composed ones (`tan`/`asin`/`acos`/
@@ -172,7 +178,6 @@ pub(crate) struct HelperFns {
     pub acos: u32,
     #[allow(dead_code)]
     pub log10: u32,
-    #[allow(dead_code)]
     pub pow: u32,
 }
 
@@ -221,6 +226,13 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
         body: emit_approx_eq(),
     });
 
+    let mod_euclid = functions.len() as u32;
+    functions.push(HelperFn {
+        params: vec![ValType::F64, ValType::F64],
+        results: vec![ValType::F64],
+        body: emit_mod_euclid(),
+    });
+
     // Leaf transcendentals (no inter-helper calls).
     let exp = push_unary(&mut functions, super::math::emit_exp());
     let ln = push_unary(&mut functions, super::math::emit_ln());
@@ -245,6 +257,7 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
     BuiltHelpers {
         fns: HelperFns {
             approx_eq,
+            mod_euclid,
             exp,
             ln,
             sin,
@@ -379,6 +392,53 @@ fn emit_ordered_bits(f: &mut Function, src_local: u32, bits_local: u32) {
     f.instruction(&Ins::I64LtS);
     // select(neg, pos, cond): neg if cond != 0 else pos
     f.instruction(&Ins::Select);
+}
+
+// `mod_euclid` helper local layout. Params 0/1 are `l`/`r`; local 2 is the
+// truncated remainder `r0`.
+const ME_L: u32 = 0;
+const ME_R: u32 = 1;
+const ME_R0: u32 = 2;
+
+/// Build the body of `mod_euclid(l: f64, r: f64) -> f64`, reproducing
+/// `f64::rem_euclid` (the VM's `Op2::Mod`) exactly.
+///
+/// `rem_euclid` is `let r0 = l % r; if r0 < 0 { r0 + r.abs() } else { r0 }`,
+/// where the truncated remainder `l % r` is `l - r * (l / r).trunc()` (wasm has
+/// no `f64.rem`, so it is computed from `f64.div`/`f64.trunc`/`f64.mul`/
+/// `f64.sub`). The branch is a `select`. The result lies in `[0, |r|)` for a
+/// non-zero divisor; this trunc-then-adjust form is correct for negative
+/// divisors too (where a `floor`-based form would not be).
+fn emit_mod_euclid() -> Function {
+    use Instruction as Ins;
+    let mut f = Function::new([(1, ValType::F64)]);
+
+    // r0 = l - r * trunc(l / r)
+    f.instruction(&Ins::LocalGet(ME_L));
+    f.instruction(&Ins::LocalGet(ME_R));
+    f.instruction(&Ins::LocalGet(ME_L));
+    f.instruction(&Ins::LocalGet(ME_R));
+    f.instruction(&Ins::F64Div);
+    f.instruction(&Ins::F64Trunc);
+    f.instruction(&Ins::F64Mul);
+    f.instruction(&Ins::F64Sub);
+    f.instruction(&Ins::LocalSet(ME_R0));
+
+    // select(r0 + |r|, r0, r0 < 0): the adjusted value when r0 is negative,
+    // else r0 unchanged. wasm `select` yields the deeper operand when the cond
+    // is true, so push `r0 + |r|` first.
+    f.instruction(&Ins::LocalGet(ME_R0));
+    f.instruction(&Ins::LocalGet(ME_R));
+    f.instruction(&Ins::F64Abs);
+    f.instruction(&Ins::F64Add);
+    f.instruction(&Ins::LocalGet(ME_R0));
+    f.instruction(&Ins::LocalGet(ME_R0));
+    f.instruction(&f64_const(0.0));
+    f.instruction(&Ins::F64Lt);
+    f.instruction(&Ins::Select);
+
+    f.instruction(&Ins::End);
+    f
 }
 
 /// Push `call approx_eq` for two f64 operands already on the wasm stack
@@ -620,13 +680,16 @@ fn emit_op2(op: Op2, ctx: &EmitCtx, f: &mut Function) -> Result<(), WasmGenError
         // `And`/`Or` are `(is_truthy(l) OP is_truthy(r)) as f64`.
         Op2::And => emit_logical(ctx, f, Instruction::I32And),
         Op2::Or => emit_logical(ctx, f, Instruction::I32Or),
-        // Mod (rem_euclid) and Exp (powf) need runtime helpers landing in
-        // Phase 2 Tasks 2-3.
-        Op2::Mod | Op2::Exp => {
-            return Err(WasmGenError::Unsupported(format!(
-                "wasmgen: unsupported binary op {}",
-                op2_name(op)
-            )));
+        // `Exp` is `l.powf(r)`: the operands `[l, r]` are already in call
+        // order, so `call pow` directly. Matches `powf` for a positive base
+        // (a negative base diverges -- see `super::math::emit_pow`).
+        Op2::Exp => {
+            f.instruction(&Instruction::Call(ctx.helpers.pow));
+        }
+        // `Mod` is `l.rem_euclid(r)` (result in [0, |r|)), routed through the
+        // `mod_euclid` helper (`[l, r]` already in call order).
+        Op2::Mod => {
+            f.instruction(&Instruction::Call(ctx.helpers.mod_euclid));
         }
     }
     Ok(())
@@ -662,24 +725,6 @@ fn emit_logical(ctx: &EmitCtx, f: &mut Function, combine: Instruction) {
 fn emit_cmp(f: &mut Function, cmp: &Instruction) {
     f.instruction(cmp);
     f.instruction(&Instruction::F64ConvertI32U);
-}
-
-fn op2_name(op: Op2) -> &'static str {
-    match op {
-        Op2::Add => "Add",
-        Op2::Sub => "Sub",
-        Op2::Exp => "Exp",
-        Op2::Mul => "Mul",
-        Op2::Div => "Div",
-        Op2::Mod => "Mod",
-        Op2::Gt => "Gt",
-        Op2::Gte => "Gte",
-        Op2::Lt => "Lt",
-        Op2::Lte => "Lte",
-        Op2::Eq => "Eq",
-        Op2::And => "And",
-        Op2::Or => "Or",
-    }
 }
 
 /// Name an unsupported opcode without depending on `Debug` (feature-gated via
@@ -1245,24 +1290,12 @@ mod tests {
         assert_eq!(stored(code, vec![], &[(24, 10.0), (32, 3.0)], 40), 7.0);
     }
 
-    #[test]
-    fn bin_op_assign_with_unsupported_op_returns_error() {
-        // A fused unsupported op (e.g. Mod) must still error cleanly.
-        let mut func = Function::new([]);
-        let program = bc(
-            vec![],
-            vec![
-                Opcode::LoadVar { off: 0 },
-                Opcode::LoadVar { off: 1 },
-                Opcode::BinOpAssignCurr {
-                    op: Op2::Mod,
-                    off: 2,
-                },
-            ],
-        );
-        let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
-    }
+    // Note: every `Op2` variant is supported as of Phase 2 (Mod/Exp landed in
+    // Task 3), so there is no longer an unsupported operator to drive the
+    // `BinOpAssign*` error-propagation path. The fused-`Mod` form is exercised
+    // for correctness by `bin_op_assign_curr_mod_stores_rem_euclid`; the
+    // clean-error-on-unsupported-*opcode* path is covered by
+    // `unsupported_lookup_returns_error` / `unsupported_array_opcode_returns_error`.
 
     #[test]
     fn lowers_assign_curr_from_expr() {
@@ -1377,19 +1410,128 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_op2_mod_returns_error() {
+    fn op2_mod_lowers_without_error() {
+        // Mod is now supported (rem_euclid via the mod_euclid helper); lowering
+        // must succeed where Phase 1 returned Unsupported.
         let mut func = Function::new([]);
         let program = bc(vec![], vec![op2(Op2::Mod)]);
         let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+        assert!(result.is_ok(), "Op2::Mod should lower without error");
     }
 
     #[test]
-    fn unsupported_op2_exp_returns_error() {
+    fn op2_exp_lowers_without_error() {
+        // Exp is now supported (powf via the pow helper).
         let mut func = Function::new([]);
         let program = bc(vec![], vec![op2(Op2::Exp)]);
         let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+        assert!(result.is_ok(), "Op2::Exp should lower without error");
+    }
+
+    // ── Op2::Exp (pow) / Op2::Mod (rem_euclid) numeric parity ─────────────
+
+    /// Evaluate `l Op2::Exp r` (push l, push r, Op2::Exp) -> f64.
+    fn eval_exp(l: f64, r: f64) -> f64 {
+        value(
+            vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
+                op2(Op2::Exp),
+            ],
+            vec![l, r],
+            &[],
+        )
+    }
+
+    #[test]
+    fn op2_exp_matches_powf_for_positive_base() {
+        // The VM's `eval_op2` Exp is `l.powf(r)`. The wasm `pow` helper matches
+        // `powf` for a positive base across integer/fractional/negative
+        // exponents; assert within the documented helper tolerance.
+        let bases: [f64; 6] = [0.5, 1.0, 2.0, 3.7, 10.0, 100.0];
+        let exps: [f64; 9] = [-3.0, -1.5, -1.0, 0.0, 0.5, 1.0, 2.0, 2.5, 7.0];
+        for &l in &bases {
+            for &r in &exps {
+                let want = l.powf(r);
+                let got = eval_exp(l, r);
+                let abs = (got - want).abs();
+                let rel = if want != 0.0 { abs / want.abs() } else { abs };
+                assert!(
+                    abs <= 1e-9 || rel <= 1e-9,
+                    "Exp({l}, {r}): got {got}, want {want} (abs {abs:.3e}, rel {rel:.3e})",
+                );
+            }
+        }
+        // x == 1 and y == 0 are the helper's exact short-circuits.
+        assert_eq!(eval_exp(1.0, 42.0), 1.0);
+        assert_eq!(eval_exp(7.0, 0.0), 1.0);
+    }
+
+    /// Evaluate `l Op2::Mod r` (push l, push r, Op2::Mod) -> f64.
+    fn eval_mod(l: f64, r: f64) -> f64 {
+        value(
+            vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
+                op2(Op2::Mod),
+            ],
+            vec![l, r],
+            &[],
+        )
+    }
+
+    #[test]
+    fn op2_mod_matches_rem_euclid_all_sign_combos() {
+        // The VM's `eval_op2` Mod is `l.rem_euclid(r)` (result in [0, |r|)),
+        // NOT a truncated remainder. Cover all four sign combinations and
+        // non-integer operands.
+        let cases: &[(f64, f64)] = &[
+            (7.0, 3.0),
+            (-7.0, 3.0),
+            (7.0, -3.0),
+            (-7.0, -3.0),
+            (7.5, 2.5),
+            (-7.5, 2.5),
+            (7.5, -2.5),
+            (-7.5, -2.5),
+            (5.3, 2.1),
+            (-5.3, 2.1),
+            (5.3, -2.1),
+            (-5.3, -2.1),
+            (0.0, 3.0),
+            (3.0, 3.0),
+            (-3.0, 3.0),
+            (2.0, 4.0),
+        ];
+        for &(l, r) in cases {
+            let want = l.rem_euclid(r);
+            let got = eval_mod(l, r);
+            assert!(
+                (got - want).abs() < 1e-12,
+                "Mod({l}, {r}): got {got}, want {want}",
+            );
+            // The euclidean remainder is always in [0, |r|).
+            assert!(
+                (0.0..r.abs()).contains(&got),
+                "Mod({l}, {r}) = {got} not in [0, {})",
+                r.abs(),
+            );
+        }
+    }
+
+    #[test]
+    fn bin_op_assign_curr_mod_stores_rem_euclid() {
+        // The peephole-fused `Op2::Mod; AssignCurr` form must also lower (it was
+        // an Unsupported case in Phase 1). -7 mod 3 = 2 -> curr slot 5 (byte 40).
+        let code = vec![
+            Opcode::LoadConstant { id: 0 },
+            Opcode::LoadConstant { id: 1 },
+            Opcode::BinOpAssignCurr {
+                op: Op2::Mod,
+                off: 5,
+            },
+        ];
+        assert_eq!(stored(code, vec![-7.0, 3.0], &[], 40), 2.0);
     }
 
     #[test]
