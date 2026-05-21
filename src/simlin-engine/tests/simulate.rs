@@ -188,6 +188,33 @@ static TEST_MODELS: &[&str] = &[
 /// `Allocate*`) stay Skipped until Phase 6, and any true runtime-range model
 /// (`ViewRangeDynamic`) stays Skipped by design; no such model is in the active
 /// corpus today.
+///
+/// Phase 6 lowers the helper-heavy array builtins -- `VectorSelect`,
+/// `VectorElmMap`, `VectorSortOrder`, `Rank`, `LookupArray`, and the
+/// `AllocateAvailable`/`AllocateByPriority` market-clearing allocators (the
+/// open-coded `erfc`/`normal_cdf`/`alloc_curve`/`allocate_available` chain) --
+/// so the backend now covers every array-producing opcode the corpus emits.
+/// It STILL leaves the floor at 50: re-running `wasm_parity_floor` shows the
+/// same 8 `submodules are not supported` skips and no `TEST_MODELS` member
+/// flips Skipped->Ran, because the vector-op / allocation corpus models are
+/// deliberately NOT in `TEST_MODELS`. `vector.xmile` is gated against genuine
+/// Vensim's `vector.dat` (a narrowed comparison the unconditional `TEST_MODELS`
+/// loop cannot express -- GH #578/#576), and `allocate.xmile` has its own
+/// dedicated test; both `simulate_path`-family entry points run the inline
+/// `wasm_parity_hook`, so the wasm backend exercises these models end-to-end
+/// from their dedicated tests rather than from this floor subset. Verified
+/// `Ran` (not `Skipped`) via that hook on `simulates_vector_xmile_genuine` and
+/// `simulates_vector_simple_mdl` (`VectorSelect` + `VectorElmMap` +
+/// `VectorSortOrder`) and on `simulates_allocate_xmile` + `simulates_allocate_mdl`
+/// (`AllocateAvailable`). `Rank`, `LookupArray`, and `AllocateByPriority` are not
+/// reached by any active corpus model (no in-tree model uses VECTOR RANK or
+/// ALLOCATE BY PRIORITY, and `LookupArray` only arises from a wrapping reducer
+/// over an arrayed GF), so their parity is pinned by the inline `wasmgen` unit
+/// tests (`wasmgen/lower_tests.rs`: the `rank_*_matches_vm`,
+/// `lookup_array_*_matches_vm`, and `allocate_by_priority_*_matches_vm` cases),
+/// exactly as RK/`PREVIOUS`/`INIT` (Phase 4) and the view/reducer ops (Phase 5)
+/// are pinned by unit tests rather than by this corpus floor. The floor rises
+/// in Phase 7 when submodules land.
 const WASM_SUPPORTED_FLOOR: usize = 50;
 
 /// AC3.1 / AC3.3 rising-floor gate: run every (non-`#[ignore]`-class) corpus
