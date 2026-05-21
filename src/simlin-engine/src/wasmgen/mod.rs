@@ -2,29 +2,31 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! WebAssembly code-generation backend (proof of concept).
+//! WebAssembly code-generation backend.
 //!
 //! This backend is an alternative to the bytecode VM (`crate::vm`). Instead of
-//! interpreting opcodes, it lowers a model's resolved `compiler::expr::Expr` IR
-//! into a self-contained WebAssembly module that runs the whole simulation in
-//! one exported call, writing results into its own linear memory. The intended
-//! use case is interactive scrubbing: compile a model to wasm once, then
-//! re-run it on every slider change at display refresh rates.
+//! interpreting opcodes, it lowers a salsa-compiled `CompiledSimulation` (the
+//! VM's own input) into a self-contained WebAssembly module that runs the whole
+//! simulation in one exported call, writing results into its own linear memory.
+//! The intended use case is interactive scrubbing: compile a model to wasm
+//! once, then re-run it on every slider change at display refresh rates.
 //!
-//! Modules are emitted with the `wasm-encoder` crate. Correctness is validated
-//! in tests by executing the emitted module under the DLR-FT `wasm-interpreter`
-//! and comparing the results against the bytecode VM.
+//! The backend walks each `CompiledModule`'s un-fused opcode programs
+//! (`compiled_initials`/`compiled_flows`/`compiled_stocks`) and emits a wasm
+//! function per program plus a `run` driver (see `lower` for the per-opcode
+//! lowering and `module` for whole-model assembly). Modules are emitted with
+//! the `wasm-encoder` crate; correctness is validated in tests by executing the
+//! emitted module under the DLR-FT `wasm-interpreter` and comparing against the
+//! bytecode VM.
 //!
-//! Status: expression lowering (M1) is in place; whole-model assembly and the
-//! integration loop land in subsequent milestones.
+//! Status: scalar-core opcodes + Euler integration for a single root model are
+//! in place; arrays, modules, lookups, and RK2/RK4 land in subsequent phases
+//! (anything unsupported returns `WasmGenError::Unsupported`).
 
-mod expr;
 mod lower;
 mod module;
 
-pub use module::{
-    WasmArtifact, WasmLayout, compile_datamodel_to_wasm, compile_module, compile_simulation,
-};
+pub use module::{WasmArtifact, WasmLayout, compile_datamodel_to_wasm, compile_simulation};
 
 use std::fmt;
 
