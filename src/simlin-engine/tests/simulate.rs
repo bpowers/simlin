@@ -15,7 +15,7 @@ use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Method, Results, SimSpecs as Specs, Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
-use test_helpers::{ensure_results, ensure_results_excluding};
+use test_helpers::{WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
@@ -99,6 +99,94 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/xidz_zidz/xidz_zidz.xmile",
     "test/test-models/tests/unicode_characters/unicode_test_model.xmile",
 ];
+
+/// Monotonically-rising floor on how many `TEST_MODELS` the wasm backend runs
+/// to VM parity (an outcome of `Ran` from `ensure_wasm_matches`). Pinned to the
+/// count Phase 1 actually achieves; each subsequent phase widens the supported
+/// feature set and RAISES this floor. Dropping below it is a regression
+/// (wasm-backend AC3.1 / AC3.3): a model that used to clear the wasm backend no
+/// longer does.
+///
+/// Phase 1 supports scalar-core opcodes + Euler integration for a single root
+/// model. A corpus model runs to parity when its *post-element-expansion* flat
+/// opcode stream is entirely in the Phase 1 set
+/// (`LoadConstant`/`LoadVar`/`LoadGlobalVar`, the `Add`/`Sub`/`Mul`/`Div` and
+/// comparison `Op2`s, `Not`/`SetCond`/`If`, `AssignCurr`/`AssignNext`, plus the
+/// `AssignConstCurr`/`BinOpAssign*` peephole superinstructions the emitter
+/// handles). That includes arrayed apply-to-all / subscript models that expand
+/// to purely scalar per-element opcodes (no array-reducer or `LookupArray`
+/// opcode), because the emitter walks the flattened opcode stream. Models that
+/// reach for nested modules, builtins (`Opcode::Apply`), table lookups
+/// (`Opcode::Lookup`), array-reducer opcodes, the `^`/`MOD`/`=`/`AND`/`OR`
+/// operators, or RK2/RK4 are `Skipped`.
+///
+/// Phase 1 achieves 28 of the 58 active `TEST_MODELS`; the remaining 30 skip on
+/// one of the above out-of-scope constructs. Observed via `wasm_parity_floor`
+/// (run it with `-- --nocapture` to see the per-model skip reasons).
+const WASM_SUPPORTED_FLOOR: usize = 28;
+
+/// AC3.1 / AC3.3 rising-floor gate: run every (non-`#[ignore]`-class) corpus
+/// model in `TEST_MODELS` through the wasm backend and assert at least
+/// `WASM_SUPPORTED_FLOOR` of them run to VM parity. `expected` is the VM's own
+/// output (the parse + `compile_vm` + run path), so this is a direct
+/// wasm-vs-VM check independent of the on-disk reference files; the per-model
+/// inline hook (`wasm_parity_hook`) separately checks every supported model
+/// against its on-disk `expected`.
+///
+/// Iterating the full `TEST_MODELS` list under the un-JITed DLR-FT interpreter
+/// stays well within the suite's wall-clock budget at Phase 1 scope (the
+/// supported models are small scalar models; unsupported ones bail at
+/// `compile_simulation` before any interpreter run), so the gate covers the
+/// whole list rather than a subset.
+#[test]
+fn wasm_parity_floor() {
+    let mut ran = 0usize;
+    let mut skipped = 0usize;
+    for &path in TEST_MODELS {
+        let file_path = format!("../../{path}");
+        match wasm_parity_outcome_for_path(&file_path) {
+            WasmRunOutcome::Ran => ran += 1,
+            WasmRunOutcome::Skipped(msg) => {
+                skipped += 1;
+                eprintln!("wasm skipped {path}: {msg}");
+            }
+        }
+    }
+    eprintln!(
+        "wasm_parity_floor: {ran} of {} corpus models ran to VM parity ({skipped} skipped); floor {WASM_SUPPORTED_FLOOR}",
+        TEST_MODELS.len()
+    );
+    assert!(
+        ran >= WASM_SUPPORTED_FLOOR,
+        "wasm parity regression: only {ran} of {} corpus models ran to VM parity, \
+         below the pinned floor of {WASM_SUPPORTED_FLOOR}. If this is an intended \
+         narrowing, lower the floor deliberately; otherwise a model that used to \
+         clear the wasm backend no longer does.",
+        TEST_MODELS.len()
+    );
+}
+
+/// Parse the XMILE/STMX model at `path`, run it through the VM for an `expected`
+/// baseline, and return whether the wasm backend reproduces it (`Ran`) or skips
+/// it as unsupported (`Skipped`). Used only by `wasm_parity_floor`. A parse or
+/// VM failure is surfaced as `Skipped` (the VM corpus tests gate those paths
+/// directly; the floor gate only counts wasm-vs-VM parity, never re-litigates
+/// VM correctness).
+fn wasm_parity_outcome_for_path(path: &str) -> WasmRunOutcome {
+    let datamodel = {
+        let Ok(f) = File::open(path) else {
+            return WasmRunOutcome::Skipped(format!("could not open {path}"));
+        };
+        let mut f = BufReader::new(f);
+        match xmile::project_from_reader(&mut f) {
+            Ok(p) => p,
+            Err(e) => return WasmRunOutcome::Skipped(format!("parse failed: {e}")),
+        }
+    };
+
+    let expected = vm_results(&datamodel);
+    ensure_wasm_matches(&datamodel, "main", &expected, &[])
+}
 
 /// Compile a datamodel project to a VM simulation using the incremental
 /// salsa-backed path.
@@ -822,10 +910,10 @@ fn run_vacuous_comparison_scenarios() {
 }
 
 /// Run the named model of `datamodel` through the VM and return its
-/// `Results`, used as the `expected` baseline a focused `ensure_wasm_matches`
-/// test compares wasm output against. Mirrors the corpus VM path (`compile_vm`
-/// -> `Vm::new` -> `run_to_end`).
-#[cfg(test)]
+/// `Results`, used as the `expected` baseline both the focused
+/// `ensure_wasm_matches` tests and `wasm_parity_floor` compare wasm output
+/// against. Mirrors the corpus VM path (`compile_vm` -> `Vm::new` ->
+/// `run_to_end`).
 fn vm_results(datamodel: &simlin_engine::datamodel::Project) -> Results {
     let compiled = compile_vm(datamodel);
     let mut vm = Vm::new(compiled).unwrap();
@@ -847,9 +935,9 @@ fn ensure_wasm_matches_runs_supported_scalar_model() {
         .build_datamodel();
 
     let expected = vm_results(&datamodel);
-    let outcome = test_helpers::ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    let outcome = ensure_wasm_matches(&datamodel, "main", &expected, &[]);
     assert!(
-        matches!(outcome, test_helpers::WasmRunOutcome::Ran),
+        matches!(outcome, WasmRunOutcome::Ran),
         "a supported scalar model must run through the wasm backend, got {outcome:?}"
     );
 }
@@ -869,15 +957,15 @@ fn ensure_wasm_matches_skips_unsupported_model() {
         .build_datamodel();
 
     let expected = vm_results(&datamodel);
-    let outcome = test_helpers::ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    let outcome = ensure_wasm_matches(&datamodel, "main", &expected, &[]);
     match outcome {
-        test_helpers::WasmRunOutcome::Skipped(msg) => {
+        WasmRunOutcome::Skipped(msg) => {
             assert!(
                 !msg.is_empty(),
                 "a Skipped outcome should carry the Unsupported message"
             );
         }
-        test_helpers::WasmRunOutcome::Ran => {
+        WasmRunOutcome::Ran => {
             panic!("a model using the unsupported `^` operator must be Skipped, not Ran")
         }
     }
@@ -974,6 +1062,28 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
     // byte-for-byte identical (we aren't losing any information)
     let serialized_xmile2 = xmile::project_to_xmile(&roundtripped_project).unwrap();
     assert_eq!(&serialized_xmile, &serialized_xmile2);
+
+    // wasm-backend parity: after the VM comparisons pass, run the model through
+    // the wasm backend once and assert it clears the SAME comparator against the
+    // same `expected`. A supported model that diverges panics inside the helper;
+    // an out-of-scope construct is skipped (counted against the rising floor in
+    // `wasm_parity_floor`, not failed here). See AC1.1 / AC3.1.
+    wasm_parity_hook(&datamodel_project, &expected, excluded);
+}
+
+/// Run one already-parsed model through the wasm backend and assert parity (the
+/// helper panics on a supported-but-divergent model). A `Skipped` outcome (an
+/// out-of-scope construct) is logged, not failed -- the inline corpus coverage
+/// stays opportunistic, while `wasm_parity_floor` pins the supported count.
+fn wasm_parity_hook(
+    datamodel: &simlin_engine::datamodel::Project,
+    expected: &Results,
+    excluded: &[&str],
+) {
+    if let WasmRunOutcome::Skipped(msg) = ensure_wasm_matches(datamodel, "main", expected, excluded)
+    {
+        eprintln!("  wasm backend skipped (unsupported): {msg}");
+    }
 }
 
 fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
@@ -1019,6 +1129,8 @@ fn simulate_mdl_path(mdl_path: &str) {
     let expected = load_expected_results_for_mdl(mdl_path)
         .unwrap_or_else(|| panic!("no reference data found for {mdl_path}"));
     ensure_results(&expected, &results);
+
+    wasm_parity_hook(&datamodel_project, &expected, &[]);
 }
 
 /// Simulate a Vensim MDL file that references external data files.
@@ -1049,6 +1161,8 @@ fn simulate_mdl_path_with_data(mdl_path: &str) {
     let expected = load_expected_results_for_mdl(mdl_path)
         .unwrap_or_else(|| panic!("no reference data found for {mdl_path}"));
     ensure_results(&expected, &results);
+
+    wasm_parity_hook(&datamodel_project, &expected, &[]);
 }
 
 #[test]
