@@ -24,6 +24,7 @@
 //! (anything unsupported returns `WasmGenError::Unsupported`).
 
 mod lower;
+mod math;
 mod module;
 
 pub use module::{WasmArtifact, WasmLayout, compile_datamodel_to_wasm, compile_simulation};

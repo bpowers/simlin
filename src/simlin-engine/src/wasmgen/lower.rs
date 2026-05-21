@@ -144,6 +144,36 @@ pub(crate) struct HelperFns {
     /// `approx_eq(a: f64, b: f64) -> i32` (1 = approximately equal, else 0),
     /// reproducing `crate::float::approx_eq` (`float_cmp` 0.10 defaults).
     pub approx_eq: u32,
+    /// Open-coded transcendental helpers (`super::math`), each `(f64) -> f64`
+    /// except [`pow`](Self::pow) which is `(f64, f64) -> f64`. The bodies are
+    /// emitted in `super::math`; the composed ones (`tan`/`asin`/`acos`/
+    /// `log10`/`pow`) `call` the leaf ones by the indices recorded here, so the
+    /// leaves are pushed first in [`build_helpers`].
+    ///
+    /// `dead_code` is allowed only until the lowering that consumes each lands:
+    /// `pow` is wired by `Op2::Exp` (Task 3), the rest by the `Apply` arm
+    /// (Task 4). The `#[cfg(test)]` accuracy harness in `super::math` already
+    /// reads every field, so the allow is for the non-test lib build alone.
+    #[allow(dead_code)]
+    pub exp: u32,
+    #[allow(dead_code)]
+    pub ln: u32,
+    #[allow(dead_code)]
+    pub sin: u32,
+    #[allow(dead_code)]
+    pub cos: u32,
+    #[allow(dead_code)]
+    pub tan: u32,
+    #[allow(dead_code)]
+    pub atan: u32,
+    #[allow(dead_code)]
+    pub asin: u32,
+    #[allow(dead_code)]
+    pub acos: u32,
+    #[allow(dead_code)]
+    pub log10: u32,
+    #[allow(dead_code)]
+    pub pow: u32,
 }
 
 /// One emitted helper function: its signature (so the assembler can register a
@@ -171,6 +201,19 @@ pub(crate) struct BuiltHelpers {
 pub(crate) fn build_helpers() -> BuiltHelpers {
     let mut functions: Vec<HelperFn> = Vec::new();
 
+    // Push a `(f64, ...) -> f64`-shaped helper and return its assigned index.
+    // The index is `functions.len()` *before* the push, so it stays valid no
+    // matter how many helpers precede it. Used for every transcendental.
+    let push_unary = |functions: &mut Vec<HelperFn>, body: Function| -> u32 {
+        let idx = functions.len() as u32;
+        functions.push(HelperFn {
+            params: vec![ValType::F64],
+            results: vec![ValType::F64],
+            body,
+        });
+        idx
+    };
+
     let approx_eq = functions.len() as u32;
     functions.push(HelperFn {
         params: vec![ValType::F64, ValType::F64],
@@ -178,8 +221,41 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
         body: emit_approx_eq(),
     });
 
+    // Leaf transcendentals (no inter-helper calls).
+    let exp = push_unary(&mut functions, super::math::emit_exp());
+    let ln = push_unary(&mut functions, super::math::emit_ln());
+    let sin = push_unary(&mut functions, super::math::emit_sin());
+    let cos = push_unary(&mut functions, super::math::emit_cos());
+    let atan = push_unary(&mut functions, super::math::emit_atan());
+
+    // Composed transcendentals, referencing the leaves by their recorded index.
+    let tan = push_unary(&mut functions, super::math::emit_tan(sin, cos));
+    let asin = push_unary(&mut functions, super::math::emit_asin(atan));
+    let acos = push_unary(&mut functions, super::math::emit_acos(asin));
+    let log10 = push_unary(&mut functions, super::math::emit_log10(ln));
+
+    // `pow` is the only binary helper.
+    let pow = functions.len() as u32;
+    functions.push(HelperFn {
+        params: vec![ValType::F64, ValType::F64],
+        results: vec![ValType::F64],
+        body: super::math::emit_pow(exp, ln),
+    });
+
     BuiltHelpers {
-        fns: HelperFns { approx_eq },
+        fns: HelperFns {
+            approx_eq,
+            exp,
+            ln,
+            sin,
+            cos,
+            tan,
+            atan,
+            asin,
+            acos,
+            log10,
+            pow,
+        },
         functions,
     }
 }
