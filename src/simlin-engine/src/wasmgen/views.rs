@@ -262,6 +262,107 @@ impl ViewDesc {
         flat
     }
 
+    /// The flat element offset (in slots) for an explicit multi-dimensional
+    /// index, mirroring `RuntimeView::flat_offset`: `offset + Σ idx_k *
+    /// strides[k]`, with a sparse dimension's index first remapped through its
+    /// `parent_offsets`. The broadcast paths below build the multi-dim index
+    /// themselves (rather than from a flat iteration index), so they route
+    /// through this rather than [`flat_element_offset`](Self::flat_element_offset).
+    pub fn flat_offset_for_indices(&self, indices: &[u16]) -> usize {
+        let mut flat = self.offset as usize;
+        for (i, &idx) in indices.iter().enumerate() {
+            let actual = if let Some(s) = self.sparse.iter().find(|s| s.dim_index == i) {
+                s.parent_offsets[idx as usize] as usize
+            } else {
+                idx as usize
+            };
+            flat += actual * self.strides[i] as usize;
+        }
+        flat
+    }
+
+    /// Decompose a flat iteration index into per-dimension indices in row-major
+    /// order (last dim varies fastest), mirroring the VM's iteration-index
+    /// decomposition in `LoadIterViewTop` / `reduce_view` / `increment_indices`.
+    fn decompose_iter_index(dims: &[u16], iter_idx: usize) -> Vec<u16> {
+        let n = dims.len();
+        let mut indices = vec![0u16; n];
+        let mut remaining = iter_idx;
+        for d in (0..n).rev() {
+            let dim = dims[d] as usize;
+            indices[d] = (remaining % dim) as u16;
+            remaining /= dim;
+        }
+        indices
+    }
+
+    /// The flat element offset (in slots) for reading `self` as the *source* of
+    /// an iteration whose output geometry is `iter` at flat index `current`,
+    /// reproducing the VM's `LoadIterViewTop` / `LoadIterViewAt` broadcast
+    /// (`vm.rs:1946-2182`). Returns `None` when the VM would push NaN: a smaller
+    /// source than the iteration, or a dimension that does not match.
+    ///
+    /// Fast path (source dims/dim_ids equal the iteration's): the simple
+    /// `offset_for_iter_index(current)` read, bounds-checked against the source
+    /// size. Otherwise the broadcast path decomposes `current` into the
+    /// iteration's multi-dim indices, matches dimensions through
+    /// [`crate::dimensions::match_dimensions_two_pass`] (exact dim-id match, then
+    /// the indexed size-fallback), and rebuilds the source indices (bounds-checked
+    /// per dimension). `is_indexed` for each dim comes from `ctx.dimensions`,
+    /// exactly as the VM resolves it.
+    pub fn iter_broadcast_offset(
+        &self,
+        iter: &ViewDesc,
+        current: usize,
+        ctx: &ByteCodeContext,
+    ) -> Option<usize> {
+        // Fast path: dims and dim_ids match exactly -> direct iteration-index read
+        // (with the VM's "source smaller than iteration -> NaN" bounds check).
+        if self.dims == iter.dims && self.dim_ids == iter.dim_ids {
+            if current >= self.size() {
+                return None;
+            }
+            return Some(self.flat_element_offset(current));
+        }
+
+        // Broadcast path: decompose `current` into the iteration's indices, then
+        // map each source dimension to an iteration dimension.
+        let iter_indices = Self::decompose_iter_index(&iter.dims, current);
+
+        let dim_indexed = |dim_ids: &[u16]| -> Vec<bool> {
+            dim_ids
+                .iter()
+                .map(|&dim_id| {
+                    ctx.dimensions
+                        .get(dim_id as usize)
+                        .is_some_and(|d| d.is_indexed)
+                })
+                .collect()
+        };
+        let source_is_indexed = dim_indexed(&self.dim_ids);
+        let iter_is_indexed = dim_indexed(&iter.dim_ids);
+
+        let source_to_iter = crate::dimensions::match_dimensions_two_pass(
+            &self.dim_ids,
+            &self.dims,
+            &source_is_indexed,
+            &iter.dim_ids,
+            &iter.dims,
+            &iter_is_indexed,
+        );
+
+        let mut source_indices: Vec<u16> = Vec::with_capacity(self.dims.len());
+        for (src_dim_pos, mapped_iter_pos) in source_to_iter.iter().enumerate() {
+            let iter_pos = (*mapped_iter_pos)?;
+            let idx = iter_indices[iter_pos];
+            if idx >= self.dims[src_dim_pos] {
+                return None;
+            }
+            source_indices.push(idx);
+        }
+        Some(self.flat_offset_for_indices(&source_indices))
+    }
+
     /// The byte address of view element `iter_idx`, decomposed into the constant
     /// part (which rides in a `memarg.offset`) and whether a runtime `module_off`
     /// addend is still required. This is the single source of truth for element
@@ -288,10 +389,26 @@ impl ViewDesc {
         temp_storage_base: u32,
         ctx: &ByteCodeContext,
     ) -> Option<ElementAddr> {
+        let flat = self.flat_element_offset(iter_idx);
+        self.element_addr_for_flat(flat, curr_base, temp_storage_base, ctx)
+    }
+
+    /// Like [`element_addr`](Self::element_addr) but for an *already-computed*
+    /// flat slot offset (the broadcast paths build the flat offset themselves via
+    /// [`flat_offset_for_indices`](Self::flat_offset_for_indices), rather than
+    /// from an iteration index). Static-view behaviour is byte-identical to
+    /// `element_addr` for the same flat offset.
+    pub fn element_addr_for_flat(
+        &self,
+        flat: usize,
+        curr_base: u32,
+        temp_storage_base: u32,
+        ctx: &ByteCodeContext,
+    ) -> Option<ElementAddr> {
         if self.runtime_off_local.is_some() {
             return None;
         }
-        let flat = self.flat_element_offset(iter_idx) as u64;
+        let flat = flat as u64;
         match self.base {
             ViewBase::CurrAbsolute => Some(ElementAddr {
                 const_byte_offset: u64::from(curr_base) + (u64::from(self.base_off) + flat) * 8,
@@ -494,5 +611,136 @@ mod tests {
         d.runtime_off_local = Some(9);
         let ctx = ByteCodeContext::default();
         assert!(d.element_addr(0, 0, 0, &ctx).is_none());
+    }
+
+    // ── iter_broadcast_offset (Task 3): cross-check against the VM ─────────
+
+    /// A `ByteCodeContext` whose dimension table makes the dims with the given
+    /// ids indexed (so `match_dimensions_two_pass`'s size-fallback can fire), all
+    /// of `size`. Used only so `iter_broadcast_offset` can resolve `is_indexed`.
+    fn ctx_indexed_dims(n: usize, size: u16) -> ByteCodeContext {
+        let mut ctx = ByteCodeContext::default();
+        for _ in 0..n {
+            let nid = ctx.intern_name("D");
+            ctx.add_dimension(crate::bytecode::DimensionInfo::indexed(nid, size));
+        }
+        ctx
+    }
+
+    /// Build a `ViewDesc` with explicit dims/dim_ids (row-major contiguous).
+    fn view_with_dim_ids(dims: &[u16], dim_ids: &[u16]) -> ViewDesc {
+        ViewDesc::contiguous(0, ViewBase::CurrAbsolute, dims.to_vec(), dim_ids.to_vec())
+    }
+
+    #[test]
+    fn iter_broadcast_offset_matches_fast_path() {
+        // Source dims == iter dims: every element reads its own offset.
+        let ctx = ctx_indexed_dims(2, 3);
+        let iter = view_with_dim_ids(&[2, 3], &[0, 1]);
+        let src = view_with_dim_ids(&[2, 3], &[0, 1]);
+        for current in 0..iter.size() {
+            assert_eq!(
+                src.iter_broadcast_offset(&iter, current, &ctx),
+                Some(current),
+                "fast-path element {current}"
+            );
+        }
+    }
+
+    #[test]
+    fn iter_broadcast_offset_broadcasts_smaller_source() {
+        // iter is 2-D [DimA(2), DimB(3)]; source is 1-D [DimA(2)] (dim_id 0). The
+        // VM broadcasts the source along the missing DimB, so result element
+        // (a, b) reads source[a]. dim_ids: iter [0,1], source [0].
+        let ctx = ctx_indexed_dims(2, 3);
+        let iter = view_with_dim_ids(&[2, 3], &[0, 1]);
+        let src = view_with_dim_ids(&[2], &[0]);
+        for a in 0..2u16 {
+            for b in 0..3u16 {
+                let current = (a as usize) * 3 + b as usize;
+                // Result element (a,b) -> source index [a] -> flat offset a.
+                assert_eq!(
+                    src.iter_broadcast_offset(&iter, current, &ctx),
+                    Some(a as usize),
+                    "broadcast element ({a},{b})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn iter_broadcast_offset_smaller_source_same_shape_is_nan() {
+        // Same dims/dim_ids fast path, but the source is genuinely shorter than
+        // the iteration: the VM returns NaN past the source size.
+        let ctx = ctx_indexed_dims(1, 5);
+        let iter = view_with_dim_ids(&[5], &[0]);
+        let src = view_with_dim_ids(&[3], &[0]);
+        assert_eq!(src.iter_broadcast_offset(&iter, 2, &ctx), Some(2));
+        assert_eq!(
+            src.iter_broadcast_offset(&iter, 3, &ctx),
+            None,
+            "element past the source size must be NaN"
+        );
+    }
+
+    #[test]
+    fn iter_broadcast_offset_unmatched_dim_is_nan() {
+        // Source dim_id 7 has no counterpart in the iteration (dim_ids [0,1]) and
+        // is named (not indexed), so the size-fallback cannot match it either:
+        // the VM returns NaN.
+        let mut ctx = ByteCodeContext::default();
+        let n0 = ctx.intern_name("A");
+        ctx.add_dimension(crate::bytecode::DimensionInfo::indexed(n0, 2)); // id 0
+        let n1 = ctx.intern_name("B");
+        ctx.add_dimension(crate::bytecode::DimensionInfo::indexed(n1, 3)); // id 1
+        // A named (non-indexed) dim id 2 used only by the source.
+        let n2 = ctx.intern_name("C");
+        ctx.add_dimension(crate::bytecode::DimensionInfo::named(
+            n2,
+            SmallVec::from_slice(&[n0, n1]),
+        )); // id 2, size 2, named
+        let iter = view_with_dim_ids(&[2, 3], &[0, 1]);
+        let src = view_with_dim_ids(&[2], &[2]);
+        assert_eq!(src.iter_broadcast_offset(&iter, 0, &ctx), None);
+    }
+
+    /// Cross-check `iter_broadcast_offset` against a from-scratch reimplementation
+    /// of the VM's `LoadIterViewTop` broadcast over a `RuntimeView`, for a
+    /// transpose-broadcast case (iter [DimA,DimB], source [DimB] -- the source's
+    /// single dim matches the iteration's *second* axis by dim-id).
+    #[test]
+    fn iter_broadcast_offset_matches_vm_loaditerviewtop() {
+        let ctx = ctx_indexed_dims(2, 0); // sizes overwritten below
+        // Rebuild with distinct sizes: DimA=2 (id 0), DimB=4 (id 1).
+        let mut ctx2 = ByteCodeContext::default();
+        let na = ctx2.intern_name("A");
+        ctx2.add_dimension(crate::bytecode::DimensionInfo::indexed(na, 2));
+        let nb = ctx2.intern_name("B");
+        ctx2.add_dimension(crate::bytecode::DimensionInfo::indexed(nb, 4));
+        let _ = ctx;
+
+        let iter = view_with_dim_ids(&[2, 4], &[0, 1]);
+        let src = view_with_dim_ids(&[4], &[1]); // only DimB
+        let iter_rv = to_runtime_view(&iter);
+        let src_rv = to_runtime_view(&src);
+
+        for current in 0..iter.size() {
+            // VM reference: decompose current into iter indices, match dims by id
+            // (DimB is id 1 in both), read source[that DimB index].
+            let n = iter_rv.dims.len();
+            let mut idx: SmallVec<[u16; 4]> = smallvec::smallvec![0; n];
+            let mut rem = current;
+            for d in (0..n).rev() {
+                idx[d] = (rem % iter_rv.dims[d] as usize) as u16;
+                rem /= iter_rv.dims[d] as usize;
+            }
+            // DimB is iteration axis 1.
+            let want = src_rv.flat_offset(&[idx[1]]);
+            assert_eq!(
+                src.iter_broadcast_offset(&iter, current, &ctx2),
+                Some(want),
+                "element {current}"
+            );
+        }
     }
 }

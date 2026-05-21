@@ -2268,4 +2268,51 @@ mod tests {
     // subscript both go through `ViewRangeDynamic` / `ViewSubscriptDynamic`,
     // which are Phase 5 Task 4, so the end-to-end coverage of those cases lands
     // there.
+
+    // ── Phase 5 Task 3: BeginIter iteration loops (end-to-end) ────────────
+    //
+    // The broadcasting `LoadIterViewAt` path (source dims != iter dims) and the
+    // standalone `BeginBroadcastIter` family are not reachable through the
+    // current production codegen (an A2A elementwise op is scalar-unrolled, and a
+    // mismatched-dim reducer argument fails the engine's own dimension check), so
+    // those are pinned directly against the VM by hand-built-bytecode unit tests
+    // in `lower.rs` (`iter_loop_*` / `broadcast_iter_*`). The two reachable
+    // shapes -- a hoisted same-dim reducer loop and the deferred transpose
+    // reducer -- are covered end-to-end here.
+
+    /// `SUM(2 * source[3:5] + 1)`: the elementwise expression is hoisted into an
+    /// `AssignTemp` `BeginIter` loop (codegen.rs:1183-1378), then `SUM` reduces
+    /// the temp. The whole-model wasm must match the VM element-for-element.
+    #[test]
+    fn compile_simulation_hoisted_reducer_loop_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("hoist")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("A", 5)
+            .array_aux("source[A]", "A")
+            .scalar_aux("summed", "SUM(2 * source[3:5] + 1)")
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (hoisted reducer)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 1, "expected to compare summed");
+    }
+
+    /// `SUM(matrix')`: the transpose materializes the transposed matrix into a
+    /// temp via a `BeginIter` loop reading the (transposed) source through
+    /// `LoadIterViewAt`, then sums the temp. This is the case Subcomponent A
+    /// deferred to the iteration task; the wasm must match the VM.
+    #[test]
+    fn compile_simulation_transpose_reducer_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("transpose")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("A", 2)
+            .indexed_dimension("B", 3)
+            .array_aux("matrix[A,B]", "A * 10 + B")
+            .scalar_aux("summed", "SUM(matrix')")
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (transpose)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 1, "expected to compare summed");
+    }
 }

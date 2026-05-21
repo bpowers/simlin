@@ -731,6 +731,57 @@ fn slot_byte_offset(chunk_base: u32, off: u16) -> u64 {
     u64::from(chunk_base) + u64::from(off) * u64::from(SLOT_SIZE)
 }
 
+/// Emit-time analogue of the VM's per-`eval_bytecode` mutable state
+/// (`vm.rs:1277-1288`): the compile-time view stack, the iteration / broadcast
+/// contexts, and the condition-register stack pointer. Threaded through
+/// [`emit_ops`] so an unrolled iteration body can be re-emitted at each
+/// compile-time index without re-deriving the view stack.
+struct EmitState {
+    /// Emit-time stack pointer into `ctx.condition_locals`, mirroring the VM's
+    /// single `condition` register but generalized to nested `If`s.
+    cond_sp: usize,
+    /// Compile-time analogue of the VM's runtime `view_stack`: the `Push*View` /
+    /// `View*` opcodes push/transform/pop `ViewDesc`s here, and the reducers read
+    /// the top descriptor. Because every static view's geometry is known at
+    /// compile time, this never materializes anything at runtime -- element
+    /// addresses are folded into the emitted reads.
+    view_stack: Vec<ViewDesc>,
+    /// Active (unrolled) iteration contexts, one per nested `BeginIter`. The
+    /// `current` field is the compile-time iteration index the unroller is
+    /// emitting (Task 3).
+    iter_stack: Vec<IterCtx>,
+    /// Active broadcast-iteration contexts (`BeginBroadcastIter`, Task 3).
+    broadcast_stack: Vec<BroadcastCtx>,
+}
+
+/// One active iteration context for the unrolled `BeginIter` loop (Task 3).
+struct IterCtx {
+    /// The view captured as the iteration source/geometry at `BeginIter`
+    /// (`view_stack.last()` then).
+    iter_view: ViewDesc,
+    /// Destination temp id for `StoreIterElement`, when `has_write_temp`.
+    write_temp_id: Option<u8>,
+    /// The compile-time iteration index currently being emitted (the unroller
+    /// re-emits the body once per `0..size`).
+    current: usize,
+}
+
+/// One active broadcast-iteration context (`BeginBroadcastIter`, Task 3),
+/// mirroring the VM's `BroadcastState` (`vm.rs:68-81`) but with the result
+/// geometry + per-source dim maps resolved at compile time.
+struct BroadcastCtx {
+    /// Per source (deepest-first): the source view and its `dim_map` (one entry
+    /// per result dimension; `Some(src_dim)` or `None` for a broadcast axis).
+    sources: Vec<(ViewDesc, Vec<Option<usize>>)>,
+    /// Destination temp id for `StoreBroadcastElement`.
+    dest_temp_id: u8,
+    /// Result dimension sizes (the union of all sources' dims, first-encounter
+    /// order), used to decompose `current` into per-result-dim indices.
+    result_dims: Vec<u16>,
+    /// The compile-time result index currently being emitted.
+    current: usize,
+}
+
 /// Lower one opcode program. Value-producing opcodes leave their f64 result on
 /// the wasm operand stack; the assignment opcodes emit a store and leave the
 /// stack empty, exactly as the VM's stack-machine arms do. `Ret` is a no-op
@@ -740,19 +791,37 @@ pub(crate) fn emit_bytecode(
     ctx: &EmitCtx,
     f: &mut Function,
 ) -> Result<(), WasmGenError> {
-    // Emit-time stack pointer into `ctx.condition_locals`, mirroring the VM's
-    // single `condition` register but generalized to nested `If`s.
-    let mut cond_sp: usize = 0;
-    // Compile-time analogue of the VM's runtime `view_stack`: the `Push*View` /
-    // `View*` opcodes push/transform/pop `ViewDesc`s here, and the reducers read
-    // the top descriptor. Because every static view's geometry is known at
-    // compile time, this never materializes anything at runtime -- element
-    // addresses are folded into the emitted reads.
-    let mut view_stack: Vec<ViewDesc> = Vec::new();
-    for op in &bc.code {
+    let mut state = EmitState {
+        cond_sp: 0,
+        view_stack: Vec::new(),
+        iter_stack: Vec::new(),
+        broadcast_stack: Vec::new(),
+    };
+    emit_ops(&bc.code, &bc.literals, ctx, &mut state, f)
+}
+
+/// Lower a (sub-)slice of opcodes, threading the emit-time [`EmitState`]. The
+/// top-level program is one call over the whole `code`; an unrolled `BeginIter`
+/// loop body (Task 3) re-enters here over the body sub-slice once per iteration
+/// index. A `pc`-based loop (rather than `for`) lets the iteration arms consume
+/// their structured `BeginIter..NextIterOrJump..EndIter` span and re-emit the
+/// body, mirroring the VM's `pc` loop without needing the `jump_back` delta.
+///
+/// `literals` is the program's shared literal pool (`LoadConstant` /
+/// `AssignConstCurr` index it); it is the same across every body re-emission.
+fn emit_ops(
+    code: &[Opcode],
+    literals: &[f64],
+    ctx: &EmitCtx,
+    state: &mut EmitState,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let mut pc = 0usize;
+    while pc < code.len() {
+        let op = &code[pc];
         match op {
             Opcode::LoadConstant { id } => {
-                let v = *bc.literals.get(*id as usize).ok_or_else(|| {
+                let v = *literals.get(*id as usize).ok_or_else(|| {
                     WasmGenError::Unsupported(format!(
                         "wasmgen: LoadConstant literal id {id} out of range"
                     ))
@@ -785,7 +854,7 @@ pub(crate) fn emit_bytecode(
                 f.instruction(&Instruction::F64ConvertI32U);
             }
             Opcode::SetCond {} => {
-                let local = *ctx.condition_locals.get(cond_sp).ok_or_else(|| {
+                let local = *ctx.condition_locals.get(state.cond_sp).ok_or_else(|| {
                     WasmGenError::Unsupported(
                         "wasmgen: SetCond nesting exceeded reserved condition locals".to_string(),
                     )
@@ -795,16 +864,16 @@ pub(crate) fn emit_bytecode(
                 // same branch the VM's `is_truthy(pop)` takes.
                 emit_is_truthy(ctx, f);
                 f.instruction(&Instruction::LocalSet(local));
-                cond_sp += 1;
+                state.cond_sp += 1;
             }
             Opcode::If {} => {
-                if cond_sp == 0 {
+                if state.cond_sp == 0 {
                     return Err(WasmGenError::Unsupported(
                         "wasmgen: If without a preceding SetCond".to_string(),
                     ));
                 }
-                cond_sp -= 1;
-                let local = ctx.condition_locals[cond_sp];
+                state.cond_sp -= 1;
+                let local = ctx.condition_locals[state.cond_sp];
                 // Stack holds [t, f] (the VM pops f then t and yields
                 // `if condition { t } else { f }`); wasm `select` pops
                 // [t, f, cond_i32] and yields t when cond != 0 else f -- exact.
@@ -826,7 +895,7 @@ pub(crate) fn emit_bytecode(
             // model with a constant initial/aux carries it. Mirrors the VM's
             // `curr[module_off + off] = literals[literal_id]` (`vm.rs:1453`).
             Opcode::AssignConstCurr { off, literal_id } => {
-                let v = *bc.literals.get(*literal_id as usize).ok_or_else(|| {
+                let v = *literals.get(*literal_id as usize).ok_or_else(|| {
                     WasmGenError::Unsupported(format!(
                         "wasmgen: AssignConstCurr literal id {literal_id} out of range"
                     ))
@@ -888,7 +957,7 @@ pub(crate) fn emit_bytecode(
                         "wasmgen: PushStaticView view_id {view_id} out of range"
                     ))
                 })?;
-                view_stack.push(ViewDesc::from_static(view));
+                state.view_stack.push(ViewDesc::from_static(view));
             }
             // `PushVarView` builds a full contiguous view over a variable array;
             // the VM folds `module_off` into the base (`vm.rs:1749`), so the base
@@ -898,7 +967,7 @@ pub(crate) fn emit_bytecode(
                 dim_list_id,
             } => {
                 let (dims, dim_ids) = resolve_dim_list_dims(ctx, *dim_list_id)?;
-                view_stack.push(ViewDesc::contiguous(
+                state.view_stack.push(ViewDesc::contiguous(
                     u32::from(*base_off),
                     ViewBase::CurrModuleRelative,
                     dims,
@@ -912,7 +981,7 @@ pub(crate) fn emit_bytecode(
                 dim_list_id,
             } => {
                 let (dims, dim_ids) = resolve_dim_list_dims(ctx, *dim_list_id)?;
-                view_stack.push(ViewDesc::contiguous(
+                state.view_stack.push(ViewDesc::contiguous(
                     u32::from(*temp_id),
                     ViewBase::Temp,
                     dims,
@@ -928,7 +997,7 @@ pub(crate) fn emit_bytecode(
             } => {
                 let (dims, _dim_ids) = resolve_dim_list_raw(ctx, *dim_list_id)?;
                 let n = dims.len();
-                view_stack.push(ViewDesc::contiguous(
+                state.view_stack.push(ViewDesc::contiguous(
                     u32::from(*base_off),
                     ViewBase::CurrModuleRelative,
                     dims,
@@ -938,14 +1007,15 @@ pub(crate) fn emit_bytecode(
 
             // ── View-stack transforms (Phase 5 Task 1) ────────────────────
             Opcode::ViewSubscriptConst { dim_idx, index } => {
-                view_top_mut(&mut view_stack)?.apply_single_subscript(*dim_idx as usize, *index);
+                view_top_mut(&mut state.view_stack)?
+                    .apply_single_subscript(*dim_idx as usize, *index);
             }
             Opcode::ViewRange {
                 dim_idx,
                 start,
                 end,
             } => {
-                view_top_mut(&mut view_stack)?.apply_range(*dim_idx as usize, *start, *end);
+                view_top_mut(&mut state.view_stack)?.apply_range(*dim_idx as usize, *start, *end);
             }
             Opcode::ViewStarRange {
                 dim_idx,
@@ -963,7 +1033,7 @@ pub(crate) fn emit_bytecode(
                     })?;
                 let parent_offsets = rel.parent_offsets.to_vec();
                 let child_dim_id = rel.child_dim_id;
-                view_top_mut(&mut view_stack)?.apply_sparse(
+                view_top_mut(&mut state.view_stack)?.apply_sparse(
                     *dim_idx as usize,
                     parent_offsets,
                     child_dim_id,
@@ -973,16 +1043,16 @@ pub(crate) fn emit_bytecode(
             // stays as-is.
             Opcode::ViewWildcard { dim_idx: _ } => {}
             Opcode::ViewTranspose {} => {
-                view_top_mut(&mut view_stack)?.transpose();
+                view_top_mut(&mut state.view_stack)?.transpose();
             }
             Opcode::PopView {} => {
-                view_stack.pop().ok_or_else(|| {
+                state.view_stack.pop().ok_or_else(|| {
                     WasmGenError::Unsupported("wasmgen: PopView on empty view stack".to_string())
                 })?;
             }
             Opcode::DupView {} => {
-                let top = view_top(&view_stack)?.clone();
-                view_stack.push(top);
+                let top = view_top(&state.view_stack)?.clone();
+                state.view_stack.push(top);
             }
 
             // ── Temp element reads (Phase 5 Task 1) ───────────────────────
@@ -1008,8 +1078,143 @@ pub(crate) fn emit_bytecode(
             | Opcode::ArrayMean {}
             | Opcode::ArrayStddev {}
             | Opcode::ArraySize {} => {
-                let view = view_top(&view_stack)?;
-                emit_array_reduce(op, view, ctx, f)?;
+                let view = view_top(&state.view_stack)?.clone();
+                emit_array_reduce(op, &view, ctx, f)?;
+            }
+
+            // ── Body element reads inside an unrolled iteration (Task 3) ───
+            // Each reads view element `current` (the compile-time iteration index
+            // the unroller set on the active iter context) and pushes the f64.
+            Opcode::LoadIterElement {} => {
+                let iter = state.iter_stack.last().ok_or_else(|| {
+                    WasmGenError::Unsupported(
+                        "wasmgen: LoadIterElement outside an iteration".to_string(),
+                    )
+                })?;
+                // The iteration view is also the source: read element `current`.
+                let view = iter.iter_view.clone();
+                let current = iter.current;
+                emit_view_element_load(&view, current, ctx, f)?;
+            }
+            // `temp_storage[temp_offsets[temp_id] + current]` (`vm.rs:1939`).
+            Opcode::LoadIterTempElement { temp_id } => {
+                let current = current_iter_index(state)?;
+                let addr = temp_element_byte_addr(ctx, *temp_id, current as u32)?;
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::F64Load(memarg(addr)));
+            }
+            // Read `view_stack.last()` at `current`, broadcasting against the
+            // iteration view (`vm.rs:1946`). `LoadIterViewAt{offset}` reads
+            // `view_stack[len-offset]` instead (`vm.rs:2068`).
+            Opcode::LoadIterViewTop {} => {
+                emit_load_iter_view(state, 1, ctx, f)?;
+            }
+            Opcode::LoadIterViewAt { offset } => {
+                emit_load_iter_view(state, *offset as usize, ctx, f)?;
+            }
+            // Store the popped value into `temp_storage[temp_offsets[write_temp]
+            // + current]` (`vm.rs:2184`).
+            Opcode::StoreIterElement {} => {
+                let iter = state.iter_stack.last().ok_or_else(|| {
+                    WasmGenError::Unsupported(
+                        "wasmgen: StoreIterElement outside an iteration".to_string(),
+                    )
+                })?;
+                let write_temp_id = iter.write_temp_id.ok_or_else(|| {
+                    WasmGenError::Unsupported(
+                        "wasmgen: StoreIterElement without a write temp".to_string(),
+                    )
+                })?;
+                let current = iter.current;
+                emit_store_iter_element(ctx, write_temp_id, current, f)?;
+            }
+
+            // ── Iteration loop (Task 3): unroll BeginIter..EndIter ────────
+            // The body span between `BeginIter` and its `NextIterOrJump` is
+            // structured (codegen.rs:1183-1378) and well-nested, so rather than a
+            // runtime wasm loop with the `jump_back` PC delta, the body is fully
+            // unrolled over the compile-time `size()` -- every element address is
+            // then a compile-time constant via `emit_view_element_load`, matching
+            // the array reducer's unrolled fold (Task 2) and the VM element-for-
+            // element. The captured iter view is `view_stack.last()` at `BeginIter`
+            // (`vm.rs:1880`).
+            Opcode::BeginIter {
+                write_temp_id,
+                has_write_temp,
+            } => {
+                let iter_view = view_top(&state.view_stack)?.clone();
+                let write_temp_id = if *has_write_temp {
+                    Some(*write_temp_id)
+                } else {
+                    None
+                };
+                let size = iter_view.size();
+                let (body, end_pc) = iter_span(code, pc, IterKind::Iter)?;
+                for current in 0..size {
+                    state.iter_stack.push(IterCtx {
+                        iter_view: iter_view.clone(),
+                        write_temp_id,
+                        current,
+                    });
+                    emit_ops(body, literals, ctx, state, f)?;
+                    state.iter_stack.pop();
+                }
+                pc = end_pc;
+                continue;
+            }
+            // `NextIterOrJump`/`EndIter` are consumed by the `BeginIter` unroll
+            // (the body slice excludes the `NextIterOrJump`, and `pc` is advanced
+            // past `EndIter`), so reaching one here means malformed bytecode.
+            Opcode::NextIterOrJump { .. } | Opcode::EndIter {} => {
+                return Err(WasmGenError::Unsupported(
+                    "wasmgen: NextIterOrJump/EndIter without a matching BeginIter".to_string(),
+                ));
+            }
+
+            // ── Broadcast iteration (Task 3): unroll over the union geometry ──
+            // `BeginBroadcastIter` unions the `n_sources` views' dim_ids into the
+            // result geometry, building a per-source dim map (`vm.rs:2314`); the
+            // body is then unrolled over the result size, mirroring
+            // `LoadBroadcastElement` / `StoreBroadcastElement`.
+            Opcode::BeginBroadcastIter {
+                n_sources,
+                dest_temp_id,
+            } => {
+                let bctx = build_broadcast_ctx(state, *n_sources as usize, *dest_temp_id)?;
+                let size: usize = bctx.result_dims.iter().map(|&d| d as usize).product();
+                let (body, end_pc) = iter_span(code, pc, IterKind::Broadcast)?;
+                for current in 0..size {
+                    state.broadcast_stack.push(BroadcastCtx {
+                        sources: bctx.sources.clone(),
+                        dest_temp_id: bctx.dest_temp_id,
+                        result_dims: bctx.result_dims.clone(),
+                        current,
+                    });
+                    emit_ops(body, literals, ctx, state, f)?;
+                    state.broadcast_stack.pop();
+                }
+                pc = end_pc;
+                continue;
+            }
+            Opcode::LoadBroadcastElement { source_idx } => {
+                emit_load_broadcast_element(state, *source_idx as usize, ctx, f)?;
+            }
+            Opcode::StoreBroadcastElement {} => {
+                let bc_ctx = state.broadcast_stack.last().ok_or_else(|| {
+                    WasmGenError::Unsupported(
+                        "wasmgen: StoreBroadcastElement outside a broadcast iteration".to_string(),
+                    )
+                })?;
+                let dest_temp_id = bc_ctx.dest_temp_id;
+                let current = bc_ctx.current;
+                emit_store_iter_element(ctx, dest_temp_id, current, f)?;
+            }
+            Opcode::NextBroadcastOrJump { .. } | Opcode::EndBroadcastIter {} => {
+                return Err(WasmGenError::Unsupported(
+                    "wasmgen: NextBroadcastOrJump/EndBroadcastIter without a matching \
+                     BeginBroadcastIter"
+                        .to_string(),
+                ));
             }
 
             Opcode::Ret => {
@@ -1017,8 +1222,231 @@ pub(crate) fn emit_bytecode(
             }
             other => return Err(WasmGenError::Unsupported(unsupported_opcode(other))),
         }
+        pc += 1;
     }
     Ok(())
+}
+
+/// The compile-time iteration index of the innermost active iteration context,
+/// erroring on a body opcode that appeared outside any iteration.
+fn current_iter_index(state: &EmitState) -> Result<usize, WasmGenError> {
+    state.iter_stack.last().map(|it| it.current).ok_or_else(|| {
+        WasmGenError::Unsupported("wasmgen: iteration body opcode outside an iteration".to_string())
+    })
+}
+
+/// Which structured iteration the body span belongs to: a `BeginIter` loop or a
+/// `BeginBroadcastIter` loop. Each has its own begin/next/end opcode triple, but
+/// the well-nested span scan is identical.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IterKind {
+    Iter,
+    Broadcast,
+}
+
+/// Given the `pc` of a `BeginIter` / `BeginBroadcastIter`, return the body slice
+/// (the opcodes after the begin, up to but excluding its `NextIterOrJump` /
+/// `NextBroadcastOrJump`) and the pc *after* the matching `EndIter` /
+/// `EndBroadcastIter` (where the outer loop resumes).
+///
+/// The span is well-nested (codegen always emits `begin .. next .. end`), so a
+/// nested loop of the *same* kind is skipped by depth tracking: `begin` raises
+/// the depth and `end` lowers it; the matching `next` is the one at depth 0.
+/// A loop of the *other* kind cannot appear inside (codegen never interleaves
+/// the two families), but its begin/end would not affect this kind's depth, and
+/// its `next` is not this kind's `next`, so the scan is still correct.
+fn iter_span(
+    code: &[Opcode],
+    begin_pc: usize,
+    kind: IterKind,
+) -> Result<(&[Opcode], usize), WasmGenError> {
+    let is_begin = |op: &Opcode| match kind {
+        IterKind::Iter => matches!(op, Opcode::BeginIter { .. }),
+        IterKind::Broadcast => matches!(op, Opcode::BeginBroadcastIter { .. }),
+    };
+    let is_next = |op: &Opcode| match kind {
+        IterKind::Iter => matches!(op, Opcode::NextIterOrJump { .. }),
+        IterKind::Broadcast => matches!(op, Opcode::NextBroadcastOrJump { .. }),
+    };
+    let is_end = |op: &Opcode| match kind {
+        IterKind::Iter => matches!(op, Opcode::EndIter {}),
+        IterKind::Broadcast => matches!(op, Opcode::EndBroadcastIter {}),
+    };
+
+    let body_start = begin_pc + 1;
+    let mut depth = 0usize;
+    let mut i = body_start;
+    let mut body_end: Option<usize> = None;
+    while i < code.len() {
+        let op = &code[i];
+        if is_begin(op) {
+            depth += 1;
+        } else if is_next(op) {
+            if depth == 0 {
+                body_end = Some(i);
+                break;
+            }
+        } else if is_end(op) {
+            // `end` closes the most recent nested `begin` of this kind. The
+            // outermost (depth-0) `end` is reached only *after* our `next`, so a
+            // saturating decrement is safe.
+            depth = depth.saturating_sub(1);
+        }
+        i += 1;
+    }
+    let body_end = body_end.ok_or_else(|| {
+        WasmGenError::Unsupported("wasmgen: iteration with no matching Next opcode".to_string())
+    })?;
+    // The `end` opcode immediately follows the (depth-0) `next`.
+    let end_idx = body_end + 1;
+    if end_idx >= code.len() || !is_end(&code[end_idx]) {
+        return Err(WasmGenError::Unsupported(
+            "wasmgen: iteration Next not immediately followed by End".to_string(),
+        ));
+    }
+    Ok((&code[body_start..body_end], end_idx + 1))
+}
+
+/// Lower `LoadIterViewTop` (`stack_offset == 1`) / `LoadIterViewAt { offset }`:
+/// read `view_stack[len - stack_offset]` at the innermost iteration's `current`,
+/// broadcasting against the captured iteration view (`vm.rs:1946-2182`). An
+/// invalid source view, a source smaller than the iteration, or an unmatched
+/// dimension pushes NaN, exactly as the VM does.
+fn emit_load_iter_view(
+    state: &EmitState,
+    stack_offset: usize,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let iter = state.iter_stack.last().ok_or_else(|| {
+        WasmGenError::Unsupported("wasmgen: LoadIterView* outside an iteration".to_string())
+    })?;
+    if stack_offset == 0 || stack_offset > state.view_stack.len() {
+        return Err(WasmGenError::Unsupported(
+            "wasmgen: LoadIterView* stack offset out of range".to_string(),
+        ));
+    }
+    let source = &state.view_stack[state.view_stack.len() - stack_offset];
+    // The broadcast index mapping is resolved at compile time; `None` means the
+    // VM would push NaN for this (source-element, iteration-index) pair.
+    match source.iter_broadcast_offset(&iter.iter_view, iter.current, ctx.ctx) {
+        Some(flat) => emit_view_offset_load(source, flat, ctx, f),
+        None => {
+            f.instruction(&f64_const(f64::NAN));
+            Ok(())
+        }
+    }
+}
+
+/// Store the f64 already on the wasm stack into `temp_storage[temp_offsets[
+/// temp_id] + index]` (the `StoreIterElement` / `StoreBroadcastElement` write).
+/// `f64.store` wants `[addr_i32, value_f64]`, so park the value in the scratch
+/// local, push the constant address, then reload the value.
+fn emit_store_iter_element(
+    ctx: &EmitCtx,
+    temp_id: u8,
+    index: usize,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let addr = temp_element_byte_addr(ctx, temp_id, index as u32)?;
+    f.instruction(&Instruction::LocalSet(ctx.scratch_local));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::LocalGet(ctx.scratch_local));
+    f.instruction(&Instruction::F64Store(memarg(addr)));
+    Ok(())
+}
+
+/// Build the compile-time broadcast context for a `BeginBroadcastIter`,
+/// mirroring the VM's `BeginBroadcastIter` arm (`vm.rs:2314-2373`): union the
+/// `n_sources` deepest views' dim_ids into the result geometry (first-encounter
+/// order), then build each source's `dim_map` (result dim -> source dim, or
+/// `None` for a broadcast axis).
+fn build_broadcast_ctx(
+    state: &EmitState,
+    n_sources: usize,
+    dest_temp_id: u8,
+) -> Result<BroadcastCtx, WasmGenError> {
+    if n_sources == 0 || n_sources > state.view_stack.len() {
+        return Err(WasmGenError::Unsupported(
+            "wasmgen: BeginBroadcastIter source count out of range".to_string(),
+        ));
+    }
+    let base = state.view_stack.len() - n_sources;
+    let sources_slice = &state.view_stack[base..];
+
+    // Result dim ids/sizes: the union over all sources, first-encounter order.
+    let mut result_dim_ids: Vec<u16> = Vec::new();
+    let mut result_dims: Vec<u16> = Vec::new();
+    for view in sources_slice {
+        for (d, &dim_id) in view.dim_ids.iter().enumerate() {
+            if !result_dim_ids.contains(&dim_id) {
+                result_dim_ids.push(dim_id);
+                result_dims.push(view.dims[d]);
+            }
+        }
+    }
+
+    // Per source: dim_map[result_dim] = Some(src_dim) by exact dim-id match, else
+    // None (the source broadcasts along that axis).
+    let mut sources: Vec<(ViewDesc, Vec<Option<usize>>)> = Vec::with_capacity(n_sources);
+    for view in sources_slice {
+        let dim_map: Vec<Option<usize>> = result_dim_ids
+            .iter()
+            .map(|&rid| view.dim_ids.iter().position(|&id| id == rid))
+            .collect();
+        sources.push((view.clone(), dim_map));
+    }
+
+    Ok(BroadcastCtx {
+        sources,
+        dest_temp_id,
+        result_dims,
+        current: 0,
+    })
+}
+
+/// Lower `LoadBroadcastElement { source_idx }`, mirroring the VM
+/// (`vm.rs:2375-2414`): decompose the broadcast `current` into per-result-dim
+/// indices, scatter them into the source's dimension order through its
+/// `dim_map`, then read the source element. An invalid source view pushes NaN.
+fn emit_load_broadcast_element(
+    state: &EmitState,
+    source_idx: usize,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let bc_ctx = state.broadcast_stack.last().ok_or_else(|| {
+        WasmGenError::Unsupported(
+            "wasmgen: LoadBroadcastElement outside a broadcast iteration".to_string(),
+        )
+    })?;
+    let (source, dim_map) = bc_ctx.sources.get(source_idx).ok_or_else(|| {
+        WasmGenError::Unsupported(
+            "wasmgen: LoadBroadcastElement source_idx out of range".to_string(),
+        )
+    })?;
+
+    // Decompose the result `current` into per-result-dim indices (row-major).
+    let n_result = bc_ctx.result_dims.len();
+    let mut result_indices = vec![0u16; n_result];
+    let mut remaining = bc_ctx.current;
+    for d in (0..n_result).rev() {
+        let dim = bc_ctx.result_dims[d] as usize;
+        result_indices[d] = (remaining % dim) as u16;
+        remaining /= dim;
+    }
+
+    // Scatter into the source's dimension order: ordered[src_dim] =
+    // result_indices[result_dim] for each mapped axis (`vm.rs:2395-2402`).
+    let mut ordered = vec![0u16; source.dims.len()];
+    for (result_dim, mapped) in dim_map.iter().enumerate() {
+        if let Some(src_dim) = mapped {
+            ordered[*src_dim] = result_indices[result_dim];
+        }
+    }
+    let flat = source.flat_offset_for_indices(&ordered);
+    let source = source.clone();
+    emit_view_offset_load(&source, flat, ctx, f)
 }
 
 /// Emit a store of the f64 already on the wasm stack into the module-relative
@@ -1536,27 +1964,53 @@ fn emit_view_element_load(
     ctx: &EmitCtx,
     f: &mut Function,
 ) -> Result<(), WasmGenError> {
-    let ElementAddr {
-        const_byte_offset,
-        module_relative,
-    } = desc
+    let addr = desc
         .element_addr(iter_idx, ctx.curr_base, ctx.temp_storage_base, ctx.ctx)
-        .ok_or_else(|| {
-            WasmGenError::Unsupported(
-                "wasmgen: array element read needs a runtime address \
-                 (dynamically-subscripted view) -- not yet supported"
-                    .to_string(),
-            )
-        })?;
-    if module_relative {
-        // dynamic address = module_off * 8 (the constant `base_off + flat` rides
-        // in the memarg), matching the VM's `curr[module_off + base_off + flat]`.
+        .ok_or_else(runtime_address_unsupported)?;
+    emit_addr_load(addr, ctx, f);
+    Ok(())
+}
+
+/// Push the f64 value of the view element at an *already-computed* flat slot
+/// offset (the broadcast paths -- `LoadIterViewTop` / `LoadBroadcastElement` --
+/// build the flat offset themselves rather than from an iteration index). A
+/// dynamically-subscripted view (Task 4) returns `Unsupported` here (its const
+/// form cannot carry the runtime addend).
+fn emit_view_offset_load(
+    desc: &ViewDesc,
+    flat: usize,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let addr = desc
+        .element_addr_for_flat(flat, ctx.curr_base, ctx.temp_storage_base, ctx.ctx)
+        .ok_or_else(runtime_address_unsupported)?;
+    emit_addr_load(addr, ctx, f);
+    Ok(())
+}
+
+/// Emit the f64 load for a resolved [`ElementAddr`]: the constant part rides in
+/// the `memarg.offset`; the dynamic part is `module_off * 8` for a module-
+/// relative view and a bare `0` otherwise (matching the VM's
+/// `curr[module_off + base_off + flat]`).
+fn emit_addr_load(addr: ElementAddr, ctx: &EmitCtx, f: &mut Function) {
+    if addr.module_relative {
         push_module_relative_base(ctx, f);
     } else {
         f.instruction(&Instruction::I32Const(0));
     }
-    f.instruction(&Instruction::F64Load(memarg(const_byte_offset)));
-    Ok(())
+    f.instruction(&Instruction::F64Load(memarg(addr.const_byte_offset)));
+}
+
+/// The `Unsupported` error for an element read that still needs a runtime
+/// address (a dynamically-subscripted view before Task 4 lands its runtime
+/// addend path).
+fn runtime_address_unsupported() -> WasmGenError {
+    WasmGenError::Unsupported(
+        "wasmgen: array element read needs a runtime address \
+         (dynamically-subscripted view) -- not yet supported"
+            .to_string(),
+    )
 }
 
 /// Lower one array reducer over the top `ViewDesc` (the descriptor stays on the
@@ -2649,10 +3103,20 @@ mod tests {
 
     #[test]
     fn unsupported_array_opcode_returns_error() {
-        // The array reducers + static view ops are supported as of Phase 5
-        // Tasks 1-2, so this drives the still-unsupported iteration path
-        // (`BeginIter`, Phase 5 Task 3) to confirm an unhandled array opcode
-        // still returns a clean error rather than a wrong module.
+        // The reducers, static view ops, and iteration loops are supported as of
+        // Phase 5 Tasks 1-3, so this drives a still-unsupported module opcode
+        // (`EvalModule`, Phase 7) to confirm an unhandled opcode still returns a
+        // clean error rather than a wrong module.
+        let mut func = Function::new([]);
+        let program = bc(vec![], vec![Opcode::EvalModule { id: 0, n_inputs: 0 }]);
+        let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
+        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+    }
+
+    #[test]
+    fn begin_iter_on_empty_view_stack_errors() {
+        // A `BeginIter` with no view pushed first is malformed bytecode: it must
+        // error cleanly (empty-view-stack), not panic.
         let mut func = Function::new([]);
         let program = bc(
             vec![],
@@ -4605,5 +5069,387 @@ mod tests {
         // still reports size 3.
         let got = run_invalid_view_reduce(Opcode::ArraySize {});
         assert_eq!(got, 3.0);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Phase 5 Task 3: iteration loops (BeginIter..EndIter) + broadcast
+    //
+    // The body span between `BeginIter` and `NextIterOrJump` is fully unrolled
+    // over the compile-time `size()`, so each iteration's reads/writes are
+    // emitted at constant addresses (mirroring the array reducer's unrolled fold
+    // and the VM element-for-element). These hand-build the canonical codegen
+    // shape (`PushStaticView(out); BeginIter; PushStaticView(src); <body>;
+    // NextIterOrJump; EndIter; PopView; ...`) and run it under DLR-FT, reading
+    // the written temp slots back and comparing to a VM-mirrored oracle.
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// A contiguous temp `StaticArrayView` over `dims` at `temp_id`.
+    fn temp_view(temp_id: u32, dims: &[u16]) -> StaticArrayView {
+        let mut v = dense_view(temp_id, dims);
+        v.is_temp = true;
+        v
+    }
+
+    /// A contiguous temp `StaticArrayView` carrying explicit `dim_ids` (for the
+    /// broadcast-matching tests).
+    fn dense_view_ids(base_off: u32, dims: &[u16], dim_ids: &[u16]) -> StaticArrayView {
+        let mut v = dense_view(base_off, dims);
+        v.dim_ids = dim_ids.iter().copied().collect();
+        v
+    }
+
+    /// Read `count` temp slots (starting at temp slot 0) back after running a
+    /// temp-writing program. The temp region base is `TEMP_BASE`.
+    fn run_and_read_temps(
+        context: &ByteCodeContext,
+        code: Vec<Opcode>,
+        literals: Vec<f64>,
+        seed: &[(u64, f64)],
+        count: usize,
+    ) -> Vec<f64> {
+        let ctx = ctx_with_arrays(context);
+        let bytes = build_module(&bc(literals, code), &ctx, false, 0);
+        let info = validate(&bytes).expect("emitted module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        if !seed.is_empty() {
+            let mem = store
+                .instance_export(inst, "mem")
+                .unwrap()
+                .as_mem()
+                .unwrap();
+            store.mem_access_mut_slice(mem, |b| {
+                for &(addr, v) in seed {
+                    let a = addr as usize;
+                    b[a..a + 8].copy_from_slice(&v.to_le_bytes());
+                }
+            });
+        }
+        let eval = store
+            .instance_export(inst, "eval")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(i32,), ()>(eval, (0_i32,))
+            .expect("invoke");
+        let mem = store
+            .instance_export(inst, "mem")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        store.mem_access_mut_slice(mem, |b| {
+            (0..count)
+                .map(|i| {
+                    let a = TEMP_BASE as usize + i * 8;
+                    f64::from_le_bytes(b[a..a + 8].try_into().unwrap())
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn iter_loop_elementwise_writes_temp_like_vm() {
+        // out_temp[i] = source[i] * 2 over a 4-element source in curr, written to
+        // temp 0. Mirrors the codegen shape: output temp view drives iteration,
+        // the source view is pushed inside, read via LoadIterViewAt{1}.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0], 4); // temp 0 spans 4 slots
+        let out_view = context.add_static_view(temp_view(0, &[4]));
+        let src_view = context.add_static_view(dense_view(0, &[4]));
+        let code = vec![
+            Opcode::PushStaticView { view_id: out_view },
+            Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: true,
+            },
+            Opcode::PushStaticView { view_id: src_view },
+            Opcode::LoadIterViewAt { offset: 1 },
+            Opcode::LoadConstant { id: 0 },
+            Opcode::Op2 { op: Op2::Mul },
+            Opcode::StoreIterElement {},
+            Opcode::NextIterOrJump { jump_back: -4 },
+            Opcode::EndIter {},
+            Opcode::PopView {},
+            Opcode::PopView {},
+        ];
+        // source = [10, 20, 30, 40] in curr slots 0..4.
+        let seed = seed_run(0, &[10.0, 20.0, 30.0, 40.0]);
+        let temps = run_and_read_temps(&context, code, vec![2.0], &seed, 4);
+        assert_eq!(temps, vec![20.0, 40.0, 60.0, 80.0]);
+    }
+
+    #[test]
+    fn iter_loop_load_iter_element_reads_captured_view() {
+        // out_temp[i] = iter_view[i] (the captured view *is* the iteration view).
+        // Here the captured view is the OUTPUT temp itself, so seed the temp and
+        // copy it to itself -- a degenerate but faithful LoadIterElement check.
+        // Use a separate source temp captured as the iter view instead: push a
+        // source temp view, BeginIter captures it, LoadIterElement reads it, and
+        // StoreIterElement writes the *same* temp's slots (write_temp == source).
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0], 3);
+        let src = context.add_static_view(temp_view(0, &[3]));
+        let code = vec![
+            Opcode::PushStaticView { view_id: src },
+            Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: true,
+            },
+            Opcode::LoadIterElement {},
+            Opcode::LoadConstant { id: 0 },
+            Opcode::Op2 { op: Op2::Add },
+            Opcode::StoreIterElement {},
+            Opcode::NextIterOrJump { jump_back: -4 },
+            Opcode::EndIter {},
+            Opcode::PopView {},
+        ];
+        // temp 0 = [1, 2, 3]; each += 5 in place -> [6, 7, 8].
+        let seed = seed_run(u64::from(TEMP_BASE), &[1.0, 2.0, 3.0]);
+        let temps = run_and_read_temps(&context, code, vec![5.0], &seed, 3);
+        assert_eq!(temps, vec![6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn iter_loop_load_iter_temp_element_reads_temp() {
+        // out_temp1[i] = temp0[i] + 100, reading temp0 via LoadIterTempElement and
+        // writing temp1. temp_offsets = [0, 3]: temp0 in slots 0..3, temp1 in 3..6.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0, 3], 6);
+        let out_view = context.add_static_view(temp_view(1, &[3])); // temp 1
+        let code = vec![
+            Opcode::PushStaticView { view_id: out_view },
+            Opcode::BeginIter {
+                write_temp_id: 1,
+                has_write_temp: true,
+            },
+            Opcode::LoadIterTempElement { temp_id: 0 },
+            Opcode::LoadConstant { id: 0 },
+            Opcode::Op2 { op: Op2::Add },
+            Opcode::StoreIterElement {},
+            Opcode::NextIterOrJump { jump_back: -4 },
+            Opcode::EndIter {},
+            Opcode::PopView {},
+        ];
+        // temp0 = [7, 8, 9] in slots 0..3.
+        let seed = seed_run(u64::from(TEMP_BASE), &[7.0, 8.0, 9.0]);
+        // Read 6 temp slots: temp1 is slots 3..6.
+        let temps = run_and_read_temps(&context, code, vec![100.0], &seed, 6);
+        assert_eq!(&temps[3..6], &[107.0, 108.0, 109.0]);
+    }
+
+    #[test]
+    fn iter_loop_broadcast_smaller_source_matches_vm() {
+        // out_temp[A,B] = mat[A,B] + vec[A]: the iteration view is 2-D [A(2),B(3)]
+        // (dim_ids [0,1]); `vec` is 1-D [A(2)] (dim_id 0), broadcast along B. This
+        // exercises the `LoadIterViewAt` broadcast path (source dims != iter
+        // dims), which production codegen does not currently emit but the VM
+        // supports. Cross-checked element-for-element against the VM's broadcast.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0], 6); // out temp [2,3]
+        // Two indexed dims so match_dimensions_two_pass can resolve is_indexed.
+        let na = context.intern_name("A");
+        context.add_dimension(DimensionInfo::indexed(na, 2)); // id 0
+        let nb = context.intern_name("B");
+        context.add_dimension(DimensionInfo::indexed(nb, 3)); // id 1
+
+        let out_view = context.add_static_view({
+            let mut v = temp_view(0, &[2, 3]);
+            v.dim_ids = SmallVec::from_slice(&[0, 1]);
+            v
+        });
+        // mat in curr slots 0..6 (dims [2,3], dim_ids [0,1]).
+        let mat = context.add_static_view(dense_view_ids(0, &[2, 3], &[0, 1]));
+        // vec in curr slots 6..8 (dims [2], dim_id 0).
+        let vec_v = context.add_static_view(dense_view_ids(6, &[2], &[0]));
+        let code = vec![
+            Opcode::PushStaticView { view_id: out_view },
+            Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: true,
+            },
+            Opcode::PushStaticView { view_id: mat }, // offset 2 after vec is pushed
+            Opcode::PushStaticView { view_id: vec_v }, // offset 1
+            Opcode::LoadIterViewAt { offset: 2 },    // mat[A,B]
+            Opcode::LoadIterViewAt { offset: 1 },    // vec[A] broadcast over B
+            Opcode::Op2 { op: Op2::Add },
+            Opcode::StoreIterElement {},
+            Opcode::NextIterOrJump { jump_back: -5 },
+            Opcode::EndIter {},
+            Opcode::PopView {},
+            Opcode::PopView {},
+            Opcode::PopView {},
+        ];
+        // mat[a,b] = a*10 + b -> [0,1,2, 10,11,12]; vec[a] = a -> [0, 1].
+        let mut seed = seed_run(0, &[0.0, 1.0, 2.0, 10.0, 11.0, 12.0]);
+        seed.extend(seed_run(6 * 8, &[0.0, 1.0]));
+        let temps = run_and_read_temps(&context, code, vec![], &seed, 6);
+        // out[a,b] = mat[a,b] + vec[a].
+        let expected = [
+            0.0 + 0.0,
+            1.0 + 0.0,
+            2.0 + 0.0,
+            10.0 + 1.0,
+            11.0 + 1.0,
+            12.0 + 1.0,
+        ];
+        assert_eq!(temps, expected);
+    }
+
+    #[test]
+    fn iter_loop_smaller_source_same_shape_writes_nan() {
+        // The iteration is over 4 elements but the source view (same dim_ids) has
+        // only 3: the VM's `LoadIterViewTop`/`LoadIterViewAt` fast path returns
+        // NaN past the source size (`vm.rs:1972`). Element 3 must be NaN.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0], 4);
+        let out_view = context.add_static_view(temp_view(0, &[4]));
+        let src = context.add_static_view(dense_view(0, &[3])); // shorter
+        let code = vec![
+            Opcode::PushStaticView { view_id: out_view },
+            Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: true,
+            },
+            Opcode::PushStaticView { view_id: src },
+            Opcode::LoadIterViewAt { offset: 1 },
+            Opcode::StoreIterElement {},
+            Opcode::NextIterOrJump { jump_back: -3 },
+            Opcode::EndIter {},
+            Opcode::PopView {},
+            Opcode::PopView {},
+        ];
+        let seed = seed_run(0, &[5.0, 6.0, 7.0]);
+        let temps = run_and_read_temps(&context, code, vec![], &seed, 4);
+        assert_eq!(&temps[0..3], &[5.0, 6.0, 7.0]);
+        assert!(
+            temps[3].is_nan(),
+            "element past the source size must be NaN"
+        );
+    }
+
+    #[test]
+    fn iter_loop_then_reduce_dotprod_matches_vm() {
+        // The full SUM(a[*]*b[*]) shape: hoist a[i]*b[i] into a temp via BeginIter,
+        // then ArraySum the temp. a in curr 0..4, b in curr 4..8, temp 0.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0], 4);
+        let out_view = context.add_static_view(temp_view(0, &[4]));
+        let a = context.add_static_view(dense_view(0, &[4]));
+        let b = context.add_static_view(dense_view(4, &[4]));
+        let temp_read = context.add_static_view(temp_view(0, &[4]));
+        let code = vec![
+            Opcode::PushStaticView { view_id: out_view },
+            Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: true,
+            },
+            Opcode::PushStaticView { view_id: a }, // offset 2 after b
+            Opcode::PushStaticView { view_id: b }, // offset 1
+            Opcode::LoadIterViewAt { offset: 2 },
+            Opcode::LoadIterViewAt { offset: 1 },
+            Opcode::Op2 { op: Op2::Mul },
+            Opcode::StoreIterElement {},
+            Opcode::NextIterOrJump { jump_back: -5 },
+            Opcode::EndIter {},
+            Opcode::PopView {},
+            Opcode::PopView {},
+            Opcode::PopView {},
+            Opcode::PushStaticView { view_id: temp_read },
+            Opcode::ArraySum {},
+            Opcode::PopView {},
+        ];
+        // a = [1,2,3,4], b = [10,20,30,40] -> dot = 10+40+90+160 = 300.
+        let mut seed = seed_run(0, &[1.0, 2.0, 3.0, 4.0]);
+        seed.extend(seed_run(4 * 8, &[10.0, 20.0, 30.0, 40.0]));
+        let ctx = ctx_with_arrays(&context);
+        let got = run(&bc(vec![], code), &ctx, true, 0, &seed, None);
+        assert_eq!(got, 300.0);
+    }
+
+    #[test]
+    fn iter_loop_zero_size_writes_nothing() {
+        // An empty iteration view (size 0): the unroller emits zero body copies,
+        // so the temp keeps its seeded value (no write). A trailing reducer over
+        // the empty output is 0 for SUM.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0], 1);
+        let out_view = context.add_static_view({
+            let mut v = temp_view(0, &[0]); // zero-size dim
+            v.dims = SmallVec::from_slice(&[0]);
+            v
+        });
+        let code = vec![
+            Opcode::PushStaticView { view_id: out_view },
+            Opcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: true,
+            },
+            Opcode::LoadIterElement {},
+            Opcode::StoreIterElement {},
+            Opcode::NextIterOrJump { jump_back: -2 },
+            Opcode::EndIter {},
+            Opcode::PopView {},
+        ];
+        // Seed temp slot 0 with a sentinel; the empty loop must not touch it.
+        let seed = seed_run(u64::from(TEMP_BASE), &[42.0]);
+        let temps = run_and_read_temps(&context, code, vec![], &seed, 1);
+        assert_eq!(temps, vec![42.0], "an empty iteration writes nothing");
+    }
+
+    // ── Broadcast iteration family (BeginBroadcastIter..EndBroadcastIter) ──
+    //
+    // Not emitted by current codegen, but lowered for completeness and pinned
+    // against the VM's `BeginBroadcastIter`/`LoadBroadcastElement` arms
+    // (`vm.rs:2314-2421`) here. The result geometry is the union of the source
+    // dim_ids; a 2-D and a 1-D source broadcast into the 2-D result.
+
+    #[test]
+    fn broadcast_iter_unions_dims_like_vm() {
+        // dest[A,B] = mat[A,B] * vec[A]: BeginBroadcastIter with two sources
+        // (mat 2-D dim_ids [0,1], vec 1-D dim_id 0). The result unions to
+        // dim_ids [0,1] (dims [2,3]); vec broadcasts along B.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0], 6);
+        let na = context.intern_name("A");
+        context.add_dimension(DimensionInfo::indexed(na, 2)); // id 0
+        let nb = context.intern_name("B");
+        context.add_dimension(DimensionInfo::indexed(nb, 3)); // id 1
+        let mat = context.add_static_view(dense_view_ids(0, &[2, 3], &[0, 1]));
+        let vec_v = context.add_static_view(dense_view_ids(6, &[2], &[0]));
+        let code = vec![
+            // Push the two sources (deepest-first): mat then vec.
+            Opcode::PushStaticView { view_id: mat },
+            Opcode::PushStaticView { view_id: vec_v },
+            Opcode::BeginBroadcastIter {
+                n_sources: 2,
+                dest_temp_id: 0,
+            },
+            Opcode::LoadBroadcastElement { source_idx: 0 }, // mat
+            Opcode::LoadBroadcastElement { source_idx: 1 }, // vec
+            Opcode::Op2 { op: Op2::Mul },
+            Opcode::StoreBroadcastElement {},
+            Opcode::NextBroadcastOrJump { jump_back: -4 },
+            Opcode::EndBroadcastIter {},
+            Opcode::PopView {},
+            Opcode::PopView {},
+        ];
+        // mat[a,b] = a*10 + b -> [0,1,2, 10,11,12]; vec[a] = a+1 -> [1, 2].
+        let mut seed = seed_run(0, &[0.0, 1.0, 2.0, 10.0, 11.0, 12.0]);
+        seed.extend(seed_run(6 * 8, &[1.0, 2.0]));
+        let temps = run_and_read_temps(&context, code, vec![], &seed, 6);
+        // dest[a,b] = mat[a,b] * vec[a].
+        let expected = [
+            0.0 * 1.0,
+            1.0 * 1.0,
+            2.0 * 1.0,
+            10.0 * 2.0,
+            11.0 * 2.0,
+            12.0 * 2.0,
+        ];
+        assert_eq!(temps, expected);
     }
 }
