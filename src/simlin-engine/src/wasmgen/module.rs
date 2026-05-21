@@ -897,10 +897,13 @@ mod tests {
         let artifact = compile_simulation(&sim).expect("wasm codegen");
 
         let checked = assert_matches_vm(sim, &artifact);
-        // interp/fwd/bwd (+ curve + input) must all be compared.
+        // All five variables must reach parity: the three lookup-mode results
+        // (interp/fwd/bwd), the lookup-only `curve` holder they read, and its
+        // `input`. Pinning >= 5 (not just the 3 lookup modes) proves the
+        // lookup-only curve holder and its driver also match the VM.
         assert!(
-            checked >= 3,
-            "expected to compare the three lookup-mode variables, only checked {checked}"
+            checked >= 5,
+            "expected to compare interp/fwd/bwd + curve + input, only checked {checked}"
         );
         for name in ["interp_val", "fwd_val", "bwd_val"] {
             assert!(

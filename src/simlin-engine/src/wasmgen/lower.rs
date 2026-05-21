@@ -2127,6 +2127,10 @@ mod tests {
     /// Pack a GF directory entry `(data_off, count)` into the f64 whose 8 LE
     /// bytes are `data_off` (low i32) then `count` (high i32) -- so seeding it as
     /// one f64 writes exactly the two i32 the `Lookup` opcode reads.
+    ///
+    /// Assumes a little-endian test host: the low 32 bits land at the lower
+    /// address, matching production's `to_le_bytes` directory encoding (the
+    /// opcode reads `data_off` at offset 0 and `count` at offset 4).
     fn dir_entry_f64(data_off: u32, count: u32) -> f64 {
         f64::from_bits(((count as u64) << 32) | data_off as u64)
     }
@@ -2249,6 +2253,126 @@ mod tests {
             assert!(
                 run_lookup_opcode(mode, LOOKUP_OPCODE_TABLE, 1, 0.0, f64::NAN).is_nan(),
                 "{mode:?}: a NaN index must be NaN"
+            );
+        }
+    }
+
+    // ── Lookup opcode: runtime table selection across TWO tables ──────────
+    //
+    // The single-table parity tests above always pass `element_offset == 0`, so
+    // the directory-indexing arithmetic in `push_gf_directory_addr`
+    // (`gf_directory_base + (base_gf + element_offset) * 8`) is only exercised
+    // for offset 0 -- the `* 8` stride and the offset add are never tested with
+    // a nonzero offset (the out-of-range tests short-circuit to NaN before the
+    // directory read). Phase 5/7 lower an arrayed scalar `Lookup` to a runtime
+    // per-element `element_offset` that selects a per-element table, so the
+    // table-selection path must be pinned here.
+
+    // Two-table layout: a 2-entry directory at `GF2_DIR_BASE`, then each
+    // table's knots laid out back-to-back past the directory.
+    const GF2_DIR_BASE: u32 = 8192;
+    const GF2_TABLE0_DATA: u32 = GF2_DIR_BASE + 2 * 8; // past two 8-byte entries
+    // Table 0 has two knots (4 f64 = 32 bytes); table 1's data follows.
+    const GF2_TABLE1_DATA: u32 = GF2_TABLE0_DATA + 2 * 16;
+
+    /// Seed two GF tables so that directory entry `t` (`t ∈ {0,1}`) points at
+    /// `table_t`'s knots. Mirrors the production directory layout the opcode
+    /// reads via `push_gf_directory_addr`.
+    fn seed_two_tables(table0: &[(f64, f64)], table1: &[(f64, f64)]) -> Vec<(u64, f64)> {
+        let mut seed = vec![
+            (
+                u64::from(GF2_DIR_BASE),
+                dir_entry_f64(GF2_TABLE0_DATA, table0.len() as u32),
+            ),
+            (
+                u64::from(GF2_DIR_BASE) + 8,
+                dir_entry_f64(GF2_TABLE1_DATA, table1.len() as u32),
+            ),
+        ];
+        for (base, knots) in [(GF2_TABLE0_DATA, table0), (GF2_TABLE1_DATA, table1)] {
+            for (k, &(x, y)) in knots.iter().enumerate() {
+                let knot_addr = u64::from(base) + (k as u64) * 16;
+                seed.push((knot_addr, x));
+                seed.push((knot_addr + 8, y));
+            }
+        }
+        seed
+    }
+
+    /// Run a `Lookup` with a compile-time-constant `element_offset` against a
+    /// two-table directory (`base_gf == 0`, `table_count == 2`).
+    fn run_lookup_two_tables(
+        mode: LookupMode,
+        table0: &[(f64, f64)],
+        table1: &[(f64, f64)],
+        element_offset: f64,
+        index: f64,
+    ) -> f64 {
+        let code = vec![
+            Opcode::LoadConstant { id: 0 }, // element_offset (pushed first)
+            Opcode::LoadConstant { id: 1 }, // index (pushed second, on top)
+            Opcode::Lookup {
+                base_gf: 0,
+                table_count: 2,
+                mode,
+            },
+        ];
+        let ctx = EmitCtx {
+            gf_directory_base: GF2_DIR_BASE,
+            // `gf_data_base` is unused at runtime by the opcode (each table's
+            // data offset comes from its directory entry), but set it to the
+            // first table's data so the ctx is internally consistent.
+            gf_data_base: GF2_TABLE0_DATA,
+            ..ctx_with_cond_depth(0)
+        };
+        run(
+            &bc(vec![element_offset, index], code),
+            &ctx,
+            true,
+            0,
+            &seed_two_tables(table0, table1),
+            None,
+        )
+    }
+
+    #[test]
+    fn lookup_opcode_selects_table_by_element_offset() {
+        // Two tables whose values differ at the probe index in ALL three modes,
+        // so selecting the wrong table is observable regardless of mode:
+        //   table 0: y = 10x        index 5 -> interp 50,  fwd 100, bwd 0
+        //   table 1: y = x/10 + 1   index 5 -> interp 1.5, fwd 2,   bwd 1
+        let table0: &[(f64, f64)] = &[(0.0, 0.0), (10.0, 100.0)];
+        let table1: &[(f64, f64)] = &[(0.0, 1.0), (10.0, 2.0)];
+        let index = 5.0;
+
+        for mode in [
+            LookupMode::Interpolate,
+            LookupMode::Forward,
+            LookupMode::Backward,
+        ] {
+            // The two tables must genuinely disagree here, otherwise selecting
+            // the wrong table would silently pass.
+            let want0 = vm_lookup_oracle(mode, table0, index);
+            let want1 = vm_lookup_oracle(mode, table1, index);
+            assert_ne!(
+                want0, want1,
+                "{mode:?}: tables must differ at the probe index to detect mis-selection"
+            );
+
+            // element_offset == 1 selects table 1; the result must match the VM
+            // oracle over table 1 (and therefore differ from table 0).
+            let got = run_lookup_two_tables(mode, table0, table1, 1.0, index);
+            assert_eq!(
+                got, want1,
+                "{mode:?}: element_offset==1 must read table 1: got {got}, want {want1}"
+            );
+
+            // Sanity: element_offset == 0 still selects table 0 (the offset is a
+            // real selector, not a constant remap to table 1).
+            let got0 = run_lookup_two_tables(mode, table0, table1, 0.0, index);
+            assert_eq!(
+                got0, want0,
+                "{mode:?}: element_offset==0 must read table 0: got {got0}, want {want0}"
             );
         }
     }
