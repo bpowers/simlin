@@ -156,7 +156,38 @@ static TEST_MODELS: &[&str] = &[
 /// unit tests (`compile_simulation_rk4_matches_vm`, `..._rk2_matches_vm`,
 /// `..._rk4_with_previous_and_init_matches_vm`, `..._previous_matches_vm`,
 /// `..._init_from_flow_matches_vm`, `..._init_from_initial_matches_vm`) rather
-/// than by this corpus floor. The floor rises again in Phase 7 (submodules).
+/// than by this corpus floor.
+///
+/// Phase 5 lowers the array core -- the compile-time view-descriptor stack and
+/// static view ops, the `Array{Sum,Max,Min,Mean,Stddev,Size}` reducers, the
+/// `BeginIter…EndIter` / broadcast iteration loops (emitted as fully-unrolled
+/// wasm), and dynamic subscripts with OOB->NaN -- so the backend now handles
+/// every array-producing opcode an arrayed model can emit. It still leaves the
+/// floor at 50: re-running `wasm_parity_floor` shows the same 8 skips, all
+/// `submodules are not supported`, and no arrayed corpus model flips
+/// Skipped->Ran because **none of them emit an array opcode in the first
+/// place**. The compiler unrolls apply-to-all variables to independent
+/// per-element scalar bytecode (`compiler/mod.rs`) and unrolls the small-array
+/// reducers in the corpus (`builtin_max`/`builtin_mean`/`builtin_min`) to scalar
+/// `Max`/`Min`/comparison opcodes, so the whole arrayed/subscript corpus
+/// (`subscript_1d`/`2d`/`3d`/`docs`/`multiples`/`selection`/`individually_defined…`,
+/// the `arrays/a2a` and `arrays/non-a2a` samples, and the three `builtin_*`
+/// reducers) was *already* `Ran` under Phases 1-3 via the purely-scalar opcode
+/// stream -- a fact verified directly by walking each corpus model's flat
+/// `ByteCode.code`: every active model's stream contains zero view/iter/reducer
+/// opcodes. The view-stack, reducer, iteration, and dynamic-subscript parity is
+/// therefore pinned by the inline `wasmgen` unit tests (`wasmgen/views.rs` plus
+/// the Task 1-4 reducer / `BeginIter` / broadcast / dynamic-subscript tests in
+/// `wasmgen/lower.rs`), exactly as RK/`PREVIOUS`/`INIT` are pinned by the
+/// `wasmgen::module` unit tests rather than by this corpus floor. The remaining
+/// 8 skips split as: nested modules / macros
+/// (`bpowers-hares_and_lynxes_modules`, `delays2`, `smooth_and_stock`, `trend`,
+/// and the four `macro_*` fixtures) -- the floor rises for those in Phase 7
+/// (submodules). Models needing vector ops/allocation
+/// (`VectorSelect`/`VectorElmMap`/`VectorSortOrder`/`Rank`/`LookupArray`/
+/// `Allocate*`) stay Skipped until Phase 6, and any true runtime-range model
+/// (`ViewRangeDynamic`) stays Skipped by design; no such model is in the active
+/// corpus today.
 const WASM_SUPPORTED_FLOOR: usize = 50;
 
 /// AC3.1 / AC3.3 rising-floor gate: run every (non-`#[ignore]`-class) corpus
