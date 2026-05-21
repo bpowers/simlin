@@ -1481,8 +1481,13 @@ export function projectAttachData(project: Project, data: ReadonlyMap<string, Se
     }
     const ident = v.ident;
     const dim = defined(project.dimensions.get(dimNames[0]));
+    // Simulation results key per-element series by canonicalized element names
+    // (e.g. `temperature[high_2xco2_sensitivity]`), but a dimension preserves
+    // the model's original-case subscript names (`High_2xCO2_sensitivity`).
+    // Canonicalize each element to match, otherwise an arrayed variable whose
+    // elements aren't already lowercase gets no data and renders no sparkline.
     const series = dim.subscripts
-      .map((element) => data.get(`${ident}[${element}]`))
+      .map((element) => data.get(`${ident}[${canonicalize(element)}]`))
       .filter((d) => d !== undefined)
       .map((d) => defined(d));
 

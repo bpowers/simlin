@@ -35,6 +35,7 @@ import {
   modelToJson,
   projectFromJson,
   projectToJson,
+  projectAttachData,
 } from '../datamodel';
 
 import type {
@@ -68,6 +69,7 @@ import type {
   JsonLinkViewElement,
   JsonCloudViewElement,
 } from '@simlin/engine';
+import { defined, type Series } from '../common';
 
 describe('GraphicalFunctionScale', () => {
   it('should roundtrip correctly', () => {
@@ -1242,5 +1244,100 @@ describe('Project', () => {
 
     expect(restored.models.get('main')?.variables.size).toBe(0);
     expect(restored.source).toBeUndefined();
+  });
+});
+
+describe('projectAttachData', () => {
+  const series = (name: string, values: number[]): Series => ({
+    name,
+    time: new Float64Array([0, 1, 2]),
+    values: new Float64Array(values),
+  });
+
+  const arrayedAux = (ident: string, dimensionNames: string[]): Aux => ({
+    type: 'aux',
+    ident,
+    equation: { type: 'applyToAll', dimensionNames, equation: '1' },
+    documentation: '',
+    units: '',
+    gf: undefined,
+    canBeModuleInput: false,
+    isPublic: false,
+    data: undefined,
+    errors: undefined,
+    unitErrors: undefined,
+    uid: 1,
+  });
+
+  const projectWith = (variables: Variable[], dimensions: Dimension[]): Project => ({
+    name: 'test',
+    simSpecs: {
+      start: 0,
+      stop: 2,
+      dt: { value: 1, isReciprocal: false },
+      saveStep: undefined,
+      simMethod: 'euler',
+      timeUnits: '',
+    },
+    models: new Map([
+      [
+        'main',
+        {
+          name: 'main',
+          variables: new Map<string, Variable>(variables.map((v) => [v.ident, v])),
+          views: [],
+          loopMetadata: [],
+          groups: [],
+        },
+      ],
+    ]),
+    dimensions: new Map(dimensions.map((d) => [d.name, d])),
+    hasNoEquations: false,
+    source: undefined,
+  });
+
+  // Regression test for arrayed-variable sparklines: the simulation keys its
+  // per-element series by CANONICALIZED element names (e.g.
+  // `temperature[high_2xco2_sensitivity]`), but a dimension preserves the
+  // model's ORIGINAL-case subscript names. projectAttachData must canonicalize
+  // each element when building the lookup key, or every arrayed variable whose
+  // dimension elements aren't already lowercase gets no data.
+  it('attaches per-element data for a 1-D arrayed variable with original-case subscripts', () => {
+    const project = projectWith(
+      [arrayedAux('temperature', ['scenario'])],
+      [{ name: 'scenario', subscripts: ['Deterministic', 'Low_2xCO2_sensitivity', 'High_2xCO2_sensitivity'] }],
+    );
+    const data = new Map<string, Series>([
+      ['temperature[deterministic]', series('temperature[deterministic]', [1, 2, 3])],
+      ['temperature[low_2xco2_sensitivity]', series('temperature[low_2xco2_sensitivity]', [4, 5, 6])],
+      ['temperature[high_2xco2_sensitivity]', series('temperature[high_2xco2_sensitivity]', [7, 8, 9])],
+    ]);
+
+    const attached = projectAttachData(project, data, 'main');
+    const v = defined(attached.models.get('main')).variables.get('temperature');
+
+    expect(v?.data).toBeDefined();
+    // ordered by the dimension's declared subscript order
+    expect((v?.data ?? []).map((s) => Array.from(s.values))).toEqual([
+      [1, 2, 3],
+      [4, 5, 6],
+      [7, 8, 9],
+    ]);
+  });
+
+  it('attaches data for an already-canonical 1-D arrayed variable', () => {
+    const project = projectWith(
+      [arrayedAux('population', ['region'])],
+      [{ name: 'region', subscripts: ['boston', 'nyc'] }],
+    );
+    const data = new Map<string, Series>([
+      ['population[boston]', series('population[boston]', [10, 11])],
+      ['population[nyc]', series('population[nyc]', [20, 21])],
+    ]);
+
+    const attached = projectAttachData(project, data, 'main');
+    const v = defined(attached.models.get('main')).variables.get('population');
+
+    expect((v?.data ?? []).length).toBe(2);
   });
 });
