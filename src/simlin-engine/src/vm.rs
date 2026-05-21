@@ -3052,8 +3052,11 @@ pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval:
     0.0
 }
 
+// `pub(crate)` so the wasm backend's lookup-helper tests can compare the
+// emitted helpers directly against the VM functions they reproduce
+// (`wasmgen::lookup`), the byte-faithful oracle for `vm.rs:3055-3186`.
 #[inline(never)]
-fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
+pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
         return f64::NAN;
     }
@@ -3105,7 +3108,7 @@ fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
 /// If x is beyond the last point, returns the y-value of the last point.
 /// This is a "sample and hold" interpolation where we look forward.
 #[inline(never)]
-fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
+pub(crate) fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
         return f64::NAN;
     }
@@ -3147,7 +3150,7 @@ fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
 ///
 /// For duplicate x-values, returns the y of the LAST point with that x.
 #[inline(never)]
-fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
+pub(crate) fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
         return f64::NAN;
     }

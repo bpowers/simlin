@@ -200,6 +200,23 @@ pub(crate) struct HelperFns {
     pub acos: u32,
     pub log10: u32,
     pub pow: u32,
+    /// Graphical-function lookup helpers (`super::lookup`), each
+    /// `(data_off: i32, count: i32, index: f64) -> f64`, reproducing the VM's
+    /// `lookup`/`lookup_forward`/`lookup_backward` (`vm.rs:3055-3186`). The
+    /// `Lookup` opcode (`emit_bytecode`) reads `(data_off, count)` from the GF
+    /// directory and `call`s the mode's helper. [`lookup_interp`](Self::lookup_interp)
+    /// `call`s [`approx_eq`](Self::approx_eq) for its at-knot exact-hit test, so
+    /// `approx_eq` is pushed before it in [`build_helpers`].
+    // Read by the `Lookup` opcode arm (Task 3); the `allow` is removed there.
+    // (`#[cfg(test)]` already exercises them via `helper_index` in
+    // `wasmgen::lookup::tests`, but that does not count for the lib's dead-code
+    // analysis.)
+    #[allow(dead_code)]
+    pub lookup_interp: u32,
+    #[allow(dead_code)]
+    pub lookup_forward: u32,
+    #[allow(dead_code)]
+    pub lookup_backward: u32,
 }
 
 /// One emitted helper function: its signature (so the assembler can register a
@@ -288,6 +305,22 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
         body: super::math::emit_pow(exp, ln),
     });
 
+    // GF lookup helpers, each `(data_off: i32, count: i32, index: f64) -> f64`.
+    // `lookup_interp` `call`s `approx_eq` (assigned above), so its body is built
+    // with that index.
+    let push_lookup = |functions: &mut Vec<HelperFn>, body: Function| -> u32 {
+        let idx = functions.len() as u32;
+        functions.push(HelperFn {
+            params: vec![ValType::I32, ValType::I32, ValType::F64],
+            results: vec![ValType::F64],
+            body,
+        });
+        idx
+    };
+    let lookup_interp = push_lookup(&mut functions, super::lookup::emit_lookup_interp(approx_eq));
+    let lookup_forward = push_lookup(&mut functions, super::lookup::emit_lookup_forward());
+    let lookup_backward = push_lookup(&mut functions, super::lookup::emit_lookup_backward());
+
     BuiltHelpers {
         fns: HelperFns {
             approx_eq,
@@ -303,6 +336,9 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
             acos,
             log10,
             pow,
+            lookup_interp,
+            lookup_forward,
+            lookup_backward,
         },
         functions,
     }
@@ -1985,6 +2021,19 @@ mod tests {
         }
         functions.function(0);
         module.section(&functions);
+
+        // The GF lookup helpers (`super::lookup`) `f64.load` from memory 0, so
+        // a module that includes every helper body must declare a memory even
+        // though `eq` itself never touches it.
+        let mut memories = MemorySection::new();
+        memories.memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&memories);
 
         let mut exports = ExportSection::new();
         exports.export("eq", ExportKind::Func, n_helpers);

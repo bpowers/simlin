@@ -24,6 +24,7 @@
 //! modules, lookups, and RK2/RK4 land in subsequent phases (anything
 //! unsupported returns `WasmGenError::Unsupported`).
 
+mod lookup;
 mod lower;
 mod math;
 mod module;

@@ -915,8 +915,8 @@ mod tests {
     use checked::Store;
     use wasm::validate;
     use wasm_encoder::{
-        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
-        TypeSection, ValType,
+        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction,
+        MemorySection, MemoryType, Module, TypeSection, ValType,
     };
 
     /// Which transcendental helper a test module exports as `f`.
@@ -984,6 +984,19 @@ mod tests {
         }
         functions.function(0);
         module.section(&functions);
+
+        // The GF lookup helpers (`super::lookup`) `f64.load` from memory 0, so
+        // a module that includes every helper body must declare a memory even
+        // though the transcendental wrappers here never touch it.
+        let mut memories = MemorySection::new();
+        memories.memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&memories);
 
         let mut exports = ExportSection::new();
         exports.export("f", ExportKind::Func, n_helpers);
