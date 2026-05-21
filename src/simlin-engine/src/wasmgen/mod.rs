@@ -32,10 +32,11 @@ use std::fmt;
 
 /// Error from the WebAssembly code-generation backend.
 ///
-/// The proof-of-concept backend covers only the scalar IR subset exercised by
-/// simple flow/stock models. Anything outside that surface (arrays, modules,
-/// table lookups, and the builtins that require runtime helpers such as `pow`)
-/// returns `Unsupported` rather than silently emitting an incorrect module.
+/// The backend currently covers the scalar-core opcode set plus Euler
+/// integration for a single root model. Anything outside that surface (arrays,
+/// submodules, table lookups, RK2/RK4, and the builtins that require runtime
+/// helpers such as `pow`) returns `Unsupported` rather than silently emitting
+/// an incorrect module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmGenError {
     Unsupported(String),
@@ -50,72 +51,3 @@ impl fmt::Display for WasmGenError {
 }
 
 impl std::error::Error for WasmGenError {}
-
-#[cfg(test)]
-mod tests {
-    use checked::Store;
-    use wasm::validate;
-    use wasm_encoder::{
-        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
-        TypeSection, ValType,
-    };
-
-    /// Emit a minimal module exporting `add(f64, f64) -> f64`.
-    ///
-    /// This exercises the full emit path (type/function/export/code sections)
-    /// end to end; it is a stand-in that the real expression-lowering codegen
-    /// will replace.
-    fn emit_add_module() -> Vec<u8> {
-        let mut module = Module::new();
-
-        let mut types = TypeSection::new();
-        types
-            .ty()
-            .function([ValType::F64, ValType::F64], [ValType::F64]);
-        module.section(&types);
-
-        let mut functions = FunctionSection::new();
-        functions.function(0);
-        module.section(&functions);
-
-        let mut exports = ExportSection::new();
-        exports.export("add", ExportKind::Func, 0);
-        module.section(&exports);
-
-        let mut code = CodeSection::new();
-        let mut func = Function::new([]);
-        func.instruction(&Instruction::LocalGet(0));
-        func.instruction(&Instruction::LocalGet(1));
-        func.instruction(&Instruction::F64Add);
-        func.instruction(&Instruction::End);
-        code.function(&func);
-        module.section(&code);
-
-        module.finish()
-    }
-
-    /// The load-bearing M0 smoke test: a module emitted by `wasm-encoder`
-    /// validates and executes correctly under the DLR-FT interpreter, with
-    /// f64 arguments and an f64 result crossing the host boundary.
-    #[test]
-    fn add_module_runs_under_interpreter() {
-        let wasm_bytes = emit_add_module();
-
-        let validation_info = validate(&wasm_bytes).expect("emitted module must validate");
-        let mut store = Store::new(());
-        let module = store
-            .module_instantiate(&validation_info, Vec::new(), None)
-            .expect("emitted module must instantiate")
-            .module_addr;
-        let add = store
-            .instance_export(module, "add")
-            .expect("add export must exist")
-            .as_func()
-            .expect("add export must be a function");
-
-        let result: f64 = store
-            .invoke_simple_typed(add, (2.5_f64, 4.0_f64))
-            .expect("invocation must succeed");
-        assert_eq!(result, 6.5_f64);
-    }
-}

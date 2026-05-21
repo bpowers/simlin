@@ -15,19 +15,24 @@
 //! the wasm operand stack, reproducing the matching arm of `eval_bytecode`
 //! (`vm.rs:1257+`).
 //!
-//! Two layers of superinstruction fusion exist in the engine, and they reach a
-//! `CompiledSimulation` consumer differently:
-//! - The **peephole** pass (`ByteCode::peephole_optimize`, run inside
+//! Three compound assignment opcodes beyond the bare scalar set reach a
+//! `CompiledSimulation` consumer, and they all lower here:
+//! - `AssignConstCurr` arrives by *two* routes: `compiler::codegen` emits it
+//!   directly for any constant-RHS `AssignCurr` (`codegen.rs:1164`), and the
+//!   **peephole** pass also fuses a `LoadConstant; AssignCurr` pair into it
+//!   (`bytecode.rs:1830`). Either way it rides through the symbolic layer into
+//!   `CompiledSimulation`; every model with a constant initial/aux carries it.
+//! - `BinOpAssignCurr` / `BinOpAssignNext` are *only* peephole output
+//!   (`bytecode.rs:1837`/`1841`, fusing `Op2; Assign{Curr,Next}`). The peephole
+//!   pass (`ByteCode::peephole_optimize`, run inside
 //!   `Module::compile`/`ByteCodeBuilder::finish`) runs per-variable-fragment in
-//!   the incremental pipeline *before* symbolization, so its three fused
-//!   opcodes (`AssignConstCurr`, `BinOpAssignCurr`, `BinOpAssignNext`) ride
-//!   through the symbolic layer into `CompiledSimulation`. Every scalar Euler
-//!   model carries them (a constant initial -> `AssignConstCurr`; a stock
-//!   integration -> `BinOpAssignNext`), so they are part of the scalar core and
-//!   are lowered here.
-//! - The late **3-address** pass (`ByteCode::fuse_three_address`) runs only on
-//!   the VM's private execution copy (`vm.rs:395-398`), so its `BinVarVar` /
-//!   `AssignAddVarVarCurr` / ... family never reaches a consumer.
+//!   the incremental pipeline *before* symbolization, so these ride through
+//!   too. Every scalar Euler stock integration (`stock + delta`) is one, so
+//!   they are part of the scalar core.
+//!
+//! The late **3-address** pass (`ByteCode::fuse_three_address`) instead runs
+//! only on the VM's private execution copy (`vm.rs:395-398`), so its
+//! `BinVarVar` / `AssignAddVarVarCurr` / ... family never reaches a consumer.
 //!
 //! Anything outside the supported scalar core -- an array/module/lookup opcode,
 //! an unsupported `Op2` (Eq/And/Or/Mod/Exp), or a late-fusion superinstruction
@@ -59,8 +64,8 @@ pub(crate) struct EmitCtx {
     // dt/start_time/final_time are the run-invariant time globals. Phase 1
     // reads them from memory via `LoadGlobalVar` (slots 0..4), so they are not
     // consulted here yet; Phase 2 lowers the `TimeStep`/`StartTime`/`FinalTime`
-    // builtins to compile-time constants from these (as the POC's `expr.rs`
-    // does), at which point they become live.
+    // builtins to compile-time constants from these, at which point they become
+    // live.
     #[allow(dead_code)]
     pub dt: f64,
     #[allow(dead_code)]
@@ -96,13 +101,20 @@ pub(crate) fn f64_const(v: f64) -> Instruction<'static> {
 /// The maximum number of simultaneously-live `SetCond` condition registers a
 /// program needs.
 ///
-/// Bytecode emitted by `compiler::codegen` always emits `SetCond` immediately
-/// followed by `If` for an `Expr::If` (`codegen.rs:1153-1159`), but a
-/// condition expression can itself contain a nested `If`, so `SetCond`/`If`
-/// pairs are well-nested (LIFO) and an inner pair can sit between an outer
-/// `SetCond` and its `If`. The condition register is therefore a stack; this
-/// computes how deep that stack gets so the caller can reserve that many wasm
-/// locals.
+/// `compiler::codegen` lowers an `Expr::If` by walking the *condition* sub-tree
+/// to completion before emitting the pair's own `SetCond`/`If`
+/// (`codegen.rs:1153-1159`: push `t`, push `f`, walk `cond`, then `SetCond`,
+/// `If`). So even when a condition itself contains a nested `If`, the inner
+/// pair is fully emitted before the outer `SetCond`, and the stream is
+/// *sequential* -- `SetCond If SetCond If` -- never interleaved. With current
+/// codegen the condition register therefore never needs to hold more than one
+/// live value (this returns 1 for any model with a conditional).
+///
+/// We still model the register as a LIFO stack and size it from the actual
+/// opcode stream rather than hard-coding 1: it costs one cheap pass, it is
+/// robust if codegen ever emits a genuinely interleaved pair, and it keeps the
+/// emitter's `SetCond`-pushes-/`If`-pops logic symmetric. The depth is computed
+/// here so the caller can reserve exactly that many wasm locals.
 pub(crate) fn max_condition_depth(bc: &ByteCode) -> usize {
     let mut depth: usize = 0;
     let mut max_depth: usize = 0;
@@ -218,12 +230,13 @@ pub(crate) fn emit_bytecode(
             Opcode::AssignNext { off } => {
                 emit_assign(ctx.next_base, *off, ctx, f);
             }
-            // `AssignConstCurr` is base-codegen output (not a late-fusion
-            // superinstruction): `compiler::codegen` emits it directly for any
-            // `AssignCurr` with a constant RHS (`codegen.rs:1161-1167`), and it
-            // rides through the symbolic layer into `CompiledSimulation`. Every
-            // model with a constant initial/aux carries it, so it is part of the
-            // scalar core, not an Unsupported fusion artifact. Mirrors the VM's
+            // `AssignConstCurr` reaches a `CompiledSimulation` by two routes
+            // (see the module docstring): `compiler::codegen` emits it directly
+            // for any constant-RHS `AssignCurr` (`codegen.rs:1164`), and the
+            // peephole pass also fuses `LoadConstant; AssignCurr` into it
+            // (`bytecode.rs:1830`). It is *not* a late-3-address fusion artifact,
+            // so it is part of the scalar core, not an Unsupported case. Every
+            // model with a constant initial/aux carries it. Mirrors the VM's
             // `curr[module_off + off] = literals[literal_id]` (`vm.rs:1453`).
             Opcode::AssignConstCurr { off, literal_id } => {
                 let v = *bc.literals.get(*literal_id as usize).ok_or_else(|| {
@@ -1069,7 +1082,10 @@ mod tests {
         );
         assert_eq!(max_condition_depth(&sequential), 1);
 
-        // Nested: SetCond, SetCond, If, If -> depth 2.
+        // Interleaved: SetCond, SetCond, If, If -> depth 2. Current codegen
+        // never emits this (it walks a condition to completion before its
+        // SetCond, so nested IFs come out sequentially); this guards the
+        // defensive stack-sizing against a future interleaved emission.
         let nested = bc(
             vec![],
             vec![

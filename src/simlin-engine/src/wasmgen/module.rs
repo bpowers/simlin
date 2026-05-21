@@ -656,6 +656,39 @@ mod tests {
     }
 
     #[test]
+    fn compile_simulation_save_step_cadence_matches_vm() {
+        // Exercises the conditional-save / non-save-step copy-back branch of
+        // `save_advance!` (`vm.rs:682`): with save_step = 2*dt, most steps copy
+        // `next -> curr` WITHOUT recording a snapshot, and only every other step
+        // (plus the forced t=start sample) writes a results row. Every other
+        // wasmgen test uses save_step = None (save_every = 1), so this is the
+        // only coverage of the multi-step cadence.
+        let mut datamodel = crate::test_common::TestProject::new("cadence")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("inflow_rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "inflow_rate", None)
+            .build_datamodel();
+        // `with_sim_time` clears save_step to dt; the builder has no
+        // `with_save_step`, so set it directly: save_step = 2, dt = 1.
+        datamodel.sim_specs.save_step = Some(crate::datamodel::Dt::Dt(2.0));
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        // dt=1, save_step=2 over [0,10] saves at t=0,2,4,6,8,10 -> 6 chunks.
+        assert_eq!(
+            artifact.layout.n_chunks, 6,
+            "save_step = 2*dt over [0,10] should yield 6 saved samples"
+        );
+
+        // Per-variable series + saved-chunk count both match the VM (which
+        // `assert_matches_vm` asserts via `step_count == n_chunks`).
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 2, "expected to compare level + inflow");
+    }
+
+    #[test]
     fn compile_simulation_conditional_model_matches_vm() {
         // Exercises the SetCond/If lowering through the whole-model path.
         let datamodel = crate::test_common::TestProject::new("cond")
@@ -685,6 +718,113 @@ mod tests {
         let sim = compile_sim(&datamodel, "main");
         let result = compile_simulation(&sim);
         assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+    }
+
+    #[test]
+    fn compile_simulation_rejects_nested_modules() {
+        // A root model that instantiates a submodule is outside Phase 1's
+        // supported set (`root.context.modules` is non-empty). It must return a
+        // clean `Unsupported` error, never a panic or a wrong module. Built as a
+        // two-model datamodel directly, since `TestProject` only emits a single
+        // `main` model.
+        use crate::datamodel;
+        let project = datamodel::Project {
+            name: "nested".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 5.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                datamodel::Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: vec![
+                        datamodel::Variable::Aux(datamodel::Aux {
+                            ident: "input".to_string(),
+                            equation: datamodel::Equation::Scalar("3".to_string()),
+                            documentation: String::new(),
+                            units: None,
+                            gf: None,
+                            ai_state: None,
+                            uid: None,
+                            compat: datamodel::Compat::default(),
+                        }),
+                        datamodel::Variable::Module(datamodel::Module {
+                            ident: "sub".to_string(),
+                            model_name: "submodel".to_string(),
+                            documentation: String::new(),
+                            units: None,
+                            references: vec![datamodel::ModuleReference {
+                                src: "input".to_string(),
+                                dst: "in".to_string(),
+                            }],
+                            compat: datamodel::Compat::default(),
+                            ai_state: None,
+                            uid: None,
+                        }),
+                    ],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                    macro_spec: None,
+                },
+                datamodel::Model {
+                    name: "submodel".to_string(),
+                    sim_specs: None,
+                    variables: vec![
+                        datamodel::Variable::Aux(datamodel::Aux {
+                            ident: "in".to_string(),
+                            equation: datamodel::Equation::Scalar("0".to_string()),
+                            documentation: String::new(),
+                            units: None,
+                            gf: None,
+                            ai_state: None,
+                            uid: None,
+                            compat: datamodel::Compat {
+                                can_be_module_input: true,
+                                ..datamodel::Compat::default()
+                            },
+                        }),
+                        datamodel::Variable::Aux(datamodel::Aux {
+                            ident: "out".to_string(),
+                            equation: datamodel::Equation::Scalar("in * 2".to_string()),
+                            documentation: String::new(),
+                            units: None,
+                            gf: None,
+                            ai_state: None,
+                            uid: None,
+                            compat: datamodel::Compat::default(),
+                        }),
+                    ],
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                    macro_spec: None,
+                },
+            ],
+            source: Default::default(),
+            ai_information: None,
+        };
+
+        let sim = compile_sim(&project, "main");
+        let result = compile_simulation(&sim);
+        // Assert on the specific submodule message so this stays a focused
+        // guard on the early `root.context.modules.is_empty()` check
+        // (`compile_simulation`), distinct from the `EvalModule`-opcode fallback
+        // in `lower.rs` that would otherwise also reject the model.
+        match result {
+            Err(WasmGenError::Unsupported(msg)) => assert!(
+                msg.contains("submodules are not supported"),
+                "expected the submodule-rejection message, got: {msg}"
+            ),
+            Ok(_) => panic!("a model with a submodule must be rejected as Unsupported"),
+        }
     }
 
     /// AC4.1: a host reads the three exported geometry globals from the
