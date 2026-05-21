@@ -62,6 +62,7 @@
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 
 use crate::bytecode::{BuiltinId, ByteCode, GraphicalFunctionId, LookupMode, Op2, Opcode};
+use crate::vm::StepPart;
 
 use super::WasmGenError;
 
@@ -97,6 +98,26 @@ pub(crate) struct EmitCtx {
     /// read from the directory, so opcode lowering does not consult this field.
     #[allow(dead_code)]
     pub gf_data_base: u32,
+    /// Byte offset of slot 0 of the `initial_values` snapshot region (n_slots
+    /// wide). `LoadInitial` reads `initial_values[module_off + off]` when the
+    /// program being emitted is *not* the initials program. Mirrors the VM's
+    /// `initial_values` buffer (`vm.rs:617`).
+    pub initial_values_base: u32,
+    /// Byte offset of slot 0 of the `prev_values` snapshot region (n_slots
+    /// wide). `LoadPrev` reads `prev_values[module_off + off]` once the snapshot
+    /// has been taken. Mirrors the VM's `prev_values` buffer.
+    pub prev_values_base: u32,
+    /// Index of the mutable i32 wasm global `use_prev_fallback` (init 1).
+    /// `LoadPrev` gates on it: while set, it yields the caller-supplied fallback
+    /// rather than reading `prev_values`. The flag -- not a `TIME == start`
+    /// comparison -- is the sole gate, because RK stages move `curr[TIME]` to
+    /// trial points before the first snapshot is taken (`vm.rs:1314-1327`).
+    pub use_prev_fallback_global: u32,
+    /// Which opcode program is being lowered. `LoadInitial` resolves its
+    /// "during Initials read `curr`, else read `initial_values`" branch
+    /// (`vm.rs:1332-1340`) at compile time from this, since the emitter knows
+    /// the program statically.
+    pub step_part: StepPart,
     // dt/start_time/final_time are the run-invariant time globals that back the
     // seeds `run` writes into the TIME/DT/INITIAL_TIME/FINAL_TIME memory slots.
     // Opcode lowering reads those values from memory via `LoadGlobalVar` (slots
@@ -823,6 +844,18 @@ pub(crate) fn emit_bytecode(
                 table_count,
                 mode,
             } => emit_lookup(*base_gf, *table_count, *mode, ctx, f),
+            // `LoadPrev` mirrors the VM (`vm.rs:1320-1328`): a fallback is
+            // already on the stack (codegen pushes it just before this opcode);
+            // yield it while `use_prev_fallback` is set, otherwise read
+            // `prev_values[module_off + off]`. The gate is the global flag, never
+            // a TIME comparison (RK moves TIME to trial points).
+            Opcode::LoadPrev { off } => emit_load_prev(*off, ctx, f),
+            // `LoadInitial` mirrors the VM (`vm.rs:1332-1340`), but its
+            // `part == Initials` branch is resolved at compile time from
+            // `ctx.step_part`: in the initials program read `curr[module_off+off]`
+            // (the value being computed); elsewhere read the post-initials
+            // `initial_values[module_off+off]` snapshot.
+            Opcode::LoadInitial { off } => emit_load_initial(*off, ctx, f),
             Opcode::Ret => {
                 // The caller emits the function's terminating `End`.
             }
@@ -1245,12 +1278,50 @@ fn emit_load_global(ctx: &EmitCtx, f: &mut Function, off: u16) {
     ))));
 }
 
+/// Lower `LoadPrev { off }`, mirroring the VM (`vm.rs:1320-1328`). A fallback
+/// f64 is already on the wasm stack (codegen pushes it immediately before this
+/// opcode). Park it in the scratch local, then build `select(fallback,
+/// prev_values[module_off+off], use_prev_fallback)`: wasm `select` yields its
+/// *deeper* operand when the condition is non-zero, so pushing
+/// `[fallback, prev_value, use_prev_fallback]` yields the fallback while the
+/// flag is set and the snapshot value once it is cleared.
+fn emit_load_prev(off: u16, ctx: &EmitCtx, f: &mut Function) {
+    use Instruction as Ins;
+    // Park the fallback (top of stack) so the module-relative prev_values
+    // address can be pushed beneath it.
+    f.instruction(&Ins::LocalSet(ctx.scratch_local));
+    f.instruction(&Ins::LocalGet(ctx.scratch_local)); // [fallback]
+    // prev_values[module_off + off]
+    push_module_relative_base(ctx, f);
+    f.instruction(&Ins::F64Load(memarg(slot_byte_offset(
+        ctx.prev_values_base,
+        off,
+    )))); // [fallback, prev_value]
+    f.instruction(&Ins::GlobalGet(ctx.use_prev_fallback_global)); // [fallback, prev_value, cond]
+    f.instruction(&Ins::Select);
+}
+
+/// Lower `LoadInitial { off }`, mirroring the VM (`vm.rs:1332-1340`) with the
+/// `part == Initials` branch resolved at compile time from `ctx.step_part`. In
+/// the initials program the snapshot is not yet taken, so read
+/// `curr[module_off+off]` (the value being computed); in the flows/stocks
+/// programs read the post-initials `initial_values[module_off+off]` snapshot.
+fn emit_load_initial(off: u16, ctx: &EmitCtx, f: &mut Function) {
+    let chunk_base = if ctx.step_part == StepPart::Initials {
+        ctx.curr_base
+    } else {
+        ctx.initial_values_base
+    };
+    push_module_relative_base(ctx, f);
+    f.instruction(&Instruction::F64Load(memarg(slot_byte_offset(
+        chunk_base, off,
+    ))));
+}
+
 /// Name an unsupported opcode without depending on `Debug` (feature-gated via
 /// `debug-derive`).
 fn unsupported_opcode(op: &Opcode) -> String {
     let name = match op {
-        Opcode::LoadPrev { .. } => "LoadPrev",
-        Opcode::LoadInitial { .. } => "LoadInitial",
         Opcode::PushSubscriptIndex { .. } => "PushSubscriptIndex",
         Opcode::LoadSubscript { .. } => "LoadSubscript",
         Opcode::LoadModuleInput { .. } => "LoadModuleInput",
@@ -1290,6 +1361,12 @@ mod tests {
             // (which do read these) build their own ctx with real GF bases.
             gf_directory_base: 0,
             gf_data_base: 0,
+            // The PREVIOUS/INIT opcode tests build their own ctx with real
+            // snapshot bases + flag; the rest never touch these fields.
+            initial_values_base: 0,
+            prev_values_base: 0,
+            use_prev_fallback_global: 0,
+            step_part: StepPart::Flows,
             dt: 0.5,
             start_time: 1.0,
             final_time: 25.0,
@@ -2375,6 +2452,218 @@ mod tests {
                 "{mode:?}: element_offset==0 must read table 0: got {got0}, want {want0}"
             );
         }
+    }
+
+    // ── LoadInitial / LoadPrev opcodes (Task 1: snapshot regions) ─────────
+
+    // Snapshot region bases for these tests, placed past `next_base` (4096) so
+    // they cannot overlap the curr/next chunks.
+    const INITIAL_BASE: u32 = 8192;
+    const PREV_BASE: u32 = 8192 + 4096;
+
+    /// `LoadInitial` in the flows/stocks programs reads `initial_values[off]`
+    /// (the post-initials snapshot), NOT `curr`. Seed both regions to distinct
+    /// values at the same slot so a wrong-region read is observable.
+    #[test]
+    fn load_initial_in_flows_reads_initial_values_region() {
+        let ctx = EmitCtx {
+            initial_values_base: INITIAL_BASE,
+            step_part: StepPart::Flows,
+            ..ctx_with_cond_depth(0)
+        };
+        // curr[2] = 111 (byte 16), initial_values[2] = 222 (INITIAL_BASE + 16).
+        let seed = [(16u64, 111.0), (u64::from(INITIAL_BASE) + 16, 222.0)];
+        let got = run(
+            &bc(vec![], vec![Opcode::LoadInitial { off: 2 }]),
+            &ctx,
+            true,
+            0,
+            &seed,
+            None,
+        );
+        assert_eq!(got, 222.0, "LoadInitial in Flows must read initial_values");
+    }
+
+    /// `LoadInitial` in the initials program reads `curr[off]` (the value being
+    /// computed), because the snapshot is not yet taken (`vm.rs:1334`).
+    #[test]
+    fn load_initial_in_initials_reads_curr() {
+        let ctx = EmitCtx {
+            initial_values_base: INITIAL_BASE,
+            step_part: StepPart::Initials,
+            ..ctx_with_cond_depth(0)
+        };
+        let seed = [(16u64, 111.0), (u64::from(INITIAL_BASE) + 16, 222.0)];
+        let got = run(
+            &bc(vec![], vec![Opcode::LoadInitial { off: 2 }]),
+            &ctx,
+            true,
+            0,
+            &seed,
+            None,
+        );
+        assert_eq!(got, 111.0, "LoadInitial in Initials must read curr");
+    }
+
+    /// `LoadInitial` honors `module_off`: with a non-zero module base it reads
+    /// `initial_values[module_off + off]`.
+    #[test]
+    fn load_initial_honors_module_off() {
+        let ctx = EmitCtx {
+            initial_values_base: INITIAL_BASE,
+            step_part: StepPart::Stocks,
+            ..ctx_with_cond_depth(0)
+        };
+        // module_off=2, off=1 -> initial_values[3] at INITIAL_BASE + 24.
+        let program = bc(vec![], vec![Opcode::LoadInitial { off: 1 }]);
+        let bytes = build_module(&program, &ctx, true, 0);
+        let info = validate(&bytes).expect("module must validate");
+        let mut store = Store::new(());
+        let module = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let mem = store
+            .instance_export(module, "mem")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        store.mem_access_mut_slice(mem, |bytes| {
+            let a = (INITIAL_BASE + 24) as usize;
+            bytes[a..a + 8].copy_from_slice(&77.0_f64.to_le_bytes());
+        });
+        let eval = store
+            .instance_export(module, "eval")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let result: f64 = store.invoke_simple_typed(eval, (2_i32,)).expect("invoke");
+        assert_eq!(
+            result, 77.0,
+            "LoadInitial must read initial_values[module_off+off]"
+        );
+    }
+
+    /// Build a module exporting `mem`, a mutable i32 global `use_prev_fallback`
+    /// (at index 0, the index the test ctx names), and an `eval(module_off: i32)
+    /// -> f64` whose body lowers `LoadConstant(fallback); LoadPrev{off}`. The
+    /// helper functions lead the function/code sections so any `call` resolves;
+    /// `eval` follows. `fallback_flag` is the global's init value (1 = use the
+    /// fallback, 0 = read prev_values).
+    fn build_load_prev_module(off: u16, fallback: f64, fallback_flag: i32) -> Vec<u8> {
+        let mut module = Module::new();
+        let helpers = build_helpers();
+        let n_helpers = helpers.functions.len() as u32;
+
+        let mut types = TypeSection::new();
+        types.ty().function([ValType::I32], [ValType::F64]); // eval
+        for hf in &helpers.functions {
+            types.ty().function(hf.params.clone(), hf.results.clone());
+        }
+        module.section(&types);
+
+        let mut functions = FunctionSection::new();
+        for (i, _) in helpers.functions.iter().enumerate() {
+            functions.function(1 + i as u32);
+        }
+        functions.function(0); // eval -> type 0
+        module.section(&functions);
+
+        let mut memories = MemorySection::new();
+        memories.memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&memories);
+
+        // The single mutable i32 global the LoadPrev ctx gates on (index 0).
+        let mut globals = wasm_encoder::GlobalSection::new();
+        globals.global(
+            wasm_encoder::GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::i32_const(fallback_flag),
+        );
+        module.section(&globals);
+
+        let mut exports = ExportSection::new();
+        exports.export("eval", ExportKind::Func, n_helpers);
+        exports.export("mem", ExportKind::Memory, 0);
+        module.section(&exports);
+
+        let ctx = EmitCtx {
+            prev_values_base: PREV_BASE,
+            use_prev_fallback_global: 0,
+            ..ctx_with_cond_depth(0)
+        };
+        let program = bc(
+            vec![fallback],
+            vec![Opcode::LoadConstant { id: 0 }, Opcode::LoadPrev { off }],
+        );
+
+        let mut code = CodeSection::new();
+        for hf in helpers.functions {
+            code.function(&hf.body);
+        }
+        let mut func = Function::new(opcode_fn_locals(0));
+        emit_bytecode(&program, &ctx, &mut func).expect("LoadPrev should lower");
+        func.instruction(&Instruction::End);
+        code.function(&func);
+        module.section(&code);
+
+        module.finish()
+    }
+
+    /// Run `LoadConstant(fallback); LoadPrev{off}` with `prev_values[off]` seeded
+    /// to `prev_value` and the gate set to `fallback_flag`.
+    fn run_load_prev(off: u16, fallback: f64, prev_value: f64, fallback_flag: i32) -> f64 {
+        let bytes = build_load_prev_module(off, fallback, fallback_flag);
+        let info = validate(&bytes).expect("LoadPrev module must validate");
+        let mut store = Store::new(());
+        let module = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let mem = store
+            .instance_export(module, "mem")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        store.mem_access_mut_slice(mem, |bytes| {
+            let a = (PREV_BASE + u32::from(off) * SLOT_SIZE) as usize;
+            bytes[a..a + 8].copy_from_slice(&prev_value.to_le_bytes());
+        });
+        let eval = store
+            .instance_export(module, "eval")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store.invoke_simple_typed(eval, (0_i32,)).expect("invoke")
+    }
+
+    /// `LoadPrev` returns the caller-supplied fallback while `use_prev_fallback`
+    /// is set (1), exactly as the VM does before the first snapshot
+    /// (`vm.rs:1322`). The seeded `prev_values` value must NOT be read.
+    #[test]
+    fn load_prev_returns_fallback_when_flag_set() {
+        let got = run_load_prev(2, 3.5, 999.0, 1);
+        assert_eq!(got, 3.5, "with the flag set, LoadPrev yields its fallback");
+    }
+
+    /// `LoadPrev` reads `prev_values[off]` once `use_prev_fallback` is cleared
+    /// (0), exactly as the VM does after the first snapshot (`vm.rs:1325`).
+    #[test]
+    fn load_prev_reads_prev_values_when_flag_clear() {
+        let got = run_load_prev(2, 3.5, 999.0, 0);
+        assert_eq!(
+            got, 999.0,
+            "with the flag clear, LoadPrev reads prev_values"
+        );
     }
 
     // ── approx_eq helper (AC7.2, AC1.5) ───────────────────────────────────

@@ -41,7 +41,7 @@ use wasm_encoder::{
 
 use crate::bytecode::{ByteCode, CompiledModule, Opcode};
 use crate::results::{Method, Specs};
-use crate::vm::CompiledSimulation;
+use crate::vm::{CompiledSimulation, StepPart};
 
 use super::WasmGenError;
 use super::lower::{self, BuiltHelpers, build_helpers, f64_const, max_condition_depth, memarg};
@@ -54,6 +54,15 @@ const FINAL_TIME_OFF: usize = 3;
 
 const SLOT_SIZE: u32 = 8;
 const WASM_PAGE_SIZE: u32 = 65536;
+
+// Global indices. The three self-describing geometry globals come first (so the
+// exported indices 0/1/2 stay stable for hosts); `use_prev_fallback` -- the only
+// mutable global -- follows at index 3. It gates `LoadPrev`: init 1 (return the
+// fallback) until the first `prev_values` snapshot clears it (`vm.rs:668`).
+const G_N_SLOTS: u32 = 0;
+const G_N_CHUNKS: u32 = 1;
+const G_RESULTS_OFFSET: u32 = 2;
+const G_USE_PREV_FALLBACK: u32 = 3;
 
 // `run`'s i32 locals.
 const L_SAVED: u32 = 0;
@@ -280,6 +289,21 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
             .ok_or_else(too_large)?,
         None => total_bytes,
     };
+
+    // The two snapshot regions follow the GF regions, each `n_slots` wide
+    // (`vm.rs:617-618`). `initial_values` backs `INIT(x)` (captured once after
+    // initials); `prev_values` backs `PREVIOUS(x)` (captured after each step, or
+    // after the end-of-step flows re-eval under RK). Their bases are threaded
+    // into every `EmitCtx` so `LoadInitial`/`LoadPrev` can address them.
+    let snapshot_bytes = n_slots.checked_mul(SLOT_SIZE).ok_or_else(too_large)?;
+    let initial_values_base = total_bytes;
+    let prev_values_base = initial_values_base
+        .checked_add(snapshot_bytes)
+        .ok_or_else(too_large)?;
+    let total_bytes = prev_values_base
+        .checked_add(snapshot_bytes)
+        .ok_or_else(too_large)?;
+
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
 
     // save_every mirrors vm.rs::run_to: max(1, round(save_step / dt)).
@@ -296,11 +320,17 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
 
     // Each opcode program runs over the shared f64 slab. The base offsets are
     // constant; `module_off` is the function's i32 parameter (0 for the root).
-    let make_ctx = |cond_depth: usize| lower::EmitCtx {
+    // `step_part` is per-program so `LoadInitial` picks its `curr`-vs-snapshot
+    // branch at compile time (`vm.rs:1332-1340`).
+    let make_ctx = |cond_depth: usize, step_part: StepPart| lower::EmitCtx {
         curr_base,
         next_base,
         gf_directory_base,
         gf_data_base,
+        initial_values_base,
+        prev_values_base,
+        use_prev_fallback_global: G_USE_PREV_FALLBACK,
+        step_part,
         dt: specs.dt,
         start_time: specs.start,
         final_time: specs.stop,
@@ -312,8 +342,8 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     };
 
     let initials_fn = emit_initials_fn(root, &make_ctx)?;
-    let flows_fn = emit_opcode_fn(&root.compiled_flows, &make_ctx)?;
-    let stocks_fn = emit_opcode_fn(&root.compiled_stocks, &make_ctx)?;
+    let flows_fn = emit_opcode_fn(&root.compiled_flows, StepPart::Flows, &make_ctx)?;
+    let stocks_fn = emit_opcode_fn(&root.compiled_stocks, StepPart::Stocks, &make_ctx)?;
 
     let stock_offsets = collect_assign_next_opcode_offsets(&root.compiled_stocks);
     let run_fn = emit_run_simulation(
@@ -325,6 +355,8 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         save_every,
         &stock_offsets,
         n_helpers,
+        initial_values_base,
+        prev_values_base,
     );
 
     let wasm = assemble_simulation(
@@ -364,7 +396,7 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
 /// depth across all the initials (they run sequentially in one function).
 fn emit_initials_fn(
     root: &CompiledModule,
-    make_ctx: &impl Fn(usize) -> lower::EmitCtx,
+    make_ctx: &impl Fn(usize, StepPart) -> lower::EmitCtx,
 ) -> Result<Function, WasmGenError> {
     let cond_depth = root
         .compiled_initials
@@ -372,7 +404,7 @@ fn emit_initials_fn(
         .map(|ci| max_condition_depth(&ci.bytecode))
         .max()
         .unwrap_or(0);
-    let ctx = make_ctx(cond_depth);
+    let ctx = make_ctx(cond_depth, StepPart::Initials);
     let mut f = new_opcode_fn(cond_depth);
     for ci in root.compiled_initials.iter() {
         lower::emit_bytecode(&ci.bytecode, &ctx, &mut f)?;
@@ -381,13 +413,16 @@ fn emit_initials_fn(
     Ok(f)
 }
 
-/// Build one opcode-program function from a single `ByteCode`.
+/// Build one opcode-program function from a single `ByteCode`, lowering it as
+/// `step_part` (which `LoadInitial` reads to pick its `curr`-vs-snapshot
+/// branch).
 fn emit_opcode_fn(
     bc: &ByteCode,
-    make_ctx: &impl Fn(usize) -> lower::EmitCtx,
+    step_part: StepPart,
+    make_ctx: &impl Fn(usize, StepPart) -> lower::EmitCtx,
 ) -> Result<Function, WasmGenError> {
     let cond_depth = max_condition_depth(bc);
-    let ctx = make_ctx(cond_depth);
+    let ctx = make_ctx(cond_depth, step_part);
     let mut f = new_opcode_fn(cond_depth);
     lower::emit_bytecode(bc, &ctx, &mut f)?;
     f.instruction(&I::End);
@@ -439,6 +474,8 @@ fn emit_run_simulation(
     save_every: i32,
     stock_offsets: &[usize],
     n_helpers: u32,
+    initial_values_base: u32,
+    prev_values_base: u32,
 ) -> Function {
     let mut f = Function::new([(3, ValType::I32)]);
 
@@ -460,6 +497,13 @@ fn emit_run_simulation(
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_initials));
 
+    // Capture `initial_values := curr` exactly once, after initials, for
+    // `INIT(x)` reads in the flows/stocks programs (`vm.rs:1124-1128`).
+    // `use_prev_fallback` stays 1 (its init value) through initials, so any
+    // `PREVIOUS(x)` evaluated during initials returns its fallback.
+    let curr_base = 0u32;
+    emit_copy_chunk(&mut f, curr_base, initial_values_base, n_slots);
+
     f.instruction(&I::Block(BlockType::Empty)); // $break
     f.instruction(&I::Loop(BlockType::Empty)); // $continue
 
@@ -475,6 +519,14 @@ fn emit_run_simulation(
     f.instruction(&I::Call(f_flows));
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_stocks));
+
+    // Snapshot `prev_values := curr` and clear `use_prev_fallback` so the next
+    // step's `PREVIOUS(x)` reads this step's `curr` rather than its fallback
+    // (`vm.rs:705-707`). Done after flows+stocks (curr holds the full time-`t`
+    // state) and before the save/advance.
+    emit_copy_chunk(&mut f, curr_base, prev_values_base, n_slots);
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::GlobalSet(G_USE_PREV_FALLBACK));
 
     // step_accum += 1
     f.instruction(&I::LocalGet(L_STEP_ACCUM));
@@ -567,6 +619,23 @@ fn store_curr_const_abs(f: &mut Function, off: usize, v: f64) {
     f.instruction(&I::F64Store(memarg(off as u64 * u64::from(SLOT_SIZE))));
 }
 
+/// Emit an unrolled `dst[0..n_slots] := src[0..n_slots]` f64 copy between two
+/// linear-memory regions whose slot-0 byte bases are `src_base`/`dst_base`. Used
+/// for the whole-chunk snapshots (`initial_values := curr`, `prev_values :=
+/// curr`), each `n_slots` wide. The unroll matches the per-slot store style the
+/// rest of `run` uses; `n_slots` is small for scalar models.
+fn emit_copy_chunk(f: &mut Function, src_base: u32, dst_base: u32, n_slots: u32) {
+    for slot in 0..n_slots {
+        let slot_off = u64::from(slot) * u64::from(SLOT_SIZE);
+        // f64.store wants [addr_i32, value_f64]; the constant `memarg.offset`
+        // carries each region's base, so the dynamic address is a constant 0.
+        f.instruction(&I::I32Const(0));
+        f.instruction(&I::I32Const(0));
+        f.instruction(&I::F64Load(memarg(u64::from(src_base) + slot_off)));
+        f.instruction(&I::F64Store(memarg(u64::from(dst_base) + slot_off)));
+    }
+}
+
 /// Assemble the simulation module: type, function, memory, globals, exports,
 /// code, and (when present) the GF data segments. The emitted helper functions
 /// ([`build_helpers`]) lead the function and code sections (indices
@@ -633,14 +702,24 @@ fn assemble_simulation(
     globals.global(i32_global(), &ConstExpr::i32_const(n_slots as i32));
     globals.global(i32_global(), &ConstExpr::i32_const(n_chunks as i32));
     globals.global(i32_global(), &ConstExpr::i32_const(results_base as i32));
+    // `use_prev_fallback`: the only mutable global. Init 1 so `LoadPrev` returns
+    // its fallback until the first `prev_values` snapshot clears it (`vm.rs:668`).
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(1),
+    );
     wasm.section(&globals);
 
     let mut exports = ExportSection::new();
     exports.export("run", ExportKind::Func, n_helpers + F_RUN);
     exports.export("memory", ExportKind::Memory, 0);
-    exports.export("n_slots", ExportKind::Global, 0);
-    exports.export("n_chunks", ExportKind::Global, 1);
-    exports.export("results_offset", ExportKind::Global, 2);
+    exports.export("n_slots", ExportKind::Global, G_N_SLOTS);
+    exports.export("n_chunks", ExportKind::Global, G_N_CHUNKS);
+    exports.export("results_offset", ExportKind::Global, G_RESULTS_OFFSET);
     wasm.section(&exports);
 
     // Code section order must match the function section: helper bodies, then
@@ -1115,6 +1194,102 @@ mod tests {
         let artifact = compile_simulation(&sim).expect("wasm codegen");
         let checked = assert_matches_vm(sim, &artifact);
         assert!(checked >= 2, "expected to compare gated + acc");
+    }
+
+    // ── PREVIOUS / INIT (Task 1: snapshot regions + LoadPrev/LoadInitial) ──
+
+    /// Task 1: `PREVIOUS(x)` under Euler. At t0 the snapshot has not been taken,
+    /// so `LoadPrev` returns its fallback (the 0 the unary `PREVIOUS` desugars
+    /// to); after the first step it returns the prior step's `x`. The series
+    /// must match the VM, which gates the same fallback-vs-snapshot choice on
+    /// `use_prev_fallback`.
+    #[test]
+    fn compile_simulation_previous_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("prev")
+            .with_sim_time(0.0, 5.0, 1.0)
+            // x ramps each step so PREVIOUS(x) is a visibly-lagged series.
+            .stock("x", "10", &["grow"], &[], None)
+            .flow("grow", "1", None)
+            .aux("x_prev", "PREVIOUS(x)", None)
+            .build_datamodel();
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 2, "expected to compare x + x_prev");
+    }
+
+    /// Task 1: `INIT(x)` referenced from a flow reads the `initial_values`
+    /// snapshot captured once after the initials phase (in the flows/stocks
+    /// programs `LoadInitial` reads `initial_values[off]`, never `curr`). Here
+    /// the inflow is held at `INIT(level)`, so `level` integrates by its own
+    /// initial value each step; the wasm series must match the VM.
+    #[test]
+    fn compile_simulation_init_from_flow_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("init_flow")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .stock("level", "7", &["inflow"], &[], None)
+            // INIT(level) is captured once at t0 (= 7) and stays 7 every step.
+            .flow("inflow", "INIT(level)", None)
+            .build_datamodel();
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 2, "expected to compare level + inflow");
+        // level starts at 7 and grows by INIT(level)=7 each of 5 steps -> 42.
+        let results = run_artifact_results(&artifact);
+        let n_slots = artifact.layout.n_slots;
+        let level_off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == "level")
+            .map(|(_, off)| *off)
+            .expect("level offset");
+        let last = (artifact.layout.n_chunks - 1) * n_slots + level_off;
+        assert!(
+            (results[last] - 42.0).abs() < 1e-9,
+            "level should reach 7 + 5*7 = 42, got {}",
+            results[last]
+        );
+    }
+
+    /// Task 1: `INIT(x)` referenced from *another initial equation* reads
+    /// `curr` during the initials phase (the snapshot is taken only after
+    /// initials run). `seed` is computed during initials, and `derived`'s
+    /// initial equation reads `INIT(seed)` -- which must resolve to the
+    /// just-computed `curr[seed]`, not an as-yet-unwritten `initial_values`.
+    #[test]
+    fn compile_simulation_init_from_initial_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("init_initial")
+            .with_sim_time(0.0, 3.0, 1.0)
+            .aux("seed", "5", None)
+            // A stock whose INITIAL equation reads INIT(seed): during initials
+            // LoadInitial must read curr[seed] (= 5), so derived starts at 5.
+            .stock("derived", "INIT(seed)", &["hold"], &[], None)
+            .flow("hold", "0", None)
+            .build_datamodel();
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 2, "expected to compare seed + derived");
+        // derived initializes to INIT(seed)=5 and the flow holds it there.
+        // Chunk 0 starts at slab offset 0, so `derived_off` indexes it directly.
+        let results = run_artifact_results(&artifact);
+        let derived_off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == "derived")
+            .map(|(_, off)| *off)
+            .expect("derived offset");
+        assert!(
+            (results[derived_off] - 5.0).abs() < 1e-9,
+            "derived should initialize to INIT(seed) = 5, got {}",
+            results[derived_off]
+        );
     }
 
     #[test]
