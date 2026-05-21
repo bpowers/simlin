@@ -1752,35 +1752,39 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
     // value on a meaningful magnitude. (#595 tracks the remaining deeper init-
     // ordering soundness gap; its nondeterminism half is fixed by `e24b0080`.)
 
-    // ===== VDF-decode-artifact (17): engine output proven CORRECT; the =====
-    // `Ref.vdf` REFERENCE column is mis-decoded by our reader. For every base
-    // here the engine's `gf(Time)` matches the model tables and applied
-    // consumers match `Ref.vdf` exactly; the divergence is entirely in the
-    // reference-side decode of standalone graphical-function ("lookup-only")
-    // descriptor columns. The SCALAR half was fixed in `d69754bc`; the ARRAYED
-    // element-order half and the 4 scalar no-distinct-column cases are tracked
-    // in #597 (which supersedes #590's "engine 0+0" framing -- the engine is
-    // correct, the reader is not).
-    //
-    //   -- Arrayed descriptor block, element-order mis-decode (#597) --
-    "historical_forestry_lookup", // VDF col mis-decoded; engine gf(Time) correct.
-    "historical_gdp_lookup",      // e.g. [g77_india] vdf 2.6e-4 vs engine 1.43e5 (correct).
-    "rs_ch4",                     // VDF descriptor col decodes to all-zero ghost; engine correct.
-    "rs_co2_ff",                  // arrayed lookup-only; VDF col mis-decoded, engine correct.
-    "rs_gdp_in_trillions",        // arrayed lookup-only; VDF col mis-decoded, engine correct.
-    "rs_hfc125",                  // arrayed lookup-only; VDF col mis-decoded, engine correct.
-    "rs_hfc134a",                 // arrayed lookup-only; VDF col mis-decoded, engine correct.
-    "rs_hfc143a",                 // arrayed lookup-only; VDF col mis-decoded, engine correct.
-    "rs_hfc152a",                 // arrayed lookup-only; VDF col mis-decoded, engine correct.
-    "rs_hfc227ea",                // arrayed lookup-only; VDF col mis-decoded, engine correct.
-    "rs_hfc23",                   // arrayed lookup-only; VDF col mis-decoded, engine correct.
-    "rs_hfc245ca",                // arrayed lookup-only; VDF col mis-decoded, engine correct.
-    "rs_hfc32",                   // arrayed lookup-only; VDF col mis-decoded, engine correct.
-    //   -- Scalar descriptor with NO distinct saved VDF column (#597) --
-    "ref_global_emissions_from_graph_lookup", // descriptor forward-links to Time; no distinct col.
-    "ozone_precursor_forcings", // forward-links to a shared "other forcings" OT (>1% off).
-    "oc,_bc,_and_bio_aerosol_forcings", // forward-links to the same shared OT; no distinct col.
-    "other_forcings_smooth_plus_rcp85", // shared-OT forward link; only 131/251 cells match.
+    // ===== lookup-only tables the model-free reader cannot drop (9) =====
+    // A bare graphical function is a *table indexed by an explicit input*, not a
+    // time series. The reader therefore DROPS standalone lookup-only descriptors
+    // rather than reconstruct a series for them
+    // (`record_results::standalone_lookup_only_descriptors`); most of C-LEARN's
+    // lookup-only variables -- `historical_gdp_lookup`, `historical_forestry_lookup`,
+    // `rs_gdp_in_trillions`, `rs_ch4`, `rs_co2_ff`, the ozone/forcings scalars --
+    // are now dropped and gone from this list (their data, where it matters, is
+    // carried by the consumer variables that call them, which are emitted as
+    // ordinary owners). The 9 below are lookup-only tables the model-free reader
+    // cannot safely distinguish from a real owner, so it still emits a ghost
+    // column the comparator flags:
+    //   - rs_hfc* (8): the descriptor forward-links to the WIDER 2-D consumer
+    //     `RS HFC[COP, HFC type]` (forward width 63 != the descriptor's 7), so the
+    //     conservative width gate declines to drop it.
+    //   - ref_global_emissions_from_graph_lookup: its forward link is Time/0, so
+    //     the forward-link guard declines to drop it.
+    // The deeper bug is in the ENGINE: a bare lookup is a table, and lowering it
+    // to `gf(Time)` synthesises a phantom series that the comparator then flags
+    // against these ghosts. Fixing that (so the engine produces no series for a
+    // bare lookup) removes them from the matched set entirely -- tracked by #606
+    // (the engine `gf(Time)` lowering, introduced for #590). #597 is the general
+    // reader fix (drop lookup-only descriptors); these nine evade it only because
+    // the model-free reader can't safely distinguish them from real owners.
+    "rs_hfc125",
+    "rs_hfc134a",
+    "rs_hfc143a",
+    "rs_hfc152a",
+    "rs_hfc227ea",
+    "rs_hfc23",
+    "rs_hfc245ca",
+    "rs_hfc32",
+    "ref_global_emissions_from_graph_lookup",
     // ===== benign-near-zero (2): divergence ONLY on near-zero magnitudes =====
     // (cross-simulator f32/integration noise), never on a meaningful value.
     // Tracked in #591 cluster 2.
@@ -1798,7 +1802,10 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
     // Vensim computes `-2*NA = -1.298e33` while Simlin keeps the bare `:NA:`
     // sentinel `-6.49e32` (`crate::float::NA`); NA-arithmetic is confirmed
     // CORRECT and explicitly out of scope (see `float::NA`). The genuine
-    // documented remainder, tracked in #591 cluster 1.
+    // documented remainder, tracked in #591 cluster 1. (`historical_gdp_lookup`
+    // -- the lookup table whose only divergence was this same -2*NA tail -- is
+    // now dropped as a lookup-only table, so only the genuine consumer
+    // `historical_gdp` remains here.)
     "historical_gdp", // non-:NA: cells match exactly (e.g. [oecd_us] 6.667e4); only -2*NA cells diverge.
     "last_set_target_year", // INIT(VECTOR SELECT(...)); every cell is -2*NA (vdf -1.298e33 vs sim -6.49e32 sentinel).
 ];
@@ -1823,17 +1830,20 @@ const EXPECTED_VDF_RESIDUAL: &[&str] = &[
 //     `DoesNotExist` blockers (incl. the `"goal 1.5 for temperature"` quoted-
 //     period ident, #559) are likewise cleared.
 //
-// What remains is a short, fully-attributed residual of 21 base variables
-// (Phases 1-3 reconciled the rest), explicitly excluded via
-// `EXPECTED_VDF_RESIDUAL` under a five-category taxonomy: 17 VDF-reader
-// decode-artifacts where the engine is PROVEN correct (#597, supersedes #590's
-// "engine 0+0" framing -- the #590 engine bug is fixed), 2 benign-near-zero,
-// and 2 `:NA:`-arithmetic boundary cells (#591); the engine-genuine and
-// NaN-vs-`:NA:` categories are empty (the sole engine-genuine divergence, init-
-// runlist nondeterminism, was fixed in `e24b0080`). The exclusion is a
-// transparent, documented, tracked carve-out -- NOT a tolerance loosening; the
-// hard 1% gate holds for every non-excluded variable and the matched floor is
-// checked after exclusion. Run with: cargo test --release -- --ignored simulates_clearn
+// What remains is a short, fully-attributed residual of 13 base variables
+// (Phases 1-3 reconciled the rest; the reader now DROPS standalone lookup-only
+// descriptors -- bare graphical-function tables, not series -- so most of them
+// leave the comparison entirely), explicitly excluded via `EXPECTED_VDF_RESIDUAL`
+// under a taxonomy: 9 lookup-only tables the model-free reader cannot safely
+// distinguish from a real owner and so still emits a ghost column for (the
+// engine's `gf(Time)` lowering of a bare lookup is the deeper bug, tracked by #606);
+// 2 benign-near-zero; and 2 `:NA:`-arithmetic boundary series (#591). The engine
+// is PROVEN correct on all of them; the engine-genuine and NaN-vs-`:NA:`
+// categories are empty (the sole engine-genuine divergence, init-runlist
+// nondeterminism, was fixed in `e24b0080`). The exclusion is a transparent,
+// documented, tracked carve-out -- NOT a tolerance loosening; the hard 1% gate
+// holds for every non-excluded variable and the matched floor is checked after
+// exclusion. Run with: cargo test --release -- --ignored simulates_clearn
 #[test]
 #[ignore]
 fn simulates_clearn() {

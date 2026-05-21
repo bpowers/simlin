@@ -229,6 +229,19 @@ pub const FILE_HEADER_SIZE: usize = 0x80;
 /// VDF fixture. Expressed explicitly as `12 + 3 * 64 = 204`.
 pub const RECORD_REGION_START_OFFSET: usize = 12 + 3 * RECORD_SIZE;
 
+/// Byte offset, within the header section's data, of the `u32` slot count
+/// (`block1[7]`): word 7 of the *second* 64-byte header block -- past the
+/// 12-byte preamble and the first 64-byte block. Vensim writes the
+/// actively-saved slot count here, and it equals the slot-table entry count on
+/// every observed run-file and dataset VDF.
+pub const SLOT_COUNT_WORD_OFFSET: usize = 12 + RECORD_SIZE + 7 * 4;
+
+/// Sentinel `u32` written immediately after the slot table, separating it from
+/// the name-table section magic. Constant (`0x00430000`) across every observed
+/// run-file and dataset VDF; used to cross-check the deterministic slot-table
+/// decode.
+pub const SLOT_TABLE_TERMINATOR: u32 = 0x0043_0000;
+
 /// Vensim system variable names that appear in every VDF name table.
 pub const SYSTEM_NAMES: [&str; 5] = ["Time", "INITIAL TIME", "FINAL TIME", "TIME STEP", "SAVEPER"];
 
@@ -548,9 +561,20 @@ pub struct VdfSection6LookupRecord {
 }
 
 impl VdfSection6LookupRecord {
-    /// OT index for this lookup table definition.
+    /// OT index of the lookup's evaluated-output block (word[10]).
+    ///
+    /// This is the OT of a *consumer* of the lookup, not the lookup-def name's
+    /// own record; it can be shared by several lookup records (see
+    /// `docs/design/vdf.md`, "Lookup mapping records").
     pub fn ot_index(&self) -> usize {
         self.words[10] as usize
+    }
+
+    /// Width of the evaluated-output block (word[11]): the number of OT slots
+    /// the consumer occupies starting at [`Self::ot_index`]. `1` for a scalar
+    /// consumer; the element count for an arrayed one.
+    pub fn output_width(&self) -> usize {
+        self.words[11] as usize
     }
 }
 
@@ -722,9 +746,11 @@ impl VdfDatasetFile {
         // section 0 behaves like the string/record area and section 1 carries
         // the printable name table.
         let names = parse_name_table_extended(&data, &sections[1], sections[1].region_end);
-        let section0_data_size = sections[0].region_data_size();
+        // Dataset VDFs shift the record/header area into section 0, so the
+        // slot-table header (`field1` + `block1[7]`) is section 0 while the
+        // name table is section 1.
         let (slot_table_offset, slot_table) =
-            find_slot_table(&data, &sections[1], names.len(), section0_data_size);
+            slot_table_from_header(&data, &sections[0], sections[1].file_offset);
 
         // Dataset VDFs share the "12-byte preamble + three header blocks,
         // then records" layout with simulation VDFs. The only difference is
@@ -885,17 +911,15 @@ impl VdfFile {
             })
             .unwrap_or_default();
 
-        // Section at index 1 is the string table section. Its field4
-        // value varies across VDF versions (2, 42, etc.) so we identify it
-        // by position rather than field4.
-        let sec1_data_size = sections.get(1).map(|s| s.region_data_size()).unwrap_or(0);
-
-        let (slot_table_offset, slot_table) = name_section_idx
-            .map(|ns_idx| {
-                let ns = &sections[ns_idx];
-                find_slot_table(&data, ns, names.len(), sec1_data_size)
-            })
-            .unwrap_or((0, Vec::new()));
+        // The slot table's start pointer and entry count live in the
+        // section-1 header (`field1` + `block1[7]`). Section 1 is identified
+        // by position because its `field4` varies across VDF versions.
+        let (slot_table_offset, slot_table) = match (sections.get(1), name_section_idx) {
+            (Some(sec1), Some(ns_idx)) => {
+                slot_table_from_header(&data, sec1, sections[ns_idx].file_offset)
+            }
+            _ => (0, Vec::new()),
+        };
 
         // Find records. The record region lives at a fixed offset within
         // section 1's data: `RECORD_REGION_START_OFFSET` bytes past
@@ -1747,11 +1771,14 @@ pub fn parse_name_table_extended(data: &[u8], section: &Section, parse_end: usiz
             .map(|&b| b as char)
             .collect();
 
-        if s.is_empty() || !s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-            break;
+        // Edited Vensim files leave stale/deleted entries: a valid u16 length
+        // prefix over non-printable binary payload. Vensim's reader skips them
+        // by the declared length and keeps going -- the table does not end at
+        // the first such entry. Only the out-of-bounds and implausible-length
+        // guards above stop the table. (See docs/design/vdf.md, section 2.)
+        if !s.is_empty() && s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+            names.push(s);
         }
-
-        names.push(s);
         pos += len;
     }
 
@@ -1787,60 +1814,61 @@ pub fn find_name_table_section_idx(data: &[u8], sections: &[Section]) -> Option<
     None
 }
 
-/// Find the slot lookup table. This is an array of u32 values (typically one per
-/// name) located just before the name table section. The values are byte offsets
-/// into section 1 data. For small models they have uniform stride (e.g., 16); for
-/// larger models the stride may vary (variable-length slot metadata).
+/// Decode the slot table deterministically from the section header.
 ///
-/// Returns (file_offset_of_table, values).
-pub fn find_slot_table(
+/// The slot table is an array of `u32` byte-offsets into the header section's
+/// data, one per slotted name. Vensim records its location exactly, so no
+/// backward scan or stride heuristic is needed:
+///
+/// - **start** is the 1-based word pointer in the header section's `field1`
+///   (`header_section.file_offset + 4 * (field1 - 1)`) -- the same field-1
+///   convention sections 6 and 7 use for their payload pointers;
+/// - **count** is `block1[7]` (`SLOT_COUNT_WORD_OFFSET` into the section's
+///   data), the actively-written slot count;
+/// - the table is followed by a single [`SLOT_TABLE_TERMINATOR`] word and then
+///   the name-table section magic.
+///
+/// `header_section` is section 1 for simulation-run files and section 0 for
+/// dataset files (whose record/header area shifts one section left).
+/// `name_table_offset` is the table's upper boundary -- the name-table
+/// section's file offset.
+///
+/// These three facts over-determine each other and were verified to agree on
+/// every run-file and dataset VDF in the corpus. The decode therefore
+/// cross-checks the layout (`start + (count + 1) * 4 == name_table_offset`,
+/// terminator word present) and returns `(0, empty)` if it does not hold,
+/// rather than emitting a mis-decoded table.
+pub fn slot_table_from_header(
     data: &[u8],
-    name_table_section: &Section,
-    max_name_count: usize,
-    section1_data_size: usize,
+    header_section: &Section,
+    name_table_offset: usize,
 ) -> (usize, Vec<u32>) {
-    if max_name_count == 0 {
+    if header_section.field1 == 0 {
         return (0, Vec::new());
     }
-    let end = name_table_section.file_offset;
+    let slot_start = header_section.file_offset + 4 * (header_section.field1 as usize - 1);
+    let count_word_offset = header_section.data_offset() + SLOT_COUNT_WORD_OFFSET;
+    if count_word_offset + 4 > data.len() {
+        return (0, Vec::new());
+    }
+    let slot_count = read_u32(data, count_word_offset) as usize;
 
-    for gap in 0..20 {
-        // Prefer the largest structurally valid table for this gap.
-        for name_count in (1..=max_name_count).rev() {
-            let table_size_bytes = name_count * 4;
-            if end < gap + table_size_bytes {
-                continue;
-            }
-            let table_start = end - gap - table_size_bytes;
-
-            let values: Vec<u32> = (0..name_count)
-                .map(|i| read_u32(data, table_start + i * 4))
-                .collect();
-
-            let mut sorted = values.clone();
-            sorted.sort();
-            sorted.dedup();
-
-            if sorted.len() != name_count {
-                continue;
-            }
-
-            let all_valid = sorted
-                .iter()
-                .all(|&v| v % 4 == 0 && v > 0 && (v as usize) < section1_data_size);
-            if !all_valid {
-                continue;
-            }
-
-            let strides: Vec<u32> = sorted.windows(2).map(|pair| pair[1] - pair[0]).collect();
-            let min_stride = strides.iter().copied().min().unwrap_or(0);
-            if min_stride >= 4 {
-                return (table_start, values);
-            }
-        }
+    // Cross-check the over-determined layout: `slot_count` slot words, then one
+    // terminator word, then the name table. Bail out (no slots) if the file
+    // does not match, rather than emit a mis-decoded table.
+    let terminator_offset = slot_start + slot_count * 4;
+    if slot_start >= name_table_offset
+        || terminator_offset + 4 != name_table_offset
+        || terminator_offset + 4 > data.len()
+        || read_u32(data, terminator_offset) != SLOT_TABLE_TERMINATOR
+    {
+        return (0, Vec::new());
     }
 
-    (0, Vec::new())
+    let slot_table = (0..slot_count)
+        .map(|i| read_u32(data, slot_start + i * 4))
+        .collect();
+    (slot_start, slot_table)
 }
 
 /// Find 64-byte variable records between `search_start` (inclusive) and
@@ -2309,6 +2337,84 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert_eq!(names[0], "Time");
         assert_eq!(names[1], "abc");
+    }
+
+    #[test]
+    fn test_parse_name_table_extended_skips_stale_nonprintable_entries() {
+        // Edited Vensim files leave stale/deleted name-table entries: a valid
+        // u16 length prefix followed by non-printable binary payload (often a
+        // 4-byte value plus a fragment of the deleted name). Vensim's reader
+        // skips them by the declared byte count and keeps going; the table does
+        // not end there. (Real example from `risk2.vdf`: len=10, payload
+        // `91 01 00 00 63 79 20 30 00 00`.) Verify the parser skips rather than
+        // stops, so the names after the stale entry are still recovered.
+        let mut data = vec![0u8; 256];
+        data[0..4].copy_from_slice(&VDF_SECTION_MAGIC);
+        data[20..24].copy_from_slice(&(6u32 << 16).to_le_bytes());
+
+        // First name at 24: "Time\0\0" (len 6, no u16 prefix).
+        data[24..28].copy_from_slice(b"Time");
+
+        // Name 2 at 30: u16=6, "abc".
+        data[30..32].copy_from_slice(&6u16.to_le_bytes());
+        data[32..35].copy_from_slice(b"abc");
+
+        // STALE entry at 38: u16=10, non-printable payload (in-bounds, len<=256).
+        data[38..40].copy_from_slice(&10u16.to_le_bytes());
+        data[40..50].copy_from_slice(&[0x91, 0x01, 0x00, 0x00, b'c', b'y', b' ', b'0', 0, 0]);
+
+        // Name 3 at 50: u16=6, "def".
+        data[50..52].copy_from_slice(&6u16.to_le_bytes());
+        data[52..55].copy_from_slice(b"def");
+
+        let section = Section {
+            file_offset: 0,
+            field1: 0,
+            region_end: 80,
+            field3: 500,
+            field4: 0,
+            field5: 6u32 << 16,
+        };
+
+        let names = parse_name_table_extended(&data, &section, 80);
+        assert_eq!(names, vec!["Time", "abc", "def"]);
+    }
+
+    #[test]
+    fn test_slot_table_deterministic_matches_header() {
+        // The slot table is decoded deterministically from the section-1
+        // header: it starts at the `field1` 1-based word pointer, has
+        // `block1[7]` entries, and is followed by a single `0x00430000`
+        // terminator word before the name table. The previous heuristic
+        // scanner under-counted on edited files (name-parser cap) and
+        // over-counted by one elsewhere (a spurious leading word); the
+        // deterministic decode matches the header exactly. See the
+        // corpus-wide invariant in tests/vdf_structural_invariants.rs.
+        for path in [
+            "../../test/bobby/vdf/econ/risk2.vdf",
+            "../../test/metasd/WRLD3-03/SCEN01.VDF",
+            "../../test/metasd/social-network-valuation/optimistic.vdf",
+            "../../test/bobby/vdf/econ/risk.vdf",
+            "../../test/bobby/vdf/water/Current.vdf",
+        ] {
+            let vdf = vdf_file(path);
+            let sec1 = &vdf.sections[1];
+            // block1[7]: 12-byte preamble + 64-byte block0 + 7 words into block1.
+            let block1_word7 = read_u32(&vdf.data, sec1.data_offset() + 12 + RECORD_SIZE + 28);
+            let field1_start = sec1.file_offset + 4 * (sec1.field1 as usize - 1);
+            assert_eq!(
+                vdf.slot_table.len() as u32,
+                block1_word7,
+                "{path}: slot count must equal block1[7]"
+            );
+            assert_eq!(
+                vdf.slot_table_offset, field1_start,
+                "{path}: slot table must start at the field1 word pointer"
+            );
+            // The word immediately after the slot table is the terminator.
+            let terminator = read_u32(&vdf.data, field1_start + vdf.slot_table.len() * 4);
+            assert_eq!(terminator, 0x0043_0000, "{path}: terminator word");
+        }
     }
 
     fn vdf_file(path: &str) -> VdfFile {
@@ -3642,20 +3748,18 @@ mod tests {
     }
 
     #[test]
-    fn test_to_results_via_records_handles_records_exceeding_slots() {
-        // WRLD3-03/SCEN01.VDF emits more records than slot-table entries.
-        // The direct f[2] key path should not care about that cardinality
-        // relationship; it decodes each record's section-2 name pointer
-        // independently and keeps the partial coverage available on this
-        // still-ambiguous large fixture.
+    fn test_to_results_via_records_decodes_large_ambiguous_fixture() {
+        // WRLD3-03/SCEN01.VDF is a large, edited fixture. The direct f[2] key
+        // path decodes each record's section-2 name pointer independently of
+        // the slot table, keeping substantial (partial) coverage on this
+        // still-ambiguous file. (Before the deterministic slot-table decode
+        // this fixture reported fewer slots than records -- a slot-under-count
+        // artifact of the old name-parser/scanner, not a property the
+        // record-based mapping ever relied on.)
         let vdf = vdf_file("../../test/metasd/WRLD3-03/SCEN01.VDF");
-        assert!(
-            vdf.records.len() > vdf.slot_table.len(),
-            "test assumes records > slots for WRLD3 SCEN01",
-        );
         let results = vdf
             .to_results_via_records()
-            .expect("WRLD3 SCEN01: record-based mapping should not error when records > slots");
+            .expect("WRLD3 SCEN01: record-based mapping should not error");
         let non_time_named = results.offsets.len().saturating_sub(1);
         assert!(
             non_time_named >= 150,
