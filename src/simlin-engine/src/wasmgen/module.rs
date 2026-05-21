@@ -383,6 +383,7 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         apply_locals: lower::apply_locals_for(cond_depth),
         helpers: helper_fns,
         temp_storage_base,
+        extra_i32_local_base: lower::extra_i32_local_base(cond_depth),
         ctx: &root.context,
     };
 
@@ -452,8 +453,18 @@ fn emit_initials_fn<'a>(
         .map(|ci| max_condition_depth(&ci.bytecode))
         .max()
         .unwrap_or(0);
+    // The initials run sequentially in one function; each fragment's dynamic-
+    // subscript accumulation completes (and `emit_bytecode` resets its local
+    // cursor) before the next, so reserving the *max* per-fragment count -- not
+    // the sum -- is correct, and the fragments reuse the same i32 locals.
+    let extra_i32 = root
+        .compiled_initials
+        .iter()
+        .map(|ci| lower::count_extra_i32_locals(&ci.bytecode))
+        .max()
+        .unwrap_or(0);
     let ctx = make_ctx(cond_depth, StepPart::Initials);
-    let mut f = new_opcode_fn(cond_depth);
+    let mut f = new_opcode_fn(cond_depth, extra_i32);
     for ci in root.compiled_initials.iter() {
         lower::emit_bytecode(&ci.bytecode, &ctx, &mut f)?;
     }
@@ -470,19 +481,21 @@ fn emit_opcode_fn<'a>(
     make_ctx: &impl Fn(usize, StepPart) -> lower::EmitCtx<'a>,
 ) -> Result<Function, WasmGenError> {
     let cond_depth = max_condition_depth(bc);
+    let extra_i32 = lower::count_extra_i32_locals(bc);
     let ctx = make_ctx(cond_depth, step_part);
-    let mut f = new_opcode_fn(cond_depth);
+    let mut f = new_opcode_fn(cond_depth, extra_i32);
     lower::emit_bytecode(bc, &ctx, &mut f)?;
     f.instruction(&I::End);
     Ok(f)
 }
 
 /// A fresh opcode-program `Function` with the scratch f64 local, `cond_depth`
-/// i32 condition locals, and the three `Apply` scratch f64 locals (param 0 =
-/// `module_off`). The exact declaration list lives in [`lower::opcode_fn_locals`]
-/// so it stays in lockstep with [`lower::apply_locals_for`].
-fn new_opcode_fn(cond_depth: usize) -> Function {
-    Function::new(lower::opcode_fn_locals(cond_depth))
+/// i32 condition locals, the three `Apply` scratch f64 locals, and `extra_i32`
+/// dynamic-subscript scratch i32 locals (param 0 = `module_off`). The exact
+/// declaration list lives in [`lower::opcode_fn_locals`] so it stays in lockstep
+/// with [`lower::apply_locals_for`] / [`lower::extra_i32_local_base`].
+fn new_opcode_fn(cond_depth: usize, extra_i32: u32) -> Function {
+    Function::new(lower::opcode_fn_locals(cond_depth, extra_i32))
 }
 
 /// The stock data-buffer offsets written by the stocks program. After each
@@ -2314,5 +2327,147 @@ mod tests {
         let artifact = compile_simulation(&sim).expect("wasm codegen (transpose)");
         let checked = assert_matches_vm(sim, &artifact);
         assert!(checked >= 1, "expected to compare summed");
+    }
+
+    // ── Phase 5 Task 4: dynamic subscripts + OOB->NaN (end-to-end) ────────
+
+    /// Assert every layout variable matches the VM, treating a NaN on both sides
+    /// as equal (the OOB-subscript result). The plain `assert_matches_vm` uses a
+    /// finite-difference compare that a NaN would fail, so the OOB tests use this.
+    fn assert_matches_vm_nan_aware(sim: CompiledSimulation, artifact: &WasmArtifact) -> usize {
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let wasm_data = run_artifact_results(artifact);
+        let mut vm = Vm::new(sim).expect("vm creation");
+        vm.run_to_end().expect("vm run");
+        let vm_results = vm.into_results();
+        assert_eq!(vm_results.step_count, n_chunks, "saved-chunk count differs");
+
+        let mut checked = 0usize;
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = wasm_data[c * n_slots + *wasm_off];
+                if vm_val.is_nan() {
+                    assert!(
+                        wasm_val.is_nan(),
+                        "{name} chunk {c}: vm=NaN but wasm={wasm_val}"
+                    );
+                } else {
+                    let diff = (vm_val - wasm_val).abs();
+                    assert!(diff < 1e-9, "{name} chunk {c}: vm={vm_val} wasm={wasm_val}");
+                }
+            }
+            checked += 1;
+        }
+        checked
+    }
+
+    /// Legacy scalar dynamic subscript `arr[idx]` (`PushSubscriptIndex` /
+    /// `LoadSubscript`), in range: the wasm must match the VM.
+    #[test]
+    fn compile_simulation_scalar_dynamic_subscript_in_range_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("dyn")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("A", 4)
+            .array_aux("arr[A]", "A * 10")
+            .scalar_aux("idx", "3")
+            .scalar_aux("picked", "arr[idx]")
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 1, "expected to compare picked");
+    }
+
+    /// Legacy scalar dynamic subscript `arr[idx]` out of range -> NaN, matching
+    /// the VM (`vm.rs:1343` sets the subscript invalid, `1361` pushes NaN).
+    #[test]
+    fn compile_simulation_scalar_dynamic_subscript_oob_is_nan() {
+        // idx = 99 is well past the 4-element dimension -> NaN on both backends.
+        let datamodel = crate::test_common::TestProject::new("dyn_oob")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("A", 4)
+            .array_aux("arr[A]", "A * 10")
+            .scalar_aux("idx", "99")
+            .scalar_aux("picked", "arr[idx]")
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let checked = assert_matches_vm_nan_aware(sim, &artifact);
+        assert!(checked >= 1, "expected to compare picked");
+
+        // Pin the NaN directly: `picked` must be NaN at every step.
+        let n_slots = artifact.layout.n_slots;
+        let off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == "picked")
+            .map(|(_, o)| *o)
+            .expect("picked offset");
+        let data = run_artifact_results(&artifact);
+        for c in 0..artifact.layout.n_chunks {
+            assert!(
+                data[c * n_slots + off].is_nan(),
+                "out-of-bounds arr[idx] must be NaN at chunk {c}"
+            );
+        }
+    }
+
+    /// `ViewSubscriptDynamic` via `SUM(mat[row, 1])`: a dynamically-subscripted
+    /// view reduced to a scalar. In range, wasm matches the VM.
+    #[test]
+    fn compile_simulation_view_dynamic_subscript_in_range_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("vdyn")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("A", 3)
+            .indexed_dimension("B", 4)
+            .array_aux("mat[A,B]", "A * 10 + B")
+            .scalar_aux("row", "2")
+            .scalar_aux("picked", "SUM(mat[row, 1])")
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 1, "expected to compare picked");
+    }
+
+    /// `ViewSubscriptDynamic` out of range -> the view is invalid -> the reducer
+    /// yields NaN for *all* reducers, matching `reduce_view`'s `if !is_valid`.
+    #[test]
+    fn compile_simulation_view_dynamic_subscript_oob_is_nan() {
+        let datamodel = crate::test_common::TestProject::new("vdyn_oob")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("A", 3)
+            .indexed_dimension("B", 4)
+            .array_aux("mat[A,B]", "A * 10 + B")
+            .scalar_aux("row", "99") // out of range for dim A (size 3)
+            .scalar_aux("picked", "SUM(mat[row, 1])")
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let checked = assert_matches_vm_nan_aware(sim, &artifact);
+        assert!(checked >= 1, "expected to compare picked");
+
+        let n_slots = artifact.layout.n_slots;
+        let off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == "picked")
+            .map(|(_, o)| *o)
+            .expect("picked offset");
+        let data = run_artifact_results(&artifact);
+        for c in 0..artifact.layout.n_chunks {
+            assert!(
+                data[c * n_slots + off].is_nan(),
+                "out-of-bounds SUM(mat[row,1]) must be NaN at chunk {c}"
+            );
+        }
     }
 }

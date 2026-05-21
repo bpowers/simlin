@@ -193,6 +193,49 @@ impl ViewDesc {
         }
     }
 
+    /// Remove `dim_idx` for a *dynamic* single subscript (Task 4): drop the
+    /// dimension/stride/dim_id and return that dimension's stride, leaving the
+    /// (runtime) offset contribution to the caller's `runtime_off_local` rather
+    /// than the compile-time `offset`. This is the runtime-index analogue of
+    /// `apply_single_subscript`: the *shape* change (which dim is collapsed) is
+    /// compile-time, only the offset addend is runtime.
+    ///
+    /// Returns `None` if the dim is out of range or sparse. A sparse dynamic
+    /// subscript would need a runtime `parent_offsets` table lookup, but the
+    /// dynamic-subscript base (`PushVarViewDirect`) is always dense, so this
+    /// never arises in practice; rejecting it keeps a wrong module from being
+    /// emitted if it ever did.
+    pub fn apply_single_subscript_dynamic(&mut self, dim_idx: usize) -> Option<i32> {
+        if dim_idx >= self.dims.len() {
+            return None;
+        }
+        if self.sparse.iter().any(|s| s.dim_index == dim_idx) {
+            return None;
+        }
+        let stride = self.strides[dim_idx];
+        self.dims.remove(dim_idx);
+        self.strides.remove(dim_idx);
+        self.dim_ids.remove(dim_idx);
+        for s in &mut self.sparse {
+            if s.dim_index > dim_idx {
+                s.dim_index -= 1;
+            }
+        }
+        Some(stride)
+    }
+
+    /// The stride of `dim_idx` (for a dynamic subscript's runtime offset
+    /// computation), or `None` if out of range.
+    pub fn stride_at(&self, dim_idx: usize) -> Option<i32> {
+        self.strides.get(dim_idx).copied()
+    }
+
+    /// The size of `dim_idx` (the bound a dynamic subscript range-checks
+    /// against), or `None` if out of range.
+    pub fn dim_at(&self, dim_idx: usize) -> Option<u16> {
+        self.dims.get(dim_idx).copied()
+    }
+
     /// Apply a `[start:end)` range (0-based) to `dim_idx`
     /// (`RuntimeView::apply_range`): fold the start into `offset` and shrink the
     /// dimension to `end - start`.
@@ -379,9 +422,9 @@ impl ViewDesc {
     ///   in the single-root scope `module_off == 0`, so the read is the same as
     ///   `CurrAbsolute` today, but the flag keeps Phase 7 correct.
     ///
-    /// Returns `None` for a dynamically-subscripted view (`runtime_off_local`
-    /// set, Task 4) -- those need an extra runtime addend the const form cannot
-    /// express.
+    /// A dynamically-subscripted view (`runtime_off_local` set, Task 4) carries
+    /// the runtime addend + validity flag in the returned [`ElementAddr`]; static
+    /// views leave both `None`, so the address is fully constant.
     pub fn element_addr(
         &self,
         iter_idx: usize,
@@ -397,7 +440,8 @@ impl ViewDesc {
     /// flat slot offset (the broadcast paths build the flat offset themselves via
     /// [`flat_offset_for_indices`](Self::flat_offset_for_indices), rather than
     /// from an iteration index). Static-view behaviour is byte-identical to
-    /// `element_addr` for the same flat offset.
+    /// `element_addr` for the same flat offset (both `runtime_off_local` /
+    /// `valid_local` are `None`).
     pub fn element_addr_for_flat(
         &self,
         flat: usize,
@@ -405,37 +449,46 @@ impl ViewDesc {
         temp_storage_base: u32,
         ctx: &ByteCodeContext,
     ) -> Option<ElementAddr> {
-        if self.runtime_off_local.is_some() {
-            return None;
-        }
         let flat = flat as u64;
-        match self.base {
-            ViewBase::CurrAbsolute => Some(ElementAddr {
-                const_byte_offset: u64::from(curr_base) + (u64::from(self.base_off) + flat) * 8,
-                module_relative: false,
-            }),
-            ViewBase::CurrModuleRelative => Some(ElementAddr {
-                const_byte_offset: u64::from(curr_base) + (u64::from(self.base_off) + flat) * 8,
-                module_relative: true,
-            }),
+        let (const_byte_offset, module_relative) = match self.base {
+            ViewBase::CurrAbsolute => (
+                u64::from(curr_base) + (u64::from(self.base_off) + flat) * 8,
+                false,
+            ),
+            ViewBase::CurrModuleRelative => (
+                u64::from(curr_base) + (u64::from(self.base_off) + flat) * 8,
+                true,
+            ),
             ViewBase::Temp => {
                 let temp_off = *ctx.temp_offsets.get(self.base_off as usize)? as u64;
-                Some(ElementAddr {
-                    const_byte_offset: u64::from(temp_storage_base) + (temp_off + flat) * 8,
-                    module_relative: false,
-                })
+                (u64::from(temp_storage_base) + (temp_off + flat) * 8, false)
             }
-        }
+        };
+        Some(ElementAddr {
+            const_byte_offset,
+            module_relative,
+            runtime_off_local: self.runtime_off_local,
+            valid_local: self.valid_local,
+        })
     }
 }
 
-/// The byte address of a view element, split into the compile-time-constant
-/// part (a `memarg.offset`) and whether the emitter must still add a runtime
-/// `module_off * 8`. Returned by [`ViewDesc::element_addr`].
+/// The byte address of a view element, split into the compile-time-constant part
+/// (a `memarg.offset`) and the runtime addends a dynamic subscript (Task 4)
+/// requires. Returned by [`ViewDesc::element_addr`].
+///
+/// `module_relative` adds `module_off * 8` (var views; 0 in the single-root
+/// scope). `runtime_off_local` (when `Some`) adds that i32 local's slot offset
+/// times 8 (a dynamic subscript's accumulated `(index-1)*stride`).
+/// `valid_local` (when `Some`) gates the load: 0 means out of bounds, so the
+/// read yields NaN rather than touching memory. Both are `None` for a static
+/// view, leaving the address fully constant.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct ElementAddr {
     pub const_byte_offset: u64,
     pub module_relative: bool,
+    pub runtime_off_local: Option<u32>,
+    pub valid_local: Option<u32>,
 }
 
 #[cfg(test)]
@@ -578,6 +631,9 @@ mod tests {
         let a = d.element_addr(1, 0, 0, &ctx).unwrap();
         assert_eq!(a.const_byte_offset, 24);
         assert!(!a.module_relative);
+        // A static view carries no runtime addend or validity gate.
+        assert_eq!(a.runtime_off_local, None);
+        assert_eq!(a.valid_local, None);
     }
 
     #[test]
@@ -604,13 +660,19 @@ mod tests {
     }
 
     #[test]
-    fn element_addr_dynamic_view_is_none() {
-        // A view with a runtime offset addend (Task 4) cannot be addressed by the
-        // const form.
+    fn element_addr_dynamic_view_carries_runtime_locals() {
+        // A view with a runtime offset addend + validity flag (Task 4) returns
+        // the constant base plus the locals the caller must add/guard.
         let mut d = dense(0, &[3]);
         d.runtime_off_local = Some(9);
+        d.valid_local = Some(7);
         let ctx = ByteCodeContext::default();
-        assert!(d.element_addr(0, 0, 0, &ctx).is_none());
+        let a = d.element_addr(0, 0, 0, &ctx).unwrap();
+        // Element 0: const base is just curr_base + base_off*8 = 0; the runtime
+        // index offset rides in local 9, the validity in local 7.
+        assert_eq!(a.const_byte_offset, 0);
+        assert_eq!(a.runtime_off_local, Some(9));
+        assert_eq!(a.valid_local, Some(7));
     }
 
     // ── iter_broadcast_offset (Task 3): cross-check against the VM ─────────

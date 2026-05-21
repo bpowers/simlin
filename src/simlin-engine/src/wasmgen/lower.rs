@@ -164,6 +164,14 @@ pub(crate) struct EmitCtx<'a> {
     /// mirroring the VM's `temp_storage[temp_offsets[temp_id] + index]`
     /// (`vm.rs:584-586`).
     pub temp_storage_base: u32,
+    /// First wasm local index reserved for the dynamic-subscript scratch i32
+    /// locals (Task 4): the runtime-offset addend and validity flag a
+    /// `ViewSubscriptDynamic` / `PushSubscriptIndex` accumulation draws from. The
+    /// function's local declarations reserve `count_extra_i32_locals(bc)` i32s
+    /// starting here, past the scratch f64 / condition i32s / `Apply` f64s, so
+    /// these never overlap [`apply_locals`](Self::apply_locals). A program with
+    /// no dynamic subscripts reserves none and this base is unused.
+    pub extra_i32_local_base: u32,
     /// The module's `ByteCodeContext`, holding the compile-time array tables the
     /// view opcodes reference by index: `static_views`, `dim_lists`,
     /// `dimensions`, `subdim_relations`, and `temp_offsets`. Run-invariant and
@@ -671,18 +679,33 @@ fn emit_is_truthy(ctx: &EmitCtx, f: &mut Function) {
 const APPLY_LOCAL_COUNT: u32 = 3;
 
 /// The local-declaration list for an opcode-program `Function` carrying
-/// `cond_depth` condition locals: one scratch f64, then `cond_depth` i32
-/// condition locals, then [`APPLY_LOCAL_COUNT`] f64 `Apply` scratch locals.
+/// `cond_depth` condition locals and `extra_i32` dynamic-subscript scratch
+/// locals: one scratch f64, then `cond_depth` i32 condition locals, then
+/// [`APPLY_LOCAL_COUNT`] f64 `Apply` scratch locals, then `extra_i32` i32 locals
+/// (Task 4 dynamic subscripts; 0 when the program has none).
 ///
 /// Defined once (and consumed by both `module.rs`'s function builders and the
 /// `#[cfg(test)]` harness) so the declared local *types and order* match the
-/// indices [`apply_locals_for`] hands out. Param 0 is `module_off`.
-pub(crate) fn opcode_fn_locals(cond_depth: usize) -> Vec<(u32, ValType)> {
+/// indices [`apply_locals_for`] and [`extra_i32_local_base`] hand out. Param 0
+/// is `module_off`. The extra i32s come *last* so they never disturb the
+/// `apply_locals` indices.
+pub(crate) fn opcode_fn_locals(cond_depth: usize, extra_i32: u32) -> Vec<(u32, ValType)> {
     vec![
         (1, ValType::F64),
         (cond_depth as u32, ValType::I32),
         (APPLY_LOCAL_COUNT, ValType::F64),
+        (extra_i32, ValType::I32),
     ]
+}
+
+/// First wasm local index of the `extra_i32` dynamic-subscript scratch locals
+/// for a function with `cond_depth` condition locals: past param 0
+/// (`module_off`), the scratch f64 (index 1), the `cond_depth` i32 condition
+/// locals, and the [`APPLY_LOCAL_COUNT`] `Apply` f64s. Threaded into
+/// [`EmitCtx::extra_i32_local_base`] so the dynamic-subscript local allocator
+/// draws from exactly the declared range.
+pub(crate) fn extra_i32_local_base(cond_depth: usize) -> u32 {
+    2 + cond_depth as u32 + APPLY_LOCAL_COUNT
 }
 
 /// The three `Apply` scratch f64 local indices `[a, b, c]` for a function with
@@ -752,6 +775,32 @@ struct EmitState {
     iter_stack: Vec<IterCtx>,
     /// Active broadcast-iteration contexts (`BeginBroadcastIter`, Task 3).
     broadcast_stack: Vec<BroadcastCtx>,
+    /// The legacy scalar dynamic-subscript accumulator (`PushSubscriptIndex` /
+    /// `LoadSubscript`, Task 4), mirroring the VM's `subscript_index` +
+    /// `subscript_index_valid` (`vm.rs:1287-1288`). Cleared by each
+    /// `LoadSubscript`.
+    subscript: SubscriptAccum,
+    /// Bump cursor for the function's extra i32 locals (Task 4). A dynamic
+    /// subscript draws fresh i32 locals from here; the count is pre-sized by
+    /// [`count_extra_i32_locals`], so this never exceeds the declared count.
+    next_i32_local: u32,
+}
+
+/// The legacy scalar dynamic-subscript accumulator (Task 4). `PushSubscriptIndex`
+/// appends a `(runtime_index_local, bounds)` and folds OOB into `valid_local`;
+/// `LoadSubscript` collapses the indices into a flat offset and reads the slot
+/// (or NaN). Mirrors the VM's `subscript_index` SmallVec + `subscript_index_valid`
+/// flag (`vm.rs:1287-1288`, `1341-1366`).
+#[derive(Default)]
+struct SubscriptAccum {
+    /// `(runtime_index_local, bounds)` for each pushed index, in push order. The
+    /// local holds the *0-based* runtime index (i32); `bounds` is the dimension
+    /// size for the row-major fold.
+    indices: Vec<(u32, u16)>,
+    /// wasm i32 local that is 0 once any pushed index was out of bounds, else 1.
+    /// `None` until the first `PushSubscriptIndex` of an accumulation allocates
+    /// it (then seeded to 1).
+    valid_local: Option<u32>,
 }
 
 /// One active iteration context for the unrolled `BeginIter` loop (Task 3).
@@ -796,8 +845,35 @@ pub(crate) fn emit_bytecode(
         view_stack: Vec::new(),
         iter_stack: Vec::new(),
         broadcast_stack: Vec::new(),
+        subscript: SubscriptAccum::default(),
+        next_i32_local: ctx.extra_i32_local_base,
     };
     emit_ops(&bc.code, &bc.literals, ctx, &mut state, f)
+}
+
+/// An upper bound on the extra i32 wasm locals a program's dynamic subscripts
+/// need (Task 4), so the function-builder can reserve them past the scratch /
+/// condition / `Apply` locals.
+///
+/// Each `ViewSubscriptDynamic` draws at most two fresh locals (a runtime-offset
+/// addend + a validity flag, allocated once per dynamically-subscripted view);
+/// each `PushSubscriptIndex` draws at most two (a 0-based index local + the
+/// shared validity flag of its accumulation). Counting two per opcode is a
+/// generous bound -- a real accumulation reuses one view's pair across several
+/// subscripts and one validity flag across several pushed indices -- but
+/// over-reserving unused i32 locals is free, and the bound keeps the reservation
+/// a single cheap pass with no dataflow.
+pub(crate) fn count_extra_i32_locals(bc: &ByteCode) -> u32 {
+    bc.code
+        .iter()
+        .filter(|op| {
+            matches!(
+                op,
+                Opcode::ViewSubscriptDynamic { .. } | Opcode::PushSubscriptIndex { .. }
+            )
+        })
+        .count() as u32
+        * 2
 }
 
 /// Lower a (sub-)slice of opcodes, threading the emit-time [`EmitState`]. The
@@ -1055,6 +1131,43 @@ fn emit_ops(
                 state.view_stack.push(top);
             }
 
+            // ── Dynamic view subscript (Phase 5 Task 4) ───────────────────
+            // `ViewSubscriptDynamic` pops a 1-based runtime index, bounds-checks
+            // it against the top view's `dims[dim_idx]`, and folds
+            // `(index-1)*strides[dim_idx]` into the descriptor's runtime offset
+            // local; OOB sets the validity flag to 0 so later reads yield NaN.
+            // Mirrors `RuntimeView::apply_single_subscript_checked` (`vm.rs:1797`,
+            // `bytecode.rs:242`).
+            Opcode::ViewSubscriptDynamic { dim_idx } => {
+                emit_view_subscript_dynamic(*dim_idx as usize, ctx, state, f)?;
+            }
+            // `ViewRangeDynamic` (`vm.rs:1815`) clamps a runtime `[start:end]`
+            // range, which yields a runtime *size*. The unrolled element
+            // addressing here folds every address at compile time, so a runtime
+            // range cannot be expressed; returning `Unsupported` keeps such a
+            // model `Skipped`. A literal range is constant-folded by codegen into
+            // the static `ViewRange` arm, so this is only reached by a true
+            // runtime range.
+            Opcode::ViewRangeDynamic { dim_idx } => {
+                return Err(WasmGenError::Unsupported(format!(
+                    "wasmgen: ViewRangeDynamic (dim {dim_idx}) needs a runtime view size; \
+                     not supported"
+                )));
+            }
+
+            // ── Legacy scalar dynamic subscript (Phase 5 Task 4) ──────────
+            // `PushSubscriptIndex` pops a 1-based index, range-checks it against
+            // `bounds`, and accumulates the 0-based runtime index; OOB clears the
+            // accumulation's validity flag. `LoadSubscript` folds the accumulated
+            // indices into a flat offset and reads `curr[module_off+off+flat]`
+            // (NaN when invalid). Mirrors `vm.rs:1341-1366`.
+            Opcode::PushSubscriptIndex { bounds } => {
+                emit_push_subscript_index(*bounds, state, f);
+            }
+            Opcode::LoadSubscript { off } => {
+                emit_load_subscript(*off, ctx, state, f);
+            }
+
             // ── Temp element reads (Phase 5 Task 1) ───────────────────────
             // `temp_storage[temp_offsets[temp_id] + index]` (`vm.rs:1860`).
             Opcode::LoadTempConst { temp_id, index } => {
@@ -1225,6 +1338,17 @@ fn emit_ops(
         pc += 1;
     }
     Ok(())
+}
+
+impl EmitState {
+    /// Hand out the next fresh i32 wasm local (Task 4 dynamic subscripts). The
+    /// count is pre-reserved by [`count_extra_i32_locals`], so this never exceeds
+    /// the function's declared locals.
+    fn alloc_i32_local(&mut self) -> u32 {
+        let idx = self.next_i32_local;
+        self.next_i32_local += 1;
+        idx
+    }
 }
 
 /// The compile-time iteration index of the innermost active iteration context,
@@ -1447,6 +1571,203 @@ fn emit_load_broadcast_element(
     let flat = source.flat_offset_for_indices(&ordered);
     let source = source.clone();
     emit_view_offset_load(&source, flat, ctx, f)
+}
+
+/// Lower `ViewSubscriptDynamic { dim_idx }` (Task 4): pop the 1-based runtime
+/// index off the wasm stack, bounds-check it against the top view's
+/// `dims[dim_idx]`, and fold `(index-1) * strides[dim_idx]` into the view's
+/// runtime-offset local; an out-of-bounds index clears the view's validity flag.
+/// The *shape* change (dropping `dim_idx`) is compile-time; only the offset
+/// addend and validity are runtime. Mirrors `apply_single_subscript_checked`
+/// (`bytecode.rs:242`) + `apply_single_subscript` (`bytecode.rs:326`).
+fn emit_view_subscript_dynamic(
+    dim_idx: usize,
+    ctx: &EmitCtx,
+    state: &mut EmitState,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    use Instruction as Ins;
+
+    // Read the geometry (stride/bound) before mutating the descriptor's shape.
+    let view = view_top(&state.view_stack)?;
+    let dim_size = view.dim_at(dim_idx).ok_or_else(|| {
+        WasmGenError::Unsupported(format!(
+            "wasmgen: ViewSubscriptDynamic dim {dim_idx} out of range"
+        ))
+    })?;
+    let stride = view.stride_at(dim_idx).ok_or_else(|| {
+        WasmGenError::Unsupported(format!(
+            "wasmgen: ViewSubscriptDynamic dim {dim_idx} out of range"
+        ))
+    })?;
+    let already_dynamic = view.runtime_off_local.is_some();
+
+    // Lazily allocate (and initialize) the view's runtime-offset + validity
+    // locals on its first dynamic subscript: offset 0, valid 1.
+    let (off_local, valid_local) = if already_dynamic {
+        (view.runtime_off_local.unwrap(), view.valid_local.unwrap())
+    } else {
+        let off_local = state.alloc_i32_local();
+        let valid_local = state.alloc_i32_local();
+        f.instruction(&Ins::I32Const(0));
+        f.instruction(&Ins::LocalSet(off_local));
+        f.instruction(&Ins::I32Const(1));
+        f.instruction(&Ins::LocalSet(valid_local));
+        let view = view_top_mut(&mut state.view_stack)?;
+        view.runtime_off_local = Some(off_local);
+        view.valid_local = Some(valid_local);
+        (off_local, valid_local)
+    };
+
+    // Park the popped f64 index in the scratch f64 local (free at an opcode
+    // boundary) so it can be read twice (bounds check + offset).
+    f.instruction(&Ins::LocalSet(ctx.scratch_local));
+
+    // in_bounds = (idx >= 1.0) & (idx <= dim_size). The VM floors the index, but
+    // the bound test is on the popped value; using the value directly (>= 1.0,
+    // <= dim_size) matches `index_1based == 0 || index_1based > dims[dim_idx]`
+    // on the floored u16 for any non-negative index, and a negative index fails
+    // `>= 1.0`. valid &= in_bounds (validity is sticky-false, like the VM).
+    f.instruction(&Ins::LocalGet(valid_local));
+    f.instruction(&Ins::LocalGet(ctx.scratch_local));
+    f.instruction(&Ins::F64Floor);
+    f.instruction(&f64_const(1.0));
+    f.instruction(&Ins::F64Ge); // floor(idx) >= 1
+    f.instruction(&Ins::LocalGet(ctx.scratch_local));
+    f.instruction(&Ins::F64Floor);
+    f.instruction(&f64_const(f64::from(dim_size)));
+    f.instruction(&Ins::F64Le); // floor(idx) <= dim_size
+    f.instruction(&Ins::I32And);
+    f.instruction(&Ins::I32And); // valid & in_bounds
+    f.instruction(&Ins::LocalSet(valid_local));
+
+    // off_local += (floor(idx) as i32 - 1) * stride. Folded unconditionally: when
+    // invalid the read is NaN-gated, so the (possibly bogus) offset is never used.
+    f.instruction(&Ins::LocalGet(off_local));
+    f.instruction(&Ins::LocalGet(ctx.scratch_local));
+    f.instruction(&Ins::F64Floor);
+    f.instruction(&Ins::I32TruncSatF64S);
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32Sub); // index - 1 (0-based)
+    f.instruction(&Ins::I32Const(stride));
+    f.instruction(&Ins::I32Mul);
+    f.instruction(&Ins::I32Add);
+    f.instruction(&Ins::LocalSet(off_local));
+
+    // Drop the subscripted dimension from the compile-time shape.
+    let view = view_top_mut(&mut state.view_stack)?;
+    view.apply_single_subscript_dynamic(dim_idx)
+        .ok_or_else(|| {
+            WasmGenError::Unsupported(
+                "wasmgen: ViewSubscriptDynamic on a sparse/out-of-range dimension".to_string(),
+            )
+        })?;
+    Ok(())
+}
+
+/// Lower `PushSubscriptIndex { bounds }` (Task 4, legacy scalar subscript): pop
+/// the 1-based runtime index, range-check it against `bounds`, and accumulate
+/// its 0-based value in a fresh i32 local for the eventual `LoadSubscript` fold.
+/// An out-of-bounds index clears the accumulation's shared validity flag.
+/// Mirrors `vm.rs:1341-1349`.
+fn emit_push_subscript_index(bounds: u16, state: &mut EmitState, f: &mut Function) {
+    use Instruction as Ins;
+
+    // Allocate the shared validity flag on the first index of an accumulation
+    // (init 1 = valid). Subsequent indices reuse it.
+    let valid_local = match state.subscript.valid_local {
+        Some(v) => v,
+        None => {
+            let v = state.alloc_i32_local();
+            f.instruction(&Ins::I32Const(1));
+            f.instruction(&Ins::LocalSet(v));
+            state.subscript.valid_local = Some(v);
+            v
+        }
+    };
+
+    // A fresh i32 local holds this index's 0-based value until LoadSubscript
+    // folds it (several PushSubscriptIndex precede one LoadSubscript).
+    let idx_local = state.alloc_i32_local();
+
+    // idx_i32 = floor(pop) as i32 (the 1-based index).
+    f.instruction(&Ins::F64Floor);
+    f.instruction(&Ins::I32TruncSatF64S);
+    // Keep a copy for the bounds check (LocalTee leaves it on the stack).
+    f.instruction(&Ins::LocalTee(idx_local));
+
+    // in_bounds = (idx >= 1) & (idx <= bounds). The VM's test is
+    // `index == 0 || index > bounds` on a u16 (so a 0 or negative index, which
+    // `floor as i32` yields <= 0, also fails `>= 1`). valid &= in_bounds.
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32GeS); // idx >= 1
+    f.instruction(&Ins::LocalGet(idx_local));
+    f.instruction(&Ins::I32Const(i32::from(bounds)));
+    f.instruction(&Ins::I32LeS); // idx <= bounds
+    f.instruction(&Ins::I32And);
+    f.instruction(&Ins::LocalGet(valid_local));
+    f.instruction(&Ins::I32And);
+    f.instruction(&Ins::LocalSet(valid_local));
+
+    // Store the 0-based index (idx - 1) for the fold.
+    f.instruction(&Ins::LocalGet(idx_local));
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32Sub);
+    f.instruction(&Ins::LocalSet(idx_local));
+
+    state.subscript.indices.push((idx_local, bounds));
+}
+
+/// Lower `LoadSubscript { off }` (Task 4, legacy scalar subscript): fold the
+/// accumulated 0-based runtime indices into a row-major flat offset and push
+/// `curr[module_off + off + flat]`, or NaN when the accumulation is invalid.
+/// Mirrors `vm.rs:1351-1366`: `flat = 0; for (i, b) in indices { flat = flat*b
+/// + i }`. Clears the accumulator.
+fn emit_load_subscript(off: u16, ctx: &EmitCtx, state: &mut EmitState, f: &mut Function) {
+    use Instruction as Ins;
+    use wasm_encoder::BlockType;
+
+    let indices = std::mem::take(&mut state.subscript.indices);
+    let valid_local = state.subscript.valid_local.take();
+
+    let emit_load = |f: &mut Function| {
+        // Dynamic address part = (module_off + flat) * 8, where the row-major
+        // fold is `flat = (((i0)*b1 + i1)*b2 + i2)...` (the VM multiplies the
+        // running index by each entry's bound then adds the entry's index).
+        f.instruction(&Ins::LocalGet(ctx.module_off_local));
+        // flat fold:
+        if indices.is_empty() {
+            f.instruction(&Ins::I32Const(0));
+        } else {
+            // Start with i0.
+            f.instruction(&Ins::LocalGet(indices[0].0));
+            for (idx_local, bounds) in &indices[1..] {
+                f.instruction(&Ins::I32Const(i32::from(*bounds)));
+                f.instruction(&Ins::I32Mul);
+                f.instruction(&Ins::LocalGet(*idx_local));
+                f.instruction(&Ins::I32Add);
+            }
+        }
+        f.instruction(&Ins::I32Add); // module_off + flat
+        f.instruction(&Ins::I32Const(SLOT_SIZE as i32));
+        f.instruction(&Ins::I32Mul); // (module_off + flat) * 8
+        f.instruction(&Ins::F64Load(memarg(slot_byte_offset(ctx.curr_base, off))));
+    };
+
+    match valid_local {
+        Some(valid_local) => {
+            // if valid == 0 { NaN } else { load }
+            f.instruction(&Ins::LocalGet(valid_local));
+            f.instruction(&Ins::I32Eqz);
+            f.instruction(&Ins::If(BlockType::Result(ValType::F64)));
+            f.instruction(&f64_const(f64::NAN));
+            f.instruction(&Ins::Else);
+            emit_load(f);
+            f.instruction(&Ins::End);
+        }
+        // No PushSubscriptIndex preceded this (a 0-dim subscript): always valid.
+        None => emit_load(f),
+    }
 }
 
 /// Emit a store of the f64 already on the wasm stack into the module-relative
@@ -1966,16 +2287,14 @@ fn emit_view_element_load(
 ) -> Result<(), WasmGenError> {
     let addr = desc
         .element_addr(iter_idx, ctx.curr_base, ctx.temp_storage_base, ctx.ctx)
-        .ok_or_else(runtime_address_unsupported)?;
+        .ok_or_else(bad_temp_view)?;
     emit_addr_load(addr, ctx, f);
     Ok(())
 }
 
 /// Push the f64 value of the view element at an *already-computed* flat slot
 /// offset (the broadcast paths -- `LoadIterViewTop` / `LoadBroadcastElement` --
-/// build the flat offset themselves rather than from an iteration index). A
-/// dynamically-subscripted view (Task 4) returns `Unsupported` here (its const
-/// form cannot carry the runtime addend).
+/// build the flat offset themselves rather than from an iteration index).
 fn emit_view_offset_load(
     desc: &ViewDesc,
     flat: usize,
@@ -1984,32 +2303,70 @@ fn emit_view_offset_load(
 ) -> Result<(), WasmGenError> {
     let addr = desc
         .element_addr_for_flat(flat, ctx.curr_base, ctx.temp_storage_base, ctx.ctx)
-        .ok_or_else(runtime_address_unsupported)?;
+        .ok_or_else(bad_temp_view)?;
     emit_addr_load(addr, ctx, f);
     Ok(())
 }
 
 /// Emit the f64 load for a resolved [`ElementAddr`]: the constant part rides in
 /// the `memarg.offset`; the dynamic part is `module_off * 8` for a module-
-/// relative view and a bare `0` otherwise (matching the VM's
-/// `curr[module_off + base_off + flat]`).
+/// relative view plus, for a dynamically-subscripted view (Task 4), the
+/// `runtime_off_local * 8` runtime addend (matching the VM's
+/// `curr[module_off + base_off + flat + dynamic]`). When the view carries a
+/// validity flag (`valid_local`), the whole load is wrapped in a guard that
+/// yields NaN when the flag is 0 -- the VM's out-of-bounds-subscript NaN.
 fn emit_addr_load(addr: ElementAddr, ctx: &EmitCtx, f: &mut Function) {
-    if addr.module_relative {
-        push_module_relative_base(ctx, f);
+    use Instruction as Ins;
+    use wasm_encoder::BlockType;
+
+    // Validity gate (dynamic subscript only): `if valid == 0 { NaN } else <load>`.
+    if let Some(valid_local) = addr.valid_local {
+        f.instruction(&Ins::LocalGet(valid_local));
+        f.instruction(&Ins::I32Eqz);
+        f.instruction(&Ins::If(BlockType::Result(ValType::F64)));
+        f.instruction(&f64_const(f64::NAN));
+        f.instruction(&Ins::Else);
+        emit_addr_load_unguarded(addr, ctx, f);
+        f.instruction(&Ins::End);
     } else {
-        f.instruction(&Instruction::I32Const(0));
+        emit_addr_load_unguarded(addr, ctx, f);
     }
-    f.instruction(&Instruction::F64Load(memarg(addr.const_byte_offset)));
 }
 
-/// The `Unsupported` error for an element read that still needs a runtime
-/// address (a dynamically-subscripted view before Task 4 lands its runtime
-/// addend path).
-fn runtime_address_unsupported() -> WasmGenError {
+/// The bare load half of [`emit_addr_load`] (no validity guard): push the
+/// dynamic address part, then `f64.load` with the constant `memarg.offset`. The
+/// dynamic part sums `module_off * 8` (module-relative views) and
+/// `runtime_off_local * 8` (a dynamic subscript's accumulated offset); if
+/// neither is present it is a bare `0`.
+fn emit_addr_load_unguarded(addr: ElementAddr, ctx: &EmitCtx, f: &mut Function) {
+    use Instruction as Ins;
+    let mut pushed = false;
+    if addr.module_relative {
+        push_module_relative_base(ctx, f);
+        pushed = true;
+    }
+    if let Some(off_local) = addr.runtime_off_local {
+        // runtime_off_local is a slot offset; convert to bytes.
+        f.instruction(&Ins::LocalGet(off_local));
+        f.instruction(&Ins::I32Const(SLOT_SIZE as i32));
+        f.instruction(&Ins::I32Mul);
+        if pushed {
+            f.instruction(&Ins::I32Add);
+        }
+        pushed = true;
+    }
+    if !pushed {
+        f.instruction(&Ins::I32Const(0));
+    }
+    f.instruction(&Ins::F64Load(memarg(addr.const_byte_offset)));
+}
+
+/// The `Unsupported` error for a temp-backed view whose `base_off` is not a
+/// valid temp id (`temp_offsets[base_off]` out of range) -- malformed bytecode
+/// rather than a wrong module.
+fn bad_temp_view() -> WasmGenError {
     WasmGenError::Unsupported(
-        "wasmgen: array element read needs a runtime address \
-         (dynamically-subscripted view) -- not yet supported"
-            .to_string(),
+        "wasmgen: array element read references an out-of-range temp id".to_string(),
     )
 }
 
@@ -2304,6 +2661,10 @@ mod tests {
             // The scalar-opcode tests place no temp region; the array-view tests
             // build their own ctx with a real temp base + context.
             temp_storage_base: 0,
+            // Dynamic-subscript scratch i32 locals (Task 4) follow the scratch
+            // f64 / condition i32s / Apply f64s; `build_module` declares exactly
+            // `count_extra_i32_locals(bc)` of them at this base.
+            extra_i32_local_base: extra_i32_local_base(depth),
             ctx: empty_ctx(),
         }
     }
@@ -2366,9 +2727,10 @@ mod tests {
         for hf in helpers.functions {
             code.function(&hf.body);
         }
-        // 1 scratch f64 local, `cond_depth` i32 condition locals, and the 3
-        // `Apply` scratch f64 locals -- the same layout production uses.
-        let mut func = Function::new(opcode_fn_locals(cond_depth));
+        // 1 scratch f64 local, `cond_depth` i32 condition locals, the 3 `Apply`
+        // scratch f64 locals, and the program's dynamic-subscript i32 scratch
+        // locals -- the same layout production uses.
+        let mut func = Function::new(opcode_fn_locals(cond_depth, count_extra_i32_locals(bc)));
         emit_bytecode(bc, ctx, &mut func).expect("lowering should succeed");
         func.instruction(&Instruction::End);
         code.function(&func);
@@ -3084,7 +3446,7 @@ mod tests {
         // Lookup is supported as of Phase 3; lowering must succeed where Phase 2
         // returned Unsupported. (Numeric parity is covered by the seeded-table
         // tests below and the end-to-end GF model tests in module.rs.)
-        let mut func = Function::new(opcode_fn_locals(0));
+        let mut func = Function::new(opcode_fn_locals(0, 0));
         let program = bc(
             vec![0.0, 1.0],
             vec![
@@ -3557,7 +3919,7 @@ mod tests {
         for hf in helpers.functions {
             code.function(&hf.body);
         }
-        let mut func = Function::new(opcode_fn_locals(0));
+        let mut func = Function::new(opcode_fn_locals(0, 0));
         emit_bytecode(&program, &ctx, &mut func).expect("LoadPrev should lower");
         func.instruction(&Instruction::End);
         code.function(&func);
@@ -4998,7 +5360,7 @@ mod tests {
             code.function(&hf.body);
         }
         // opcode-fn locals plus one extra i32 for the validity flag.
-        let mut locals = opcode_fn_locals(0);
+        let mut locals = opcode_fn_locals(0, 0);
         locals.push((1, ValType::I32));
         let mut func = Function::new(locals);
         // valid_local = 0 (invalid).
@@ -5451,5 +5813,180 @@ mod tests {
             12.0 * 2.0,
         ];
         assert_eq!(temps, expected);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Phase 5 Task 4: dynamic subscripts + OOB->NaN
+    //
+    // The legacy scalar subscript (`PushSubscriptIndex` / `LoadSubscript`) and
+    // the view-stack dynamic subscript (`ViewSubscriptDynamic`) both carry a
+    // runtime offset + validity flag in fresh i32 wasm locals (reserved by
+    // `count_extra_i32_locals`). An out-of-bounds index clears the validity
+    // flag, so the read yields NaN -- matching the VM (`vm.rs:1341-1366` for the
+    // legacy path; `reduce_view`'s `if !is_valid { NaN }` for the view path).
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// Run `code` (with `count_extra_i32_locals` reserved) returning the f64
+    /// result, with `curr` seeded from `data` (slot 0 = byte 0). The literal pool
+    /// holds the runtime index value(s).
+    fn run_dyn(code: Vec<Opcode>, literals: Vec<f64>, data: &[f64]) -> f64 {
+        let context = ByteCodeContext::default();
+        let ctx = ctx_with_arrays(&context);
+        run(&bc(literals, code), &ctx, true, 0, &seed_run(0, data), None)
+    }
+
+    #[test]
+    fn legacy_subscript_1d_in_range_matches_vm() {
+        // arr[idx] (idx 1-based) over a 4-element array in curr slots 0..4.
+        // idx = 3 (1-based) -> 0-based 2 -> data[2].
+        let data = [10.0, 20.0, 30.0, 40.0];
+        let code = vec![
+            Opcode::LoadConstant { id: 0 }, // idx = 3.0
+            Opcode::PushSubscriptIndex { bounds: 4 },
+            Opcode::LoadSubscript { off: 0 },
+        ];
+        assert_eq!(run_dyn(code, vec![3.0], &data), 30.0);
+    }
+
+    #[test]
+    fn legacy_subscript_oob_is_nan() {
+        let data = [10.0, 20.0, 30.0, 40.0];
+        // idx = 5 > bounds 4 -> invalid -> NaN.
+        let high = vec![
+            Opcode::LoadConstant { id: 0 },
+            Opcode::PushSubscriptIndex { bounds: 4 },
+            Opcode::LoadSubscript { off: 0 },
+        ];
+        assert!(
+            run_dyn(high, vec![5.0], &data).is_nan(),
+            "idx > bounds -> NaN"
+        );
+        // idx = 0 is invalid in 1-based indexing -> NaN.
+        let zero = vec![
+            Opcode::LoadConstant { id: 0 },
+            Opcode::PushSubscriptIndex { bounds: 4 },
+            Opcode::LoadSubscript { off: 0 },
+        ];
+        assert!(run_dyn(zero, vec![0.0], &data).is_nan(), "idx 0 -> NaN");
+    }
+
+    #[test]
+    fn legacy_subscript_off_shifts_base_like_vm() {
+        // LoadSubscript reads curr[module_off + off + flat]; with off=2 the base
+        // shifts by 2 slots. arr starts at slot 2; idx=2 (1-based) -> slot 3.
+        let data = [99.0, 99.0, 100.0, 200.0, 300.0];
+        let code = vec![
+            Opcode::LoadConstant { id: 0 },
+            Opcode::PushSubscriptIndex { bounds: 3 },
+            Opcode::LoadSubscript { off: 2 },
+        ];
+        assert_eq!(run_dyn(code, vec![2.0], &data), 200.0);
+    }
+
+    #[test]
+    fn legacy_subscript_2d_fold_matches_vm() {
+        // arr[i, j] over a [2,3] row-major array in curr slots 0..6. The VM folds
+        // index = i0*bounds1 + i1 (the running index times the current bound plus
+        // the current index). i=2 (1-based -> 0-based 1), j=3 (1-based -> 0-based
+        // 2): flat = 1*3 + 2 = 5 -> data[5].
+        let data = [0.0, 1.0, 2.0, 10.0, 11.0, 12.0];
+        let code = vec![
+            Opcode::LoadConstant { id: 0 }, // i = 2.0
+            Opcode::PushSubscriptIndex { bounds: 2 },
+            Opcode::LoadConstant { id: 1 }, // j = 3.0
+            Opcode::PushSubscriptIndex { bounds: 3 },
+            Opcode::LoadSubscript { off: 0 },
+        ];
+        assert_eq!(run_dyn(code, vec![2.0, 3.0], &data), 12.0);
+    }
+
+    #[test]
+    fn legacy_subscript_2d_oob_in_either_index_is_nan() {
+        let data = [0.0, 1.0, 2.0, 10.0, 11.0, 12.0];
+        // Second index out of bounds (j=4 > 3) -> NaN even though i is valid.
+        let code = vec![
+            Opcode::LoadConstant { id: 0 }, // i = 1
+            Opcode::PushSubscriptIndex { bounds: 2 },
+            Opcode::LoadConstant { id: 1 }, // j = 4 (oob)
+            Opcode::PushSubscriptIndex { bounds: 3 },
+            Opcode::LoadSubscript { off: 0 },
+        ];
+        assert!(run_dyn(code, vec![1.0, 4.0], &data).is_nan());
+    }
+
+    #[test]
+    fn legacy_subscript_floors_fractional_index() {
+        // The VM does `stack.pop().floor() as u16`; idx 2.9 -> 1-based 2 -> slot 1.
+        let data = [10.0, 20.0, 30.0];
+        let code = vec![
+            Opcode::LoadConstant { id: 0 },
+            Opcode::PushSubscriptIndex { bounds: 3 },
+            Opcode::LoadSubscript { off: 0 },
+        ];
+        assert_eq!(run_dyn(code, vec![2.9], &data), 20.0);
+    }
+
+    /// Build a 1-D `PushVarViewDirect` over `dim` slots, apply a dynamic subscript
+    /// at dim 0 from a constant index, and `ArraySum` the resulting (scalar) view
+    /// -- the `ViewSubscriptDynamic` end-to-end shape, runnable in isolation.
+    fn run_view_dyn_subscript(dim: u16, index: f64, data: &[f64]) -> f64 {
+        let mut context = ByteCodeContext::default();
+        // PushVarViewDirect resolves dims from a dim-list of raw sizes.
+        context.add_dim_list(1, [dim, 0, 0, 0]);
+        let ctx = ctx_with_arrays(&context);
+        let code = vec![
+            Opcode::PushVarViewDirect {
+                base_off: 0,
+                dim_list_id: 0,
+            },
+            Opcode::LoadConstant { id: 0 }, // dynamic index
+            Opcode::ViewSubscriptDynamic { dim_idx: 0 },
+            Opcode::ArraySum {}, // sum of the 1-element view (or NaN if invalid)
+            Opcode::PopView {},
+        ];
+        run(
+            &bc(vec![index], code),
+            &ctx,
+            true,
+            0,
+            &seed_run(0, data),
+            None,
+        )
+    }
+
+    #[test]
+    fn view_subscript_dynamic_in_range_reads_element() {
+        // arr[idx] reduced: idx = 3 (1-based) -> data[2]; SUM of the 1-element
+        // view is that element.
+        let data = [10.0, 20.0, 30.0, 40.0];
+        assert_eq!(run_view_dyn_subscript(4, 3.0, &data), 30.0);
+    }
+
+    #[test]
+    fn view_subscript_dynamic_oob_is_nan() {
+        let data = [10.0, 20.0, 30.0, 40.0];
+        // idx = 5 > dim 4 -> view invalid -> reducer (even SUM) yields NaN.
+        assert!(
+            run_view_dyn_subscript(4, 5.0, &data).is_nan(),
+            "idx > dim -> invalid view -> NaN"
+        );
+        // idx = 0 invalid (1-based) -> NaN.
+        assert!(
+            run_view_dyn_subscript(4, 0.0, &data).is_nan(),
+            "idx 0 -> invalid view -> NaN"
+        );
+    }
+
+    #[test]
+    fn view_subscript_dynamic_offset_picks_right_element() {
+        // Sweep the in-range indices: each picks the matching element.
+        let data = [5.0, 6.0, 7.0, 8.0, 9.0];
+        for (idx_1based, expected) in [(1, 5.0), (2, 6.0), (3, 7.0), (4, 8.0), (5, 9.0)] {
+            assert_eq!(
+                run_view_dyn_subscript(5, idx_1based as f64, &data),
+                expected,
+                "arr[{idx_1based}] (1-based)"
+            );
+        }
     }
 }
