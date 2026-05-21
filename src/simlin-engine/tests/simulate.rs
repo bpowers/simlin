@@ -125,9 +125,14 @@ static TEST_MODELS: &[&str] = &[
 /// when its *post-element-expansion* flat opcode stream is entirely in that set.
 /// That includes arrayed apply-to-all / subscript models that expand to purely
 /// scalar per-element opcodes (no array-reducer or `LookupArray` opcode),
-/// because the emitter walks the flattened opcode stream. Models that reach for
-/// nested modules / macros (`wasmgen: submodules are not supported`),
-/// array-reducer opcodes, or RK2/RK4 are `Skipped` until their phases land.
+/// because the emitter walks the flattened opcode stream.
+///
+/// Phase 4 adds RK2/RK4 integration (the multi-stage run loops with the
+/// end-of-step flows re-eval) and `PREVIOUS`/`INIT` (the `prev_values` /
+/// `initial_values` snapshot regions + the `use_prev_fallback` gate), so a model
+/// is now `Skipped` only when its flat opcode stream still reaches for nested
+/// modules / macros (`wasmgen: submodules are not supported`) or array-reducer
+/// opcodes.
 ///
 /// Phase 3 achieves 50 of the 58 active `TEST_MODELS` (up from Phase 2's 45):
 /// the five graphical-function models that previously skipped on
@@ -139,6 +144,19 @@ static TEST_MODELS: &[&str] = &[
 /// and the four `macro_*` fixtures, each `wasmgen: submodules are not
 /// supported`). Observed via `wasm_parity_floor` (run it with `-- --nocapture`
 /// to see the per-model skip reasons).
+///
+/// Phase 4 leaves the floor at 50 even though RK2/RK4 and `PREVIOUS`/`INIT` now
+/// run: re-running `wasm_parity_floor` shows all 8 remaining skips are still
+/// `submodules are not supported`. No *active* corpus model is gated on RK or
+/// `PREVIOUS`/`INIT` -- the standalone RK fixture (`tests/rounding`) and the
+/// `INIT` fixture (`tests/arguments`) are commented out of `TEST_MODELS` for
+/// unrelated reasons, and every other RK / `PREVIOUS` / `INIT` model in the tree
+/// also instantiates a submodule (so it skips on that first). RK2/RK4 and
+/// `PREVIOUS`/`INIT` parity is therefore pinned by the inline `wasmgen::module`
+/// unit tests (`compile_simulation_rk4_matches_vm`, `..._rk2_matches_vm`,
+/// `..._rk4_with_previous_and_init_matches_vm`, `..._previous_matches_vm`,
+/// `..._init_from_flow_matches_vm`, `..._init_from_initial_matches_vm`) rather
+/// than by this corpus floor. The floor rises again in Phase 7 (submodules).
 const WASM_SUPPORTED_FLOOR: usize = 50;
 
 /// AC3.1 / AC3.3 rising-floor gate: run every (non-`#[ignore]`-class) corpus
