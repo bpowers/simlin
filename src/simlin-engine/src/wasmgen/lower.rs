@@ -13,16 +13,26 @@
 //!
 //! Each `Opcode` lowers to a short, mostly 1:1 wasm instruction sequence over
 //! the wasm operand stack, reproducing the matching arm of `eval_bytecode`
-//! (`vm.rs:1257+`). The opcode programs a `CompiledSimulation` consumer sees
-//! are un-fused (the VM's `fuse_three_address` superinstruction pass runs on a
-//! private execution copy after `CompiledSimulation` is produced), so only the
-//! plain scalar-core set is handled here; any fused/superinstruction or
-//! array/module opcode returns `WasmGenError::Unsupported`.
-
-// The emitter is exercised by this module's tests but is not yet wired into a
-// non-test caller; `wasmgen/module.rs::compile_simulation` consumes it in the
-// next task, at which point this allow is removed.
-#![allow(dead_code)]
+//! (`vm.rs:1257+`).
+//!
+//! Two layers of superinstruction fusion exist in the engine, and they reach a
+//! `CompiledSimulation` consumer differently:
+//! - The **peephole** pass (`ByteCode::peephole_optimize`, run inside
+//!   `Module::compile`/`ByteCodeBuilder::finish`) runs per-variable-fragment in
+//!   the incremental pipeline *before* symbolization, so its three fused
+//!   opcodes (`AssignConstCurr`, `BinOpAssignCurr`, `BinOpAssignNext`) ride
+//!   through the symbolic layer into `CompiledSimulation`. Every scalar Euler
+//!   model carries them (a constant initial -> `AssignConstCurr`; a stock
+//!   integration -> `BinOpAssignNext`), so they are part of the scalar core and
+//!   are lowered here.
+//! - The late **3-address** pass (`ByteCode::fuse_three_address`) runs only on
+//!   the VM's private execution copy (`vm.rs:395-398`), so its `BinVarVar` /
+//!   `AssignAddVarVarCurr` / ... family never reaches a consumer.
+//!
+//! Anything outside the supported scalar core -- an array/module/lookup opcode,
+//! an unsupported `Op2` (Eq/And/Or/Mod/Exp), or a late-fusion superinstruction
+//! that somehow appeared -- returns `WasmGenError::Unsupported` rather than
+//! emitting a wrong module.
 
 use wasm_encoder::{Function, Instruction, MemArg};
 
@@ -46,8 +56,16 @@ const F64_ALIGN: u32 = 3;
 pub(crate) struct EmitCtx {
     pub curr_base: u32,
     pub next_base: u32,
+    // dt/start_time/final_time are the run-invariant time globals. Phase 1
+    // reads them from memory via `LoadGlobalVar` (slots 0..4), so they are not
+    // consulted here yet; Phase 2 lowers the `TimeStep`/`StartTime`/`FinalTime`
+    // builtins to compile-time constants from these (as the POC's `expr.rs`
+    // does), at which point they become live.
+    #[allow(dead_code)]
     pub dt: f64,
+    #[allow(dead_code)]
     pub start_time: f64,
+    #[allow(dead_code)]
     pub final_time: f64,
     /// wasm local index holding this instance's `module_off` (i32).
     pub module_off_local: u32,
@@ -198,6 +216,41 @@ pub(crate) fn emit_bytecode(
                 emit_assign(ctx.curr_base, *off, ctx, f);
             }
             Opcode::AssignNext { off } => {
+                emit_assign(ctx.next_base, *off, ctx, f);
+            }
+            // `AssignConstCurr` is base-codegen output (not a late-fusion
+            // superinstruction): `compiler::codegen` emits it directly for any
+            // `AssignCurr` with a constant RHS (`codegen.rs:1161-1167`), and it
+            // rides through the symbolic layer into `CompiledSimulation`. Every
+            // model with a constant initial/aux carries it, so it is part of the
+            // scalar core, not an Unsupported fusion artifact. Mirrors the VM's
+            // `curr[module_off + off] = literals[literal_id]` (`vm.rs:1453`).
+            Opcode::AssignConstCurr { off, literal_id } => {
+                let v = *bc.literals.get(*literal_id as usize).ok_or_else(|| {
+                    WasmGenError::Unsupported(format!(
+                        "wasmgen: AssignConstCurr literal id {literal_id} out of range"
+                    ))
+                })?;
+                // Nothing is on the stack; push the store address then the
+                // constant value (f64.store wants [addr_i32, value_f64]).
+                push_module_relative_base(ctx, f);
+                f.instruction(&f64_const(v));
+                f.instruction(&Instruction::F64Store(memarg(slot_byte_offset(
+                    ctx.curr_base,
+                    *off,
+                ))));
+            }
+            // Peephole fusions of `Op2; Assign{Curr,Next}`. Operands `[l, r]`
+            // are on the stack; apply the op (which errors cleanly on an
+            // unsupported operator) then store the result. Mirrors the VM's
+            // `curr/next[module_off + off] = eval_op2(op, l, r)` (`vm.rs:1457`,
+            // `vm.rs:1463`).
+            Opcode::BinOpAssignCurr { op, off } => {
+                emit_op2(*op, f)?;
+                emit_assign(ctx.curr_base, *off, ctx, f);
+            }
+            Opcode::BinOpAssignNext { op, off } => {
+                emit_op2(*op, f)?;
                 emit_assign(ctx.next_base, *off, ctx, f);
             }
             Opcode::Ret => {
@@ -719,6 +772,126 @@ mod tests {
             Opcode::AssignCurr { off: 5 },
         ];
         assert_eq!(stored(code, vec![42.0], &[], 40), 42.0);
+    }
+
+    #[test]
+    fn lowers_assign_const_curr() {
+        // AssignConstCurr is emitted by base codegen for a constant-RHS
+        // assignment (e.g. a constant initial or aux): curr[off] = literals[id].
+        // Store 7.0 into curr slot 6 (byte 48), read it back.
+        let code = vec![Opcode::AssignConstCurr {
+            off: 6,
+            literal_id: 0,
+        }];
+        assert_eq!(stored(code, vec![7.0], &[], 48), 7.0);
+    }
+
+    #[test]
+    fn assign_const_curr_honors_module_off() {
+        // With module_off=2, AssignConstCurr{off:1} writes curr[3] (byte 24).
+        let ctx = ctx_with_cond_depth(0);
+        let program = bc(
+            vec![3.5],
+            vec![Opcode::AssignConstCurr {
+                off: 1,
+                literal_id: 0,
+            }],
+        );
+        let bytes = build_module(&program, &ctx, false, 0);
+        let info = validate(&bytes).expect("module must validate");
+        let mut store = Store::new(());
+        let module = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let eval = store
+            .instance_export(module, "eval")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(i32,), ()>(eval, (2_i32,))
+            .expect("invoke");
+        let mem = store
+            .instance_export(module, "mem")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        let v = store.mem_access_mut_slice(mem, |bytes| {
+            f64::from_le_bytes(bytes[24..32].try_into().unwrap())
+        });
+        assert_eq!(v, 3.5);
+    }
+
+    #[test]
+    fn lowers_bin_op_assign_curr() {
+        // BinOpAssignCurr is the peephole fusion of `Op2; AssignCurr`: pops
+        // [l, r], computes l op r, stores to curr[off]. Mirrors vm.rs:1457.
+        // deaths = pop / 80 -> curr slot 6 (byte 48); pop = slot 4 (byte 32).
+        let code = vec![
+            Opcode::LoadVar { off: 4 },
+            Opcode::LoadConstant { id: 0 },
+            Opcode::BinOpAssignCurr {
+                op: Op2::Div,
+                off: 6,
+            },
+        ];
+        assert_eq!(stored(code, vec![80.0], &[(32, 200.0)], 48), 2.5);
+    }
+
+    #[test]
+    fn lowers_bin_op_assign_next() {
+        // BinOpAssignNext is the peephole fusion of `Op2; AssignNext` (stock
+        // integration): pops [l, r], computes l op r, stores to next[off].
+        // next[pop] = pop + delta, with delta in curr slot 5.
+        // next slot 4 lives at next_base(4096) + 32 = 4128.
+        let code = vec![
+            Opcode::LoadVar { off: 4 }, // pop
+            Opcode::LoadVar { off: 5 }, // delta
+            Opcode::BinOpAssignNext {
+                op: Op2::Add,
+                off: 4,
+            },
+        ];
+        // pop=100, delta=3.75 -> 103.75
+        assert_eq!(
+            stored(code, vec![], &[(32, 100.0), (40, 3.75)], 4128),
+            103.75
+        );
+    }
+
+    #[test]
+    fn bin_op_assign_curr_operand_order_matches_vm() {
+        // Non-commutative op: l - r with l pushed first.
+        // result = a - b -> curr slot 5 (byte 40); a=slot 3 (24), b=slot 4 (32).
+        let code = vec![
+            Opcode::LoadVar { off: 3 },
+            Opcode::LoadVar { off: 4 },
+            Opcode::BinOpAssignCurr {
+                op: Op2::Sub,
+                off: 5,
+            },
+        ];
+        assert_eq!(stored(code, vec![], &[(24, 10.0), (32, 3.0)], 40), 7.0);
+    }
+
+    #[test]
+    fn bin_op_assign_with_unsupported_op_returns_error() {
+        // A fused unsupported op (e.g. Mod) must still error cleanly.
+        let mut func = Function::new([]);
+        let program = bc(
+            vec![],
+            vec![
+                Opcode::LoadVar { off: 0 },
+                Opcode::LoadVar { off: 1 },
+                Opcode::BinOpAssignCurr {
+                    op: Op2::Mod,
+                    off: 2,
+                },
+            ],
+        );
+        let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
+        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
     }
 
     #[test]

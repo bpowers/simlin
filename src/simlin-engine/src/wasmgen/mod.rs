@@ -22,7 +22,9 @@ mod expr;
 mod lower;
 mod module;
 
-pub use module::{compile_datamodel_to_wasm, compile_module};
+pub use module::{
+    WasmArtifact, WasmLayout, compile_datamodel_to_wasm, compile_module, compile_simulation,
+};
 
 use std::fmt;
 

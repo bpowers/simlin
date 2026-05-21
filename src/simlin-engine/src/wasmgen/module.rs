@@ -29,11 +29,14 @@ use wasm_encoder::{
     ValType,
 };
 
+use crate::bytecode::{ByteCode, CompiledModule, Opcode};
 use crate::compiler::{Expr, Module};
 use crate::results::{Method, Specs};
+use crate::vm::CompiledSimulation;
 
 use super::WasmGenError;
 use super::expr::{EmitCtx, f64_const, lower_expr, memarg};
+use super::lower::{self, max_condition_depth};
 
 // Reserved global slots, mirroring `crate::vm`.
 const TIME_OFF: usize = 0;
@@ -358,6 +361,417 @@ fn assemble(run: Function, pages: u32, n_slots: u32, n_chunks: u32, results_base
     wasm.finish()
 }
 
+// ============================================================================
+// CompiledSimulation -> wasm (the production path; consumes salsa bytecode)
+// ============================================================================
+
+/// A compiled simulation wasm module together with the layout metadata a host
+/// needs to read its results by variable name.
+pub struct WasmArtifact {
+    pub wasm: Vec<u8>,
+    pub layout: WasmLayout,
+}
+
+/// Geometry + variable-offset map describing a [`WasmArtifact`]'s results
+/// region. The wasm module also exports `n_slots`/`n_chunks`/`results_offset`
+/// as i32 globals so a host can stride results with no external metadata; this
+/// struct mirrors those values and adds the canonical-name -> slot map needed
+/// for by-name reads.
+pub struct WasmLayout {
+    pub n_slots: usize,
+    pub n_chunks: usize,
+    /// Byte offset of the results region within linear memory.
+    pub results_offset: usize,
+    /// Canonical variable name -> slot offset within a chunk.
+    pub var_offsets: Vec<(String, usize)>,
+}
+
+// Function indices in the emitted module. The three opcode programs share the
+// `(i32) -> ()` type; `run` is `() -> ()`.
+const F_INITIALS: u32 = 0;
+const F_FLOWS: u32 = 1;
+const F_STOCKS: u32 = 2;
+const F_RUN: u32 = 3;
+
+// Type-section indices.
+const TYPE_OPCODE_FN: u32 = 0; // (i32) -> ()
+const TYPE_RUN_FN: u32 = 1; // () -> ()
+
+// Local indices shared by every opcode-program function. Param 0 is
+// `module_off`; the scratch f64 and the condition i32(s) are declared locals.
+const L_MODULE_OFF: u32 = 0;
+const L_SCRATCH: u32 = 1;
+const L_COND_BASE: u32 = 2;
+
+/// Compile a `CompiledSimulation` (produced by the salsa incremental pipeline)
+/// into a self-contained wasm module.
+///
+/// Phase 1 scope: the root module only, Euler integration only. The opcode
+/// programs a `CompiledSimulation` carries are the plain, un-fused scalar set
+/// (the VM's superinstruction fusion runs on a private execution copy), so each
+/// `Opcode` lowers via [`lower::emit_bytecode`]. Anything outside the supported
+/// set -- a non-Euler method, nested modules, or an unsupported opcode --
+/// returns [`WasmGenError::Unsupported`] rather than emitting a wrong module.
+pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, WasmGenError> {
+    // `wasmgen` is in-crate, so it reads `CompiledSimulation`'s `pub(crate)`
+    // fields directly rather than through accessors.
+    let specs = &sim.specs;
+    if specs.method != Method::Euler {
+        return Err(WasmGenError::Unsupported(
+            "wasmgen: only Euler integration is supported".to_string(),
+        ));
+    }
+
+    let root = sim
+        .modules
+        .get(&sim.root)
+        .ok_or_else(|| WasmGenError::Unsupported("wasmgen: root module not found".to_string()))?;
+
+    if !root.context.modules.is_empty() {
+        return Err(WasmGenError::Unsupported(
+            "wasmgen: submodules are not supported".to_string(),
+        ));
+    }
+    let too_large =
+        || WasmGenError::Unsupported("wasmgen: model too large for Phase 1".to_string());
+    let n_slots = u32::try_from(root.n_slots).map_err(|_| too_large())?;
+    let n_chunks = u32::try_from(specs.n_chunks).map_err(|_| too_large())?;
+    let stride = n_slots.checked_mul(SLOT_SIZE).ok_or_else(too_large)?;
+    let curr_base = 0u32;
+    let next_base = stride;
+    let results_base = stride.checked_mul(2).ok_or_else(too_large)?;
+    let results_bytes = n_chunks.checked_mul(stride).ok_or_else(too_large)?;
+    let total_bytes = results_base
+        .checked_add(results_bytes)
+        .ok_or_else(too_large)?;
+    let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
+
+    // save_every mirrors vm.rs::run_to: max(1, round(save_step / dt)).
+    let save_every = ((specs.save_step / specs.dt).round() as i64).max(1);
+    let save_every = i32::try_from(save_every).map_err(|_| too_large())?;
+
+    // Each opcode program runs over the shared f64 slab. The base offsets are
+    // constant; `module_off` is the function's i32 parameter (0 for the root).
+    let make_ctx = |cond_depth: usize| lower::EmitCtx {
+        curr_base,
+        next_base,
+        dt: specs.dt,
+        start_time: specs.start,
+        final_time: specs.stop,
+        module_off_local: L_MODULE_OFF,
+        scratch_local: L_SCRATCH,
+        condition_locals: (0..cond_depth as u32).map(|i| L_COND_BASE + i).collect(),
+    };
+
+    let initials_fn = emit_initials_fn(root, &make_ctx)?;
+    let flows_fn = emit_opcode_fn(&root.compiled_flows, &make_ctx)?;
+    let stocks_fn = emit_opcode_fn(&root.compiled_stocks, &make_ctx)?;
+
+    let stock_offsets = collect_assign_next_opcode_offsets(&root.compiled_stocks);
+    let run_fn = emit_run_simulation(
+        specs,
+        n_slots,
+        results_base,
+        stride,
+        n_chunks,
+        save_every,
+        &stock_offsets,
+    );
+
+    let wasm = assemble_simulation(
+        initials_fn,
+        flows_fn,
+        stocks_fn,
+        run_fn,
+        pages,
+        n_slots,
+        n_chunks,
+        results_base,
+    );
+
+    let var_offsets = sim
+        .offsets
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), *v))
+        .collect();
+
+    Ok(WasmArtifact {
+        wasm,
+        layout: WasmLayout {
+            n_slots: root.n_slots,
+            n_chunks: specs.n_chunks,
+            results_offset: results_base as usize,
+            var_offsets,
+        },
+    })
+}
+
+/// Build the `initials` function: every `CompiledInitial`'s bytecode in order,
+/// over the shared slab. The shared condition-local count is the max nesting
+/// depth across all the initials (they run sequentially in one function).
+fn emit_initials_fn(
+    root: &CompiledModule,
+    make_ctx: &impl Fn(usize) -> lower::EmitCtx,
+) -> Result<Function, WasmGenError> {
+    let cond_depth = root
+        .compiled_initials
+        .iter()
+        .map(|ci| max_condition_depth(&ci.bytecode))
+        .max()
+        .unwrap_or(0);
+    let ctx = make_ctx(cond_depth);
+    let mut f = new_opcode_fn(cond_depth);
+    for ci in root.compiled_initials.iter() {
+        lower::emit_bytecode(&ci.bytecode, &ctx, &mut f)?;
+    }
+    f.instruction(&I::End);
+    Ok(f)
+}
+
+/// Build one opcode-program function from a single `ByteCode`.
+fn emit_opcode_fn(
+    bc: &ByteCode,
+    make_ctx: &impl Fn(usize) -> lower::EmitCtx,
+) -> Result<Function, WasmGenError> {
+    let cond_depth = max_condition_depth(bc);
+    let ctx = make_ctx(cond_depth);
+    let mut f = new_opcode_fn(cond_depth);
+    lower::emit_bytecode(bc, &ctx, &mut f)?;
+    f.instruction(&I::End);
+    Ok(f)
+}
+
+/// A fresh opcode-program `Function` with the scratch f64 local plus
+/// `cond_depth` i32 condition locals (param 0 = `module_off`).
+fn new_opcode_fn(cond_depth: usize) -> Function {
+    Function::new([(1, ValType::F64), (cond_depth as u32, ValType::I32)])
+}
+
+/// The stock data-buffer offsets written by the stocks program. After each
+/// step these slots are copied `next -> curr`, mirroring the VM's chunk-advance
+/// for the freshly integrated stock values. A stock integration writes via
+/// either `AssignNext` or its peephole-fused `BinOpAssignNext` form (most
+/// integrations are `stock + delta`, which peepholes to `BinOpAssignNext`), so
+/// both are collected -- matching the VM's `collect_stock_offsets`
+/// (`vm.rs:524`). Phase 1 has no nested modules, so the VM's `EvalModule`
+/// recursion has no analogue here.
+fn collect_assign_next_opcode_offsets(stocks: &ByteCode) -> Vec<usize> {
+    let mut offsets: Vec<usize> = stocks
+        .code
+        .iter()
+        .filter_map(|op| match op {
+            Opcode::AssignNext { off } | Opcode::BinOpAssignNext { off, .. } => Some(*off as usize),
+            _ => None,
+        })
+        .collect();
+    // Defensive dedup, as the VM does: duplicate offsets would double-copy.
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
+}
+
+/// Emit the body of `run` for the `CompiledSimulation` path. Identical control
+/// flow to the POC's `emit_run` (`vm.rs::run_to` Euler arm + `save_advance!`),
+/// but it `call`s the three opcode-emitted functions instead of inlining `Expr`
+/// lowering.
+#[allow(clippy::too_many_arguments)]
+fn emit_run_simulation(
+    specs: &Specs,
+    n_slots: u32,
+    results_base: u32,
+    stride: u32,
+    n_chunks: u32,
+    save_every: i32,
+    stock_offsets: &[usize],
+) -> Function {
+    let mut f = Function::new([(3, ValType::I32)]);
+
+    let time_addr = TIME_OFF as u64 * u64::from(SLOT_SIZE);
+
+    // Seed the reserved global slots into curr (chunk base 0), then run the
+    // initials. The seeds mirror the VM, which writes start/dt/start/stop into
+    // TIME/DT/INITIAL_TIME/FINAL_TIME before run_initials.
+    store_curr_const_abs(&mut f, TIME_OFF, specs.start);
+    store_curr_const_abs(&mut f, DT_OFF, specs.dt);
+    store_curr_const_abs(&mut f, INITIAL_TIME_OFF, specs.start);
+    store_curr_const_abs(&mut f, FINAL_TIME_OFF, specs.stop);
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::Call(F_INITIALS));
+
+    f.instruction(&I::Block(BlockType::Empty)); // $break
+    f.instruction(&I::Loop(BlockType::Empty)); // $continue
+
+    // if curr[TIME] > stop: break
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::F64Load(memarg(time_addr)));
+    f.instruction(&f64_const(specs.stop));
+    f.instruction(&I::F64Gt);
+    f.instruction(&I::BrIf(1));
+
+    // flows then stocks, both over module_off 0.
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::Call(F_FLOWS));
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::Call(F_STOCKS));
+
+    // step_accum += 1
+    f.instruction(&I::LocalGet(L_STEP_ACCUM));
+    f.instruction(&I::I32Const(1));
+    f.instruction(&I::I32Add);
+    f.instruction(&I::LocalSet(L_STEP_ACCUM));
+
+    // save_cond = (step_accum == save_every) | (saved == 0 & time == start)
+    f.instruction(&I::LocalGet(L_STEP_ACCUM));
+    f.instruction(&I::I32Const(save_every));
+    f.instruction(&I::I32Eq);
+    f.instruction(&I::LocalGet(L_SAVED));
+    f.instruction(&I::I32Eqz);
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::F64Load(memarg(time_addr)));
+    f.instruction(&f64_const(specs.start));
+    f.instruction(&I::F64Eq);
+    f.instruction(&I::I32And);
+    f.instruction(&I::I32Or);
+    f.instruction(&I::If(BlockType::Empty));
+
+    // dst = results_base + saved * stride
+    f.instruction(&I::I32Const(results_base as i32));
+    f.instruction(&I::LocalGet(L_SAVED));
+    f.instruction(&I::I32Const(stride as i32));
+    f.instruction(&I::I32Mul);
+    f.instruction(&I::I32Add);
+    f.instruction(&I::LocalSet(L_DST));
+
+    // results[dst + slot*8] = curr[slot]   for every slot
+    for slot in 0..n_slots {
+        f.instruction(&I::LocalGet(L_DST));
+        f.instruction(&I::I32Const(0));
+        f.instruction(&I::F64Load(memarg(u64::from(slot) * u64::from(SLOT_SIZE))));
+        f.instruction(&I::F64Store(memarg(u64::from(slot) * u64::from(SLOT_SIZE))));
+    }
+
+    // saved += 1; step_accum = 0
+    f.instruction(&I::LocalGet(L_SAVED));
+    f.instruction(&I::I32Const(1));
+    f.instruction(&I::I32Add);
+    f.instruction(&I::LocalSet(L_SAVED));
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::LocalSet(L_STEP_ACCUM));
+
+    // if saved >= n_chunks: break (depth 2: if -> loop -> block)
+    f.instruction(&I::LocalGet(L_SAVED));
+    f.instruction(&I::I32Const(n_chunks as i32));
+    f.instruction(&I::I32GeS);
+    f.instruction(&I::BrIf(2));
+
+    f.instruction(&I::End); // end if
+
+    // Advance: copy the freshly integrated stock values next -> curr.
+    for &off in stock_offsets {
+        f.instruction(&I::I32Const(0));
+        f.instruction(&I::I32Const(0));
+        f.instruction(&I::F64Load(memarg(
+            u64::from(next_base_of(n_slots)) + off as u64 * u64::from(SLOT_SIZE),
+        )));
+        f.instruction(&I::F64Store(memarg(off as u64 * u64::from(SLOT_SIZE))));
+    }
+
+    // time += dt
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::F64Load(memarg(time_addr)));
+    f.instruction(&f64_const(specs.dt));
+    f.instruction(&I::F64Add);
+    f.instruction(&I::F64Store(memarg(time_addr)));
+
+    f.instruction(&I::Br(0)); // continue
+    f.instruction(&I::End); // end loop
+    f.instruction(&I::End); // end block
+    f.instruction(&I::End); // end function
+    f
+}
+
+/// Byte offset of slot 0 of the `next` chunk: `n_slots * 8` (the `next` chunk
+/// immediately follows `curr` in the slab).
+fn next_base_of(n_slots: u32) -> u32 {
+    n_slots * SLOT_SIZE
+}
+
+/// Store a compile-time constant into a `curr` slot at an absolute (module_off
+/// 0) address.
+fn store_curr_const_abs(f: &mut Function, off: usize, v: f64) {
+    f.instruction(&I::I32Const(0));
+    f.instruction(&f64_const(v));
+    f.instruction(&I::F64Store(memarg(off as u64 * u64::from(SLOT_SIZE))));
+}
+
+/// Assemble the four-function simulation module: type, function, memory,
+/// globals, exports, code. Exports `memory`, `run`, and the three
+/// self-describing i32 geometry globals.
+#[allow(clippy::too_many_arguments)]
+fn assemble_simulation(
+    initials: Function,
+    flows: Function,
+    stocks: Function,
+    run: Function,
+    pages: u32,
+    n_slots: u32,
+    n_chunks: u32,
+    results_base: u32,
+) -> Vec<u8> {
+    let mut wasm = WasmModule::new();
+
+    let mut types = TypeSection::new();
+    types.ty().function([ValType::I32], []); // TYPE_OPCODE_FN: (i32) -> ()
+    types.ty().function([], []); // TYPE_RUN_FN: () -> ()
+    wasm.section(&types);
+
+    let mut functions = FunctionSection::new();
+    functions.function(TYPE_OPCODE_FN); // initials
+    functions.function(TYPE_OPCODE_FN); // flows
+    functions.function(TYPE_OPCODE_FN); // stocks
+    functions.function(TYPE_RUN_FN); // run
+    wasm.section(&functions);
+
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType {
+        minimum: u64::from(pages),
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    wasm.section(&memories);
+
+    let i32_global = || GlobalType {
+        val_type: ValType::I32,
+        mutable: false,
+        shared: false,
+    };
+    let mut globals = GlobalSection::new();
+    globals.global(i32_global(), &ConstExpr::i32_const(n_slots as i32));
+    globals.global(i32_global(), &ConstExpr::i32_const(n_chunks as i32));
+    globals.global(i32_global(), &ConstExpr::i32_const(results_base as i32));
+    wasm.section(&globals);
+
+    let mut exports = ExportSection::new();
+    exports.export("run", ExportKind::Func, F_RUN);
+    exports.export("memory", ExportKind::Memory, 0);
+    exports.export("n_slots", ExportKind::Global, 0);
+    exports.export("n_chunks", ExportKind::Global, 1);
+    exports.export("results_offset", ExportKind::Global, 2);
+    wasm.section(&exports);
+
+    let mut code = CodeSection::new();
+    code.function(&initials);
+    code.function(&flows);
+    code.function(&stocks);
+    code.function(&run);
+    wasm.section(&code);
+
+    wasm.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +890,262 @@ mod tests {
             main_offsets.contains_key(&pop) && vm_results.offsets.contains_key(&pop),
             "the population stock should have been compared"
         );
+    }
+
+    // ── compile_simulation (CompiledSimulation -> wasm) ───────────────────
+
+    /// Build a `CompiledSimulation` for the named model of `datamodel` via the
+    /// production incremental pipeline (the same path the VM corpus uses).
+    fn compile_sim(datamodel: &crate::datamodel::Project, model_name: &str) -> CompiledSimulation {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+        compile_project_incremental(&db, sync.project, model_name).expect("incremental compile")
+    }
+
+    /// Run a `WasmArtifact` under the DLR-FT interpreter and return the
+    /// step-major results slab (`n_chunks * n_slots` f64, row-major by step).
+    fn run_artifact_results(artifact: &WasmArtifact) -> Vec<f64> {
+        let info = validate(&artifact.wasm).expect("generated module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let run = store
+            .instance_export(inst, "run")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(), ()>(run, ())
+            .expect("run wasm");
+        let mem = store
+            .instance_export(inst, "memory")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        let n = artifact.layout.n_chunks * artifact.layout.n_slots;
+        let base = artifact.layout.results_offset;
+        store.mem_access_mut_slice(mem, |bytes| {
+            (0..n)
+                .map(|i| {
+                    let a = base + i * 8;
+                    f64::from_le_bytes(bytes[a..a + 8].try_into().unwrap())
+                })
+                .collect()
+        })
+    }
+
+    /// Assert every variable in `artifact.layout` matches the VM's series for
+    /// the same `CompiledSimulation`. Returns the number of variables checked.
+    fn assert_matches_vm(sim: CompiledSimulation, artifact: &WasmArtifact) -> usize {
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let wasm_data = run_artifact_results(artifact);
+
+        let mut vm = Vm::new(sim).expect("vm creation");
+        vm.run_to_end().expect("vm run");
+        let vm_results = vm.into_results();
+
+        assert_eq!(
+            vm_results.step_count, n_chunks,
+            "saved-chunk count differs from VM"
+        );
+
+        let mut checked = 0usize;
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = wasm_data[c * n_slots + wasm_off];
+                let diff = (vm_val - wasm_val).abs();
+                assert!(
+                    diff < 1e-9,
+                    "{name} mismatch at chunk {c}: vm={vm_val} wasm={wasm_val} (diff {diff})",
+                );
+            }
+            checked += 1;
+        }
+        checked
+    }
+
+    #[test]
+    fn compile_simulation_population_matches_vm() {
+        let file = std::fs::File::open(POPULATION_XMILE).expect("open population model");
+        let mut reader = BufReader::new(file);
+        let datamodel = open_xmile(&mut reader).expect("parse population xmile");
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        // Geometry is self-consistent with the specs.
+        let specs = Specs::from(&datamodel.sim_specs);
+        assert_eq!(artifact.layout.n_chunks, specs.n_chunks);
+
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(
+            checked >= 5,
+            "expected to compare the population model's variables, only checked {checked}"
+        );
+        assert!(
+            artifact
+                .layout
+                .var_offsets
+                .iter()
+                .any(|(n, _)| n == "population"),
+            "the population stock should be in the layout"
+        );
+    }
+
+    #[test]
+    fn compile_simulation_simple_stock_flow_matches_vm() {
+        // A minimal scalar Euler model: a stock filled by a constant inflow.
+        let datamodel = crate::test_common::TestProject::new("simple")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("inflow_rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "inflow_rate", None)
+            .build_datamodel();
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 2, "expected to compare level + inflow");
+        // level should integrate to 2*10 = 20 by the last step.
+        let last = run_artifact_results(&artifact);
+        let n_slots = artifact.layout.n_slots;
+        let level_off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == "level")
+            .map(|(_, off)| *off)
+            .expect("level offset");
+        let last_step = (artifact.layout.n_chunks - 1) * n_slots + level_off;
+        assert!(
+            (last[last_step] - 20.0).abs() < 1e-9,
+            "level should reach 20"
+        );
+    }
+
+    #[test]
+    fn compile_simulation_conditional_model_matches_vm() {
+        // Exercises the SetCond/If lowering through the whole-model path.
+        let datamodel = crate::test_common::TestProject::new("cond")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("threshold", "3", None)
+            .aux("gated", "IF TIME > threshold THEN 10 ELSE 1", None)
+            .stock("acc", "0", &["gated_flow"], &[], None)
+            .flow("gated_flow", "gated", None)
+            .build_datamodel();
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 2, "expected to compare gated + acc");
+    }
+
+    #[test]
+    fn compile_simulation_rejects_non_euler() {
+        let datamodel = crate::test_common::TestProject::new("rk4")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
+            .aux("inflow_rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "inflow_rate", None)
+            .build_datamodel();
+
+        let sim = compile_sim(&datamodel, "main");
+        let result = compile_simulation(&sim);
+        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+    }
+
+    /// AC4.1: a host reads the three exported geometry globals from the
+    /// instantiated module and uses them (no external metadata) to stride one
+    /// variable's series, which must match the VM.
+    #[test]
+    fn compile_simulation_exports_self_describing_geometry() {
+        let file = std::fs::File::open(POPULATION_XMILE).expect("open population model");
+        let mut reader = BufReader::new(file);
+        let datamodel = open_xmile(&mut reader).expect("parse population xmile");
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+
+        // Read the three i32 geometry globals straight from the module.
+        let read_global = |store: &mut Store<()>, name: &str| -> usize {
+            let g = store
+                .instance_export(inst, name)
+                .unwrap()
+                .as_global()
+                .unwrap();
+            match store.global_read(g) {
+                checked::StoredValue::I32(x) => x as usize,
+                other => panic!("expected i32 global, got {other:?}"),
+            }
+        };
+        let n_slots = read_global(&mut store, "n_slots");
+        let n_chunks = read_global(&mut store, "n_chunks");
+        let results_offset = read_global(&mut store, "results_offset");
+
+        // They equal the layout values.
+        assert_eq!(n_slots, artifact.layout.n_slots);
+        assert_eq!(n_chunks, artifact.layout.n_chunks);
+        assert_eq!(results_offset, artifact.layout.results_offset);
+
+        // Stride to the population series using only module-reported geometry.
+        let run = store
+            .instance_export(inst, "run")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(), ()>(run, ())
+            .expect("run wasm");
+        let mem = store
+            .instance_export(inst, "memory")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        let pop_off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == "population")
+            .map(|(_, off)| *off)
+            .expect("population offset");
+        let pop_series: Vec<f64> = store.mem_access_mut_slice(mem, |bytes| {
+            (0..n_chunks)
+                .map(|c| {
+                    let a = results_offset + (c * n_slots + pop_off) * 8;
+                    f64::from_le_bytes(bytes[a..a + 8].try_into().unwrap())
+                })
+                .collect()
+        });
+
+        let mut vm = Vm::new(sim).expect("vm");
+        vm.run_to_end().expect("vm run");
+        let vm_results = vm.into_results();
+        let pop = Ident::<Canonical>::from_str_unchecked("population");
+        let vm_pop_off = *vm_results.offsets.get(&pop).expect("vm population offset");
+        for (c, &wasm_val) in pop_series.iter().enumerate() {
+            let vm_val = vm_results.data[c * vm_results.step_size + vm_pop_off];
+            assert!(
+                (vm_val - wasm_val).abs() < 1e-9,
+                "population mismatch at chunk {c}: vm={vm_val} wasm={wasm_val}"
+            );
+        }
     }
 }
