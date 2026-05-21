@@ -19,9 +19,10 @@
 //! emitted module under the DLR-FT `wasm-interpreter` and comparing against the
 //! bytecode VM.
 //!
-//! Status: scalar-core opcodes + Euler integration for a single root model are
-//! in place; arrays, modules, lookups, and RK2/RK4 land in subsequent phases
-//! (anything unsupported returns `WasmGenError::Unsupported`).
+//! Status: the full scalar opcode set (every `Op2` operator and every `Apply`
+//! builtin) + Euler integration for a single root model are in place; arrays,
+//! modules, lookups, and RK2/RK4 land in subsequent phases (anything
+//! unsupported returns `WasmGenError::Unsupported`).
 
 mod lower;
 mod math;
@@ -33,11 +34,11 @@ use std::fmt;
 
 /// Error from the WebAssembly code-generation backend.
 ///
-/// The backend currently covers the scalar-core opcode set plus Euler
-/// integration for a single root model. Anything outside that surface (arrays,
-/// submodules, table lookups, RK2/RK4, and the builtins that require runtime
-/// helpers such as `pow`) returns `Unsupported` rather than silently emitting
-/// an incorrect module.
+/// The backend covers the full scalar opcode set -- every `Op2` operator
+/// (including `Mod`/`Exp`) and every `Apply` builtin -- plus Euler integration
+/// for a single root model. Anything outside that surface (arrays, submodules,
+/// table lookups, and RK2/RK4 integration) returns `Unsupported` rather than
+/// silently emitting an incorrect module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmGenError {
     Unsupported(String),

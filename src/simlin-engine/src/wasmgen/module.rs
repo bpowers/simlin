@@ -29,7 +29,7 @@
 //! time is advanced. Auxiliaries/flows are recomputed each step, so `curr`
 //! always holds the full, correct state for the timestep it represents.
 //!
-//! Phase 1 scope: a single scalar root model, Euler integration, no submodules,
+//! Current scope: a single scalar root model, Euler integration, no submodules,
 //! temp arrays, or array machinery. Anything else returns `WasmGenError`.
 
 use wasm_encoder::Instruction as I;
@@ -131,7 +131,7 @@ const L_COND_BASE: u32 = 2;
 /// Compile a `CompiledSimulation` (produced by the salsa incremental pipeline)
 /// into a self-contained wasm module.
 ///
-/// Phase 1 scope: the root module only, Euler integration only. The opcode
+/// Current scope: the root module only, Euler integration only. The opcode
 /// programs a `CompiledSimulation` carries are the plain, un-fused scalar set
 /// (the VM's superinstruction fusion runs on a private execution copy), so each
 /// `Opcode` lowers via [`lower::emit_bytecode`]. Anything outside the supported
@@ -157,8 +157,7 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
             "wasmgen: submodules are not supported".to_string(),
         ));
     }
-    let too_large =
-        || WasmGenError::Unsupported("wasmgen: model too large for Phase 1".to_string());
+    let too_large = || WasmGenError::Unsupported("wasmgen: model too large to lower".to_string());
     let n_slots = u32::try_from(root.n_slots).map_err(|_| too_large())?;
     let n_chunks = u32::try_from(specs.n_chunks).map_err(|_| too_large())?;
     let stride = n_slots.checked_mul(SLOT_SIZE).ok_or_else(too_large)?;
@@ -292,8 +291,8 @@ fn new_opcode_fn(cond_depth: usize) -> Function {
 /// either `AssignNext` or its peephole-fused `BinOpAssignNext` form (most
 /// integrations are `stock + delta`, which peepholes to `BinOpAssignNext`), so
 /// both are collected -- matching the VM's `collect_stock_offsets`
-/// (`vm.rs:524`). Phase 1 has no nested modules, so the VM's `EvalModule`
-/// recursion has no analogue here.
+/// (`vm.rs:524`). The current scope has no nested modules, so the VM's
+/// `EvalModule` recursion has no analogue here.
 fn collect_assign_next_opcode_offsets(stocks: &ByteCode) -> Vec<usize> {
     let mut offsets: Vec<usize> = stocks
         .code
@@ -775,7 +774,7 @@ mod tests {
 
     #[test]
     fn compile_simulation_rejects_nested_modules() {
-        // A root model that instantiates a submodule is outside Phase 1's
+        // A root model that instantiates a submodule is outside the currently
         // supported set (`root.context.modules` is non-empty). It must return a
         // clean `Unsupported` error, never a panic or a wrong module. Built as a
         // two-model datamodel directly, since `TestProject` only emits a single

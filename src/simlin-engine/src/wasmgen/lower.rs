@@ -81,11 +81,13 @@ const F64_ALIGN: u32 = 3;
 pub(crate) struct EmitCtx {
     pub curr_base: u32,
     pub next_base: u32,
-    // dt/start_time/final_time are the run-invariant time globals. Phase 1
-    // reads them from memory via `LoadGlobalVar` (slots 0..4), so they are not
-    // consulted here yet; Phase 2 lowers the `TimeStep`/`StartTime`/`FinalTime`
-    // builtins to compile-time constants from these, at which point they become
-    // live.
+    // dt/start_time/final_time are the run-invariant time globals that back the
+    // seeds `run` writes into the TIME/DT/INITIAL_TIME/FINAL_TIME memory slots.
+    // Opcode lowering reads those values from memory via `LoadGlobalVar` (slots
+    // 0..4) rather than from these fields -- the XMILE time builtins lower to
+    // `LoadGlobalVar`, and the time-driven `Apply` arms (Step/Ramp/Pulse) read
+    // TIME/DT from memory -- so the fields stay unused here. They are retained
+    // because a later phase may fold them into compile-time constants.
     #[allow(dead_code)]
     pub dt: f64,
     #[allow(dead_code)]
