@@ -107,23 +107,35 @@ static TEST_MODELS: &[&str] = &[
 /// (wasm-backend AC3.1 / AC3.3): a model that used to clear the wasm backend no
 /// longer does.
 ///
-/// Phase 1 supports scalar-core opcodes + Euler integration for a single root
-/// model. A corpus model runs to parity when its *post-element-expansion* flat
-/// opcode stream is entirely in the Phase 1 set
-/// (`LoadConstant`/`LoadVar`/`LoadGlobalVar`, the `Add`/`Sub`/`Mul`/`Div` and
-/// comparison `Op2`s, `Not`/`SetCond`/`If`, `AssignCurr`/`AssignNext`, plus the
-/// `AssignConstCurr`/`BinOpAssign*` peephole superinstructions the emitter
-/// handles). That includes arrayed apply-to-all / subscript models that expand
+/// As of Phase 2 the backend covers the full *scalar* opcode set: the
+/// scalar-core opcodes (`LoadConstant`/`LoadVar`/`LoadGlobalVar`, the
+/// `Add`/`Sub`/`Mul`/`Div` and comparison `Op2`s, `Not`/`SetCond`/`If`,
+/// `AssignCurr`/`AssignNext`, plus the `AssignConstCurr`/`BinOpAssign*` peephole
+/// superinstructions), the `^`/`MOD`/`=`/`AND`/`OR` operators
+/// (`Op2::Exp`/`Mod`/`Eq`/`And`/`Or`, with equality and truthiness routed
+/// through a wasm `approx_eq` helper matching `crate::float::approx_eq`), and the
+/// entire scalar `BuiltinId` set via `Opcode::Apply` -- the open-coded
+/// transcendentals (`exp`/`ln`/`log10`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/
+/// `pow`) plus `abs`/`sqrt`/`int`/`min`/`max`/`sign`/`quantum`/`safediv`/
+/// `sshape` and the time-driven `step`/`ramp`/`pulse`. A corpus model runs to
+/// parity when its *post-element-expansion* flat opcode stream is entirely in
+/// that set. That includes arrayed apply-to-all / subscript models that expand
 /// to purely scalar per-element opcodes (no array-reducer or `LookupArray`
 /// opcode), because the emitter walks the flattened opcode stream. Models that
-/// reach for nested modules, builtins (`Opcode::Apply`), table lookups
-/// (`Opcode::Lookup`), array-reducer opcodes, the `^`/`MOD`/`=`/`AND`/`OR`
-/// operators, or RK2/RK4 are `Skipped`.
+/// reach for nested modules / macros (`wasmgen: submodules are not supported`),
+/// table lookups (`Opcode::Lookup`), array-reducer opcodes, or RK2/RK4 are
+/// `Skipped` until their phases land.
 ///
-/// Phase 1 achieves 28 of the 58 active `TEST_MODELS`; the remaining 30 skip on
-/// one of the above out-of-scope constructs. Observed via `wasm_parity_floor`
-/// (run it with `-- --nocapture` to see the per-model skip reasons).
-const WASM_SUPPORTED_FLOOR: usize = 28;
+/// Phase 2 achieves 45 of the 58 active `TEST_MODELS` (up from Phase 1's 28):
+/// every previously-`Skipped` purely-scalar model that used a builtin
+/// (`abs`/`builtin_max`/`builtin_min`/`builtin_int`/`exp`/`sqrt`/`trig`/`ln`/
+/// `log`/`xidz_zidz`/`input_functions`), the `^` operator (`exponentiation`),
+/// `=` (`comparisons`), `AND`/`OR`/`NOT` (`logicals`), or `MOD`
+/// (`input_functions`) now `Ran`. The remaining 13 skip on one of the
+/// still-out-of-scope constructs: 6 module/macro models and 7 `Opcode::Lookup`
+/// (graphical-function) models. Observed via `wasm_parity_floor` (run it with
+/// `-- --nocapture` to see the per-model skip reasons).
+const WASM_SUPPORTED_FLOOR: usize = 45;
 
 /// AC3.1 / AC3.3 rising-floor gate: run every (non-`#[ignore]`-class) corpus
 /// model in `TEST_MODELS` through the wasm backend and assert at least
