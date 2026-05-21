@@ -1464,33 +1464,33 @@ export function projectToJson(project: Project): JsonProject {
 
 export function projectAttachData(project: Project, data: ReadonlyMap<string, Series>, modelName: string): Project {
   const model = defined(project.models.get(modelName));
-  const variables = mapValues(model.variables, (v: Variable) => {
-    if (data.has(v.ident)) {
-      return { ...v, data: [defined(data.get(v.ident))] };
-    }
-    if (!variableIsArrayed(v)) {
-      return v;
-    }
-    const eqn = variableEquation(v);
-    if (!eqn || (eqn.type !== 'applyToAll' && eqn.type !== 'arrayed')) {
-      return v;
-    }
-    const dimNames = eqn.dimensionNames;
-    if (dimNames.length !== 1) {
-      return v;
-    }
-    const ident = v.ident;
-    const dim = defined(project.dimensions.get(dimNames[0]));
-    // Simulation results key per-element series by canonicalized element names
-    // (e.g. `temperature[high_2xco2_sensitivity]`), but a dimension preserves
-    // the model's original-case subscript names (`High_2xCO2_sensitivity`).
-    // Canonicalize each element to match, otherwise an arrayed variable whose
-    // elements aren't already lowercase gets no data and renders no sparkline.
-    const series = dim.subscripts
-      .map((element) => data.get(`${ident}[${canonicalize(element)}]`))
-      .filter((d) => d !== undefined)
-      .map((d) => defined(d));
 
+  // Group every result series by its base variable ident. A scalar variable's
+  // series is keyed by the bare canonical ident; an arrayed variable's
+  // per-element series are keyed `ident[<canonical subscripts>]` for any
+  // dimensionality (1-D `x[a]`, multi-D `x[a,b]`). Grouping by the ident before
+  // the first `[` attaches every element series -- so multi-dimensional
+  // variables are plotted too -- and matches whatever the simulation emitted
+  // rather than reconstructing keys from a Dimension's (original-case)
+  // subscripts, which avoids the element-name canonicalization mismatch
+  // entirely.
+  const seriesByIdent = new Map<string, Series[]>();
+  for (const [key, s] of data) {
+    const open = key.indexOf('[');
+    const ident = open === -1 ? key : key.slice(0, open);
+    const existing = seriesByIdent.get(ident);
+    if (existing) {
+      existing.push(s);
+    } else {
+      seriesByIdent.set(ident, [s]);
+    }
+  }
+
+  const variables = mapValues(model.variables, (v: Variable) => {
+    const series = seriesByIdent.get(v.ident);
+    if (!series || series.length === 0) {
+      return v;
+    }
     return { ...v, data: series };
   });
   const updatedModel: Model = { ...model, variables };

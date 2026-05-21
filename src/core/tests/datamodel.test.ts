@@ -1340,4 +1340,40 @@ describe('projectAttachData', () => {
 
     expect((v?.data ?? []).length).toBe(2);
   });
+
+  // The "plot all the series" behavior must also cover multi-dimensional
+  // arrayed variables: the simulation emits one series per element of the
+  // cartesian product (`flux[co2,deterministic]`, ...), and every one should
+  // be attached so the chart/sparkline can draw them all.
+  it('attaches all per-element series for a multi-dimensional arrayed variable', () => {
+    const project = projectWith(
+      [arrayedAux('flux', ['gas', 'scenario'])],
+      [
+        { name: 'gas', subscripts: ['CO2', 'CH4'] },
+        { name: 'scenario', subscripts: ['Deterministic', 'High_2xCO2_sensitivity'] },
+      ],
+    );
+    const data = new Map<string, Series>([
+      ['flux[co2,deterministic]', series('flux[co2,deterministic]', [1, 1])],
+      ['flux[co2,high_2xco2_sensitivity]', series('flux[co2,high_2xco2_sensitivity]', [2, 2])],
+      ['flux[ch4,deterministic]', series('flux[ch4,deterministic]', [3, 3])],
+      ['flux[ch4,high_2xco2_sensitivity]', series('flux[ch4,high_2xco2_sensitivity]', [4, 4])],
+    ]);
+
+    const attached = projectAttachData(project, data, 'main');
+    const v = defined(attached.models.get('main')).variables.get('flux');
+
+    expect((v?.data ?? []).length).toBe(4);
+  });
+
+  it('leaves a variable with no result series unchanged', () => {
+    const project = projectWith(
+      [arrayedAux('unused', ['scenario'])],
+      [{ name: 'scenario', subscripts: ['Deterministic'] }],
+    );
+    const attached = projectAttachData(project, new Map<string, Series>(), 'main');
+    const v = defined(attached.models.get('main')).variables.get('unused');
+
+    expect(v?.data).toBeUndefined();
+  });
 });
