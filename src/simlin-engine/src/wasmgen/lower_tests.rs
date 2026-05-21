@@ -4025,3 +4025,342 @@ fn vector_elm_map_sliced_source_base_i_matches_vm() {
     assert_eq!(got[1], 202.0);
     assert!(got[2].is_nan());
 }
+
+// ── VectorSortOrder / Rank parity vs the VM (stable sort) ─────────────────
+
+/// Run `PushStaticView(input); Vector{SortOrder|Rank}` over a `curr` slab seeded
+/// from `data`, writing temp 0, and read back `temp_count` temp slots. The
+/// `direction` operand is pushed beneath the op.
+fn run_sort_op(
+    input: StaticArrayView,
+    op: Opcode,
+    direction: f64,
+    data: &[f64],
+    temp_count: usize,
+    temp_slots: usize,
+) -> Vec<f64> {
+    let mut context = ByteCodeContext::default();
+    context.set_temp_info(vec![0], temp_slots);
+    let in_id = context.add_static_view(input);
+    let code = vec![
+        Opcode::LoadConstant { id: 0 }, // direction
+        Opcode::PushStaticView { view_id: in_id },
+        op,
+        Opcode::PopView {},
+    ];
+    run_and_read_temps(
+        &context,
+        code,
+        vec![direction],
+        &seed_run(0, data),
+        temp_count,
+    )
+}
+
+/// The VM oracle for `VectorSortOrder`: run the sibling
+/// `crate::vm_vector_sort_order::vector_sort_order` over a `RuntimeView`.
+fn vm_sort_order_oracle(
+    input: &StaticArrayView,
+    direction: i32,
+    data: &[f64],
+    temp_slots: usize,
+) -> Vec<f64> {
+    let mut context = ByteCodeContext::default();
+    context.set_temp_info(vec![0], temp_slots);
+    let mut temp_storage = vec![0.0f64; temp_slots];
+    crate::vm_vector_sort_order::vector_sort_order(
+        &input.to_runtime_view(),
+        direction,
+        0,
+        data,
+        &mut temp_storage,
+        &context,
+    );
+    temp_storage
+}
+
+/// A faithful local oracle for `Rank` (mirroring `vm.rs:2540-2584`): over the
+/// whole view, collect `(value, orig_idx)`, stable sort (asc if direction==1
+/// else desc, NaN-as-Equal), write `temp[orig_idx] = rank_0based + 1`.
+fn vm_rank_oracle(
+    input: &StaticArrayView,
+    direction: i32,
+    data: &[f64],
+    temp_slots: usize,
+) -> Vec<f64> {
+    let rv = input.to_runtime_view();
+    let size = rv.size();
+    let mut indexed: Vec<(f64, usize)> = Vec::with_capacity(size);
+    let mut idx: SmallVec<[u16; 4]> = smallvec::smallvec![0; rv.dims.len()];
+    for i in 0..size {
+        let flat = rv.flat_offset(&idx);
+        indexed.push((data[rv.base_off as usize + flat], i));
+        crate::vm::increment_indices(&mut idx, &rv.dims);
+    }
+    if direction == 1 {
+        indexed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    } else {
+        indexed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    let mut temp = vec![0.0f64; temp_slots];
+    for (rank_0based, &(_, orig_idx)) in indexed.iter().enumerate() {
+        temp[orig_idx] = (rank_0based + 1) as f64;
+    }
+    temp
+}
+
+fn assert_sort_order_matches(input: &StaticArrayView, direction: f64, data: &[f64], slots: usize) {
+    let got = run_sort_op(
+        input.clone(),
+        Opcode::VectorSortOrder { write_temp_id: 0 },
+        direction,
+        data,
+        slots,
+        slots,
+    );
+    let want = vm_sort_order_oracle(input, direction.round() as i32, data, slots);
+    assert_eq!(got, want, "sort_order direction {direction}");
+}
+
+fn assert_rank_matches(input: &StaticArrayView, direction: f64, data: &[f64], slots: usize) {
+    let got = run_sort_op(
+        input.clone(),
+        Opcode::Rank { write_temp_id: 0 },
+        direction,
+        data,
+        slots,
+        slots,
+    );
+    let want = vm_rank_oracle(input, direction.round() as i32, data, slots);
+    assert_eq!(got, want, "rank direction {direction}");
+}
+
+#[test]
+fn vector_sort_order_1d_ascending_matches_vm() {
+    // input [30, 10, 20, 40]; ascending -> the sorted in-row source indices are
+    // [1 (10), 2 (20), 0 (30), 3 (40)].
+    let input = dense_view(0, &[4]);
+    let data = [30.0, 10.0, 20.0, 40.0];
+    assert_sort_order_matches(&input, 1.0, &data, 4);
+    let got = run_sort_op(
+        input,
+        Opcode::VectorSortOrder { write_temp_id: 0 },
+        1.0,
+        &data,
+        4,
+        4,
+    );
+    assert_eq!(got, vec![1.0, 2.0, 0.0, 3.0]);
+}
+
+#[test]
+fn vector_sort_order_1d_descending_matches_vm() {
+    // direction != 1 sorts descending: [30,10,20,40] -> indices of [40,30,20,10]
+    // = [3, 0, 2, 1].
+    let input = dense_view(0, &[4]);
+    let data = [30.0, 10.0, 20.0, 40.0];
+    assert_sort_order_matches(&input, 0.0, &data, 4);
+    let got = run_sort_op(
+        input,
+        Opcode::VectorSortOrder { write_temp_id: 0 },
+        0.0,
+        &data,
+        4,
+        4,
+    );
+    assert_eq!(got, vec![3.0, 0.0, 2.0, 1.0]);
+}
+
+#[test]
+fn vector_sort_order_tie_stability_matches_vm() {
+    // Equal values keep input order (stable). [5, 5, 1, 5]: ascending sorts the
+    // single 1 (index 2) first, then the three 5s in input order [0, 1, 3].
+    let input = dense_view(0, &[4]);
+    let data = [5.0, 5.0, 1.0, 5.0];
+    assert_sort_order_matches(&input, 1.0, &data, 4);
+    let got = run_sort_op(
+        input,
+        Opcode::VectorSortOrder { write_temp_id: 0 },
+        1.0,
+        &data,
+        4,
+        4,
+    );
+    assert_eq!(got, vec![2.0, 0.0, 1.0, 3.0]);
+}
+
+#[test]
+fn vector_sort_order_multi_row_matches_vm() {
+    // A 2x3 source: each ROW is sorted independently (the innermost dim is the
+    // sorted axis), and result indices are 0-based WITHIN the row. Row 0
+    // [30,10,20] asc -> [1,2,0]; row 1 [5,9,7] asc -> [0,2,1]. The output is
+    // row-major, so temp = [1,2,0, 0,2,1].
+    let input = dense_view(0, &[2, 3]);
+    let data = [30.0, 10.0, 20.0, 5.0, 9.0, 7.0];
+    assert_sort_order_matches(&input, 1.0, &data, 6);
+    let got = run_sort_op(
+        input,
+        Opcode::VectorSortOrder { write_temp_id: 0 },
+        1.0,
+        &data,
+        6,
+        6,
+    );
+    assert_eq!(got, vec![1.0, 2.0, 0.0, 0.0, 2.0, 1.0]);
+}
+
+#[test]
+fn vector_sort_order_nan_element_is_stable_like_vm() {
+    // A NaN element compares Equal to everything (the VM's
+    // partial_cmp.unwrap_or(Equal) under a stable sort), so it neither displaces
+    // a non-NaN nor reorders -- it stays in input order. Cross-checked
+    // element-for-element vs the sibling VM function.
+    let input = dense_view(0, &[4]);
+    let data = [3.0, f64::NAN, 1.0, 2.0];
+    assert_sort_order_matches(&input, 1.0, &data, 4);
+    assert_sort_order_matches(&input, 0.0, &data, 4);
+}
+
+#[test]
+fn vector_sort_order_transposed_view_matches_vm() {
+    // A non-contiguous (transposed) view exercises the strided element reads in
+    // the gather. Cross-checked vs the sibling over every element.
+    let view = StaticArrayView {
+        base_off: 0,
+        is_temp: false,
+        dims: SmallVec::from_slice(&[3, 2]),
+        strides: SmallVec::from_slice(&[1, 3]),
+        offset: 0,
+        sparse: SmallVec::new(),
+        dim_ids: SmallVec::from_slice(&[0, 0]),
+    };
+    assert!(!view.to_runtime_view().is_contiguous());
+    let data = [11.0, 12.0, 13.0, 21.0, 22.0, 23.0];
+    assert_sort_order_matches(&view, 1.0, &data, 6);
+    assert_sort_order_matches(&view, 0.0, &data, 6);
+}
+
+#[test]
+fn rank_whole_view_ascending_matches_vm() {
+    // Rank over the WHOLE view, 1-based, indexed by ORIGINAL position. [30,10,20,
+    // 40] ascending: 10 is rank 1, 20 rank 2, 30 rank 3, 40 rank 4, so the result
+    // at the original positions is [3, 1, 2, 4].
+    let input = dense_view(0, &[4]);
+    let data = [30.0, 10.0, 20.0, 40.0];
+    assert_rank_matches(&input, 1.0, &data, 4);
+    let got = run_sort_op(input, Opcode::Rank { write_temp_id: 0 }, 1.0, &data, 4, 4);
+    assert_eq!(got, vec![3.0, 1.0, 2.0, 4.0]);
+}
+
+#[test]
+fn rank_whole_view_descending_matches_vm() {
+    // Descending: 40 rank 1, 30 rank 2, 20 rank 3, 10 rank 4 -> [2, 4, 3, 1].
+    let input = dense_view(0, &[4]);
+    let data = [30.0, 10.0, 20.0, 40.0];
+    assert_rank_matches(&input, 0.0, &data, 4);
+    let got = run_sort_op(input, Opcode::Rank { write_temp_id: 0 }, 0.0, &data, 4, 4);
+    assert_eq!(got, vec![2.0, 4.0, 3.0, 1.0]);
+}
+
+#[test]
+fn rank_multi_dim_ranks_whole_view_not_per_row() {
+    // Unlike VectorSortOrder, Rank ranks the WHOLE view (not per-row). A 2x3
+    // view ranks all 6 cells together. Cross-checked vs the faithful oracle.
+    let input = dense_view(0, &[2, 3]);
+    let data = [30.0, 10.0, 20.0, 5.0, 9.0, 7.0];
+    assert_rank_matches(&input, 1.0, &data, 6);
+    // Sorted ascending: 5(idx3),9(idx4),7(idx5)... actually [5,7,9,10,20,30]
+    // -> ranks at original positions: 30->6, 10->4, 20->5, 5->1, 9->3, 7->2.
+    let got = run_sort_op(input, Opcode::Rank { write_temp_id: 0 }, 1.0, &data, 6, 6);
+    assert_eq!(got, vec![6.0, 4.0, 5.0, 1.0, 3.0, 2.0]);
+}
+
+#[test]
+fn rank_tie_stability_matches_vm() {
+    // Equal values keep input order: [5, 5, 1, 5] ascending. The 1 (idx 2) is
+    // rank 1; the three 5s get ranks 2, 3, 4 in input order (idx 0, 1, 3).
+    let input = dense_view(0, &[4]);
+    let data = [5.0, 5.0, 1.0, 5.0];
+    assert_rank_matches(&input, 1.0, &data, 4);
+    let got = run_sort_op(input, Opcode::Rank { write_temp_id: 0 }, 1.0, &data, 4, 4);
+    assert_eq!(got, vec![2.0, 3.0, 1.0, 4.0]);
+}
+
+#[test]
+fn rank_nan_element_matches_vm() {
+    // A NaN element compares Equal (stable). Cross-checked vs the faithful oracle
+    // (the NaN keeps its input position in the stable sort, so its rank is its
+    // sorted slot among the Equal-treated elements).
+    let input = dense_view(0, &[4]);
+    let data = [3.0, f64::NAN, 1.0, 2.0];
+    assert_rank_matches(&input, 1.0, &data, 4);
+    assert_rank_matches(&input, 0.0, &data, 4);
+}
+
+/// Build `mat[rows][cols]` via `PushVarViewDirect`, dynamically subscript dim 0
+/// with an out-of-range `row_1based` (so the resulting `cols`-element row view's
+/// validity flag is 0), run `op` writing temp 0, and read back the `cols` temp
+/// slots. An invalid input view must fill the whole temp region with NaN.
+fn run_dyn_sort_op(rows: u16, cols: u16, row_1based: f64, op: Opcode, data: &[f64]) -> Vec<f64> {
+    let mut context = ByteCodeContext::default();
+    context.add_dim_list(2, [rows, cols, 0, 0]);
+    context.set_temp_info(vec![0], cols as usize);
+    let code = vec![
+        Opcode::PushVarViewDirect {
+            base_off: 0,
+            dim_list_id: 0,
+        },
+        Opcode::LoadConstant { id: 0 }, // direction
+        Opcode::LoadConstant { id: 1 }, // runtime row index (1-based)
+        Opcode::ViewSubscriptDynamic { dim_idx: 0 },
+        op,
+        Opcode::PopView {},
+    ];
+    run_and_read_temps(
+        &context,
+        code,
+        vec![1.0, row_1based],
+        &seed_run(0, data),
+        cols as usize,
+    )
+}
+
+#[test]
+fn vector_sort_order_invalid_view_fills_temp_with_nan() {
+    // A 3x4 matrix; row 5 is out of range, so the dynamically-subscripted row
+    // view is invalid and VectorSortOrder must fill the whole temp with NaN
+    // (the VM's `!is_valid -> fill_temp_nan`).
+    let data: Vec<f64> = (0..12).map(|i| i as f64).collect();
+    let got = run_dyn_sort_op(
+        3,
+        4,
+        5.0,
+        Opcode::VectorSortOrder { write_temp_id: 0 },
+        &data,
+    );
+    assert!(
+        got.iter().all(|v| v.is_nan()),
+        "invalid view must fill the temp with NaN, got {got:?}"
+    );
+    // A valid row (row 2) writes real 0-based in-row ranks (no NaN).
+    let ok = run_dyn_sort_op(
+        3,
+        4,
+        2.0,
+        Opcode::VectorSortOrder { write_temp_id: 0 },
+        &data,
+    );
+    assert!(ok.iter().all(|v| !v.is_nan()), "valid row must not be NaN");
+}
+
+#[test]
+fn rank_invalid_view_fills_temp_with_nan() {
+    let data: Vec<f64> = (0..12).map(|i| i as f64).collect();
+    let got = run_dyn_sort_op(3, 4, 5.0, Opcode::Rank { write_temp_id: 0 }, &data);
+    assert!(
+        got.iter().all(|v| v.is_nan()),
+        "invalid view must fill the temp with NaN, got {got:?}"
+    );
+    let ok = run_dyn_sort_op(3, 4, 2.0, Opcode::Rank { write_temp_id: 0 }, &data);
+    assert!(ok.iter().all(|v| !v.is_nan()), "valid row must not be NaN");
+}

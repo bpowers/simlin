@@ -19,18 +19,21 @@
 //!
 //! - [`emit_vector_select`] -- `vm.rs:2444-2502`
 //! - [`emit_vector_elm_map`] -- `crate::vm_vector_elm_map::vector_elm_map`
+//! - [`emit_vector_sort_order`] -- `crate::vm_vector_sort_order::vector_sort_order`
+//! - [`emit_rank`] -- `vm.rs:2540-2584`
 //!
-//! (`VectorSortOrder`/`Rank`/`LookupArray` land in later Phase-6 tasks.)
+//! (`LookupArray` lands in a later Phase-6 task.)
 //!
 //! ## Runtime loop vs unrolled
 //!
-//! Each emitter here is a per-element map/gather over the *compile-time* view
-//! size, so the element addresses fold into wasm constants and the bodies are
-//! unrolled. The caller (`super::lower`) charges the Phase-5
+//! The *stable sort* ([`emit_stable_sort`], backing `VectorSortOrder`/`Rank`) is
+//! a self-contained wasm helper with a **runtime** insertion-sort loop -- never
+//! unrolled, since an unrolled O(n^2) body over a runtime view size would blow
+//! up. Everything else here is a per-element map/gather/scatter over the
+//! *compile-time* view size, so the element addresses fold into wasm constants
+//! and the bodies are unrolled. The caller (`super::lower`) charges the Phase-5
 //! [`EmitState`](super::lower) unroll budget for the view size before invoking
-//! these, so the size cap still bounds an over-large arrayed model. (The
-//! later-task stable sort backing `VectorSortOrder`/`Rank` is the exception: a
-//! runtime loop, never unrolled.)
+//! these, so the size cap still bounds an over-large arrayed model.
 //!
 //! ## Invalid input view
 //!
@@ -66,6 +69,162 @@ fn emit_round_half_away(f: &mut Function, scratch: u32) {
     f.instruction(&Ins::F64Copysign); // copysign(0.5, x): 0.5 with x's sign
     f.instruction(&Ins::F64Add); // x + copysign(0.5, x)
     f.instruction(&Ins::F64Trunc); // round half away from zero
+}
+
+// ── stable sort helper (VectorSortOrder / Rank) ─────────────────────────────
+
+// `stable_sort(pairs_ptr: i32, n: i32, ascending: i32)` local layout.
+const SS_PTR: u32 = 0; // i32 byte address of pair 0
+const SS_N: u32 = 1; // i32 pair count
+const SS_ASC: u32 = 2; // i32 1 = ascending, else descending
+const SS_I: u32 = 3; // i32 outer index
+const SS_J: u32 = 4; // i32 inner index
+const SS_KEY_VAL: u32 = 5; // f64 key value
+const SS_KEY_IDX: u32 = 6; // f64 key idx payload
+const SS_LEFT_VAL: u32 = 7; // f64 the left neighbour's value
+
+/// Bytes per `(value: f64, idx: f64)` sort pair.
+const PAIR_BYTES: i32 = 16;
+
+/// Build the body of `stable_sort(pairs_ptr: i32, n: i32, ascending: i32) -> ()`,
+/// an in-place **stable** insertion sort of `n` `(value: f64 @ +0, idx: f64 @ +8)`
+/// pairs starting at byte `pairs_ptr`, ordered by `value`.
+///
+/// Reproduces the VM's stable `sort_by(|a, b| a.partial_cmp(b).unwrap_or(Equal))`
+/// (ascending) / the `b.partial_cmp(a)` form (descending). The shift predicate is
+/// a **strict** `f64.lt` (ascending) / `f64.gt` (descending) of the left
+/// neighbour against the key: it is `false` whenever either operand is NaN, so a
+/// NaN never displaces a non-NaN and never reorders relative to another NaN --
+/// i.e. NaN comparisons act as `Equal`, exactly matching `partial_cmp(..)
+/// .unwrap_or(Equal)` under a stable sort. Insertion sort only shifts past
+/// strictly-ordered neighbours, so equal-keyed elements keep their input order
+/// (stability) for free.
+///
+/// A runtime loop (never unrolled): `n` is a runtime view size, so an unrolled
+/// O(n^2) body would be unbounded. n is small for real arrays (the corpus's
+/// largest single dimension is 9), so insertion sort is more than adequate.
+pub(crate) fn emit_stable_sort() -> Function {
+    // Locals after the three i32 params: i32 SS_I/SS_J, f64 SS_KEY_VAL/
+    // SS_KEY_IDX/SS_LEFT_VAL.
+    let mut f = Function::new([(2, ValType::I32), (3, ValType::F64)]);
+
+    // i = 1
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::LocalSet(SS_I));
+
+    f.instruction(&Ins::Block(BlockType::Empty)); // $outer_exit
+    f.instruction(&Ins::Loop(BlockType::Empty)); // $outer
+
+    // while-head: if !(i < n) break $outer_exit  (br depth 1)
+    f.instruction(&Ins::LocalGet(SS_I));
+    f.instruction(&Ins::LocalGet(SS_N));
+    f.instruction(&Ins::I32LtS);
+    f.instruction(&Ins::I32Eqz);
+    f.instruction(&Ins::BrIf(1));
+
+    // key_val = mem[ptr + 16*i + 0]; key_idx = mem[ptr + 16*i + 8]
+    push_pair_addr(&mut f, SS_I);
+    f.instruction(&Ins::F64Load(memarg(0)));
+    f.instruction(&Ins::LocalSet(SS_KEY_VAL));
+    push_pair_addr(&mut f, SS_I);
+    f.instruction(&Ins::F64Load(memarg(8)));
+    f.instruction(&Ins::LocalSet(SS_KEY_IDX));
+
+    // j = i - 1
+    f.instruction(&Ins::LocalGet(SS_I));
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32Sub);
+    f.instruction(&Ins::LocalSet(SS_J));
+
+    f.instruction(&Ins::Block(BlockType::Empty)); // $inner_exit
+    f.instruction(&Ins::Loop(BlockType::Empty)); // $inner
+
+    // while-head: if !(j >= 0) break $inner_exit  (br depth 1)
+    f.instruction(&Ins::LocalGet(SS_J));
+    f.instruction(&Ins::I32Const(0));
+    f.instruction(&Ins::I32GeS);
+    f.instruction(&Ins::I32Eqz);
+    f.instruction(&Ins::BrIf(1));
+
+    // left_val = mem[ptr + 16*j + 0]
+    push_pair_addr(&mut f, SS_J);
+    f.instruction(&Ins::F64Load(memarg(0)));
+    f.instruction(&Ins::LocalSet(SS_LEFT_VAL));
+
+    // cmp = ascending ? (left_val > key_val) : (left_val < key_val)
+    // Both are strict, hence false for any NaN operand (NaN-as-Equal stability).
+    f.instruction(&Ins::LocalGet(SS_LEFT_VAL));
+    f.instruction(&Ins::LocalGet(SS_KEY_VAL));
+    f.instruction(&Ins::F64Gt); // gt (the ascending predicate)
+    f.instruction(&Ins::LocalGet(SS_LEFT_VAL));
+    f.instruction(&Ins::LocalGet(SS_KEY_VAL));
+    f.instruction(&Ins::F64Lt); // lt (the descending predicate)
+    f.instruction(&Ins::LocalGet(SS_ASC));
+    f.instruction(&Ins::Select); // gt if ascending else lt
+    // if !cmp break $inner_exit  (br depth 1)
+    f.instruction(&Ins::I32Eqz);
+    f.instruction(&Ins::BrIf(1));
+
+    // mem[ptr + 16*(j+1)] = mem[ptr + 16*j]  (both value and idx)
+    push_pair_addr_plus1(&mut f, SS_J); // dst addr (value)
+    push_pair_addr(&mut f, SS_J);
+    f.instruction(&Ins::F64Load(memarg(0)));
+    f.instruction(&Ins::F64Store(memarg(0)));
+    push_pair_addr_plus1(&mut f, SS_J); // dst addr (idx)
+    push_pair_addr(&mut f, SS_J);
+    f.instruction(&Ins::F64Load(memarg(8)));
+    f.instruction(&Ins::F64Store(memarg(8)));
+
+    // j -= 1 ; continue $inner
+    f.instruction(&Ins::LocalGet(SS_J));
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32Sub);
+    f.instruction(&Ins::LocalSet(SS_J));
+    f.instruction(&Ins::Br(0));
+
+    f.instruction(&Ins::End); // end $inner loop
+    f.instruction(&Ins::End); // end $inner_exit block
+
+    // mem[ptr + 16*(j+1)] = (key_val, key_idx)
+    push_pair_addr_plus1(&mut f, SS_J);
+    f.instruction(&Ins::LocalGet(SS_KEY_VAL));
+    f.instruction(&Ins::F64Store(memarg(0)));
+    push_pair_addr_plus1(&mut f, SS_J);
+    f.instruction(&Ins::LocalGet(SS_KEY_IDX));
+    f.instruction(&Ins::F64Store(memarg(8)));
+
+    // i += 1 ; continue $outer
+    f.instruction(&Ins::LocalGet(SS_I));
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32Add);
+    f.instruction(&Ins::LocalSet(SS_I));
+    f.instruction(&Ins::Br(0));
+
+    f.instruction(&Ins::End); // end $outer loop
+    f.instruction(&Ins::End); // end $outer_exit block
+    f.instruction(&Ins::End); // end function
+    f
+}
+
+/// Push the byte address of sort pair `idx_local`: `ptr + 16 * idx`. A following
+/// `f64.load`/`store` reads `value` at `memarg(0)` and `idx` at `memarg(8)`.
+fn push_pair_addr(f: &mut Function, idx_local: u32) {
+    f.instruction(&Ins::LocalGet(SS_PTR));
+    f.instruction(&Ins::LocalGet(idx_local));
+    f.instruction(&Ins::I32Const(PAIR_BYTES));
+    f.instruction(&Ins::I32Mul);
+    f.instruction(&Ins::I32Add);
+}
+
+/// Push the byte address of sort pair `idx_local + 1`: `ptr + 16 * (idx + 1)`.
+fn push_pair_addr_plus1(f: &mut Function, idx_local: u32) {
+    f.instruction(&Ins::LocalGet(SS_PTR));
+    f.instruction(&Ins::LocalGet(idx_local));
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32Add);
+    f.instruction(&Ins::I32Const(PAIR_BYTES));
+    f.instruction(&Ins::I32Mul);
+    f.instruction(&Ins::I32Add);
 }
 
 // ── shared input-view helpers ───────────────────────────────────────────────
@@ -552,6 +711,190 @@ fn emit_storage_indexed_load(
         f.instruction(&Ins::I32Mul);
     }
     f.instruction(&Ins::F64Load(memarg(base_byte)));
+}
+
+// ── VectorSortOrder (vm_vector_sort_order.rs:49-101) ─────────────────────────
+
+/// Lower `VectorSortOrder { write_temp_id }`, mirroring
+/// `crate::vm_vector_sort_order::vector_sort_order`. `input_view = top`; the
+/// `direction` operand is popped (`.round() as i32`). The innermost (last)
+/// dimension is the sorted axis; outer dims select independent rows (a scalar/1-D
+/// view is one row of `inner == size`). Per row, the `(value, local_idx 0..inner)`
+/// pairs are staged into the vector scratch region, sorted (ascending if
+/// `direction == 1`, else descending) by the runtime [`emit_stable_sort`] helper,
+/// then `temp[row_base + rank] = local_idx` is written (the 0-based in-row source
+/// index at the sorted position). An invalid input view fills the temp with NaN.
+pub(crate) fn emit_vector_sort_order(
+    input_view: &ViewDesc,
+    write_temp_id: u8,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    // The direction operand is on the stack now; pop it to the `ascending` flag
+    // first (the validity gate's body / fill_temp_nan arms must be
+    // operand-balanced, so the operand is consumed before the gate). A
+    // dynamically-subscripted input is handled by the gate (invalid ->
+    // fill_temp_nan) and `emit_view_element_load` (runtime offset + validity).
+    let ascending = ctx.vector_i32_locals[0];
+    pop_direction_to_ascending(ascending, ctx, f);
+
+    emit_with_validity_gate(&[input_view], write_temp_id, ctx, f, |ctx, f| {
+        emit_vector_sort_order_body(input_view, write_temp_id, ascending, ctx, f)
+    })
+}
+
+/// The valid-input body of [`emit_vector_sort_order`].
+fn emit_vector_sort_order_body(
+    input_view: &ViewDesc,
+    write_temp_id: u8,
+    ascending: u32,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let size = input_view.size();
+    let n_dims = input_view.dims.len();
+    let inner = if n_dims == 0 {
+        size
+    } else {
+        input_view.dims[n_dims - 1] as usize
+    };
+    if inner == 0 {
+        // A zero-length innermost dim yields an empty result; nothing to write.
+        return Ok(());
+    }
+
+    let scratch = u64::from(ctx.vector_scratch_base);
+    // Iterate rows in row-major logical order; each block of `inner` iterations
+    // is one row (mirroring the VM's `increment_indices` walk -- element
+    // `iter_idx` of the view, read row-major, is `flat_element_offset(iter_idx)`).
+    let mut i = 0usize;
+    while i < size {
+        // Gather: pair[local_idx] = (value = input[i + local_idx], idx = local_idx).
+        for local_idx in 0..inner {
+            let pair_val_addr = scratch + (local_idx as u64) * (PAIR_BYTES as u64);
+            // value slot
+            f.instruction(&Ins::I32Const(0));
+            emit_view_element_load(input_view, i + local_idx, ctx, f)?;
+            f.instruction(&Ins::F64Store(memarg(pair_val_addr)));
+            // idx slot (+8)
+            f.instruction(&Ins::I32Const(0));
+            f.instruction(&f64_const(local_idx as f64));
+            f.instruction(&Ins::F64Store(memarg(pair_val_addr + 8)));
+        }
+
+        // stable_sort(scratch, inner, ascending)
+        f.instruction(&Ins::I32Const(ctx.vector_scratch_base as i32));
+        f.instruction(&Ins::I32Const(inner as i32));
+        f.instruction(&Ins::LocalGet(ascending));
+        f.instruction(&Ins::Call(ctx.helpers.stable_sort));
+
+        // Scatter: temp[temp_off + i + rank] = pair[rank].idx.
+        for rank in 0..inner {
+            let pair_idx_addr = scratch + (rank as u64) * (PAIR_BYTES as u64) + 8;
+            let temp_addr = temp_element_byte_addr(ctx, write_temp_id, (i + rank) as u32)?;
+            f.instruction(&Ins::I32Const(0));
+            f.instruction(&Ins::I32Const(0));
+            f.instruction(&Ins::F64Load(memarg(pair_idx_addr)));
+            f.instruction(&Ins::F64Store(memarg(temp_addr)));
+        }
+
+        i += inner;
+    }
+    Ok(())
+}
+
+// ── Rank (vm.rs:2540-2584) ───────────────────────────────────────────────────
+
+/// Lower `Rank { write_temp_id }`, mirroring `vm.rs:2540-2584`. `input_view =
+/// top`; the `direction` operand is popped. Over the WHOLE view, the `(value,
+/// orig_idx 0..size)` pairs are staged into the vector scratch region and sorted
+/// (ascending if `direction == 1`, else descending) by [`emit_stable_sort`], then
+/// `temp[orig_idx] = rank_0based + 1` (1-based, indexed by original position) is
+/// written. An invalid input view fills the temp with NaN.
+pub(crate) fn emit_rank(
+    input_view: &ViewDesc,
+    write_temp_id: u8,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let ascending = ctx.vector_i32_locals[0];
+    pop_direction_to_ascending(ascending, ctx, f);
+
+    emit_with_validity_gate(&[input_view], write_temp_id, ctx, f, |ctx, f| {
+        emit_rank_body(input_view, write_temp_id, ascending, ctx, f)
+    })
+}
+
+/// The valid-input body of [`emit_rank`].
+fn emit_rank_body(
+    input_view: &ViewDesc,
+    write_temp_id: u8,
+    ascending: u32,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let size = input_view.size();
+    if size == 0 {
+        return Ok(());
+    }
+    let scratch = u64::from(ctx.vector_scratch_base);
+    let temp_off = *ctx
+        .ctx
+        .temp_offsets
+        .get(write_temp_id as usize)
+        .ok_or_else(|| {
+            WasmGenError::Unsupported(format!("wasmgen: temp id {write_temp_id} out of range"))
+        })?;
+
+    // Gather: pair[orig_idx] = (value = input[orig_idx], idx = orig_idx).
+    for orig_idx in 0..size {
+        let pair_val_addr = scratch + (orig_idx as u64) * (PAIR_BYTES as u64);
+        f.instruction(&Ins::I32Const(0));
+        emit_view_element_load(input_view, orig_idx, ctx, f)?;
+        f.instruction(&Ins::F64Store(memarg(pair_val_addr)));
+        f.instruction(&Ins::I32Const(0));
+        f.instruction(&f64_const(orig_idx as f64));
+        f.instruction(&Ins::F64Store(memarg(pair_val_addr + 8)));
+    }
+
+    // stable_sort(scratch, size, ascending)
+    f.instruction(&Ins::I32Const(ctx.vector_scratch_base as i32));
+    f.instruction(&Ins::I32Const(size as i32));
+    f.instruction(&Ins::LocalGet(ascending));
+    f.instruction(&Ins::Call(ctx.helpers.stable_sort));
+
+    // Scatter by ORIGINAL position: for each rank, orig_idx = pair[rank].idx
+    // (runtime); temp[temp_off + orig_idx] = rank + 1. The destination slot is
+    // runtime-indexed (it depends on the sorted permutation), so the dynamic
+    // address part is `orig_idx * 8` and the constant `temp_storage_base +
+    // temp_off*8` rides in the `memarg.offset`. f64.store wants
+    // [addr_i32, value_f64], so push the address first, then `rank + 1`.
+    let temp_base_byte =
+        u64::from(ctx.temp_storage_base) + (temp_off as u64) * u64::from(SLOT_SIZE);
+    for rank in 0..size {
+        let pair_idx_addr = scratch + (rank as u64) * (PAIR_BYTES as u64) + 8;
+        // dynamic addr = orig_idx * 8, where orig_idx = trunc(pair[rank].idx).
+        f.instruction(&Ins::I32Const(0));
+        f.instruction(&Ins::F64Load(memarg(pair_idx_addr)));
+        f.instruction(&Ins::I32TruncSatF64S);
+        f.instruction(&Ins::I32Const(SLOT_SIZE as i32));
+        f.instruction(&Ins::I32Mul);
+        // value = rank + 1 (1-based)
+        f.instruction(&f64_const((rank + 1) as f64));
+        f.instruction(&Ins::F64Store(memarg(temp_base_byte)));
+    }
+    Ok(())
+}
+
+/// Pop the `direction` operand off the wasm stack (the VM does `.round() as
+/// i32`), compute `ascending = (round(direction) == 1) as i32`, and store it in
+/// `ascending_local`. Shared by `VectorSortOrder`/`Rank`.
+fn pop_direction_to_ascending(ascending_local: u32, ctx: &EmitCtx, f: &mut Function) {
+    emit_round_half_away(f, ctx.scratch_local);
+    f.instruction(&Ins::I32TruncSatF64S);
+    f.instruction(&Ins::I32Const(1));
+    f.instruction(&Ins::I32Eq);
+    f.instruction(&Ins::LocalSet(ascending_local));
 }
 
 // ── validity gate ────────────────────────────────────────────────────────────

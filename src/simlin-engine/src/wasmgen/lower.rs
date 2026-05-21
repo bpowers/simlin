@@ -279,6 +279,15 @@ pub(crate) struct HelperFns {
     pub lookup_interp: u32,
     pub lookup_forward: u32,
     pub lookup_backward: u32,
+    /// `stable_sort(pairs_ptr: i32, n: i32, ascending: i32) -> ()`
+    /// (`super::vector`), an in-place stable comparison sort of `n` `(value: f64,
+    /// idx: f64)` pairs by `value`, used by `VectorSortOrder`/`Rank`. A runtime
+    /// loop (insertion sort) -- never unrolled -- because the element count is a
+    /// runtime view size and an unrolled O(n^2) body would blow up. NaN
+    /// comparisons sort as `Equal` (the comparison is a strict `f64.lt`/`f64.gt`,
+    /// which is false for NaN), reproducing the VM's stable
+    /// `sort_by(partial_cmp(..).unwrap_or(Equal))`.
+    pub stable_sort: u32,
 }
 
 /// One emitted helper function: its signature (so the assembler can register a
@@ -383,6 +392,15 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
     let lookup_forward = push_lookup(&mut functions, super::lookup::emit_lookup_forward());
     let lookup_backward = push_lookup(&mut functions, super::lookup::emit_lookup_backward());
 
+    // `stable_sort(pairs_ptr: i32, n: i32, ascending: i32) -> ()` -- the runtime
+    // insertion sort backing `VectorSortOrder`/`Rank` (`super::vector`).
+    let stable_sort = functions.len() as u32;
+    functions.push(HelperFn {
+        params: vec![ValType::I32, ValType::I32, ValType::I32],
+        results: vec![],
+        body: super::vector::emit_stable_sort(),
+    });
+
     BuiltHelpers {
         fns: HelperFns {
             approx_eq,
@@ -401,6 +419,7 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
             lookup_interp,
             lookup_forward,
             lookup_backward,
+            stable_sort,
         },
         functions,
     }
@@ -1522,6 +1541,18 @@ fn emit_ops(
                     ctx,
                     f,
                 )?;
+            }
+            Opcode::VectorSortOrder { write_temp_id } => {
+                let input_view = view_top(&state.view_stack)?.clone();
+                // Gather + scatter both unroll over `size`; the sort itself is a
+                // runtime loop in the `stable_sort` helper.
+                state.charge_unroll(input_view.size())?;
+                super::vector::emit_vector_sort_order(&input_view, *write_temp_id, ctx, f)?;
+            }
+            Opcode::Rank { write_temp_id } => {
+                let input_view = view_top(&state.view_stack)?.clone();
+                state.charge_unroll(input_view.size())?;
+                super::vector::emit_rank(&input_view, *write_temp_id, ctx, f)?;
             }
             Opcode::Ret => {
                 // The caller emits the function's terminating `End`.
