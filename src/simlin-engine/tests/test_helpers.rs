@@ -6,10 +6,23 @@
 //!
 //! Extracted from `simulate.rs` so that multiple integration test files
 //! (simulate.rs, simulate_systems.rs, etc.) can share the comparison logic.
+//!
+//! pattern: Mixed (unavoidable)
+//! Reason: `ensure_results*` is a pure comparator (Functional Core), while
+//! `ensure_wasm_matches` is an Imperative Shell (it drives the salsa compile
+//! pipeline and executes the emitted wasm under the DLR-FT interpreter). They
+//! live together because this is the single shared test-helper module the
+//! implementation plan centralizes comparison logic in, and the wasm shell's
+//! only job is to feed the pure comparator. The slab -> `Results` conversion is
+//! extracted as a pure function (`wasm_results_from_slab`) to keep the I/O
+//! boundary explicit.
 
+use checked::Store;
 use float_cmp::approx_eq;
-use simlin_engine::Results;
 use simlin_engine::common::{Canonical, Ident};
+use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_simulation};
+use simlin_engine::{Results, SimSpecs};
+use wasm::validate;
 
 /// Columns that are vendor-specific or otherwise not important for
 /// simulation correctness.
@@ -127,4 +140,150 @@ pub fn ensure_results_excluding(expected: &Results, results: &Results, excluded:
             .offsets
             .contains_key(&Ident::<Canonical>::from_str_unchecked("UNKNOWN"))
     );
+}
+
+// The wasm-parity helpers below are consumed only by the `simulate` corpus
+// binary; the other test binaries that share this module (`simulate_systems`,
+// `systems_roundtrip`, `metasd_macros`) include the file but do not run wasm
+// parity, so each item is `#[allow(dead_code)]` to stay clean under
+// `cargo clippy --all-targets -- -D warnings` (the same shared-helper idiom as
+// `SimTier` in `metasd_macros.rs`).
+
+/// Outcome of running a model through the wasm backend via
+/// [`ensure_wasm_matches`].
+///
+/// `Ran` means the model was within the wasm backend's supported feature set,
+/// executed under the interpreter, and CLEARED the parity comparator (the
+/// helper panics internally on any divergence -- a supported-but-wrong model is
+/// a hard failure, never a `Ran`). `Skipped` means `compile_simulation`
+/// returned [`WasmGenError::Unsupported`] (an out-of-scope construct); the
+/// message is carried so the caller can record/aggregate it. A `Skipped` model
+/// is never a failure -- that is the AC3.1 "unsupported models are skipped, not
+/// failed" contract.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum WasmRunOutcome {
+    Ran,
+    Skipped(String),
+}
+
+/// Build a `Results` from a wasm backend's step-major results slab.
+///
+/// The slab is `layout.n_chunks * layout.n_slots` f64 laid out row-major by
+/// saved step (the same step-major order the bytecode VM's `Results` uses), so
+/// `step_size = n_slots` and `step_count = n_chunks` make `Results::iter` yield
+/// one chunk per saved step. Each canonical variable name in `layout` maps back
+/// to its slot offset within a chunk. `is_vensim = false`: a wasm-emitted run is
+/// a Simlin computation, so it takes the absolute-tolerance branch of the
+/// comparator (never the Vensim relative-tolerance branch).
+///
+/// Pure: no I/O, no global state -- it only reshapes already-read data, so it is
+/// the Functional Core boundary of [`ensure_wasm_matches`].
+#[allow(dead_code)]
+fn wasm_results_from_slab(layout: &WasmLayout, slab: Vec<f64>, specs: SimSpecs) -> Results {
+    let offsets = layout
+        .var_offsets
+        .iter()
+        // The names came from `CompiledSimulation::offsets`, whose keys are
+        // already `Ident<Canonical>`, so they round-trip without re-canonicalizing.
+        .map(|(name, off)| (Ident::<Canonical>::from_str_unchecked(name), *off))
+        .collect();
+
+    Results {
+        offsets,
+        data: slab.into_boxed_slice(),
+        step_size: layout.n_slots,
+        step_count: layout.n_chunks,
+        specs,
+        is_vensim: false,
+    }
+}
+
+/// Compile `model_name` of `datamodel` to wasm, run it under the DLR-FT
+/// interpreter, and assert its results clear the SAME `ensure_results_excluding`
+/// comparator the VM clears against `expected`.
+///
+/// There is no separate, tighter wasm-vs-VM threshold (per the design's
+/// validation bar): "wasm-vs-VM parity" is established because both backends
+/// clear the identical comparator against the identical expected outputs. A
+/// model outside the wasm backend's supported feature set returns
+/// [`WasmRunOutcome::Skipped`] (never a failure); a supported model whose wasm
+/// output diverges panics inside `ensure_results_excluding`.
+///
+/// Imperative Shell: it drives the salsa compile pipeline and the wasm
+/// interpreter (side effects), delegating the reshape to the pure
+/// [`wasm_results_from_slab`] and the comparison to the pure
+/// [`ensure_results_excluding`].
+#[allow(dead_code)]
+pub fn ensure_wasm_matches(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+    expected: &Results,
+    excluded: &[&str],
+) -> WasmRunOutcome {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
+    };
+
+    // Build the CompiledSimulation exactly as the corpus VM path does
+    // (simulate.rs `compile_vm`). A compile error here is a VM-side issue
+    // already gated elsewhere, so surface it as Skipped rather than failing.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    let sim = match compile_project_incremental(&db, sync.project, model_name) {
+        Ok(sim) => sim,
+        Err(e) => return WasmRunOutcome::Skipped(format!("incremental compile failed: {e:?}")),
+    };
+
+    let artifact = match compile_simulation(&sim) {
+        Ok(artifact) => artifact,
+        Err(WasmGenError::Unsupported(msg)) => return WasmRunOutcome::Skipped(msg),
+    };
+
+    let slab = run_wasm_results(&artifact.wasm, &artifact.layout);
+    let specs = SimSpecs::from(&datamodel.sim_specs);
+    let wasm_results = wasm_results_from_slab(&artifact.layout, slab, specs);
+
+    // The same comparator the VM clears: panics loudly on any divergence, so a
+    // supported-but-wrong wasm module fails here rather than reporting Ran.
+    ensure_results_excluding(expected, &wasm_results, excluded);
+    WasmRunOutcome::Ran
+}
+
+/// Instantiate `wasm` under the DLR-FT `checked::Store`, invoke the exported
+/// `run`, and copy `n_chunks * n_slots` f64 out of the results region (located
+/// via `layout.results_offset`). This is the wasm-execution side effect of
+/// [`ensure_wasm_matches`]; the bytes it returns are consumed purely afterward.
+#[allow(dead_code)]
+fn run_wasm_results(wasm: &[u8], layout: &WasmLayout) -> Vec<f64> {
+    let info = validate(wasm).expect("generated wasm module must validate");
+    let mut store = Store::new(());
+    let inst = store
+        .module_instantiate(&info, Vec::new(), None)
+        .expect("instantiate wasm module")
+        .module_addr;
+    let run = store
+        .instance_export(inst, "run")
+        .expect("run export must exist")
+        .as_func()
+        .expect("run export must be a function");
+    store
+        .invoke_simple_typed::<(), ()>(run, ())
+        .expect("run wasm");
+    let mem = store
+        .instance_export(inst, "memory")
+        .expect("memory export must exist")
+        .as_mem()
+        .expect("memory export must be a memory");
+
+    let n = layout.n_chunks * layout.n_slots;
+    let base = layout.results_offset;
+    store.mem_access_mut_slice(mem, |bytes| {
+        (0..n)
+            .map(|i| {
+                let a = base + i * 8;
+                f64::from_le_bytes(bytes[a..a + 8].try_into().unwrap())
+            })
+            .collect()
+    })
 }

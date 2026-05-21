@@ -821,6 +821,68 @@ fn run_vacuous_comparison_scenarios() {
     asserts_panic("near-zero but meaningful divergence", &expected_nz, &sim_nz);
 }
 
+/// Run the named model of `datamodel` through the VM and return its
+/// `Results`, used as the `expected` baseline a focused `ensure_wasm_matches`
+/// test compares wasm output against. Mirrors the corpus VM path (`compile_vm`
+/// -> `Vm::new` -> `run_to_end`).
+#[cfg(test)]
+fn vm_results(datamodel: &simlin_engine::datamodel::Project) -> Results {
+    let compiled = compile_vm(datamodel);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    vm.into_results()
+}
+
+/// AC1.1: a scalar Euler model the wasm backend supports runs through
+/// `ensure_wasm_matches` and clears the same `ensure_results` comparator the VM
+/// clears (the helper panics internally on any divergence), so the outcome is
+/// `Ran`.
+#[test]
+fn ensure_wasm_matches_runs_supported_scalar_model() {
+    let datamodel = simlin_engine::test_common::TestProject::new("simple")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("inflow_rate", "2", None)
+        .stock("level", "0", &["inflow"], &[], None)
+        .flow("inflow", "inflow_rate", None)
+        .build_datamodel();
+
+    let expected = vm_results(&datamodel);
+    let outcome = test_helpers::ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    assert!(
+        matches!(outcome, test_helpers::WasmRunOutcome::Ran),
+        "a supported scalar model must run through the wasm backend, got {outcome:?}"
+    );
+}
+
+/// AC3.1: a model using a not-yet-supported construct (here the `^` operator,
+/// which lowers to the Phase-2 `Op2::Exp` opcode) is SKIPPED, not failed --
+/// `compile_simulation` returns `WasmGenError::Unsupported` and the helper
+/// surfaces it as `Skipped(msg)` carrying that message.
+#[test]
+fn ensure_wasm_matches_skips_unsupported_model() {
+    let datamodel = simlin_engine::test_common::TestProject::new("unsupported")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .aux("base", "2", None)
+        .aux("powered", "base ^ TIME", None)
+        .stock("acc", "0", &["growth"], &[], None)
+        .flow("growth", "powered", None)
+        .build_datamodel();
+
+    let expected = vm_results(&datamodel);
+    let outcome = test_helpers::ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    match outcome {
+        test_helpers::WasmRunOutcome::Skipped(msg) => {
+            assert!(
+                !msg.is_empty(),
+                "a Skipped outcome should carry the Unsupported message"
+            );
+        }
+        test_helpers::WasmRunOutcome::Ran => {
+            panic!("a model using the unsupported `^` operator must be Skipped, not Ran")
+        }
+    }
+}
+
 type CompileFn = fn(&simlin_engine::datamodel::Project) -> simlin_engine::CompiledSimulation;
 
 fn simulate_path(xmile_path: &str) {
