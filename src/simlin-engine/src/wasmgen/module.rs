@@ -368,6 +368,28 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         .checked_add(vector_scratch_bytes)
         .ok_or_else(too_large)?;
 
+    // The allocation scratch region follows the vector scratch. The Phase-6
+    // `AllocateAvailable`/`AllocateByPriority` arms stage, per opcode, the
+    // gathered request values (n f64), the per-requester profile tuples (4n
+    // f64), and the output allocations (n f64) -- `6n` f64 all live across the
+    // `allocate_available` helper call. A requester count `n` is bounded by the
+    // largest view a vector op could process (a temp or a var-view input), so
+    // `6 * max(temp_total_size, n_slots)` f64 is a safe upper bound. Reserved
+    // unconditionally (a model without allocators never reads it); the bound is
+    // tiny for scalar models. `alloc_scratch_base` is threaded into every
+    // `EmitCtx`.
+    let alloc_scratch_base = total_bytes;
+    let alloc_scratch_slots = temp_total_size
+        .max(n_slots)
+        .checked_mul(6)
+        .ok_or_else(too_large)?;
+    let alloc_scratch_bytes = alloc_scratch_slots
+        .checked_mul(SLOT_SIZE)
+        .ok_or_else(too_large)?;
+    let total_bytes = alloc_scratch_base
+        .checked_add(alloc_scratch_bytes)
+        .ok_or_else(too_large)?;
+
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
 
     // save_every mirrors vm.rs::run_to: max(1, round(save_step / dt)).
@@ -408,6 +430,7 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         vector_f64_locals: lower::vector_f64_locals_for(cond_depth),
         vector_i32_locals: lower::vector_i32_locals_for(cond_depth),
         vector_scratch_base,
+        alloc_scratch_base,
         ctx: &root.context,
     };
 
@@ -1519,6 +1542,40 @@ mod tests {
             checked += 1;
         }
         checked
+    }
+
+    /// End-to-end VM parity for the `AllocateAvailable` opcode on the real
+    /// `allocate.xmile` corpus model. The model's supply ramps from 0 to 10
+    /// over the run while total demand is 9, so the recorded series sweep all
+    /// three regimes -- `avail <= 0` (zeros) early, the partial-allocation
+    /// bisection over rectangular priority profiles in the middle, and
+    /// `avail >= total_demand` (full grant) once supply exceeds demand --
+    /// against `Vm::new(sim).run_to_end()`. (The model is NOT in the active
+    /// `wasm_parity_floor` corpus; raising that floor is a separate task.)
+    #[test]
+    fn compile_simulation_allocate_available_matches_vm() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/sdeverywhere/models/allocate/allocate.xmile"
+        );
+        let file = std::fs::File::open(path).expect("open allocate xmile");
+        let mut reader = BufReader::new(file);
+        let datamodel = open_xmile(&mut reader).expect("parse allocate xmile");
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("allocate wasm codegen");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(
+            checked >= 5,
+            "expected to compare the allocate model's variables, only checked {checked}"
+        );
+        assert!(
+            artifact
+                .layout
+                .var_offsets
+                .iter()
+                .any(|(n, _)| n.starts_with("shipments")),
+            "the arrayed shipments allocation should be in the layout"
+        );
     }
 
     #[test]

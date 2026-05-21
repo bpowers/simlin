@@ -96,7 +96,11 @@ const TAN_PI_12: f64 = 0.267_949_192_431_122_7; // 2 - sqrt(3) = tan(pi/12)
 ///
 /// `v` must already be materialized in `var_local` (a plain f64 local) because
 /// Horner reads it once per term and the wasm operand stack is strict LIFO.
-fn emit_horner(f: &mut Function, var_local: u32, coeffs: &[f64]) {
+///
+/// Shared with `super::alloc` (the `erfc_approx` Abramowitz-Stegun polynomial
+/// folds with the identical `acc = acc*v + c` order, so reusing this keeps the
+/// emitted op sequence bit-faithful to the Rust reference).
+pub(crate) fn emit_horner(f: &mut Function, var_local: u32, coeffs: &[f64]) {
     // Start from the highest-order coefficient.
     let mut it = coeffs.iter().rev();
     let first = *it

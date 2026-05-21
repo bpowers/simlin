@@ -74,6 +74,10 @@ fn ctx_with_cond_depth(depth: usize) -> EmitCtx<'static> {
         // the harness's single 64 KiB memory page, so the small test views'
         // sort-pair / collected-value staging never collides with temp_storage.
         vector_scratch_base: VECTOR_SCRATCH_BASE,
+        // The allocation scratch region: a separate high band, past the vector
+        // scratch and clear of temp_storage, sized for the tiny test views'
+        // request/profile/out staging.
+        alloc_scratch_base: ALLOC_SCRATCH_BASE,
         ctx: empty_ctx(),
     }
 }
@@ -82,6 +86,11 @@ fn ctx_with_cond_depth(depth: usize) -> EmitCtx<'static> {
 /// `TEMP_BASE` (8192) and any small test temp region, with ~6000 f64 slots of
 /// headroom before the 64 KiB page end -- ample for the tiny test views.
 const VECTOR_SCRATCH_BASE: u32 = 16384;
+
+/// Byte offset of the allocation scratch region for the test harness. A high
+/// band (~40 KiB) past `VECTOR_SCRATCH_BASE`, leaving room for both regions'
+/// tiny test stagings within the single 64 KiB page.
+const ALLOC_SCRATCH_BASE: u32 = 40960;
 
 fn bc(literals: Vec<f64>, code: Vec<Opcode>) -> ByteCode {
     ByteCode { literals, code }
@@ -4769,4 +4778,362 @@ fn lookup_array_invalid_view_fills_temp_with_nan() {
         temps.iter().all(|v| v.is_nan()),
         "invalid input view must fill the LookupArray temp with NaN, got {temps:?}"
     );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Phase 6 Task 4: AllocateAvailable + AllocateByPriority (opcode lowering)
+//
+// These run the emitted opcode programs under DLR-FT and cross-check the
+// written temp region against the VM's own arm logic (`vm.rs:2631-2794`),
+// which gathers requests/profiles from the views and calls
+// `crate::alloc::allocate_available`. The oracle below reproduces that gather
+// (the `pp_cols`/defaults for AllocateAvailable, the rectangular-profile
+// synthesis for AllocateByPriority) and calls the same `allocate_available`,
+// so a passing test proves the wasm opcode == the VM opcode element-for-element.
+// The full `Vm::new(sim).run_to_end()` parity on a real model lives in
+// `module.rs`'s `compile_simulation_allocate_available_matches_vm`.
+// ════════════════════════════════════════════════════════════════════════
+
+/// Run `PushStaticView(requests); PushStaticView(profile); AllocateAvailable;
+/// PopView; PopView` over a `curr` slab seeded from `data`, writing temp 0, and
+/// read back `n` temp slots. The views are pushed requests-then-profile so
+/// `profile_view = top`, `requests_view = top-1` (matching the VM); `avail` is
+/// the single operand pushed beneath the opcode.
+fn run_allocate_available(
+    requests: StaticArrayView,
+    profile: StaticArrayView,
+    avail: f64,
+    data: &[f64],
+    n: usize,
+) -> Vec<f64> {
+    let mut context = ByteCodeContext::default();
+    context.set_temp_info(vec![0], n);
+    let req_id = context.add_static_view(requests);
+    let prof_id = context.add_static_view(profile);
+    let code = vec![
+        Opcode::LoadConstant { id: 0 }, // avail
+        Opcode::PushStaticView { view_id: req_id },
+        Opcode::PushStaticView { view_id: prof_id },
+        Opcode::AllocateAvailable { write_temp_id: 0 },
+        Opcode::PopView {},
+        Opcode::PopView {},
+    ];
+    run_and_read_temps(&context, code, vec![avail], &seed_run(0, data), n)
+}
+
+/// Run `PushStaticView(requests); PushStaticView(priority); AllocateByPriority;
+/// PopView; PopView`. The operands are `width` (pushed first) then `supply`
+/// (pushed last, on top) -- matching the VM's `supply = pop`, `width = pop`.
+fn run_allocate_by_priority(
+    requests: StaticArrayView,
+    priority: StaticArrayView,
+    width: f64,
+    supply: f64,
+    data: &[f64],
+    n: usize,
+) -> Vec<f64> {
+    let mut context = ByteCodeContext::default();
+    context.set_temp_info(vec![0], n);
+    let req_id = context.add_static_view(requests);
+    let pri_id = context.add_static_view(priority);
+    let code = vec![
+        Opcode::LoadConstant { id: 0 }, // width (pushed first)
+        Opcode::LoadConstant { id: 1 }, // supply (pushed second, on top)
+        Opcode::PushStaticView { view_id: req_id },
+        Opcode::PushStaticView { view_id: pri_id },
+        Opcode::AllocateByPriority { write_temp_id: 0 },
+        Opcode::PopView {},
+        Opcode::PopView {},
+    ];
+    run_and_read_temps(&context, code, vec![width, supply], &seed_run(0, data), n)
+}
+
+/// The VM `AllocateAvailable` oracle (`vm.rs:2631-2721`): gather requests +
+/// the flattened profile array from the views, build the per-requester
+/// `(ptype, ppriority, pwidth, pextra)` tuples via the `pp_cols`/defaults logic,
+/// then call `crate::alloc::allocate_available`.
+fn vm_allocate_available_oracle(
+    requests_view: &StaticArrayView,
+    profile_view: &StaticArrayView,
+    avail: f64,
+    data: &[f64],
+) -> Vec<f64> {
+    let requests: Vec<f64> = (0..requests_view.to_runtime_view().size())
+        .map(|i| vm_view_element(requests_view, data, i))
+        .collect();
+    let n = requests.len();
+    let pp_size = profile_view.to_runtime_view().size();
+    let pp_values: Vec<f64> = (0..pp_size)
+        .map(|i| vm_view_element(profile_view, data, i))
+        .collect();
+    let pp_cols = if !pp_values.is_empty() && n > 0 && pp_size.is_multiple_of(n) {
+        pp_size / n
+    } else {
+        4
+    };
+    let profiles: Vec<(f64, f64, f64, f64)> = (0..n)
+        .map(|i| {
+            let base = i * pp_cols;
+            let g = |k: usize, dflt: f64| pp_values.get(base + k).copied().unwrap_or(dflt);
+            (g(0, 0.0), g(1, 0.0), g(2, 1.0), g(3, 0.0))
+        })
+        .collect();
+    crate::alloc::allocate_available(&requests, &profiles, avail)
+}
+
+/// The VM `AllocateByPriority` oracle (`vm.rs:2723-2794`): gather requests +
+/// priorities, synthesize rectangular profiles `(1, priorities[i] or 0, width,
+/// 0)`, then call `crate::alloc::allocate_available` with `supply`.
+fn vm_allocate_by_priority_oracle(
+    requests_view: &StaticArrayView,
+    priority_view: &StaticArrayView,
+    width: f64,
+    supply: f64,
+    data: &[f64],
+) -> Vec<f64> {
+    let requests: Vec<f64> = (0..requests_view.to_runtime_view().size())
+        .map(|i| vm_view_element(requests_view, data, i))
+        .collect();
+    let n = requests.len();
+    let priorities: Vec<f64> = (0..priority_view.to_runtime_view().size())
+        .map(|i| vm_view_element(priority_view, data, i))
+        .collect();
+    let profiles: Vec<(f64, f64, f64, f64)> = (0..n)
+        .map(|i| (1.0, priorities.get(i).copied().unwrap_or(0.0), width, 0.0))
+        .collect();
+    crate::alloc::allocate_available(&requests, &profiles, supply)
+}
+
+/// Assert the emitted `AllocateAvailable` matches the VM oracle (NaN as NaN,
+/// else exact -- the wasm helpers are bit-faithful ports, so the only drift is
+/// the leaf `exp`/`pow` approximations; use a tight tolerance).
+fn assert_allocate_available_matches(
+    requests_view: &StaticArrayView,
+    profile_view: &StaticArrayView,
+    avail: f64,
+    data: &[f64],
+    n: usize,
+) {
+    let got = run_allocate_available(requests_view.clone(), profile_view.clone(), avail, data, n);
+    let want = vm_allocate_available_oracle(requests_view, profile_view, avail, data);
+    assert_eq!(got.len(), want.len());
+    for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+        if w.is_nan() {
+            assert!(
+                g.is_nan(),
+                "allocate_available slot {i}: expected NaN, got {g}"
+            );
+        } else {
+            let diff = (g - w).abs();
+            let rel = if w != 0.0 { diff / w.abs() } else { diff };
+            assert!(
+                diff <= 1e-9 || rel <= 1e-9,
+                "allocate_available slot {i}: got {g}, want {w} (diff {diff:.3e})"
+            );
+        }
+    }
+}
+
+#[test]
+fn allocate_available_full_grant_matches_vm() {
+    // avail >= total_demand: each requester gets request.max(0). requests in
+    // curr slots 0..3, the flat profile [3 requesters x 4 fields] in slots 3..15.
+    // Rectangular (ptype 1) profiles. total_demand = 3+2+4 = 9 < avail 100.
+    let requests = dense_view(0, &[3]);
+    let profile = dense_view(3, &[3, 4]);
+    let mut data = vec![3.0, 2.0, 4.0];
+    // Profile rows (region-major): (ptype, ppriority, pwidth, pextra).
+    data.extend_from_slice(&[1.0, 1.0, 1.0, 0.0]);
+    data.extend_from_slice(&[1.0, 2.0, 1.0, 0.0]);
+    data.extend_from_slice(&[1.0, 3.0, 1.0, 0.0]);
+    assert_allocate_available_matches(&requests, &profile, 100.0, &data, 3);
+    // Full grant returns the requests verbatim.
+    let got = run_allocate_available(requests, profile, 100.0, &data, 3);
+    assert_eq!(got, vec![3.0, 2.0, 4.0]);
+}
+
+#[test]
+fn allocate_available_zeros_when_supply_nonpositive_matches_vm() {
+    let requests = dense_view(0, &[3]);
+    let profile = dense_view(3, &[3, 4]);
+    let mut data = vec![3.0, 2.0, 4.0];
+    data.extend_from_slice(&[1.0, 1.0, 1.0, 0.0]);
+    data.extend_from_slice(&[1.0, 2.0, 1.0, 0.0]);
+    data.extend_from_slice(&[1.0, 3.0, 1.0, 0.0]);
+    assert_allocate_available_matches(&requests, &profile, 0.0, &data, 3);
+    let got = run_allocate_available(requests, profile, -5.0, &data, 3);
+    assert_eq!(got, vec![0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn allocate_available_partial_bisection_rectangular_matches_vm() {
+    // 0 < avail < total_demand forces the bisection. Rectangular profiles.
+    let requests = dense_view(0, &[3]);
+    let profile = dense_view(3, &[3, 4]);
+    let mut data = vec![3.0, 2.0, 4.0];
+    data.extend_from_slice(&[1.0, 1.0, 1.0, 0.0]);
+    data.extend_from_slice(&[1.0, 2.0, 1.0, 0.0]);
+    data.extend_from_slice(&[1.0, 3.0, 1.0, 0.0]);
+    for avail in [1.0, 3.0, 5.0, 7.0, 8.5] {
+        assert_allocate_available_matches(&requests, &profile, avail, &data, 3);
+    }
+}
+
+#[test]
+fn allocate_available_partial_bisection_across_profile_types_matches_vm() {
+    // A mix of profile types (fixed/triangular/normal/exponential/CES), so the
+    // search-range `spread` per type and each curve at the converged price are
+    // exercised. 5 requesters x 4 profile fields.
+    let requests = dense_view(0, &[5]);
+    let profile = dense_view(5, &[5, 4]);
+    let mut data = vec![4.0, 3.0, 5.0, 2.0, 6.0];
+    data.extend_from_slice(&[0.0, 2.0, 1.0, 0.0]); // fixed
+    data.extend_from_slice(&[2.0, 3.0, 1.5, 0.0]); // triangular
+    data.extend_from_slice(&[3.0, 2.5, 1.0, 0.0]); // normal
+    data.extend_from_slice(&[4.0, 2.0, 1.2, 0.0]); // exponential
+    data.extend_from_slice(&[5.0, 3.0, 1.0, 2.0]); // CES
+    for avail in [2.0, 6.0, 10.0, 15.0, 19.0] {
+        assert_allocate_available_matches(&requests, &profile, avail, &data, 5);
+    }
+}
+
+#[test]
+fn allocate_available_pp_cols_defaults_when_not_divisible_matches_vm() {
+    // When pp_size is not a multiple of n, pp_cols falls back to 4 and the
+    // out-of-range profile fields take the defaults (0,0,1,0). Here n=3 but the
+    // profile view is 1-D of size 5 (not a multiple of 3), so pp_cols=4 and
+    // every requester reads past the end -> all-default profiles.
+    let requests = dense_view(0, &[3]);
+    let profile = dense_view(3, &[5]);
+    let data = vec![3.0, 2.0, 4.0, 9.0, 9.0, 9.0, 9.0, 9.0];
+    for avail in [0.5, 4.0, 100.0] {
+        assert_allocate_available_matches(&requests, &profile, avail, &data, 3);
+    }
+}
+
+#[test]
+fn allocate_available_invalid_view_fills_temp_with_nan() {
+    // A dynamically-subscripted requests view made invalid at runtime (row index
+    // out of bounds) takes the VM's `fill_temp_nan` short-circuit. Build the
+    // requests view via PushVarViewDirect + an out-of-bounds ViewSubscriptDynamic.
+    let mut context = ByteCodeContext::default();
+    context.set_temp_info(vec![0], 3);
+    context.add_dim_list(2, [3, 3, 0, 0]); // a [3,3] base for the dynamic subscript
+    let prof_id = context.add_static_view(dense_view(20, &[3, 4]));
+    let ctx = ctx_with_arrays(&context);
+    let code = vec![
+        Opcode::LoadConstant { id: 0 }, // avail
+        // requests view: PushVarViewDirect over a [3,3] base, then subscript row
+        // 9 (out of bounds) -> invalid view.
+        Opcode::PushVarViewDirect {
+            base_off: 0,
+            dim_list_id: 0,
+        },
+        Opcode::LoadConstant { id: 1 }, // runtime row index (1-based, OOB)
+        Opcode::ViewSubscriptDynamic { dim_idx: 0 },
+        Opcode::PushStaticView { view_id: prof_id },
+        Opcode::AllocateAvailable { write_temp_id: 0 },
+        Opcode::PopView {},
+        Opcode::PopView {},
+    ];
+    let bytes = build_module(&bc(vec![5.0, 9.0], code), &ctx, false, 0);
+    let info = validate(&bytes).expect("module must validate");
+    let mut store = Store::new(());
+    let inst = store
+        .module_instantiate(&info, Vec::new(), None)
+        .expect("instantiate")
+        .module_addr;
+    let eval = store
+        .instance_export(inst, "eval")
+        .unwrap()
+        .as_func()
+        .unwrap();
+    store
+        .invoke_simple_typed::<(i32,), ()>(eval, (0_i32,))
+        .expect("invoke");
+    let mem = store
+        .instance_export(inst, "mem")
+        .unwrap()
+        .as_mem()
+        .unwrap();
+    let temps: Vec<f64> = store.mem_access_mut_slice(mem, |b| {
+        (0..3)
+            .map(|i| {
+                let a = TEMP_BASE as usize + i * 8;
+                f64::from_le_bytes(b[a..a + 8].try_into().unwrap())
+            })
+            .collect()
+    });
+    assert!(
+        temps.iter().all(|v| v.is_nan()),
+        "invalid input view must fill the AllocateAvailable temp with NaN, got {temps:?}"
+    );
+}
+
+#[test]
+fn allocate_by_priority_full_grant_matches_vm() {
+    // avail >= total_demand: full grant. requests in slots 0..3, priorities in
+    // slots 3..6. width=1, supply=100, total_demand=9.
+    let requests = dense_view(0, &[3]);
+    let priority = dense_view(3, &[3]);
+    let data = vec![3.0, 2.0, 4.0, 1.0, 2.0, 3.0];
+    assert_allocate_by_priority_matches(&requests, &priority, 1.0, 100.0, &data, 3);
+    let got = run_allocate_by_priority(requests, priority, 1.0, 100.0, &data, 3);
+    assert_eq!(got, vec![3.0, 2.0, 4.0]);
+}
+
+#[test]
+fn allocate_by_priority_zeros_when_supply_nonpositive_matches_vm() {
+    let requests = dense_view(0, &[3]);
+    let priority = dense_view(3, &[3]);
+    let data = vec![3.0, 2.0, 4.0, 1.0, 2.0, 3.0];
+    assert_allocate_by_priority_matches(&requests, &priority, 1.0, 0.0, &data, 3);
+}
+
+#[test]
+fn allocate_by_priority_partial_bisection_matches_vm() {
+    // 0 < supply < total_demand forces the bisection over the synthesized
+    // rectangular (ptype 1) profiles. Sweep several partial supplies and widths.
+    let requests = dense_view(0, &[3]);
+    let priority = dense_view(3, &[3]);
+    let data = vec![3.0, 2.0, 4.0, 1.0, 2.0, 3.0];
+    for &(width, supply) in &[(1.0, 1.0), (1.0, 5.0), (2.0, 4.0), (0.5, 7.0), (3.0, 8.5)] {
+        assert_allocate_by_priority_matches(&requests, &priority, width, supply, &data, 3);
+    }
+}
+
+/// Assert the emitted `AllocateByPriority` matches the VM oracle.
+fn assert_allocate_by_priority_matches(
+    requests_view: &StaticArrayView,
+    priority_view: &StaticArrayView,
+    width: f64,
+    supply: f64,
+    data: &[f64],
+    n: usize,
+) {
+    let got = run_allocate_by_priority(
+        requests_view.clone(),
+        priority_view.clone(),
+        width,
+        supply,
+        data,
+        n,
+    );
+    let want = vm_allocate_by_priority_oracle(requests_view, priority_view, width, supply, data);
+    assert_eq!(got.len(), want.len());
+    for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+        if w.is_nan() {
+            assert!(
+                g.is_nan(),
+                "allocate_by_priority slot {i}: expected NaN, got {g}"
+            );
+        } else {
+            let diff = (g - w).abs();
+            let rel = if w != 0.0 { diff / w.abs() } else { diff };
+            assert!(
+                diff <= 1e-9 || rel <= 1e-9,
+                "allocate_by_priority slot {i}: got {g}, want {w} (diff {diff:.3e})"
+            );
+        }
+    }
 }

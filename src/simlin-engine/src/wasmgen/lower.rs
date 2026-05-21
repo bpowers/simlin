@@ -195,6 +195,17 @@ pub(crate) struct EmitCtx<'a> {
     /// largest view a vector op could process; the test harness sets a fixed
     /// high offset within its single memory page.
     pub vector_scratch_base: u32,
+    /// Byte offset of slot 0 of the allocation scratch region. The Phase-6
+    /// `AllocateAvailable`/`AllocateByPriority` arms stage the gathered request
+    /// values, the per-requester profile tuples (4 f64 each), and the output
+    /// allocations here before/after `call`ing the `allocate_available` helper.
+    /// The three sub-regions (`requests` (n) ++ `profiles` (4n) ++ `out` (n))
+    /// are laid out consecutively and are all live across the helper call.
+    /// Sized by `module.rs` to `6 * max(temp_total_size, n_slots)` f64 (a
+    /// requester count is bounded by a view's element count); reserved
+    /// unconditionally (a model without allocators never reads it). The test
+    /// harness sets a fixed high offset within its single memory page.
+    pub alloc_scratch_base: u32,
     /// The module's `ByteCodeContext`, holding the compile-time array tables the
     /// view opcodes reference by index: `static_views`, `dim_lists`,
     /// `dimensions`, `subdim_relations`, and `temp_offsets`. Run-invariant and
@@ -288,6 +299,38 @@ pub(crate) struct HelperFns {
     /// which is false for NaN), reproducing the VM's stable
     /// `sort_by(partial_cmp(..).unwrap_or(Equal))`.
     pub stable_sort: u32,
+    /// Allocation helpers (`super::alloc`), porting `crate::alloc`
+    /// bit-faithfully for the `AllocateAvailable`/`AllocateByPriority` opcodes:
+    /// - `erfc_approx(z: f64) -> f64` (Abramowitz-Stegun 26.2.17; `call`s
+    ///   [`exp`](Self::exp) for the `(-z*z).exp()` factor),
+    /// - `normal_cdf(x: f64) -> f64` (`0.5 * erfc_approx(-x / SQRT_2)`; `call`s
+    ///   [`erfc_approx`](Self::erfc_approx)),
+    /// - `alloc_curve(p, request, ptype, ppriority, pwidth, pextra) -> f64`
+    ///   (all six `ptype % 10` curve branches + the `ptype >= 10` floor flag;
+    ///   `call`s [`normal_cdf`](Self::normal_cdf)/[`exp`](Self::exp)/
+    ///   [`pow`](Self::pow)),
+    /// - `allocate_available(requests_ptr: i32, n: i32, profiles_ptr: i32,
+    ///   avail: f64, out_ptr: i32) -> ()` -- the bisection market-clearing solve
+    ///   over scratch memory (a runtime loop; never unrolled), `call`s
+    ///   [`alloc_curve`](Self::alloc_curve).
+    ///
+    /// Pushed after `exp`/`pow`/`erfc_approx`/`normal_cdf`/`alloc_curve` (in that
+    /// dependency order) in [`build_helpers`], so each inter-helper `call`
+    /// resolves to an already-recorded index.
+    ///
+    /// `erfc_approx`/`normal_cdf`/`alloc_curve` are only consumed *during*
+    /// helper construction (each is passed to the next helper's emitter so its
+    /// `call` resolves) and by the `#[cfg(test)]` parity harness; only
+    /// `allocate_available` is `call`ed from an opcode arm. They are kept as
+    /// named registry fields for discoverability and so the tests can target
+    /// each helper by index, mirroring the rest of `HelperFns`.
+    #[allow(dead_code)]
+    pub erfc_approx: u32,
+    #[allow(dead_code)]
+    pub normal_cdf: u32,
+    #[allow(dead_code)]
+    pub alloc_curve: u32,
+    pub allocate_available: u32,
 }
 
 /// One emitted helper function: its signature (so the assembler can register a
@@ -401,6 +444,48 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
         body: super::vector::emit_stable_sort(),
     });
 
+    // Allocation helpers (`super::alloc`). Pushed in dependency order so each
+    // inter-helper `call` resolves to an already-recorded index:
+    // `erfc_approx` -> `exp`; `normal_cdf` -> `erfc_approx`; `alloc_curve` ->
+    // `normal_cdf`/`exp`/`pow`; `allocate_available` -> `alloc_curve`.
+    let erfc_approx = functions.len() as u32;
+    functions.push(HelperFn {
+        params: vec![ValType::F64],
+        results: vec![ValType::F64],
+        body: super::alloc::emit_erfc_approx(exp),
+    });
+    let normal_cdf = functions.len() as u32;
+    functions.push(HelperFn {
+        params: vec![ValType::F64],
+        results: vec![ValType::F64],
+        body: super::alloc::emit_normal_cdf(erfc_approx),
+    });
+    let alloc_curve = functions.len() as u32;
+    functions.push(HelperFn {
+        params: vec![
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+        ],
+        results: vec![ValType::F64],
+        body: super::alloc::emit_alloc_curve(normal_cdf, exp, pow),
+    });
+    let allocate_available = functions.len() as u32;
+    functions.push(HelperFn {
+        params: vec![
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::F64,
+            ValType::I32,
+        ],
+        results: vec![],
+        body: super::alloc::emit_allocate_available(alloc_curve),
+    });
+
     BuiltHelpers {
         fns: HelperFns {
             approx_eq,
@@ -420,6 +505,10 @@ pub(crate) fn build_helpers() -> BuiltHelpers {
             lookup_forward,
             lookup_backward,
             stable_sort,
+            erfc_approx,
+            normal_cdf,
+            alloc_curve,
+            allocate_available,
         },
         functions,
     }
@@ -1567,6 +1656,48 @@ fn emit_ops(
                     *base_gf,
                     *table_count,
                     *mode,
+                    *write_temp_id,
+                    ctx,
+                    f,
+                )?;
+            }
+            Opcode::AllocateAvailable { write_temp_id } => {
+                // profile_view = top, requests_view = top-1 (vm.rs:2634-2635).
+                let n_views = state.view_stack.len();
+                if n_views < 2 {
+                    return Err(WasmGenError::Unsupported(
+                        "wasmgen: AllocateAvailable needs two views on the stack".to_string(),
+                    ));
+                }
+                let profile_view = state.view_stack[n_views - 1].clone();
+                let requests_view = state.view_stack[n_views - 2].clone();
+                // Gather (requests) + profile reads + output copy unroll over
+                // n + 4n + n element-emits.
+                let n = requests_view.size();
+                state.charge_unroll(n.saturating_mul(6))?;
+                super::alloc::emit_allocate_available_op(
+                    &requests_view,
+                    &profile_view,
+                    *write_temp_id,
+                    ctx,
+                    f,
+                )?;
+            }
+            Opcode::AllocateByPriority { write_temp_id } => {
+                // priority_view = top, requests_view = top-1 (vm.rs:2728-2729).
+                let n_views = state.view_stack.len();
+                if n_views < 2 {
+                    return Err(WasmGenError::Unsupported(
+                        "wasmgen: AllocateByPriority needs two views on the stack".to_string(),
+                    ));
+                }
+                let priority_view = state.view_stack[n_views - 1].clone();
+                let requests_view = state.view_stack[n_views - 2].clone();
+                let n = requests_view.size();
+                state.charge_unroll(n.saturating_mul(6))?;
+                super::alloc::emit_allocate_by_priority_op(
+                    &requests_view,
+                    &priority_view,
                     *write_temp_id,
                     ctx,
                     f,
