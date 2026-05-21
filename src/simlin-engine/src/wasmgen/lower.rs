@@ -2,6 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// pattern: Functional Core
+// Pure transformation: bytecode + layout data in, wasm `Function` bodies /
+// instruction sequences out. No I/O; the only side effect is in `#[cfg(test)]`,
+// which executes the emitted modules under the DLR-FT interpreter.
+
 //! Lowering of the bytecode VM's scalar-core opcode set to WebAssembly.
 //!
 //! The runtime data model mirrors the bytecode VM (`crate::vm`): all variable
@@ -35,11 +40,26 @@
 //! `BinVarVar` / `AssignAddVarVarCurr` / ... family never reaches a consumer.
 //!
 //! Anything outside the supported scalar core -- an array/module/lookup opcode,
-//! an unsupported `Op2` (Eq/And/Or/Mod/Exp), or a late-fusion superinstruction
-//! that somehow appeared -- returns `WasmGenError::Unsupported` rather than
-//! emitting a wrong module.
+//! a not-yet-supported `Op2` (Mod/Exp, deferred to Phase 2 Tasks 2-3), or a
+//! late-fusion superinstruction that somehow appeared -- returns
+//! `WasmGenError::Unsupported` rather than emitting a wrong module.
+//!
+//! ## Emitted helper functions
+//!
+//! Equality and truthiness route through a single emitted wasm helper,
+//! `approx_eq(a: f64, b: f64) -> i32`, that reproduces `crate::float::approx_eq`
+//! (`float_cmp` 0.10 defaults) bit-faithfully, so the backend takes the same
+//! branch the VM does. Helper functions are assembled into the module ahead of
+//! the per-program functions ([`build_helpers`] returns their bodies and a
+//! [`HelperFns`] index registry); `module.rs` places them at function indices
+//! `0..N` and the per-program + `run` functions at `N..`. `emit_bytecode`
+//! references a helper by its stable index (held in [`EmitCtx::helpers`]) via a
+//! `call`. Subcomponent B (the transcendental + `pulse` helpers) and later
+//! phases extend this by adding a field to [`HelperFns`] and pushing the
+//! corresponding body in [`build_helpers`]; no helper index is hard-coded
+//! elsewhere, so the per-program offset adjusts automatically.
 
-use wasm_encoder::{Function, Instruction, MemArg};
+use wasm_encoder::{Function, Instruction, MemArg, ValType};
 
 use crate::bytecode::{ByteCode, Op2, Opcode};
 
@@ -82,6 +102,11 @@ pub(crate) struct EmitCtx {
     /// Sized to the program's maximum `If` nesting depth (see
     /// [`max_condition_depth`]).
     pub condition_locals: Vec<u32>,
+    /// Function indices of the module's emitted helper functions, so
+    /// value-producing opcodes that need the VM's `approx_eq`/transcendental
+    /// semantics can `call` them. The same registry is shared by every
+    /// per-program function in a module.
+    pub helpers: HelperFns,
 }
 
 pub(crate) fn memarg(addr: u64) -> MemArg {
@@ -96,6 +121,204 @@ pub(crate) fn memarg(addr: u64) -> MemArg {
 /// a bare `f64` or an `Ieee64` wrapper across versions.
 pub(crate) fn f64_const(v: f64) -> Instruction<'static> {
     Instruction::F64Const(v.into())
+}
+
+// ============================================================================
+// Emitted helper functions
+// ============================================================================
+
+/// Function indices of a module's emitted helper functions.
+///
+/// Helpers occupy the module's first function slots (`0..N`), so their indices
+/// are fixed and known before any per-program function is emitted. This is what
+/// lets a value-producing opcode in `emit_bytecode` reference a helper by index
+/// (`call`). [`build_helpers`] both emits the bodies and assigns these indices,
+/// keeping the index assignment and the body emission in one place.
+///
+/// To add a helper (Subcomponent B's transcendentals + `pulse`, later phases'
+/// lookup/array/allocation helpers): add a field here and push its body in
+/// [`build_helpers`], assigning the field from the pre-push `functions.len()`.
+/// Do not hard-code a helper's index anywhere else.
+#[derive(Clone, Copy)]
+pub(crate) struct HelperFns {
+    /// `approx_eq(a: f64, b: f64) -> i32` (1 = approximately equal, else 0),
+    /// reproducing `crate::float::approx_eq` (`float_cmp` 0.10 defaults).
+    pub approx_eq: u32,
+}
+
+/// One emitted helper function: its signature (so the assembler can register a
+/// wasm type for it) and its body (the terminating `End` is included).
+pub(crate) struct HelperFn {
+    pub params: Vec<ValType>,
+    pub results: Vec<ValType>,
+    pub body: Function,
+}
+
+/// The emitted helper functions plus the [`HelperFns`] index registry that
+/// names them. `functions[i]` is the body for function index `i`.
+pub(crate) struct BuiltHelpers {
+    pub fns: HelperFns,
+    pub functions: Vec<HelperFn>,
+}
+
+/// Emit every helper function a module needs, assigning each a stable function
+/// index starting at 0.
+///
+/// The returned [`HelperFns`] records the indices; the caller (`module.rs`)
+/// places `functions` at module function indices `0..functions.len()` and emits
+/// the per-program + `run` functions after them, threading [`BuiltHelpers::fns`]
+/// into each [`EmitCtx`].
+pub(crate) fn build_helpers() -> BuiltHelpers {
+    let mut functions: Vec<HelperFn> = Vec::new();
+
+    let approx_eq = functions.len() as u32;
+    functions.push(HelperFn {
+        params: vec![ValType::F64, ValType::F64],
+        results: vec![ValType::I32],
+        body: emit_approx_eq(),
+    });
+
+    BuiltHelpers {
+        fns: HelperFns { approx_eq },
+        functions,
+    }
+}
+
+// `approx_eq` helper local layout. Params 0/1 are `a`/`b`; the rest are declared
+// i64 scratch locals.
+const AE_A: u32 = 0;
+const AE_B: u32 = 1;
+const AE_BITS: u32 = 2; // scratch for one operand's raw bits
+const AE_ORD_A: u32 = 3; // ordered(a)
+const AE_ORD_B: u32 = 4; // ordered(b)
+const AE_DIFF: u32 = 5; // ordered(a) - ordered(b)
+const AE_ABS: u32 = 6; // abs(diff) before saturation
+const AE_LOCAL_COUNT: u32 = 5; // declared i64 locals (indices 2..=6)
+
+/// Build the body of the `approx_eq(a: f64, b: f64) -> i32` helper, reproducing
+/// `crate::float::approx_eq` (`float_cmp` 0.10, `f64`, default margin
+/// `epsilon = f64::EPSILON`, `ulps = 4`) bit-faithfully.
+///
+/// The Rust reference (`float_cmp` `eq.rs`) is the short-circuiting OR of three
+/// total, trap-free checks (exact equality / ±inf, absolute-epsilon, ULP):
+///
+/// ```text
+/// a == b  ||  f64abs(a - b) <= f64::EPSILON  ||  saturating_abs(ulps(a, b)) <= 4
+/// ```
+///
+/// where `ulps(a, b) = ordered(a).wrapping_sub(ordered(b))` over `i64` and
+/// `ordered(f) = { let bits = f.to_bits() as i64; if bits < 0 { !bits } else
+/// { bits ^ i64::MIN } }` maps the sign-magnitude bit pattern to a monotonic
+/// integer. Because all three checks are pure and total (no division, no traps),
+/// evaluating them eagerly and OR-ing the i32 results is bit-identical to the
+/// Rust short-circuit; the fast path is only a performance shortcut, not a
+/// semantic difference. Notably this makes `approx_eq(NaN, NaN) == true`
+/// (identical bits -> 0 ULPs) and keeps the finite `crate::float::NA` sentinel
+/// distinct from ordinary values (its exponent is far from theirs).
+fn emit_approx_eq() -> Function {
+    use Instruction as Ins;
+    let mut f = Function::new([(AE_LOCAL_COUNT, ValType::I64)]);
+
+    // check 1: a == b -> i32
+    f.instruction(&Ins::LocalGet(AE_A));
+    f.instruction(&Ins::LocalGet(AE_B));
+    f.instruction(&Ins::F64Eq);
+
+    // check 2: f64.abs(a - b) <= f64::EPSILON -> i32
+    f.instruction(&Ins::LocalGet(AE_A));
+    f.instruction(&Ins::LocalGet(AE_B));
+    f.instruction(&Ins::F64Sub);
+    f.instruction(&Ins::F64Abs);
+    f.instruction(&f64_const(f64::EPSILON));
+    f.instruction(&Ins::F64Le);
+
+    // check 3: saturating_abs(ordered(a) - ordered(b)) <= 4 -> i32.
+    emit_ordered_bits(&mut f, AE_A, AE_BITS);
+    f.instruction(&Ins::LocalSet(AE_ORD_A));
+    emit_ordered_bits(&mut f, AE_B, AE_BITS);
+    f.instruction(&Ins::LocalSet(AE_ORD_B));
+
+    // diff = wrapping_sub(ordered_a, ordered_b)  (i64.sub wraps)
+    f.instruction(&Ins::LocalGet(AE_ORD_A));
+    f.instruction(&Ins::LocalGet(AE_ORD_B));
+    f.instruction(&Ins::I64Sub);
+    f.instruction(&Ins::LocalSet(AE_DIFF));
+
+    // abs = if diff < 0 { 0 - diff } else { diff }  (the wrapping negate; for
+    // diff == i64::MIN this stays negative, handled by the saturation below).
+    f.instruction(&Ins::I64Const(0));
+    f.instruction(&Ins::LocalGet(AE_DIFF));
+    f.instruction(&Ins::I64Sub); // 0 - diff
+    f.instruction(&Ins::LocalGet(AE_DIFF)); // [neg, diff]
+    f.instruction(&Ins::LocalGet(AE_DIFF));
+    f.instruction(&Ins::I64Const(0));
+    f.instruction(&Ins::I64LtS); // diff < 0
+    f.instruction(&Ins::Select); // neg if diff<0 else diff
+    f.instruction(&Ins::LocalSet(AE_ABS));
+
+    // sat = if abs < 0 { i64::MAX } else { abs }  (saturating_abs: the only abs
+    // still negative is the i64::MIN overflow, which saturates to i64::MAX).
+    f.instruction(&Ins::I64Const(i64::MAX));
+    f.instruction(&Ins::LocalGet(AE_ABS)); // [i64::MAX, abs]
+    f.instruction(&Ins::LocalGet(AE_ABS));
+    f.instruction(&Ins::I64Const(0));
+    f.instruction(&Ins::I64LtS); // abs < 0
+    f.instruction(&Ins::Select); // i64::MAX if abs<0 else abs
+
+    // sat <= 4 -> i32
+    f.instruction(&Ins::I64Const(4));
+    f.instruction(&Ins::I64LeS);
+
+    // Combine the three i32 booleans: (check1 | check2 | check3). Stack holds
+    // [c1, c2, c3]; two i32.or reduce it to one result.
+    f.instruction(&Ins::I32Or);
+    f.instruction(&Ins::I32Or);
+
+    f.instruction(&Ins::End);
+    f
+}
+
+/// Append the wasm sequence that pushes `ordered(local)` onto the stack, where
+/// `ordered(f) = { let bits = f.to_bits() as i64; if bits < 0 { !bits } else
+/// { bits ^ i64::MIN } }` (float_cmp's sign-magnitude -> monotonic map). `bits`
+/// is materialized once into `bits_local` (i64) and reused for the two branch
+/// values and the sign test; `select` chooses between them. `i64::MIN` is the
+/// `1 << 63` sign mask as a signed `i64`, and `!bits` is `bits ^ -1`.
+fn emit_ordered_bits(f: &mut Function, src_local: u32, bits_local: u32) {
+    use Instruction as Ins;
+    f.instruction(&Ins::LocalGet(src_local));
+    f.instruction(&Ins::I64ReinterpretF64);
+    f.instruction(&Ins::LocalSet(bits_local));
+    // neg case: !bits = bits ^ -1
+    f.instruction(&Ins::LocalGet(bits_local));
+    f.instruction(&Ins::I64Const(-1));
+    f.instruction(&Ins::I64Xor);
+    // pos case: bits ^ i64::MIN  (flip the sign bit)
+    f.instruction(&Ins::LocalGet(bits_local));
+    f.instruction(&Ins::I64Const(i64::MIN));
+    f.instruction(&Ins::I64Xor);
+    // cond: bits < 0  (the sign bit is set)
+    f.instruction(&Ins::LocalGet(bits_local));
+    f.instruction(&Ins::I64Const(0));
+    f.instruction(&Ins::I64LtS);
+    // select(neg, pos, cond): neg if cond != 0 else pos
+    f.instruction(&Ins::Select);
+}
+
+/// Push `call approx_eq` for two f64 operands already on the wasm stack
+/// (`[a, b]`); leaves an i32 (1 = approximately equal) on the stack. Mirrors a
+/// `crate::float::approx_eq(a, b)` call.
+fn emit_call_approx_eq(ctx: &EmitCtx, f: &mut Function) {
+    f.instruction(&Instruction::Call(ctx.helpers.approx_eq));
+}
+
+/// Push the i32 truthiness of the f64 already on the wasm stack, reproducing the
+/// VM's `is_truthy(n) = !approx_eq(n, 0.0)` (`vm.rs:89`): `approx_eq(n, 0.0)`
+/// gives `is_false`, and `i32.eqz` negates it to `is_truthy`.
+fn emit_is_truthy(ctx: &EmitCtx, f: &mut Function) {
+    f.instruction(&f64_const(0.0));
+    emit_call_approx_eq(ctx, f);
+    f.instruction(&Instruction::I32Eqz);
 }
 
 /// The maximum number of simultaneously-live `SetCond` condition registers a
@@ -188,13 +411,14 @@ pub(crate) fn emit_bytecode(
                     *off,
                 ))));
             }
-            Opcode::Op2 { op } => emit_op2(*op, f)?,
+            Opcode::Op2 { op } => emit_op2(*op, ctx, f)?,
             Opcode::Not {} => {
-                // Phase 1 truthiness-negate: (value == 0.0) as f64, matching the
-                // POC. The VM's `!is_truthy(r)` routes through `approx_eq`;
-                // Phase 2 swaps in that helper.
+                // The VM's `Not` is `(!is_truthy(r)) as f64`, which simplifies to
+                // `approx_eq(r, 0.0) as f64` (since `is_truthy = !approx_eq(·,0.0)`,
+                // the double negation cancels). So push `approx_eq(r, 0.0)` and
+                // widen the i32 1/0 to f64.
                 f.instruction(&f64_const(0.0));
-                f.instruction(&Instruction::F64Eq);
+                emit_call_approx_eq(ctx, f);
                 f.instruction(&Instruction::F64ConvertI32U);
             }
             Opcode::SetCond {} => {
@@ -203,10 +427,10 @@ pub(crate) fn emit_bytecode(
                         "wasmgen: SetCond nesting exceeded reserved condition locals".to_string(),
                     )
                 })?;
-                // Reduce the f64 condition to i32 truthiness (value != 0.0).
-                // Phase 1 uses exact compare; Phase 2 routes through approx_eq.
-                f.instruction(&f64_const(0.0));
-                f.instruction(&Instruction::F64Ne);
+                // Reduce the f64 condition to i32 truthiness, routing through
+                // `approx_eq` so a near-zero / ULP-adjacent condition takes the
+                // same branch the VM's `is_truthy(pop)` takes.
+                emit_is_truthy(ctx, f);
                 f.instruction(&Instruction::LocalSet(local));
                 cond_sp += 1;
             }
@@ -259,11 +483,11 @@ pub(crate) fn emit_bytecode(
             // `curr/next[module_off + off] = eval_op2(op, l, r)` (`vm.rs:1457`,
             // `vm.rs:1463`).
             Opcode::BinOpAssignCurr { op, off } => {
-                emit_op2(*op, f)?;
+                emit_op2(*op, ctx, f)?;
                 emit_assign(ctx.curr_base, *off, ctx, f);
             }
             Opcode::BinOpAssignNext { op, off } => {
-                emit_op2(*op, f)?;
+                emit_op2(*op, ctx, f)?;
                 emit_assign(ctx.next_base, *off, ctx, f);
             }
             Opcode::Ret => {
@@ -293,7 +517,7 @@ fn emit_assign(chunk_base: u32, off: u16, ctx: &EmitCtx, f: &mut Function) {
 /// non-commutative wasm ops (`f64.sub`/`f64.div`) are already correct.
 /// Comparisons yield an i32 0/1 which is converted to f64 1.0/0.0 because
 /// downstream opcodes consume booleans as f64 (matching `eval_op2`).
-fn emit_op2(op: Op2, f: &mut Function) -> Result<(), WasmGenError> {
+fn emit_op2(op: Op2, ctx: &EmitCtx, f: &mut Function) -> Result<(), WasmGenError> {
     match op {
         Op2::Add => {
             f.instruction(&Instruction::F64Add);
@@ -311,9 +535,18 @@ fn emit_op2(op: Op2, f: &mut Function) -> Result<(), WasmGenError> {
         Op2::Gte => emit_cmp(f, &Instruction::F64Ge),
         Op2::Lt => emit_cmp(f, &Instruction::F64Lt),
         Op2::Lte => emit_cmp(f, &Instruction::F64Le),
-        // Eq/And/Or need the VM's approx_eq / truthiness reduction; Mod
-        // (rem_euclid) and Exp (powf) need runtime helpers. Deferred to Phase 2.
-        Op2::Eq | Op2::And | Op2::Or | Op2::Mod | Op2::Exp => {
+        // `Eq` is `approx_eq(l, r) as f64`: the operands `[l, r]` are already in
+        // call order, so `call approx_eq` then widen the i32 1/0 to f64.
+        Op2::Eq => {
+            emit_call_approx_eq(ctx, f);
+            f.instruction(&Instruction::F64ConvertI32U);
+        }
+        // `And`/`Or` are `(is_truthy(l) OP is_truthy(r)) as f64`.
+        Op2::And => emit_logical(ctx, f, Instruction::I32And),
+        Op2::Or => emit_logical(ctx, f, Instruction::I32Or),
+        // Mod (rem_euclid) and Exp (powf) need runtime helpers landing in
+        // Phase 2 Tasks 2-3.
+        Op2::Mod | Op2::Exp => {
             return Err(WasmGenError::Unsupported(format!(
                 "wasmgen: unsupported binary op {}",
                 op2_name(op)
@@ -321,6 +554,31 @@ fn emit_op2(op: Op2, f: &mut Function) -> Result<(), WasmGenError> {
         }
     }
     Ok(())
+}
+
+/// Lower `Op2::And`/`Op2::Or`: `(is_truthy(l) OP is_truthy(r)) as f64`, with
+/// `combine` the bitwise `i32.and`/`i32.or` that realizes `OP`.
+///
+/// The operands are on the stack as `[l, r]` (`r` on top), and the wasm operand
+/// stack is strict LIFO, so `l` cannot be reduced while `r` sits above it.
+/// Park `r` in the scratch f64 local (the same local `emit_assign` uses; it is
+/// free here and -- in the `BinOpAssign*` callers -- is overwritten by
+/// `emit_assign` before its next read), reduce `is_truthy(l)`, push `r` back and
+/// reduce `is_truthy(r)`, then combine. Each `is_truthy` yields an i32 that is
+/// exactly 0 or 1, so the bitwise `combine` equals the logical operator; and
+/// because `is_truthy` is pure and total, evaluating both operands is
+/// bit-identical to the VM's short-circuiting `&&`/`||`.
+fn emit_logical(ctx: &EmitCtx, f: &mut Function, combine: Instruction) {
+    // stack: [l, r] -> scratch = r; stack: [l]
+    f.instruction(&Instruction::LocalSet(ctx.scratch_local));
+    // is_truthy(l); stack: [t_l]
+    emit_is_truthy(ctx, f);
+    // bring r back; is_truthy(r); stack: [t_l, t_r]
+    f.instruction(&Instruction::LocalGet(ctx.scratch_local));
+    emit_is_truthy(ctx, f);
+    // combine and widen to f64 1.0/0.0
+    f.instruction(&combine);
+    f.instruction(&Instruction::F64ConvertI32U);
 }
 
 /// Emit an f64 comparison and convert its i32 result to the f64 0.0/1.0 the
@@ -394,6 +652,10 @@ mod tests {
             module_off_local: L_MODULE_OFF,
             scratch_local: L_SCRATCH,
             condition_locals: (0..depth as u32).map(|i| L_COND_BASE + i).collect(),
+            // The helper-function indices are deterministic (helpers occupy the
+            // module's first function slots), and `build_module` emits exactly
+            // these helper bodies ahead of `eval`, so the indices agree.
+            helpers: build_helpers().fns,
         }
     }
 
@@ -405,18 +667,34 @@ mod tests {
     /// whose body is the lowered `bc`. When `with_result`, `eval` returns the
     /// f64 left on the stack. The function declares one scratch f64 local plus
     /// `cond_depth` i32 condition locals.
+    ///
+    /// Mirrors `module.rs`'s production assembly: the emitted helper functions
+    /// ([`build_helpers`]) occupy function indices `0..N` so the `call`s
+    /// `emit_bytecode` generates resolve, and `eval` follows at index `N`.
     fn build_module(bc: &ByteCode, ctx: &EmitCtx, with_result: bool, cond_depth: usize) -> Vec<u8> {
         let mut module = Module::new();
 
+        let helpers = build_helpers();
+        let n_helpers = helpers.functions.len() as u32;
+
+        // Type 0 is `eval`'s signature; each helper's signature follows.
         let mut types = TypeSection::new();
         if with_result {
             types.ty().function([ValType::I32], [ValType::F64]);
         } else {
             types.ty().function([ValType::I32], []);
         }
+        for hf in &helpers.functions {
+            types.ty().function(hf.params.clone(), hf.results.clone());
+        }
         module.section(&types);
 
+        // Function indices follow declaration order: helpers first (0..N), then
+        // `eval` at N. Helper type indices are 1..=N (eval's type is 0).
         let mut functions = FunctionSection::new();
+        for (i, _) in helpers.functions.iter().enumerate() {
+            functions.function(1 + i as u32);
+        }
         functions.function(0);
         module.section(&functions);
 
@@ -431,11 +709,14 @@ mod tests {
         module.section(&memories);
 
         let mut exports = ExportSection::new();
-        exports.export("eval", ExportKind::Func, 0);
+        exports.export("eval", ExportKind::Func, n_helpers);
         exports.export("mem", ExportKind::Memory, 0);
         module.section(&exports);
 
         let mut code = CodeSection::new();
+        for hf in helpers.functions {
+            code.function(&hf.body);
+        }
         // 1 scratch f64 local, then `cond_depth` i32 condition locals.
         let mut func = Function::new([(1, ValType::F64), (cond_depth as u32, ValType::I32)]);
         emit_bytecode(bc, ctx, &mut func).expect("lowering should succeed");
@@ -1009,17 +1290,28 @@ mod tests {
     // ── AC1.4: unsupported opcodes return a clean error, never a panic ────
 
     #[test]
-    fn unsupported_op2_eq_returns_error() {
+    fn op2_eq_lowers_without_error() {
+        // Eq is now supported (routed through the approx_eq helper), so lowering
+        // must succeed where Phase 1 returned Unsupported. Numeric parity is
+        // covered by the dedicated approx_eq / Op2::Eq tests below.
         let mut func = Function::new([]);
         let program = bc(vec![1.0, 2.0], vec![op2(Op2::Eq)]);
         let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+        assert!(result.is_ok(), "Op2::Eq should lower without error");
     }
 
     #[test]
     fn unsupported_op2_mod_returns_error() {
         let mut func = Function::new([]);
         let program = bc(vec![], vec![op2(Op2::Mod)]);
+        let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
+        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+    }
+
+    #[test]
+    fn unsupported_op2_exp_returns_error() {
+        let mut func = Function::new([]);
+        let program = bc(vec![], vec![op2(Op2::Exp)]);
         let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
         assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
     }
@@ -1060,6 +1352,375 @@ mod tests {
         let program = bc(vec![], vec![Opcode::ArraySum {}]);
         let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
         assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+    }
+
+    // ── approx_eq helper (AC7.2, AC1.5) ───────────────────────────────────
+
+    /// Build a module exporting `eq(a: f64, b: f64) -> i32` whose body is just
+    /// `local.get a; local.get b; call approx_eq`, directly exercising the
+    /// emitted helper in isolation. The helper functions are placed at indices
+    /// `0..N` (so the `call` resolves) and `eq` follows at index `N`.
+    fn build_approx_eq_module() -> Vec<u8> {
+        let mut module = Module::new();
+
+        let helpers = build_helpers();
+        let n_helpers = helpers.functions.len() as u32;
+
+        // Type 0 is `eq`'s signature (f64, f64) -> i32; helper types follow.
+        let mut types = TypeSection::new();
+        types
+            .ty()
+            .function([ValType::F64, ValType::F64], [ValType::I32]);
+        for hf in &helpers.functions {
+            types.ty().function(hf.params.clone(), hf.results.clone());
+        }
+        module.section(&types);
+
+        let mut functions = FunctionSection::new();
+        for (i, _) in helpers.functions.iter().enumerate() {
+            functions.function(1 + i as u32);
+        }
+        functions.function(0);
+        module.section(&functions);
+
+        let mut exports = ExportSection::new();
+        exports.export("eq", ExportKind::Func, n_helpers);
+        module.section(&exports);
+
+        let mut code = CodeSection::new();
+        for hf in helpers.functions {
+            code.function(&hf.body);
+        }
+        let mut eq = Function::new([]);
+        eq.instruction(&Instruction::LocalGet(0));
+        eq.instruction(&Instruction::LocalGet(1));
+        eq.instruction(&Instruction::Call(helpers.fns.approx_eq));
+        eq.instruction(&Instruction::End);
+        code.function(&eq);
+        module.section(&code);
+
+        module.finish()
+    }
+
+    /// Run the emitted `approx_eq` helper on `(a, b)` under the interpreter,
+    /// returning its i32 result (1 = approximately equal). Built once per call
+    /// (cheap; the sample sizes are small).
+    fn run_approx_eq(a: f64, b: f64) -> i32 {
+        let bytes = build_approx_eq_module();
+        let info = validate(&bytes).expect("approx_eq module must validate");
+        let mut store = Store::new(());
+        let module = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("approx_eq module must instantiate")
+            .module_addr;
+        let eq = store
+            .instance_export(module, "eq")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(f64, f64), i32>(eq, (a, b))
+            .expect("eq invocation must succeed")
+    }
+
+    /// Assert the emitted helper agrees with the Rust `crate::float::approx_eq`
+    /// oracle for both argument orders (the function is symmetric).
+    fn assert_approx_eq_matches_oracle(a: f64, b: f64) {
+        let oracle = crate::float::approx_eq(a, b) as i32;
+        assert_eq!(
+            run_approx_eq(a, b),
+            oracle,
+            "approx_eq({a:?}, {b:?}) disagreed with oracle {oracle}"
+        );
+        let oracle_swapped = crate::float::approx_eq(b, a) as i32;
+        assert_eq!(
+            run_approx_eq(b, a),
+            oracle_swapped,
+            "approx_eq({b:?}, {a:?}) disagreed with oracle {oracle_swapped}"
+        );
+    }
+
+    /// Move `x` by `k` ULPs in raw-bit order (the increment the float-cmp ordered
+    /// map measures within a sign). For small `|k|` and finite `x` this yields a
+    /// value the oracle judges 0..|k| ULPs away.
+    fn nudge_ulps(x: f64, k: i64) -> f64 {
+        f64::from_bits(((x.to_bits() as i64).wrapping_add(k)) as u64)
+    }
+
+    #[test]
+    fn approx_eq_matches_oracle_curated() {
+        // The exact edge cases the task enumerates.
+        let na = crate::float::NA; // finite -2^109 sentinel, NOT NaN.
+        let cases: &[(f64, f64)] = &[
+            // exact-equal
+            (1.0, 1.0),
+            (0.0, 0.0),
+            (-3.5, -3.5),
+            (1e300, 1e300),
+            // far apart
+            (1.0, 2.0),
+            (0.0, 1e100),
+            (-1e9, 1e9),
+            // 1-4 ULP apart around 1.0
+            (1.0, nudge_ulps(1.0, 1)),
+            (1.0, nudge_ulps(1.0, 2)),
+            (1.0, nudge_ulps(1.0, 3)),
+            (1.0, nudge_ulps(1.0, 4)),
+            // 5 ULPs apart (just past the threshold) around a larger magnitude
+            (1000.0, nudge_ulps(1000.0, 5)),
+            (1000.0, nudge_ulps(1000.0, 4)),
+            // f64::EPSILON-apart around 1.0 (the absolute-epsilon check)
+            (1.0, 1.0 + f64::EPSILON),
+            (1.0, 1.0 - f64::EPSILON),
+            // around zero (subnormals and tiny values straddling the epsilon)
+            (0.0, f64::from_bits(1)),                // smallest subnormal
+            (0.0, -f64::from_bits(1)),               // negative smallest subnormal
+            (0.0, f64::EPSILON),                     // EPSILON away from zero
+            (0.0, 1e-300),                           // tiny normal, within epsilon
+            (f64::MIN_POSITIVE, -f64::MIN_POSITIVE), // straddle zero by subnormal step
+            // signed zeros
+            (0.0, -0.0),
+            // NaN cases
+            (f64::NAN, f64::NAN),
+            (f64::NAN, 1.0),
+            (f64::NAN, 0.0),
+            // the finite :NA: sentinel
+            (na, na),
+            (na, 0.0),
+            (na, 1.0),
+            (na, -(2.0_f64).powi(110)),
+            // infinities
+            (f64::INFINITY, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::NEG_INFINITY),
+            (f64::INFINITY, f64::NEG_INFINITY),
+            (f64::INFINITY, f64::MAX),
+            (f64::NEG_INFINITY, f64::MIN),
+        ];
+        for &(a, b) in cases {
+            assert_approx_eq_matches_oracle(a, b);
+        }
+    }
+
+    #[test]
+    fn approx_eq_matches_oracle_randomized() {
+        use rand::prelude::*;
+        // Fixed seed: a sampled-but-reproducible parity sweep against the oracle.
+        let mut rng = StdRng::seed_from_u64(0xA222_02EE);
+        for _ in 0..400 {
+            // A diverse magnitude/sign base value.
+            let exp = rng.random_range(-308i32..=308);
+            let mantissa: f64 = rng.random_range(-1.0..1.0);
+            let x = mantissa * 10f64.powi(exp);
+
+            // ULP-adjacent partner (often within the 4-ULP threshold, sometimes
+            // just past it), exercising the ULP path on both sides of the gap.
+            let k = rng.random_range(-8i64..=8);
+            assert_approx_eq_matches_oracle(x, nudge_ulps(x, k));
+
+            // An independent unrelated value (usually far apart -> ULP + epsilon
+            // both fail), exercising the false path.
+            let exp2 = rng.random_range(-308i32..=308);
+            let y: f64 = rng.random_range(-1.0..1.0) * 10f64.powi(exp2);
+            assert_approx_eq_matches_oracle(x, y);
+
+            // Near-zero straddling pairs (the epsilon absolute check region).
+            let tiny_a = rng.random_range(-1.0..1.0) * f64::EPSILON;
+            let tiny_b = rng.random_range(-1.0..1.0) * f64::EPSILON;
+            assert_approx_eq_matches_oracle(tiny_a, tiny_b);
+        }
+    }
+
+    // ── Op2::Eq / And / Or / Not / SetCond+If route through approx_eq ─────
+
+    /// Evaluate `l Op2::Eq r` (push l, push r, Op2::Eq) and return the f64 bool.
+    fn eval_eq(l: f64, r: f64) -> f64 {
+        let lit = vec![l, r];
+        value(
+            vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
+                op2(Op2::Eq),
+            ],
+            lit,
+            &[],
+        )
+    }
+
+    #[test]
+    fn op2_eq_matches_vm_for_ulp_adjacent_operands() {
+        // Raw `==` would call these unequal, but the VM's `approx_eq` (and so the
+        // wasm) calls them equal: 1 ULP and EPSILON-apart around 1.0.
+        let one_ulp = nudge_ulps(1.0, 1);
+        assert_eq!(eval_eq(1.0, one_ulp), 1.0);
+        assert_eq!(eval_eq(1.0, 1.0 + f64::EPSILON), 1.0);
+        // 5 ULPs apart at a larger magnitude: past the threshold -> not equal.
+        assert_eq!(eval_eq(1000.0, nudge_ulps(1000.0, 5)), 0.0);
+        // Exact and far-apart anchors.
+        assert_eq!(eval_eq(2.5, 2.5), 1.0);
+        assert_eq!(eval_eq(1.0, 2.0), 0.0);
+        // NaN == NaN is true under approx_eq (identical bits -> 0 ULPs).
+        assert_eq!(eval_eq(f64::NAN, f64::NAN), 1.0);
+        assert_eq!(eval_eq(f64::NAN, 1.0), 0.0);
+    }
+
+    #[test]
+    fn op2_eq_matches_vm_oracle_over_sample() {
+        // The whole-expression Eq lowering must agree with the VM's eval_op2 Eq
+        // (= approx_eq as f64) across the curated edge values.
+        let na = crate::float::NA;
+        let cases: &[(f64, f64)] = &[
+            (1.0, nudge_ulps(1.0, 3)),
+            (1.0, nudge_ulps(1.0, 4)),
+            (1.0, nudge_ulps(1.0, 5)),
+            (0.0, -0.0),
+            (0.0, f64::EPSILON),
+            (na, na),
+            (na, 0.0),
+            (f64::INFINITY, f64::INFINITY),
+            (f64::INFINITY, f64::NEG_INFINITY),
+        ];
+        for &(l, r) in cases {
+            let expected = crate::float::approx_eq(l, r) as i8 as f64;
+            assert_eq!(eval_eq(l, r), expected, "Eq({l:?}, {r:?})");
+        }
+    }
+
+    /// Evaluate `l Op2::And r` / `l Op2::Or r`.
+    fn eval_logical(op: Op2, l: f64, r: f64) -> f64 {
+        value(
+            vec![
+                Opcode::LoadConstant { id: 0 },
+                Opcode::LoadConstant { id: 1 },
+                op2(op),
+            ],
+            vec![l, r],
+            &[],
+        )
+    }
+
+    /// The VM's truthiness: `is_truthy(n) = !approx_eq(n, 0.0)`.
+    fn vm_is_truthy(n: f64) -> bool {
+        !crate::float::approx_eq(n, 0.0)
+    }
+
+    #[test]
+    fn op2_and_or_match_vm_truthiness() {
+        // EPSILON is falsy (within epsilon of 0); a small-but-not-epsilon value
+        // is truthy. These are exactly where raw `!= 0.0` would diverge from the
+        // VM.
+        let eps = f64::EPSILON;
+        let small = 0.001;
+        let operands = [
+            0.0,
+            -0.0,
+            eps,
+            -eps,
+            small,
+            -small,
+            1.0,
+            f64::NAN,
+            f64::INFINITY,
+        ];
+        for &l in &operands {
+            for &r in &operands {
+                let and_expected = (vm_is_truthy(l) && vm_is_truthy(r)) as i8 as f64;
+                let or_expected = (vm_is_truthy(l) || vm_is_truthy(r)) as i8 as f64;
+                assert_eq!(
+                    eval_logical(Op2::And, l, r),
+                    and_expected,
+                    "And({l:?}, {r:?})"
+                );
+                assert_eq!(eval_logical(Op2::Or, l, r), or_expected, "Or({l:?}, {r:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn op2_and_or_operand_order_preserved() {
+        // And/Or stash the right operand in the scratch local; verify a
+        // non-symmetric truthiness pairing still combines correctly and that the
+        // scratch reuse doesn't corrupt a following assignment.
+        // (truthy AND falsy) = 0; (truthy OR falsy) = 1.
+        assert_eq!(eval_logical(Op2::And, 5.0, 0.0), 0.0);
+        assert_eq!(eval_logical(Op2::And, 0.0, 5.0), 0.0);
+        assert_eq!(eval_logical(Op2::Or, 5.0, 0.0), 1.0);
+        assert_eq!(eval_logical(Op2::Or, 0.0, 5.0), 1.0);
+    }
+
+    #[test]
+    fn bin_op_assign_and_uses_scratch_safely() {
+        // BinOpAssignCurr{And} fuses the And reduction with a store; the And
+        // lowering reuses the scratch local, which emit_assign then overwrites.
+        // Verify the stored result is correct. (truthy AND truthy) = 1 -> slot 5.
+        let code = vec![
+            Opcode::LoadConstant { id: 0 },
+            Opcode::LoadConstant { id: 1 },
+            Opcode::BinOpAssignCurr {
+                op: Op2::And,
+                off: 5,
+            },
+        ];
+        assert_eq!(stored(code, vec![3.0, 7.0], &[], 40), 1.0);
+        // (truthy AND falsy) = 0.
+        let code0 = vec![
+            Opcode::LoadConstant { id: 0 },
+            Opcode::LoadConstant { id: 1 },
+            Opcode::BinOpAssignCurr {
+                op: Op2::And,
+                off: 5,
+            },
+        ];
+        assert_eq!(stored(code0, vec![3.0, 0.0], &[], 40), 0.0);
+    }
+
+    #[test]
+    fn not_matches_vm_approx_eq_truthiness() {
+        // Not(n) = (!is_truthy(n)) as f64 = approx_eq(n, 0.0) as f64.
+        // EPSILON is "false" so Not(EPSILON) = 1.0; small-but-not-epsilon is
+        // "true" so Not(0.001) = 0.0.
+        let operands = [0.0, -0.0, f64::EPSILON, -f64::EPSILON, 0.001, 1.0, f64::NAN];
+        for &n in &operands {
+            let expected = (!vm_is_truthy(n)) as i8 as f64;
+            let got = value(
+                vec![Opcode::LoadConstant { id: 0 }, Opcode::Not {}],
+                vec![n],
+                &[],
+            );
+            assert_eq!(got, expected, "Not({n:?})");
+        }
+    }
+
+    #[test]
+    fn setcond_if_uses_approx_eq_truthiness() {
+        // `if cond then t else f` with the condition routed through approx_eq.
+        // EPSILON is falsy -> selects the else arm; 0.001 is truthy -> then arm.
+        let if_eval = |cond: f64| {
+            let code = vec![
+                Opcode::LoadConstant { id: 1 }, // t
+                Opcode::LoadConstant { id: 2 }, // f
+                Opcode::LoadConstant { id: 0 }, // cond
+                Opcode::SetCond {},
+                Opcode::If {},
+            ];
+            run(
+                &bc(vec![cond, 10.0, 20.0], code),
+                &ctx_with_cond_depth(1),
+                true,
+                1,
+                &[],
+                None,
+            )
+        };
+        // Falsy conditions (within epsilon of 0) -> else (20.0).
+        assert_eq!(if_eval(0.0), 20.0);
+        assert_eq!(if_eval(-0.0), 20.0);
+        assert_eq!(if_eval(f64::EPSILON), 20.0);
+        assert_eq!(if_eval(-f64::EPSILON), 20.0);
+        // Truthy conditions -> then (10.0).
+        assert_eq!(if_eval(0.001), 10.0);
+        assert_eq!(if_eval(1.0), 10.0);
+        assert_eq!(if_eval(f64::NAN), 10.0); // is_truthy(NaN) is true
+        assert_eq!(if_eval(f64::INFINITY), 10.0);
     }
 
     // ── max_condition_depth ───────────────────────────────────────────────

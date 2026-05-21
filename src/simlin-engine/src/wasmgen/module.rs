@@ -2,6 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// pattern: Functional Core
+// Pure transformation: a `CompiledSimulation` (or datamodel routed through the
+// in-memory salsa compile) in, a self-contained wasm module (`Vec<u8>`) plus its
+// `WasmLayout` out. No filesystem/network I/O; tests execute the result under
+// the DLR-FT interpreter.
+
 //! Whole-model code generation: lower a salsa-compiled `CompiledSimulation` to
 //! a self-contained WebAssembly module that runs an entire simulation in one
 //! exported call.
@@ -38,7 +44,7 @@ use crate::results::{Method, Specs};
 use crate::vm::CompiledSimulation;
 
 use super::WasmGenError;
-use super::lower::{self, f64_const, max_condition_depth, memarg};
+use super::lower::{self, BuiltHelpers, build_helpers, f64_const, max_condition_depth, memarg};
 
 // Reserved global slots, mirroring `crate::vm`.
 const TIME_OFF: usize = 0;
@@ -99,14 +105,20 @@ pub struct WasmLayout {
     pub var_offsets: Vec<(String, usize)>,
 }
 
-// Function indices in the emitted module. The three opcode programs share the
-// `(i32) -> ()` type; `run` is `() -> ()`.
+// Function indices of the per-program block, RELATIVE to the first program
+// function. The emitted helper functions ([`lower::build_helpers`]) occupy the
+// module's first function slots (`0..n_helpers`), so the absolute index of each
+// program function is `n_helpers + F_*`. The three opcode programs share the
+// `(i32) -> ()` type; `run` is `() -> ()`. Keeping these relative (and adding
+// `n_helpers` at the call/export sites) means new helpers shift every program
+// function automatically, with no index hard-coded against a fixed helper count.
 const F_INITIALS: u32 = 0;
 const F_FLOWS: u32 = 1;
 const F_STOCKS: u32 = 2;
 const F_RUN: u32 = 3;
 
-// Type-section indices.
+// Type-section indices. The two program types come first; helper types are
+// appended after them (at indices 2..), so these stay fixed.
 const TYPE_OPCODE_FN: u32 = 0; // (i32) -> ()
 const TYPE_RUN_FN: u32 = 1; // () -> ()
 
@@ -163,6 +175,14 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     let save_every = ((specs.save_step / specs.dt).round() as i64).max(1);
     let save_every = i32::try_from(save_every).map_err(|_| too_large())?;
 
+    // Emitted helper functions occupy the module's first function slots; the
+    // per-program functions follow at `n_helpers + F_*`. Build them up front so
+    // the index registry threaded into each `EmitCtx` matches the assembled
+    // module's layout, and so `emit_bytecode`'s `call`s resolve.
+    let helpers = build_helpers();
+    let helper_fns = helpers.fns;
+    let n_helpers = helpers.functions.len() as u32;
+
     // Each opcode program runs over the shared f64 slab. The base offsets are
     // constant; `module_off` is the function's i32 parameter (0 for the root).
     let make_ctx = |cond_depth: usize| lower::EmitCtx {
@@ -174,6 +194,7 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         module_off_local: L_MODULE_OFF,
         scratch_local: L_SCRATCH,
         condition_locals: (0..cond_depth as u32).map(|i| L_COND_BASE + i).collect(),
+        helpers: helper_fns,
     };
 
     let initials_fn = emit_initials_fn(root, &make_ctx)?;
@@ -189,9 +210,11 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         n_chunks,
         save_every,
         &stock_offsets,
+        n_helpers,
     );
 
     let wasm = assemble_simulation(
+        helpers,
         initials_fn,
         flows_fn,
         stocks_fn,
@@ -296,8 +319,15 @@ fn emit_run_simulation(
     n_chunks: u32,
     save_every: i32,
     stock_offsets: &[usize],
+    n_helpers: u32,
 ) -> Function {
     let mut f = Function::new([(3, ValType::I32)]);
+
+    // Absolute function indices of the per-program functions: the helpers
+    // occupy slots `0..n_helpers`, so each program function is `n_helpers + F_*`.
+    let f_initials = n_helpers + F_INITIALS;
+    let f_flows = n_helpers + F_FLOWS;
+    let f_stocks = n_helpers + F_STOCKS;
 
     let time_addr = TIME_OFF as u64 * u64::from(SLOT_SIZE);
 
@@ -309,7 +339,7 @@ fn emit_run_simulation(
     store_curr_const_abs(&mut f, INITIAL_TIME_OFF, specs.start);
     store_curr_const_abs(&mut f, FINAL_TIME_OFF, specs.stop);
     f.instruction(&I::I32Const(0));
-    f.instruction(&I::Call(F_INITIALS));
+    f.instruction(&I::Call(f_initials));
 
     f.instruction(&I::Block(BlockType::Empty)); // $break
     f.instruction(&I::Loop(BlockType::Empty)); // $continue
@@ -323,9 +353,9 @@ fn emit_run_simulation(
 
     // flows then stocks, both over module_off 0.
     f.instruction(&I::I32Const(0));
-    f.instruction(&I::Call(F_FLOWS));
+    f.instruction(&I::Call(f_flows));
     f.instruction(&I::I32Const(0));
-    f.instruction(&I::Call(F_STOCKS));
+    f.instruction(&I::Call(f_stocks));
 
     // step_accum += 1
     f.instruction(&I::LocalGet(L_STEP_ACCUM));
@@ -418,11 +448,13 @@ fn store_curr_const_abs(f: &mut Function, off: usize, v: f64) {
     f.instruction(&I::F64Store(memarg(off as u64 * u64::from(SLOT_SIZE))));
 }
 
-/// Assemble the four-function simulation module: type, function, memory,
-/// globals, exports, code. Exports `memory`, `run`, and the three
-/// self-describing i32 geometry globals.
+/// Assemble the simulation module: type, function, memory, globals, exports,
+/// code. The emitted helper functions ([`build_helpers`]) lead the function and
+/// code sections (indices `0..n_helpers`); the four program functions follow.
+/// Exports `memory`, `run`, and the three self-describing i32 geometry globals.
 #[allow(clippy::too_many_arguments)]
 fn assemble_simulation(
+    helpers: BuiltHelpers,
     initials: Function,
     flows: Function,
     stocks: Function,
@@ -433,13 +465,26 @@ fn assemble_simulation(
     results_base: u32,
 ) -> Vec<u8> {
     let mut wasm = WasmModule::new();
+    let n_helpers = helpers.functions.len() as u32;
 
+    // Type indices 0/1 are the program types; helper types are appended at 2..
+    // (in helper order), so a helper at function index `i` uses type index
+    // `2 + i`.
     let mut types = TypeSection::new();
     types.ty().function([ValType::I32], []); // TYPE_OPCODE_FN: (i32) -> ()
     types.ty().function([], []); // TYPE_RUN_FN: () -> ()
+    for hf in &helpers.functions {
+        types.ty().function(hf.params.clone(), hf.results.clone());
+    }
     wasm.section(&types);
 
+    // Function section: helpers first (so their indices are 0..n_helpers), then
+    // the four program functions.
     let mut functions = FunctionSection::new();
+    let first_helper_type = TYPE_RUN_FN + 1; // == 2
+    for (i, _) in helpers.functions.iter().enumerate() {
+        functions.function(first_helper_type + i as u32);
+    }
     functions.function(TYPE_OPCODE_FN); // initials
     functions.function(TYPE_OPCODE_FN); // flows
     functions.function(TYPE_OPCODE_FN); // stocks
@@ -468,14 +513,19 @@ fn assemble_simulation(
     wasm.section(&globals);
 
     let mut exports = ExportSection::new();
-    exports.export("run", ExportKind::Func, F_RUN);
+    exports.export("run", ExportKind::Func, n_helpers + F_RUN);
     exports.export("memory", ExportKind::Memory, 0);
     exports.export("n_slots", ExportKind::Global, 0);
     exports.export("n_chunks", ExportKind::Global, 1);
     exports.export("results_offset", ExportKind::Global, 2);
     wasm.section(&exports);
 
+    // Code section order must match the function section: helper bodies, then
+    // the four program functions.
     let mut code = CodeSection::new();
+    for hf in &helpers.functions {
+        code.function(&hf.body);
+    }
     code.function(&initials);
     code.function(&flows);
     code.function(&stocks);
