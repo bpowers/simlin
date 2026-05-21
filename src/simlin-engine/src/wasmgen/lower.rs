@@ -81,6 +81,20 @@ const F64_ALIGN: u32 = 3;
 pub(crate) struct EmitCtx {
     pub curr_base: u32,
     pub next_base: u32,
+    /// Byte offset of the GF directory region (8 bytes/entry, indexed by global
+    /// table index: `(data_byte_offset: i32, n_points: i32)`). The `Lookup`
+    /// opcode reads `directory_base + table_idx*8` to map a table index to its
+    /// data location. Both bases are run-invariant: every per-program function
+    /// reads the same read-only GF regions.
+    // Read by the `Lookup` opcode arm (Task 3); the `allow` is removed there.
+    #[allow(dead_code)]
+    pub gf_directory_base: u32,
+    /// Byte offset of the GF data region (every table's `(x,y)` knots as f64 LE
+    /// pairs, concatenated). Retained for completeness/Phase-7 reuse; the
+    /// per-table absolute data offset the `Lookup` opcode passes to a helper is
+    /// read from the directory, so opcode lowering does not consult this field.
+    #[allow(dead_code)]
+    pub gf_data_base: u32,
     // dt/start_time/final_time are the run-invariant time globals that back the
     // seeds `run` writes into the TIME/DT/INITIAL_TIME/FINAL_TIME memory slots.
     // Opcode lowering reads those values from memory via `LoadGlobalVar` (slots
@@ -1129,6 +1143,11 @@ mod tests {
         EmitCtx {
             curr_base: 0,
             next_base: 4096,
+            // The non-Lookup opcode tests place no GF regions; these bases are
+            // unused by the opcodes they exercise. The Lookup-opcode tests
+            // (which do read these) build their own ctx with real GF bases.
+            gf_directory_base: 0,
+            gf_data_base: 0,
             dt: 0.5,
             start_time: 1.0,
             final_time: 25.0,

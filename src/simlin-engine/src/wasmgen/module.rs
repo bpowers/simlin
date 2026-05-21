@@ -34,9 +34,9 @@
 
 use wasm_encoder::Instruction as I;
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, ExportKind, ExportSection, Function, FunctionSection,
-    GlobalSection, GlobalType, MemorySection, MemoryType, Module as WasmModule, TypeSection,
-    ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, Function,
+    FunctionSection, GlobalSection, GlobalType, MemorySection, MemoryType, Module as WasmModule,
+    TypeSection, ValType,
 };
 
 use crate::bytecode::{ByteCode, CompiledModule, Opcode};
@@ -101,8 +101,104 @@ pub struct WasmLayout {
     pub n_chunks: usize,
     /// Byte offset of the results region within linear memory.
     pub results_offset: usize,
+    /// Byte offset of the GF directory region (8 bytes/entry, indexed by global
+    /// table index: `(data_byte_offset: i32, n_points: i32)`). Zero when the
+    /// model has no graphical functions.
+    pub gf_directory_offset: usize,
+    /// Byte offset of the GF data region (every table's `(x,y)` knots as
+    /// consecutive f64 LE pairs). Zero when the model has no graphical
+    /// functions.
+    pub gf_data_offset: usize,
     /// Canonical variable name -> slot offset within a chunk.
     pub var_offsets: Vec<(String, usize)>,
+}
+
+// GF region geometry. The directory holds one 8-byte entry per global table
+// index (two i32: the table's absolute data byte offset, and its point count);
+// the data region holds every table's knots as consecutive f64 LE `(x, y)`
+// pairs (16 bytes/point).
+const GF_DIRECTORY_ENTRY_BYTES: u32 = 8; // i32 data_offset + i32 n_points
+const GF_KNOT_BYTES: u32 = 16; // f64 x + f64 y
+
+/// The two read-only graphical-function regions for a model, laid out at a
+/// caller-chosen `region_base` byte offset within the module's linear memory.
+///
+/// `directory_base` == `region_base`; the data region follows the directory.
+/// Each directory entry's first i32 is the *absolute* byte offset of its
+/// table's first knot (so the lookup helpers can `f64.load` a knot with no
+/// further base arithmetic); the second i32 is the table's point count. The
+/// concatenation order is the global table order in
+/// `ByteCodeContext.graphical_functions`, so the `Lookup` opcode's
+/// `base_gf + element_offset` indexes directly into the directory.
+struct GfRegions {
+    directory_base: u32,
+    data_base: u32,
+    /// `directory` ++ `data` would be the full image, but they are kept
+    /// separate so each can be emitted as its own active `DataSection` segment
+    /// at its own base.
+    directory: Vec<u8>,
+    data: Vec<u8>,
+    /// Total byte span of both regions (directory + data), for growing `pages`.
+    total_bytes: u32,
+}
+
+/// Build the GF directory + data regions for `tables` (the root's
+/// `graphical_functions`) at `region_base`. Returns `None` (no regions, no
+/// growth) when there are no tables. Returns a layout error if the regions
+/// would overflow a u32 byte address.
+fn build_gf_regions(
+    tables: &[Vec<(f64, f64)>],
+    region_base: u32,
+) -> Result<Option<GfRegions>, WasmGenError> {
+    if tables.is_empty() {
+        return Ok(None);
+    }
+    let too_large =
+        || WasmGenError::Unsupported("wasmgen: graphical functions too large".to_string());
+
+    let n_tables = u32::try_from(tables.len()).map_err(|_| too_large())?;
+    let directory_bytes = n_tables
+        .checked_mul(GF_DIRECTORY_ENTRY_BYTES)
+        .ok_or_else(too_large)?;
+    let directory_base = region_base;
+    let data_base = directory_base
+        .checked_add(directory_bytes)
+        .ok_or_else(too_large)?;
+
+    let mut directory = Vec::with_capacity(directory_bytes as usize);
+    let mut data: Vec<u8> = Vec::new();
+    // The running byte offset of the next table's first knot, relative to
+    // `data_base`. Promoted to an absolute address when written into the
+    // directory so a helper can load a knot directly.
+    let mut data_rel_offset: u32 = 0;
+    for table in tables {
+        let n_points = u32::try_from(table.len()).map_err(|_| too_large())?;
+        let abs_data_offset = data_base
+            .checked_add(data_rel_offset)
+            .ok_or_else(too_large)?;
+        directory.extend_from_slice(&(abs_data_offset as i32).to_le_bytes());
+        directory.extend_from_slice(&(n_points as i32).to_le_bytes());
+
+        for &(x, y) in table {
+            data.extend_from_slice(&x.to_le_bytes());
+            data.extend_from_slice(&y.to_le_bytes());
+        }
+        let table_bytes = n_points.checked_mul(GF_KNOT_BYTES).ok_or_else(too_large)?;
+        data_rel_offset = data_rel_offset
+            .checked_add(table_bytes)
+            .ok_or_else(too_large)?;
+    }
+
+    let total_bytes = directory_bytes
+        .checked_add(data_rel_offset)
+        .ok_or_else(too_large)?;
+    Ok(Some(GfRegions {
+        directory_base,
+        data_base,
+        directory,
+        data,
+        total_bytes,
+    }))
 }
 
 // Function indices of the per-program block, RELATIVE to the first program
@@ -168,6 +264,22 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     let total_bytes = results_base
         .checked_add(results_bytes)
         .ok_or_else(too_large)?;
+
+    // The GF directory + data regions follow the results region. Their bases
+    // are threaded into every `EmitCtx` so the `Lookup` opcode can address the
+    // directory, and they are initialized at instantiation by an active
+    // `DataSection`. `results_offset` (exported) is unchanged.
+    let gf_regions = build_gf_regions(&root.context.graphical_functions, total_bytes)?;
+    let (gf_directory_base, gf_data_base) = gf_regions
+        .as_ref()
+        .map(|r| (r.directory_base, r.data_base))
+        .unwrap_or((0, 0));
+    let total_bytes = match &gf_regions {
+        Some(r) => total_bytes
+            .checked_add(r.total_bytes)
+            .ok_or_else(too_large)?,
+        None => total_bytes,
+    };
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
 
     // save_every mirrors vm.rs::run_to: max(1, round(save_step / dt)).
@@ -187,6 +299,8 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     let make_ctx = |cond_depth: usize| lower::EmitCtx {
         curr_base,
         next_base,
+        gf_directory_base,
+        gf_data_base,
         dt: specs.dt,
         start_time: specs.start,
         final_time: specs.stop,
@@ -223,6 +337,7 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         n_slots,
         n_chunks,
         results_base,
+        gf_regions.as_ref(),
     );
 
     let var_offsets = sim
@@ -237,6 +352,8 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
             n_slots: root.n_slots,
             n_chunks: specs.n_chunks,
             results_offset: results_base as usize,
+            gf_directory_offset: gf_directory_base as usize,
+            gf_data_offset: gf_data_base as usize,
             var_offsets,
         },
     })
@@ -451,9 +568,12 @@ fn store_curr_const_abs(f: &mut Function, off: usize, v: f64) {
 }
 
 /// Assemble the simulation module: type, function, memory, globals, exports,
-/// code. The emitted helper functions ([`build_helpers`]) lead the function and
-/// code sections (indices `0..n_helpers`); the four program functions follow.
-/// Exports `memory`, `run`, and the three self-describing i32 geometry globals.
+/// code, and (when present) the GF data segments. The emitted helper functions
+/// ([`build_helpers`]) lead the function and code sections (indices
+/// `0..n_helpers`); the four program functions follow. Exports `memory`, `run`,
+/// and the three self-describing i32 geometry globals. When `gf_regions` is
+/// `Some`, two active `DataSection` segments initialize the GF directory and
+/// data regions at instantiation.
 #[allow(clippy::too_many_arguments)]
 fn assemble_simulation(
     helpers: BuiltHelpers,
@@ -465,6 +585,7 @@ fn assemble_simulation(
     n_slots: u32,
     n_chunks: u32,
     results_base: u32,
+    gf_regions: Option<&GfRegions>,
 ) -> Vec<u8> {
     let mut wasm = WasmModule::new();
     let n_helpers = helpers.functions.len() as u32;
@@ -534,6 +655,24 @@ fn assemble_simulation(
     code.function(&run);
     wasm.section(&code);
 
+    // The GF directory + data regions are read-only constants; an active data
+    // segment writes each at its region base when the module is instantiated.
+    // The data section must follow the code section per the wasm binary order.
+    if let Some(gf) = gf_regions {
+        let mut data = DataSection::new();
+        data.active(
+            0,
+            &ConstExpr::i32_const(gf.directory_base as i32),
+            gf.directory.iter().copied(),
+        );
+        data.active(
+            0,
+            &ConstExpr::i32_const(gf.data_base as i32),
+            gf.data.iter().copied(),
+        );
+        wasm.section(&data);
+    }
+
     wasm.finish()
 }
 
@@ -552,6 +691,170 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../default_projects/population/model.xmile"
     );
+
+    /// Decode a GF directory's `n`th entry from `directory` bytes: the absolute
+    /// data byte offset and the point count.
+    fn decode_dir_entry(directory: &[u8], n: usize) -> (usize, usize) {
+        let base = n * GF_DIRECTORY_ENTRY_BYTES as usize;
+        let data_off = i32::from_le_bytes(directory[base..base + 4].try_into().unwrap()) as usize;
+        let n_points =
+            i32::from_le_bytes(directory[base + 4..base + 8].try_into().unwrap()) as usize;
+        (data_off, n_points)
+    }
+
+    /// Decode the `(x, y)` knots stored at relative `data` offset `rel_off` for
+    /// a table of `n_points` (interleaved f64 LE x,y pairs).
+    fn decode_knots(data: &[u8], rel_off: usize, n_points: usize) -> Vec<(f64, f64)> {
+        (0..n_points)
+            .map(|k| {
+                let a = rel_off + k * GF_KNOT_BYTES as usize;
+                let x = f64::from_le_bytes(data[a..a + 8].try_into().unwrap());
+                let y = f64::from_le_bytes(data[a + 8..a + 16].try_into().unwrap());
+                (x, y)
+            })
+            .collect()
+    }
+
+    /// Task 1 (pure layout): `build_gf_regions` concatenates several tables into
+    /// the data region in order, and the directory maps each global table index
+    /// to its *absolute* data byte offset + point count. The data offset for
+    /// table `t` must be `data_base` plus the byte span of all earlier tables.
+    #[test]
+    fn build_gf_regions_lays_out_directory_and_data() {
+        let region_base = 4096u32;
+        let tables = vec![
+            vec![(0.0, 10.0), (1.0, 20.0), (2.5, 5.0)],
+            vec![(-1.0, 0.5)],
+            vec![(0.0, 0.0), (10.0, 100.0)],
+        ];
+        let regions = build_gf_regions(&tables, region_base)
+            .expect("layout must succeed")
+            .expect("non-empty tables yield Some");
+
+        // Directory immediately at region_base; data follows the directory.
+        assert_eq!(regions.directory_base, region_base);
+        let directory_bytes = tables.len() as u32 * GF_DIRECTORY_ENTRY_BYTES;
+        assert_eq!(regions.data_base, region_base + directory_bytes);
+        assert_eq!(regions.directory.len(), directory_bytes as usize);
+
+        // Walk the directory; each table's data offset is absolute and its
+        // knots round-trip exactly. The running expected offset is data_base
+        // plus the byte span of all previously-laid tables.
+        let mut expected_abs = regions.data_base as usize;
+        let mut total_knot_bytes = 0usize;
+        for (t, table) in tables.iter().enumerate() {
+            let (data_off, n_points) = decode_dir_entry(&regions.directory, t);
+            assert_eq!(n_points, table.len(), "table {t} point count");
+            assert_eq!(data_off, expected_abs, "table {t} absolute data offset");
+
+            let rel = data_off - regions.data_base as usize;
+            assert_eq!(
+                decode_knots(&regions.data, rel, n_points).as_slice(),
+                table.as_slice(),
+                "table {t} knots round-trip"
+            );
+
+            let span = table.len() * GF_KNOT_BYTES as usize;
+            expected_abs += span;
+            total_knot_bytes += span;
+        }
+        assert_eq!(
+            regions.total_bytes as usize,
+            directory_bytes as usize + total_knot_bytes,
+            "total span covers directory + all knots"
+        );
+    }
+
+    /// Task 1 (pure layout): an empty table list yields no regions and no
+    /// growth, so a model without graphical functions is unaffected.
+    #[test]
+    fn build_gf_regions_empty_is_none() {
+        assert!(
+            build_gf_regions(&[], 4096)
+                .expect("layout must succeed")
+                .is_none(),
+            "no tables -> no GF regions"
+        );
+    }
+
+    /// Task 1 (data-section round-trip): the GF regions reach the instantiated
+    /// module's linear memory via the active `DataSection`, at the bases the
+    /// directory advertises. Reads the directory entry for table 0 from memory,
+    /// follows its absolute data offset, and asserts the `(x, y)` knots are
+    /// present with the right count -- the contract the `Lookup` opcode (Task 3)
+    /// relies on. (Exercised end-to-end through a GF *model* once the opcode
+    /// lowers, in `compile_simulation_gf_lookup_modes_match_vm`.)
+    #[test]
+    fn assembled_module_initializes_gf_regions_in_memory() {
+        let knots = [(0.0, 10.0), (1.0, 20.0), (2.5, 5.0), (4.0, 40.0)];
+        let region_base = WASM_PAGE_SIZE; // one page in, comfortably past slot 0
+        let regions = build_gf_regions(std::slice::from_ref(&knots.to_vec()), region_base)
+            .expect("layout")
+            .expect("non-empty");
+
+        // A minimal module: one empty exported `run` (so the assembler shape is
+        // exercised) is unnecessary here -- assert directly that the active data
+        // segments initialize memory. Assemble via the production assembler with
+        // a trivial set of empty program functions.
+        let helpers = build_helpers();
+        let empty = || {
+            let mut f = Function::new([]);
+            f.instruction(&I::End);
+            f
+        };
+        let pages = (region_base + regions.total_bytes)
+            .div_ceil(WASM_PAGE_SIZE)
+            .max(1);
+        let wasm = assemble_simulation(
+            helpers,
+            empty(),
+            empty(),
+            empty(),
+            empty(),
+            pages,
+            0,
+            0,
+            0,
+            Some(&regions),
+        );
+
+        let info = validate(&wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let mem = store
+            .instance_export(inst, "memory")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+
+        let dir_off = regions.directory_base as usize;
+        let (data_off, n_points, flat) = store.mem_access_mut_slice(mem, |bytes| {
+            let data_off =
+                i32::from_le_bytes(bytes[dir_off..dir_off + 4].try_into().unwrap()) as usize;
+            let n_points =
+                i32::from_le_bytes(bytes[dir_off + 4..dir_off + 8].try_into().unwrap()) as usize;
+            let flat: Vec<f64> = (0..n_points * 2)
+                .map(|i| {
+                    let a = data_off + i * 8;
+                    f64::from_le_bytes(bytes[a..a + 8].try_into().unwrap())
+                })
+                .collect();
+            (data_off, n_points, flat)
+        });
+
+        assert_eq!(n_points, knots.len(), "directory point count");
+        assert_eq!(
+            data_off, regions.data_base as usize,
+            "table 0's data offset is the start of the data region"
+        );
+        for (k, &(x, y)) in knots.iter().enumerate() {
+            assert_eq!(flat[2 * k], x, "knot {k} x");
+            assert_eq!(flat[2 * k + 1], y, "knot {k} y");
+        }
+    }
 
     /// The FFI entry point goes through the salsa pipeline + `compile_simulation`
     /// and returns a non-empty blob that validates under the interpreter.
