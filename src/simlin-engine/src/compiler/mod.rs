@@ -16,16 +16,16 @@ use std::sync::Arc;
 use crate::ast::{ArrayView, Ast, Loc};
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, CanonicalElementName, Ident, Result};
-// These imports back the monolithic `Module::new` builder (further down). It
-// was originally test-only, but the wasm code-generation backend
-// (`crate::wasmgen`) consumes the `Expr` runlists it produces, so the builder
-// -- and therefore these imports -- are compiled in all builds now.
+#[cfg(test)]
 use crate::common::{Error, ErrorCode, ErrorKind};
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
+#[cfg(test)]
 use crate::model::ModelStage1;
+#[cfg(test)]
 use crate::project::Project;
 use crate::sim_err;
 use crate::variable::Variable;
+#[cfg(test)]
 use crate::vm::IMPLICIT_VAR_COUNT;
 use crate::vm::ModuleKey;
 
@@ -2428,6 +2428,7 @@ pub struct Module {
     pub(crate) module_refs: HashMap<Ident<Canonical>, ModuleKey>,
 }
 
+#[cfg(test)]
 pub(crate) fn calc_module_model_map(
     project: &Project,
     model_name: &Ident<Canonical>,
@@ -2462,6 +2463,7 @@ pub(crate) fn calc_module_model_map(
     all_models
 }
 
+#[cfg(test)]
 pub(crate) fn build_metadata<'p>(
     project: &'p Project,
     model_name: &Ident<Canonical>,
@@ -2598,6 +2600,7 @@ pub(crate) fn build_metadata<'p>(
     all_offsets.insert(model_name.clone(), offsets);
 }
 
+#[cfg(test)]
 fn calc_n_slots(
     all_metadata: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata<'_>>>,
     model_name: &Ident<Canonical>,
@@ -2613,10 +2616,7 @@ impl Module {
     }
 }
 
-// The monolithic Expr-runlist builder. Originally test-only; the wasm backend
-// (`crate::wasmgen`) consumes the `Expr` runlists it produces, so it is compiled
-// in all builds. The production simulation path uses
-// `db::compile_project_incremental` instead.
+#[cfg(test)]
 impl Module {
     pub(crate) fn new(
         project: &Project,
