@@ -2113,4 +2113,159 @@ mod tests {
             );
         }
     }
+
+    // ── Array reducers end-to-end (Phase 5 Tasks 1-2) ─────────────────────
+    //
+    // These compile real reducer models through the production salsa pipeline
+    // (so the bytecode is the genuine `PushStaticView; Array<Reduce>; PopView`
+    // codegen emits, with all constant subscripts baked into the static view)
+    // and assert the wasm matches the VM. They are the gold-standard parity
+    // checks for Tasks 1-2; the inline `lower.rs` unit tests pin the individual
+    // view ops against the VM's addressing oracle.
+
+    /// Assert a single scalar variable's wasm series matches the VM, allowing a
+    /// NaN-vs-NaN match (`assert_matches_vm` rejects NaN via its abs-diff
+    /// tolerance, so the empty-view / OOB reducers need this NaN-aware variant).
+    fn assert_scalar_matches_vm(sim: CompiledSimulation, artifact: &WasmArtifact, name: &str) {
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let wasm_data = run_artifact_results(artifact);
+
+        let mut vm = Vm::new(sim).expect("vm creation");
+        vm.run_to_end().expect("vm run");
+        let vm_results = vm.into_results();
+
+        let wasm_off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, off)| *off)
+            .unwrap_or_else(|| panic!("{name} not in wasm layout"));
+        let ident = Ident::<Canonical>::from_str_unchecked(name);
+        let vm_off = *vm_results
+            .offsets
+            .get(&ident)
+            .unwrap_or_else(|| panic!("{name} not in vm offsets"));
+
+        for c in 0..n_chunks {
+            let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+            let wasm_val = wasm_data[c * n_slots + wasm_off];
+            if vm_val.is_nan() {
+                assert!(
+                    wasm_val.is_nan(),
+                    "{name} chunk {c}: vm=NaN but wasm={wasm_val}"
+                );
+            } else {
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} chunk {c}: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+    }
+
+    /// A 1-D `SUM(source[3:5])` over an indexed dimension: a range subscript that
+    /// codegen bakes into a static view with `offset=2`, `dims=[3]`. The whole
+    /// model (including the arrayed `source`) must match the VM.
+    #[test]
+    fn compile_simulation_sum_range_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("sum_range")
+            .with_sim_time(0.0, 3.0, 1.0)
+            .indexed_dimension("A", 5)
+            .array_aux("source[A]", "3 * A + 1")
+            .scalar_aux("total", "SUM(source[3:5])")
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (SUM range)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 1, "expected to compare source elements + total");
+    }
+
+    /// `SUM(values[*:SubA])` (star-range) selects a sparse subset of a named
+    /// dimension's elements; codegen bakes the sparse mapping into the static
+    /// view, exercising the sparse addressing path against the VM. (A transposed
+    /// reducer like `SUM(matrix')` instead hoists into a `BeginIter` temp-copy
+    /// loop, so it lands in Phase 5 Task 3; the transpose `ViewDesc` transform
+    /// itself is pinned by `lower.rs`'s `view_transpose_then_reduce_matches_vm`.)
+    #[test]
+    fn compile_simulation_sum_star_range_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("sum_star_range")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("DimA", &["A1", "A2", "A3", "A4"])
+            .named_dimension("SubA", &["A2", "A3"])
+            .array_with_ranges(
+                "values[DimA]",
+                vec![("A1", "10"), ("A2", "20"), ("A3", "30"), ("A4", "40")],
+            )
+            .scalar_aux("total", "SUM(values[*:SubA])")
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (SUM star range)");
+        // The whole model (including the sparse-selected `total` = A2+A3 = 50)
+        // matches the VM element-for-element.
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 1);
+        // Independently pin the sparse selection value against the VM.
+        let sim2 = compile_sim(&datamodel, "main");
+        assert_scalar_matches_vm(sim2, &artifact, "total");
+    }
+
+    /// A per-element sliced reducer `msum[D] = SUM(m[D, *])` over a 2-D array.
+    /// Each output element is its own `PushStaticView; ArraySum; PopView` over a
+    /// per-row static view (the A2A target unrolls to per-element bytecode).
+    #[test]
+    fn compile_simulation_sliced_row_sum_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("row_sum")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("D", 2)
+            .indexed_dimension("E", 3)
+            .array_aux("m[D, E]", "10 * D + E")
+            .array_aux("msum[D]", "SUM(m[D, *])")
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (row sum)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(
+            checked >= 1,
+            "expected to compare m elements + msum elements"
+        );
+    }
+
+    /// MEAN / STDDEV / MAX / MIN / SIZE over a range slice, each matching the VM.
+    /// One model carries all five so a single compile exercises every reducer's
+    /// production lowering.
+    #[test]
+    fn compile_simulation_all_reducers_match_vm() {
+        let datamodel = crate::test_common::TestProject::new("all_reducers")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .indexed_dimension("A", 5)
+            .array_aux("source[A]", "2 * A")
+            .scalar_aux("mean_val", "MEAN(source[2:4])")
+            .scalar_aux("stddev_val", "STDDEV(source[1:5])")
+            .scalar_aux("max_val", "MAX(source[2:4])")
+            .scalar_aux("min_val", "MIN(source[2:4])")
+            .scalar_aux("size_val", "SIZE(source[2:4])")
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (all reducers)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 5, "expected to compare all five reducer results");
+        for name in ["mean_val", "stddev_val", "max_val", "min_val", "size_val"] {
+            assert!(
+                artifact.layout.var_offsets.iter().any(|(n, _)| n == name),
+                "{name} should be in the layout"
+            );
+        }
+    }
+
+    // The empty-but-valid view reducer asymmetry (SUM->0.0 vs others->NaN) and
+    // the invalid-view->NaN-for-all asymmetry are pinned directly against the
+    // VM's `reduce_view` semantics by the inline `lower.rs` unit tests
+    // (`empty_valid_view_*` / `invalid_view_*`): a literal empty range
+    // (`source[4:3]`) is rejected at compile time, and a runtime-empty range
+    // (`source[start:end]` with `start > end`) plus an out-of-bounds dynamic
+    // subscript both go through `ViewRangeDynamic` / `ViewSubscriptDynamic`,
+    // which are Phase 5 Task 4, so the end-to-end coverage of those cases lands
+    // there.
 }

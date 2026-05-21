@@ -998,6 +998,20 @@ pub(crate) fn emit_bytecode(
                 emit_load_temp_dynamic(ctx, *temp_id, f)?;
             }
 
+            // ── Array reducers (Phase 5 Task 2) ───────────────────────────
+            // Reduce over the TOP view descriptor (the production pattern is
+            // `PushStaticView; Array<Reduce>; PopView`, so the descriptor stays
+            // for the trailing `PopView`).
+            Opcode::ArraySum {}
+            | Opcode::ArrayMax {}
+            | Opcode::ArrayMin {}
+            | Opcode::ArrayMean {}
+            | Opcode::ArrayStddev {}
+            | Opcode::ArraySize {} => {
+                let view = view_top(&view_stack)?;
+                emit_array_reduce(op, view, ctx, f)?;
+            }
+
             Opcode::Ret => {
                 // The caller emits the function's terminating `End`.
             }
@@ -1516,7 +1530,6 @@ fn emit_load_temp_dynamic(
 /// Landed with the view machinery (Task 1) as the single element-read primitive;
 /// its first consumer is the array reducer (Task 2), with the iteration loop
 /// (Task 3) and Phase 6 to follow.
-#[allow(dead_code)]
 fn emit_view_element_load(
     desc: &ViewDesc,
     iter_idx: usize,
@@ -1543,6 +1556,166 @@ fn emit_view_element_load(
         f.instruction(&Instruction::I32Const(0));
     }
     f.instruction(&Instruction::F64Load(memarg(const_byte_offset)));
+    Ok(())
+}
+
+/// Lower one array reducer over the top `ViewDesc` (the descriptor stays on the
+/// stack; the production pattern is `PushStaticView; Array<Reduce>; PopView`).
+///
+/// Reproduces `reduce_view` (`vm.rs:2802-2840`) and the per-reducer arms
+/// (`vm.rs:2216-2309`) exactly, including the asymmetry:
+/// - an **invalid** view (`valid_local` present and 0) yields NaN for *every*
+///   reducer, including `ArraySum` (`reduce_view`'s `if !is_valid { NaN }`);
+/// - an **empty-but-valid** view (`size() == 0`) yields `0.0` for `ArraySum`,
+///   `NaN` for Max/Min/Mean/Stddev, and `0` for `ArraySize`.
+///
+/// The fold is fully unrolled over the compile-time `size()`: reducer arrays are
+/// small, and unrolling reads each element at its compile-time-known address via
+/// [`emit_view_element_load`], so no runtime loop or precomputed offset table is
+/// needed for the static/temp views the reducer path produces. `ArrayMax`/
+/// `ArrayMin` use the VM's compare-and-select form (`if v > acc { v } else
+/// { acc }`), not `f64.max`/`f64.min`, matching the reduce path (AC7.3).
+fn emit_array_reduce(
+    op: &Opcode,
+    desc: &ViewDesc,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    use Instruction as Ins;
+
+    // ArraySize is always defined (the size of the view), independent of
+    // validity, and needs no element reads. The VM pushes `view.size() as f64`
+    // unconditionally (`vm.rs:2306`).
+    if matches!(op, Opcode::ArraySize {}) {
+        f.instruction(&f64_const(desc.size() as f64));
+        return Ok(());
+    }
+
+    let size = desc.size();
+    let is_sum = matches!(op, Opcode::ArraySum {});
+
+    // The empty-but-valid result, before accounting for an invalid view: 0.0 for
+    // Sum, NaN for the others.
+    let empty_result = if is_sum { 0.0 } else { f64::NAN };
+
+    if size == 0 {
+        // No element reads. For a static view (always valid) this is the final
+        // answer; a dynamic view's validity is folded in below.
+        f.instruction(&f64_const(empty_result));
+    } else {
+        emit_reduce_fold(op, desc, size, ctx, f)?;
+    }
+
+    // An invalid view (Task 4 dynamic subscript out of bounds) overrides the
+    // computed value with NaN for ALL reducers, mirroring `reduce_view`'s
+    // leading `if !is_valid { return NaN }`. For static views `valid_local` is
+    // `None`, so this is a no-op and the static result stands.
+    if let Some(valid_local) = desc.valid_local {
+        // Build `select(NaN, computed, valid == 0)`. wasm `select` pops
+        // `[a, b, cond]` and yields `a` when `cond != 0`, so `a` must be NaN and
+        // `b` the computed value. The computed value is currently on top, so
+        // park it (the fold has released `scratch_local` by now), push NaN, push
+        // the parked value, then `cond = (valid == 0)`.
+        f.instruction(&Ins::LocalSet(ctx.scratch_local));
+        f.instruction(&f64_const(f64::NAN)); // a = NaN
+        f.instruction(&Ins::LocalGet(ctx.scratch_local)); // b = computed
+        f.instruction(&Ins::LocalGet(valid_local));
+        f.instruction(&Ins::I32Eqz); // cond = 1 when invalid
+        f.instruction(&Ins::Select);
+    }
+
+    Ok(())
+}
+
+/// Emit the unrolled fold body for a non-empty reducer (size >= 1). Leaves the
+/// reduced f64 on the wasm stack. Split out so [`emit_array_reduce`] reads
+/// linearly.
+fn emit_reduce_fold(
+    op: &Opcode,
+    desc: &ViewDesc,
+    size: usize,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    use Instruction as Ins;
+    match op {
+        // Sum / Mean / Stddev all begin with the running sum over the elements.
+        Opcode::ArraySum {} | Opcode::ArrayMean {} | Opcode::ArrayStddev {} => {
+            // sum = e0 + e1 + ... (init 0.0, matching reduce_view's `0.0` init).
+            f.instruction(&f64_const(0.0));
+            for i in 0..size {
+                emit_view_element_load(desc, i, ctx, f)?;
+                f.instruction(&Ins::F64Add);
+            }
+            match op {
+                Opcode::ArraySum {} => {}
+                Opcode::ArrayMean {} => {
+                    // mean = sum / size (size > 0 here).
+                    f.instruction(&f64_const(size as f64));
+                    f.instruction(&Ins::F64Div);
+                }
+                Opcode::ArrayStddev {} => {
+                    // Two-pass population variance: mean = sum/size (computed
+                    // above and on the stack), then variance = mean of
+                    // (v - mean)^2, then sqrt. Park the mean so each squared
+                    // deviation can reference it.
+                    f.instruction(&f64_const(size as f64));
+                    f.instruction(&Ins::F64Div);
+                    f.instruction(&Ins::LocalSet(ctx.scratch_local)); // scratch = mean
+                    // variance_sum = Σ (v - mean)^2
+                    f.instruction(&f64_const(0.0));
+                    for i in 0..size {
+                        emit_view_element_load(desc, i, ctx, f)?;
+                        f.instruction(&Ins::LocalGet(ctx.scratch_local));
+                        f.instruction(&Ins::F64Sub); // v - mean
+                        // (v - mean)^2 via self-multiply (matches `.powf(2.0)`
+                        // bit-for-bit for a finite base: x^2 == x*x).
+                        f.instruction(&Ins::LocalTee(ctx.apply_locals[0]));
+                        f.instruction(&Ins::LocalGet(ctx.apply_locals[0]));
+                        f.instruction(&Ins::F64Mul);
+                        f.instruction(&Ins::F64Add);
+                    }
+                    // stddev = sqrt(variance_sum / size)
+                    f.instruction(&f64_const(size as f64));
+                    f.instruction(&Ins::F64Div);
+                    f.instruction(&Ins::F64Sqrt);
+                }
+                _ => unreachable!(),
+            }
+        }
+        // Max / Min: fold with the VM's compare-and-select (`if v > acc { v }
+        // else { acc }`), init NEG_INFINITY / INFINITY (`vm.rs:2228`/`2245`).
+        Opcode::ArrayMax {} | Opcode::ArrayMin {} => {
+            let init = if matches!(op, Opcode::ArrayMax {}) {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+            f.instruction(&f64_const(init)); // acc
+            for i in 0..size {
+                // stack: [acc]; load v -> [acc, v]; select(v, acc, cmp).
+                emit_view_element_load(desc, i, ctx, f)?;
+                // Compute the comparison then select. wasm `select` pops
+                // [a, b, cond] and yields a when cond != 0. We want
+                // `if v <cmp> acc { v } else { acc }`, so push v then acc and
+                // test `v <cmp> acc`. Park acc/v in scratch f64 locals so they
+                // can be reused for both the select operands and the compare.
+                f.instruction(&Ins::LocalSet(ctx.apply_locals[1])); // b1 = v
+                f.instruction(&Ins::LocalSet(ctx.apply_locals[0])); // b0 = acc
+                f.instruction(&Ins::LocalGet(ctx.apply_locals[1])); // v   (select arg a)
+                f.instruction(&Ins::LocalGet(ctx.apply_locals[0])); // acc (select arg b)
+                f.instruction(&Ins::LocalGet(ctx.apply_locals[1])); // v
+                f.instruction(&Ins::LocalGet(ctx.apply_locals[0])); // acc
+                if matches!(op, Opcode::ArrayMax {}) {
+                    f.instruction(&Ins::F64Gt); // v > acc
+                } else {
+                    f.instruction(&Ins::F64Lt); // v < acc
+                }
+                f.instruction(&Ins::Select); // v if (cmp) else acc -> new acc
+            }
+        }
+        _ => unreachable!("emit_reduce_fold called with non-reducer opcode"),
+    }
     Ok(())
 }
 
@@ -3727,5 +3900,710 @@ mod tests {
         let seed = vec![(u64::from(TEMP_BASE) + 2 * 8, 13.0)];
         let got = run(&bc(vec![2.9], code), &ctx, true, 0, &seed, None);
         assert_eq!(got, 13.0);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Phase 5 Task 2: array reducers (Sum/Max/Min/Mean/Stddev/Size)
+    //
+    // These run the emitted reducers under DLR-FT and assert the result matches
+    // the VM's own addressing oracle (`RuntimeView::flat_offset`, via
+    // `StaticArrayView::to_runtime_view`) folded per the matching VM reducer arm
+    // (`vm.rs:2216-2309`). The view transform opcodes the production codegen does
+    // not emit directly (it bakes constant subscripts into one `PushStaticView`)
+    // are exercised here on a `PushVarView` base so each `apply_*` is reduced
+    // over and checked against the VM. Reuses `TEMP_BASE` / `ctx_with_arrays`
+    // from the Task 1 section above.
+    // ════════════════════════════════════════════════════════════════════════
+
+    use crate::bytecode::{
+        DimensionInfo, RuntimeSparseMapping, RuntimeView, StaticArrayView, SubdimensionRelation,
+    };
+    use smallvec::SmallVec;
+
+    fn seed_run(base_byte: u64, values: &[f64]) -> Vec<(u64, f64)> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (base_byte + (i as u64) * 8, v))
+            .collect()
+    }
+
+    /// Read element `iter_idx` of `view` from a flat slab `data` indexed by slot,
+    /// using the VM's own addressing (`to_runtime_view().flat_offset`). The
+    /// addressing oracle for every reducer parity check.
+    fn vm_view_element(view: &StaticArrayView, data: &[f64], iter_idx: usize) -> f64 {
+        let rv = view.to_runtime_view();
+        let n = rv.dims.len();
+        let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n];
+        let mut remaining = iter_idx;
+        for d in (0..n).rev() {
+            let dim = rv.dims[d] as usize;
+            indices[d] = (remaining % dim) as u16;
+            remaining /= dim;
+        }
+        let flat = rv.flat_offset(&indices);
+        data[rv.base_off as usize + flat]
+    }
+
+    /// The VM's expected `ArraySum` over `view`'s elements drawn from `data`.
+    fn vm_sum(view: &StaticArrayView, data: &[f64]) -> f64 {
+        (0..view.to_runtime_view().size())
+            .map(|i| vm_view_element(view, data, i))
+            .sum()
+    }
+
+    fn dense_view(base_off: u32, dims: &[u16]) -> StaticArrayView {
+        // Row-major strides for a dense contiguous array.
+        let mut strides: SmallVec<[i32; 4]> = SmallVec::new();
+        let mut s = 1i32;
+        for &d in dims.iter().rev() {
+            strides.push(s);
+            s *= d as i32;
+        }
+        strides.reverse();
+        StaticArrayView {
+            base_off,
+            is_temp: false,
+            dims: dims.iter().copied().collect(),
+            strides,
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: dims.iter().map(|_| 0u16).collect(),
+        }
+    }
+
+    /// Compile+run `PushStaticView(view); <reduce>; PopView` over a `curr` array
+    /// seeded from `data` (slot 0 of curr is byte 0).
+    fn run_static_reduce(view: StaticArrayView, reduce: Opcode, data: &[f64]) -> f64 {
+        let mut context = ByteCodeContext::default();
+        let view_id = context.add_static_view(view);
+        let ctx = ctx_with_arrays(&context);
+        let code = vec![
+            Opcode::PushStaticView { view_id },
+            reduce,
+            Opcode::PopView {},
+        ];
+        run(&bc(vec![], code), &ctx, true, 0, &seed_run(0, data), None)
+    }
+    // ── Task 1: PushStaticView addressing across geometries ───────────────
+
+    #[test]
+    fn static_view_sum_contiguous_matches_vm() {
+        // A bare 1-D contiguous view over curr slots 0..4.
+        let data = [10.0, 20.0, 30.0, 40.0];
+        let view = dense_view(0, &[4]);
+        let got = run_static_reduce(view.clone(), Opcode::ArraySum {}, &data);
+        assert_eq!(got, vm_sum(&view, &data));
+        assert_eq!(got, 100.0);
+    }
+
+    #[test]
+    fn static_view_sum_with_offset_matches_vm() {
+        // A range slice source[3:5] over a 5-element array bakes into `offset=2`
+        // (0-based start), dims=[3]. Elements are data[2], data[3], data[4].
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let mut view = dense_view(0, &[3]);
+        view.offset = 2;
+        let got = run_static_reduce(view.clone(), Opcode::ArraySum {}, &data);
+        assert_eq!(got, vm_sum(&view, &data));
+        assert_eq!(got, 3.0 + 4.0 + 5.0);
+    }
+
+    #[test]
+    fn static_view_sum_transposed_strides_matches_vm() {
+        // A 2x3 matrix stored row-major (strides [3,1]) transposed to dims [3,2]
+        // with strides [1,3] -- non-contiguous, so the strided flat_offset path
+        // is exercised. Data laid out row-major: m[r,c] = data[r*3 + c].
+        let data = [11.0, 12.0, 13.0, 21.0, 22.0, 23.0];
+        let view = StaticArrayView {
+            base_off: 0,
+            is_temp: false,
+            dims: SmallVec::from_slice(&[3, 2]),
+            strides: SmallVec::from_slice(&[1, 3]),
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::from_slice(&[0, 0]),
+        };
+        assert!(!view.to_runtime_view().is_contiguous());
+        let got = run_static_reduce(view.clone(), Opcode::ArraySum {}, &data);
+        // Sum is order-independent and covers all six cells regardless.
+        assert_eq!(got, vm_sum(&view, &data));
+        assert_eq!(got, 11.0 + 12.0 + 13.0 + 21.0 + 22.0 + 23.0);
+    }
+
+    #[test]
+    fn static_view_max_transposed_picks_right_cells() {
+        // Max over the transposed view must read the same cells the VM reads.
+        // Make one cell dominate so a mis-addressed read would change the max.
+        let data = [11.0, 12.0, 99.0, 21.0, 22.0, 23.0];
+        let view = StaticArrayView {
+            base_off: 0,
+            is_temp: false,
+            dims: SmallVec::from_slice(&[3, 2]),
+            strides: SmallVec::from_slice(&[1, 3]),
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::from_slice(&[0, 0]),
+        };
+        let got = run_static_reduce(view, Opcode::ArrayMax {}, &data);
+        assert_eq!(got, 99.0);
+    }
+
+    #[test]
+    fn static_view_sum_sparse_matches_vm() {
+        // A sparse (star-range) view selecting elements at parent offsets [0, 2]
+        // of a 4-element array: dims=[2], a RuntimeSparseMapping mapping view
+        // index 0->parent 0, 1->parent 2. Elements are data[0], data[2].
+        let data = [5.0, 6.0, 7.0, 8.0];
+        let view = StaticArrayView {
+            base_off: 0,
+            is_temp: false,
+            dims: SmallVec::from_slice(&[2]),
+            strides: SmallVec::from_slice(&[1]),
+            offset: 0,
+            sparse: smallvec::smallvec![RuntimeSparseMapping {
+                dim_index: 0,
+                parent_offsets: SmallVec::from_slice(&[0, 2]),
+            }],
+            dim_ids: SmallVec::from_slice(&[0]),
+        };
+        let got = run_static_reduce(view.clone(), Opcode::ArraySum {}, &data);
+        assert_eq!(got, vm_sum(&view, &data));
+        assert_eq!(got, 5.0 + 7.0);
+    }
+
+    #[test]
+    fn static_temp_view_sum_reads_temp_storage() {
+        // A contiguous temp view (is_temp) reads temp_storage, not curr. temp_id
+        // 0 lives at temp_offsets[0]=0, so its slot 0 is byte TEMP_BASE.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0], 3);
+        let view = StaticArrayView {
+            base_off: 0, // temp_id 0
+            is_temp: true,
+            dims: SmallVec::from_slice(&[3]),
+            strides: SmallVec::from_slice(&[1]),
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::from_slice(&[0]),
+        };
+        let view_id = context.add_static_view(view);
+        let ctx = ctx_with_arrays(&context);
+        let code = vec![
+            Opcode::PushStaticView { view_id },
+            Opcode::ArraySum {},
+            Opcode::PopView {},
+        ];
+        // Seed curr slots 0..3 with decoys and temp_storage with the real data;
+        // a read from the wrong region would pick up the decoys.
+        let mut seed = seed_run(0, &[100.0, 200.0, 300.0]);
+        seed.extend(seed_run(u64::from(TEMP_BASE), &[2.0, 3.0, 4.0]));
+        let got = run(&bc(vec![], code), &ctx, true, 0, &seed, None);
+        assert_eq!(got, 9.0, "temp view must read temp_storage, not curr");
+    }
+
+    #[test]
+    fn static_temp_view_honors_temp_offset() {
+        // temp_id 1 lives at temp_offsets[1]=4, so its slot 0 is byte
+        // TEMP_BASE + 4*8. A reducer over it must skip temp 0's slots.
+        let mut context = ByteCodeContext::default();
+        context.set_temp_info(vec![0, 4], 6);
+        let view = StaticArrayView {
+            base_off: 1, // temp_id 1
+            is_temp: true,
+            dims: SmallVec::from_slice(&[2]),
+            strides: SmallVec::from_slice(&[1]),
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::from_slice(&[0]),
+        };
+        let view_id = context.add_static_view(view);
+        let ctx = ctx_with_arrays(&context);
+        let code = vec![
+            Opcode::PushStaticView { view_id },
+            Opcode::ArraySum {},
+            Opcode::PopView {},
+        ];
+        // temp_storage: [t0_0, t0_1, t0_2, t0_3, t1_0, t1_1] = [9,9,9,9, 2, 5].
+        let seed = seed_run(u64::from(TEMP_BASE), &[9.0, 9.0, 9.0, 9.0, 2.0, 5.0]);
+        let got = run(&bc(vec![], code), &ctx, true, 0, &seed, None);
+        assert_eq!(got, 7.0, "temp view must start at temp_offsets[temp_id]");
+    }
+
+    // ── Task 1: view transform opcodes (mirror RuntimeView::apply_*) ──────
+    //
+    // Build a full var view with PushVarView, apply one transform, reduce, and
+    // compare to the VM's RuntimeView with the same transform applied. These are
+    // the opcodes production codegen bakes into a single PushStaticView, so they
+    // are exercised here directly to pin each `apply_*` against the VM.
+
+    /// A `ByteCodeContext` with a single dimension of `size` (DimId 0) and a
+    /// dim-list `[DimId 0]` (DimListId 0) for a 1-D `PushVarView`.
+    fn ctx_one_dim(size: u16) -> ByteCodeContext {
+        let mut context = ByteCodeContext::default();
+        let name_id = context.intern_name("D");
+        context.add_dimension(DimensionInfo::indexed(name_id, size));
+        context.add_dim_list(1, [0, 0, 0, 0]);
+        context
+    }
+
+    /// Run `PushVarView(base 0, dims) ; <transforms> ; <reduce> ; PopView` and
+    /// also build the VM `RuntimeView` the same way for the addressing oracle.
+    fn run_var_view_reduce(
+        context: &ByteCodeContext,
+        transforms: &[Opcode],
+        reduce: Opcode,
+        data: &[f64],
+    ) -> f64 {
+        let ctx = ctx_with_arrays(context);
+        let mut code = vec![Opcode::PushVarView {
+            base_off: 0,
+            dim_list_id: 0,
+        }];
+        code.extend_from_slice(transforms);
+        code.push(reduce);
+        code.push(Opcode::PopView {});
+        run(&bc(vec![], code), &ctx, true, 0, &seed_run(0, data), None)
+    }
+
+    #[test]
+    fn view_subscript_const_drops_dim_matches_vm() {
+        // A 2x3 matrix; subscript dim 0 to index 1 (0-based) -> row 1: cells
+        // data[3], data[4], data[5]. Mirror with RuntimeView.
+        let mut context = ByteCodeContext::default();
+        let name_d = context.intern_name("D");
+        context.add_dimension(DimensionInfo::indexed(name_d, 2));
+        let name_e = context.intern_name("E");
+        context.add_dimension(DimensionInfo::indexed(name_e, 3));
+        context.add_dim_list(2, [0, 1, 0, 0]); // [DimId 0 (size2), DimId 1 (size3)]
+        let data = [11.0, 12.0, 13.0, 21.0, 22.0, 23.0];
+
+        let got = run_var_view_reduce(
+            &context,
+            &[Opcode::ViewSubscriptConst {
+                dim_idx: 0,
+                index: 1,
+            }],
+            Opcode::ArraySum {},
+            &data,
+        );
+        // VM oracle: build the same RuntimeView and apply the same subscript.
+        let mut rv = RuntimeView::for_var(
+            0,
+            SmallVec::from_slice(&[2, 3]),
+            SmallVec::from_slice(&[0, 1]),
+        );
+        rv.apply_single_subscript(0, 1);
+        let want: f64 = (0..rv.size())
+            .map(|i| {
+                let n = rv.dims.len();
+                let mut idx: SmallVec<[u16; 4]> = smallvec::smallvec![0; n];
+                let mut rem = i;
+                for d in (0..n).rev() {
+                    idx[d] = (rem % rv.dims[d] as usize) as u16;
+                    rem /= rv.dims[d] as usize;
+                }
+                data[rv.base_off as usize + rv.flat_offset(&idx)]
+            })
+            .sum();
+        assert_eq!(got, want);
+        assert_eq!(got, 21.0 + 22.0 + 23.0);
+    }
+
+    #[test]
+    fn view_range_matches_vm() {
+        // 1-D dim of 5; ViewRange [1:4) keeps indices 1,2,3 -> data[1..4].
+        let context = ctx_one_dim(5);
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let got = run_var_view_reduce(
+            &context,
+            &[Opcode::ViewRange {
+                dim_idx: 0,
+                start: 1,
+                end: 4,
+            }],
+            Opcode::ArraySum {},
+            &data,
+        );
+        assert_eq!(got, 2.0 + 3.0 + 4.0);
+    }
+
+    #[test]
+    fn view_wildcard_is_noop() {
+        // ViewWildcard leaves the dimension as-is: the sum is the full array.
+        let context = ctx_one_dim(4);
+        let data = [1.0, 2.0, 3.0, 4.0];
+        let got = run_var_view_reduce(
+            &context,
+            &[Opcode::ViewWildcard { dim_idx: 0 }],
+            Opcode::ArraySum {},
+            &data,
+        );
+        assert_eq!(got, 10.0);
+    }
+
+    #[test]
+    fn view_transpose_then_reduce_matches_vm() {
+        // 2x3 matrix; transpose to 3x2 then sum (order-independent but exercises
+        // the stride/dim reversal addressing).
+        let mut context = ByteCodeContext::default();
+        let name_d = context.intern_name("D");
+        context.add_dimension(DimensionInfo::indexed(name_d, 2));
+        let name_e = context.intern_name("E");
+        context.add_dimension(DimensionInfo::indexed(name_e, 3));
+        context.add_dim_list(2, [0, 1, 0, 0]);
+        let data = [11.0, 12.0, 13.0, 21.0, 22.0, 23.0];
+        let got = run_var_view_reduce(
+            &context,
+            &[Opcode::ViewTranspose {}],
+            Opcode::ArraySum {},
+            &data,
+        );
+        assert_eq!(got, 11.0 + 12.0 + 13.0 + 21.0 + 22.0 + 23.0);
+    }
+
+    #[test]
+    fn view_star_range_sparse_matches_vm() {
+        // A 1-D parent dim of 4; a star-range via a subdim relation selecting
+        // parent offsets [1, 3] -> sum of data[1] + data[3].
+        let mut context = ByteCodeContext::default();
+        let name_p = context.intern_name("P");
+        context.add_dimension(DimensionInfo::indexed(name_p, 4));
+        let name_s = context.intern_name("S");
+        context.add_dimension(DimensionInfo::indexed(name_s, 2)); // child dim
+        context.add_dim_list(1, [0, 0, 0, 0]); // parent dim list
+        context.add_subdim_relation(SubdimensionRelation::sparse(
+            0,
+            1,
+            SmallVec::from_slice(&[1, 3]),
+        ));
+        let data = [5.0, 6.0, 7.0, 8.0];
+        let got = run_var_view_reduce(
+            &context,
+            &[Opcode::ViewStarRange {
+                dim_idx: 0,
+                subdim_relation_id: 0,
+            }],
+            Opcode::ArraySum {},
+            &data,
+        );
+        assert_eq!(got, 6.0 + 8.0);
+    }
+
+    #[test]
+    fn dup_view_then_reduce_matches_single() {
+        // DupView duplicates the top descriptor; reducing the dup gives the same
+        // result as reducing the original (and the original stays on the stack).
+        let context = ctx_one_dim(3);
+        let data = [2.0, 3.0, 5.0];
+        let got = run_var_view_reduce(&context, &[Opcode::DupView {}], Opcode::ArraySum {}, &data);
+        assert_eq!(got, 10.0);
+        // The duplicate must leave the stack balanced for the trailing PopView;
+        // a second PopView would underflow, so add one more here to drain the
+        // dup and confirm both pops succeed.
+        let ctx = ctx_with_arrays(&context);
+        let code = vec![
+            Opcode::PushVarView {
+                base_off: 0,
+                dim_list_id: 0,
+            },
+            Opcode::DupView {},
+            Opcode::ArraySum {},
+            Opcode::PopView {}, // pop dup
+            Opcode::PopView {}, // pop original
+        ];
+        let got2 = run(&bc(vec![], code), &ctx, true, 0, &seed_run(0, &data), None);
+        assert_eq!(got2, 10.0);
+    }
+
+    // ── Task 2: each reducer vs an explicit VM-mirrored oracle ────────────
+
+    /// Sum/Max/Min/Mean/Stddev/Size oracle over a contiguous element slice,
+    /// mirroring the VM's per-reducer arms (`vm.rs:2216-2309`) exactly.
+    fn reducer_oracle(op: &Opcode, elems: &[f64]) -> f64 {
+        let size = elems.len();
+        match op {
+            Opcode::ArraySum {} => elems.iter().sum(),
+            Opcode::ArraySize {} => size as f64,
+            _ if size == 0 => f64::NAN,
+            Opcode::ArrayMax {} => elems
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, |a, v| if v > a { v } else { a }),
+            Opcode::ArrayMin {} => elems
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, |a, v| if v < a { v } else { a }),
+            Opcode::ArrayMean {} => elems.iter().sum::<f64>() / size as f64,
+            Opcode::ArrayStddev {} => {
+                let mean = elems.iter().sum::<f64>() / size as f64;
+                let var = elems.iter().map(|v| (v - mean).powf(2.0)).sum::<f64>() / size as f64;
+                var.sqrt()
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn assert_reducer_matches(op: Opcode, elems: &[f64]) {
+        // A bare contiguous 1-D static view over the data.
+        let data: Vec<f64> = elems.to_vec();
+        let view = dense_view(0, &[elems.len() as u16]);
+        let got = run_static_reduce(view, op, &data);
+        let want = reducer_oracle(&op, elems);
+        if want.is_nan() {
+            assert!(got.is_nan(), "{}: expected NaN, got {got}", op.name());
+        } else {
+            assert!(
+                (got - want).abs() < 1e-12,
+                "{}: got {got}, want {want}",
+                op.name()
+            );
+        }
+    }
+
+    #[test]
+    fn reducer_sum_matches_vm() {
+        assert_reducer_matches(Opcode::ArraySum {}, &[1.0, 2.0, 3.0, 4.5]);
+    }
+
+    #[test]
+    fn reducer_max_matches_vm() {
+        assert_reducer_matches(Opcode::ArrayMax {}, &[3.0, -1.0, 7.5, 2.0]);
+        // Negative-only set: max stays negative (init NEG_INFINITY never wins).
+        assert_reducer_matches(Opcode::ArrayMax {}, &[-5.0, -2.0, -9.0]);
+    }
+
+    #[test]
+    fn reducer_min_matches_vm() {
+        assert_reducer_matches(Opcode::ArrayMin {}, &[3.0, -1.0, 7.5, 2.0]);
+        assert_reducer_matches(Opcode::ArrayMin {}, &[5.0, 2.0, 9.0]);
+    }
+
+    #[test]
+    fn reducer_mean_matches_vm() {
+        assert_reducer_matches(Opcode::ArrayMean {}, &[2.0, 4.0, 6.0]);
+        assert_reducer_matches(Opcode::ArrayMean {}, &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn reducer_stddev_matches_vm_population_variance() {
+        // Population variance (divisor N): for [2,4,4,4,5,5,7,9] the population
+        // stddev is exactly 2.0 -- a value check, not just parity, pinning the
+        // divisor-N (not N-1) choice that matches `vm.rs::ArrayStddev`.
+        let elems = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        assert_reducer_matches(Opcode::ArrayStddev {}, &elems);
+        let view = dense_view(0, &[elems.len() as u16]);
+        let got = run_static_reduce(view, Opcode::ArrayStddev {}, &elems);
+        assert!(
+            (got - 2.0).abs() < 1e-12,
+            "population stddev should be 2.0, got {got}"
+        );
+    }
+
+    #[test]
+    fn reducer_size_matches_vm() {
+        assert_reducer_matches(Opcode::ArraySize {}, &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn reducer_size_multidim_is_product() {
+        // SIZE over a 2x3 view is 6, regardless of the data.
+        let data = [0.0; 6];
+        let view = dense_view(0, &[2, 3]);
+        let got = run_static_reduce(view, Opcode::ArraySize {}, &data);
+        assert_eq!(got, 6.0);
+    }
+
+    // ── Task 2: empty-but-valid view asymmetry (AC1.5) ────────────────────
+
+    /// An empty-but-valid view: a `[start:start)` range collapses dim 0 to size
+    /// 0 (`apply_range_checked`), valid with zero elements. Built as a static
+    /// view with a zero-size dimension.
+    fn empty_static_view() -> StaticArrayView {
+        StaticArrayView {
+            base_off: 0,
+            is_temp: false,
+            dims: SmallVec::from_slice(&[0]),
+            strides: SmallVec::from_slice(&[1]),
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::from_slice(&[0]),
+        }
+    }
+
+    #[test]
+    fn empty_valid_view_sum_is_zero() {
+        // ArraySum over an empty-but-valid view is the additive identity 0.0
+        // (`vm.rs:2216`), NOT NaN.
+        let got = run_static_reduce(empty_static_view(), Opcode::ArraySum {}, &[1.0]);
+        assert_eq!(got, 0.0);
+    }
+
+    #[test]
+    fn empty_valid_view_max_min_mean_stddev_are_nan() {
+        for op in [
+            Opcode::ArrayMax {},
+            Opcode::ArrayMin {},
+            Opcode::ArrayMean {},
+            Opcode::ArrayStddev {},
+        ] {
+            let got = run_static_reduce(empty_static_view(), op, &[1.0]);
+            assert!(
+                got.is_nan(),
+                "{}: empty-but-valid view must be NaN",
+                op.name()
+            );
+        }
+    }
+
+    #[test]
+    fn empty_valid_view_size_is_zero() {
+        let got = run_static_reduce(empty_static_view(), Opcode::ArraySize {}, &[1.0]);
+        assert_eq!(got, 0.0);
+    }
+
+    // ── Task 2: invalid view -> NaN for ALL reducers (AC1.5) ──────────────
+    //
+    // A static view is always valid (`valid_local` is None), so an invalid view
+    // is modeled by directly setting `valid_local` to a wasm i32 local seeded to
+    // 0 -- mirroring what Task 4's out-of-bounds dynamic subscript will produce.
+    // Every reducer (including ArraySum) must yield NaN, matching `reduce_view`'s
+    // leading `if !is_valid { return NaN }`.
+
+    /// Run a reducer over a contiguous static view whose `valid_local` is forced
+    /// to an i32 local pre-set to 0 (invalid). The harness function reserves the
+    /// three Apply f64 scratch locals; we add one i32 local after them for the
+    /// validity flag and initialize it to 0 in the emitted prologue.
+    fn run_invalid_view_reduce(reduce: Opcode) -> f64 {
+        let mut context = ByteCodeContext::default();
+        // Contiguous 1-D view over 3 curr slots; geometry is valid, but the
+        // view is flagged invalid.
+        let view = dense_view(0, &[3]);
+        let view_id = context.add_static_view(view);
+
+        // Build a custom module: the opcode function declares an extra i32 local
+        // (index after the standard opcode-fn locals) for the validity flag,
+        // seeded to 0. We mark the descriptor invalid by post-processing is out
+        // of reach here, so instead emit the program through a small shim that
+        // sets `valid_local` on the pushed descriptor.
+        //
+        // Simpler: emit PushStaticView, then a hand-rolled reduce over a desc
+        // with valid_local set, by calling emit_array_reduce directly.
+        let ctx = EmitCtx {
+            temp_storage_base: TEMP_BASE,
+            ctx: &context,
+            ..ctx_with_cond_depth(0)
+        };
+
+        // The validity i32 local index: opcode_fn_locals(0) declares param 0 +
+        // 1 scratch f64 + 0 cond + 3 apply f64 = locals 0..5 (indices 1..=4
+        // declared). The next free local index is 5.
+        let valid_local = 5u32;
+
+        let mut module = Module::new();
+        let helpers = build_helpers();
+        let n_helpers = helpers.functions.len() as u32;
+        let mut types = TypeSection::new();
+        types.ty().function([ValType::I32], [ValType::F64]); // eval -> f64
+        for hf in &helpers.functions {
+            types.ty().function(hf.params.clone(), hf.results.clone());
+        }
+        module.section(&types);
+        let mut functions = FunctionSection::new();
+        for (i, _) in helpers.functions.iter().enumerate() {
+            functions.function(1 + i as u32);
+        }
+        functions.function(0);
+        module.section(&functions);
+        let mut memories = MemorySection::new();
+        memories.memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&memories);
+        let mut exports = ExportSection::new();
+        exports.export("eval", ExportKind::Func, n_helpers);
+        exports.export("mem", ExportKind::Memory, 0);
+        module.section(&exports);
+
+        let mut code = CodeSection::new();
+        for hf in helpers.functions {
+            code.function(&hf.body);
+        }
+        // opcode-fn locals plus one extra i32 for the validity flag.
+        let mut locals = opcode_fn_locals(0);
+        locals.push((1, ValType::I32));
+        let mut func = Function::new(locals);
+        // valid_local = 0 (invalid).
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(valid_local));
+        // Reduce over a desc built from the registered static view, but with its
+        // `valid_local` forced to the (zero-seeded) validity flag -- exactly the
+        // shape Task 4's out-of-bounds dynamic subscript will produce.
+        let mut desc = ViewDesc::from_static(ctx.ctx.get_static_view(view_id).unwrap());
+        desc.valid_local = Some(valid_local);
+        emit_array_reduce(&reduce, &desc, &ctx, &mut func).expect("reduce lowers");
+        func.instruction(&Instruction::End);
+        code.function(&func);
+        module.section(&code);
+
+        let bytes = module.finish();
+        let info = validate(&bytes).expect("invalid-view module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        // Seed the curr slots so a (wrongly) valid read would produce a finite
+        // value -- making the NaN assertion meaningful.
+        let mem = store
+            .instance_export(inst, "mem")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        store.mem_access_mut_slice(mem, |b| {
+            for (i, v) in [1.0f64, 2.0, 3.0].iter().enumerate() {
+                let a = i * 8;
+                b[a..a + 8].copy_from_slice(&v.to_le_bytes());
+            }
+        });
+        let eval = store
+            .instance_export(inst, "eval")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store.invoke_simple_typed(eval, (0_i32,)).expect("invoke")
+    }
+
+    #[test]
+    fn invalid_view_all_reducers_are_nan() {
+        // Every reducer over an invalid view is NaN -- including ArraySum, whose
+        // empty-but-valid result is 0.0 but whose invalid-view result is NaN.
+        for op in [
+            Opcode::ArraySum {},
+            Opcode::ArrayMax {},
+            Opcode::ArrayMin {},
+            Opcode::ArrayMean {},
+            Opcode::ArrayStddev {},
+        ] {
+            let got = run_invalid_view_reduce(op);
+            assert!(
+                got.is_nan(),
+                "{}: an invalid view must reduce to NaN, got {got}",
+                op.name()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_view_size_is_still_the_size() {
+        // ArraySize is defined regardless of validity (`vm.rs:2306` reads
+        // `view.size()` with no validity gate), so an invalid 3-element view
+        // still reports size 3.
+        let got = run_invalid_view_reduce(Opcode::ArraySize {});
+        assert_eq!(got, 3.0);
     }
 }

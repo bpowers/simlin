@@ -143,10 +143,8 @@ impl ViewDesc {
     }
 
     /// `size() == product of dims` (`RuntimeView::size`). A scalar view (no
-    /// dims) has size 1. (Landed with the view machinery in Task 1; the array
-    /// reducer in Task 2 is its first non-test consumer -- it bounds the
-    /// unrolled fold.)
-    #[allow(dead_code)]
+    /// dims) has size 1. The array reducer (Task 2) bounds its unrolled fold by
+    /// this.
     pub fn size(&self) -> usize {
         self.dims.iter().map(|&d| d as usize).product()
     }
