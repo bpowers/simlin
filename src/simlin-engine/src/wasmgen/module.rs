@@ -55,6 +55,12 @@ const FINAL_TIME_OFF: usize = 3;
 const SLOT_SIZE: u32 = 8;
 const WASM_PAGE_SIZE: u32 = 65536;
 
+// Slot-0 byte base of the `curr` chunk, and the byte address of `curr[TIME]`
+// (an absolute, module-independent global slot). Both run-loop and snapshot
+// code address `curr` from byte 0.
+const CURR_BASE: u32 = 0;
+const TIME_ADDR: u64 = TIME_OFF as u64 * SLOT_SIZE as u64;
+
 // Global indices. The three self-describing geometry globals come first (so the
 // exported indices 0/1/2 stay stable for hosts); `use_prev_fallback` -- the only
 // mutable global -- follows at index 3. It gates `LoadPrev`: init 1 (return the
@@ -246,11 +252,8 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     // `wasmgen` is in-crate, so it reads `CompiledSimulation`'s `pub(crate)`
     // fields directly rather than through accessors.
     let specs = &sim.specs;
-    if specs.method != Method::Euler {
-        return Err(WasmGenError::Unsupported(
-            "wasmgen: only Euler integration is supported".to_string(),
-        ));
-    }
+    // The run-loop shape is selected from `specs.method` below; all three
+    // methods (`Euler`/`RungeKutta2`/`RungeKutta4`) are supported.
 
     let root = sim
         .modules
@@ -263,6 +266,12 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         ));
     }
     let too_large = || WasmGenError::Unsupported("wasmgen: model too large to lower".to_string());
+    // The stock data-buffer offsets the stocks program writes (`AssignNext` /
+    // its `BinOpAssignNext` peephole form). The Euler advance copies these
+    // `next -> curr`; the RK loops index `rk_scratch[saved/accum]` by their
+    // position here. Collected up front so the RK scratch region is sized below.
+    let stock_offsets = collect_assign_next_opcode_offsets(&root.compiled_stocks);
+    let n_stocks = u32::try_from(stock_offsets.len()).map_err(|_| too_large())?;
     let n_slots = u32::try_from(root.n_slots).map_err(|_| too_large())?;
     let n_chunks = u32::try_from(specs.n_chunks).map_err(|_| too_large())?;
     let stride = n_slots.checked_mul(SLOT_SIZE).ok_or_else(too_large)?;
@@ -303,6 +312,24 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     let total_bytes = prev_values_base
         .checked_add(snapshot_bytes)
         .ok_or_else(too_large)?;
+
+    // The RK scratch region (`saved`(n_stocks) ++ `accum`(n_stocks)) follows the
+    // snapshot regions. It holds each stock's stage-1 value and running RK
+    // accumulator across the stages (`vm.rs:655`, the VM's `rk_scratch`
+    // split). Euler needs neither, so the region is only reserved for RK.
+    let rk = matches!(specs.method, Method::RungeKutta2 | Method::RungeKutta4);
+    let stock_scratch_bytes = n_stocks.checked_mul(SLOT_SIZE).ok_or_else(too_large)?;
+    let rk_saved_base = total_bytes;
+    let rk_accum_base = rk_saved_base
+        .checked_add(stock_scratch_bytes)
+        .ok_or_else(too_large)?;
+    let total_bytes = if rk {
+        rk_accum_base
+            .checked_add(stock_scratch_bytes)
+            .ok_or_else(too_large)?
+    } else {
+        total_bytes
+    };
 
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
 
@@ -345,18 +372,21 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     let flows_fn = emit_opcode_fn(&root.compiled_flows, StepPart::Flows, &make_ctx)?;
     let stocks_fn = emit_opcode_fn(&root.compiled_stocks, StepPart::Stocks, &make_ctx)?;
 
-    let stock_offsets = collect_assign_next_opcode_offsets(&root.compiled_stocks);
     let run_fn = emit_run_simulation(
         specs,
-        n_slots,
-        results_base,
-        stride,
-        n_chunks,
+        RunRegions {
+            n_slots,
+            results_base,
+            stride,
+            n_chunks,
+            initial_values_base,
+            prev_values_base,
+            rk_saved_base,
+            rk_accum_base,
+        },
         save_every,
         &stock_offsets,
         n_helpers,
-        initial_values_base,
-        prev_values_base,
     );
 
     let wasm = assemble_simulation(
@@ -460,32 +490,51 @@ fn collect_assign_next_opcode_offsets(stocks: &ByteCode) -> Vec<usize> {
     offsets
 }
 
-/// Emit the body of `run` for the `CompiledSimulation` path. Identical control
-/// flow to the POC's `emit_run` (`vm.rs::run_to` Euler arm + `save_advance!`),
-/// but it `call`s the three opcode-emitted functions instead of inlining `Expr`
-/// lowering.
-#[allow(clippy::too_many_arguments)]
-fn emit_run_simulation(
-    specs: &Specs,
+/// The linear-memory region geometry `run` needs: the chunk/results bases, the
+/// snapshot bases (`initial_values`/`prev_values`), and the RK scratch bases
+/// (`saved`/`accum`). Bundled to keep `emit_run_simulation`'s signature small as
+/// the run loop gained snapshot + RK regions.
+#[derive(Clone, Copy)]
+struct RunRegions {
     n_slots: u32,
     results_base: u32,
     stride: u32,
     n_chunks: u32,
+    initial_values_base: u32,
+    prev_values_base: u32,
+    /// Slot-0 byte base of the RK `saved[i]` scratch (one f64 per stock).
+    rk_saved_base: u32,
+    /// Slot-0 byte base of the RK `accum[i]` scratch (one f64 per stock).
+    rk_accum_base: u32,
+}
+
+// `run`'s f64 locals (after the three i32 locals). The RK loops need a
+// `saved_time` (the timestep's t, restored after the stages move `curr[TIME]` to
+// trial points) and a per-stage `s` scratch (`next[off]-curr[off]`). Euler
+// declares them too -- two unused f64 locals are free.
+const L_SAVED_TIME: u32 = 3;
+const L_RK_S: u32 = 4;
+
+/// Emit the body of `run` for the `CompiledSimulation` path: seed the reserved
+/// globals, run the initials, capture `initial_values`, then drive the
+/// integration loop selected by `specs.method`. The loop `call`s the three
+/// opcode-emitted functions; the Euler arm mirrors `vm.rs::run_to`'s Euler arm,
+/// and the RK arms mirror `vm.rs:712-838`.
+fn emit_run_simulation(
+    specs: &Specs,
+    regions: RunRegions,
     save_every: i32,
     stock_offsets: &[usize],
     n_helpers: u32,
-    initial_values_base: u32,
-    prev_values_base: u32,
 ) -> Function {
-    let mut f = Function::new([(3, ValType::I32)]);
+    // Three i32 locals (saved/step_accum/dst) + two f64 locals (saved_time, s).
+    let mut f = Function::new([(3, ValType::I32), (2, ValType::F64)]);
 
     // Absolute function indices of the per-program functions: the helpers
     // occupy slots `0..n_helpers`, so each program function is `n_helpers + F_*`.
     let f_initials = n_helpers + F_INITIALS;
     let f_flows = n_helpers + F_FLOWS;
     let f_stocks = n_helpers + F_STOCKS;
-
-    let time_addr = TIME_OFF as u64 * u64::from(SLOT_SIZE);
 
     // Seed the reserved global slots into curr (chunk base 0), then run the
     // initials. The seeds mirror the VM, which writes start/dt/start/stop into
@@ -501,32 +550,87 @@ fn emit_run_simulation(
     // `INIT(x)` reads in the flows/stocks programs (`vm.rs:1124-1128`).
     // `use_prev_fallback` stays 1 (its init value) through initials, so any
     // `PREVIOUS(x)` evaluated during initials returns its fallback.
-    let curr_base = 0u32;
-    emit_copy_chunk(&mut f, curr_base, initial_values_base, n_slots);
+    emit_copy_chunk(
+        &mut f,
+        CURR_BASE,
+        regions.initial_values_base,
+        regions.n_slots,
+    );
 
     f.instruction(&I::Block(BlockType::Empty)); // $break
     f.instruction(&I::Loop(BlockType::Empty)); // $continue
 
     // if curr[TIME] > stop: break
     f.instruction(&I::I32Const(0));
-    f.instruction(&I::F64Load(memarg(time_addr)));
+    f.instruction(&I::F64Load(memarg(TIME_ADDR)));
     f.instruction(&f64_const(specs.stop));
     f.instruction(&I::F64Gt);
     f.instruction(&I::BrIf(1));
 
-    // flows then stocks, both over module_off 0.
+    // The per-method step: compute the new stock values into `next[off]`, leave
+    // `curr` holding the full time-`t` state (aux/flows + time-`t` stocks), then
+    // snapshot `prev_values := curr` and clear `use_prev_fallback`.
+    match specs.method {
+        Method::Euler => emit_euler_step(&mut f, f_flows, f_stocks, &regions),
+        Method::RungeKutta4 => {
+            emit_rk4_step(&mut f, f_flows, f_stocks, specs.dt, stock_offsets, &regions)
+        }
+        Method::RungeKutta2 => {
+            emit_rk2_step(&mut f, f_flows, f_stocks, specs.dt, stock_offsets, &regions)
+        }
+    }
+
+    // The save + advance tail is method-agnostic: every method leaves `next[off]`
+    // holding the new stock values and `curr` holding the time-`t` state, so the
+    // save row records `curr`, the advance copies the new stocks `next -> curr`,
+    // and `curr[TIME] += dt`.
+    emit_save_advance(&mut f, specs, save_every, stock_offsets, &regions);
+
+    f.instruction(&I::Br(0)); // continue
+    f.instruction(&I::End); // end loop
+    f.instruction(&I::End); // end block
+    f.instruction(&I::End); // end function
+    f
+}
+
+/// The Euler step: `flows`+`stocks` (the stocks program writes `next[off]`),
+/// then the `prev_values` snapshot. Mirrors `vm.rs:698-708`.
+fn emit_euler_step(f: &mut Function, f_flows: u32, f_stocks: u32, regions: &RunRegions) {
+    emit_eval_step(f, f_flows, f_stocks);
+    emit_prev_snapshot(f, regions);
+}
+
+/// `eval_step` = `flows(0)` then `stocks(0)` (`vm.rs:1195`). The stocks program
+/// writes each stock's integrated value into `next[off]`.
+fn emit_eval_step(f: &mut Function, f_flows: u32, f_stocks: u32) {
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_flows));
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_stocks));
+}
 
-    // Snapshot `prev_values := curr` and clear `use_prev_fallback` so the next
-    // step's `PREVIOUS(x)` reads this step's `curr` rather than its fallback
-    // (`vm.rs:705-707`). Done after flows+stocks (curr holds the full time-`t`
-    // state) and before the save/advance.
-    emit_copy_chunk(&mut f, curr_base, prev_values_base, n_slots);
+/// Snapshot `prev_values := curr` and clear `use_prev_fallback` so the next
+/// step's `PREVIOUS(x)` reads this step's `curr` rather than its fallback
+/// (`vm.rs:705-707` for Euler; `vm.rs:781-783` / `832-834` for RK, where it runs
+/// only after the end-of-step flows re-eval has restored `curr`).
+fn emit_prev_snapshot(f: &mut Function, regions: &RunRegions) {
+    emit_copy_chunk(f, CURR_BASE, regions.prev_values_base, regions.n_slots);
     f.instruction(&I::I32Const(0));
     f.instruction(&I::GlobalSet(G_USE_PREV_FALLBACK));
+}
+
+/// The method-agnostic save + advance tail (the wasm analogue of the VM's
+/// `save_advance!` plus its per-step advance). Records a results row from `curr`
+/// on the VM's cadence, breaks when the chunk budget is exhausted, then advances
+/// by copying the new stock values `next -> curr` and stepping `curr[TIME] += dt`.
+fn emit_save_advance(
+    f: &mut Function,
+    specs: &Specs,
+    save_every: i32,
+    stock_offsets: &[usize],
+    regions: &RunRegions,
+) {
+    let n_slots = regions.n_slots;
 
     // step_accum += 1
     f.instruction(&I::LocalGet(L_STEP_ACCUM));
@@ -541,7 +645,7 @@ fn emit_run_simulation(
     f.instruction(&I::LocalGet(L_SAVED));
     f.instruction(&I::I32Eqz);
     f.instruction(&I::I32Const(0));
-    f.instruction(&I::F64Load(memarg(time_addr)));
+    f.instruction(&I::F64Load(memarg(TIME_ADDR)));
     f.instruction(&f64_const(specs.start));
     f.instruction(&I::F64Eq);
     f.instruction(&I::I32And);
@@ -549,9 +653,9 @@ fn emit_run_simulation(
     f.instruction(&I::If(BlockType::Empty));
 
     // dst = results_base + saved * stride
-    f.instruction(&I::I32Const(results_base as i32));
+    f.instruction(&I::I32Const(regions.results_base as i32));
     f.instruction(&I::LocalGet(L_SAVED));
-    f.instruction(&I::I32Const(stride as i32));
+    f.instruction(&I::I32Const(regions.stride as i32));
     f.instruction(&I::I32Mul);
     f.instruction(&I::I32Add);
     f.instruction(&I::LocalSet(L_DST));
@@ -574,18 +678,19 @@ fn emit_run_simulation(
 
     // if saved >= n_chunks: break (depth 2: if -> loop -> block)
     f.instruction(&I::LocalGet(L_SAVED));
-    f.instruction(&I::I32Const(n_chunks as i32));
+    f.instruction(&I::I32Const(regions.n_chunks as i32));
     f.instruction(&I::I32GeS);
     f.instruction(&I::BrIf(2));
 
     f.instruction(&I::End); // end if
 
     // Advance: copy the freshly integrated stock values next -> curr.
+    let next_base = n_slots * SLOT_SIZE;
     for &off in stock_offsets {
         f.instruction(&I::I32Const(0));
         f.instruction(&I::I32Const(0));
         f.instruction(&I::F64Load(memarg(
-            u64::from(next_base_of(n_slots)) + off as u64 * u64::from(SLOT_SIZE),
+            u64::from(next_base) + off as u64 * u64::from(SLOT_SIZE),
         )));
         f.instruction(&I::F64Store(memarg(off as u64 * u64::from(SLOT_SIZE))));
     }
@@ -593,22 +698,10 @@ fn emit_run_simulation(
     // time += dt
     f.instruction(&I::I32Const(0));
     f.instruction(&I::I32Const(0));
-    f.instruction(&I::F64Load(memarg(time_addr)));
+    f.instruction(&I::F64Load(memarg(TIME_ADDR)));
     f.instruction(&f64_const(specs.dt));
     f.instruction(&I::F64Add);
-    f.instruction(&I::F64Store(memarg(time_addr)));
-
-    f.instruction(&I::Br(0)); // continue
-    f.instruction(&I::End); // end loop
-    f.instruction(&I::End); // end block
-    f.instruction(&I::End); // end function
-    f
-}
-
-/// Byte offset of slot 0 of the `next` chunk: `n_slots * 8` (the `next` chunk
-/// immediately follows `curr` in the slab).
-fn next_base_of(n_slots: u32) -> u32 {
-    n_slots * SLOT_SIZE
+    f.instruction(&I::F64Store(memarg(TIME_ADDR)));
 }
 
 /// Store a compile-time constant into a `curr` slot at an absolute (module_off
@@ -617,6 +710,281 @@ fn store_curr_const_abs(f: &mut Function, off: usize, v: f64) {
     f.instruction(&I::I32Const(0));
     f.instruction(&f64_const(v));
     f.instruction(&I::F64Store(memarg(off as u64 * u64::from(SLOT_SIZE))));
+}
+
+// ── RK loop primitives ────────────────────────────────────────────────────
+//
+// Every RK memory slot lives at a constant byte address (`base + idx*8`), so the
+// dynamic part of the address is always `i32.const 0` and the constant
+// `memarg.offset` carries `base + idx*8`. `f64.store` wants `[addr_i32,
+// value_f64]`, so the store helpers push the `i32.const 0` address first, then
+// the caller leaves the value on the stack.
+
+/// `i32.const 0; f64.load[base + idx*8]` -- push the f64 at slot `idx` of the
+/// region whose slot-0 byte base is `base`.
+fn emit_load_slot(f: &mut Function, base: u32, idx: u32) {
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::F64Load(memarg(
+        u64::from(base) + u64::from(idx) * u64::from(SLOT_SIZE),
+    )));
+}
+
+/// Push the `i32.const 0` store address for slot `idx` of `base`. After this the
+/// caller pushes the f64 value and emits `emit_store_slot_value(base, idx)`.
+fn emit_store_slot_addr(f: &mut Function) {
+    f.instruction(&I::I32Const(0));
+}
+
+/// `f64.store[base + idx*8]` -- consume `[addr_i32, value_f64]` already on the
+/// stack (the address from [`emit_store_slot_addr`]).
+fn emit_store_slot_value(f: &mut Function, base: u32, idx: u32) {
+    f.instruction(&I::F64Store(memarg(
+        u64::from(base) + u64::from(idx) * u64::from(SLOT_SIZE),
+    )));
+}
+
+/// Emit `L_RK_S := next[off] - curr[off]` -- the stock's stage delta `s_k`
+/// (`vm.rs`: `let sN = next[off] - curr[off]`). Computed before any of the
+/// stage's writes clobber `curr[off]`. `next_base` is `n_slots*8`.
+fn emit_compute_stage_delta(f: &mut Function, next_base: u32, off: u16) {
+    emit_load_slot(f, next_base, u32::from(off));
+    emit_load_slot(f, CURR_BASE, u32::from(off));
+    f.instruction(&I::F64Sub);
+    f.instruction(&I::LocalSet(L_RK_S));
+}
+
+/// The RK4 step (`vm.rs:712-787`): four stages over the compile-time stock
+/// offsets, the time juggling, the final flows-only re-eval with restored
+/// `curr`, and the `prev_values` snapshot. `next[off]` ends holding the new
+/// integrated stock value; `curr` ends holding the time-`t` state.
+fn emit_rk4_step(
+    f: &mut Function,
+    f_flows: u32,
+    f_stocks: u32,
+    dt: f64,
+    stock_offsets: &[usize],
+    regions: &RunRegions,
+) {
+    let (saved, accum) = (regions.rk_saved_base, regions.rk_accum_base);
+    let next_base = regions.n_slots * SLOT_SIZE;
+
+    // saved_time = curr[TIME]
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::F64Load(memarg(TIME_ADDR)));
+    f.instruction(&I::LocalSet(L_SAVED_TIME));
+
+    // Stage 1 at (t, y): s1 = next-curr; saved=curr; accum=s1; curr=saved+s1*0.5
+    emit_eval_step(f, f_flows, f_stocks);
+    for (i, &off) in stock_offsets.iter().enumerate() {
+        let (i, off) = (i as u32, off as u16);
+        emit_compute_stage_delta(f, next_base, off);
+        // saved[i] = curr[off]
+        emit_store_slot_addr(f);
+        emit_load_slot(f, CURR_BASE, u32::from(off));
+        emit_store_slot_value(f, saved, i);
+        // accum[i] = s1
+        emit_store_slot_addr(f);
+        f.instruction(&I::LocalGet(L_RK_S));
+        emit_store_slot_value(f, accum, i);
+        // curr[off] = saved[i] + s1*0.5
+        emit_store_slot_addr(f);
+        emit_load_slot(f, saved, i);
+        f.instruction(&I::LocalGet(L_RK_S));
+        f.instruction(&f64_const(0.5));
+        f.instruction(&I::F64Mul);
+        f.instruction(&I::F64Add);
+        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+    }
+    // curr[TIME] = saved_time + dt*0.5
+    emit_store_time_offset(f, dt * 0.5);
+
+    // Stage 2 at (t+dt/2, y+s1/2): s2 = next-curr; accum+=2*s2; curr=saved+s2*0.5
+    emit_eval_step(f, f_flows, f_stocks);
+    for (i, &off) in stock_offsets.iter().enumerate() {
+        let (i, off) = (i as u32, off as u16);
+        emit_compute_stage_delta(f, next_base, off);
+        // accum[i] += 2*s2
+        emit_store_slot_addr(f);
+        emit_load_slot(f, accum, i);
+        f.instruction(&I::LocalGet(L_RK_S));
+        f.instruction(&f64_const(2.0));
+        f.instruction(&I::F64Mul);
+        f.instruction(&I::F64Add);
+        emit_store_slot_value(f, accum, i);
+        // curr[off] = saved[i] + s2*0.5
+        emit_store_slot_addr(f);
+        emit_load_slot(f, saved, i);
+        f.instruction(&I::LocalGet(L_RK_S));
+        f.instruction(&f64_const(0.5));
+        f.instruction(&I::F64Mul);
+        f.instruction(&I::F64Add);
+        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+    }
+
+    // Stage 3 at (t+dt/2, y+s2/2): s3 = next-curr; accum+=2*s3; curr=saved+s3
+    emit_eval_step(f, f_flows, f_stocks);
+    for (i, &off) in stock_offsets.iter().enumerate() {
+        let (i, off) = (i as u32, off as u16);
+        emit_compute_stage_delta(f, next_base, off);
+        // accum[i] += 2*s3
+        emit_store_slot_addr(f);
+        emit_load_slot(f, accum, i);
+        f.instruction(&I::LocalGet(L_RK_S));
+        f.instruction(&f64_const(2.0));
+        f.instruction(&I::F64Mul);
+        f.instruction(&I::F64Add);
+        emit_store_slot_value(f, accum, i);
+        // curr[off] = saved[i] + s3
+        emit_store_slot_addr(f);
+        emit_load_slot(f, saved, i);
+        f.instruction(&I::LocalGet(L_RK_S));
+        f.instruction(&I::F64Add);
+        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+    }
+    // curr[TIME] = saved_time + dt
+    emit_store_time_offset(f, dt);
+
+    // Stage 4 at (t+dt, y+s3): s4 = next-curr; accum+=s4;
+    // next[off] = saved[i] + accum[i]/6; curr[off] = saved[i]
+    emit_eval_step(f, f_flows, f_stocks);
+    for (i, &off) in stock_offsets.iter().enumerate() {
+        let (i, off) = (i as u32, off as u16);
+        emit_compute_stage_delta(f, next_base, off);
+        // accum[i] += s4
+        emit_store_slot_addr(f);
+        emit_load_slot(f, accum, i);
+        f.instruction(&I::LocalGet(L_RK_S));
+        f.instruction(&I::F64Add);
+        emit_store_slot_value(f, accum, i);
+        // next[off] = saved[i] + accum[i]/6.0
+        emit_store_slot_addr(f);
+        emit_load_slot(f, saved, i);
+        emit_load_slot(f, accum, i);
+        f.instruction(&f64_const(6.0));
+        f.instruction(&I::F64Div);
+        f.instruction(&I::F64Add);
+        emit_store_slot_value(f, next_base, u32::from(off));
+        // curr[off] = saved[i]  (restore the original)
+        emit_store_slot_addr(f);
+        emit_load_slot(f, saved, i);
+        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+    }
+
+    // curr[TIME] = saved_time ; next[TIME] = saved_time + dt
+    emit_restore_and_advance_time(f, dt, regions);
+
+    // Final flows-only re-eval with the restored curr, so curr's aux/flow slots
+    // hold time-`t` values (stages 2-4 clobbered them). Load-bearing for both
+    // the saved output row and the PREVIOUS snapshot (`vm.rs:769-778`).
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::Call(f_flows));
+
+    emit_prev_snapshot(f, regions);
+}
+
+/// The RK2 (Heun) step (`vm.rs:788-838`): two stages, the time juggling, the
+/// final flows-only re-eval, and the `prev_values` snapshot.
+fn emit_rk2_step(
+    f: &mut Function,
+    f_flows: u32,
+    f_stocks: u32,
+    dt: f64,
+    stock_offsets: &[usize],
+    regions: &RunRegions,
+) {
+    let (saved, accum) = (regions.rk_saved_base, regions.rk_accum_base);
+    let next_base = regions.n_slots * SLOT_SIZE;
+
+    // saved_time = curr[TIME]
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::F64Load(memarg(TIME_ADDR)));
+    f.instruction(&I::LocalSet(L_SAVED_TIME));
+
+    // Stage 1 at (t, y): s1 = next-curr; saved=curr; accum=s1; curr=saved+s1
+    emit_eval_step(f, f_flows, f_stocks);
+    for (i, &off) in stock_offsets.iter().enumerate() {
+        let (i, off) = (i as u32, off as u16);
+        emit_compute_stage_delta(f, next_base, off);
+        // saved[i] = curr[off]
+        emit_store_slot_addr(f);
+        emit_load_slot(f, CURR_BASE, u32::from(off));
+        emit_store_slot_value(f, saved, i);
+        // accum[i] = s1
+        emit_store_slot_addr(f);
+        f.instruction(&I::LocalGet(L_RK_S));
+        emit_store_slot_value(f, accum, i);
+        // curr[off] = saved[i] + s1   (full Euler step for the trial point)
+        emit_store_slot_addr(f);
+        emit_load_slot(f, saved, i);
+        f.instruction(&I::LocalGet(L_RK_S));
+        f.instruction(&I::F64Add);
+        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+    }
+    // curr[TIME] = saved_time + dt
+    emit_store_time_offset(f, dt);
+
+    // Stage 2 at (t+dt, y+s1): s2 = next-curr; accum+=s2;
+    // next[off] = saved[i] + accum[i]/2; curr[off] = saved[i]
+    emit_eval_step(f, f_flows, f_stocks);
+    for (i, &off) in stock_offsets.iter().enumerate() {
+        let (i, off) = (i as u32, off as u16);
+        emit_compute_stage_delta(f, next_base, off);
+        // accum[i] += s2
+        emit_store_slot_addr(f);
+        emit_load_slot(f, accum, i);
+        f.instruction(&I::LocalGet(L_RK_S));
+        f.instruction(&I::F64Add);
+        emit_store_slot_value(f, accum, i);
+        // next[off] = saved[i] + accum[i]/2.0
+        emit_store_slot_addr(f);
+        emit_load_slot(f, saved, i);
+        emit_load_slot(f, accum, i);
+        f.instruction(&f64_const(2.0));
+        f.instruction(&I::F64Div);
+        f.instruction(&I::F64Add);
+        emit_store_slot_value(f, next_base, u32::from(off));
+        // curr[off] = saved[i]  (restore the original)
+        emit_store_slot_addr(f);
+        emit_load_slot(f, saved, i);
+        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+    }
+
+    // curr[TIME] = saved_time ; next[TIME] = saved_time + dt
+    emit_restore_and_advance_time(f, dt, regions);
+
+    // Final flows-only re-eval with restored curr (see the RK4 comment).
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::Call(f_flows));
+
+    emit_prev_snapshot(f, regions);
+}
+
+/// `curr[TIME] = saved_time + offset` -- the trial-point time the stages run at
+/// (`saved_time + dt*0.5` or `saved_time + dt`).
+fn emit_store_time_offset(f: &mut Function, offset: f64) {
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::LocalGet(L_SAVED_TIME));
+    f.instruction(&f64_const(offset));
+    f.instruction(&I::F64Add);
+    f.instruction(&I::F64Store(memarg(TIME_ADDR)));
+}
+
+/// Restore `curr[TIME] = saved_time` and set `next[TIME] = saved_time + dt`
+/// (`vm.rs:759-760` / `818-819`), so the final flows re-eval runs at time `t`.
+/// `next[TIME]` is set for faithfulness with the VM even though the wasm
+/// save/advance tail advances via `curr[TIME] += dt` rather than reading it.
+fn emit_restore_and_advance_time(f: &mut Function, dt: f64, regions: &RunRegions) {
+    let next_time_addr = u64::from(regions.n_slots) * u64::from(SLOT_SIZE) + TIME_ADDR;
+    // curr[TIME] = saved_time
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::LocalGet(L_SAVED_TIME));
+    f.instruction(&I::F64Store(memarg(TIME_ADDR)));
+    // next[TIME] = saved_time + dt
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::LocalGet(L_SAVED_TIME));
+    f.instruction(&f64_const(dt));
+    f.instruction(&I::F64Add);
+    f.instruction(&I::F64Store(memarg(next_time_addr)));
 }
 
 /// Emit an unrolled `dst[0..n_slots] := src[0..n_slots]` f64 copy between two
@@ -1292,9 +1660,111 @@ mod tests {
         );
     }
 
+    // ── RK2 / RK4 integration loops (Task 2) ──────────────────────────────
+
+    /// A logistic-growth model: `pop' = rate * pop * (1 - pop/capacity)`. The
+    /// nonlinear flow depends on the stock, so RK's trial-point evaluations
+    /// genuinely differ from Euler -- a pure-constant flow would let a broken RK
+    /// loop pass by coincidence.
+    fn logistic_growth(
+        name: &str,
+        method: crate::datamodel::SimMethod,
+    ) -> crate::datamodel::Project {
+        crate::test_common::TestProject::new(name)
+            .with_sim_time(0.0, 20.0, 0.5)
+            .with_sim_method(method)
+            .aux("rate", "0.3", None)
+            .aux("capacity", "1000", None)
+            .stock("pop", "10", &["growth"], &[], None)
+            .flow("growth", "rate * pop * (1 - pop / capacity)", None)
+            .build_datamodel()
+    }
+
+    /// Task 2: an RK4 scalar model matches the VM's saved samples (cadence and
+    /// values). The VM's RK4 loop is the oracle; the emitted four-stage loop
+    /// with time juggling + the end-of-step flows re-eval must reproduce it.
     #[test]
-    fn compile_simulation_rejects_non_euler() {
-        let datamodel = crate::test_common::TestProject::new("rk4")
+    fn compile_simulation_rk4_matches_vm() {
+        let datamodel = logistic_growth("rk4_logistic", crate::datamodel::SimMethod::RungeKutta4);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (RK4)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 2, "expected to compare pop + growth");
+    }
+
+    /// Task 2: an RK2 (Heun) scalar model matches the VM's saved samples. Same
+    /// nonlinear model so the two-stage trial step is genuinely exercised.
+    #[test]
+    fn compile_simulation_rk2_matches_vm() {
+        let datamodel = logistic_growth("rk2_logistic", crate::datamodel::SimMethod::RungeKutta2);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (RK2)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 2, "expected to compare pop + growth");
+    }
+
+    /// Task 2: RK4 and RK2 must genuinely differ from Euler on this nonlinear
+    /// model -- otherwise the RK tests above could pass against a loop that
+    /// silently fell back to Euler. Establishes that the oracle (the VM) sees a
+    /// method-dependent trajectory, so wasm-vs-VM parity is a meaningful check.
+    #[test]
+    fn rk_methods_differ_from_euler_in_vm() {
+        let last_pop = |method| {
+            let datamodel = logistic_growth("rk_vs_euler", method);
+            let sim = compile_sim(&datamodel, "main");
+            let mut vm = Vm::new(sim).expect("vm");
+            vm.run_to_end().expect("vm run");
+            let results = vm.into_results();
+            let pop = Ident::<Canonical>::from_str_unchecked("pop");
+            let off = *results.offsets.get(&pop).expect("pop offset");
+            results.data[(results.step_count - 1) * results.step_size + off]
+        };
+        let euler = last_pop(crate::datamodel::SimMethod::Euler);
+        let rk4 = last_pop(crate::datamodel::SimMethod::RungeKutta4);
+        let rk2 = last_pop(crate::datamodel::SimMethod::RungeKutta2);
+        assert!(
+            (euler - rk4).abs() > 1e-6,
+            "RK4 must differ from Euler (euler={euler}, rk4={rk4})"
+        );
+        assert!(
+            (euler - rk2).abs() > 1e-6,
+            "RK2 must differ from Euler (euler={euler}, rk2={rk2})"
+        );
+    }
+
+    /// Task 2: a model using `PREVIOUS`/`INIT` under RK4 matches the VM. The
+    /// snapshot timing is the subtle part: `prev_values` is captured AFTER the
+    /// end-of-step flows re-eval (with `curr` restored to time-`t` state), not
+    /// from a trial point. `x_prev` lags `pop`; `pop_init` reads INIT(pop).
+    #[test]
+    fn compile_simulation_rk4_with_previous_and_init_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("rk4_prev_init")
+            .with_sim_time(0.0, 10.0, 0.5)
+            .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
+            .aux("rate", "0.3", None)
+            .aux("capacity", "1000", None)
+            .stock("pop", "10", &["growth"], &[], None)
+            .flow("growth", "rate * pop * (1 - pop / capacity)", None)
+            // PREVIOUS(pop): lagged by one saved step; captured after re-eval.
+            .aux("pop_prev", "PREVIOUS(pop)", None)
+            // INIT(pop): the t0 snapshot (= 10), read from initial_values.
+            .aux("pop_init", "INIT(pop)", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (RK4 + PREVIOUS/INIT)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(
+            checked >= 4,
+            "expected to compare pop + growth + pop_prev + pop_init"
+        );
+    }
+
+    /// After Task 2, RK4 (and RK2) are supported, so a model using them runs
+    /// rather than being rejected -- the inverse of the Phase-1 guard. Pinned so
+    /// a regression that re-introduced the Euler-only guard would be caught.
+    #[test]
+    fn compile_simulation_accepts_rk4() {
+        let datamodel = crate::test_common::TestProject::new("rk4_accept")
             .with_sim_time(0.0, 5.0, 1.0)
             .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
             .aux("inflow_rate", "2", None)
@@ -1303,8 +1773,7 @@ mod tests {
             .build_datamodel();
 
         let sim = compile_sim(&datamodel, "main");
-        let result = compile_simulation(&sim);
-        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+        compile_simulation(&sim).expect("RK4 must now be supported");
     }
 
     #[test]
