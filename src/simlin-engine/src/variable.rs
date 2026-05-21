@@ -427,6 +427,112 @@ fn build_tables(
     (tables, errors)
 }
 
+/// Pure predicate: a "lookup-only" variable is a standalone graphical-function
+/// holder -- it carries a graphical function (`has_tables`) and its equation is
+/// empty or the MDL lookup sentinel (i.e. there is no functional input
+/// expression to feed the table). Such a variable is a *table indexed by an
+/// explicit input* (`y = table(input)`), not a runtime value-bearing variable:
+/// it produces no simulation series (see `Variable::Var::is_table_only`).
+///
+/// Mirrors `mdl::writer::is_lookup_only_equation`'s "empty or sentinel" rule so
+/// that BOTH the canonical empty-equation form (now emitted by both the XMILE
+/// and MDL importers) and a legacy MDL-sourced one (the `LOOKUP_SENTINEL`
+/// equation alongside a `gf`) are detected. New imports emit the empty form; the
+/// `"0+0"` arm is a back-compat read-shim for models already serialized with it.
+///
+/// Returns `false` for WITH LOOKUP (`var = WITH LOOKUP(input, table)`: tables
+/// present but a *real* input equation) and for an ordinary aux (a real
+/// equation, no tables). The `has_tables` guard also keeps an empty-RHS aux (no
+/// gf) off this path.
+pub(crate) fn is_lookup_only(equation: &str, has_tables: bool) -> bool {
+    has_tables && is_empty_or_sentinel(equation)
+}
+
+/// An equation string with no functional content: empty/whitespace-only (the
+/// canonical lookup-only form) or exactly the MDL lookup sentinel `"0+0"` (a
+/// legacy back-compat read-shim -- older serialized models may still carry it).
+/// The trimmed comparison mirrors `mdl::writer::is_lookup_only_equation`.
+pub(crate) fn is_empty_or_sentinel(equation: &str) -> bool {
+    let trimmed = equation.trim();
+    trimmed.is_empty() || trimmed == crate::mdl::LOOKUP_SENTINEL
+}
+
+/// Whether a whole variable is lookup-only, given its source `datamodel::Equation`
+/// and whether it carries graphical functions (`has_tables`). A scalar/A2A
+/// variable is lookup-only when its single equation is empty/sentinel; an
+/// arrayed (`Equation::Arrayed`) variable is lookup-only when EVERY element
+/// equation (and the EXCEPT default, if any) is empty/sentinel -- i.e. it is a
+/// pure per-element table holder. Returns `false` when the variable has no
+/// equation or no tables.
+pub(crate) fn var_is_lookup_only(eqn: Option<&datamodel::Equation>, has_tables: bool) -> bool {
+    use crate::datamodel::Equation;
+    if !has_tables {
+        return false;
+    }
+    match eqn {
+        // Scalar / A2A: one equation string -- the pure `is_lookup_only` atom.
+        Some(Equation::Scalar(s)) | Some(Equation::ApplyToAll(_, s)) => {
+            is_lookup_only(s, has_tables)
+        }
+        // Arrayed: a pure per-element table holder iff EVERY element equation
+        // (and the EXCEPT default, if any) is empty/sentinel. `has_tables` is
+        // already true here, so the per-element check is just the string
+        // predicate `is_empty_or_sentinel` that the atom is built on.
+        Some(Equation::Arrayed(_, elements, default, _)) => {
+            !elements.is_empty()
+                && elements.iter().all(|(_, e, _, _)| is_empty_or_sentinel(e))
+                && default.as_deref().map(is_empty_or_sentinel).unwrap_or(true)
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod is_lookup_only_tests {
+    use super::*;
+
+    #[test]
+    fn is_lookup_only_sentinel_equation_with_tables_is_true() {
+        // Legacy MDL-sourced lookup-only: `g(<table>)` serialized with equation
+        // == LOOKUP_SENTINEL ("0+0") + a graphical function. Still detected as a
+        // back-compat read-shim even though new imports emit the empty form.
+        assert!(is_lookup_only(crate::mdl::LOOKUP_SENTINEL, true));
+    }
+
+    #[test]
+    fn is_lookup_only_empty_equation_with_tables_is_true() {
+        // Canonical lookup-only: a variable with a `<gf>` but no equation.
+        assert!(is_lookup_only("", true));
+        // Whitespace-only is equivalent to empty (matches the `.trim()` in
+        // `mdl::writer::is_lookup_only_equation`).
+        assert!(is_lookup_only("   ", true));
+    }
+
+    #[test]
+    fn is_lookup_only_with_lookup_real_input_is_false() {
+        // WITH LOOKUP (`g = WITH LOOKUP(some_input, <table>)`): tables present
+        // but a real input expression. Must NOT be treated as lookup-only --
+        // it is a genuine value-bearing variable that evaluates `gf(input)`.
+        assert!(!is_lookup_only("some_input", true));
+    }
+
+    #[test]
+    fn is_lookup_only_ordinary_aux_no_tables_is_false() {
+        // An ordinary aux: a real equation and no graphical function.
+        assert!(!is_lookup_only("3 * x + 1", false));
+    }
+
+    #[test]
+    fn is_lookup_only_sentinel_equation_without_tables_is_false() {
+        // An empty-RHS aux (MdlEquation::EmptyRhs): the sentinel equation but
+        // NO graphical function. `has_tables == false` keeps it off the
+        // lookup-only path even though its equation text matches the sentinel.
+        assert!(!is_lookup_only(crate::mdl::LOOKUP_SENTINEL, false));
+        // The empty-equation, no-tables case is likewise not lookup-only.
+        assert!(!is_lookup_only("", false));
+    }
+}
+
 fn get_dimensions(
     dimensions: &[datamodel::Dimension],
     names: &[DimensionName],
@@ -623,7 +729,22 @@ where
                 }
             }
             None => {
-                if errors.is_empty() && !is_initial && !v.can_be_module_input() {
+                // An empty equation is only an error when the variable has no
+                // graphical function. A standalone lookup-only table (empty
+                // equation + a `<gf>`) is a valid static table, not an error
+                // (issue #606): it produces no series and is excluded from the
+                // runlist downstream. (WITH LOOKUP has a real input equation, so
+                // it never reaches this empty-equation branch.)
+                let is_lookup_only_table = matches!(
+                    v,
+                    datamodel::Variable::Aux(datamodel::Aux { gf: Some(_), .. })
+                        | datamodel::Variable::Flow(datamodel::Flow { gf: Some(_), .. })
+                );
+                if errors.is_empty()
+                    && !is_initial
+                    && !v.can_be_module_input()
+                    && !is_lookup_only_table
+                {
                     errors.push(EquationError {
                         start: 0,
                         end: 0,
@@ -689,6 +810,10 @@ where
             };
             let (tables, table_errors) = build_tables(&v.gf, &v.equation, dimensions);
             errors.extend(table_errors);
+            // A standalone graphical-function holder (a `<gf>`/MDL lookup with an
+            // empty-or-sentinel equation) is a static table, not a value-bearing
+            // variable: it is excluded from the runlist and produces no series.
+            let is_table_only = var_is_lookup_only(Some(&v.equation), !tables.is_empty());
             Variable::Var {
                 ident,
                 ast,
@@ -697,7 +822,7 @@ where
                 units,
                 tables,
                 is_flow: true,
-                is_table_only: false,
+                is_table_only,
                 non_negative: v.compat.non_negative,
                 errors,
                 unit_errors,
@@ -727,6 +852,10 @@ where
             };
             let (tables, table_errors) = build_tables(&v.gf, &v.equation, dimensions);
             errors.extend(table_errors);
+            // A standalone graphical-function holder (a `<gf>`/MDL lookup with an
+            // empty-or-sentinel equation) is a static table, not a value-bearing
+            // variable: it is excluded from the runlist and produces no series.
+            let is_table_only = var_is_lookup_only(Some(&v.equation), !tables.is_empty());
             Variable::Var {
                 ident,
                 ast,
@@ -735,7 +864,7 @@ where
                 units,
                 tables,
                 is_flow: false,
-                is_table_only: false,
+                is_table_only,
                 non_negative: false,
                 errors,
                 unit_errors,
@@ -784,6 +913,13 @@ pub struct DepClassification {
     pub previous_only: BTreeSet<String>,
     /// Idents referenced ONLY inside INIT() or PREVIOUS() -- not outside either.
     pub init_only: BTreeSet<String>,
+    /// Standalone lookup tables referenced via `LOOKUP(table, x)`. A table
+    /// reference is a *layout* reference (codegen needs the table variable's
+    /// offset for the table-identity reverse-map), NOT a data-flow dependency:
+    /// it is kept OUT of `all` so it never creates a runlist-ordering or
+    /// causal/LTM edge, and is reunited with the dependency set only when the
+    /// fragment compiler builds its metadata + tables map (issue #606).
+    pub referenced_tables: BTreeSet<String>,
 }
 
 /// Unified AST walker that computes all dependency categories in a single pass.
@@ -812,6 +948,7 @@ struct ClassifyVisitor<'a> {
     previous_referenced: BTreeSet<String>,
     non_previous: BTreeSet<String>,
     non_init: BTreeSet<String>,
+    referenced_tables: BTreeSet<String>,
     dimensions: &'a [Dimension],
     module_inputs: Option<&'a BTreeSet<Ident<Canonical>>>,
     in_previous: bool,
@@ -918,6 +1055,20 @@ impl ClassifyVisitor<'_> {
                             self.all.insert(Ident::new(id));
                         }
                         BuiltinContents::Expr(expr) => self.walk(expr),
+                        // A graphical-function table reference is a *layout*
+                        // reference, not a data-flow dependency: record it in
+                        // `referenced_tables` (so the fragment compiler can find
+                        // the table's offset for the reverse-map) WITHOUT adding
+                        // it to `all`, keeping it off the runlist-ordering and
+                        // causal/LTM graphs (issue #606). A *bare* reference to
+                        // such a table is a plain `Var`, not a `LookupTable`, and
+                        // is rejected separately as a compile error.
+                        BuiltinContents::LookupTable(table_expr) => {
+                            if let Expr2::Var(id, _, _) | Expr2::Subscript(id, _, _, _) = table_expr
+                            {
+                                self.referenced_tables.insert(id.to_string());
+                            }
+                        }
                     });
                 }
             },
@@ -979,6 +1130,7 @@ pub fn classify_dependencies(
         previous_referenced: BTreeSet::new(),
         non_previous: BTreeSet::new(),
         non_init: BTreeSet::new(),
+        referenced_tables: BTreeSet::new(),
         dimensions,
         module_inputs,
         in_previous: false,
@@ -1012,6 +1164,7 @@ pub fn classify_dependencies(
         previous_referenced: visitor.previous_referenced,
         previous_only,
         init_only,
+        referenced_tables: visitor.referenced_tables,
     }
 }
 

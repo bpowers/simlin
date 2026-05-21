@@ -61,6 +61,10 @@ use crate::db::model_dependency_graph;
 pub(crate) struct VarInfo {
     pub(crate) is_stock: bool,
     pub(crate) is_module: bool,
+    /// A standalone lookup-only table: excluded from every runlist and from the
+    /// saved output, because it is a static table indexed by callers, not a
+    /// value-bearing variable (issue #606).
+    pub(crate) is_table_only: bool,
     pub(crate) dt_deps: BTreeSet<String>,
     pub(crate) initial_deps: BTreeSet<String>,
 }
@@ -324,6 +328,7 @@ pub(crate) fn build_var_info(
             VarInfo {
                 is_stock: kind == SourceVariableKind::Stock,
                 is_module: kind == SourceVariableKind::Module,
+                is_table_only: crate::db::source_var_is_table_only(db, source_vars[name.as_str()]),
                 dt_deps: normalize_deps(&dt_deps),
                 initial_deps: normalize_deps(&initial_deps),
             },
@@ -353,6 +358,8 @@ pub(crate) fn build_var_info(
                 VarInfo {
                     is_stock: implicit.is_stock,
                     is_module: implicit.is_module,
+                    // Implicit SMOOTH/DELAY/TREND internals are never lookup tables.
+                    is_table_only: false,
                     dt_deps: normalize_deps(&dt_deps),
                     initial_deps: normalize_deps(&initial_deps),
                 },
@@ -2271,9 +2278,12 @@ pub(crate) fn model_dependency_graph_impl(
                 var_info
                     .get(n.as_str())
                     .map(|i| {
-                        i.is_stock
-                            || i.is_module
-                            || (i.dt_deps.is_empty() && !i.initial_deps.is_empty())
+                        // A lookup-only table produces no value, so it is never
+                        // an initials-phase variable (issue #606).
+                        !i.is_table_only
+                            && (i.is_stock
+                                || i.is_module
+                                || (i.dt_deps.is_empty() && !i.initial_deps.is_empty()))
                     })
                     .unwrap_or(false)
                     || all_init_referenced.contains(n.as_str())
@@ -2345,7 +2355,9 @@ pub(crate) fn model_dependency_graph_impl(
                 let is_input = module_input_set.contains(canonicalize(n).as_ref());
                 var_info
                     .get(n.as_str())
-                    .map(|i| is_input || !i.is_stock)
+                    // A lookup-only table is a static table, not a flow: it is
+                    // never lowered and emits no bytecode (issue #606).
+                    .map(|i| (is_input || !i.is_stock) && !i.is_table_only)
                     .unwrap_or(false)
             })
             .collect();

@@ -453,6 +453,15 @@ pub fn is_builtin_fn(name: &str) -> bool {
 pub(crate) enum BuiltinContents<'a, Expr> {
     Ident(&'a str, Loc),
     Expr(&'a Expr),
+    /// The table-identity argument of a graphical-function lookup
+    /// (`LOOKUP`/`LOOKUP FORWARD`/`LOOKUP BACKWARD`) -- a reference to a
+    /// gf-holding variable (a standalone lookup-only table, or a value-bearing
+    /// WITH LOOKUP variable's own table), NOT a runtime value input. The static
+    /// table data is laid out at compile time independent of the runlist, so
+    /// dependency/causal walkers must treat this as a non-edge (a table
+    /// reference imposes no runtime data dependency); printing and
+    /// source-location walkers treat it like any other argument expression.
+    LookupTable(&'a Expr),
 }
 
 pub(crate) fn walk_builtin_expr<'a, Expr, F>(builtin: &'a BuiltinFn<Expr>, mut cb: F)
@@ -470,7 +479,7 @@ where
         BuiltinFn::Lookup(table_expr, index_expr, _loc)
         | BuiltinFn::LookupForward(table_expr, index_expr, _loc)
         | BuiltinFn::LookupBackward(table_expr, index_expr, _loc) => {
-            cb(BuiltinContents::Expr(table_expr));
+            cb(BuiltinContents::LookupTable(table_expr));
             cb(BuiltinContents::Expr(index_expr));
         }
         BuiltinFn::Abs(a)

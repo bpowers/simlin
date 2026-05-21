@@ -819,18 +819,14 @@ fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
     buf.push(')');
 }
 
-/// Returns true when the equation text is a placeholder sentinel rather
-/// than a real input expression (standalone lookup definition).
-///
-/// The MDL parser produces [`LOOKUP_SENTINEL`](super::LOOKUP_SENTINEL)
-/// when a variable is defined as a pure lookup (no input expression) --
-/// see `MdlEquation::Lookup` in `convert/variables.rs`.  Vensim's native
-/// representation is `name(body)` rather than `name = WITH LOOKUP(input,
-/// body)`.  An empty string covers XMILE variables that have a graphical
-/// function but no equation.
+/// Returns true when the equation text is the canonical empty lookup-only form
+/// (a graphical function with no input expression) or the legacy `"0+0"`
+/// sentinel. Such a variable is a standalone lookup definition, written in
+/// Vensim's native `name(body)` syntax rather than `name = WITH LOOKUP(input,
+/// body)`. Delegates to the shared predicate so the writer, the MDL converter,
+/// and the compiler all agree on what counts as lookup-only (issue #606).
 fn is_lookup_only_equation(eqn: &str) -> bool {
-    let trimmed = eqn.trim();
-    trimmed.is_empty() || trimmed == super::LOOKUP_SENTINEL
+    crate::variable::is_empty_or_sentinel(eqn)
 }
 
 /// Format f64 for MDL output: omit trailing `.0` for whole numbers.

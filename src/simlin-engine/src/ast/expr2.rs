@@ -998,7 +998,8 @@ impl Expr2 {
                             loc = Some(id_loc);
                         }
                     }
-                    BuiltinContents::Expr(expr) => {
+                    // The lookup table identity is a locatable reference too.
+                    BuiltinContents::Expr(expr) | BuiltinContents::LookupTable(expr) => {
                         if loc.is_none() {
                             loc = expr.get_var_loc(ident);
                         }

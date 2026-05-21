@@ -34,10 +34,17 @@ use crate::datamodel::{Project, Variable};
 use convert::convert_mdl_with_data;
 use writer::MdlWriter;
 
-/// Sentinel equation produced by the MDL parser for variables that are
-/// pure lookup definitions (no input expression) or have an empty RHS.
-/// The writer recognises this to emit native Vensim `name(body)` syntax
-/// instead of `name = WITH LOOKUP(input, body)`.
+/// Sentinel equation `"0+0"` used by the MDL converter for a variable with an
+/// empty RHS (`MdlEquation::EmptyRhs`) -- a defined-but-unspecified variable
+/// that should evaluate to 0 rather than error.
+///
+/// A bare lookup definition (`MdlEquation::Lookup`) now imports as the canonical
+/// lookup-only form -- an EMPTY equation + a graphical function -- NOT this
+/// sentinel (issue #606). The sentinel is still ACCEPTED on read as a
+/// lookup-only marker (`variable::is_empty_or_sentinel`) for models already
+/// serialized with it. The writer recognises both the empty and sentinel forms
+/// to emit native Vensim `name(body)` syntax instead of
+/// `name = WITH LOOKUP(input, body)`.
 pub(crate) const LOOKUP_SENTINEL: &str = "0+0";
 
 /// Convert a Project to Vensim MDL text.
