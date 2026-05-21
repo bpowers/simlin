@@ -692,6 +692,24 @@ mod tests {
         "/../../default_projects/population/model.xmile"
     );
 
+    /// A graphical function whose table is `knots`. `Continuous` kind, with the
+    /// x-scale spanning the knots' x-range.
+    fn gf_from_knots(knots: &[(f64, f64)]) -> crate::datamodel::GraphicalFunction {
+        use crate::datamodel;
+        let x_points: Vec<f64> = knots.iter().map(|&(x, _)| x).collect();
+        let y_points: Vec<f64> = knots.iter().map(|&(_, y)| y).collect();
+        datamodel::GraphicalFunction {
+            kind: datamodel::GraphicalFunctionKind::Continuous,
+            x_points: Some(x_points.clone()),
+            y_points,
+            x_scale: datamodel::GraphicalFunctionScale {
+                min: x_points.first().copied().unwrap_or(0.0),
+                max: x_points.last().copied().unwrap_or(1.0),
+            },
+            y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        }
+    }
+
     /// Decode a GF directory's `n`th entry from `directory` bytes: the absolute
     /// data byte offset and the point count.
     fn decode_dir_entry(directory: &[u8], n: usize) -> (usize, usize) {
@@ -853,6 +871,42 @@ mod tests {
         for (k, &(x, y)) in knots.iter().enumerate() {
             assert_eq!(flat[2 * k], x, "knot {k} x");
             assert_eq!(flat[2 * k + 1], y, "knot {k} y");
+        }
+    }
+
+    /// Task 3 (end-to-end): a model with a graphical-function variable looked up
+    /// in all three modes -- `LOOKUP` (Interpolate), `LOOKUP FORWARD`, and
+    /// `LOOKUP BACKWARD` -- matches the VM at every saved step. The lookup index
+    /// is `TIME - 1`, which sweeps the table's x-domain plus a below-range
+    /// margin (negative at t=0) and an above-range margin, so the recorded
+    /// series exercise below/at-knot/between/above across the run.
+    #[test]
+    fn compile_simulation_gf_lookup_modes_match_vm() {
+        let knots = [(0.0, 10.0), (1.0, 20.0), (2.5, 5.0), (4.0, 40.0)];
+        let datamodel = crate::test_common::TestProject::new("gf_modes")
+            // TIME 0..6, dt 0.25 -> index = TIME-1 sweeps -1..5 over [0,4] table.
+            .with_sim_time(0.0, 6.0, 0.25)
+            .aux("input", "TIME - 1", None)
+            .aux_with_gf("curve", "0", gf_from_knots(&knots))
+            .aux("interp_val", "LOOKUP(curve, input)", None)
+            .aux("fwd_val", "LOOKUP_FORWARD(curve, input)", None)
+            .aux("bwd_val", "LOOKUP_BACKWARD(curve, input)", None)
+            .build_datamodel();
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let checked = assert_matches_vm(sim, &artifact);
+        // interp/fwd/bwd (+ curve + input) must all be compared.
+        assert!(
+            checked >= 3,
+            "expected to compare the three lookup-mode variables, only checked {checked}"
+        );
+        for name in ["interp_val", "fwd_val", "bwd_val"] {
+            assert!(
+                artifact.layout.var_offsets.iter().any(|(n, _)| n == name),
+                "{name} should be in the layout"
+            );
         }
     }
 

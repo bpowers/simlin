@@ -117,25 +117,29 @@ static TEST_MODELS: &[&str] = &[
 /// entire scalar `BuiltinId` set via `Opcode::Apply` -- the open-coded
 /// transcendentals (`exp`/`ln`/`log10`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/
 /// `pow`) plus `abs`/`sqrt`/`int`/`min`/`max`/`sign`/`quantum`/`safediv`/
-/// `sshape` and the time-driven `step`/`ramp`/`pulse`. A corpus model runs to
-/// parity when its *post-element-expansion* flat opcode stream is entirely in
-/// that set. That includes arrayed apply-to-all / subscript models that expand
-/// to purely scalar per-element opcodes (no array-reducer or `LookupArray`
-/// opcode), because the emitter walks the flattened opcode stream. Models that
-/// reach for nested modules / macros (`wasmgen: submodules are not supported`),
-/// table lookups (`Opcode::Lookup`), array-reducer opcodes, or RK2/RK4 are
-/// `Skipped` until their phases land.
+/// `sshape` and the time-driven `step`/`ramp`/`pulse`. Phase 3 adds the scalar
+/// `Opcode::Lookup` in all three modes (Interpolate / Forward / Backward): the
+/// graphical-function tables are laid into linear memory with a per-table
+/// directory, and three wasm helpers reproduce the VM's
+/// `lookup`/`lookup_forward`/`lookup_backward`. A corpus model runs to parity
+/// when its *post-element-expansion* flat opcode stream is entirely in that set.
+/// That includes arrayed apply-to-all / subscript models that expand to purely
+/// scalar per-element opcodes (no array-reducer or `LookupArray` opcode),
+/// because the emitter walks the flattened opcode stream. Models that reach for
+/// nested modules / macros (`wasmgen: submodules are not supported`),
+/// array-reducer opcodes, or RK2/RK4 are `Skipped` until their phases land.
 ///
-/// Phase 2 achieves 45 of the 58 active `TEST_MODELS` (up from Phase 1's 28):
-/// every previously-`Skipped` purely-scalar model that used a builtin
-/// (`abs`/`builtin_max`/`builtin_min`/`builtin_int`/`exp`/`sqrt`/`trig`/`ln`/
-/// `log`/`xidz_zidz`/`input_functions`), the `^` operator (`exponentiation`),
-/// `=` (`comparisons`), `AND`/`OR`/`NOT` (`logicals`), or `MOD`
-/// (`input_functions`) now `Ran`. The remaining 13 skip on one of the
-/// still-out-of-scope constructs: 6 module/macro models and 7 `Opcode::Lookup`
-/// (graphical-function) models. Observed via `wasm_parity_floor` (run it with
-/// `-- --nocapture` to see the per-model skip reasons).
-const WASM_SUPPORTED_FLOOR: usize = 45;
+/// Phase 3 achieves 50 of the 58 active `TEST_MODELS` (up from Phase 2's 45):
+/// the five graphical-function models that previously skipped on
+/// `Opcode::Lookup` (`lookups_inline`, `lookups_inline_bounded`,
+/// `lookups/test_lookups_no-indirect`, `lookups_simlin/test_lookups`,
+/// `lookups_with_expr`) now `Ran`. The remaining 8 skip on the
+/// still-out-of-scope constructs: nested modules / macros
+/// (`bpowers-hares_and_lynxes_modules`, `delays2`, `smooth_and_stock`, `trend`,
+/// and the four `macro_*` fixtures, each `wasmgen: submodules are not
+/// supported`). Observed via `wasm_parity_floor` (run it with `-- --nocapture`
+/// to see the per-model skip reasons).
+const WASM_SUPPORTED_FLOOR: usize = 50;
 
 /// AC3.1 / AC3.3 rising-floor gate: run every (non-`#[ignore]`-class) corpus
 /// model in `TEST_MODELS` through the wasm backend and assert at least

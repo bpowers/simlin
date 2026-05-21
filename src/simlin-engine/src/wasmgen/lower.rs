@@ -61,7 +61,7 @@
 
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 
-use crate::bytecode::{BuiltinId, ByteCode, Op2, Opcode};
+use crate::bytecode::{BuiltinId, ByteCode, GraphicalFunctionId, LookupMode, Op2, Opcode};
 
 use super::WasmGenError;
 
@@ -69,6 +69,10 @@ use super::WasmGenError;
 const SLOT_SIZE: u32 = 8;
 /// Alignment exponent for an 8-byte f64 access (log2(8)).
 const F64_ALIGN: u32 = 3;
+/// Bytes per GF directory entry (two i32: data byte offset + point count). Must
+/// match `module.rs`'s `GF_DIRECTORY_ENTRY_BYTES`, the layout the `Lookup`
+/// opcode reads.
+const GF_DIRECTORY_ENTRY_BYTES: i32 = 8;
 
 /// Compile-time context for lowering a scalar opcode program over the f64 slab.
 ///
@@ -86,8 +90,6 @@ pub(crate) struct EmitCtx {
     /// opcode reads `directory_base + table_idx*8` to map a table index to its
     /// data location. Both bases are run-invariant: every per-program function
     /// reads the same read-only GF regions.
-    // Read by the `Lookup` opcode arm (Task 3); the `allow` is removed there.
-    #[allow(dead_code)]
     pub gf_directory_base: u32,
     /// Byte offset of the GF data region (every table's `(x,y)` knots as f64 LE
     /// pairs, concatenated). Retained for completeness/Phase-7 reuse; the
@@ -207,15 +209,8 @@ pub(crate) struct HelperFns {
     /// directory and `call`s the mode's helper. [`lookup_interp`](Self::lookup_interp)
     /// `call`s [`approx_eq`](Self::approx_eq) for its at-knot exact-hit test, so
     /// `approx_eq` is pushed before it in [`build_helpers`].
-    // Read by the `Lookup` opcode arm (Task 3); the `allow` is removed there.
-    // (`#[cfg(test)]` already exercises them via `helper_index` in
-    // `wasmgen::lookup::tests`, but that does not count for the lib's dead-code
-    // analysis.)
-    #[allow(dead_code)]
     pub lookup_interp: u32,
-    #[allow(dead_code)]
     pub lookup_forward: u32,
-    #[allow(dead_code)]
     pub lookup_backward: u32,
 }
 
@@ -820,6 +815,14 @@ pub(crate) fn emit_bytecode(
             // builtins with `LoadConstant 0.0` / `LoadGlobalVar{FINAL_TIME}`),
             // mirroring the VM (`vm.rs:1701`). See [`emit_apply`].
             Opcode::Apply { func } => emit_apply(*func, ctx, f),
+            // `Lookup` pops `index` then `element_offset`, bounds-checks the
+            // offset, and dispatches to the mode's helper over the table at
+            // `base_gf + element_offset` (`vm.rs:1710`). See [`emit_lookup`].
+            Opcode::Lookup {
+                base_gf,
+                table_count,
+                mode,
+            } => emit_lookup(*base_gf, *table_count, *mode, ctx, f),
             Opcode::Ret => {
                 // The caller emits the function's terminating `End`.
             }
@@ -1119,6 +1122,109 @@ fn emit_apply(func: BuiltinId, ctx: &EmitCtx, f: &mut Function) {
         BuiltinId::Pi => {
             f.instruction(&f64_const(std::f64::consts::PI));
         }
+    }
+}
+
+/// Lower the `Lookup { base_gf, table_count, mode }` opcode, mirroring the VM's
+/// `Lookup` arm (`vm.rs:1710-1731`). The two operands are on the wasm stack as
+/// `[element_offset, index]` (`index` on top, matching the VM popping
+/// `lookup_index` then `element_offset`).
+///
+/// Bounds check: `element_offset < 0.0 || element_offset >= table_count as f64`
+/// pushes NaN (the VM's `*table_count as usize as f64` widens the compile-time
+/// `u16` count to f64). Otherwise the table index is
+/// `base_gf + (element_offset as i32)` (the VM's `as usize` truncation; the
+/// bounds check guarantees `0 <= element_offset < table_count`, so
+/// `i32.trunc_sat` is exact and non-negative); its `(data_off, count)` is read
+/// from the GF directory at `gf_directory_base + table_idx*8`, and the result
+/// comes from a static `call` to the mode's helper (the mode is known at
+/// compile time). The result is left on the stack.
+///
+/// `index`/`element_offset` are parked in [`scratch_local`](EmitCtx::scratch_local)
+/// and `apply_locals[0]` -- both free f64 scratch locals at an opcode boundary
+/// (nothing from a prior opcode is live there; `Lookup` and `Apply` never share
+/// a live operand within one opcode). The i32 directory address carries no
+/// dedicated local (the opcode-program function reserves none), so it is
+/// recomputed for the `count` read; the recompute is a handful of cheap integer
+/// ops.
+fn emit_lookup(
+    base_gf: GraphicalFunctionId,
+    table_count: u16,
+    mode: LookupMode,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) {
+    use Instruction as Ins;
+    use wasm_encoder::BlockType;
+
+    let index_local = ctx.scratch_local;
+    let elem_off_local = ctx.apply_locals[0];
+
+    // Pop the operands. `index` is on top, then `element_offset`.
+    f.instruction(&Ins::LocalSet(index_local));
+    f.instruction(&Ins::LocalSet(elem_off_local));
+
+    // bounds = (element_offset < 0.0) | (element_offset >= table_count as f64)
+    f.instruction(&Ins::LocalGet(elem_off_local));
+    f.instruction(&f64_const(0.0));
+    f.instruction(&Ins::F64Lt);
+    f.instruction(&Ins::LocalGet(elem_off_local));
+    f.instruction(&f64_const(table_count as f64));
+    f.instruction(&Ins::F64Ge);
+    f.instruction(&Ins::I32Or);
+    f.instruction(&Ins::If(BlockType::Result(ValType::F64)));
+    // out of range -> NaN
+    f.instruction(&f64_const(f64::NAN));
+    f.instruction(&Ins::Else);
+
+    let helper_idx = match mode {
+        LookupMode::Interpolate => ctx.helpers.lookup_interp,
+        LookupMode::Forward => ctx.helpers.lookup_forward,
+        LookupMode::Backward => ctx.helpers.lookup_backward,
+    };
+
+    // data_off = i32.load[dir_addr + 0]; count = i32.load[dir_addr + 4], where
+    // dir_addr = gf_directory_base + (base_gf + (element_offset as i32)) * 8.
+    push_gf_directory_addr(ctx, f, base_gf, elem_off_local);
+    f.instruction(&Ins::I32Load(i32_memarg(0)));
+    push_gf_directory_addr(ctx, f, base_gf, elem_off_local);
+    f.instruction(&Ins::I32Load(i32_memarg(4)));
+    // index, then call the mode's helper -> f64 result.
+    f.instruction(&Ins::LocalGet(index_local));
+    f.instruction(&Ins::Call(helper_idx));
+
+    f.instruction(&Ins::End); // end if
+}
+
+/// Push the byte address of table `base_gf + (element_offset as i32)`'s GF
+/// directory entry: `gf_directory_base + (base_gf + elem_off_i32) * 8`.
+/// `element_offset` is in `elem_off_local` (f64); `i32.trunc_sat_f64_s` matches
+/// the VM's `as usize` for the bounds-checked non-negative offset.
+fn push_gf_directory_addr(
+    ctx: &EmitCtx,
+    f: &mut Function,
+    base_gf: GraphicalFunctionId,
+    elem_off_local: u32,
+) {
+    use Instruction as Ins;
+    f.instruction(&Ins::I32Const(ctx.gf_directory_base as i32));
+    f.instruction(&Ins::I32Const(base_gf as i32));
+    f.instruction(&Ins::LocalGet(elem_off_local));
+    f.instruction(&Ins::I32TruncSatF64S);
+    f.instruction(&Ins::I32Add); // table_idx = base_gf + elem_off
+    f.instruction(&Ins::I32Const(GF_DIRECTORY_ENTRY_BYTES));
+    f.instruction(&Ins::I32Mul); // table_idx * 8
+    f.instruction(&Ins::I32Add); // gf_directory_base + table_idx*8
+}
+
+/// A 4-byte (i32) memory access with a static byte `offset` (for reading a GF
+/// directory entry's two i32 fields). The directory is 8-byte aligned, so a
+/// 4-byte access at offset 0 or 4 is naturally aligned.
+fn i32_memarg(offset: u64) -> MemArg {
+    MemArg {
+        offset,
+        align: 2, // log2(4): a 4-byte i32 access
+        memory_index: 0,
     }
 }
 
@@ -1970,19 +2076,25 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_lookup_returns_error() {
-        use crate::bytecode::LookupMode;
-        let mut func = Function::new([]);
+    fn lookup_lowers_without_error() {
+        // Lookup is supported as of Phase 3; lowering must succeed where Phase 2
+        // returned Unsupported. (Numeric parity is covered by the seeded-table
+        // tests below and the end-to-end GF model tests in module.rs.)
+        let mut func = Function::new(opcode_fn_locals(0));
         let program = bc(
-            vec![],
-            vec![Opcode::Lookup {
-                base_gf: 0,
-                table_count: 1,
-                mode: LookupMode::Interpolate,
-            }],
+            vec![0.0, 1.0],
+            vec![
+                Opcode::LoadConstant { id: 0 }, // element_offset
+                Opcode::LoadConstant { id: 1 }, // index
+                Opcode::Lookup {
+                    base_gf: 0,
+                    table_count: 1,
+                    mode: LookupMode::Interpolate,
+                },
+            ],
         );
         let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
-        assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+        assert!(result.is_ok(), "Lookup should lower without error");
     }
 
     #[test]
@@ -1991,6 +2103,154 @@ mod tests {
         let program = bc(vec![], vec![Opcode::ArraySum {}]);
         let result = emit_bytecode(&program, &ctx_with_cond_depth(0), &mut func);
         assert!(matches!(result, Err(WasmGenError::Unsupported(_))));
+    }
+
+    // ── Lookup opcode: seeded-table parity with the VM lookup functions ───
+
+    // GF region bases for the Lookup opcode tests, placed well past
+    // `next_base` (4096) so they cannot overlap the curr/next chunks. The
+    // single test table's directory entry sits at `GF_DIR_BASE`; its data
+    // follows at `GF_DATA_BASE`.
+    const GF_DIR_BASE: u32 = 8192;
+    const GF_DATA_BASE: u32 = 8192 + 8; // one 8-byte directory entry
+
+    /// A ctx whose GF region bases point at the hand-seeded test regions, so a
+    /// `Lookup` opcode reads the directory at `GF_DIR_BASE`.
+    fn ctx_with_gf() -> EmitCtx {
+        EmitCtx {
+            gf_directory_base: GF_DIR_BASE,
+            gf_data_base: GF_DATA_BASE,
+            ..ctx_with_cond_depth(0)
+        }
+    }
+
+    /// Pack a GF directory entry `(data_off, count)` into the f64 whose 8 LE
+    /// bytes are `data_off` (low i32) then `count` (high i32) -- so seeding it as
+    /// one f64 writes exactly the two i32 the `Lookup` opcode reads.
+    fn dir_entry_f64(data_off: u32, count: u32) -> f64 {
+        f64::from_bits(((count as u64) << 32) | data_off as u64)
+    }
+
+    /// Seed a single GF table (`base_gf == 0`, `table_count == 1`) into memory:
+    /// the directory entry at `GF_DIR_BASE` and the knots at `GF_DATA_BASE`.
+    fn seed_single_table(knots: &[(f64, f64)]) -> Vec<(u64, f64)> {
+        let mut seed = vec![(
+            u64::from(GF_DIR_BASE),
+            dir_entry_f64(GF_DATA_BASE, knots.len() as u32),
+        )];
+        for (k, &(x, y)) in knots.iter().enumerate() {
+            let knot_addr = u64::from(GF_DATA_BASE) + (k as u64) * 16;
+            seed.push((knot_addr, x));
+            seed.push((knot_addr + 8, y));
+        }
+        seed
+    }
+
+    /// Run a `Lookup` over a single seeded table at `(element_offset, index)`.
+    /// `table_count` lets a test push an out-of-range element_offset.
+    fn run_lookup_opcode(
+        mode: LookupMode,
+        knots: &[(f64, f64)],
+        table_count: u16,
+        element_offset: f64,
+        index: f64,
+    ) -> f64 {
+        let code = vec![
+            Opcode::LoadConstant { id: 0 }, // element_offset (pushed first)
+            Opcode::LoadConstant { id: 1 }, // index (pushed second, on top)
+            Opcode::Lookup {
+                base_gf: 0,
+                table_count,
+                mode,
+            },
+        ];
+        run(
+            &bc(vec![element_offset, index], code),
+            &ctx_with_gf(),
+            true,
+            0,
+            &seed_single_table(knots),
+            None,
+        )
+    }
+
+    /// The VM oracle for `mode` -- the exact function the opcode dispatches to.
+    fn vm_lookup_oracle(mode: LookupMode, knots: &[(f64, f64)], index: f64) -> f64 {
+        match mode {
+            LookupMode::Interpolate => crate::vm::lookup(knots, index),
+            LookupMode::Forward => crate::vm::lookup_forward(knots, index),
+            LookupMode::Backward => crate::vm::lookup_backward(knots, index),
+        }
+    }
+
+    fn assert_lookup_opcode_matches_vm(mode: LookupMode, knots: &[(f64, f64)], index: f64) {
+        let got = run_lookup_opcode(mode, knots, 1, 0.0, index);
+        let want = vm_lookup_oracle(mode, knots, index);
+        if want.is_nan() {
+            assert!(got.is_nan(), "{mode:?} at {index}: expected NaN, got {got}");
+        } else {
+            assert_eq!(got, want, "{mode:?} at {index}: got {got}, want {want}");
+        }
+    }
+
+    const LOOKUP_OPCODE_TABLE: &[(f64, f64)] = &[(0.0, 10.0), (1.0, 20.0), (2.5, 5.0), (4.0, 40.0)];
+
+    #[test]
+    fn lookup_opcode_dispatches_to_each_mode_and_reads_directory() {
+        // The opcode reads (data_off, count) from the directory, then dispatches
+        // to the mode's helper. Probe below/above range, on a knot, and between
+        // knots for all three modes against the VM oracle.
+        let probes = [-1.0, 0.0, 0.5, 1.0, 1.75, 2.5, 3.0, 4.0, 9.0];
+        for mode in [
+            LookupMode::Interpolate,
+            LookupMode::Forward,
+            LookupMode::Backward,
+        ] {
+            for &index in &probes {
+                assert_lookup_opcode_matches_vm(mode, LOOKUP_OPCODE_TABLE, index);
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_opcode_out_of_range_element_offset_is_nan() {
+        // The VM pushes NaN when element_offset < 0 or >= table_count, BEFORE
+        // touching the table; the opcode must match (the directory is seeded for
+        // table 0 only, so an OOB offset must short-circuit, never read garbage).
+        for mode in [
+            LookupMode::Interpolate,
+            LookupMode::Forward,
+            LookupMode::Backward,
+        ] {
+            // table_count = 1, so offset 1 and -1 are both out of range.
+            assert!(
+                run_lookup_opcode(mode, LOOKUP_OPCODE_TABLE, 1, 1.0, 2.0).is_nan(),
+                "{mode:?}: element_offset == table_count must be NaN"
+            );
+            assert!(
+                run_lookup_opcode(mode, LOOKUP_OPCODE_TABLE, 1, -1.0, 2.0).is_nan(),
+                "{mode:?}: negative element_offset must be NaN"
+            );
+            // In range (offset 0) is NOT NaN for an in-range index.
+            assert!(
+                !run_lookup_opcode(mode, LOOKUP_OPCODE_TABLE, 1, 0.0, 2.0).is_nan(),
+                "{mode:?}: in-range element_offset must not be NaN"
+            );
+        }
+    }
+
+    #[test]
+    fn lookup_opcode_nan_index_is_nan() {
+        for mode in [
+            LookupMode::Interpolate,
+            LookupMode::Forward,
+            LookupMode::Backward,
+        ] {
+            assert!(
+                run_lookup_opcode(mode, LOOKUP_OPCODE_TABLE, 1, 0.0, f64::NAN).is_nan(),
+                "{mode:?}: a NaN index must be NaN"
+            );
+        }
     }
 
     // ── approx_eq helper (AC7.2, AC1.5) ───────────────────────────────────
