@@ -21,8 +21,7 @@
 //! - [`emit_vector_elm_map`] -- `crate::vm_vector_elm_map::vector_elm_map`
 //! - [`emit_vector_sort_order`] -- `crate::vm_vector_sort_order::vector_sort_order`
 //! - [`emit_rank`] -- `vm.rs:2540-2584`
-//!
-//! (`LookupArray` lands in a later Phase-6 task.)
+//! - [`emit_lookup_array`] -- `vm.rs:2586-2629`
 //!
 //! ## Runtime loop vs unrolled
 //!
@@ -47,10 +46,13 @@
 
 use wasm_encoder::{BlockType, Function, Instruction as Ins, ValType};
 
+use crate::bytecode::{GraphicalFunctionId, LookupMode};
+
 use super::WasmGenError;
 use super::lower::{
-    EmitCtx, SLOT_SIZE, emit_fill_temp_nan, emit_is_truthy, emit_view_element_load, f64_const,
-    memarg, push_module_relative_base, temp_element_byte_addr,
+    EmitCtx, GF_DIRECTORY_ENTRY_BYTES, SLOT_SIZE, emit_fill_temp_nan, emit_is_truthy,
+    emit_view_element_load, f64_const, i32_memarg, memarg, push_module_relative_base,
+    temp_element_byte_addr,
 };
 use super::views::{ViewBase, ViewDesc};
 
@@ -895,6 +897,95 @@ fn pop_direction_to_ascending(ascending_local: u32, ctx: &EmitCtx, f: &mut Funct
     f.instruction(&Ins::I32Const(1));
     f.instruction(&Ins::I32Eq);
     f.instruction(&Ins::LocalSet(ascending_local));
+}
+
+// ── LookupArray (vm.rs:2586-2629) ────────────────────────────────────────────
+
+/// Lower `LookupArray { base_gf, table_count, mode, write_temp_id }`, mirroring
+/// `vm.rs:2586-2629`. The shared `index` is popped; `input_view = top`. For each
+/// element `i`, `elem_off = flat_offset(indices)` (compile-time); if `elem_off >=
+/// table_count` the result is NaN, else the GF directory entry at `base_gf +
+/// elem_off` is read and the mode's Phase-3 helper (`lookup_interp`/`forward`/
+/// `backward`) is `call`ed at `index`. Written to `temp[temp_off + i]` (sequential
+/// index). An invalid input view fills the temp with NaN.
+///
+/// Each element's `elem_off` is compile-time, so the bound check, the GF
+/// directory entry address, and the mode dispatch all resolve at compile time;
+/// only the `index` and the `lookup_*` evaluation are runtime. Unrolled over the
+/// view size (the caller charges the unroll budget).
+pub(crate) fn emit_lookup_array(
+    input_view: &ViewDesc,
+    base_gf: GraphicalFunctionId,
+    table_count: u16,
+    mode: LookupMode,
+    write_temp_id: u8,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    // Pop `index` to a scratch f64 (read once per element). Done before the gate
+    // so both gate arms are operand-balanced. A dynamically-subscripted input is
+    // handled by the gate (invalid -> fill_temp_nan) and `emit_view_element_load`.
+    let index = ctx.scratch_local;
+    f.instruction(&Ins::LocalSet(index));
+
+    emit_with_validity_gate(&[input_view], write_temp_id, ctx, f, |ctx, f| {
+        emit_lookup_array_body(
+            input_view,
+            base_gf,
+            table_count,
+            mode,
+            write_temp_id,
+            index,
+            ctx,
+            f,
+        )
+    })
+}
+
+/// The valid-input body of [`emit_lookup_array`].
+#[allow(clippy::too_many_arguments)]
+fn emit_lookup_array_body(
+    input_view: &ViewDesc,
+    base_gf: GraphicalFunctionId,
+    table_count: u16,
+    mode: LookupMode,
+    write_temp_id: u8,
+    index: u32,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let helper_idx = match mode {
+        LookupMode::Interpolate => ctx.helpers.lookup_interp,
+        LookupMode::Forward => ctx.helpers.lookup_forward,
+        LookupMode::Backward => ctx.helpers.lookup_backward,
+    };
+    let size = input_view.size();
+    for i in 0..size {
+        // elem_off (compile-time) = flat offset of element i over the view.
+        let elem_off = input_view.flat_element_offset(i);
+        let temp_addr = temp_element_byte_addr(ctx, write_temp_id, i as u32)?;
+        f.instruction(&Ins::I32Const(0)); // temp store dynamic addr (const base)
+
+        if elem_off >= table_count as usize {
+            // Out-of-range element offset -> NaN (matching the scalar Lookup
+            // bound; vm.rs:2615).
+            f.instruction(&f64_const(f64::NAN));
+        } else {
+            // table_idx = base_gf + elem_off (compile-time). Read (data_off,
+            // count) from the GF directory at gf_directory_base + table_idx*8,
+            // then call the mode's helper at `index`.
+            let dir_addr = u64::from(ctx.gf_directory_base)
+                + (base_gf as u64 + elem_off as u64) * (GF_DIRECTORY_ENTRY_BYTES as u64);
+            f.instruction(&Ins::I32Const(0));
+            f.instruction(&Ins::I32Load(i32_memarg(dir_addr))); // data_off
+            f.instruction(&Ins::I32Const(0));
+            f.instruction(&Ins::I32Load(i32_memarg(dir_addr + 4))); // count
+            f.instruction(&Ins::LocalGet(index));
+            f.instruction(&Ins::Call(helper_idx));
+        }
+        f.instruction(&Ins::F64Store(memarg(temp_addr)));
+    }
+    Ok(())
 }
 
 // ── validity gate ────────────────────────────────────────────────────────────

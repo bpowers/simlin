@@ -4364,3 +4364,409 @@ fn rank_invalid_view_fills_temp_with_nan() {
     let ok = run_dyn_sort_op(3, 4, 2.0, Opcode::Rank { write_temp_id: 0 }, &data);
     assert!(ok.iter().all(|v| !v.is_nan()), "valid row must not be NaN");
 }
+
+// ── LookupArray parity vs the VM (per-element arrayed GF) ─────────────────
+
+// GF region base for the LookupArray tests: past the curr/next chunks
+// (4096..8192), TEMP_BASE (8192), and VECTOR_SCRATCH_BASE (16384), within the
+// harness's single 64 KiB page.
+const LA_GF_BASE: u32 = 24576;
+
+/// Seed `tables` into the GF directory + data regions at `LA_GF_BASE` (the
+/// directory's N 8-byte entries, then each table's knots), matching the
+/// production layout the `LookupArray`/`Lookup` opcodes read.
+fn seed_gf_tables(tables: &[&[(f64, f64)]]) -> Vec<(u64, f64)> {
+    let n = tables.len() as u32;
+    let data_base = LA_GF_BASE + n * 8; // past the N directory entries
+    let mut seed = Vec::new();
+    let mut data_rel = 0u32;
+    for (t, knots) in tables.iter().enumerate() {
+        let abs = data_base + data_rel;
+        seed.push((
+            u64::from(LA_GF_BASE) + (t as u64) * 8,
+            dir_entry_f64(abs, knots.len() as u32),
+        ));
+        for (k, &(x, y)) in knots.iter().enumerate() {
+            let knot = u64::from(abs) + (k as u64) * 16;
+            seed.push((knot, x));
+            seed.push((knot + 8, y));
+        }
+        data_rel += knots.len() as u32 * 16;
+    }
+    seed
+}
+
+/// Run `PushStaticView(input); LookupArray{base_gf, table_count, mode}; PopView`
+/// over the seeded GF tables, writing temp 0, and read back `temp_count` slots.
+/// `index` (the shared scalar lookup index) is pushed beneath the opcode.
+#[allow(clippy::too_many_arguments)]
+fn run_lookup_array(
+    input: StaticArrayView,
+    base_gf: GraphicalFunctionId,
+    table_count: u16,
+    mode: LookupMode,
+    index: f64,
+    tables: &[&[(f64, f64)]],
+    temp_count: usize,
+    temp_slots: usize,
+    input_data: &[f64],
+) -> Vec<f64> {
+    let mut context = ByteCodeContext::default();
+    context.set_temp_info(vec![0], temp_slots);
+    let in_id = context.add_static_view(input);
+    let ctx = EmitCtx {
+        gf_directory_base: LA_GF_BASE,
+        gf_data_base: LA_GF_BASE,
+        temp_storage_base: TEMP_BASE,
+        ctx: &context,
+        ..ctx_with_cond_depth(0)
+    };
+    let code = vec![
+        Opcode::LoadConstant { id: 0 }, // index
+        Opcode::PushStaticView { view_id: in_id },
+        Opcode::LookupArray {
+            base_gf,
+            table_count,
+            mode,
+            write_temp_id: 0,
+        },
+        Opcode::PopView {},
+    ];
+    let mut seed = seed_run(0, input_data);
+    seed.extend(seed_gf_tables(tables));
+    let bytes = build_module(&bc(vec![index], code), &ctx, false, 0);
+    let info = validate(&bytes).expect("emitted module must validate");
+    let mut store = Store::new(());
+    let inst = store
+        .module_instantiate(&info, Vec::new(), None)
+        .expect("instantiate")
+        .module_addr;
+    let mem = store
+        .instance_export(inst, "mem")
+        .unwrap()
+        .as_mem()
+        .unwrap();
+    store.mem_access_mut_slice(mem, |b| {
+        for &(addr, v) in &seed {
+            let a = addr as usize;
+            b[a..a + 8].copy_from_slice(&v.to_le_bytes());
+        }
+    });
+    let eval = store
+        .instance_export(inst, "eval")
+        .unwrap()
+        .as_func()
+        .unwrap();
+    store
+        .invoke_simple_typed::<(i32,), ()>(eval, (0_i32,))
+        .expect("invoke");
+    store.mem_access_mut_slice(mem, |b| {
+        (0..temp_count)
+            .map(|i| {
+                let a = TEMP_BASE as usize + i * 8;
+                f64::from_le_bytes(b[a..a + 8].try_into().unwrap())
+            })
+            .collect()
+    })
+}
+
+/// Faithful oracle for `LookupArray` (mirroring `vm.rs:2586-2629`): for each
+/// element `i`, `elem_off = flat_offset(indices)`; NaN if `elem_off >=
+/// table_count`, else the VM lookup over `tables[base_gf + elem_off]` at `index`.
+fn vm_lookup_array_oracle(
+    input: &StaticArrayView,
+    base_gf: GraphicalFunctionId,
+    table_count: u16,
+    mode: LookupMode,
+    index: f64,
+    tables: &[&[(f64, f64)]],
+    temp_slots: usize,
+) -> Vec<f64> {
+    let rv = input.to_runtime_view();
+    let size = rv.size();
+    let mut idx: SmallVec<[u16; 4]> = smallvec::smallvec![0; rv.dims.len()];
+    let mut temp = vec![0.0f64; temp_slots];
+    for slot in temp.iter_mut().take(size) {
+        let elem_off = rv.flat_offset(&idx);
+        *slot = if elem_off >= table_count as usize {
+            f64::NAN
+        } else {
+            let gf = tables[base_gf as usize + elem_off];
+            vm_lookup_oracle(mode, gf, index)
+        };
+        crate::vm::increment_indices(&mut idx, &rv.dims);
+    }
+    temp
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_lookup_array_matches(
+    input: &StaticArrayView,
+    base_gf: GraphicalFunctionId,
+    table_count: u16,
+    mode: LookupMode,
+    index: f64,
+    tables: &[&[(f64, f64)]],
+    slots: usize,
+    input_data: &[f64],
+) {
+    let got = run_lookup_array(
+        input.clone(),
+        base_gf,
+        table_count,
+        mode,
+        index,
+        tables,
+        slots,
+        slots,
+        input_data,
+    );
+    let want = vm_lookup_array_oracle(input, base_gf, table_count, mode, index, tables, slots);
+    assert_eq!(got.len(), want.len());
+    for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+        if w.is_nan() {
+            assert!(g.is_nan(), "lookup_array slot {i}: expected NaN, got {g}");
+        } else {
+            assert_eq!(g, w, "lookup_array slot {i}: got {g}, want {w}");
+        }
+    }
+}
+
+#[test]
+fn lookup_array_interp_matches_vm() {
+    // Three per-element tables; a contiguous 3-element input view -> elem_off
+    // [0, 1, 2]. Each element looks up its own table at the shared index.
+    let t0: &[(f64, f64)] = &[(0.0, 0.0), (10.0, 100.0)]; // y = 10x
+    let t1: &[(f64, f64)] = &[(0.0, 1.0), (10.0, 2.0)]; // y = x/10 + 1
+    let t2: &[(f64, f64)] = &[(0.0, 5.0), (10.0, 5.0)]; // constant 5
+    let tables = [t0, t1, t2];
+    let input = dense_view(0, &[3]);
+    let input_data = [0.0, 0.0, 0.0];
+    assert_lookup_array_matches(
+        &input,
+        0,
+        3,
+        LookupMode::Interpolate,
+        5.0,
+        &tables,
+        3,
+        &input_data,
+    );
+    let got = run_lookup_array(
+        input,
+        0,
+        3,
+        LookupMode::Interpolate,
+        5.0,
+        &tables,
+        3,
+        3,
+        &input_data,
+    );
+    // index 5: t0 interp 50, t1 interp 1.5, t2 constant 5.
+    assert_eq!(got, vec![50.0, 1.5, 5.0]);
+}
+
+/// A monotonic-x table fixture (reused across modes/indices).
+const LA_TABLE_A: &[(f64, f64)] = &[(0.0, 10.0), (1.0, 20.0), (2.5, 5.0), (4.0, 40.0)];
+const LA_TABLE_B: &[(f64, f64)] = &[(0.0, 0.0), (2.0, 8.0), (2.0, 12.0), (5.0, 50.0)];
+
+#[test]
+fn lookup_array_all_modes_over_domain_match_vm() {
+    // Two per-element tables, a 2-element input view (elem_off [0, 1]). For each
+    // mode, probe several indices spanning below/at/between/above the knots; each
+    // element's result must match the corresponding VM lookup over its table.
+    let tables = [LA_TABLE_A, LA_TABLE_B];
+    let input = dense_view(0, &[2]);
+    let input_data = [0.0, 0.0];
+    for mode in [
+        LookupMode::Interpolate,
+        LookupMode::Forward,
+        LookupMode::Backward,
+    ] {
+        for &index in &[-1.0, 0.0, 0.5, 1.0, 2.0, 2.001, 3.25, 4.0, 100.0] {
+            assert_lookup_array_matches(&input, 0, 2, mode, index, &tables, 2, &input_data);
+        }
+    }
+}
+
+#[test]
+fn lookup_array_out_of_range_element_offset_is_nan() {
+    // table_count = 2, but the input view has 3 elements -> elem_off [0, 1, 2].
+    // Element 2's offset (2) is >= table_count (2), so its result is NaN
+    // (matching the scalar Lookup bound), while elements 0 and 1 look up tables
+    // 0 and 1.
+    let tables = [LA_TABLE_A, LA_TABLE_B];
+    let input = dense_view(0, &[3]);
+    let input_data = [0.0, 0.0, 0.0];
+    assert_lookup_array_matches(
+        &input,
+        0,
+        2,
+        LookupMode::Interpolate,
+        1.0,
+        &tables,
+        3,
+        &input_data,
+    );
+    let got = run_lookup_array(
+        input,
+        0,
+        2,
+        LookupMode::Interpolate,
+        1.0,
+        &tables,
+        3,
+        3,
+        &input_data,
+    );
+    assert_eq!(got[0], 20.0); // t0 at index 1 (exact knot)
+    assert!(got[2].is_nan(), "element offset 2 >= table_count 2 -> NaN");
+}
+
+#[test]
+fn lookup_array_base_gf_offsets_into_directory() {
+    // base_gf selects a starting table; a 2-element view with base_gf=1 reads
+    // tables 1 and 2 (NOT 0 and 1). Three tables, table_count covers all three.
+    let t0: &[(f64, f64)] = &[(0.0, 0.0), (10.0, 100.0)];
+    let t1: &[(f64, f64)] = &[(0.0, 1.0), (10.0, 2.0)];
+    let t2: &[(f64, f64)] = &[(0.0, 7.0), (10.0, 7.0)];
+    let tables = [t0, t1, t2];
+    let input = dense_view(0, &[2]);
+    let input_data = [0.0, 0.0];
+    // base_gf=1, table_count=3 (the bound is on elem_off, not base_gf+elem_off,
+    // matching the VM): elem_off [0,1], tables base_gf+elem_off = [1, 2].
+    assert_lookup_array_matches(
+        &input,
+        1,
+        3,
+        LookupMode::Interpolate,
+        5.0,
+        &tables,
+        2,
+        &input_data,
+    );
+    let got = run_lookup_array(
+        input,
+        1,
+        3,
+        LookupMode::Interpolate,
+        5.0,
+        &tables,
+        2,
+        2,
+        &input_data,
+    );
+    // t1 interp at 5 -> 1.5; t2 constant 7.
+    assert_eq!(got, vec![1.5, 7.0]);
+}
+
+#[test]
+fn lookup_array_strided_view_offsets_match_vm() {
+    // A transposed (non-contiguous) input view exercises the per-element
+    // flat_offset projection for elem_off. dim_ids/strides differ from row-major,
+    // so a mis-addressed elem_off would pick the wrong table. Cross-checked vs the
+    // faithful oracle, which uses the same `flat_offset`.
+    let t0: &[(f64, f64)] = &[(0.0, 0.0), (10.0, 100.0)];
+    let t1: &[(f64, f64)] = &[(0.0, 1.0), (10.0, 2.0)];
+    let t2: &[(f64, f64)] = &[(0.0, 20.0), (10.0, 30.0)];
+    let t3: &[(f64, f64)] = &[(0.0, 5.0), (10.0, 5.0)];
+    let tables = [t0, t1, t2, t3];
+    // 2x2 transposed: dims [2,2], strides [1,2] -> elem_offs visited row-major
+    // are [0, 2, 1, 3].
+    let input = StaticArrayView {
+        base_off: 0,
+        is_temp: false,
+        dims: SmallVec::from_slice(&[2, 2]),
+        strides: SmallVec::from_slice(&[1, 2]),
+        offset: 0,
+        sparse: SmallVec::new(),
+        dim_ids: SmallVec::from_slice(&[0, 0]),
+    };
+    let input_data = [0.0, 0.0, 0.0, 0.0];
+    assert_lookup_array_matches(
+        &input,
+        0,
+        4,
+        LookupMode::Interpolate,
+        5.0,
+        &tables,
+        4,
+        &input_data,
+    );
+}
+
+#[test]
+fn lookup_array_invalid_view_fills_temp_with_nan() {
+    // A dynamically-subscripted-out-of-range input view -> the whole temp region
+    // is filled with NaN (the VM's `!is_valid -> fill_temp_nan`).
+    let t0: &[(f64, f64)] = &[(0.0, 0.0), (10.0, 100.0)];
+    let tables = [t0, t0, t0, t0];
+    let mut context = ByteCodeContext::default();
+    context.add_dim_list(2, [3, 4, 0, 0]); // mat[3][4]
+    context.set_temp_info(vec![0], 4);
+    let ctx = EmitCtx {
+        gf_directory_base: LA_GF_BASE,
+        gf_data_base: LA_GF_BASE,
+        temp_storage_base: TEMP_BASE,
+        ctx: &context,
+        ..ctx_with_cond_depth(0)
+    };
+    // mat[5, *]: row 5 out of range -> invalid 4-element row view.
+    let code = vec![
+        Opcode::LoadConstant { id: 0 }, // index
+        Opcode::PushVarViewDirect {
+            base_off: 0,
+            dim_list_id: 0,
+        },
+        Opcode::LoadConstant { id: 1 }, // runtime row index (1-based)
+        Opcode::ViewSubscriptDynamic { dim_idx: 0 },
+        Opcode::LookupArray {
+            base_gf: 0,
+            table_count: 4,
+            mode: LookupMode::Interpolate,
+            write_temp_id: 0,
+        },
+        Opcode::PopView {},
+    ];
+    let mut seed = seed_run(0, &(0..12).map(|i| i as f64).collect::<Vec<_>>());
+    seed.extend(seed_gf_tables(&tables));
+    let bytes = build_module(&bc(vec![5.0, 5.0], code), &ctx, false, 0);
+    let info = validate(&bytes).expect("module must validate");
+    let mut store = Store::new(());
+    let inst = store
+        .module_instantiate(&info, Vec::new(), None)
+        .expect("instantiate")
+        .module_addr;
+    let mem = store
+        .instance_export(inst, "mem")
+        .unwrap()
+        .as_mem()
+        .unwrap();
+    store.mem_access_mut_slice(mem, |b| {
+        for &(addr, v) in &seed {
+            let a = addr as usize;
+            b[a..a + 8].copy_from_slice(&v.to_le_bytes());
+        }
+    });
+    let eval = store
+        .instance_export(inst, "eval")
+        .unwrap()
+        .as_func()
+        .unwrap();
+    store
+        .invoke_simple_typed::<(i32,), ()>(eval, (0_i32,))
+        .expect("invoke");
+    let temps: Vec<f64> = store.mem_access_mut_slice(mem, |b| {
+        (0..4)
+            .map(|i| {
+                let a = TEMP_BASE as usize + i * 8;
+                f64::from_le_bytes(b[a..a + 8].try_into().unwrap())
+            })
+            .collect()
+    });
+    assert!(
+        temps.iter().all(|v| v.is_nan()),
+        "invalid input view must fill the LookupArray temp with NaN, got {temps:?}"
+    );
+}

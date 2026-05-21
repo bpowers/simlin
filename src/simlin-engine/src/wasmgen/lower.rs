@@ -1554,6 +1554,24 @@ fn emit_ops(
                 state.charge_unroll(input_view.size())?;
                 super::vector::emit_rank(&input_view, *write_temp_id, ctx, f)?;
             }
+            Opcode::LookupArray {
+                base_gf,
+                table_count,
+                mode,
+                write_temp_id,
+            } => {
+                let input_view = view_top(&state.view_stack)?.clone();
+                state.charge_unroll(input_view.size())?;
+                super::vector::emit_lookup_array(
+                    &input_view,
+                    *base_gf,
+                    *table_count,
+                    *mode,
+                    *write_temp_id,
+                    ctx,
+                    f,
+                )?;
+            }
             Opcode::Ret => {
                 // The caller emits the function's terminating `End`.
             }
