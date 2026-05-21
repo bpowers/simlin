@@ -28,6 +28,7 @@ import { plainDeserialize, plainSerialize } from './drawing/common';
 import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor';
 import { caretOffsetForClick, caretOffsetWithinSpan, RenderedGlyph } from './equation-caret';
 import { LookupEditor } from './LookupEditor';
+import { variableDetailsView } from './variable-details-display';
 import { errorCodeDescription } from '@simlin/engine';
 
 import styles from './VariableDetails.module.css';
@@ -386,31 +387,38 @@ export class VariableDetails extends React.PureComponent<VariableDetailsProps, V
       initialUnits !== stringFromDescendants(this.state.unitsContents) ||
       initialDocs !== stringFromDescendants(this.state.notesContents);
 
-    let chartOrErrors;
     const errors = this.props.variable.errors;
     const unitErrors = this.props.variable.unitErrors;
-    if (errors || unitErrors) {
-      const errorList: Array<React.ReactElement> = [];
-      if (errors) {
-        errors.forEach((error) => {
-          errorList.push(<div className={styles.errorList}>error: {errorCodeDescription(error.code)}</div>);
-        });
-      }
-      if (unitErrors) {
-        unitErrors.forEach((error) => {
-          const details = error.details;
-          errorList.push(
-            <div className={styles.errorList}>
-              unit error: {errorCodeDescription(error.code)}
-              {details ? `: ${details}` : undefined}
-            </div>,
-          );
-        });
-      }
-      chartOrErrors = errorList;
+    const detailsView = variableDetailsView(this.props.variable);
+    // Unit errors are non-fatal warnings: the variable still simulates and has
+    // data. They are rendered beneath the chart (or alongside equation errors)
+    // rather than replacing the results.
+    const unitWarnings = detailsView.unitWarnings.map((error, i) => {
+      const details = error.details;
+      return (
+        <div key={`unit-${i}`} className={styles.errorList}>
+          unit error: {errorCodeDescription(error.code)}
+          {details ? `: ${details}` : undefined}
+        </div>
+      );
+    });
+
+    let chartOrErrors;
+    if (!detailsView.showChart) {
+      // Equation/compile errors mean the variable produced no valid data, so
+      // the error list replaces the chart.
+      const errorList = detailsView.equationErrors.map((error, i) => (
+        <div key={`eqn-${i}`} className={styles.errorList}>
+          error: {errorCodeDescription(error.code)}
+        </div>
+      ));
+      chartOrErrors = [...errorList, ...unitWarnings];
     } else {
       chartOrErrors = (
-        <LineChart height={300} series={chartSeries} yDomain={[yMin, yMax]} tooltipFormatter={this.formatValue} />
+        <>
+          <LineChart height={300} series={chartSeries} yDomain={[yMin, yMax]} tooltipFormatter={this.formatValue} />
+          {unitWarnings}
+        </>
       );
     }
 
