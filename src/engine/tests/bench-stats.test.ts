@@ -86,18 +86,21 @@ describe('runTimed', () => {
   });
 
   it('stops early once the budget is exceeded after minIters', () => {
-    // budget 50ms, clock advances 20ms per read. The loop checks the clock
-    // before each push beyond minIters. minIters=2 is honored; then it keeps
-    // going while elapsed < 50: clock reads at the guard are 0, 20, 40, 60...
+    // budget 50ms, clock advances 20ms per read. Deterministic trace with
+    // fakeClock(20): the first read is consumed as `start` (=0); the first two
+    // pushes short-circuit on `times.length < minIters` so the clock is NOT
+    // read. From iteration 3 the guard reads the clock: 20 (<50 push), 40
+    // (<50 push), 60 (>=50 stop). So the loop runs EXACTLY 4 iterations -- the
+    // exact count is pinned so an off-by-one in the budget guard (`<` -> `<=`)
+    // is caught (a loose `>= 2 && < 100` would not notice it).
     const opts: BenchOpts = { warmup: 0, minIters: 2, maxIters: 100, budgetMs: 50 };
     const body = sequenceBody([10, 11, 12, 13, 14, 15, 16, 17]);
     const stat = runTimed(opts, body, fakeClock(20));
 
-    // The clock starts after the first read (used as `start`). minIters=2 push
-    // unconditionally; subsequent iterations gate on elapsed < 50ms.
-    expect(stat.iters).toBeGreaterThanOrEqual(2);
-    expect(stat.iters).toBeLessThan(100);
-    expect(Number.isFinite(stat.medianMs)).toBe(true);
+    expect(stat.iters).toBe(4);
+    // measured = [10, 11, 12, 13]; sorted, len>>1==2 -> 12; min is 10.
+    expect(stat.medianMs).toBe(12);
+    expect(stat.minMs).toBe(10);
   });
 
   it('honors minIters even when the budget is already exceeded', () => {
@@ -158,13 +161,18 @@ describe('runTimedAsync', () => {
   });
 
   it('stops early once the budget is exceeded after minIters', async () => {
+    // Same deterministic trace as the sync twin: `start`=0, the first two
+    // pushes short-circuit (no clock read), then guards read 20, 40, 60 and
+    // stop at 60 >= 50. Exactly 4 iterations -- pinned to catch an off-by-one
+    // in the (byte-identical) async budget guard.
     const opts: BenchOpts = { warmup: 0, minIters: 2, maxIters: 100, budgetMs: 50 };
     const body = asyncSequenceBody([10, 11, 12, 13, 14, 15, 16, 17]);
     const stat = await runTimedAsync(opts, body, fakeClock(20));
 
-    expect(stat.iters).toBeGreaterThanOrEqual(2);
-    expect(stat.iters).toBeLessThan(100);
-    expect(Number.isFinite(stat.medianMs)).toBe(true);
+    expect(stat.iters).toBe(4);
+    // measured = [10, 11, 12, 13]; sorted, len>>1==2 -> 12; min is 10.
+    expect(stat.medianMs).toBe(12);
+    expect(stat.minMs).toBe(10);
   });
 
   it('honors minIters even when the budget is already exceeded', async () => {
@@ -238,6 +246,59 @@ describe('seriesClose', () => {
     expect(result.match).toBe(false);
     if (!result.match) {
       expect(result.index).toBe(-1);
+    }
+  });
+
+  it('reports NaN-vs-finite as a mismatch at the offending index', () => {
+    // The Rust oracle (`ensure_results`) PANICS on this: a NaN is never
+    // around-zero and approx_eq!(NaN, finite) is false. A naive
+    // `Math.abs(NaN - finite) > tol` is NaN > tol === false, which would
+    // wrongly wave it through -- this pins the faithful rejection.
+    const a = new Float64Array([1.0, NaN, 3.0]);
+    const b = new Float64Array([1.0, 2.0, 3.0]);
+    const result = seriesClose(a, b);
+    expect(result.match).toBe(false);
+    if (!result.match) {
+      expect(result.index).toBe(1);
+      expect(Number.isNaN(result.expected)).toBe(true);
+      expect(result.actual).toBe(2.0);
+    }
+  });
+
+  it('reports finite-vs-NaN as a mismatch at the offending index', () => {
+    // Symmetric to the above: NaN on the `actual` side is equally a mismatch.
+    const a = new Float64Array([1.0, 2.0, 3.0]);
+    const b = new Float64Array([1.0, NaN, 3.0]);
+    const result = seriesClose(a, b);
+    expect(result.match).toBe(false);
+    if (!result.match) {
+      expect(result.index).toBe(1);
+      expect(result.expected).toBe(2.0);
+      expect(Number.isNaN(result.actual)).toBe(true);
+    }
+  });
+
+  it('reports NaN-vs-NaN as a mismatch (faithful to approx_eq! on NaN)', () => {
+    // approx_eq!(NaN, NaN) is false, so the Rust oracle would PANIC even
+    // here. A parity comparison must never silently accept NaN.
+    const a = new Float64Array([1.0, NaN]);
+    const b = new Float64Array([1.0, NaN]);
+    const result = seriesClose(a, b);
+    expect(result.match).toBe(false);
+    if (!result.match) {
+      expect(result.index).toBe(1);
+    }
+  });
+
+  it('reports +Infinity-vs-finite as a mismatch', () => {
+    // A non-finite value on either side (Infinity as well as NaN) is a
+    // broken run the cross-check exists to reject.
+    const a = new Float64Array([1.0, Infinity]);
+    const b = new Float64Array([1.0, 2.0]);
+    const result = seriesClose(a, b);
+    expect(result.match).toBe(false);
+    if (!result.match) {
+      expect(result.index).toBe(1);
     }
   });
 });

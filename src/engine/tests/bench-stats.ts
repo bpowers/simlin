@@ -9,6 +9,14 @@
 // reads the clock itself nor touches a model/WASM. It mirrors the methodology
 // of `src/simlin-engine/examples/backend_bench.rs` (the `Stat`/`bench` pair),
 // adding the explicit warmup phase AC9.1 requires.
+//
+// The single deliberate impurity is `defaultNow()` (a `performance.now()` read).
+// It exists ONLY as the default value of the injected `now` parameter -- a
+// default-injection seam, analogous to the FCIS logger exception. Every public
+// function takes `now` as a parameter and the pure logic reads the clock solely
+// through it, so all unit tests pass a fake clock and the core stays
+// deterministically testable; the real wall clock is reached only when a caller
+// omits the argument.
 
 /** One phase's timing summary. `iters` makes the sample size visible so a
  *  single-iteration heavy phase is never silently treated as an average. */
@@ -121,7 +129,9 @@ const NEAR_ZERO_ACTUAL = 1e-6;
  * Element-wise comparison of two simulation series within the engine's VM-vs-wasm
  * parity tolerance (a faithful port of `ensure_results`'s non-Vensim, near-zero-
  * robust isclose). Returns a match, or the first divergence with its step index
- * and values. A length mismatch is reported with `index === -1`.
+ * and values. A length mismatch is reported with `index === -1`. A non-finite
+ * value (NaN/Infinity) on either side is a mismatch -- matching `ensure_results`,
+ * which panics on any NaN (see the loop body for the rationale).
  *
  * Pure: no I/O, no clock. The benchmark's `crossCheck` is the imperative shell
  * that fetches the series and turns a non-match into a thrown error.
@@ -133,6 +143,16 @@ export function seriesClose(expected: Readonly<Float64Array>, actual: Readonly<F
   for (let i = 0; i < expected.length; i++) {
     const e = expected[i];
     const a = actual[i];
+    // A non-finite value (NaN/Infinity) on EITHER side is a mismatch, checked
+    // before the tolerance comparison. `ensure_results` PANICS on any NaN --
+    // approx_eq!(NaN, x) is false and NaN is never around-zero, so it would
+    // reject even NaN-vs-NaN. Relying on `Math.abs(e - a) > tol` alone would
+    // wave a NaN/finite divergence through, since NaN > tol is false. The wasm
+    // backend can legitimately emit genuine NaN (OOB vector reads, empty
+    // reducers), exactly the broken run this cross-check must reject.
+    if (!Number.isFinite(e) || !Number.isFinite(a)) {
+      return { match: false, index: i, expected: e, actual: a };
+    }
     const aroundZero = Math.abs(e) <= NEAR_ZERO_EXPECTED && Math.abs(a) <= NEAR_ZERO_ACTUAL;
     if (aroundZero) {
       continue;
@@ -149,8 +169,12 @@ function summarize(times: ReadonlyArray<number>): Stat {
   return { medianMs: median(times), minMs, iters: times.length };
 }
 
-// performance.now() returns fractional milliseconds; this is the only wall-clock
-// read in the module, and it is the injectable default so tests stay deterministic.
+// performance.now() returns fractional milliseconds. This is the module's single
+// deliberate impurity (see the header note): a non-deterministic read that the
+// FCIS Functional Core would otherwise forbid, permitted here ONLY as the
+// default-injection seam for `now` -- the same exception class as a logger.
+// Every public function takes `now` as a parameter, so the pure logic never
+// reaches the clock except through it, and all tests inject a fake clock.
 function defaultNow(): number {
   return performance.now();
 }
