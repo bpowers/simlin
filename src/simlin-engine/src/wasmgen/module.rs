@@ -2882,6 +2882,125 @@ mod tests {
         }
     }
 
+    /// A two-model datamodel like [`submodel_project`], but the submodel carries
+    /// its OWN overridable constant `k` (a flows-phase `AssignConstCurr`) and
+    /// `out = in + k`. Instantiating it `n_instances` times in `main` gives each
+    /// instance a DISTINCT absolute offset for its own `k` (the recursive
+    /// `base_off + module_decl.off` addressing), so a per-instance `set_value`
+    /// override on one instance's `k` must not perturb the other. `in_value` is a
+    /// constant wired into every instance's `in`, so the only differentiator
+    /// between two instances' `out` is each instance's `k` override.
+    fn submodel_with_constant_project(
+        name: &str,
+        in_value: &str,
+        k_default: &str,
+        n_instances: usize,
+    ) -> crate::datamodel::Project {
+        use crate::datamodel;
+        let mut main_vars: Vec<datamodel::Variable> =
+            vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "in_value".to_string(),
+                equation: datamodel::Equation::Scalar(in_value.to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })];
+        for i in 0..n_instances {
+            let ident = format!("sub{i}");
+            main_vars.push(datamodel::Variable::Module(datamodel::Module {
+                references: vec![datamodel::ModuleReference {
+                    src: "in_value".to_string(),
+                    dst: format!("{ident}.in"),
+                }],
+                ident,
+                model_name: "submodel".to_string(),
+                documentation: String::new(),
+                units: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }));
+        }
+
+        let submodel_vars = vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "in".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    ..datamodel::Compat::default()
+                },
+            }),
+            // `k` is a bare constant, so it lowers to a flows-phase
+            // `AssignConstCurr` -- i.e. an overridable constant, distinct per
+            // instance.
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "k".to_string(),
+                equation: datamodel::Equation::Scalar(k_default.to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "out".to_string(),
+                equation: datamodel::Equation::Scalar("in + k".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+        ];
+
+        datamodel::Project {
+            name: name.to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 3.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                datamodel::Model {
+                    name: "main".to_string(),
+                    sim_specs: None,
+                    variables: main_vars,
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                    macro_spec: None,
+                },
+                datamodel::Model {
+                    name: "submodel".to_string(),
+                    sim_specs: None,
+                    variables: submodel_vars,
+                    views: vec![],
+                    loop_metadata: vec![],
+                    groups: vec![],
+                    macro_spec: None,
+                },
+            ],
+            source: Default::default(),
+            ai_information: None,
+        }
+    }
+
     /// Task 1: a model instantiating a submodel runs through wasm and matches the
     /// VM. The submodel's `out` depends on its `in` input (passed from `main`), so
     /// this exercises both `EvalModule` (the child `call`) and `LoadModuleInput`
@@ -2997,6 +3116,138 @@ mod tests {
         assert_ne!(
             out_slots[0], out_slots[1],
             "the two instances must run at different module offsets"
+        );
+    }
+
+    /// Task 1 (per-instance DISTINCT overrides -- the direct test of the
+    /// absolute-slot const-region addressing): the SAME `CompiledModule`,
+    /// instantiated twice in `main`, carries DISTINCT `set_value` overrides for
+    /// its own constant `k`. Each instance's `k` lives at a distinct absolute
+    /// offset (`base_off + module_decl.off`, the recursion in
+    /// `collect_overridable_defaults`); the wasm override region is indexed by
+    /// that absolute offset, so overriding instance 0's `k` to 100 and instance
+    /// 1's `k` to 200 makes each instance's `out = in + k` reflect ITS OWN
+    /// override. A bug that applied one override to both instances, or that
+    /// ignored `module_off` (writing both overrides to the same slot), would make
+    /// the two `out` series equal -- which the non-vacuity `assert_ne!` rejects.
+    ///
+    /// This is a wasm-only correctness property: the VM is NOT a valid cell-for-
+    /// cell oracle for *distinct* overrides of a SHARED module, because its
+    /// `set_value_by_offset` mutates the module's shared bytecode literal (one
+    /// `literal_id` for both instances, resolved through the single shared
+    /// `ModuleKey`), so the second override clobbers the first and both instances
+    /// read the last value. The wasm backend is strictly more correct here. The
+    /// VM divergence is tracked separately; this test still anchors against the
+    /// VM in the regime where they DO agree -- both instances overridden to the
+    /// SAME value (`compile_simulation_two_instances_same_value_override_matches_vm`).
+    #[test]
+    fn compile_simulation_two_instances_distinct_overrides() {
+        // `in_value` is the constant 7 wired into both instances' `in`, so the
+        // ONLY differentiator between the two instances' `out` is each instance's
+        // `k` override (default 1).
+        let datamodel = submodel_with_constant_project("distinct", "7", "1", 2);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (distinct overrides)");
+
+        let (k0_off, k1_off) = instance_k_offsets(&artifact);
+        assert_ne!(
+            k0_off, k1_off,
+            "the two instances' `k` must occupy distinct absolute offsets"
+        );
+        assert!(
+            sim.is_constant_offset(k0_off) && sim.is_constant_offset(k1_off),
+            "each instance's `k` must be a VM-overridable constant (sub0·k={k0_off}, sub1·k={k1_off})"
+        );
+
+        // Apply DIFFERENT overrides to the two instances, then reset + run.
+        let wasm_slab = run_artifact_with_overrides(&artifact, &[(k0_off, 100.0), (k1_off, 200.0)]);
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        // Non-vacuity: each instance's `out` reflects ITS OWN override, and the
+        // two genuinely DIFFER. `in_value` is 7, so sub0·out = 7 + 100 = 107 and
+        // sub1·out = 7 + 200 = 207 at every saved step. If a bug applied one
+        // override to both instances (or ignored `module_off` and wrote both to
+        // one slot), the two `out` series would be equal and this would fail.
+        let out0_off = layout_offset(&artifact, qualified_ident("sub0", "out").as_str());
+        let out1_off = layout_offset(&artifact, qualified_ident("sub1", "out").as_str());
+        for c in 0..n_chunks {
+            let out0 = wasm_slab[c * n_slots + out0_off];
+            let out1 = wasm_slab[c * n_slots + out1_off];
+            assert!(
+                (out0 - 107.0).abs() < 1e-9,
+                "sub0·out should be in_value(7)+k0(100)=107 at chunk {c}, got {out0}"
+            );
+            assert!(
+                (out1 - 207.0).abs() < 1e-9,
+                "sub1·out should be in_value(7)+k1(200)=207 at chunk {c}, got {out1}"
+            );
+            assert_ne!(
+                out0, out1,
+                "the two instances' outputs must DIFFER under distinct per-instance overrides"
+            );
+        }
+    }
+
+    /// Task 1 (VM parity anchor for the shared-module override path): overriding
+    /// BOTH instances' `k` to the SAME value matches the VM cell-for-cell. This is
+    /// the regime where the VM and wasm agree -- the VM's shared-literal clobber
+    /// (see `compile_simulation_two_instances_distinct_overrides`) is harmless
+    /// when both overrides carry the same value -- so it proves the wasm override
+    /// mechanism is faithful to the VM (not merely internally consistent) for a
+    /// shared `CompiledModule` instantiated at two `module_off`s.
+    #[test]
+    fn compile_simulation_two_instances_same_value_override_matches_vm() {
+        let datamodel = submodel_with_constant_project("same_val", "7", "1", 2);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let (k0_off, k1_off) = instance_k_offsets(&artifact);
+        let wasm_slab = run_artifact_with_overrides(&artifact, &[(k0_off, 300.0), (k1_off, 300.0)]);
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm creation");
+        vm.set_value_by_offset(k0_off, 300.0)
+            .expect("sub0·k must be a VM-overridable constant");
+        vm.set_value_by_offset(k1_off, 300.0)
+            .expect("sub1·k must be a VM-overridable constant");
+        vm.run_to_end().expect("vm run");
+        let vm_results = vm.into_results();
+        assert_eq!(
+            vm_results.step_count, n_chunks,
+            "saved-chunk count differs from VM"
+        );
+
+        let mut checked = 0usize;
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = wasm_slab[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} mismatch at chunk {c} under same-value override: \
+                     vm={vm_val} wasm={wasm_val}"
+                );
+            }
+            checked += 1;
+        }
+        assert!(
+            checked >= 3,
+            "expected to compare in_value + both instances' k/out, only checked {checked}"
+        );
+        // Both instances reach 7 + 300 = 307 (the override took on both).
+        let out0_off = layout_offset(&artifact, qualified_ident("sub0", "out").as_str());
+        let out1_off = layout_offset(&artifact, qualified_ident("sub1", "out").as_str());
+        assert!(
+            (wasm_slab[out0_off] - 307.0).abs() < 1e-9
+                && (wasm_slab[out1_off] - 307.0).abs() < 1e-9,
+            "both instances should reach 7+300=307 under the shared override"
         );
     }
 
@@ -3723,6 +3974,28 @@ mod tests {
             .unwrap_or_else(|| panic!("{name} offset"))
     }
 
+    /// The canonical qualified ident for a sub-model `instance`'s sub-variable
+    /// `var` (`Ident::join`, the U+00B7 module-hierarchy separator), e.g.
+    /// `sub0·k`. Built the same way `calc_flattened_offsets_incremental` keys the
+    /// layout, so it stays correct if the separator ever changes.
+    fn qualified_ident(instance: &str, var: &str) -> Ident<Canonical> {
+        Ident::<Canonical>::join(
+            &Ident::<Canonical>::new(instance).as_canonical_str(),
+            &Ident::<Canonical>::new(var).as_canonical_str(),
+        )
+    }
+
+    /// The absolute slab offsets of the two `submodel_with_constant_project`
+    /// instances' own constant `k` (`sub0·k`, `sub1·k`). These are distinct
+    /// because `calc_flattened_offsets_incremental` advances the base offset per
+    /// instance, mirroring the VM's `collect_constant_info` recursion.
+    fn instance_k_offsets(artifact: &WasmArtifact) -> (usize, usize) {
+        (
+            layout_offset(artifact, qualified_ident("sub0", "k").as_str()),
+            layout_offset(artifact, qualified_ident("sub1", "k").as_str()),
+        )
+    }
+
     /// A VM run of `sim` with an override applied at absolute `off` (the VM's
     /// `set_value_by_offset`), returning that variable's slab so wasm overrides
     /// can be compared cell-for-cell against the VM oracle.
@@ -3776,15 +4049,16 @@ mod tests {
         for (name, wasm_off) in &artifact.layout.var_offsets {
             let wasm_off = *wasm_off;
             let ident = Ident::<Canonical>::from_str_unchecked(name);
+            // Index the VM slab with the VM's own offset for this variable. It
+            // equals `wasm_off` (both backends derive offsets from
+            // `calc_flattened_offsets_incremental`), so this also skips the
+            // implicit globals the layout carries but the VM offsets map omits.
             let vm_off = match sim.get_offset(&ident) {
                 Some(o) => o,
                 None => continue,
             };
-            let _ = vm_off;
-            // Compare against the VM results slab via the canonical offsets map.
-            let vm_var_off = wasm_off; // wasm and VM share the same slab layout
             for c in 0..n_chunks {
-                let vm_val = vm_data[c * vm_step_size + vm_var_off];
+                let vm_val = vm_data[c * vm_step_size + vm_off];
                 let wasm_val = wasm_slab[c * n_slots + wasm_off];
                 assert!(
                     (vm_val - wasm_val).abs() < 1e-9,
