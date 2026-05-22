@@ -47,6 +47,12 @@ pub struct ModelStage0 {
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
     pub implicit: bool,
+    /// is_macro is true if this model is a macro definition. A macro is a
+    /// polymorphic template: its body variables' declared units may name the
+    /// macro's formal parameters (a Vensim idiom -- e.g. `~ xfrom` inside
+    /// RAMP FROM TO), so unit inference must treat those as polymorphic rather
+    /// than concrete base units.
+    pub is_macro: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -73,6 +79,10 @@ pub struct ModelStage1 {
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
     pub implicit: bool,
+    /// is_macro is true if this model is a macro definition; see
+    /// `ModelStage0::is_macro`. Inference treats a macro body's declared units
+    /// as polymorphic rather than concrete base units.
+    pub is_macro: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -964,6 +974,7 @@ impl ModelStage0 {
             variables,
             errors: None,
             implicit,
+            is_macro: x_model.macro_spec.is_some(),
         }
     }
 
@@ -1065,6 +1076,7 @@ impl ModelStage0 {
             variables,
             errors: None,
             implicit,
+            is_macro: x_model.macro_spec.is_some(),
         }
     }
 }
@@ -1110,6 +1122,7 @@ impl ModelStage1 {
             model_deps: Some(model_deps),
             instantiations: None,
             implicit: model_s0.implicit,
+            is_macro: model_s0.is_macro,
         }
     }
 

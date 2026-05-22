@@ -159,6 +159,7 @@ impl Project {
                 variables,
                 errors: None,
                 implicit: is_stdlib,
+                is_macro: src_model.macro_spec(db).is_some(),
             });
         }
 

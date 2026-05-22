@@ -215,6 +215,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
             variables,
             errors: None,
             implicit: is_stdlib,
+            is_macro: src_model.macro_spec(db).is_some(),
         }
     };
 
@@ -263,27 +264,41 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
         .values()
         .any(|var| var.units().is_some());
 
-    // Run unit inference.
-    let inferred_units = crate::units_infer::infer(&models_s1, units_ctx, target_model)
-        .unwrap_or_else(|err| {
-            if has_declared_units
-                && let crate::common::UnitError::InferenceError { code, .. } = &err
-                && *code == ErrorCode::UnitMismatch
-            {
-                CompilationDiagnostic(Diagnostic {
-                    model: model_name.clone(),
-                    variable: None,
-                    error: DiagnosticError::Model(crate::common::Error {
-                        kind: ErrorKind::Model,
-                        code: *code,
-                        details: Some(format!("{}", err)),
-                    }),
-                    severity: DiagnosticSeverity::Warning,
-                })
-                .accumulate(db);
-            }
-            Default::default()
-        });
+    // Run unit inference. Inference is partial: it returns the units it could
+    // resolve together with any dimensional conflicts it found. We keep the
+    // resolved units -- so the rest of the model is still unit-checked even when
+    // one equation conflicts, rather than discarding the whole inferred-units
+    // map on the first conflict (GH #614).
+    //
+    // Conflicts are surfaced as a single umbrella model-level warning rather
+    // than one diagnostic per conflict: a large macro-instantiated model can
+    // produce hundreds of internal constraint contradictions, and emitting one
+    // warning each would flood the report. The full conflict list remains
+    // available on the `InferenceResult` for callers that want it.
+    let inference = crate::units_infer::infer(&models_s1, units_ctx, target_model);
+    if has_declared_units && !inference.conflicts.is_empty() {
+        let detail = if inference.conflicts.len() == 1 {
+            format!("{}", inference.conflicts[0])
+        } else {
+            format!(
+                "{} dimensional unit conflicts found during inference; first: {}",
+                inference.conflicts.len(),
+                inference.conflicts[0]
+            )
+        };
+        CompilationDiagnostic(Diagnostic {
+            model: model_name.clone(),
+            variable: None,
+            error: DiagnosticError::Model(crate::common::Error {
+                kind: ErrorKind::Model,
+                code: ErrorCode::UnitMismatch,
+                details: Some(detail),
+            }),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    }
+    let inferred_units = inference.resolved;
 
     // Check stdlib module argument unit compatibility.
     //

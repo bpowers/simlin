@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
-use crate::common::{Canonical, ErrorCode, Ident, UnitError, UnitResult, canonicalize};
+use crate::common::{Canonical, ErrorCode, Ident, UnitError, canonicalize};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
 #[cfg(test)]
@@ -86,6 +86,22 @@ impl LocatedConstraint {
     fn is_empty(&self) -> bool {
         self.unit_map.is_empty()
     }
+}
+
+/// The result of unit inference for a model.
+///
+/// Inference is *partial*: `resolved` holds every metavariable the solver
+/// could pin to a concrete unit, and `conflicts` holds every dimensional
+/// contradiction it found. A conflict in one connected component of the
+/// constraint graph cannot affect another (substitution only flows along
+/// shared metavariables), so a single bad equation no longer discards the
+/// units resolved for the rest of the model -- and the conflict set is
+/// complete rather than just the first contradiction encountered (GH #614).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Default)]
+pub(crate) struct InferenceResult {
+    pub resolved: HashMap<Ident<Canonical>, UnitMap>,
+    pub conflicts: Vec<UnitError>,
 }
 
 struct UnitInferer<'a> {
@@ -280,9 +296,27 @@ fn split_constraint(u: &UnitMap) -> (UnitMap, UnitMap) {
 ///
 /// This is O(n) by grouping constraints by their metavariable signature using a HashMap,
 /// rather than O(n²) pairwise comparison.
-fn find_constraint_mismatch(constraints: &[LocatedConstraint]) -> Option<UnitError> {
+/// Find every dimensional contradiction among the residual (post-solve)
+/// constraints, rather than just the first. Collecting them all -- instead of
+/// short-circuiting on the first -- gives a complete diagnostic set in one pass
+/// and makes the reported set independent of which contradiction the solver
+/// happens to reach first (GH #614, and mitigates the order-dependence in
+/// GH #474).
+///
+/// Two kinds of contradiction:
+///
+/// 1. A constraint with only concrete units (no metavariables) that isn't
+///    dimensionless -- e.g. `meters == seconds`, which is impossible.
+/// 2. Two constraints with the same metavariable "signature" but different
+///    concrete "residuals" -- e.g. `@a/@b * meters == 1` and
+///    `@a/@b * seconds == 1` imply `meters == seconds`.
+///
+/// Grouping by signature keeps this O(n) rather than O(n^2) pairwise.
+fn find_constraint_mismatches(constraints: &[LocatedConstraint]) -> Vec<UnitError> {
     use std::collections::HashMap;
     use std::fmt::Write;
+
+    let mut mismatches: Vec<UnitError> = Vec::new();
 
     // Group constraints by their metavariable signature.
     // Key: sorted string representation of metavar signature (for HashMap key)
@@ -296,7 +330,7 @@ fn find_constraint_mismatch(constraints: &[LocatedConstraint]) -> Option<UnitErr
         if signature.map.is_empty() && !residual.map.is_empty() {
             let mut s = "unit checking failed; conflicting constraint:\n".to_owned();
             write!(s, "    1 == {}", constraint.unit_map).unwrap();
-            return Some(UnitError::InferenceError {
+            mismatches.push(UnitError::InferenceError {
                 code: ErrorCode::UnitMismatch,
                 sources: constraint
                     .sources
@@ -305,13 +339,17 @@ fn find_constraint_mismatch(constraints: &[LocatedConstraint]) -> Option<UnitErr
                     .collect(),
                 details: Some(s),
             });
+            continue;
         }
 
         // Create a canonical string key for the signature (sorted for consistency)
         let sig_key = format!("{signature}");
 
         if let Some((first_constraint, first_residual)) = signature_groups.get(&sig_key) {
-            // Case 2: Same signature but different residual means contradiction
+            // Case 2: Same signature but different residual means contradiction.
+            // We compare every member against the group's first residual, so a
+            // signature with k distinct residuals yields k-1 mismatches; exact
+            // duplicates are deduped by the caller.
             if residual != *first_residual {
                 let mut s = "unit checking failed; inconsistent constraints:\n".to_owned();
                 writeln!(s, "    1 == {}", first_constraint.unit_map).unwrap();
@@ -335,7 +373,7 @@ fn find_constraint_mismatch(constraints: &[LocatedConstraint]) -> Option<UnitErr
                     }
                 }
 
-                return Some(UnitError::InferenceError {
+                mismatches.push(UnitError::InferenceError {
                     code: ErrorCode::UnitMismatch,
                     sources: all_sources,
                     details: Some(s),
@@ -346,7 +384,7 @@ fn find_constraint_mismatch(constraints: &[LocatedConstraint]) -> Option<UnitErr
         }
     }
 
-    None
+    mismatches
 }
 
 impl UnitInferer<'_> {
@@ -800,7 +838,19 @@ impl UnitInferer<'_> {
                     ));
                 }
             }
-            if let Some(units) = var.units() {
+            // A macro is a polymorphic template: its body variables' declared
+            // units may name the macro's formal parameters (a Vensim idiom,
+            // e.g. `~ xfrom` inside RAMP FROM TO), which would otherwise leak
+            // the parameter name as a literal base unit into every
+            // instantiation and conflict with the real argument units. So we
+            // skip declared-units constraints for macro bodies and let those
+            // units be inferred polymorphically from the equation and the
+            // cross-module parameter bindings instead. (This mirrors
+            // `check_model_units`, which skips unit-checking macro models
+            // entirely.)
+            if !model.is_macro
+                && let Some(units) = var.units()
+            {
                 let mv: UnitMap = [(format!("@{prefix}{id}"), 1)].iter().cloned().collect();
                 // User-defined unit declarations don't have equation locations
                 constraints.push(LocatedConstraint::new(
@@ -813,19 +863,29 @@ impl UnitInferer<'_> {
     }
 
     #[allow(clippy::type_complexity)]
+    /// Solve the constraint system by Gaussian-elimination-style substitution,
+    /// returning the resolved metavariable units, the residual (still
+    /// metavariable-bearing) constraints, and any dimensional conflicts found
+    /// while solving.
+    ///
+    /// A conflict is recorded and solving continues with the *first* binding
+    /// kept, rather than aborting (GH #614). Because substitution only ever
+    /// flows along shared metavariables, a contradiction is confined to its own
+    /// connected component of the constraint graph: keeping going can never
+    /// corrupt the units resolved for an independent component.
+    #[allow(clippy::type_complexity)]
     fn unify(
         &self,
         constraints: Vec<LocatedConstraint>,
-    ) -> std::result::Result<
-        (
-            HashMap<Ident<Canonical>, UnitMap>,
-            Option<Vec<LocatedConstraint>>,
-        ),
-        UnitError,
-    > {
+    ) -> (
+        HashMap<Ident<Canonical>, UnitMap>,
+        Vec<LocatedConstraint>,
+        Vec<UnitError>,
+    ) {
         let mut resolved_fvs: HashMap<Ident<Canonical>, UnitMap> = HashMap::new();
         // Track sources for each resolved variable in case of conflict
         let mut resolved_sources: HashMap<Ident<Canonical>, Vec<ConstraintSource>> = HashMap::new();
+        let mut conflicts: Vec<UnitError> = Vec::new();
         let mut pending = ConstraintSet::from_vec(constraints);
         let mut finalized = ConstraintSet::default();
 
@@ -855,7 +915,10 @@ impl UnitInferer<'_> {
                                     }
                                 }
                             }
-                            return Err(UnitError::InferenceError {
+                            // Record the conflict but keep the first binding and
+                            // keep solving: a contradiction for one metavariable
+                            // must not discard the units resolved for the rest.
+                            conflicts.push(UnitError::InferenceError {
                                 code: ErrorCode::UnitMismatch,
                                 sources: all_sources,
                                 details: Some(format!(
@@ -879,41 +942,32 @@ impl UnitInferer<'_> {
             }
         }
 
-        let final_constraints = finalized.into_vec();
-        let final_constraints = if final_constraints.is_empty() {
-            None
-        } else {
-            Some(final_constraints)
-        };
-
-        Ok((resolved_fvs, final_constraints))
+        (resolved_fvs, finalized.into_vec(), conflicts)
     }
 
-    fn infer(&self, model: &ModelStage1) -> UnitResult<HashMap<Ident<Canonical>, UnitMap>> {
-        // use rand::seq::SliceRandom;
-        // use rand::thread_rng;
-
+    fn infer(&self, model: &ModelStage1) -> InferenceResult {
         let mut constraints = vec![];
         self.gen_all_constraints(model, "", &mut constraints);
-        // mostly for robustness: ensure we don't inadvertently depend on
-        // test cases iterating in a specific order.
-        // constraints.shuffle(&mut thread_rng());
 
-        let (results, constraints) = self.unify(constraints)?;
+        let (resolved, leftover, mut conflicts) = self.unify(constraints);
 
-        if let Some(constraints) = constraints {
-            // Check if any unresolved constraint represents an actual mismatch
-            let mismatch = find_constraint_mismatch(&constraints);
+        // Leftover constraints that still contain metavariables just mean the
+        // model is under-constrained (e.g. undeclared units) -- not an error.
+        // Only a concrete contradiction among them is a real mismatch.
+        conflicts.extend(find_constraint_mismatches(&leftover));
 
-            if let Some(err) = mismatch {
-                Err(err)
-            } else {
-                // Unresolved constraints with metavariables just mean the model
-                // is under-constrained (e.g., no units declared). Return partial results.
-                Ok(results)
+        // The same contradiction can be reached both while solving and as a
+        // leftover constraint; drop exact duplicates so each is reported once.
+        let mut deduped: Vec<UnitError> = Vec::with_capacity(conflicts.len());
+        for conflict in conflicts {
+            if !deduped.contains(&conflict) {
+                deduped.push(conflict);
             }
-        } else {
-            Ok(results)
+        }
+
+        InferenceResult {
+            resolved,
+            conflicts: deduped,
         }
     }
 }
@@ -980,8 +1034,7 @@ fn test_inference() {
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> =
-                Ok(Default::default());
+            let mut results = InferenceResult::default();
             let db = crate::db::SimlinDb::default();
             let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
             let _project = crate::project::Project::from_salsa(
@@ -992,7 +1045,12 @@ fn test_inference() {
                     results = infer(models, units_ctx, model);
                 },
             );
-            let results = results.unwrap();
+            assert!(
+                results.conflicts.is_empty(),
+                "expected no conflicts for a fully-inferrable model, got: {:?}",
+                results.conflicts
+            );
+            let results = results.resolved;
             for (ident, expected_units) in expected.iter() {
                 let expected_units: UnitMap =
                     crate::units::parse_units(&units_ctx, Some(expected_units))
@@ -1030,7 +1088,7 @@ fn test_declared_units_without_equation_propagate() {
     let model = x_model("main", vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+    let mut results = InferenceResult::default();
     let db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
     let _project = crate::project::Project::from_salsa(
@@ -1041,7 +1099,7 @@ fn test_declared_units_without_equation_propagate() {
             results = infer(models, units_ctx, model);
         },
     );
-    let results = results.unwrap();
+    let results = results.resolved;
 
     let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
         .unwrap()
@@ -1109,12 +1167,7 @@ fn test_inference_negative() {
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> =
-                Err(UnitError::InferenceError {
-                    code: ErrorCode::UnitMismatch,
-                    sources: vec![],
-                    details: None,
-                });
+            let mut results = InferenceResult::default();
             let db = crate::db::SimlinDb::default();
             let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
             let _project = crate::project::Project::from_salsa(
@@ -1125,7 +1178,10 @@ fn test_inference_negative() {
                     results = infer(models, units_ctx, model);
                 },
             );
-            assert!(results.is_err());
+            assert!(
+                !results.conflicts.is_empty(),
+                "expected a dimensional conflict to be reported"
+            );
         }
     }
 }
@@ -1142,7 +1198,7 @@ fn test_inference_error_has_location() {
     let model = x_model("main", vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+    let mut results = InferenceResult::default();
     let db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
     let _project = crate::project::Project::from_salsa(
@@ -1154,47 +1210,167 @@ fn test_inference_error_has_location() {
         },
     );
 
-    // Verify that we got an error with location information
-    match results {
-        Err(UnitError::InferenceError {
+    // Verify that at least one reported conflict carries source + location info.
+    assert!(
+        !results.conflicts.is_empty(),
+        "expected at least one conflict to be reported"
+    );
+    let found = results.conflicts.iter().any(|conflict| {
+        if let UnitError::InferenceError {
             code,
             sources,
             details,
-        }) => {
-            assert_eq!(code, ErrorCode::UnitMismatch);
-            // Should have at least one source with the variable name
-            assert!(
-                !sources.is_empty(),
-                "inference error should have at least one source"
-            );
-            // At least one source should reference "bad" (the variable with the mismatch)
-            let has_bad = sources.iter().any(|(var, _)| var == "bad");
-            assert!(
-                has_bad,
-                "sources should contain 'bad' variable, got: {:?}",
-                sources
-            );
-            // The source should have a location (non-None) for the equation-based constraint
-            // Note: some sources may have None loc (e.g., from declarations without equations)
-            let has_loc = sources.iter().any(|(_, loc)| loc.is_some());
-            assert!(
-                has_loc,
-                "at least one source should have a location, got: {:?}",
-                sources
-            );
-            // Verify there's a meaningful details message
-            assert!(details.is_some(), "error should have details");
+        } = conflict
+        {
+            *code == ErrorCode::UnitMismatch
+                // at least one source references "bad" (the mismatched variable)
+                && sources.iter().any(|(var, _)| var == "bad")
+                // at least one source carries an equation location (some sources,
+                // e.g. bare unit declarations, legitimately have None)
+                && sources.iter().any(|(_, loc)| loc.is_some())
+                && details.is_some()
+        } else {
+            false
         }
-        Ok(_) => panic!("expected inference error, got Ok"),
-        Err(e) => panic!("expected InferenceError, got {:?}", e),
-    }
+    });
+    assert!(
+        found,
+        "expected an InferenceError mentioning 'bad' with a location and details, got: {:?}",
+        results.conflicts
+    );
+}
+
+/// Inference is partial: a dimensional conflict in one part of a model must
+/// not discard the units inference resolved elsewhere, and every independent
+/// conflict must be reported -- not just whichever one happens to be found
+/// first (see GH #614).
+#[test]
+fn test_inference_partial_results_survive_conflict() {
+    let sim_specs = sim_specs_with_units("year");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+
+    let vars = vec![
+        // A clean, independently-inferrable chain.
+        x_aux("clean_src", "6", Some("widget")),
+        x_aux("clean_dst", "clean_src", None), // inferred: widget
+        // Conflict A: `a` is forced to two incompatible units.
+        x_aux("a", "10", None),
+        x_aux("ay", "a", Some("meter")),
+        x_aux("az", "a", Some("second")),
+        // Conflict B: independent of A -- `b` forced to two incompatible units.
+        x_aux("b", "10", None),
+        x_aux("bp", "b", Some("gram")),
+        x_aux("bq", "b", Some("ampere")),
+    ];
+    let model = x_model("main", vars);
+    let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+    let mut result = InferenceResult::default();
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let _project = crate::project::Project::from_salsa(
+        project_datamodel.clone(),
+        &db,
+        sync.project,
+        |models, units_ctx, model| {
+            result = infer(models, units_ctx, model);
+        },
+    );
+
+    // The clean chain is resolved despite conflicts elsewhere in the model.
+    let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.resolved.get(&*canonicalize("clean_dst")),
+        Some(&widget),
+        "an unrelated dimensional conflict must not discard resolved units"
+    );
+
+    // Both independent conflicts are reported, not just the first one found.
+    assert!(
+        result.conflicts.len() >= 2,
+        "expected at least two independent conflicts, got {}: {:?}",
+        result.conflicts.len(),
+        result.conflicts
+    );
+}
+
+/// A Vensim macro can annotate a body variable's units with the macro's formal
+/// parameter *names* (e.g. `~ xfrom` inside C-LEARN's `RAMP FROM TO`) -- a
+/// symbolic, polymorphic unit, NOT a concrete base unit. Inference must treat
+/// such a macro-body unit as polymorphic; otherwise the parameter name leaks as
+/// a literal unit into every instantiation and conflicts with the real argument
+/// units (the source of C-LEARN's `xfrom`/`xto` unit-error storm once #614 stops
+/// the all-or-nothing behavior from masking it).
+#[test]
+fn test_macro_body_units_naming_parameters_are_polymorphic() {
+    let sim_specs = sim_specs_with_units("year");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+
+    // A macro `scaleit(amount)` whose output is the parameter `amount`, with the
+    // output's units declared as the parameter name `amount` (the polymorphic
+    // idiom). Instantiated with a `widget` argument, the result must infer to
+    // `widget`, not conflict against a bogus `amount` base unit.
+    let macro_model = crate::datamodel::Model {
+        name: "scaleit".to_string(),
+        sim_specs: None,
+        variables: vec![
+            x_aux("scaleit", "amount", Some("amount")),
+            x_aux("amount", "0", None),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(crate::datamodel::MacroSpec {
+            parameters: vec!["amount".to_string()],
+            primary_output: "scaleit".to_string(),
+            additional_outputs: vec![],
+        }),
+    };
+    let root = x_model(
+        "main",
+        vec![
+            x_aux("source", "10", Some("widget")),
+            x_aux("scaled", "scaleit(source)", None),
+        ],
+    );
+    let project_datamodel = x_project(sim_specs.clone(), &[root, macro_model]);
+
+    let mut result = InferenceResult::default();
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let _project = crate::project::Project::from_salsa(
+        project_datamodel.clone(),
+        &db,
+        sync.project,
+        |models, units_ctx, model| {
+            if model.name.as_str() == "main" {
+                result = infer(models, units_ctx, model);
+            }
+        },
+    );
+
+    assert!(
+        result.conflicts.is_empty(),
+        "a macro body unit naming a parameter must be polymorphic, not leak as a literal unit; got conflicts: {:?}",
+        result.conflicts
+    );
+    let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.resolved.get(&*canonicalize("scaled")),
+        Some(&widget),
+        "the macro result should infer to the argument's units"
+    );
 }
 
 pub(crate) fn infer(
     models: &HashMap<Ident<Canonical>, &ModelStage1>,
     units_ctx: &Context,
     model: &ModelStage1,
-) -> UnitResult<HashMap<Ident<Canonical>, UnitMap>> {
+) -> InferenceResult {
     let time_units_name =
         canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
     // Resolve through the alias map so the synthetic `time` variable's units
@@ -1254,7 +1430,7 @@ fn test_previous_infers_units_from_lagged_arg() {
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
     for _ in 0..64 {
-        let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+        let mut results = InferenceResult::default();
         let db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
         let _project = crate::project::Project::from_salsa(
@@ -1265,7 +1441,7 @@ fn test_previous_infers_units_from_lagged_arg() {
                 results = infer(models, units_ctx, model);
             },
         );
-        let results = results.unwrap();
+        let results = results.resolved;
         for (ident, expected_units) in expected.iter() {
             let expected_units: UnitMap =
                 crate::units::parse_units(&units_ctx, Some(expected_units))
@@ -1311,12 +1487,7 @@ fn test_previous_constrains_fallback_units() {
     let project_datamodel = x_project(sim_specs, &[model]);
 
     for _ in 0..64 {
-        let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> =
-            Err(UnitError::InferenceError {
-                code: ErrorCode::UnitMismatch,
-                sources: vec![],
-                details: None,
-            });
+        let mut results = InferenceResult::default();
         let db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
         let _project = crate::project::Project::from_salsa(
@@ -1328,7 +1499,7 @@ fn test_previous_constrains_fallback_units() {
             },
         );
         assert!(
-            results.is_err(),
+            !results.conflicts.is_empty(),
             "PREVIOUS(widget, wallop) should fail unit inference"
         );
     }
@@ -1397,12 +1568,7 @@ fn test_multi_metavar_constraint_mismatch() {
     let model = x_model("main", vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> =
-        Err(UnitError::InferenceError {
-            code: ErrorCode::UnitMismatch,
-            sources: vec![],
-            details: None,
-        });
+    let mut results = InferenceResult::default();
     let db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
     let _project = crate::project::Project::from_salsa(
@@ -1414,9 +1580,10 @@ fn test_multi_metavar_constraint_mismatch() {
         },
     );
 
-    // The inference should fail because x and y have inconsistent unit declarations
+    // The inference should report a conflict because x and y have inconsistent
+    // unit declarations.
     assert!(
-        results.is_err(),
+        !results.conflicts.is_empty(),
         "Should detect multi-metavar constraint mismatch"
     );
 }
@@ -1439,8 +1606,8 @@ fn test_find_constraint_mismatch_direct() {
             .cloned()
             .collect::<UnitMap>(),
     )];
-    let result = find_constraint_mismatch(&constraints);
-    assert!(result.is_some(), "Should detect direct concrete mismatch");
+    let result = find_constraint_mismatches(&constraints);
+    assert!(!result.is_empty(), "Should detect direct concrete mismatch");
 
     // Case 2: Pairwise mismatch with shared metavariables
     let constraints = vec![
@@ -1465,9 +1632,9 @@ fn test_find_constraint_mismatch_direct() {
             .collect::<UnitMap>(),
         ),
     ];
-    let result = find_constraint_mismatch(&constraints);
+    let result = find_constraint_mismatches(&constraints);
     assert!(
-        result.is_some(),
+        !result.is_empty(),
         "Should detect pairwise constraint mismatch"
     );
 
@@ -1494,10 +1661,10 @@ fn test_find_constraint_mismatch_direct() {
             .collect::<UnitMap>(),
         ),
     ];
-    let result = find_constraint_mismatch(&constraints);
+    let result = find_constraint_mismatches(&constraints);
     // The ratio of these two would be @a/@b * @d/@c which still has metavariables
     assert!(
-        result.is_none(),
+        result.is_empty(),
         "Should not detect mismatch for different metavar structures"
     );
 
@@ -1516,9 +1683,9 @@ fn test_find_constraint_mismatch_direct() {
                 .collect::<UnitMap>(),
         ),
     ];
-    let result = find_constraint_mismatch(&constraints);
+    let result = find_constraint_mismatches(&constraints);
     assert!(
-        result.is_none(),
+        result.is_empty(),
         "Should not detect mismatch for purely under-constrained case"
     );
 }
@@ -1640,7 +1807,7 @@ fn test_rank_builtin_unit_inference() {
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
     let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
-    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+    let mut results = InferenceResult::default();
     let db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
     let _project = crate::project::Project::from_salsa(
@@ -1652,7 +1819,7 @@ fn test_rank_builtin_unit_inference() {
         },
     );
 
-    let results = results.expect("RANK inference should succeed");
+    let results = results.resolved;
 
     // `values` keeps its declared dollar units...
     let dollar: UnitMap = crate::units::parse_units(&units_ctx, Some("dollar"))
@@ -1690,7 +1857,7 @@ fn test_unify_conflict_detection() {
     let model = x_model("main", model_vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+    let mut results = InferenceResult::default();
     let db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
     let _project = crate::project::Project::from_salsa(
@@ -1702,25 +1869,25 @@ fn test_unify_conflict_detection() {
         },
     );
 
-    // This should fail because 'a' can't be both meters and seconds
+    // This should report a conflict because 'a' can't be both meters and seconds.
     assert!(
-        results.is_err(),
+        !results.conflicts.is_empty(),
         "Should detect conflict when same variable has different unit constraints"
     );
 
-    // Verify we get an InferenceError with the right code
-    match results {
-        Err(UnitError::InferenceError { code, sources, .. }) => {
-            assert_eq!(code, ErrorCode::UnitMismatch);
-            // Should have sources indicating which variables are involved
-            assert!(
-                !sources.is_empty(),
-                "Should have source information for conflict"
-            );
-        }
-        Err(e) => panic!("Expected InferenceError, got {:?}", e),
-        Ok(_) => panic!("Expected error, got success"),
-    }
+    // Verify we get an InferenceError with the right code and source info.
+    let found = results.conflicts.iter().any(|conflict| {
+        matches!(
+            conflict,
+            UnitError::InferenceError { code, sources, .. }
+                if *code == ErrorCode::UnitMismatch && !sources.is_empty()
+        )
+    });
+    assert!(
+        found,
+        "expected an InferenceError with source information, got: {:?}",
+        results.conflicts
+    );
 }
 
 #[test]
