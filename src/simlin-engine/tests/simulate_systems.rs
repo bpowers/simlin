@@ -62,33 +62,29 @@ fn simulate_systems_file(txt_path: &str, csv_path: &str, rounds: u64) {
     let results = vm.into_results();
     ensure_results(&expected, &results);
 
-    // Opportunistic wasm-backend parity: a systems-format model translates to
+    // wasm-backend parity (AC3.2): a systems-format model translates to
     // stdlib-module instances (`systems_rate`/`systems_leak`/`systems_conversion`),
-    // so this exercises the wasm backend's module path end-to-end. A supported
-    // model must clear the SAME comparator the VM cleared against `expected`; an
-    // unsupported construct is `Skipped` (never a failure -- the supported count
-    // is pinned by `wasm_systems_parity_floor`). `ensure_wasm_matches` panics on a
-    // supported-but-wrong model.
-    let _ = ensure_wasm_matches(&datamodel_project, "main", &expected, &[]);
+    // so this exercises the wasm backend's module path end-to-end. Every
+    // VM-simulated systems model must run through the wasm backend and clear the
+    // SAME comparator against `expected`; an `Unsupported` outcome here is a hard
+    // failure (this model VM-simulated, so the wasm backend must cover it).
+    // `ensure_wasm_matches` panics internally on a supported-but-wrong model.
+    if let WasmRunOutcome::Skipped(msg) =
+        ensure_wasm_matches(&datamodel_project, "main", &expected, &[])
+    {
+        panic!(
+            "wasm parity gate: systems model {txt_path} VM-simulated but the wasm \
+             backend returned Unsupported (AC3.2 -- every core-simulation model \
+             must run through both backends): {msg}"
+        );
+    }
 }
-
-/// Monotonically-rising floor on how many systems-format models run through the
-/// wasm backend to VM parity. Systems-format models translate to stdlib-module
-/// instances (`systems_rate`/`systems_leak`/`systems_conversion`), so they
-/// exercise the wasm backend's `EvalModule`/`LoadModuleInput` path (Phase 7
-/// Task 1) end-to-end. Dropping below this floor is a regression: a systems
-/// model that used to clear the wasm backend no longer does.
-///
-/// Phase 7 observes all 10 `ALL_VALID_MODELS` run to VM parity through wasm (the
-/// systems stdlib modules carry only scalar/`AssignNext` opcodes the backend
-/// fully supports). Re-observe with `wasm_systems_parity_floor -- --nocapture`.
-const WASM_SYSTEMS_SUPPORTED_FLOOR: usize = 10;
 
 /// Parse + translate the systems model at `path` (a fixed `rounds`), run it
 /// through the VM for an `expected` baseline, and return whether the wasm backend
-/// reproduces it (`Ran`) or skips it as unsupported (`Skipped`). A parse/
+/// reproduces it (`Ran`) or returns `Unsupported` (`Skipped`). A parse/
 /// translate/VM failure is surfaced as `Skipped` (those paths are gated by the
-/// per-model simulation tests; this floor only counts wasm-vs-VM parity).
+/// per-model simulation tests; this gate only checks wasm-vs-VM parity).
 fn wasm_systems_outcome_for_path(path: &str, rounds: u64) -> WasmRunOutcome {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return WasmRunOutcome::Skipped(format!("could not read {path}"));
@@ -119,35 +115,43 @@ fn wasm_systems_outcome_for_path(path: &str, rounds: u64) -> WasmRunOutcome {
     ensure_wasm_matches(&datamodel, "main", &expected, &[])
 }
 
-/// Rising-floor gate: run every systems-format model through the wasm backend and
-/// assert at least `WASM_SYSTEMS_SUPPORTED_FLOOR` of them run to VM parity. This
-/// is a direct wasm-vs-VM check (the VM's own output is the baseline), independent
-/// of the on-disk CSV fixtures. The per-model simulation tests additionally run
-/// the inline `ensure_wasm_matches` hook against their CSV-cleared `expected`.
+/// End-state wasm parity gate (AC3.2 / AC3.3): EVERY systems-format model must
+/// run through the wasm backend to VM parity -- zero may return
+/// `WasmGenError::Unsupported`. Systems-format models translate to stdlib-module
+/// instances (`systems_rate`/`systems_leak`/`systems_conversion`), so they
+/// exercise the wasm backend's `EvalModule`/`LoadModuleInput` path end-to-end.
+/// This is a direct wasm-vs-VM check (the VM's own output is the baseline),
+/// independent of the on-disk CSV fixtures. The per-model simulation tests
+/// additionally run the inline `ensure_wasm_matches` hook against their
+/// CSV-cleared `expected` and likewise hard-fail on `Unsupported`. A regression
+/// that drops a previously-supported systems model fails here with the offender.
 #[test]
 fn wasm_systems_parity_floor() {
-    let mut ran = 0usize;
-    let mut skipped = 0usize;
+    let mut unsupported: Vec<(String, String)> = Vec::new();
     for &path in ALL_VALID_MODELS {
         // A fixed `rounds` like the compile-only gate; the wasm-vs-VM parity does
         // not depend on the exact horizon, only that both backends agree on it.
-        match wasm_systems_outcome_for_path(path, 5) {
-            WasmRunOutcome::Ran => ran += 1,
-            WasmRunOutcome::Skipped(msg) => {
-                skipped += 1;
-                eprintln!("wasm skipped {path}: {msg}");
-            }
+        if let WasmRunOutcome::Skipped(msg) = wasm_systems_outcome_for_path(path, 5) {
+            unsupported.push((path.to_string(), msg));
         }
     }
     eprintln!(
-        "wasm_systems_parity_floor: {ran} of {} systems models ran to VM parity ({skipped} skipped); floor {WASM_SYSTEMS_SUPPORTED_FLOOR}",
-        ALL_VALID_MODELS.len()
+        "wasm_systems_parity_floor: {} of {} systems models ran to VM parity ({} unsupported)",
+        ALL_VALID_MODELS.len() - unsupported.len(),
+        ALL_VALID_MODELS.len(),
+        unsupported.len()
     );
     assert!(
-        ran >= WASM_SYSTEMS_SUPPORTED_FLOOR,
-        "wasm systems parity regression: only {ran} of {} systems models ran to VM parity, \
-         below the pinned floor of {WASM_SYSTEMS_SUPPORTED_FLOOR}",
-        ALL_VALID_MODELS.len()
+        unsupported.is_empty(),
+        "wasm systems parity gate (AC3.2/AC3.3): every systems model must run \
+         through the wasm backend, but {} of {} returned Unsupported:\n{}",
+        unsupported.len(),
+        ALL_VALID_MODELS.len(),
+        unsupported
+            .iter()
+            .map(|(p, m)| format!("  {p}: {m}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 

@@ -157,9 +157,16 @@ pub fn ensure_results_excluding(expected: &Results, results: &Results, excluded:
 /// helper panics internally on any divergence -- a supported-but-wrong model is
 /// a hard failure, never a `Ran`). `Skipped` means `compile_simulation`
 /// returned [`WasmGenError::Unsupported`] (an out-of-scope construct); the
-/// message is carried so the caller can record/aggregate it. A `Skipped` model
-/// is never a failure -- that is the AC3.1 "unsupported models are skipped, not
-/// failed" contract.
+/// message is carried so the caller decides whether that is a failure.
+///
+/// Phase 8 closed the corpus gate: for a model the VM SIMULATED in the default
+/// suite, a `Skipped` outcome is now a HARD FAILURE -- the corpus callers
+/// (`wasm_parity_hook`, the parity-floor gates, the systems harness) panic on
+/// it (wasm-backend AC3.2: every core-simulation model runs through both
+/// backends). The variant survives only so the `ensure_wasm_matches_skips_*`
+/// unit test can still observe a *genuinely* out-of-scope construct returning a
+/// clean `Unsupported` (AC1.4) -- never a panic or a silently wrong result --
+/// rather than reaching the hook.
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum WasmRunOutcome {

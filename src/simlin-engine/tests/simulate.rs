@@ -100,185 +100,70 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/unicode_characters/unicode_test_model.xmile",
 ];
 
-/// Monotonically-rising floor on how many `TEST_MODELS` the wasm backend runs
-/// to VM parity (an outcome of `Ran` from `ensure_wasm_matches`). Pinned to the
-/// count Phase 1 actually achieves; each subsequent phase widens the supported
-/// feature set and RAISES this floor. Dropping below it is a regression
-/// (wasm-backend AC3.1 / AC3.3): a model that used to clear the wasm backend no
-/// longer does.
+/// End-state wasm parity gate (wasm-backend AC3.2 / AC3.3): EVERY corpus model
+/// in `TEST_MODELS` must run through the wasm backend to VM parity -- zero may
+/// return `WasmGenError::Unsupported`. `expected` is the VM's own output (the
+/// parse + `compile_vm` + run path), so this is a direct wasm-vs-VM check
+/// independent of the on-disk reference files; the per-model inline hook
+/// (`wasm_parity_hook`) separately checks every model against its on-disk
+/// `expected` and likewise hard-fails on `Unsupported`.
 ///
-/// As of Phase 2 the backend covers the full *scalar* opcode set: the
-/// scalar-core opcodes (`LoadConstant`/`LoadVar`/`LoadGlobalVar`, the
-/// `Add`/`Sub`/`Mul`/`Div` and comparison `Op2`s, `Not`/`SetCond`/`If`,
-/// `AssignCurr`/`AssignNext`, plus the `AssignConstCurr`/`BinOpAssign*` peephole
-/// superinstructions), the `^`/`MOD`/`=`/`AND`/`OR` operators
-/// (`Op2::Exp`/`Mod`/`Eq`/`And`/`Or`, with equality and truthiness routed
-/// through a wasm `approx_eq` helper matching `crate::float::approx_eq`), and the
-/// entire scalar `BuiltinId` set via `Opcode::Apply` -- the open-coded
-/// transcendentals (`exp`/`ln`/`log10`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/
-/// `pow`) plus `abs`/`sqrt`/`int`/`min`/`max`/`sign`/`quantum`/`safediv`/
-/// `sshape` and the time-driven `step`/`ramp`/`pulse`. Phase 3 adds the scalar
-/// `Opcode::Lookup` in all three modes (Interpolate / Forward / Backward): the
-/// graphical-function tables are laid into linear memory with a per-table
-/// directory, and three wasm helpers reproduce the VM's
-/// `lookup`/`lookup_forward`/`lookup_backward`. A corpus model runs to parity
-/// when its *post-element-expansion* flat opcode stream is entirely in that set.
-/// That includes arrayed apply-to-all / subscript models that expand to purely
-/// scalar per-element opcodes (no array-reducer or `LookupArray` opcode),
-/// because the emitter walks the flattened opcode stream.
-///
-/// Phase 4 adds RK2/RK4 integration (the multi-stage run loops with the
-/// end-of-step flows re-eval) and `PREVIOUS`/`INIT` (the `prev_values` /
-/// `initial_values` snapshot regions + the `use_prev_fallback` gate), so a model
-/// is now `Skipped` only when its flat opcode stream still reaches for nested
-/// modules / macros (`wasmgen: submodules are not supported`) or array-reducer
-/// opcodes.
-///
-/// Phase 3 achieves 50 of the 58 active `TEST_MODELS` (up from Phase 2's 45):
-/// the five graphical-function models that previously skipped on
-/// `Opcode::Lookup` (`lookups_inline`, `lookups_inline_bounded`,
-/// `lookups/test_lookups_no-indirect`, `lookups_simlin/test_lookups`,
-/// `lookups_with_expr`) now `Ran`. The remaining 8 skip on the
-/// still-out-of-scope constructs: nested modules / macros
-/// (`bpowers-hares_and_lynxes_modules`, `delays2`, `smooth_and_stock`, `trend`,
-/// and the four `macro_*` fixtures, each `wasmgen: submodules are not
-/// supported`). Observed via `wasm_parity_floor` (run it with `-- --nocapture`
-/// to see the per-model skip reasons).
-///
-/// Phase 4 leaves the floor at 50 even though RK2/RK4 and `PREVIOUS`/`INIT` now
-/// run: re-running `wasm_parity_floor` shows all 8 remaining skips are still
-/// `submodules are not supported`. No *active* corpus model is gated on RK or
-/// `PREVIOUS`/`INIT` -- the standalone RK fixture (`tests/rounding`) and the
-/// `INIT` fixture (`tests/arguments`) are commented out of `TEST_MODELS` for
-/// unrelated reasons, and every other RK / `PREVIOUS` / `INIT` model in the tree
-/// also instantiates a submodule (so it skips on that first). RK2/RK4 and
-/// `PREVIOUS`/`INIT` parity is therefore pinned by the inline `wasmgen::module`
-/// unit tests (`compile_simulation_rk4_matches_vm`, `..._rk2_matches_vm`,
-/// `..._rk4_with_previous_and_init_matches_vm`, `..._previous_matches_vm`,
-/// `..._init_from_flow_matches_vm`, `..._init_from_initial_matches_vm`) rather
-/// than by this corpus floor.
-///
-/// Phase 5 lowers the array core -- the compile-time view-descriptor stack and
-/// static view ops, the `Array{Sum,Max,Min,Mean,Stddev,Size}` reducers, the
-/// `BeginIter…EndIter` / broadcast iteration loops (emitted as fully-unrolled
-/// wasm), and dynamic subscripts with OOB->NaN -- so the backend now handles
-/// every array-producing opcode an arrayed model can emit. It still leaves the
-/// floor at 50: re-running `wasm_parity_floor` shows the same 8 skips, all
-/// `submodules are not supported`, and no arrayed corpus model flips
-/// Skipped->Ran because **none of them emit an array opcode in the first
-/// place**. The compiler unrolls apply-to-all variables to independent
-/// per-element scalar bytecode (`compiler/mod.rs`) and unrolls the small-array
-/// reducers in the corpus (`builtin_max`/`builtin_mean`/`builtin_min`) to scalar
-/// `Max`/`Min`/comparison opcodes, so the whole arrayed/subscript corpus
-/// (`subscript_1d`/`2d`/`3d`/`docs`/`multiples`/`selection`/`individually_defined…`,
-/// the `arrays/a2a` and `arrays/non-a2a` samples, and the three `builtin_*`
-/// reducers) was *already* `Ran` under Phases 1-3 via the purely-scalar opcode
-/// stream -- a fact verified directly by walking each corpus model's flat
-/// `ByteCode.code`: every active model's stream contains zero view/iter/reducer
-/// opcodes. The view-stack, reducer, iteration, and dynamic-subscript parity is
-/// therefore pinned by the inline `wasmgen` unit tests (`wasmgen/views.rs` plus
-/// the Task 1-4 reducer / `BeginIter` / broadcast / dynamic-subscript tests in
-/// `wasmgen/lower.rs`), exactly as RK/`PREVIOUS`/`INIT` are pinned by the
-/// `wasmgen::module` unit tests rather than by this corpus floor. The remaining
-/// 8 skips split as: nested modules / macros
-/// (`bpowers-hares_and_lynxes_modules`, `delays2`, `smooth_and_stock`, `trend`,
-/// and the four `macro_*` fixtures) -- the floor rises for those in Phase 7
-/// (submodules). Models needing vector ops/allocation
-/// (`VectorSelect`/`VectorElmMap`/`VectorSortOrder`/`Rank`/`LookupArray`/
-/// `Allocate*`) stay Skipped until Phase 6, and any true runtime-range model
-/// (`ViewRangeDynamic`) stays Skipped by design; no such model is in the active
-/// corpus today.
-///
-/// Phase 6 lowers the helper-heavy array builtins -- `VectorSelect`,
-/// `VectorElmMap`, `VectorSortOrder`, `Rank`, `LookupArray`, and the
-/// `AllocateAvailable`/`AllocateByPriority` market-clearing allocators (the
-/// open-coded `erfc`/`normal_cdf`/`alloc_curve`/`allocate_available` chain) --
-/// so the backend now covers every array-producing opcode the corpus emits.
-/// It STILL leaves the floor at 50: re-running `wasm_parity_floor` shows the
-/// same 8 `submodules are not supported` skips and no `TEST_MODELS` member
-/// flips Skipped->Ran, because the vector-op / allocation corpus models are
-/// deliberately NOT in `TEST_MODELS`. `vector.xmile` is gated against genuine
-/// Vensim's `vector.dat` (a narrowed comparison the unconditional `TEST_MODELS`
-/// loop cannot express -- GH #578/#576), and `allocate.xmile` has its own
-/// dedicated test; both `simulate_path`-family entry points run the inline
-/// `wasm_parity_hook`, so the wasm backend exercises these models end-to-end
-/// from their dedicated tests rather than from this floor subset. Verified
-/// `Ran` (not `Skipped`) via that hook on `simulates_vector_xmile_genuine` and
-/// `simulates_vector_simple_mdl` (`VectorSelect` + `VectorElmMap` +
-/// `VectorSortOrder`) and on `simulates_allocate_xmile` + `simulates_allocate_mdl`
-/// (`AllocateAvailable`). `Rank`, `LookupArray`, and `AllocateByPriority` are not
-/// reached by any active corpus model (no in-tree model uses VECTOR RANK or
-/// ALLOCATE BY PRIORITY, and `LookupArray` only arises from a wrapping reducer
-/// over an arrayed GF), so their parity is pinned by the inline `wasmgen` unit
-/// tests (`wasmgen/lower_tests.rs`: the `rank_*_matches_vm`,
-/// `lookup_array_*_matches_vm`, and `allocate_by_priority_*_matches_vm` cases),
-/// exactly as RK/`PREVIOUS`/`INIT` (Phase 4) and the view/reducer ops (Phase 5)
-/// are pinned by unit tests rather than by this corpus floor. The floor rises
-/// in Phase 7 when submodules land.
-///
-/// Phase 7 lands nested modules (`EvalModule`/`LoadModuleInput`, one wasm
-/// function-triple per `(model, input_set)` instance) plus the `set_value`/`reset`
-/// override mechanism, so the eight previously-`Skipped` corpus models that all
-/// failed on `wasmgen: submodules are not supported`
-/// (`bpowers-hares_and_lynxes_modules`, `delays2`, `smooth_and_stock`, `trend`,
-/// and the four `macro_*` fixtures) now `Ran`. Re-running `wasm_parity_floor`
-/// shows ALL 58 active `TEST_MODELS` run to VM parity (0 skipped), so the floor
-/// rises to 58 -- the full active corpus. (Any remaining out-of-scope construct
-/// -- a genuine runtime view range `arr[lo:hi]` with non-literal bounds, or array
-/// unrolling past the per-function budget -- still returns `Unsupported`, but no
-/// active `TEST_MODELS` member reaches one; those are pinned by the inline
-/// `wasmgen` unit tests and `ensure_wasm_matches_skips_unsupported_model`.) The
-/// heavy/`#[ignore]`-class models (e.g. C-LEARN) defer their wasm twins to a
-/// later phase.
-const WASM_SUPPORTED_FLOOR: usize = 58;
-
-/// AC3.1 / AC3.3 rising-floor gate: run every (non-`#[ignore]`-class) corpus
-/// model in `TEST_MODELS` through the wasm backend and assert at least
-/// `WASM_SUPPORTED_FLOOR` of them run to VM parity. `expected` is the VM's own
-/// output (the parse + `compile_vm` + run path), so this is a direct
-/// wasm-vs-VM check independent of the on-disk reference files; the per-model
-/// inline hook (`wasm_parity_hook`) separately checks every supported model
-/// against its on-disk `expected`.
+/// This replaces the Phase 1-7 monotonic floor (a `ran >= FLOOR` count). The
+/// backend now covers the full core-simulation surface -- scalar + every
+/// `Apply` builtin + arrays/reducers/iteration + vector ops + allocation +
+/// scalar/array lookups + Euler/RK2/RK4 + PREVIOUS/INIT + nested modules -- so
+/// the end state is total coverage, and any regression that makes a previously
+/// supported model `Unsupported` fails here (AC3.3) with the offending model and
+/// reason. The genuinely out-of-scope constructs (a runtime view range
+/// `arr[lo:hi]` with non-literal bounds -> `ViewRangeDynamic`, or array
+/// unrolling past the per-function budget) are not reached by any `TEST_MODELS`
+/// member; they are pinned by the inline `wasmgen` unit tests and
+/// `ensure_wasm_matches_skips_unsupported_model`. The heavy `#[ignore]`-class
+/// models (C-LEARN) have their own `#[ignore]`d wasm twins so this gate stays
+/// within the default suite's 3-minute wall-clock cap.
 ///
 /// Iterating the full `TEST_MODELS` list under the un-JITed DLR-FT interpreter
-/// stays well within the suite's wall-clock budget at Phase 1 scope (the
-/// supported models are small scalar models; unsupported ones bail at
-/// `compile_simulation` before any interpreter run), so the gate covers the
-/// whole list rather than a subset.
+/// stays well within that cap (the corpus is small/medium scalar/arrayed
+/// models), so the gate covers the whole list rather than a subset.
 #[test]
 fn wasm_parity_floor() {
-    let mut ran = 0usize;
-    let mut skipped = 0usize;
+    let mut unsupported: Vec<(String, String)> = Vec::new();
     for &path in TEST_MODELS {
         let file_path = format!("../../{path}");
-        match wasm_parity_outcome_for_path(&file_path) {
-            WasmRunOutcome::Ran => ran += 1,
-            WasmRunOutcome::Skipped(msg) => {
-                skipped += 1;
-                eprintln!("wasm skipped {path}: {msg}");
-            }
+        if let WasmRunOutcome::Skipped(msg) = wasm_parity_outcome_for_path(&file_path) {
+            unsupported.push((path.to_string(), msg));
         }
     }
     eprintln!(
-        "wasm_parity_floor: {ran} of {} corpus models ran to VM parity ({skipped} skipped); floor {WASM_SUPPORTED_FLOOR}",
-        TEST_MODELS.len()
+        "wasm_parity_floor: {} of {} corpus models ran to VM parity ({} unsupported)",
+        TEST_MODELS.len() - unsupported.len(),
+        TEST_MODELS.len(),
+        unsupported.len()
     );
     assert!(
-        ran >= WASM_SUPPORTED_FLOOR,
-        "wasm parity regression: only {ran} of {} corpus models ran to VM parity, \
-         below the pinned floor of {WASM_SUPPORTED_FLOOR}. If this is an intended \
-         narrowing, lower the floor deliberately; otherwise a model that used to \
-         clear the wasm backend no longer does.",
-        TEST_MODELS.len()
+        unsupported.is_empty(),
+        "wasm parity gate (AC3.2/AC3.3): every corpus model must run through the \
+         wasm backend, but {} of {} returned Unsupported -- a regression that \
+         dropped a previously-supported model, or a new feature whose lowering is \
+         missing:\n{}",
+        unsupported.len(),
+        TEST_MODELS.len(),
+        unsupported
+            .iter()
+            .map(|(p, m)| format!("  {p}: {m}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
 /// Parse the XMILE/STMX model at `path`, run it through the VM for an `expected`
-/// baseline, and return whether the wasm backend reproduces it (`Ran`) or skips
-/// it as unsupported (`Skipped`). Used only by `wasm_parity_floor`. A parse or
-/// VM failure is surfaced as `Skipped` (the VM corpus tests gate those paths
-/// directly; the floor gate only counts wasm-vs-VM parity, never re-litigates
-/// VM correctness).
+/// baseline, and return whether the wasm backend reproduces it (`Ran`) or
+/// returns `Unsupported` (`Skipped`). Used only by `wasm_parity_floor`, which
+/// turns any `Skipped` into a hard failure. A parse or VM failure is surfaced as
+/// `Skipped` (the VM corpus tests gate those paths directly; this gate only
+/// checks wasm-vs-VM parity, never re-litigates VM correctness), so an
+/// upstream parse/VM break would also trip the gate -- intended, since a model
+/// that no longer VM-simulates can't establish wasm parity either.
 fn wasm_parity_outcome_for_path(path: &str) -> WasmRunOutcome {
     let datamodel = {
         let Ok(f) = File::open(path) else {
@@ -1185,15 +1070,20 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
     // wasm-backend parity: after the VM comparisons pass, run the model through
     // the wasm backend once and assert it clears the SAME comparator against the
     // same `expected`. A supported model that diverges panics inside the helper;
-    // an out-of-scope construct is skipped (counted against the rising floor in
-    // `wasm_parity_floor`, not failed here). See AC1.1 / AC3.1.
+    // an `Unsupported` outcome for this VM-simulated model is now a HARD FAILURE
+    // (the corpus gate, AC3.2). See AC1.1 / AC3.2.
     wasm_parity_hook(&datamodel_project, &expected, excluded);
 }
 
-/// Run one already-parsed model through the wasm backend and assert parity (the
-/// helper panics on a supported-but-divergent model). A `Skipped` outcome (an
-/// out-of-scope construct) is logged, not failed -- the inline corpus coverage
-/// stays opportunistic, while `wasm_parity_floor` pins the supported count.
+/// Run one already-parsed, VM-simulated model through the wasm backend and
+/// assert parity. This is reached only from the `simulate_path`/`simulate_mdl`
+/// helpers, i.e. AFTER the VM has simulated the model, so a `Skipped`
+/// (`WasmGenError::Unsupported`) here means a model the VM handles is NOT
+/// covered by the wasm backend -- a hard failure (AC3.2: every core-simulation
+/// model runs through both backends). A model the VM itself cannot simulate
+/// (DELAY FIXED, GET DATA) is `#[ignore]`d and never reaches this hook, so it
+/// stays out of scope. A supported-but-divergent model panics inside
+/// `ensure_wasm_matches`.
 fn wasm_parity_hook(
     datamodel: &simlin_engine::datamodel::Project,
     expected: &Results,
@@ -1201,7 +1091,13 @@ fn wasm_parity_hook(
 ) {
     if let WasmRunOutcome::Skipped(msg) = ensure_wasm_matches(datamodel, "main", expected, excluded)
     {
-        eprintln!("  wasm backend skipped (unsupported): {msg}");
+        panic!(
+            "wasm parity gate: a VM-simulated model returned Unsupported from the \
+             wasm backend -- every core-simulation model must run through both \
+             backends (AC3.2). Close the lowering gap or, if this is a genuinely \
+             VM-unsupported feature, the test should be #[ignore]d so it never \
+             reaches this hook. Reason: {msg}"
+        );
     }
 }
 
