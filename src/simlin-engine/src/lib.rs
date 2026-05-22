@@ -116,10 +116,11 @@ mod vm;
 mod vm_profile;
 mod vm_vector_elm_map;
 mod vm_vector_sort_order;
-// Experimental WebAssembly code-generation backend: lowers the resolved
-// `compiler::expr::Expr` IR to a self-contained wasm module, as an alternative
-// to the bytecode VM. Validated in tests by executing the emitted module under
-// a pure-Rust wasm interpreter and comparing against the VM.
+// WebAssembly code-generation backend: lowers the salsa-compiled
+// `CompiledSimulation` bytecode (the same value `Vm::new` consumes) to a
+// self-contained wasm module, as an alternative execution path to the bytecode
+// VM. Validated in tests by executing the emitted module under a pure-Rust wasm
+// interpreter and comparing against the VM.
 pub mod wasmgen;
 pub mod xmile;
 
