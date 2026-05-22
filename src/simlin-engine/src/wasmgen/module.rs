@@ -5135,4 +5135,172 @@ mod tests {
             }
         }
     }
+
+    /// Task 3 (AC3.1, AC5.4): on a single reused instance, `run` then
+    /// `reset; run` reproduce the same compiled-default series, and both equal the
+    /// VM (with a `reset` between two VM runs). `reset` clears the cursor globals
+    /// so the second `run` is a full from-t0 simulation, not a stale resume.
+    #[test]
+    fn reset_then_run_reproduces_defaults() {
+        let datamodel = resumable_fixture(5.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let invoke_run = |store: &mut Store<()>| {
+            let run = store
+                .instance_export(inst, "run")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store.invoke_simple_typed::<(), ()>(run, ()).expect("run");
+        };
+        let invoke_reset = |store: &mut Store<()>| {
+            let reset = store
+                .instance_export(inst, "reset")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store
+                .invoke_simple_typed::<(), ()>(reset, ())
+                .expect("reset");
+        };
+
+        invoke_run(&mut store);
+        let series_a = read_slab(&mut store, inst, &artifact.layout);
+        invoke_reset(&mut store);
+        invoke_run(&mut store);
+        let series_b = read_slab(&mut store, inst, &artifact.layout);
+
+        assert_eq!(
+            series_a, series_b,
+            "reset; run must reproduce the first run's default series exactly"
+        );
+
+        // The VM oracle: a fresh run, then reset, then a second run -- both equal
+        // the wasm series.
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to_end().expect("vm run");
+        vm.reset();
+        vm.run_to_end().expect("vm run after reset");
+        let vm_results = vm.into_results();
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = series_b[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} reset-default mismatch at chunk {c}: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+    }
+
+    /// Task 3 (AC3.2, AC5.4): `reset` preserves a constant override. On one reused
+    /// instance: `set_value(inflow_rate, 5)`, `run` -> series A; `reset`, `run` ->
+    /// series B. A == B (the override survived the reset, since `reset` does not
+    /// touch the constants region), and both equal the VM run with the same
+    /// override and a `reset` between runs.
+    #[test]
+    fn reset_preserves_overrides() {
+        let datamodel = resumable_fixture(5.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let rate_off = layout_offset(&artifact, "inflow_rate");
+        assert!(
+            sim.is_constant_offset(rate_off),
+            "inflow_rate must be an overridable constant"
+        );
+
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        // set_value(inflow_rate, 5) on this instance.
+        let set_value = store
+            .instance_export(inst, "set_value")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let rc: i32 = store
+            .invoke_simple_typed::<(i32, f64), i32>(set_value, (rate_off as i32, 5.0))
+            .expect("set_value");
+        assert_eq!(rc, 0, "set_value on inflow_rate must succeed");
+
+        let invoke_run = |store: &mut Store<()>| {
+            let run = store
+                .instance_export(inst, "run")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store.invoke_simple_typed::<(), ()>(run, ()).expect("run");
+        };
+
+        invoke_run(&mut store);
+        let series_a = read_slab(&mut store, inst, &artifact.layout);
+        let reset = store
+            .instance_export(inst, "reset")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(), ()>(reset, ())
+            .expect("reset");
+        invoke_run(&mut store);
+        let series_b = read_slab(&mut store, inst, &artifact.layout);
+
+        assert_eq!(
+            series_a, series_b,
+            "reset must preserve the override -- both runs use inflow_rate=5"
+        );
+
+        // The VM oracle: override, run, reset, run -- the override persists across
+        // the VM's reset too (it does not call clear_values).
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.set_value_by_offset(rate_off, 5.0)
+            .expect("vm override on a constant");
+        vm.run_to_end().expect("vm run");
+        vm.reset();
+        vm.run_to_end().expect("vm run after reset");
+        let vm_results = vm.into_results();
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = series_b[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} reset-override mismatch at chunk {c}: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+        // The override actually took: level reaches 5*5 = 25 (not the default 10).
+        let level_off = layout_offset(&artifact, "level");
+        let last = (n_chunks - 1) * n_slots + level_off;
+        assert!(
+            (series_b[last] - 25.0).abs() < 1e-9,
+            "level under inflow_rate=5 should reach 25 after reset, got {}",
+            series_b[last]
+        );
+    }
 }
