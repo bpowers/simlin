@@ -61,6 +61,27 @@ mod tests {
     }
 
     #[test]
+    fn test_rank_result_dimensionless_in_checking() {
+        // A RANK result is a dimensionless ordinal position, not the units of
+        // the ranked array. Declaring the result with the array's units
+        // (`widgets`) is therefore a genuine dimensional error that the unit
+        // checker must flag -- it must not silently inherit `widgets` from the
+        // ranked source.
+        TestProject::new("rank_units_test")
+            .with_sim_time(0.0, 0.0, 1.0)
+            .unit("widgets", None)
+            .indexed_dimension("D", 3)
+            .array_const_with_units("source[D]", 10.0, "widgets")
+            .array_aux_direct(
+                "result",
+                vec!["D".to_string()],
+                "RANK(source[D], 1)",
+                Some("widgets"),
+            )
+            .assert_unit_error_vm();
+    }
+
+    #[test]
     fn test_delay1_with_units() {
         // Test DELAY1 function
         // delay_time must have the same units as simulation time

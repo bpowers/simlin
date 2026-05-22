@@ -505,12 +505,13 @@ impl UnitInferer<'_> {
                     units
                 }
                 BuiltinFn::Rank(a, _) => {
-                    let a_units = self.gen_constraints(a, prefix, current_var, constraints);
-
-                    // The direction argument is unitless control input; RANK's
-                    // result keeps the array's units for now.
-
-                    a_units
+                    // Walk the ranked array so any constraints inside `a` are
+                    // generated, but discard its units: a RANK result is a
+                    // dimensionless position/index (like a comparison result),
+                    // not the units of the array being ranked. The direction
+                    // argument is a unitless control input.
+                    self.gen_constraints(a, prefix, current_var, constraints);
+                    Units::Explicit(UnitMap::new())
                 }
                 BuiltinFn::VectorSelect(_, expr_array, _, _, _) => {
                     self.gen_constraints(expr_array, prefix, current_var, constraints)
@@ -1625,21 +1626,17 @@ fn test_located_constraint_is_empty() {
 
 #[test]
 fn test_rank_builtin_unit_inference() {
-    // Test that RANK builtin is handled correctly in unit inference
-    // RANK returns the same units as its first argument (the array being ranked)
+    // RANK returns a dimensionless position/index, NOT the units of the
+    // ranked array. So `ranking` below must infer to dimensionless (an empty
+    // unit map) even though the ranked `values` is in dollars.
     let sim_specs = sim_specs_with_units("year");
 
-    let vars = [
-        (x_aux("values", "10", Some("dollar")), "dollar"),
-        (x_aux("ranking", "RANK(values, 1)", None), "dollar"),
+    let vars = vec![
+        x_aux("values", "10", Some("dollar")),
+        x_aux("ranking", "RANK(values, 1)", None),
     ];
 
-    let expected: HashMap<&str, &str> = vars
-        .iter()
-        .map(|(var, units)| (var.get_ident(), *units))
-        .collect();
-    let model_vars: Vec<_> = vars.iter().map(|(var, _)| var.clone()).collect();
-    let model = x_model("main", model_vars);
+    let model = x_model("main", vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
     let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
@@ -1656,18 +1653,19 @@ fn test_rank_builtin_unit_inference() {
     );
 
     let results = results.expect("RANK inference should succeed");
-    for (ident, expected_units) in expected.iter() {
-        let expected_units: UnitMap = crate::units::parse_units(&units_ctx, Some(expected_units))
-            .unwrap()
-            .unwrap();
-        if let Some(computed_units) = results.get(&*canonicalize(ident)) {
-            assert_eq!(
-                expected_units, *computed_units,
-                "Units for {} should match",
-                ident
-            );
-        }
-    }
+
+    // `values` keeps its declared dollar units...
+    let dollar: UnitMap = crate::units::parse_units(&units_ctx, Some("dollar"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(results.get(&*canonicalize("values")), Some(&dollar));
+
+    // ...but `ranking` is dimensionless, not dollars.
+    assert_eq!(
+        results.get(&*canonicalize("ranking")),
+        Some(&UnitMap::new()),
+        "RANK result should be dimensionless, not inherit the ranked array's units"
+    );
 }
 
 #[test]
