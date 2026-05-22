@@ -572,3 +572,148 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
     });
   });
 });
+
+// A statically-arrayed model the wasm backend supports. `source` is dimensioned
+// over `Dim` (a STATIC dimension -- NOT a dynamic `[lo:hi]` view range, which is
+// the unsupported case), and `scaled` is an arrayed aux derived from it. Its
+// layout keys are per-element with the canonical base + bracketed canonical
+// element name (verified empirically: `source[boston]`, `scaled[la]`, ...). This
+// exercises the part of the name pipeline that scalar teacup cannot: a raw,
+// mixed-case array-element name (`source[Boston]`) flowing through
+// canonicalizeIdent -> wasmLayout.varOffsets lookup -> readStridedSeries.
+const WASM_ARRAYED_XMILE = `<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header>
+        <vendor>Test</vendor>
+        <product>Simlin</product>
+    </header>
+    <sim_specs method="Euler" time_units="Time">
+        <start>0</start>
+        <stop>2</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="Dim">
+            <elem name="Boston"/>
+            <elem name="LA"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="source">
+                <element subscript="Boston"><eqn>10</eqn></element>
+                <element subscript="LA"><eqn>20</eqn></element>
+                <dimensions><dim name="Dim"/></dimensions>
+            </aux>
+            <aux name="scaled">
+                <eqn>source*2</eqn>
+                <dimensions><dim name="Dim"/></dimensions>
+            </aux>
+        </variables>
+    </model>
+</xmile>`;
+
+// End-to-end name resolution for NON-SCALAR variables (the design's "correctness
+// crux"). canonicalizeIdent is proven correct in isolation, but the TS-side
+// canonicalize -> varOffsets lookup -> strided read had no test for an array
+// element name (a key containing `[`/`]`); scalar teacup never exercises it. The
+// VM is the oracle here, driven identically to wasm and compared within TOL.
+describe('DirectBackend wasm engine: end-to-end name resolution for arrayed vars', () => {
+  let backend: DirectBackend;
+  const TOL = 1e-9;
+
+  beforeAll(async () => {
+    backend = new DirectBackend();
+    backend.reset();
+    backend.configureWasm({ source: loadWasmBuffer() });
+    await backend.init();
+  });
+
+  afterAll(() => {
+    backend.reset();
+  });
+
+  function expectSeriesClose(actual: Float64Array, expected: Float64Array): void {
+    expect(actual.length).toBe(expected.length);
+    for (let i = 0; i < expected.length; i++) {
+      expect(Math.abs(actual[i] - expected[i])).toBeLessThanOrEqual(TOL);
+    }
+  }
+
+  function openPair(): {
+    vm: SimHandle;
+    wasm: SimHandle;
+    dispose: () => void;
+  } {
+    const projectHandle = backend.projectOpenXmile(new TextEncoder().encode(WASM_ARRAYED_XMILE));
+    const modelHandle = backend.projectGetModel(projectHandle, null);
+    const vm = backend.simNew(modelHandle, false, 'vm');
+    const wasm = backend.simNew(modelHandle, false, 'wasm');
+    const dispose = () => {
+      backend.simDispose(vm);
+      backend.simDispose(wasm);
+      backend.modelDispose(modelHandle);
+      backend.projectDispose(projectHandle);
+    };
+    return { vm, wasm, dispose };
+  }
+
+  // Guard the precondition the rest of the suite relies on: the fixture must be
+  // a wasm-SUPPORTED model. If a future engine change made a static array
+  // unsupported, this fails loudly here rather than masquerading as a parity bug.
+  it('the static-arrayed fixture compiles to wasm without throwing', () => {
+    const projectHandle = backend.projectOpenXmile(new TextEncoder().encode(WASM_ARRAYED_XMILE));
+    const modelHandle = backend.projectGetModel(projectHandle, null);
+    let wasm: SimHandle | undefined;
+    expect(() => {
+      wasm = backend.simNew(modelHandle, false, 'wasm');
+    }).not.toThrow();
+    if (wasm !== undefined) {
+      backend.simDispose(wasm);
+    }
+    backend.modelDispose(modelHandle);
+    backend.projectDispose(projectHandle);
+  });
+
+  it('getVarNames (wasm) exposes the per-element bracketed keys and equals the VM', () => {
+    const { vm, wasm, dispose } = openPair();
+    backend.simRunToEnd(vm);
+    backend.simRunToEnd(wasm);
+
+    const names = backend.simGetVarNames(wasm);
+    expect(names).toEqual(backend.simGetVarNames(vm));
+    // The arrayed vars appear as canonical per-element keys (base + bracketed,
+    // lowercased element name), not as a bare scalar base name.
+    expect(names).toContain('source[boston]');
+    expect(names).toContain('source[la]');
+    expect(names).toContain('scaled[boston]');
+    expect(names).toContain('scaled[la]');
+    dispose();
+  });
+
+  it('getSeries resolves a raw mixed-case array-element name to the VM series', () => {
+    const { vm, wasm, dispose } = openPair();
+    backend.simRunToEnd(vm);
+    backend.simRunToEnd(wasm);
+
+    // Each name is passed RAW (mixed case, original element casing) so the read
+    // path must canonicalize it (`source[Boston]` -> `source[boston]`) before the
+    // varOffsets lookup -- the exact integration scalar teacup cannot cover.
+    for (const rawName of ['source[Boston]', 'source[LA]', 'scaled[Boston]', 'scaled[LA]']) {
+      expectSeriesClose(backend.simGetSeries(wasm, rawName), backend.simGetSeries(vm, rawName));
+    }
+    dispose();
+  });
+
+  it('getSeries (wasm) equals the VM for every variable in the arrayed layout', () => {
+    const { vm, wasm, dispose } = openPair();
+    backend.simRunToEnd(vm);
+    backend.simRunToEnd(wasm);
+    const names = backend.simGetVarNames(wasm);
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) {
+      expectSeriesClose(backend.simGetSeries(wasm, name), backend.simGetSeries(vm, name));
+    }
+    dispose();
+  });
+});

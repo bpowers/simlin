@@ -187,6 +187,77 @@ describe('Model/Sim engine selection (public API)', () => {
     });
   });
 
+  describe('AC6.2: enableLtm rejected on the wasm engine through the public facade', () => {
+    it("simulate({enableLtm:true, engine:'wasm'}) rejects with the LTM-not-supported error", async () => {
+      const model = await project.mainModel();
+      // The rejection is enforced authoritatively in DirectBackend.simNew; this
+      // closes the loop that the facade forwards the option (it does not swallow
+      // or default it away) and that the rejection surfaces as a rejected promise.
+      await expect(model.simulate({}, { enableLtm: true, engine: 'wasm' })).rejects.toThrow(
+        /not supported on the wasm engine/i,
+      );
+    });
+
+    it("run({analyzeLtm:true, engine:'wasm'}) rejects the same way (run forwards analyzeLtm)", async () => {
+      const model = await project.mainModel();
+      await expect(model.run({}, { analyzeLtm: true, engine: 'wasm' })).rejects.toThrow(/LTM/i);
+    });
+  });
+
+  describe('Sim.reset() reset+reapply-overrides path on a wasm sim (public API)', () => {
+    it('setValue(const) -> reset() -> runToEnd reproduces the override result (matches the VM)', async () => {
+      const model = await project.mainModel();
+      const wasmSim = await model.simulate({}, { engine: 'wasm' });
+      const vmSim = await model.simulate({}, { engine: 'vm' });
+
+      // Drive both identically through the public Sim API: override a constant,
+      // run, reset, run again. Sim.reset() calls backend.simReset then re-applies
+      // its recorded overrides; the wasm blob's reset preserves the override too.
+      await wasmSim.setValue('room temperature', 55);
+      await vmSim.setValue('room temperature', 55);
+      await wasmSim.runToEnd();
+      await vmSim.runToEnd();
+      await wasmSim.reset();
+      await vmSim.reset();
+      await wasmSim.runToEnd();
+      await vmSim.runToEnd();
+
+      for (const name of await wasmSim.getVarNames()) {
+        expectSeriesClose(await wasmSim.getSeries(name), await vmSim.getSeries(name));
+      }
+      // The override is still in effect after reset (room temperature 55, not the
+      // compiled default), confirming reset did not silently drop it.
+      expect((await wasmSim.getSeries('room_temperature'))[0]).toBeCloseTo(55, 9);
+
+      await wasmSim.dispose();
+      await vmSim.dispose();
+    });
+
+    it('reset() re-applies a creation-time override and stays at VM parity', async () => {
+      const model = await project.mainModel();
+      // A creation-time override populates Sim._overrides, so Sim.reset()'s
+      // reapply loop actually runs (the half a bare setValue does not touch).
+      const wasmSim = await model.simulate({ room_temperature: 40 }, { engine: 'wasm' });
+      const vmSim = await model.simulate({ room_temperature: 40 }, { engine: 'vm' });
+
+      await wasmSim.runToEnd();
+      await vmSim.runToEnd();
+      await wasmSim.reset();
+      await vmSim.reset();
+      await wasmSim.runToEnd();
+      await vmSim.runToEnd();
+
+      expect(wasmSim.overrides).toEqual({ room_temperature: 40 });
+      for (const name of await wasmSim.getVarNames()) {
+        expectSeriesClose(await wasmSim.getSeries(name), await vmSim.getSeries(name));
+      }
+      expect((await wasmSim.getSeries('room_temperature'))[0]).toBeCloseTo(40, 9);
+
+      await wasmSim.dispose();
+      await vmSim.dispose();
+    });
+  });
+
   describe('AC6.3: run({engine:wasm}) yields a Run with empty links and never calls getLinks', () => {
     it('resolves to a Run whose links array is empty', async () => {
       const model = await project.mainModel();
