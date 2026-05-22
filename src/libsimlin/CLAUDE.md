@@ -40,6 +40,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 - **`src/model.rs`** - Inspect model structure:
   - `simlin_model_{ref,unref}()`, `simlin_model_get_var_count()`, `simlin_model_get_var_names()`
   - `simlin_model_get_dependencies()`, `simlin_model_get_links()`, `simlin_model_get_equations()`
+  - `simlin_model_compile_to_wasm()` - Compile the model to a self-contained wasm module (engine `wasmgen` backend, an alternative to the VM for fast repeated re-simulation). Returns two malloc'd buffers, each freed with `simlin_free`: the wasm blob and a serialized `WasmLayout` (length-prefixed, little-endian: geometry `n_slots`/`n_chunks`/`results_offset` then a canonical-name -> slot-offset map a host strides the results region with). Works from a `SimlinModel`'s datamodel alone -- no `SimlinSim` required -- and stores a `SimlinError` (never panics) on any compile/codegen failure
 
 ### Serialization
 
@@ -81,6 +82,7 @@ Integration tests live in `tests/` (standard Rust layout), organized by FFI modu
 - **`tests/patch.rs`** - JSON patch application, error collection, unit warnings, XMILE patches
 - **`tests/incremental.rs`** - Incremental compilation path (patch-then-sim, snapshot isolation)
 - **`tests/analysis.rs`** - Causal analysis: incoming links, loop detection, loop scores
+- **`tests/wasm.rs`** - `simlin_model_compile_to_wasm`: validates and executes the returned blob under the DLR-FT interpreter (a libsimlin dev-dependency), parses the returned layout per its documented wire format, and checks the strided series against the VM via `simlin_sim_get_series`; also asserts a graceful `SimlinError` (no panic) for an unsupported model
 - **`tests/rendering.rs`** - SVG and PNG diagram rendering
 - **`tests/diagram.rs`** - Diagram layout sync
 - **`tests/errors.rs`** - Error formatting, error kind mapping, diagnostics

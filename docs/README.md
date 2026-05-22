@@ -30,6 +30,7 @@
   - [design-plans/2026-05-11-ltm-arrays-hardening.md](design-plans/2026-05-11-ltm-arrays-hardening.md) -- Arrayed/cross-element LTM hardening: unify the reference-site walkers behind one classification IR (#520), then layer eight fixes (#487, #511, #510, #514, #515, #483, #502, #492)
   - [design-plans/2026-05-13-macros.md](design-plans/2026-05-13-macros.md) -- Vensim macro support: macros as a data-driven generalization of the stdlib module mechanism, persisted via a `MacroSpec` marker on `Model`; 7 implementation phases
   - [design-plans/2026-05-19-clearn-residual.md](design-plans/2026-05-19-clearn-residual.md) -- Close C-LEARN's residual (#590/#591) as general Vensim import/simulation primitives: arrayed inline graphical functions, import-time macro shadowing, user-macro INITIAL recurrence, residual attribution; 5 phases
+  - [design-plans/2026-05-20-wasm-backend.md](design-plans/2026-05-20-wasm-backend.md) -- WebAssembly code-generation backend: compile a model to one self-contained wasm module as an alternative to the bytecode VM (for fast interactive re-simulation), validated to full VM parity; 8 phases
 - [plans/](plans/README.md) -- Implementation plans (active and completed)
 - [test-plans/](test-plans/) -- Human verification plans for completed features
 - `implementation-plans/` -- Detailed phase-by-phase implementation plans, created during plan execution
