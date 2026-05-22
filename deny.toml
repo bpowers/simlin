@@ -60,6 +60,7 @@ license-files = []
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 skip = [
     # resvg's transitive deps pin older versions we can't control
@@ -72,4 +73,8 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
     "https://github.com/bpowers/test-generator",
+    # DLR-FT/wasm-interpreter backs the engine's WebAssembly simulation
+    # backend (#620). Used unreleased and pinned by `rev`; there is no
+    # crates.io release yet, so it is referenced directly from git.
+    "https://github.com/DLR-FT/wasm-interpreter.git",
 ]
