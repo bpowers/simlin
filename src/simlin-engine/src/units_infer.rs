@@ -862,30 +862,25 @@ impl UnitInferer<'_> {
         }
     }
 
-    #[allow(clippy::type_complexity)]
     /// Solve the constraint system by Gaussian-elimination-style substitution,
-    /// returning the resolved metavariable units, the residual (still
-    /// metavariable-bearing) constraints, and any dimensional conflicts found
-    /// while solving.
+    /// returning the resolved metavariable units and the residual (still
+    /// metavariable-bearing) constraints.
     ///
-    /// A conflict is recorded and solving continues with the *first* binding
-    /// kept, rather than aborting (GH #614). Because substitution only ever
-    /// flows along shared metavariables, a contradiction is confined to its own
-    /// connected component of the constraint graph: keeping going can never
-    /// corrupt the units resolved for an independent component.
+    /// A metavariable is solved at most once: `substitute` removes it from every
+    /// remaining constraint (and the metavar index), so it can never reappear as
+    /// a single free variable. `unify` therefore does not detect conflicts
+    /// itself -- a genuine over-constraint (the same metavariable forced to two
+    /// different units) reduces to a residual concrete contradiction (e.g.
+    /// `meter == second`) that `find_constraint_mismatches` reports. The
+    /// vacant-entry guard keeps the first binding -- and never propagates a
+    /// rejected re-derivation -- if that solved-at-most-once invariant is ever
+    /// weakened (GH #614).
     #[allow(clippy::type_complexity)]
     fn unify(
         &self,
         constraints: Vec<LocatedConstraint>,
-    ) -> (
-        HashMap<Ident<Canonical>, UnitMap>,
-        Vec<LocatedConstraint>,
-        Vec<UnitError>,
-    ) {
+    ) -> (HashMap<Ident<Canonical>, UnitMap>, Vec<LocatedConstraint>) {
         let mut resolved_fvs: HashMap<Ident<Canonical>, UnitMap> = HashMap::new();
-        // Track sources for each resolved variable in case of conflict
-        let mut resolved_sources: HashMap<Ident<Canonical>, Vec<ConstraintSource>> = HashMap::new();
-        let mut conflicts: Vec<UnitError> = Vec::new();
         let mut pending = ConstraintSet::from_vec(constraints);
         let mut finalized = ConstraintSet::default();
 
@@ -898,51 +893,19 @@ impl UnitInferer<'_> {
                 if let Some(var) = single_fv(&c.unit_map) {
                     let var = var.to_owned();
                     let units = solve_for(&var, c.unit_map.clone());
-                    let sources = c.sources.clone();
                     let var_key = var.strip_prefix('@').unwrap();
                     let var_ident = Ident::<Canonical>::from_str_unchecked(var_key);
-                    // Decide whether to accept this binding BEFORE substituting it,
-                    // so a rejected (conflicting) re-derivation can never overwrite
-                    // the kept binding in the remaining constraints -- substitution
-                    // only ever propagates the binding we actually accept.
-                    //
-                    // The conflict arm is currently unreachable: `substitute`
-                    // removes the metavariable from every remaining constraint, so a
-                    // metavariable is solved at most once and `resolved_fvs` never
-                    // already contains it here. A genuine over-constraint (the same
-                    // metavariable forced to two different units) instead surfaces as
-                    // a residual concrete contradiction (e.g. `meter == second`)
-                    // reported by `find_constraint_mismatches`. The arm is kept, and
-                    // ordered so it never substitutes the rejected units, so "keep
-                    // the first binding" stays correct if that invariant ever changes.
-                    if let Some(existing_units) = resolved_fvs.get(&var_ident) {
-                        if *existing_units != units {
-                            let mut all_sources: Vec<(String, Option<Loc>)> =
-                                c.sources.iter().map(|s| (s.var.clone(), s.loc)).collect();
-                            if let Some(existing_sources) = resolved_sources.get(&var_ident) {
-                                for s in existing_sources {
-                                    if !all_sources.iter().any(|(v, l)| v == &s.var && *l == s.loc)
-                                    {
-                                        all_sources.push((s.var.clone(), s.loc));
-                                    }
-                                }
-                            }
-                            conflicts.push(UnitError::InferenceError {
-                                code: ErrorCode::UnitMismatch,
-                                sources: all_sources,
-                                details: Some(format!(
-                                    "conflicting units for {}: {} vs {}",
-                                    var, existing_units, units
-                                )),
-                            });
-                        }
-                        // Keep the first binding either way: do NOT substitute the
-                        // re-derived units into the remaining constraints.
-                    } else {
-                        pending.substitute(&var, &units, &sources);
-                        finalized.substitute(&var, &units, &sources);
-                        resolved_fvs.insert(var_ident.clone(), units);
-                        resolved_sources.insert(var_ident, sources);
+                    // Record the first (and, by the invariant above, only) binding
+                    // for this metavariable and propagate it. The vacant-entry
+                    // guard keeps the first binding -- and never substitutes a
+                    // rejected re-derivation into the remaining constraints -- even
+                    // if the solved-at-most-once invariant is ever weakened.
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        resolved_fvs.entry(var_ident)
+                    {
+                        pending.substitute(&var, &units, &c.sources);
+                        finalized.substitute(&var, &units, &c.sources);
+                        e.insert(units);
                     }
                 } else {
                     finalized.push(c);
@@ -955,32 +918,31 @@ impl UnitInferer<'_> {
             }
         }
 
-        (resolved_fvs, finalized.into_vec(), conflicts)
+        (resolved_fvs, finalized.into_vec())
     }
 
     fn infer(&self, model: &ModelStage1) -> InferenceResult {
         let mut constraints = vec![];
         self.gen_all_constraints(model, "", &mut constraints);
 
-        let (resolved, leftover, mut conflicts) = self.unify(constraints);
+        let (resolved, leftover) = self.unify(constraints);
 
         // Leftover constraints that still contain metavariables just mean the
         // model is under-constrained (e.g. undeclared units) -- not an error.
-        // Only a concrete contradiction among them is a real mismatch.
-        conflicts.extend(find_constraint_mismatches(&leftover));
-
-        // The same contradiction can be reached both while solving and as a
-        // leftover constraint; drop exact duplicates so each is reported once.
-        let mut deduped: Vec<UnitError> = Vec::with_capacity(conflicts.len());
-        for conflict in conflicts {
-            if !deduped.contains(&conflict) {
-                deduped.push(conflict);
+        // Only a concrete contradiction among them is a real mismatch; this is
+        // now the single source of conflicts, so we just dedup identical
+        // findings (the same contradiction can be reported from more than one
+        // residual constraint) to report each once.
+        let mut conflicts: Vec<UnitError> = Vec::new();
+        for conflict in find_constraint_mismatches(&leftover) {
+            if !conflicts.contains(&conflict) {
+                conflicts.push(conflict);
             }
         }
 
         InferenceResult {
             resolved,
-            conflicts: deduped,
+            conflicts,
         }
     }
 }
