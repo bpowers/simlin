@@ -19,9 +19,48 @@ use test_helpers::{
     WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches, wasm_results_for,
 };
 
+/// Generate one `#[test] fn` per corpus model so libtest (and nextest) schedule
+/// them across a thread pool in parallel, rather than running a single `#[test]`
+/// that loops the list serially on one thread. Each generated test runs its
+/// model through [`simulate_path`] (VM + protobuf round-trip + XMILE round-trip
+/// + wasm-backend parity).
+///
+/// Tests are grouped in a `mod` so names need only be unique within their list
+/// and gain a stable filter prefix (`cargo test corpus::`, `sdeverywhere::`).
+/// The `array:` arm additionally emits the backing `static [&str]` for the call
+/// sites that still consume the list as data (`bad_model_name`,
+/// `incremental_compilation_covers_all_models`); the `module:`-only arm emits
+/// just the tests. Names are derived mechanically from each path, so adding a
+/// model is a single `name => "path"` line.
+macro_rules! corpus_tests {
+    (
+        array: $arr:ident;
+        module: $module:ident;
+        $($name:ident => $path:literal),* $(,)?
+    ) => {
+        static $arr: &[&str] = &[$($path),*];
+        corpus_tests! { module: $module; $($name => $path),* }
+    };
+    (
+        module: $module:ident;
+        $($name:ident => $path:literal),* $(,)?
+    ) => {
+        mod $module {
+            $(
+                #[test]
+                fn $name() {
+                    super::simulate_path(concat!("../../", $path));
+                }
+            )*
+        }
+    };
+}
+
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
-static TEST_MODELS: &[&str] = &[
+corpus_tests! {
+    array: TEST_MODELS;
+    module: corpus;
     // failing testcases (various reasons)
     // "test/test-models/tests/arguments/test_arguments.xmile",
     // "test/test-models/tests/delay_parentheses/test_delay_parentheses.xmile",
@@ -33,42 +72,42 @@ static TEST_MODELS: &[&str] = &[
     // failing testcase: xmutil doesn't handle this correctly
     // "test/test-models/tests/subscript_mixed_assembly/test_subscript_mixed_assembly.xmile",
     //
-    "test/test-models/samples/arrays/a2a/a2a.stmx",
-    "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
-    "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
-    "test/test-models/samples/SIR/SIR.xmile",
-    "test/test-models/samples/SIR/SIR_reciprocal-dt.xmile",
-    "test/test-models/samples/teacup/teacup_w_diagram.xmile",
-    "test/test-models/samples/teacup/teacup.xmile",
-    "test/test-models/tests/abs/test_abs.xmile",
-    "test/test-models/tests/builtin_max/builtin_max.xmile",
-    "test/test-models/tests/builtin_mean/builtin_mean.xmile",
-    "test/test-models/tests/builtin_min/builtin_min.xmile",
-    "test/test-models/tests/builtin_int/builtin_int.xmile",
-    "test/test-models/tests/chained_initialization/test_chained_initialization.xmile",
-    "test/test-models/tests/comparisons/comparisons.xmile",
-    "test/test-models/tests/constant_expressions/test_constant_expressions.xmile",
-    "test/test-models/tests/delays2/delays.xmile",
-    "test/test-models/tests/euler_step_vs_saveper/test_euler_step_vs_saveper.xmile",
-    "test/test-models/tests/eval_order/eval_order.xmile",
-    "test/test-models/tests/exponentiation/exponentiation.xmile",
-    "test/test-models/tests/exp/test_exp.xmile",
-    "test/test-models/tests/function_capitalization/test_function_capitalization.xmile",
-    "test/test-models/tests/game/test_game.xmile",
-    "test/test-models/tests/if_stmt/if_stmt.xmile",
-    "test/test-models/tests/input_functions/test_inputs.xmile",
-    "test/test-models/tests/limits/test_limits.xmile",
-    "test/test-models/tests/line_breaks/test_line_breaks.xmile",
-    "test/test-models/tests/line_continuation/test_line_continuation.xmile",
-    "test/test-models/tests/ln/test_ln.xmile",
-    "test/test-models/tests/logicals/test_logicals.xmile",
-    "test/test-models/tests/log/test_log.xmile",
-    "test/test-models/tests/lookups_inline_bounded/test_lookups_inline_bounded.xmile",
-    "test/test-models/tests/lookups_inline/test_lookups_inline.xmile",
-    "test/test-models/tests/lookups/test_lookups_no-indirect.xmile",
+    samples_arrays_a2a => "test/test-models/samples/arrays/a2a/a2a.stmx",
+    samples_arrays_non_a2a => "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
+    samples_bpowers_hares_and_lynxes_modules_model => "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
+    samples_sir => "test/test-models/samples/SIR/SIR.xmile",
+    samples_sir_sir_reciprocal_dt => "test/test-models/samples/SIR/SIR_reciprocal-dt.xmile",
+    samples_teacup_teacup_w_diagram => "test/test-models/samples/teacup/teacup_w_diagram.xmile",
+    samples_teacup => "test/test-models/samples/teacup/teacup.xmile",
+    tests_abs_test_abs => "test/test-models/tests/abs/test_abs.xmile",
+    tests_builtin_max => "test/test-models/tests/builtin_max/builtin_max.xmile",
+    tests_builtin_mean => "test/test-models/tests/builtin_mean/builtin_mean.xmile",
+    tests_builtin_min => "test/test-models/tests/builtin_min/builtin_min.xmile",
+    tests_builtin_int => "test/test-models/tests/builtin_int/builtin_int.xmile",
+    tests_chained_initialization_test_chained_initialization => "test/test-models/tests/chained_initialization/test_chained_initialization.xmile",
+    tests_comparisons => "test/test-models/tests/comparisons/comparisons.xmile",
+    tests_constant_expressions_test_constant_expressions => "test/test-models/tests/constant_expressions/test_constant_expressions.xmile",
+    tests_delays2_delays => "test/test-models/tests/delays2/delays.xmile",
+    tests_euler_step_vs_saveper_test_euler_step_vs_saveper => "test/test-models/tests/euler_step_vs_saveper/test_euler_step_vs_saveper.xmile",
+    tests_eval_order => "test/test-models/tests/eval_order/eval_order.xmile",
+    tests_exponentiation => "test/test-models/tests/exponentiation/exponentiation.xmile",
+    tests_exp_test_exp => "test/test-models/tests/exp/test_exp.xmile",
+    tests_function_capitalization_test_function_capitalization => "test/test-models/tests/function_capitalization/test_function_capitalization.xmile",
+    tests_game_test_game => "test/test-models/tests/game/test_game.xmile",
+    tests_if_stmt => "test/test-models/tests/if_stmt/if_stmt.xmile",
+    tests_input_functions_test_inputs => "test/test-models/tests/input_functions/test_inputs.xmile",
+    tests_limits_test_limits => "test/test-models/tests/limits/test_limits.xmile",
+    tests_line_breaks_test_line_breaks => "test/test-models/tests/line_breaks/test_line_breaks.xmile",
+    tests_line_continuation_test_line_continuation => "test/test-models/tests/line_continuation/test_line_continuation.xmile",
+    tests_ln_test_ln => "test/test-models/tests/ln/test_ln.xmile",
+    tests_logicals_test_logicals => "test/test-models/tests/logicals/test_logicals.xmile",
+    tests_log_test_log => "test/test-models/tests/log/test_log.xmile",
+    tests_lookups_inline_bounded_test_lookups_inline_bounded => "test/test-models/tests/lookups_inline_bounded/test_lookups_inline_bounded.xmile",
+    tests_lookups_inline_test_lookups_inline => "test/test-models/tests/lookups_inline/test_lookups_inline.xmile",
+    tests_lookups_test_lookups_no_indirect => "test/test-models/tests/lookups/test_lookups_no-indirect.xmile",
     // "test/test-models/tests/lookups/test_lookups.xmile",
-    "test/test-models/tests/lookups_simlin/test_lookups.xmile",
-    "test/test-models/tests/lookups_with_expr/test_lookups_with_expr.xmile",
+    tests_lookups_simlin_test_lookups => "test/test-models/tests/lookups_simlin/test_lookups.xmile",
+    tests_lookups_with_expr_test_lookups_with_expr => "test/test-models/tests/lookups_with_expr/test_lookups_with_expr.xmile",
     // Macro fixtures: each `<macro>` element imports as a macro-marked model
     // (Phase 5 Task 1 reader), the invocation expands and simulates against
     // `output.tab` (Phase 3), and `simulate_path_with` re-serializes the
@@ -77,109 +116,29 @@ static TEST_MODELS: &[&str] = &[
     // `macro_stock` a stock-bearing macro body. (The `.stmx` variants and the
     // `macro_cross_reference`/`macro_trailing_definition` dirs have no
     // `<macro>` element, so they are not wired here.)
-    "test/test-models/tests/macro_expression/test_macro_expression.xmile",
-    "test/test-models/tests/macro_multi_expression/test_macro_multi_expression.xmile",
-    "test/test-models/tests/macro_multi_macros/test_macro_multi_macros.xmile",
-    "test/test-models/tests/macro_stock/test_macro_stock.xmile",
-    "test/test-models/tests/model_doc/model_doc.xmile",
-    "test/test-models/tests/number_handling/test_number_handling.xmile",
-    "test/test-models/tests/parentheses/test_parens.xmile",
-    "test/test-models/tests/reference_capitalization/test_reference_capitalization.xmile",
-    "test/test-models/tests/smooth_and_stock/test_smooth_and_stock.xmile",
-    "test/test-models/tests/sqrt/test_sqrt.xmile",
-    "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
-    "test/test-models/tests/subscript_1d_arrays/test_subscript_1d_arrays.xmile",
-    "test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
-    "test/test-models/tests/subscript_3d_arrays/test_subscript_3d_arrays.xmile",
-    "test/test-models/tests/subscript_docs/subscript_docs.xmile",
-    "test/test-models/tests/subscript_individually_defined_1_of_2d_arrays_from_floats/subscript_individually_defined_1_of_2d_arrays_from_floats.xmile",
-    "test/test-models/tests/subscript_individually_defined_1_of_2d_arrays/subscript_individually_defined_1_of_2d_arrays.xmile",
-    "test/test-models/tests/subscript_multiples/test_multiple_subscripts.xmile",
-    "test/test-models/tests/subscript_selection/subscript_selection.xmile",
-    "test/test-models/tests/trend/test_trend.xmile",
-    "test/test-models/tests/trig/test_trig.xmile",
-    "test/test-models/tests/xidz_zidz/xidz_zidz.xmile",
-    "test/test-models/tests/unicode_characters/unicode_test_model.xmile",
-];
-
-/// End-state wasm parity gate (wasm-backend AC3.2 / AC3.3): EVERY corpus model
-/// in `TEST_MODELS` must run through the wasm backend to VM parity -- zero may
-/// return `WasmGenError::Unsupported`. `expected` is the VM's own output (the
-/// parse + `compile_vm` + run path), so this is a direct wasm-vs-VM check
-/// independent of the on-disk reference files; the per-model inline hook
-/// (`wasm_parity_hook`) separately checks every model against its on-disk
-/// `expected` and likewise hard-fails on `Unsupported`.
-///
-/// This replaces the Phase 1-7 monotonic floor (a `ran >= FLOOR` count). The
-/// backend now covers the full core-simulation surface -- scalar + every
-/// `Apply` builtin + arrays/reducers/iteration + vector ops + allocation +
-/// scalar/array lookups + Euler/RK2/RK4 + PREVIOUS/INIT + nested modules -- so
-/// the end state is total coverage, and any regression that makes a previously
-/// supported model `Unsupported` fails here (AC3.3) with the offending model and
-/// reason. The genuinely out-of-scope constructs (a runtime view range
-/// `arr[lo:hi]` with non-literal bounds -> `ViewRangeDynamic`, or array
-/// unrolling past the per-function budget) are not reached by any `TEST_MODELS`
-/// member; they are pinned by the inline `wasmgen` unit tests and
-/// `ensure_wasm_matches_skips_unsupported_model`. The heavy `#[ignore]`-class
-/// models (C-LEARN) have their own `#[ignore]`d wasm twins so this gate stays
-/// within the default suite's 3-minute wall-clock cap.
-///
-/// Iterating the full `TEST_MODELS` list under the un-JITed DLR-FT interpreter
-/// stays well within that cap (the corpus is small/medium scalar/arrayed
-/// models), so the gate covers the whole list rather than a subset.
-#[test]
-fn wasm_parity_floor() {
-    let mut unsupported: Vec<(String, String)> = Vec::new();
-    for &path in TEST_MODELS {
-        let file_path = format!("../../{path}");
-        if let WasmRunOutcome::Skipped(msg) = wasm_parity_outcome_for_path(&file_path) {
-            unsupported.push((path.to_string(), msg));
-        }
-    }
-    eprintln!(
-        "wasm_parity_floor: {} of {} corpus models ran to VM parity ({} unsupported)",
-        TEST_MODELS.len() - unsupported.len(),
-        TEST_MODELS.len(),
-        unsupported.len()
-    );
-    assert!(
-        unsupported.is_empty(),
-        "wasm parity gate (AC3.2/AC3.3): every corpus model must run through the \
-         wasm backend, but {} of {} returned Unsupported -- a regression that \
-         dropped a previously-supported model, or a new feature whose lowering is \
-         missing:\n{}",
-        unsupported.len(),
-        TEST_MODELS.len(),
-        unsupported
-            .iter()
-            .map(|(p, m)| format!("  {p}: {m}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-}
-
-/// Parse the XMILE/STMX model at `path`, run it through the VM for an `expected`
-/// baseline, and return whether the wasm backend reproduces it (`Ran`) or
-/// returns `Unsupported` (`Skipped`). Used only by `wasm_parity_floor`, which
-/// turns any `Skipped` into a hard failure. A parse or VM failure is surfaced as
-/// `Skipped` (the VM corpus tests gate those paths directly; this gate only
-/// checks wasm-vs-VM parity, never re-litigates VM correctness), so an
-/// upstream parse/VM break would also trip the gate -- intended, since a model
-/// that no longer VM-simulates can't establish wasm parity either.
-fn wasm_parity_outcome_for_path(path: &str) -> WasmRunOutcome {
-    let datamodel = {
-        let Ok(f) = File::open(path) else {
-            return WasmRunOutcome::Skipped(format!("could not open {path}"));
-        };
-        let mut f = BufReader::new(f);
-        match xmile::project_from_reader(&mut f) {
-            Ok(p) => p,
-            Err(e) => return WasmRunOutcome::Skipped(format!("parse failed: {e}")),
-        }
-    };
-
-    let expected = vm_results(&datamodel);
-    ensure_wasm_matches(&datamodel, "main", &expected, &[])
+    tests_macro_expression_test_macro_expression => "test/test-models/tests/macro_expression/test_macro_expression.xmile",
+    tests_macro_multi_expression_test_macro_multi_expression => "test/test-models/tests/macro_multi_expression/test_macro_multi_expression.xmile",
+    tests_macro_multi_macros_test_macro_multi_macros => "test/test-models/tests/macro_multi_macros/test_macro_multi_macros.xmile",
+    tests_macro_stock_test_macro_stock => "test/test-models/tests/macro_stock/test_macro_stock.xmile",
+    tests_model_doc => "test/test-models/tests/model_doc/model_doc.xmile",
+    tests_number_handling_test_number_handling => "test/test-models/tests/number_handling/test_number_handling.xmile",
+    tests_parentheses_test_parens => "test/test-models/tests/parentheses/test_parens.xmile",
+    tests_reference_capitalization_test_reference_capitalization => "test/test-models/tests/reference_capitalization/test_reference_capitalization.xmile",
+    tests_smooth_and_stock_test_smooth_and_stock => "test/test-models/tests/smooth_and_stock/test_smooth_and_stock.xmile",
+    tests_sqrt_test_sqrt => "test/test-models/tests/sqrt/test_sqrt.xmile",
+    tests_stocks_with_expressions_test_stock_with_expression => "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
+    tests_subscript_1d_arrays_test_subscript_1d_arrays => "test/test-models/tests/subscript_1d_arrays/test_subscript_1d_arrays.xmile",
+    tests_subscript_2d_arrays_test_subscript_2d_arrays => "test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
+    tests_subscript_3d_arrays_test_subscript_3d_arrays => "test/test-models/tests/subscript_3d_arrays/test_subscript_3d_arrays.xmile",
+    tests_subscript_docs => "test/test-models/tests/subscript_docs/subscript_docs.xmile",
+    tests_subscript_individually_defined_1_of_2d_arrays_from_floats => "test/test-models/tests/subscript_individually_defined_1_of_2d_arrays_from_floats/subscript_individually_defined_1_of_2d_arrays_from_floats.xmile",
+    tests_subscript_individually_defined_1_of_2d_arrays => "test/test-models/tests/subscript_individually_defined_1_of_2d_arrays/subscript_individually_defined_1_of_2d_arrays.xmile",
+    tests_subscript_multiples_test_multiple_subscripts => "test/test-models/tests/subscript_multiples/test_multiple_subscripts.xmile",
+    tests_subscript_selection => "test/test-models/tests/subscript_selection/subscript_selection.xmile",
+    tests_trend_test_trend => "test/test-models/tests/trend/test_trend.xmile",
+    tests_trig_test_trig => "test/test-models/tests/trig/test_trig.xmile",
+    tests_xidz_zidz => "test/test-models/tests/xidz_zidz/xidz_zidz.xmile",
+    tests_unicode_characters_unicode_test_model => "test/test-models/tests/unicode_characters/unicode_test_model.xmile",
 }
 
 /// Compile a datamodel project to a VM simulation using the incremental
@@ -904,10 +863,9 @@ fn run_vacuous_comparison_scenarios() {
 }
 
 /// Run the named model of `datamodel` through the VM and return its
-/// `Results`, used as the `expected` baseline both the focused
-/// `ensure_wasm_matches` tests and `wasm_parity_floor` compare wasm output
-/// against. Mirrors the corpus VM path (`compile_vm` -> `Vm::new` ->
-/// `run_to_end`).
+/// `Results`, used as the `expected` baseline the focused `ensure_wasm_matches`
+/// tests compare wasm output against. Mirrors the corpus VM path
+/// (`compile_vm` -> `Vm::new` -> `run_to_end`).
 fn vm_results(datamodel: &simlin_engine::datamodel::Project) -> Results {
     let compiled = compile_vm(datamodel);
     let mut vm = Vm::new(compiled).unwrap();
@@ -1180,14 +1138,6 @@ fn simulate_mdl_path_with_data(mdl_path: &str) {
     ensure_results(&expected, &results);
 
     wasm_parity_hook(&datamodel_project, &expected, &[]);
-}
-
-#[test]
-fn simulates_models_correctly() {
-    for &path in TEST_MODELS {
-        let file_path = format!("../../{path}");
-        simulate_path(file_path.as_str());
-    }
 }
 
 #[test]
@@ -1470,38 +1420,39 @@ fn simulates_2d_array() {
 }
 
 // Commented out: test_generator approach is useful for discovery but generates many tests.
-// Use simulates_arrayed_models_correctly below for the curated list.
+// Use the corpus_tests! invocation below for the curated list.
 // #[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
 // fn simulates_sdeverywhere(resource: &str) {
 //     let resource = format!("../../{}", resource);
 //     simulate_path(&resource);
 // }
 
-/// SDEverywhere test models from test/sdeverywhere/models/**/*.xmile
-/// These are Vensim models converted to XMILE format.
-static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
+// SDEverywhere test models from test/sdeverywhere/models/**/*.xmile
+// These are Vensim models converted to XMILE format.
+corpus_tests! {
+    module: sdeverywhere;
     // Passing tests
-    "test/sdeverywhere/models/active_initial/active_initial.xmile",
-    "test/sdeverywhere/models/comments/comments.xmile",
-    "test/sdeverywhere/models/delay/delay.xmile",
-    "test/sdeverywhere/models/elmcount/elmcount.xmile",
-    "test/sdeverywhere/models/index/index.xmile",
-    "test/sdeverywhere/models/initial/initial.xmile",
-    "test/sdeverywhere/models/lookup/lookup.xmile",
-    "test/sdeverywhere/models/pulsetrain/pulsetrain.xmile",
-    "test/sdeverywhere/models/sir/sir.xmile",
-    "test/sdeverywhere/models/smooth/smooth.xmile",
-    "test/sdeverywhere/models/smooth3/smooth3.xmile",
-    "test/sdeverywhere/models/specialchars/specialchars.xmile",
-    "test/sdeverywhere/models/subalias/subalias.xmile",
-    "test/sdeverywhere/models/trend/trend.xmile",
+    active_initial => "test/sdeverywhere/models/active_initial/active_initial.xmile",
+    comments => "test/sdeverywhere/models/comments/comments.xmile",
+    delay => "test/sdeverywhere/models/delay/delay.xmile",
+    elmcount => "test/sdeverywhere/models/elmcount/elmcount.xmile",
+    index => "test/sdeverywhere/models/index/index.xmile",
+    initial => "test/sdeverywhere/models/initial/initial.xmile",
+    lookup => "test/sdeverywhere/models/lookup/lookup.xmile",
+    pulsetrain => "test/sdeverywhere/models/pulsetrain/pulsetrain.xmile",
+    sir => "test/sdeverywhere/models/sir/sir.xmile",
+    smooth => "test/sdeverywhere/models/smooth/smooth.xmile",
+    smooth3 => "test/sdeverywhere/models/smooth3/smooth3.xmile",
+    specialchars => "test/sdeverywhere/models/specialchars/specialchars.xmile",
+    subalias => "test/sdeverywhere/models/subalias/subalias.xmile",
+    trend => "test/sdeverywhere/models/trend/trend.xmile",
     //
     // xmutil strips GET DIRECT CONSTANTS data during conversion. Tested via MDL path.
     // "test/sdeverywhere/models/directconst/directconst.xmile",
-    "test/sdeverywhere/models/longeqns/longeqns.xmile",
-    "test/sdeverywhere/models/npv/npv.xmile",
-    "test/sdeverywhere/models/sample/sample.xmile",
-    "test/sdeverywhere/models/sum/sum.xmile",
+    longeqns => "test/sdeverywhere/models/longeqns/longeqns.xmile",
+    npv => "test/sdeverywhere/models/npv/npv.xmile",
+    sample => "test/sdeverywhere/models/sample/sample.xmile",
+    sum => "test/sdeverywhere/models/sum/sum.xmile",
     //
     // --- XMILE-path limitations (xmutil conversion issues) ---
     //
@@ -1617,14 +1568,6 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     //
     // Nested model directory duplicate, no .dat
     // "test/sdeverywhere/models/sir/model/sir.xmile",
-];
-
-#[test]
-fn simulates_arrayed_models_correctly() {
-    for &path in TEST_SDEVERYWHERE_MODELS {
-        let file_path = format!("../../{path}");
-        simulate_path(file_path.as_str());
-    }
 }
 
 /// Genuine-Vensim regression gate for VECTOR ELM MAP cross-dimension
