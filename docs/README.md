@@ -33,6 +33,7 @@
   - [design-plans/2026-05-20-wasm-backend.md](design-plans/2026-05-20-wasm-backend.md) -- WebAssembly code-generation backend: compile a model to one self-contained wasm module as an alternative to the bytecode VM (for fast interactive re-simulation), validated to full VM parity; 8 phases
 - [plans/](plans/README.md) -- Implementation plans (active and completed)
 - [test-plans/](test-plans/) -- Human verification plans for completed features
+  - [test-plans/2026-05-20-wasm-backend.md](test-plans/2026-05-20-wasm-backend.md) -- Manual verification for the WebAssembly simulation backend: the heavy `#[ignore]`d parity twins (C-LEARN vs `Ref.vdf`, WORLD3), driving the libsimlin FFI from a real host, and the AC3.3 deliberate-regression check (the bytecode VM is the automated oracle for everything else)
 - `implementation-plans/` -- Detailed phase-by-phase implementation plans, created during plan execution
 
 ## Security
