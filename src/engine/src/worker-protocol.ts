@@ -11,6 +11,7 @@
  * Handles are opaque integers that reference WASM objects in the worker.
  */
 
+import type { SimEngine } from './backend';
 import type { ErrorDetail } from './internal/types';
 
 // Branded handle types for messages (mirrors backend.ts, but without class brands)
@@ -80,7 +81,7 @@ export type WorkerRequest =
   | { type: 'modelGetVarNames'; requestId: number; handle: WorkerModelHandle; typeMask: number; filter: string | null }
   | { type: 'modelGetSimSpecsJson'; requestId: number; handle: WorkerModelHandle }
   // Sim operations
-  | { type: 'simNew'; requestId: number; modelHandle: WorkerModelHandle; enableLtm: boolean }
+  | { type: 'simNew'; requestId: number; modelHandle: WorkerModelHandle; enableLtm: boolean; engine?: SimEngine }
   | { type: 'simDispose'; requestId: number; handle: WorkerSimHandle }
   | { type: 'simRunTo'; requestId: number; handle: WorkerSimHandle; time: number }
   | { type: 'simRunToEnd'; requestId: number; handle: WorkerSimHandle }

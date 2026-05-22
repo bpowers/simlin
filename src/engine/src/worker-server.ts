@@ -366,7 +366,7 @@ export class WorkerServer {
       // Sim operations
       case 'simNew': {
         const modelHandle = this.getModelHandle(request.modelHandle);
-        const backendSimHandle = this.backend.simNew(modelHandle, request.enableLtm);
+        const backendSimHandle = this.backend.simNew(modelHandle, request.enableLtm, request.engine);
         const parentProject = this.modelToProject.get(request.modelHandle);
         if (parentProject === undefined) {
           throw new Error(`Model handle ${request.modelHandle} not associated with a project`);
