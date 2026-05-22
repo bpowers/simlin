@@ -7,7 +7,7 @@
 // adaptive warmup/measure policy. Both `body` and `now` are injected, so these
 // tests are deterministic and never touch the wall clock or any model/WASM.
 
-import { median, runTimed, runTimedAsync, type BenchOpts } from './bench-stats';
+import { median, runTimed, runTimedAsync, seriesClose, type BenchOpts } from './bench-stats';
 
 describe('median', () => {
   it('returns the middle element of an odd-length input', () => {
@@ -185,5 +185,59 @@ describe('runTimedAsync', () => {
     expect(stat.iters).toBe(5);
     expect(stat.medianMs).toBe(5);
     expect(stat.minMs).toBe(1);
+  });
+});
+
+describe('seriesClose', () => {
+  it('reports two identical series as matching', () => {
+    const a = new Float64Array([1, 2, 3]);
+    const b = new Float64Array([1, 2, 3]);
+    expect(seriesClose(a, b).match).toBe(true);
+  });
+
+  it('treats differences within the absolute tolerance as matching', () => {
+    // 1e-4 < 2e-3 absolute tolerance.
+    const a = new Float64Array([1.0, 100.0]);
+    const b = new Float64Array([1.0001, 100.0001]);
+    expect(seriesClose(a, b).match).toBe(true);
+  });
+
+  it('treats near-zero noise as matching', () => {
+    // both within the near-zero guard (expected <= 3e-6, actual <= 1e-6).
+    const a = new Float64Array([0.0, 1e-7]);
+    const b = new Float64Array([5e-7, 0.0]);
+    expect(seriesClose(a, b).match).toBe(true);
+  });
+
+  it('matches the real C-LEARN VM-vs-wasm reassociation noise', () => {
+    // The exact divergence observed: |diff| ~ 2.47e-9 on a value ~0.153 is
+    // floating-point reassociation noise, six orders of magnitude inside the
+    // engine's 2e-3 absolute VM-vs-wasm parity tolerance -- a match, not a bug.
+    const a = new Float64Array([0.15306828340588152]);
+    const b = new Float64Array([0.15306828094062933]);
+    const result = seriesClose(a, b);
+    expect(result.match).toBe(true);
+  });
+
+  it('reports a genuine divergence beyond tolerance, with the offending index and values', () => {
+    const a = new Float64Array([1.0, 2.0, 3.0]);
+    const b = new Float64Array([1.0, 2.5, 3.0]);
+    const result = seriesClose(a, b);
+    expect(result.match).toBe(false);
+    if (!result.match) {
+      expect(result.index).toBe(1);
+      expect(result.expected).toBe(2.0);
+      expect(result.actual).toBe(2.5);
+    }
+  });
+
+  it('reports a length mismatch (index -1)', () => {
+    const a = new Float64Array([1, 2, 3]);
+    const b = new Float64Array([1, 2]);
+    const result = seriesClose(a, b);
+    expect(result.match).toBe(false);
+    if (!result.match) {
+      expect(result.index).toBe(-1);
+    }
   });
 });
