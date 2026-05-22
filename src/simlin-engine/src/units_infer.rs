@@ -362,25 +362,30 @@ impl UnitInferer<'_> {
         prefix: &str,
         current_var: &str,
         constraints: &mut Vec<LocatedConstraint>,
-    ) -> UnitResult<Units> {
+    ) -> Units {
+        // Constraint generation is total: every well-formed expression yields
+        // a `Units` value (and pushes zero or more `1 == UnitMap` constraints).
+        // Dimensional *inconsistency* is detected later, during solving
+        // (`unify`/`find_constraint_mismatch`), never here -- so this function
+        // does not return a `Result` and cannot fail.
         match expr {
-            Expr2::Const(_, _, _) => Ok(Units::Constant),
+            Expr2::Const(_, _, _) => Units::Constant,
             Expr2::Var(ident, _, _loc) => {
                 let units: UnitMap = [(format!("@{prefix}{ident}"), 1)].iter().cloned().collect();
 
-                Ok(Units::Explicit(units))
+                Units::Explicit(units)
             }
             Expr2::App(builtin, _, _) => match builtin {
-                BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),
+                BuiltinFn::Inf | BuiltinFn::Pi => Units::Constant,
                 BuiltinFn::Time
                 | BuiltinFn::TimeStep
                 | BuiltinFn::StartTime
-                | BuiltinFn::FinalTime => Ok(Units::Explicit(
-                    self.time.units().cloned().unwrap_or_default(),
-                )),
+                | BuiltinFn::FinalTime => {
+                    Units::Explicit(self.time.units().cloned().unwrap_or_default())
+                }
                 BuiltinFn::IsModuleInput(_, _) => {
                     // returns a bool, which is unitless
-                    Ok(Units::Explicit(UnitMap::new()))
+                    Units::Explicit(UnitMap::new())
                 }
                 BuiltinFn::Lookup(table_expr, _, _loc)
                 | BuiltinFn::LookupForward(table_expr, _, _loc)
@@ -389,14 +394,14 @@ impl UnitInferer<'_> {
                     let table_name = match table_expr.as_ref() {
                         Expr2::Var(name, _, _) => name.as_str(),
                         Expr2::Subscript(name, _, _, _) => name.as_str(),
-                        _ => return Ok(Units::Constant),
+                        _ => return Units::Constant,
                     };
                     let units: UnitMap = [(format!("@{prefix}{table_name}"), 1)]
                         .iter()
                         .cloned()
                         .collect();
 
-                    Ok(Units::Explicit(units))
+                    Units::Explicit(units)
                 }
                 BuiltinFn::Abs(a)
                 | BuiltinFn::Arccos(a)
@@ -418,10 +423,10 @@ impl UnitInferer<'_> {
                     let args = args
                         .iter()
                         .map(|arg| self.gen_constraints(arg, prefix, current_var, constraints))
-                        .collect::<UnitResult<Vec<_>>>()?;
+                        .collect::<Vec<_>>();
 
                     if args.is_empty() {
-                        return Ok(Units::Constant);
+                        return Units::Constant;
                     }
 
                     // find the first non-constant argument
@@ -441,16 +446,16 @@ impl UnitInferer<'_> {
                                     ));
                                 }
                             }
-                            Ok(Units::Explicit(arg0))
+                            Units::Explicit(arg0)
                         }
-                        Some(Units::Constant) => Ok(Units::Constant),
-                        None => Ok(Units::Constant),
+                        Some(Units::Constant) => Units::Constant,
+                        None => Units::Constant,
                     }
                 }
                 BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
-                    let a_units = self.gen_constraints(a, prefix, current_var, constraints)?;
+                    let a_units = self.gen_constraints(a, prefix, current_var, constraints);
                     if let Some(b) = b {
-                        let b_units = self.gen_constraints(b, prefix, current_var, constraints)?;
+                        let b_units = self.gen_constraints(b, prefix, current_var, constraints);
 
                         if let Units::Explicit(ref lunits) = a_units
                             && let Units::Explicit(runits) = b_units
@@ -463,7 +468,7 @@ impl UnitInferer<'_> {
                             ));
                         }
                     }
-                    Ok(a_units)
+                    a_units
                 }
                 BuiltinFn::Quantum(a, _) => {
                     self.gen_constraints(a, prefix, current_var, constraints)
@@ -472,7 +477,7 @@ impl UnitInferer<'_> {
                     self.gen_constraints(bottom, prefix, current_var, constraints)
                 }
                 BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
-                    Ok(Units::Constant)
+                    Units::Constant
                 }
                 BuiltinFn::SafeDiv(a, b, c) => {
                     let div = Expr2::Op2(
@@ -482,13 +487,13 @@ impl UnitInferer<'_> {
                         None,
                         a.get_loc().union(&b.get_loc()),
                     );
-                    let units = self.gen_constraints(&div, prefix, current_var, constraints)?;
+                    let units = self.gen_constraints(&div, prefix, current_var, constraints);
 
                     // the optional argument to safediv, if specified, should match the units of a/b
                     if let Units::Explicit(ref result_units) = units
                         && let Some(c) = c
                         && let Units::Explicit(c_units) =
-                            self.gen_constraints(c, prefix, current_var, constraints)?
+                            self.gen_constraints(c, prefix, current_var, constraints)
                     {
                         constraints.push(LocatedConstraint::new(
                             combine(UnitOp::Div, c_units, result_units.clone()),
@@ -497,15 +502,15 @@ impl UnitInferer<'_> {
                         ));
                     }
 
-                    Ok(units)
+                    units
                 }
                 BuiltinFn::Rank(a, _) => {
-                    let a_units = self.gen_constraints(a, prefix, current_var, constraints)?;
+                    let a_units = self.gen_constraints(a, prefix, current_var, constraints);
 
                     // The direction argument is unitless control input; RANK's
                     // result keeps the array's units for now.
 
-                    Ok(a_units)
+                    a_units
                 }
                 BuiltinFn::VectorSelect(_, expr_array, _, _, _) => {
                     self.gen_constraints(expr_array, prefix, current_var, constraints)
@@ -513,7 +518,7 @@ impl UnitInferer<'_> {
                 BuiltinFn::VectorElmMap(source, _) => {
                     self.gen_constraints(source, prefix, current_var, constraints)
                 }
-                BuiltinFn::VectorSortOrder(_, _) => Ok(Units::Constant),
+                BuiltinFn::VectorSortOrder(_, _) => Units::Constant,
                 BuiltinFn::AllocateAvailable(req, _, _)
                 | BuiltinFn::AllocateByPriority(req, _, _, _, _) => {
                     self.gen_constraints(req, prefix, current_var, constraints)
@@ -521,8 +526,8 @@ impl UnitInferer<'_> {
                 // Previous(x, fallback) and Init(x) preserve the units of the
                 // lagged/current argument; the fallback must be compatible.
                 BuiltinFn::Previous(a, b) => {
-                    let a_units = self.gen_constraints(a, prefix, current_var, constraints)?;
-                    let b_units = self.gen_constraints(b, prefix, current_var, constraints)?;
+                    let a_units = self.gen_constraints(a, prefix, current_var, constraints);
+                    let b_units = self.gen_constraints(b, prefix, current_var, constraints);
                     // Constrain fallback to match the lagged argument's units,
                     // analogous to Max/Min handling.
                     if let Units::Explicit(ref a_map) = a_units
@@ -535,7 +540,7 @@ impl UnitInferer<'_> {
                             Some(loc),
                         ));
                     }
-                    Ok(a_units)
+                    a_units
                 }
                 BuiltinFn::Init(a) => self.gen_constraints(a, prefix, current_var, constraints),
             },
@@ -545,18 +550,18 @@ impl UnitInferer<'_> {
                     .iter()
                     .cloned()
                     .collect();
-                Ok(Units::Explicit(units))
+                Units::Explicit(units)
             }
             Expr2::Op1(_, l, _, _) => self.gen_constraints(l, prefix, current_var, constraints),
             Expr2::Op2(op, l, r, _, _) => {
-                let lunits = self.gen_constraints(l, prefix, current_var, constraints)?;
-                let runits = self.gen_constraints(r, prefix, current_var, constraints)?;
+                let lunits = self.gen_constraints(l, prefix, current_var, constraints);
+                let runits = self.gen_constraints(r, prefix, current_var, constraints);
 
                 match op {
                     BinaryOp::Add | BinaryOp::Sub => match (lunits, runits) {
-                        (Units::Constant, Units::Constant) => Ok(Units::Constant),
+                        (Units::Constant, Units::Constant) => Units::Constant,
                         (Units::Constant, Units::Explicit(units))
-                        | (Units::Explicit(units), Units::Constant) => Ok(Units::Explicit(units)),
+                        | (Units::Explicit(units), Units::Constant) => Units::Explicit(units),
                         (Units::Explicit(lunits), Units::Explicit(runits)) => {
                             let loc = l.get_loc().union(&r.get_loc());
                             constraints.push(LocatedConstraint::new(
@@ -564,26 +569,26 @@ impl UnitInferer<'_> {
                                 current_var,
                                 Some(loc),
                             ));
-                            Ok(Units::Explicit(lunits))
+                            Units::Explicit(lunits)
                         }
                     },
-                    BinaryOp::Exp | BinaryOp::Mod => Ok(lunits),
+                    BinaryOp::Exp | BinaryOp::Mod => lunits,
                     BinaryOp::Mul => match (lunits, runits) {
-                        (Units::Constant, Units::Constant) => Ok(Units::Constant),
+                        (Units::Constant, Units::Constant) => Units::Constant,
                         (Units::Explicit(units), Units::Constant)
-                        | (Units::Constant, Units::Explicit(units)) => Ok(Units::Explicit(units)),
+                        | (Units::Constant, Units::Explicit(units)) => Units::Explicit(units),
                         (Units::Explicit(lunits), Units::Explicit(runits)) => {
-                            Ok(Units::Explicit(combine(UnitOp::Mul, lunits, runits)))
+                            Units::Explicit(combine(UnitOp::Mul, lunits, runits))
                         }
                     },
                     BinaryOp::Div => match (lunits, runits) {
-                        (Units::Constant, Units::Constant) => Ok(Units::Constant),
-                        (Units::Explicit(units), Units::Constant) => Ok(Units::Explicit(units)),
+                        (Units::Constant, Units::Constant) => Units::Constant,
+                        (Units::Explicit(units), Units::Constant) => Units::Explicit(units),
                         (Units::Constant, Units::Explicit(units)) => {
-                            Ok(Units::Explicit(combine(UnitOp::Div, UnitMap::new(), units)))
+                            Units::Explicit(combine(UnitOp::Div, UnitMap::new(), units))
                         }
                         (Units::Explicit(lunits), Units::Explicit(runits)) => {
-                            Ok(Units::Explicit(combine(UnitOp::Div, lunits, runits)))
+                            Units::Explicit(combine(UnitOp::Div, lunits, runits))
                         }
                     },
                     BinaryOp::Gt
@@ -595,13 +600,13 @@ impl UnitInferer<'_> {
                     | BinaryOp::And
                     | BinaryOp::Or => {
                         // binary comparisons result in unitless quantities
-                        Ok(Units::Explicit(UnitMap::new()))
+                        Units::Explicit(UnitMap::new())
                     }
                 }
             }
             Expr2::If(_, l, r, _, _) => {
-                let lunits = self.gen_constraints(l, prefix, current_var, constraints)?;
-                let runits = self.gen_constraints(r, prefix, current_var, constraints)?;
+                let lunits = self.gen_constraints(l, prefix, current_var, constraints);
+                let runits = self.gen_constraints(r, prefix, current_var, constraints);
 
                 if let Units::Explicit(ref lunits) = lunits
                     && let Units::Explicit(runits) = runits
@@ -614,7 +619,7 @@ impl UnitInferer<'_> {
                     ));
                 }
 
-                Ok(lunits)
+                lunits
             }
         }
     }
@@ -723,55 +728,50 @@ impl UnitInferer<'_> {
                         let array_var: UnitMap =
                             [(format!("@{prefix}{id}"), 1)].iter().cloned().collect();
 
-                        let mut result: UnitResult<Units> = Ok(Units::Constant);
                         for (_element, expr) in asts.iter() {
-                            match self.gen_constraints(expr, prefix, &current_var, constraints) {
-                                Ok(expr_units) => {
-                                    // Add a constraint tying this element's units to the array variable
-                                    if let Units::Explicit(units) = expr_units {
-                                        let element_var = format!("{current_var}[element]");
-                                        constraints.push(LocatedConstraint::new(
-                                            combine(UnitOp::Div, array_var.clone(), units),
-                                            &element_var,
-                                            Some(expr.get_loc()),
-                                        ));
-                                    }
-                                }
-                                Err(e) => {
-                                    result = Err(e);
-                                    break;
-                                }
+                            let expr_units =
+                                self.gen_constraints(expr, prefix, &current_var, constraints);
+                            // Add a constraint tying this element's units to the array variable
+                            if let Units::Explicit(units) = expr_units {
+                                let element_var = format!("{current_var}[element]");
+                                constraints.push(LocatedConstraint::new(
+                                    combine(UnitOp::Div, array_var.clone(), units),
+                                    &element_var,
+                                    Some(expr.get_loc()),
+                                ));
                             }
                         }
                         if let Some(default_expr) = default_expr {
-                            match self.gen_constraints(
+                            let expr_units = self.gen_constraints(
                                 default_expr,
                                 prefix,
                                 &current_var,
                                 constraints,
-                            ) {
-                                Ok(expr_units) => {
-                                    if let Units::Explicit(units) = expr_units {
-                                        constraints.push(LocatedConstraint::new(
-                                            combine(UnitOp::Div, array_var.clone(), units),
-                                            &format!("{current_var}[default]"),
-                                            Some(default_expr.get_loc()),
-                                        ));
-                                    }
-                                }
-                                Err(e) => result = Err(e),
+                            );
+                            if let Units::Explicit(units) = expr_units {
+                                constraints.push(LocatedConstraint::new(
+                                    combine(UnitOp::Div, array_var.clone(), units),
+                                    &format!("{current_var}[default]"),
+                                    Some(default_expr.get_loc()),
+                                ));
                             }
                         }
-                        // Return Constant since we've added constraints directly above
-                        // (the constraint from var_units below would be redundant)
-                        result
+                        // We added the per-element constraints directly above, so the
+                        // array variable itself contributes no further equation
+                        // constraint here (the `Units::Explicit` branch below would be
+                        // redundant).
+                        Units::Constant
                     }
                     None => {
-                        // TODO: maybe we should bail early?  If there is no equation we will fail
-                        continue;
+                        // No parsed equation -- e.g. an empty/not-yet-written equation
+                        // or a module-input placeholder. There is no equation-derived
+                        // constraint to add, but we must NOT skip the variable: we fall
+                        // through to the `var.units()` constraint below so a variable
+                        // with declared units but no equation still informs inference of
+                        // its dependents.
+                        Units::Constant
                     }
-                }
-                .unwrap();
+                };
                 // Constants don't generate constraints - they adopt units from context
                 // (e.g., in "x + 1", the 1 has the same units as x)
                 if let Units::Explicit(units) = var_units {
@@ -1005,6 +1005,51 @@ fn test_inference() {
             }
         }
     }
+}
+
+/// A variable can have declared units but no parsed equation -- e.g. in the
+/// editor when units are entered before the equation is written (the same
+/// half-built state that powers unit fill-in). Such a variable must still
+/// contribute its declared units to inference so that dependents can be
+/// inferred. Regression test for the `None => continue` gap in
+/// `gen_all_constraints`, which skipped the `var.units()` constraint entirely
+/// for equation-less variables.
+#[test]
+fn test_declared_units_without_equation_propagate() {
+    let sim_specs = sim_specs_with_units("parsec");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+
+    // `base` has declared units but an empty equation (so `ast()` is None).
+    // `derived = base` has no declared units; inference should propagate
+    // `widget` to it through the reference.
+    let vars = vec![
+        x_aux("base", "", Some("widget")),
+        x_aux("derived", "base", None),
+    ];
+    let model = x_model("main", vars);
+    let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let _project = crate::project::Project::from_salsa(
+        project_datamodel.clone(),
+        &db,
+        sync.project,
+        |models, units_ctx, model| {
+            results = infer(models, units_ctx, model);
+        },
+    );
+    let results = results.unwrap();
+
+    let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        results.get(&*canonicalize("derived")),
+        Some(&widget),
+        "derived should inherit base's declared units via inference even though base has no equation"
+    );
 }
 
 #[test]
