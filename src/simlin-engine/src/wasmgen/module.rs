@@ -4875,4 +4875,264 @@ mod tests {
             "level at t=4 after run_to(4): wasm={wasm_at_4} vm={vm_at_4} (expected 8)"
         );
     }
+
+    /// Read a single f64 slot from the live `curr` chunk (base 0) of an
+    /// already-driven instance -- the value `run_to` left "current". This is the
+    /// blob-side analogue of the VM's `get_value_now(off)` (which reads the VM's
+    /// current chunk): the phase reads AC2.2's "getValue after run_to(t)" at the
+    /// blob level as the live curr chunk, since the blob has no `getValue` export.
+    fn read_curr_slot(
+        store: &mut Store<()>,
+        inst: checked::Stored<wasm::addrs::ModuleAddr>,
+        off: usize,
+    ) -> f64 {
+        let mem = store
+            .instance_export(inst, "memory")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        let addr = off * 8; // curr chunk starts at byte 0
+        store.mem_access_mut_slice(mem, |bytes| {
+            f64::from_le_bytes(bytes[addr..addr + 8].try_into().unwrap())
+        })
+    }
+
+    /// The VM's saved slab after driving it through `run_to(t)` for each `t` in
+    /// `targets` (mirrors `run_artifact_segmented`). `run_to` calls `run_initials`
+    /// internally, so the VM advances exactly as the blob does.
+    fn vm_slab_segmented(sim: CompiledSimulation, targets: &[f64]) -> (Vec<f64>, usize, usize) {
+        let mut vm = Vm::new(sim).expect("vm creation");
+        for &t in targets {
+            vm.run_to(t).expect("vm run_to");
+        }
+        let results = vm.into_results();
+        (results.data.to_vec(), results.step_size, results.step_count)
+    }
+
+    /// Count the committed (written) rows in a *blob* results slab after a partial
+    /// run, via the TIME column. This is sound for the blob specifically because
+    /// the blob keeps its working `curr`/`next` chunks SEPARATE from the results
+    /// region (see the "Cursor mapping" caveat): an unwritten results row stays at
+    /// its zero-initialized state, so its TIME slot reads 0.0 and won't match the
+    /// expected save-point time `start + c*save_step` for `c > 0`. Row 0 is always
+    /// written (the forced t=start save). The same heuristic is NOT sound for the
+    /// VM slab, whose chunk-ring leaks the working chunk into the exported range
+    /// (its TIME slot holds a genuine overshoot time) -- hence callers derive the
+    /// VM's committed count analytically instead. Used only with the resumable
+    /// fixture, where save_step == dt.
+    fn live_saved_rows(
+        slab: &[f64],
+        n_slots: usize,
+        n_chunks: usize,
+        start: f64,
+        dt: f64,
+    ) -> usize {
+        let mut count = 0usize;
+        for c in 0..n_chunks {
+            let t = slab[c * n_slots + TIME_OFF];
+            let expected = start + c as f64 * dt;
+            if c == 0 || (t - expected).abs() < 1e-9 {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        count
+    }
+
+    /// Task 2 (AC2.3): a segmented `run_initials; run_to(t1); run_to(t2)` produces
+    /// the same rows (up to t2) as a single `run_initials; run_to(t2)` and as the
+    /// VM driven through the same `run_to(t1); run_to(t2)` segments. The cursor in
+    /// the globals must survive across the two `run_to` calls and resume exactly.
+    #[test]
+    fn run_to_segmented_matches_single_and_vm() {
+        let datamodel = resumable_fixture(10.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        let (t1, t2) = (3.0, 7.0);
+        let segmented = run_artifact_segmented(&artifact, &[t1, t2]);
+        let single = run_artifact_segmented(&artifact, &[t2]);
+        let (vm_data, vm_step_size, _) =
+            vm_slab_segmented(compile_sim(&datamodel, "main"), &[t1, t2]);
+
+        // Rows for times <= t2 (chunks 0..=7) must agree across all three.
+        let last_row = t2 as usize; // save_step == dt == 1, so row index == time.
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(vm_off) = sim.get_offset(&ident) else {
+                continue;
+            };
+            for c in 0..=last_row {
+                let seg = segmented[c * n_slots + wasm_off];
+                let sng = single[c * n_slots + wasm_off];
+                let vm_val = vm_data[c * vm_step_size + vm_off];
+                assert!(
+                    (seg - sng).abs() < 1e-9,
+                    "{name} segmented vs single mismatch at chunk {c}: {seg} vs {sng}"
+                );
+                assert!(
+                    (seg - vm_val).abs() < 1e-9,
+                    "{name} segmented vs VM mismatch at chunk {c}: {seg} vs {vm_val}"
+                );
+            }
+        }
+        assert!(
+            n_chunks >= 8,
+            "fixture must have at least 8 chunks for t2=7"
+        );
+    }
+
+    /// Task 2 (AC2.2): the count of saved rows after `run_to(t)` matches the VM's,
+    /// for `t` exactly on a save point and `t` between save points.
+    ///
+    /// Layout note (the phase's "Cursor mapping" caveat): the blob keeps its
+    /// working `curr`/`next` chunks SEPARATE from the results region, so a partial
+    /// `run_to(t)` writes exactly the committed save-cadence rows (t=0..floor(t),
+    /// 5 rows for both t=4 and t=4.5). The VM stores results in a chunk-ring and
+    /// advances `curr_chunk` THROUGH it, so its working chunk (the t=floor(t)+dt
+    /// overshoot the guard `curr[TIME] > end` leaves behind) leaks into the
+    /// exported slab as one extra populated row -- a known chunk-ring artifact, not
+    /// a committed save point. We therefore compare the committed-save-point count
+    /// (which both backends agree on) and assert the blob's committed rows equal
+    /// the VM's on exactly those rows; separately we assert AC2.2 directly: the
+    /// blob's live `curr` chunk after `run_to(t)` equals the VM's `get_value_now`
+    /// (which reads the VM's current chunk, i.e. the same t=floor(t)+dt overshoot).
+    #[test]
+    fn run_to_at_save_and_between_save_points() {
+        let datamodel = resumable_fixture(10.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let start = sim.specs.start;
+        let dt = sim.specs.dt;
+        let level_off = layout_offset(&artifact, "level");
+
+        for &t in &[4.0_f64, 4.5_f64] {
+            // The committed save-cadence count is analytic from the spec: save
+            // points at start + c*save_step (save_step == dt here) for every c with
+            // start + c*dt <= t, capped at n_chunks.
+            let committed = ((t - start) / dt).floor() as usize + 1;
+            let committed = committed.min(n_chunks);
+
+            let slab = run_artifact_segmented(&artifact, &[t]);
+            let wasm_rows = live_saved_rows(&slab, n_slots, n_chunks, start, dt);
+            assert_eq!(
+                wasm_rows, committed,
+                "run_to({t}) committed-row count: wasm={wasm_rows}, expected {committed}"
+            );
+            assert_eq!(committed, 5, "run_to({t}) should commit 5 rows (t=0..4)");
+
+            // The blob's committed rows equal the VM's corresponding rows.
+            let (vm_data, vm_step_size, _) =
+                vm_slab_segmented(compile_sim(&datamodel, "main"), &[t]);
+            for (name, wasm_off) in &artifact.layout.var_offsets {
+                let wasm_off = *wasm_off;
+                let ident = Ident::<Canonical>::from_str_unchecked(name);
+                let Some(vm_off) = sim.get_offset(&ident) else {
+                    continue;
+                };
+                for c in 0..committed {
+                    let w = slab[c * n_slots + wasm_off];
+                    let v = vm_data[c * vm_step_size + vm_off];
+                    assert!(
+                        (w - v).abs() < 1e-9,
+                        "{name} committed-row mismatch at chunk {c} (run_to({t})): wasm={w} vm={v}"
+                    );
+                }
+            }
+
+            // AC2.2: the blob's live curr chunk (base 0) after run_to(t) equals the
+            // VM's get_value_now. Both advance one step past the on-grid target:
+            // run_to(4) and run_to(4.5) both leave the cursor at t=5, level=10.
+            let info = validate(&artifact.wasm).expect("module must validate");
+            let mut store = Store::new(());
+            let inst = store
+                .module_instantiate(&info, Vec::new(), None)
+                .expect("instantiate")
+                .module_addr;
+            let run_initials = store
+                .instance_export(inst, "run_initials")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store
+                .invoke_simple_typed::<(), ()>(run_initials, ())
+                .expect("run_initials");
+            let run_to = store
+                .instance_export(inst, "run_to")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store
+                .invoke_simple_typed::<(f64,), ()>(run_to, (t,))
+                .expect("run_to");
+            let curr_level = read_curr_slot(&mut store, inst, level_off);
+
+            let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+            vm.run_to(t).expect("vm run_to");
+            let vm_now = vm.get_value_now(
+                vm.get_offset(&Ident::<Canonical>::from_str_unchecked("level"))
+                    .unwrap(),
+            );
+            assert!(
+                (curr_level - vm_now).abs() < 1e-9 && (curr_level - 10.0).abs() < 1e-9,
+                "live curr level after run_to({t}): wasm={curr_level} vm={vm_now} (expected 10)"
+            );
+        }
+    }
+
+    /// Task 2 (AC2.4): `run_to(stop * 2)` clamps to the end -- it equals both a
+    /// `run_to(stop)` and `Vm::run_to_end`, and saves exactly `n_chunks` rows. The
+    /// blob clamps via the saved-row exhaustion break (`if saved >= n_chunks`),
+    /// exactly like the VM's chunk-ring exhaustion: it can never overrun the slab.
+    #[test]
+    fn run_to_past_final_time_clamps() {
+        let datamodel = resumable_fixture(10.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let stop = sim.specs.stop;
+        let start = sim.specs.start;
+        let dt = sim.specs.dt;
+
+        let clamped = run_artifact_segmented(&artifact, &[stop * 2.0]);
+        let to_stop = run_artifact_segmented(&artifact, &[stop]);
+
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to_end().expect("vm run");
+        let vm_results = vm.into_results();
+
+        assert_eq!(
+            clamped, to_stop,
+            "run_to(stop*2) must equal run_to(stop) -- past-FINAL_TIME must clamp"
+        );
+        // Exactly n_chunks rows are live (the full slab), none beyond.
+        assert_eq!(
+            live_saved_rows(&clamped, n_slots, n_chunks, start, dt),
+            n_chunks,
+            "run_to(stop*2) must save exactly n_chunks rows"
+        );
+
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = clamped[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} clamp mismatch at chunk {c}: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+    }
 }
