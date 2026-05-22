@@ -40,7 +40,11 @@ function splitIdentifierParts(s: string): Array<string> {
       let i = 1;
       let closed = false;
       while (i < remaining.length) {
-        if (remaining.charCodeAt(i) === 0x5c /* '\' */ && i + 1 < remaining.length && remaining.charCodeAt(i + 1) === 0x22) {
+        if (
+          remaining.charCodeAt(i) === 0x5c /* '\' */ &&
+          i + 1 < remaining.length &&
+          remaining.charCodeAt(i + 1) === 0x22
+        ) {
           i += 2; // skip the escaped quote
         } else if (remaining.charCodeAt(i) === 0x22) {
           parts.push(remaining.slice(0, i + 1));

@@ -102,10 +102,7 @@ function parseJsonGraphicalFunction(gf: JsonGraphicalFunction): GraphicalFunctio
   };
 }
 
-function extractEquation(
-  topLevel: string | undefined,
-  arrayed: { equation?: string } | undefined,
-): string {
+function extractEquation(topLevel: string | undefined, arrayed: { equation?: string } | undefined): string {
   if (topLevel) {
     return topLevel;
   }
@@ -120,10 +117,7 @@ function extractEquation(
  * in the top-level `initialEquation` or in the arrayed `equation` field
  * (XMILE-sourced data where `<eqn>` IS the initial value).
  */
-function extractStockInitialEquation(
-  topLevel: string | undefined,
-  arrayed: { equation?: string } | undefined,
-): string {
+function extractStockInitialEquation(topLevel: string | undefined, arrayed: { equation?: string } | undefined): string {
   if (topLevel) {
     return topLevel;
   }

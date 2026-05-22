@@ -65,7 +65,11 @@ export interface EngineBackend {
   projectGetModel(handle: ProjectHandle, name: string | null): MaybePromise<ModelHandle>;
   projectIsSimulatable(handle: ProjectHandle, modelName: string | null): MaybePromise<boolean>;
   projectSerializeProtobuf(handle: ProjectHandle): MaybePromise<Uint8Array>;
-  projectSerializeJson(handle: ProjectHandle, format: SimlinJsonFormat, includeStdlib?: boolean): MaybePromise<Uint8Array>;
+  projectSerializeJson(
+    handle: ProjectHandle,
+    format: SimlinJsonFormat,
+    includeStdlib?: boolean,
+  ): MaybePromise<Uint8Array>;
   projectSerializeXmile(handle: ProjectHandle): MaybePromise<Uint8Array>;
   projectRenderSvg(handle: ProjectHandle, modelName: string): MaybePromise<Uint8Array>;
   projectRenderPng(handle: ProjectHandle, modelName: string, width: number, height: number): MaybePromise<Uint8Array>;

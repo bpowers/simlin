@@ -13,14 +13,7 @@
 // in isolation, which their tests exercise without any WASM instance.
 
 import { getExports } from '@simlin/engine/internal/wasm';
-import {
-  free,
-  copyFromWasm,
-  allocOutPtr,
-  readOutPtr,
-  allocOutUsize,
-  readOutUsize,
-} from './memory';
+import { free, copyFromWasm, allocOutPtr, readOutPtr, allocOutUsize, readOutUsize } from './memory';
 import { SimlinModelPtr } from './types';
 import {
   simlin_error_free,

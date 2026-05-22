@@ -251,12 +251,10 @@ describe('readStridedSeries', () => {
     // allocation of exactly nChunks elements (no intermediate arrays).
     const RealFloat64Array = Float64Array;
     const allocations: Array<number> = [];
-    const spy = jest
-      .spyOn(global, 'Float64Array')
-      .mockImplementation(function (this: unknown, arg: number) {
-        allocations.push(arg);
-        return new RealFloat64Array(arg);
-      } as unknown as typeof Float64Array);
+    const spy = jest.spyOn(global, 'Float64Array').mockImplementation(function (this: unknown, arg: number) {
+      allocations.push(arg);
+      return new RealFloat64Array(arg);
+    } as unknown as typeof Float64Array);
 
     try {
       const series = readStridedSeries(buffer, layout, 0);
