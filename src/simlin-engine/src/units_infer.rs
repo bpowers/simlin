@@ -625,8 +625,19 @@ impl UnitInferer<'_> {
         prefix: &str,
         constraints: &mut Vec<LocatedConstraint>,
     ) {
-        let time_units =
+        let time_units_name =
             canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
+        // Resolve the time unit through the units Context's alias map so that
+        // inference uses the same canonical time unit as `units_check::check`.
+        // Without this, a model that declares some units with an aliased time
+        // name (e.g. `yr`) while `time_units` names the primary (`year`)
+        // produces a spurious `year` vs `yr` mismatch on every stock/flow
+        // constraint.
+        let time_units: UnitMap = self
+            .ctx
+            .lookup(&time_units_name)
+            .cloned()
+            .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect());
 
         for (id, var) in model.variables.iter() {
             let current_var = format!("{prefix}{id}");
@@ -640,13 +651,15 @@ impl UnitInferer<'_> {
             {
                 let stock_ident = ident;
                 let stock_var = format!("{prefix}{stock_ident}");
-                let expected = [
-                    (format!("@{prefix}{stock_ident}"), 1),
-                    (time_units.clone(), -1),
-                ]
-                .iter()
-                .cloned()
-                .collect::<UnitMap>();
+                // expected = @stock / time_units (the units a flow must carry).
+                let expected = combine(
+                    UnitOp::Div,
+                    [(format!("@{prefix}{stock_ident}"), 1)]
+                        .iter()
+                        .cloned()
+                        .collect::<UnitMap>(),
+                    time_units.clone(),
+                );
                 let mut check_flows = |flows: &Vec<Ident<Canonical>>| {
                     for flow_ident in flows.iter() {
                         let flow_var = format!("{prefix}{flow_ident}");
@@ -1136,8 +1149,15 @@ pub(crate) fn infer(
     units_ctx: &Context,
     model: &ModelStage1,
 ) -> UnitResult<HashMap<Ident<Canonical>, UnitMap>> {
-    let time_units =
+    let time_units_name =
         canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
+    // Resolve through the alias map so the synthetic `time` variable's units
+    // match what `units_check::check` uses (see the same resolution in
+    // `gen_all_constraints`).
+    let time_units: UnitMap = units_ctx
+        .lookup(&time_units_name)
+        .cloned()
+        .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect());
 
     let units = UnitInferer {
         ctx: units_ctx,
@@ -1147,7 +1167,7 @@ pub(crate) fn infer(
             ast: None,
             init_ast: None,
             eqn: None,
-            units: Some([(time_units, 1)].iter().cloned().collect()),
+            units: Some(time_units),
             tables: vec![],
             non_negative: false,
             is_flow: false,

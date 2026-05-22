@@ -170,11 +170,12 @@ impl Context {
             // A primary name that is already an alias of *another* unit is a
             // genuine conflict; a primary name that's already itself a prime
             // unit is a benign re-declaration as long as the inferred unit
-            // map matches.
-            if let Some(target) = aliases.get(&unit_name) {
-                if target != &unit_name {
-                    unit_errors.push(dup_err(&unit_name));
-                }
+            // map matches.  A name that appears among its OWN aliases (a
+            // self-alias -- e.g. `22:Yr,...,yr,...` where both `Yr` and `yr`
+            // canonicalize to `yr`) is also benign: we must still register the
+            // prime unit so that the name and its aliases resolve via lookup.
+            if matches!(aliases.get(&unit_name), Some(target) if target != &unit_name) {
+                unit_errors.push(dup_err(&unit_name));
             } else {
                 let new_map: UnitMap = [(unit_name.clone(), 1)].iter().cloned().collect();
                 match parsed_units.entry(unit_name.clone()) {
@@ -241,10 +242,10 @@ impl Context {
                 None => [(unit_name.clone(), 1)].iter().cloned().collect(),
             };
 
-            if let Some(target) = ctx.aliases.get(&unit_name) {
-                if target != &unit_name {
-                    unit_errors.push(dup_err(&unit_name));
-                }
+            // As in step 1: only an alias of *another* unit is a conflict; a
+            // self-alias is benign and the prime unit must still be registered.
+            if matches!(ctx.aliases.get(&unit_name), Some(target) if target != &unit_name) {
+                unit_errors.push(dup_err(&unit_name));
             } else {
                 match ctx.units.entry(unit_name.clone()) {
                     Entry::Vacant(e) => {
@@ -442,6 +443,47 @@ pub fn parse_units(
     } else {
         Ok(None)
     }
+}
+
+#[test]
+fn self_aliased_prime_unit_is_registered() {
+    // A Vensim `22:` equivalence group can list the canonical form of its own
+    // primary name among its aliases.  C-LEARN declares
+    // `22:Yr,year,years,yr,Year,Years`: the primary `Yr` canonicalizes to `yr`,
+    // and `yr` ALSO appears in the alias list, so `yr` becomes an alias of
+    // itself.  The prime unit must still be registered so that the primary
+    // name and every alias resolve to the same UnitMap.  Before the fix the
+    // self-alias caused `Context::new` to skip registering the prime unit, so
+    // `lookup` returned None and callers fell back to whatever (un-normalized)
+    // name they queried with -- the source of the C-LEARN `year` vs `yr`
+    // mismatch flood.
+    let ctx = Context::new(
+        &[Unit {
+            name: "Yr".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec![
+                "year".to_owned(),
+                "years".to_owned(),
+                "yr".to_owned(),
+                "Year".to_owned(),
+                "Years".to_owned(),
+            ],
+        }],
+        &Default::default(),
+    )
+    .expect("a self-aliased unit group must not produce a DuplicateUnit error");
+
+    let yr = ctx.lookup("yr");
+    let year = ctx.lookup("year");
+    assert!(
+        yr.is_some(),
+        "lookup(\"yr\") must resolve the registered prime unit, got None"
+    );
+    assert_eq!(
+        yr, year,
+        "\"yr\" and \"year\" must resolve to the same UnitMap"
+    );
 }
 
 #[test]

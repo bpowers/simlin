@@ -502,111 +502,50 @@ pub fn check(
                 check_flows(inflows);
                 check_flows(outflows);
             }
+            // Compare a sub-expression's computed units against the variable's
+            // declared (`expected`) units. Returns a mismatch error, or None
+            // when the units match, the expression is constant, or a
+            // dependency's units are unknown. Unknown units (DoesNotExist) are
+            // NOT a dimensional inconsistency -- they arise from module outputs
+            // or synthesized helpers that inference left unresolved -- so we
+            // skip the check, exactly as the arrayed-element consistency check
+            // above does (and as Vensim does: it warns that the dependency
+            // lacks units rather than erroring on every reader).
+            let check_against_expected = |expr: &Expr2| -> Option<UnitError> {
+                match units.check(expr) {
+                    Ok(Units::Explicit(actual)) if actual != *expected => {
+                        let loc = expr.get_loc();
+                        Some(ConsistencyError(
+                            ErrorCode::UnitMismatch,
+                            Loc::new(loc.start.into(), loc.end.into()),
+                            Some(format!(
+                                "computed units '{actual}' don't match specified units"
+                            )),
+                        ))
+                    }
+                    Ok(_) => None,
+                    Err(ConsistencyError(ErrorCode::DoesNotExist, _, _)) => None,
+                    Err(err) => Some(err),
+                }
+            };
+
             if let Some(ast) = var.ast() {
                 match ast {
-                    Ast::Scalar(expr) => match units.check(expr) {
-                        Ok(Units::Explicit(actual)) => {
-                            if actual != *expected {
-                                let details = format!(
-                                    "computed units '{}' don't match specified units",
-                                    &actual,
-                                );
-                                let loc = expr.get_loc();
-                                errors.push((
-                                    ident.clone(),
-                                    ConsistencyError(
-                                        ErrorCode::UnitMismatch,
-                                        Loc::new(loc.start.into(), loc.end.into()),
-                                        Some(details),
-                                    ),
-                                ))
-                            }
-                        }
-                        Ok(Units::Constant) => {
-                            // definitionally we're fine
-                        }
-                        Err(err) => {
+                    Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
+                        if let Some(err) = check_against_expected(expr) {
                             errors.push((ident.clone(), err));
                         }
-                    },
-                    Ast::ApplyToAll(_, expr) => match units.check(expr) {
-                        Ok(Units::Explicit(actual)) => {
-                            if actual != *expected {
-                                let details = format!(
-                                    "computed units '{}' don't match specified units",
-                                    &actual,
-                                );
-                                let loc = expr.get_loc();
-                                errors.push((
-                                    ident.clone(),
-                                    ConsistencyError(
-                                        ErrorCode::UnitMismatch,
-                                        Loc::new(loc.start.into(), loc.end.into()),
-                                        Some(details),
-                                    ),
-                                ))
-                            }
-                        }
-                        Ok(Units::Constant) => {
-                            // definitionally we're fine
-                        }
-                        Err(err) => {
-                            errors.push((ident.clone(), err));
-                        }
-                    },
+                    }
                     Ast::Arrayed(_, asts, default_expr, _) => {
-                        // Check each element expression in the arrayed variable
                         for (_element, expr) in asts.iter() {
-                            match units.check(expr) {
-                                Ok(Units::Explicit(actual)) => {
-                                    if actual != *expected {
-                                        let details = format!(
-                                            "computed units '{}' don't match specified units",
-                                            &actual,
-                                        );
-                                        let loc = expr.get_loc();
-                                        errors.push((
-                                            ident.clone(),
-                                            ConsistencyError(
-                                                ErrorCode::UnitMismatch,
-                                                Loc::new(loc.start.into(), loc.end.into()),
-                                                Some(details),
-                                            ),
-                                        ))
-                                    }
-                                }
-                                Ok(Units::Constant) => {
-                                    // definitionally we're fine
-                                }
-                                Err(err) => {
-                                    errors.push((ident.clone(), err));
-                                }
+                            if let Some(err) = check_against_expected(expr) {
+                                errors.push((ident.clone(), err));
                             }
                         }
-                        if let Some(default_expr) = default_expr {
-                            match units.check(default_expr) {
-                                Ok(Units::Explicit(actual)) => {
-                                    if actual != *expected {
-                                        let details = format!(
-                                            "computed units '{}' don't match specified units",
-                                            &actual,
-                                        );
-                                        let loc = default_expr.get_loc();
-                                        errors.push((
-                                            ident.clone(),
-                                            ConsistencyError(
-                                                ErrorCode::UnitMismatch,
-                                                Loc::new(loc.start.into(), loc.end.into()),
-                                                Some(details),
-                                            ),
-                                        ))
-                                    }
-                                }
-                                Ok(Units::Constant) => {}
-                                Err(err) => {
-                                    errors.push((ident.clone(), err));
-                                }
-                            }
+                        if let Some(default_expr) = default_expr
+                            && let Some(err) = check_against_expected(default_expr)
+                        {
+                            errors.push((ident.clone(), err));
                         }
                     }
                 }

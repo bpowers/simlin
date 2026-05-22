@@ -1260,3 +1260,40 @@ sibling=
         );
     }
 }
+
+// ── unit checking: macro-marked models are templates, like stdlib ──────────
+
+/// F4: a macro-marked model is a generic template -- its formal parameters are
+/// unitless, so unit checking it in isolation produces only spurious errors.
+/// Like a stdlib model, it must be SKIPPED by unit checking. Even a blatant
+/// dimensional inconsistency in the macro body (here `meters + seconds`) must
+/// not surface a diagnostic attributed to the macro model. (Macro correctness
+/// is validated at instantiation via cross-module unit constraints; this is
+/// the source of C-LEARN's spurious `ramp_from_to`/`sshape` unit warnings.)
+#[test]
+fn macro_body_units_are_not_checked() {
+    let source = mdl(r#":MACRO: BADUNITS(a, b)
+BADUNITS = lhs + rhs
+	~	widgets
+	~	|
+lhs = a
+	~	meters
+	~	|
+rhs = b
+	~	seconds
+	~	|
+:END OF MACRO:
+y =
+	BADUNITS(3, 4)
+	~	widgets
+	~	|
+"#);
+
+    let diags = diagnostics_for(&source);
+    let macro_diags: Vec<_> = diags.iter().filter(|d| d.model == "badunits").collect();
+    assert!(
+        macro_diags.is_empty(),
+        "unit checking must skip macro-marked models; diagnostics attributed \
+         to the `badunits` macro model:\n{macro_diags:#?}",
+    );
+}
