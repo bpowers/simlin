@@ -899,10 +899,22 @@ impl UnitInferer<'_> {
                     let var = var.to_owned();
                     let units = solve_for(&var, c.unit_map.clone());
                     let sources = c.sources.clone();
-                    pending.substitute(&var, &units, &sources);
-                    finalized.substitute(&var, &units, &sources);
                     let var_key = var.strip_prefix('@').unwrap();
                     let var_ident = Ident::<Canonical>::from_str_unchecked(var_key);
+                    // Decide whether to accept this binding BEFORE substituting it,
+                    // so a rejected (conflicting) re-derivation can never overwrite
+                    // the kept binding in the remaining constraints -- substitution
+                    // only ever propagates the binding we actually accept.
+                    //
+                    // The conflict arm is currently unreachable: `substitute`
+                    // removes the metavariable from every remaining constraint, so a
+                    // metavariable is solved at most once and `resolved_fvs` never
+                    // already contains it here. A genuine over-constraint (the same
+                    // metavariable forced to two different units) instead surfaces as
+                    // a residual concrete contradiction (e.g. `meter == second`)
+                    // reported by `find_constraint_mismatches`. The arm is kept, and
+                    // ordered so it never substitutes the rejected units, so "keep
+                    // the first binding" stays correct if that invariant ever changes.
                     if let Some(existing_units) = resolved_fvs.get(&var_ident) {
                         if *existing_units != units {
                             let mut all_sources: Vec<(String, Option<Loc>)> =
@@ -915,9 +927,6 @@ impl UnitInferer<'_> {
                                     }
                                 }
                             }
-                            // Record the conflict but keep the first binding and
-                            // keep solving: a contradiction for one metavariable
-                            // must not discard the units resolved for the rest.
                             conflicts.push(UnitError::InferenceError {
                                 code: ErrorCode::UnitMismatch,
                                 sources: all_sources,
@@ -927,7 +936,11 @@ impl UnitInferer<'_> {
                                 )),
                             });
                         }
+                        // Keep the first binding either way: do NOT substitute the
+                        // re-derived units into the remaining constraints.
                     } else {
+                        pending.substitute(&var, &units, &sources);
+                        finalized.substitute(&var, &units, &sources);
                         resolved_fvs.insert(var_ident.clone(), units);
                         resolved_sources.insert(var_ident, sources);
                     }
