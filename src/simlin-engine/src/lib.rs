@@ -49,6 +49,7 @@ mod db_macro_registry;
 // (`scripts/lint-project.sh` rule 2); `db.rs` reaches it via
 // `crate::db_dep_graph::...`, mirroring `db_ltm_ir` / `db_macro_registry`.
 mod db_dep_graph;
+mod db_units;
 mod db_var_fragment;
 pub mod diagram;
 mod dimensions;

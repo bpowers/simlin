@@ -116,6 +116,18 @@ impl TestProject {
         self
     }
 
+    /// Add a unit definition with alias names (a Vensim `22:` equivalence
+    /// group). The first name is the primary; the rest are aliases.
+    pub fn unit_with_aliases(mut self, name: &str, aliases: &[&str]) -> Self {
+        self.units.push(datamodel::Unit {
+            name: name.to_string(),
+            equation: None,
+            disabled: false,
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+        });
+        self
+    }
+
     /// Add an indexed dimension (e.g., for numeric indices)
     pub fn indexed_dimension(mut self, name: &str, size: u32) -> Self {
         self.dimensions
