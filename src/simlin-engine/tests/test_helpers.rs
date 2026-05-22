@@ -244,6 +244,45 @@ pub fn wasm_results_for(
     Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
 }
 
+/// Resumable-ABI peer of [`wasm_results_for`]: compile `model_name` of
+/// `datamodel` to wasm, then drive the blob through the segmented
+/// `run_initials`-then-per-target-`run_to` path (rather than the single-shot
+/// `run`) and reshape the final slab into a [`Results`].
+///
+/// `targets` is the ordered list of `run_to(t)` boundaries; the final target must
+/// be the simulation's `stop` so the slab is fully populated and the result is
+/// directly comparable (via [`ensure_results`]) to the single-`run`
+/// [`wasm_results_for`] series. The whole-model `#[ignore]`d twins use this to
+/// prove a mid-run-split run on a real model lands on the byte-identical final
+/// series as a single uninterrupted run.
+///
+/// Imperative Shell: drives the salsa compile pipeline and the wasm interpreter,
+/// delegating the reshape to the pure [`wasm_results_from_slab`].
+#[allow(dead_code)]
+pub fn wasm_results_for_segmented(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+    targets: &[f64],
+) -> Result<Results, String> {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    let sim = compile_project_incremental(&db, sync.project, model_name)
+        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+
+    let artifact = match compile_simulation(&sim) {
+        Ok(artifact) => artifact,
+        Err(WasmGenError::Unsupported(msg)) => return Err(msg),
+    };
+
+    let slab = run_wasm_results_segmented(&artifact.wasm, &artifact.layout, targets);
+    let specs = SimSpecs::from(&datamodel.sim_specs);
+    Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
+}
+
 /// Compile `model_name` of `datamodel` to wasm, run it under the DLR-FT
 /// interpreter, and assert its results clear the SAME `ensure_results_excluding`
 /// comparator the VM clears against `expected`.
@@ -325,7 +364,7 @@ fn run_wasm_results(wasm: &[u8], layout: &WasmLayout) -> Vec<f64> {
 /// rows up to `t2` equal a single `run_to(t2)` and the VM driven through the same
 /// `run_to` segments -- the parity the wasm-side tests assert.
 #[allow(dead_code)]
-fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f64]) -> Vec<f64> {
+pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f64]) -> Vec<f64> {
     let info = validate(wasm).expect("generated wasm module must validate");
     let mut store = Store::new(());
     let inst = store
