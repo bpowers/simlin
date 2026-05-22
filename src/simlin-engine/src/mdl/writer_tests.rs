@@ -4763,23 +4763,27 @@ fn default_aux_size_keeps_single_line_at_historical_default() {
 fn default_aux_size_sizes_multiline_names_to_their_lines() {
     // A forced break in the display name -- the literal two-character `\n`
     // XMILE name attributes use, or a real newline -- is the modeler's chosen
-    // multi-line layout. The box grows to the widest line (~6px/char, erring
-    // wide like the flow-label estimate so Vensim doesn't re-wrap it tighter)
-    // and ~11px per line, so Vensim renders those lines instead of cramming a
-    // re-wrapped name into 20px of height.
-    assert_eq!(default_aux_size("Maximum\\nfishery size"), (12 * 6, 22));
+    // multi-line layout. The name is written collapsed, so we steer Vensim's
+    // word-wrap by sizing the box: width = the widest line at ~4px/char (the
+    // measured median in the writer's Times New Roman|12 @96dpi font is
+    // ~3.8px/char, n=1412 real boxes), height = ~11px per line. Sizing to the
+    // line's *true* width -- not erring wide -- is what makes Vensim re-wrap
+    // the collapsed name back to the modeler's line count and break points; a
+    // box wide enough to fit two of those lines on one row would drop a line.
+    assert_eq!(default_aux_size("Maximum\\nfishery size"), (12 * 4, 22));
     assert_eq!(
         default_aux_size("Effect of fish density\non catch per ship"),
-        (22 * 6, 22)
+        (22 * 4, 22)
     );
-    assert_eq!(default_aux_size("one\\ntwo\\nthree three"), (11 * 6, 33));
+    assert_eq!(default_aux_size("one\\ntwo\\nthree three"), (11 * 4, 33));
 }
 
 #[test]
 fn aux_without_compat_sizes_multiline_name() {
     // The aux name still renders collapsed in the record ("Maximum fishery
     // size"); only the box dimensions grow to fit the modeler's two lines
-    // (12 chars * 6px = 72 wide, two 11px lines = 22 tall).
+    // (widest line "fishery size" = 12 chars * 4px = 48 wide, two 11px lines
+    // = 22 tall).
     let aux = view_element::Aux {
         name: "Maximum\\nfishery size".to_string(),
         uid: 1,
@@ -4791,8 +4795,36 @@ fn aux_without_compat_sizes_multiline_name() {
     let mut buf = String::new();
     write_aux_element(&mut buf, &aux);
     assert_eq!(
-        buf, "10,1,Maximum fishery size,100,200,72,22,8,3,0,0,-1,0,0,0",
+        buf, "10,1,Maximum fishery size,100,200,48,22,8,3,0,0,-1,0,0,0",
         "multi-line aux name should size the box to its lines: {buf}"
+    );
+}
+
+#[test]
+fn default_flow_label_size_single_line_errs_wide_to_avoid_wrapping() {
+    // A single-line flow label is sized to its whole text, erring wide
+    // (~6px/char) so Vensim never wraps it into the pipe. "Birth Rate" is 10
+    // chars -> 60px wide, single 11px line. (Underscores count as one char,
+    // like spaces, so "Birth_Rate" sizes the same.)
+    assert_eq!(default_flow_label_size("Birth Rate"), (60, 11));
+    assert_eq!(default_flow_label_size("Birth_Rate"), (60, 11));
+}
+
+#[test]
+fn default_flow_label_size_sizes_multiline_names_to_their_lines() {
+    // A flow label with a forced break gets the same multi-line treatment an
+    // aux does (so a flow the modeler broke onto two lines isn't written as one
+    // very wide single-line label that overruns the pipe). Width = the widest
+    // line at the calibrated ~4px/char, height = ~11px per line. "Purchase of
+    // new" and "ships this year" are both 15 chars -> 60px wide, two lines -> 22.
+    assert_eq!(
+        default_flow_label_size("Purchase of new\\nships this year"),
+        (15 * 4, 22)
+    );
+    // Widest line wins: "harbor this year" is 16 chars (vs "Ships moved to" 14).
+    assert_eq!(
+        default_flow_label_size("Ships moved to\\nharbor this year"),
+        (16 * 4, 22)
     );
 }
 
@@ -4876,6 +4908,44 @@ fn flow_default_dimensions_without_compat() {
     assert!(
         buf.contains(",60,11,40,3,"),
         "flow label without label_compat should size to its text: {buf}"
+    );
+}
+
+#[test]
+fn flow_without_compat_sizes_multiline_label_to_its_lines() {
+    // A flow whose display name carries a forced break sizes its label box to
+    // the modeler's lines (like an aux), instead of one very wide single line
+    // that would overrun the pipe. The label name still renders collapsed
+    // ("Purchase of new ships this year"); only the box grows: widest line
+    // "Purchase of new"/"ships this year" = 15 chars * 4px = 60 wide, two 11px
+    // lines = 22 tall.
+    let flow = view_element::Flow {
+        name: "Purchase of new\\nships this year".to_string(),
+        uid: 6,
+        x: 295.0,
+        y: 191.0,
+        label_side: view_element::LabelSide::Bottom,
+        points: vec![],
+        compat: None,
+        label_compat: None,
+    };
+    let mut buf = String::new();
+    let valve_uids = HashMap::from([(6, 100)]);
+    let mut next_connector_uid = 200;
+    write_flow_element(
+        &mut buf,
+        &flow,
+        &valve_uids,
+        &HashSet::new(),
+        &mut next_connector_uid,
+    );
+    assert!(
+        buf.contains("Purchase of new ships this year,"),
+        "multi-line flow label should still render the collapsed name: {buf}"
+    );
+    assert!(
+        buf.contains(",60,22,40,3,"),
+        "multi-line flow label should size the box to its lines (60x22): {buf}"
     );
 }
 
@@ -4984,8 +5054,8 @@ fn alias_without_compat_sizes_multiline_ghosted_name() {
     let mut buf = String::new();
     write_alias_element(&mut buf, &alias, &name_map);
     assert!(
-        buf.starts_with("10,10,Maximum fishery size,200,300,72,22,8,2,"),
-        "multi-line ghosted name should size the alias box to its lines: {buf}"
+        buf.starts_with("10,10,Maximum fishery size,200,300,48,22,8,2,"),
+        "multi-line ghosted name should size the alias box to its lines (48x22): {buf}"
     );
 }
 

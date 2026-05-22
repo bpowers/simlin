@@ -2042,15 +2042,28 @@ fn default_flow_label_point(flow: &view_element::Flow, transform: SketchTransfor
 /// Estimated bounding box (width, height in px) for a flow label, used when the
 /// original sketch didn't record one.
 ///
-/// Vensim sizes a flow label's box to its text; a fixed default that's too
-/// narrow for a longer name makes Vensim wrap the label, which then overlaps
-/// the flow's pipe. Estimating roughly from the displayed text length (~6px
-/// per character at the sketch's default font, deliberately erring wide so the
-/// text never wraps) avoids that. The height matches Vensim's single-line
-/// flow labels.
-fn default_flow_label_size(displayed_name: &str) -> (i32, i32) {
-    let width = (displayed_name.chars().count() as i32 * 6).max(15);
-    (width, 11)
+/// A single-line label is sized to its whole text, erring wide (~6px/char at
+/// the sketch's default font) so Vensim never word-wraps it into the flow's
+/// pipe -- a fixed default too narrow for a longer name is what made Vensim
+/// wrap "New fish per year" into the pipe in the fishbanks export.
+///
+/// A label whose display name carries a forced break -- the literal two-char
+/// `\n` XMILE name attributes use, or a real newline -- is the modeler's
+/// multi-line layout, so it gets the same treatment a multi-line aux does (see
+/// `default_aux_size`): width = the widest line at `SKETCH_MULTILINE_PX_PER_CHAR`,
+/// height = `SKETCH_LINE_HEIGHT` per line. Without this a broken flow name like
+/// `Purchase of new\nships this year` collapses to one ~186px single-line label
+/// that overruns the pipe; sizing it to two ~60px lines lets Vensim re-wrap the
+/// (still collapsed) name back to the intended two lines. A single line's
+/// height matches Vensim's own single-line flow labels.
+fn default_flow_label_size(name: &str) -> (i32, i32) {
+    let lines = split_display_lines(name);
+    if lines.len() <= 1 {
+        let width = (name.chars().count() as i32 * 6).max(15);
+        return (width, SKETCH_LINE_HEIGHT);
+    }
+    let width = widest_multiline_width(&lines, 15);
+    (width, lines.len() as i32 * SKETCH_LINE_HEIGHT)
 }
 
 /// Per-line height (px) for a multi-line sketch text element at the writer's
@@ -2058,6 +2071,36 @@ fn default_flow_label_size(displayed_name: &str) -> (i32, i32) {
 /// kind of font show ~11px per wrapped line (e.g. a three-line aux box is 33px
 /// tall); this matches `default_flow_label_size`'s single-line height too.
 const SKETCH_LINE_HEIGHT: i32 = 11;
+
+/// Per-character width estimate (px) for sizing a *multi-line* sketch box to
+/// its widest line, at the writer's default font (`Times New Roman|12` at
+/// 96 dpi). Calibrated against real Vensim files: the median single-line aux
+/// box in that font is ~3.8px/char (measured over 1412 boxes in `test/`), so
+/// ~4 reproduces a line's true width.
+///
+/// The point of matching the *true* width (rather than erring wide) is that the
+/// name is written collapsed; the box is the only lever we have over Vensim's
+/// word-wrap. A box sized to the widest line forces Vensim to re-wrap the
+/// collapsed name back to the modeler's line count and break points. A box
+/// erring wide (the historical `6`) instead fits two of the modeler's lines on
+/// one row, dropping a line. (Single-line boxes still err wide -- see
+/// `default_flow_label_size` -- because there the goal is the opposite: never
+/// wrap.)
+const SKETCH_MULTILINE_PX_PER_CHAR: i32 = 4;
+
+/// Width (px) of the widest line of a multi-line display name, at the
+/// calibrated multi-line per-char estimate. `min` is the historical floor so a
+/// name with short lines never collapses to a degenerate box. Single-sources
+/// the multi-line width math shared by `default_aux_size` and
+/// `default_flow_label_size`.
+fn widest_multiline_width(lines: &[String], min: i32) -> i32 {
+    lines
+        .iter()
+        .map(|line| line.chars().count() as i32 * SKETCH_MULTILINE_PX_PER_CHAR)
+        .max()
+        .unwrap_or(min)
+        .max(min)
+}
 
 /// Estimated sketch box (width, height in px) for an Aux or Alias element when
 /// the original Vensim geometry isn't available (e.g. exporting from XMILE).
@@ -2074,23 +2117,18 @@ const SKETCH_LINE_HEIGHT: i32 = 11;
 /// at `40x20`, Vensim then re-wraps the now-unbroken name to fit the 40px box
 /// and crams the result into 20px of height -- the overlapping "effect of fish
 /// density on catch per ship" in the fishbanks export. Sizing the box to the
-/// modeler's lines instead -- width = the widest line at ~6px/char
-/// (deliberately erring wide, like `default_flow_label_size`, so Vensim's
-/// re-wrap stays at or under that line count rather than splitting tighter),
-/// height = `SKETCH_LINE_HEIGHT` per line -- reproduces the intended layout.
-/// Widths still floor at the historical `40`, heights at `20`, so a name with
-/// short lines never collapses to a degenerate box.
+/// modeler's lines instead -- width = the widest line at
+/// `SKETCH_MULTILINE_PX_PER_CHAR` (the calibrated real per-char width, so
+/// Vensim re-wraps the collapsed name to the modeler's line count and break
+/// points), height = `SKETCH_LINE_HEIGHT` per line -- reproduces the intended
+/// layout. Widths still floor at the historical `40`, heights at `20`, so a
+/// name with short lines never collapses to a degenerate box.
 fn default_aux_size(display_name: &str) -> (i32, i32) {
     let lines = split_display_lines(display_name);
     if lines.len() <= 1 {
         return (40, 20);
     }
-    let width = lines
-        .iter()
-        .map(|line| line.chars().count() as i32 * 6)
-        .max()
-        .unwrap_or(40)
-        .max(40);
+    let width = widest_multiline_width(&lines, 40);
     let height = (lines.len() as i32 * SKETCH_LINE_HEIGHT).max(20);
     (width, height)
 }
@@ -2172,7 +2210,10 @@ fn write_flow_element_with_context(
     let (label_w, label_h, label_shape, label_bits) = match label_compat {
         Some(c) => (c.width as i32, c.height as i32, c.shape, c.bits),
         None => {
-            let (w, h) = default_flow_label_size(&collapse_display_newlines(&flow.name));
+            // Pass the raw name (break intact) so a multi-line flow label is
+            // sized to its lines; the label record itself still renders the
+            // collapsed name via `format_sketch_name` above.
+            let (w, h) = default_flow_label_size(&flow.name);
             (w, h, 40, 3)
         }
     };
