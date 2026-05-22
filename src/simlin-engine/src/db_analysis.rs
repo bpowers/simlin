@@ -2244,7 +2244,7 @@ fn reconstruct_implicit_variable(
         };
     }
 
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap_or_default();
+    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut dummy_implicits = Vec::new();
     let parsed_imp = crate::variable::parse_var(
         dims,

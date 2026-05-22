@@ -1188,7 +1188,7 @@ mod ast_tests {
             macro_spec: None,
         };
 
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
         let model_s0 = ModelStage0::new(
             &model_datamodel,
             std::slice::from_ref(&dim),
@@ -1278,7 +1278,7 @@ mod ast_tests {
             macro_spec: None,
         };
 
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
         let model_s0 = ModelStage0::new(
             &model_datamodel,
             &[dim1.clone(), dim2.clone()],

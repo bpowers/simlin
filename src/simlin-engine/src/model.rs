@@ -47,6 +47,12 @@ pub struct ModelStage0 {
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
     pub implicit: bool,
+    /// is_macro is true if this model is a macro definition. A macro is a
+    /// polymorphic template: its body variables' declared units may name the
+    /// macro's formal parameters (a Vensim idiom -- e.g. `~ xfrom` inside
+    /// RAMP FROM TO), so unit inference must treat those as polymorphic rather
+    /// than concrete base units.
+    pub is_macro: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -73,6 +79,10 @@ pub struct ModelStage1 {
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
     pub implicit: bool,
+    /// is_macro is true if this model is a macro definition; see
+    /// `ModelStage0::is_macro`. Inference treats a macro body's declared units
+    /// as polymorphic rather than concrete base units.
+    pub is_macro: bool,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -964,6 +974,7 @@ impl ModelStage0 {
             variables,
             errors: None,
             implicit,
+            is_macro: x_model.macro_spec.is_some(),
         }
     }
 
@@ -1065,6 +1076,7 @@ impl ModelStage0 {
             variables,
             errors: None,
             implicit,
+            is_macro: x_model.macro_spec.is_some(),
         }
     }
 }
@@ -1110,6 +1122,7 @@ impl ModelStage1 {
             model_deps: Some(model_deps),
             instantiations: None,
             implicit: model_s0.implicit,
+            is_macro: model_s0.is_macro,
         }
     }
 
@@ -1509,7 +1522,7 @@ fn test_module_parse() {
     );
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
 
     let owned_models: HashMap<Ident<Canonical>, ModelStage0> = vec![
         ("main".to_string(), &main_model),
@@ -1540,7 +1553,7 @@ fn test_module_parse() {
 
 #[test]
 fn test_errors() {
-    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let units_ctx = Context::new(&[], &Default::default()).0;
     let main_model = x_model(
         "main",
         vec![x_aux("aux_3", "unknown_variable * 3.14", None)],
@@ -1595,7 +1608,7 @@ fn test_errors() {
 
 #[test]
 fn test_new_cached_preserves_previous_helper_rewrite() {
-    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let units_ctx = Context::new(&[], &Default::default()).0;
     let main_model = x_model(
         "main",
         vec![
@@ -1709,7 +1722,7 @@ fn test_init_expression_vm() {
 
 #[test]
 fn test_previous_module_input_var_uses_helper_rewrite() {
-    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let units_ctx = Context::new(&[], &Default::default()).0;
     let module_input = datamodel::Variable::Aux(datamodel::Aux {
         ident: "input".to_string(),
         equation: datamodel::Equation::Scalar("0".to_string()),
@@ -1977,7 +1990,7 @@ fn test_all_deps() {
             x_aux("aux_4", "mod_1.output", None),
         ],
     );
-    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let units_ctx = Context::new(&[], &Default::default()).0;
     let owned_x_models: HashMap<Ident<Canonical>, ModelStage0> = vec![
         ("mod_1".to_owned(), &mod_1_model),
         ("main".to_owned(), &main_model),
@@ -2026,7 +2039,7 @@ fn test_all_deps() {
     };
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+    let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mod_1_orig = &main_model.variables[0];
     assert_eq!("mod_1", mod_1_orig.get_ident());
     let mod_1 = parse_var(&[], mod_1_orig, &mut implicit_vars, &unit_ctx, |mi| {

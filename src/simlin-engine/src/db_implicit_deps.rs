@@ -33,7 +33,7 @@ pub(super) fn extract_implicit_var_deps(
         return Vec::new();
     }
 
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap_or_default();
+    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let converted_dims: Vec<crate::dimensions::Dimension> = dims
         .iter()
         .map(crate::dimensions::Dimension::from)

@@ -217,7 +217,13 @@ impl UnitEvaluator<'_> {
 
                         Ok(units)
                     }
-                    BuiltinFn::Rank(a, _) => self.check(a),
+                    BuiltinFn::Rank(a, _) => {
+                        // Check the ranked array for internal consistency, but a
+                        // RANK result is a dimensionless ordinal position, not
+                        // the units of the array being ranked.
+                        self.check(a)?;
+                        Ok(Units::Explicit(UnitMap::new()))
+                    }
                     BuiltinFn::VectorSelect(_, expr_array, _, _, _) => self.check(expr_array),
                     BuiltinFn::VectorElmMap(source, _) => self.check(source),
                     BuiltinFn::VectorSortOrder(_, _) => Ok(Units::Constant),
