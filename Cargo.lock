@@ -3817,11 +3817,13 @@ name = "simlin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "checked",
  "mimalloc",
  "prost",
  "serde",
  "serde_json",
  "simlin-engine",
+ "wasm-interpreter",
 ]
 
 [[package]]

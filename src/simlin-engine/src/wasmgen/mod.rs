@@ -34,7 +34,10 @@ mod module;
 mod vector;
 mod views;
 
-pub use module::{WasmArtifact, WasmLayout, compile_datamodel_to_wasm, compile_simulation};
+pub use module::{
+    WasmArtifact, WasmLayout, compile_datamodel_to_artifact, compile_datamodel_to_wasm,
+    compile_simulation,
+};
 
 use std::fmt;
 

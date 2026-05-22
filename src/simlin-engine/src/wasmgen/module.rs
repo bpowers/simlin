@@ -85,24 +85,37 @@ const L_SAVED: u32 = 0;
 const L_STEP_ACCUM: u32 = 1;
 const L_DST: u32 = 2;
 
-/// Compile the named model of a datamodel `Project` to a self-contained wasm
-/// module, through the salsa incremental pipeline and [`compile_simulation`].
+/// Compile the named model of a datamodel `Project` to a full [`WasmArtifact`]
+/// (the wasm blob plus its [`WasmLayout`]), through the salsa incremental
+/// pipeline and [`compile_simulation`].
 ///
-/// This is the entry point used across the FFI boundary by `libsimlin`. The
-/// `WasmLayout` is dropped here (only the raw bytes are returned); Phase 7
-/// surfaces it through the FFI. The signature is kept stable so `libsimlin` and
-/// the `wasm-backend-poc.mjs` exploratory script keep building.
-pub fn compile_datamodel_to_wasm(
+/// This is the entry point `libsimlin` uses across the FFI boundary
+/// (`simlin_model_compile_to_wasm`): it works from a datamodel alone, with no
+/// `Vm`/`SimlinSim`, returning both the blob and the name->offset layout. An
+/// incremental-compile failure or an unsupported construct surfaces as
+/// [`WasmGenError`] (the FFI maps it to a `SimlinError`, never a panic).
+pub fn compile_datamodel_to_artifact(
     datamodel: &crate::datamodel::Project,
     model_name: &str,
-) -> Result<Vec<u8>, WasmGenError> {
+) -> Result<WasmArtifact, WasmGenError> {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
     let sim =
         crate::db::compile_project_incremental(&db, sync.project, model_name).map_err(|e| {
             WasmGenError::Unsupported(format!("wasmgen: incremental compile failed: {e:?}"))
         })?;
-    Ok(compile_simulation(&sim)?.wasm)
+    compile_simulation(&sim)
+}
+
+/// Compile the named model of a datamodel `Project` to a self-contained wasm
+/// module, dropping the [`WasmLayout`] (callers that need the layout use
+/// [`compile_datamodel_to_artifact`]). Kept as the stable raw-bytes entry point
+/// for the `wasm-backend-poc.mjs` exploratory script and any blob-only consumer.
+pub fn compile_datamodel_to_wasm(
+    datamodel: &crate::datamodel::Project,
+    model_name: &str,
+) -> Result<Vec<u8>, WasmGenError> {
+    Ok(compile_datamodel_to_artifact(datamodel, model_name)?.wasm)
 }
 
 // ============================================================================
@@ -136,6 +149,91 @@ pub struct WasmLayout {
     pub gf_data_offset: usize,
     /// Canonical variable name -> slot offset within a chunk.
     pub var_offsets: Vec<(String, usize)>,
+}
+
+impl WasmLayout {
+    /// Serialize the layout to a self-describing, length-prefixed byte buffer for
+    /// the FFI (no protobuf -- it rides the same malloc-return convention as the
+    /// wasm blob). The format is, all integers little-endian:
+    ///
+    /// ```text
+    /// n_slots:        u64
+    /// n_chunks:       u64
+    /// results_offset: u64
+    /// count:          u32              (number of var_offsets entries)
+    /// repeated count times:
+    ///     name_len:   u32
+    ///     name:       name_len bytes   (UTF-8, the canonical variable name)
+    ///     offset:     u64              (slot offset within a chunk)
+    /// ```
+    ///
+    /// The GF region offsets are intentionally NOT serialized: a host reads
+    /// results by name (via `n_slots`/`results_offset` + the name->offset map),
+    /// never the GF regions directly. [`deserialize`] is the exact inverse over
+    /// the geometry + name map (it leaves the GF offsets 0).
+    ///
+    /// [`deserialize`]: Self::deserialize
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(self.n_slots as u64).to_le_bytes());
+        out.extend_from_slice(&(self.n_chunks as u64).to_le_bytes());
+        out.extend_from_slice(&(self.results_offset as u64).to_le_bytes());
+        out.extend_from_slice(&(self.var_offsets.len() as u32).to_le_bytes());
+        for (name, offset) in &self.var_offsets {
+            let bytes = name.as_bytes();
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(bytes);
+            out.extend_from_slice(&(*offset as u64).to_le_bytes());
+        }
+        out
+    }
+
+    /// Parse a buffer produced by [`serialize`]. Returns `None` if the buffer is
+    /// truncated, an integer is malformed, or a name is not valid UTF-8 -- a host
+    /// gets a clean failure rather than a panic on a corrupt buffer. The GF region
+    /// offsets are reconstructed as 0 (they are not in the serialized format).
+    ///
+    /// This is the inverse used by the libsimlin FFI tests and any host that wants
+    /// to round-trip the layout in Rust; a non-Rust host re-implements the same
+    /// little-endian parse against the documented format.
+    ///
+    /// [`serialize`]: Self::serialize
+    pub fn deserialize(bytes: &[u8]) -> Option<WasmLayout> {
+        let mut pos = 0usize;
+        let take = |pos: &mut usize, n: usize| -> Option<&[u8]> {
+            let end = pos.checked_add(n)?;
+            let slice = bytes.get(*pos..end)?;
+            *pos = end;
+            Some(slice)
+        };
+        let read_u64 = |pos: &mut usize| -> Option<u64> {
+            Some(u64::from_le_bytes(take(pos, 8)?.try_into().ok()?))
+        };
+        let read_u32 = |pos: &mut usize| -> Option<u32> {
+            Some(u32::from_le_bytes(take(pos, 4)?.try_into().ok()?))
+        };
+
+        let n_slots = read_u64(&mut pos)? as usize;
+        let n_chunks = read_u64(&mut pos)? as usize;
+        let results_offset = read_u64(&mut pos)? as usize;
+        let count = read_u32(&mut pos)? as usize;
+        let mut var_offsets = Vec::with_capacity(count);
+        for _ in 0..count {
+            let name_len = read_u32(&mut pos)? as usize;
+            let name_bytes = take(&mut pos, name_len)?;
+            let name = std::str::from_utf8(name_bytes).ok()?.to_string();
+            let offset = read_u64(&mut pos)? as usize;
+            var_offsets.push((name, offset));
+        }
+        Some(WasmLayout {
+            n_slots,
+            n_chunks,
+            results_offset,
+            gf_directory_offset: 0,
+            gf_data_offset: 0,
+            var_offsets,
+        })
+    }
 }
 
 // GF region geometry. The directory holds one 8-byte entry per global table
@@ -1870,6 +1968,60 @@ mod tests {
         );
     }
 
+    /// Task 3 (pure serializer): a `WasmLayout` round-trips through
+    /// `serialize`/`deserialize` -- the geometry and the full name->offset map are
+    /// recovered exactly. The GF offsets are not part of the wire format (a host
+    /// reads results by name), so they come back as 0.
+    #[test]
+    fn wasm_layout_serialize_round_trips() {
+        let layout = WasmLayout {
+            n_slots: 7,
+            n_chunks: 101,
+            results_offset: 112,
+            gf_directory_offset: 4096,
+            gf_data_offset: 4104,
+            var_offsets: vec![
+                ("time".to_string(), 0),
+                ("population".to_string(), 4),
+                ("a_var_with_a_longer_name".to_string(), 6),
+            ],
+        };
+        let bytes = layout.serialize();
+        let back = WasmLayout::deserialize(&bytes).expect("round-trip must succeed");
+        assert_eq!(back.n_slots, 7);
+        assert_eq!(back.n_chunks, 101);
+        assert_eq!(back.results_offset, 112);
+        assert_eq!(back.var_offsets, layout.var_offsets);
+        // The GF offsets are not serialized; they reconstruct as 0.
+        assert_eq!(back.gf_directory_offset, 0);
+        assert_eq!(back.gf_data_offset, 0);
+    }
+
+    /// Task 3 (serializer robustness): a truncated buffer deserializes to `None`
+    /// rather than panicking, so a host handed a corrupt buffer fails cleanly.
+    #[test]
+    fn wasm_layout_deserialize_truncated_is_none() {
+        let layout = WasmLayout {
+            n_slots: 2,
+            n_chunks: 3,
+            results_offset: 32,
+            gf_directory_offset: 0,
+            gf_data_offset: 0,
+            var_offsets: vec![("x".to_string(), 0), ("y".to_string(), 1)],
+        };
+        let bytes = layout.serialize();
+        // Every strict prefix of a valid buffer must fail to parse (each cuts off
+        // a length-prefixed field mid-way).
+        for cut in 0..bytes.len() {
+            assert!(
+                WasmLayout::deserialize(&bytes[..cut]).is_none(),
+                "a buffer truncated to {cut} bytes must not deserialize"
+            );
+        }
+        // The full buffer parses.
+        assert!(WasmLayout::deserialize(&bytes).is_some());
+    }
+
     /// Task 1 (pure layout): an empty table list yields no regions and no
     /// growth, so a model without graphical functions is unaffected.
     #[test]
@@ -3408,6 +3560,63 @@ mod tests {
             assert!(
                 data[c * n_slots + off].is_nan(),
                 "out-of-bounds SUM(mat[row,1]) must be NaN at chunk {c}"
+            );
+        }
+    }
+
+    /// AC4.2: a by-name series read strides the results slab using only the
+    /// layout's `n_slots`/`results_offset` + the variable's offset, copies exactly
+    /// `n_chunks` values (never the whole `n_chunks * n_slots` slab), and equals
+    /// the VM's `get_series` for that variable. This is the read pattern a host
+    /// performs over the blob's results region (the FFI returns the same layout).
+    #[test]
+    fn by_name_series_read_strides_slab_and_matches_vm_get_series() {
+        let file = std::fs::File::open(POPULATION_XMILE).expect("open population model");
+        let mut reader = BufReader::new(file);
+        let datamodel = open_xmile(&mut reader).expect("parse population xmile");
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let results_offset = artifact.layout.results_offset;
+        let pop_off = layout_offset(&artifact, "population");
+
+        // Run the blob and read the whole results region once (the host would map
+        // the module's memory; here we copy it out).
+        let slab = run_artifact_results(&artifact);
+
+        // Stride out ONLY `population`'s series: exactly `n_chunks` reads at
+        // `results_offset/8 + c*n_slots + off` (the slab is f64-indexed here).
+        let _ = results_offset; // documents the byte base; `slab` already starts at it
+        let mut series = Vec::with_capacity(n_chunks);
+        for c in 0..n_chunks {
+            series.push(slab[c * n_slots + pop_off]);
+        }
+        assert_eq!(
+            series.len(),
+            n_chunks,
+            "a by-name read copies exactly n_chunks values, not the whole slab"
+        );
+        assert!(
+            n_slots > 1,
+            "the model must have >1 slot so striding (not a full copy) is meaningful"
+        );
+
+        // It equals the VM's get_series for the same variable.
+        let mut vm = Vm::new(sim).expect("vm");
+        vm.run_to_end().expect("vm run");
+        let pop = Ident::<Canonical>::from_str_unchecked("population");
+        let vm_series = vm.get_series(&pop).expect("vm get_series(population)");
+        assert_eq!(
+            vm_series.len(),
+            series.len(),
+            "series length matches the VM"
+        );
+        for (c, (&w, &v)) in series.iter().zip(vm_series.iter()).enumerate() {
+            assert!(
+                (w - v).abs() < 1e-9,
+                "population chunk {c}: striped wasm read {w} != vm get_series {v}"
             );
         }
     }

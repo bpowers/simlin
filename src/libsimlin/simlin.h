@@ -349,22 +349,39 @@ void simlin_free(uint8_t *ptr);
 // - `s` must be a valid pointer returned by simlin API functions that return strings
 void simlin_free_string(char *s);
 
-// Compile the model to a self-contained WebAssembly module.
+// Compile the model to a self-contained WebAssembly module plus its layout.
 //
 // The emitted module exports its own linear `memory` and a `run` function
 // that executes the whole simulation in one call, writing step-major result
 // snapshots into a results region of its memory. This is an alternative to
 // the bytecode VM intended for fast, repeated re-simulation (e.g. interactive
 // parameter scrubbing): the host instantiates the module once and calls `run`
-// on every change. Caller must free the output with `simlin_free`.
+// on every change.
+//
+// Two buffers are returned via the malloc-return convention, each freed
+// separately with `simlin_free`:
+// - `out_wasm`/`out_wasm_len`: the wasm blob.
+// - `out_layout`/`out_layout_len`: a self-describing, length-prefixed layout
+//   buffer (all integers little-endian): `n_slots` (u64), `n_chunks` (u64),
+//   `results_offset` (u64), `count` (u32), then per entry `name_len` (u32) +
+//   UTF-8 name + `offset` (u64). A host strides one variable's `n_chunks`-long
+//   series from the results region using `results_offset`, `n_slots`, and the
+//   variable's `offset` from this map.
+//
+// Works from the model's datamodel alone -- no `SimlinSim` is required. Any
+// compile or codegen failure stores a `SimlinError` (never panics across the
+// boundary) and leaves both output buffers NULL.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
-// - `out_buffer` and `out_len` must be valid, non-null pointers
+// - `out_wasm`, `out_wasm_len`, `out_layout`, and `out_layout_len` must be
+//   valid, non-null pointers
 // - `out_error` may be null
 void simlin_model_compile_to_wasm(SimlinModel *model,
-                                  uint8_t **out_buffer,
-                                  uintptr_t *out_len,
+                                  uint8_t **out_wasm,
+                                  uintptr_t *out_wasm_len,
+                                  uint8_t **out_layout,
+                                  uintptr_t *out_layout_len,
                                   SimlinError **out_error);
 
 // Increments the reference count of a model

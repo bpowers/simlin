@@ -101,17 +101,60 @@ free(namePtr);
 
 const outBuf = outPtr();
 const outLen = outPtr();
+const outLayout = outPtr();
+const outLayoutLen = outPtr();
 ep = outPtr();
-E.simlin_model_compile_to_wasm(model, outBuf, outLen, ep);
+// New 6-arg signature: returns the wasm blob AND a serialized WasmLayout
+// (name -> slot offset map + geometry), each via the malloc-return convention.
+E.simlin_model_compile_to_wasm(model, outBuf, outLen, outLayout, outLayoutLen, ep);
 checkErr(ep, 'compile_to_wasm');
 const blobPtr = u32(outBuf);
 const blobLen = u32(outLen);
 const blob = readBytes(blobPtr, blobLen);
+const layoutPtr = u32(outLayout);
+const layoutLen = u32(outLayoutLen);
+const layoutBytes = readBytes(layoutPtr, layoutLen);
 free(blobPtr);
+free(layoutPtr);
 free(outBuf);
 free(outLen);
+free(outLayout);
+free(outLayoutLen);
 free(ep);
-console.log(`compiled model -> ${blobLen} bytes of WebAssembly`);
+console.log(`compiled model -> ${blobLen} bytes of WebAssembly + ${layoutLen}-byte layout`);
+
+// Parse the serialized WasmLayout (little-endian): n_slots, n_chunks,
+// results_offset (u64 each), count (u32), then per entry name_len (u32) +
+// UTF-8 name + offset (u64). This is the same name->offset map the engine
+// exposes, so a host can read a variable's series by name with no guessing.
+function parseLayout(bytes) {
+  const d = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let p = 0;
+  const u64 = () => {
+    const v = Number(d.getBigUint64(p, true));
+    p += 8;
+    return v;
+  };
+  const u32le = () => {
+    const v = d.getUint32(p, true);
+    p += 4;
+    return v;
+  };
+  const nSlots = u64();
+  const nChunks = u64();
+  const resultsOffset = u64();
+  const count = u32le();
+  const varOffsets = new Map();
+  for (let i = 0; i < count; i++) {
+    const nameLen = u32le();
+    const name = TD.decode(bytes.slice(p, p + nameLen));
+    p += nameLen;
+    varOffsets.set(name, u64());
+  }
+  return { nSlots, nChunks, resultsOffset, varOffsets };
+}
+const layout = parseLayout(layoutBytes);
+console.log(`layout: ${layout.varOffsets.size} named variables`);
 
 // ── direct-drive: JS instantiates the model blob and calls run() ──────────
 const { instance: mi } = await WebAssembly.instantiate(blob, {});
@@ -182,6 +225,31 @@ for (const name of vars) {
   console.log(`  ${name.padEnd(18)} -> blob column ${bestCol}, max|Δ| = ${best.toExponential(2)}`);
 }
 console.log(`worst mismatch across variables: ${worst.toExponential(2)} -> ${worst < 1e-9 ? 'MATCH' : 'FAIL'}`);
+
+// ── by-name reads via the layout (no brute-force column matching) ──────────
+// The layout's name -> offset map lets a host read a variable's series directly,
+// striding the results region by `n_slots`. Verify it agrees with the VM.
+console.log('\nby-name reads via the returned layout:');
+let worstByName = 0;
+for (const name of vars) {
+  let vm;
+  try {
+    vm = vmSeries(name);
+  } catch {
+    continue;
+  }
+  const off = layout.varOffsets.get(name);
+  if (off === undefined) {
+    console.log(`  ${name.padEnd(18)} (not in layout)`);
+    continue;
+  }
+  const series = blobColumn(off);
+  let m = 0;
+  for (let c = 0; c < vm.length; c++) m = Math.max(m, Math.abs(vm[c] - series[c]));
+  worstByName = Math.max(worstByName, m);
+  console.log(`  ${name.padEnd(18)} -> layout offset ${off}, max|Δ| = ${m.toExponential(2)}`);
+}
+console.log(`worst by-name mismatch: ${worstByName.toExponential(2)} -> ${worstByName < 1e-9 ? 'MATCH' : 'FAIL'}`);
 
 const pop = vmSeries('population');
 console.log(`\npopulation: ${pop[0].toFixed(2)} (t=start) ... ${pop[pop.length - 1].toFixed(2)} (t=stop), ${pop.length} steps`);
