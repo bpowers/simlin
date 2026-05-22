@@ -16,7 +16,7 @@ use simlin_engine::db::{
 };
 use simlin_engine::load_csv;
 
-use test_helpers::ensure_results;
+use test_helpers::{WasmRunOutcome, ensure_results, ensure_wasm_matches};
 
 /// All valid systems format test models.
 const ALL_VALID_MODELS: &[&str] = &[
@@ -61,6 +61,94 @@ fn simulate_systems_file(txt_path: &str, csv_path: &str, rounds: u64) {
         .unwrap_or_else(|e| panic!("VM execution failed for {txt_path}: {e}"));
     let results = vm.into_results();
     ensure_results(&expected, &results);
+
+    // Opportunistic wasm-backend parity: a systems-format model translates to
+    // stdlib-module instances (`systems_rate`/`systems_leak`/`systems_conversion`),
+    // so this exercises the wasm backend's module path end-to-end. A supported
+    // model must clear the SAME comparator the VM cleared against `expected`; an
+    // unsupported construct is `Skipped` (never a failure -- the supported count
+    // is pinned by `wasm_systems_parity_floor`). `ensure_wasm_matches` panics on a
+    // supported-but-wrong model.
+    let _ = ensure_wasm_matches(&datamodel_project, "main", &expected, &[]);
+}
+
+/// Monotonically-rising floor on how many systems-format models run through the
+/// wasm backend to VM parity. Systems-format models translate to stdlib-module
+/// instances (`systems_rate`/`systems_leak`/`systems_conversion`), so they
+/// exercise the wasm backend's `EvalModule`/`LoadModuleInput` path (Phase 7
+/// Task 1) end-to-end. Dropping below this floor is a regression: a systems
+/// model that used to clear the wasm backend no longer does.
+///
+/// Phase 7 observes all 10 `ALL_VALID_MODELS` run to VM parity through wasm (the
+/// systems stdlib modules carry only scalar/`AssignNext` opcodes the backend
+/// fully supports). Re-observe with `wasm_systems_parity_floor -- --nocapture`.
+const WASM_SYSTEMS_SUPPORTED_FLOOR: usize = 10;
+
+/// Parse + translate the systems model at `path` (a fixed `rounds`), run it
+/// through the VM for an `expected` baseline, and return whether the wasm backend
+/// reproduces it (`Ran`) or skips it as unsupported (`Skipped`). A parse/
+/// translate/VM failure is surfaced as `Skipped` (those paths are gated by the
+/// per-model simulation tests; this floor only counts wasm-vs-VM parity).
+fn wasm_systems_outcome_for_path(path: &str, rounds: u64) -> WasmRunOutcome {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return WasmRunOutcome::Skipped(format!("could not read {path}"));
+    };
+    let systems_model = match simlin_engine::systems::parse(&contents) {
+        Ok(m) => m,
+        Err(e) => return WasmRunOutcome::Skipped(format!("parse failed: {e}")),
+    };
+    let datamodel = match simlin_engine::systems::translate::translate(&systems_model, rounds) {
+        Ok(p) => p,
+        Err(e) => return WasmRunOutcome::Skipped(format!("translate failed: {e}")),
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    let compiled = match compile_project_incremental(&db, sync.project, "main") {
+        Ok(c) => c,
+        Err(e) => return WasmRunOutcome::Skipped(format!("VM compile failed: {e:?}")),
+    };
+    let mut vm = match Vm::new(compiled) {
+        Ok(vm) => vm,
+        Err(e) => return WasmRunOutcome::Skipped(format!("VM creation failed: {e}")),
+    };
+    if let Err(e) = vm.run_to_end() {
+        return WasmRunOutcome::Skipped(format!("VM run failed: {e}"));
+    }
+    let expected = vm.into_results();
+    ensure_wasm_matches(&datamodel, "main", &expected, &[])
+}
+
+/// Rising-floor gate: run every systems-format model through the wasm backend and
+/// assert at least `WASM_SYSTEMS_SUPPORTED_FLOOR` of them run to VM parity. This
+/// is a direct wasm-vs-VM check (the VM's own output is the baseline), independent
+/// of the on-disk CSV fixtures. The per-model simulation tests additionally run
+/// the inline `ensure_wasm_matches` hook against their CSV-cleared `expected`.
+#[test]
+fn wasm_systems_parity_floor() {
+    let mut ran = 0usize;
+    let mut skipped = 0usize;
+    for &path in ALL_VALID_MODELS {
+        // A fixed `rounds` like the compile-only gate; the wasm-vs-VM parity does
+        // not depend on the exact horizon, only that both backends agree on it.
+        match wasm_systems_outcome_for_path(path, 5) {
+            WasmRunOutcome::Ran => ran += 1,
+            WasmRunOutcome::Skipped(msg) => {
+                skipped += 1;
+                eprintln!("wasm skipped {path}: {msg}");
+            }
+        }
+    }
+    eprintln!(
+        "wasm_systems_parity_floor: {ran} of {} systems models ran to VM parity ({skipped} skipped); floor {WASM_SYSTEMS_SUPPORTED_FLOOR}",
+        ALL_VALID_MODELS.len()
+    );
+    assert!(
+        ran >= WASM_SYSTEMS_SUPPORTED_FLOOR,
+        "wasm systems parity regression: only {ran} of {} systems models ran to VM parity, \
+         below the pinned floor of {WASM_SYSTEMS_SUPPORTED_FLOOR}",
+        ALL_VALID_MODELS.len()
+    );
 }
 
 #[test]

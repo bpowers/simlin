@@ -215,7 +215,22 @@ static TEST_MODELS: &[&str] = &[
 /// exactly as RK/`PREVIOUS`/`INIT` (Phase 4) and the view/reducer ops (Phase 5)
 /// are pinned by unit tests rather than by this corpus floor. The floor rises
 /// in Phase 7 when submodules land.
-const WASM_SUPPORTED_FLOOR: usize = 50;
+///
+/// Phase 7 lands nested modules (`EvalModule`/`LoadModuleInput`, one wasm
+/// function-triple per `(model, input_set)` instance) plus the `set_value`/`reset`
+/// override mechanism, so the eight previously-`Skipped` corpus models that all
+/// failed on `wasmgen: submodules are not supported`
+/// (`bpowers-hares_and_lynxes_modules`, `delays2`, `smooth_and_stock`, `trend`,
+/// and the four `macro_*` fixtures) now `Ran`. Re-running `wasm_parity_floor`
+/// shows ALL 58 active `TEST_MODELS` run to VM parity (0 skipped), so the floor
+/// rises to 58 -- the full active corpus. (Any remaining out-of-scope construct
+/// -- a genuine runtime view range `arr[lo:hi]` with non-literal bounds, or array
+/// unrolling past the per-function budget -- still returns `Unsupported`, but no
+/// active `TEST_MODELS` member reaches one; those are pinned by the inline
+/// `wasmgen` unit tests and `ensure_wasm_matches_skips_unsupported_model`.) The
+/// heavy/`#[ignore]`-class models (e.g. C-LEARN) defer their wasm twins to a
+/// later phase.
+const WASM_SUPPORTED_FLOOR: usize = 58;
 
 /// AC3.1 / AC3.3 rising-floor gate: run every (non-`#[ignore]`-class) corpus
 /// model in `TEST_MODELS` through the wasm backend and assert at least
