@@ -10,7 +10,7 @@
  * For batch analysis, use Model.run() instead.
  */
 
-import { EngineBackend, SimHandle } from './backend';
+import { EngineBackend, SimHandle, SimEngine } from './backend';
 import { Link } from './types';
 import { Model } from './model';
 import { Run } from './run';
@@ -28,32 +28,47 @@ export class Sim {
   private _overrides: Record<string, number>;
   private _disposed: boolean = false;
   private _enableLtm: boolean;
+  // Which execution backend this sim runs on. Kept private so getRun and
+  // diagnostics can branch on it without widening the public surface.
+  private _engine: SimEngine;
 
   /** @internal Use Sim.create() instead. */
-  private constructor(handle: SimHandle, model: Model, overrides: Record<string, number>, enableLtm: boolean) {
+  private constructor(
+    handle: SimHandle,
+    model: Model,
+    overrides: Record<string, number>,
+    enableLtm: boolean,
+    engine: SimEngine,
+  ) {
     this._handle = handle;
     this._model = model;
     this._overrides = { ...overrides };
     this._enableLtm = enableLtm;
+    this._engine = engine;
   }
 
   /**
    * Create a Sim from a Model.
    * This is internal - use Model.simulate() instead.
    */
-  static async create(model: Model, overrides: Record<string, number> = {}, enableLtm: boolean = false): Promise<Sim> {
+  static async create(
+    model: Model,
+    overrides: Record<string, number> = {},
+    enableLtm: boolean = false,
+    engine: SimEngine = 'vm',
+  ): Promise<Sim> {
     if (model.project === null) {
       throw new Error('Model is not attached to a Project');
     }
     const backend = model.project.backend;
-    const handle = await backend.simNew(model.handle, enableLtm);
+    const handle = await backend.simNew(model.handle, enableLtm, engine);
 
     // Apply any overrides
     for (const [name, value] of Object.entries(overrides)) {
       await backend.simSetValue(handle, name, value);
     }
 
-    return new Sim(handle, model, overrides, enableLtm);
+    return new Sim(handle, model, overrides, enableLtm, engine);
   }
 
   /** @internal */
@@ -209,7 +224,19 @@ export class Sim {
       results.set(allNames[i], seriesArrays[i]);
     }
 
-    const [loops, links, stepCount] = await Promise.all([this._model.loops(), this.getLinks(), this.getStepCount()]);
+    // Fetch LTM link scores only when this sim can actually produce them: LTM
+    // must be enabled, and the wasm engine never supports getLinks (it throws).
+    // The two are correlated -- LTM-on-wasm is rejected at sim creation -- but
+    // reading `_engine` here makes the guard self-evidently safe and keeps
+    // Model.run({engine:'wasm'}) working (empty links, no getLinks call). The
+    // VM path with LTM off also carries empty links. loops() is model-level
+    // (engine-agnostic) and stays unconditional.
+    const wantLinks = this.ltmEnabled && this._engine !== 'wasm';
+    const [loops, links, stepCount] = await Promise.all([
+      this._model.loops(),
+      wantLinks ? this.getLinks() : Promise.resolve<readonly Link[]>([]),
+      this.getStepCount(),
+    ]);
 
     return new Run({
       varNames,
