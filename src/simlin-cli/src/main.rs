@@ -2,13 +2,16 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// mimalloc on native builds (the engine compile path is allocation-heavy;
-// mimalloc roughly halves allocator time -- see docs/design/engine-performance.md)
-// comes via the `simlin/mimalloc` feature on the libsimlin dependency, which
-// installs the global allocator. We deliberately do NOT declare a second
-// `#[global_allocator]` here: this binary links libsimlin, and two global
-// allocators in one artifact is a compile error (notably under
-// `cargo clippy --all-features`, which enables libsimlin's feature).
+// mimalloc is this binary's global allocator on native builds: the engine
+// compile path is allocation-heavy and mimalloc roughly halves allocator time
+// (see docs/design/engine-performance.md). Installed directly here rather than
+// via libsimlin so the CLI links no cdylib/staticlib crate -- libsimlin's
+// fixed-name (unhashed) rlib otherwise relinked this binary on every
+// `cargo build` <-> `cargo build -p simlin-cli` switch. wasm is never a target
+// for this binary; the cfg mirrors libsimlin's own allocator guard.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -17,9 +20,6 @@ use std::result::Result as StdResult;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use simlin::errors::{
-    FormattedError, FormattedErrorKind, FormattedErrors, format_diagnostic, format_simulation_error,
-};
 use simlin_engine::common::ErrorKind;
 use simlin_engine::data_provider::FilesystemDataProvider;
 use simlin_engine::datamodel::Project as DatamodelProject;
@@ -28,6 +28,9 @@ use simlin_engine::db::{
     compile_project_incremental, model_detected_loops, model_module_ident_context,
     parse_source_variable_with_module_context, set_project_ltm_enabled, sync_from_datamodel,
     sync_from_datamodel_incremental,
+};
+use simlin_engine::errors::{
+    FormattedError, FormattedErrorKind, FormattedErrors, format_diagnostic, format_simulation_error,
 };
 use simlin_engine::prost::Message;
 use simlin_engine::{Error, ErrorCode, Result, Results, Vm, datamodel, project_io, serde};

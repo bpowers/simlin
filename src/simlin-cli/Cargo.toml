@@ -14,11 +14,14 @@ clap = { version = "4", features = ["derive"] }
 stringreader = "0.1"
 sha2 = "0.10"
 simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["file_io"] }
-# `mimalloc` installs mimalloc as the process global allocator (this binary runs
-# the allocation-heavy engine compile path). Routed through libsimlin rather than
-# a direct dep + local `#[global_allocator]` so there is exactly one global
-# allocator in this artifact even under `cargo clippy --all-features`.
-simlin = { version = "0.1", path = "../libsimlin", features = ["mimalloc"] }
+# mimalloc is this binary's global allocator (installed in main.rs): the engine
+# compile path is allocation-heavy and mimalloc roughly halves allocator time
+# (docs/design/engine-performance.md). Depended on directly rather than through
+# libsimlin so the CLI's dependency closure contains no cdylib/staticlib crate.
+# libsimlin emits a fixed-name (unhashed) rlib that cannot coexist with the
+# workspace's feature-unified variant of itself, so depending on it forced this
+# binary to relink on every `cargo build` <-> `cargo build -p simlin-cli` switch.
+mimalloc = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
