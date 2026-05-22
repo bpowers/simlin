@@ -95,6 +95,7 @@ IMPORTANT: If feedback seems non-actionable, it means you need comments explaini
 - Public Rust items and non-trivial internal functions should have concise rustdoc describing purpose, key assumptions, and side effects.
 - When behavior changes, update nearby comments in the same commit so docs and code stay aligned.
 - If you intentionally remove a comment block, replace it with an updated equivalent when the context is still non-obvious.
+- NEVER add a "Last updated" (or "Last verified") line to a `CLAUDE.md`: it is a perpetual rebase/merge-conflict magnet and goes stale immediately. Describe current state in prose; rely on `git log` / `git blame` for history.
 
 ## Development Standards
 
