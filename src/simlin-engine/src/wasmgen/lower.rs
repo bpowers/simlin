@@ -59,12 +59,14 @@
 //! corresponding body in [`build_helpers`]; no helper index is hard-coded
 //! elsewhere, so the per-program offset adjusts automatically.
 
+use std::collections::HashMap;
+
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, GraphicalFunctionId, LookupMode, Op2, Opcode,
 };
-use crate::vm::StepPart;
+use crate::vm::{StepPart, make_module_key};
 
 use super::WasmGenError;
 use super::views::ElementAddr;
@@ -206,10 +208,29 @@ pub(crate) struct EmitCtx<'a> {
     /// unconditionally (a model without allocators never reads it). The test
     /// harness sets a fixed high offset within its single memory page.
     pub alloc_scratch_base: u32,
-    /// The module's `ByteCodeContext`, holding the compile-time array tables the
-    /// view opcodes reference by index: `static_views`, `dim_lists`,
-    /// `dimensions`, `subdim_relations`, and `temp_offsets`. Run-invariant and
-    /// shared by every per-program function.
+    /// First wasm local index of the `EvalModule` reverse-pop scratch f64s (Phase
+    /// 7). An `EvalModule { n_inputs }` pops its `n_inputs` operands into the first
+    /// `n_inputs` of these (in reverse, matching the VM's `for j in
+    /// (0..n_inputs).rev()`), then pushes `child_module_off` followed by them in
+    /// order before the child `call`. Sized by `module.rs` to the max `n_inputs`
+    /// over the program's `EvalModule` sites; 0 (and unused) for a program with no
+    /// submodule instantiation. See [`module_input_scratch_base`].
+    pub module_input_scratch_base: u32,
+    /// Resolves an `EvalModule { id }` site to the child instance's wasm function
+    /// index for the program being emitted: `module_fn_index[(child_key, part)]`,
+    /// where `child_key = make_module_key(&ctx.modules[id].model_name,
+    /// &ctx.modules[id].input_set)` and `part == step_part`. Built once by
+    /// `module.rs` before any program function is emitted (the module
+    /// instantiation graph is acyclic, so every child index exists by the time its
+    /// caller is emitted). Empty for a single-module (no-submodule) program.
+    pub module_fn_index: &'a HashMap<(crate::vm::ModuleKey, StepPart), u32>,
+    /// The module instance's `ByteCodeContext`, holding the compile-time array
+    /// tables the view opcodes reference by index (`static_views`, `dim_lists`,
+    /// `dimensions`, `subdim_relations`, `temp_offsets`) *and* the `modules`
+    /// declaration table the `EvalModule` arm resolves child keys from. This is
+    /// the *per-instance* context (Phase 7): each instance's functions are emitted
+    /// with its own context, so an `EvalModule`'s `ctx.modules[id]` and the array
+    /// tables refer to the instance whose function is being lowered.
     pub ctx: &'a ByteCodeContext,
 }
 
@@ -825,22 +846,41 @@ pub(crate) const VECTOR_F64_LOCAL_COUNT: u32 = 5;
 /// free.
 pub(crate) const VECTOR_I32_LOCAL_COUNT: u32 = 3;
 
+/// The first declared-local wasm index of an opcode-program function with
+/// `n_inputs` f64 module-input parameters. Param 0 is `module_off`; params
+/// `1..=n_inputs` are the module inputs (`LoadModuleInput { input }` reads param
+/// `input + 1`); declared locals begin at `1 + n_inputs`. For the root (and every
+/// Phase 1-6 single-module function) `n_inputs == 0`, so this is the historical
+/// index 1 (the scratch f64).
+fn first_local_index(n_inputs: u32) -> u32 {
+    1 + n_inputs
+}
+
 /// The local-declaration list for an opcode-program `Function` carrying
-/// `cond_depth` condition locals and `extra_i32` dynamic-subscript scratch
-/// locals: one scratch f64, then `cond_depth` i32 condition locals, then
+/// `cond_depth` condition locals, `extra_i32` dynamic-subscript scratch locals,
+/// and `module_input_scratch` f64 locals for the `EvalModule` reverse-pop: one
+/// scratch f64, then `cond_depth` i32 condition locals, then
 /// [`APPLY_LOCAL_COUNT`] f64 `Apply` scratch locals, then
 /// [`VECTOR_F64_LOCAL_COUNT`] f64 vector-op scratch locals, then
 /// [`VECTOR_I32_LOCAL_COUNT`] i32 vector-op scratch locals, then `extra_i32` i32
-/// locals (Task 4 dynamic subscripts; 0 when the program has none).
+/// locals (Task 4 dynamic subscripts; 0 when the program has none), then
+/// `module_input_scratch` f64 locals (Phase 7 `EvalModule`; 0 when the program
+/// instantiates no submodule).
 ///
 /// Defined once (and consumed by both `module.rs`'s function builders and the
 /// `#[cfg(test)]` harness) so the declared local *types and order* match the
 /// indices [`apply_locals_for`], [`vector_f64_locals_for`],
-/// [`vector_i32_locals_for`], and [`extra_i32_local_base`] hand out. Param 0 is
-/// `module_off`. The vector locals sit at a *fixed* offset (independent of
-/// `extra_i32`) so the dynamic-subscript extra i32s -- placed last -- shift by a
-/// constant and never disturb the `apply_locals` indices.
-pub(crate) fn opcode_fn_locals(cond_depth: usize, extra_i32: u32) -> Vec<(u32, ValType)> {
+/// [`vector_i32_locals_for`], [`extra_i32_local_base`], and
+/// [`module_input_scratch_base`] hand out. The declared locals always start at
+/// `1 + n_inputs` (past `module_off` and the f64 input params); the vector locals
+/// sit at a *fixed* offset (independent of `extra_i32`) so the dynamic-subscript
+/// extra i32s -- and the module-input scratch after them -- shift by a constant
+/// and never disturb the `apply_locals` indices.
+pub(crate) fn opcode_fn_locals(
+    cond_depth: usize,
+    extra_i32: u32,
+    module_input_scratch: u32,
+) -> Vec<(u32, ValType)> {
     vec![
         (1, ValType::F64),
         (cond_depth as u32, ValType::I32),
@@ -848,47 +888,93 @@ pub(crate) fn opcode_fn_locals(cond_depth: usize, extra_i32: u32) -> Vec<(u32, V
         (VECTOR_F64_LOCAL_COUNT, ValType::F64),
         (VECTOR_I32_LOCAL_COUNT, ValType::I32),
         (extra_i32, ValType::I32),
+        (module_input_scratch, ValType::F64),
     ]
 }
 
 /// The [`VECTOR_F64_LOCAL_COUNT`] vector-op scratch f64 local indices for a
-/// function with `cond_depth` condition locals. They follow param 0, the scratch
-/// f64 (index 1), the `cond_depth` i32 condition locals, and the
-/// [`APPLY_LOCAL_COUNT`] `Apply` f64s. Threaded into
-/// [`EmitCtx::vector_f64_locals`].
-pub(crate) fn vector_f64_locals_for(cond_depth: usize) -> [u32; VECTOR_F64_LOCAL_COUNT as usize] {
-    let base = 2 + cond_depth as u32 + APPLY_LOCAL_COUNT;
+/// function with `n_inputs` module-input params and `cond_depth` condition
+/// locals. They follow the declared scratch f64 (index `1 + n_inputs`), the
+/// `cond_depth` i32 condition locals, and the [`APPLY_LOCAL_COUNT`] `Apply` f64s.
+/// Threaded into [`EmitCtx::vector_f64_locals`].
+pub(crate) fn vector_f64_locals_for(
+    n_inputs: u32,
+    cond_depth: usize,
+) -> [u32; VECTOR_F64_LOCAL_COUNT as usize] {
+    let base = first_local_index(n_inputs) + 1 + cond_depth as u32 + APPLY_LOCAL_COUNT;
     [base, base + 1, base + 2, base + 3, base + 4]
 }
 
 /// The [`VECTOR_I32_LOCAL_COUNT`] vector-op scratch i32 local indices for a
-/// function with `cond_depth` condition locals. They follow the
-/// [`VECTOR_F64_LOCAL_COUNT`] vector-op f64s. Threaded into
-/// [`EmitCtx::vector_i32_locals`].
-pub(crate) fn vector_i32_locals_for(cond_depth: usize) -> [u32; VECTOR_I32_LOCAL_COUNT as usize] {
-    let base = 2 + cond_depth as u32 + APPLY_LOCAL_COUNT + VECTOR_F64_LOCAL_COUNT;
+/// function with `n_inputs` module-input params and `cond_depth` condition
+/// locals. They follow the [`VECTOR_F64_LOCAL_COUNT`] vector-op f64s. Threaded
+/// into [`EmitCtx::vector_i32_locals`].
+pub(crate) fn vector_i32_locals_for(
+    n_inputs: u32,
+    cond_depth: usize,
+) -> [u32; VECTOR_I32_LOCAL_COUNT as usize] {
+    let base = first_local_index(n_inputs)
+        + 1
+        + cond_depth as u32
+        + APPLY_LOCAL_COUNT
+        + VECTOR_F64_LOCAL_COUNT;
     [base, base + 1, base + 2]
 }
 
-/// First wasm local index of the `extra_i32` dynamic-subscript scratch locals
-/// for a function with `cond_depth` condition locals: past param 0
-/// (`module_off`), the scratch f64 (index 1), the `cond_depth` i32 condition
-/// locals, the [`APPLY_LOCAL_COUNT`] `Apply` f64s, the
-/// [`VECTOR_F64_LOCAL_COUNT`] vector-op f64s, and the [`VECTOR_I32_LOCAL_COUNT`]
-/// vector-op i32s. Threaded into [`EmitCtx::extra_i32_local_base`] so the
-/// dynamic-subscript local allocator draws from exactly the declared range.
-pub(crate) fn extra_i32_local_base(cond_depth: usize) -> u32 {
-    2 + cond_depth as u32 + APPLY_LOCAL_COUNT + VECTOR_F64_LOCAL_COUNT + VECTOR_I32_LOCAL_COUNT
+/// First wasm local index of the `extra_i32` dynamic-subscript scratch locals for
+/// a function with `n_inputs` module-input params and `cond_depth` condition
+/// locals: past `module_off` + the `n_inputs` f64 input params, the scratch f64
+/// (index `1 + n_inputs`), the `cond_depth` i32 condition locals, the
+/// [`APPLY_LOCAL_COUNT`] `Apply` f64s, the [`VECTOR_F64_LOCAL_COUNT`] vector-op
+/// f64s, and the [`VECTOR_I32_LOCAL_COUNT`] vector-op i32s. Threaded into
+/// [`EmitCtx::extra_i32_local_base`] so the dynamic-subscript local allocator
+/// draws from exactly the declared range.
+pub(crate) fn extra_i32_local_base(n_inputs: u32, cond_depth: usize) -> u32 {
+    first_local_index(n_inputs)
+        + 1
+        + cond_depth as u32
+        + APPLY_LOCAL_COUNT
+        + VECTOR_F64_LOCAL_COUNT
+        + VECTOR_I32_LOCAL_COUNT
+}
+
+/// First wasm local index of the `module_input_scratch` f64 locals (Phase 7
+/// `EvalModule` reverse-pop) for a function with `n_inputs` module-input params,
+/// `cond_depth` condition locals, and `extra_i32` dynamic-subscript i32 locals.
+/// They follow the `extra_i32` block (the last i32 run), so this is
+/// [`extra_i32_local_base`]`+ extra_i32`. The `EvalModule` arm pops a child's
+/// inputs into the first `n` of these (where `n` is that call's `n_inputs`),
+/// matching the VM's reverse pop into `module_inputs`. Threaded into
+/// [`EmitCtx::module_input_scratch_base`].
+pub(crate) fn module_input_scratch_base(n_inputs: u32, cond_depth: usize, extra_i32: u32) -> u32 {
+    extra_i32_local_base(n_inputs, cond_depth) + extra_i32
 }
 
 /// The three `Apply` scratch f64 local indices `[a, b, c]` for a function with
-/// `cond_depth` condition locals. They follow param 0 (`module_off`), the
-/// scratch f64 (index 1), and the `cond_depth` i32 condition locals, so they
-/// start at `2 + cond_depth`. Mirrors the declaration order in
+/// `n_inputs` module-input params and `cond_depth` condition locals. They follow
+/// `module_off` + the `n_inputs` f64 input params, the scratch f64
+/// (index `1 + n_inputs`), and the `cond_depth` i32 condition locals, so they
+/// start at `1 + n_inputs + 1 + cond_depth`. Mirrors the declaration order in
 /// [`opcode_fn_locals`].
-pub(crate) fn apply_locals_for(cond_depth: usize) -> [u32; 3] {
-    let base = 2 + cond_depth as u32; // 1 (param) + 1 (scratch) + cond_depth
+pub(crate) fn apply_locals_for(n_inputs: u32, cond_depth: usize) -> [u32; 3] {
+    let base = first_local_index(n_inputs) + 1 + cond_depth as u32;
     [base, base + 1, base + 2]
+}
+
+/// The wasm local index of the assign-scratch f64 for a function with `n_inputs`
+/// module-input params: the first declared local (`1 + n_inputs`), past
+/// `module_off` and the f64 input params. Threaded into [`EmitCtx::scratch_local`].
+pub(crate) fn scratch_local_for(n_inputs: u32) -> u32 {
+    first_local_index(n_inputs)
+}
+
+/// The `cond_depth` condition-register local indices for a function with
+/// `n_inputs` module-input params. They follow the scratch f64 (index
+/// `1 + n_inputs`), so the first is `2 + n_inputs`. Threaded into
+/// [`EmitCtx::condition_locals`].
+pub(crate) fn condition_locals_for(n_inputs: u32, cond_depth: usize) -> Vec<u32> {
+    let base = first_local_index(n_inputs) + 1;
+    (0..cond_depth as u32).map(|i| base + i).collect()
 }
 
 pub(crate) fn max_condition_depth(bc: &ByteCode) -> usize {
@@ -1104,6 +1190,26 @@ pub(crate) fn count_extra_i32_locals(bc: &ByteCode) -> u32 {
         })
         .count() as u32
         * 2
+}
+
+/// The number of scratch f64 wasm locals a program needs for the `EvalModule`
+/// reverse-pop (Phase 7): the maximum `n_inputs` over its `EvalModule` sites.
+///
+/// Each `EvalModule { n_inputs }` pops its `n_inputs` operands into scratch f64
+/// locals (in reverse, matching the VM) before pushing `child_module_off` and
+/// re-pushing them in order. Because the sites are emitted sequentially (each
+/// fully consumes its scratch before the next runs), reserving the *max* per-site
+/// count -- not the sum -- suffices, and successive sites reuse the same locals.
+/// Returns 0 for a program that instantiates no submodule.
+pub(crate) fn count_module_input_scratch(bc: &ByteCode) -> u32 {
+    bc.code
+        .iter()
+        .filter_map(|op| match op {
+            Opcode::EvalModule { n_inputs, .. } => Some(u32::from(*n_inputs)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Lower a (sub-)slice of opcodes, threading the emit-time [`EmitState`]. The
@@ -1702,6 +1808,20 @@ fn emit_ops(
                     ctx,
                     f,
                 )?;
+            }
+            // `LoadModuleInput { input }` mirrors the VM (`vm.rs:1376-1378`:
+            // `stack.push(module_inputs[input])`). The instance's inputs are wasm
+            // params `1..=n_inputs` (param 0 is `module_off`), so input `input` is
+            // at local `input + 1`.
+            Opcode::LoadModuleInput { input } => {
+                f.instruction(&Instruction::LocalGet(u32::from(*input) + 1));
+            }
+            // `EvalModule { id, n_inputs }` mirrors the VM (`vm.rs:1379-1443`):
+            // pop the `n_inputs` operands into scratch (in reverse), resolve the
+            // child instance, and `call` its function for the current `StepPart`,
+            // passing `module_off + decl.off` and the inputs in order.
+            Opcode::EvalModule { id, n_inputs } => {
+                emit_eval_module(*id, *n_inputs, ctx, f)?;
             }
             Opcode::Ret => {
                 // The caller emits the function's terminating `End`.
@@ -3010,6 +3130,65 @@ fn emit_load_initial(off: u16, ctx: &EmitCtx, f: &mut Function) {
     f.instruction(&Instruction::F64Load(memarg(slot_byte_offset(
         chunk_base, off,
     ))));
+}
+
+/// Lower `EvalModule { id, n_inputs }`, mirroring the VM (`vm.rs:1379-1443`).
+///
+/// The `n_inputs` operands are already on the wasm stack (the parent's bytecode
+/// pushed them, top = the last input). The VM pops them in reverse into
+/// `module_inputs[j]` (`for j in (0..n_inputs).rev()`), computes
+/// `child_module_off = module_off + context.modules[id].off`, then evaluates the
+/// child for the current `part`. Here:
+///   1. pop the operands in reverse into the function's `module_input_scratch`
+///      f64 locals (`scratch[j]` for `j` from `n_inputs-1` down to 0), so
+///      `scratch[j]` holds input `j` -- identical to the VM's `module_inputs[j]`;
+///   2. resolve the child instance's function index for `ctx.step_part` (the
+///      `EvalModule` site in the initials/flows/stocks program calls the child's
+///      initials/flows/stocks function -- the `StepPart` is compile-time per
+///      program; the instantiation graph is acyclic, so the index already exists);
+///   3. push `child_module_off` (`module_off + decl.off`) then `scratch[0..k]` in
+///      order -- the child's `(module_off, in_0, .., in_{k-1})` argument list --
+///      and `call` it. The child reads/writes the shared slab at `module_off +
+///      off`, so threading the runtime `child_module_off` is what lets one
+///      `CompiledModule` run at several base offsets.
+fn emit_eval_module(
+    id: u16,
+    n_inputs: u8,
+    ctx: &EmitCtx,
+    f: &mut Function,
+) -> Result<(), WasmGenError> {
+    let decl = ctx.ctx.modules.get(id as usize).ok_or_else(|| {
+        WasmGenError::Unsupported(format!("wasmgen: EvalModule module id {id} out of range"))
+    })?;
+    let child_key = make_module_key(&decl.model_name, &decl.input_set);
+    let &fn_index = ctx
+        .module_fn_index
+        .get(&(child_key, ctx.step_part))
+        .ok_or_else(|| {
+            WasmGenError::Unsupported(format!(
+                "wasmgen: EvalModule child instance for module id {id} has no compiled function"
+            ))
+        })?;
+    let decl_off = i32::try_from(decl.off).map_err(|_| {
+        WasmGenError::Unsupported("wasmgen: module offset too large to lower".to_string())
+    })?;
+
+    // Pop the operands in reverse into the reverse-pop scratch f64 locals, so
+    // `scratch[j]` ends holding input `j` (exactly the VM's `module_inputs[j]`).
+    let n = u32::from(n_inputs);
+    for j in (0..n).rev() {
+        f.instruction(&Instruction::LocalSet(ctx.module_input_scratch_base + j));
+    }
+    // Push `child_module_off = module_off + decl.off`.
+    f.instruction(&Instruction::LocalGet(ctx.module_off_local));
+    f.instruction(&Instruction::I32Const(decl_off));
+    f.instruction(&Instruction::I32Add);
+    // Push the inputs back in order, then call the child's `part` function.
+    for j in 0..n {
+        f.instruction(&Instruction::LocalGet(ctx.module_input_scratch_base + j));
+    }
+    f.instruction(&Instruction::Call(fn_index));
+    Ok(())
 }
 
 /// Name an unsupported opcode without depending on `Debug` (feature-gated via

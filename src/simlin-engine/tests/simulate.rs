@@ -1039,18 +1039,25 @@ fn ensure_wasm_matches_runs_supported_scalar_model() {
 /// surfaces it as `Skipped(msg)` carrying that message.
 ///
 /// The example construct has migrated as the backend's coverage grew: `^`
-/// (`Op2::Exp`) became supported in Phase 2 Task 3, and RK4 integration became
-/// supported in Phase 4. A `SMOOTH` builtin still expands to a stdlib *submodule*
-/// (`wasmgen: submodules are not supported`), so it is the current stable
-/// still-unsupported construct driving the `Skipped` path.
+/// (`Op2::Exp`) became supported in Phase 2 Task 3, RK4 in Phase 4, and *modules*
+/// (so `SMTH1`/`DELAY3` stdlib expansions) in Phase 7. The stable still-
+/// unsupported construct is now a *true runtime range* `arr[lo:hi]` with
+/// non-literal bounds, which lowers to `Opcode::ViewRangeDynamic` -- a runtime
+/// view *size* the fully-unrolled emitter cannot express (`wasmgen.rs`'s
+/// `ViewRangeDynamic` arm returns `Unsupported`). A literal range is
+/// constant-folded into a static view, so the bounds must be variables.
 #[test]
 fn ensure_wasm_matches_skips_unsupported_model() {
     let datamodel = simlin_engine::test_common::TestProject::new("unsupported")
         .with_sim_time(0.0, 5.0, 1.0)
-        .aux("input", "TIME", None)
-        // SMTH1 expands to a stdlib submodule, which the wasm backend does not
-        // yet support (Phase 7), so the whole model is Skipped.
-        .aux("smoothed", "SMTH1(input, 2)", None)
+        .indexed_dimension("A", 5)
+        .array_aux("source[A]", "A")
+        .scalar_aux("lo", "2")
+        .scalar_aux("hi", "4")
+        // SUM over a runtime range (variable bounds) -> ViewRangeDynamic, which
+        // the wasm backend cannot express (a runtime view size in a fully-
+        // unrolled emitter), so the whole model is Skipped.
+        .scalar_aux("total", "SUM(source[lo:hi])")
         .build_datamodel();
 
     let expected = vm_results(&datamodel);
@@ -1058,12 +1065,12 @@ fn ensure_wasm_matches_skips_unsupported_model() {
     match outcome {
         WasmRunOutcome::Skipped(msg) => {
             assert!(
-                msg.contains("submodules are not supported"),
-                "expected the submodule-rejection message, got: {msg}"
+                msg.contains("ViewRangeDynamic"),
+                "expected the runtime-range rejection message, got: {msg}"
             );
         }
         WasmRunOutcome::Ran => {
-            panic!("a model using an unsupported submodule construct must be Skipped, not Ran")
+            panic!("a model using a runtime-range construct must be Skipped, not Ran")
         }
     }
 }

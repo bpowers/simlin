@@ -11,18 +11,20 @@
 //! The intended use case is interactive scrubbing: compile a model to wasm
 //! once, then re-run it on every slider change at display refresh rates.
 //!
-//! The backend walks each `CompiledModule`'s un-fused opcode programs
+//! The backend walks every module instance's un-fused opcode programs
 //! (`compiled_initials`/`compiled_flows`/`compiled_stocks`) and emits a wasm
-//! function per program plus a `run` driver (see `lower` for the per-opcode
-//! lowering and `module` for whole-model assembly). Modules are emitted with
-//! the `wasm-encoder` crate; correctness is validated in tests by executing the
-//! emitted module under the DLR-FT `wasm-interpreter` and comparing against the
-//! bytecode VM.
+//! function-triple per `(model, input_set)` instance plus a `run` driver (see
+//! `lower` for the per-opcode lowering and `module` for whole-model assembly).
+//! Modules are emitted with the `wasm-encoder` crate; correctness is validated
+//! in tests by executing the emitted module under the DLR-FT `wasm-interpreter`
+//! and comparing against the bytecode VM.
 //!
-//! Status: the full scalar opcode set (every `Op2` operator and every `Apply`
-//! builtin) + Euler integration for a single root model are in place; arrays,
-//! modules, lookups, and RK2/RK4 land in subsequent phases (anything
-//! unsupported returns `WasmGenError::Unsupported`).
+//! Status: the full scalar + array opcode set (every `Op2` operator, every
+//! `Apply` builtin, the view/reducer/iteration/vector ops, scalar/array
+//! lookups), Euler/RK2/RK4 integration, and nested modules (incl. SMOOTH/DELAY
+//! stdlib expansions) are in place. A genuine runtime view range
+//! (`ViewRangeDynamic`) or array unrolling past the per-function budget returns
+//! `WasmGenError::Unsupported`.
 
 mod alloc;
 mod lookup;
@@ -38,11 +40,11 @@ use std::fmt;
 
 /// Error from the WebAssembly code-generation backend.
 ///
-/// The backend covers the full scalar opcode set -- every `Op2` operator
-/// (including `Mod`/`Exp`) and every `Apply` builtin -- plus Euler integration
-/// for a single root model. Anything outside that surface (arrays, submodules,
-/// table lookups, and RK2/RK4 integration) returns `Unsupported` rather than
-/// silently emitting an incorrect module.
+/// The backend covers the full scalar + array opcode set, Euler/RK2/RK4
+/// integration, and nested modules (including SMOOTH/DELAY stdlib expansions).
+/// A genuine runtime view range (`ViewRangeDynamic`) or array unrolling past the
+/// per-function budget returns `Unsupported` rather than silently emitting an
+/// incorrect module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmGenError {
     Unsupported(String),

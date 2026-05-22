@@ -204,7 +204,7 @@ struct CompiledSlicedSimulation {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum StepPart {
     Initials,
     Flows,

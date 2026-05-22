@@ -18,12 +18,11 @@ use wasm_encoder::{
 use crate::bytecode::ByteCodeContext;
 use std::sync::OnceLock;
 
-/// Local layout for the test harness function. The function takes
-/// `module_off` as param 0; the scratch f64 and the condition i32(s) are
-/// declared locals.
+/// Local layout for the test harness function. The function takes `module_off`
+/// as param 0 (no f64 module-input params -- these are root-only lowering tests);
+/// the scratch f64 and condition i32(s) are declared locals, whose indices come
+/// from the production helpers (`scratch_local_for` / `condition_locals_for`).
 const L_MODULE_OFF: u32 = 0;
-const L_SCRATCH: u32 = 1;
-const L_COND_BASE: u32 = 2;
 
 /// A shared empty `ByteCodeContext` for the scalar-opcode tests, which never
 /// touch the array tables. Array-view tests build their own context (with
@@ -33,7 +32,22 @@ fn empty_ctx() -> &'static ByteCodeContext {
     EMPTY.get_or_init(ByteCodeContext::default)
 }
 
+/// A shared empty `(ModuleKey, StepPart) -> fn index` map. These lowering unit
+/// tests build single root-only functions (0 module inputs) and never emit an
+/// `EvalModule`, so the map is never consulted. The whole-model `EvalModule` /
+/// `LoadModuleInput` parity is exercised end-to-end in `module.rs`'s tests.
+fn empty_module_fn_index()
+-> &'static std::collections::HashMap<(crate::vm::ModuleKey, StepPart), u32> {
+    static EMPTY: OnceLock<std::collections::HashMap<(crate::vm::ModuleKey, StepPart), u32>> =
+        OnceLock::new();
+    EMPTY.get_or_init(std::collections::HashMap::new)
+}
+
 fn ctx_with_cond_depth(depth: usize) -> EmitCtx<'static> {
+    // These tests build a root-only function: `module_off` is param 0, there are
+    // no f64 module-input params, so `n_inputs == 0` reproduces the historical
+    // (pre-Phase-7) local indices exactly (scratch at 1, conditions at 2..).
+    let n_inputs = 0;
     EmitCtx {
         curr_base: 0,
         next_base: 4096,
@@ -52,9 +66,9 @@ fn ctx_with_cond_depth(depth: usize) -> EmitCtx<'static> {
         start_time: 1.0,
         final_time: 25.0,
         module_off_local: L_MODULE_OFF,
-        scratch_local: L_SCRATCH,
-        condition_locals: (0..depth as u32).map(|i| L_COND_BASE + i).collect(),
-        apply_locals: apply_locals_for(depth),
+        scratch_local: scratch_local_for(n_inputs),
+        condition_locals: condition_locals_for(n_inputs, depth),
+        apply_locals: apply_locals_for(n_inputs, depth),
         // The helper-function indices are deterministic (helpers occupy the
         // module's first function slots), and `build_module` emits exactly
         // these helper bodies ahead of `eval`, so the indices agree.
@@ -66,10 +80,10 @@ fn ctx_with_cond_depth(depth: usize) -> EmitCtx<'static> {
         // f64 / condition i32s / Apply f64s / the vector-op scratch blocks;
         // `build_module` declares exactly `count_extra_i32_locals(bc)` of them
         // at this base.
-        extra_i32_local_base: extra_i32_local_base(depth),
+        extra_i32_local_base: extra_i32_local_base(n_inputs, depth),
         // The fixed Phase-6 vector-op scratch local blocks.
-        vector_f64_locals: vector_f64_locals_for(depth),
-        vector_i32_locals: vector_i32_locals_for(depth),
+        vector_f64_locals: vector_f64_locals_for(n_inputs, depth),
+        vector_i32_locals: vector_i32_locals_for(n_inputs, depth),
         // The vector-op scratch region: well past TEMP_BASE (8192) but within
         // the harness's single 64 KiB memory page, so the small test views'
         // sort-pair / collected-value staging never collides with temp_storage.
@@ -78,6 +92,11 @@ fn ctx_with_cond_depth(depth: usize) -> EmitCtx<'static> {
         // scratch and clear of temp_storage, sized for the tiny test views'
         // request/profile/out staging.
         alloc_scratch_base: ALLOC_SCRATCH_BASE,
+        // No `EvalModule` in these single-function tests: the reverse-pop scratch
+        // base sits past the extra-i32 block (none declared here), and the child
+        // function map is empty.
+        module_input_scratch_base: module_input_scratch_base(n_inputs, depth, 0),
+        module_fn_index: empty_module_fn_index(),
         ctx: empty_ctx(),
     }
 }
@@ -151,9 +170,14 @@ fn build_module(bc: &ByteCode, ctx: &EmitCtx, with_result: bool, cond_depth: usi
         code.function(&hf.body);
     }
     // 1 scratch f64 local, `cond_depth` i32 condition locals, the 3 `Apply`
-    // scratch f64 locals, and the program's dynamic-subscript i32 scratch
-    // locals -- the same layout production uses.
-    let mut func = Function::new(opcode_fn_locals(cond_depth, count_extra_i32_locals(bc)));
+    // scratch f64 locals, the program's dynamic-subscript i32 scratch locals,
+    // and the `EvalModule` reverse-pop f64 scratch (none here -- root-only) --
+    // the same layout production uses.
+    let mut func = Function::new(opcode_fn_locals(
+        cond_depth,
+        count_extra_i32_locals(bc),
+        count_module_input_scratch(bc),
+    ));
     emit_bytecode(bc, ctx, &mut func).expect("lowering should succeed");
     func.instruction(&Instruction::End);
     code.function(&func);
@@ -869,7 +893,7 @@ fn lookup_lowers_without_error() {
     // Lookup is supported as of Phase 3; lowering must succeed where Phase 2
     // returned Unsupported. (Numeric parity is covered by the seeded-table
     // tests below and the end-to-end GF model tests in module.rs.)
-    let mut func = Function::new(opcode_fn_locals(0, 0));
+    let mut func = Function::new(opcode_fn_locals(0, 0, 0));
     let program = bc(
         vec![0.0, 1.0],
         vec![
@@ -1342,7 +1366,7 @@ fn build_load_prev_module(off: u16, fallback: f64, fallback_flag: i32) -> Vec<u8
     for hf in helpers.functions {
         code.function(&hf.body);
     }
-    let mut func = Function::new(opcode_fn_locals(0, 0));
+    let mut func = Function::new(opcode_fn_locals(0, 0, 0));
     emit_bytecode(&program, &ctx, &mut func).expect("LoadPrev should lower");
     func.instruction(&Instruction::End);
     code.function(&func);
@@ -2749,7 +2773,7 @@ fn run_invalid_view_reduce(reduce: Opcode) -> f64 {
     // Phase-6 vector-op f64/i32 scratch blocks), i.e. exactly where the
     // dynamic-subscript "extra i32" locals begin. The shim below pushes a single
     // i32 local at that index for the validity flag.
-    let valid_local = extra_i32_local_base(0);
+    let valid_local = extra_i32_local_base(0, 0);
 
     let mut module = Module::new();
     let helpers = build_helpers();
@@ -2785,7 +2809,7 @@ fn run_invalid_view_reduce(reduce: Opcode) -> f64 {
         code.function(&hf.body);
     }
     // opcode-fn locals plus one extra i32 for the validity flag.
-    let mut locals = opcode_fn_locals(0, 0);
+    let mut locals = opcode_fn_locals(0, 0, 0);
     locals.push((1, ValType::I32));
     let mut func = Function::new(locals);
     // valid_local = 0 (invalid).
@@ -3532,7 +3556,11 @@ fn view_dyn_in_range_row_reduces_like_vm() {
 /// to assert that an over-budget program is rejected at emit time without
 /// running (or even finishing building) the module.
 fn lower_only(bc: &ByteCode, ctx: &EmitCtx) -> Result<Function, WasmGenError> {
-    let mut func = Function::new(opcode_fn_locals(0, count_extra_i32_locals(bc)));
+    let mut func = Function::new(opcode_fn_locals(
+        0,
+        count_extra_i32_locals(bc),
+        count_module_input_scratch(bc),
+    ));
     emit_bytecode(bc, ctx, &mut func)?;
     func.instruction(&Instruction::End);
     Ok(func)
@@ -4047,7 +4075,7 @@ fn build_round_probe_module() -> Vec<u8> {
     // Same local layout production uses; the round helper draws its two f64
     // temps from `scratch_local` (index 1) and `apply_locals[0]` (index 2).
     let ctx = ctx_with_cond_depth(0);
-    let mut func = Function::new(opcode_fn_locals(0, 0));
+    let mut func = Function::new(opcode_fn_locals(0, 0, 0));
     // result_addr (i32) for the trailing store, then x = mem[0].
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::I32Const(0));

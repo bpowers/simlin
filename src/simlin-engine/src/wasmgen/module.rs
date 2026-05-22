@@ -14,23 +14,31 @@
 //!
 //! The emitted module exports its own linear `memory`, a `run` function, and
 //! three i32 geometry globals (`n_slots`/`n_chunks`/`results_offset`). It emits
-//! the three opcode programs (`initials`/`flows`/`stocks`) as wasm functions
-//! over the shared slab (each lowered by [`super::lower::emit_bytecode`]), then
-//! a `run` function that seeds the reserved globals, calls the initials, and
-//! drives the Euler loop. `run` lays the slab out as: a `curr` working chunk, a
-//! `next` working chunk, then a results region of `n_chunks` step-major
-//! snapshots. It records a snapshot of `curr` on the same cadence the bytecode
-//! VM uses (`vm.rs::run_to`): the t=start sample is forced, then every
-//! `save_every = round(save_step/dt)` steps, up to `n_chunks` samples.
+//! one `initials`/`flows`/`stocks` function-triple *per unique `(model,
+//! input_set)` module instance* in `CompiledSimulation.modules`, each taking a
+//! runtime `module_off: i32` plus its module inputs as f64 params and lowered by
+//! [`super::lower::emit_bytecode`] over the shared slab. An `EvalModule` `call`s
+//! the child instance's function for the current phase (passing `module_off +
+//! decl.off` and the inputs), so one shared `CompiledModule` runs at every base
+//! offset it is instantiated at. A final `run` function seeds the reserved
+//! globals, calls the *root* instance's initials, and drives the integration
+//! loop. `run` lays the slab out as: a `curr` working chunk, a `next` working
+//! chunk, then a results region of `n_chunks` step-major snapshots. It records a
+//! snapshot of `curr` on the same cadence the bytecode VM uses (`vm.rs::run_to`):
+//! the t=start sample is forced, then every `save_every = round(save_step/dt)`
+//! steps, up to `n_chunks` samples.
 //!
 //! Unlike the VM's chunk-ring buffer, this uses a single `curr` chunk plus a
-//! `next` chunk that holds only the freshly integrated stock values: after
-//! recording a snapshot, the updated stocks are copied back into `curr` and
-//! time is advanced. Auxiliaries/flows are recomputed each step, so `curr`
-//! always holds the full, correct state for the timestep it represents.
+//! `next` chunk that holds only the freshly integrated stock values (including
+//! nested-module stocks, collected by recursing through `EvalModule`): after
+//! recording a snapshot, the updated stocks are copied back into `curr` and time
+//! is advanced. Auxiliaries/flows are recomputed each step, so `curr` always
+//! holds the full, correct state for the timestep it represents.
 //!
-//! Current scope: a single scalar root model, Euler integration, no submodules,
-//! temp arrays, or array machinery. Anything else returns `WasmGenError`.
+//! Current scope: the full scalar + array opcode set, Euler/RK2/RK4 integration,
+//! and nested modules (incl. SMOOTH/DELAY stdlib expansions). A genuine runtime
+//! view range (`ViewRangeDynamic`) or array unrolling past the per-function
+//! budget returns `WasmGenError::Unsupported`.
 
 use wasm_encoder::Instruction as I;
 use wasm_encoder::{
@@ -39,9 +47,11 @@ use wasm_encoder::{
     TypeSection, ValType,
 };
 
+use std::collections::HashMap;
+
 use crate::bytecode::{ByteCode, CompiledModule, Opcode};
 use crate::results::{Method, Specs};
-use crate::vm::{CompiledSimulation, StepPart};
+use crate::vm::{CompiledSimulation, ModuleKey, StepPart};
 
 use super::WasmGenError;
 use super::lower::{self, BuiltHelpers, build_helpers, f64_const, max_condition_depth, memarg};
@@ -216,38 +226,68 @@ fn build_gf_regions(
     }))
 }
 
-// Function indices of the per-program block, RELATIVE to the first program
-// function. The emitted helper functions ([`lower::build_helpers`]) occupy the
-// module's first function slots (`0..n_helpers`), so the absolute index of each
-// program function is `n_helpers + F_*`. The three opcode programs share the
-// `(i32) -> ()` type; `run` is `() -> ()`. Keeping these relative (and adding
-// `n_helpers` at the call/export sites) means new helpers shift every program
-// function automatically, with no index hard-coded against a fixed helper count.
+// Offsets of an instance's three program functions within its function-triple.
+// The module's function slots are: the emitted helper functions
+// ([`lower::build_helpers`]) at `0..n_helpers`, then one
+// `[initials, flows, stocks]` triple per module instance (in `instance_order`),
+// then `run` last. So instance `i`'s `StepPart` function is at
+// `n_helpers + i*FUNCS_PER_INSTANCE + {F_INITIALS,F_FLOWS,F_STOCKS}`, and `run`
+// is at `n_helpers + n_instances*FUNCS_PER_INSTANCE`. Keeping these relative
+// (and adding `n_helpers`/the triple base at the call/export sites) means new
+// helpers or instances shift the indices automatically.
 const F_INITIALS: u32 = 0;
 const F_FLOWS: u32 = 1;
 const F_STOCKS: u32 = 2;
-const F_RUN: u32 = 3;
+const FUNCS_PER_INSTANCE: u32 = 3;
 
-// Type-section indices. The two program types come first; helper types are
-// appended after them (at indices 2..), so these stay fixed.
-const TYPE_OPCODE_FN: u32 = 0; // (i32) -> ()
-const TYPE_RUN_FN: u32 = 1; // () -> ()
+// Type-section indices. The `run` type comes first; one opcode-program type per
+// distinct module-input count follows (`(i32, f64*k) -> ()`), and helper types
+// are appended after those. `run` is `() -> ()`.
+const TYPE_RUN_FN: u32 = 0; // () -> ()
 
-// Local indices shared by every opcode-program function. Param 0 is
-// `module_off`; the scratch f64 and the condition i32(s) are declared locals.
+// Param 0 of every opcode-program function is `module_off` (i32); params
+// `1..=n_inputs` are the f64 module inputs. Declared locals follow.
 const L_MODULE_OFF: u32 = 0;
-const L_SCRATCH: u32 = 1;
-const L_COND_BASE: u32 = 2;
+
+/// Everything an instance's `EmitCtx` needs that varies per `(model, input_set)`
+/// module instance: its own `ByteCodeContext`, the disjoint linear-memory bases
+/// the emitter threads in for that instance's array tables / GF lookups, its
+/// module-input parameter count, and (when it has graphical functions) its slice
+/// of the combined GF region. Computed once in [`compile_simulation`] before any
+/// function is emitted, in `instance_order`.
+struct PerInstance<'a> {
+    module: &'a CompiledModule,
+    /// Number of f64 module-input parameters this instance's three functions
+    /// take (param 0 is `module_off`, params `1..=n_inputs` are the inputs).
+    /// `0` for the root and any uninstantiated module. Drawn from the
+    /// `EvalModule { n_inputs }` of its call sites (the count the VM passes).
+    n_inputs: u32,
+    /// Byte base of this instance's GF directory region (`0` when it has no
+    /// graphical functions). Threaded into the instance's `EmitCtx`.
+    gf_directory_base: u32,
+    /// Byte base of this instance's GF data region (`0` when it has no GFs).
+    gf_data_base: u32,
+    /// Byte base of this instance's disjoint `temp_storage` region.
+    temp_storage_base: u32,
+    /// This instance's GF region image (directory + data + bases), for the
+    /// `DataSection`; `None` when the instance has no graphical functions.
+    gf_regions: Option<GfRegions>,
+}
 
 /// Compile a `CompiledSimulation` (produced by the salsa incremental pipeline)
 /// into a self-contained wasm module.
 ///
-/// Current scope: the root module only, Euler integration only. The opcode
-/// programs a `CompiledSimulation` carries are the plain, un-fused scalar set
-/// (the VM's superinstruction fusion runs on a private execution copy), so each
-/// `Opcode` lowers via [`lower::emit_bytecode`]. Anything outside the supported
-/// set -- a non-Euler method, nested modules, or an unsupported opcode --
-/// returns [`WasmGenError::Unsupported`] rather than emitting a wrong module.
+/// Every unique `(model, input_set)` module instance in `sim.modules` becomes its
+/// own initials/flows/stocks wasm function-triple taking `(module_off: i32,
+/// in_0..in_{k-1}: f64)`; an `EvalModule` resolves the child instance and `call`s
+/// its function for the current phase (passing `module_off + decl.off` and the
+/// inputs), so one shared `CompiledModule` runs at every base offset it is
+/// instantiated at. The opcode programs a `CompiledSimulation` carries are the
+/// plain, un-fused scalar set (the VM's superinstruction fusion runs on a private
+/// execution copy), so each `Opcode` lowers via [`lower::emit_bytecode`].
+/// Anything outside the supported set -- an unsupported opcode, or array
+/// unrolling past the per-function budget -- returns [`WasmGenError::Unsupported`]
+/// rather than emitting a wrong module.
 pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, WasmGenError> {
     // `wasmgen` is in-crate, so it reads `CompiledSimulation`'s `pub(crate)`
     // fields directly rather than through accessors.
@@ -259,19 +299,26 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         .modules
         .get(&sim.root)
         .ok_or_else(|| WasmGenError::Unsupported("wasmgen: root module not found".to_string()))?;
-
-    if !root.context.modules.is_empty() {
-        return Err(WasmGenError::Unsupported(
-            "wasmgen: submodules are not supported".to_string(),
-        ));
-    }
     let too_large = || WasmGenError::Unsupported("wasmgen: model too large to lower".to_string());
-    // The stock data-buffer offsets the stocks program writes (`AssignNext` /
-    // its `BinOpAssignNext` peephole form). The Euler advance copies these
-    // `next -> curr`; the RK loops index `rk_scratch[saved/accum]` by their
-    // position here. Collected up front so the RK scratch region is sized below.
-    let stock_offsets = collect_assign_next_opcode_offsets(&root.compiled_stocks);
+
+    // Enumerate every module instance in a deterministic order (sorted by key),
+    // and the count of inputs each receives. The root receives 0 inputs (it is
+    // called by `run`); every other instance's input count is the `n_inputs` of
+    // its `EvalModule` call sites -- exactly what the VM sizes `module_inputs` to.
+    let mut instance_order: Vec<ModuleKey> = sim.modules.keys().cloned().collect();
+    instance_order.sort();
+    let instance_n_inputs = collect_instance_input_counts(sim);
+
+    // The stock data-buffer offsets the *whole simulation* integrates, recursing
+    // through `EvalModule` so submodule (SMOOTH/DELAY) stocks are included --
+    // mirroring the VM's `collect_stock_offsets` (`vm.rs:512-543`). The Euler
+    // advance copies these `next -> curr`; the RK loops index `rk_scratch` by
+    // their position here. Collected up front so the RK scratch region is sized
+    // below.
+    let stock_offsets = collect_all_stock_offsets(&sim.modules, &sim.root, 0);
     let n_stocks = u32::try_from(stock_offsets.len()).map_err(|_| too_large())?;
+    // `n_slots` is the ROOT module's slot count, which spans the whole slab
+    // including every nested module's slots (`vm.rs::n_slots` returns the root's).
     let n_slots = u32::try_from(root.n_slots).map_err(|_| too_large())?;
     let n_chunks = u32::try_from(specs.n_chunks).map_err(|_| too_large())?;
     let stride = n_slots.checked_mul(SLOT_SIZE).ok_or_else(too_large)?;
@@ -279,123 +326,117 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     let next_base = stride;
     let results_base = stride.checked_mul(2).ok_or_else(too_large)?;
     let results_bytes = n_chunks.checked_mul(stride).ok_or_else(too_large)?;
-    let total_bytes = results_base
+    let mut total_bytes = results_base
         .checked_add(results_bytes)
         .ok_or_else(too_large)?;
 
-    // The GF directory + data regions follow the results region. Their bases
-    // are threaded into every `EmitCtx` so the `Lookup` opcode can address the
-    // directory, and they are initialized at instantiation by an active
-    // `DataSection`. `results_offset` (exported) is unchanged.
-    let gf_regions = build_gf_regions(&root.context.graphical_functions, total_bytes)?;
-    let (gf_directory_base, gf_data_base) = gf_regions
-        .as_ref()
-        .map(|r| (r.directory_base, r.data_base))
+    // Per-instance GF regions follow the results region, concatenated in
+    // `instance_order` (each instance's directory+data sits at its own base, so
+    // its directory entry 0 maps to its own table 0). The `Lookup` opcode reads
+    // the directory at `instance_gf_directory_base + table_idx*8`, so each
+    // instance's `EmitCtx` carries its own base. They are initialized at
+    // instantiation by active `DataSection` segments.
+    let mut instance_gf: HashMap<ModuleKey, (u32, u32, Option<GfRegions>)> = HashMap::new();
+    for key in &instance_order {
+        let module = &sim.modules[key];
+        let regions = build_gf_regions(&module.context.graphical_functions, total_bytes)?;
+        let (dir_base, data_base) = regions
+            .as_ref()
+            .map(|r| (r.directory_base, r.data_base))
+            .unwrap_or((0, 0));
+        if let Some(r) = &regions {
+            total_bytes = total_bytes
+                .checked_add(r.total_bytes)
+                .ok_or_else(too_large)?;
+        }
+        instance_gf.insert(key.clone(), (dir_base, data_base, regions));
+    }
+    // The layout reports the ROOT instance's GF bases (a host reads results, not
+    // GF directly; this preserves the single-root-model layout exactly).
+    let (root_gf_directory_base, root_gf_data_base) = instance_gf
+        .get(&sim.root)
+        .map(|(d, dd, _)| (*d, *dd))
         .unwrap_or((0, 0));
-    let total_bytes = match &gf_regions {
-        Some(r) => total_bytes
-            .checked_add(r.total_bytes)
-            .ok_or_else(too_large)?,
-        None => total_bytes,
-    };
 
     // The two snapshot regions follow the GF regions, each `n_slots` wide
     // (`vm.rs:617-618`). `initial_values` backs `INIT(x)` (captured once after
     // initials); `prev_values` backs `PREVIOUS(x)` (captured after each step, or
     // after the end-of-step flows re-eval under RK). Their bases are threaded
-    // into every `EmitCtx` so `LoadInitial`/`LoadPrev` can address them.
+    // into every `EmitCtx` so `LoadInitial`/`LoadPrev` can address them. They are
+    // shared across instances: a child reads `initial_values[module_off + off]`,
+    // the same single snapshot the VM keeps.
     let snapshot_bytes = n_slots.checked_mul(SLOT_SIZE).ok_or_else(too_large)?;
     let initial_values_base = total_bytes;
     let prev_values_base = initial_values_base
         .checked_add(snapshot_bytes)
         .ok_or_else(too_large)?;
-    let total_bytes = prev_values_base
+    total_bytes = prev_values_base
         .checked_add(snapshot_bytes)
         .ok_or_else(too_large)?;
 
     // The RK scratch region (`saved`(n_stocks) ++ `accum`(n_stocks)) follows the
     // snapshot regions. It holds each stock's stage-1 value and running RK
     // accumulator across the stages (`vm.rs:655`, the VM's `rk_scratch`
-    // split). Euler needs neither, so the region is only reserved for RK.
+    // split). `n_stocks` now spans nested module stocks. Euler needs neither, so
+    // the region is only reserved for RK.
     let rk = matches!(specs.method, Method::RungeKutta2 | Method::RungeKutta4);
     let stock_scratch_bytes = n_stocks.checked_mul(SLOT_SIZE).ok_or_else(too_large)?;
     let rk_saved_base = total_bytes;
     let rk_accum_base = rk_saved_base
         .checked_add(stock_scratch_bytes)
         .ok_or_else(too_large)?;
-    let total_bytes = if rk {
-        rk_accum_base
+    if rk {
+        total_bytes = rk_accum_base
             .checked_add(stock_scratch_bytes)
-            .ok_or_else(too_large)?
-    } else {
-        total_bytes
-    };
+            .ok_or_else(too_large)?;
+    }
 
-    // The `temp_storage` region follows everything else. It mirrors the VM's
-    // flat `temp_storage` buffer of `temp_total_size` f64 (`vm.rs:584-586`):
-    // element `index` of temp `temp_id` lives at
-    // `temp_storage[temp_offsets[temp_id] + index]`. Array-producing builtins
-    // (`AssignTemp` -> `BeginIter` loops) and the sliced reducers read/write it
-    // through the view machinery. `temp_total_size` is a compile-time
-    // `ByteCodeContext` field, so the region's size is known here.
-    let temp_total_size = u32::try_from(root.context.temp_total_size).map_err(|_| too_large())?;
-    let temp_storage_base = total_bytes;
-    let temp_storage_bytes = temp_total_size
-        .checked_mul(SLOT_SIZE)
-        .ok_or_else(too_large)?;
-    let total_bytes = temp_storage_base
-        .checked_add(temp_storage_bytes)
-        .ok_or_else(too_large)?;
+    // Per-instance `temp_storage` regions follow the snapshot/RK regions, one
+    // disjoint region per instance (sized by that instance's `temp_total_size`).
+    // The VM shares one `temp_storage` buffer across modules (per-module
+    // `temp_offsets`); disjoint regions are unconditionally correct because a
+    // parent's temps never survive across an `EvalModule` call (the child would
+    // otherwise clobber a shared slot the VM relies on not surviving), so giving
+    // each instance its own region cannot diverge from the VM. The largest
+    // per-instance `temp_total_size` also bounds the shared vector/alloc scratch.
+    let mut instance_temp_base: HashMap<ModuleKey, u32> = HashMap::new();
+    let mut max_temp_total_size = 0u32;
+    for key in &instance_order {
+        let module = &sim.modules[key];
+        let temp_total_size =
+            u32::try_from(module.context.temp_total_size).map_err(|_| too_large())?;
+        max_temp_total_size = max_temp_total_size.max(temp_total_size);
+        instance_temp_base.insert(key.clone(), total_bytes);
+        let temp_bytes = temp_total_size
+            .checked_mul(SLOT_SIZE)
+            .ok_or_else(too_large)?;
+        total_bytes = total_bytes.checked_add(temp_bytes).ok_or_else(too_large)?;
+    }
 
-    // The vector-op scratch region follows `temp_storage`. The Phase-6 vector
-    // ops (`VectorSelect`'s collected selected values, `VectorSortOrder`/`Rank`'s
-    // `(value, idx)` sort pairs) stage data here. A sort pair region for a view
-    // of `size` elements needs `2 * size` f64; the largest view a vector op
-    // processes is bounded by the largest temp it writes (`temp_total_size`) and
-    // by the model's slot count (a var-view input), so `2 * max(temp_total_size,
-    // n_slots)` f64 is a safe upper bound. Reserved unconditionally (a model
-    // without vector ops simply never reads it); the bound is tiny for scalar
-    // models. `vector_scratch_base` is threaded into every `EmitCtx`.
-    //
-    // Sizing invariant: every vector-op *input view*'s logical `size()` is <=
-    // its storage footprint -- a full or sliced var view fits in `n_slots`, a
-    // temp view fits in `temp_total_size` -- so `max(temp_total_size, n_slots)`
-    // bounds the element count any vector op stages, gathers, or sorts. A
-    // *broadcast* view (logical `size()` > footprint, e.g. a 1-D source iterated
-    // over a 2-D output) would violate this, but the vector ops never take one as
-    // a direct argument: broadcasting happens earlier, in the `BeginBroadcastIter`
-    // temp materialization, and a vector op reads the materialized temp.
+    // The vector-op + allocation scratch regions follow the temp regions. They
+    // are shared across instances (the staging is within a single opcode, never
+    // live across an `EvalModule` boundary -- the same reason the VM shares
+    // them). A vector/alloc op's element count is bounded by the largest view it
+    // processes, in turn bounded by the largest per-instance `temp_total_size`
+    // and the slab's `n_slots`; see the detailed sizing invariant retained on the
+    // per-region comments below. `2 * max(...)` f64 for the sort-pair vector
+    // scratch, `6 * max(...)` f64 for the allocation staging.
+    let scratch_view_bound = max_temp_total_size.max(n_slots);
     let vector_scratch_base = total_bytes;
-    let vector_scratch_slots = temp_total_size
-        .max(n_slots)
-        .checked_mul(2)
-        .ok_or_else(too_large)?;
+    let vector_scratch_slots = scratch_view_bound.checked_mul(2).ok_or_else(too_large)?;
     let vector_scratch_bytes = vector_scratch_slots
         .checked_mul(SLOT_SIZE)
         .ok_or_else(too_large)?;
-    let total_bytes = vector_scratch_base
+    total_bytes = vector_scratch_base
         .checked_add(vector_scratch_bytes)
         .ok_or_else(too_large)?;
 
-    // The allocation scratch region follows the vector scratch. The Phase-6
-    // `AllocateAvailable`/`AllocateByPriority` arms stage, per opcode, the
-    // gathered request values (n f64), the per-requester profile tuples (4n
-    // f64), and the output allocations (n f64) -- `6n` f64 all live across the
-    // `allocate_available` helper call. A requester count `n` is bounded by the
-    // largest view a vector op could process (a temp or a var-view input), so
-    // `6 * max(temp_total_size, n_slots)` f64 is a safe upper bound. Reserved
-    // unconditionally (a model without allocators never reads it); the bound is
-    // tiny for scalar models. `alloc_scratch_base` is threaded into every
-    // `EmitCtx`.
     let alloc_scratch_base = total_bytes;
-    let alloc_scratch_slots = temp_total_size
-        .max(n_slots)
-        .checked_mul(6)
-        .ok_or_else(too_large)?;
+    let alloc_scratch_slots = scratch_view_bound.checked_mul(6).ok_or_else(too_large)?;
     let alloc_scratch_bytes = alloc_scratch_slots
         .checked_mul(SLOT_SIZE)
         .ok_or_else(too_large)?;
-    let total_bytes = alloc_scratch_base
+    total_bytes = alloc_scratch_base
         .checked_add(alloc_scratch_bytes)
         .ok_or_else(too_large)?;
 
@@ -406,47 +447,103 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     let save_every = i32::try_from(save_every).map_err(|_| too_large())?;
 
     // Emitted helper functions occupy the module's first function slots; the
-    // per-program functions follow at `n_helpers + F_*`. Build them up front so
-    // the index registry threaded into each `EmitCtx` matches the assembled
-    // module's layout, and so `emit_bytecode`'s `call`s resolve.
+    // per-instance function-triples follow (at `n_helpers + i*FUNCS_PER_INSTANCE`
+    // for instance `i`), and `run` is last. Build the helpers up front so the
+    // index registry threaded into each `EmitCtx` matches the assembled module's
+    // layout, and so `emit_bytecode`'s `call`s resolve.
     let helpers = build_helpers();
     let helper_fns = helpers.fns;
     let n_helpers = helpers.functions.len() as u32;
 
-    // Each opcode program runs over the shared f64 slab. The base offsets are
-    // constant; `module_off` is the function's i32 parameter (0 for the root).
-    // `step_part` is per-program so `LoadInitial` picks its `curr`-vs-snapshot
-    // branch at compile time (`vm.rs:1332-1340`).
-    let make_ctx = |cond_depth: usize, step_part: StepPart| lower::EmitCtx {
-        curr_base,
-        next_base,
-        gf_directory_base,
-        gf_data_base,
-        initial_values_base,
-        prev_values_base,
-        use_prev_fallback_global: G_USE_PREV_FALLBACK,
-        step_part,
-        dt: specs.dt,
-        start_time: specs.start,
-        final_time: specs.stop,
-        module_off_local: L_MODULE_OFF,
-        scratch_local: L_SCRATCH,
-        condition_locals: (0..cond_depth as u32).map(|i| L_COND_BASE + i).collect(),
-        apply_locals: lower::apply_locals_for(cond_depth),
-        helpers: helper_fns,
-        temp_storage_base,
-        extra_i32_local_base: lower::extra_i32_local_base(cond_depth),
-        vector_f64_locals: lower::vector_f64_locals_for(cond_depth),
-        vector_i32_locals: lower::vector_i32_locals_for(cond_depth),
-        vector_scratch_base,
-        alloc_scratch_base,
-        ctx: &root.context,
-    };
+    // Assemble the per-instance descriptors and the `(ModuleKey, StepPart) -> fn
+    // index` map. The map is built for ALL instances before any function body is
+    // emitted, so an `EvalModule` in one instance's program resolves to the
+    // child's already-known function index (the instantiation graph is acyclic,
+    // but the index map does not depend on emit order regardless).
+    let mut instances: Vec<PerInstance> = Vec::with_capacity(instance_order.len());
+    let mut module_fn_index: HashMap<(ModuleKey, StepPart), u32> = HashMap::new();
+    for (i, key) in instance_order.iter().enumerate() {
+        let module = &sim.modules[key];
+        let base = n_helpers + (i as u32) * FUNCS_PER_INSTANCE;
+        module_fn_index.insert((key.clone(), StepPart::Initials), base + F_INITIALS);
+        module_fn_index.insert((key.clone(), StepPart::Flows), base + F_FLOWS);
+        module_fn_index.insert((key.clone(), StepPart::Stocks), base + F_STOCKS);
+        let (gf_directory_base, gf_data_base, gf_regions) =
+            instance_gf.remove(key).expect("gf entry per instance");
+        instances.push(PerInstance {
+            module,
+            n_inputs: instance_n_inputs.get(key).copied().unwrap_or(0),
+            gf_directory_base,
+            gf_data_base,
+            temp_storage_base: instance_temp_base[key],
+            gf_regions,
+        });
+    }
 
-    let initials_fn = emit_initials_fn(root, &make_ctx)?;
-    let flows_fn = emit_opcode_fn(&root.compiled_flows, StepPart::Flows, &make_ctx)?;
-    let stocks_fn = emit_opcode_fn(&root.compiled_stocks, StepPart::Stocks, &make_ctx)?;
+    // Emit each instance's three program functions (initials/flows/stocks) over
+    // the shared f64 slab, each lowered with that instance's own `ByteCodeContext`
+    // and per-instance bases. `step_part` is per-program so `LoadInitial` picks
+    // its `curr`-vs-snapshot branch at compile time (`vm.rs:1332-1340`), and an
+    // `EvalModule` resolves the child's function for that same phase.
+    let mut program_fns: Vec<Function> = Vec::with_capacity(instances.len() * 3);
+    for inst in &instances {
+        // `module_off` is the function's i32 param 0; inputs are params
+        // `1..=n_inputs`. The reverse-pop scratch f64 base sits past all other
+        // declared locals; the index helpers shift everything by `n_inputs`.
+        let make_ctx = |cond_depth: usize, extra_i32: u32, step_part: StepPart| lower::EmitCtx {
+            curr_base,
+            next_base,
+            gf_directory_base: inst.gf_directory_base,
+            gf_data_base: inst.gf_data_base,
+            initial_values_base,
+            prev_values_base,
+            use_prev_fallback_global: G_USE_PREV_FALLBACK,
+            step_part,
+            dt: specs.dt,
+            start_time: specs.start,
+            final_time: specs.stop,
+            module_off_local: L_MODULE_OFF,
+            scratch_local: lower::scratch_local_for(inst.n_inputs),
+            condition_locals: lower::condition_locals_for(inst.n_inputs, cond_depth),
+            apply_locals: lower::apply_locals_for(inst.n_inputs, cond_depth),
+            helpers: helper_fns,
+            temp_storage_base: inst.temp_storage_base,
+            extra_i32_local_base: lower::extra_i32_local_base(inst.n_inputs, cond_depth),
+            vector_f64_locals: lower::vector_f64_locals_for(inst.n_inputs, cond_depth),
+            vector_i32_locals: lower::vector_i32_locals_for(inst.n_inputs, cond_depth),
+            vector_scratch_base,
+            alloc_scratch_base,
+            module_input_scratch_base: lower::module_input_scratch_base(
+                inst.n_inputs,
+                cond_depth,
+                extra_i32,
+            ),
+            module_fn_index: &module_fn_index,
+            ctx: &inst.module.context,
+        };
+        program_fns.push(emit_initials_fn(inst.module, inst.n_inputs, &make_ctx)?);
+        program_fns.push(emit_opcode_fn(
+            &inst.module.compiled_flows,
+            inst.n_inputs,
+            StepPart::Flows,
+            &make_ctx,
+        )?);
+        program_fns.push(emit_opcode_fn(
+            &inst.module.compiled_stocks,
+            inst.n_inputs,
+            StepPart::Stocks,
+            &make_ctx,
+        )?);
+    }
 
+    // `run` calls the ROOT instance's initials/flows/stocks with `module_off = 0`
+    // and no inputs (the root takes none) -- unchanged from the single-module
+    // path. Its child `EvalModule`s recurse from there.
+    let root_idx = instance_order
+        .iter()
+        .position(|k| *k == sim.root)
+        .expect("root is among the instances");
+    let root_fn_base = n_helpers + (root_idx as u32) * FUNCS_PER_INSTANCE;
     let run_fn = emit_run_simulation(
         specs,
         RunRegions {
@@ -461,21 +558,25 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         },
         save_every,
         &stock_offsets,
-        n_helpers,
+        root_fn_base,
     );
 
-    let wasm = assemble_simulation(
+    let instance_input_counts: Vec<u32> = instances.iter().map(|inst| inst.n_inputs).collect();
+    let gf_images: Vec<&GfRegions> = instances
+        .iter()
+        .filter_map(|inst| inst.gf_regions.as_ref())
+        .collect();
+    let wasm = assemble_simulation(AssembleParts {
         helpers,
-        initials_fn,
-        flows_fn,
-        stocks_fn,
+        program_fns,
         run_fn,
+        instance_input_counts: &instance_input_counts,
         pages,
         n_slots,
         n_chunks,
         results_base,
-        gf_regions.as_ref(),
-    );
+        gf_regions: &gf_images,
+    });
 
     let var_offsets = sim
         .offsets
@@ -489,39 +590,73 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
             n_slots: root.n_slots,
             n_chunks: specs.n_chunks,
             results_offset: results_base as usize,
-            gf_directory_offset: gf_directory_base as usize,
-            gf_data_offset: gf_data_base as usize,
+            gf_directory_offset: root_gf_directory_base as usize,
+            gf_data_offset: root_gf_data_base as usize,
             var_offsets,
         },
     })
 }
 
-/// Build the `initials` function: every `CompiledInitial`'s bytecode in order,
-/// over the shared slab. The shared condition-local count is the max nesting
-/// depth across all the initials (they run sequentially in one function).
+/// The `n_inputs` (module-input parameter count) of each module instance, drawn
+/// from the `EvalModule { n_inputs }` opcodes across every instance's three
+/// programs. The root receives 0 inputs (it is invoked by `run` with none); a
+/// child receives the count its callers pass -- the same value the VM sizes
+/// `module_inputs` to. All call sites for a given `(model, input_set)` key agree
+/// (the `input_set` is part of the key and `n_inputs == args.len()` at codegen,
+/// `codegen.rs:1094-1109`); first-seen wins, which is therefore unambiguous.
+fn collect_instance_input_counts(sim: &CompiledSimulation) -> HashMap<ModuleKey, u32> {
+    let mut counts: HashMap<ModuleKey, u32> = HashMap::new();
+    for module in sim.modules.values() {
+        let programs: [&ByteCode; 2] = [&module.compiled_flows, &module.compiled_stocks];
+        let initial_codes = module.compiled_initials.iter().map(|ci| &ci.bytecode);
+        for bc in programs.into_iter().chain(initial_codes) {
+            for op in &bc.code {
+                if let Opcode::EvalModule { id, n_inputs } = op {
+                    let decl = &module.context.modules[*id as usize];
+                    let child_key = crate::vm::make_module_key(&decl.model_name, &decl.input_set);
+                    counts.entry(child_key).or_insert(u32::from(*n_inputs));
+                }
+            }
+        }
+    }
+    counts
+}
+
+/// Build an instance's `initials` function: every `CompiledInitial`'s bytecode
+/// in order, over the shared slab. The shared condition-local count is the max
+/// nesting depth across all the initials (they run sequentially in one function);
+/// the reverse-pop scratch covers the max `EvalModule { n_inputs }` over them.
+/// `n_inputs` is the instance's module-input parameter count (shifts the locals).
 fn emit_initials_fn<'a>(
-    root: &CompiledModule,
-    make_ctx: &impl Fn(usize, StepPart) -> lower::EmitCtx<'a>,
+    module: &CompiledModule,
+    n_inputs: u32,
+    make_ctx: &impl Fn(usize, u32, StepPart) -> lower::EmitCtx<'a>,
 ) -> Result<Function, WasmGenError> {
-    let cond_depth = root
+    let cond_depth = module
         .compiled_initials
         .iter()
         .map(|ci| max_condition_depth(&ci.bytecode))
         .max()
         .unwrap_or(0);
     // The initials run sequentially in one function; each fragment's dynamic-
-    // subscript accumulation completes (and `emit_bytecode` resets its local
-    // cursor) before the next, so reserving the *max* per-fragment count -- not
-    // the sum -- is correct, and the fragments reuse the same i32 locals.
-    let extra_i32 = root
+    // subscript accumulation (and `EvalModule` reverse-pop) completes before the
+    // next, so reserving the *max* per-fragment count -- not the sum -- is
+    // correct, and the fragments reuse the same scratch locals.
+    let extra_i32 = module
         .compiled_initials
         .iter()
         .map(|ci| lower::count_extra_i32_locals(&ci.bytecode))
         .max()
         .unwrap_or(0);
-    let ctx = make_ctx(cond_depth, StepPart::Initials);
-    let mut f = new_opcode_fn(cond_depth, extra_i32);
-    for ci in root.compiled_initials.iter() {
+    let module_input_scratch = module
+        .compiled_initials
+        .iter()
+        .map(|ci| lower::count_module_input_scratch(&ci.bytecode))
+        .max()
+        .unwrap_or(0);
+    let ctx = make_ctx(cond_depth, extra_i32, StepPart::Initials);
+    let mut f = new_opcode_fn(n_inputs, cond_depth, extra_i32, module_input_scratch);
+    for ci in module.compiled_initials.iter() {
         lower::emit_bytecode(&ci.bytecode, &ctx, &mut f)?;
     }
     f.instruction(&I::End);
@@ -529,48 +664,84 @@ fn emit_initials_fn<'a>(
 }
 
 /// Build one opcode-program function from a single `ByteCode`, lowering it as
-/// `step_part` (which `LoadInitial` reads to pick its `curr`-vs-snapshot
-/// branch).
+/// `step_part` (which `LoadInitial` reads to pick its `curr`-vs-snapshot branch,
+/// and which an `EvalModule` calls the child's matching phase function for).
+/// `n_inputs` is the instance's module-input parameter count.
 fn emit_opcode_fn<'a>(
     bc: &ByteCode,
+    n_inputs: u32,
     step_part: StepPart,
-    make_ctx: &impl Fn(usize, StepPart) -> lower::EmitCtx<'a>,
+    make_ctx: &impl Fn(usize, u32, StepPart) -> lower::EmitCtx<'a>,
 ) -> Result<Function, WasmGenError> {
     let cond_depth = max_condition_depth(bc);
     let extra_i32 = lower::count_extra_i32_locals(bc);
-    let ctx = make_ctx(cond_depth, step_part);
-    let mut f = new_opcode_fn(cond_depth, extra_i32);
+    let module_input_scratch = lower::count_module_input_scratch(bc);
+    let ctx = make_ctx(cond_depth, extra_i32, step_part);
+    let mut f = new_opcode_fn(n_inputs, cond_depth, extra_i32, module_input_scratch);
     lower::emit_bytecode(bc, &ctx, &mut f)?;
     f.instruction(&I::End);
     Ok(f)
 }
 
-/// A fresh opcode-program `Function` with the scratch f64 local, `cond_depth`
-/// i32 condition locals, the three `Apply` scratch f64 locals, and `extra_i32`
-/// dynamic-subscript scratch i32 locals (param 0 = `module_off`). The exact
-/// declaration list lives in [`lower::opcode_fn_locals`] so it stays in lockstep
-/// with [`lower::apply_locals_for`] / [`lower::extra_i32_local_base`].
-fn new_opcode_fn(cond_depth: usize, extra_i32: u32) -> Function {
-    Function::new(lower::opcode_fn_locals(cond_depth, extra_i32))
+/// A fresh opcode-program `Function` for an instance with `n_inputs` f64 input
+/// params: the scratch f64 local, `cond_depth` i32 condition locals, the three
+/// `Apply` scratch f64 locals, the vector-op scratch, `extra_i32`
+/// dynamic-subscript scratch i32 locals, and `module_input_scratch` `EvalModule`
+/// reverse-pop f64 locals (param 0 = `module_off`, params `1..=n_inputs` =
+/// inputs). The declaration list lives in [`lower::opcode_fn_locals`] (which is
+/// param-count-independent); the index helpers shift by `n_inputs`.
+fn new_opcode_fn(
+    n_inputs: u32,
+    cond_depth: usize,
+    extra_i32: u32,
+    module_input_scratch: u32,
+) -> Function {
+    // `n_inputs` is in the function's *type* (its params), not the declared
+    // locals list; it is applied at `assemble_simulation` where the type is
+    // chosen, so it does not appear here.
+    let _ = n_inputs;
+    Function::new(lower::opcode_fn_locals(
+        cond_depth,
+        extra_i32,
+        module_input_scratch,
+    ))
 }
 
-/// The stock data-buffer offsets written by the stocks program. After each
-/// step these slots are copied `next -> curr`, mirroring the VM's chunk-advance
-/// for the freshly integrated stock values. A stock integration writes via
-/// either `AssignNext` or its peephole-fused `BinOpAssignNext` form (most
-/// integrations are `stock + delta`, which peepholes to `BinOpAssignNext`), so
-/// both are collected -- matching the VM's `collect_stock_offsets`
-/// (`vm.rs:524`). The current scope has no nested modules, so the VM's
-/// `EvalModule` recursion has no analogue here.
-fn collect_assign_next_opcode_offsets(stocks: &ByteCode) -> Vec<usize> {
-    let mut offsets: Vec<usize> = stocks
-        .code
-        .iter()
-        .filter_map(|op| match op {
-            Opcode::AssignNext { off } | Opcode::BinOpAssignNext { off, .. } => Some(*off as usize),
-            _ => None,
-        })
-        .collect();
+/// Collect absolute offsets of all stock variables across the whole simulation,
+/// recursing into child modules via `EvalModule` so submodule (SMOOTH/DELAY)
+/// stocks are included. Mirrors the VM's `collect_stock_offsets`
+/// (`vm.rs:512-543`) exactly: a stock writes via `AssignNext` or its
+/// peephole-fused `BinOpAssignNext` (most integrations are `stock + delta`), and
+/// an `EvalModule` recurses with `base_off + decl.off` (each instance addresses
+/// its slot at `base_off + off`). After each step these slots are copied `next ->
+/// curr`; the RK loops index `rk_scratch[saved/accum]` by their sorted position.
+fn collect_all_stock_offsets(
+    modules: &HashMap<ModuleKey, CompiledModule>,
+    key: &ModuleKey,
+    base_off: usize,
+) -> Vec<usize> {
+    let module = match modules.get(key) {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+    let mut offsets: Vec<usize> = Vec::new();
+    for op in module.compiled_stocks.code.iter() {
+        match op {
+            Opcode::AssignNext { off } | Opcode::BinOpAssignNext { off, .. } => {
+                offsets.push(base_off + *off as usize);
+            }
+            Opcode::EvalModule { id, .. } => {
+                let decl = &module.context.modules[*id as usize];
+                let child_key = crate::vm::make_module_key(&decl.model_name, &decl.input_set);
+                offsets.extend(collect_all_stock_offsets(
+                    modules,
+                    &child_key,
+                    base_off + decl.off,
+                ));
+            }
+            _ => {}
+        }
+    }
     // Defensive dedup, as the VM does: duplicate offsets would double-copy.
     offsets.sort_unstable();
     offsets.dedup();
@@ -612,16 +783,17 @@ fn emit_run_simulation(
     regions: RunRegions,
     save_every: i32,
     stock_offsets: &[usize],
-    n_helpers: u32,
+    root_fn_base: u32,
 ) -> Function {
     // Three i32 locals (saved/step_accum/dst) + two f64 locals (saved_time, s).
     let mut f = Function::new([(3, ValType::I32), (2, ValType::F64)]);
 
-    // Absolute function indices of the per-program functions: the helpers
-    // occupy slots `0..n_helpers`, so each program function is `n_helpers + F_*`.
-    let f_initials = n_helpers + F_INITIALS;
-    let f_flows = n_helpers + F_FLOWS;
-    let f_stocks = n_helpers + F_STOCKS;
+    // Absolute function indices of the ROOT instance's three program functions:
+    // its function-triple base + the per-phase offset. `run` drives the root with
+    // `module_off = 0`; nested instances are reached via `EvalModule` from there.
+    let f_initials = root_fn_base + F_INITIALS;
+    let f_flows = root_fn_base + F_FLOWS;
+    let f_stocks = root_fn_base + F_STOCKS;
 
     // Seed the reserved global slots into curr (chunk base 0), then run the
     // initials. The seeds mirror the VM, which writes start/dt/start/stop into
@@ -1103,50 +1275,96 @@ fn emit_copy_chunk(f: &mut Function, src_base: u32, dst_base: u32, n_slots: u32)
     }
 }
 
-/// Assemble the simulation module: type, function, memory, globals, exports,
-/// code, and (when present) the GF data segments. The emitted helper functions
-/// ([`build_helpers`]) lead the function and code sections (indices
-/// `0..n_helpers`); the four program functions follow. Exports `memory`, `run`,
-/// and the three self-describing i32 geometry globals. When `gf_regions` is
-/// `Some`, two active `DataSection` segments initialize the GF directory and
-/// data regions at instantiation.
-#[allow(clippy::too_many_arguments)]
-fn assemble_simulation(
+/// Inputs to [`assemble_simulation`], grouped to keep the signature small now
+/// that the module carries a per-instance function-triple (one per
+/// `(model, input_set)`) plus a `run` driver, and possibly several GF regions.
+struct AssembleParts<'a> {
     helpers: BuiltHelpers,
-    initials: Function,
-    flows: Function,
-    stocks: Function,
-    run: Function,
+    /// The instances' program functions in `instance_order`, flattened as
+    /// `[initials_0, flows_0, stocks_0, initials_1, ...]`. `instance_input_counts`
+    /// (same instance order) gives each triple's f64 input-param count.
+    program_fns: Vec<Function>,
+    run_fn: Function,
+    /// Module-input parameter count per instance, in the same order the triples
+    /// appear in `program_fns`. Drives the per-triple wasm type
+    /// (`(i32, f64*k) -> ()`).
+    instance_input_counts: &'a [u32],
     pages: u32,
     n_slots: u32,
     n_chunks: u32,
     results_base: u32,
-    gf_regions: Option<&GfRegions>,
-) -> Vec<u8> {
+    /// Every GF-bearing instance's region image, for the active `DataSection`
+    /// segments (each instance's directory + data sit at distinct bases).
+    gf_regions: &'a [&'a GfRegions],
+}
+
+/// Assemble the simulation module: types, functions, memory, globals, exports,
+/// code, and (when present) the GF data segments. Layout: the emitted helper
+/// functions ([`build_helpers`]) lead the function/code sections (indices
+/// `0..n_helpers`); then one `[initials, flows, stocks]` triple per module
+/// instance (in `instance_order`); then `run` last. Exports `memory`, `run`, and
+/// the three self-describing i32 geometry globals. Each GF-bearing instance
+/// contributes two active `DataSection` segments (its directory + data) at its
+/// own bases.
+fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
+    let AssembleParts {
+        helpers,
+        program_fns,
+        run_fn,
+        instance_input_counts,
+        pages,
+        n_slots,
+        n_chunks,
+        results_base,
+        gf_regions,
+    } = parts;
+
     let mut wasm = WasmModule::new();
     let n_helpers = helpers.functions.len() as u32;
+    let n_instances = instance_input_counts.len() as u32;
+    let run_fn_index = n_helpers + n_instances * FUNCS_PER_INSTANCE;
 
-    // Type indices 0/1 are the program types; helper types are appended at 2..
-    // (in helper order), so a helper at function index `i` uses type index
-    // `2 + i`.
+    // Type section: `run`'s `() -> ()` first, then one opcode-program type per
+    // *distinct* module-input count (`(i32, f64*k) -> ()`, sorted), then the
+    // helper types. `opcode_type_for` maps an instance's `n_inputs` to its type
+    // index; a helper at function index `i` uses the type appended after those.
+    let mut distinct_inputs: Vec<u32> = instance_input_counts.to_vec();
+    distinct_inputs.sort_unstable();
+    distinct_inputs.dedup();
+    let opcode_type_index: HashMap<u32, u32> = distinct_inputs
+        .iter()
+        .enumerate()
+        .map(|(i, &k)| (k, TYPE_RUN_FN + 1 + i as u32))
+        .collect();
+    let first_helper_type = TYPE_RUN_FN + 1 + distinct_inputs.len() as u32;
+
     let mut types = TypeSection::new();
-    types.ty().function([ValType::I32], []); // TYPE_OPCODE_FN: (i32) -> ()
     types.ty().function([], []); // TYPE_RUN_FN: () -> ()
+    for &k in &distinct_inputs {
+        // (module_off: i32, in_0..in_{k-1}: f64) -> ()
+        let mut params: Vec<ValType> = Vec::with_capacity(1 + k as usize);
+        params.push(ValType::I32);
+        params.extend(std::iter::repeat_n(ValType::F64, k as usize));
+        types.ty().function(params, []);
+    }
     for hf in &helpers.functions {
         types.ty().function(hf.params.clone(), hf.results.clone());
     }
     wasm.section(&types);
 
-    // Function section: helpers first (so their indices are 0..n_helpers), then
-    // the four program functions.
+    // Function section: helpers first (indices `0..n_helpers`), then each
+    // instance's three program functions (typed by that instance's `n_inputs`),
+    // then `run`.
     let mut functions = FunctionSection::new();
-    let first_helper_type = TYPE_RUN_FN + 1; // == 2
     for (i, _) in helpers.functions.iter().enumerate() {
         functions.function(first_helper_type + i as u32);
     }
-    functions.function(TYPE_OPCODE_FN); // initials
-    functions.function(TYPE_OPCODE_FN); // flows
-    functions.function(TYPE_OPCODE_FN); // stocks
+    for &k in instance_input_counts {
+        let ty = opcode_type_index[&k];
+        functions.function(ty); // initials
+        functions.function(ty); // flows
+        functions.function(ty); // stocks
+    }
     functions.function(TYPE_RUN_FN); // run
     wasm.section(&functions);
 
@@ -1182,40 +1400,42 @@ fn assemble_simulation(
     wasm.section(&globals);
 
     let mut exports = ExportSection::new();
-    exports.export("run", ExportKind::Func, n_helpers + F_RUN);
+    exports.export("run", ExportKind::Func, run_fn_index);
     exports.export("memory", ExportKind::Memory, 0);
     exports.export("n_slots", ExportKind::Global, G_N_SLOTS);
     exports.export("n_chunks", ExportKind::Global, G_N_CHUNKS);
     exports.export("results_offset", ExportKind::Global, G_RESULTS_OFFSET);
     wasm.section(&exports);
 
-    // Code section order must match the function section: helper bodies, then
-    // the four program functions.
+    // Code section order must match the function section: helper bodies, then the
+    // per-instance program functions (in `program_fns` order), then `run`.
     let mut code = CodeSection::new();
     for hf in &helpers.functions {
         code.function(&hf.body);
     }
-    code.function(&initials);
-    code.function(&flows);
-    code.function(&stocks);
-    code.function(&run);
+    for program in &program_fns {
+        code.function(program);
+    }
+    code.function(&run_fn);
     wasm.section(&code);
 
-    // The GF directory + data regions are read-only constants; an active data
-    // segment writes each at its region base when the module is instantiated.
+    // The GF directory + data regions are read-only constants; active data
+    // segments write each at its region base when the module is instantiated.
     // The data section must follow the code section per the wasm binary order.
-    if let Some(gf) = gf_regions {
+    if !gf_regions.is_empty() {
         let mut data = DataSection::new();
-        data.active(
-            0,
-            &ConstExpr::i32_const(gf.directory_base as i32),
-            gf.directory.iter().copied(),
-        );
-        data.active(
-            0,
-            &ConstExpr::i32_const(gf.data_base as i32),
-            gf.data.iter().copied(),
-        );
+        for gf in gf_regions {
+            data.active(
+                0,
+                &ConstExpr::i32_const(gf.directory_base as i32),
+                gf.directory.iter().copied(),
+            );
+            data.active(
+                0,
+                &ConstExpr::i32_const(gf.data_base as i32),
+                gf.data.iter().copied(),
+            );
+        }
         wasm.section(&data);
     }
 
@@ -1359,7 +1579,7 @@ mod tests {
         // A minimal module: one empty exported `run` (so the assembler shape is
         // exercised) is unnecessary here -- assert directly that the active data
         // segments initialize memory. Assemble via the production assembler with
-        // a trivial set of empty program functions.
+        // a single root instance of three empty (0-input) program functions.
         let helpers = build_helpers();
         let empty = || {
             let mut f = Function::new([]);
@@ -1369,18 +1589,17 @@ mod tests {
         let pages = (region_base + regions.total_bytes)
             .div_ceil(WASM_PAGE_SIZE)
             .max(1);
-        let wasm = assemble_simulation(
+        let wasm = assemble_simulation(AssembleParts {
             helpers,
-            empty(),
-            empty(),
-            empty(),
-            empty(),
+            program_fns: vec![empty(), empty(), empty()],
+            run_fn: empty(),
+            instance_input_counts: &[0],
             pages,
-            0,
-            0,
-            0,
-            Some(&regions),
-        );
+            n_slots: 0,
+            n_chunks: 0,
+            results_base: 0,
+            gf_regions: &[&regions],
+        });
 
         let info = validate(&wasm).expect("module must validate");
         let mut store = Store::new(());
@@ -2026,22 +2245,125 @@ mod tests {
         compile_simulation(&sim).expect("RK4 must now be supported");
     }
 
-    #[test]
-    fn compile_simulation_rejects_nested_modules() {
-        // A root model that instantiates a submodule is outside the currently
-        // supported set (`root.context.modules` is non-empty). It must return a
-        // clean `Unsupported` error, never a panic or a wrong module. Built as a
-        // two-model datamodel directly, since `TestProject` only emits a single
-        // `main` model.
+    // ── Modules: EvalModule / LoadModuleInput (Phase 7 Task 1) ────────────
+    //
+    // Each unique `(model, input_set)` instance becomes its own initials/flows/
+    // stocks wasm function taking `(module_off: i32, in_0..in_{k-1}: f64)`. An
+    // `EvalModule` resolves the child instance and `call`s its function for the
+    // current `StepPart`, passing `module_off + decl.off` and the popped inputs;
+    // `LoadModuleInput` reads an input parameter. These tests assert wasm matches
+    // the VM for submodel-bearing models, including the SMOOTH stdlib macro (which
+    // expands to implicit module stocks) and the same instance at two offsets.
+
+    /// A two-model datamodel: a `main` model that instantiates `submodel`
+    /// `n_instances` times, wiring `in_value` (an aux in `main`) into each
+    /// instance's `in` input. The submodel computes `out = body` (referencing its
+    /// own `in`); `body_is_stock` makes `out` a stock integrating `body`, so the
+    /// submodel carries internal stocks reached only through `EvalModule` (the
+    /// nested-stock-offset case). `TestProject` only emits a single `main` model,
+    /// so this is built as an explicit datamodel.
+    fn submodel_project(
+        name: &str,
+        method: crate::datamodel::SimMethod,
+        in_value: &str,
+        body: &str,
+        body_is_stock: bool,
+        n_instances: usize,
+    ) -> crate::datamodel::Project {
         use crate::datamodel;
-        let project = datamodel::Project {
-            name: "nested".to_string(),
+        let mut main_vars: Vec<datamodel::Variable> =
+            vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "in_value".to_string(),
+                equation: datamodel::Equation::Scalar(in_value.to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })];
+        for i in 0..n_instances {
+            let ident = format!("sub{i}");
+            main_vars.push(datamodel::Variable::Module(datamodel::Module {
+                // A module reference's `dst` is qualified with the instance name
+                // (`subN.in`), not the bare input variable; an unqualified `dst`
+                // silently fails to wire the input (the submodel's `in` keeps its
+                // default), which would make `LoadModuleInput` untested.
+                references: vec![datamodel::ModuleReference {
+                    src: "in_value".to_string(),
+                    dst: format!("{ident}.in"),
+                }],
+                ident,
+                model_name: "submodel".to_string(),
+                documentation: String::new(),
+                units: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }));
+        }
+
+        let out_var = if body_is_stock {
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "out".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["grow".to_string()],
+                outflows: vec![],
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })
+        } else {
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "out".to_string(),
+                equation: datamodel::Equation::Scalar(body.to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            })
+        };
+        let mut submodel_vars = vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "in".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    ..datamodel::Compat::default()
+                },
+            }),
+            out_var,
+        ];
+        if body_is_stock {
+            submodel_vars.push(datamodel::Variable::Flow(datamodel::Flow {
+                ident: "grow".to_string(),
+                equation: datamodel::Equation::Scalar(body.to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }));
+        }
+
+        datamodel::Project {
+            name: name.to_string(),
             sim_specs: datamodel::SimSpecs {
                 start: 0.0,
                 stop: 5.0,
                 dt: datamodel::Dt::Dt(1.0),
                 save_step: None,
-                sim_method: datamodel::SimMethod::Euler,
+                sim_method: method,
                 time_units: None,
             },
             dimensions: vec![],
@@ -2050,31 +2372,7 @@ mod tests {
                 datamodel::Model {
                     name: "main".to_string(),
                     sim_specs: None,
-                    variables: vec![
-                        datamodel::Variable::Aux(datamodel::Aux {
-                            ident: "input".to_string(),
-                            equation: datamodel::Equation::Scalar("3".to_string()),
-                            documentation: String::new(),
-                            units: None,
-                            gf: None,
-                            ai_state: None,
-                            uid: None,
-                            compat: datamodel::Compat::default(),
-                        }),
-                        datamodel::Variable::Module(datamodel::Module {
-                            ident: "sub".to_string(),
-                            model_name: "submodel".to_string(),
-                            documentation: String::new(),
-                            units: None,
-                            references: vec![datamodel::ModuleReference {
-                                src: "input".to_string(),
-                                dst: "in".to_string(),
-                            }],
-                            compat: datamodel::Compat::default(),
-                            ai_state: None,
-                            uid: None,
-                        }),
-                    ],
+                    variables: main_vars,
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
@@ -2083,31 +2381,7 @@ mod tests {
                 datamodel::Model {
                     name: "submodel".to_string(),
                     sim_specs: None,
-                    variables: vec![
-                        datamodel::Variable::Aux(datamodel::Aux {
-                            ident: "in".to_string(),
-                            equation: datamodel::Equation::Scalar("0".to_string()),
-                            documentation: String::new(),
-                            units: None,
-                            gf: None,
-                            ai_state: None,
-                            uid: None,
-                            compat: datamodel::Compat {
-                                can_be_module_input: true,
-                                ..datamodel::Compat::default()
-                            },
-                        }),
-                        datamodel::Variable::Aux(datamodel::Aux {
-                            ident: "out".to_string(),
-                            equation: datamodel::Equation::Scalar("in * 2".to_string()),
-                            documentation: String::new(),
-                            units: None,
-                            gf: None,
-                            ai_state: None,
-                            uid: None,
-                            compat: datamodel::Compat::default(),
-                        }),
-                    ],
+                    variables: submodel_vars,
                     views: vec![],
                     loop_metadata: vec![],
                     groups: vec![],
@@ -2116,21 +2390,261 @@ mod tests {
             ],
             source: Default::default(),
             ai_information: None,
-        };
-
-        let sim = compile_sim(&project, "main");
-        let result = compile_simulation(&sim);
-        // Assert on the specific submodule message so this stays a focused
-        // guard on the early `root.context.modules.is_empty()` check
-        // (`compile_simulation`), distinct from the `EvalModule`-opcode fallback
-        // in `lower.rs` that would otherwise also reject the model.
-        match result {
-            Err(WasmGenError::Unsupported(msg)) => assert!(
-                msg.contains("submodules are not supported"),
-                "expected the submodule-rejection message, got: {msg}"
-            ),
-            Ok(_) => panic!("a model with a submodule must be rejected as Unsupported"),
         }
+    }
+
+    /// Task 1: a model instantiating a submodel runs through wasm and matches the
+    /// VM. The submodel's `out` depends on its `in` input (passed from `main`), so
+    /// this exercises both `EvalModule` (the child `call`) and `LoadModuleInput`
+    /// (the child reading its passed input). Previously this construct was rejected
+    /// as `submodules are not supported`.
+    #[test]
+    fn compile_simulation_submodel_matches_vm() {
+        let datamodel = submodel_project(
+            "submod",
+            crate::datamodel::SimMethod::Euler,
+            "TIME + 1",
+            "in * 2",
+            false,
+            1,
+        );
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (submodel)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(
+            checked >= 2,
+            "expected to compare main's in_value + the submodel's out, only checked {checked}"
+        );
+        // The submodel's output slot is in the single shared slab, addressed at
+        // `module_off + off`; its layout entry confirms it was emitted.
+        assert!(
+            artifact
+                .layout
+                .var_offsets
+                .iter()
+                .any(|(n, _)| n.ends_with("out")),
+            "the submodel's `out` should be in the layout"
+        );
+    }
+
+    /// Task 1: `LoadModuleInput` reads the right input. The submodel's output is
+    /// exactly its input, and `in_value` varies with TIME, so a wrong input-param
+    /// index (or a missing pass-through) would diverge from the VM immediately.
+    #[test]
+    fn compile_simulation_submodel_loadmoduleinput_reads_right_input() {
+        let datamodel = submodel_project(
+            "passthru",
+            crate::datamodel::SimMethod::Euler,
+            "TIME * 3 + 1",
+            "in", // out == in: a pure pass-through of the module input
+            false,
+            1,
+        );
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (passthrough)");
+
+        // out must equal in_value (= TIME*3+1) at every saved step.
+        let results = run_artifact_results(&artifact);
+        let n_slots = artifact.layout.n_slots;
+        let find = |needle: &str| {
+            artifact
+                .layout
+                .var_offsets
+                .iter()
+                .find(|(n, _)| n.ends_with(needle))
+                .map(|(_, o)| *o)
+                .unwrap_or_else(|| panic!("{needle} offset"))
+        };
+        let in_off = find("in_value");
+        let out_off = find("out");
+        for c in 0..artifact.layout.n_chunks {
+            let in_v = results[c * n_slots + in_off];
+            let out_v = results[c * n_slots + out_off];
+            assert!(
+                (in_v - out_v).abs() < 1e-9,
+                "submodel out must equal its passed input at chunk {c}: in={in_v} out={out_v}"
+            );
+        }
+        // And the whole model matches the VM.
+        assert_matches_vm(sim, &artifact);
+    }
+
+    /// Task 1 (the `module_off` proof): the SAME `(model, input_set)` instance,
+    /// instantiated twice in `main`, runs through wasm and matches the VM. Both
+    /// instances share one `CompiledModule` (one function triple) but run at two
+    /// different base offsets, so `module_off` must thread correctly into the
+    /// child's slab reads/writes. Each `EvalModule` passes a distinct
+    /// `module_off + decl.off`.
+    #[test]
+    fn compile_simulation_two_instances_same_module_matches_vm() {
+        let datamodel = submodel_project(
+            "twice",
+            crate::datamodel::SimMethod::Euler,
+            "TIME + 2",
+            "in * 10",
+            false,
+            2,
+        );
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (two instances)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(
+            checked >= 3,
+            "expected to compare in_value + both instances' out, only checked {checked}"
+        );
+        // Both instances' outputs occupy distinct slots in the shared slab.
+        let out_slots: Vec<usize> = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .filter(|(n, _)| n.ends_with("out"))
+            .map(|(_, o)| *o)
+            .collect();
+        assert_eq!(
+            out_slots.len(),
+            2,
+            "two instances should contribute two distinct `out` slots, got {out_slots:?}"
+        );
+        assert_ne!(
+            out_slots[0], out_slots[1],
+            "the two instances must run at different module offsets"
+        );
+    }
+
+    /// Task 1 (nested stocks under Euler): a submodel whose `out` is a stock
+    /// integrating a flow that depends on its `in` input. The submodel's internal
+    /// stock is reached only through `EvalModule`, and its offset must be picked
+    /// up by the recursive stock-offset collection so the Euler advance copies it
+    /// `next -> curr`. The wasm must match the VM.
+    #[test]
+    fn compile_simulation_submodel_nested_stock_euler_matches_vm() {
+        let datamodel = submodel_project(
+            "nested_stock",
+            crate::datamodel::SimMethod::Euler,
+            "2",
+            "in", // grow = in (= 2); out integrates by 2 each step
+            true,
+            1,
+        );
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (nested stock)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(
+            checked >= 2,
+            "expected to compare in_value + nested out stock"
+        );
+        // Pin the nested stock's value so this can't pass vacuously with an
+        // un-wired input (`in` defaulting to 0). `grow = in = 2` integrates the
+        // nested `out` stock by 2 each of the 5 Euler steps -> 10.
+        let results = run_artifact_results(&artifact);
+        let n_slots = artifact.layout.n_slots;
+        let out_off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n.ends_with("out"))
+            .map(|(_, o)| *o)
+            .expect("nested out offset");
+        let last = (artifact.layout.n_chunks - 1) * n_slots + out_off;
+        assert!(
+            (results[last] - 10.0).abs() < 1e-9,
+            "nested out stock should integrate to 2*5 = 10, got {}",
+            results[last]
+        );
+    }
+
+    /// Task 1 (nested stocks under RK4): the same nested-stock submodel under RK4.
+    /// The recursive stock-offset collection must feed the RK stage math (saved/
+    /// accum scratch indexed by stock position) the submodel's internal stock, so
+    /// the four-stage integration covers nested stocks. The wasm must match the VM.
+    #[test]
+    fn compile_simulation_submodel_nested_stock_rk4_matches_vm() {
+        // A nonlinear flow so RK genuinely differs from Euler: grow = in - out/10,
+        // a first-order approach to a steady state, evaluated at trial points.
+        let datamodel = submodel_project(
+            "nested_stock_rk4",
+            crate::datamodel::SimMethod::RungeKutta4,
+            "5",
+            "in - out / 10",
+            true,
+            1,
+        );
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (nested stock RK4)");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(
+            checked >= 2,
+            "expected to compare in_value + nested out stock"
+        );
+    }
+
+    /// Task 1 (stdlib macro -> implicit module stocks): `SMTH1(input, delay)`
+    /// expands to a stdlib `smth1` submodule carrying an internal SMOOTH stock.
+    /// The whole model must match the VM, proving the implicit-module path (the
+    /// stdlib instance's own `ByteCodeContext`, its nested stock under the RK/Euler
+    /// loop, and the `EvalModule`/`LoadModuleInput` wiring) reproduces the VM.
+    /// `SMTH1` was the canonical still-`Skipped` construct before this task.
+    ///
+    /// A NaN-aware comparison: the stdlib `smth1` instance carries an internal
+    /// `initial_value` helper slot that is NaN at the t=0 results snapshot in
+    /// *both* the VM and wasm (it is not written into `curr` before the forced
+    /// t=0 save), so a finite-difference compare would spuriously fail on a
+    /// faithful NaN==NaN match. Every user-visible variable (`input`,
+    /// `smoothed`) is finite and compared exactly.
+    #[test]
+    fn compile_simulation_smooth_macro_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("smooth")
+            .with_sim_time(0.0, 8.0, 0.25)
+            .aux("input", "TIME", None)
+            .aux("smoothed", "SMTH1(input, 2)", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (SMTH1)");
+        // Pin that `smoothed` is finite and nonzero at the last step, so the
+        // NaN-aware comparison cannot pass vacuously (an all-NaN `smoothed` would
+        // satisfy NaN==NaN). A 2-unit smoothing of `input = TIME` reaches a
+        // meaningful positive value by t=8.
+        let results = run_artifact_results(&artifact);
+        let n_slots = artifact.layout.n_slots;
+        let smoothed_off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == "smoothed")
+            .map(|(_, o)| *o)
+            .expect("smoothed offset");
+        let last = (artifact.layout.n_chunks - 1) * n_slots + smoothed_off;
+        assert!(
+            results[last].is_finite() && results[last] > 0.0,
+            "smoothed should be finite and positive by the last step, got {}",
+            results[last]
+        );
+        let checked = assert_matches_vm_nan_aware(sim, &artifact);
+        assert!(
+            checked >= 2,
+            "expected to compare input + smoothed, only checked {checked}"
+        );
+    }
+
+    /// Task 1 (DELAY stdlib macro under RK4): `DELAY3` expands to a stdlib
+    /// submodule with three chained internal SMOOTH stocks, exercising a deeper
+    /// nested-stock chain under the RK4 stage math. The wasm must match the VM.
+    /// NaN-aware for the same internal-`initial_value` reason as the SMTH1 test.
+    #[test]
+    fn compile_simulation_delay3_macro_rk4_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("delay3")
+            .with_sim_time(0.0, 8.0, 0.25)
+            .with_sim_method(crate::datamodel::SimMethod::RungeKutta4)
+            .aux("input", "TIME", None)
+            .aux("delayed", "DELAY3(input, 2)", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen (DELAY3 RK4)");
+        let checked = assert_matches_vm_nan_aware(sim, &artifact);
+        assert!(
+            checked >= 2,
+            "expected to compare input + delayed, only checked {checked}"
+        );
     }
 
     /// AC4.1: a host reads the three exported geometry globals from the
