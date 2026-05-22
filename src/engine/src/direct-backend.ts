@@ -61,11 +61,17 @@ import {
   simlin_free_links,
 } from './internal/analysis';
 import { readAllErrorDetails, simlin_error_free } from './internal/error';
-import { simlin_model_compile_to_wasm, parseWasmLayout, WasmLayout, WasmBlobExports } from './internal/wasmgen';
+import {
+  simlin_model_compile_to_wasm,
+  parseWasmLayout,
+  readStridedSeries,
+  WasmLayout,
+  WasmBlobExports,
+} from './internal/wasmgen';
+import { canonicalizeIdent } from './internal/canonicalize';
 import {
   SimlinProjectPtr,
   SimlinModelPtr,
-  SimlinSimPtr,
   SimlinJsonFormat,
   SimlinLinkPolarity,
   ErrorDetail,
@@ -81,6 +87,33 @@ import {
   WasmConfig,
   WasmSourceProvider,
 } from '@simlin/engine/internal/wasm';
+
+/**
+ * Compare two strings by Unicode code point, matching Rust's `str` `sort()`
+ * (which orders by UTF-8 bytes -- equivalent to code-point order for valid
+ * Unicode). The default JS `Array.prototype.sort` compares by UTF-16 code unit,
+ * which mis-orders characters outside the BMP (a surrogate-pair lead unit
+ * 0xD800-0xDBFF sorts below a BMP char like U+E000 even though its code point is
+ * higher), so the wasm `getVarNames` must use this comparator to stay byte-for-
+ * byte identical to the VM's sorted output.
+ */
+function compareByCodePoint(a: string, b: string): number {
+  const ai = a[Symbol.iterator]();
+  const bi = b[Symbol.iterator]();
+  for (;;) {
+    const an = ai.next();
+    const bn = bi.next();
+    if (an.done || bn.done) {
+      // The shorter string sorts first; if both ended, they are equal.
+      return an.done ? (bn.done ? 0 : -1) : 1;
+    }
+    const ac = an.value.codePointAt(0)!;
+    const bc = bn.value.codePointAt(0)!;
+    if (ac !== bc) {
+      return ac - bc;
+    }
+  }
+}
 
 function convertLinkPolarity(raw: SimlinLinkPolarity): LinkPolarity {
   switch (raw) {
@@ -192,10 +225,6 @@ export class DirectBackend implements EngineBackend {
 
   private getModelPtr(handle: ModelHandle): SimlinModelPtr {
     return this.getEntry(handle as number, 'model').ptr;
-  }
-
-  private getSimPtr(handle: SimHandle): SimlinSimPtr {
-    return this.getEntry(handle as number, 'sim').ptr;
   }
 
   // Lifecycle
@@ -479,45 +508,130 @@ export class DirectBackend implements EngineBackend {
     }
   }
 
+  /**
+   * Resolve a caller variable name to its f64 slot in the wasm layout.
+   * Canonicalizes the name (Rust-faithful) and looks it up in `varOffsets`;
+   * throws an "unknown variable" error when absent (parity with the VM's
+   * not-found error on by-name reads/writes).
+   */
+  private wasmSlot(layout: WasmLayout, name: string): number {
+    const slot = layout.varOffsets.get(canonicalizeIdent(name));
+    if (slot === undefined) {
+      throw new Error(`unknown variable: ${name}`);
+    }
+    return slot;
+  }
+
   simRunTo(handle: SimHandle, time: number): void {
-    simlin_sim_run_to(this.getSimPtr(handle), time);
+    const entry = this.getEntry(handle as number, 'sim');
+    if (entry.engine === 'wasm') {
+      // The blob's run_to is resumable (calls run_initials internally and
+      // resumes from the prior cursor); a time past the stop is clamped by the blob.
+      entry.wasmExports!.run_to(time);
+      return;
+    }
+    simlin_sim_run_to(entry.ptr, time);
   }
 
   simRunToEnd(handle: SimHandle): void {
-    simlin_sim_run_to_end(this.getSimPtr(handle));
+    const entry = this.getEntry(handle as number, 'sim');
+    if (entry.engine === 'wasm') {
+      // Drive run_to(stop), mirroring the VM's run_to(specs.stop).
+      entry.wasmExports!.run_to(entry.wasmStopTime!);
+      return;
+    }
+    simlin_sim_run_to_end(entry.ptr);
   }
 
   simReset(handle: SimHandle): void {
-    simlin_sim_reset(this.getSimPtr(handle));
+    const entry = this.getEntry(handle as number, 'sim');
+    if (entry.engine === 'wasm') {
+      // Phase-1 reset: clears the run cursor, preserves constant overrides.
+      entry.wasmExports!.reset();
+      return;
+    }
+    simlin_sim_reset(entry.ptr);
   }
 
   simGetTime(handle: SimHandle): number {
-    return simlin_sim_get_value(this.getSimPtr(handle), 'time');
+    const entry = this.getEntry(handle as number, 'sim');
+    if (entry.engine === 'wasm') {
+      // `time` is slot 0 of the live curr chunk at linear-memory base 0.
+      return new DataView(entry.wasmExports!.memory.buffer).getFloat64(0, true);
+    }
+    return simlin_sim_get_value(entry.ptr, 'time');
   }
 
   simGetStepCount(handle: SimHandle): number {
-    return simlin_sim_get_stepcount(this.getSimPtr(handle));
+    const entry = this.getEntry(handle as number, 'sim');
+    if (entry.engine === 'wasm') {
+      // nChunks is the saved-row count == the VM's results.step_count.
+      return entry.wasmLayout!.nChunks;
+    }
+    return simlin_sim_get_stepcount(entry.ptr);
   }
 
   simGetValue(handle: SimHandle, name: string): number {
-    return simlin_sim_get_value(this.getSimPtr(handle), name);
+    const entry = this.getEntry(handle as number, 'sim');
+    if (entry.engine === 'wasm') {
+      // Read the variable's current value from the blob's live curr chunk at
+      // linear-memory base 0, mirroring the VM's get_value_now (vm.rs:880-887).
+      const slot = this.wasmSlot(entry.wasmLayout!, name);
+      return new DataView(entry.wasmExports!.memory.buffer).getFloat64(slot * 8, true);
+    }
+    return simlin_sim_get_value(entry.ptr, name);
   }
 
   simSetValue(handle: SimHandle, name: string, value: number): void {
-    simlin_sim_set_value(this.getSimPtr(handle), name, value);
+    const entry = this.getEntry(handle as number, 'sim');
+    if (entry.engine === 'wasm') {
+      const slot = this.wasmSlot(entry.wasmLayout!, name);
+      const rc = entry.wasmExports!.set_value(slot, value);
+      if (rc !== 0) {
+        // The blob returns nonzero when the slot is not a settable constant,
+        // mirroring the VM's BadOverride rejection (constants only).
+        throw new Error(`cannot set value of '${name}': not a simple constant`);
+      }
+      return;
+    }
+    simlin_sim_set_value(entry.ptr, name, value);
   }
 
   simGetSeries(handle: SimHandle, name: string): Float64Array {
+    const entry = this.getEntry(handle as number, 'sim');
+    if (entry.engine === 'wasm') {
+      // One Float64Array(nChunks) read strided from the blob's results region.
+      // Read memory.buffer fresh per call (uniform with the singleton helpers).
+      const slot = this.wasmSlot(entry.wasmLayout!, name);
+      return readStridedSeries(entry.wasmExports!.memory.buffer, entry.wasmLayout!, slot);
+    }
     const stepCount = this.simGetStepCount(handle);
-    return simlin_sim_get_series(this.getSimPtr(handle), name, stepCount);
+    return simlin_sim_get_series(entry.ptr, name, stepCount);
   }
 
   simGetVarNames(handle: SimHandle): string[] {
-    return simlin_sim_get_var_names_fn(this.getSimPtr(handle));
+    const entry = this.getEntry(handle as number, 'sim');
+    if (entry.engine === 'wasm') {
+      // Mirror the VM's simlin_sim_get_var_names: filter ONLY `$`-prefixed
+      // internal vars (is_internal_var) -- the reserved time/dt/initial_time/
+      // final_time names are kept -- and sort by Rust byte order. Rust's
+      // str `sort()` compares by UTF-8 bytes, which for valid Unicode orders
+      // identically to code-point order; the default JS UTF-16 Array.sort
+      // would mis-order non-ASCII (surrogate-pair) names, so compare by code point.
+      const names = Array.from(entry.wasmLayout!.varOffsets.keys()).filter((n) => !n.startsWith('$'));
+      names.sort(compareByCodePoint);
+      return names;
+    }
+    return simlin_sim_get_var_names_fn(entry.ptr);
   }
 
   simGetLinks(handle: SimHandle): Link[] {
-    const linksPtr = simlin_analyze_get_links(this.getSimPtr(handle));
+    const entry = this.getEntry(handle as number, 'sim');
+    if (entry.engine === 'wasm') {
+      // LTM link scores are a VM-only analysis; a wasm sim never enables LTM.
+      throw new Error("getLinks is not supported on the wasm engine; use engine:'vm'");
+    }
+    const linksPtr = simlin_analyze_get_links(entry.ptr);
     return convertLinks(linksPtr);
   }
 }

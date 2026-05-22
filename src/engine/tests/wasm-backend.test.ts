@@ -253,3 +253,322 @@ describe('DirectBackend wasm engine: sim creation and disposal (Task 3)', () => 
     });
   });
 });
+
+// VM-vs-wasm parity: the bytecode VM is the correctness oracle. Each wasm-engine
+// operation is driven identically to the VM path and compared within a tight
+// tolerance (the wasm blob mirrors the VM opcode-for-opcode, so identical f64
+// arithmetic is expected). Teacup is the supported scalar fixture; its constant
+// `room temperature` is the override exercised by the setValue cases.
+describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
+  let backend: DirectBackend;
+
+  // Tolerance for VM-vs-wasm comparison. Both executors run the same compiled
+  // simulation, so the difference is at most floating-point reassociation noise.
+  const TOL = 1e-9;
+
+  beforeAll(async () => {
+    backend = new DirectBackend();
+    backend.reset();
+    backend.configureWasm({ source: loadWasmBuffer() });
+    await backend.init();
+  });
+
+  afterAll(() => {
+    backend.reset();
+  });
+
+  // Open teacup and return both a vm sim and a wasm sim for the same model, plus
+  // a disposer. Each test drives the two identically and compares.
+  function openPair(): {
+    vm: SimHandle;
+    wasm: SimHandle;
+    projectHandle: ProjectHandle;
+    modelHandle: ModelHandle;
+    dispose: () => void;
+  } {
+    const projectHandle = backend.projectOpenXmile(loadTeacupXmile());
+    const modelHandle = backend.projectGetModel(projectHandle, null);
+    const vm = backend.simNew(modelHandle, false, 'vm');
+    const wasm = backend.simNew(modelHandle, false, 'wasm');
+    const dispose = () => {
+      backend.simDispose(vm);
+      backend.simDispose(wasm);
+      backend.modelDispose(modelHandle);
+      backend.projectDispose(projectHandle);
+    };
+    return { vm, wasm, projectHandle, modelHandle, dispose };
+  }
+
+  function expectSeriesClose(actual: Float64Array, expected: Float64Array): void {
+    expect(actual.length).toBe(expected.length);
+    for (let i = 0; i < expected.length; i++) {
+      expect(Math.abs(actual[i] - expected[i])).toBeLessThanOrEqual(TOL);
+    }
+  }
+
+  describe('AC2.1: runToEnd series parity', () => {
+    it('wasm runToEnd series equal the VM for every variable', () => {
+      const { vm, wasm, dispose } = openPair();
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+
+      const names = backend.simGetVarNames(wasm);
+      expect(names.length).toBeGreaterThan(0);
+      for (const name of names) {
+        expectSeriesClose(backend.simGetSeries(wasm, name), backend.simGetSeries(vm, name));
+      }
+      dispose();
+    });
+  });
+
+  describe('AC2.2: runTo(t) then getValue parity', () => {
+    // The VM's get_value_now reads its live curr chunk; after a run_to(t) that
+    // stops mid-interval the curr chunk holds the integrated state (stocks + the
+    // reserved time vars) but NOT the dependent flows/auxes/constants, because
+    // the VM's Euler loop breaks before evaluating the chunk whose time exceeds
+    // t (vm.rs:711). The wasm read is the byte-identical base-0 curr-chunk read
+    // (the determined source of truth) and agrees with the VM exactly on the
+    // integrated state mid-run. Both agree on EVERY variable after a full run
+    // (covered by 'getValue after runToEnd equals the VM for every variable').
+    it('wasm getValue after runTo(t) equals the VM on the integrated state', () => {
+      const { vm, wasm, dispose } = openPair();
+      const t = 5;
+      backend.simRunTo(vm, t);
+      backend.simRunTo(wasm, t);
+
+      // The stock and the reserved time vars are the well-defined "value at t".
+      for (const name of ['teacup_temperature', 'time', 'dt', 'initial_time', 'final_time']) {
+        expect(Math.abs(backend.simGetValue(wasm, name) - backend.simGetValue(vm, name))).toBeLessThanOrEqual(TOL);
+      }
+      // simGetTime must agree too (it reads slot 0 of the live curr chunk).
+      expect(Math.abs(backend.simGetTime(wasm) - backend.simGetTime(vm))).toBeLessThanOrEqual(TOL);
+      dispose();
+    });
+
+    it('getValue after runToEnd equals the VM for every variable', () => {
+      const { vm, wasm, dispose } = openPair();
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+      // After a full run the curr chunk is fully evaluated, so every variable --
+      // stocks, flows, auxes, constants, and the reserved time vars -- matches.
+      for (const name of backend.simGetVarNames(wasm)) {
+        expect(Math.abs(backend.simGetValue(wasm, name) - backend.simGetValue(vm, name))).toBeLessThanOrEqual(TOL);
+      }
+      dispose();
+    });
+  });
+
+  describe('AC2.3: segmented runTo equals a single runTo and the VM', () => {
+    it('runTo(t1)+runTo(t2) equals runTo(t2) and the VM', () => {
+      const projectHandle = backend.projectOpenXmile(loadTeacupXmile());
+      const modelHandle = backend.projectGetModel(projectHandle, null);
+      const vm = backend.simNew(modelHandle, false, 'vm');
+      const wasmSeg = backend.simNew(modelHandle, false, 'wasm');
+      const wasmOne = backend.simNew(modelHandle, false, 'wasm');
+
+      const t1 = 7;
+      const t2 = 19;
+      backend.simRunTo(vm, t2);
+      backend.simRunTo(wasmSeg, t1);
+      backend.simRunTo(wasmSeg, t2);
+      backend.simRunTo(wasmOne, t2);
+
+      // Segmented vs single (wasm-vs-wasm): both fully evaluate their stopping
+      // chunk, so getValue agrees on EVERY variable -- this is the core "segments
+      // accumulate to the same place" check.
+      for (const name of backend.simGetVarNames(wasmSeg)) {
+        expect(Math.abs(backend.simGetValue(wasmSeg, name) - backend.simGetValue(wasmOne, name))).toBeLessThanOrEqual(
+          TOL,
+        );
+      }
+      // Against the VM: the live integrated state (stock + time) matches mid-run.
+      // (Mid-run getSeries is unavailable on the VM -- it builds Results only at
+      // the end -- and non-stock getValue is a VM artifact mid-run; see AC2.2.)
+      for (const name of ['teacup_temperature', 'time']) {
+        expect(Math.abs(backend.simGetValue(wasmSeg, name) - backend.simGetValue(vm, name))).toBeLessThanOrEqual(TOL);
+      }
+
+      backend.simDispose(vm);
+      backend.simDispose(wasmSeg);
+      backend.simDispose(wasmOne);
+      backend.modelDispose(modelHandle);
+      backend.projectDispose(projectHandle);
+    });
+  });
+
+  describe('AC2.4: runTo past the stop time clamps to the end', () => {
+    it('runTo(stop*2) equals runToEnd and the VM', () => {
+      const projectHandle = backend.projectOpenXmile(loadTeacupXmile());
+      const modelHandle = backend.projectGetModel(projectHandle, null);
+      const vm = backend.simNew(modelHandle, false, 'vm');
+      const wasmPast = backend.simNew(modelHandle, false, 'wasm');
+      const wasmEnd = backend.simNew(modelHandle, false, 'wasm');
+
+      // teacup stop is 30; run well past it.
+      backend.simRunToEnd(vm);
+      backend.simRunTo(wasmPast, 60);
+      backend.simRunToEnd(wasmEnd);
+
+      for (const name of backend.simGetVarNames(wasmPast)) {
+        expectSeriesClose(backend.simGetSeries(wasmPast, name), backend.simGetSeries(wasmEnd, name));
+        expectSeriesClose(backend.simGetSeries(wasmPast, name), backend.simGetSeries(vm, name));
+      }
+
+      backend.simDispose(vm);
+      backend.simDispose(wasmPast);
+      backend.simDispose(wasmEnd);
+      backend.modelDispose(modelHandle);
+      backend.projectDispose(projectHandle);
+    });
+  });
+
+  describe('AC3.1/AC3.2: reset parity', () => {
+    it('reset then re-run reproduces the compiled defaults (matches VM)', () => {
+      const { vm, wasm, dispose } = openPair();
+      backend.simRunToEnd(wasm);
+      const before = backend.simGetSeries(wasm, 'teacup_temperature');
+
+      backend.simReset(wasm);
+      backend.simRunToEnd(wasm);
+      const after = backend.simGetSeries(wasm, 'teacup_temperature');
+
+      // Reset+re-run with no override reproduces the same defaults.
+      expectSeriesClose(after, before);
+
+      // And matches the VM run.
+      backend.simRunToEnd(vm);
+      expectSeriesClose(after, backend.simGetSeries(vm, 'teacup_temperature'));
+      dispose();
+    });
+
+    it('reset preserves a constant override (matches VM reset semantics)', () => {
+      const { vm, wasm, dispose } = openPair();
+
+      // Override the same constant on both, run, reset, run again. The VM's
+      // reset preserves overrides; the wasm reset must do the same.
+      backend.simSetValue(vm, 'room temperature', 40);
+      backend.simSetValue(wasm, 'room temperature', 40);
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+      backend.simReset(vm);
+      backend.simReset(wasm);
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+
+      for (const name of backend.simGetVarNames(wasm)) {
+        expectSeriesClose(backend.simGetSeries(wasm, name), backend.simGetSeries(vm, name));
+      }
+      // Sanity: the override is still in effect after reset (room temperature 40,
+      // not the compiled default 70).
+      expect(backend.simGetSeries(wasm, 'room_temperature')[0]).toBeCloseTo(40, 9);
+      dispose();
+    });
+  });
+
+  describe('AC4.1/AC4.2/AC4.4: by-name reads parity', () => {
+    it('getSeries for every variable equals the VM', () => {
+      const { vm, wasm, dispose } = openPair();
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+      for (const name of backend.simGetVarNames(wasm)) {
+        expectSeriesClose(backend.simGetSeries(wasm, name), backend.simGetSeries(vm, name));
+      }
+      dispose();
+    });
+
+    it('getVarNames and getStepCount equal the VM (exact array equality)', () => {
+      const { vm, wasm, dispose } = openPair();
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+
+      // The VM's getVarNames includes the reserved time vars (it filters only
+      // $-prefixed names); the wasm path must produce the identical array.
+      expect(backend.simGetVarNames(wasm)).toEqual(backend.simGetVarNames(vm));
+      expect(backend.simGetStepCount(wasm)).toBe(backend.simGetStepCount(vm));
+
+      // The reserved names are present (not filtered out).
+      const names = backend.simGetVarNames(wasm);
+      expect(names).toContain('time');
+      expect(names).toContain('dt');
+      expect(names).toContain('initial_time');
+      expect(names).toContain('final_time');
+      dispose();
+    });
+
+    it('getSeries(unknownName) throws like the VM', () => {
+      const { vm, wasm, dispose } = openPair();
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+      expect(() => backend.simGetSeries(vm, 'definitely_not_a_var')).toThrow();
+      expect(() => backend.simGetSeries(wasm, 'definitely_not_a_var')).toThrow();
+      dispose();
+    });
+  });
+
+  describe('AC4.3: getSeries returns a single Float64Array of length nChunks', () => {
+    it('returns one Float64Array whose length equals the step count', () => {
+      const { wasm, dispose } = openPair();
+      backend.simRunToEnd(wasm);
+      const stepCount = backend.simGetStepCount(wasm);
+      const series = backend.simGetSeries(wasm, 'teacup_temperature');
+      expect(series).toBeInstanceOf(Float64Array);
+      expect(series.length).toBe(stepCount);
+      dispose();
+    });
+  });
+
+  describe('AC5.1/AC5.2/AC5.3: setValue (constants only) + mid-run', () => {
+    it('setValue(const) then run matches the VM under the same override', () => {
+      const { vm, wasm, dispose } = openPair();
+      backend.simSetValue(vm, 'room temperature', 55);
+      backend.simSetValue(wasm, 'room temperature', 55);
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+      for (const name of backend.simGetVarNames(wasm)) {
+        expectSeriesClose(backend.simGetSeries(wasm, name), backend.simGetSeries(vm, name));
+      }
+      dispose();
+    });
+
+    it('setValue(nonConstant) throws, matching the VM constants-only rejection', () => {
+      const { vm, wasm, dispose } = openPair();
+      // heat_loss_to_room is a flow (computed), not a settable constant.
+      expect(() => backend.simSetValue(vm, 'heat loss to room', 1)).toThrow();
+      expect(() => backend.simSetValue(wasm, 'heat loss to room', 1)).toThrow();
+      dispose();
+    });
+
+    it('setValue(unknownVariable) throws', () => {
+      const { wasm, dispose } = openPair();
+      expect(() => backend.simSetValue(wasm, 'definitely_not_a_var', 1)).toThrow();
+      dispose();
+    });
+
+    it('mid-run setValue affects only post-t1 steps (matches VM driven identically)', () => {
+      const { vm, wasm, dispose } = openPair();
+      const t1 = 10;
+      backend.simRunTo(vm, t1);
+      backend.simRunTo(wasm, t1);
+      backend.simSetValue(vm, 'room temperature', 30);
+      backend.simSetValue(wasm, 'room temperature', 30);
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+
+      // Full-series parity against the VM driven the same way.
+      for (const name of backend.simGetVarNames(wasm)) {
+        expectSeriesClose(backend.simGetSeries(wasm, name), backend.simGetSeries(vm, name));
+      }
+      dispose();
+    });
+  });
+
+  describe('AC6.1: getLinks rejected on the wasm engine', () => {
+    it('getLinks on a wasm sim throws a clear error', () => {
+      const { vm, wasm, dispose } = openPair();
+      // The VM path returns links (empty with LTM off); the wasm path rejects.
+      expect(() => backend.simGetLinks(vm)).not.toThrow();
+      expect(() => backend.simGetLinks(wasm)).toThrow(/not supported on the wasm engine/i);
+      dispose();
+    });
+  });
+});
