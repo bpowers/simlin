@@ -314,3 +314,56 @@ fn run_wasm_results(wasm: &[u8], layout: &WasmLayout) -> Vec<f64> {
             .collect()
     })
 }
+
+/// Drive the blob's *resumable* run ABI: instantiate `wasm`, call `run_initials`
+/// once, then `run_to(t)` for each `t` in `targets` (advancing the persistent
+/// step cursor held in the blob's mutable globals), and copy the whole step-major
+/// results slab out (`n_chunks * n_slots` f64 at `layout.results_offset`).
+///
+/// This is the resumable peer of [`run_wasm_results`] (which calls the
+/// single-shot `run`). A segmented drive `&[t1, t2]` must produce a slab whose
+/// rows up to `t2` equal a single `run_to(t2)` and the VM driven through the same
+/// `run_to` segments -- the parity the wasm-side tests assert.
+#[allow(dead_code)]
+fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f64]) -> Vec<f64> {
+    let info = validate(wasm).expect("generated wasm module must validate");
+    let mut store = Store::new(());
+    let inst = store
+        .module_instantiate(&info, Vec::new(), None)
+        .expect("instantiate wasm module")
+        .module_addr;
+    let run_initials = store
+        .instance_export(inst, "run_initials")
+        .expect("run_initials export must exist")
+        .as_func()
+        .expect("run_initials export must be a function");
+    store
+        .invoke_simple_typed::<(), ()>(run_initials, ())
+        .expect("run_initials wasm");
+    for &t in targets {
+        let run_to = store
+            .instance_export(inst, "run_to")
+            .expect("run_to export must exist")
+            .as_func()
+            .expect("run_to export must be a function");
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to, (t,))
+            .expect("run_to wasm");
+    }
+    let mem = store
+        .instance_export(inst, "memory")
+        .expect("memory export must exist")
+        .as_mem()
+        .expect("memory export must be a memory");
+
+    let n = layout.n_chunks * layout.n_slots;
+    let base = layout.results_offset;
+    store.mem_access_mut_slice(mem, |bytes| {
+        (0..n)
+            .map(|i| {
+                let a = base + i * 8;
+                f64::from_le_bytes(bytes[a..a + 8].try_into().unwrap())
+            })
+            .collect()
+    })
+}
