@@ -75,7 +75,7 @@ impl Context {
     pub fn new_with_builtins(
         units: &[Unit],
         sim_specs: &SimSpecs,
-    ) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
+    ) -> (Self, Vec<(String, Vec<EquationError>)>) {
         // Built-in unit equivalences for common singular/plural variations.
         // These ensure that "person" and "people" (etc.) are treated as the same unit.
         // We only add a built-in if the model doesn't already define a unit with that name.
@@ -126,10 +126,7 @@ impl Context {
 
         Self::new(&combined_units, sim_specs)
     }
-    pub fn new(
-        units: &[Unit],
-        sim_specs: &SimSpecs,
-    ) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
+    pub fn new(units: &[Unit], sim_specs: &SimSpecs) -> (Self, Vec<(String, Vec<EquationError>)>) {
         let mut unit_errors: Vec<(String, Vec<EquationError>)> = Vec::new();
 
         // Vensim's MDL files routinely repeat the same `22:` unit-equivalence
@@ -260,18 +257,14 @@ impl Context {
             }
         }
 
-        // TODO: we shouldn't discard the whole context if there are errors
-        if unit_errors.is_empty() {
-            Ok(ctx)
-        } else {
-            // for (id, errors) in unit_errors.iter() {
-            //     eprintln!("unit errors for '{}'", id);
-            //     for err in errors.iter() {
-            //         eprintln!("    {}", err);
-            //     }
-            // }
-            Err(unit_errors)
-        }
+        // Construction is partial: always return the context we built, with any
+        // conflicting/duplicate declarations reported alongside it. A single bad
+        // unit declaration must not discard every other (valid) unit -- callers
+        // surface the errors as diagnostics and keep using the context. This is
+        // the context-layer parallel of the inference partial-results fix
+        // (GH #614): an empty context would lose all alias normalization
+        // (yr/year, person/people) and re-create a spurious mismatch flood.
+        (ctx, unit_errors)
     }
 
     pub(crate) fn lookup(&self, ident: &str) -> Option<&UnitMap> {
@@ -457,7 +450,7 @@ fn self_aliased_prime_unit_is_registered() {
     // `lookup` returned None and callers fell back to whatever (un-normalized)
     // name they queried with -- the source of the C-LEARN `year` vs `yr`
     // mismatch flood.
-    let ctx = Context::new(
+    let (ctx, errors) = Context::new(
         &[Unit {
             name: "Yr".to_owned(),
             equation: None,
@@ -471,8 +464,11 @@ fn self_aliased_prime_unit_is_registered() {
             ],
         }],
         &Default::default(),
-    )
-    .expect("a self-aliased unit group must not produce a DuplicateUnit error");
+    );
+    assert!(
+        errors.is_empty(),
+        "a self-aliased unit group must not produce a DuplicateUnit error"
+    );
 
     let yr = ctx.lookup("yr");
     let year = ctx.lookup("year");
@@ -483,6 +479,55 @@ fn self_aliased_prime_unit_is_registered() {
     assert_eq!(
         yr, year,
         "\"yr\" and \"year\" must resolve to the same UnitMap"
+    );
+}
+
+/// Context construction is partial: one conflicting unit declaration must not
+/// discard the whole context. The unrelated valid units (and their alias
+/// normalization) still resolve, and the conflict is reported alongside them
+/// rather than throwing every definition away. This is the context-layer
+/// parallel of the inference all-or-nothing fix (GH #614); it closes the
+/// long-standing "we shouldn't discard the whole context if there are errors"
+/// TODO.
+#[test]
+fn context_construction_keeps_valid_units_despite_a_conflict() {
+    let units = [
+        // A valid alias group: `yr` normalizes to `year`.
+        Unit {
+            name: "year".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["yr".to_owned()],
+        },
+        // A genuine conflict: `m` is claimed as an alias of two different units.
+        Unit {
+            name: "meter".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["m".to_owned()],
+        },
+        Unit {
+            name: "second".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["m".to_owned()],
+        },
+    ];
+    let (ctx, errors) = Context::new(&units, &Default::default());
+
+    assert!(
+        !errors.is_empty(),
+        "the conflicting `m` alias must be reported"
+    );
+    // ...but the unrelated valid alias group still resolves.
+    assert!(
+        ctx.lookup("yr").is_some(),
+        "valid units must survive a conflict elsewhere in the unit list"
+    );
+    assert_eq!(
+        ctx.lookup("yr"),
+        ctx.lookup("year"),
+        "`yr` must still normalize to `year` despite the conflict"
     );
 }
 
@@ -517,7 +562,7 @@ fn test_pretty_print_unit() {
         ],
         &Default::default(),
     )
-    .unwrap();
+    .0;
 
     let positive_cases: &[(&str, &str); 9] = &[
         ("m^2/s", "meter^2/second"),
@@ -584,10 +629,7 @@ fn test_context_creation() {
         .collect(),
     };
 
-    assert_eq!(
-        expected,
-        Context::new(simple_units, &Default::default()).unwrap()
-    );
+    assert_eq!(expected, Context::new(simple_units, &Default::default()).0);
 
     let more_units = &[
         Unit {
@@ -625,10 +667,7 @@ fn test_context_creation() {
         .collect(),
     };
 
-    assert_eq!(
-        expected2,
-        Context::new(more_units, &Default::default()).unwrap()
-    );
+    assert_eq!(expected2, Context::new(more_units, &Default::default()).0);
 }
 
 #[test]
@@ -662,7 +701,7 @@ fn test_basic_unit_parsing() {
         ],
         &Default::default(),
     )
-    .unwrap();
+    .0;
 
     let positive_cases: &[(&str, UnitMap); 6] = &[
         (
@@ -738,7 +777,7 @@ fn test_basic_unit_checks() {
         ],
         &Default::default(),
     )
-    .unwrap();
+    .0;
     // from a set of datamodel::Units build a Context
 
     // with a context, check if a set of variables unit checks
@@ -806,7 +845,7 @@ fn test_unit_canonicalization() {
         ],
         &Default::default(),
     )
-    .unwrap();
+    .0;
 
     // All of these should resolve to the same canonical unit
     let test_cases = &["meter", "Meter", "METER", "m", "M", "meters", "METERS"];
@@ -848,7 +887,7 @@ fn test_unit_canonicalization() {
 fn test_year_years_builtin_alias() {
     // Test that the year/years builtin alias works correctly
     // This tests the `new_with_builtins` path which adds built-in aliases
-    let context = Context::new_with_builtins(&[], &Default::default()).unwrap();
+    let context = Context::new_with_builtins(&[], &Default::default()).0;
 
     // Test singular form
     let expr = Expr0::new("year", LexerType::Units).unwrap().unwrap();
@@ -902,7 +941,7 @@ fn test_year_years_builtin_alias() {
 
 #[test]
 fn test_builtin_dollar_equivalences() {
-    let context = Context::new_with_builtins(&[], &Default::default()).unwrap();
+    let context = Context::new_with_builtins(&[], &Default::default()).0;
 
     let expected: UnitMap = [("$".to_owned(), 1)].iter().cloned().collect();
 
@@ -933,7 +972,7 @@ fn test_builtin_dollar_equivalences() {
 
 #[test]
 fn test_builtin_unit_equivalences() {
-    let context = Context::new_with_builtins(&[], &Default::default()).unwrap();
+    let context = Context::new_with_builtins(&[], &Default::default()).0;
 
     let expected: UnitMap = [("unit".to_owned(), 1)].iter().cloned().collect();
 
@@ -966,8 +1005,11 @@ fn test_redundant_duplicate_unit_declarations_are_benign() {
             aliases: vec!["Resource units".to_string()],
         },
     ];
-    let context = Context::new_with_builtins(&units, &Default::default())
-        .expect("duplicate identical unit declarations must be tolerated; got an error");
+    let (context, errors) = Context::new_with_builtins(&units, &Default::default());
+    assert!(
+        errors.is_empty(),
+        "duplicate identical unit declarations must be tolerated; got an error"
+    );
 
     // Both spellings must still resolve through the alias to the same canonical unit.
     let expr = Expr0::new("Resource_unit", LexerType::Units)
@@ -1002,9 +1044,9 @@ fn test_conflicting_unit_declarations_are_still_errors() {
             aliases: vec!["FB".to_string()], // same alias mapped to a different primary
         },
     ];
-    let result = Context::new(&units, &Default::default());
+    let (_ctx, errors) = Context::new(&units, &Default::default());
     assert!(
-        result.is_err(),
+        !errors.is_empty(),
         "conflicting alias declarations must still produce an error"
     );
 }
@@ -1021,7 +1063,7 @@ fn debug_user_alias_with_underscore_identifiers() {
         disabled: false,
         aliases: vec!["Resource units".to_string()],
     }];
-    let context = Context::new_with_builtins(&units, &Default::default()).unwrap();
+    let context = Context::new_with_builtins(&units, &Default::default()).0;
 
     let expr = Expr0::new("Resource_unit", LexerType::Units)
         .unwrap()

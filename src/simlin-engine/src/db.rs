@@ -750,28 +750,30 @@ impl std::fmt::Debug for ParsedVariableResult {
 pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::units::Context {
     let dm_units = source_units_to_datamodel(project.units(db));
     let dm_sim_specs = source_sim_specs_to_datamodel(project.sim_specs(db));
-    match crate::units::Context::new_with_builtins(&dm_units, &dm_sim_specs) {
-        Ok(ctx) => ctx,
-        Err(unit_parse_errors) => {
-            // Accumulate each unit definition parsing error as a
-            // project-level diagnostic (no model / variable).
-            for (unit_name, eq_errors) in &unit_parse_errors {
-                for eq_err in eq_errors {
-                    CompilationDiagnostic(Diagnostic {
-                        model: String::new(),
-                        variable: Some(unit_name.clone()),
-                        error: DiagnosticError::Unit(crate::common::UnitError::DefinitionError(
-                            eq_err.clone(),
-                            None,
-                        )),
-                        severity: DiagnosticSeverity::Error,
-                    })
-                    .accumulate(db);
-                }
-            }
-            Default::default()
+    // Construction is partial: keep the context built from the valid unit
+    // declarations and surface each conflicting/duplicate declaration as a
+    // project-level diagnostic, rather than discarding every unit definition on
+    // the first conflict. An empty context would lose all alias normalization
+    // project-wide (yr/year, person/people, model-defined equivalences) and
+    // re-create a spurious unit-mismatch flood -- the context-layer parallel of
+    // the inference partial-results fix (GH #614).
+    let (ctx, unit_parse_errors) =
+        crate::units::Context::new_with_builtins(&dm_units, &dm_sim_specs);
+    for (unit_name, eq_errors) in &unit_parse_errors {
+        for eq_err in eq_errors {
+            CompilationDiagnostic(Diagnostic {
+                model: String::new(),
+                variable: Some(unit_name.clone()),
+                error: DiagnosticError::Unit(crate::common::UnitError::DefinitionError(
+                    eq_err.clone(),
+                    None,
+                )),
+                severity: DiagnosticSeverity::Error,
+            })
+            .accumulate(db);
         }
     }
+    ctx
 }
 
 /// Cached datamodel dimensions -- computed once per project.

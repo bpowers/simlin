@@ -30,7 +30,7 @@ pub(crate) fn x_aux(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::V
 pub(crate) fn aux(ident: &str, eqn: &str) -> Variable {
     let var = x_aux(ident, eqn, None);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+    let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
         Ok(Some(mi.clone()))
     });
@@ -70,7 +70,7 @@ pub(crate) fn x_stock(
 pub(crate) fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
     let var = x_stock(ident, eqn, inflows, outflows, None);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+    let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
         Ok(Some(mi.clone()))
     });
@@ -159,7 +159,7 @@ pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::
 pub(crate) fn flow(ident: &str, eqn: &str) -> Variable {
     let var = x_flow(ident, eqn, None);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+    let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
         Ok(Some(mi.clone()))
     });

@@ -1522,7 +1522,7 @@ fn test_module_parse() {
     );
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
 
     let owned_models: HashMap<Ident<Canonical>, ModelStage0> = vec![
         ("main".to_string(), &main_model),
@@ -1553,7 +1553,7 @@ fn test_module_parse() {
 
 #[test]
 fn test_errors() {
-    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let units_ctx = Context::new(&[], &Default::default()).0;
     let main_model = x_model(
         "main",
         vec![x_aux("aux_3", "unknown_variable * 3.14", None)],
@@ -1608,7 +1608,7 @@ fn test_errors() {
 
 #[test]
 fn test_new_cached_preserves_previous_helper_rewrite() {
-    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let units_ctx = Context::new(&[], &Default::default()).0;
     let main_model = x_model(
         "main",
         vec![
@@ -1722,7 +1722,7 @@ fn test_init_expression_vm() {
 
 #[test]
 fn test_previous_module_input_var_uses_helper_rewrite() {
-    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let units_ctx = Context::new(&[], &Default::default()).0;
     let module_input = datamodel::Variable::Aux(datamodel::Aux {
         ident: "input".to_string(),
         equation: datamodel::Equation::Scalar("0".to_string()),
@@ -1990,7 +1990,7 @@ fn test_all_deps() {
             x_aux("aux_4", "mod_1.output", None),
         ],
     );
-    let units_ctx = Context::new(&[], &Default::default()).unwrap();
+    let units_ctx = Context::new(&[], &Default::default()).0;
     let owned_x_models: HashMap<Ident<Canonical>, ModelStage0> = vec![
         ("mod_1".to_owned(), &mod_1_model),
         ("main".to_owned(), &main_model),
@@ -2039,7 +2039,7 @@ fn test_all_deps() {
     };
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+    let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mod_1_orig = &main_model.variables[0];
     assert_eq!("mod_1", mod_1_orig.get_ident());
     let mod_1 = parse_var(&[], mod_1_orig, &mut implicit_vars, &unit_ctx, |mi| {

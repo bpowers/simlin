@@ -975,7 +975,7 @@ impl UnitInferer<'_> {
 #[test]
 fn test_inference() {
     let sim_specs = sim_specs_with_units("parsec");
-    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
 
     // test cases where we should be able to infer all units
     let test_cases: &[&[(crate::datamodel::Variable, &'static str)]] = &[
@@ -1076,7 +1076,7 @@ fn test_inference() {
 #[test]
 fn test_declared_units_without_equation_propagate() {
     let sim_specs = sim_specs_with_units("parsec");
-    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
 
     // `base` has declared units but an empty equation (so `ast()` is None).
     // `derived = base` has no declared units; inference should propagate
@@ -1247,7 +1247,7 @@ fn test_inference_error_has_location() {
 #[test]
 fn test_inference_partial_results_survive_conflict() {
     let sim_specs = sim_specs_with_units("year");
-    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
 
     let vars = vec![
         // A clean, independently-inferrable chain.
@@ -1306,7 +1306,7 @@ fn test_inference_partial_results_survive_conflict() {
 #[test]
 fn test_macro_body_units_naming_parameters_are_polymorphic() {
     let sim_specs = sim_specs_with_units("year");
-    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
 
     // A macro `scaleit(amount)` whose output is the parameter `amount`, with the
     // output's units declared as the parameter name `amount` (the polymorphic
@@ -1407,7 +1407,7 @@ pub(crate) fn infer(
 #[test]
 fn test_previous_infers_units_from_lagged_arg() {
     let sim_specs = sim_specs_with_units("parsec");
-    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
 
     // position has explicit units "widget". prev_pos has no declared
     // units; inference should propagate "widget" from position
@@ -1806,7 +1806,7 @@ fn test_rank_builtin_unit_inference() {
     let model = x_model("main", vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
     let mut results = InferenceResult::default();
     let db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);

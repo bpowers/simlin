@@ -4297,7 +4297,7 @@ mod tests {
             })
         };
 
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
         let mut implicit_vars = Vec::new();
         let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
             dims,
@@ -4568,7 +4568,7 @@ mod tests {
 
         // ApplyToAll target.
         let dims = vec![region_dm_dimension()];
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
         let mut implicit = Vec::new();
         let a2a_dm = crate::datamodel::Variable::Aux(crate::datamodel::Aux {
             ident: "a2a_target".to_string(),
