@@ -5303,4 +5303,185 @@ mod tests {
             series_b[last]
         );
     }
+
+    /// Task 4 (AC5.3): a mid-run `set_value` affects only steps after the cursor.
+    /// On one instance: `run_initials; run_to(t1)`, `set_value(inflow_rate, v2)`,
+    /// `run_to(stop)`. Rows at times <= t1 match a no-override baseline; rows after
+    /// reflect v2. The whole slab matches the VM driven identically. The override
+    /// re-reads from the region every step (`lower.rs`'s `AssignConstCurr`
+    /// redirect), so no new mechanism is needed beyond the resumable run.
+    ///
+    /// AC5.1 (full-run override) is already covered by
+    /// `compile_simulation_set_value_override_matches_vm` above; this is the
+    /// incremental peer.
+    #[test]
+    fn mid_run_set_value_matches_vm() {
+        let datamodel = resumable_fixture(10.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let stop = sim.specs.stop;
+        let rate_off = layout_offset(&artifact, "inflow_rate");
+        let level_off = layout_offset(&artifact, "level");
+        assert!(sim.is_constant_offset(rate_off));
+
+        let t1 = 5.0_f64;
+        let v2 = 5.0_f64;
+
+        // Drive the blob: run_initials; run_to(t1); set_value(rate, v2); run_to(stop).
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let run_initials = store
+            .instance_export(inst, "run_initials")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(), ()>(run_initials, ())
+            .expect("run_initials");
+        let run_to_t1 = store
+            .instance_export(inst, "run_to")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to_t1, (t1,))
+            .expect("run_to(t1)");
+        let set_value = store
+            .instance_export(inst, "set_value")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let rc: i32 = store
+            .invoke_simple_typed::<(i32, f64), i32>(set_value, (rate_off as i32, v2))
+            .expect("set_value");
+        assert_eq!(rc, 0, "mid-run set_value on a constant must succeed");
+        let run_to_stop = store
+            .instance_export(inst, "run_to")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to_stop, (stop,))
+            .expect("run_to(stop)");
+        let wasm_slab = read_slab(&mut store, inst, &artifact.layout);
+
+        // The VM oracle, driven identically.
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to(t1).expect("vm run_to(t1)");
+        vm.set_value(&Ident::<Canonical>::from_str_unchecked("inflow_rate"), v2)
+            .expect("vm set_value");
+        vm.run_to(stop).expect("vm run_to(stop)");
+        let vm_results = vm.into_results();
+
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = wasm_slab[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} mid-run mismatch at chunk {c}: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+
+        // Rows up to and including the override-application point match the
+        // no-override baseline (rate=2). Because `set_value` runs AFTER
+        // `run_to(t1)` -- which (like the VM) advances the committed cursor one
+        // step PAST t1, i.e. to t1+dt, running the t1->t1+dt step with the OLD
+        // rate -- the first overridden step is t1+dt -> t1+2dt. So rows for
+        // t <= t1+dt are unchanged; rows after reflect v2. This is exactly AC5.3's
+        // "affects only steps after t1" (the override re-reads from the const
+        // region every step, so it cannot retroactively change committed rows).
+        let baseline = run_artifact_segmented(&artifact, &[stop]);
+        let unchanged_through = (t1 + sim.specs.dt) as usize;
+        for c in 0..=unchanged_through {
+            let mid = wasm_slab[c * n_slots + level_off];
+            let base = baseline[c * n_slots + level_off];
+            assert!(
+                (mid - base).abs() < 1e-9,
+                "level at chunk {c} (<= t1+dt) must match the no-override baseline: mid={mid} base={base}"
+            );
+        }
+        // The override took effect for the later steps: the final committed value
+        // exceeds the no-override baseline (rate 5 > 2 after the application point).
+        let last = (n_chunks - 1) * n_slots + level_off;
+        assert!(
+            wasm_slab[last] > baseline[last] + 1.0,
+            "level at stop after a mid-run rate bump must exceed the rate=2 baseline: mid={} base={}",
+            wasm_slab[last],
+            baseline[last]
+        );
+        // And a row strictly after the application point differs from baseline.
+        let after = (unchanged_through + 1) * n_slots + level_off;
+        assert!(
+            wasm_slab[after] > baseline[after],
+            "the first overridden row must exceed the baseline: mid={} base={}",
+            wasm_slab[after],
+            baseline[after]
+        );
+    }
+
+    /// Task 4 (AC5.2): the blob's `set_value` returns nonzero for a non-constant
+    /// offset (a stock or a computed flow) and zero for an overridable constant.
+    /// This is the blob-level peer of the VM's `BadOverride` rejection
+    /// (`vm.rs:1036-1044`); the TS facade turns the nonzero code into a thrown
+    /// error in Phase 2.
+    #[test]
+    fn set_value_nonconstant_returns_error() {
+        let datamodel = resumable_fixture(5.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let level_off = layout_offset(&artifact, "level"); // a stock
+        let inflow_off = layout_offset(&artifact, "inflow"); // a computed flow
+        let rate_off = layout_offset(&artifact, "inflow_rate"); // a constant
+        assert!(!sim.is_constant_offset(level_off), "level is a stock");
+        assert!(!sim.is_constant_offset(inflow_off), "inflow is computed");
+        assert!(
+            sim.is_constant_offset(rate_off),
+            "inflow_rate is a constant"
+        );
+
+        assert_ne!(
+            set_value_rc(&artifact, level_off as i32, 1.0),
+            0,
+            "set_value on a stock offset must return nonzero"
+        );
+        assert_ne!(
+            set_value_rc(&artifact, inflow_off as i32, 1.0),
+            0,
+            "set_value on a computed-flow offset must return nonzero"
+        );
+        assert_eq!(
+            set_value_rc(&artifact, rate_off as i32, 1.0),
+            0,
+            "set_value on the overridable constant must return zero"
+        );
+
+        // Cross-check the VM rejects the same non-constants and accepts the constant.
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        assert!(
+            vm.set_value_by_offset(level_off, 1.0).is_err(),
+            "VM must reject a stock offset"
+        );
+        assert!(
+            vm.set_value_by_offset(inflow_off, 1.0).is_err(),
+            "VM must reject a computed-flow offset"
+        );
+        assert!(
+            vm.set_value_by_offset(rate_off, 1.0).is_ok(),
+            "VM must accept the overridable constant"
+        );
+    }
 }
