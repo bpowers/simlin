@@ -35,6 +35,19 @@ pub type DependencyMap = HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>;
 
 pub type VariableStage0 = Variable<datamodel::ModuleReference, Expr0>;
 
+/// Canonical formal-parameter names of a macro (empty for a non-macro model).
+/// Unit inference lowers a macro body's parameter-named unit declarations
+/// (`~ xfrom`) to the parameters' metavariables so they resolve to the actual
+/// argument units at each instantiation, rather than leaking the parameter
+/// name as a literal base unit (GH #619).
+pub(crate) fn macro_param_idents(
+    macro_spec: Option<&datamodel::MacroSpec>,
+) -> Vec<Ident<Canonical>> {
+    macro_spec
+        .map(|spec| spec.parameters.iter().map(|p| Ident::new(p)).collect())
+        .unwrap_or_default()
+}
+
 /// ModelStage0 converts a datamodel::Model to one with a map of canonicalized
 /// identifiers to Variables where module dependencies haven't been resolved.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -53,6 +66,11 @@ pub struct ModelStage0 {
     /// RAMP FROM TO), so unit inference must treat those as polymorphic rather
     /// than concrete base units.
     pub is_macro: bool,
+    /// Canonical formal-parameter names when `is_macro` is true (empty
+    /// otherwise). Lets unit inference recognize which identifiers in a macro
+    /// body's unit declarations are parameters and lower them to the
+    /// corresponding metavariables (GH #619).
+    pub macro_params: Vec<Ident<Canonical>>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -83,6 +101,9 @@ pub struct ModelStage1 {
     /// `ModelStage0::is_macro`. Inference treats a macro body's declared units
     /// as polymorphic rather than concrete base units.
     pub is_macro: bool,
+    /// Canonical formal-parameter names when `is_macro` is true (empty
+    /// otherwise); see `ModelStage0::macro_params` (GH #619).
+    pub macro_params: Vec<Ident<Canonical>>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -975,6 +996,7 @@ impl ModelStage0 {
             errors: None,
             implicit,
             is_macro: x_model.macro_spec.is_some(),
+            macro_params: macro_param_idents(x_model.macro_spec.as_ref()),
         }
     }
 
@@ -1077,6 +1099,7 @@ impl ModelStage0 {
             errors: None,
             implicit,
             is_macro: x_model.macro_spec.is_some(),
+            macro_params: macro_param_idents(x_model.macro_spec.as_ref()),
         }
     }
 }
@@ -1123,6 +1146,7 @@ impl ModelStage1 {
             instantiations: None,
             implicit: model_s0.implicit,
             is_macro: model_s0.is_macro,
+            macro_params: model_s0.macro_params.clone(),
         }
     }
 

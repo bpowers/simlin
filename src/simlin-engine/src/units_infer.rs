@@ -266,6 +266,33 @@ impl ConstraintSet {
     }
 }
 
+/// Lower a macro body's declared units, replacing each unit identifier that
+/// names a formal parameter with that parameter's metavariable
+/// (`@{prefix}{param}`). A genuine base unit -- any name that is not a
+/// parameter, e.g. `dmnl` -- is kept verbatim. This is what makes a macro's
+/// unit signature polymorphic: a `~ xfrom` declaration becomes a constraint
+/// tying the body variable to the metavariable the module's input binding
+/// already ties to the actual argument, so it resolves to the argument's units
+/// at this instantiation instead of leaking a bogus literal base unit `xfrom`
+/// (GH #619). `prefix` is the instantiation prefix of the macro body (e.g.
+/// `$⁚ramped⁚0⁚ramp_from_to·`), so the metavariable is per-instantiation.
+fn lower_macro_unit_to_metavars(
+    units: &UnitMap,
+    params: &[Ident<Canonical>],
+    prefix: &str,
+) -> UnitMap {
+    let mut lowered = UnitMap::new();
+    for (name, exp) in units.map.iter() {
+        let canonical = canonicalize(name);
+        if params.iter().any(|p| p.as_str() == &*canonical) {
+            lowered.map.insert(format!("@{prefix}{canonical}"), *exp);
+        } else {
+            lowered.map.insert(name.clone(), *exp);
+        }
+    }
+    lowered
+}
+
 /// Splits a UnitMap into its metavariable part (signature) and concrete part (residual).
 /// This enables O(n) mismatch detection by grouping constraints with the same signature.
 fn split_constraint(u: &UnitMap) -> (UnitMap, UnitMap) {
@@ -385,6 +412,82 @@ fn find_constraint_mismatches(constraints: &[LocatedConstraint]) -> Vec<UnitErro
     }
 
     mismatches
+}
+
+/// Parse a (possibly synthetic) inference source-variable name into the owning
+/// user variable and the macro/stdlib function it expands. A module-function
+/// call is rewritten by `builtins_visitor::expand_module_function` into a
+/// synthetic module named `$⁚{var}⁚{n}⁚{func}` (optionally `⁚{subscript}` in
+/// A2A context), and a body-variable reference appends `·{body}` path
+/// segments. So `$⁚ramped⁚0⁚ramp_from_to·slope` means: variable `ramped`'s
+/// equation calls the macro/function `ramp_from_to`. Returns `(var, func)` for
+/// such a synthetic name, or `None` for an ordinary user variable. The two
+/// separators are U+205A (`⁚`, the synthetic-name field separator) and U+00B7
+/// (`·`, the compile-time module-path separator).
+fn synthetic_owner_and_func(name: &str) -> Option<(String, String)> {
+    for segment in name.split('\u{b7}') {
+        if let Some(rest) = segment.strip_prefix("$\u{205A}") {
+            let parts: Vec<&str> = rest.split('\u{205A}').collect();
+            // parts == [var, n, func, (subscript?)]
+            if parts.len() >= 3 {
+                return Some((parts[0].to_string(), parts[2].to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Rewrite an inference conflict that involves a synthetic module/macro
+/// instantiation into a clear, user-facing diagnostic. The synthetic
+/// instantiation variable names (`$⁚…·…`) and the `@`-metavariable constraint
+/// text are meaningless to a modeler, so we collapse the synthetic sources to
+/// the owning user variable and rebuild the message to name the function and
+/// the variable using it (GH #619). A conflict with no synthetic source is an
+/// ordinary user-level diagnostic and is left untouched. Distinct raw
+/// conflicts that clarify to the same message dedupe in the caller, so a single
+/// inconsistent macro yields one clear warning rather than one per internal
+/// contradiction.
+fn clarify_macro_conflict(error: UnitError) -> UnitError {
+    let UnitError::InferenceError {
+        code,
+        sources,
+        details,
+    } = error
+    else {
+        return error;
+    };
+
+    let owner_func = sources
+        .iter()
+        .find_map(|(var, _)| synthetic_owner_and_func(var));
+    let Some((owner, func)) = owner_func else {
+        // No synthetic instantiation involved: already a user-level diagnostic.
+        return UnitError::InferenceError {
+            code,
+            sources,
+            details,
+        };
+    };
+
+    // Collapse synthetic sources to the owning user variable, keeping any
+    // genuine (non-synthetic) user variables that were also involved so the
+    // modeler still sees which of their own variables participated.
+    let mut clean_sources: Vec<(String, Option<Loc>)> = vec![(owner.clone(), None)];
+    for (var, loc) in &sources {
+        if synthetic_owner_and_func(var).is_none()
+            && !clean_sources.iter().any(|(existing, _)| existing == var)
+        {
+            clean_sources.push((var.clone(), *loc));
+        }
+    }
+
+    UnitError::InferenceError {
+        code,
+        sources: clean_sources,
+        details: Some(format!(
+            "units in '{func}' (used by variable '{owner}') are inconsistent"
+        )),
+    }
 }
 
 impl UnitInferer<'_> {
@@ -838,23 +941,30 @@ impl UnitInferer<'_> {
                     ));
                 }
             }
-            // A macro is a polymorphic template: its body variables' declared
-            // units may name the macro's formal parameters (a Vensim idiom,
-            // e.g. `~ xfrom` inside RAMP FROM TO), which would otherwise leak
-            // the parameter name as a literal base unit into every
-            // instantiation and conflict with the real argument units. So we
-            // skip declared-units constraints for macro bodies and let those
-            // units be inferred polymorphically from the equation and the
-            // cross-module parameter bindings instead. (This mirrors
-            // `check_model_units`, which skips unit-checking macro models
-            // entirely.)
-            if !model.is_macro
-                && let Some(units) = var.units()
-            {
+            // Declared-units constraint. A macro is a polymorphic template:
+            // its body variables' declared units may name the macro's formal
+            // parameters (a Vensim idiom, e.g. `~ xfrom` inside RAMP FROM TO).
+            // Treating such a name as a literal base unit would leak the
+            // parameter name into every instantiation and collide with the
+            // real argument units, so for a macro body we lower each
+            // parameter-named unit to that parameter's metavariable -- the
+            // declared units then resolve to the actual argument units at this
+            // instantiation, AND a genuine declared-vs-equation inconsistency
+            // is still caught (genuine base units like `dmnl` are kept and
+            // checked). A non-macro model contributes its declared units
+            // verbatim. (GH #619; the earlier GH #618 fix skipped macro
+            // declarations entirely -- containing the leak but neither
+            // resolving nor checking them.)
+            if let Some(units) = var.units() {
                 let mv: UnitMap = [(format!("@{prefix}{id}"), 1)].iter().cloned().collect();
+                let declared = if model.is_macro {
+                    lower_macro_unit_to_metavars(units, &model.macro_params, prefix)
+                } else {
+                    units.clone()
+                };
                 // User-defined unit declarations don't have equation locations
                 constraints.push(LocatedConstraint::new(
-                    combine(UnitOp::Div, mv, units.clone()),
+                    combine(UnitOp::Div, mv, declared),
                     &current_var,
                     None,
                 ));
@@ -935,6 +1045,7 @@ impl UnitInferer<'_> {
         // residual constraint) to report each once.
         let mut conflicts: Vec<UnitError> = Vec::new();
         for conflict in find_constraint_mismatches(&leftover) {
+            let conflict = clarify_macro_conflict(conflict);
             if !conflicts.contains(&conflict) {
                 conflicts.push(conflict);
             }
@@ -1338,6 +1449,235 @@ fn test_macro_body_units_naming_parameters_are_polymorphic() {
         result.resolved.get(&*canonicalize("scaled")),
         Some(&widget),
         "the macro result should infer to the argument's units"
+    );
+}
+
+/// A macro-body variable whose units are pinned ONLY by a parameter-named
+/// declaration (`~ amount`) -- not derivable from its own (constant) equation
+/// -- must RESOLVE to the actual argument's units at each instantiation. This
+/// is the "resolve, don't merely contain" half of GH #619: the GH #618
+/// containment skipped the declaration entirely, so the body variable (and the
+/// macro result that reads it) were left unresolved. Lowering the parameter
+/// name to the parameter's metavariable ties it to the actual argument.
+#[test]
+fn test_macro_param_named_units_resolve_to_actual_arg() {
+    let sim_specs = sim_specs_with_units("year");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
+
+    // macro carryunits(amount):
+    //   carryunits = held            (no declared units; equation only)
+    //   held       = 5     ~ amount  (CONSTANT equation -> units come ONLY
+    //                                 from the parameter-named declaration)
+    //   amount     = 0               (parameter placeholder)
+    let macro_model = crate::datamodel::Model {
+        name: "carryunits".to_string(),
+        sim_specs: None,
+        variables: vec![
+            x_aux("carryunits", "held", None),
+            x_aux("held", "5", Some("amount")),
+            x_aux("amount", "0", None),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(crate::datamodel::MacroSpec {
+            parameters: vec!["amount".to_string()],
+            primary_output: "carryunits".to_string(),
+            additional_outputs: vec![],
+        }),
+    };
+    let root = x_model(
+        "main",
+        vec![
+            x_aux("source", "10", Some("widget")),
+            x_aux("scaled", "carryunits(source)", None),
+        ],
+    );
+    let project_datamodel = x_project(sim_specs.clone(), &[root, macro_model]);
+
+    let mut result = InferenceResult::default();
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let _project = crate::project::Project::from_salsa(
+        project_datamodel.clone(),
+        &db,
+        sync.project,
+        |models, units_ctx, model| {
+            if model.name.as_str() == "main" {
+                result = infer(models, units_ctx, model);
+            }
+        },
+    );
+
+    assert!(
+        result.conflicts.is_empty(),
+        "no conflict expected for a consistent macro; got: {:?}",
+        result.conflicts
+    );
+    let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.resolved.get(&*canonicalize("scaled")),
+        Some(&widget),
+        "a parameter-named macro-body unit must resolve to the actual argument's units"
+    );
+}
+
+/// When a macro's declared units are internally inconsistent with its
+/// equations, the conflict must be reported with a CLEAR, user-facing message
+/// that names the macro and the variable using it -- NOT the synthetic
+/// instantiation names (`$⁚...`) or raw `@` unit metavariables (GH #619). End
+/// users are modelers, not software developers, so the diagnostic has to be
+/// comprehensible.
+#[test]
+fn test_inconsistent_macro_reports_clear_user_facing_conflict() {
+    let sim_specs = sim_specs_with_units("year");
+
+    // macro squareit(amount):
+    //   squareit = amount * amount  ~ amount  (equation units = amount^2, but
+    //                                          the signature declares `amount`)
+    //   amount   = 0
+    let macro_model = crate::datamodel::Model {
+        name: "squareit".to_string(),
+        sim_specs: None,
+        variables: vec![
+            x_aux("squareit", "amount * amount", Some("amount")),
+            x_aux("amount", "0", None),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(crate::datamodel::MacroSpec {
+            parameters: vec!["amount".to_string()],
+            primary_output: "squareit".to_string(),
+            additional_outputs: vec![],
+        }),
+    };
+    let root = x_model(
+        "main",
+        vec![
+            x_aux("source", "10", Some("widget")),
+            x_aux("result", "squareit(source)", None),
+        ],
+    );
+    let project_datamodel = x_project(sim_specs.clone(), &[root, macro_model]);
+
+    let mut result = InferenceResult::default();
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let _project = crate::project::Project::from_salsa(
+        project_datamodel.clone(),
+        &db,
+        sync.project,
+        |models, units_ctx, model| {
+            if model.name.as_str() == "main" {
+                result = infer(models, units_ctx, model);
+            }
+        },
+    );
+
+    assert!(
+        !result.conflicts.is_empty(),
+        "an internally-inconsistent macro must produce a conflict"
+    );
+    let rendered = result
+        .conflicts
+        .iter()
+        .map(|c| format!("{c}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !rendered.contains('\u{205A}'),
+        "diagnostic must not expose synthetic instantiation names (got: {rendered})"
+    );
+    assert!(
+        !rendered.contains('@'),
+        "diagnostic must not expose raw unit metavariables (got: {rendered})"
+    );
+    assert!(
+        rendered.contains("squareit"),
+        "diagnostic should name the macro (got: {rendered})"
+    );
+    assert!(
+        rendered.contains("result"),
+        "diagnostic should name the variable that uses the macro (got: {rendered})"
+    );
+}
+
+/// A macro that mixes parameter-named units (`~ xfrom`, `~ xfrom/tstart`) with
+/// genuine base units (`~ dmnl`), instantiated with concrete arguments, must
+/// infer cleanly with NO conflicts: the parameter names lower to the argument
+/// metavariables (so there is no `xfrom`-as-a-literal-base-unit storm) while
+/// genuine base units are still honored. This mirrors C-LEARN's RAMP FROM TO
+/// and guards against re-introducing the leak GH #618 contained.
+#[test]
+fn test_macro_mixed_param_and_base_units_infer_cleanly() {
+    let sim_specs = sim_specs_with_units("year");
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
+
+    // macro rampish(xfrom, tstart):
+    //   rampish = xfrom + slope * tstart  ~ xfrom         (output)
+    //   slope   = xfrom / tstart          ~ xfrom/tstart  (two params)
+    //   flag    = 1                       ~ dmnl          (genuine base unit)
+    //   xfrom   = 0
+    //   tstart  = 0
+    let macro_model = crate::datamodel::Model {
+        name: "rampish".to_string(),
+        sim_specs: None,
+        variables: vec![
+            x_aux("rampish", "xfrom + slope * tstart", Some("xfrom")),
+            x_aux("slope", "xfrom / tstart", Some("xfrom/tstart")),
+            x_aux("flag", "1", Some("dmnl")),
+            x_aux("xfrom", "0", None),
+            x_aux("tstart", "0", None),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(crate::datamodel::MacroSpec {
+            parameters: vec!["xfrom".to_string(), "tstart".to_string()],
+            primary_output: "rampish".to_string(),
+            additional_outputs: vec![],
+        }),
+    };
+    // `dur` carries the time units (year); `amt` is an arbitrary base unit.
+    let root = x_model(
+        "main",
+        vec![
+            x_aux("amt", "10", Some("widget")),
+            x_aux("dur", "3", Some("year")),
+            x_aux("ramped", "rampish(amt, dur)", None),
+        ],
+    );
+    let project_datamodel = x_project(sim_specs.clone(), &[root, macro_model]);
+
+    let mut result = InferenceResult::default();
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
+    let _project = crate::project::Project::from_salsa(
+        project_datamodel.clone(),
+        &db,
+        sync.project,
+        |models, units_ctx, model| {
+            if model.name.as_str() == "main" {
+                result = infer(models, units_ctx, model);
+            }
+        },
+    );
+
+    assert!(
+        result.conflicts.is_empty(),
+        "a macro mixing parameter-named and genuine base units must infer cleanly; got: {:?}",
+        result.conflicts
+    );
+    let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.resolved.get(&*canonicalize("ramped")),
+        Some(&widget),
+        "the macro result (declared ~ xfrom) should resolve to the first argument's units"
     );
 }
 

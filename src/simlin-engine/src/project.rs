@@ -160,6 +160,7 @@ impl Project {
                 errors: None,
                 implicit: is_stdlib,
                 is_macro: src_model.macro_spec(db).is_some(),
+                macro_params: crate::model::macro_param_idents(src_model.macro_spec(db).as_ref()),
             });
         }
 
