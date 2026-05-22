@@ -15,7 +15,9 @@ use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Method, Results, SimSpecs as Specs, Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
-use test_helpers::{WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches};
+use test_helpers::{
+    WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches, wasm_results_for,
+};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
@@ -1905,6 +1907,48 @@ fn simulates_wrld3_03() {
     assert_eq!(vdf_results.step_count, results.step_count);
 }
 
+/// WORLD3 wasm parity twin (wasm-backend.AC1.1, heavy-model scale check): WORLD3
+/// is a large model, so its wasm blob exercises the backend well beyond the
+/// small/medium default corpus. The VM test above only smoke-checks the VDF
+/// decoder (no series comparison), so this twin asserts the wasm output matches
+/// the VM output element-for-element via `ensure_results` -- the strongest
+/// available parity check for this model (both backends consume the same
+/// `CompiledSimulation`, so any divergence is a wasm lowering bug). A
+/// `WasmGenError::Unsupported` would be a hard failure: WORLD3 is a
+/// core-simulation model the VM handles. `#[ignore]`d for runtime class, like
+/// the other heavy models.
+///
+/// Run with: cargo test --release -- --ignored simulates_wrld3_03_wasm
+#[test]
+#[ignore]
+fn simulates_wrld3_03_wasm() {
+    let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+
+    eprintln!("model (vensim mdl): {mdl_path}");
+
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    // VM reference run.
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
+    let vm_results = vm.into_results();
+
+    // wasm twin: compile through the backend, run under the interpreter, and
+    // match the VM element-for-element.
+    let wasm_results = wasm_results_for(&datamodel_project, "main").unwrap_or_else(|msg| {
+        panic!("WORLD3 must compile to wasm (a core-simulation model the VM handles): {msg}")
+    });
+
+    ensure_results(&vm_results, &wasm_results);
+}
+
 /// Known-residual C-LEARN base-variable names excluded from the
 /// `simulates_clearn` VDF gate. C-LEARN compiles via the incremental path,
 /// runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
@@ -2029,13 +2073,11 @@ fn simulates_clearn() {
     ensure_vdf_results_excluding(&vdf_results, &results, EXPECTED_VDF_RESIDUAL);
 }
 
-/// Compile and run C-LEARN end-to-end and parse `Ref.vdf`, returning
-/// `(vdf_results, results)`. Shared by `simulates_clearn` (the 1% gate) and
-/// `clearn_residual_exactness` (the exclusion-exactness guard) so both exercise
-/// the byte-identical `open_vensim` -> `compile_vm` -> `run_to_end` -> parse-VDF
-/// path and compare the same data. Heavy (C-LEARN is ~53k lines / 1.4 MB,
-/// ~5s just to parse on release), so every caller is `#[ignore]`d.
-fn run_clearn_vs_vdf() -> (Results, Results) {
+/// Read and parse the C-LEARN `.mdl` into a datamodel project. Shared by the VM
+/// path ([`run_clearn_vs_vdf`]) and the wasm twin ([`simulates_clearn_wasm`]) so
+/// both compile the byte-identical model. Heavy (C-LEARN is ~53k lines / 1.4 MB,
+/// ~5s just to parse on release).
+fn clearn_datamodel() -> simlin_engine::datamodel::Project {
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
 
     eprintln!("model (vensim mdl): {mdl_path}");
@@ -2043,26 +2085,70 @@ fn run_clearn_vs_vdf() -> (Results, Results) {
     let contents = std::fs::read_to_string(mdl_path)
         .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
 
-    let datamodel_project =
-        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+    open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"))
+}
 
-    let compiled = compile_vm(&datamodel_project);
-    let mut vm =
-        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
-    vm.run_to_end()
-        .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
-    let results = vm.into_results();
-
+/// Parse the C-LEARN `Ref.vdf` genuine-Vensim reference output into `Results`.
+/// Shared by every C-LEARN comparison path so they assert against identical data.
+fn clearn_vdf_results() -> Results {
     let vdf_path = "../../test/xmutil_test_models/Ref.vdf";
     let vdf_data_bytes =
         std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
     let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
         .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
-    let vdf_results = vdf_file
+    vdf_file
         .to_results_via_records()
-        .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"));
+        .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"))
+}
+
+/// Compile and run C-LEARN end-to-end through the VM and parse `Ref.vdf`,
+/// returning `(vdf_results, results)`. Shared by `simulates_clearn` (the 1% gate)
+/// and `clearn_residual_exactness` (the exclusion-exactness guard) so both
+/// exercise the byte-identical `open_vensim` -> `compile_vm` -> `run_to_end` ->
+/// parse-VDF path and compare the same data. Heavy, so every caller is
+/// `#[ignore]`d.
+fn run_clearn_vs_vdf() -> (Results, Results) {
+    let datamodel_project = clearn_datamodel();
+
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for C-LEARN: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for C-LEARN: {e}"));
+    let results = vm.into_results();
+
+    let vdf_results = clearn_vdf_results();
 
     (vdf_results, results)
+}
+
+/// C-LEARN wasm parity twin (wasm-backend.AC1.3): compile C-LEARN through the
+/// wasm backend, run it under the DLR-FT interpreter, and assert its output
+/// clears the SAME hard 1% VDF gate + `EXPECTED_VDF_RESIDUAL` carve-out that
+/// `simulates_clearn` applies to the VM. Both backends consume the same
+/// `CompiledSimulation` produced by `compile_project_incremental`, so the wasm
+/// output must clear the gate exactly as the VM does (a divergence is a wasm
+/// lowering bug); the residual carve-out is identical because it is a property
+/// of the model + reference data, not the execution engine. `#[ignore]`d for
+/// runtime class -- C-LEARN under the non-JIT interpreter is slow -- exactly
+/// like `simulates_clearn`.
+///
+/// A `WasmGenError::Unsupported` here would be a hard failure: C-LEARN is a
+/// core-simulation model the VM handles, so the wasm backend must too.
+///
+/// Run with: cargo test --release -- --ignored simulates_clearn_wasm
+#[test]
+#[ignore]
+fn simulates_clearn_wasm() {
+    let datamodel_project = clearn_datamodel();
+
+    let wasm_results = wasm_results_for(&datamodel_project, "main").unwrap_or_else(|msg| {
+        panic!("C-LEARN must compile to wasm (a core-simulation model the VM handles): {msg}")
+    });
+
+    let vdf_results = clearn_vdf_results();
+
+    ensure_vdf_results_excluding(&vdf_results, &wasm_results, EXPECTED_VDF_RESIDUAL);
 }
 
 /// Committed regression guard that `EXPECTED_VDF_RESIDUAL` stays EXACT: it is

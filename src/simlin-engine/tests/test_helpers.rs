@@ -207,6 +207,44 @@ fn wasm_results_from_slab(layout: &WasmLayout, slab: Vec<f64>, specs: SimSpecs) 
 }
 
 /// Compile `model_name` of `datamodel` to wasm, run it under the DLR-FT
+/// interpreter, and reshape the results slab into a [`Results`] — or return the
+/// `Unsupported` message if the model is outside the wasm backend's feature set.
+///
+/// Builds the `CompiledSimulation` exactly as the corpus VM path does
+/// (simulate.rs `compile_vm`), so the wasm blob is the twin of the VM's run. An
+/// incremental-compile error (a VM-side issue gated elsewhere) and an
+/// `Unsupported` codegen result both return `Err(msg)`; the caller decides
+/// whether that is a skip or a hard failure.
+///
+/// Imperative Shell: drives the salsa compile pipeline and the wasm interpreter
+/// (side effects), delegating the reshape to the pure [`wasm_results_from_slab`].
+/// Shared by [`ensure_wasm_matches`] (the corpus `.dat`/CSV comparator) and the
+/// C-LEARN wasm twin (which compares against `Ref.vdf` instead).
+#[allow(dead_code)]
+pub fn wasm_results_for(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Result<Results, String> {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    let sim = compile_project_incremental(&db, sync.project, model_name)
+        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+
+    let artifact = match compile_simulation(&sim) {
+        Ok(artifact) => artifact,
+        Err(WasmGenError::Unsupported(msg)) => return Err(msg),
+    };
+
+    let slab = run_wasm_results(&artifact.wasm, &artifact.layout);
+    let specs = SimSpecs::from(&datamodel.sim_specs);
+    Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
+}
+
+/// Compile `model_name` of `datamodel` to wasm, run it under the DLR-FT
 /// interpreter, and assert its results clear the SAME `ensure_results_excluding`
 /// comparator the VM clears against `expected`.
 ///
@@ -228,28 +266,10 @@ pub fn ensure_wasm_matches(
     expected: &Results,
     excluded: &[&str],
 ) -> WasmRunOutcome {
-    use simlin_engine::db::{
-        SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
+    let wasm_results = match wasm_results_for(datamodel, model_name) {
+        Ok(results) => results,
+        Err(msg) => return WasmRunOutcome::Skipped(msg),
     };
-
-    // Build the CompiledSimulation exactly as the corpus VM path does
-    // (simulate.rs `compile_vm`). A compile error here is a VM-side issue
-    // already gated elsewhere, so surface it as Skipped rather than failing.
-    let mut db = SimlinDb::default();
-    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    let sim = match compile_project_incremental(&db, sync.project, model_name) {
-        Ok(sim) => sim,
-        Err(e) => return WasmRunOutcome::Skipped(format!("incremental compile failed: {e:?}")),
-    };
-
-    let artifact = match compile_simulation(&sim) {
-        Ok(artifact) => artifact,
-        Err(WasmGenError::Unsupported(msg)) => return WasmRunOutcome::Skipped(msg),
-    };
-
-    let slab = run_wasm_results(&artifact.wasm, &artifact.layout);
-    let specs = SimSpecs::from(&datamodel.sim_specs);
-    let wasm_results = wasm_results_from_slab(&artifact.layout, slab, specs);
 
     // The same comparator the VM clears: panics loudly on any divergence, so a
     // supported-but-wrong wasm module fails here rather than reporting Ran.
