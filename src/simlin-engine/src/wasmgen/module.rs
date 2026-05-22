@@ -1035,12 +1035,23 @@ fn emit_run_simulation(
     store_curr_const_abs(&mut f, DT_OFF, specs.dt);
     store_curr_const_abs(&mut f, INITIAL_TIME_OFF, specs.start);
     store_curr_const_abs(&mut f, FINAL_TIME_OFF, specs.stop);
+    // Re-arm the PREVIOUS fallback for this run, mirroring the VM's
+    // `run_initials` (which sets `use_prev_fallback = true` at the start of
+    // every run). `run` reseeds the time globals + reruns initials and is the
+    // documented per-change entry point for repeated re-simulation, so it must
+    // reset this flag itself: the loop below clears it to 0 after the first
+    // `prev_values` snapshot, and without re-arming it here a second `run` on
+    // the same instance would read the prior run's `prev_values` on step 0 (and
+    // during initials) instead of the fallback. The module-init value is also 1,
+    // so this is a no-op only on the very first run.
+    f.instruction(&I::I32Const(1));
+    f.instruction(&I::GlobalSet(G_USE_PREV_FALLBACK));
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_initials));
 
     // Capture `initial_values := curr` exactly once, after initials, for
     // `INIT(x)` reads in the flows/stocks programs (`vm.rs:1124-1128`).
-    // `use_prev_fallback` stays 1 (its init value) through initials, so any
+    // `use_prev_fallback` is 1 (re-armed just above) through initials, so any
     // `PREVIOUS(x)` evaluated during initials returns its fallback.
     emit_copy_chunk(
         &mut f,
@@ -2426,6 +2437,99 @@ mod tests {
         let artifact = compile_simulation(&sim).expect("wasm codegen");
         let checked = assert_matches_vm(sim, &artifact);
         assert!(checked >= 2, "expected to compare x + x_prev");
+    }
+
+    /// Instantiate `artifact` ONCE and invoke the exported `run` `runs` times in
+    /// sequence with no `reset` between, returning the results slab read after
+    /// each call. Models the wasm backend's documented "instantiate once, re-run
+    /// on every change" usage (interactive scrubbing; the POC's `run` "re-runs
+    /// the whole simulation" per call) -- which exercises the cross-run state
+    /// reset that a single `run` invocation cannot.
+    fn run_artifact_results_repeated(artifact: &WasmArtifact, runs: usize) -> Vec<Vec<f64>> {
+        let info = validate(&artifact.wasm).expect("generated module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let n = artifact.layout.n_chunks * artifact.layout.n_slots;
+        let base = artifact.layout.results_offset;
+        let mut out = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let run = store
+                .instance_export(inst, "run")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store
+                .invoke_simple_typed::<(), ()>(run, ())
+                .expect("run wasm");
+            let mem = store
+                .instance_export(inst, "memory")
+                .unwrap()
+                .as_mem()
+                .unwrap();
+            let slab = store.mem_access_mut_slice(mem, |bytes| {
+                (0..n)
+                    .map(|i| {
+                        let a = base + i * 8;
+                        f64::from_le_bytes(bytes[a..a + 8].try_into().unwrap())
+                    })
+                    .collect::<Vec<f64>>()
+            });
+            out.push(slab);
+        }
+        out
+    }
+
+    /// Regression (PR #620 review): `run` reseeds the time globals and reruns
+    /// initials, so it is a complete simulation from t0 and the documented
+    /// per-change entry point for repeated re-simulation. It must therefore
+    /// reset the PREVIOUS fallback flag itself, mirroring the VM's `run_initials`
+    /// (which sets `use_prev_fallback = true` at the start of every run). Without
+    /// that reset, the loop leaves the flag at 0, so a SECOND `run` on the same
+    /// instance reads the first run's final `prev_values` on step 0 (and during
+    /// initials) instead of the fallback -- contaminating any `PREVIOUS(...)`
+    /// model. This instantiates once and runs twice with no `reset` between: a
+    /// deterministic model must produce identical results both times, and
+    /// `x_prev` at t0 must be the unary-PREVIOUS fallback (0), not the stale
+    /// prior-run value.
+    #[test]
+    fn compile_simulation_repeated_run_resets_previous_fallback() {
+        let datamodel = crate::test_common::TestProject::new("prev_repeat")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .stock("x", "10", &["grow"], &[], None)
+            .flow("grow", "1", None)
+            .aux("x_prev", "PREVIOUS(x)", None)
+            .build_datamodel();
+
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let runs = run_artifact_results_repeated(&artifact, 2);
+        let (first, second) = (&runs[0], &runs[1]);
+
+        // A deterministic model re-run from t0 produces byte-identical results;
+        // the bug makes the second run's PREVIOUS reads diverge on step 0.
+        assert_eq!(
+            first, second,
+            "second run() diverged from the first -- stale PREVIOUS fallback state leaked across runs"
+        );
+
+        // Pin the discriminating cell: x_prev at the first saved chunk (t0) is
+        // the unary-PREVIOUS fallback (0), not the prior run's final x.
+        let x_prev_off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(name, _)| name == "x_prev")
+            .map(|(_, off)| *off)
+            .expect("x_prev in layout");
+        assert_eq!(
+            second[x_prev_off], 0.0,
+            "x_prev at t0 on the second run must be the PREVIOUS fallback (0), got {}",
+            second[x_prev_off]
+        );
     }
 
     /// Task 1: `INIT(x)` referenced from a flow reads the `initial_values`
