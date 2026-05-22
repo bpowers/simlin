@@ -216,6 +216,29 @@ pub(crate) struct EmitCtx<'a> {
     /// over the program's `EvalModule` sites; 0 (and unused) for a program with no
     /// submodule instantiation. See [`module_input_scratch_base`].
     pub module_input_scratch_base: u32,
+    /// Byte offset of slot 0 of the constants-override region (Phase 7 Task 2),
+    /// an `n_slots`-wide f64 region indexed by *absolute* slab offset and
+    /// initialized to the compiled-default literals at every overridable slot. A
+    /// redirected `AssignConstCurr { off }` (one whose `off` is in
+    /// [`flows_const_offsets`](Self::flows_const_offsets)) sources its value from
+    /// `const_region_base + (module_off + off) * 8` instead of an immediate
+    /// `f64.const`, so the exported `set_value` override takes effect every step
+    /// -- exactly as the VM mutating the bytecode literal does (`vm.rs:994-1008`).
+    /// Indexing by absolute slot (the same `module_off`-relative addressing the
+    /// slab uses) is what lets one shared `CompiledModule` running at several
+    /// `module_off`s pick up each instance's distinct override.
+    pub const_region_base: u32,
+    /// The set of *relative* offsets this instance's module assigns via an
+    /// `AssignConstCurr` in its flows phase -- i.e. the overridable constants of
+    /// this module (mirroring `collect_constant_info`'s flows-only overridability
+    /// rule, `vm.rs:436-450`, computed per module so it is compile-time even for a
+    /// shared module run at several offsets). An `AssignConstCurr { off }` in *any*
+    /// phase (initials/flows/stocks) whose `off` is in this set sources from the
+    /// constants region; one whose `off` is absent emits its immediate literal
+    /// unchanged. This matches the VM applying the override at every location of an
+    /// overridable offset (`collect_constant_info` collects flows + stocks +
+    /// initials locations for each flows-overridable offset).
+    pub flows_const_offsets: &'a std::collections::HashSet<u16>,
     /// Resolves an `EvalModule { id }` site to the child instance's wasm function
     /// index for the program being emitted: `module_fn_index[(child_key, part)]`,
     /// where `child_key = make_module_key(&ctx.modules[id].model_name,
@@ -1312,10 +1335,30 @@ fn emit_ops(
                         "wasmgen: AssignConstCurr literal id {literal_id} out of range"
                     ))
                 })?;
-                // Nothing is on the stack; push the store address then the
-                // constant value (f64.store wants [addr_i32, value_f64]).
+                // Nothing is on the stack; push the store address then the value
+                // (f64.store wants [addr_i32, value_f64]).
                 push_module_relative_base(ctx, f);
-                f.instruction(&f64_const(v));
+                // Phase 7 Task 2: an overridable constant sources its value from
+                // the constants-override region (initialized to `v`, mutable via
+                // the exported `set_value`) instead of the immediate literal, so
+                // an override takes effect on every assignment -- exactly as the
+                // VM rewrites the bytecode literal. The const region is indexed by
+                // absolute slot, so the read uses the same `module_off`-relative
+                // addressing the slab does (`const_region_base + (module_off +
+                // off) * 8`); a shared module run at several `module_off`s thus
+                // picks up each instance's distinct override. A non-overridable
+                // constant emits its literal unchanged.
+                if ctx.flows_const_offsets.contains(off) {
+                    f.instruction(&Instruction::LocalGet(ctx.module_off_local));
+                    f.instruction(&Instruction::I32Const(SLOT_SIZE as i32));
+                    f.instruction(&Instruction::I32Mul);
+                    f.instruction(&Instruction::F64Load(memarg(slot_byte_offset(
+                        ctx.const_region_base,
+                        *off,
+                    ))));
+                } else {
+                    f.instruction(&f64_const(v));
+                }
                 f.instruction(&Instruction::F64Store(memarg(slot_byte_offset(
                     ctx.curr_base,
                     *off,

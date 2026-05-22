@@ -167,6 +167,19 @@ impl CompiledSimulation {
     pub fn is_constant_offset(&self, off: usize) -> bool {
         self.cached_constant_info.contains_key(&off)
     }
+
+    /// The full set of overridable constant offsets (absolute data-buffer
+    /// offsets), i.e. every offset for which [`is_constant_offset`] is true.
+    /// These are the offsets with an `AssignConstCurr` in some module's flows
+    /// phase (see `collect_constant_info`); `set_value`/`set_value_by_offset`
+    /// accept exactly these. The wasm backend reads this to size and initialize
+    /// its constants-override region so a blob's `set_value` accepts the same
+    /// set the VM does.
+    ///
+    /// [`is_constant_offset`]: Self::is_constant_offset
+    pub(crate) fn constant_offsets(&self) -> impl Iterator<Item = usize> + '_ {
+        self.cached_constant_info.keys().copied()
+    }
 }
 
 /// One unique compiled module (a distinct `(model_name, input_set)`), holding

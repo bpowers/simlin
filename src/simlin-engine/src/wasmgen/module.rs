@@ -272,6 +272,11 @@ struct PerInstance<'a> {
     /// This instance's GF region image (directory + data + bases), for the
     /// `DataSection`; `None` when the instance has no graphical functions.
     gf_regions: Option<GfRegions>,
+    /// The relative offsets this instance's module assigns via a flows
+    /// `AssignConstCurr` -- its overridable constants (Phase 7 Task 2). Threaded
+    /// into the instance's `EmitCtx` so an `AssignConstCurr { off }` whose `off`
+    /// is in this set sources from the constants-override region.
+    flows_const_offsets: std::collections::HashSet<u16>,
 }
 
 /// Compile a `CompiledSimulation` (produced by the salsa incremental pipeline)
@@ -440,6 +445,47 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         .checked_add(alloc_scratch_bytes)
         .ok_or_else(too_large)?;
 
+    // The constants-override region (Phase 7 Task 2) follows the scratch regions:
+    // an `n_slots`-wide f64 region indexed by ABSOLUTE slab offset, holding each
+    // overridable constant's current value (initialized to the compiled default).
+    // It is `n_slots` wide -- not `n_overridable` -- so a redirected
+    // `AssignConstCurr { off }` reads it with the same `module_off`-relative
+    // addressing the slab uses (`const_region_base + (module_off + off) * 8`),
+    // which is what lets one shared `CompiledModule` running at several
+    // `module_off`s pick up each instance's distinct override. A parallel
+    // `n_slots`-byte validity region marks which absolute slots `set_value` may
+    // write (1 = overridable). Both are initialized by active `DataSection`
+    // segments built from `collect_overridable_defaults` (which mirrors the VM's
+    // `collect_constant_info` recursion).
+    let const_region_base = total_bytes;
+    let const_region_bytes = n_slots.checked_mul(SLOT_SIZE).ok_or_else(too_large)?;
+    total_bytes = const_region_base
+        .checked_add(const_region_bytes)
+        .ok_or_else(too_large)?;
+    let const_valid_base = total_bytes;
+    // One validity byte per slot.
+    total_bytes = const_valid_base
+        .checked_add(n_slots)
+        .ok_or_else(too_large)?;
+
+    let overridable_defaults = collect_overridable_defaults(&sim.modules, &sim.root, 0);
+    // Defense in depth: the offsets `collect_overridable_defaults` reports must
+    // be exactly the set the VM considers overridable (`constant_offsets`, the
+    // keys of `cached_constant_info`). Both walk the same flows-`AssignConstCurr`
+    // overridability rule, so any divergence is a bug -- a blob's `set_value`
+    // would then accept/reject a different set than the VM. Checked only in debug.
+    debug_assert!(
+        {
+            let mut ours: Vec<usize> = overridable_defaults.iter().map(|(off, _)| *off).collect();
+            ours.sort_unstable();
+            ours.dedup();
+            let mut theirs: Vec<usize> = sim.constant_offsets().collect();
+            theirs.sort_unstable();
+            ours == theirs
+        },
+        "wasmgen overridable-constant offsets diverged from CompiledSimulation::constant_offsets"
+    );
+
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
 
     // save_every mirrors vm.rs::run_to: max(1, round(save_step / dt)).
@@ -477,6 +523,7 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
             gf_data_base,
             temp_storage_base: instance_temp_base[key],
             gf_regions,
+            flows_const_offsets: flows_const_offsets_for(module),
         });
     }
 
@@ -518,6 +565,8 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
                 cond_depth,
                 extra_i32,
             ),
+            const_region_base,
+            flows_const_offsets: &inst.flows_const_offsets,
             module_fn_index: &module_fn_index,
             ctx: &inst.module.context,
         };
@@ -561,6 +610,20 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         root_fn_base,
     );
 
+    // The constants-override exports (Phase 7 Task 2): `set_value` writes an
+    // override into the constants region (validated against the validity bytes),
+    // `reset` resets the run state (`use_prev_fallback`) without clearing the
+    // region, and `clear_values` restores the compiled defaults.
+    let set_value_fn = emit_set_value(n_slots, const_region_base, const_valid_base);
+    let reset_fn = emit_reset();
+    let clear_values_fn = emit_clear_values(const_region_base, &overridable_defaults);
+
+    // The constants region + validity bytes are initialized at instantiation by
+    // active data segments built from the overridable defaults (sparse writes,
+    // one f64 + one validity byte per overridable absolute offset).
+    let const_init =
+        build_const_region_init(&overridable_defaults, const_region_base, const_valid_base);
+
     let instance_input_counts: Vec<u32> = instances.iter().map(|inst| inst.n_inputs).collect();
     let gf_images: Vec<&GfRegions> = instances
         .iter()
@@ -570,12 +633,16 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         helpers,
         program_fns,
         run_fn,
+        set_value_fn,
+        reset_fn,
+        clear_values_fn,
         instance_input_counts: &instance_input_counts,
         pages,
         n_slots,
         n_chunks,
         results_base,
         gf_regions: &gf_images,
+        const_init: &const_init,
     });
 
     let var_offsets = sim
@@ -746,6 +813,74 @@ fn collect_all_stock_offsets(
     offsets.sort_unstable();
     offsets.dedup();
     offsets
+}
+
+/// The set of *relative* offsets a module assigns via an `AssignConstCurr` in
+/// its **flows** phase: exactly this module's overridable constants. Mirrors the
+/// first (flows-only) pass of the VM's `collect_constant_info` (`vm.rs:436-450`),
+/// but keyed by relative offset and computed per module, so it is compile-time
+/// even for a shared `CompiledModule` instantiated at several base offsets (every
+/// instantiation's `base_off + off` is overridable, since `collect_constant_info`
+/// recurses through every declaration). An `AssignConstCurr { off }` in any phase
+/// whose `off` is in this set is redirected to read the constants-override
+/// region; one whose `off` is absent emits its immediate literal.
+fn flows_const_offsets_for(module: &CompiledModule) -> std::collections::HashSet<u16> {
+    module
+        .compiled_flows
+        .code
+        .iter()
+        .filter_map(|op| match op {
+            Opcode::AssignConstCurr { off, .. } => Some(*off),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Collect `(absolute offset, compiled-default literal)` for every overridable
+/// constant across the whole simulation, recursing through `EvalModule`
+/// declarations with cumulative `base_off`. Mirrors the VM's `collect_constant_info`
+/// (`vm.rs:426-507`): an offset is overridable iff some module assigns it via an
+/// `AssignConstCurr` in its **flows** phase, and the default value is that flows
+/// `AssignConstCurr`'s literal. Used to size and initialize the constants-override
+/// region so the wasm blob's `set_value` accepts exactly the offsets the VM's
+/// `set_value_by_offset` does, each initialized to the same compiled default.
+///
+/// A shared module instantiated at two base offsets contributes both absolute
+/// offsets (one per instantiation), exactly as the VM's recursion does.
+fn collect_overridable_defaults(
+    modules: &HashMap<ModuleKey, CompiledModule>,
+    key: &ModuleKey,
+    base_off: usize,
+) -> Vec<(usize, f64)> {
+    let module = match modules.get(key) {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+    let mut out: Vec<(usize, f64)> = Vec::new();
+    for op in module.compiled_flows.code.iter() {
+        if let Opcode::AssignConstCurr { off, literal_id } = op {
+            // The literal is the flows assignment's compiled default. A
+            // well-formed program always has the literal in range; fall back to
+            // 0.0 defensively rather than panicking across what is otherwise an
+            // infallible layout pass.
+            let v = module
+                .compiled_flows
+                .literals
+                .get(*literal_id as usize)
+                .copied()
+                .unwrap_or(0.0);
+            out.push((base_off + *off as usize, v));
+        }
+    }
+    for decl in &module.context.modules {
+        let child_key = crate::vm::make_module_key(&decl.model_name, &decl.input_set);
+        out.extend(collect_overridable_defaults(
+            modules,
+            &child_key,
+            base_off + decl.off,
+        ));
+    }
+    out
 }
 
 /// The linear-memory region geometry `run` needs: the chunk/results bases, the
@@ -971,6 +1106,143 @@ fn store_curr_const_abs(f: &mut Function, off: usize, v: f64) {
     f.instruction(&I::I32Const(0));
     f.instruction(&f64_const(v));
     f.instruction(&I::F64Store(memarg(off as u64 * u64::from(SLOT_SIZE))));
+}
+
+// ── Constants-override exports (Phase 7 Task 2) ───────────────────────────
+//
+// `set_value(offset: i32, val: f64) -> i32` writes the override into the
+// constants region (0 ok / 1 when `offset` is out of range or not overridable);
+// `reset() -> ()` resets the run state without clearing the region (overrides
+// persist across reset, like the VM); `clear_values() -> ()` restores the
+// compiled defaults. The constants region is `n_slots`-wide and indexed by
+// absolute slab offset (so a redirected `AssignConstCurr` reads it with the same
+// `module_off`-relative addressing the slab uses); a parallel `n_slots`-byte
+// validity region (1 = overridable) is what `set_value` checks.
+
+/// A `MemArg` for a single-byte access (the validity region), align 0.
+fn byte_memarg(addr: u64) -> wasm_encoder::MemArg {
+    wasm_encoder::MemArg {
+        offset: addr,
+        align: 0,
+        memory_index: 0,
+    }
+}
+
+// `set_value`'s i32 params: the absolute slab offset and (param 1) the f64
+// value. Param 0 is the offset.
+const SV_OFFSET: u32 = 0;
+const SV_VALUE: u32 = 1;
+
+/// Emit `set_value(offset: i32, val: f64) -> i32`: write `const_region[offset] =
+/// val` and return 0 when `offset` is a valid overridable slot, else return 1
+/// without writing. Validity is `0 <= offset < n_slots` AND `valid[offset] != 0`
+/// (the byte the data segment set for each overridable absolute offset). This
+/// mirrors the VM's `set_value_by_offset` (`vm.rs:1037-1052`): an out-of-range or
+/// non-constant offset is rejected (the VM returns `Err`), a valid one applies
+/// the override (which persists across `reset`).
+fn emit_set_value(n_slots: u32, const_region_base: u32, const_valid_base: u32) -> Function {
+    let mut f = Function::new([]);
+
+    // if (offset < 0) | (offset >= n_slots): return 1
+    f.instruction(&I::LocalGet(SV_OFFSET));
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::I32LtS);
+    f.instruction(&I::LocalGet(SV_OFFSET));
+    f.instruction(&I::I32Const(n_slots as i32));
+    f.instruction(&I::I32GeS);
+    f.instruction(&I::I32Or);
+    f.instruction(&I::If(BlockType::Empty));
+    f.instruction(&I::I32Const(1));
+    f.instruction(&I::Return);
+    f.instruction(&I::End);
+
+    // if valid[offset] == 0: return 1   (valid byte at const_valid_base + offset)
+    f.instruction(&I::LocalGet(SV_OFFSET));
+    f.instruction(&I::I32Load8U(byte_memarg(u64::from(const_valid_base))));
+    f.instruction(&I::I32Eqz);
+    f.instruction(&I::If(BlockType::Empty));
+    f.instruction(&I::I32Const(1));
+    f.instruction(&I::Return);
+    f.instruction(&I::End);
+
+    // const_region[offset] = val   (f64 at const_region_base + offset*8)
+    f.instruction(&I::LocalGet(SV_OFFSET));
+    f.instruction(&I::I32Const(SLOT_SIZE as i32));
+    f.instruction(&I::I32Mul);
+    f.instruction(&I::LocalGet(SV_VALUE));
+    f.instruction(&I::F64Store(memarg(u64::from(const_region_base))));
+
+    // return 0
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::End);
+    f
+}
+
+/// Emit `reset() -> ()`: reset the run state so the next `run` re-runs initials
+/// and the loop from t=start. The wasm `run` already re-seeds the time slots and
+/// re-runs initials on every call and uses fresh i32 locals for the chunk/step
+/// counters, so the only cross-run state is the `use_prev_fallback` global, which
+/// `run` clears after the first `prev_values` snapshot. Setting it back to 1 here
+/// is the analogue of the VM's `reset` clearing `prev_values_valid` (`vm.rs:976-989`),
+/// and -- like the VM -- it deliberately does NOT touch the constants region, so
+/// overrides persist across reset.
+fn emit_reset() -> Function {
+    let mut f = Function::new([]);
+    f.instruction(&I::I32Const(1));
+    f.instruction(&I::GlobalSet(G_USE_PREV_FALLBACK));
+    f.instruction(&I::End);
+    f
+}
+
+/// Emit `clear_values() -> ()`: restore each overridable constant to its
+/// compiled-default literal by writing the defaults back into the constants
+/// region (the VM's `clear_values`, `vm.rs:1055-1062`). The defaults are
+/// compile-time constants, so this is a straight-line sequence of `f64.store`s --
+/// one per overridable absolute offset. The data segment also writes these at
+/// instantiation; `clear_values` lets a host undo a `set_value` without
+/// re-instantiating the module.
+fn emit_clear_values(const_region_base: u32, overridable_defaults: &[(usize, f64)]) -> Function {
+    let mut f = Function::new([]);
+    for &(abs_off, default) in overridable_defaults {
+        f.instruction(&I::I32Const(0));
+        f.instruction(&f64_const(default));
+        f.instruction(&I::F64Store(memarg(
+            u64::from(const_region_base) + abs_off as u64 * u64::from(SLOT_SIZE),
+        )));
+    }
+    f.instruction(&I::End);
+    f
+}
+
+/// The active `DataSection` payloads that initialize the constants region and
+/// its validity bytes at instantiation: for each overridable absolute offset, the
+/// f64 default written into the constants region and a `1` validity byte. Sparse
+/// (one segment per overridable offset), so a model with no overridable constants
+/// produces an empty list (no segments).
+struct ConstRegionInit {
+    /// `(byte address within the constants region, the 8 LE bytes of the default)`.
+    value_segments: Vec<(u32, [u8; 8])>,
+    /// `byte address within the validity region` (the byte written is always 1).
+    valid_segments: Vec<u32>,
+}
+
+/// Build the constants-region init payloads from the overridable defaults.
+fn build_const_region_init(
+    overridable_defaults: &[(usize, f64)],
+    const_region_base: u32,
+    const_valid_base: u32,
+) -> ConstRegionInit {
+    let mut value_segments = Vec::with_capacity(overridable_defaults.len());
+    let mut valid_segments = Vec::with_capacity(overridable_defaults.len());
+    for &(abs_off, default) in overridable_defaults {
+        let value_addr = const_region_base + abs_off as u32 * SLOT_SIZE;
+        value_segments.push((value_addr, default.to_le_bytes()));
+        valid_segments.push(const_valid_base + abs_off as u32);
+    }
+    ConstRegionInit {
+        value_segments,
+        valid_segments,
+    }
 }
 
 // ── RK loop primitives ────────────────────────────────────────────────────
@@ -1285,6 +1557,12 @@ struct AssembleParts<'a> {
     /// (same instance order) gives each triple's f64 input-param count.
     program_fns: Vec<Function>,
     run_fn: Function,
+    /// `set_value(offset: i32, val: f64) -> i32` (Phase 7 Task 2).
+    set_value_fn: Function,
+    /// `reset() -> ()` (Phase 7 Task 2).
+    reset_fn: Function,
+    /// `clear_values() -> ()` (Phase 7 Task 2).
+    clear_values_fn: Function,
     /// Module-input parameter count per instance, in the same order the triples
     /// appear in `program_fns`. Drives the per-triple wasm type
     /// (`(i32, f64*k) -> ()`).
@@ -1296,6 +1574,10 @@ struct AssembleParts<'a> {
     /// Every GF-bearing instance's region image, for the active `DataSection`
     /// segments (each instance's directory + data sit at distinct bases).
     gf_regions: &'a [&'a GfRegions],
+    /// The constants-override region init payloads (Phase 7 Task 2): sparse
+    /// active `DataSection` segments seeding each overridable slot's f64 default
+    /// and its validity byte.
+    const_init: &'a ConstRegionInit,
 }
 
 /// Assemble the simulation module: types, functions, memory, globals, exports,
@@ -1311,23 +1593,34 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         helpers,
         program_fns,
         run_fn,
+        set_value_fn,
+        reset_fn,
+        clear_values_fn,
         instance_input_counts,
         pages,
         n_slots,
         n_chunks,
         results_base,
         gf_regions,
+        const_init,
     } = parts;
 
     let mut wasm = WasmModule::new();
     let n_helpers = helpers.functions.len() as u32;
     let n_instances = instance_input_counts.len() as u32;
+    // Function layout: helpers, the per-instance triples, then `run`, then the
+    // three constants-override exports (`set_value`/`reset`/`clear_values`).
     let run_fn_index = n_helpers + n_instances * FUNCS_PER_INSTANCE;
+    let set_value_fn_index = run_fn_index + 1;
+    let reset_fn_index = run_fn_index + 2;
+    let clear_values_fn_index = run_fn_index + 3;
 
     // Type section: `run`'s `() -> ()` first, then one opcode-program type per
     // *distinct* module-input count (`(i32, f64*k) -> ()`, sorted), then the
-    // helper types. `opcode_type_for` maps an instance's `n_inputs` to its type
-    // index; a helper at function index `i` uses the type appended after those.
+    // helper types, then the `set_value` type (`(i32, f64) -> i32`).
+    // `reset`/`clear_values` reuse `TYPE_RUN_FN`. `opcode_type_for` maps an
+    // instance's `n_inputs` to its type index; a helper at function index `i`
+    // uses the type appended after those.
     let mut distinct_inputs: Vec<u32> = instance_input_counts.to_vec();
     distinct_inputs.sort_unstable();
     distinct_inputs.dedup();
@@ -1337,6 +1630,7 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         .map(|(i, &k)| (k, TYPE_RUN_FN + 1 + i as u32))
         .collect();
     let first_helper_type = TYPE_RUN_FN + 1 + distinct_inputs.len() as u32;
+    let set_value_type = first_helper_type + helpers.functions.len() as u32;
 
     let mut types = TypeSection::new();
     types.ty().function([], []); // TYPE_RUN_FN: () -> ()
@@ -1350,11 +1644,15 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     for hf in &helpers.functions {
         types.ty().function(hf.params.clone(), hf.results.clone());
     }
+    // `set_value(offset: i32, val: f64) -> i32`.
+    types
+        .ty()
+        .function([ValType::I32, ValType::F64], [ValType::I32]);
     wasm.section(&types);
 
     // Function section: helpers first (indices `0..n_helpers`), then each
     // instance's three program functions (typed by that instance's `n_inputs`),
-    // then `run`.
+    // then `run`, then `set_value`/`reset`/`clear_values`.
     let mut functions = FunctionSection::new();
     for (i, _) in helpers.functions.iter().enumerate() {
         functions.function(first_helper_type + i as u32);
@@ -1366,6 +1664,9 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         functions.function(ty); // stocks
     }
     functions.function(TYPE_RUN_FN); // run
+    functions.function(set_value_type); // set_value
+    functions.function(TYPE_RUN_FN); // reset
+    functions.function(TYPE_RUN_FN); // clear_values
     wasm.section(&functions);
 
     let mut memories = MemorySection::new();
@@ -1401,6 +1702,9 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
 
     let mut exports = ExportSection::new();
     exports.export("run", ExportKind::Func, run_fn_index);
+    exports.export("set_value", ExportKind::Func, set_value_fn_index);
+    exports.export("reset", ExportKind::Func, reset_fn_index);
+    exports.export("clear_values", ExportKind::Func, clear_values_fn_index);
     exports.export("memory", ExportKind::Memory, 0);
     exports.export("n_slots", ExportKind::Global, G_N_SLOTS);
     exports.export("n_chunks", ExportKind::Global, G_N_CHUNKS);
@@ -1408,7 +1712,8 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     wasm.section(&exports);
 
     // Code section order must match the function section: helper bodies, then the
-    // per-instance program functions (in `program_fns` order), then `run`.
+    // per-instance program functions (in `program_fns` order), then `run`, then
+    // `set_value`/`reset`/`clear_values`.
     let mut code = CodeSection::new();
     for hf in &helpers.functions {
         code.function(&hf.body);
@@ -1417,12 +1722,19 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         code.function(program);
     }
     code.function(&run_fn);
+    code.function(&set_value_fn);
+    code.function(&reset_fn);
+    code.function(&clear_values_fn);
     wasm.section(&code);
 
-    // The GF directory + data regions are read-only constants; active data
-    // segments write each at its region base when the module is instantiated.
-    // The data section must follow the code section per the wasm binary order.
-    if !gf_regions.is_empty() {
+    // The GF directory + data regions and the constants-override init values
+    // are read-only-at-instantiation constants; active data segments write each
+    // at its byte address when the module is instantiated. A module has at most
+    // one data section, so the GF regions and the constants-override init share
+    // it. The data section must follow the code section per the wasm binary order.
+    let has_const_init =
+        !const_init.value_segments.is_empty() || !const_init.valid_segments.is_empty();
+    if !gf_regions.is_empty() || has_const_init {
         let mut data = DataSection::new();
         for gf in gf_regions {
             data.active(
@@ -1435,6 +1747,15 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
                 &ConstExpr::i32_const(gf.data_base as i32),
                 gf.data.iter().copied(),
             );
+        }
+        // The constants region's per-slot default (8 LE bytes each) and its
+        // validity bytes (a single `1` each), one active segment per overridable
+        // absolute offset.
+        for &(addr, bytes) in &const_init.value_segments {
+            data.active(0, &ConstExpr::i32_const(addr as i32), bytes.iter().copied());
+        }
+        for &addr in &const_init.valid_segments {
+            data.active(0, &ConstExpr::i32_const(addr as i32), [1u8].iter().copied());
         }
         wasm.section(&data);
     }
@@ -1589,16 +1910,32 @@ mod tests {
         let pages = (region_base + regions.total_bytes)
             .div_ceil(WASM_PAGE_SIZE)
             .max(1);
+        let empty_const_init = ConstRegionInit {
+            value_segments: Vec::new(),
+            valid_segments: Vec::new(),
+        };
         let wasm = assemble_simulation(AssembleParts {
             helpers,
             program_fns: vec![empty(), empty(), empty()],
             run_fn: empty(),
+            // Empty (no-op) override functions: this test only checks the GF data
+            // segments, so the override exports are present but trivial.
+            set_value_fn: {
+                let mut f = Function::new([]);
+                // A `(i32, f64) -> i32` body must leave an i32 on the stack.
+                f.instruction(&I::I32Const(0));
+                f.instruction(&I::End);
+                f
+            },
+            reset_fn: empty(),
+            clear_values_fn: empty(),
             instance_input_counts: &[0],
             pages,
             n_slots: 0,
             n_chunks: 0,
             results_base: 0,
             gf_regions: &[&regions],
+            const_init: &empty_const_init,
         });
 
         let info = validate(&wasm).expect("module must validate");
@@ -3073,5 +3410,465 @@ mod tests {
                 "out-of-bounds SUM(mat[row,1]) must be NaN at chunk {c}"
             );
         }
+    }
+
+    // ── set_value / reset override mechanism (Phase 7 Task 2) ─────────────
+    //
+    // An exported `set_value(offset, val) -> i32` writes the override into the
+    // constants region (0 ok / nonzero when `offset` is not overridable), an
+    // exported `reset()` resets run state without clearing the region (overrides
+    // persist across reset, like the VM), and the next `run` re-runs initials +
+    // the loop sourcing the overridable `AssignConstCurr` from the region.
+    // `clear_values()` restores compiled defaults. These mirror the VM's
+    // `set_value_by_offset`/`reset`/`clear_values` (`vm.rs:976-1062`).
+
+    /// Instantiate `artifact.wasm`, optionally apply a list of `(offset, value)`
+    /// overrides via the exported `set_value`, call `reset` then `run`, and copy
+    /// the step-major results slab out. Each `set_value` return code is checked to
+    /// be 0 (the caller passes only overridable offsets). Returns the slab.
+    fn run_artifact_with_overrides(
+        artifact: &WasmArtifact,
+        overrides: &[(usize, f64)],
+    ) -> Vec<f64> {
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let set_value = store
+            .instance_export(inst, "set_value")
+            .expect("set_value export")
+            .as_func()
+            .expect("set_value is a function");
+        for &(off, val) in overrides {
+            let rc: i32 = store
+                .invoke_simple_typed::<(i32, f64), i32>(set_value, (off as i32, val))
+                .expect("set_value invoke");
+            assert_eq!(
+                rc, 0,
+                "set_value({off}, {val}) should accept an overridable offset"
+            );
+        }
+        let reset = store
+            .instance_export(inst, "reset")
+            .expect("reset export")
+            .as_func()
+            .expect("reset is a function");
+        store
+            .invoke_simple_typed::<(), ()>(reset, ())
+            .expect("reset invoke");
+        let run = store
+            .instance_export(inst, "run")
+            .expect("run export")
+            .as_func()
+            .expect("run is a function");
+        store
+            .invoke_simple_typed::<(), ()>(run, ())
+            .expect("run invoke");
+        let mem = store
+            .instance_export(inst, "memory")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        let n = artifact.layout.n_chunks * artifact.layout.n_slots;
+        let base = artifact.layout.results_offset;
+        store.mem_access_mut_slice(mem, |bytes| {
+            (0..n)
+                .map(|i| {
+                    let a = base + i * 8;
+                    f64::from_le_bytes(bytes[a..a + 8].try_into().unwrap())
+                })
+                .collect()
+        })
+    }
+
+    /// Call the exported `set_value` once on a freshly-instantiated module and
+    /// return its i32 return code, without running the simulation. Used to assert
+    /// the validation behavior (nonzero on a non-overridable offset).
+    fn set_value_rc(artifact: &WasmArtifact, off: i32, val: f64) -> i32 {
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let set_value = store
+            .instance_export(inst, "set_value")
+            .expect("set_value export")
+            .as_func()
+            .expect("set_value is a function");
+        store
+            .invoke_simple_typed::<(i32, f64), i32>(set_value, (off, val))
+            .expect("set_value invoke")
+    }
+
+    /// The absolute slab offset of `name` in the artifact's layout.
+    fn layout_offset(artifact: &WasmArtifact, name: &str) -> usize {
+        artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, o)| *o)
+            .unwrap_or_else(|| panic!("{name} offset"))
+    }
+
+    /// A VM run of `sim` with an override applied at absolute `off` (the VM's
+    /// `set_value_by_offset`), returning that variable's slab so wasm overrides
+    /// can be compared cell-for-cell against the VM oracle.
+    fn vm_results_with_override(
+        sim: CompiledSimulation,
+        off: usize,
+        val: f64,
+    ) -> (Vec<f64>, usize, usize) {
+        let mut vm = Vm::new(sim).expect("vm creation");
+        vm.set_value_by_offset(off, val)
+            .expect("offset must be a VM-overridable constant");
+        vm.run_to_end().expect("vm run");
+        let results = vm.into_results();
+        (results.data.to_vec(), results.step_size, results.step_count)
+    }
+
+    /// AC5.1: overriding a constant via `set_value`, then `reset`, then `run`,
+    /// yields the same series the VM produces under the same override. A constant
+    /// aux feeds a flow that integrates a stock, so the override propagates into
+    /// every downstream value at every step -- a wrong source (or an override that
+    /// did not take) would diverge from the VM immediately.
+    #[test]
+    fn compile_simulation_set_value_override_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("override")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("inflow_rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "inflow_rate", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let rate_off = layout_offset(&artifact, "inflow_rate");
+        assert!(
+            sim.is_constant_offset(rate_off),
+            "inflow_rate must be a VM-overridable constant for this test to be meaningful"
+        );
+
+        // Override the constant inflow_rate to 5 (was 2), so level integrates by
+        // 5/step: 0,5,10,...,25 -- visibly different from the default 0,2,...,10.
+        let wasm_slab = run_artifact_with_overrides(&artifact, &[(rate_off, 5.0)]);
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        let sim_vm = compile_sim(&datamodel, "main");
+        let (vm_data, vm_step_size, vm_step_count) =
+            vm_results_with_override(sim_vm, rate_off, 5.0);
+        assert_eq!(vm_step_count, n_chunks, "saved-chunk count differs from VM");
+
+        let mut checked = 0usize;
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let vm_off = match sim.get_offset(&ident) {
+                Some(o) => o,
+                None => continue,
+            };
+            let _ = vm_off;
+            // Compare against the VM results slab via the canonical offsets map.
+            let vm_var_off = wasm_off; // wasm and VM share the same slab layout
+            for c in 0..n_chunks {
+                let vm_val = vm_data[c * vm_step_size + vm_var_off];
+                let wasm_val = wasm_slab[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} mismatch at chunk {c} under override: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+            checked += 1;
+        }
+        assert!(
+            checked >= 2,
+            "expected to compare inflow_rate + level + inflow"
+        );
+
+        // Pin the override actually took: level reaches 5*5 = 25 (not the default
+        // 10), so this cannot pass vacuously with an ignored override.
+        let level_off = layout_offset(&artifact, "level");
+        let last = (n_chunks - 1) * n_slots + level_off;
+        assert!(
+            (wasm_slab[last] - 25.0).abs() < 1e-9,
+            "level under inflow_rate=5 should reach 25, got {}",
+            wasm_slab[last]
+        );
+    }
+
+    /// AC5.2: `reset` with no override reproduces the compiled-default series. A
+    /// `set_value`-then-reset-then-run with an empty override list must match a
+    /// plain VM run (the default literals), proving the constants region is
+    /// initialized to the compiled defaults and `reset` leaves them intact.
+    #[test]
+    fn compile_simulation_reset_no_override_restores_defaults() {
+        let datamodel = crate::test_common::TestProject::new("defaults")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("inflow_rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "inflow_rate", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let wasm_slab = run_artifact_with_overrides(&artifact, &[]);
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        // The default run: level integrates by 2/step -> reaches 10.
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to_end().expect("vm run");
+        let vm_results = vm.into_results();
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = wasm_slab[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} default mismatch at chunk {c}: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+        let level_off = layout_offset(&artifact, "level");
+        let last = (n_chunks - 1) * n_slots + level_off;
+        assert!(
+            (wasm_slab[last] - 10.0).abs() < 1e-9,
+            "default level should reach 10, got {}",
+            wasm_slab[last]
+        );
+    }
+
+    /// `set_value` on a non-constant offset returns the error code and does not
+    /// write. A stock's offset (`level`) is not an overridable constant (its
+    /// initial is a constant, but it is assigned via `AssignNext`, not an
+    /// `AssignConstCurr` in flows), so `set_value` must reject it. After the
+    /// rejected call the default run must be unchanged.
+    #[test]
+    fn compile_simulation_set_value_rejects_non_constant_offset() {
+        let datamodel = crate::test_common::TestProject::new("reject")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("inflow_rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "inflow_rate", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let level_off = layout_offset(&artifact, "level");
+        assert!(
+            !sim.is_constant_offset(level_off),
+            "level (a stock) must not be a VM-overridable constant"
+        );
+        // A non-overridable offset returns nonzero.
+        assert_ne!(
+            set_value_rc(&artifact, level_off as i32, 999.0),
+            0,
+            "set_value on a stock offset must return a nonzero error code"
+        );
+        // An out-of-range offset (>= n_slots) also returns nonzero.
+        assert_ne!(
+            set_value_rc(&artifact, artifact.layout.n_slots as i32, 1.0),
+            0,
+            "set_value on an out-of-range offset must return a nonzero error code"
+        );
+        assert_ne!(
+            set_value_rc(&artifact, -1, 1.0),
+            0,
+            "set_value on a negative offset must return a nonzero error code"
+        );
+
+        // The rejected write left the constants region untouched: a no-override
+        // run still reproduces the defaults (level reaches 10, not 999-driven).
+        let wasm_slab = run_artifact_with_overrides(&artifact, &[]);
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let last = (n_chunks - 1) * n_slots + level_off;
+        assert!(
+            (wasm_slab[last] - 10.0).abs() < 1e-9,
+            "a rejected set_value must not perturb the default run; level should still reach 10, got {}",
+            wasm_slab[last]
+        );
+    }
+
+    /// `clear_values` restores compiled defaults after an override, without
+    /// re-instantiating. Override inflow_rate, run (diverges), then clear, reset,
+    /// run again -- the second run must reproduce the defaults.
+    #[test]
+    fn compile_simulation_clear_values_restores_defaults() {
+        let datamodel = crate::test_common::TestProject::new("clear")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("inflow_rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "inflow_rate", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let rate_off = layout_offset(&artifact, "inflow_rate");
+        let level_off = layout_offset(&artifact, "level");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let func = |store: &mut Store<()>, name: &str| {
+            store
+                .instance_export(inst, name)
+                .unwrap()
+                .as_func()
+                .unwrap()
+        };
+
+        // Override -> run -> level reaches 25.
+        let set_value = func(&mut store, "set_value");
+        let rc: i32 = store
+            .invoke_simple_typed::<(i32, f64), i32>(set_value, (rate_off as i32, 5.0))
+            .expect("set_value");
+        assert_eq!(rc, 0);
+        let run = func(&mut store, "run");
+        store.invoke_simple_typed::<(), ()>(run, ()).expect("run");
+
+        // clear_values -> reset -> run -> level back to the default 10.
+        let clear_values = func(&mut store, "clear_values");
+        store
+            .invoke_simple_typed::<(), ()>(clear_values, ())
+            .expect("clear_values");
+        let reset = func(&mut store, "reset");
+        store
+            .invoke_simple_typed::<(), ()>(reset, ())
+            .expect("reset");
+        let run = func(&mut store, "run");
+        store.invoke_simple_typed::<(), ()>(run, ()).expect("run");
+
+        let mem = store
+            .instance_export(inst, "memory")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        let base = artifact.layout.results_offset;
+        let last_addr = base + ((n_chunks - 1) * n_slots + level_off) * 8;
+        let level_last = store.mem_access_mut_slice(mem, |bytes| {
+            f64::from_le_bytes(bytes[last_addr..last_addr + 8].try_into().unwrap())
+        });
+        assert!(
+            (level_last - 10.0).abs() < 1e-9,
+            "after clear_values the default level should reach 10, got {level_last}"
+        );
+    }
+
+    /// The wasm backend's overridable-constant set (`collect_overridable_defaults`,
+    /// which mirrors the VM's `collect_constant_info` recursion to capture each
+    /// default literal) must address EXACTLY the offsets the VM reports overridable
+    /// via `CompiledSimulation::constant_offsets`. If the two diverged, a blob's
+    /// `set_value` would accept/reject a different set than the VM's, or initialize
+    /// the wrong slots -- so this pins them equal over a model with both a top-level
+    /// constant and a nested-module (SMOOTH) constant.
+    #[test]
+    fn wasm_overridable_set_matches_vm_constant_offsets() {
+        let datamodel = crate::test_common::TestProject::new("const_set")
+            .with_sim_time(0.0, 4.0, 0.5)
+            .aux("k", "3", None)
+            .aux("input", "TIME + k", None)
+            // SMTH1 expands to a nested stdlib module carrying its own constants
+            // (the smoothing delay), so the overridable set spans nested modules.
+            .aux("smoothed", "SMTH1(input, 2)", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+
+        let mut wasm_set: Vec<usize> = collect_overridable_defaults(&sim.modules, &sim.root, 0)
+            .into_iter()
+            .map(|(off, _)| off)
+            .collect();
+        wasm_set.sort_unstable();
+        wasm_set.dedup();
+
+        let mut vm_set: Vec<usize> = sim.constant_offsets().collect();
+        vm_set.sort_unstable();
+
+        assert_eq!(
+            wasm_set, vm_set,
+            "the wasm overridable-constant offsets must match the VM's exactly"
+        );
+        assert!(
+            !vm_set.is_empty(),
+            "this model must have at least one overridable constant (k) for the check to be meaningful"
+        );
+
+        // Every overridable offset is in range (so it indexes the n_slots-wide
+        // const region and the validity byte region safely).
+        let n_slots = sim.n_slots();
+        for &off in &vm_set {
+            assert!(
+                off < n_slots,
+                "overridable offset {off} must be < n_slots {n_slots}"
+            );
+        }
+    }
+
+    /// AC5.1 with an override on a constant that feeds an *initial* equation: the
+    /// VM re-applies the override across initials (it mutates the literal at all
+    /// locations), so an overridable constant read during the initials phase must
+    /// also source from the region. Here `seed` is a constant whose value is the
+    /// stock's initial, so overriding `seed` must change the stock's starting
+    /// value -- exercising the initials-phase redirect, not just flows.
+    #[test]
+    fn compile_simulation_set_value_override_in_initials_matches_vm() {
+        let datamodel = crate::test_common::TestProject::new("override_init")
+            .with_sim_time(0.0, 3.0, 1.0)
+            .aux("seed", "5", None)
+            .stock("level", "seed", &["hold"], &[], None)
+            .flow("hold", "0", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let seed_off = layout_offset(&artifact, "seed");
+        assert!(
+            sim.is_constant_offset(seed_off),
+            "seed must be an overridable constant"
+        );
+
+        let wasm_slab = run_artifact_with_overrides(&artifact, &[(seed_off, 42.0)]);
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        let sim_vm = compile_sim(&datamodel, "main");
+        let (vm_data, vm_step_size, vm_step_count) =
+            vm_results_with_override(sim_vm, seed_off, 42.0);
+        assert_eq!(vm_step_count, n_chunks);
+
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            if sim.get_offset(&ident).is_none() {
+                continue;
+            }
+            for c in 0..n_chunks {
+                let vm_val = vm_data[c * vm_step_size + wasm_off];
+                let wasm_val = wasm_slab[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} mismatch at chunk {c} under initials override: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+        // seed=42 makes level start (and stay, hold=0) at 42.
+        let level_off = layout_offset(&artifact, "level");
+        assert!(
+            (wasm_slab[level_off] - 42.0).abs() < 1e-9,
+            "level should initialize to the overridden seed=42, got {}",
+            wasm_slab[level_off]
+        );
     }
 }

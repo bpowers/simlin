@@ -43,6 +43,16 @@ fn empty_module_fn_index()
     EMPTY.get_or_init(std::collections::HashMap::new)
 }
 
+/// A shared empty set of overridable constant offsets. These lowering unit
+/// tests never exercise an `AssignConstCurr` redirect (the set is empty, so
+/// every `AssignConstCurr` emits its immediate literal -- the pre-Task-2
+/// behavior these tests pin); the constants-region redirect is exercised
+/// end-to-end in `module.rs`'s `set_value`/`reset` tests.
+fn empty_const_offsets() -> &'static std::collections::HashSet<u16> {
+    static EMPTY: OnceLock<std::collections::HashSet<u16>> = OnceLock::new();
+    EMPTY.get_or_init(std::collections::HashSet::new)
+}
+
 fn ctx_with_cond_depth(depth: usize) -> EmitCtx<'static> {
     // These tests build a root-only function: `module_off` is param 0, there are
     // no f64 module-input params, so `n_inputs == 0` reproduces the historical
@@ -96,6 +106,12 @@ fn ctx_with_cond_depth(depth: usize) -> EmitCtx<'static> {
         // base sits past the extra-i32 block (none declared here), and the child
         // function map is empty.
         module_input_scratch_base: module_input_scratch_base(n_inputs, depth, 0),
+        // No overridable constants in these single-function tests: the constants
+        // region is unused and the offset set is empty (every `AssignConstCurr`
+        // emits its immediate literal -- the pre-Task-2 behavior). The Task-2
+        // override redirect is exercised end-to-end in `module.rs`'s tests.
+        const_region_base: 0,
+        flows_const_offsets: empty_const_offsets(),
         module_fn_index: empty_module_fn_index(),
         ctx: empty_ctx(),
     }
