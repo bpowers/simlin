@@ -31,6 +31,14 @@ anyhow = "1.0"
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
+# Pure-Rust no_std wasm interpreter (the same DLR-FT rev simlin-engine pins),
+# used by the `tests/wasm.rs` integration test to validate and execute the blob
+# `simlin_model_compile_to_wasm` returns and check it against the returned
+# layout. Dev-only: dev-dependencies are never built into the cdylib/staticlib
+# or the wasm32 bundle (which uses --no-default-features), so this cannot leak
+# into the shipped library.
+wasm-interpreter = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a" }
+checked = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a", features = ["linker", "interop"] }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

@@ -15,7 +15,9 @@ use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Method, Results, SimSpecs as Specs, Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
-use test_helpers::{ensure_results, ensure_results_excluding};
+use test_helpers::{
+    WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches, wasm_results_for,
+};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
@@ -99,6 +101,86 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/xidz_zidz/xidz_zidz.xmile",
     "test/test-models/tests/unicode_characters/unicode_test_model.xmile",
 ];
+
+/// End-state wasm parity gate (wasm-backend AC3.2 / AC3.3): EVERY corpus model
+/// in `TEST_MODELS` must run through the wasm backend to VM parity -- zero may
+/// return `WasmGenError::Unsupported`. `expected` is the VM's own output (the
+/// parse + `compile_vm` + run path), so this is a direct wasm-vs-VM check
+/// independent of the on-disk reference files; the per-model inline hook
+/// (`wasm_parity_hook`) separately checks every model against its on-disk
+/// `expected` and likewise hard-fails on `Unsupported`.
+///
+/// This replaces the Phase 1-7 monotonic floor (a `ran >= FLOOR` count). The
+/// backend now covers the full core-simulation surface -- scalar + every
+/// `Apply` builtin + arrays/reducers/iteration + vector ops + allocation +
+/// scalar/array lookups + Euler/RK2/RK4 + PREVIOUS/INIT + nested modules -- so
+/// the end state is total coverage, and any regression that makes a previously
+/// supported model `Unsupported` fails here (AC3.3) with the offending model and
+/// reason. The genuinely out-of-scope constructs (a runtime view range
+/// `arr[lo:hi]` with non-literal bounds -> `ViewRangeDynamic`, or array
+/// unrolling past the per-function budget) are not reached by any `TEST_MODELS`
+/// member; they are pinned by the inline `wasmgen` unit tests and
+/// `ensure_wasm_matches_skips_unsupported_model`. The heavy `#[ignore]`-class
+/// models (C-LEARN) have their own `#[ignore]`d wasm twins so this gate stays
+/// within the default suite's 3-minute wall-clock cap.
+///
+/// Iterating the full `TEST_MODELS` list under the un-JITed DLR-FT interpreter
+/// stays well within that cap (the corpus is small/medium scalar/arrayed
+/// models), so the gate covers the whole list rather than a subset.
+#[test]
+fn wasm_parity_floor() {
+    let mut unsupported: Vec<(String, String)> = Vec::new();
+    for &path in TEST_MODELS {
+        let file_path = format!("../../{path}");
+        if let WasmRunOutcome::Skipped(msg) = wasm_parity_outcome_for_path(&file_path) {
+            unsupported.push((path.to_string(), msg));
+        }
+    }
+    eprintln!(
+        "wasm_parity_floor: {} of {} corpus models ran to VM parity ({} unsupported)",
+        TEST_MODELS.len() - unsupported.len(),
+        TEST_MODELS.len(),
+        unsupported.len()
+    );
+    assert!(
+        unsupported.is_empty(),
+        "wasm parity gate (AC3.2/AC3.3): every corpus model must run through the \
+         wasm backend, but {} of {} returned Unsupported -- a regression that \
+         dropped a previously-supported model, or a new feature whose lowering is \
+         missing:\n{}",
+        unsupported.len(),
+        TEST_MODELS.len(),
+        unsupported
+            .iter()
+            .map(|(p, m)| format!("  {p}: {m}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Parse the XMILE/STMX model at `path`, run it through the VM for an `expected`
+/// baseline, and return whether the wasm backend reproduces it (`Ran`) or
+/// returns `Unsupported` (`Skipped`). Used only by `wasm_parity_floor`, which
+/// turns any `Skipped` into a hard failure. A parse or VM failure is surfaced as
+/// `Skipped` (the VM corpus tests gate those paths directly; this gate only
+/// checks wasm-vs-VM parity, never re-litigates VM correctness), so an
+/// upstream parse/VM break would also trip the gate -- intended, since a model
+/// that no longer VM-simulates can't establish wasm parity either.
+fn wasm_parity_outcome_for_path(path: &str) -> WasmRunOutcome {
+    let datamodel = {
+        let Ok(f) = File::open(path) else {
+            return WasmRunOutcome::Skipped(format!("could not open {path}"));
+        };
+        let mut f = BufReader::new(f);
+        match xmile::project_from_reader(&mut f) {
+            Ok(p) => p,
+            Err(e) => return WasmRunOutcome::Skipped(format!("parse failed: {e}")),
+        }
+    };
+
+    let expected = vm_results(&datamodel);
+    ensure_wasm_matches(&datamodel, "main", &expected, &[])
+}
 
 /// Compile a datamodel project to a VM simulation using the incremental
 /// salsa-backed path.
@@ -821,6 +903,80 @@ fn run_vacuous_comparison_scenarios() {
     asserts_panic("near-zero but meaningful divergence", &expected_nz, &sim_nz);
 }
 
+/// Run the named model of `datamodel` through the VM and return its
+/// `Results`, used as the `expected` baseline both the focused
+/// `ensure_wasm_matches` tests and `wasm_parity_floor` compare wasm output
+/// against. Mirrors the corpus VM path (`compile_vm` -> `Vm::new` ->
+/// `run_to_end`).
+fn vm_results(datamodel: &simlin_engine::datamodel::Project) -> Results {
+    let compiled = compile_vm(datamodel);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    vm.into_results()
+}
+
+/// AC1.1: a scalar Euler model the wasm backend supports runs through
+/// `ensure_wasm_matches` and clears the same `ensure_results` comparator the VM
+/// clears (the helper panics internally on any divergence), so the outcome is
+/// `Ran`.
+#[test]
+fn ensure_wasm_matches_runs_supported_scalar_model() {
+    let datamodel = simlin_engine::test_common::TestProject::new("simple")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("inflow_rate", "2", None)
+        .stock("level", "0", &["inflow"], &[], None)
+        .flow("inflow", "inflow_rate", None)
+        .build_datamodel();
+
+    let expected = vm_results(&datamodel);
+    let outcome = ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "a supported scalar model must run through the wasm backend, got {outcome:?}"
+    );
+}
+
+/// AC3.1: a model using a not-yet-supported construct is SKIPPED, not failed --
+/// `compile_simulation` returns `WasmGenError::Unsupported` and the helper
+/// surfaces it as `Skipped(msg)` carrying that message.
+///
+/// The example construct has migrated as the backend's coverage grew: `^`
+/// (`Op2::Exp`) became supported in Phase 2 Task 3, RK4 in Phase 4, and *modules*
+/// (so `SMTH1`/`DELAY3` stdlib expansions) in Phase 7. The stable still-
+/// unsupported construct is now a *true runtime range* `arr[lo:hi]` with
+/// non-literal bounds, which lowers to `Opcode::ViewRangeDynamic` -- a runtime
+/// view *size* the fully-unrolled emitter cannot express (`wasmgen.rs`'s
+/// `ViewRangeDynamic` arm returns `Unsupported`). A literal range is
+/// constant-folded into a static view, so the bounds must be variables.
+#[test]
+fn ensure_wasm_matches_skips_unsupported_model() {
+    let datamodel = simlin_engine::test_common::TestProject::new("unsupported")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .indexed_dimension("A", 5)
+        .array_aux("source[A]", "A")
+        .scalar_aux("lo", "2")
+        .scalar_aux("hi", "4")
+        // SUM over a runtime range (variable bounds) -> ViewRangeDynamic, which
+        // the wasm backend cannot express (a runtime view size in a fully-
+        // unrolled emitter), so the whole model is Skipped.
+        .scalar_aux("total", "SUM(source[lo:hi])")
+        .build_datamodel();
+
+    let expected = vm_results(&datamodel);
+    let outcome = ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    match outcome {
+        WasmRunOutcome::Skipped(msg) => {
+            assert!(
+                msg.contains("ViewRangeDynamic"),
+                "expected the runtime-range rejection message, got: {msg}"
+            );
+        }
+        WasmRunOutcome::Ran => {
+            panic!("a model using a runtime-range construct must be Skipped, not Ran")
+        }
+    }
+}
+
 type CompileFn = fn(&simlin_engine::datamodel::Project) -> simlin_engine::CompiledSimulation;
 
 fn simulate_path(xmile_path: &str) {
@@ -912,6 +1068,39 @@ fn simulate_path_with_excluding(xmile_path: &str, compile: CompileFn, excluded: 
     // byte-for-byte identical (we aren't losing any information)
     let serialized_xmile2 = xmile::project_to_xmile(&roundtripped_project).unwrap();
     assert_eq!(&serialized_xmile, &serialized_xmile2);
+
+    // wasm-backend parity: after the VM comparisons pass, run the model through
+    // the wasm backend once and assert it clears the SAME comparator against the
+    // same `expected`. A supported model that diverges panics inside the helper;
+    // an `Unsupported` outcome for this VM-simulated model is now a HARD FAILURE
+    // (the corpus gate, AC3.2). See AC1.1 / AC3.2.
+    wasm_parity_hook(&datamodel_project, &expected, excluded);
+}
+
+/// Run one already-parsed, VM-simulated model through the wasm backend and
+/// assert parity. This is reached only from the `simulate_path`/`simulate_mdl`
+/// helpers, i.e. AFTER the VM has simulated the model, so a `Skipped`
+/// (`WasmGenError::Unsupported`) here means a model the VM handles is NOT
+/// covered by the wasm backend -- a hard failure (AC3.2: every core-simulation
+/// model runs through both backends). A model the VM itself cannot simulate
+/// (DELAY FIXED, GET DATA) is `#[ignore]`d and never reaches this hook, so it
+/// stays out of scope. A supported-but-divergent model panics inside
+/// `ensure_wasm_matches`.
+fn wasm_parity_hook(
+    datamodel: &simlin_engine::datamodel::Project,
+    expected: &Results,
+    excluded: &[&str],
+) {
+    if let WasmRunOutcome::Skipped(msg) = ensure_wasm_matches(datamodel, "main", expected, excluded)
+    {
+        panic!(
+            "wasm parity gate: a VM-simulated model returned Unsupported from the \
+             wasm backend -- every core-simulation model must run through both \
+             backends (AC3.2). Close the lowering gap or, if this is a genuinely \
+             VM-unsupported feature, the test should be #[ignore]d so it never \
+             reaches this hook. Reason: {msg}"
+        );
+    }
 }
 
 fn load_expected_results_for_mdl(mdl_path: &str) -> Option<Results> {
@@ -957,6 +1146,8 @@ fn simulate_mdl_path(mdl_path: &str) {
     let expected = load_expected_results_for_mdl(mdl_path)
         .unwrap_or_else(|| panic!("no reference data found for {mdl_path}"));
     ensure_results(&expected, &results);
+
+    wasm_parity_hook(&datamodel_project, &expected, &[]);
 }
 
 /// Simulate a Vensim MDL file that references external data files.
@@ -987,6 +1178,8 @@ fn simulate_mdl_path_with_data(mdl_path: &str) {
     let expected = load_expected_results_for_mdl(mdl_path)
         .unwrap_or_else(|| panic!("no reference data found for {mdl_path}"));
     ensure_results(&expected, &results);
+
+    wasm_parity_hook(&datamodel_project, &expected, &[]);
 }
 
 #[test]
@@ -1714,6 +1907,48 @@ fn simulates_wrld3_03() {
     assert_eq!(vdf_results.step_count, results.step_count);
 }
 
+/// WORLD3 wasm parity twin (wasm-backend.AC1.1, heavy-model scale check): WORLD3
+/// is a large model, so its wasm blob exercises the backend well beyond the
+/// small/medium default corpus. The VM test above only smoke-checks the VDF
+/// decoder (no series comparison), so this twin asserts the wasm output matches
+/// the VM output element-for-element via `ensure_results` -- the strongest
+/// available parity check for this model (both backends consume the same
+/// `CompiledSimulation`, so any divergence is a wasm lowering bug). A
+/// `WasmGenError::Unsupported` would be a hard failure: WORLD3 is a
+/// core-simulation model the VM handles. `#[ignore]`d for runtime class, like
+/// the other heavy models.
+///
+/// Run with: cargo test --release -- --ignored simulates_wrld3_03_wasm
+#[test]
+#[ignore]
+fn simulates_wrld3_03_wasm() {
+    let mdl_path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+
+    eprintln!("model (vensim mdl): {mdl_path}");
+
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+
+    let datamodel_project =
+        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    // VM reference run.
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
+    let vm_results = vm.into_results();
+
+    // wasm twin: compile through the backend, run under the interpreter, and
+    // match the VM element-for-element.
+    let wasm_results = wasm_results_for(&datamodel_project, "main").unwrap_or_else(|msg| {
+        panic!("WORLD3 must compile to wasm (a core-simulation model the VM handles): {msg}")
+    });
+
+    ensure_results(&vm_results, &wasm_results);
+}
+
 /// Known-residual C-LEARN base-variable names excluded from the
 /// `simulates_clearn` VDF gate. C-LEARN compiles via the incremental path,
 /// runs to FINAL TIME, and matches `Ref.vdf` within the 1% cross-simulator
@@ -1838,13 +2073,11 @@ fn simulates_clearn() {
     ensure_vdf_results_excluding(&vdf_results, &results, EXPECTED_VDF_RESIDUAL);
 }
 
-/// Compile and run C-LEARN end-to-end and parse `Ref.vdf`, returning
-/// `(vdf_results, results)`. Shared by `simulates_clearn` (the 1% gate) and
-/// `clearn_residual_exactness` (the exclusion-exactness guard) so both exercise
-/// the byte-identical `open_vensim` -> `compile_vm` -> `run_to_end` -> parse-VDF
-/// path and compare the same data. Heavy (C-LEARN is ~53k lines / 1.4 MB,
-/// ~5s just to parse on release), so every caller is `#[ignore]`d.
-fn run_clearn_vs_vdf() -> (Results, Results) {
+/// Read and parse the C-LEARN `.mdl` into a datamodel project. Shared by the VM
+/// path ([`run_clearn_vs_vdf`]) and the wasm twin ([`simulates_clearn_wasm`]) so
+/// both compile the byte-identical model. Heavy (C-LEARN is ~53k lines / 1.4 MB,
+/// ~5s just to parse on release).
+fn clearn_datamodel() -> simlin_engine::datamodel::Project {
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
 
     eprintln!("model (vensim mdl): {mdl_path}");
@@ -1852,26 +2085,70 @@ fn run_clearn_vs_vdf() -> (Results, Results) {
     let contents = std::fs::read_to_string(mdl_path)
         .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
 
-    let datamodel_project =
-        open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+    open_vensim(&contents).unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"))
+}
 
-    let compiled = compile_vm(&datamodel_project);
-    let mut vm =
-        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {mdl_path}: {e}"));
-    vm.run_to_end()
-        .unwrap_or_else(|e| panic!("VM run failed for {mdl_path}: {e}"));
-    let results = vm.into_results();
-
+/// Parse the C-LEARN `Ref.vdf` genuine-Vensim reference output into `Results`.
+/// Shared by every C-LEARN comparison path so they assert against identical data.
+fn clearn_vdf_results() -> Results {
     let vdf_path = "../../test/xmutil_test_models/Ref.vdf";
     let vdf_data_bytes =
         std::fs::read(vdf_path).unwrap_or_else(|e| panic!("failed to read {vdf_path}: {e}"));
     let vdf_file = simlin_engine::vdf::VdfFile::parse(vdf_data_bytes)
         .unwrap_or_else(|e| panic!("failed to parse VDF {vdf_path}: {e}"));
-    let vdf_results = vdf_file
+    vdf_file
         .to_results_via_records()
-        .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"));
+        .unwrap_or_else(|e| panic!("VDF to_results_via_records failed: {e}"))
+}
+
+/// Compile and run C-LEARN end-to-end through the VM and parse `Ref.vdf`,
+/// returning `(vdf_results, results)`. Shared by `simulates_clearn` (the 1% gate)
+/// and `clearn_residual_exactness` (the exclusion-exactness guard) so both
+/// exercise the byte-identical `open_vensim` -> `compile_vm` -> `run_to_end` ->
+/// parse-VDF path and compare the same data. Heavy, so every caller is
+/// `#[ignore]`d.
+fn run_clearn_vs_vdf() -> (Results, Results) {
+    let datamodel_project = clearn_datamodel();
+
+    let compiled = compile_vm(&datamodel_project);
+    let mut vm =
+        Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for C-LEARN: {e}"));
+    vm.run_to_end()
+        .unwrap_or_else(|e| panic!("VM run failed for C-LEARN: {e}"));
+    let results = vm.into_results();
+
+    let vdf_results = clearn_vdf_results();
 
     (vdf_results, results)
+}
+
+/// C-LEARN wasm parity twin (wasm-backend.AC1.3): compile C-LEARN through the
+/// wasm backend, run it under the DLR-FT interpreter, and assert its output
+/// clears the SAME hard 1% VDF gate + `EXPECTED_VDF_RESIDUAL` carve-out that
+/// `simulates_clearn` applies to the VM. Both backends consume the same
+/// `CompiledSimulation` produced by `compile_project_incremental`, so the wasm
+/// output must clear the gate exactly as the VM does (a divergence is a wasm
+/// lowering bug); the residual carve-out is identical because it is a property
+/// of the model + reference data, not the execution engine. `#[ignore]`d for
+/// runtime class -- C-LEARN under the non-JIT interpreter is slow -- exactly
+/// like `simulates_clearn`.
+///
+/// A `WasmGenError::Unsupported` here would be a hard failure: C-LEARN is a
+/// core-simulation model the VM handles, so the wasm backend must too.
+///
+/// Run with: cargo test --release -- --ignored simulates_clearn_wasm
+#[test]
+#[ignore]
+fn simulates_clearn_wasm() {
+    let datamodel_project = clearn_datamodel();
+
+    let wasm_results = wasm_results_for(&datamodel_project, "main").unwrap_or_else(|msg| {
+        panic!("C-LEARN must compile to wasm (a core-simulation model the VM handles): {msg}")
+    });
+
+    let vdf_results = clearn_vdf_results();
+
+    ensure_vdf_results_excluding(&vdf_results, &wasm_results, EXPECTED_VDF_RESIDUAL);
 }
 
 /// Committed regression guard that `EXPECTED_VDF_RESIDUAL` stays EXACT: it is

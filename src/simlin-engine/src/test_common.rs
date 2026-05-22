@@ -183,6 +183,28 @@ impl TestProject {
         self
     }
 
+    /// Add an auxiliary variable backed by a graphical function. The `equation`
+    /// is the lookup input expression; `gf` is the table the value is looked up
+    /// in. With a real input expression this lowers to `LOOKUP(self, input)`.
+    pub fn aux_with_gf(
+        mut self,
+        name: &str,
+        equation: &str,
+        gf: datamodel::GraphicalFunction,
+    ) -> Self {
+        self.variables.push(Variable::Aux(datamodel::Aux {
+            ident: name.to_string(),
+            equation: Equation::Scalar(equation.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: Some(gf),
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+        self
+    }
+
     /// Add a flow variable
     pub fn flow(mut self, name: &str, equation: &str, units: Option<&str>) -> Self {
         self.variables.push(Variable::Flow(datamodel::Flow {

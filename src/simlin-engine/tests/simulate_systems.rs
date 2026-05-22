@@ -16,7 +16,7 @@ use simlin_engine::db::{
 };
 use simlin_engine::load_csv;
 
-use test_helpers::ensure_results;
+use test_helpers::{WasmRunOutcome, ensure_results, ensure_wasm_matches};
 
 /// All valid systems format test models.
 const ALL_VALID_MODELS: &[&str] = &[
@@ -61,6 +61,98 @@ fn simulate_systems_file(txt_path: &str, csv_path: &str, rounds: u64) {
         .unwrap_or_else(|e| panic!("VM execution failed for {txt_path}: {e}"));
     let results = vm.into_results();
     ensure_results(&expected, &results);
+
+    // wasm-backend parity (AC3.2): a systems-format model translates to
+    // stdlib-module instances (`systems_rate`/`systems_leak`/`systems_conversion`),
+    // so this exercises the wasm backend's module path end-to-end. Every
+    // VM-simulated systems model must run through the wasm backend and clear the
+    // SAME comparator against `expected`; an `Unsupported` outcome here is a hard
+    // failure (this model VM-simulated, so the wasm backend must cover it).
+    // `ensure_wasm_matches` panics internally on a supported-but-wrong model.
+    if let WasmRunOutcome::Skipped(msg) =
+        ensure_wasm_matches(&datamodel_project, "main", &expected, &[])
+    {
+        panic!(
+            "wasm parity gate: systems model {txt_path} VM-simulated but the wasm \
+             backend returned Unsupported (AC3.2 -- every core-simulation model \
+             must run through both backends): {msg}"
+        );
+    }
+}
+
+/// Parse + translate the systems model at `path` (a fixed `rounds`), run it
+/// through the VM for an `expected` baseline, and return whether the wasm backend
+/// reproduces it (`Ran`) or returns `Unsupported` (`Skipped`). A parse/
+/// translate/VM failure is surfaced as `Skipped` (those paths are gated by the
+/// per-model simulation tests; this gate only checks wasm-vs-VM parity).
+fn wasm_systems_outcome_for_path(path: &str, rounds: u64) -> WasmRunOutcome {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return WasmRunOutcome::Skipped(format!("could not read {path}"));
+    };
+    let systems_model = match simlin_engine::systems::parse(&contents) {
+        Ok(m) => m,
+        Err(e) => return WasmRunOutcome::Skipped(format!("parse failed: {e}")),
+    };
+    let datamodel = match simlin_engine::systems::translate::translate(&systems_model, rounds) {
+        Ok(p) => p,
+        Err(e) => return WasmRunOutcome::Skipped(format!("translate failed: {e}")),
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    let compiled = match compile_project_incremental(&db, sync.project, "main") {
+        Ok(c) => c,
+        Err(e) => return WasmRunOutcome::Skipped(format!("VM compile failed: {e:?}")),
+    };
+    let mut vm = match Vm::new(compiled) {
+        Ok(vm) => vm,
+        Err(e) => return WasmRunOutcome::Skipped(format!("VM creation failed: {e}")),
+    };
+    if let Err(e) = vm.run_to_end() {
+        return WasmRunOutcome::Skipped(format!("VM run failed: {e}"));
+    }
+    let expected = vm.into_results();
+    ensure_wasm_matches(&datamodel, "main", &expected, &[])
+}
+
+/// End-state wasm parity gate (AC3.2 / AC3.3): EVERY systems-format model must
+/// run through the wasm backend to VM parity -- zero may return
+/// `WasmGenError::Unsupported`. Systems-format models translate to stdlib-module
+/// instances (`systems_rate`/`systems_leak`/`systems_conversion`), so they
+/// exercise the wasm backend's `EvalModule`/`LoadModuleInput` path end-to-end.
+/// This is a direct wasm-vs-VM check (the VM's own output is the baseline),
+/// independent of the on-disk CSV fixtures. The per-model simulation tests
+/// additionally run the inline `ensure_wasm_matches` hook against their
+/// CSV-cleared `expected` and likewise hard-fail on `Unsupported`. A regression
+/// that drops a previously-supported systems model fails here with the offender.
+#[test]
+fn wasm_systems_parity_floor() {
+    let mut unsupported: Vec<(String, String)> = Vec::new();
+    for &path in ALL_VALID_MODELS {
+        // A fixed `rounds` like the compile-only gate; the wasm-vs-VM parity does
+        // not depend on the exact horizon, only that both backends agree on it.
+        if let WasmRunOutcome::Skipped(msg) = wasm_systems_outcome_for_path(path, 5) {
+            unsupported.push((path.to_string(), msg));
+        }
+    }
+    eprintln!(
+        "wasm_systems_parity_floor: {} of {} systems models ran to VM parity ({} unsupported)",
+        ALL_VALID_MODELS.len() - unsupported.len(),
+        ALL_VALID_MODELS.len(),
+        unsupported.len()
+    );
+    assert!(
+        unsupported.is_empty(),
+        "wasm systems parity gate (AC3.2/AC3.3): every systems model must run \
+         through the wasm backend, but {} of {} returned Unsupported:\n{}",
+        unsupported.len(),
+        ALL_VALID_MODELS.len(),
+        unsupported
+            .iter()
+            .map(|(p, m)| format!("  {p}: {m}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 #[test]

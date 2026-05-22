@@ -85,6 +85,118 @@ unsafe fn write_bytes_to_ffi_output(
     true
 }
 
+/// Compile the model to a self-contained WebAssembly module plus its layout.
+///
+/// The emitted module exports its own linear `memory` and a `run` function
+/// that executes the whole simulation in one call, writing step-major result
+/// snapshots into a results region of its memory. This is an alternative to
+/// the bytecode VM intended for fast, repeated re-simulation (e.g. interactive
+/// parameter scrubbing): the host instantiates the module once and calls `run`
+/// on every change.
+///
+/// Two buffers are returned via the malloc-return convention, each freed
+/// separately with `simlin_free`:
+/// - `out_wasm`/`out_wasm_len`: the wasm blob.
+/// - `out_layout`/`out_layout_len`: a self-describing, length-prefixed layout
+///   buffer (all integers little-endian): `n_slots` (u64), `n_chunks` (u64),
+///   `results_offset` (u64), `count` (u32), then per entry `name_len` (u32) +
+///   UTF-8 name + `offset` (u64). A host strides one variable's `n_chunks`-long
+///   series from the results region using `results_offset`, `n_slots`, and the
+///   variable's `offset` from this map.
+///
+/// Works from the model's datamodel alone -- no `SimlinSim` is required. Any
+/// compile or codegen failure stores a `SimlinError` (never panics across the
+/// boundary) and leaves both output buffers NULL.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `out_wasm`, `out_wasm_len`, `out_layout`, and `out_layout_len` must be
+///   valid, non-null pointers
+/// - `out_error` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_compile_to_wasm(
+    model: *mut SimlinModel,
+    out_wasm: *mut *mut u8,
+    out_wasm_len: *mut usize,
+    out_layout: *mut *mut u8,
+    out_layout_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_wasm.is_null()
+        || out_wasm_len.is_null()
+        || out_layout.is_null()
+        || out_layout_len.is_null()
+    {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+    *out_wasm = ptr::null_mut();
+    *out_wasm_len = 0;
+    *out_layout = ptr::null_mut();
+    *out_layout_len = 0;
+
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return;
+        }
+    };
+
+    // The compiled-model wasm is regenerated from the project's datamodel; it
+    // does not depend on the VM `SimState`, so this works even before a
+    // `SimlinSim` has been created for the model.
+    let project_ref = &*model_ref.project;
+    let datamodel = project_ref.datamodel.lock().unwrap();
+
+    let artifact = match engine::wasmgen::compile_datamodel_to_artifact(
+        &datamodel,
+        model_ref.model_name.as_str(),
+    ) {
+        Ok(artifact) => artifact,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("wasm code generation failed: {err}")),
+            );
+            return;
+        }
+    };
+
+    let layout_bytes = artifact.layout.serialize();
+
+    // Write the wasm blob first. On its allocation failure `write_bytes_to_ffi_output`
+    // stores the error and returns false; bail before touching the layout buffer.
+    if !write_bytes_to_ffi_output(
+        &artifact.wasm,
+        out_wasm,
+        out_wasm_len,
+        out_error,
+        "model wasm",
+    ) {
+        return;
+    }
+    // If the layout allocation fails, free the wasm buffer already handed out so
+    // the caller is never left with one buffer set and the other NULL-but-leaked.
+    if !write_bytes_to_ffi_output(
+        &layout_bytes,
+        out_layout,
+        out_layout_len,
+        out_error,
+        "model wasm layout",
+    ) {
+        crate::memory::simlin_free(*out_wasm);
+        *out_wasm = ptr::null_mut();
+        *out_wasm_len = 0;
+    }
+}
+
 /// Find a model by name in a locked datamodel.
 pub(crate) fn find_model_in_datamodel<'a>(
     datamodel: &'a MutexGuard<'_, datamodel::Project>,

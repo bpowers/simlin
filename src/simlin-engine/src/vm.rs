@@ -167,6 +167,19 @@ impl CompiledSimulation {
     pub fn is_constant_offset(&self, off: usize) -> bool {
         self.cached_constant_info.contains_key(&off)
     }
+
+    /// The full set of overridable constant offsets (absolute data-buffer
+    /// offsets), i.e. every offset for which [`is_constant_offset`] is true.
+    /// These are the offsets with an `AssignConstCurr` in some module's flows
+    /// phase (see `collect_constant_info`); `set_value`/`set_value_by_offset`
+    /// accept exactly these. The wasm backend reads this to size and initialize
+    /// its constants-override region so a blob's `set_value` accepts the same
+    /// set the VM does.
+    ///
+    /// [`is_constant_offset`]: Self::is_constant_offset
+    pub(crate) fn constant_offsets(&self) -> impl Iterator<Item = usize> + '_ {
+        self.cached_constant_info.keys().copied()
+    }
 }
 
 /// One unique compiled module (a distinct `(model_name, input_set)`), holding
@@ -204,7 +217,7 @@ struct CompiledSlicedSimulation {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum StepPart {
     Initials,
     Flows,
@@ -3052,8 +3065,11 @@ pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval:
     0.0
 }
 
+// `pub(crate)` so the wasm backend's lookup-helper tests can compare the
+// emitted helpers directly against the VM functions they reproduce
+// (`wasmgen::lookup`), the byte-faithful oracle for `vm.rs:3055-3186`.
 #[inline(never)]
-fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
+pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
         return f64::NAN;
     }
@@ -3105,7 +3121,7 @@ fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
 /// If x is beyond the last point, returns the y-value of the last point.
 /// This is a "sample and hold" interpolation where we look forward.
 #[inline(never)]
-fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
+pub(crate) fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
         return f64::NAN;
     }
@@ -3147,7 +3163,7 @@ fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
 ///
 /// For duplicate x-values, returns the y of the LAST point with that x.
 #[inline(never)]
-fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
+pub(crate) fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
         return f64::NAN;
     }
