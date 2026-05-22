@@ -9,7 +9,7 @@
  * Maps opaque integer handles to WASM pointers.
  */
 
-import { EngineBackend, ProjectHandle, ModelHandle, SimHandle } from './backend';
+import { EngineBackend, ProjectHandle, ModelHandle, SimHandle, SimEngine } from './backend';
 import {
   simlin_project_open_protobuf,
   simlin_project_open_json,
@@ -61,6 +61,7 @@ import {
   simlin_free_links,
 } from './internal/analysis';
 import { readAllErrorDetails, simlin_error_free } from './internal/error';
+import { simlin_model_compile_to_wasm, parseWasmLayout, WasmLayout, WasmBlobExports } from './internal/wasmgen';
 import {
   SimlinProjectPtr,
   SimlinModelPtr,
@@ -121,6 +122,28 @@ interface HandleEntry {
   disposed: boolean;
   // For model/sim handles, track which project they belong to
   projectHandle?: number;
+  // For sim handles: which execution backend this sim runs on. A 'wasm' entry
+  // has no native sim pointer (ptr is 0); it owns a WebAssembly.Instance and
+  // drives the blob's exports directly. Absent/'vm' means the bytecode VM.
+  engine?: SimEngine;
+  // Wasm-engine state (set only when engine === 'wasm'). The instance is owned
+  // here so it is created exactly once and GC'd when the entry is dropped.
+  wasmInstance?: WebAssembly.Instance;
+  wasmLayout?: WasmLayout;
+  wasmExports?: WasmBlobExports;
+  // The model's stop time, captured at creation so simRunToEnd can drive the
+  // blob's resumable run_to(stop) (mirroring the VM's run_to(specs.stop)).
+  wasmStopTime?: number;
+}
+
+/** Optional fields carried onto a freshly-allocated handle entry. */
+interface HandleExtra {
+  projectHandle?: number;
+  engine?: SimEngine;
+  wasmInstance?: WebAssembly.Instance;
+  wasmLayout?: WasmLayout;
+  wasmExports?: WasmBlobExports;
+  wasmStopTime?: number;
 }
 
 export class DirectBackend implements EngineBackend {
@@ -128,13 +151,18 @@ export class DirectBackend implements EngineBackend {
   private _handles = new Map<number, HandleEntry>();
   private _projectChildren = new Map<number, Set<number>>();
 
-  private allocHandle(kind: HandleKind, ptr: number, extra?: { projectHandle?: number }): number {
+  private allocHandle(kind: HandleKind, ptr: number, extra?: HandleExtra): number {
     const handle = this._nextHandle++;
     this._handles.set(handle, {
       kind,
       ptr,
       disposed: false,
       projectHandle: extra?.projectHandle,
+      engine: extra?.engine,
+      wasmInstance: extra?.wasmInstance,
+      wasmLayout: extra?.wasmLayout,
+      wasmExports: extra?.wasmExports,
+      wasmStopTime: extra?.wasmStopTime,
     });
     if (kind === 'project') {
       this._projectChildren.set(handle, new Set());
@@ -232,7 +260,10 @@ export class DirectBackend implements EngineBackend {
         if (childEntry && !childEntry.disposed) {
           childEntry.disposed = true;
           if (childEntry.kind === 'sim') {
-            simlin_sim_unref(childEntry.ptr);
+            // Skip the native unref for a wasm sim (no native sim pointer).
+            if (childEntry.engine !== 'wasm') {
+              simlin_sim_unref(childEntry.ptr);
+            }
           } else if (childEntry.kind === 'model') {
             simlin_model_unref(childEntry.ptr);
           }
@@ -375,11 +406,60 @@ export class DirectBackend implements EngineBackend {
 
   // Sim operations
 
-  simNew(modelHandle: ModelHandle, enableLtm: boolean): SimHandle {
+  simNew(modelHandle: ModelHandle, enableLtm: boolean, engine: SimEngine = 'vm'): SimHandle {
     const modelEntry = this.getEntry(modelHandle as number, 'model');
+    if (engine === 'wasm') {
+      return this.simNewWasm(modelHandle, modelEntry, enableLtm);
+    }
     const ptr = simlin_sim_new(modelEntry.ptr, enableLtm);
     return this.allocHandle('sim', ptr, {
       projectHandle: modelEntry.projectHandle,
+      engine: 'vm',
+    }) as SimHandle;
+  }
+
+  /**
+   * Create a wasm-engine sim: compile the model to a self-contained wasm blob,
+   * instantiate it import-free, and store the instance + decoded layout + stop
+   * time on the handle entry. There is intentionally no VM fallback -- an
+   * unsupported model surfaces the compile error to the caller.
+   */
+  private simNewWasm(modelHandle: ModelHandle, modelEntry: HandleEntry, enableLtm: boolean): SimHandle {
+    // Reject LTM up front, before any compile work: the wasm backend does not
+    // emit LTM instrumentation, so a wasm sim can never satisfy enableLtm.
+    if (enableLtm) {
+      throw new Error("LTM is not supported on the wasm engine; use engine:'vm'");
+    }
+
+    // Throws SimlinError on an unsupported model (e.g. a runtime view range);
+    // we deliberately do not catch-and-fall-back to the VM.
+    const { wasm, layout } = simlin_model_compile_to_wasm(modelEntry.ptr);
+    const parsed = parseWasmLayout(layout);
+
+    // Capture the model's stop time so simRunToEnd can drive run_to(stop),
+    // mirroring Model.timeSpec()'s defensive endTime parse (model.ts:297).
+    const specs = JSON.parse(new TextDecoder().decode(this.modelGetSimSpecsJson(modelHandle))) as {
+      endTime?: number;
+    };
+    const wasmStopTime = specs.endTime ?? 10;
+
+    // The blob is import-free and DirectBackend never runs on the browser main
+    // thread, so synchronous compile + instantiate is allowed here. The blob has
+    // its own (non-growing) linear memory, independent of the libsimlin singleton.
+    // `copyFromWasm` returns a fresh, non-shared Uint8Array (byteOffset 0), so its
+    // backing buffer is a plain ArrayBuffer -- the cast only drops the lib's
+    // ArrayBufferLike widening (which admits SharedArrayBuffer) that does not apply here.
+    const wasmBytes = wasm.buffer as ArrayBuffer;
+    const instance = new WebAssembly.Instance(new WebAssembly.Module(wasmBytes), {});
+    const wasmExports = instance.exports as unknown as WasmBlobExports;
+
+    return this.allocHandle('sim', 0, {
+      projectHandle: modelEntry.projectHandle,
+      engine: 'wasm',
+      wasmInstance: instance,
+      wasmLayout: parsed,
+      wasmExports,
+      wasmStopTime,
     }) as SimHandle;
   }
 
@@ -392,7 +472,11 @@ export class DirectBackend implements EngineBackend {
     if (entry.projectHandle !== undefined) {
       this._projectChildren.get(entry.projectHandle)?.delete(handle as number);
     }
-    simlin_sim_unref(entry.ptr);
+    // A wasm sim has no native sim pointer; dropping the entry lets the
+    // WebAssembly.Instance be GC'd. Only the VM path holds a native sim to unref.
+    if (entry.engine !== 'wasm') {
+      simlin_sim_unref(entry.ptr);
+    }
   }
 
   simRunTo(handle: SimHandle, time: number): void {
