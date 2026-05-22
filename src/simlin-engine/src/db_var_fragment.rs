@@ -705,6 +705,7 @@ pub(crate) fn lower_var_fragment(
             implicit: false,
             // Single-variable fragment compilation only; not a macro template.
             is_macro: false,
+            macro_params: vec![],
         };
 
         let mut models: HashMap<Ident<Canonical>, &crate::model::ModelStage0> = HashMap::new();
