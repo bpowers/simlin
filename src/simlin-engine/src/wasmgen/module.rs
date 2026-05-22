@@ -1394,9 +1394,16 @@ fn emit_store_slot_value(f: &mut Function, base: u32, idx: u32) {
 /// Emit `L_RK_S := next[off] - curr[off]` -- the stock's stage delta `s_k`
 /// (`vm.rs`: `let sN = next[off] - curr[off]`). Computed before any of the
 /// stage's writes clobber `curr[off]`. `next_base` is `n_slots*8`.
-fn emit_compute_stage_delta(f: &mut Function, next_base: u32, off: u16) {
-    emit_load_slot(f, next_base, u32::from(off));
-    emit_load_slot(f, CURR_BASE, u32::from(off));
+///
+/// `off` is the full-width absolute slot offset (`u32`, like the Euler advance's
+/// `emit_save_advance`). A `u16` here would silently truncate a stock at slot
+/// 65536 or above -- reachable in a large nested model (each submodel / SMOOTH /
+/// DELAY instance adds slots, with no cap on total `n_slots`) -- to
+/// `off & 0xFFFF`, clobbering an unrelated slot (offset 65536 maps to slot 0,
+/// TIME).
+fn emit_compute_stage_delta(f: &mut Function, next_base: u32, off: u32) {
+    emit_load_slot(f, next_base, off);
+    emit_load_slot(f, CURR_BASE, off);
     f.instruction(&I::F64Sub);
     f.instruction(&I::LocalSet(L_RK_S));
 }
@@ -1426,11 +1433,11 @@ fn emit_rk4_step(
     // Stage 1 at (t, y): s1 = next-curr; saved=curr; accum=s1; curr=saved+s1*0.5
     emit_eval_step(f, f_flows, f_stocks);
     for (i, &off) in stock_offsets.iter().enumerate() {
-        let (i, off) = (i as u32, off as u16);
+        let (i, off) = (i as u32, off as u32);
         emit_compute_stage_delta(f, next_base, off);
         // saved[i] = curr[off]
         emit_store_slot_addr(f);
-        emit_load_slot(f, CURR_BASE, u32::from(off));
+        emit_load_slot(f, CURR_BASE, off);
         emit_store_slot_value(f, saved, i);
         // accum[i] = s1
         emit_store_slot_addr(f);
@@ -1443,7 +1450,7 @@ fn emit_rk4_step(
         f.instruction(&f64_const(0.5));
         f.instruction(&I::F64Mul);
         f.instruction(&I::F64Add);
-        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+        emit_store_slot_value(f, CURR_BASE, off);
     }
     // curr[TIME] = saved_time + dt*0.5
     emit_store_time_offset(f, dt * 0.5);
@@ -1451,7 +1458,7 @@ fn emit_rk4_step(
     // Stage 2 at (t+dt/2, y+s1/2): s2 = next-curr; accum+=2*s2; curr=saved+s2*0.5
     emit_eval_step(f, f_flows, f_stocks);
     for (i, &off) in stock_offsets.iter().enumerate() {
-        let (i, off) = (i as u32, off as u16);
+        let (i, off) = (i as u32, off as u32);
         emit_compute_stage_delta(f, next_base, off);
         // accum[i] += 2*s2
         emit_store_slot_addr(f);
@@ -1468,13 +1475,13 @@ fn emit_rk4_step(
         f.instruction(&f64_const(0.5));
         f.instruction(&I::F64Mul);
         f.instruction(&I::F64Add);
-        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+        emit_store_slot_value(f, CURR_BASE, off);
     }
 
     // Stage 3 at (t+dt/2, y+s2/2): s3 = next-curr; accum+=2*s3; curr=saved+s3
     emit_eval_step(f, f_flows, f_stocks);
     for (i, &off) in stock_offsets.iter().enumerate() {
-        let (i, off) = (i as u32, off as u16);
+        let (i, off) = (i as u32, off as u32);
         emit_compute_stage_delta(f, next_base, off);
         // accum[i] += 2*s3
         emit_store_slot_addr(f);
@@ -1489,7 +1496,7 @@ fn emit_rk4_step(
         emit_load_slot(f, saved, i);
         f.instruction(&I::LocalGet(L_RK_S));
         f.instruction(&I::F64Add);
-        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+        emit_store_slot_value(f, CURR_BASE, off);
     }
     // curr[TIME] = saved_time + dt
     emit_store_time_offset(f, dt);
@@ -1498,7 +1505,7 @@ fn emit_rk4_step(
     // next[off] = saved[i] + accum[i]/6; curr[off] = saved[i]
     emit_eval_step(f, f_flows, f_stocks);
     for (i, &off) in stock_offsets.iter().enumerate() {
-        let (i, off) = (i as u32, off as u16);
+        let (i, off) = (i as u32, off as u32);
         emit_compute_stage_delta(f, next_base, off);
         // accum[i] += s4
         emit_store_slot_addr(f);
@@ -1513,11 +1520,11 @@ fn emit_rk4_step(
         f.instruction(&f64_const(6.0));
         f.instruction(&I::F64Div);
         f.instruction(&I::F64Add);
-        emit_store_slot_value(f, next_base, u32::from(off));
+        emit_store_slot_value(f, next_base, off);
         // curr[off] = saved[i]  (restore the original)
         emit_store_slot_addr(f);
         emit_load_slot(f, saved, i);
-        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+        emit_store_slot_value(f, CURR_BASE, off);
     }
 
     // curr[TIME] = saved_time ; next[TIME] = saved_time + dt
@@ -1555,11 +1562,11 @@ fn emit_rk2_step(
     // Stage 1 at (t, y): s1 = next-curr; saved=curr; accum=s1; curr=saved+s1
     emit_eval_step(f, f_flows, f_stocks);
     for (i, &off) in stock_offsets.iter().enumerate() {
-        let (i, off) = (i as u32, off as u16);
+        let (i, off) = (i as u32, off as u32);
         emit_compute_stage_delta(f, next_base, off);
         // saved[i] = curr[off]
         emit_store_slot_addr(f);
-        emit_load_slot(f, CURR_BASE, u32::from(off));
+        emit_load_slot(f, CURR_BASE, off);
         emit_store_slot_value(f, saved, i);
         // accum[i] = s1
         emit_store_slot_addr(f);
@@ -1570,7 +1577,7 @@ fn emit_rk2_step(
         emit_load_slot(f, saved, i);
         f.instruction(&I::LocalGet(L_RK_S));
         f.instruction(&I::F64Add);
-        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+        emit_store_slot_value(f, CURR_BASE, off);
     }
     // curr[TIME] = saved_time + dt
     emit_store_time_offset(f, dt);
@@ -1579,7 +1586,7 @@ fn emit_rk2_step(
     // next[off] = saved[i] + accum[i]/2; curr[off] = saved[i]
     emit_eval_step(f, f_flows, f_stocks);
     for (i, &off) in stock_offsets.iter().enumerate() {
-        let (i, off) = (i as u32, off as u16);
+        let (i, off) = (i as u32, off as u32);
         emit_compute_stage_delta(f, next_base, off);
         // accum[i] += s2
         emit_store_slot_addr(f);
@@ -1594,11 +1601,11 @@ fn emit_rk2_step(
         f.instruction(&f64_const(2.0));
         f.instruction(&I::F64Div);
         f.instruction(&I::F64Add);
-        emit_store_slot_value(f, next_base, u32::from(off));
+        emit_store_slot_value(f, next_base, off);
         // curr[off] = saved[i]  (restore the original)
         emit_store_slot_addr(f);
         emit_load_slot(f, saved, i);
-        emit_store_slot_value(f, CURR_BASE, u32::from(off));
+        emit_store_slot_value(f, CURR_BASE, off);
     }
 
     // curr[TIME] = saved_time ; next[TIME] = saved_time + dt
@@ -2529,6 +2536,95 @@ mod tests {
             second[x_prev_off], 0.0,
             "x_prev at t0 on the second run must be the PREVIOUS fallback (0), got {}",
             second[x_prev_off]
+        );
+    }
+
+    /// Regression (PR #620 review): a stock at an absolute slot offset >= 65536
+    /// must address its real slot under RK integration, not `off & 0xFFFF`. Such
+    /// offsets are reachable in a large nested model (each submodel/SMOOTH/DELAY
+    /// instance adds slots; nothing caps total `n_slots` in the wasm path). The
+    /// RK stage delta `next[off] - curr[off]` is computed by
+    /// `emit_compute_stage_delta`; the original bug threaded `off` as `u16`, so a
+    /// stock at offset 65536 read slot `65536 & 0xFFFF == 0` (TIME) instead of its
+    /// own. This drives the helper at offset 65536 over a hand-built memory whose
+    /// slot 0 and slot 65536 hold distinct values and asserts it reads slot 65536
+    /// (matching the Euler advance, which has always used the full-width offset).
+    #[test]
+    fn rk_stage_delta_addresses_stock_above_65535() {
+        // 65536 & 0xFFFF == 0, so a truncated offset would alias slot 0 (TIME).
+        const HIGH_OFF: u32 = 65536;
+        // `curr` holds slots [0, HIGH_OFF]; `next` sits one stride past it.
+        let next_base = (HIGH_OFF + 1) * SLOT_SIZE;
+
+        // probe() -> f64: L_RK_S := next[HIGH_OFF] - curr[HIGH_OFF]; return it.
+        // Locals mirror the run fn so the f64 local L_RK_S (index 4) is valid.
+        let mut probe = Function::new([(3, ValType::I32), (2, ValType::F64)]);
+        emit_compute_stage_delta(&mut probe, next_base, HIGH_OFF);
+        probe.instruction(&I::LocalGet(L_RK_S));
+        probe.instruction(&I::End);
+
+        let mut module = WasmModule::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], [ValType::F64]);
+        module.section(&types);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        module.section(&functions);
+        let bytes_needed = next_base + (HIGH_OFF + 1) * SLOT_SIZE;
+        let mut memories = MemorySection::new();
+        memories.memory(MemoryType {
+            minimum: u64::from(bytes_needed.div_ceil(65536) + 1),
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&memories);
+        let mut exports = ExportSection::new();
+        exports.export("probe", ExportKind::Func, 0);
+        exports.export("memory", ExportKind::Memory, 0);
+        module.section(&exports);
+        let mut code = CodeSection::new();
+        code.function(&probe);
+        module.section(&code);
+        let wasm = module.finish();
+
+        let info = validate(&wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let mem = store
+            .instance_export(inst, "memory")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        // Seed slot 0 (the alias target under truncation) and slot HIGH_OFF with
+        // distinct values, so reading the wrong slot yields a distinguishable result.
+        let curr_hi = (HIGH_OFF * SLOT_SIZE) as usize;
+        let next0 = next_base as usize;
+        let next_hi = (next_base + HIGH_OFF * SLOT_SIZE) as usize;
+        store.mem_access_mut_slice(mem, |b| {
+            b[0..8].copy_from_slice(&100.0f64.to_le_bytes()); // curr[0]
+            b[next0..next0 + 8].copy_from_slice(&200.0f64.to_le_bytes()); // next[0]
+            b[curr_hi..curr_hi + 8].copy_from_slice(&3.0f64.to_le_bytes()); // curr[HIGH_OFF]
+            b[next_hi..next_hi + 8].copy_from_slice(&10.0f64.to_le_bytes()); // next[HIGH_OFF]
+        });
+        let probe_fn = store
+            .instance_export(inst, "probe")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let delta: f64 = store
+            .invoke_simple_typed::<(), f64>(probe_fn, ())
+            .expect("probe");
+
+        // next[HIGH_OFF] - curr[HIGH_OFF] = 10 - 3 = 7. A truncated u16 offset
+        // would read slot 0 instead (200 - 100 = 100).
+        assert_eq!(
+            delta, 7.0,
+            "RK stage delta read the wrong slot -- stock offset truncated above 65535?"
         );
     }
 
