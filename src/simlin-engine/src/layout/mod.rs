@@ -4485,7 +4485,12 @@ fn build_stock_flow_from_state(
 
 /// Seeds for parallel layout generation. Each seed produces a different SFDP
 /// layout; the one with fewest connector crossings is selected.
-const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
+///
+/// These are also the layout-quality sweep's best-of-k production proxy: the
+/// `layout_eval` example scores the best layout over exactly this seed set to
+/// estimate what production (which picks best-of-`LAYOUT_SEEDS`) would ship,
+/// so it is exposed publicly. The value and behavior are unchanged.
+pub const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
 
 /// Apply a model patch incrementally to an existing diagram view,
 /// preserving existing element positions and only placing new or

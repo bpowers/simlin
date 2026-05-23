@@ -115,6 +115,15 @@ name = "compiler_vector"
 name = "vdf_alias_decoder"
 required-features = ["file_io"]
 
+# The layout_eval example calls the png_render-gated `render_png` and loads
+# Vensim corpus models that reference external data (file_io). Examples are
+# auto-discovered and built by `--all-targets` / clippy / pre-commit under the
+# DEFAULT feature set (which excludes png_render); without this `[[example]]`
+# entry pinning required-features, that build would fail to compile the example.
+[[example]]
+name = "layout_eval"
+required-features = ["png_render", "file_io"]
+
 [[bench]]
 name = "array_ops"
 harness = false
