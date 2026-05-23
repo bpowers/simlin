@@ -22,7 +22,7 @@ use crate::diagram::common::{
     self, Point, Rect, display_name, merge_bounds, rect_area, rect_overlap_area,
     segment_length_in_rect,
 };
-use crate::diagram::connector::{ARC_POLYLINE_SAMPLES, connector_polyline};
+use crate::diagram::connector::{ARC_POLYLINE_SAMPLES, connector_polyline, get_visual_center};
 use crate::diagram::elements::{
     aux_bounds, aux_shape_bounds, cloud_bounds, module_bounds, stock_bounds, stock_shape_bounds,
 };
@@ -366,34 +366,48 @@ const MAX_CYCLE_LEN: usize = 12;
 const MAX_CYCLES: usize = 64;
 
 /// Directed adjacency over positioned node-box elements, keyed by uid with
-/// sorted successor lists. The center of each node's bare *shape* box (which is
-/// symmetric about the element position, so it is the element center -- unlike
-/// the asymmetric label-merged `node_box`) is recorded for the polygon geometry.
+/// sorted successor lists. Each node's loop vertex is the renderer's VISUAL
+/// center (`diagram::connector::get_visual_center`) -- for a flow that is its
+/// VALVE `(flow.x, flow.y)`, NOT the pipe-extent center of `flow_shape_bounds`
+/// (which unions the valve box with every pipe point and so drifts off the valve
+/// when the pipe is bent or the valve is dragged off-center); for an
+/// aux/stock/module/cloud it is the element center, which already equals the
+/// symmetric shape-box midpoint. Using the same visual center the SVG renderer
+/// draws keeps the loop polygon faithful to the drawn diagram.
 struct LoopGraph {
     /// uid -> sorted, de-duplicated successor uids.
     adj: BTreeMap<i32, Vec<i32>>,
-    /// uid -> node-box center point.
+    /// uid -> node visual-center point (the valve for flows; the element center
+    /// for aux/stock/module/cloud).
     centers: BTreeMap<i32, Point>,
 }
 
 /// Build the directed loop graph from the view. Nodes are exactly the elements
-/// with a node box (`node_shape_box`). Edges to/from uids that are not
-/// positioned nodes are dropped. Edges come from:
+/// with a node box (`node_shape_box` -- aux/stock/module/cloud/flow; links,
+/// aliases, and groups are excluded). Each node's loop vertex is the renderer's
+/// VISUAL center (`get_visual_center`), so a flow's vertex is its VALVE
+/// `(flow.x, flow.y)`, NOT the pipe-extent center of `flow_shape_bounds` (the
+/// valve box unioned with every pipe point), which drifts off the valve when the
+/// pipe is bent or the valve is dragged off-center. For aux/stock/module/cloud
+/// the visual center is the element center, which already equals the symmetric
+/// shape-box midpoint, so those vertices are unchanged. Edges to/from uids that
+/// are not positioned nodes are dropped. Edges come from:
 ///   * each Link: `from_uid -> to_uid`;
 ///   * each Flow: for consecutive attached points, `source_attached -> flow.uid`
 ///     and `flow.uid -> dest_attached`, so a stock--flow--stock feedback path is
 ///     part of the graph (the flow's own valve is the intermediate node).
 fn build_loop_graph(view: &datamodel::StockFlow) -> LoopGraph {
+    // The node-membership gate stays `node_shape_box` (it defines which elements
+    // are loop nodes), but the loop VERTEX is the renderer's visual center, which
+    // is correct for every gated kind: the valve for a flow, the element center
+    // for aux/stock/module/cloud. `not_arrayed` matches `collect_connector_geometry`
+    // / `build_view_segments` (offset 0, deterministic).
+    let not_arrayed = |_: &str| false;
     let mut centers: BTreeMap<i32, Point> = BTreeMap::new();
     for e in &view.elements {
-        if let Some(r) = node_shape_box(e) {
-            centers.insert(
-                e.get_uid(),
-                Point {
-                    x: (r.left + r.right) / 2.0,
-                    y: (r.top + r.bottom) / 2.0,
-                },
-            );
+        if node_shape_box(e).is_some() {
+            let (cx, cy) = get_visual_center(e, &not_arrayed);
+            centers.insert(e.get_uid(), Point { x: cx, y: cy });
         }
     }
 
@@ -1923,6 +1937,102 @@ mod tests {
             m.loop_compactness > 0.0,
             "a stock--flow--stock feedback path must form a scored loop, got {}",
             m.loop_compactness
+        );
+    }
+
+    /// A stock--flow--stock loop whose flow has an extra pipe point placed far
+    /// from the valve, plus a closing link. The flow valve sits at `valve`; an
+    /// interior pipe point at `bend` (between the two attached endpoints) bends
+    /// the drawn pipe. `loop_compactness` must score the loop on the flow's
+    /// VALVE (its visual center), NOT on `flow_shape_bounds`' pipe-extent bbox
+    /// center, so the result must depend only on `valve` -- never on `bend`.
+    fn bent_flow_loop_view(valve: Point, bend: Point) -> datamodel::StockFlow {
+        let s1 = stock(1, "a", 0.0, 0.0);
+        let s2 = stock(2, "b", 300.0, 0.0);
+        let f = ViewElement::Flow(view_element::Flow {
+            name: "f".to_string(),
+            uid: 3,
+            x: valve.x,
+            y: valve.y,
+            label_side: LabelSide::Bottom,
+            points: vec![
+                view_element::FlowPoint {
+                    x: 0.0,
+                    y: 0.0,
+                    attached_to_uid: Some(1),
+                },
+                // An interior pipe point that bends the drawn pipe and stretches
+                // `flow_shape_bounds`' bbox, but is NOT the valve.
+                view_element::FlowPoint {
+                    x: bend.x,
+                    y: bend.y,
+                    attached_to_uid: None,
+                },
+                view_element::FlowPoint {
+                    x: 300.0,
+                    y: 0.0,
+                    attached_to_uid: Some(2),
+                },
+            ],
+            compat: None,
+            label_compat: None,
+        });
+        let link = straight_link(10, 2, 1);
+        make_view(vec![s1, s2, f, link])
+    }
+
+    #[test]
+    fn test_loop_compactness_scored_on_flow_valve_not_pipe_extent() {
+        // The loop vertex for a flow must be its VALVE (the renderer's visual
+        // center), not the center of `flow_shape_bounds` (which unions the valve
+        // box with every pipe point). Extending the pipe with a far interior
+        // point moves the pipe-extent bbox center but leaves the valve fixed, so
+        // `loop_compactness` -- which scores the feedback-loop polygon -- must be
+        // UNCHANGED. On the buggy (shape-box-midpoint) implementation it changes.
+        let valve = Point { x: 150.0, y: 200.0 };
+
+        // A pipe bend near the valve vs. one stretched far away. The valve is
+        // identical in both, so the loop polygon (stock--valve--stock) is too.
+        let near = compute_layout_metrics(
+            &bent_flow_loop_view(valve, Point { x: 150.0, y: 210.0 }),
+            &cfg(),
+        );
+        let far = compute_layout_metrics(
+            &bent_flow_loop_view(
+                valve,
+                Point {
+                    x: 150.0,
+                    y: 2000.0,
+                },
+            ),
+            &cfg(),
+        );
+
+        assert!(
+            near.loop_compactness > 0.0,
+            "fixture must form a real (positive-penalty) loop, got {}",
+            near.loop_compactness
+        );
+        assert!(
+            (near.loop_compactness - far.loop_compactness).abs() < 1e-12,
+            "loop_compactness must score the flow VALVE, not the pipe-extent bbox \
+             center: stretching the pipe changed it from {} to {}",
+            near.loop_compactness,
+            far.loop_compactness
+        );
+
+        // Non-vacuous guard: MOVING the valve (with the same pipe bend) DOES
+        // change the loop polygon, so the metric is not trivially constant.
+        let moved_valve = compute_layout_metrics(
+            &bent_flow_loop_view(Point { x: 150.0, y: 400.0 }, Point { x: 150.0, y: 210.0 }),
+            &cfg(),
+        );
+        assert!(
+            (near.loop_compactness - moved_valve.loop_compactness).abs() > 1e-9,
+            "moving the valve must change loop_compactness (test is not trivially \
+             constant): {} vs {}",
+            near.loop_compactness,
+            moved_valve.loop_compactness
         );
     }
 
