@@ -51,9 +51,11 @@ gaps.
    reserved zero-weighted structure terms. `weighted_cost(&MetricWeights) -> f64` collapses
    them to one scalar to minimize.
 
-2. **Edge crossings are counted on real geometry** -- arcs and multipoint connectors
-   sampled to polylines -- replacing the straight-chord approximation that
-   `count_view_crossings` (`mod.rs`) uses today.
+2. **Edge crossings are counted on real geometry** -- Arc links sampled to polylines
+   instead of straight chords -- fixing the chord approximation `count_view_crossings`
+   (`mod.rs`) applies to `Link`/Arc shapes today (flow polylines are already
+   segment-sampled). MultiPoint links currently render to nothing; see Additional
+   Considerations.
 
 3. **A Rust in-tree corpus sweep driver** (`src/simlin-engine/examples/layout_eval.rs`)
    runs over a curated `test/` corpus: for each model it generates layouts across multiple
@@ -82,7 +84,7 @@ gaps.
 
 8. **The hill-climbing ladder (rungs 1-3) is documented** as the forward path (parameter
    search; metric-driven annealing cost; new layout passes), naming the seam each rung
-   touches.
+   touches. (Satisfied by this plan's Additional Considerations -- no implementation task.)
 
 ### Out of scope
 - Redesigning the layout algorithm beyond Rung 0 (rungs 1-3 are documented, not built).
@@ -106,7 +108,7 @@ gaps.
 
 ### layout-quality-eval.AC2: Crossings are counted on real geometry
 - **layout-quality-eval.AC2.1 Success:** Two connectors that cross once yield a crossing count of 1; connectors sharing an endpoint yield 0.
-- **layout-quality-eval.AC2.2 Success:** An Arc/MultiPoint connector that visually crosses another edge is counted via polyline sampling, on a constructed case where the straight-chord approximation does not count it.
+- **layout-quality-eval.AC2.2 Success:** An Arc connector that visually crosses another edge is counted via polyline sampling, on a constructed case where the straight-chord approximation does not count it. (MultiPoint links currently render to nothing, so faithfully counting them is deferred with that renderer gap -- see Additional Considerations.)
 - **layout-quality-eval.AC2.3 Success:** The crossing count is invariant under translation and rotation of the whole view.
 
 ### layout-quality-eval.AC3: Corpus sweep produces renders and scores
@@ -138,7 +140,7 @@ gaps.
 
 ### layout-quality-eval.AC8: Cross-cutting
 - **layout-quality-eval.AC8.1 Success:** A fixed seed reproduces a byte-identical layout (determinism), distinct from the M-seed statistical sampling.
-- **layout-quality-eval.AC8.2 Success:** Additional Considerations documents rungs 1-3 and names the seam each touches.
+- **layout-quality-eval.AC8.2 Success:** Additional Considerations documents rungs 1-3 and names the seam each touches. (Satisfied by this design document itself; no implementation phase.)
 
 ## Glossary
 
@@ -232,7 +234,9 @@ pure function with no I/O. It is computed on the **same geometry the renderer dr
 node bounding boxes, connector paths, and label boxes obtained from the `diagram` module's
 existing geometry helpers (`diagram::elements`/`flow` `*_bounds`, `diagram::connector`
 path, `diagram::label::label_bounds`) -- so a layout's score and its rendered PNG can never
-disagree. Every term is a **cost** (0 = ideal) and normalized to be scale-free, so models
+disagree. Those helpers are `pub fn`, but their modules (`elements`, `flow`, `label`,
+`connector`) are private in `diagram/mod.rs` today, so a prerequisite is exposing them
+`pub(crate)` for `layout` to call. Every term is a **cost** (0 = ideal) and normalized to be scale-free, so models
 of different sizes are comparable and the corpus can be aggregated.
 
 | Term | Definition (cost; 0 = ideal) | Pain it captures |
@@ -274,11 +278,14 @@ directions (compact vs. non-overlapping). That tension is intended: the weights 
 balance, and the overlap terms keep "minimize area" from collapsing the layout.
 
 **Accurate crossings.** The `crossings` term, and a refactored `count_view_crossings`,
-operate on connector geometry sampled to polylines (arcs and `MultiPoint` links, plus
-`Flow.points`), not straight chords. This requires factoring the connector's path geometry
-into a polyline producer shared by the renderer and the metric, so both see identical
-geometry. This both feeds the metric and fixes a latent undercount in today's
-seed selection.
+operate on connector geometry sampled to polylines (Arc links plus `Flow.points`), not
+straight chords. This requires factoring the arc geometry -- currently entangled with
+SVG-string emission in `connector::render_arc` (which returns a `String`) -- into a polyline
+producer shared by the renderer and the metric, so both see identical geometry. This is the
+highest-effort item in Phase 1, and the factor-out must keep `render_svg` byte-for-byte
+unchanged (a TS-vs-Rust parity test asserts it). It both feeds the metric and fixes a latent
+undercount in today's seed selection. (MultiPoint links currently render to an empty group,
+so they have no drawn geometry to match; they are a known gap, not measured here.)
 
 ### Statistics core (`layout/eval_stats.rs`, pure)
 
@@ -316,12 +323,14 @@ noise. All are pure, table-testable functions.
 
 ### Sweep driver (`examples/layout_eval.rs`, imperative shell)
 
-The shell loads each model in a curated corpus list (via the engine's model-open + salsa
-sync path used by `tests/layout.rs`), and for each model:
+The shell loads each model in a curated corpus list (XMILE via `open_xmile` and Vensim via
+`open_vensim`, as `examples/backend_bench.rs` does, then salsa-syncs the project as the
+DB-backed layout tests do), and for each model:
 
 1. Runs layout for M independent seeds, producing M `MetricSample`s (and the best-of-k
-   production proxy). Requires a per-seed layout entry point (a thin
-   `generate_layout_seeded(seed)` over the existing per-seed pipeline).
+   production proxy). The per-seed seam is the existing `generate_layout_with_config`
+   (`mod.rs`, `pub`) -- its single `annealing_random_seed` drives both the SFDP and
+   annealing RNGs -- or the equivalent `generate` closure inside `generate_best_layout`.
 2. Renders the best/median/worst layouts to PNG via `diagram::render_png` (after writing
    the generated `StockFlow` onto the model's view, which `render_png` reads as
    `views.first()`).
@@ -372,14 +381,21 @@ one in-tree example, and re-points one existing decision function.
   Roboto-Light, behind the `png_render` feature), with geometry in `elements.rs`,
   `flow.rs`, `connector.rs`, `label.rs` (`label_bounds`), `common.rs` (`Rect`,
   `calc_view_box`), and shared `constants.rs`. The metric reuses these geometry helpers so
-  scores match the rendered image. The TS renderer is byte-identical to `render_svg`, so
-  the PNG faithfully reflects the product UI.
+  scores match the rendered image -- but only `common`/`constants` are `pub mod` today, so
+  the others must be exposed (see Architecture). `render_svg` is asserted byte-identical to
+  the TS renderer by `src/diagram/tests/svg-rendering.test.ts`, so the PNG faithfully
+  reflects the product UI -- and that test is the tripwire any connector-geometry refactor
+  must not break.
 - **In-tree example precedent.** `src/simlin-engine/examples/backend_bench.rs` is an
-  existing on-demand benchmark example (VM-vs-wasm simulation); `examples/layout_eval.rs`
-  follows the same shape and `required-features` mechanism for an on-demand sweep.
-- **Corpus loading.** `tests/layout.rs` (`verify_layout`) already loads native diagram
-  models from `test/` (e.g. `open_xmile`) and syncs the salsa DB before layout; the sweep
-  driver reuses that loading path.
+  existing on-demand example (auto-discovered; loads models via `std::fs` +
+  `open_vensim`/`open_xmile`). `examples/layout_eval.rs` follows its shape; the
+  `required-features` mechanism (used today by the crate's `[[test]]` entries, not by any
+  example) means adding a new `[[example]]` block to `Cargo.toml`.
+- **Corpus loading.** `tests/layout.rs` loads XMILE via `load_project`/`open_xmile`; its
+  DB-backed tests show the salsa-sync-then-layout pattern (`SimlinDb::default()` ->
+  `sync_from_datamodel_incremental` -> pass `Some((&mut db, source_project))`). The sweep
+  combines that with `open_vensim` for the Vensim `test/metasd` models. (`verify_layout`
+  itself is only an assertion helper, not a loader.)
 - **Test-time budget.** Per `CLAUDE.md` / `docs/dev/rust.md`, `cargo test --workspace`
   runs under a 3-minute cap and individual tests complete in seconds. The full corpus sweep
   therefore stays in the example (not in tests); only a tiny deterministic guard runs in the
@@ -397,13 +413,17 @@ an existing example, one edit to an existing selection function.
 **Goal:** A pure, geometry-accurate `LayoutMetrics` and a polyline-based crossing count.
 
 **Components:**
+- Expose the `diagram` geometry modules (`elements`, `flow`, `label`, `connector`) as
+  `pub(crate)` -- they are private today, so `layout::metrics` cannot call their `*_bounds` /
+  path helpers without this.
 - `src/simlin-engine/src/layout/metrics.rs` (new) -- `LayoutMetrics`, `MetricWeights`,
   `compute_layout_metrics(view, config)`, `weighted_cost`. Each term computed on the
   `diagram` module's geometry helpers.
-- Shared connector-polyline geometry factored out of `diagram::connector` (sampling arcs
-  and `MultiPoint`), reused by the renderer and the metric.
+- Connector arc-to-polyline geometry factored out of `connector::render_arc` (highest-effort
+  item; geometry is currently entangled with SVG-string building), reused by the renderer and
+  the metric. The renderer must be re-routed through it without changing its output.
 - `count_view_crossings` (`mod.rs`) refactored to count on polylines instead of straight
-  chords.
+  chords (Arc/`Link` shapes; flow polylines are already sampled).
 - Unit tests on hand-built tiny views with known geometry (two boxes overlapping by a known
   fraction; two segments crossing once; shared-endpoint connectors -> 0; a 1x10 bbox ->
   known aspect penalty; an arc that crosses where its chord would not). Property tests:
@@ -413,7 +433,8 @@ an existing example, one edit to an existing selection function.
 
 **Done when:** the metric terms match the hand-computed values, scale/translation
 invariance holds, the polyline crossing count differs from the old chord count on the
-constructed arc case, and `cargo test` passes. Covers `layout-quality-eval.AC1.*`,
+constructed arc case, `render_svg` output is unchanged (the `svg-rendering.test.ts` parity
+test still passes), and `cargo test` passes. Covers `layout-quality-eval.AC1.*`,
 `layout-quality-eval.AC2.*`.
 <!-- END_PHASE_1 -->
 
@@ -428,7 +449,7 @@ constructed arc case, and `cargo test` passes. Covers `layout-quality-eval.AC1.*
 - Unit tests against known reference values (geomean of a known set; Mann-Whitney U on
   textbook samples; identical baseline/candidate -> zero delta, non-significant).
 
-**Dependencies:** none (uses `LayoutMetrics` types from Phase 1 for `MetricSample`).
+**Dependencies:** Phase 1 (the `LayoutMetrics` type embedded in `MetricSample`).
 
 **Done when:** the helpers match known values and `compare()` reports the expected
 significance verdicts. Covers `layout-quality-eval.AC4.4`, `layout-quality-eval.AC4.5`.
@@ -441,14 +462,17 @@ significance verdicts. Covers `layout-quality-eval.AC4.4`, `layout-quality-eval.
 **Components:**
 - `src/simlin-engine/examples/layout_eval.rs` (new) -- loads a curated corpus list
   (canonical SIR/teacup/logistic-growth; modules; multipoint connectors; LTM/loop models;
-  aliases; the `test/ai-information` set; a few large `test/metasd` Vensim models),
-  runs M seeds per model, scores each, renders best/median/worst PNGs, and scores+renders
-  any shipped hand-authored view as a reference.
-- A per-seed layout entry point (`generate_layout_seeded(seed)`) over the existing per-seed
-  pipeline, so the driver can sample seeds and compute the best-of-k proxy.
+  aliases; the `test/ai-information` set; a few large `test/metasd` Vensim models) via
+  `open_xmile`/`open_vensim` + salsa sync, runs M seeds per model, scores each, renders
+  best/median/worst PNGs, and scores+renders any shipped hand-authored view as a reference.
+- The per-seed seam: wrap `generate_layout_with_config` (`mod.rs`) or the `generate` closure
+  in `generate_best_layout`, varying `annealing_random_seed` per sample, so the driver can
+  sample seeds and compute the best-of-k proxy.
 - Emits `metrics.json`, `index.html` contact-sheet, and a `compare()` diff against a
   committed `baseline.json`, under `target/layout-eval/` (gitignored).
-- `Cargo.toml` example entry with `required-features = ["png_render", "file_io"]`.
+- A new `[[example]]` entry in `Cargo.toml` with `required-features = ["png_render",
+  "file_io"]` (no example uses `required-features` today; `file_io` helps load Vensim models
+  that reference external data, and AC3.6 skip-on-failure covers any that still fail).
 
 **Dependencies:** Phase 1 (metric), Phase 2 (stats).
 
@@ -488,16 +512,17 @@ has signed off on the weights after reviewing the contact-sheet. Covers
 - `select_best_layout` (`mod.rs`) re-pointed to minimize `weighted_cost` (accurate
   crossings), tie-break on seed.
 - A deterministic regression-guard test over a few tiny models asserting `weighted_cost`
-  stays at or below a committed threshold (fixed seeds; fast; under the time budget).
+  stays at or below a committed threshold (fixed seeds; fast; under the time budget), plus a
+  determinism check (the same seed reproduces a byte-identical layout).
 - Confirm existing layout tests (`tests/layout.rs`, `layout_tests.rs`,
   `layout_review_tests.rs`) still pass with the new selection.
 
 **Dependencies:** Phase 1 (metric), Phase 4 (committed weights).
 
 **Done when:** selection picks the lowest-`weighted_cost` candidate (verified on
-constructed candidates where lowest-cost differs from fewest-crossings), the guard test
-passes within budget, and the existing layout suite is green. Covers
-`layout-quality-eval.AC6.*`, `layout-quality-eval.AC7.*`.
+constructed candidates where lowest-cost differs from fewest-crossings), the guard +
+determinism tests pass within budget, and the existing layout suite is green. Covers
+`layout-quality-eval.AC6.*`, `layout-quality-eval.AC7.*`, `layout-quality-eval.AC8.1`.
 <!-- END_PHASE_5 -->
 
 ## Additional Considerations
