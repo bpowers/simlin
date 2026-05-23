@@ -363,6 +363,146 @@ impl CorpusReport {
     }
 }
 
+/// Per-model verdict from comparing a baseline against a candidate report.
+#[derive(Clone, Debug)]
+pub struct ModelComparison {
+    pub model: String,
+    pub baseline_median: f64,
+    pub candidate_median: f64,
+    /// `candidate_median / baseline_median - 1.0`, or `0.0` when the baseline
+    /// median is `0` (so a degenerate baseline never produces inf/NaN). A
+    /// negative ratio means the candidate is cheaper (better).
+    pub delta_ratio: f64,
+    /// Two-sided Mann-Whitney U p-value over the two models' seed-sample
+    /// `weighted_cost` vectors.
+    pub p_value: f64,
+    /// `p_value < SIGNIFICANCE_ALPHA`.
+    pub significant: bool,
+}
+
+/// Result of comparing two corpus reports: one [`ModelComparison`] per matched
+/// model plus the corpus-wide aggregate delta and significance verdict.
+#[derive(Clone, Debug)]
+pub struct Comparison {
+    /// One entry per model present in BOTH reports (unmatched models are
+    /// skipped -- see [`compare`]), in baseline iteration order.
+    pub per_model: Vec<ModelComparison>,
+    /// `geomean(candidate medians) / geomean(baseline medians) - 1.0` over the
+    /// matched per-model medians, or `0.0` when the baseline geomean is `0`.
+    pub aggregate_delta_ratio: f64,
+    /// Two-sided Mann-Whitney U p-value over the matched per-model medians (see
+    /// [`compare`] for why Mann-Whitney rather than a paired test).
+    pub aggregate_p_value: f64,
+    /// `aggregate_p_value < SIGNIFICANCE_ALPHA`.
+    pub aggregate_significant: bool,
+}
+
+/// Significance threshold for the p-value verdicts -- the conventional 5%.
+pub const SIGNIFICANCE_ALPHA: f64 = 0.05;
+
+/// Compute `candidate / baseline - 1.0`, returning `0.0` when `baseline == 0`
+/// so a degenerate (zero) baseline never produces an infinite or NaN ratio.
+/// Mirrors the no-NaN policy of the rest of this module.
+fn delta_ratio(baseline: f64, candidate: f64) -> f64 {
+    if baseline == 0.0 {
+        0.0
+    } else {
+        candidate / baseline - 1.0
+    }
+}
+
+/// Compare two corpus reports.
+///
+/// Models are matched by `model` name; only models present in BOTH reports are
+/// compared. A model present in just one report is **skipped** (it has no
+/// counterpart to difference against). The returned `per_model` is in baseline
+/// iteration order.
+///
+/// Per matched model: the two seed-sample `weighted_cost` vectors are run
+/// through [`mann_whitney_u`]; `delta_ratio` is computed from the medians
+/// (`0.0` when the baseline median is `0`); `significant` is
+/// `p_value < SIGNIFICANCE_ALPHA`.
+///
+/// Aggregate: `aggregate_delta_ratio` is the ratio of the candidate-side to
+/// baseline-side geometric mean of the matched per-model medians (each side
+/// floored by [`GEOMEAN_FLOOR_EPSILON`] exactly as [`CorpusReport`] does, so a
+/// `0` median can't zero the aggregate). `aggregate_p_value` is
+/// `mann_whitney_u(baseline_medians, candidate_medians).p_value` over the
+/// matched per-model medians.
+///
+/// The aggregate significance test treats the two median vectors as
+/// independent samples (Mann-Whitney U), per the design. A paired test such as
+/// Wilcoxon signed-rank -- which would exploit the model-by-model pairing of
+/// the matched medians -- is a documented future refinement, not implemented
+/// here.
+///
+/// On empty or fully-disjoint reports there are no matched models:
+/// `per_model` is empty, `aggregate_delta_ratio == 0.0`, and the aggregate is
+/// non-significant with a finite p-value (no NaN).
+pub fn compare(baseline: &CorpusReport, candidate: &CorpusReport) -> Comparison {
+    // Index the candidate's models by name so we can pull the matching entry in
+    // baseline iteration order without an O(n^2) scan.
+    let candidate_by_name: std::collections::HashMap<&str, &ModelStats> = candidate
+        .per_model
+        .iter()
+        .map(|m| (m.model.as_str(), m))
+        .collect();
+
+    let mut per_model = Vec::new();
+    let mut baseline_medians = Vec::new();
+    let mut candidate_medians = Vec::new();
+
+    for base in &baseline.per_model {
+        let Some(cand) = candidate_by_name.get(base.model.as_str()) else {
+            // Unmatched: present only in the baseline, so skip it.
+            continue;
+        };
+
+        let baseline_costs: Vec<f64> = base.samples.iter().map(|s| s.weighted_cost).collect();
+        let candidate_costs: Vec<f64> = cand.samples.iter().map(|s| s.weighted_cost).collect();
+        let mw = mann_whitney_u(&baseline_costs, &candidate_costs);
+
+        let baseline_median = base.median_cost;
+        let candidate_median = cand.median_cost;
+        let ratio = delta_ratio(baseline_median, candidate_median);
+
+        baseline_medians.push(baseline_median);
+        candidate_medians.push(candidate_median);
+
+        per_model.push(ModelComparison {
+            model: base.model.clone(),
+            baseline_median,
+            candidate_median,
+            delta_ratio: ratio,
+            p_value: mw.p_value,
+            significant: mw.p_value < SIGNIFICANCE_ALPHA,
+        });
+    }
+
+    // Aggregate delta: ratio of the two geomean-of-medians, each side floored
+    // by the same epsilon CorpusReport uses so a single 0 median can't zero a
+    // side's geometric mean.
+    let baseline_floored: Vec<f64> = baseline_medians
+        .iter()
+        .map(|&m| m.max(GEOMEAN_FLOOR_EPSILON))
+        .collect();
+    let candidate_floored: Vec<f64> = candidate_medians
+        .iter()
+        .map(|&m| m.max(GEOMEAN_FLOOR_EPSILON))
+        .collect();
+    let aggregate_delta_ratio =
+        delta_ratio(geomean(&baseline_floored), geomean(&candidate_floored));
+
+    let aggregate_p_value = mann_whitney_u(&baseline_medians, &candidate_medians).p_value;
+
+    Comparison {
+        per_model,
+        aggregate_delta_ratio,
+        aggregate_p_value,
+        aggregate_significant: aggregate_p_value < SIGNIFICANCE_ALPHA,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,5 +910,200 @@ mod tests {
         let report = CorpusReport::from_model_stats(vec![]);
         assert_eq!(report.geomean_of_medians, 0.0);
         assert!(report.geomean_of_medians.is_finite());
+    }
+
+    // --- Task 3: compare(baseline, candidate) ---
+
+    /// Build a `ModelStats` directly from a list of `(seed, cost)` pairs, with
+    /// no production seeds (best-of-k irrelevant for the comparison tests).
+    fn model_stats_from_costs(model: &str, seed_costs: &[(u64, f64)]) -> ModelStats {
+        let samples: Vec<MetricSample> = seed_costs
+            .iter()
+            .map(|&(seed, cost)| sample(seed, cost))
+            .collect();
+        ModelStats::from_samples(model.to_string(), samples, &[])
+    }
+
+    #[test]
+    fn test_compare_identical_report_is_zero_and_nonsignificant() {
+        // AC4.5: comparing a report against itself must report no change and no
+        // significance, with p-values pinned to the non-significant default.
+        let report = CorpusReport::from_model_stats(vec![
+            model_stats_from_costs("a", &[(1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0)]),
+            model_stats_from_costs("b", &[(1, 5.0), (2, 15.0), (3, 25.0), (4, 35.0)]),
+        ]);
+
+        let cmp = compare(&report, &report);
+
+        assert_eq!(cmp.per_model.len(), 2);
+        for m in &cmp.per_model {
+            assert_eq!(m.delta_ratio, 0.0, "model {} delta_ratio", m.model);
+            assert!(!m.significant, "model {} must not be significant", m.model);
+            // Identical seed samples ⇒ every value tied ⇒ non-significant.
+            assert!(
+                m.p_value > 0.5,
+                "model {} p_value {} should be non-significant",
+                m.model,
+                m.p_value
+            );
+        }
+        assert_eq!(cmp.aggregate_delta_ratio, 0.0);
+        assert!(!cmp.aggregate_significant);
+        assert!(
+            cmp.aggregate_p_value > 0.5,
+            "aggregate p_value {} should be non-significant",
+            cmp.aggregate_p_value
+        );
+    }
+
+    #[test]
+    fn test_compare_clear_improvement_is_negative_and_significant() {
+        // Candidate strictly below baseline with non-overlapping seed samples:
+        // the aggregate delta is negative and the per-model verdict is
+        // significant where the two samples completely separate.
+        let baseline = CorpusReport::from_model_stats(vec![
+            model_stats_from_costs(
+                "a",
+                &[(1, 100.0), (2, 110.0), (3, 120.0), (4, 130.0), (5, 140.0)],
+            ),
+            model_stats_from_costs(
+                "b",
+                &[(1, 200.0), (2, 210.0), (3, 220.0), (4, 230.0), (5, 240.0)],
+            ),
+        ]);
+        let candidate = CorpusReport::from_model_stats(vec![
+            model_stats_from_costs(
+                "a",
+                &[(1, 10.0), (2, 11.0), (3, 12.0), (4, 13.0), (5, 14.0)],
+            ),
+            model_stats_from_costs(
+                "b",
+                &[(1, 20.0), (2, 21.0), (3, 22.0), (4, 23.0), (5, 24.0)],
+            ),
+        ]);
+
+        let cmp = compare(&baseline, &candidate);
+
+        assert_eq!(cmp.per_model.len(), 2);
+        for m in &cmp.per_model {
+            assert!(
+                m.delta_ratio < 0.0,
+                "model {} delta_ratio {} should be negative",
+                m.model,
+                m.delta_ratio
+            );
+            assert!(
+                m.candidate_median < m.baseline_median,
+                "model {} candidate median {} should be below baseline {}",
+                m.model,
+                m.candidate_median,
+                m.baseline_median
+            );
+            assert!(
+                m.significant,
+                "model {} (completely separated samples) should be significant; p_value {}",
+                m.model, m.p_value
+            );
+        }
+        assert!(
+            cmp.aggregate_delta_ratio < 0.0,
+            "aggregate_delta_ratio {} should be negative",
+            cmp.aggregate_delta_ratio
+        );
+    }
+
+    #[test]
+    fn test_compare_only_matched_models_are_compared() {
+        // Models are matched by name; a model present in only one report is
+        // skipped. baseline has {a, b, only_baseline}; candidate has
+        // {a, b, only_candidate}. The matched set compared is {a, b}, in
+        // baseline order.
+        let baseline = CorpusReport::from_model_stats(vec![
+            model_stats_from_costs("only_baseline", &[(1, 1.0), (2, 2.0)]),
+            model_stats_from_costs("a", &[(1, 10.0), (2, 20.0), (3, 30.0)]),
+            model_stats_from_costs("b", &[(1, 100.0), (2, 200.0), (3, 300.0)]),
+        ]);
+        let candidate = CorpusReport::from_model_stats(vec![
+            model_stats_from_costs("b", &[(1, 100.0), (2, 200.0), (3, 300.0)]),
+            model_stats_from_costs("a", &[(1, 10.0), (2, 20.0), (3, 30.0)]),
+            model_stats_from_costs("only_candidate", &[(1, 9.0), (2, 8.0)]),
+        ]);
+
+        let cmp = compare(&baseline, &candidate);
+
+        // Exactly the two matched models, in baseline iteration order.
+        let names: Vec<&str> = cmp.per_model.iter().map(|m| m.model.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["a", "b"],
+            "only matched models, in baseline order"
+        );
+        // The unmatched names appear nowhere.
+        assert!(!names.contains(&"only_baseline"));
+        assert!(!names.contains(&"only_candidate"));
+    }
+
+    #[test]
+    fn test_compare_zero_baseline_median_no_divide_by_zero() {
+        // No NaN: a model whose baseline median is 0 yields delta_ratio == 0.0
+        // (not inf/NaN) and every reported field stays finite.
+        let baseline = CorpusReport::from_model_stats(vec![model_stats_from_costs(
+            "z",
+            &[(1, 0.0), (2, 0.0), (3, 0.0)],
+        )]);
+        let candidate = CorpusReport::from_model_stats(vec![model_stats_from_costs(
+            "z",
+            &[(1, 5.0), (2, 6.0), (3, 7.0)],
+        )]);
+
+        let cmp = compare(&baseline, &candidate);
+
+        assert_eq!(cmp.per_model.len(), 1);
+        let m = &cmp.per_model[0];
+        assert_eq!(m.baseline_median, 0.0);
+        assert_eq!(
+            m.delta_ratio, 0.0,
+            "delta_ratio with a 0 baseline median must be 0.0, not inf/NaN"
+        );
+        assert!(m.delta_ratio.is_finite());
+        assert!(m.candidate_median.is_finite());
+        assert!(m.p_value.is_finite());
+        assert!(cmp.aggregate_delta_ratio.is_finite());
+        assert!(cmp.aggregate_p_value.is_finite());
+    }
+
+    #[test]
+    fn test_compare_empty_reports_are_finite_and_nonsignificant() {
+        // Degenerate input: two empty corpora compare to no per-model rows, a
+        // zero aggregate delta, and a finite non-significant verdict.
+        let empty = CorpusReport::from_model_stats(vec![]);
+        let cmp = compare(&empty, &empty);
+        assert!(cmp.per_model.is_empty());
+        assert_eq!(cmp.aggregate_delta_ratio, 0.0);
+        assert!(cmp.aggregate_delta_ratio.is_finite());
+        assert!(cmp.aggregate_p_value.is_finite());
+        assert!(!cmp.aggregate_significant);
+    }
+
+    #[test]
+    fn test_compare_no_matched_models_is_finite() {
+        // Reports with disjoint model names share no matched models: no
+        // per-model rows, a zero aggregate delta, and a finite verdict.
+        let baseline =
+            CorpusReport::from_model_stats(vec![model_stats_from_costs("a", &[(1, 10.0)])]);
+        let candidate =
+            CorpusReport::from_model_stats(vec![model_stats_from_costs("b", &[(1, 20.0)])]);
+        let cmp = compare(&baseline, &candidate);
+        assert!(cmp.per_model.is_empty());
+        assert_eq!(cmp.aggregate_delta_ratio, 0.0);
+        assert!(cmp.aggregate_delta_ratio.is_finite());
+        assert!(cmp.aggregate_p_value.is_finite());
+        assert!(!cmp.aggregate_significant);
+    }
+
+    #[test]
+    fn test_compare_significance_alpha_is_five_percent() {
+        // The exported significance threshold is the conventional 0.05.
+        assert_eq!(SIGNIFICANCE_ALPHA, 0.05);
     }
 }
