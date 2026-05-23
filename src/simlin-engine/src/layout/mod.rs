@@ -6,6 +6,7 @@ pub mod annealing;
 pub mod chain;
 pub mod config;
 pub mod connector;
+pub mod eval_stats;
 pub mod graph;
 pub mod metadata;
 pub mod metrics;
