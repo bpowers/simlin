@@ -67,8 +67,12 @@ pub struct LayoutMetrics {
     /// a false causal connection; a connector under only a label is not
     /// charged here.
     pub node_connector_overlap: f64,
-    /// Sum of label-vs-label and label-vs-node overlap area, normalized by
-    /// total label area.
+    /// Sum over labeled elements of each label's *obscured fraction*: the area
+    /// of the label box covered by any other label box or any other element's
+    /// bare shape box, capped at the label's own area and divided by it (so each
+    /// term is in [0,1]). 0 = no label obscured. Per-label so a small overlap
+    /// registers at its true obscuration fraction rather than being diluted by
+    /// the corpus's total label area.
     pub label_overlap: f64,
     /// Edge crossings normalized by connector count.
     pub crossings: f64,
@@ -648,22 +652,36 @@ pub fn compute_layout_metrics(
         0.0
     };
 
-    // --- label_overlap ---
-    // Each label box is tagged with its owning element's uid so the
-    // label-vs-node sum can skip that element's own node box: a label is, by
-    // construction, adjacent to (and inside the merged bounds of) its own
-    // element, so charging it against its own box would always add exactly the
-    // label's area -- a constant that is not a real collision.
+    // --- label_overlap (per-label obscuration) ---
     //
-    // The label-vs-node sum compares each label against every OTHER element's
-    // bare *shape* box (`node_shape_box`), NOT its label-merged `node_box`.
-    // `aux_bounds`/`stock_bounds`/`flow_bounds` union each element's own label
-    // into the box they return, so comparing a label against another node's
-    // MERGED box would re-count a label-vs-label overlap that the label-vs-label
-    // term above already counts -- a double-count that inflates the term's
-    // magnitude (which Phase 4 calibrates against). Using the label-free shape
-    // cleanly separates "label lands on another label" from "label lands on
-    // another node's shape".
+    // For each labeled element L, measure how much of its label box B_L is
+    // covered (obscured) by OTHER drawn geometry, then SUM each label's obscured
+    // fraction. This is per-label rather than a single corpus-wide ratio: a
+    // small-but-readability-killing overlap (e.g. a node circle clipping the last
+    // two characters of a short label) registers at its true obscuration
+    // fraction instead of being diluted to ~0 by the corpus's total label area
+    // (the prior `sum_of_overlaps / total_label_area` definition under-counted
+    // exactly this case).
+    //
+    // The coverers of B_L are (a) any OTHER label box and (b) any OTHER element's
+    // bare *shape* box (`node_shape_box`, NOT the label-merged `node_box`):
+    //   * A label is never charged against its OWN element's shape box. By
+    //     construction a label sits adjacent to (and within the merged bounds of)
+    //     its own element, so charging it there would always add a constant that
+    //     is not a real collision.
+    //   * Comparing against the bare shape box (not the label-merged box) keeps
+    //     "label lands on another label" and "label lands on another node's
+    //     shape" cleanly separate -- the merged box unions that node's own label,
+    //     which would re-count the label-vs-label coverage already captured by
+    //     the label-box term.
+    //
+    // A pixel-exact union of all coverers is unnecessary: the covered area is
+    // approximated by the SUM of individual overlap areas, capped at area(B_L) so
+    // a label's obscured fraction stays in [0,1] even when coverers overlap each
+    // other. This is a monotone proxy (more/larger overlaps never decrease the
+    // fraction). A mutual label-label collision is charged from BOTH labels'
+    // perspectives -- intended, since both are unreadable. Guards area(B_L) == 0
+    // (degenerate label) by skipping it, so the term is always finite.
     let label_boxes: Vec<(i32, Rect)> = view
         .elements
         .iter()
@@ -671,28 +689,32 @@ pub fn compute_layout_metrics(
         .collect();
     // `node_shape_boxes` is computed once above (shared with node_overlap and
     // node_connector_overlap).
-    let total_label_area: f64 = label_boxes.iter().map(|(_, r)| rect_area(r)).sum();
-    let label_overlap = if total_label_area > 0.0 {
-        let mut overlap = 0.0;
-        // label-vs-label (each unordered pair once)
-        for i in 0..label_boxes.len() {
-            for j in (i + 1)..label_boxes.len() {
-                overlap += rect_overlap_area(&label_boxes[i].1, &label_boxes[j].1);
-            }
+    let mut label_overlap = 0.0;
+    for (lbl_uid, lbl) in &label_boxes {
+        let lbl_area = rect_area(lbl);
+        if lbl_area <= 0.0 {
+            continue; // degenerate label box: no NaN, contributes nothing
         }
-        // label-vs-node, against the OTHER element's bare shape box.
-        for (lbl_uid, lbl) in &label_boxes {
-            for (node_uid, node) in &node_shape_boxes {
-                if lbl_uid == node_uid {
-                    continue;
-                }
-                overlap += rect_overlap_area(lbl, node);
+        let mut covered = 0.0;
+        // Covered by every OTHER label box.
+        for (other_uid, other) in &label_boxes {
+            if other_uid == lbl_uid {
+                continue;
             }
+            covered += rect_overlap_area(lbl, other);
         }
-        overlap / total_label_area
-    } else {
-        0.0
-    };
+        // Covered by every OTHER element's bare shape box.
+        for (node_uid, node) in &node_shape_boxes {
+            if node_uid == lbl_uid {
+                continue;
+            }
+            covered += rect_overlap_area(lbl, node);
+        }
+        // Cap the (possibly over-counted) covered area at the label's own area
+        // so the obscured fraction is in [0,1].
+        let obscured_fraction = (covered.min(lbl_area)) / lbl_area;
+        label_overlap += obscured_fraction;
+    }
 
     // --- crossings ---
     let connector_count = connectors.len();
@@ -815,6 +837,19 @@ mod tests {
             x,
             y,
             label_side: LabelSide::Bottom,
+            compat: None,
+        })
+    }
+
+    /// A cloud at `(x, y)`. A cloud is a positioned node with a bare shape box
+    /// (`cloud_bounds`, a 27x27 square: CLOUD_RADIUS = 13.5) and NO rendered
+    /// label, so it is the cleanest "obscuring shape" fixture for label_overlap.
+    fn cloud(uid: i32, x: f64, y: f64) -> ViewElement {
+        ViewElement::Cloud(view_element::Cloud {
+            uid,
+            flow_uid: -1,
+            x,
+            y,
             compat: None,
         })
     }
@@ -1167,25 +1202,37 @@ mod tests {
         );
     }
 
-    // --- AC1.4: label_overlap ---
+    // --- AC1.4: label_overlap (per-label obscuration) ---
+    //
+    // label_overlap is the SUM over labeled elements of each label's obscured
+    // fraction: the area of the label box covered by any OTHER label box or any
+    // OTHER element's bare shape box, capped at the label's own area and divided
+    // by it (so each term is in [0,1]). 0 = no label obscured. A small overlap
+    // registers at its true per-label obscuration fraction rather than being
+    // diluted by the corpus's total label area (the old area/total definition's
+    // under-counting; see `test_label_overlap_small_clip_is_sensitive`).
 
     #[test]
     fn test_label_overlap_overlapping_labels() {
-        // Two auxes at the same position -> their labels (Bottom) coincide.
+        // Two auxes at the same position -> their labels (Bottom) coincide
+        // exactly. Each label is fully covered by the other (capped at its own
+        // area), so each obscured fraction is 1.0 and the sum is 2.0.
         let view = make_view(vec![
             aux(1, "samename", 100.0, 100.0),
             aux(2, "samename", 100.0, 100.0),
         ]);
         let m = compute_layout_metrics(&view, &cfg());
         assert!(
-            m.label_overlap > 0.0,
-            "coincident labels must produce positive label_overlap"
+            (m.label_overlap - 2.0).abs() < 1e-9,
+            "two coincident labels are each fully obscured: expected 2.0, got {}",
+            m.label_overlap
         );
     }
 
     #[test]
     fn test_label_overlap_disjoint_is_zero() {
-        // Two auxes far apart -> labels and node boxes are all disjoint.
+        // Two auxes far apart -> no label is covered by anything. Sum of
+        // obscured fractions is 0.0.
         let view = make_view(vec![aux(1, "a", 0.0, 0.0), aux(2, "b", 1000.0, 1000.0)]);
         let m = compute_layout_metrics(&view, &cfg());
         assert_eq!(m.label_overlap, 0.0);
@@ -1193,12 +1240,11 @@ mod tests {
 
     #[test]
     fn test_label_overlap_counts_label_pair_exactly_once() {
-        // Regression for the label_overlap double-count: the label-vs-node term
-        // must compare each label against the OTHER element's bare *shape* box,
-        // not its label-merged `*_bounds` box. Otherwise a label-vs-label
-        // overlap is also counted (once or twice more) inside the other node's
-        // merged box, inflating the magnitude (and the Phase 4 weight it
-        // calibrates).
+        // The Phase-1 double-count guard, restated for per-label obscuration: a
+        // label is never charged against its OWN element's shape box, and a
+        // label-vs-label collision is counted from each label's own perspective
+        // (both labels are unreadable -- that is intended), not via the other
+        // node's label-merged bounds.
         //
         // Fixture: two `LabelSide::Bottom` auxes named "samename" (8 chars).
         //   AUX_RADIUS = 9; label editor width = 8*6 + 10 = 58, height = 14.
@@ -1209,25 +1255,103 @@ mod tests {
         //   aux1 @ (0,0): shape [-9,9]x[-9,9],  label [-29,29]x[13,27]
         //   aux2 @ (40,0): shape [31,49]x[-9,9], label [11,69]x[13,27]
         //
-        // SHAPE boxes do NOT overlap (9 < 31). LABELS overlap by
-        //   x: [11,29] = 18, y: [13,27] = 14  ->  18*14 = 252.
-        // Each label clears the OTHER aux's bare shape box entirely, so the only
-        // contribution is the single label-vs-label pair: total overlap = 252.
+        // SHAPE boxes do NOT overlap (9 < 31), and each label clears the OTHER
+        // aux's bare shape box entirely (label y [13,27] vs shape y [-9,9]). The
+        // LABELS overlap by x:[11,29]=18, y:[13,27]=14 -> 252. Each label box has
+        // area 58*14 = 812 and is covered only by the other label (252 < 812, no
+        // cap), so each obscured fraction is 252/812 and the sum is 504/812.
         let view = make_view(vec![
             aux(1, "samename", 0.0, 0.0),
             aux(2, "samename", 40.0, 0.0),
         ]);
         let m = compute_layout_metrics(&view, &cfg());
 
-        // Total label area = 2 * (58 * 14) = 1624.
-        let expected_overlap = 18.0 * 14.0; // 252.0, counted exactly once
-        let total_label_area = 2.0 * (58.0 * 14.0); // 1624.0
-        let expected = expected_overlap / total_label_area;
+        let label_area = 58.0 * 14.0; // 812.0
+        let overlap = 18.0 * 14.0; // 252.0, the single label-label intersection
+        let expected = (overlap / label_area) + (overlap / label_area); // 504/812
         assert!(
             (m.label_overlap - expected).abs() < 1e-9,
-            "label_overlap should count the label pair exactly once: got {} expected {}",
+            "per-label obscuration should sum each label's fraction once: got {} expected {}",
             m.label_overlap,
             expected
+        );
+    }
+
+    #[test]
+    fn test_label_overlap_never_charged_against_own_shape() {
+        // A single labeled aux: its Bottom label sits adjacent to (and partly
+        // within the merged bounds of) its OWN shape. A label is never charged
+        // against its own element's shape, and there is no other element, so the
+        // obscured fraction is 0 and label_overlap is exactly 0.0.
+        let view = make_view(vec![aux(1, "samename", 0.0, 0.0)]);
+        let m = compute_layout_metrics(&view, &cfg());
+        assert_eq!(
+            m.label_overlap, 0.0,
+            "a label must never be charged against its own element's shape box"
+        );
+    }
+
+    #[test]
+    fn test_label_overlap_small_clip_is_sensitive() {
+        // A small node SHAPE clipping a few characters of a short label must
+        // register at its true per-label obscuration fraction, NOT be diluted to
+        // ~0 by the corpus's total label area (the old area/total under-count).
+        //
+        // L: aux "ab" (2 chars) @ (0,0), Bottom label.
+        //   editor_width = 2*6 + 10 = 22, height 14 -> label area 308.
+        //   label box: left -11, right 11, top 13, bottom 27.
+        // O: a cloud (no label) @ (18, 20). cloud_bounds (CLOUD_RADIUS 13.5):
+        //   x [4.5, 31.5], y [6.5, 33.5].
+        //   Overlap with L's label: x [4.5,11]=6.5, y [13,27]=14 -> 91.
+        //   obscured_fraction(L) = 91/308 ~= 0.2955; the cloud has no label, so
+        //   the sum is exactly 91/308.
+        // Plus 15 far-apart auxes with long (20-char) labels: each label area
+        //   20*6+10 = 130 wide * 14 = 1820, none overlapping anything. They add
+        //   nothing to the per-label SUM (obscured fraction 0 each) but bloat the
+        //   OLD denominator (total label area), so the OLD area/total score for
+        //   the same clip collapses to ~0.003 -- the under-count this fixes.
+        let mut elements = vec![aux(1, "ab", 0.0, 0.0), cloud(2, 18.0, 20.0)];
+        for k in 0..15 {
+            // Far apart on a 1000px grid so nothing overlaps; 20-char names.
+            elements.push(aux(
+                100 + k,
+                "abcdefghijklmnopqrst",
+                3000.0 + f64::from(k) * 1000.0,
+                3000.0,
+            ));
+        }
+        let view = make_view(elements);
+        let m = compute_layout_metrics(&view, &cfg());
+
+        let label_area = 22.0 * 14.0; // 308.0
+        let clip_area = 6.5 * 14.0; // 91.0
+        let expected = clip_area / label_area; // ~0.2955
+        assert!(
+            (m.label_overlap - expected).abs() < 1e-9,
+            "small clip must score its per-label obscuration fraction: got {} expected {}",
+            m.label_overlap,
+            expected
+        );
+        assert!(
+            m.label_overlap > 0.1,
+            "a readability-killing clip must register clearly (> 0.1), got {}",
+            m.label_overlap
+        );
+
+        // Confirm the OLD area/total definition would have under-counted this to
+        // near-zero: the same clip area divided by the corpus total label area.
+        let total_label_area = label_area + 15.0 * (130.0 * 14.0); // 308 + 27300
+        let old_score = clip_area / total_label_area; // ~0.0033
+        assert!(
+            old_score < 0.01,
+            "fixture must demonstrate the old under-count (< 0.01), got {}",
+            old_score
+        );
+        assert!(
+            m.label_overlap > old_score * 50.0,
+            "new per-label score {} must be far larger than the old {}",
+            m.label_overlap,
+            old_score
         );
     }
 
