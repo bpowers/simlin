@@ -5325,8 +5325,11 @@ pub fn compute_layout_metadata(
 }
 
 /// Pick the layout that minimizes the full calibrated layout-quality metric
-/// (`weighted_cost`); on tie, the one from the lowest seed. The first `Err`
-/// short-circuits, and an empty result set is an error.
+/// (`weighted_cost`); on tie, the one from the lowest seed. NaN-cost candidates
+/// (degenerate layouts) never win over a finite one regardless of position in
+/// the result set; if ALL candidates are NaN the earliest is kept
+/// deterministically. The first `Err` short-circuits, and an empty result set is
+/// an error.
 fn select_best_layout(
     results: Vec<Result<LayoutResult, String>>,
 ) -> Result<datamodel::StockFlow, String> {
@@ -5337,13 +5340,23 @@ fn select_best_layout(
         best = Some(match best {
             None => lr,
             Some(prev) => {
-                // NaN-safe by construction: `<` yields false when
-                // `lr.weighted_cost` is NaN, so a degenerate NaN-cost candidate
-                // never displaces a finite one. If BOTH costs are NaN the
-                // tie-break does not fire either (`==` is false for NaN), so the
-                // earlier candidate is kept -- deterministic regardless.
-                let better = lr.weighted_cost < prev.weighted_cost
-                    || (lr.weighted_cost == prev.weighted_cost && lr.seed < prev.seed);
+                // NaN-safe and order-independent: a degenerate NaN-cost
+                // candidate never wins over a finite one regardless of which
+                // came first. A plain `<` already drops a NaN *challenger*
+                // (`NaN < finite` is false), but it would NOT let a finite
+                // challenger overtake a NaN *running best* (`finite < NaN` and
+                // `finite == NaN` are both false), so the first seed's NaN would
+                // be sticky. The explicit NaN branches fix that asymmetry. If
+                // ALL candidates are NaN the challenger is never better, so the
+                // earliest is kept -- deterministic regardless.
+                let better = if lr.weighted_cost.is_nan() {
+                    false // a NaN challenger never wins
+                } else if prev.weighted_cost.is_nan() {
+                    true // a finite challenger always beats a NaN running best
+                } else {
+                    lr.weighted_cost < prev.weighted_cost
+                        || (lr.weighted_cost == prev.weighted_cost && lr.seed < prev.seed)
+                };
                 if better { lr } else { prev }
             }
         });

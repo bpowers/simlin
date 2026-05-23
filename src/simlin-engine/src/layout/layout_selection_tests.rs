@@ -227,18 +227,17 @@ fn test_select_best_layout_nan_challenger_never_displaces_finite() {
     );
 }
 
-/// AC6.1 (NaN-first limitation, documented): the current fold seeds the running
-/// best with the FIRST result and only replaces it when a challenger compares
-/// strictly less (or ties on cost with a lower seed). A NaN seeded as the
-/// running best is therefore sticky -- `finite < NaN` is false and `finite ==
-/// NaN` is false, so no later finite candidate overtakes it. In production
-/// (`generate_best_layout` runs seeds in the fixed order [42, 123, 456, 789]),
-/// this means a degenerate NaN-cost layout from the first seed would be shipped
-/// even when a later seed produced a finite, usable layout. This test pins that
-/// real behavior so the limitation is explicit, not silently assumed away;
-/// tightening the fold to skip NaN running-bests is tracked separately.
+/// AC6.1 (NaN safety, order-independent): a finite challenger must beat a NaN
+/// running best regardless of position. The fold seeds the running best with the
+/// FIRST result, so a degenerate NaN-cost layout from the first seed could
+/// otherwise become a sticky running best (`finite < NaN` is false and `finite
+/// == NaN` is false, so a plain `<` comparison never overtakes it). The fold
+/// special-cases a NaN running best so a later finite candidate always wins. In
+/// production (`generate_best_layout` runs seeds in the fixed order [42, 123,
+/// 456, 789]), this guarantees a usable finite layout is shipped whenever ANY
+/// seed produced one, no matter which seed degenerated.
 #[test]
-fn test_select_best_layout_nan_first_is_sticky_documented_limitation() {
+fn test_select_best_layout_finite_beats_nan_running_best() {
     let nan_first = vec![
         Ok(LayoutResult {
             view: sel_view("nan", vec![marker_aux(1, "a", 0.0, 0.0)]),
@@ -254,9 +253,35 @@ fn test_select_best_layout_nan_first_is_sticky_documented_limitation() {
     let best = select_best_layout(nan_first).expect("selection should succeed");
     assert_eq!(
         best.name.as_deref(),
-        Some("nan"),
-        "a NaN seeded as the running best is sticky under the current fold \
-         (documented limitation)"
+        Some("finite"),
+        "a finite challenger must beat a NaN running best regardless of order"
+    );
+}
+
+/// AC6.1 (NaN safety, all-NaN determinism): when EVERY candidate has a NaN cost,
+/// neither the `<` comparison nor the NaN special-cases fire (a NaN challenger is
+/// never "better"), so the earliest candidate is kept. This is deterministic
+/// regardless of seed order -- the production caller would ship the first seed's
+/// (degenerate) layout, but the choice is reproducible rather than arbitrary.
+#[test]
+fn test_select_best_layout_all_nan_keeps_earliest() {
+    let all_nan = vec![
+        Ok(LayoutResult {
+            view: sel_view("first", vec![marker_aux(1, "a", 0.0, 0.0)]),
+            weighted_cost: f64::NAN,
+            seed: 456,
+        }),
+        Ok(LayoutResult {
+            view: sel_view("second", vec![marker_aux(1, "a", 0.0, 0.0)]),
+            weighted_cost: f64::NAN,
+            seed: 42,
+        }),
+    ];
+    let best = select_best_layout(all_nan).expect("selection should succeed");
+    assert_eq!(
+        best.name.as_deref(),
+        Some("first"),
+        "when all candidates are NaN the earliest is kept deterministically"
     );
 }
 
