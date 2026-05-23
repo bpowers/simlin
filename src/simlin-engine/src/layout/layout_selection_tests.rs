@@ -409,3 +409,69 @@ fn test_weighted_cost_guard_rejects_degenerate_layout() {
          the guard ceiling {GUARD_POP_COST_CEILING}, proving the guard discriminates"
     );
 }
+
+/// A model with enough nodes (a stock fed/drained by ten leaf auxes through two
+/// flows) that the SFDP/annealing RNG genuinely shapes the layout, so two
+/// different seeds produce two different layouts. The tiny guard models above
+/// converge to one arrangement regardless of seed, which would make a
+/// determinism check vacuous; this model exercises the seeded path.
+fn guard_seed_sensitive_model() -> datamodel::Project {
+    let mut tp = TestProject::new("guard_seed_sensitive")
+        .stock("s", "100", &["inflow"], &["outflow"], None)
+        .flow("inflow", "a1 + a2 + a3 + a4 + a5", None)
+        .flow("outflow", "b1 + b2 + b3 + b4 + b5", None);
+    for i in 1..=5 {
+        tp = tp.aux(&format!("a{i}"), "1", None);
+        tp = tp.aux(&format!("b{i}"), "1", None);
+    }
+    tp.build_datamodel()
+}
+
+/// Lay `project`'s `main` model out at `seed`.
+fn layout_at_seed(project: &datamodel::Project, seed: u64) -> datamodel::StockFlow {
+    let config = LayoutConfig {
+        annealing_random_seed: seed,
+        ..LayoutConfig::default()
+    };
+    generate_layout_with_config(project, MAIN_MODEL, config, None)
+        .expect("layout generation should succeed")
+}
+
+/// AC8.1: a fixed seed reproduces a byte-identical layout. Generating the same
+/// model twice through `generate_layout_with_config` at the same explicit seed
+/// must yield two `StockFlow` values that compare equal (`StockFlow` derives
+/// `PartialEq`, so this checks every field -- positions, view box, element
+/// order -- not just element counts).
+///
+/// We use a seed-sensitive model and also assert that a DIFFERENT seed yields a
+/// DIFFERENT layout, so the same-seed equality is a real determinism guarantee
+/// rather than a vacuous pass on a model whose layout ignores the seed.
+///
+/// This per-seed reproducibility is distinct from the Phase 3 M-seed
+/// statistical sweep, which deliberately VARIES the seed to sample the layout
+/// distribution. Here the seed is held fixed and the layout must be exactly
+/// repeatable; there the seed sweeps and the layouts are expected to differ.
+/// The integration test `tests/layout.rs` already asserts `view1 == view2` for
+/// `generate_layout`; this focused in-crate test covers the
+/// `generate_layout_with_config` + explicit-seed Rung-0 path.
+#[test]
+fn test_layout_is_byte_identical_for_fixed_seed() {
+    let project = guard_seed_sensitive_model();
+
+    let view1 = layout_at_seed(&project, 7);
+    let view2 = layout_at_seed(&project, 7);
+    assert_eq!(
+        view1, view2,
+        "the same model at the same fixed seed must produce a byte-identical layout"
+    );
+
+    // Non-vacuity: a different seed must produce a different layout, proving the
+    // equality above reflects genuine per-seed determinism (not a seed-agnostic
+    // model where any pair would compare equal).
+    let other = layout_at_seed(&project, 999);
+    assert_ne!(
+        view1, other,
+        "a different seed should produce a different layout, so the same-seed \
+         equality is a meaningful determinism guarantee"
+    );
+}
