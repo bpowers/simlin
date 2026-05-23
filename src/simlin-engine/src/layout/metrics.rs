@@ -23,8 +23,10 @@ use crate::diagram::common::{
     segment_length_in_rect,
 };
 use crate::diagram::connector::{ARC_POLYLINE_SAMPLES, connector_polyline};
-use crate::diagram::elements::{aux_bounds, cloud_bounds, module_bounds, stock_bounds};
-use crate::diagram::flow::flow_bounds;
+use crate::diagram::elements::{
+    aux_bounds, aux_shape_bounds, cloud_bounds, module_bounds, stock_bounds, stock_shape_bounds,
+};
+use crate::diagram::flow::{flow_bounds, flow_shape_bounds};
 use crate::diagram::label::{LabelProps, label_bounds};
 
 use super::annealing::count_crossings;
@@ -163,6 +165,25 @@ fn node_box(element: &ViewElement) -> Option<Rect> {
         ViewElement::Module(m) => Some(module_bounds(m)),
         ViewElement::Cloud(c) => Some(cloud_bounds(c)),
         ViewElement::Flow(f) => Some(flow_bounds(f)),
+        ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => None,
+    }
+}
+
+/// The element's bare *shape* box, WITHOUT its own label, for the same set of
+/// elements as `node_box`. `aux_bounds`/`stock_bounds`/`flow_bounds` merge each
+/// element's own label into the returned box; the label-vs-node term of
+/// `label_overlap` must use the label-free shape so a label-vs-label overlap is
+/// not also charged via the other node's label-merged box (a double-count).
+/// `module_bounds`/`cloud_bounds` already exclude the label (modules render a
+/// label that their bounds omit; clouds render none), so they are their own
+/// shape box.
+fn node_shape_box(element: &ViewElement) -> Option<Rect> {
+    match element {
+        ViewElement::Aux(a) => Some(aux_shape_bounds(a)),
+        ViewElement::Stock(s) => Some(stock_shape_bounds(s)),
+        ViewElement::Module(m) => Some(module_bounds(m)),
+        ViewElement::Cloud(c) => Some(cloud_bounds(c)),
+        ViewElement::Flow(f) => Some(flow_shape_bounds(f)),
         ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => None,
     }
 }
@@ -335,10 +356,25 @@ pub fn compute_layout_metrics(
     // construction, adjacent to (and inside the merged bounds of) its own
     // element, so charging it against its own box would always add exactly the
     // label's area -- a constant that is not a real collision.
+    //
+    // The label-vs-node sum compares each label against every OTHER element's
+    // bare *shape* box (`node_shape_box`), NOT its label-merged `node_box`.
+    // `aux_bounds`/`stock_bounds`/`flow_bounds` union each element's own label
+    // into the box they return, so comparing a label against another node's
+    // MERGED box would re-count a label-vs-label overlap that the label-vs-label
+    // term above already counts -- a double-count that inflates the term's
+    // magnitude (which Phase 4 calibrates against). Using the label-free shape
+    // cleanly separates "label lands on another label" from "label lands on
+    // another node's shape".
     let label_boxes: Vec<(i32, Rect)> = view
         .elements
         .iter()
         .filter_map(|e| element_label_props(e).map(|props| (e.get_uid(), label_bounds(&props))))
+        .collect();
+    let node_shape_boxes: Vec<(i32, Rect)> = view
+        .elements
+        .iter()
+        .filter_map(|e| node_shape_box(e).map(|r| (e.get_uid(), r)))
         .collect();
     let total_label_area: f64 = label_boxes.iter().map(|(_, r)| rect_area(r)).sum();
     let label_overlap = if total_label_area > 0.0 {
@@ -349,9 +385,9 @@ pub fn compute_layout_metrics(
                 overlap += rect_overlap_area(&label_boxes[i].1, &label_boxes[j].1);
             }
         }
-        // label-vs-node, skipping the label's own element box.
+        // label-vs-node, against the OTHER element's bare shape box.
         for (lbl_uid, lbl) in &label_boxes {
-            for (node_uid, node) in &node_boxes {
+            for (node_uid, node) in &node_shape_boxes {
                 if lbl_uid == node_uid {
                     continue;
                 }
@@ -714,6 +750,46 @@ mod tests {
         assert_eq!(m.label_overlap, 0.0);
     }
 
+    #[test]
+    fn test_label_overlap_counts_label_pair_exactly_once() {
+        // Regression for the label_overlap double-count: the label-vs-node term
+        // must compare each label against the OTHER element's bare *shape* box,
+        // not its label-merged `*_bounds` box. Otherwise a label-vs-label
+        // overlap is also counted (once or twice more) inside the other node's
+        // merged box, inflating the magnitude (and the Phase 4 weight it
+        // calibrates).
+        //
+        // Fixture: two `LabelSide::Bottom` auxes named "samename" (8 chars).
+        //   AUX_RADIUS = 9; label editor width = 8*6 + 10 = 58, height = 14.
+        //   With Bottom labels, label top = cy + 9 + LABEL_PADDING(4) = cy + 13,
+        //   bottom = cy + 27, left = cx - 29, right = cx + 29.
+        //
+        // Place them 40px apart horizontally, same y:
+        //   aux1 @ (0,0): shape [-9,9]x[-9,9],  label [-29,29]x[13,27]
+        //   aux2 @ (40,0): shape [31,49]x[-9,9], label [11,69]x[13,27]
+        //
+        // SHAPE boxes do NOT overlap (9 < 31). LABELS overlap by
+        //   x: [11,29] = 18, y: [13,27] = 14  ->  18*14 = 252.
+        // Each label clears the OTHER aux's bare shape box entirely, so the only
+        // contribution is the single label-vs-label pair: total overlap = 252.
+        let view = make_view(vec![
+            aux(1, "samename", 0.0, 0.0),
+            aux(2, "samename", 40.0, 0.0),
+        ]);
+        let m = compute_layout_metrics(&view, &cfg());
+
+        // Total label area = 2 * (58 * 14) = 1624.
+        let expected_overlap = 18.0 * 14.0; // 252.0, counted exactly once
+        let total_label_area = 2.0 * (58.0 * 14.0); // 1624.0
+        let expected = expected_overlap / total_label_area;
+        assert!(
+            (m.label_overlap - expected).abs() < 1e-9,
+            "label_overlap should count the label pair exactly once: got {} expected {}",
+            m.label_overlap,
+            expected
+        );
+    }
+
     // --- AC1.5: aspect_penalty ---
 
     #[test]
@@ -881,9 +957,15 @@ mod tests {
     // `aspect_penalty` as scale-free. After implementing the metric against the
     // ACTUAL renderer geometry (the design's load-bearing invariant: metrics
     // are computed on the same geometry the renderer draws), only `crossings`
-    // is *exactly* scale-invariant. The reason is the same fixed-pixel element
-    // geometry the plan already cites for node_overlap/label_overlap/sprawl, and
-    // it propagates further than the plan anticipated:
+    // is exactly scale-invariant -- and even then only for crossings that lie
+    // INTERIOR to both connectors, away from the fixed-size node boundaries the
+    // polylines are clipped to (a crossing grazing a node boundary near a
+    // segment endpoint can flip; see the detailed note at the assertion below).
+    // This fixture's crossing is at the center of the square the two links form,
+    // squarely in that interior regime. The reason the other terms are not
+    // exactly invariant is the same fixed-pixel element geometry the plan
+    // already cites for node_overlap/label_overlap/sprawl, and it propagates
+    // further than the plan anticipated:
     //
     //   * Connectors are clipped to fixed-radius element boundaries, so a
     //     straight link's drawn length is `s*center_dist - r_from - r_to`
@@ -941,8 +1023,21 @@ mod tests {
         let s = 3.0;
         let scaled = compute_layout_metrics(&scale_view(&view, s), &cfg());
 
-        // The one exactly scale-invariant term: edge crossings are a topological
-        // count, preserved by any uniform scale.
+        // The one exactly scale-invariant term here: edge crossings.
+        //
+        // Crossings are NOT *universally* scale-invariant. A crossing is counted
+        // on the drawn polylines, which are clipped to the same fixed-pixel node
+        // boxes (the connector endpoints sit on element boundaries that do not
+        // scale). A crossing that merely grazes a node boundary near a segment
+        // endpoint can therefore appear or disappear under uniform scale.
+        // Crossings that lie comfortably INTERIOR to both connectors (away from
+        // those fixed-size boundaries) are exactly preserved, because the
+        // interior of each polyline is an exact affine image of itself under
+        // uniform scale and an intersection of two segments is invariant under a
+        // shared affine map. This fixture's crossing is at the center of the
+        // square the two links form -- maximally far from every node box -- so
+        // it is squarely in the scale-invariant interior regime and the count is
+        // preserved exactly.
         assert!(
             (scaled.crossings - base.crossings).abs() < 1e-9,
             "crossings not scale-invariant: {} vs {}",

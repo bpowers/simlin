@@ -141,7 +141,12 @@ pub fn render_flow(element: &view_element::Flow, sink: &ViewElement, is_arrayed:
     svg
 }
 
-pub fn flow_bounds(element: &view_element::Flow) -> Rect {
+/// The flow's bare *shape* box (the valve plus the pipe polyline points),
+/// WITHOUT its label. `flow_bounds` is this box merged with the label; see
+/// `diagram::elements::aux_shape_bounds` for why the label-free shape is
+/// exposed separately. The flow path points ARE part of the shape (the drawn
+/// pipe), so they stay included here.
+pub(crate) fn flow_shape_bounds(element: &view_element::Flow) -> Rect {
     let cx = element.x;
     let cy = element.y;
     // Flow valve bounds use r=6 (FLOW_VALVE_RADIUS), NOT AuxRadius
@@ -153,13 +158,7 @@ pub fn flow_bounds(element: &view_element::Flow) -> Rect {
         bottom: cy + r,
     };
 
-    // Include label bounds
-    let label_props =
-        LabelProps::new(cx, cy, element.label_side, display_name(&element.name)).with_radii(r, r);
-    let l_bounds = label_bounds(&label_props);
-    bounds = merge_bounds(bounds, l_bounds);
-
-    // Include flow path points
+    // Include flow path points (the drawn pipe).
     for point in &element.points {
         bounds.left = bounds.left.min(point.x);
         bounds.right = bounds.right.max(point.x);
@@ -168,6 +167,20 @@ pub fn flow_bounds(element: &view_element::Flow) -> Rect {
     }
 
     bounds
+}
+
+pub fn flow_bounds(element: &view_element::Flow) -> Rect {
+    let cx = element.x;
+    let cy = element.y;
+    let r = FLOW_VALVE_RADIUS;
+    let shape = flow_shape_bounds(element);
+
+    // Include label bounds
+    let label_props =
+        LabelProps::new(cx, cy, element.label_side, display_name(&element.name)).with_radii(r, r);
+    let l_bounds = label_bounds(&label_props);
+
+    merge_bounds(shape, l_bounds)
 }
 
 #[cfg(test)]
