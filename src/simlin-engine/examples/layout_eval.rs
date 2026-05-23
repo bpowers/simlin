@@ -55,34 +55,6 @@ use simlin_engine::layout::generate_layout_with_config;
 use simlin_engine::layout::metrics::{LayoutMetrics, MetricWeights, compute_layout_metrics};
 use simlin_engine::{datamodel, open_vensim, open_xmile};
 
-/// Phase-3 PLACEHOLDER weights for `weighted_cost`.
-///
-/// `MetricWeights::default()` is all-zeros until Phase 4 commits the calibrated
-/// weights (so any accidental pre-calibration use of `weighted_cost` is inert
-/// rather than silently wrong). The sweep needs a *non-trivial* scalar to rank
-/// seeds (best/median/worst) and to compute the corpus geomean, so this
-/// placeholder encodes the design's intended failure-mode priorities:
-/// the overlap family (`node_overlap`, `node_connector_overlap`, `label_overlap`)
-/// and edge `crossings` are dominant; `sprawl`, `edge_length_cv`, and
-/// `aspect_penalty` are moderate; the reserved structure terms
-/// (`chain_straightness`, `loop_compactness`, always 0.0 in Phase 1-3) carry
-/// zero weight.
-///
-/// Phase 4 commits the calibrated `MetricWeights` (its `Default`); when it
-/// lands, this placeholder MUST be replaced by `MetricWeights::default()` (see
-/// the Phase 4 plan, Task 2).
-const PLACEHOLDER_WEIGHTS: MetricWeights = MetricWeights {
-    node_overlap: 1.0,
-    node_connector_overlap: 1.0,
-    label_overlap: 1.0,
-    crossings: 1.0,
-    sprawl: 0.25,
-    edge_length_cv: 0.25,
-    aspect_penalty: 0.25,
-    chain_straightness: 0.0,
-    loop_compactness: 0.0,
-};
-
 /// The model name the layout pipeline and renderer operate on. `Project::get_model`
 /// maps "main" to the single/main model (matching `tests/layout.rs`).
 const MAIN_MODEL: &str = "main";
@@ -380,7 +352,7 @@ fn sweep_model(key: &str, project: &datamodel::Project, seeds: &[u64]) -> ModelS
             match generate_layout_with_config(project, MAIN_MODEL, cfg.clone(), None) {
                 Ok(view) => {
                     let metrics = compute_layout_metrics(&view, &cfg);
-                    let weighted_cost = metrics.weighted_cost(&PLACEHOLDER_WEIGHTS);
+                    let weighted_cost = metrics.weighted_cost(&MetricWeights::default());
                     Some((
                         seed,
                         MetricSample {
@@ -422,7 +394,7 @@ struct Render {
     seed: Option<u64>,
     /// Per-term metrics of the rendered view.
     metrics: LayoutMetrics,
-    /// Scalar weighted cost under the placeholder weights.
+    /// Scalar weighted cost under the calibrated default weights.
     weighted_cost: f64,
 }
 
@@ -466,7 +438,7 @@ fn render_view(
         eprintln!("WARN: failed to write {path}: {err}");
         return None;
     }
-    let weighted_cost = metrics.weighted_cost(&PLACEHOLDER_WEIGHTS);
+    let weighted_cost = metrics.weighted_cost(&MetricWeights::default());
     Some(Render {
         file: file.to_string(),
         seed,
@@ -1200,7 +1172,7 @@ fn main() {
         &corpus.per_model,
         &renders,
         corpus.geomean_of_medians,
-        &PLACEHOLDER_WEIGHTS,
+        &MetricWeights::default(),
         baseline_comparison,
     );
 
