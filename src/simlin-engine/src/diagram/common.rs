@@ -138,31 +138,29 @@ pub fn rad_to_deg(r: f64) -> f64 {
 }
 
 // These rectangle/segment geometry primitives are the load-bearing helpers for
-// the layout quality metric (`layout::metrics`, added in a later task of this
-// phase). They are exercised by the inline tests below; the production callers
-// (node-overlap, label-overlap, and node-connector-overlap terms) land in
-// subsequent tasks, so each is `#[allow(dead_code)]` until then.
+// the layout quality metric (`layout::metrics`). `rect_width`/`rect_height`/
+// `rect_area`/`rect_overlap_area`/`segment_length_in_rect` are consumed there
+// (node-overlap, label-overlap, node-connector-overlap, sprawl, and aspect
+// terms); `rect_contains_point` is a primitive kept for completeness and
+// exercised by the inline tests below, so it stays `#[allow(dead_code)]` until
+// a caller needs it.
 
 /// Width of a rect (right - left). May be negative for a degenerate/inverted rect.
-#[allow(dead_code)]
 pub(crate) fn rect_width(r: &Rect) -> f64 {
     r.right - r.left
 }
 
 /// Height of a rect (bottom - top).
-#[allow(dead_code)]
 pub(crate) fn rect_height(r: &Rect) -> f64 {
     r.bottom - r.top
 }
 
 /// Area of a rect, clamped to >= 0.
-#[allow(dead_code)]
 pub(crate) fn rect_area(r: &Rect) -> f64 {
     (rect_width(r).max(0.0)) * (rect_height(r).max(0.0))
 }
 
 /// Area of the axis-aligned intersection of two rects (0 if they do not overlap).
-#[allow(dead_code)]
 pub(crate) fn rect_overlap_area(a: &Rect, b: &Rect) -> f64 {
     let w = a.right.min(b.right) - a.left.max(b.left);
     let h = a.bottom.min(b.bottom) - a.top.max(b.top);
@@ -177,7 +175,6 @@ pub(crate) fn rect_contains_point(r: &Rect, p: &Point) -> bool {
 
 /// Length of the portion of segment p0->p1 that lies within axis-aligned rect r.
 /// Returns 0 if the segment never enters r. Pure; no allocation.
-#[allow(dead_code)]
 pub(crate) fn segment_length_in_rect(p0: &Point, p1: &Point, r: &Rect) -> f64 {
     // Liang-Barsky clip of the parametric segment p0 + t*(p1-p0), t in [0,1],
     // against left/right/top/bottom slabs.
