@@ -16,7 +16,8 @@ use simlin_engine::{Method, Results, SimSpecs as Specs, Vm, project_io};
 use simlin_engine::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
 
 use test_helpers::{
-    WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches, wasm_results_for,
+    WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches,
+    wasm_results_for, wasm_results_for_segmented,
 };
 
 /// Generate one `#[test] fn` per corpus model so libtest (and nextest) schedule
@@ -1850,6 +1851,24 @@ fn simulates_wrld3_03() {
     assert_eq!(vdf_results.step_count, results.step_count);
 }
 
+/// Time of the saved chunk nearest the middle of `[start, stop]`, derived from a
+/// model's compiled [`Specs`]. The blob/VM save cadence is
+/// `effective_save_step = max(save_step, dt)` (mirroring `Specs::from`), and
+/// chunk `k` is saved at `start + k * effective_save_step`, so the middle chunk
+/// `n_chunks / 2` lands on a genuine save point strictly inside the horizon
+/// (`n_chunks >= 3` for any real model). Reading the boundary from the specs --
+/// rather than hardcoding -- keeps the two-segment split meaningful for whatever
+/// time axis the model declares.
+fn midpoint_save_time(specs: &Specs) -> f64 {
+    let effective_save_step = if specs.save_step > specs.dt {
+        specs.save_step
+    } else {
+        specs.dt
+    };
+    let mid_chunk = specs.n_chunks / 2;
+    specs.start + (mid_chunk as f64) * effective_save_step
+}
+
 /// WORLD3 wasm parity twin (wasm-backend.AC1.1, heavy-model scale check): WORLD3
 /// is a large model, so its wasm blob exercises the backend well beyond the
 /// small/medium default corpus. The VM test above only smoke-checks the VDF
@@ -1860,6 +1879,13 @@ fn simulates_wrld3_03() {
 /// `WasmGenError::Unsupported` would be a hard failure: WORLD3 is a
 /// core-simulation model the VM handles. `#[ignore]`d for runtime class, like
 /// the other heavy models.
+///
+/// In addition to the single-`run` vs VM parity check, this twin re-runs the
+/// same blob through a TWO-SEGMENT `run_to` (split at the midpoint save time) and
+/// asserts the segmented final series equals the single-`run` series -- and
+/// therefore the VM (wasm-backend.AC2.3 segmented-run parity on a real model).
+/// Comparing the full final series (both segments run through to `stop`) is exact
+/// regardless of where the cursor paused mid-run.
 ///
 /// Run with: cargo test --release -- --ignored simulates_wrld3_03_wasm
 #[test]
@@ -1890,6 +1916,17 @@ fn simulates_wrld3_03_wasm() {
     });
 
     ensure_results(&vm_results, &wasm_results);
+
+    // Segmented resumable run: split at the midpoint save time and drive the same
+    // blob through `run_to(mid)` then `run_to(stop)`. The full final series must
+    // equal the single-`run` series (already matched to the VM above), proving the
+    // resumable cursor resumes correctly on a real model at scale.
+    let mid = midpoint_save_time(&wasm_results.specs);
+    let stop = wasm_results.specs.stop;
+    let segmented_results = wasm_results_for_segmented(&datamodel_project, "main", &[mid, stop])
+        .unwrap_or_else(|msg| panic!("WORLD3 segmented wasm run failed: {msg}"));
+
+    ensure_results(&wasm_results, &segmented_results);
 }
 
 /// Known-residual C-LEARN base-variable names excluded from the
@@ -2079,6 +2116,12 @@ fn run_clearn_vs_vdf() -> (Results, Results) {
 /// A `WasmGenError::Unsupported` here would be a hard failure: C-LEARN is a
 /// core-simulation model the VM handles, so the wasm backend must too.
 ///
+/// In addition to the single-`run` vs VDF gate, this twin re-runs the same blob
+/// through a TWO-SEGMENT `run_to` (split at the midpoint save time) and asserts
+/// the segmented final series equals the single-`run` series -- which is already
+/// checked against the VDF oracle -- so the resumable cursor is proven on a real
+/// model at C-LEARN scale (wasm-backend.AC2.3 segmented-run parity).
+///
 /// Run with: cargo test --release -- --ignored simulates_clearn_wasm
 #[test]
 #[ignore]
@@ -2092,6 +2135,17 @@ fn simulates_clearn_wasm() {
     let vdf_results = clearn_vdf_results();
 
     ensure_vdf_results_excluding(&vdf_results, &wasm_results, EXPECTED_VDF_RESIDUAL);
+
+    // Segmented resumable run: split at the midpoint save time and drive the same
+    // blob through `run_to(mid)` then `run_to(stop)`. The full final series must
+    // equal the single-`run` series (already gated against `Ref.vdf` above),
+    // proving the resumable cursor resumes correctly at C-LEARN scale.
+    let mid = midpoint_save_time(&wasm_results.specs);
+    let stop = wasm_results.specs.stop;
+    let segmented_results = wasm_results_for_segmented(&datamodel_project, "main", &[mid, stop])
+        .unwrap_or_else(|msg| panic!("C-LEARN segmented wasm run failed: {msg}"));
+
+    ensure_results(&wasm_results, &segmented_results);
 }
 
 /// Committed regression guard that `EXPECTED_VDF_RESIDUAL` stays EXACT: it is

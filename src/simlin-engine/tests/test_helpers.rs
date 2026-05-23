@@ -244,6 +244,45 @@ pub fn wasm_results_for(
     Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
 }
 
+/// Resumable-ABI peer of [`wasm_results_for`]: compile `model_name` of
+/// `datamodel` to wasm, then drive the blob through the segmented
+/// `run_initials`-then-per-target-`run_to` path (rather than the single-shot
+/// `run`) and reshape the final slab into a [`Results`].
+///
+/// `targets` is the ordered list of `run_to(t)` boundaries; the final target must
+/// be the simulation's `stop` so the slab is fully populated and the result is
+/// directly comparable (via [`ensure_results`]) to the single-`run`
+/// [`wasm_results_for`] series. The whole-model `#[ignore]`d twins use this to
+/// prove a mid-run-split run on a real model lands on the byte-identical final
+/// series as a single uninterrupted run.
+///
+/// Imperative Shell: drives the salsa compile pipeline and the wasm interpreter,
+/// delegating the reshape to the pure [`wasm_results_from_slab`].
+#[allow(dead_code)]
+pub fn wasm_results_for_segmented(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+    targets: &[f64],
+) -> Result<Results, String> {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    let sim = compile_project_incremental(&db, sync.project, model_name)
+        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+
+    let artifact = match compile_simulation(&sim) {
+        Ok(artifact) => artifact,
+        Err(WasmGenError::Unsupported(msg)) => return Err(msg),
+    };
+
+    let slab = run_wasm_results_segmented(&artifact.wasm, &artifact.layout, targets);
+    let specs = SimSpecs::from(&datamodel.sim_specs);
+    Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
+}
+
 /// Compile `model_name` of `datamodel` to wasm, run it under the DLR-FT
 /// interpreter, and assert its results clear the SAME `ensure_results_excluding`
 /// comparator the VM clears against `expected`.
@@ -297,6 +336,59 @@ fn run_wasm_results(wasm: &[u8], layout: &WasmLayout) -> Vec<f64> {
     store
         .invoke_simple_typed::<(), ()>(run, ())
         .expect("run wasm");
+    let mem = store
+        .instance_export(inst, "memory")
+        .expect("memory export must exist")
+        .as_mem()
+        .expect("memory export must be a memory");
+
+    let n = layout.n_chunks * layout.n_slots;
+    let base = layout.results_offset;
+    store.mem_access_mut_slice(mem, |bytes| {
+        (0..n)
+            .map(|i| {
+                let a = base + i * 8;
+                f64::from_le_bytes(bytes[a..a + 8].try_into().unwrap())
+            })
+            .collect()
+    })
+}
+
+/// Drive the blob's *resumable* run ABI: instantiate `wasm`, call `run_initials`
+/// once, then `run_to(t)` for each `t` in `targets` (advancing the persistent
+/// step cursor held in the blob's mutable globals), and copy the whole step-major
+/// results slab out (`n_chunks * n_slots` f64 at `layout.results_offset`).
+///
+/// This is the resumable peer of [`run_wasm_results`] (which calls the
+/// single-shot `run`). A segmented drive `&[t1, t2]` must produce a slab whose
+/// rows up to `t2` equal a single `run_to(t2)` and the VM driven through the same
+/// `run_to` segments -- the parity the wasm-side tests assert.
+#[allow(dead_code)]
+pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f64]) -> Vec<f64> {
+    let info = validate(wasm).expect("generated wasm module must validate");
+    let mut store = Store::new(());
+    let inst = store
+        .module_instantiate(&info, Vec::new(), None)
+        .expect("instantiate wasm module")
+        .module_addr;
+    let run_initials = store
+        .instance_export(inst, "run_initials")
+        .expect("run_initials export must exist")
+        .as_func()
+        .expect("run_initials export must be a function");
+    store
+        .invoke_simple_typed::<(), ()>(run_initials, ())
+        .expect("run_initials wasm");
+    for &t in targets {
+        let run_to = store
+            .instance_export(inst, "run_to")
+            .expect("run_to export must exist")
+            .as_func()
+            .expect("run_to export must be a function");
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to, (t,))
+            .expect("run_to wasm");
+    }
     let mem = store
         .instance_export(inst, "memory")
         .expect("memory export must exist")

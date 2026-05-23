@@ -82,7 +82,7 @@ Integration tests live in `tests/` (standard Rust layout), organized by FFI modu
 - **`tests/patch.rs`** - JSON patch application, error collection, unit warnings, XMILE patches
 - **`tests/incremental.rs`** - Incremental compilation path (patch-then-sim, snapshot isolation)
 - **`tests/analysis.rs`** - Causal analysis: incoming links, loop detection, loop scores
-- **`tests/wasm.rs`** - `simlin_model_compile_to_wasm`: validates and executes the returned blob under the DLR-FT interpreter (a libsimlin dev-dependency), parses the returned layout per its documented wire format, and checks the strided series against the VM via `simlin_sim_get_series`; also asserts a graceful `SimlinError` (no panic) for an unsupported model
+- **`tests/wasm.rs`** - `simlin_model_compile_to_wasm`: validates and executes the returned blob under the DLR-FT interpreter (a libsimlin dev-dependency), parses the returned layout per its documented wire format, and checks the strided series against the VM via `simlin_sim_get_series`; also asserts a graceful `SimlinError` (no panic) for an unsupported model. `compile_to_wasm_blob_supports_resumable_run` further drives the FFI-compiled blob's resumable ABI (`run_initials`/`run_to`/`set_value`/`reset`, the additive exports) against a VM oracle driven identically through `simlin_sim_run_to`/`simlin_sim_set_value`/`simlin_sim_run_to_end`, confirming the resumable surface survives the FFI compile path and the export set grew purely additively
 - **`tests/rendering.rs`** - SVG and PNG diagram rendering
 - **`tests/diagram.rs`** - Diagram layout sync
 - **`tests/errors.rs`** - Error formatting, error kind mapping, diagnostics

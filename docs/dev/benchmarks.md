@@ -22,11 +22,11 @@ Criterion saves results in `target/criterion/` and generates HTML reports in `ta
 
 ## Benchmark suites
 
-| Suite | File | What it measures |
-|-------|------|------------------|
-| `compiler` | `benches/compiler.rs` | End-to-end compiler pipeline on real models (WRLD3, C-LEARN) |
+| Suite        | File                    | What it measures                                                  |
+| ------------ | ----------------------- | ----------------------------------------------------------------- |
+| `compiler`   | `benches/compiler.rs`   | End-to-end compiler pipeline on real models (WRLD3, C-LEARN)      |
 | `simulation` | `benches/simulation.rs` | VM execution, slider interaction, compilation of synthetic models |
-| `array_ops` | `benches/array_ops.rs` | Array sum, element-wise add, broadcasting, multi-ref |
+| `array_ops`  | `benches/array_ops.rs`  | Array sum, element-wise add, broadcasting, multi-ref              |
 
 ### compiler benchmarks
 
@@ -38,10 +38,39 @@ The `compiler` suite measures each stage of the compilation pipeline independent
 - **`full_pipeline`** — all stages end-to-end
 
 Models used:
+
 - `wrld3` — World3 model (151 KB, ~3,800 lines), a classic system dynamics model
 - `clearn` — C-LEARN climate model (1.4 MB, ~53,000 lines), a stress test for the compiler
 
 C-LEARN currently uses builtins that are not yet implemented in the bytecode compiler, so it is automatically skipped for `bytecode_compile` and `full_pipeline`. It still participates in `parse_mdl` and `project_build`, which are the most allocation-heavy stages.
+
+## Node VM-vs-wasm eval benchmark
+
+`@simlin/engine` can run a model on two backends: the libsimlin VM or a compiled WebAssembly blob. This benchmark compares their **simulation (eval) time** through the public `Model.simulate({ engine })` API, on fishbanks, WORLD3, and C-LEARN.
+
+It is a [jest](https://jestjs.io/) test gated behind `RUN_BENCH` so it stays out of the default `pnpm test` (a full C-LEARN run on both engines exceeds the per-test time budget):
+
+```bash
+# Run all three models on both engines
+RUN_BENCH=1 pnpm -C src/engine exec jest backend-bench
+
+# Subset the models (comma-separated: fishbanks, wrld3, clearn)
+RUN_BENCH=1 BENCH_MODELS=fishbanks,wrld3 pnpm -C src/engine exec jest backend-bench
+```
+
+It prints a markdown table of the warm **median** eval time per engine plus the wasm/VM ratio.
+
+What it measures, and what it deliberately excludes:
+
+- **Eval only.** The `Sim` for each `(model, engine)` is built once in untimed setup; for wasm that one-time cost is the blob compile and instantiate. Each measured iteration is a `reset()` (also untimed) followed by a timed `runToEnd()`. Result extraction (`getRun`/`getSeries`) is not timed.
+- **Median over an explicit warmup.** A discard-only warmup runs first, then the harness collects timings adaptively (until a max iteration count or a per-model wall-clock budget) and reports the median. The pure stats/harness lives in `src/engine/tests/bench-stats.ts` and is always-on unit-tested.
+- **Cross-checked before trusted.** Before timing, the benchmark runs each model on both engines and compares a representative series within the engine's tolerance, so a broken run can't masquerade as a fast one.
+
+Absolute numbers include the async public-API overhead, so the VM/wasm ratio is the figure to compare across runs.
+
+The Rust counterpart is `src/simlin-engine/examples/backend_bench.rs`, which uses the same eval-vs-eval methodology and median statistic against the lower-level `Vm`/wasm interfaces.
+
+Results are reported in the PR or chat, not committed: the harness is regenerable, but checked-in numbers go stale and mislead. Do not add a results file.
 
 ## Profiling
 

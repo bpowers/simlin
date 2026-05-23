@@ -15,7 +15,7 @@
  * are transferred for zero-copy.
  */
 
-import type { EngineBackend, ProjectHandle, ModelHandle, SimHandle } from './backend';
+import type { EngineBackend, ProjectHandle, ModelHandle, SimHandle, SimEngine } from './backend';
 import type { ErrorDetail, SimlinJsonFormat } from './internal/types';
 import type { Loop, Link } from './types';
 import type { JsonProjectPatch } from './json-types';
@@ -509,12 +509,13 @@ export class WorkerBackend implements EngineBackend {
 
   // ---- Sim operations ----
 
-  simNew(modelHandle: ModelHandle, enableLtm: boolean): Promise<SimHandle> {
+  simNew(modelHandle: ModelHandle, enableLtm: boolean, engine?: SimEngine): Promise<SimHandle> {
     return this.sendRequest<SimHandle>((requestId) => ({
       type: 'simNew',
       requestId,
       modelHandle,
       enableLtm,
+      engine,
     }));
   }
 

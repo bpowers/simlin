@@ -23,6 +23,13 @@ export type ProjectHandle = Handle & { __brand: 'project' };
 export type ModelHandle = Handle & { __brand: 'model' };
 export type SimHandle = Handle & { __brand: 'sim' };
 
+/**
+ * Which execution backend a `Sim` runs on: the bytecode VM (the default) or the
+ * per-model WebAssembly blob. The wasm engine is for fast repeated re-runs
+ * (interactive scrubbing); it does not support LTM or `getLinks`.
+ */
+export type SimEngine = 'vm' | 'wasm';
+
 export interface SimRunResult {
   varNames: string[];
   results: Map<string, Float64Array>;
@@ -58,7 +65,11 @@ export interface EngineBackend {
   projectGetModel(handle: ProjectHandle, name: string | null): MaybePromise<ModelHandle>;
   projectIsSimulatable(handle: ProjectHandle, modelName: string | null): MaybePromise<boolean>;
   projectSerializeProtobuf(handle: ProjectHandle): MaybePromise<Uint8Array>;
-  projectSerializeJson(handle: ProjectHandle, format: SimlinJsonFormat, includeStdlib?: boolean): MaybePromise<Uint8Array>;
+  projectSerializeJson(
+    handle: ProjectHandle,
+    format: SimlinJsonFormat,
+    includeStdlib?: boolean,
+  ): MaybePromise<Uint8Array>;
   projectSerializeXmile(handle: ProjectHandle): MaybePromise<Uint8Array>;
   projectRenderSvg(handle: ProjectHandle, modelName: string): MaybePromise<Uint8Array>;
   projectRenderPng(handle: ProjectHandle, modelName: string, width: number, height: number): MaybePromise<Uint8Array>;
@@ -82,7 +93,7 @@ export interface EngineBackend {
   modelGetSimSpecsJson(handle: ModelHandle): MaybePromise<Uint8Array>;
 
   // Sim operations
-  simNew(modelHandle: ModelHandle, enableLtm: boolean): MaybePromise<SimHandle>;
+  simNew(modelHandle: ModelHandle, enableLtm: boolean, engine?: SimEngine): MaybePromise<SimHandle>;
   simDispose(handle: SimHandle): MaybePromise<void>;
   simRunTo(handle: SimHandle, time: number): MaybePromise<void>;
   simRunToEnd(handle: SimHandle): MaybePromise<void>;

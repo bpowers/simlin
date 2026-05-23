@@ -19,3 +19,4 @@ export * from './model';
 export * from './sim';
 export * from './analysis';
 export * from './import-export';
+export * from './wasmgen';

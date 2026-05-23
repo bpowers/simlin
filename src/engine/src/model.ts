@@ -10,7 +10,7 @@
  * Sim instances.
  */
 
-import { EngineBackend, ModelHandle } from './backend';
+import { EngineBackend, ModelHandle, SimEngine } from './backend';
 import { Stock, Flow, Aux, Module, Variable, TimeSpec, Link, Loop, ModelIssue, GraphicalFunction } from './types';
 import {
   JsonStock,
@@ -102,10 +102,7 @@ function parseJsonGraphicalFunction(gf: JsonGraphicalFunction): GraphicalFunctio
   };
 }
 
-function extractEquation(
-  topLevel: string | undefined,
-  arrayed: { equation?: string } | undefined,
-): string {
+function extractEquation(topLevel: string | undefined, arrayed: { equation?: string } | undefined): string {
   if (topLevel) {
     return topLevel;
   }
@@ -120,10 +117,7 @@ function extractEquation(
  * in the top-level `initialEquation` or in the arrayed `equation` field
  * (XMILE-sourced data where `<eqn>` IS the initial value).
  */
-function extractStockInitialEquation(
-  topLevel: string | undefined,
-  arrayed: { equation?: string } | undefined,
-): string {
+function extractStockInitialEquation(topLevel: string | undefined, arrayed: { equation?: string } | undefined): string {
   if (topLevel) {
     return topLevel;
   }
@@ -424,13 +418,19 @@ export class Model {
   /**
    * Create low-level simulation for step-by-step execution.
    * @param overrides Variable value overrides
-   * @param options Simulation options
+   * @param options Simulation options. `engine` selects the execution backend
+   *   ('vm', the default, or 'wasm' for fast repeated re-runs). The
+   *   enableLtm+wasm rejection is enforced authoritatively in the backend's
+   *   simNew (covering the worker path too); this method only forwards.
    * @returns Sim instance for step-by-step execution
    */
-  async simulate(overrides: Record<string, number> = {}, options: { enableLtm?: boolean } = {}): Promise<Sim> {
+  async simulate(
+    overrides: Record<string, number> = {},
+    options: { enableLtm?: boolean; engine?: SimEngine } = {},
+  ): Promise<Sim> {
     this.checkDisposed();
-    const { enableLtm = false } = options;
-    return Sim.create(this, overrides, enableLtm);
+    const { enableLtm = false, engine = 'vm' } = options;
+    return Sim.create(this, overrides, enableLtm, engine);
   }
 
   /**
@@ -442,14 +442,19 @@ export class Model {
    * scores must pass `{ analyzeLtm: true }` explicitly.
    *
    * @param overrides Override values for any model variables
-   * @param options Run options
+   * @param options Run options. `engine` selects the execution backend ('vm',
+   *   the default, or 'wasm'); a wasm run never enables LTM, so its Run carries
+   *   empty links.
    * @returns Run object with results and analysis
    */
-  async run(overrides: Record<string, number> = {}, options: { analyzeLtm?: boolean } = {}): Promise<Run> {
+  async run(
+    overrides: Record<string, number> = {},
+    options: { analyzeLtm?: boolean; engine?: SimEngine } = {},
+  ): Promise<Run> {
     this.checkDisposed();
-    const { analyzeLtm = false } = options;
+    const { analyzeLtm = false, engine = 'vm' } = options;
 
-    const sim = await this.simulate(overrides, { enableLtm: analyzeLtm });
+    const sim = await this.simulate(overrides, { enableLtm: analyzeLtm, engine });
     await sim.runToEnd();
 
     return await sim.getRun();

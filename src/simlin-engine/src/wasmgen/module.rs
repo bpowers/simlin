@@ -72,17 +72,34 @@ const CURR_BASE: u32 = 0;
 const TIME_ADDR: u64 = TIME_OFF as u64 * SLOT_SIZE as u64;
 
 // Global indices. The three self-describing geometry globals come first (so the
-// exported indices 0/1/2 stay stable for hosts); `use_prev_fallback` -- the only
-// mutable global -- follows at index 3. It gates `LoadPrev`: init 1 (return the
-// fallback) until the first `prev_values` snapshot clears it (`vm.rs:668`).
+// exported indices 0/1/2 stay stable for hosts), all immutable. The mutable
+// globals follow: `use_prev_fallback` at index 3, then the persistent step
+// cursor (`saved`/`step_accum`/`did_initials`) at 4/5/6. The cursor globals make
+// a run resumable: they survive across separate exported calls so `run_initials`
+// can run once and each `run_to(target)` resumes from where the prior one
+// stopped (the blob analogue of the VM's `curr_chunk`/`step_accum`/`did_initials`
+// fields). They are internal -- not exported -- since a host drives the run only
+// through `run`/`run_to`/`run_initials`/`reset`.
+//
+// `use_prev_fallback` gates `LoadPrev`: init 1 (return the fallback) until the
+// first `prev_values` snapshot clears it (`vm.rs:668`); it is the inverse of the
+// VM's `prev_values_valid`.
 const G_N_SLOTS: u32 = 0;
 const G_N_CHUNKS: u32 = 1;
 const G_RESULTS_OFFSET: u32 = 2;
 const G_USE_PREV_FALLBACK: u32 = 3;
+// The persistent step cursor (mutable, internal):
+const G_SAVED: u32 = 4; // saved-row counter (was the run-local `L_SAVED`)
+const G_STEP_ACCUM: u32 = 5; // save-cadence accumulator (was `L_STEP_ACCUM`)
+const G_DID_INITIALS: u32 = 6; // 0 until initials have run (cf. `Vm::did_initials`)
 
-// `run`'s i32 locals.
-const L_SAVED: u32 = 0;
-const L_STEP_ACCUM: u32 = 1;
+// `run_to`'s i32 locals. Its sole f64 *param* (the run target) occupies local 0,
+// so the i32 working locals start at index 1 and `L_DST` is index 2 -- the same
+// index the per-step emitters (`emit_save_advance`/`emit_rk*_step`) use, which
+// lets those helpers stay shared between the (now removed) function-local cursor
+// and the global cursor. Index 1 is an unused i32 filler that keeps `L_DST` at 2.
+// The saved-row/step-accum cursor lives in `G_SAVED`/`G_STEP_ACCUM` (globals),
+// not locals, so it survives across `run_to` calls.
 const L_DST: u32 = 2;
 
 /// Compile the named model of a datamodel `Project` to a full [`WasmArtifact`]
@@ -337,6 +354,16 @@ const F_INITIALS: u32 = 0;
 const F_FLOWS: u32 = 1;
 const F_STOCKS: u32 = 2;
 const FUNCS_PER_INSTANCE: u32 = 3;
+
+/// The function index of `run` (the first driver function, after the helpers and
+/// the per-instance triples). The driver functions follow in this fixed order:
+/// `run`, `set_value`, `reset`, `clear_values`, `run_to`, `run_initials` (the two
+/// resumable exports append last, keeping the original four at stable indices).
+/// Used both at emit time (`compile_simulation`, to resolve the delegation
+/// targets) and at assembly time (`assemble_simulation`), so the two never drift.
+fn run_fn_index_of(n_helpers: u32, n_instances: u32) -> u32 {
+    n_helpers + n_instances * FUNCS_PER_INSTANCE
+}
 
 // Type-section indices. The `run` type comes first; one opcode-program type per
 // distinct module-input count follows (`(i32, f64*k) -> ()`), and helper types
@@ -683,35 +710,61 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         )?);
     }
 
-    // `run` calls the ROOT instance's initials/flows/stocks with `module_off = 0`
-    // and no inputs (the root takes none) -- unchanged from the single-module
-    // path. Its child `EvalModule`s recurse from there.
+    // The root instance's initials/flows/stocks are driven with `module_off = 0`
+    // and no inputs (the root takes none); child `EvalModule`s recurse from there.
     let root_idx = instance_order
         .iter()
         .position(|k| *k == sim.root)
         .expect("root is among the instances");
     let root_fn_base = n_helpers + (root_idx as u32) * FUNCS_PER_INSTANCE;
-    let run_fn = emit_run_simulation(
+    let regions = RunRegions {
+        n_slots,
+        results_base,
+        stride,
+        n_chunks,
+        initial_values_base,
+        prev_values_base,
+        rk_saved_base,
+        rk_accum_base,
+    };
+
+    // Driver function indices, in the function-section order `assemble_simulation`
+    // lays out after the per-instance triples: run, set_value, reset, clear_values,
+    // run_to, run_initials. `run` and `run_to` delegate (`run` -> `reset` +
+    // `run_to`; `run_to` -> `run_initials`), so their indices must be known before
+    // their bodies are emitted -- the function section declares all indices up
+    // front, so this is sound. Keeping run/set_value/reset/clear_values at their
+    // original indices (the two new exports append after) keeps the change additive.
+    let run_fn_index = run_fn_index_of(n_helpers, instances.len() as u32);
+    let reset_fn_index = run_fn_index + 2;
+    let run_to_fn_index = run_fn_index + 4;
+    let run_initials_fn_index = run_fn_index + 5;
+
+    // The resumable run ABI: `run_initials` (idempotent), `run_to(target)` (the
+    // single shared stepping loop), and `run` (re-expressed as `reset;
+    // run_to(stop)`). The cursor lives in mutable globals so a run is resumable.
+    let run_initials_fn = emit_run_initials(specs, regions, root_fn_base);
+    let run_to_fn = emit_run_to(
         specs,
-        RunRegions {
-            n_slots,
-            results_base,
-            stride,
-            n_chunks,
-            initial_values_base,
-            prev_values_base,
-            rk_saved_base,
-            rk_accum_base,
-        },
+        regions,
         save_every,
         &stock_offsets,
         root_fn_base,
+        run_initials_fn_index,
+    );
+    let run_fn = emit_run(
+        specs,
+        RunFnIndices {
+            run_to: run_to_fn_index,
+            reset: reset_fn_index,
+        },
     );
 
     // The constants-override exports (Phase 7 Task 2): `set_value` writes an
     // override into the constants region (validated against the validity bytes),
-    // `reset` resets the run state (`use_prev_fallback`) without clearing the
-    // region, and `clear_values` restores the compiled defaults.
+    // `reset` resets the run state (the cursor globals + `use_prev_fallback`)
+    // without clearing the region, and `clear_values` restores the compiled
+    // defaults.
     let set_value_fn = emit_set_value(n_slots, const_region_base, const_valid_base);
     let reset_fn = emit_reset();
     let clear_values_fn = emit_clear_values(const_region_base, &overridable_defaults);
@@ -734,6 +787,8 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
         set_value_fn,
         reset_fn,
         clear_values_fn,
+        run_to_fn,
+        run_initials_fn,
         instance_input_counts: &instance_input_counts,
         pages,
         n_slots,
@@ -981,10 +1036,10 @@ fn collect_overridable_defaults(
     out
 }
 
-/// The linear-memory region geometry `run` needs: the chunk/results bases, the
-/// snapshot bases (`initial_values`/`prev_values`), and the RK scratch bases
-/// (`saved`/`accum`). Bundled to keep `emit_run_simulation`'s signature small as
-/// the run loop gained snapshot + RK regions.
+/// The linear-memory region geometry the run driver needs: the chunk/results
+/// bases, the snapshot bases (`initial_values`/`prev_values`), and the RK scratch
+/// bases (`saved`/`accum`). Bundled to keep the `emit_run_initials`/`emit_run_to`
+/// signatures small as the run loop gained snapshot + RK regions.
 #[derive(Clone, Copy)]
 struct RunRegions {
     n_slots: u32,
@@ -999,60 +1054,67 @@ struct RunRegions {
     rk_accum_base: u32,
 }
 
-// `run`'s f64 locals (after the three i32 locals). The RK loops need a
-// `saved_time` (the timestep's t, restored after the stages move `curr[TIME]` to
-// trial points) and a per-stage `s` scratch (`next[off]-curr[off]`). Euler
-// declares them too -- two unused f64 locals are free.
+// `run_to`'s f64 locals. The RK loops need a `saved_time` (the timestep's t,
+// restored after the stages move `curr[TIME]` to trial points) and a per-stage
+// `s` scratch (`next[off]-curr[off]`). Euler declares them too -- two unused f64
+// locals are free. They sit at indices 3/4: `run_to`'s f64 param is local 0 and
+// its two i32 working locals (index 1 filler + `L_DST` at 2) precede them.
 const L_SAVED_TIME: u32 = 3;
 const L_RK_S: u32 = 4;
 
-/// Emit the body of `run` for the `CompiledSimulation` path: seed the reserved
-/// globals, run the initials, capture `initial_values`, then drive the
-/// integration loop selected by `specs.method`. The loop `call`s the three
-/// opcode-emitted functions; the Euler arm mirrors `vm.rs::run_to`'s Euler arm,
-/// and the RK arms mirror `vm.rs:712-838`.
-fn emit_run_simulation(
-    specs: &Specs,
-    regions: RunRegions,
-    save_every: i32,
-    stock_offsets: &[usize],
-    root_fn_base: u32,
-) -> Function {
-    // Three i32 locals (saved/step_accum/dst) + two f64 locals (saved_time, s).
-    let mut f = Function::new([(3, ValType::I32), (2, ValType::F64)]);
+/// `run_to`'s f64 param: the run target (the strict upper bound on `curr[TIME]`),
+/// at local 0. The loop steps until `curr[TIME] > target`.
+const RT_TARGET: u32 = 0;
 
-    // Absolute function indices of the ROOT instance's three program functions:
-    // its function-triple base + the per-phase offset. `run` drives the root with
-    // `module_off = 0`; nested instances are reached via `EvalModule` from there.
+/// The function indices `run`'s delegating body calls: `run` is re-expressed as
+/// `reset(); run_to(stop)` (one shared stepping loop). The indices are resolved
+/// in `compile_simulation` before the bodies are emitted (the function section
+/// declares all indices up front). (`run_to` calls `run_initials` directly via
+/// its own index argument, so that index is not threaded here.)
+#[derive(Clone, Copy)]
+struct RunFnIndices {
+    run_to: u32,
+    reset: u32,
+}
+
+/// Emit `run_initials() -> ()`: seed the reserved time slots, run the root
+/// initials, capture `initial_values`, and arm the step cursor -- but only the
+/// first time per `reset`. Idempotent via the `G_DID_INITIALS` guard, mirroring
+/// `vm.rs:1080-1082` (`if self.did_initials { return Ok(()); }`), so a `run_to`
+/// after another `run_to` re-runs initials zero times and resumes the existing
+/// cursor instead.
+fn emit_run_initials(specs: &Specs, regions: RunRegions, root_fn_base: u32) -> Function {
+    let mut f = Function::new([]);
+
+    // if G_DID_INITIALS != 0: return  (idempotency -- already initialized).
+    f.instruction(&I::GlobalGet(G_DID_INITIALS));
+    f.instruction(&I::If(BlockType::Empty));
+    f.instruction(&I::Return);
+    f.instruction(&I::End);
+
     let f_initials = root_fn_base + F_INITIALS;
-    let f_flows = root_fn_base + F_FLOWS;
-    let f_stocks = root_fn_base + F_STOCKS;
 
-    // Seed the reserved global slots into curr (chunk base 0), then run the
-    // initials. The seeds mirror the VM, which writes start/dt/start/stop into
-    // TIME/DT/INITIAL_TIME/FINAL_TIME before run_initials.
+    // Seed the reserved global slots into curr (chunk base 0), mirroring the VM,
+    // which writes start/dt/start/stop into TIME/DT/INITIAL_TIME/FINAL_TIME before
+    // run_initials.
     store_curr_const_abs(&mut f, TIME_OFF, specs.start);
     store_curr_const_abs(&mut f, DT_OFF, specs.dt);
     store_curr_const_abs(&mut f, INITIAL_TIME_OFF, specs.start);
     store_curr_const_abs(&mut f, FINAL_TIME_OFF, specs.stop);
-    // Re-arm the PREVIOUS fallback for this run, mirroring the VM's
-    // `run_initials` (which sets `use_prev_fallback = true` at the start of
-    // every run). `run` reseeds the time globals + reruns initials and is the
-    // documented per-change entry point for repeated re-simulation, so it must
-    // reset this flag itself: the loop below clears it to 0 after the first
-    // `prev_values` snapshot, and without re-arming it here a second `run` on
-    // the same instance would read the prior run's `prev_values` on step 0 (and
-    // during initials) instead of the fallback. The module-init value is also 1,
-    // so this is a no-op only on the very first run.
+
+    // Arm the PREVIOUS fallback for this run, mirroring the VM's `run_initials`
+    // (which sets `use_prev_fallback = true`). `reset` also re-arms it, but a bare
+    // `run_initials` (no `reset` first, e.g. the resumable test driver) must arm
+    // it here too so a `PREVIOUS(x)` evaluated during initials returns its
+    // fallback. The first `run_to` step clears it after the first `prev_values`
+    // snapshot.
     f.instruction(&I::I32Const(1));
     f.instruction(&I::GlobalSet(G_USE_PREV_FALLBACK));
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_initials));
 
-    // Capture `initial_values := curr` exactly once, after initials, for
-    // `INIT(x)` reads in the flows/stocks programs (`vm.rs:1124-1128`).
-    // `use_prev_fallback` is 1 (re-armed just above) through initials, so any
-    // `PREVIOUS(x)` evaluated during initials returns its fallback.
+    // Capture `initial_values := curr` exactly once, after initials, for `INIT(x)`
+    // reads in the flows/stocks programs (`vm.rs:1124-1128`).
     emit_copy_chunk(
         &mut f,
         CURR_BASE,
@@ -1060,13 +1122,59 @@ fn emit_run_simulation(
         regions.n_slots,
     );
 
+    // Arm the cursor: nothing saved yet, accumulator cleared, initials done. The
+    // first save happens in `run_to`'s loop (the forced t=start row), matching the
+    // VM (`run_initials` does not save chunk 0).
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::GlobalSet(G_SAVED));
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::GlobalSet(G_STEP_ACCUM));
+    f.instruction(&I::I32Const(1));
+    f.instruction(&I::GlobalSet(G_DID_INITIALS));
+
+    f.instruction(&I::End); // end function
+    f
+}
+
+/// Emit `run_to(target: f64) -> ()`: advance the simulation until `curr[TIME] >
+/// target` (strict `>`, matching `vm.rs:644`), starting from wherever the
+/// persistent cursor left off. Calls `run_initials` first (idempotent), then runs
+/// the per-method stepping loop -- the single shared stepping-loop implementation
+/// both `run` and `run_to` use. The loop reads/writes the saved-row cursor from
+/// `G_SAVED`/`G_STEP_ACCUM` (globals), so it resumes correctly across calls; the
+/// saved-row exhaustion break (`if saved >= n_chunks`) clamps a target past
+/// FINAL_TIME to the slab end, exactly like the VM's chunk-ring exhaustion.
+fn emit_run_to(
+    specs: &Specs,
+    regions: RunRegions,
+    save_every: i32,
+    stock_offsets: &[usize],
+    root_fn_base: u32,
+    run_initials_idx: u32,
+) -> Function {
+    // One f64 param (`target`, local 0) + two i32 locals (index 1 filler, `L_DST`
+    // at 2) + two f64 locals (`saved_time`, `s` at 3/4). The cursor lives in
+    // globals, not locals; the i32 at index 1 is unused filler that keeps `L_DST`
+    // at the index the per-step emitters expect.
+    let mut f = Function::new([(2, ValType::I32), (2, ValType::F64)]);
+
+    // Absolute function indices of the ROOT instance's three program functions:
+    // its function-triple base + the per-phase offset. The root is driven with
+    // `module_off = 0`; nested instances are reached via `EvalModule` from there.
+    let f_flows = root_fn_base + F_FLOWS;
+    let f_stocks = root_fn_base + F_STOCKS;
+
+    // Idempotent initials (seeds time slots, runs initials, arms the cursor on the
+    // first call after a reset; a no-op otherwise).
+    f.instruction(&I::Call(run_initials_idx));
+
     f.instruction(&I::Block(BlockType::Empty)); // $break
     f.instruction(&I::Loop(BlockType::Empty)); // $continue
 
-    // if curr[TIME] > stop: break
+    // if curr[TIME] > target: break
     f.instruction(&I::I32Const(0));
     f.instruction(&I::F64Load(memarg(TIME_ADDR)));
-    f.instruction(&f64_const(specs.stop));
+    f.instruction(&I::LocalGet(RT_TARGET));
     f.instruction(&I::F64Gt);
     f.instruction(&I::BrIf(1));
 
@@ -1086,13 +1194,33 @@ fn emit_run_simulation(
     // The save + advance tail is method-agnostic: every method leaves `next[off]`
     // holding the new stock values and `curr` holding the time-`t` state, so the
     // save row records `curr`, the advance copies the new stocks `next -> curr`,
-    // and `curr[TIME] += dt`.
+    // and `curr[TIME] += dt`. The saved-row counter is the `G_SAVED` global, so
+    // the cursor survives across `run_to` calls.
     emit_save_advance(&mut f, specs, save_every, stock_offsets, &regions);
 
     f.instruction(&I::Br(0)); // continue
     f.instruction(&I::End); // end loop
     f.instruction(&I::End); // end block
     f.instruction(&I::End); // end function
+    f
+}
+
+/// Emit `run() -> ()` for the `CompiledSimulation` path by *delegating* to the
+/// resumable ABI: `reset(); run_to(stop)`. This keeps exactly one stepping-loop
+/// implementation (in `run_to`), so `run` and `run_to` can never drift apart.
+///
+/// Invariant (the linchpin): `run()` must produce a full from-t0 simulation on
+/// every call to a reused instance. The delegation satisfies this for free --
+/// `reset` clears `G_DID_INITIALS`/`G_SAVED`/`G_STEP_ACCUM` and re-arms
+/// `G_USE_PREV_FALLBACK = 1`, so the subsequent `run_to` -> `run_initials` (no
+/// longer short-circuited, since `reset` cleared `G_DID_INITIALS`) re-seeds the
+/// reserved time slots and re-runs initials from scratch.
+fn emit_run(specs: &Specs, indices: RunFnIndices) -> Function {
+    let mut f = Function::new([]);
+    f.instruction(&I::Call(indices.reset));
+    f.instruction(&f64_const(specs.stop));
+    f.instruction(&I::Call(indices.run_to));
+    f.instruction(&I::End);
     f
 }
 
@@ -1135,17 +1263,22 @@ fn emit_save_advance(
 ) {
     let n_slots = regions.n_slots;
 
+    // The saved-row counter (`G_SAVED`) and the save-cadence accumulator
+    // (`G_STEP_ACCUM`) are mutable globals, not function locals, so the cursor
+    // persists across the separate `run_to` calls a resumable run makes. `L_DST`
+    // is a per-step transient and stays a function local.
+
     // step_accum += 1
-    f.instruction(&I::LocalGet(L_STEP_ACCUM));
+    f.instruction(&I::GlobalGet(G_STEP_ACCUM));
     f.instruction(&I::I32Const(1));
     f.instruction(&I::I32Add);
-    f.instruction(&I::LocalSet(L_STEP_ACCUM));
+    f.instruction(&I::GlobalSet(G_STEP_ACCUM));
 
     // save_cond = (step_accum == save_every) | (saved == 0 & time == start)
-    f.instruction(&I::LocalGet(L_STEP_ACCUM));
+    f.instruction(&I::GlobalGet(G_STEP_ACCUM));
     f.instruction(&I::I32Const(save_every));
     f.instruction(&I::I32Eq);
-    f.instruction(&I::LocalGet(L_SAVED));
+    f.instruction(&I::GlobalGet(G_SAVED));
     f.instruction(&I::I32Eqz);
     f.instruction(&I::I32Const(0));
     f.instruction(&I::F64Load(memarg(TIME_ADDR)));
@@ -1157,7 +1290,7 @@ fn emit_save_advance(
 
     // dst = results_base + saved * stride
     f.instruction(&I::I32Const(regions.results_base as i32));
-    f.instruction(&I::LocalGet(L_SAVED));
+    f.instruction(&I::GlobalGet(G_SAVED));
     f.instruction(&I::I32Const(regions.stride as i32));
     f.instruction(&I::I32Mul);
     f.instruction(&I::I32Add);
@@ -1172,15 +1305,15 @@ fn emit_save_advance(
     }
 
     // saved += 1; step_accum = 0
-    f.instruction(&I::LocalGet(L_SAVED));
+    f.instruction(&I::GlobalGet(G_SAVED));
     f.instruction(&I::I32Const(1));
     f.instruction(&I::I32Add);
-    f.instruction(&I::LocalSet(L_SAVED));
+    f.instruction(&I::GlobalSet(G_SAVED));
     f.instruction(&I::I32Const(0));
-    f.instruction(&I::LocalSet(L_STEP_ACCUM));
+    f.instruction(&I::GlobalSet(G_STEP_ACCUM));
 
     // if saved >= n_chunks: break (depth 2: if -> loop -> block)
-    f.instruction(&I::LocalGet(L_SAVED));
+    f.instruction(&I::GlobalGet(G_SAVED));
     f.instruction(&I::I32Const(regions.n_chunks as i32));
     f.instruction(&I::I32GeS);
     f.instruction(&I::BrIf(2));
@@ -1287,16 +1420,24 @@ fn emit_set_value(n_slots: u32, const_region_base: u32, const_valid_base: u32) -
     f
 }
 
-/// Emit `reset() -> ()`: reset the run state so the next `run` re-runs initials
-/// and the loop from t=start. The wasm `run` already re-seeds the time slots and
-/// re-runs initials on every call and uses fresh i32 locals for the chunk/step
-/// counters, so the only cross-run state is the `use_prev_fallback` global, which
-/// `run` clears after the first `prev_values` snapshot. Setting it back to 1 here
-/// is the analogue of the VM's `reset` clearing `prev_values_valid` (`vm.rs:976-989`),
-/// and -- like the VM -- it deliberately does NOT touch the constants region, so
-/// overrides persist across reset.
+/// Emit `reset() -> ()`: clear the persistent run state so the next `run_to`
+/// (and therefore `run`, which delegates `reset; run_to(stop)`) re-runs initials
+/// and steps the loop from t=start. The run cursor now lives in mutable globals
+/// (since the run is resumable), so `reset` must clear all of it:
+/// `G_SAVED`/`G_STEP_ACCUM` to 0 (no rows saved, accumulator empty),
+/// `G_DID_INITIALS` to 0 (so `run_initials` no longer short-circuits and re-seeds
+/// the time slots + re-runs initials), and `G_USE_PREV_FALLBACK` back to 1 (the
+/// analogue of the VM's `reset` clearing `prev_values_valid`). This mirrors
+/// `vm.rs:989-1002` exactly. Like the VM, it deliberately does NOT touch the
+/// constants-override region, so a `set_value` override persists across `reset`.
 fn emit_reset() -> Function {
     let mut f = Function::new([]);
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::GlobalSet(G_SAVED));
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::GlobalSet(G_STEP_ACCUM));
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::GlobalSet(G_DID_INITIALS));
     f.instruction(&I::I32Const(1));
     f.instruction(&I::GlobalSet(G_USE_PREV_FALLBACK));
     f.instruction(&I::End);
@@ -1672,13 +1813,18 @@ struct AssembleParts<'a> {
     /// `[initials_0, flows_0, stocks_0, initials_1, ...]`. `instance_input_counts`
     /// (same instance order) gives each triple's f64 input-param count.
     program_fns: Vec<Function>,
+    /// `run() -> ()`, re-expressed as `reset; run_to(stop)`.
     run_fn: Function,
     /// `set_value(offset: i32, val: f64) -> i32` (Phase 7 Task 2).
     set_value_fn: Function,
-    /// `reset() -> ()` (Phase 7 Task 2).
+    /// `reset() -> ()` (Phase 7 Task 2; now also clears the run cursor globals).
     reset_fn: Function,
     /// `clear_values() -> ()` (Phase 7 Task 2).
     clear_values_fn: Function,
+    /// `run_to(target: f64) -> ()`: advance the resumable run to `target`.
+    run_to_fn: Function,
+    /// `run_initials() -> ()`: idempotent initials for the resumable run.
+    run_initials_fn: Function,
     /// Module-input parameter count per instance, in the same order the triples
     /// appear in `program_fns`. Drives the per-triple wasm type
     /// (`(i32, f64*k) -> ()`).
@@ -1712,6 +1858,8 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         set_value_fn,
         reset_fn,
         clear_values_fn,
+        run_to_fn,
+        run_initials_fn,
         instance_input_counts,
         pages,
         n_slots,
@@ -1724,19 +1872,25 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     let mut wasm = WasmModule::new();
     let n_helpers = helpers.functions.len() as u32;
     let n_instances = instance_input_counts.len() as u32;
-    // Function layout: helpers, the per-instance triples, then `run`, then the
-    // three constants-override exports (`set_value`/`reset`/`clear_values`).
-    let run_fn_index = n_helpers + n_instances * FUNCS_PER_INSTANCE;
+    // Function layout: helpers, the per-instance triples, then the driver
+    // functions in this fixed order: `run`, `set_value`, `reset`, `clear_values`,
+    // `run_to`, `run_initials`. The two resumable exports append last so the
+    // original four keep stable indices (the growth is purely additive). The
+    // emit-time index math in `compile_simulation` uses the same `run_fn_index_of`.
+    let run_fn_index = run_fn_index_of(n_helpers, n_instances);
     let set_value_fn_index = run_fn_index + 1;
     let reset_fn_index = run_fn_index + 2;
     let clear_values_fn_index = run_fn_index + 3;
+    let run_to_fn_index = run_fn_index + 4;
+    let run_initials_fn_index = run_fn_index + 5;
 
     // Type section: `run`'s `() -> ()` first, then one opcode-program type per
     // *distinct* module-input count (`(i32, f64*k) -> ()`, sorted), then the
-    // helper types, then the `set_value` type (`(i32, f64) -> i32`).
-    // `reset`/`clear_values` reuse `TYPE_RUN_FN`. `opcode_type_for` maps an
-    // instance's `n_inputs` to its type index; a helper at function index `i`
-    // uses the type appended after those.
+    // helper types, then the `set_value` type (`(i32, f64) -> i32`), then
+    // `run_to`'s `(f64) -> ()` type. `reset`/`clear_values`/`run_initials` reuse
+    // `TYPE_RUN_FN` (`() -> ()`). `opcode_type_for` maps an instance's `n_inputs`
+    // to its type index; a helper at function index `i` uses the type appended
+    // after those.
     let mut distinct_inputs: Vec<u32> = instance_input_counts.to_vec();
     distinct_inputs.sort_unstable();
     distinct_inputs.dedup();
@@ -1747,6 +1901,7 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         .collect();
     let first_helper_type = TYPE_RUN_FN + 1 + distinct_inputs.len() as u32;
     let set_value_type = first_helper_type + helpers.functions.len() as u32;
+    let run_to_type = set_value_type + 1;
 
     let mut types = TypeSection::new();
     types.ty().function([], []); // TYPE_RUN_FN: () -> ()
@@ -1764,11 +1919,14 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     types
         .ty()
         .function([ValType::I32, ValType::F64], [ValType::I32]);
+    // `run_to(target: f64) -> ()`.
+    types.ty().function([ValType::F64], []);
     wasm.section(&types);
 
     // Function section: helpers first (indices `0..n_helpers`), then each
     // instance's three program functions (typed by that instance's `n_inputs`),
-    // then `run`, then `set_value`/`reset`/`clear_values`.
+    // then the driver functions in index order: `run`, `set_value`, `reset`,
+    // `clear_values`, `run_to`, `run_initials`.
     let mut functions = FunctionSection::new();
     for (i, _) in helpers.functions.iter().enumerate() {
         functions.function(first_helper_type + i as u32);
@@ -1783,6 +1941,8 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     functions.function(set_value_type); // set_value
     functions.function(TYPE_RUN_FN); // reset
     functions.function(TYPE_RUN_FN); // clear_values
+    functions.function(run_to_type); // run_to
+    functions.function(TYPE_RUN_FN); // run_initials
     wasm.section(&functions);
 
     let mut memories = MemorySection::new();
@@ -1800,20 +1960,25 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
         mutable: false,
         shared: false,
     };
+    let mutable_i32_global = || GlobalType {
+        val_type: ValType::I32,
+        mutable: true,
+        shared: false,
+    };
     let mut globals = GlobalSection::new();
     globals.global(i32_global(), &ConstExpr::i32_const(n_slots as i32));
     globals.global(i32_global(), &ConstExpr::i32_const(n_chunks as i32));
     globals.global(i32_global(), &ConstExpr::i32_const(results_base as i32));
-    // `use_prev_fallback`: the only mutable global. Init 1 so `LoadPrev` returns
-    // its fallback until the first `prev_values` snapshot clears it (`vm.rs:668`).
-    globals.global(
-        GlobalType {
-            val_type: ValType::I32,
-            mutable: true,
-            shared: false,
-        },
-        &ConstExpr::i32_const(1),
-    );
+    // The mutable globals (index 3..=6), all internal. `use_prev_fallback` (index
+    // 3) inits 1 so `LoadPrev` returns its fallback until the first `prev_values`
+    // snapshot clears it (`vm.rs:668`). The persistent step cursor follows:
+    // `G_SAVED`/`G_STEP_ACCUM`/`G_DID_INITIALS` (4/5/6), all init 0 -- the
+    // module-init state is "no rows saved, accumulator empty, initials not yet
+    // run", which `run_initials` arms and `reset` restores.
+    globals.global(mutable_i32_global(), &ConstExpr::i32_const(1)); // G_USE_PREV_FALLBACK
+    globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_SAVED
+    globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_STEP_ACCUM
+    globals.global(mutable_i32_global(), &ConstExpr::i32_const(0)); // G_DID_INITIALS
     wasm.section(&globals);
 
     let mut exports = ExportSection::new();
@@ -1821,15 +1986,24 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     exports.export("set_value", ExportKind::Func, set_value_fn_index);
     exports.export("reset", ExportKind::Func, reset_fn_index);
     exports.export("clear_values", ExportKind::Func, clear_values_fn_index);
+    // The resumable run ABI (purely additive to the export set above).
+    exports.export("run_to", ExportKind::Func, run_to_fn_index);
+    exports.export("run_initials", ExportKind::Func, run_initials_fn_index);
     exports.export("memory", ExportKind::Memory, 0);
     exports.export("n_slots", ExportKind::Global, G_N_SLOTS);
     exports.export("n_chunks", ExportKind::Global, G_N_CHUNKS);
     exports.export("results_offset", ExportKind::Global, G_RESULTS_OFFSET);
+    // The live saved-row counter (a mutable global): it is 0 before any run and
+    // after `reset`, and equals `n_chunks` after a full run. A host reads it as
+    // the number of completed steps (the VM's `results.step_count`), which the
+    // static `n_chunks` capacity cannot express mid-run / pre-run. Additive.
+    exports.export("saved_steps", ExportKind::Global, G_SAVED);
     wasm.section(&exports);
 
     // Code section order must match the function section: helper bodies, then the
-    // per-instance program functions (in `program_fns` order), then `run`, then
-    // `set_value`/`reset`/`clear_values`.
+    // per-instance program functions (in `program_fns` order), then the driver
+    // functions in index order: `run`, `set_value`, `reset`, `clear_values`,
+    // `run_to`, `run_initials`.
     let mut code = CodeSection::new();
     for hf in &helpers.functions {
         code.function(&hf.body);
@@ -1841,6 +2015,8 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     code.function(&set_value_fn);
     code.function(&reset_fn);
     code.function(&clear_values_fn);
+    code.function(&run_to_fn);
+    code.function(&run_initials_fn);
     wasm.section(&code);
 
     // The GF directory + data regions and the constants-override init values
@@ -2099,6 +2275,12 @@ mod tests {
             },
             reset_fn: empty(),
             clear_values_fn: empty(),
+            // Empty (no-op) resumable-run functions: this test only checks the GF
+            // data segments. `run_to` is `(f64) -> ()` and `run_initials` is
+            // `() -> ()`; an empty body type-checks against either (the type comes
+            // from the function section, and a no-op leaves the stack empty).
+            run_to_fn: empty(),
+            run_initials_fn: empty(),
             instance_input_counts: &[0],
             pages,
             n_slots: 0,
@@ -4552,6 +4734,759 @@ mod tests {
             (wasm_slab[level_off] - 42.0).abs() < 1e-9,
             "level should initialize to the overridden seed=42, got {}",
             wasm_slab[level_off]
+        );
+    }
+
+    // ── Resumable run ABI (run_initials/run_to) vs the VM oracle ──────────
+    //
+    // The blob's persistent step cursor lives in mutable globals
+    // (`G_SAVED`/`G_STEP_ACCUM`/`G_DID_INITIALS`), so a run can be advanced
+    // incrementally: `run_initials()` once, then `run_to(t)` per target. The VM
+    // (`Vm::run_initials`/`run_to`/`reset`/`set_value`) is the correctness oracle
+    // for every behavior below; the comparator tolerance matches the
+    // single-shot-`run` tests above (1e-9 cell-for-cell on the in-memory
+    // fixtures, which run identically on both backends).
+
+    /// A small stock + constant-flow fixture with `n_chunks` save points spanning
+    /// `[0, stop]` at `dt`/`save_step` = 1. `level` integrates `inflow_rate` per
+    /// step, so a wrong cursor or guard diverges immediately and visibly.
+    fn resumable_fixture(stop: f64) -> crate::datamodel::Project {
+        crate::test_common::TestProject::new("resumable")
+            .with_sim_time(0.0, stop, 1.0)
+            .aux("inflow_rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "inflow_rate", None)
+            .build_datamodel()
+    }
+
+    /// Drive the blob's resumable exports on a *fresh* instance: `run_initials`
+    /// once, then `run_to(t)` for each `t` in `targets`, then copy the whole
+    /// step-major slab out. The in-module peer of the integration-test helper
+    /// `run_wasm_results_segmented`; kept here because the lib `#[cfg(test)]`
+    /// module cannot reach the integration crate's private helpers.
+    fn run_artifact_segmented(artifact: &WasmArtifact, targets: &[f64]) -> Vec<f64> {
+        let info = validate(&artifact.wasm).expect("generated module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let run_initials = store
+            .instance_export(inst, "run_initials")
+            .expect("run_initials export")
+            .as_func()
+            .expect("run_initials is a function");
+        store
+            .invoke_simple_typed::<(), ()>(run_initials, ())
+            .expect("run_initials wasm");
+        for &t in targets {
+            let run_to = store
+                .instance_export(inst, "run_to")
+                .expect("run_to export")
+                .as_func()
+                .expect("run_to is a function");
+            store
+                .invoke_simple_typed::<(f64,), ()>(run_to, (t,))
+                .expect("run_to wasm");
+        }
+        read_slab(&mut store, inst, &artifact.layout)
+    }
+
+    /// Copy the whole step-major results slab (`n_chunks * n_slots` f64 at
+    /// `layout.results_offset`) out of an already-driven instance's `memory`.
+    fn read_slab(
+        store: &mut Store<()>,
+        inst: checked::Stored<wasm::addrs::ModuleAddr>,
+        layout: &WasmLayout,
+    ) -> Vec<f64> {
+        let mem = store
+            .instance_export(inst, "memory")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        let n = layout.n_chunks * layout.n_slots;
+        let base = layout.results_offset;
+        store.mem_access_mut_slice(mem, |bytes| {
+            (0..n)
+                .map(|i| {
+                    let a = base + i * 8;
+                    f64::from_le_bytes(bytes[a..a + 8].try_into().unwrap())
+                })
+                .collect()
+        })
+    }
+
+    /// Task 1 (AC2.1, AC2.2 foundation): the re-expressed `run`, the resumable
+    /// `run_initials`+`run_to(stop)`, and the VM must all agree on the full series.
+    /// `run` is now `reset; run_to(stop)`, so this proves the delegation is
+    /// faithful (the `run` export matches the segmented drive) and that the
+    /// resumable path matches the VM (`Vm::run_to_end`) cell-for-cell.
+    #[test]
+    fn compile_simulation_run_to_matches_run_and_vm() {
+        let datamodel = resumable_fixture(10.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let stop = sim.specs.stop;
+
+        // (a) the single-shot `run` export.
+        let via_run = run_artifact_results(&artifact);
+        // (b) run_initials + run_to(stop).
+        let via_run_to = run_artifact_segmented(&artifact, &[stop]);
+        // (c) the VM oracle.
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to_end().expect("vm run");
+        let vm_results = vm.into_results();
+        assert_eq!(vm_results.step_count, n_chunks, "VM saved-chunk count");
+
+        // The two wasm paths must be byte-identical (the run re-expression is a
+        // pure delegation to run_to, so there is no numeric slack between them).
+        assert_eq!(
+            via_run, via_run_to,
+            "run export diverged from run_initials+run_to(stop) -- the run re-expression is unfaithful"
+        );
+
+        // Both wasm paths equal the VM cell-for-cell over every layout variable.
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let run_val = via_run[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - run_val).abs() < 1e-9,
+                    "{name} mismatch at chunk {c}: vm={vm_val} wasm={run_val}"
+                );
+            }
+        }
+
+        // AC2.2 foundation: after run_to(t), the saved row for time t holds the
+        // VM's value at t. level integrates inflow_rate=2/step from 0, so at t its
+        // saved value is 2*t. Drive a fresh instance to t=4 and read level's row 4.
+        let level_off = layout_offset(&artifact, "level");
+        let to_4 = run_artifact_segmented(&artifact, &[4.0]);
+        let mut vm4 = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm4.run_to(4.0).expect("vm run_to(4)");
+        let vm4_results = vm4.into_results();
+        let vm4_level_off = vm4_results.offsets[&Ident::<Canonical>::from_str_unchecked("level")];
+        let wasm_at_4 = to_4[4 * n_slots + level_off];
+        let vm_at_4 = vm4_results.data[4 * vm4_results.step_size + vm4_level_off];
+        assert!(
+            (wasm_at_4 - vm_at_4).abs() < 1e-9 && (wasm_at_4 - 8.0).abs() < 1e-9,
+            "level at t=4 after run_to(4): wasm={wasm_at_4} vm={vm_at_4} (expected 8)"
+        );
+    }
+
+    /// Read a single f64 slot from the live `curr` chunk (base 0) of an
+    /// already-driven instance -- the value `run_to` left "current". This is the
+    /// blob-side analogue of the VM's `get_value_now(off)` (which reads the VM's
+    /// current chunk): the phase reads AC2.2's "getValue after run_to(t)" at the
+    /// blob level as the live curr chunk, since the blob has no `getValue` export.
+    fn read_curr_slot(
+        store: &mut Store<()>,
+        inst: checked::Stored<wasm::addrs::ModuleAddr>,
+        off: usize,
+    ) -> f64 {
+        let mem = store
+            .instance_export(inst, "memory")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+        let addr = off * 8; // curr chunk starts at byte 0
+        store.mem_access_mut_slice(mem, |bytes| {
+            f64::from_le_bytes(bytes[addr..addr + 8].try_into().unwrap())
+        })
+    }
+
+    /// The VM's saved slab after driving it through `run_to(t)` for each `t` in
+    /// `targets` (mirrors `run_artifact_segmented`). `run_to` calls `run_initials`
+    /// internally, so the VM advances exactly as the blob does.
+    fn vm_slab_segmented(sim: CompiledSimulation, targets: &[f64]) -> (Vec<f64>, usize, usize) {
+        let mut vm = Vm::new(sim).expect("vm creation");
+        for &t in targets {
+            vm.run_to(t).expect("vm run_to");
+        }
+        let results = vm.into_results();
+        (results.data.to_vec(), results.step_size, results.step_count)
+    }
+
+    /// Count the committed (written) rows in a *blob* results slab after a partial
+    /// run, via the TIME column. This is sound for the blob specifically because
+    /// the blob keeps its working `curr`/`next` chunks SEPARATE from the results
+    /// region (see the "Cursor mapping" caveat): an unwritten results row stays at
+    /// its zero-initialized state, so its TIME slot reads 0.0 and won't match the
+    /// expected save-point time `start + c*save_step` for `c > 0`. Row 0 is always
+    /// written (the forced t=start save). The same heuristic is NOT sound for the
+    /// VM slab, whose chunk-ring leaks the working chunk into the exported range
+    /// (its TIME slot holds a genuine overshoot time) -- hence callers derive the
+    /// VM's committed count analytically instead. Used only with the resumable
+    /// fixture, where save_step == dt.
+    fn live_saved_rows(
+        slab: &[f64],
+        n_slots: usize,
+        n_chunks: usize,
+        start: f64,
+        dt: f64,
+    ) -> usize {
+        let mut count = 0usize;
+        for c in 0..n_chunks {
+            let t = slab[c * n_slots + TIME_OFF];
+            let expected = start + c as f64 * dt;
+            if c == 0 || (t - expected).abs() < 1e-9 {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        count
+    }
+
+    /// Task 2 (AC2.3): a segmented `run_initials; run_to(t1); run_to(t2)` produces
+    /// the same rows (up to t2) as a single `run_initials; run_to(t2)` and as the
+    /// VM driven through the same `run_to(t1); run_to(t2)` segments. The cursor in
+    /// the globals must survive across the two `run_to` calls and resume exactly.
+    #[test]
+    fn run_to_segmented_matches_single_and_vm() {
+        let datamodel = resumable_fixture(10.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        let (t1, t2) = (3.0, 7.0);
+        let segmented = run_artifact_segmented(&artifact, &[t1, t2]);
+        let single = run_artifact_segmented(&artifact, &[t2]);
+        let (vm_data, vm_step_size, _) =
+            vm_slab_segmented(compile_sim(&datamodel, "main"), &[t1, t2]);
+
+        // Rows for times <= t2 (chunks 0..=7) must agree across all three.
+        let last_row = t2 as usize; // save_step == dt == 1, so row index == time.
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(vm_off) = sim.get_offset(&ident) else {
+                continue;
+            };
+            for c in 0..=last_row {
+                let seg = segmented[c * n_slots + wasm_off];
+                let sng = single[c * n_slots + wasm_off];
+                let vm_val = vm_data[c * vm_step_size + vm_off];
+                assert!(
+                    (seg - sng).abs() < 1e-9,
+                    "{name} segmented vs single mismatch at chunk {c}: {seg} vs {sng}"
+                );
+                assert!(
+                    (seg - vm_val).abs() < 1e-9,
+                    "{name} segmented vs VM mismatch at chunk {c}: {seg} vs {vm_val}"
+                );
+            }
+        }
+        assert!(
+            n_chunks >= 8,
+            "fixture must have at least 8 chunks for t2=7"
+        );
+    }
+
+    /// Task 2 (AC2.2): the count of saved rows after `run_to(t)` matches the VM's,
+    /// for `t` exactly on a save point and `t` between save points.
+    ///
+    /// Layout note (the phase's "Cursor mapping" caveat): the blob keeps its
+    /// working `curr`/`next` chunks SEPARATE from the results region, so a partial
+    /// `run_to(t)` writes exactly the committed save-cadence rows (t=0..floor(t),
+    /// 5 rows for both t=4 and t=4.5). The VM stores results in a chunk-ring and
+    /// advances `curr_chunk` THROUGH it, so its working chunk (the t=floor(t)+dt
+    /// overshoot the guard `curr[TIME] > end` leaves behind) leaks into the
+    /// exported slab as one extra populated row -- a known chunk-ring artifact, not
+    /// a committed save point. We therefore compare the committed-save-point count
+    /// (which both backends agree on) and assert the blob's committed rows equal
+    /// the VM's on exactly those rows; separately we assert AC2.2 directly: the
+    /// blob's live `curr` chunk after `run_to(t)` equals the VM's `get_value_now`
+    /// (which reads the VM's current chunk, i.e. the same t=floor(t)+dt overshoot).
+    #[test]
+    fn run_to_at_save_and_between_save_points() {
+        let datamodel = resumable_fixture(10.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let start = sim.specs.start;
+        let dt = sim.specs.dt;
+        let level_off = layout_offset(&artifact, "level");
+
+        for &t in &[4.0_f64, 4.5_f64] {
+            // The committed save-cadence count is analytic from the spec: save
+            // points at start + c*save_step (save_step == dt here) for every c with
+            // start + c*dt <= t, capped at n_chunks.
+            let committed = ((t - start) / dt).floor() as usize + 1;
+            let committed = committed.min(n_chunks);
+
+            let slab = run_artifact_segmented(&artifact, &[t]);
+            let wasm_rows = live_saved_rows(&slab, n_slots, n_chunks, start, dt);
+            assert_eq!(
+                wasm_rows, committed,
+                "run_to({t}) committed-row count: wasm={wasm_rows}, expected {committed}"
+            );
+            assert_eq!(committed, 5, "run_to({t}) should commit 5 rows (t=0..4)");
+
+            // The blob's committed rows equal the VM's corresponding rows.
+            let (vm_data, vm_step_size, _) =
+                vm_slab_segmented(compile_sim(&datamodel, "main"), &[t]);
+            for (name, wasm_off) in &artifact.layout.var_offsets {
+                let wasm_off = *wasm_off;
+                let ident = Ident::<Canonical>::from_str_unchecked(name);
+                let Some(vm_off) = sim.get_offset(&ident) else {
+                    continue;
+                };
+                for c in 0..committed {
+                    let w = slab[c * n_slots + wasm_off];
+                    let v = vm_data[c * vm_step_size + vm_off];
+                    assert!(
+                        (w - v).abs() < 1e-9,
+                        "{name} committed-row mismatch at chunk {c} (run_to({t})): wasm={w} vm={v}"
+                    );
+                }
+            }
+
+            // AC2.2: the blob's live curr chunk (base 0) after run_to(t) equals the
+            // VM's get_value_now. Both advance one step past the on-grid target:
+            // run_to(4) and run_to(4.5) both leave the cursor at t=5, level=10.
+            let info = validate(&artifact.wasm).expect("module must validate");
+            let mut store = Store::new(());
+            let inst = store
+                .module_instantiate(&info, Vec::new(), None)
+                .expect("instantiate")
+                .module_addr;
+            let run_initials = store
+                .instance_export(inst, "run_initials")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store
+                .invoke_simple_typed::<(), ()>(run_initials, ())
+                .expect("run_initials");
+            let run_to = store
+                .instance_export(inst, "run_to")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store
+                .invoke_simple_typed::<(f64,), ()>(run_to, (t,))
+                .expect("run_to");
+            let curr_level = read_curr_slot(&mut store, inst, level_off);
+
+            let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+            vm.run_to(t).expect("vm run_to");
+            let vm_now = vm.get_value_now(
+                vm.get_offset(&Ident::<Canonical>::from_str_unchecked("level"))
+                    .unwrap(),
+            );
+            assert!(
+                (curr_level - vm_now).abs() < 1e-9 && (curr_level - 10.0).abs() < 1e-9,
+                "live curr level after run_to({t}): wasm={curr_level} vm={vm_now} (expected 10)"
+            );
+        }
+    }
+
+    /// Task 2 (AC2.4): `run_to(stop * 2)` clamps to the end -- it equals both a
+    /// `run_to(stop)` and `Vm::run_to_end`, and saves exactly `n_chunks` rows. The
+    /// blob clamps via the saved-row exhaustion break (`if saved >= n_chunks`),
+    /// exactly like the VM's chunk-ring exhaustion: it can never overrun the slab.
+    #[test]
+    fn run_to_past_final_time_clamps() {
+        let datamodel = resumable_fixture(10.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let stop = sim.specs.stop;
+        let start = sim.specs.start;
+        let dt = sim.specs.dt;
+
+        let clamped = run_artifact_segmented(&artifact, &[stop * 2.0]);
+        let to_stop = run_artifact_segmented(&artifact, &[stop]);
+
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to_end().expect("vm run");
+        let vm_results = vm.into_results();
+
+        assert_eq!(
+            clamped, to_stop,
+            "run_to(stop*2) must equal run_to(stop) -- past-FINAL_TIME must clamp"
+        );
+        // Exactly n_chunks rows are live (the full slab), none beyond.
+        assert_eq!(
+            live_saved_rows(&clamped, n_slots, n_chunks, start, dt),
+            n_chunks,
+            "run_to(stop*2) must save exactly n_chunks rows"
+        );
+
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = clamped[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} clamp mismatch at chunk {c}: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+    }
+
+    /// Task 3 (AC3.1, AC5.4): on a single reused instance, `run` then
+    /// `reset; run` reproduce the same compiled-default series, and both equal the
+    /// VM (with a `reset` between two VM runs). `reset` clears the cursor globals
+    /// so the second `run` is a full from-t0 simulation, not a stale resume.
+    #[test]
+    fn reset_then_run_reproduces_defaults() {
+        let datamodel = resumable_fixture(5.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let invoke_run = |store: &mut Store<()>| {
+            let run = store
+                .instance_export(inst, "run")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store.invoke_simple_typed::<(), ()>(run, ()).expect("run");
+        };
+        let invoke_reset = |store: &mut Store<()>| {
+            let reset = store
+                .instance_export(inst, "reset")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store
+                .invoke_simple_typed::<(), ()>(reset, ())
+                .expect("reset");
+        };
+
+        invoke_run(&mut store);
+        let series_a = read_slab(&mut store, inst, &artifact.layout);
+        invoke_reset(&mut store);
+        invoke_run(&mut store);
+        let series_b = read_slab(&mut store, inst, &artifact.layout);
+
+        assert_eq!(
+            series_a, series_b,
+            "reset; run must reproduce the first run's default series exactly"
+        );
+
+        // The VM oracle: a fresh run, then reset, then a second run -- both equal
+        // the wasm series.
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to_end().expect("vm run");
+        vm.reset();
+        vm.run_to_end().expect("vm run after reset");
+        let vm_results = vm.into_results();
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = series_b[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} reset-default mismatch at chunk {c}: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+    }
+
+    /// Task 3 (AC3.2, AC5.4): `reset` preserves a constant override. On one reused
+    /// instance: `set_value(inflow_rate, 5)`, `run` -> series A; `reset`, `run` ->
+    /// series B. A == B (the override survived the reset, since `reset` does not
+    /// touch the constants region), and both equal the VM run with the same
+    /// override and a `reset` between runs.
+    #[test]
+    fn reset_preserves_overrides() {
+        let datamodel = resumable_fixture(5.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let rate_off = layout_offset(&artifact, "inflow_rate");
+        assert!(
+            sim.is_constant_offset(rate_off),
+            "inflow_rate must be an overridable constant"
+        );
+
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        // set_value(inflow_rate, 5) on this instance.
+        let set_value = store
+            .instance_export(inst, "set_value")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let rc: i32 = store
+            .invoke_simple_typed::<(i32, f64), i32>(set_value, (rate_off as i32, 5.0))
+            .expect("set_value");
+        assert_eq!(rc, 0, "set_value on inflow_rate must succeed");
+
+        let invoke_run = |store: &mut Store<()>| {
+            let run = store
+                .instance_export(inst, "run")
+                .unwrap()
+                .as_func()
+                .unwrap();
+            store.invoke_simple_typed::<(), ()>(run, ()).expect("run");
+        };
+
+        invoke_run(&mut store);
+        let series_a = read_slab(&mut store, inst, &artifact.layout);
+        let reset = store
+            .instance_export(inst, "reset")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(), ()>(reset, ())
+            .expect("reset");
+        invoke_run(&mut store);
+        let series_b = read_slab(&mut store, inst, &artifact.layout);
+
+        assert_eq!(
+            series_a, series_b,
+            "reset must preserve the override -- both runs use inflow_rate=5"
+        );
+
+        // The VM oracle: override, run, reset, run -- the override persists across
+        // the VM's reset too (it does not call clear_values).
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.set_value_by_offset(rate_off, 5.0)
+            .expect("vm override on a constant");
+        vm.run_to_end().expect("vm run");
+        vm.reset();
+        vm.run_to_end().expect("vm run after reset");
+        let vm_results = vm.into_results();
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = series_b[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} reset-override mismatch at chunk {c}: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+        // The override actually took: level reaches 5*5 = 25 (not the default 10).
+        let level_off = layout_offset(&artifact, "level");
+        let last = (n_chunks - 1) * n_slots + level_off;
+        assert!(
+            (series_b[last] - 25.0).abs() < 1e-9,
+            "level under inflow_rate=5 should reach 25 after reset, got {}",
+            series_b[last]
+        );
+    }
+
+    /// Task 4 (AC5.3): a mid-run `set_value` affects only steps after the cursor.
+    /// On one instance: `run_initials; run_to(t1)`, `set_value(inflow_rate, v2)`,
+    /// `run_to(stop)`. Rows at times <= t1 match a no-override baseline; rows after
+    /// reflect v2. The whole slab matches the VM driven identically. The override
+    /// re-reads from the region every step (`lower.rs`'s `AssignConstCurr`
+    /// redirect), so no new mechanism is needed beyond the resumable run.
+    ///
+    /// AC5.1 (full-run override) is already covered by
+    /// `compile_simulation_set_value_override_matches_vm` above; this is the
+    /// incremental peer.
+    #[test]
+    fn mid_run_set_value_matches_vm() {
+        let datamodel = resumable_fixture(10.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+        let stop = sim.specs.stop;
+        let rate_off = layout_offset(&artifact, "inflow_rate");
+        let level_off = layout_offset(&artifact, "level");
+        assert!(sim.is_constant_offset(rate_off));
+
+        let t1 = 5.0_f64;
+        let v2 = 5.0_f64;
+
+        // Drive the blob: run_initials; run_to(t1); set_value(rate, v2); run_to(stop).
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let run_initials = store
+            .instance_export(inst, "run_initials")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(), ()>(run_initials, ())
+            .expect("run_initials");
+        let run_to_t1 = store
+            .instance_export(inst, "run_to")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to_t1, (t1,))
+            .expect("run_to(t1)");
+        let set_value = store
+            .instance_export(inst, "set_value")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let rc: i32 = store
+            .invoke_simple_typed::<(i32, f64), i32>(set_value, (rate_off as i32, v2))
+            .expect("set_value");
+        assert_eq!(rc, 0, "mid-run set_value on a constant must succeed");
+        let run_to_stop = store
+            .instance_export(inst, "run_to")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to_stop, (stop,))
+            .expect("run_to(stop)");
+        let wasm_slab = read_slab(&mut store, inst, &artifact.layout);
+
+        // The VM oracle, driven identically.
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to(t1).expect("vm run_to(t1)");
+        vm.set_value(&Ident::<Canonical>::from_str_unchecked("inflow_rate"), v2)
+            .expect("vm set_value");
+        vm.run_to(stop).expect("vm run_to(stop)");
+        let vm_results = vm.into_results();
+
+        for (name, wasm_off) in &artifact.layout.var_offsets {
+            let wasm_off = *wasm_off;
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(&vm_off) = vm_results.offsets.get(&ident) else {
+                continue;
+            };
+            for c in 0..n_chunks {
+                let vm_val = vm_results.data[c * vm_results.step_size + vm_off];
+                let wasm_val = wasm_slab[c * n_slots + wasm_off];
+                assert!(
+                    (vm_val - wasm_val).abs() < 1e-9,
+                    "{name} mid-run mismatch at chunk {c}: vm={vm_val} wasm={wasm_val}"
+                );
+            }
+        }
+
+        // Rows up to and including the override-application point match the
+        // no-override baseline (rate=2). Because `set_value` runs AFTER
+        // `run_to(t1)` -- which (like the VM) advances the committed cursor one
+        // step PAST t1, i.e. to t1+dt, running the t1->t1+dt step with the OLD
+        // rate -- the first overridden step is t1+dt -> t1+2dt. So rows for
+        // t <= t1+dt are unchanged; rows after reflect v2. This is exactly AC5.3's
+        // "affects only steps after t1" (the override re-reads from the const
+        // region every step, so it cannot retroactively change committed rows).
+        let baseline = run_artifact_segmented(&artifact, &[stop]);
+        let unchanged_through = (t1 + sim.specs.dt) as usize;
+        for c in 0..=unchanged_through {
+            let mid = wasm_slab[c * n_slots + level_off];
+            let base = baseline[c * n_slots + level_off];
+            assert!(
+                (mid - base).abs() < 1e-9,
+                "level at chunk {c} (<= t1+dt) must match the no-override baseline: mid={mid} base={base}"
+            );
+        }
+        // The override took effect for the later steps: the final committed value
+        // exceeds the no-override baseline (rate 5 > 2 after the application point).
+        let last = (n_chunks - 1) * n_slots + level_off;
+        assert!(
+            wasm_slab[last] > baseline[last] + 1.0,
+            "level at stop after a mid-run rate bump must exceed the rate=2 baseline: mid={} base={}",
+            wasm_slab[last],
+            baseline[last]
+        );
+        // And a row strictly after the application point differs from baseline.
+        let after = (unchanged_through + 1) * n_slots + level_off;
+        assert!(
+            wasm_slab[after] > baseline[after],
+            "the first overridden row must exceed the baseline: mid={} base={}",
+            wasm_slab[after],
+            baseline[after]
+        );
+    }
+
+    /// Task 4 (AC5.2): the blob's `set_value` returns nonzero for a non-constant
+    /// offset (a stock or a computed flow) and zero for an overridable constant.
+    /// This is the blob-level peer of the VM's `BadOverride` rejection
+    /// (`vm.rs:1036-1044`); the TS facade turns the nonzero code into a thrown
+    /// error in Phase 2.
+    #[test]
+    fn set_value_nonconstant_returns_error() {
+        let datamodel = resumable_fixture(5.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+
+        let level_off = layout_offset(&artifact, "level"); // a stock
+        let inflow_off = layout_offset(&artifact, "inflow"); // a computed flow
+        let rate_off = layout_offset(&artifact, "inflow_rate"); // a constant
+        assert!(!sim.is_constant_offset(level_off), "level is a stock");
+        assert!(!sim.is_constant_offset(inflow_off), "inflow is computed");
+        assert!(
+            sim.is_constant_offset(rate_off),
+            "inflow_rate is a constant"
+        );
+
+        assert_ne!(
+            set_value_rc(&artifact, level_off as i32, 1.0),
+            0,
+            "set_value on a stock offset must return nonzero"
+        );
+        assert_ne!(
+            set_value_rc(&artifact, inflow_off as i32, 1.0),
+            0,
+            "set_value on a computed-flow offset must return nonzero"
+        );
+        assert_eq!(
+            set_value_rc(&artifact, rate_off as i32, 1.0),
+            0,
+            "set_value on the overridable constant must return zero"
+        );
+
+        // Cross-check the VM rejects the same non-constants and accepts the constant.
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        assert!(
+            vm.set_value_by_offset(level_off, 1.0).is_err(),
+            "VM must reject a stock offset"
+        );
+        assert!(
+            vm.set_value_by_offset(inflow_off, 1.0).is_err(),
+            "VM must reject a computed-flow offset"
+        );
+        assert!(
+            vm.set_value_by_offset(rate_off, 1.0).is_ok(),
+            "VM must accept the overridable constant"
         );
     }
 }

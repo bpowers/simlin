@@ -17,11 +17,15 @@ mod common;
 
 use std::ptr;
 
-use checked::Store;
+use checked::{Store, Stored};
 use common::open_project_from_datamodel;
 use simlin::*;
 use simlin_engine::test_common::TestProject;
+use wasm::addrs::ModuleAddr;
 use wasm::validate;
+
+/// A DLR-FT module instance handle, as returned by `module_instantiate`.
+type Inst = Stored<ModuleAddr>;
 
 /// A small scalar stock-and-flow model: a constant inflow fills a stock. Used as
 /// the supported-model fixture (it runs through the wasm backend cleanly).
@@ -183,6 +187,162 @@ fn compile_to_wasm_returns_blob_and_layout() {
     }
 }
 
+/// engine-wasm-sim.AC2.3 + AC5.3 across the `simlin_model_compile_to_wasm` path:
+/// the blob compiled via the FFI carries and honors the resumable ABI
+/// (`run_initials`/`run_to`/`reset`) added in Subcomponent A. The FFI signature
+/// itself is unchanged -- the resumable surface is reached purely through the
+/// blob's own exports.
+///
+/// Both the blob and the bytecode-VM oracle are driven through the *same*
+/// segmented sequence: advance to `t1`, override the constant `inflow_rate`
+/// mid-run, then advance to the end. Because a mid-run constant override is
+/// re-read each step (it affects only steps after `t1`), and because we compare
+/// the complete end-of-run `level` series (not a partial-run intermediate slab,
+/// which can differ by the VM's one leaked working chunk), the two must agree
+/// exactly here.
+#[test]
+fn compile_to_wasm_blob_supports_resumable_run() {
+    let datamodel = simple_model();
+    // t1 lands on a save point; the override raises inflow_rate partway through.
+    let t1 = 5.0;
+    let stop = 10.0;
+    let override_val = 5.0;
+    unsafe {
+        let project = open_project_from_datamodel(&datamodel);
+        let model_name = std::ffi::CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(project, model_name.as_ptr(), &mut err);
+        assert!(err.is_null(), "get_model should not error");
+        assert!(!model.is_null(), "model handle must be non-null");
+
+        let mut out_wasm: *mut u8 = ptr::null_mut();
+        let mut out_wasm_len: usize = 0;
+        let mut out_layout: *mut u8 = ptr::null_mut();
+        let mut out_layout_len: usize = 0;
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_model_compile_to_wasm(
+            model,
+            &mut out_wasm,
+            &mut out_wasm_len,
+            &mut out_layout,
+            &mut out_layout_len,
+            &mut err,
+        );
+        assert!(err.is_null(), "compile_to_wasm should not error");
+        assert!(
+            !out_wasm.is_null() && out_wasm_len > 0,
+            "blob must be non-empty"
+        );
+
+        let wasm = std::slice::from_raw_parts(out_wasm, out_wasm_len).to_vec();
+        validate(&wasm).expect("returned blob must validate");
+        let layout_bytes = std::slice::from_raw_parts(out_layout, out_layout_len).to_vec();
+        let layout = parse_layout(&layout_bytes);
+
+        // The export-set growth is purely additive: the blob still carries every
+        // original export at its original kind, plus the two new resumable funcs.
+        assert_blob_exports(&wasm);
+
+        let level_off = layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == "level")
+            .map(|(_, o)| *o)
+            .expect("level must be in the layout");
+        let inflow_rate_off = layout
+            .var_offsets
+            .iter()
+            .find(|(n, _)| n == "inflow_rate")
+            .map(|(_, o)| *o)
+            .expect("inflow_rate must be in the layout");
+
+        // Drive the blob's resumable ABI on ONE instance: run_initials ->
+        // run_to(t1) -> set_value(inflow_rate) -> run_to(stop), reading level's
+        // strided series at the end. The same instance is then reset and re-run.
+        let info = validate(&wasm).expect("validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+
+        invoke_unit(&mut store, inst, "run_initials");
+        invoke_run_to(&mut store, inst, t1);
+        let rc = invoke_set_value(&mut store, inst, inflow_rate_off as i32, override_val);
+        assert_eq!(rc, 0, "set_value on the overridable constant must return 0");
+        invoke_run_to(&mut store, inst, stop);
+        let blob_segmented = stride_var(&store, inst, &layout, level_off);
+
+        // VM oracle driven identically through the FFI: new -> run_to(t1) ->
+        // set_value -> run_to_end -> get_series.
+        let vm_segmented = vm_series_segmented_override(
+            project,
+            &model_name,
+            "level",
+            "inflow_rate",
+            t1,
+            override_val,
+            layout.n_chunks,
+        );
+        assert_eq!(
+            blob_segmented.len(),
+            vm_segmented.len(),
+            "blob and VM series length must match"
+        );
+        for (c, (&b, &v)) in blob_segmented.iter().zip(vm_segmented.iter()).enumerate() {
+            assert!(
+                (b - v).abs() < 1e-9,
+                "segmented level chunk {c}: blob {b} != vm {v}"
+            );
+        }
+
+        // reset across the FFI compile path: the override survives reset (the
+        // const-override region is untouched), so a fresh full `run` on the SAME
+        // instance reproduces the override-applied defaults -- a from-t0 run with
+        // inflow_rate = override_val throughout. Peer of `simlin_sim_reset`.
+        invoke_unit(&mut store, inst, "reset");
+        invoke_unit(&mut store, inst, "run");
+        let blob_after_reset = stride_var(&store, inst, &layout, level_off);
+
+        let vm_override_full = vm_series_with_override(
+            project,
+            &model_name,
+            "level",
+            "inflow_rate",
+            override_val,
+            layout.n_chunks,
+        );
+        assert_eq!(
+            blob_after_reset.len(),
+            vm_override_full.len(),
+            "post-reset blob and VM series length must match"
+        );
+        for (c, (&b, &v)) in blob_after_reset
+            .iter()
+            .zip(vm_override_full.iter())
+            .enumerate()
+        {
+            assert!(
+                (b - v).abs() < 1e-9,
+                "post-reset level chunk {c}: blob {b} != vm {v}"
+            );
+        }
+        // The override raised every step relative to the unmodified defaults, so
+        // the post-reset run is genuinely the override-applied series, not the
+        // compiled default (a guard against reset silently clearing overrides).
+        assert!(
+            (blob_after_reset[blob_after_reset.len() - 1] - 50.0).abs() < 1e-9,
+            "with inflow_rate={override_val} throughout, level reaches 50, got {}",
+            blob_after_reset[blob_after_reset.len() - 1]
+        );
+
+        simlin_free(out_wasm);
+        simlin_free(out_layout);
+        simlin_model_unref(model);
+        simlin_project_unref(project);
+    }
+}
+
 /// AC6.2: a model the wasm backend cannot compile surfaces a `SimlinError`
 /// (out_error is set, both buffers stay NULL), never a panic across the FFI
 /// boundary. `SUM(source[lo:hi])` with variable bounds lowers to a runtime view
@@ -306,6 +466,202 @@ fn run_and_stride(wasm: &[u8], layout: &ParsedLayout, off: usize) -> Vec<f64> {
             })
             .collect()
     })
+}
+
+/// Assert the FFI-compiled blob carries every original export (at its original
+/// kind) plus the two resumable functions added in Subcomponent A. The original
+/// set is `run`/`set_value`/`reset`/`clear_values` (funcs), `memory`, and the
+/// geometry globals `n_slots`/`n_chunks`/`results_offset`; the additions are
+/// `run_to`/`run_initials` (funcs) and `saved_steps` (the live saved-row counter
+/// global). This pins the export-set growth as purely additive.
+fn assert_blob_exports(wasm: &[u8]) {
+    let info = validate(wasm).expect("validate");
+    let mut store = Store::new(());
+    let inst = store
+        .module_instantiate(&info, Vec::new(), None)
+        .expect("instantiate")
+        .module_addr;
+    for name in [
+        "run",
+        "set_value",
+        "reset",
+        "clear_values",
+        "run_to",
+        "run_initials",
+    ] {
+        let exp = store
+            .instance_export(inst, name)
+            .unwrap_or_else(|_| panic!("blob must export `{name}`"));
+        assert!(
+            exp.as_func().is_some(),
+            "export `{name}` must be a function"
+        );
+    }
+    assert!(
+        store
+            .instance_export(inst, "memory")
+            .expect("blob must export `memory`")
+            .as_mem()
+            .is_some(),
+        "export `memory` must be a memory"
+    );
+    for name in ["n_slots", "n_chunks", "results_offset", "saved_steps"] {
+        let exp = store
+            .instance_export(inst, name)
+            .unwrap_or_else(|_| panic!("blob must export `{name}`"));
+        assert!(
+            exp.as_global().is_some(),
+            "export `{name}` must be a global"
+        );
+    }
+}
+
+/// Invoke a `() -> ()` blob export (`run_initials`/`run`/`reset`) on `inst`.
+fn invoke_unit(store: &mut Store<()>, inst: Inst, name: &str) {
+    let f = store
+        .instance_export(inst, name)
+        .unwrap_or_else(|_| panic!("`{name}` export must exist"))
+        .as_func()
+        .unwrap_or_else(|| panic!("`{name}` export must be a function"));
+    store
+        .invoke_simple_typed::<(), ()>(f, ())
+        .unwrap_or_else(|_| panic!("invoke `{name}`"));
+}
+
+/// Invoke `run_to(target)` (a `(f64) -> ()` export) on `inst`.
+fn invoke_run_to(store: &mut Store<()>, inst: Inst, target: f64) {
+    let f = store
+        .instance_export(inst, "run_to")
+        .expect("`run_to` export must exist")
+        .as_func()
+        .expect("`run_to` export must be a function");
+    store
+        .invoke_simple_typed::<(f64,), ()>(f, (target,))
+        .expect("invoke `run_to`");
+}
+
+/// Invoke `set_value(offset, val)` (a `(i32, f64) -> i32` export) on `inst`,
+/// returning the blob's status code (0 = applied, nonzero = rejected).
+fn invoke_set_value(store: &mut Store<()>, inst: Inst, offset: i32, val: f64) -> i32 {
+    let f = store
+        .instance_export(inst, "set_value")
+        .expect("`set_value` export must exist")
+        .as_func()
+        .expect("`set_value` export must be a function");
+    store
+        .invoke_simple_typed::<(i32, f64), i32>(f, (offset, val))
+        .expect("invoke `set_value`")
+}
+
+/// Stride the `n_chunks`-long series for the variable at `off` out of the live
+/// instance's results region (using only the layout geometry), without
+/// re-invoking `run` -- the cursor/run state already lives in the instance.
+fn stride_var(store: &Store<()>, inst: Inst, layout: &ParsedLayout, off: usize) -> Vec<f64> {
+    let mem = store
+        .instance_export(inst, "memory")
+        .expect("`memory` export must exist")
+        .as_mem()
+        .expect("`memory` export must be a memory");
+    let base = layout.results_offset;
+    let n_slots = layout.n_slots;
+    store.mem_access_mut_slice(mem, |bytes| {
+        (0..layout.n_chunks)
+            .map(|c| {
+                let a = base + (c * n_slots + off) * 8;
+                f64::from_le_bytes(bytes[a..a + 8].try_into().unwrap())
+            })
+            .collect()
+    })
+}
+
+/// VM oracle for a segmented, mid-run-override drive through the FFI:
+/// `simlin_sim_new` -> `run_to(t1)` -> `set_value(const_name, v)` ->
+/// `run_to_end` -> `get_series(name)`. Mirrors the blob's resumable sequence.
+unsafe fn vm_series_segmented_override(
+    project: *mut SimlinProject,
+    model_name: &std::ffi::CStr,
+    name: &str,
+    const_name: &str,
+    t1: f64,
+    override_val: f64,
+    n_chunks: usize,
+) -> Vec<f64> {
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let model = simlin_project_get_model(project, model_name.as_ptr(), &mut err);
+    assert!(err.is_null());
+    let sim = simlin_sim_new(model, false, &mut err);
+    assert!(err.is_null(), "sim_new should succeed");
+
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_sim_run_to(sim, t1, &mut err);
+    assert!(err.is_null(), "run_to(t1) should succeed");
+
+    let const_c = std::ffi::CString::new(const_name).unwrap();
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_sim_set_value(sim, const_c.as_ptr(), override_val, &mut err);
+    assert!(err.is_null(), "set_value on a constant should succeed");
+
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_sim_run_to_end(sim, &mut err);
+    assert!(err.is_null(), "run_to_end should succeed");
+
+    let series = read_series(sim, name, n_chunks);
+    simlin_sim_unref(sim);
+    simlin_model_unref(model);
+    series
+}
+
+/// VM oracle for a full from-t0 run with a constant override applied before the
+/// run: `simlin_sim_new` -> `set_value(const_name, v)` -> `run_to_end` ->
+/// `get_series(name)`. This is the "override-applied defaults" the blob must
+/// reproduce after a `reset` that preserves overrides.
+unsafe fn vm_series_with_override(
+    project: *mut SimlinProject,
+    model_name: &std::ffi::CStr,
+    name: &str,
+    const_name: &str,
+    override_val: f64,
+    n_chunks: usize,
+) -> Vec<f64> {
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let model = simlin_project_get_model(project, model_name.as_ptr(), &mut err);
+    assert!(err.is_null());
+    let sim = simlin_sim_new(model, false, &mut err);
+    assert!(err.is_null(), "sim_new should succeed");
+
+    let const_c = std::ffi::CString::new(const_name).unwrap();
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_sim_set_value(sim, const_c.as_ptr(), override_val, &mut err);
+    assert!(err.is_null(), "set_value on a constant should succeed");
+
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_sim_run_to_end(sim, &mut err);
+    assert!(err.is_null(), "run_to_end should succeed");
+
+    let series = read_series(sim, name, n_chunks);
+    simlin_sim_unref(sim);
+    simlin_model_unref(model);
+    series
+}
+
+/// Read `name`'s series from a run sim via `simlin_sim_get_series`, truncated to
+/// the number actually written.
+unsafe fn read_series(sim: *mut SimlinSim, name: &str, n_chunks: usize) -> Vec<f64> {
+    let name_c = std::ffi::CString::new(name).unwrap();
+    let mut results = vec![0.0f64; n_chunks];
+    let mut written: usize = 0;
+    let mut err: *mut SimlinError = ptr::null_mut();
+    simlin_sim_get_series(
+        sim,
+        name_c.as_ptr(),
+        results.as_mut_ptr(),
+        n_chunks,
+        &mut written,
+        &mut err,
+    );
+    assert!(err.is_null(), "get_series should succeed");
+    results.truncate(written);
+    results
 }
 
 /// The VM's series for `name` via `simlin_sim_new` + `simlin_sim_get_series`.
