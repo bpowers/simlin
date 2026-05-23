@@ -94,10 +94,8 @@ pub struct LayoutMetrics {
 
 /// Per-term weights for the scalar an optimizer minimizes.
 ///
-/// The calibrated production weights (and the failure-mode priority ordering)
-/// are committed in Phase 4. Until then `MetricWeights::default()` is all-zeros
-/// (see below) so any accidental use of `weighted_cost` before calibration is
-/// obviously inert rather than silently wrong.
+/// `MetricWeights::default()` holds the calibrated production weights committed
+/// in Phase 4 (see the failure-mode rationale on the `Default` impl below).
 ///
 /// `Serialize`/`Deserialize` let the layout-quality eval sweep
 /// (`examples/layout_eval.rs`) record the weight set it used in its
@@ -118,21 +116,36 @@ pub struct MetricWeights {
 }
 
 impl Default for MetricWeights {
-    /// All-zeros: calibrated in Phase 4. An all-zero weight set makes
-    /// `weighted_cost` return 0.0 regardless of the metrics, so using the
-    /// default before calibration is inert (cannot mislead an optimizer) rather
-    /// than applying made-up weights.
+    /// The calibrated production weights, from the Phase 3 contact-sheet
+    /// calibration with explicit user sign-off (2026-05-23).
+    ///
+    /// Failure-mode rationale -- readability >> compactness:
+    ///   * The dominant concerns all carry weight 1.0: node-shape overlap
+    ///     (`node_overlap`), connectors passing under node shapes
+    ///     (`node_connector_overlap`), obscured labels (`label_overlap`), and
+    ///     edge `crossings`. These are the things that make a diagram unreadable
+    ///     or assert false causal connections, so they dominate the cost.
+    ///   * `sprawl`, `edge_length_cv`, and `aspect_penalty` are intentionally
+    ///     0.0: compactness and aspect ratio are NOT goals. Spreading nodes out
+    ///     to keep labels legible and feedback loops visible is GOOD, not
+    ///     something to penalize, so these terms must not pull against
+    ///     readability.
+    ///   * `loop_compactness` is a low 0.25: it gently REWARDS drawing feedback
+    ///     loops as visible circles (a readability aid), but must never dominate
+    ///     the overlap/crossings family, so it stays well below 1.0.
+    ///   * `chain_straightness` stays 0.0: it is reserved (not yet computed), so
+    ///     it carries no weight.
     fn default() -> Self {
         MetricWeights {
-            node_overlap: 0.0,
-            node_connector_overlap: 0.0,
-            label_overlap: 0.0,
-            crossings: 0.0,
+            node_overlap: 1.0,
+            node_connector_overlap: 1.0,
+            label_overlap: 1.0,
+            crossings: 1.0,
             sprawl: 0.0,
             edge_length_cv: 0.0,
             aspect_penalty: 0.0,
             chain_straightness: 0.0,
-            loop_compactness: 0.0,
+            loop_compactness: 0.25,
         }
     }
 }
@@ -1449,20 +1462,102 @@ mod tests {
         assert!((m.weighted_cost(&w) - expected).abs() < 1e-9);
     }
 
+    // --- AC5.1: the committed calibrated default expresses readability dominance ---
+    //
+    // The Phase-1 placeholder default was all-zeros (so a pre-calibration
+    // `weighted_cost` was inert). Phase 4 commits real, user-signed-off weights
+    // (2026-05-23), so the default is no longer all-zeros and `weighted_cost`
+    // under it is now meaningful. This test pins the DOMINANCE ORDERING the
+    // committed weights encode -- relationships rather than magic numbers, so it
+    // documents the intent and survives minor retuning -- and re-confirms that
+    // `weighted_cost` applies the default exactly as Σ wᵢ·termᵢ. It replaces the
+    // old "default is all-zeros so cost is inert" assertion, which is no longer
+    // true by design.
+
     #[test]
-    fn test_default_weights_are_all_zero_so_cost_is_inert() {
+    fn test_default_weights_readability_dominant_ordering() {
+        let w = MetricWeights::default();
+
+        // The dominant "overlap + crossings" family: each term that hurts
+        // readability (shapes overlapping shapes, connectors under shapes, labels
+        // obscured, edges crossing) must outweigh every compactness/aspect term.
+        let dominant = [
+            w.node_overlap,
+            w.node_connector_overlap,
+            w.label_overlap,
+            w.crossings,
+        ];
+        let compactness = [w.sprawl, w.edge_length_cv, w.aspect_penalty];
+        for &d in &dominant {
+            for &c in &compactness {
+                assert!(
+                    d > c,
+                    "every readability term ({d}) must strictly exceed every \
+                     compactness/aspect term ({c})"
+                );
+            }
+        }
+
+        // Compactness/aspect are intentionally zero: spreading out to keep labels
+        // legible and feedback loops visible is good, not penalized.
+        assert_eq!(w.sprawl, 0.0, "sprawl is not a goal");
+        assert_eq!(
+            w.edge_length_cv, 0.0,
+            "edge-length uniformity is not a goal"
+        );
+        assert_eq!(w.aspect_penalty, 0.0, "aspect ratio is not a goal");
+
+        // chain_straightness is reserved (not yet computed), so it carries no
+        // weight.
+        assert_eq!(
+            w.chain_straightness, 0.0,
+            "chain_straightness is reserved and must stay zero"
+        );
+
+        // loop_compactness rewards visible feedback-loop circles, but only as a
+        // gentle nudge: a low, non-dominant weight strictly between zero and the
+        // dominant family.
+        assert!(
+            w.loop_compactness > 0.0,
+            "loop_compactness should gently reward visible loops, got {}",
+            w.loop_compactness
+        );
+        assert!(
+            w.loop_compactness < w.node_overlap,
+            "loop_compactness ({}) must stay below the dominant node_overlap ({})",
+            w.loop_compactness,
+            w.node_overlap
+        );
+
+        // `weighted_cost` under the default is still the exact linear combination
+        // (the default is now meaningful, not inert): verify against an explicit
+        // Σ wᵢ·termᵢ over a hand-set metrics value.
         let m = LayoutMetrics {
-            node_overlap: 1.0,
-            node_connector_overlap: 1.0,
-            label_overlap: 1.0,
-            crossings: 1.0,
-            sprawl: 1.0,
-            edge_length_cv: 1.0,
-            aspect_penalty: 1.0,
-            chain_straightness: 1.0,
-            loop_compactness: 1.0,
+            node_overlap: 0.3,
+            node_connector_overlap: 0.1,
+            label_overlap: 0.7,
+            crossings: 2.0,
+            sprawl: 5.0,
+            edge_length_cv: 0.4,
+            aspect_penalty: 1.5,
+            chain_straightness: 0.0,
+            loop_compactness: 0.8,
         };
-        assert_eq!(m.weighted_cost(&MetricWeights::default()), 0.0);
+        let expected = m.node_overlap * w.node_overlap
+            + m.node_connector_overlap * w.node_connector_overlap
+            + m.label_overlap * w.label_overlap
+            + m.crossings * w.crossings
+            + m.sprawl * w.sprawl
+            + m.edge_length_cv * w.edge_length_cv
+            + m.aspect_penalty * w.aspect_penalty
+            + m.chain_straightness * w.chain_straightness
+            + m.loop_compactness * w.loop_compactness;
+        assert!(
+            (m.weighted_cost(&w) - expected).abs() < 1e-12,
+            "weighted_cost under the default must equal Σ wᵢ·termᵢ: got {} expected {}",
+            m.weighted_cost(&w),
+            expected
+        );
     }
 
     // --- AC1.7: empty / single-element views are all-zero and finite ---
