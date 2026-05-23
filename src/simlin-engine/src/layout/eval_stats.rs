@@ -837,6 +837,22 @@ mod tests {
     }
 
     #[test]
+    fn test_from_samples_worst_seed_tie_break_lowest() {
+        // Two seeds SHARE the maximum cost; the lower seed must win. The third
+        // (lower-cost) sample ensures the max is a genuine tie, not the only
+        // value. seeds 7 and 4 both cost 50 (the max); seed 2 costs 10.
+        // worst_seed must be 4 (the lower of the two tied-at-max seeds), NOT 7.
+        // This fails if the tie-break direction in from_samples were reversed
+        // (a `.then(x.seed.cmp(&y.seed))` after max_by would pick 7).
+        let samples = vec![sample(7, 50.0), sample(2, 10.0), sample(4, 50.0)];
+        let stats = ModelStats::from_samples("m".to_string(), samples, &[]);
+        assert_eq!(
+            stats.worst_seed, 4,
+            "max-cost tie must break on the lowest seed"
+        );
+    }
+
+    #[test]
     fn test_from_samples_empty_is_all_zero() {
         let stats = ModelStats::from_samples("empty".to_string(), vec![], &[1, 2, 3]);
         assert_eq!(stats.median_cost, 0.0);
