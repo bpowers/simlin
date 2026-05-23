@@ -32,8 +32,41 @@ use std::collections::BTreeSet;
 use std::env;
 use std::io::BufReader;
 
+use rayon::prelude::*;
 use simlin_engine::layout::LAYOUT_SEEDS;
+use simlin_engine::layout::config::LayoutConfig;
+use simlin_engine::layout::eval_stats::{CorpusReport, MetricSample, ModelStats};
+use simlin_engine::layout::generate_layout_with_config;
+use simlin_engine::layout::metrics::{MetricWeights, compute_layout_metrics};
 use simlin_engine::{datamodel, open_vensim, open_xmile};
+
+/// Phase-3 PLACEHOLDER weights for `weighted_cost`.
+///
+/// `MetricWeights::default()` is all-zeros until Phase 4 commits the calibrated
+/// weights (so any accidental pre-calibration use of `weighted_cost` is inert
+/// rather than silently wrong). The sweep needs a *non-trivial* scalar to rank
+/// seeds (best/median/worst) and to compute the corpus geomean, so this
+/// placeholder encodes the design's intended failure-mode priorities:
+/// the overlap family (`node_overlap`, `node_connector_overlap`, `label_overlap`)
+/// and edge `crossings` are dominant; `sprawl`, `edge_length_cv`, and
+/// `aspect_penalty` are moderate; the reserved structure terms
+/// (`chain_straightness`, `loop_compactness`, always 0.0 in Phase 1-3) carry
+/// zero weight.
+///
+/// Phase 4 commits the calibrated `MetricWeights` (its `Default`); when it
+/// lands, this placeholder MUST be replaced by `MetricWeights::default()` (see
+/// the Phase 4 plan, Task 2).
+const PLACEHOLDER_WEIGHTS: MetricWeights = MetricWeights {
+    node_overlap: 1.0,
+    node_connector_overlap: 1.0,
+    label_overlap: 1.0,
+    crossings: 1.0,
+    sprawl: 0.25,
+    edge_length_cv: 0.25,
+    aspect_penalty: 0.25,
+    chain_straightness: 0.0,
+    loop_compactness: 0.0,
+};
 
 /// The model name the layout pipeline and renderer operate on. `Project::get_model`
 /// maps "main" to the single/main model (matching `tests/layout.rs`).
@@ -237,6 +270,69 @@ fn out_dir() -> String {
         .unwrap_or_else(|_| format!("{}/../../target/layout-eval", env!("CARGO_MANIFEST_DIR")))
 }
 
+// ── Per-model seed sweep ─────────────────────────────────────────────────────
+
+/// Lay out `project`'s main model once for each `seed`, score each layout, and
+/// summarize the samples into a `ModelStats`.
+///
+/// The per-seed layouts run in parallel via rayon (mirroring
+/// `generate_best_layout`'s `par_iter` over seeds). The parallel results are
+/// collapsed back into `seeds`-order before being summarized, so the sample
+/// vector -- and every statistic derived from it -- is invariant to rayon's
+/// scheduling: parallelism introduces no nondeterminism here.
+///
+/// NOTE: `generate_layout_with_config` is itself NOT deterministic per seed --
+/// the same `(model, seed)` pair produces slightly different layouts on
+/// repeated calls, *even serially within one process* (verified by direct
+/// probe). The drift traces to per-process-randomized `HashMap`/`HashSet`
+/// iteration order in the layout pipeline (e.g. `sfdp::build_node_index`'s
+/// `HashMap` feeding force accumulation). This is a pre-existing layout-engine
+/// issue, not a property of this sweep; it means the reported median/spread
+/// vary run-to-run within a small band. The fix belongs in the layout engine
+/// (deterministic ordered containers). Tracked separately.
+///
+/// A seed whose layout fails to generate is dropped with a WARN (a single bad
+/// seed must not sink the whole model's sweep). The full model-level
+/// skip-on-failure path (load/render) lands in a later task; here a model with
+/// zero successful seeds yields an empty `ModelStats` (all-zero, no panic).
+fn sweep_model(key: &str, project: &datamodel::Project, seeds: &[u64]) -> ModelStats {
+    // Compute one (seed, sample) per seed in parallel, then sort back into seed
+    // order so the sample vector -- and therefore every statistic derived from
+    // it -- is independent of rayon's scheduling.
+    let mut indexed: Vec<(u64, MetricSample)> = seeds
+        .par_iter()
+        .filter_map(|&seed| {
+            let cfg = LayoutConfig {
+                annealing_random_seed: seed,
+                ..LayoutConfig::default()
+            };
+            match generate_layout_with_config(project, MAIN_MODEL, cfg.clone(), None) {
+                Ok(view) => {
+                    let metrics = compute_layout_metrics(&view, &cfg);
+                    let weighted_cost = metrics.weighted_cost(&PLACEHOLDER_WEIGHTS);
+                    Some((
+                        seed,
+                        MetricSample {
+                            seed,
+                            metrics,
+                            weighted_cost,
+                        },
+                    ))
+                }
+                Err(err) => {
+                    eprintln!("WARN: {key} seed {seed} failed to lay out: {err}");
+                    None
+                }
+            }
+        })
+        .collect();
+
+    indexed.sort_by_key(|(seed, _)| *seed);
+    let samples: Vec<MetricSample> = indexed.into_iter().map(|(_, sample)| sample).collect();
+
+    ModelStats::from_samples(key.to_string(), samples, &LAYOUT_SEEDS)
+}
+
 fn main() {
     let keys = selected_keys();
     let m = seed_count();
@@ -246,19 +342,37 @@ fn main() {
     std::fs::create_dir_all(&out)
         .unwrap_or_else(|e| panic!("failed to create output dir {out}: {e}"));
 
+    let n_sampled = seeds.len();
     println!(
-        "layout_eval: {} model(s), M={m} seeds (sampling {} unique), out={out}",
+        "layout_eval: {} model(s), M={m} seeds (sampling {n_sampled} unique), out={out}",
         keys.len(),
-        seeds.len()
     );
 
+    let mut per_model: Vec<ModelStats> = Vec::new();
     for spec in CORPUS.iter().filter(|s| keys.contains(&s.key)) {
         match load_model(spec) {
             Ok(project) => {
                 let n = loaded_element_count(&project);
                 println!("loaded {}: {n} elements", spec.key);
+
+                let stats = sweep_model(spec.key, &project, &seeds);
+                let (p25, p75) = stats.spread;
+                // The actual sampled seed count is the union of LAYOUT_SEEDS and
+                // 0..m (deduped), reported here as the real M the run swept.
+                println!(
+                    "{}: median={:.4} p25/p75={:.4}/{:.4} best_of_k={:.4} (M={n_sampled})",
+                    spec.key, stats.median_cost, p25, p75, stats.best_of_k_cost,
+                );
+                per_model.push(stats);
             }
             Err(err) => eprintln!("WARN: skipping {}: {err}", spec.key),
         }
     }
+
+    let report = CorpusReport::from_model_stats(per_model);
+    println!(
+        "corpus: geomean_of_medians={:.4} ({} model(s) scored)",
+        report.geomean_of_medians,
+        report.per_model.len(),
+    );
 }
