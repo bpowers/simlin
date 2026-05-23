@@ -50,7 +50,11 @@ pub const TARGET_AR_MAX: f64 = 16.0 / 9.0;
 /// the fixed pixel size of a stock/aux box should score differently from one
 /// spread far apart, and that sensitivity is what makes those terms meaningful
 /// across models. See the AC1.8 scoping note in the Phase 1 plan.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// `Serialize` lets the layout-quality eval sweep (`examples/layout_eval.rs`)
+/// emit the per-term breakdown into its `metrics.json` artifact; the struct is
+/// pure data (every field a plain `f64`), so the derive carries no behavior.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub struct LayoutMetrics {
     /// Sum of pairwise node-box overlap area, normalized by total node area.
     pub node_overlap: f64,
@@ -80,7 +84,11 @@ pub struct LayoutMetrics {
 /// are committed in Phase 4. Until then `MetricWeights::default()` is all-zeros
 /// (see below) so any accidental use of `weighted_cost` before calibration is
 /// obviously inert rather than silently wrong.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// `Serialize` lets the layout-quality eval sweep (`examples/layout_eval.rs`)
+/// record the weight set it used in its `metrics.json` artifact; the struct is
+/// pure data (every field a plain `f64`), so the derive carries no behavior.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub struct MetricWeights {
     pub node_overlap: f64,
     pub node_connector_overlap: f64,

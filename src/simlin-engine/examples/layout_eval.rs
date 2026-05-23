@@ -30,9 +30,11 @@
 
 use std::collections::BTreeSet;
 use std::env;
+use std::fmt::Write as _;
 use std::io::BufReader;
 
 use rayon::prelude::*;
+use serde::Serialize;
 use simlin_engine::diagram::{PngRenderOpts, render_png};
 use simlin_engine::layout::LAYOUT_SEEDS;
 use simlin_engine::layout::config::LayoutConfig;
@@ -350,11 +352,10 @@ fn sweep_model(key: &str, project: &datamodel::Project, seeds: &[u64]) -> ModelS
 /// the metric breakdown of the view that was rendered. The seed is `Some` for a
 /// generated render (best/median/worst) and `None` for the as-loaded reference.
 ///
-/// `seed`, `metrics`, and `weighted_cost` are recorded here but not yet read:
-/// Task 4 serializes them into `metrics.json` and the contact-sheet's per-render
-/// breakdown table. They are deliberately kept as data now (rather than dropped
-/// and recomputed) so Task 4's serializer is a pure read over this struct.
-#[allow(dead_code)]
+/// `seed`, `metrics`, and `weighted_cost` are read by Task 4: the report builder
+/// serializes them into `metrics.json` and the contact-sheet's per-render
+/// breakdown table. They are kept as data here (rather than dropped and
+/// recomputed) so the report builder is a pure read over this struct.
 struct Render {
     /// Filename of the PNG, relative to the out dir (e.g. `sir_best.png`).
     file: String,
@@ -515,6 +516,309 @@ fn report_renders(key: &str, renders: &ModelRenders) {
     }
 }
 
+// ── Report (metrics.json + index.html) ──────────────────────────────────────
+//
+// The structs below are the on-disk JSON shape. They are PURE DATA built once
+// from the in-memory `ModelStats` + `ModelRenders` the sweep produced, then
+// serialized straight to disk -- no recomputation. The contact-sheet HTML is
+// rendered from the same `EvalReport`, so the JSON table and the HTML can never
+// disagree. Building the report and rendering the HTML are pure (the only I/O
+// is the two `std::fs::write` calls in `main`).
+
+/// One rendered view's row in the JSON: the PNG filename, the seed that
+/// produced it (`None` for the as-loaded reference), the full per-term
+/// `LayoutMetrics` breakdown, and the scalar `weighted_cost` under the weights
+/// in use.
+#[derive(Serialize)]
+struct RenderReport {
+    file: String,
+    seed: Option<u64>,
+    metrics: LayoutMetrics,
+    weighted_cost: f64,
+}
+
+/// One model's full row in the JSON: its summary statistics (the seed-sweep
+/// center/spread, the best-of-k production proxy, the chosen best/median/worst
+/// seeds, and `m` -- the number of seeds actually swept) plus each of its
+/// renders' per-term breakdowns (`reference` present only when the model ships
+/// a hand-authored view).
+#[derive(Serialize)]
+struct ModelReport {
+    model: String,
+    /// Number of seeds swept for this model (the union of `LAYOUT_SEEDS` and
+    /// `0..M`, deduped). Recorded so a reader can interpret the spread.
+    m: usize,
+    median_cost: f64,
+    /// `(p25, p75)` of the per-seed weighted costs.
+    spread: (f64, f64),
+    /// Production proxy: min weighted cost over the `LAYOUT_SEEDS` seed set.
+    best_of_k_cost: f64,
+    best_seed: u64,
+    median_seed: u64,
+    worst_seed: u64,
+    /// The hand-authored reference render + score, when the model ships one.
+    reference: Option<RenderReport>,
+    best: Option<RenderReport>,
+    median: Option<RenderReport>,
+    worst: Option<RenderReport>,
+}
+
+/// The top-level `metrics.json` document: every scored model plus the corpus
+/// aggregates (the geomean of per-model medians and the weight set used).
+///
+/// `baseline_comparison` is the place Task 5's baseline-vs-candidate diff plugs
+/// in (per-model + aggregate deltas with Mann-Whitney p-values). It is `None`
+/// here in Phase 3; the field exists so the JSON schema is stable across the
+/// two tasks (a Phase-3 reader sees `null`, a Phase-4 reader sees the diff).
+#[derive(Serialize)]
+struct EvalReport {
+    /// Models sorted worst-cost-first (highest `median_cost` at the front), the
+    /// same order the contact-sheet renders so the JSON and HTML agree.
+    models: Vec<ModelReport>,
+    /// Geometric mean of the per-model medians -- the single headline aggregate.
+    geomean_of_medians: f64,
+    /// The `MetricWeights` used to compute every `weighted_cost` in this report.
+    weights: MetricWeights,
+    /// Reserved for Task 5's baseline diff; always `None` in Phase 3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline_comparison: Option<()>,
+}
+
+/// Map an in-memory `Render` to its JSON row.
+fn render_report(render: &Render) -> RenderReport {
+    RenderReport {
+        file: render.file.clone(),
+        seed: render.seed,
+        metrics: render.metrics,
+        weighted_cost: render.weighted_cost,
+    }
+}
+
+/// Build the serializable report from the sweep's in-memory results.
+///
+/// PURE: a read over `(per_model, renders)` (paired positionally -- they are
+/// pushed together per model in `main`) plus the corpus `geomean_of_medians`
+/// and the weight set. Models are sorted worst-cost-first (highest median at
+/// the front), the order the contact-sheet inspects top-down as the visual
+/// guardrail; ties break on the model name so the order is deterministic.
+fn build_report(
+    per_model: &[ModelStats],
+    renders: &[ModelRenders],
+    geomean_of_medians: f64,
+    weights: &MetricWeights,
+) -> EvalReport {
+    let mut models: Vec<ModelReport> = per_model
+        .iter()
+        .zip(renders.iter())
+        .map(|(stats, render)| ModelReport {
+            model: stats.model.clone(),
+            m: stats.samples.len(),
+            median_cost: stats.median_cost,
+            spread: stats.spread,
+            best_of_k_cost: stats.best_of_k_cost,
+            best_seed: stats.best_seed,
+            median_seed: stats.median_seed,
+            worst_seed: stats.worst_seed,
+            reference: render.reference.as_ref().map(render_report),
+            best: render.best.as_ref().map(render_report),
+            median: render.median.as_ref().map(render_report),
+            worst: render.worst.as_ref().map(render_report),
+        })
+        .collect();
+
+    // Worst-cost-first: highest median at the front. Sort descending by median,
+    // tie-break on model name (ascending) for a deterministic ordering. NaN
+    // medians can't occur (eval_stats guarantees finite costs), but guard the
+    // partial_cmp anyway so a hypothetical NaN never panics the sort.
+    models.sort_by(|a, b| {
+        b.median_cost
+            .partial_cmp(&a.median_cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.model.cmp(&b.model))
+    });
+
+    EvalReport {
+        models,
+        geomean_of_medians,
+        weights: *weights,
+        baseline_comparison: None,
+    }
+}
+
+/// HTML-escape the five characters that are special in element text or
+/// attribute values. The interpolated strings are static model keys and
+/// PNG filenames derived from them, so this is defense-in-depth rather than a
+/// live injection vector -- but escaping unconditionally keeps the artifact
+/// well-formed if a corpus key ever gains a special character.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Render the per-term metric breakdown for one render as a compact two-column
+/// table (term name -> value), with the scalar `weighted_cost` as the final
+/// row. PURE: appends to `html`.
+fn write_metrics_table(html: &mut String, render: &RenderReport) {
+    let m = &render.metrics;
+    let rows = [
+        ("node_overlap", m.node_overlap),
+        ("node_connector_overlap", m.node_connector_overlap),
+        ("label_overlap", m.label_overlap),
+        ("crossings", m.crossings),
+        ("sprawl", m.sprawl),
+        ("edge_length_cv", m.edge_length_cv),
+        ("aspect_penalty", m.aspect_penalty),
+        ("chain_straightness", m.chain_straightness),
+        ("loop_compactness", m.loop_compactness),
+    ];
+    html.push_str("<table class=\"metrics\">");
+    for (name, value) in rows {
+        let _ = write!(
+            html,
+            "<tr><td>{name}</td><td class=\"num\">{value:.4}</td></tr>"
+        );
+    }
+    let _ = write!(
+        html,
+        "<tr class=\"wcost\"><td>weighted_cost</td><td class=\"num\">{:.4}</td></tr>",
+        render.weighted_cost
+    );
+    html.push_str("</table>");
+}
+
+/// Render one render's cell (heading + image + breakdown table). A missing
+/// render (the model shipped no reference, or its layout/render failed) renders
+/// a muted placeholder so the contact-sheet records the gap rather than hiding
+/// it. PURE.
+fn write_render_cell(html: &mut String, kind: &str, render: Option<&RenderReport>) {
+    html.push_str("<div class=\"cell\">");
+    let _ = write!(html, "<h4>{}</h4>", html_escape(kind));
+    match render {
+        Some(r) => {
+            let src = html_escape(&r.file);
+            let alt = html_escape(&format!("{kind} layout"));
+            let _ = write!(html, "<img src=\"{src}\" alt=\"{alt}\">");
+            if let Some(seed) = r.seed {
+                let _ = write!(html, "<p class=\"seed\">seed {seed}</p>");
+            }
+            write_metrics_table(html, r);
+        }
+        None => html.push_str("<p class=\"missing\">(not rendered)</p>"),
+    }
+    html.push_str("</div>");
+}
+
+/// Render the self-contained `index.html` contact-sheet from the report.
+///
+/// PURE: a string built from `report`. The header shows the corpus
+/// `geomean_of_medians` and the weight set; models are laid out one section per
+/// model, worst-cost-first (the report is already sorted), each with its
+/// reference (if any) and best/median/worst renders side by side and a per-term
+/// breakdown under each. `<img>` paths are relative to the out dir so the file
+/// references its sibling PNGs.
+fn render_index_html(report: &EvalReport) -> String {
+    let mut html = String::new();
+    html.push_str(
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>Layout quality eval</title>\n<style>\n\
+         :root { font-family: Roboto, Helvetica, Arial, sans-serif; }\n\
+         body { margin: 24px; color: #1a1a1a; background: #fafafa; }\n\
+         h1 { font-size: 20px; margin: 0 0 4px; }\n\
+         .summary { color: #555; font-size: 13px; margin-bottom: 16px; }\n\
+         .summary code { background: #eee; padding: 1px 4px; border-radius: 4px; }\n\
+         table.weights { border-collapse: collapse; font-size: 12px; margin: 8px 0 24px; }\n\
+         table.weights td { border: 1px solid #ddd; padding: 2px 8px; }\n\
+         .model { border: 1px solid #ddd; border-radius: 4px; background: #fff;\n\
+                  padding: 12px 16px; margin-bottom: 20px; }\n\
+         .model h2 { font-size: 16px; margin: 0 0 2px; }\n\
+         .model .stats { color: #555; font-size: 12px; margin-bottom: 12px; }\n\
+         .renders { display: flex; flex-wrap: wrap; gap: 16px; }\n\
+         .cell { flex: 0 0 auto; max-width: 280px; }\n\
+         .cell h4 { font-size: 13px; margin: 0 0 4px; text-transform: capitalize; }\n\
+         .cell img { max-width: 280px; height: auto; border: 1px solid #eee;\n\
+                     background: #fff; display: block; }\n\
+         .cell .seed { font-size: 11px; color: #888; margin: 4px 0 2px; }\n\
+         .cell .missing { font-size: 12px; color: #999; font-style: italic; }\n\
+         table.metrics { border-collapse: collapse; font-size: 11px; margin-top: 4px;\n\
+                         width: 100%; }\n\
+         table.metrics td { border-bottom: 1px solid #f0f0f0; padding: 1px 4px; }\n\
+         table.metrics td.num { text-align: right; font-variant-numeric: tabular-nums; }\n\
+         table.metrics tr.wcost td { font-weight: 600; border-top: 1px solid #ccc; }\n\
+         </style>\n</head>\n<body>\n",
+    );
+
+    html.push_str("<h1>Layout quality eval</h1>\n");
+    let _ = writeln!(
+        &mut html,
+        "<p class=\"summary\">Corpus <code>geomean_of_medians = {:.4}</code> over \
+         {} model(s), sorted worst-cost-first.</p>",
+        report.geomean_of_medians,
+        report.models.len(),
+    );
+
+    // The weight set used for every weighted_cost in this report.
+    let w = &report.weights;
+    let weight_rows = [
+        ("node_overlap", w.node_overlap),
+        ("node_connector_overlap", w.node_connector_overlap),
+        ("label_overlap", w.label_overlap),
+        ("crossings", w.crossings),
+        ("sprawl", w.sprawl),
+        ("edge_length_cv", w.edge_length_cv),
+        ("aspect_penalty", w.aspect_penalty),
+        ("chain_straightness", w.chain_straightness),
+        ("loop_compactness", w.loop_compactness),
+    ];
+    html.push_str("<table class=\"weights\"><caption>weights</caption>");
+    for (name, value) in weight_rows {
+        let _ = write!(
+            &mut html,
+            "<tr><td>{name}</td><td class=\"num\">{value:.4}</td></tr>"
+        );
+    }
+    html.push_str("</table>\n");
+
+    for model in &report.models {
+        let name = html_escape(&model.model);
+        html.push_str("<section class=\"model\">");
+        let _ = write!(&mut html, "<h2>{name}</h2>");
+        let _ = write!(
+            &mut html,
+            "<p class=\"stats\">median={:.4} &middot; p25/p75={:.4}/{:.4} &middot; \
+             best_of_k={:.4} &middot; M={} &middot; \
+             seeds best/median/worst={}/{}/{}</p>",
+            model.median_cost,
+            model.spread.0,
+            model.spread.1,
+            model.best_of_k_cost,
+            model.m,
+            model.best_seed,
+            model.median_seed,
+            model.worst_seed,
+        );
+        html.push_str("<div class=\"renders\">");
+        write_render_cell(&mut html, "reference", model.reference.as_ref());
+        write_render_cell(&mut html, "best", model.best.as_ref());
+        write_render_cell(&mut html, "median", model.median.as_ref());
+        write_render_cell(&mut html, "worst", model.worst.as_ref());
+        html.push_str("</div></section>\n");
+    }
+
+    html.push_str("</body>\n</html>\n");
+    html
+}
+
 fn main() {
     let keys = selected_keys();
     let m = seed_count();
@@ -559,20 +863,43 @@ fn main() {
         }
     }
 
-    let report = CorpusReport::from_model_stats(per_model);
+    let corpus = CorpusReport::from_model_stats(per_model);
     println!(
         "corpus: geomean_of_medians={:.4} ({} model(s) scored)",
-        report.geomean_of_medians,
-        report.per_model.len(),
+        corpus.geomean_of_medians,
+        corpus.per_model.len(),
     );
 
-    // The per-model `renders` (PNG filenames + metric breakdowns) are the input
-    // Task 4 serializes into `metrics.json` and the contact-sheet. Until then,
-    // summarize how many models shipped a hand-authored reference so a run's
-    // stdout records the reference coverage AC3.4 depends on.
     let with_reference = renders.iter().filter(|r| r.reference.is_some()).count();
     println!(
         "corpus: {with_reference}/{} model(s) shipped a hand-authored reference view",
         renders.len(),
     );
+
+    // Build the serializable report from the in-memory stats + renders, then
+    // emit both artifacts under the out dir (which defaults under the gitignored
+    // repo-root `target/`). `corpus.per_model` and `renders` are positionally
+    // paired -- both are pushed once per surviving model in the loop above.
+    let report = build_report(
+        &corpus.per_model,
+        &renders,
+        corpus.geomean_of_medians,
+        &PLACEHOLDER_WEIGHTS,
+    );
+
+    let metrics_path = format!("{out}/metrics.json");
+    match serde_json::to_string_pretty(&report) {
+        Ok(json) => match std::fs::write(&metrics_path, json) {
+            Ok(()) => println!("wrote {metrics_path}"),
+            Err(err) => eprintln!("WARN: failed to write {metrics_path}: {err}"),
+        },
+        Err(err) => eprintln!("WARN: failed to serialize metrics.json: {err}"),
+    }
+
+    let index_path = format!("{out}/index.html");
+    let html = render_index_html(&report);
+    match std::fs::write(&index_path, html) {
+        Ok(()) => println!("wrote {index_path}"),
+        Err(err) => eprintln!("WARN: failed to write {index_path}: {err}"),
+    }
 }
