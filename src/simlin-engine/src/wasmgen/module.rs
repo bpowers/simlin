@@ -1249,8 +1249,12 @@ fn emit_run_to(
     // the VM's resting curr (#625). This touches only `curr` (not the saved rows,
     // which were already committed; not the cursor, which a resume reads), and it
     // does NOT snapshot `prev_values`, so a resumed `run_to`'s `PREVIOUS` still
-    // sees the last completed step. The full-run/`run`/`reset` paths break with a
-    // freshly-evaluated curr already, so this re-eval is idempotent for them.
+    // sees the last completed step. When the slab fills, the loop breaks via the
+    // post-save exhaustion break (or the top-of-loop full-slab guard on a resumed
+    // call) *before* an advance, so `curr` is already the freshly-evaluated last
+    // saved row -- the re-eval is idempotent there, keeping a resumed `run_to` on a
+    // full slab a no-op. Unlike the VM, there is no chunk aliasing to guard against:
+    // `curr` is always the fixed `CURR_BASE` region.
     f.instruction(&I::I32Const(0));
     f.instruction(&I::Call(f_flows));
 
