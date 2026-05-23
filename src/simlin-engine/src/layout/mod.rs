@@ -1119,23 +1119,38 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
     // Track which old links have been consumed so each is used at most once.
     let mut consumed_old_links: HashSet<(i32, i32)> = HashSet::new();
 
+    // Iterate edges in a deterministic order. `new_edges` is a HashSet, so its
+    // iteration order is per-process random; since each newly-created link both
+    // allocates a sequential `uid` and is appended to `state.elements` in this
+    // loop, hash order would otherwise assign different uids / element ordering
+    // to the same logical link run-to-run (the incremental analogue of #633).
+    let mut sorted_new_edges: Vec<(i32, i32)> = new_edges.iter().copied().collect();
+    sorted_new_edges.sort_unstable();
+
     // Add back preserved links (unchanged) and create new links
-    for &(from_uid, to_uid) in &new_edges {
+    for (from_uid, to_uid) in sorted_new_edges {
         if let Some(old_link) = old_links.get(&(from_uid, to_uid)) {
             // Preserved: keep the old link exactly as-is
             state.elements.push(old_link.clone());
             consumed_old_links.insert((from_uid, to_uid));
-        } else if let Some((&key, old_link)) = old_links.iter().find(|&(&(of, ot), _)| {
-            if consumed_old_links.contains(&(of, ot)) {
-                return false;
-            }
-            let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
-            let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
-            rf == from_uid && rt == to_uid
-        }) {
+        } else if let Some(key) = old_links
+            .keys()
+            .copied()
+            .filter(|&(of, ot)| {
+                if consumed_old_links.contains(&(of, ot)) {
+                    return false;
+                }
+                let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
+                let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
+                rf == from_uid && rt == to_uid
+            })
+            // Pick the lowest matching key so the alias-match selection is
+            // deterministic; HashMap iteration order would otherwise vary.
+            .min()
+        {
             // Preserved via alias: the old link targets an alias whose primary
             // variable matches this dependency edge. Keep the alias link as-is.
-            state.elements.push(old_link.clone());
+            state.elements.push(old_links[&key].clone());
             consumed_old_links.insert(key);
         } else if let Some((from_ident, to_ident)) = new_edge_idents.get(&(from_uid, to_uid)) {
             // Added: create new link with default shape
@@ -1172,14 +1187,19 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
     // match a valid dependency. Imported views may have multiple rendered
     // connectors for the same dependency (e.g., links to two different
     // aliases of the same variable).
-    for (&(of, ot), old_link) in &old_links {
+    // Iterate in a deterministic order for the same reason as the new-edge loop:
+    // the preserved links are appended to `state.elements`, so HashMap iteration
+    // order would otherwise perturb element ordering run-to-run.
+    let mut sorted_old_links: Vec<&(i32, i32)> = old_links.keys().collect();
+    sorted_old_links.sort_unstable();
+    for &(of, ot) in sorted_old_links {
         if consumed_old_links.contains(&(of, ot)) {
             continue;
         }
         let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
         let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
         if new_edges.contains(&(rf, rt)) {
-            state.elements.push(old_link.clone());
+            state.elements.push(old_links[&(of, ot)].clone());
         }
     }
 }
@@ -2456,7 +2476,16 @@ fn run_sfdp_with_rigid_chains(
     let mut center_y = config.start_y;
     let mut count = 0;
 
-    for (var_ident, node_id) in var_to_node {
+    // `var_to_node` is a HashMap, so its iteration order is per-process random.
+    // Two loops below are order-sensitive: the centroid accumulation sums floats
+    // (non-associative, so hash order perturbs the result) and the aux-placement
+    // loop assigns each unpositioned aux a polar seed angle by its iteration rank.
+    // Materialize a deterministic sorted view and iterate THAT in both loops so a
+    // fixed (model, seed) yields a bit-identical layout across repeated calls (#633).
+    let mut entries: Vec<(&String, &String)> = var_to_node.iter().collect();
+    entries.sort();
+
+    for &(var_ident, node_id) in &entries {
         if let Some(uid) = state.uid_manager.get_uid(var_ident)
             && let Some(&pos) = state.positions.get(&uid)
         {
@@ -2491,7 +2520,7 @@ fn run_sfdp_with_rigid_chains(
     }
 
     let mut aux_index = 0;
-    for node_id in var_to_node.values() {
+    for &(_var_ident, node_id) in &entries {
         if initial_layout.contains_key(node_id) {
             continue;
         }
