@@ -714,6 +714,24 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
       dispose();
     });
 
+    // setValue must update the live curr state, not only the override region read
+    // by the next run. The VM's apply_override writes the new value into the live
+    // curr chunk immediately (set_value_now, vm.rs:869-873), so getValue() reflects
+    // the override before any run; the blob's set_value only writes the constants
+    // region, so the wasm host must mirror the live write to keep an interactive
+    // read at parity (the divergence the reviewer flagged).
+    it('setValue(const) is reflected by getValue immediately, before any run (matches the VM)', () => {
+      const { vm, wasm, dispose } = openPair();
+      // No run has happened: a fresh sim's live curr chunk is the pre-run zero
+      // state, so this read exercises the override write, not a run's output.
+      backend.simSetValue(vm, 'room temperature', 55);
+      backend.simSetValue(wasm, 'room temperature', 55);
+
+      expect(backend.simGetValue(vm, 'room_temperature')).toBe(55);
+      expect(backend.simGetValue(wasm, 'room_temperature')).toBe(backend.simGetValue(vm, 'room_temperature'));
+      dispose();
+    });
+
     it('setValue(nonConstant) throws, matching the VM constants-only rejection', () => {
       const { vm, wasm, dispose } = openPair();
       // heat_loss_to_room is a flow (computed), not a settable constant.

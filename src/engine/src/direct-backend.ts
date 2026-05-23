@@ -626,6 +626,13 @@ export class DirectBackend implements EngineBackend {
         // mirroring the VM's BadOverride rejection (constants only).
         throw new Error(`cannot set value of '${name}': not a simple constant`);
       }
+      // The blob's set_value writes only the constants-override region read by the
+      // NEXT evaluation; the VM's apply_override also writes the value into the
+      // live curr chunk immediately (set_value_now, vm.rs:869-873), so getValue()
+      // reflects an override before any run. Mirror that live write here (memory
+      // base 0, slot*8 -- the same cell simGetValue/simGetTime read) so an
+      // interactive read agrees with the VM rather than returning the prior value.
+      new DataView(entry.wasmExports!.memory.buffer).setFloat64(slot * 8, value, true);
       return;
     }
     simlin_sim_set_value(entry.ptr, name, value);
