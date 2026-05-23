@@ -8,6 +8,7 @@ pub mod config;
 pub mod connector;
 pub mod graph;
 pub mod metadata;
+pub mod metrics;
 pub mod placement;
 pub mod sfdp;
 pub mod text;
