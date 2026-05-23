@@ -515,6 +515,13 @@ fn dfs_cycles(
 /// Rotate a cycle so its smallest uid is first, preserving traversal direction.
 /// The DFS already guarantees the start (= minimum) is element 0, but rotating
 /// defensively keeps the canonical form correct for any caller.
+///
+/// Note: this canonicalizes rotation (start at min uid) but NOT traversal
+/// direction, so a directed cycle and its reverse canonicalize to distinct
+/// entries. That is harmless: a reverse-direction duplicate (essentially never
+/// present for directed SD feedback loops, which would require both directed
+/// edge sets in the graph) would compute the same isoperimetric penalty because
+/// the shoelace polygon area in `cycle_penalty` is direction-invariant.
 fn canonicalize_cycle(cycle: &[i32]) -> Vec<i32> {
     if cycle.is_empty() {
         return Vec::new();
@@ -2065,6 +2072,13 @@ mod tests {
         assert_human_beats_auto("fishbanks");
     }
 
+    // Population is a MARGINAL taste anchor: under the committed default weights
+    // its human cost (~0.0521) beats auto (~0.0533) by only ~2.3%, far thinner
+    // than the other anchors (reliability ~8.5%, fishbanks ~12%,
+    // logistic-growth ~58%). The layout is deterministic per seed, so the
+    // assertion is not flaky -- but if it ever fails it should be read as
+    // "population sits near the boundary" rather than necessarily a real metric
+    // regression. The robust signal lives in reliability/fishbanks/logistic-growth.
     #[test]
     fn test_reference_pair_population_human_beats_auto() {
         assert_human_beats_auto("population");
