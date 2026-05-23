@@ -18,6 +18,8 @@
 // The corpus sweep (Phase 3) is the imperative shell that fills these structs
 // from real layouts.
 
+use crate::layout::metrics::LayoutMetrics;
+
 /// Geometric mean of strictly-positive values: `exp(mean(ln(x)))`.
 ///
 /// Returns `0.0` for an empty slice. Values must be `> 0`; layout costs are
@@ -200,6 +202,165 @@ fn erf(x: f64) -> f64 {
 /// Standard normal CDF, `Phi(x) = 0.5 * (1 + erf(x / sqrt(2)))`.
 fn phi(x: f64) -> f64 {
     0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+}
+
+/// Floor applied to each model's median before it enters the corpus geometric
+/// mean. A geometric mean is the product of its terms, so a single `0` median
+/// would zero the whole aggregate; flooring with this small epsilon keeps a
+/// genuinely-perfect (zero-cost) model from collapsing the corpus number while
+/// remaining far below any meaningful cost. Documented and applied only in
+/// [`CorpusReport::from_model_stats`].
+pub const GEOMEAN_FLOOR_EPSILON: f64 = 1e-9;
+
+/// One per-seed layout sample: the seed that produced the layout, its computed
+/// metrics, and the scalar weighted cost the optimizer minimizes.
+#[derive(Clone, Debug)]
+pub struct MetricSample {
+    pub seed: u64,
+    pub metrics: LayoutMetrics,
+    pub weighted_cost: f64,
+}
+
+/// Aggregated statistics for one model's seed sweep: the raw per-seed samples
+/// plus the center (`median_cost`), spread (`p25`, `p75`), the best-of-k
+/// production proxy, and the best/median/worst seeds (which drive Phase 3's
+/// PNG renders).
+#[derive(Clone, Debug)]
+pub struct ModelStats {
+    pub model: String,
+    /// One sample per seed.
+    pub samples: Vec<MetricSample>,
+    pub median_cost: f64,
+    /// `(p25, p75)` of the weighted costs.
+    pub spread: (f64, f64),
+    /// Production proxy: the min weighted cost over the k production seeds.
+    pub best_of_k_cost: f64,
+    pub best_seed: u64,
+    pub median_seed: u64,
+    pub worst_seed: u64,
+}
+
+/// Corpus-wide report: one `ModelStats` per model plus the geometric mean of
+/// the per-model medians (the single headline aggregate, benchstat-style).
+#[derive(Clone, Debug)]
+pub struct CorpusReport {
+    pub per_model: Vec<ModelStats>,
+    pub geomean_of_medians: f64,
+}
+
+impl ModelStats {
+    /// Summarize a model's per-seed samples.
+    ///
+    /// `production_seeds` is the fixed seed set used for the best-of-k proxy:
+    /// `best_of_k_cost` is the min `weighted_cost` among the samples whose seed
+    /// is in that set, falling back to the global min when none of the
+    /// production seeds were sampled. The median seed is the sample whose cost
+    /// is closest to `median_cost`, breaking ties on the lowest seed (so the
+    /// chosen render is deterministic). Empty `samples` yields all-zero fields
+    /// and seeds of `0` -- no panic.
+    pub fn from_samples(
+        model: String,
+        samples: Vec<MetricSample>,
+        production_seeds: &[u64],
+    ) -> ModelStats {
+        if samples.is_empty() {
+            return ModelStats {
+                model,
+                samples,
+                median_cost: 0.0,
+                spread: (0.0, 0.0),
+                best_of_k_cost: 0.0,
+                best_seed: 0,
+                median_seed: 0,
+                worst_seed: 0,
+            };
+        }
+
+        let costs: Vec<f64> = samples.iter().map(|s| s.weighted_cost).collect();
+        let median_cost = median(&costs);
+        let spread = (percentile(&costs, 0.25), percentile(&costs, 0.75));
+
+        // best/worst seeds: the seeds of the global min / max weighted_cost.
+        // Tie-break on the lowest seed so the chosen render is deterministic.
+        let best_seed = samples
+            .iter()
+            .min_by(|x, y| {
+                x.weighted_cost
+                    .partial_cmp(&y.weighted_cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(x.seed.cmp(&y.seed))
+            })
+            .map(|s| s.seed)
+            .unwrap_or(0);
+        let worst_seed = samples
+            .iter()
+            .max_by(|x, y| {
+                x.weighted_cost
+                    .partial_cmp(&y.weighted_cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    // For a tie on cost, max_by returns the LATER-compared-greater
+                    // element; flip the seed comparison so the lowest seed wins.
+                    .then(y.seed.cmp(&x.seed))
+            })
+            .map(|s| s.seed)
+            .unwrap_or(0);
+
+        // median seed: the sample whose cost is closest to `median_cost`,
+        // breaking ties on the lowest seed.
+        let median_seed = samples
+            .iter()
+            .min_by(|x, y| {
+                let dx = (x.weighted_cost - median_cost).abs();
+                let dy = (y.weighted_cost - median_cost).abs();
+                dx.partial_cmp(&dy)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(x.seed.cmp(&y.seed))
+            })
+            .map(|s| s.seed)
+            .unwrap_or(0);
+
+        // best-of-k: min weighted_cost among samples whose seed is a production
+        // seed; fall back to the global min when none were sampled.
+        let prod_min = samples
+            .iter()
+            .filter(|s| production_seeds.contains(&s.seed))
+            .map(|s| s.weighted_cost)
+            .fold(f64::INFINITY, f64::min);
+        let best_of_k_cost = if prod_min.is_finite() {
+            prod_min
+        } else {
+            costs.iter().cloned().fold(f64::INFINITY, f64::min)
+        };
+
+        ModelStats {
+            model,
+            samples,
+            median_cost,
+            spread,
+            best_of_k_cost,
+            best_seed,
+            median_seed,
+            worst_seed,
+        }
+    }
+}
+
+impl CorpusReport {
+    /// Build a corpus report. `geomean_of_medians` is the geometric mean of
+    /// each model's `median_cost`, with each median floored by
+    /// [`GEOMEAN_FLOOR_EPSILON`] so a single `0` median cannot zero the whole
+    /// aggregate. An empty corpus yields `geomean_of_medians == 0.0`.
+    pub fn from_model_stats(per_model: Vec<ModelStats>) -> CorpusReport {
+        let medians: Vec<f64> = per_model
+            .iter()
+            .map(|m| m.median_cost.max(GEOMEAN_FLOOR_EPSILON))
+            .collect();
+        let geomean_of_medians = geomean(&medians);
+        CorpusReport {
+            per_model,
+            geomean_of_medians,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -447,5 +608,167 @@ mod tests {
             prop_assert!((r.u - r.u1.min(r.u2)).abs() < 1e-9);
             prop_assert!(r.p_value.is_finite() && (0.0..=1.0).contains(&r.p_value));
         }
+    }
+
+    // --- Task 2: ModelStats / CorpusReport constructors ---
+
+    /// A `LayoutMetrics` whose `node_overlap` carries `cost` and every other
+    /// term is zero, so `weighted_cost` with `node_overlap == 1.0` returns
+    /// exactly `cost`. Keeps the test fixtures readable while still exercising
+    /// the real struct.
+    fn metrics_with_cost(cost: f64) -> LayoutMetrics {
+        LayoutMetrics {
+            node_overlap: cost,
+            node_connector_overlap: 0.0,
+            label_overlap: 0.0,
+            crossings: 0.0,
+            sprawl: 0.0,
+            edge_length_cv: 0.0,
+            aspect_penalty: 0.0,
+            chain_straightness: 0.0,
+            loop_compactness: 0.0,
+        }
+    }
+
+    fn sample(seed: u64, cost: f64) -> MetricSample {
+        MetricSample {
+            seed,
+            metrics: metrics_with_cost(cost),
+            weighted_cost: cost,
+        }
+    }
+
+    #[test]
+    fn test_from_samples_known_set() {
+        // Five seeds with hand-pickable costs.
+        //   seed 1 -> 10, seed 2 -> 30, seed 3 -> 20, seed 4 -> 50, seed 5 -> 40
+        // Sorted costs: [10, 20, 30, 40, 50].
+        //   median (type-7, p=0.5) = 30
+        //   p25 = 20, p75 = 40
+        //   global min cost = 10 (seed 1), max cost = 50 (seed 4)
+        //   median-nearest cost = 30 (seed 2)
+        let samples = vec![
+            sample(1, 10.0),
+            sample(2, 30.0),
+            sample(3, 20.0),
+            sample(4, 50.0),
+            sample(5, 40.0),
+        ];
+        // Production seeds: 3 and 5 (costs 20 and 40). Min over them is 20, which
+        // is NOT the global min (10, seed 1). This is the "best-of-k differs from
+        // the global min" case.
+        let production_seeds = [3u64, 5u64];
+        let stats = ModelStats::from_samples("m".to_string(), samples, &production_seeds);
+
+        assert_eq!(stats.model, "m");
+        assert_eq!(stats.median_cost, 30.0);
+        assert_eq!(stats.spread, (20.0, 40.0));
+        assert_eq!(
+            stats.best_of_k_cost, 20.0,
+            "best-of-k must use production seeds"
+        );
+        assert_eq!(stats.best_seed, 1, "global min cost is seed 1");
+        assert_eq!(stats.worst_seed, 4, "global max cost is seed 4");
+        assert_eq!(stats.median_seed, 2, "median-nearest cost is seed 2");
+    }
+
+    #[test]
+    fn test_from_samples_best_of_k_falls_back_to_global_min() {
+        // No production seed was sampled -> best_of_k_cost falls back to global
+        // min weighted_cost.
+        let samples = vec![sample(1, 10.0), sample(2, 30.0), sample(3, 20.0)];
+        let production_seeds = [100u64, 200u64];
+        let stats = ModelStats::from_samples("m".to_string(), samples, &production_seeds);
+        assert_eq!(
+            stats.best_of_k_cost, 10.0,
+            "no production seed sampled -> global min"
+        );
+    }
+
+    #[test]
+    fn test_from_samples_median_seed_tie_break_lowest() {
+        // Two seeds equidistant from the median cost: the lower seed wins.
+        //   seeds 5, 9 with costs 10 and 30; sorted costs [10, 30] -> median 20.
+        //   |10 - 20| == |30 - 20| == 10, a tie. Lowest seed (5) must win.
+        let samples = vec![sample(9, 30.0), sample(5, 10.0)];
+        let stats = ModelStats::from_samples("m".to_string(), samples, &[]);
+        assert_eq!(stats.median_cost, 20.0);
+        assert_eq!(stats.median_seed, 5, "tie must break on the lowest seed");
+    }
+
+    #[test]
+    fn test_from_samples_empty_is_all_zero() {
+        let stats = ModelStats::from_samples("empty".to_string(), vec![], &[1, 2, 3]);
+        assert_eq!(stats.median_cost, 0.0);
+        assert_eq!(stats.spread, (0.0, 0.0));
+        assert_eq!(stats.best_of_k_cost, 0.0);
+        assert_eq!(stats.best_seed, 0);
+        assert_eq!(stats.median_seed, 0);
+        assert_eq!(stats.worst_seed, 0);
+        // Finite, no NaN.
+        assert!(stats.median_cost.is_finite());
+        assert!(stats.spread.0.is_finite() && stats.spread.1.is_finite());
+        assert!(stats.best_of_k_cost.is_finite());
+    }
+
+    fn model_stats_with_median(model: &str, median: f64) -> ModelStats {
+        // Build a one-sample model whose median equals `median`.
+        ModelStats::from_samples(model.to_string(), vec![sample(1, median)], &[1])
+    }
+
+    #[test]
+    fn test_from_model_stats_geomean_of_medians() {
+        // Three models with medians 2, 8, 32: geomean = cbrt(2*8*32) = cbrt(512) = 8.
+        let per_model = vec![
+            model_stats_with_median("a", 2.0),
+            model_stats_with_median("b", 8.0),
+            model_stats_with_median("c", 32.0),
+        ];
+        let medians: Vec<f64> = per_model.iter().map(|m| m.median_cost).collect();
+        let report = CorpusReport::from_model_stats(per_model);
+        assert!(
+            close(report.geomean_of_medians, geomean(&medians)),
+            "{} != {}",
+            report.geomean_of_medians,
+            geomean(&medians)
+        );
+        assert!(
+            close(report.geomean_of_medians, 8.0),
+            "{}",
+            report.geomean_of_medians
+        );
+    }
+
+    #[test]
+    fn test_from_model_stats_zero_median_does_not_zero_aggregate() {
+        // A model with median 0 must not collapse the corpus geomean to 0; the
+        // epsilon floor keeps it positive and finite.
+        let per_model = vec![
+            model_stats_with_median("a", 0.0),
+            model_stats_with_median("b", 10.0),
+            model_stats_with_median("c", 1000.0),
+        ];
+        let report = CorpusReport::from_model_stats(per_model);
+        assert!(
+            report.geomean_of_medians > 0.0,
+            "a single 0 median must not zero the aggregate: got {}",
+            report.geomean_of_medians
+        );
+        assert!(report.geomean_of_medians.is_finite());
+        // It must equal the geomean of the floored medians, exactly.
+        let floored = [GEOMEAN_FLOOR_EPSILON, 10.0, 1000.0];
+        assert!(
+            close(report.geomean_of_medians, geomean(&floored)),
+            "{} != {}",
+            report.geomean_of_medians,
+            geomean(&floored)
+        );
+    }
+
+    #[test]
+    fn test_from_model_stats_empty_corpus_is_zero() {
+        let report = CorpusReport::from_model_stats(vec![]);
+        assert_eq!(report.geomean_of_medians, 0.0);
+        assert!(report.geomean_of_medians.is_finite());
     }
 }
