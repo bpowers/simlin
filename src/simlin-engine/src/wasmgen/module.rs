@@ -1238,6 +1238,43 @@ fn emit_run_to(
     f.instruction(&I::Br(0)); // continue
     f.instruction(&I::End); // end loop
     f.instruction(&I::End); // end block
+
+    // After a mid-interval stop, refresh `curr`'s flow/aux/constant slots at the
+    // resting state -- but ONLY when `curr` was advanced (`saved < n_chunks`).
+    //
+    // The `curr[TIME] > target` break fires *after* the save+advance tail, which
+    // copies only the stock offsets `next -> curr` and steps the time, leaving the
+    // non-stock slots holding the previous step's values (a one-step lag versus the
+    // advanced time + stocks). A mid-run `getValue` of a flow/aux would otherwise
+    // read that lagged value, so one root `flows(0)` re-eval makes the live curr
+    // chunk self-consistent at the resting time and identical to the VM's resting
+    // curr (#625). At that advanced break `prev_values` holds the *last completed*
+    // step (one before the resting time), so the re-eval's `PREVIOUS(x)` correctly
+    // reads `x(t-dt)`.
+    //
+    // The guard skips the re-eval when the slab is full (`saved >= n_chunks`),
+    // which is exactly the break paths that do NOT advance `curr`: the post-save
+    // exhaustion break and the top-of-loop full-slab guard. There `curr` is already
+    // the just-saved, fully-evaluated `t=stop` row, so the re-eval is unnecessary
+    // for flows/auxes -- and actively WRONG for a `PREVIOUS` aux: `prev_values` was
+    // snapshotted to that same `t=stop` row (the per-step snapshot runs after
+    // flows), so a re-eval would resolve `PREVIOUS(x)` to `x(stop)` instead of
+    // `x(stop-dt)`, corrupting the live curr a host reads via `getValue` and
+    // diverging from the committed series + the VM. Skipping also keeps a resumed
+    // `run_to` on a full slab a strict no-op. This mirrors the VM's
+    // `curr_chunk != next_chunk` guard ("re-eval only when curr was advanced").
+    // The re-eval touches only `curr` (the saved rows were already committed) and
+    // does NOT snapshot `prev_values`, so a resume's `PREVIOUS` still sees the last
+    // completed step. Unlike the VM there is no chunk aliasing: `curr` is always
+    // the fixed `CURR_BASE` region.
+    f.instruction(&I::GlobalGet(G_SAVED));
+    f.instruction(&I::I32Const(regions.n_chunks as i32));
+    f.instruction(&I::I32LtS);
+    f.instruction(&I::If(BlockType::Empty));
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::Call(f_flows));
+    f.instruction(&I::End); // end if
+
     f.instruction(&I::End); // end function
     f
 }
@@ -5253,6 +5290,154 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Reconcile #625: after a `run_to(t)` that stops mid-interval, the live curr
+    /// chunk must be fully self-consistent at the resting time -- every flow / aux /
+    /// constant evaluated for the same time and stocks `curr` holds -- and
+    /// identical across the VM and wasm. Previously the integration loop broke
+    /// right after an advance, so non-stock slots lagged a step (wasm) or held
+    /// stale garbage including 0 for constants (VM); both backends now re-evaluate
+    /// root flows once at the resting `curr` after the overshoot break.
+    #[test]
+    fn mid_run_curr_is_self_consistent_and_matches_vm() {
+        // `doubled = level * 2` is a flow-phase aux that varies every step (it
+        // tracks the growing stock), so a one-step flow/aux lag is observable; a
+        // constant flow like `inflow` would hide the lag. `prev_level` also covers
+        // a PREVIOUS aux mid-run: at the advanced resting point its re-eval reads
+        // the last completed step's snapshot, which IS the previous timestep -- so
+        // both backends must agree on it too (the `level` of the step before).
+        let datamodel = crate::test_common::TestProject::new("midrun")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("inflow_rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "inflow_rate", None)
+            .aux("doubled", "level * 2", None)
+            .aux("prev_level", "PREVIOUS(level, 0)", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let level_off = layout_offset(&artifact, "level");
+        let doubled_off = layout_offset(&artifact, "doubled");
+
+        // A mid-interval target: run_to(4.5) rests at t=5 (level=10) on both.
+        let target = 4.5_f64;
+
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let run_initials = store
+            .instance_export(inst, "run_initials")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let run_to = store
+            .instance_export(inst, "run_to")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(), ()>(run_initials, ())
+            .expect("run_initials");
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to, (target,))
+            .expect("run_to");
+
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to(target).expect("vm run_to");
+
+        // Every variable's live curr value agrees between the two backends -- not
+        // just the stocks + reserved time vars, but the flows/auxes/constants too.
+        for (name, off) in &artifact.layout.var_offsets {
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(vm_off) = vm.get_offset(&ident) else {
+                continue;
+            };
+            let wasm_val = read_curr_slot(&mut store, inst, *off);
+            let vm_val = vm.get_value_now(vm_off);
+            assert!(
+                (wasm_val - vm_val).abs() < 1e-9,
+                "{name} mid-run curr mismatch: wasm={wasm_val} vm={vm_val}"
+            );
+        }
+
+        // And the curr chunk is internally self-consistent at the resting time:
+        // doubled == level * 2 (level=10 at t=5, so doubled=20), not the lagged 16.
+        let wasm_level = read_curr_slot(&mut store, inst, level_off);
+        let wasm_doubled = read_curr_slot(&mut store, inst, doubled_off);
+        assert!(
+            (wasm_doubled - wasm_level * 2.0).abs() < 1e-9 && (wasm_doubled - 20.0).abs() < 1e-9,
+            "wasm curr not self-consistent: doubled={wasm_doubled} level={wasm_level} (expected 20)"
+        );
+    }
+
+    /// Regression (#632 review, P2): the post-loop `flows(0)` re-eval must be
+    /// SKIPPED after a full / at-stop run, or it corrupts PREVIOUS-using auxes in
+    /// the live curr chunk. A full run breaks via the slab-exhaustion path, which
+    /// does NOT advance curr: curr is the just-saved `t=stop` row, and
+    /// `prev_values` was already snapshotted to that same row (the per-step
+    /// snapshot runs after the step's flows). A re-eval would then resolve
+    /// `PREVIOUS(x)` against curr's own snapshot -> `x(stop)` instead of
+    /// `x(stop-dt)`. Since the wasm host's `getValue` reads the live curr, it would
+    /// diverge from the committed series and from the VM (which reads the last
+    /// results row). The `saved < n_chunks` guard skips the re-eval exactly when
+    /// curr was not advanced (the slab is full), mirroring the VM's
+    /// `curr_chunk != next_chunk`. Only flows/auxes built on PREVIOUS expose this,
+    /// so the constant-only teacup parity tests miss it.
+    #[test]
+    fn full_run_previous_aux_curr_matches_series_and_vm() {
+        // level grows 2/step from 0; prev_level(t) = level(t-dt). At t=stop=5 the
+        // correct prev_level is level(4) = 8 -- NOT level(5) = 10.
+        let datamodel = crate::test_common::TestProject::new("prev_full")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "rate", None)
+            .aux("prev_level", "PREVIOUS(level, 0)", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let prev_off = layout_offset(&artifact, "prev_level");
+        let n_slots = artifact.layout.n_slots;
+        let n_chunks = artifact.layout.n_chunks;
+
+        // Full run via the single-shot `run` export (reset; run_to(stop)).
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let run = store
+            .instance_export(inst, "run")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store.invoke_simple_typed::<(), ()>(run, ()).expect("run");
+
+        // The live curr value (what the host's getValue reads) must equal the last
+        // committed series row -- not the re-eval'd self-snapshot.
+        let curr_prev = read_curr_slot(&mut store, inst, prev_off);
+        let slab = read_slab(&mut store, inst, &artifact.layout);
+        let last_series_prev = slab[(n_chunks - 1) * n_slots + prev_off];
+        assert!(
+            (curr_prev - last_series_prev).abs() < 1e-9,
+            "live curr prev_level ({curr_prev}) must equal the last saved row ({last_series_prev})"
+        );
+
+        // And both equal the VM's last results row (= level(4) = 8).
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to_end().expect("vm run");
+        let vm_results = vm.into_results();
+        let vm_off = vm_results.offsets[&Ident::<Canonical>::from_str_unchecked("prev_level")];
+        let vm_last = vm_results.data[(vm_results.step_count - 1) * vm_results.step_size + vm_off];
+        assert!(
+            (curr_prev - vm_last).abs() < 1e-9 && (curr_prev - 8.0).abs() < 1e-9,
+            "wasm curr prev_level={curr_prev} vm last={vm_last} (expected 8 = level at t=4)"
+        );
     }
 
     /// Task 3 (AC3.1, AC5.4): on a single reused instance, `run` then
