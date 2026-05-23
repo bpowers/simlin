@@ -5360,3 +5360,7 @@ mod tests;
 #[cfg(test)]
 #[path = "crossings_tests.rs"]
 mod crossings_tests;
+
+#[cfg(test)]
+#[path = "layout_selection_tests.rs"]
+mod layout_selection_tests;
