@@ -73,7 +73,11 @@ struct FlowAttachment {
 /// Result of a single layout generation, used to select the best among parallel attempts.
 struct LayoutResult {
     view: datamodel::StockFlow,
-    crossings: usize,
+    /// The full calibrated layout-quality metric for `view` (Sigma w_i * term_i,
+    /// with `MetricWeights::default()`). `select_best_layout` minimizes this; its
+    /// `crossings` term already captures the accurate connector-crossing count, so
+    /// there is no separate `crossings` field.
+    weighted_cost: f64,
     seed: u64,
 }
 
@@ -5264,8 +5268,10 @@ pub fn generate_layout_with_config(
     fresh_layout(model, &metadata, &config)
 }
 
-/// Generate multiple layouts with different seeds in parallel and pick the
-/// one with fewest crossings. On tie, the lowest seed wins.
+/// Generate multiple layouts with different seeds in parallel and pick the one
+/// that minimizes the full calibrated layout-quality metric (`weighted_cost`,
+/// which includes the accurate connector-crossing count alongside node/label
+/// overlap and loop compactness). On tie, the lowest seed wins.
 pub fn generate_best_layout(
     project: &datamodel::Project,
     model_name: &str,
@@ -5281,10 +5287,14 @@ pub fn generate_best_layout(
         let mut cfg = config.clone();
         cfg.annealing_random_seed = seed;
         let view = fresh_layout(model, &metadata, &cfg)?;
-        let crossings = count_view_crossings(&view);
+        // Score the candidate with the full calibrated metric. Its `crossings`
+        // term computes the accurate connector-crossing count internally, so we
+        // no longer call `count_view_crossings` directly here.
+        let metrics = metrics::compute_layout_metrics(&view, &cfg);
+        let weighted_cost = metrics.weighted_cost(&metrics::MetricWeights::default());
         Ok(LayoutResult {
             view,
-            crossings,
+            weighted_cost,
             seed,
         })
     };
@@ -5314,7 +5324,9 @@ pub fn compute_layout_metadata(
     compute_metadata(project, model_name, db_state)
 }
 
-/// Pick the layout with fewest crossings; on tie, the one from the lowest seed.
+/// Pick the layout that minimizes the full calibrated layout-quality metric
+/// (`weighted_cost`); on tie, the one from the lowest seed. The first `Err`
+/// short-circuits, and an empty result set is an error.
 fn select_best_layout(
     results: Vec<Result<LayoutResult, String>>,
 ) -> Result<datamodel::StockFlow, String> {
@@ -5325,13 +5337,14 @@ fn select_best_layout(
         best = Some(match best {
             None => lr,
             Some(prev) => {
-                if lr.crossings < prev.crossings
-                    || (lr.crossings == prev.crossings && lr.seed < prev.seed)
-                {
-                    lr
-                } else {
-                    prev
-                }
+                // NaN-safe by construction: `<` yields false when
+                // `lr.weighted_cost` is NaN, so a degenerate NaN-cost candidate
+                // never displaces a finite one. If BOTH costs are NaN the
+                // tie-break does not fire either (`==` is false for NaN), so the
+                // earlier candidate is kept -- deterministic regardless.
+                let better = lr.weighted_cost < prev.weighted_cost
+                    || (lr.weighted_cost == prev.weighted_cost && lr.seed < prev.seed);
+                if better { lr } else { prev }
             }
         });
     }

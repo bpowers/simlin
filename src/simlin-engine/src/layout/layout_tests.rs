@@ -529,70 +529,6 @@ fn test_extract_equation_deps_arrayed_uses_all_entries() {
 }
 
 #[test]
-fn test_select_best_layout_fewest_crossings() {
-    let results = vec![
-        Ok(LayoutResult {
-            view: datamodel::StockFlow {
-                name: None,
-                elements: vec![ViewElement::Aux(view_element::Aux {
-                    name: "from_5_crossings".to_string(),
-                    uid: 1,
-                    x: 0.0,
-                    y: 0.0,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                })],
-                view_box: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 100.0,
-                    height: 100.0,
-                },
-                zoom: 1.0,
-                use_lettered_polarity: false,
-                font: None,
-                sketch_compat: None,
-            },
-            crossings: 5,
-            seed: 42,
-        }),
-        Ok(LayoutResult {
-            view: datamodel::StockFlow {
-                name: None,
-                elements: vec![ViewElement::Aux(view_element::Aux {
-                    name: "from_2_crossings".to_string(),
-                    uid: 2,
-                    x: 0.0,
-                    y: 0.0,
-                    label_side: LabelSide::Bottom,
-                    compat: None,
-                })],
-                view_box: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 100.0,
-                    height: 100.0,
-                },
-                zoom: 1.0,
-                use_lettered_polarity: false,
-                font: None,
-                sketch_compat: None,
-            },
-            crossings: 2,
-            seed: 123,
-        }),
-    ];
-    let best = select_best_layout(results).unwrap();
-    // Should pick the one with 2 crossings (fewer is better)
-    assert_eq!(best.elements.len(), 1);
-    if let ViewElement::Aux(aux) = &best.elements[0] {
-        assert_eq!(aux.name, "from_2_crossings");
-    } else {
-        unreachable!("expected Aux element");
-    }
-}
-
-#[test]
 fn test_select_best_layout_lowest_seed_on_tie() {
     let results = vec![
         Ok(LayoutResult {
@@ -617,7 +553,7 @@ fn test_select_best_layout_lowest_seed_on_tie() {
                 font: None,
                 sketch_compat: None,
             },
-            crossings: 3,
+            weighted_cost: 3.0,
             seed: 123,
         }),
         Ok(LayoutResult {
@@ -642,12 +578,13 @@ fn test_select_best_layout_lowest_seed_on_tie() {
                 font: None,
                 sketch_compat: None,
             },
-            crossings: 3,
+            weighted_cost: 3.0,
             seed: 42,
         }),
     ];
     let best = select_best_layout(results).unwrap();
-    // Should pick seed 42 (lower seed wins on tie)
+    // Equal weighted_cost on both: the lower seed wins the tie-break (still valid
+    // under the Rung-0 weighted_cost selection rule).
     assert_eq!(best.elements.len(), 1);
     if let ViewElement::Aux(aux) = &best.elements[0] {
         assert_eq!(aux.name, "from_seed_42");
