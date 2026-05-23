@@ -4327,49 +4327,89 @@ fn detect_chains(
     chains
 }
 
-/// Count edge crossings in a completed StockFlow view.
+/// Build the set of [`LineSegment`]s that crossing detection runs over for a
+/// completed StockFlow view. This is the single source of geometry shared by
+/// [`count_view_crossings`] and the layout quality metric, so a layout's
+/// crossing score can never disagree with the geometry the renderer draws.
 ///
-/// Arc and multi-point link shapes are approximated as straight segments
-/// from source to target position, so counts for diagrams with curved
-/// connectors are approximate.
-pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
+/// Connector geometry comes from [`crate::diagram::connector::connector_polyline`],
+/// the exact polyline the SVG renderer draws: straight links are clipped to
+/// element boundaries, arcs are sampled along their arc circle, and MultiPoint
+/// links contribute nothing (the renderer draws nothing for them today).
+///
+/// Element endpoints are resolved over *all* element kinds, so a link incident
+/// on a Module or Alias is no longer dropped (the previous chord-based code
+/// only mapped Stock/Flow/Aux/Cloud, silently undercounting such crossings).
+///
+/// Node naming suppresses self- and shared-endpoint "crossings" exactly like
+/// before: a connector's first vertex is `elem_{from_uid}` and its last is
+/// `elem_{to_uid}` (so two connectors sharing an element endpoint never count),
+/// while internal arc-sample vertices are `link_{link.uid}#{i}` (so the
+/// consecutive segments of one arc share an internal node name and never count
+/// as self-crossings). Flow pipe segments keep the historic `flow_{uid}#{i}`
+/// naming.
+fn build_view_segments(view: &datamodel::StockFlow) -> Vec<LineSegment> {
     if view.elements.is_empty() {
-        return 0;
+        return Vec::new();
     }
 
-    let mut uid_positions: HashMap<i32, Position> = HashMap::new();
+    // Resolve every element by uid so a link can find its endpoints regardless
+    // of the endpoint's kind (Module/Alias included).
+    let mut uid_elements: HashMap<i32, &ViewElement> = HashMap::new();
     for elem in &view.elements {
-        match elem {
-            ViewElement::Stock(s) => {
-                uid_positions.insert(s.uid, Position::new(s.x, s.y));
-            }
-            ViewElement::Flow(f) => {
-                uid_positions.insert(f.uid, Position::new(f.x, f.y));
-            }
-            ViewElement::Aux(a) => {
-                uid_positions.insert(a.uid, Position::new(a.x, a.y));
-            }
-            ViewElement::Cloud(c) => {
-                uid_positions.insert(c.uid, Position::new(c.x, c.y));
-            }
-            _ => {}
-        }
+        uid_elements.insert(elem.get_uid(), elem);
     }
+
+    // Crossing detection is center-based and deterministic; no element is
+    // treated as arrayed (matching the historic behavior).
+    let not_arrayed = |_: &str| false;
 
     let mut segments: Vec<LineSegment> = Vec::new();
 
     for elem in &view.elements {
         match elem {
             ViewElement::Link(link) => {
-                if let (Some(&from_pos), Some(&to_pos)) = (
-                    uid_positions.get(&link.from_uid),
-                    uid_positions.get(&link.to_uid),
-                ) {
+                let (Some(&from), Some(&to)) = (
+                    uid_elements.get(&link.from_uid),
+                    uid_elements.get(&link.to_uid),
+                ) else {
+                    continue; // an endpoint is genuinely missing
+                };
+
+                let polyline = crate::diagram::connector::connector_polyline(
+                    link,
+                    from,
+                    to,
+                    &not_arrayed,
+                    crate::diagram::connector::ARC_POLYLINE_SAMPLES,
+                );
+                if polyline.len() < 2 {
+                    continue; // MultiPoint / degenerate: nothing drawn
+                }
+
+                let last_idx = polyline.len() - 1;
+                // Name the first vertex after the source element and the last
+                // after the target element so two connectors sharing an element
+                // endpoint are suppressed; name internal vertices per-link so a
+                // connector never crosses itself.
+                let vertex_name = |i: usize| -> String {
+                    if i == 0 {
+                        format!("elem_{}", link.from_uid)
+                    } else if i == last_idx {
+                        format!("elem_{}", link.to_uid)
+                    } else {
+                        format!("link_{}#{}", link.uid, i)
+                    }
+                };
+
+                for i in 0..last_idx {
+                    let a = polyline[i];
+                    let b = polyline[i + 1];
                     segments.push(LineSegment {
-                        start: from_pos,
-                        end: to_pos,
-                        from_node: format!("elem_{}", link.from_uid),
-                        to_node: format!("elem_{}", link.to_uid),
+                        start: Position::new(a.x, a.y),
+                        end: Position::new(b.x, b.y),
+                        from_node: vertex_name(i),
+                        to_node: vertex_name(i + 1),
                     });
                 }
             }
@@ -4387,7 +4427,18 @@ pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
         }
     }
 
-    annealing::count_crossings(&segments)
+    segments
+}
+
+/// Count edge crossings in a completed StockFlow view.
+///
+/// Crossings are counted on the connectors' sampled drawn polylines: straight
+/// links clipped to element boundaries, arcs sampled along their arc circle,
+/// and flow pipes as their point polylines. All element endpoints are resolved
+/// (Module/Alias included), so the count reflects the geometry the renderer
+/// actually draws rather than a straight chord approximation.
+pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
+    annealing::count_crossings(&build_view_segments(view))
 }
 
 /// Assemble a [`datamodel::StockFlow`] from finalized layout state, copying
@@ -5157,3 +5208,7 @@ fn select_best_layout(
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "crossings_tests.rs"]
+mod crossings_tests;

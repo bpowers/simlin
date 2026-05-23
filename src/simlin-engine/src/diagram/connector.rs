@@ -20,9 +20,6 @@ use crate::diagram::constants::*;
 /// radii, which is more than enough to detect whether the arc crosses another
 /// edge. It does not affect rendered SVG (the renderer still emits a single
 /// `A` arc command); it only governs the sampled geometry the metric sees.
-// Production callers (crate::layout::count_view_crossings / metrics.rs) arrive
-// in Tasks 4 and 5; remove this allow when the first crate-side caller lands.
-#[allow(dead_code)]
 pub(crate) const ARC_POLYLINE_SAMPLES: usize = 16;
 
 enum ElementShape {
@@ -458,9 +455,6 @@ fn arc_geometry(
 /// start angle and a signed sweep `delta` from the two endpoint angles, then
 /// adjust `delta` so its sign matches the sweep-flag and its magnitude matches
 /// the large-arc-flag. Returns `samples.max(2) + 1` points.
-// Reached only through `connector_polyline`, whose first non-test caller lands
-// in Task 4; remove this allow then.
-#[allow(dead_code)]
 fn sample_arc(g: &ArcGeometry, samples: usize) -> Vec<Point> {
     let n = samples.max(2);
     let theta0 = (g.start.y - g.circ.y).atan2(g.start.x - g.circ.x);
@@ -508,9 +502,6 @@ fn sample_arc(g: &ArcGeometry, samples: usize) -> Vec<Point> {
 /// circle (matching `render_arc`, which draws start=from_visual to
 /// arc_end=to_visual); MultiPoint links return an empty vec because the
 /// renderer draws nothing for them today (known gap).
-// First non-test caller (crate::layout::count_view_crossings) lands in Task 4;
-// remove this allow then.
-#[allow(dead_code)]
 pub(crate) fn connector_polyline(
     element: &view_element::Link,
     from: &ViewElement,
