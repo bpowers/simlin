@@ -592,6 +592,19 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
     total_bytes = const_valid_base
         .checked_add(n_slots)
         .ok_or_else(too_large)?;
+    // A parallel `n_slots`-byte region marking which absolute slots have been
+    // *explicitly* overridden via `set_value` (1 = overridden) -- distinct from
+    // the `const_valid` "is overridable" region. `reset` reads it to reproduce the
+    // VM's recreate-and-reapply semantics (`simulation.rs:314-330`): it zeroes the
+    // live curr chunk, then reapplies only the explicitly-overridden constants. A
+    // freshly-created VM leaves an unoverridden constant at 0 until initials run,
+    // so reapplying the mere compiled *defaults* here would diverge -- hence the
+    // override-set marker is required, not just the validity region. Zero-init (no
+    // overrides at instantiation), so it needs no active data segment.
+    let const_override_set_base = total_bytes;
+    total_bytes = const_override_set_base
+        .checked_add(n_slots)
+        .ok_or_else(too_large)?;
 
     let overridable_defaults = collect_overridable_defaults(&sim.modules, &sim.root, 0);
     // Defense in depth: the offsets `collect_overridable_defaults` reports must
@@ -762,12 +775,22 @@ pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, Wasm
 
     // The constants-override exports (Phase 7 Task 2): `set_value` writes an
     // override into the constants region (validated against the validity bytes),
-    // `reset` resets the run state (the cursor globals + `use_prev_fallback`)
-    // without clearing the region, and `clear_values` restores the compiled
-    // defaults.
-    let set_value_fn = emit_set_value(n_slots, const_region_base, const_valid_base);
-    let reset_fn = emit_reset();
-    let clear_values_fn = emit_clear_values(const_region_base, &overridable_defaults);
+    // mirrors it into the live curr chunk, and marks the slot as overridden;
+    // `reset` re-establishes the fresh pre-run curr chunk (zero, with overrides
+    // reapplied) and clears the run cursor without clearing the override region;
+    // `clear_values` restores the compiled defaults and drops the override marks.
+    let set_value_fn = emit_set_value(
+        n_slots,
+        const_region_base,
+        const_valid_base,
+        const_override_set_base,
+    );
+    let reset_fn = emit_reset(n_slots, const_region_base, const_override_set_base);
+    let clear_values_fn = emit_clear_values(
+        const_region_base,
+        const_override_set_base,
+        &overridable_defaults,
+    );
 
     // The constants region + validity bytes are initialized at instantiation by
     // active data segments built from the overridable defaults (sparse writes,
@@ -1171,6 +1194,20 @@ fn emit_run_to(
     f.instruction(&I::Block(BlockType::Empty)); // $break
     f.instruction(&I::Loop(BlockType::Empty)); // $continue
 
+    // if saved >= n_chunks: break. A resumed `run_to` on an already-complete slab
+    // (`saved == n_chunks`, reachable via a second `run_to_end` or interactive
+    // scrubbing that stays at the end) must be a no-op: the results region is
+    // exactly `n_chunks` rows, so saving one more would write past it and corrupt
+    // the snapshot/GF regions that sit immediately after. This is the resumable
+    // analogue of the post-save exhaustion break below, moved to the loop *entry*
+    // so re-entry on a full slab steps and saves nothing. (A fresh run never trips
+    // it -- `saved` only reaches `n_chunks` via that post-save break, which exits
+    // before this guard is re-checked.)
+    f.instruction(&I::GlobalGet(G_SAVED));
+    f.instruction(&I::I32Const(regions.n_chunks as i32));
+    f.instruction(&I::I32GeS);
+    f.instruction(&I::BrIf(1));
+
     // if curr[TIME] > target: break
     f.instruction(&I::I32Const(0));
     f.instruction(&I::F64Load(memarg(TIME_ADDR)));
@@ -1382,7 +1419,12 @@ const SV_VALUE: u32 = 1;
 /// mirrors the VM's `set_value_by_offset` (`vm.rs:1037-1052`): an out-of-range or
 /// non-constant offset is rejected (the VM returns `Err`), a valid one applies
 /// the override (which persists across `reset`).
-fn emit_set_value(n_slots: u32, const_region_base: u32, const_valid_base: u32) -> Function {
+fn emit_set_value(
+    n_slots: u32,
+    const_region_base: u32,
+    const_valid_base: u32,
+    const_override_set_base: u32,
+) -> Function {
     let mut f = Function::new([]);
 
     // if (offset < 0) | (offset >= n_slots): return 1
@@ -1414,24 +1456,81 @@ fn emit_set_value(n_slots: u32, const_region_base: u32, const_valid_base: u32) -
     f.instruction(&I::LocalGet(SV_VALUE));
     f.instruction(&I::F64Store(memarg(u64::from(const_region_base))));
 
+    // curr[offset] = val: mirror the override into the live curr chunk (base 0)
+    // so a by-name read reflects it immediately, before any run -- exactly what
+    // the VM's `apply_override` does via `set_value_now` (`vm.rs:1020`). The blob
+    // owns this so the host needs no shadow write into curr.
+    f.instruction(&I::LocalGet(SV_OFFSET));
+    f.instruction(&I::I32Const(SLOT_SIZE as i32));
+    f.instruction(&I::I32Mul);
+    f.instruction(&I::LocalGet(SV_VALUE));
+    f.instruction(&I::F64Store(memarg(u64::from(CURR_BASE))));
+
+    // override_set[offset] = 1: mark this slot as explicitly overridden, so `reset`
+    // reapplies it into curr (and `clear_values` can later drop the mark).
+    f.instruction(&I::LocalGet(SV_OFFSET));
+    f.instruction(&I::I32Const(1));
+    f.instruction(&I::I32Store8(byte_memarg(u64::from(
+        const_override_set_base,
+    ))));
+
     // return 0
     f.instruction(&I::I32Const(0));
     f.instruction(&I::End);
     f
 }
 
-/// Emit `reset() -> ()`: clear the persistent run state so the next `run_to`
-/// (and therefore `run`, which delegates `reset; run_to(stop)`) re-runs initials
-/// and steps the loop from t=start. The run cursor now lives in mutable globals
-/// (since the run is resumable), so `reset` must clear all of it:
-/// `G_SAVED`/`G_STEP_ACCUM` to 0 (no rows saved, accumulator empty),
-/// `G_DID_INITIALS` to 0 (so `run_initials` no longer short-circuits and re-seeds
-/// the time slots + re-runs initials), and `G_USE_PREV_FALLBACK` back to 1 (the
-/// analogue of the VM's `reset` clearing `prev_values_valid`). This mirrors
-/// `vm.rs:989-1002` exactly. Like the VM, it deliberately does NOT touch the
-/// constants-override region, so a `set_value` override persists across `reset`.
-fn emit_reset() -> Function {
+/// Emit `reset() -> ()`: re-establish the fresh pre-run state so the next
+/// `run_to` (and therefore `run`, which delegates `reset; run_to(stop)`) re-runs
+/// initials and steps the loop from t=start, and so a by-name read between the
+/// reset and the next run sees the same fresh state libsimlin presents.
+///
+/// Two parts, mirroring libsimlin's `simlin_sim_reset` recreate-and-reapply path
+/// (`simulation.rs:314-330`):
+///
+/// 1. **Live curr chunk** (base 0): each slot becomes its explicit override (if
+///    `override_set[slot] != 0`) or 0 otherwise -- the state a freshly-created VM
+///    presents after reapplying its tracked overrides. A non-overridden constant
+///    reads 0 here (its compiled default is not materialized until `run_initials`),
+///    so this reapplies *overrides only*, never defaults; that is why the
+///    override-set marker is needed and the validity region alone would not do.
+///    The host therefore needs no shadow write into curr (the zero-fill it used to
+///    do clobbered the very override it had mirrored). Unrolled per slot, matching
+///    `emit_copy_chunk`; `run_initials` overwrites curr wholesale on the next run,
+///    so this matters only for a read taken between `reset` and the next run.
+///
+/// 2. **Run cursor + PREVIOUS fallback** globals: `G_SAVED`/`G_STEP_ACCUM` to 0
+///    (no rows saved, accumulator empty), `G_DID_INITIALS` to 0 (so `run_initials`
+///    no longer short-circuits and re-seeds the time slots + re-runs initials), and
+///    `G_USE_PREV_FALLBACK` back to 1 (the analogue of the VM's `reset` clearing
+///    `prev_values_valid`). Mirrors `vm.rs:989-1002`.
+///
+/// Like the VM, `reset` deliberately does NOT touch the constants-override region
+/// or its markers, so a `set_value` override persists across `reset`.
+fn emit_reset(n_slots: u32, const_region_base: u32, const_override_set_base: u32) -> Function {
     let mut f = Function::new([]);
+
+    // Part 1: curr[slot] = override_set[slot] ? const_region[slot] : 0.0
+    for slot in 0..n_slots {
+        let slot_addr = u64::from(slot) * u64::from(SLOT_SIZE);
+        f.instruction(&I::I32Const(0)); // F64Store address operand (curr base 0)
+        // the overridden value ...
+        f.instruction(&I::I32Const(0));
+        f.instruction(&I::F64Load(memarg(
+            u64::from(const_region_base) + slot_addr,
+        )));
+        // ... vs 0.0 ...
+        f.instruction(&f64_const(0.0));
+        // ... selected by the override-set marker byte.
+        f.instruction(&I::I32Const(0));
+        f.instruction(&I::I32Load8U(byte_memarg(
+            u64::from(const_override_set_base) + u64::from(slot),
+        )));
+        f.instruction(&I::Select);
+        f.instruction(&I::F64Store(memarg(slot_addr)));
+    }
+
+    // Part 2: clear the persistent run state (cursor + PREVIOUS fallback).
     f.instruction(&I::I32Const(0));
     f.instruction(&I::GlobalSet(G_SAVED));
     f.instruction(&I::I32Const(0));
@@ -1446,18 +1545,33 @@ fn emit_reset() -> Function {
 
 /// Emit `clear_values() -> ()`: restore each overridable constant to its
 /// compiled-default literal by writing the defaults back into the constants
-/// region (the VM's `clear_values`, `vm.rs:1055-1062`). The defaults are
-/// compile-time constants, so this is a straight-line sequence of `f64.store`s --
-/// one per overridable absolute offset. The data segment also writes these at
+/// region (the VM's `clear_values`, `vm.rs:1055-1062`), and drop each slot's
+/// override-set marker so a subsequent `reset` no longer reapplies the cleared
+/// override into curr (it reverts to the fresh-zero state). Like the VM, this
+/// does NOT touch the live curr chunk -- the next run re-materializes the
+/// defaults. The defaults and offsets are compile-time constants, so this is a
+/// straight-line sequence of stores -- one f64 default + one zero marker byte per
+/// overridable absolute offset. The data segment also writes the defaults at
 /// instantiation; `clear_values` lets a host undo a `set_value` without
 /// re-instantiating the module.
-fn emit_clear_values(const_region_base: u32, overridable_defaults: &[(usize, f64)]) -> Function {
+fn emit_clear_values(
+    const_region_base: u32,
+    const_override_set_base: u32,
+    overridable_defaults: &[(usize, f64)],
+) -> Function {
     let mut f = Function::new([]);
     for &(abs_off, default) in overridable_defaults {
+        // const_region[abs_off] = default
         f.instruction(&I::I32Const(0));
         f.instruction(&f64_const(default));
         f.instruction(&I::F64Store(memarg(
             u64::from(const_region_base) + abs_off as u64 * u64::from(SLOT_SIZE),
+        )));
+        // override_set[abs_off] = 0
+        f.instruction(&I::I32Const(0));
+        f.instruction(&I::I32Const(0));
+        f.instruction(&I::I32Store8(byte_memarg(
+            u64::from(const_override_set_base) + abs_off as u64,
         )));
     }
     f.instruction(&I::End);
@@ -5306,6 +5420,160 @@ mod tests {
             (series_b[last] - 25.0).abs() < 1e-9,
             "level under inflow_rate=5 should reach 25 after reset, got {}",
             series_b[last]
+        );
+    }
+
+    /// Regression (PR #628 follow-up, P2): the blob owns the live `curr` chunk's
+    /// override semantics end-to-end, so a host needs no shadow writes into curr.
+    /// `set_value(off, v)` writes the override into the live curr chunk immediately
+    /// (mirroring the VM's `set_value_now`, `vm.rs:869-873`), and `reset()`
+    /// re-establishes the fresh pre-run curr state -- zeroed everywhere except the
+    /// explicitly-overridden constants, which keep their override (mirroring
+    /// libsimlin's recreate-and-reapply `simlin_sim_reset`). Previously the blob's
+    /// set_value/reset left curr untouched and the TS host poked curr directly: a
+    /// zero-fill on reset that then clobbered the very override it had mirrored.
+    #[test]
+    fn set_value_writes_curr_and_reset_reapplies_override() {
+        let datamodel = resumable_fixture(5.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let rate_off = layout_offset(&artifact, "inflow_rate");
+        let level_off = layout_offset(&artifact, "level");
+
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let set_value = store
+            .instance_export(inst, "set_value")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let reset = store
+            .instance_export(inst, "reset")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let clear_values = store
+            .instance_export(inst, "clear_values")
+            .unwrap()
+            .as_func()
+            .unwrap();
+
+        // set_value(inflow_rate, 5) on a fresh instance (no run): the override must
+        // land in the live curr chunk immediately, not only in the constants region.
+        let rc: i32 = store
+            .invoke_simple_typed::<(i32, f64), i32>(set_value, (rate_off as i32, 5.0))
+            .expect("set_value");
+        assert_eq!(rc, 0, "set_value on inflow_rate must succeed");
+        assert_eq!(
+            read_curr_slot(&mut store, inst, rate_off),
+            5.0,
+            "set_value must write the override into the live curr chunk"
+        );
+
+        // reset(): curr returns to the fresh pre-run state -- the override persists
+        // in curr, while every non-overridden slot (the level stock and the reserved
+        // TIME slot) reads 0, exactly as a freshly-created VM does after reapply.
+        store
+            .invoke_simple_typed::<(), ()>(reset, ())
+            .expect("reset");
+        assert_eq!(
+            read_curr_slot(&mut store, inst, rate_off),
+            5.0,
+            "reset must reapply the explicitly-overridden constant into curr"
+        );
+        assert_eq!(
+            read_curr_slot(&mut store, inst, level_off),
+            0.0,
+            "reset must zero non-overridden slots in curr"
+        );
+        assert_eq!(
+            read_curr_slot(&mut store, inst, TIME_OFF),
+            0.0,
+            "reset must zero the reserved time slot in curr"
+        );
+
+        // clear_values() drops the override, so a subsequent reset zeroes the slot:
+        // a cleared override is no longer reapplied (matching the VM's clear_values).
+        store
+            .invoke_simple_typed::<(), ()>(clear_values, ())
+            .expect("clear_values");
+        store
+            .invoke_simple_typed::<(), ()>(reset, ())
+            .expect("reset after clear_values");
+        assert_eq!(
+            read_curr_slot(&mut store, inst, rate_off),
+            0.0,
+            "after clear_values, reset must no longer reapply the dropped override"
+        );
+    }
+
+    /// Regression (PR #628 follow-up, P1): a `run_to` that resumes on an
+    /// already-complete slab (`saved == n_chunks`, reachable via a second
+    /// `run_to_end` or interactive scrubbing that stays at the end) must be a
+    /// complete no-op. Previously the stepping loop re-entered -- its
+    /// `curr[TIME] > target` guard is false when `target >= stop` -- and
+    /// `emit_save_advance` wrote one results row at `results_base + n_chunks*stride`,
+    /// one full row past the `n_chunks`-row results region, silently corrupting the
+    /// snapshot/GF regions that sit immediately after it. The loop now breaks at the
+    /// top when `saved >= n_chunks`, so a resumed-on-full `run_to` cannot touch
+    /// linear memory at all.
+    #[test]
+    fn run_to_on_full_slab_is_a_noop() {
+        // save_step == dt == 1 => save_every == 1, so every step saves and the
+        // overshoot row is written immediately on re-entry (the worst case).
+        let datamodel = resumable_fixture(10.0);
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let stop = sim.specs.stop;
+
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let run_initials = store
+            .instance_export(inst, "run_initials")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let run_to = store
+            .instance_export(inst, "run_to")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let mem = store
+            .instance_export(inst, "memory")
+            .unwrap()
+            .as_mem()
+            .unwrap();
+
+        // Fill the slab: run_initials; run_to(stop). saved == n_chunks now.
+        store
+            .invoke_simple_typed::<(), ()>(run_initials, ())
+            .expect("run_initials");
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to, (stop,))
+            .expect("run_to(stop)");
+        let before: Vec<u8> = store.mem_access_mut_slice(mem, |bytes| bytes.to_vec());
+
+        // Resume on the full slab: a re-run to stop, and a run far past it, must each
+        // change nothing -- not the results region, not the regions following it.
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to, (stop,))
+            .expect("run_to(stop) again");
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to, (stop * 100.0,))
+            .expect("run_to(stop*100)");
+        let after: Vec<u8> = store.mem_access_mut_slice(mem, |bytes| bytes.to_vec());
+
+        assert!(
+            before == after,
+            "run_to on a full slab must be a no-op; linear memory changed (out-of-bounds results write)"
         );
     }
 

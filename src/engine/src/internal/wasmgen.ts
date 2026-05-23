@@ -50,8 +50,12 @@ export interface WasmLayout {
  * The exports of a compiled-model wasm blob. The blob is import-free; the host
  * instantiates it and drives `run`/`run_to`/`reset` directly (libsimlin is not
  * on this hot path). `run_to` is resumable: it calls the idempotent
- * `run_initials` internally and resumes from where a prior call stopped;
- * `reset` clears the run cursor while preserving constant overrides.
+ * `run_initials` internally and resumes from where a prior call stopped (a
+ * resume on an already-complete slab is a no-op). The blob owns the live `curr`
+ * chunk's presentation, so the host needs no shadow writes: `set_value` mirrors
+ * the override into curr, and `reset` clears the run cursor AND re-establishes
+ * the fresh pre-run curr (zeroed, with constant overrides reapplied), preserving
+ * the overrides themselves across reset.
  */
 export interface WasmBlobExports {
   memory: WebAssembly.Memory;
@@ -59,7 +63,11 @@ export interface WasmBlobExports {
   run_to(time: number): void;
   run_initials(): void;
   reset(): void;
-  /** Override a constant by slot offset; returns 0 on success, nonzero if the slot is not a settable constant. */
+  /**
+   * Override a constant by slot offset: writes the constants region AND mirrors
+   * the value into the live curr chunk. Returns 0 on success, nonzero if the
+   * slot is not a settable constant.
+   */
   set_value(offset: number, value: number): number;
   clear_values(): void;
   n_slots: WebAssembly.Global;
