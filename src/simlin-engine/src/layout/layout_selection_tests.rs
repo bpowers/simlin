@@ -12,6 +12,12 @@
 
 use super::*;
 use crate::datamodel;
+use crate::layout::metrics::{MetricWeights, compute_layout_metrics};
+use crate::test_common::TestProject;
+
+/// `TestProject::build_datamodel` synthesizes a single model named `"main"`, so
+/// every `generate_layout_with_config` call in this file targets that name.
+const MAIN_MODEL: &str = "main";
 
 /// A scalar aux at (`x`, `y`) with a unique name, so a selected view can be
 /// identified by which marker element it carries.
@@ -251,5 +257,155 @@ fn test_select_best_layout_nan_first_is_sticky_documented_limitation() {
         Some("nan"),
         "a NaN seeded as the running best is sticky under the current fold \
          (documented limitation)"
+    );
+}
+
+// ---- AC7: deterministic weighted_cost regression guard ----
+//
+// The thresholds below are observed-cost CEILINGS captured at the fixed
+// annealing seed 42 with the calibrated `MetricWeights::default()`. They guard
+// against layout-quality regressions: if a change to the layout algorithm,
+// metric, or weights pushes a tiny model's fixed-seed `weighted_cost` above its
+// ceiling, this test fails loudly. Each ceiling sits a small margin above the
+// observed cost (roughly observed * 1.15, or a small absolute floor when the
+// observed cost is 0) -- tight enough to catch a real regression, loose enough
+// not to flake on float noise.
+//
+// To regenerate after an INTENTIONAL metric/weight change: layout is
+// deterministic per seed, so print the new `weighted_cost` for each guard model
+// (e.g. add a temporary `println!` to `guard_fixed_seed_cost`), run this test
+// once, and reset each ceiling a small margin above the new observed value.
+// Lowering a ceiling that no longer matches reality is fine; raising one to
+// paper over a real regression is not.
+//
+// Observed at seed 42 (2026-05-23): pop = 0.0533, chain = 0.0,
+// two_stock = 0.1646.
+const GUARD_POP_COST_CEILING: f64 = 0.06;
+const GUARD_CHAIN_COST_CEILING: f64 = 0.05;
+const GUARD_TWO_STOCK_COST_CEILING: f64 = 0.19;
+
+/// Lay `project`'s `main` model out at the fixed seed 42 and return its
+/// calibrated `weighted_cost`. Seeding explicitly (rather than relying on the
+/// `LayoutConfig::default()` seed) keeps the guard pinned to one reproducible
+/// layout even if the default seed changes.
+fn guard_fixed_seed_cost(project: &datamodel::Project) -> f64 {
+    let config = LayoutConfig {
+        annealing_random_seed: 42,
+        ..LayoutConfig::default()
+    };
+    let view = generate_layout_with_config(project, MAIN_MODEL, config.clone(), None)
+        .expect("layout generation should succeed");
+    compute_layout_metrics(&view, &config).weighted_cost(&MetricWeights::default())
+}
+
+/// A population stock with births/deaths flows and two rate auxes -- the
+/// canonical tiny feedback model.
+fn guard_pop_model() -> datamodel::Project {
+    TestProject::new("guard_pop")
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * birth_rate", None)
+        .flow("deaths", "population * death_rate", None)
+        .aux("birth_rate", "0.03", None)
+        .aux("death_rate", "0.01", None)
+        .build_datamodel()
+}
+
+/// A pure auxiliary dependency chain (no stocks): a -> b -> c -> d.
+fn guard_chain_model() -> datamodel::Project {
+    TestProject::new("guard_chain")
+        .aux("a", "1", None)
+        .aux("b", "a * 2", None)
+        .aux("c", "b + a", None)
+        .aux("d", "c * b", None)
+        .build_datamodel()
+}
+
+/// A two-stock transfer model: source -> transfer -> sink, rate-driven.
+fn guard_two_stock_model() -> datamodel::Project {
+    TestProject::new("guard_two_stock")
+        .stock("source", "100", &[], &["transfer"], None)
+        .stock("sink", "0", &["transfer"], &[], None)
+        .flow("transfer", "source * rate", None)
+        .aux("rate", "0.1", None)
+        .build_datamodel()
+}
+
+/// AC7.1: the fixed-seed `weighted_cost` of each tiny guard model stays at or
+/// below its committed ceiling. Fast and deterministic: three tiny models, one
+/// seed each.
+#[test]
+fn test_weighted_cost_regression_guard() {
+    let cases: [(&str, datamodel::Project, f64); 3] = [
+        ("pop", guard_pop_model(), GUARD_POP_COST_CEILING),
+        ("chain", guard_chain_model(), GUARD_CHAIN_COST_CEILING),
+        (
+            "two_stock",
+            guard_two_stock_model(),
+            GUARD_TWO_STOCK_COST_CEILING,
+        ),
+    ];
+
+    for (name, project, ceiling) in cases {
+        let cost = guard_fixed_seed_cost(&project);
+        assert!(
+            cost <= ceiling,
+            "{name}: fixed-seed weighted_cost {cost} exceeded ceiling {ceiling} \
+             -- a layout-quality regression (or an intentional metric/weight \
+             change that needs the ceiling regenerated)"
+        );
+    }
+}
+
+/// AC7.2: the guard ceiling actually discriminates good layouts from bad ones.
+/// We take a real fixed-seed layout of the pop model and pile every node onto
+/// the same coordinate, blowing up the node-overlap term, then assert the
+/// resulting `weighted_cost` exceeds the ceiling -- so a real layout that
+/// regressed to this level WOULD trip `test_weighted_cost_regression_guard`.
+/// This makes the failure direction explicit and testable without flakiness.
+#[test]
+fn test_weighted_cost_guard_rejects_degenerate_layout() {
+    let project = guard_pop_model();
+    let config = LayoutConfig {
+        annealing_random_seed: 42,
+        ..LayoutConfig::default()
+    };
+    let view = generate_layout_with_config(&project, MAIN_MODEL, config.clone(), None)
+        .expect("layout generation should succeed");
+
+    // Collapse every positioned node onto the origin so the shapes overlap
+    // maximally (links/aliases/groups have no independent position).
+    let mut degenerate = view.clone();
+    for elem in &mut degenerate.elements {
+        match elem {
+            ViewElement::Aux(a) => {
+                a.x = 0.0;
+                a.y = 0.0;
+            }
+            ViewElement::Stock(s) => {
+                s.x = 0.0;
+                s.y = 0.0;
+            }
+            ViewElement::Flow(f) => {
+                f.x = 0.0;
+                f.y = 0.0;
+            }
+            ViewElement::Module(m) => {
+                m.x = 0.0;
+                m.y = 0.0;
+            }
+            ViewElement::Cloud(c) => {
+                c.x = 0.0;
+                c.y = 0.0;
+            }
+            ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => {}
+        }
+    }
+
+    let degenerate_cost =
+        compute_layout_metrics(&degenerate, &config).weighted_cost(&MetricWeights::default());
+    assert!(
+        degenerate_cost > GUARD_POP_COST_CEILING,
+        "a degenerate all-overlapping layout (cost {degenerate_cost}) must exceed \
+         the guard ceiling {GUARD_POP_COST_CEILING}, proving the guard discriminates"
     );
 }
