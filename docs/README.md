@@ -36,6 +36,7 @@
 - [plans/](plans/README.md) -- Implementation plans (active and completed)
 - [test-plans/](test-plans/) -- Human verification plans for completed features
   - [test-plans/2026-05-22-engine-wasm-sim.md](test-plans/2026-05-22-engine-wasm-sim.md) -- Manual verification for the `@simlin/engine` selectable wasm engine (`Model.simulate({engine:'wasm'})`): re-running the automated gates, driving the gated/`#[ignore]`d heavy tests, and the human-judged extras (interactive scrubbing feel, VM-vs-wasm benchmark numbers); all 25 ACs already have automated coverage
+  - [test-plans/2026-05-22-layout-quality-eval.md](test-plans/2026-05-22-layout-quality-eval.md) -- Manual verification for the layout-quality eval: running the on-demand corpus sweep and inspecting its `target/layout-eval/` artifacts (metrics.json, the worst-first contact-sheet), plus the human-judgment calibration gate (best/median/worst ordering, reference-vs-auto scoring, weight magnitudes)
 - `implementation-plans/` -- Detailed phase-by-phase implementation plans, created during plan execution
 
 ## Security
