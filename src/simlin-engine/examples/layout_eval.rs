@@ -33,11 +33,12 @@ use std::env;
 use std::io::BufReader;
 
 use rayon::prelude::*;
+use simlin_engine::diagram::{PngRenderOpts, render_png};
 use simlin_engine::layout::LAYOUT_SEEDS;
 use simlin_engine::layout::config::LayoutConfig;
 use simlin_engine::layout::eval_stats::{CorpusReport, MetricSample, ModelStats};
 use simlin_engine::layout::generate_layout_with_config;
-use simlin_engine::layout::metrics::{MetricWeights, compute_layout_metrics};
+use simlin_engine::layout::metrics::{LayoutMetrics, MetricWeights, compute_layout_metrics};
 use simlin_engine::{datamodel, open_vensim, open_xmile};
 
 /// Phase-3 PLACEHOLDER weights for `weighted_cost`.
@@ -209,12 +210,21 @@ fn load_model(spec: &ModelSpec) -> Result<datamodel::Project, String> {
 /// the later tasks score and render. A model with no hand-authored view yields
 /// 0 here (its layout is generated from scratch in Task 2).
 fn loaded_element_count(project: &datamodel::Project) -> usize {
-    let Some(model) = project.get_model(MAIN_MODEL) else {
-        return 0;
-    };
+    reference_view(project)
+        .map(|sf| sf.elements.len())
+        .unwrap_or(0)
+}
+
+/// Borrow the model's as-loaded main `StockFlow` view if it is a hand-authored
+/// reference: a non-empty view carrying non-empty `elements`. A model loaded
+/// without a saved diagram (its layout is generated from scratch in the sweep)
+/// has no such view, so this returns `None` and the caller skips the reference
+/// render.
+fn reference_view(project: &datamodel::Project) -> Option<&datamodel::StockFlow> {
+    let model = project.get_model(MAIN_MODEL)?;
     match model.views.first() {
-        Some(datamodel::View::StockFlow(sf)) => sf.elements.len(),
-        None => 0,
+        Some(datamodel::View::StockFlow(sf)) if !sf.elements.is_empty() => Some(sf),
+        _ => None,
     }
 }
 
@@ -333,6 +343,178 @@ fn sweep_model(key: &str, project: &datamodel::Project, seeds: &[u64]) -> ModelS
     ModelStats::from_samples(key.to_string(), samples, &LAYOUT_SEEDS)
 }
 
+// ── Rendering ────────────────────────────────────────────────────────────────
+
+/// One rendered diagram: the PNG filename written under the out dir (relative,
+/// so the Task-4 `index.html` can reference it with a sibling `<img src>`) and
+/// the metric breakdown of the view that was rendered. The seed is `Some` for a
+/// generated render (best/median/worst) and `None` for the as-loaded reference.
+///
+/// `seed`, `metrics`, and `weighted_cost` are recorded here but not yet read:
+/// Task 4 serializes them into `metrics.json` and the contact-sheet's per-render
+/// breakdown table. They are deliberately kept as data now (rather than dropped
+/// and recomputed) so Task 4's serializer is a pure read over this struct.
+#[allow(dead_code)]
+struct Render {
+    /// Filename of the PNG, relative to the out dir (e.g. `sir_best.png`).
+    file: String,
+    /// The seed that produced the generated view (`None` for the reference).
+    seed: Option<u64>,
+    /// Per-term metrics of the rendered view.
+    metrics: LayoutMetrics,
+    /// Scalar weighted cost under the placeholder weights.
+    weighted_cost: f64,
+}
+
+/// All renders produced for one model: the optional hand-authored reference and
+/// the three generated layouts (best/median/worst). Task 4 serializes these
+/// per-model metric breakdowns into `metrics.json` and the contact-sheet, so the
+/// fields are kept as data the report can read back. A render that failed is
+/// `None` (the failure was already WARN-logged) -- skip-on-failure feeds Task 6.
+struct ModelRenders {
+    reference: Option<Render>,
+    best: Option<Render>,
+    median: Option<Render>,
+    worst: Option<Render>,
+}
+
+/// Render one view to a PNG file under `out`, scoring it with the default
+/// layout config (the metric core is config-driven only for node sizing, which
+/// is constant across the sweep). On any render or write failure, WARN to
+/// stderr and return `None` so the sweep continues (AC3.6).
+///
+/// `project` must already carry the view to render as its main view's first
+/// view (the renderer reads `model.views.first()`). The caller installs the
+/// view (a clone of the project for a generated layout, or the as-loaded
+/// project for the reference) before calling.
+fn render_view(
+    project: &datamodel::Project,
+    metrics: LayoutMetrics,
+    seed: Option<u64>,
+    file: &str,
+    out: &str,
+) -> Option<Render> {
+    let png = match render_png(project, MAIN_MODEL, &PngRenderOpts::default()) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("WARN: failed to render {file}: {err}");
+            return None;
+        }
+    };
+    let path = format!("{out}/{file}");
+    if let Err(err) = std::fs::write(&path, &png) {
+        eprintln!("WARN: failed to write {path}: {err}");
+        return None;
+    }
+    let weighted_cost = metrics.weighted_cost(&PLACEHOLDER_WEIGHTS);
+    Some(Render {
+        file: file.to_string(),
+        seed,
+        metrics,
+        weighted_cost,
+    })
+}
+
+/// Regenerate the view for `seed`, install it into a clone of `project`, render
+/// it to `{key}_{suffix}.png`, and return the `Render`. A layout-generation
+/// failure is non-fatal: WARN and return `None`.
+fn render_generated(
+    key: &str,
+    suffix: &str,
+    project: &datamodel::Project,
+    seed: u64,
+    out: &str,
+) -> Option<Render> {
+    let cfg = LayoutConfig {
+        annealing_random_seed: seed,
+        ..LayoutConfig::default()
+    };
+    let view = match generate_layout_with_config(project, MAIN_MODEL, cfg.clone(), None) {
+        Ok(view) => view,
+        Err(err) => {
+            eprintln!("WARN: {key} {suffix} (seed {seed}) failed to lay out: {err}");
+            return None;
+        }
+    };
+    let metrics = compute_layout_metrics(&view, &cfg);
+    // Install the generated view into a clone so the as-loaded project (and its
+    // reference view) is never mutated.
+    let mut p = project.clone();
+    p.get_model_mut(MAIN_MODEL).unwrap().views = vec![datamodel::View::StockFlow(view)];
+    let file = format!("{key}_{suffix}.png");
+    render_view(&p, metrics, Some(seed), &file, out)
+}
+
+/// Render the model's best/median/worst generated layouts and -- if the model
+/// ships a hand-authored view -- its reference, all to PNGs under `out`.
+///
+/// The reference is rendered from the AS-LOADED `project` (before any view is
+/// overwritten) so it captures the model's own diagram, not a generated one.
+/// Generated layouts are each regenerated from `project` by seed and installed
+/// into a fresh clone, leaving `project` untouched.
+fn render_model(
+    key: &str,
+    project: &datamodel::Project,
+    stats: &ModelStats,
+    out: &str,
+) -> ModelRenders {
+    // Reference first, from the as-loaded project, before any clone-and-install.
+    // Score the hand-authored `StockFlow` directly (the renderer reads the same
+    // view from `project`, so this is the geometry being rasterized).
+    let reference = reference_view(project).and_then(|sf| {
+        let metrics = compute_layout_metrics(sf, &LayoutConfig::default());
+        render_view(project, metrics, None, &format!("{key}_reference.png"), out)
+    });
+
+    // A model whose sweep produced no samples has all-zero seeds and nothing
+    // worth rendering; skip the generated renders (the reference, if any, is
+    // already captured).
+    if stats.samples.is_empty() {
+        return ModelRenders {
+            reference,
+            best: None,
+            median: None,
+            worst: None,
+        };
+    }
+
+    let best = render_generated(key, "best", project, stats.best_seed, out);
+    let median = render_generated(key, "median", project, stats.median_seed, out);
+    let worst = render_generated(key, "worst", project, stats.worst_seed, out);
+
+    ModelRenders {
+        reference,
+        best,
+        median,
+        worst,
+    }
+}
+
+/// Print the PNG filenames produced for one model (and note a skipped reference
+/// or generated render) so a run's stdout records exactly what was written.
+fn report_renders(key: &str, renders: &ModelRenders) {
+    let mut produced: Vec<&str> = Vec::new();
+    for render in [
+        &renders.reference,
+        &renders.best,
+        &renders.median,
+        &renders.worst,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        produced.push(render.file.as_str());
+    }
+    if produced.is_empty() {
+        println!("{key}: no PNGs rendered");
+    } else {
+        println!("{key}: rendered {}", produced.join(", "));
+    }
+    if renders.reference.is_none() {
+        println!("{key}: no hand-authored reference view (skipped reference render)");
+    }
+}
+
 fn main() {
     let keys = selected_keys();
     let m = seed_count();
@@ -349,6 +531,7 @@ fn main() {
     );
 
     let mut per_model: Vec<ModelStats> = Vec::new();
+    let mut renders: Vec<ModelRenders> = Vec::new();
     for spec in CORPUS.iter().filter(|s| keys.contains(&s.key)) {
         match load_model(spec) {
             Ok(project) => {
@@ -363,7 +546,14 @@ fn main() {
                     "{}: median={:.4} p25/p75={:.4}/{:.4} best_of_k={:.4} (M={n_sampled})",
                     spec.key, stats.median_cost, p25, p75, stats.best_of_k_cost,
                 );
+
+                // Render best/median/worst (and the reference, if the model
+                // ships one) to PNGs. Render failures are non-fatal.
+                let model_renders = render_model(spec.key, &project, &stats, &out);
+                report_renders(spec.key, &model_renders);
+
                 per_model.push(stats);
+                renders.push(model_renders);
             }
             Err(err) => eprintln!("WARN: skipping {}: {err}", spec.key),
         }
@@ -374,5 +564,15 @@ fn main() {
         "corpus: geomean_of_medians={:.4} ({} model(s) scored)",
         report.geomean_of_medians,
         report.per_model.len(),
+    );
+
+    // The per-model `renders` (PNG filenames + metric breakdowns) are the input
+    // Task 4 serializes into `metrics.json` and the contact-sheet. Until then,
+    // summarize how many models shipped a hand-authored reference so a run's
+    // stdout records the reference coverage AC3.4 depends on.
+    let with_reference = renders.iter().filter(|r| r.reference.is_some()).count();
+    println!(
+        "corpus: {with_reference}/{} model(s) shipped a hand-authored reference view",
+        renders.len(),
     );
 }
