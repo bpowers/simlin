@@ -289,8 +289,12 @@ export class DirectBackend implements EngineBackend {
         if (childEntry && !childEntry.disposed) {
           childEntry.disposed = true;
           if (childEntry.kind === 'sim') {
-            // Skip the native unref for a wasm sim (no native sim pointer).
-            if (childEntry.engine !== 'wasm') {
+            // A wasm sim has no native sim pointer; release its heavy wasm state
+            // (instance + layout) instead of unref'ing, so disposing the project
+            // does not leave child WebAssembly.Instances pinned via the map.
+            if (childEntry.engine === 'wasm') {
+              this.releaseWasmSimState(childEntry);
+            } else {
               simlin_sim_unref(childEntry.ptr);
             }
           } else if (childEntry.kind === 'model') {
@@ -492,6 +496,21 @@ export class DirectBackend implements EngineBackend {
     }) as SimHandle;
   }
 
+  /**
+   * Release a wasm sim entry's heavy state (the WebAssembly.Instance, its
+   * exports, and the decoded layout). The disposed entry is intentionally kept
+   * in `_handles` as a tombstone so a use-after-dispose still throws the clear
+   * "has been disposed" diagnostic; but those heavy refs must be cleared, or the
+   * map would pin a whole WebAssembly.Instance + layout per disposed sim and
+   * memory would grow unbounded across create/dispose cycles. `wasmStopTime` is
+   * a plain number, so it costs nothing to leave -- only the heavy refs matter.
+   */
+  private releaseWasmSimState(entry: HandleEntry): void {
+    entry.wasmInstance = undefined;
+    entry.wasmExports = undefined;
+    entry.wasmLayout = undefined;
+  }
+
   simDispose(handle: SimHandle): void {
     const entry = this._handles.get(handle as number);
     if (!entry || entry.disposed) {
@@ -501,9 +520,12 @@ export class DirectBackend implements EngineBackend {
     if (entry.projectHandle !== undefined) {
       this._projectChildren.get(entry.projectHandle)?.delete(handle as number);
     }
-    // A wasm sim has no native sim pointer; dropping the entry lets the
-    // WebAssembly.Instance be GC'd. Only the VM path holds a native sim to unref.
-    if (entry.engine !== 'wasm') {
+    // A wasm sim has no native sim pointer; instead it owns a WebAssembly.Instance,
+    // so explicitly release that heavy state (the tombstone stays for diagnostics).
+    // Only the VM path holds a native sim to unref.
+    if (entry.engine === 'wasm') {
+      this.releaseWasmSimState(entry);
+    } else {
       simlin_sim_unref(entry.ptr);
     }
   }

@@ -252,6 +252,75 @@ describe('DirectBackend wasm engine: sim creation and disposal (Task 3)', () => 
       expect(() => backend.simRunToEnd(sim)).toThrow(/disposed/);
     });
   });
+
+  // A disposed wasm entry is kept in the handle map as a tombstone (so a
+  // use-after-dispose still throws the clear "has been disposed" diagnostic),
+  // but it must NOT keep pinning the heavy wasm state -- the WebAssembly.Instance
+  // and decoded layout -- or memory grows unbounded across create/dispose cycles
+  // even though simDispose was called. These white-box checks reach into the
+  // private handle map to confirm the heavy refs are released on dispose while
+  // the tombstone (and its disposed-error semantics) is preserved.
+  describe('disposal releases heavy wasm state but keeps the tombstone', () => {
+    type DisposedEntryView = {
+      disposed: boolean;
+      wasmInstance?: WebAssembly.Instance;
+      wasmLayout?: unknown;
+      wasmExports?: unknown;
+    };
+    function entryOf(sim: SimHandle): DisposedEntryView {
+      const handles = (backend as unknown as { _handles: Map<number, DisposedEntryView> })._handles;
+      const entry = handles.get(sim as unknown as number);
+      if (!entry) {
+        throw new Error('sim entry not found');
+      }
+      return entry;
+    }
+
+    it('simDispose releases the wasm instance, exports, and layout', () => {
+      const projectHandle = backend.projectOpenXmile(loadTeacupXmile());
+      const modelHandle = backend.projectGetModel(projectHandle, null);
+      const sim = backend.simNew(modelHandle, false, 'wasm');
+
+      // Precondition: a live wasm sim holds all three heavy refs.
+      const live = entryOf(sim);
+      expect(live.wasmInstance).toBeInstanceOf(WebAssembly.Instance);
+      expect(live.wasmExports).toBeDefined();
+      expect(live.wasmLayout).toBeDefined();
+
+      backend.simDispose(sim);
+
+      // The tombstone is preserved (entry still present, marked disposed) ...
+      const dead = entryOf(sim);
+      expect(dead.disposed).toBe(true);
+      // ... but the heavy wasm state is released so GC can reclaim it.
+      expect(dead.wasmInstance).toBeUndefined();
+      expect(dead.wasmExports).toBeUndefined();
+      expect(dead.wasmLayout).toBeUndefined();
+
+      // Nulling the heavy fields must not change the disposed-error semantics:
+      // getEntry checks `disposed` before touching any wasm field.
+      expect(() => backend.simRunToEnd(sim)).toThrow(/disposed/);
+
+      backend.modelDispose(modelHandle);
+      backend.projectDispose(projectHandle);
+    });
+
+    it('projectDispose releases heavy wasm state of a live child sim', () => {
+      const projectHandle = backend.projectOpenXmile(loadTeacupXmile());
+      const modelHandle = backend.projectGetModel(projectHandle, null);
+      const sim = backend.simNew(modelHandle, false, 'wasm');
+
+      // Disposing the project must cascade the same release to its wasm child.
+      backend.projectDispose(projectHandle);
+
+      const dead = entryOf(sim);
+      expect(dead.disposed).toBe(true);
+      expect(dead.wasmInstance).toBeUndefined();
+      expect(dead.wasmExports).toBeUndefined();
+      expect(dead.wasmLayout).toBeUndefined();
+      expect(() => backend.simRunToEnd(sim)).toThrow(/disposed/);
+    });
+  });
 });
 
 // VM-vs-wasm parity: the bytecode VM is the correctness oracle. Each wasm-engine
