@@ -333,20 +333,17 @@ fn baseline_path() -> String {
 /// vector -- and every statistic derived from it -- is invariant to rayon's
 /// scheduling: parallelism introduces no nondeterminism here.
 ///
-/// NOTE: `generate_layout_with_config` is itself NOT deterministic per seed --
-/// the same `(model, seed)` pair produces slightly different layouts on
-/// repeated calls, *even serially within one process* (verified by direct
-/// probe). The drift traces to per-process-randomized `HashMap`/`HashSet`
-/// iteration order in the layout pipeline (e.g. `sfdp::build_node_index`'s
-/// `HashMap` feeding force accumulation). This is a pre-existing layout-engine
-/// issue, not a property of this sweep; it means the reported median/spread
-/// vary run-to-run within a small band. The fix belongs in the layout engine
-/// (deterministic ordered containers). Tracked separately.
+/// `generate_layout_with_config` is deterministic per seed (fix #633): the same
+/// `(model, seed)` pair produces the identical layout on repeated calls within
+/// and across processes, so the reported median/spread are reproducible.
 ///
 /// A seed whose layout fails to generate is dropped with a WARN (a single bad
-/// seed must not sink the whole model's sweep). The full model-level
-/// skip-on-failure path (load/render) lands in a later task; here a model with
-/// zero successful seeds yields an empty `ModelStats` (all-zero, no panic).
+/// seed must not sink the whole model's sweep). A model whose layout fails on
+/// EVERY seed yields an empty `samples` vector here; the caller
+/// (`process_model`) treats that zero-usable-samples case as a model-level
+/// failure and skips the model (`WARN: skipping {key}: ...`), so a model that
+/// never lays out is omitted from the report rather than reported as a
+/// degenerate all-zero entry (AC3.6).
 fn sweep_model(key: &str, project: &datamodel::Project, seeds: &[u64]) -> ModelStats {
     // Compute one (seed, sample) per seed in parallel, then sort back into seed
     // order so the sample vector -- and therefore every statistic derived from
@@ -554,6 +551,71 @@ fn report_renders(key: &str, renders: &ModelRenders) {
     if renders.reference.is_none() {
         println!("{key}: no hand-authored reference view (skipped reference render)");
     }
+}
+
+// ── Per-model pipeline (skip-on-failure) ─────────────────────────────────────
+
+/// Run one model's full pipeline -- load -> seed sweep -> render -- and return
+/// its `(ModelStats, ModelRenders)` on success.
+///
+/// This is the model-level skip-on-failure boundary (AC3.6): EVERY way a single
+/// model can fail funnels through the returned `Err(String)`, which `main` turns
+/// into a `WARN: skipping {key}: {err}` and a continue to the next model, so one
+/// bad model never aborts the sweep and is simply omitted from the report.
+///
+/// Three failure modes, validated in the order data flows (defense-in-depth):
+///   1. **Load failure** (entry layer): a missing file or a parse error is
+///      already surfaced as `Err(String)` by `load_model`; propagated with `?`.
+///   2. **No usable layout** (business layer): `sweep_model` drops each
+///      individually-failing seed with a WARN but still returns a (possibly
+///      empty) `ModelStats`. A model whose layout failed on EVERY seed has zero
+///      samples and cannot be scored, rendered, or aggregated -- it is a
+///      model-level failure here, returned as `Err`. Crucially this only fires
+///      when ALL seeds failed: a model with even one usable sample proceeds, so
+///      a partial per-seed failure never sinks the model.
+///   3. **Render failure** (handled inside `render_model`): a layout that scores
+///      but fails to rasterize or write is non-fatal -- it is WARN-logged and
+///      its `Render` is `None`. A model can therefore appear in the report with
+///      its statistics but a missing PNG cell; this is intentionally NOT a
+///      model-level skip (the scores are still meaningful).
+fn process_model(
+    spec: &ModelSpec,
+    seeds: &[u64],
+    out: &str,
+) -> Result<(ModelStats, ModelRenders), String> {
+    // 1. Load (entry-layer validation lives in `load_model`).
+    let project = load_model(spec)?;
+
+    let n = loaded_element_count(&project);
+    println!("loaded {}: {n} elements", spec.key);
+
+    // 2. Sweep. A model with zero usable samples laid out on no seed -- it is a
+    //    model-level failure, not a degenerate all-zero report entry.
+    let stats = sweep_model(spec.key, &project, seeds);
+    if stats.samples.is_empty() {
+        return Err(format!(
+            "no usable layout: all {} seed(s) failed to lay out",
+            seeds.len(),
+        ));
+    }
+
+    let (p25, p75) = stats.spread;
+    println!(
+        "{}: median={:.4} p25/p75={:.4}/{:.4} best_of_k={:.4} (M={})",
+        spec.key,
+        stats.median_cost,
+        p25,
+        p75,
+        stats.best_of_k_cost,
+        stats.samples.len(),
+    );
+
+    // 3. Render best/median/worst (and the reference, if any). Render failures
+    //    are non-fatal: `render_model` WARN-logs and leaves the cell `None`.
+    let renders = render_model(spec.key, &project, &stats, out);
+    report_renders(spec.key, &renders);
+
+    Ok((stats, renders))
 }
 
 // ── Report (metrics.json + index.html) ──────────────────────────────────────
@@ -1060,33 +1122,33 @@ fn main() {
         keys.len(),
     );
 
+    // Per-model skip-on-failure (AC3.6): each model's full pipeline (load ->
+    // sweep -> render) is wrapped in `process_model`. ANY failure -- a load
+    // error, a layout that fails on every seed, etc. -- is WARN-logged and the
+    // sweep CONTINUES to the next model; the failed model is omitted from
+    // `per_model`/`renders` (and therefore from every artifact). The harness
+    // always reaches the end and exits 0, even if every model was skipped.
+    //
+    // `per_model` and `renders` stay positionally paired: both are pushed
+    // exactly once per surviving model, so the Task-4 report builder can zip
+    // them.
     let mut per_model: Vec<ModelStats> = Vec::new();
     let mut renders: Vec<ModelRenders> = Vec::new();
+    let mut skipped = 0usize;
     for spec in CORPUS.iter().filter(|s| keys.contains(&s.key)) {
-        match load_model(spec) {
-            Ok(project) => {
-                let n = loaded_element_count(&project);
-                println!("loaded {}: {n} elements", spec.key);
-
-                let stats = sweep_model(spec.key, &project, &seeds);
-                let (p25, p75) = stats.spread;
-                // The actual sampled seed count is the union of LAYOUT_SEEDS and
-                // 0..m (deduped), reported here as the real M the run swept.
-                println!(
-                    "{}: median={:.4} p25/p75={:.4}/{:.4} best_of_k={:.4} (M={n_sampled})",
-                    spec.key, stats.median_cost, p25, p75, stats.best_of_k_cost,
-                );
-
-                // Render best/median/worst (and the reference, if the model
-                // ships one) to PNGs. Render failures are non-fatal.
-                let model_renders = render_model(spec.key, &project, &stats, &out);
-                report_renders(spec.key, &model_renders);
-
+        match process_model(spec, &seeds, &out) {
+            Ok((stats, model_renders)) => {
                 per_model.push(stats);
                 renders.push(model_renders);
             }
-            Err(err) => eprintln!("WARN: skipping {}: {err}", spec.key),
+            Err(err) => {
+                eprintln!("WARN: skipping {}: {err}", spec.key);
+                skipped += 1;
+            }
         }
+    }
+    if skipped > 0 {
+        println!("skipped {skipped} model(s) (see WARN lines above)");
     }
 
     let corpus = CorpusReport::from_model_stats(per_model);
