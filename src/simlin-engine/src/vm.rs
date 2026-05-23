@@ -851,6 +851,36 @@ impl Vm {
             }
         }
 
+        // The integration loop breaks on `curr[TIME] > end` *after* an advance, so
+        // the live curr chunk holds the resting-point stocks + reserved time vars
+        // but its flow/aux/constant slots were never recomputed for the advanced
+        // time -- Euler's `curr.copy_from_slice(next)` leaves a stale `next` row,
+        // and the chunk-ring advance lands on a chunk whose non-stock slots are
+        // stale (e.g. 0 for a constant). A mid-run `get_value_now` of a non-stock
+        // would otherwise read that garbage. Re-evaluate root flows once at the
+        // resting curr so the chunk is fully self-consistent ("the value at the
+        // current time") and identical to the wasm backend's resting curr (#625).
+        //
+        // This touches only the live curr chunk: every results row was already
+        // saved (and `get_series` reads chunks `[0, curr_chunk)`, excluding this
+        // one), a resumed `run_to` re-evaluates from scratch, and `run_to_end`
+        // reads the last *results* row -- so it is invisible to the saved series,
+        // to resume, and to a full run. It does NOT re-snapshot `prev_values`, so a
+        // resume's `PREVIOUS` still sees the last completed step.
+        {
+            let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
+            Self::eval(
+                &self.sliced_sim,
+                &mut state,
+                root_idx,
+                StepPart::Flows,
+                0,
+                &[],
+                curr,
+                next,
+            );
+        }
+
         self.data = Some(data);
         Ok(())
     }

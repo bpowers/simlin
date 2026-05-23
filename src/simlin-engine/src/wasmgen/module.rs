@@ -1238,6 +1238,22 @@ fn emit_run_to(
     f.instruction(&I::Br(0)); // continue
     f.instruction(&I::End); // end loop
     f.instruction(&I::End); // end block
+
+    // After the loop, refresh `curr`'s flow/aux/constant slots at the resting
+    // state. The loop breaks on `curr[TIME] > target` *after* the save+advance
+    // tail, which copies only the stock offsets `next -> curr` and steps the time,
+    // leaving the non-stock slots holding the *previous* step's values (a one-step
+    // lag versus the advanced time + stocks). A mid-run `getValue` of a flow/aux
+    // would otherwise read that lagged value. One root `flows(0)` re-eval makes the
+    // live curr chunk fully self-consistent at the resting time and identical to
+    // the VM's resting curr (#625). This touches only `curr` (not the saved rows,
+    // which were already committed; not the cursor, which a resume reads), and it
+    // does NOT snapshot `prev_values`, so a resumed `run_to`'s `PREVIOUS` still
+    // sees the last completed step. The full-run/`run`/`reset` paths break with a
+    // freshly-evaluated curr already, so this re-eval is idempotent for them.
+    f.instruction(&I::I32Const(0));
+    f.instruction(&I::Call(f_flows));
+
     f.instruction(&I::End); // end function
     f
 }
@@ -5253,6 +5269,84 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Reconcile #625: after a `run_to(t)` that stops mid-interval, the live curr
+    /// chunk must be fully self-consistent at the resting time -- every flow / aux /
+    /// constant evaluated for the same time and stocks `curr` holds -- and
+    /// identical across the VM and wasm. Previously the integration loop broke
+    /// right after an advance, so non-stock slots lagged a step (wasm) or held
+    /// stale garbage including 0 for constants (VM); both backends now re-evaluate
+    /// root flows once at the resting `curr` after the overshoot break.
+    #[test]
+    fn mid_run_curr_is_self_consistent_and_matches_vm() {
+        // `doubled = level * 2` is a flow-phase aux that varies every step (it
+        // tracks the growing stock), so a one-step flow/aux lag is observable; a
+        // constant flow like `inflow` would hide the lag.
+        let datamodel = crate::test_common::TestProject::new("midrun")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("inflow_rate", "2", None)
+            .stock("level", "0", &["inflow"], &[], None)
+            .flow("inflow", "inflow_rate", None)
+            .aux("doubled", "level * 2", None)
+            .build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("wasm codegen");
+        let level_off = layout_offset(&artifact, "level");
+        let doubled_off = layout_offset(&artifact, "doubled");
+
+        // A mid-interval target: run_to(4.5) rests at t=5 (level=10) on both.
+        let target = 4.5_f64;
+
+        let info = validate(&artifact.wasm).expect("module must validate");
+        let mut store = Store::new(());
+        let inst = store
+            .module_instantiate(&info, Vec::new(), None)
+            .expect("instantiate")
+            .module_addr;
+        let run_initials = store
+            .instance_export(inst, "run_initials")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        let run_to = store
+            .instance_export(inst, "run_to")
+            .unwrap()
+            .as_func()
+            .unwrap();
+        store
+            .invoke_simple_typed::<(), ()>(run_initials, ())
+            .expect("run_initials");
+        store
+            .invoke_simple_typed::<(f64,), ()>(run_to, (target,))
+            .expect("run_to");
+
+        let mut vm = Vm::new(compile_sim(&datamodel, "main")).expect("vm");
+        vm.run_to(target).expect("vm run_to");
+
+        // Every variable's live curr value agrees between the two backends -- not
+        // just the stocks + reserved time vars, but the flows/auxes/constants too.
+        for (name, off) in &artifact.layout.var_offsets {
+            let ident = Ident::<Canonical>::from_str_unchecked(name);
+            let Some(vm_off) = vm.get_offset(&ident) else {
+                continue;
+            };
+            let wasm_val = read_curr_slot(&mut store, inst, *off);
+            let vm_val = vm.get_value_now(vm_off);
+            assert!(
+                (wasm_val - vm_val).abs() < 1e-9,
+                "{name} mid-run curr mismatch: wasm={wasm_val} vm={vm_val}"
+            );
+        }
+
+        // And the curr chunk is internally self-consistent at the resting time:
+        // doubled == level * 2 (level=10 at t=5, so doubled=20), not the lagged 16.
+        let wasm_level = read_curr_slot(&mut store, inst, level_off);
+        let wasm_doubled = read_curr_slot(&mut store, inst, doubled_off);
+        assert!(
+            (wasm_doubled - wasm_level * 2.0).abs() < 1e-9 && (wasm_doubled - 20.0).abs() < 1e-9,
+            "wasm curr not self-consistent: doubled={wasm_doubled} level={wasm_level} (expected 20)"
+        );
     }
 
     /// Task 3 (AC3.1, AC5.4): on a single reused instance, `run` then

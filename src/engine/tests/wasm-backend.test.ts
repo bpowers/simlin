@@ -391,22 +391,23 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
   });
 
   describe('AC2.2: runTo(t) then getValue parity', () => {
-    // The VM's get_value_now reads its live curr chunk; after a run_to(t) that
-    // stops mid-interval the curr chunk holds the integrated state (stocks + the
-    // reserved time vars) but NOT the dependent flows/auxes/constants, because
-    // the VM's Euler loop breaks before evaluating the chunk whose time exceeds
-    // t (vm.rs:711). The wasm read is the byte-identical base-0 curr-chunk read
-    // (the determined source of truth) and agrees with the VM exactly on the
-    // integrated state mid-run. Both agree on EVERY variable after a full run
-    // (covered by 'getValue after runToEnd equals the VM for every variable').
-    it('wasm getValue after runTo(t) equals the VM on the integrated state', () => {
+    // After a runTo(t) that stops mid-interval, the live curr chunk is fully
+    // self-consistent at the resting time on BOTH backends: stocks + reserved
+    // time vars AND every flow/aux/constant are evaluated for the same time and
+    // stocks. Both backends re-evaluate root flows at the resting curr after the
+    // overshoot break (#625), so a mid-run getValue of ANY variable agrees with
+    // the VM -- not just the integrated state. (Previously the VM left stale
+    // non-stock slots -- e.g. 0 for a constant -- and the wasm left them one step
+    // behind, so this parity was scoped to stocks + reserved time vars.)
+    it('wasm getValue after runTo(t) equals the VM for every variable', () => {
       const { vm, wasm, dispose } = openPair();
-      const t = 5;
+      const t = 15.05; // mid-interval (teacup dt=0.125): both rest at t=15.125
       backend.simRunTo(vm, t);
       backend.simRunTo(wasm, t);
 
-      // The stock and the reserved time vars are the well-defined "value at t".
-      for (const name of ['teacup_temperature', 'time', 'dt', 'initial_time', 'final_time']) {
+      // Every variable -- stocks, flows, auxes, constants, and reserved time vars
+      // -- is the well-defined "value at the current time" on both backends.
+      for (const name of backend.simGetVarNames(wasm)) {
         expect(Math.abs(backend.simGetValue(wasm, name) - backend.simGetValue(vm, name))).toBeLessThanOrEqual(TOL);
       }
       // simGetTime must agree too (it reads slot 0 of the live curr chunk).
