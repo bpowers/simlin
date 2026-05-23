@@ -532,6 +532,36 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
       expect(backend.simGetSeries(wasm, 'room_temperature')[0]).toBeCloseTo(40, 9);
       dispose();
     });
+
+    // reset must return the live curr chunk (what getTime/getValue read) to the
+    // fresh pre-run state, not leave the previous run's end-of-run values there.
+    // The blob's reset clears only the run cursor (mirroring Vm::reset), so the
+    // host must present the fresh state -- exactly as libsimlin's FFI does by
+    // recreating a zeroed VM. The VM reads 0 for every variable after reset (a
+    // freshly-created sim reads 0); the wasm twin must match, not leak stale tail.
+    it('reset returns the live curr state to the fresh pre-run state (matches the VM)', () => {
+      const { vm, wasm, dispose } = openPair();
+
+      // Run both to the end so the live curr chunk holds end-of-run values, then
+      // confirm they agree there before reset (precondition for a meaningful test).
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+      expect(backend.simGetValue(wasm, 'teacup_temperature')).toBeGreaterThan(0);
+
+      backend.simReset(vm);
+      backend.simReset(wasm);
+
+      // After reset (no re-run) every by-name read must equal the VM's fresh-state
+      // value, not the previous run's stale tail. Both are exactly 0 here.
+      for (const name of backend.simGetVarNames(wasm)) {
+        expect(backend.simGetValue(wasm, name)).toBe(backend.simGetValue(vm, name));
+      }
+      expect(backend.simGetTime(wasm)).toBe(backend.simGetTime(vm));
+      // Spot-check the well-known reads: the stock and the reserved time var.
+      expect(backend.simGetValue(wasm, 'teacup_temperature')).toBe(0);
+      expect(backend.simGetTime(wasm)).toBe(0);
+      dispose();
+    });
   });
 
   describe('AC4.1/AC4.2/AC4.4: by-name reads parity', () => {

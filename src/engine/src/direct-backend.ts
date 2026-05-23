@@ -568,8 +568,16 @@ export class DirectBackend implements EngineBackend {
   simReset(handle: SimHandle): void {
     const entry = this.getEntry(handle as number, 'sim');
     if (entry.engine === 'wasm') {
-      // Phase-1 reset: clears the run cursor, preserves constant overrides.
+      // The blob's reset clears the run cursor and preserves constant overrides,
+      // faithfully mirroring Vm::reset() -- which also leaves the previous run's
+      // values in the live curr chunk and defers re-init to the next run. The VM
+      // stack still presents a fresh pre-run state after reset (libsimlin recreates
+      // a zeroed VM), so the host must do the same: zero the live curr chunk
+      // (memory base 0, the nSlots f64 that simGetTime/simGetValue read). Without
+      // this, getTime()/getValue() return stale end-of-run values until the next
+      // run_to repopulates curr -- diverging from the VM, which reads 0.
       entry.wasmExports!.reset();
+      new Float64Array(entry.wasmExports!.memory.buffer, 0, entry.wasmLayout!.nSlots).fill(0);
       return;
     }
     simlin_sim_reset(entry.ptr);
