@@ -15,7 +15,7 @@
 // them. That makes every term trivially testable with hand-computed expected
 // values (see the inline tests below).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::datamodel::{self, ViewElement};
 use crate::diagram::common::{
@@ -80,7 +80,11 @@ pub struct LayoutMetrics {
     pub aspect_penalty: f64,
     /// Reserved; computed in a future rung. Always 0.0, weight 0.
     pub chain_straightness: f64,
-    /// Reserved; computed in a future rung. Always 0.0, weight 0.
+    /// Mean isoperimetric penalty `1 - Q` over the view's feedback cycles
+    /// (`Q = 4*PI*Area / Perimeter^2` of each loop's node-center polygon,
+    /// clamped to [0,1]). 0.0 = clean, well-spread loops (circles); higher =
+    /// collapsed/collinear loops. 0.0 when the view has no cycle of >= 3 nodes.
+    /// Computed and reported now; weight stays 0 until Phase 4 calibration.
     pub loop_compactness: f64,
 }
 
@@ -310,6 +314,265 @@ fn collect_connector_geometry(view: &datamodel::StockFlow) -> Vec<ConnectorGeome
     out
 }
 
+// --- loop_compactness (isoperimetric feedback-loop quality) -----------------
+//
+// What it measures: how cleanly the view draws its feedback loops as visible
+// circles. For each simple directed cycle of >= 3 positioned nodes we take the
+// node-box centers in cycle order and form a polygon. Its isoperimetric
+// quotient Q = 4*PI*Area / Perimeter^2 is 1 for a perfect circle and tends to 0
+// as the polygon collapses toward a line (the area vanishes while the perimeter
+// stays large). The per-cycle penalty is `1 - Q` (0 = ideal clean loop, ~1 =
+// squished/collinear), and `loop_compactness` is the mean penalty over all
+// qualifying cycles (0.0 when the view has no cycle of >= 3 nodes). It thus
+// REWARDS well-spread loops and PENALIZES collapsed ones.
+//
+// Bounds (SD diagrams are small, so this stays O(small) and total): a simple
+// cycle is enumerated only up to `MAX_CYCLE_LEN` nodes, and at most
+// `MAX_CYCLES` cycles are scored; enumeration stops once the cap is hit. The
+// graph is built over positioned node-box elements (aux/stock/flow/module/cloud
+// -- the same set as `node_box`); links and flows supply the directed edges.
+//
+// Determinism: layout is deterministic per seed, but this term is additionally
+// independent of element ordering. Adjacency targets are sorted, the DFS starts
+// from each node in sorted uid order, and every enumerated cycle is canonicalized
+// (rotated so its smallest uid is first) and de-duplicated, so the mean is the
+// same regardless of how the elements are listed in the view.
+
+/// Maximum number of nodes in an enumerated simple cycle. SD feedback loops are
+/// short; a longer "cycle" is almost always an artifact of many overlapping
+/// smaller loops and is not worth the combinatorial cost.
+const MAX_CYCLE_LEN: usize = 12;
+
+/// Maximum number of distinct simple cycles scored. Bounds the work on dense
+/// graphs; the mean penalty over the first `MAX_CYCLES` cycles is a faithful
+/// proxy for the whole (SD diagrams rarely approach this).
+const MAX_CYCLES: usize = 64;
+
+/// Directed adjacency over positioned node-box elements, keyed by uid with
+/// sorted successor lists. The center of each node's bare *shape* box (which is
+/// symmetric about the element position, so it is the element center -- unlike
+/// the asymmetric label-merged `node_box`) is recorded for the polygon geometry.
+struct LoopGraph {
+    /// uid -> sorted, de-duplicated successor uids.
+    adj: BTreeMap<i32, Vec<i32>>,
+    /// uid -> node-box center point.
+    centers: BTreeMap<i32, Point>,
+}
+
+/// Build the directed loop graph from the view. Nodes are exactly the elements
+/// with a node box (`node_shape_box`). Edges to/from uids that are not
+/// positioned nodes are dropped. Edges come from:
+///   * each Link: `from_uid -> to_uid`;
+///   * each Flow: for consecutive attached points, `source_attached -> flow.uid`
+///     and `flow.uid -> dest_attached`, so a stock--flow--stock feedback path is
+///     part of the graph (the flow's own valve is the intermediate node).
+fn build_loop_graph(view: &datamodel::StockFlow) -> LoopGraph {
+    let mut centers: BTreeMap<i32, Point> = BTreeMap::new();
+    for e in &view.elements {
+        if let Some(r) = node_shape_box(e) {
+            centers.insert(
+                e.get_uid(),
+                Point {
+                    x: (r.left + r.right) / 2.0,
+                    y: (r.top + r.bottom) / 2.0,
+                },
+            );
+        }
+    }
+
+    // Collect edges into sorted sets per source so the adjacency is canonical
+    // (sorted, de-duplicated) and the cycle search is order-independent.
+    let mut edge_sets: BTreeMap<i32, BTreeSet<i32>> = BTreeMap::new();
+    let mut add_edge = |from: i32, to: i32, centers: &BTreeMap<i32, Point>| {
+        // Both endpoints must be positioned nodes, and we never record a
+        // self-loop (a single-node "cycle" forms no polygon).
+        if from != to && centers.contains_key(&from) && centers.contains_key(&to) {
+            edge_sets.entry(from).or_default().insert(to);
+        }
+    };
+
+    for e in &view.elements {
+        match e {
+            ViewElement::Link(link) => {
+                add_edge(link.from_uid, link.to_uid, &centers);
+            }
+            ViewElement::Flow(flow) => {
+                // Consecutive attached points define stock->flow and flow->stock
+                // edges through the flow's own valve uid.
+                let attached: Vec<i32> = flow
+                    .points
+                    .iter()
+                    .filter_map(|p| p.attached_to_uid)
+                    .collect();
+                for w in attached.windows(2) {
+                    add_edge(w[0], flow.uid, &centers);
+                    add_edge(flow.uid, w[1], &centers);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let adj: BTreeMap<i32, Vec<i32>> = edge_sets
+        .into_iter()
+        .map(|(k, set)| (k, set.into_iter().collect()))
+        .collect();
+    LoopGraph { adj, centers }
+}
+
+/// Enumerate simple directed cycles (each >= 2 nodes), bounded by
+/// `MAX_CYCLE_LEN` and `MAX_CYCLES`, canonicalized and de-duplicated so the same
+/// directed cycle is returned exactly once regardless of where the search
+/// started. A bounded DFS suffices: SD diagrams are tiny, and the caps keep it
+/// O(small) on the rare dense graph.
+///
+/// Each returned cycle is a `Vec<i32>` of uids in traversal order, rotated so
+/// its smallest uid is first (canonical form), and the set of returned cycles is
+/// itself sorted for a fully deterministic result.
+fn enumerate_simple_cycles(graph: &LoopGraph) -> Vec<Vec<i32>> {
+    let mut found: BTreeSet<Vec<i32>> = BTreeSet::new();
+    // Start a DFS from each node in sorted uid order. To avoid re-finding the
+    // same cycle from each of its members we still canonicalize+dedup, but we
+    // also restrict each search to cycles whose minimum node is the start node,
+    // which prunes the bulk of the duplicate work.
+    let starts: Vec<i32> = graph.adj.keys().copied().collect();
+    let mut path: Vec<i32> = Vec::new();
+    let mut on_path: HashSet<i32> = HashSet::new();
+    for &start in &starts {
+        path.clear();
+        on_path.clear();
+        dfs_cycles(graph, start, start, &mut path, &mut on_path, &mut found);
+        if found.len() >= MAX_CYCLES {
+            break;
+        }
+    }
+    found.into_iter().take(MAX_CYCLES).collect()
+}
+
+/// Depth-first walk that records every simple cycle returning to `start` and
+/// composed only of nodes whose uid is >= `start` (so each cycle is discovered
+/// from its smallest member). `path`/`on_path` track the current simple path.
+fn dfs_cycles(
+    graph: &LoopGraph,
+    start: i32,
+    current: i32,
+    path: &mut Vec<i32>,
+    on_path: &mut HashSet<i32>,
+    found: &mut BTreeSet<Vec<i32>>,
+) {
+    if found.len() >= MAX_CYCLES {
+        return;
+    }
+    path.push(current);
+    on_path.insert(current);
+
+    if let Some(succs) = graph.adj.get(&current) {
+        for &next in succs {
+            if next == start {
+                // Closed a cycle back to the start. Record it (>= 2 nodes by
+                // construction; self-loops were never added as edges).
+                if path.len() >= 2 {
+                    found.insert(canonicalize_cycle(path));
+                    if found.len() >= MAX_CYCLES {
+                        break;
+                    }
+                }
+                continue;
+            }
+            // Only extend through nodes strictly greater than the start (so the
+            // start is the minimum), not already on the path, within the length
+            // cap.
+            if next > start && !on_path.contains(&next) && path.len() < MAX_CYCLE_LEN {
+                dfs_cycles(graph, start, next, path, on_path, found);
+                if found.len() >= MAX_CYCLES {
+                    break;
+                }
+            }
+        }
+    }
+
+    on_path.remove(&current);
+    path.pop();
+}
+
+/// Rotate a cycle so its smallest uid is first, preserving traversal direction.
+/// The DFS already guarantees the start (= minimum) is element 0, but rotating
+/// defensively keeps the canonical form correct for any caller.
+fn canonicalize_cycle(cycle: &[i32]) -> Vec<i32> {
+    if cycle.is_empty() {
+        return Vec::new();
+    }
+    let min_idx = cycle
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, v)| *v)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(cycle.len());
+    for k in 0..cycle.len() {
+        out.push(cycle[(min_idx + k) % cycle.len()]);
+    }
+    out
+}
+
+/// Isoperimetric penalty `1 - Q` for one cycle's node-box centers, or `None` if
+/// the cycle does not qualify (fewer than 3 distinct positioned nodes, or a
+/// degenerate zero-perimeter polygon). `Q = 4*PI*Area / Perimeter^2` is clamped
+/// to [0, 1]; `Area` is the shoelace area (absolute value) and `Perimeter` the
+/// summed edge length over the closed polygon.
+fn cycle_penalty(cycle: &[i32], centers: &BTreeMap<i32, Point>) -> Option<f64> {
+    // Distinct positioned nodes only: a polygon needs >= 3 vertices.
+    let distinct: BTreeSet<i32> = cycle.iter().copied().collect();
+    if distinct.len() < 3 {
+        return None;
+    }
+    let pts: Vec<Point> = cycle
+        .iter()
+        .filter_map(|uid| centers.get(uid).copied())
+        .collect();
+    if pts.len() < 3 {
+        return None;
+    }
+
+    let n = pts.len();
+    let mut area2 = 0.0;
+    let mut perimeter = 0.0;
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        area2 += a.x * b.y - b.x * a.y;
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        perimeter += (dx * dx + dy * dy).sqrt();
+    }
+    if perimeter <= 0.0 {
+        // All centers coincide: no polygon. Guarded so the division below is
+        // never NaN; such a degenerate cycle simply does not contribute.
+        return None;
+    }
+    let area = area2.abs() / 2.0;
+    let q = (4.0 * std::f64::consts::PI * area / (perimeter * perimeter)).clamp(0.0, 1.0);
+    Some(1.0 - q)
+}
+
+/// `loop_compactness`: mean isoperimetric penalty `1 - Q` over the view's
+/// bounded simple directed cycles of >= 3 positioned nodes. 0.0 when there is no
+/// qualifying cycle. Deterministic for a given view regardless of element order
+/// (see the module comment above). PURE.
+fn compute_loop_compactness(view: &datamodel::StockFlow) -> f64 {
+    let graph = build_loop_graph(view);
+    let cycles = enumerate_simple_cycles(&graph);
+    let penalties: Vec<f64> = cycles
+        .iter()
+        .filter_map(|c| cycle_penalty(c, &graph.centers))
+        .collect();
+    if penalties.is_empty() {
+        0.0
+    } else {
+        penalties.iter().sum::<f64>() / penalties.len() as f64
+    }
+}
+
 /// Compute the layout quality metrics for a completed view.
 ///
 /// PURE: takes data, returns scalars, performs no I/O. The `_config` parameter
@@ -501,6 +764,9 @@ pub fn compute_layout_metrics(
         None => 0.0,
     };
 
+    // --- loop_compactness (isoperimetric feedback-loop quality) ---
+    let loop_compactness = compute_loop_compactness(view);
+
     LayoutMetrics {
         node_overlap,
         node_connector_overlap,
@@ -511,7 +777,7 @@ pub fn compute_layout_metrics(
         aspect_penalty,
         // reserved; computed in a future rung
         chain_straightness: 0.0,
-        loop_compactness: 0.0,
+        loop_compactness,
     }
 }
 
@@ -560,6 +826,41 @@ mod tests {
             to_uid,
             shape: LinkShape::Straight,
             polarity: None,
+        })
+    }
+
+    /// A flow valve at `(x, y)` with a two-point polyline whose endpoints attach
+    /// to `from_uid` and `to_uid` (a stock--flow--stock segment). The point
+    /// coordinates are irrelevant to `loop_compactness` (which uses node-box
+    /// centers, not flow points), so they are placed at the valve.
+    fn flow_between(
+        uid: i32,
+        name: &str,
+        x: f64,
+        y: f64,
+        from_uid: i32,
+        to_uid: i32,
+    ) -> ViewElement {
+        ViewElement::Flow(view_element::Flow {
+            name: name.to_string(),
+            uid,
+            x,
+            y,
+            label_side: LabelSide::Bottom,
+            points: vec![
+                view_element::FlowPoint {
+                    x,
+                    y,
+                    attached_to_uid: Some(from_uid),
+                },
+                view_element::FlowPoint {
+                    x,
+                    y,
+                    attached_to_uid: Some(to_uid),
+                },
+            ],
+            compat: None,
+            label_compat: None,
         })
     }
 
@@ -1234,5 +1535,207 @@ mod tests {
                 other.node_overlap
             );
         }
+    }
+
+    // --- loop_compactness (isoperimetric loop quality) ---
+
+    /// The center of a node's bare shape box (which is symmetric about the
+    /// element position, so this is the element center). Mirrors the centers the
+    /// metric uses to build each loop polygon.
+    fn shape_center(e: &ViewElement) -> Point {
+        let r = node_shape_box(e).unwrap();
+        Point {
+            x: (r.left + r.right) / 2.0,
+            y: (r.top + r.bottom) / 2.0,
+        }
+    }
+
+    /// Hand-computed isoperimetric penalty `1 - Q` for a polygon over the given
+    /// centers in order (shoelace area, summed-edge perimeter, Q clamped to
+    /// [0,1]). The test's independent oracle for `loop_compactness`.
+    fn expected_loop_penalty(centers: &[Point]) -> f64 {
+        let n = centers.len();
+        let mut area2 = 0.0;
+        let mut perim = 0.0;
+        for i in 0..n {
+            let a = centers[i];
+            let b = centers[(i + 1) % n];
+            area2 += a.x * b.y - b.x * a.y;
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            perim += (dx * dx + dy * dy).sqrt();
+        }
+        let area = area2.abs() / 2.0;
+        let q = (4.0 * std::f64::consts::PI * area / (perim * perim)).clamp(0.0, 1.0);
+        1.0 - q
+    }
+
+    #[test]
+    fn test_loop_compactness_circle_loop_near_zero() {
+        // Eight stocks placed on a circle of radius 300, wired into a directed
+        // 8-cycle by links 1->2->...->8->1. A well-spread loop reads as a clean
+        // circle, so its isoperimetric quotient Q is close to 1 and the penalty
+        // (1 - Q) is small.
+        let n: i32 = 8;
+        let radius = 300.0;
+        let mut elements: Vec<ViewElement> = Vec::new();
+        let mut centers: Vec<Point> = Vec::new();
+        for i in 0..n {
+            let theta = 2.0 * std::f64::consts::PI * f64::from(i) / f64::from(n);
+            let x = radius * theta.cos();
+            let y = radius * theta.sin();
+            let e = stock(i + 1, "n", x, y);
+            centers.push(shape_center(&e));
+            elements.push(e);
+        }
+        for i in 0..n {
+            let from = i + 1;
+            let to = (i + 1) % n + 1;
+            elements.push(straight_link(100 + i, from, to));
+        }
+        let view = make_view(elements);
+        let m = compute_layout_metrics(&view, &cfg());
+
+        let expected = expected_loop_penalty(&centers);
+        assert!(
+            (m.loop_compactness - expected).abs() < 1e-9,
+            "loop_compactness {} != hand-computed penalty {}",
+            m.loop_compactness,
+            expected
+        );
+        // A regular octagon's penalty is ~0.05 -- "near 0" (a clean circle).
+        assert!(
+            m.loop_compactness < 0.1,
+            "a well-spread circular loop should score near 0, got {}",
+            m.loop_compactness
+        );
+    }
+
+    #[test]
+    fn test_loop_compactness_collapsed_loop_higher() {
+        // The SAME directed 8-cycle, but the nodes are squished onto a nearly
+        // straight line (a collapsed/collinear loop). The polygon area shrinks
+        // toward zero while the perimeter stays large, so Q -> 0 and the penalty
+        // (1 - Q) -> 1: clearly higher than the circular placement.
+        let n: i32 = 8;
+        let mut elements: Vec<ViewElement> = Vec::new();
+        let mut centers: Vec<Point> = Vec::new();
+        for i in 0..n {
+            // Spread along x, with a tiny alternating y wobble so the polygon is
+            // non-degenerate (nonzero perimeter) but nearly collinear.
+            let x = f64::from(i) * 100.0;
+            let y = if i % 2 == 0 { 0.0 } else { 1.0 };
+            let e = stock(i + 1, "n", x, y);
+            centers.push(shape_center(&e));
+            elements.push(e);
+        }
+        for i in 0..n {
+            let from = i + 1;
+            let to = (i + 1) % n + 1;
+            elements.push(straight_link(100 + i, from, to));
+        }
+        let view = make_view(elements);
+        let m = compute_layout_metrics(&view, &cfg());
+
+        let expected = expected_loop_penalty(&centers);
+        assert!(
+            (m.loop_compactness - expected).abs() < 1e-9,
+            "loop_compactness {} != hand-computed penalty {}",
+            m.loop_compactness,
+            expected
+        );
+        // A nearly-collinear loop scores near 1 (squished).
+        assert!(
+            m.loop_compactness > 0.9,
+            "a collapsed/collinear loop should score near 1, got {}",
+            m.loop_compactness
+        );
+    }
+
+    #[test]
+    fn test_loop_compactness_no_cycle_is_zero() {
+        // A pure chain a -> b -> c (no feedback) has no directed cycle, so there
+        // is nothing to score: loop_compactness == 0.0.
+        let view = make_view(vec![
+            aux(1, "a", 0.0, 0.0),
+            aux(2, "b", 200.0, 0.0),
+            aux(3, "c", 400.0, 0.0),
+            straight_link(10, 1, 2),
+            straight_link(11, 2, 3),
+        ]);
+        let m = compute_layout_metrics(&view, &cfg());
+        assert_eq!(m.loop_compactness, 0.0);
+    }
+
+    #[test]
+    fn test_loop_compactness_two_node_mutual_pair_is_zero() {
+        // A 2-node mutual pair (a -> b -> a) is a cycle, but two points form no
+        // polygon (fewer than 3 distinct nodes), so it contributes nothing.
+        let view = make_view(vec![
+            aux(1, "a", 0.0, 0.0),
+            aux(2, "b", 200.0, 0.0),
+            straight_link(10, 1, 2),
+            straight_link(11, 2, 1),
+        ]);
+        let m = compute_layout_metrics(&view, &cfg());
+        assert_eq!(m.loop_compactness, 0.0);
+    }
+
+    #[test]
+    fn test_loop_compactness_flow_feedback_path_is_a_cycle() {
+        // A stock--flow--stock feedback path must enter the loop graph: stock #1
+        // and stock #2 connected by flow #3 (so #1 -> #3 -> #2), plus a link
+        // #2 -> #1 closing the loop. The cycle is {#1, #3, #2}: three distinct
+        // positioned nodes -> a real polygon -> a positive penalty.
+        let s1 = stock(1, "a", 0.0, 0.0);
+        let s2 = stock(2, "b", 300.0, 0.0);
+        let f = flow_between(3, "f", 150.0, 200.0, 1, 2);
+        let link = straight_link(10, 2, 1);
+        let view = make_view(vec![s1, s2, f, link]);
+        let m = compute_layout_metrics(&view, &cfg());
+        assert!(
+            m.loop_compactness > 0.0,
+            "a stock--flow--stock feedback path must form a scored loop, got {}",
+            m.loop_compactness
+        );
+    }
+
+    #[test]
+    fn test_loop_compactness_deterministic_under_shuffle() {
+        // loop_compactness is a mean over cycles, each computed from node-box
+        // centers in cycle order. It must be invariant to the order elements
+        // appear in the view's element list.
+        let n: i32 = 6;
+        let radius = 250.0;
+        let mut elements: Vec<ViewElement> = Vec::new();
+        for i in 0..n {
+            let theta = 2.0 * std::f64::consts::PI * f64::from(i) / f64::from(n);
+            elements.push(stock(
+                i + 1,
+                "n",
+                radius * theta.cos(),
+                radius * theta.sin(),
+            ));
+        }
+        for i in 0..n {
+            let from = i + 1;
+            let to = (i + 1) % n + 1;
+            elements.push(straight_link(100 + i, from, to));
+        }
+        let base = compute_layout_metrics(&make_view(elements.clone()), &cfg());
+
+        // Reverse the element order (links before nodes, nodes reversed); the
+        // graph and its cycles are unchanged.
+        let mut shuffled = elements.clone();
+        shuffled.reverse();
+        let other = compute_layout_metrics(&make_view(shuffled), &cfg());
+
+        assert!(
+            (base.loop_compactness - other.loop_compactness).abs() < 1e-12,
+            "loop_compactness changed under element shuffle: {} vs {}",
+            base.loop_compactness,
+            other.loop_compactness
+        );
+        assert!(base.loop_compactness > 0.0);
     }
 }
