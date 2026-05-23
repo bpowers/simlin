@@ -21,9 +21,19 @@
 //!   LAYOUT_EVAL_MODELS=teacup,sir cargo run ... --example layout_eval
 //!
 //! Env knobs:
-//!   LAYOUT_EVAL_MODELS  comma list of corpus keys to run (default: all)
-//!   LAYOUT_EVAL_SEEDS   number of seeds M to sample (default: 25)
-//!   LAYOUT_EVAL_OUT     output directory (default: repo-root target/layout-eval)
+//!   LAYOUT_EVAL_MODELS         comma list of corpus keys to run (default: all)
+//!   LAYOUT_EVAL_SEEDS          number of seeds M to sample (default: 25)
+//!   LAYOUT_EVAL_OUT            output directory (default: repo-root target/layout-eval)
+//!   LAYOUT_EVAL_WRITE_BASELINE 1 -> write this run's report to the committed
+//!                              baseline JSON (see below) instead of diffing.
+//!
+//! Baseline diff: a committed `examples/layout_eval_baseline.json` (a serialized
+//! `CorpusReport`) records a reference run. A normal run reads it back, runs
+//! `compare(baseline, candidate)`, and embeds the per-model + aggregate deltas
+//! (with Mann-Whitney U p-values / significance verdicts) into `metrics.json`
+//! and the `index.html` header. With `LAYOUT_EVAL_WRITE_BASELINE=1` the run
+//! instead overwrites that baseline file (re-seed it after the metric weights
+//! change). If the file is absent a normal run skips the diff with a note.
 //!
 //! Requires `--features png_render,file_io`: `png_render` for `render_png`, and
 //! `file_io` so Vensim corpus models that reference external data can load.
@@ -38,7 +48,9 @@ use serde::Serialize;
 use simlin_engine::diagram::{PngRenderOpts, render_png};
 use simlin_engine::layout::LAYOUT_SEEDS;
 use simlin_engine::layout::config::LayoutConfig;
-use simlin_engine::layout::eval_stats::{CorpusReport, MetricSample, ModelStats};
+use simlin_engine::layout::eval_stats::{
+    Comparison, CorpusReport, MetricSample, ModelStats, compare,
+};
 use simlin_engine::layout::generate_layout_with_config;
 use simlin_engine::layout::metrics::{LayoutMetrics, MetricWeights, compute_layout_metrics};
 use simlin_engine::{datamodel, open_vensim, open_xmile};
@@ -77,6 +89,12 @@ const MAIN_MODEL: &str = "main";
 
 /// Default number of seeds to sample per model when `LAYOUT_EVAL_SEEDS` is unset.
 const DEFAULT_SEEDS: u64 = 25;
+
+/// Path (relative to `CARGO_MANIFEST_DIR` = `src/simlin-engine`) of the committed
+/// baseline `CorpusReport`. This file lives in the SOURCE TREE by design (it is
+/// checked in and diffed against on every normal run), unlike every other
+/// artifact, which is written under the gitignored `target/` output dir.
+const BASELINE_REL_PATH: &str = "examples/layout_eval_baseline.json";
 
 // ── Corpus ─────────────────────────────────────────────────────────────────
 
@@ -280,6 +298,28 @@ fn seed_set(m: u64) -> Vec<u64> {
 fn out_dir() -> String {
     env::var("LAYOUT_EVAL_OUT")
         .unwrap_or_else(|_| format!("{}/../../target/layout-eval", env!("CARGO_MANIFEST_DIR")))
+}
+
+/// Whether to (re)seed the committed baseline instead of diffing against it.
+/// True when `LAYOUT_EVAL_WRITE_BASELINE` is set to a truthy value (`1`/`true`,
+/// case-insensitive). Any other value -- and an unset variable -- means a normal
+/// diffing run.
+fn write_baseline_requested() -> bool {
+    matches!(
+        env::var("LAYOUT_EVAL_WRITE_BASELINE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true"
+    )
+}
+
+/// Absolute path of the committed baseline `CorpusReport` JSON. Resolved against
+/// `CARGO_MANIFEST_DIR` so it always points at the source-tree file regardless
+/// of the working directory the example runs from.
+fn baseline_path() -> String {
+    format!("{}/{}", env!("CARGO_MANIFEST_DIR"), BASELINE_REL_PATH)
 }
 
 // ── Per-model seed sweep ─────────────────────────────────────────────────────
@@ -566,10 +606,11 @@ struct ModelReport {
 /// The top-level `metrics.json` document: every scored model plus the corpus
 /// aggregates (the geomean of per-model medians and the weight set used).
 ///
-/// `baseline_comparison` is the place Task 5's baseline-vs-candidate diff plugs
-/// in (per-model + aggregate deltas with Mann-Whitney p-values). It is `None`
-/// here in Phase 3; the field exists so the JSON schema is stable across the
-/// two tasks (a Phase-3 reader sees `null`, a Phase-4 reader sees the diff).
+/// `baseline_comparison` carries the baseline-vs-candidate diff (per-model +
+/// aggregate deltas with Mann-Whitney p-values) when a committed baseline JSON
+/// is present; it is `None` (and serde-skipped) when there is no baseline to
+/// diff against. A reader therefore sees the diff embedded directly in the JSON,
+/// or no `baseline_comparison` key at all.
 #[derive(Serialize)]
 struct EvalReport {
     /// Models sorted worst-cost-first (highest `median_cost` at the front), the
@@ -579,9 +620,10 @@ struct EvalReport {
     geomean_of_medians: f64,
     /// The `MetricWeights` used to compute every `weighted_cost` in this report.
     weights: MetricWeights,
-    /// Reserved for Task 5's baseline diff; always `None` in Phase 3.
+    /// The baseline-vs-candidate diff, present only when a committed baseline
+    /// `CorpusReport` was found and compared against this run.
     #[serde(skip_serializing_if = "Option::is_none")]
-    baseline_comparison: Option<()>,
+    baseline_comparison: Option<Comparison>,
 }
 
 /// Map an in-memory `Render` to its JSON row.
@@ -606,6 +648,7 @@ fn build_report(
     renders: &[ModelRenders],
     geomean_of_medians: f64,
     weights: &MetricWeights,
+    baseline_comparison: Option<Comparison>,
 ) -> EvalReport {
     let mut models: Vec<ModelReport> = per_model
         .iter()
@@ -641,7 +684,7 @@ fn build_report(
         models,
         geomean_of_medians,
         weights: *weights,
-        baseline_comparison: None,
+        baseline_comparison,
     }
 }
 
@@ -718,14 +761,83 @@ fn write_render_cell(html: &mut String, kind: &str, render: Option<&RenderReport
     html.push_str("</div>");
 }
 
+/// Format a `delta_ratio` as a signed percentage (e.g. `+3.2%`, `-0.0%`). PURE.
+fn fmt_delta_pct(ratio: f64) -> String {
+    format!("{:+.2}%", ratio * 100.0)
+}
+
+/// Render the baseline-vs-candidate diff into the header: the aggregate delta +
+/// significance verdict, then a per-model table of `delta_ratio`, the
+/// Mann-Whitney p-value, and the significance verdict. A `None` comparison (no
+/// committed baseline) renders a muted note instead, so the contact-sheet always
+/// records whether a baseline was diffed. PURE: appends to `html`.
+fn write_baseline_diff(html: &mut String, comparison: Option<&Comparison>) {
+    let Some(cmp) = comparison else {
+        html.push_str(
+            "<p class=\"none\">No baseline diff (run with \
+             <code>LAYOUT_EVAL_WRITE_BASELINE=1</code> to seed one).</p>\n",
+        );
+        return;
+    };
+
+    html.push_str("<div class=\"baseline\"><h3>Baseline diff</h3>");
+    let agg_class = if cmp.aggregate_significant {
+        "sig"
+    } else {
+        "nonsig"
+    };
+    let agg_verdict = if cmp.aggregate_significant {
+        "significant"
+    } else {
+        "not significant"
+    };
+    let _ = write!(
+        html,
+        "<p class=\"agg\">aggregate delta <code>{}</code> &middot; \
+         p={:.4} &middot; <span class=\"{agg_class}\">{agg_verdict}</span></p>",
+        fmt_delta_pct(cmp.aggregate_delta_ratio),
+        cmp.aggregate_p_value,
+    );
+
+    if cmp.per_model.is_empty() {
+        html.push_str("<p class=\"agg\">(no models matched the baseline)</p></div>\n");
+        return;
+    }
+
+    html.push_str(
+        "<table class=\"diff\"><tr><th>model</th><th>baseline</th>\
+         <th>candidate</th><th>delta</th><th>p</th><th>significance</th></tr>",
+    );
+    for m in &cmp.per_model {
+        let (cls, verdict) = if m.significant {
+            ("sig", "significant")
+        } else {
+            ("nonsig", "&mdash;")
+        };
+        let _ = write!(
+            html,
+            "<tr><td>{}</td><td class=\"num\">{:.4}</td><td class=\"num\">{:.4}</td>\
+             <td class=\"num\">{}</td><td class=\"num\">{:.4}</td>\
+             <td class=\"{cls}\">{verdict}</td></tr>",
+            html_escape(&m.model),
+            m.baseline_median,
+            m.candidate_median,
+            fmt_delta_pct(m.delta_ratio),
+            m.p_value,
+        );
+    }
+    html.push_str("</table></div>\n");
+}
+
 /// Render the self-contained `index.html` contact-sheet from the report.
 ///
 /// PURE: a string built from `report`. The header shows the corpus
-/// `geomean_of_medians` and the weight set; models are laid out one section per
-/// model, worst-cost-first (the report is already sorted), each with its
-/// reference (if any) and best/median/worst renders side by side and a per-term
-/// breakdown under each. `<img>` paths are relative to the out dir so the file
-/// references its sibling PNGs.
+/// `geomean_of_medians`, the weight set, and (when a committed baseline was
+/// diffed) the baseline-vs-candidate delta table; models are laid out one
+/// section per model, worst-cost-first (the report is already sorted), each with
+/// its reference (if any) and best/median/worst renders side by side and a
+/// per-term breakdown under each. `<img>` paths are relative to the out dir so
+/// the file references its sibling PNGs.
 fn render_index_html(report: &EvalReport) -> String {
     let mut html = String::new();
     html.push_str(
@@ -739,6 +851,18 @@ fn render_index_html(report: &EvalReport) -> String {
          .summary code { background: #eee; padding: 1px 4px; border-radius: 4px; }\n\
          table.weights { border-collapse: collapse; font-size: 12px; margin: 8px 0 24px; }\n\
          table.weights td { border: 1px solid #ddd; padding: 2px 8px; }\n\
+         .baseline { border: 1px solid #ddd; border-radius: 4px; background: #fff;\n\
+                     padding: 8px 12px; margin: 8px 0 24px; }\n\
+         .baseline h3 { font-size: 13px; margin: 0 0 6px; }\n\
+         .baseline .agg { font-size: 12px; color: #555; margin: 0 0 6px; }\n\
+         table.diff { border-collapse: collapse; font-size: 12px; }\n\
+         table.diff th, table.diff td { border: 1px solid #eee; padding: 2px 8px;\n\
+                                        text-align: right; }\n\
+         table.diff th:first-child, table.diff td:first-child { text-align: left; }\n\
+         table.diff td.num { font-variant-numeric: tabular-nums; }\n\
+         .sig { color: #c62828; font-weight: 600; }\n\
+         .nonsig { color: #888; }\n\
+         .none { color: #999; font-style: italic; font-size: 12px; margin: 0 0 24px; }\n\
          .model { border: 1px solid #ddd; border-radius: 4px; background: #fff;\n\
                   padding: 12px 16px; margin-bottom: 20px; }\n\
          .model h2 { font-size: 16px; margin: 0 0 2px; }\n\
@@ -789,6 +913,8 @@ fn render_index_html(report: &EvalReport) -> String {
     }
     html.push_str("</table>\n");
 
+    write_baseline_diff(&mut html, report.baseline_comparison.as_ref());
+
     for model in &report.models {
         let name = html_escape(&model.model);
         html.push_str("<section class=\"model\">");
@@ -817,6 +943,106 @@ fn render_index_html(report: &EvalReport) -> String {
 
     html.push_str("</body>\n</html>\n");
     html
+}
+
+// ── Baseline diff (imperative shell) ─────────────────────────────────────────
+
+/// Write `candidate` to the committed baseline JSON, replacing any existing
+/// file. The full `CorpusReport` -- including each model's per-seed `samples` --
+/// is serialized so a later run can re-run Mann-Whitney U over the seed-sample
+/// cost sets. On a serialize or write failure WARN to stderr (the run still
+/// emits its `target/` artifacts; only the baseline re-seed failed).
+fn write_baseline(candidate: &CorpusReport) {
+    let path = baseline_path();
+    match serde_json::to_string_pretty(candidate) {
+        Ok(json) => match std::fs::write(&path, json) {
+            Ok(()) => println!(
+                "wrote baseline {path}\n\
+                 note: re-seed this baseline after the metric weights change."
+            ),
+            Err(err) => eprintln!("WARN: failed to write baseline {path}: {err}"),
+        },
+        Err(err) => eprintln!("WARN: failed to serialize baseline: {err}"),
+    }
+}
+
+/// Read and deserialize the committed baseline `CorpusReport`, if present.
+///
+/// Returns `None` (with a one-line note) when the file does not exist -- the
+/// expected state before a baseline has been seeded. A file that exists but
+/// fails to read or parse is a real error: WARN with the cause and return `None`
+/// so the run still emits its artifacts without a diff.
+fn read_baseline() -> Option<CorpusReport> {
+    let path = baseline_path();
+    let json = match std::fs::read_to_string(&path) {
+        Ok(json) => json,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            println!("no baseline; run with LAYOUT_EVAL_WRITE_BASELINE=1 to seed one.");
+            return None;
+        }
+        Err(err) => {
+            eprintln!("WARN: failed to read baseline {path}: {err}");
+            return None;
+        }
+    };
+    match serde_json::from_str::<CorpusReport>(&json) {
+        Ok(report) => Some(report),
+        Err(err) => {
+            eprintln!("WARN: failed to parse baseline {path}: {err}");
+            None
+        }
+    }
+}
+
+/// Print the baseline-vs-candidate diff to stdout: one line per matched model
+/// (delta + p-value + significance) and an aggregate line. PURE-ish: reads
+/// `cmp` and prints; kept in the shell because it does I/O (stdout).
+fn print_comparison(cmp: &Comparison) {
+    println!("baseline diff (candidate vs baseline):");
+    for m in &cmp.per_model {
+        let verdict = if m.significant {
+            "significant"
+        } else {
+            "not significant"
+        };
+        println!(
+            "  {}: delta={} p={:.4} ({verdict})",
+            m.model,
+            fmt_delta_pct(m.delta_ratio),
+            m.p_value,
+        );
+    }
+    if cmp.per_model.is_empty() {
+        println!("  (no models matched the baseline)");
+    }
+    let agg_verdict = if cmp.aggregate_significant {
+        "significant"
+    } else {
+        "not significant"
+    };
+    println!(
+        "  aggregate: delta={} p={:.4} ({agg_verdict})",
+        fmt_delta_pct(cmp.aggregate_delta_ratio),
+        cmp.aggregate_p_value,
+    );
+}
+
+/// Resolve the baseline diff for this run.
+///
+/// When `LAYOUT_EVAL_WRITE_BASELINE` is set, (re)seed the committed baseline
+/// from `candidate` and return `None` (a seeding run reports no diff -- there is
+/// nothing yet to diff against). Otherwise read the committed baseline (if any),
+/// run `compare(baseline, candidate)`, print the diff, and return it for
+/// embedding in the artifacts. Absent baseline -> `None`.
+fn resolve_baseline_diff(candidate: &CorpusReport) -> Option<Comparison> {
+    if write_baseline_requested() {
+        write_baseline(candidate);
+        return None;
+    }
+    let baseline = read_baseline()?;
+    let cmp = compare(&baseline, candidate);
+    print_comparison(&cmp);
+    Some(cmp)
 }
 
 fn main() {
@@ -876,6 +1102,12 @@ fn main() {
         renders.len(),
     );
 
+    // Either (re)seed the committed baseline from this run, or diff this run's
+    // report against the committed baseline (printing the per-model + aggregate
+    // deltas with Mann-Whitney p-values). The returned `Comparison` (if any) is
+    // embedded into both artifacts below.
+    let baseline_comparison = resolve_baseline_diff(&corpus);
+
     // Build the serializable report from the in-memory stats + renders, then
     // emit both artifacts under the out dir (which defaults under the gitignored
     // repo-root `target/`). `corpus.per_model` and `renders` are positionally
@@ -885,6 +1117,7 @@ fn main() {
         &renders,
         corpus.geomean_of_medians,
         &PLACEHOLDER_WEIGHTS,
+        baseline_comparison,
     );
 
     let metrics_path = format!("{out}/metrics.json");

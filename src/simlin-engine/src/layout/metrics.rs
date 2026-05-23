@@ -51,10 +51,12 @@ pub const TARGET_AR_MAX: f64 = 16.0 / 9.0;
 /// spread far apart, and that sensitivity is what makes those terms meaningful
 /// across models. See the AC1.8 scoping note in the Phase 1 plan.
 ///
-/// `Serialize` lets the layout-quality eval sweep (`examples/layout_eval.rs`)
-/// emit the per-term breakdown into its `metrics.json` artifact; the struct is
-/// pure data (every field a plain `f64`), so the derive carries no behavior.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+/// `Serialize`/`Deserialize` let the layout-quality eval sweep
+/// (`examples/layout_eval.rs`) emit the per-term breakdown into its
+/// `metrics.json` artifact and round-trip the committed baseline report back
+/// from JSON for the baseline diff; the struct is pure data (every field a
+/// plain `f64`), so the derives carry no behavior.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayoutMetrics {
     /// Sum of pairwise node-box overlap area, normalized by total node area.
     pub node_overlap: f64,
@@ -85,10 +87,12 @@ pub struct LayoutMetrics {
 /// (see below) so any accidental use of `weighted_cost` before calibration is
 /// obviously inert rather than silently wrong.
 ///
-/// `Serialize` lets the layout-quality eval sweep (`examples/layout_eval.rs`)
-/// record the weight set it used in its `metrics.json` artifact; the struct is
-/// pure data (every field a plain `f64`), so the derive carries no behavior.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+/// `Serialize`/`Deserialize` let the layout-quality eval sweep
+/// (`examples/layout_eval.rs`) record the weight set it used in its
+/// `metrics.json` artifact and read it back when round-tripping the committed
+/// baseline report; the struct is pure data (every field a plain `f64`), so the
+/// derives carry no behavior.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MetricWeights {
     pub node_overlap: f64,
     pub node_connector_overlap: f64,

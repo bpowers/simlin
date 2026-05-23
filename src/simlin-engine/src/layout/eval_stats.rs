@@ -214,7 +214,12 @@ pub const GEOMEAN_FLOOR_EPSILON: f64 = 1e-9;
 
 /// One per-seed layout sample: the seed that produced the layout, its computed
 /// metrics, and the scalar weighted cost the optimizer minimizes.
-#[derive(Clone, Debug)]
+///
+/// `Serialize`/`Deserialize` let the corpus sweep round-trip a full
+/// [`CorpusReport`] (including these per-seed samples) through JSON, so the
+/// committed baseline report can be read back and the per-model seed-sample
+/// cost sets re-run through [`mann_whitney_u`] by [`compare`].
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MetricSample {
     pub seed: u64,
     pub metrics: LayoutMetrics,
@@ -225,7 +230,10 @@ pub struct MetricSample {
 /// plus the center (`median_cost`), spread (`p25`, `p75`), the best-of-k
 /// production proxy, and the best/median/worst seeds (which drive Phase 3's
 /// PNG renders).
-#[derive(Clone, Debug)]
+///
+/// `Serialize`/`Deserialize` ride on [`MetricSample`]'s so a [`CorpusReport`]
+/// round-trips through JSON (see [`MetricSample`]).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ModelStats {
     pub model: String,
     /// One sample per seed.
@@ -242,7 +250,13 @@ pub struct ModelStats {
 
 /// Corpus-wide report: one `ModelStats` per model plus the geometric mean of
 /// the per-model medians (the single headline aggregate, benchstat-style).
-#[derive(Clone, Debug)]
+///
+/// `Serialize`/`Deserialize` let the corpus sweep write this report to the
+/// committed `examples/layout_eval_baseline.json` and read it back for the
+/// baseline-vs-candidate diff (`compare`). The full report -- including each
+/// model's per-seed `samples` -- round-trips so `compare` can re-run
+/// Mann-Whitney U over the seed-sample cost sets.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CorpusReport {
     pub per_model: Vec<ModelStats>,
     pub geomean_of_medians: f64,
@@ -364,7 +378,11 @@ impl CorpusReport {
 }
 
 /// Per-model verdict from comparing a baseline against a candidate report.
-#[derive(Clone, Debug)]
+///
+/// `Serialize` lets the corpus sweep embed the baseline-vs-candidate diff into
+/// its `metrics.json` artifact. The verdict is never read back from JSON (it is
+/// recomputed by `compare` on every run), so it carries no `Deserialize`.
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ModelComparison {
     pub model: String,
     pub baseline_median: f64,
@@ -382,7 +400,11 @@ pub struct ModelComparison {
 
 /// Result of comparing two corpus reports: one [`ModelComparison`] per matched
 /// model plus the corpus-wide aggregate delta and significance verdict.
-#[derive(Clone, Debug)]
+///
+/// `Serialize` lets the corpus sweep embed this diff into its `metrics.json`
+/// artifact. Like [`ModelComparison`] it carries no `Deserialize`: the diff is
+/// recomputed by `compare` on every run, never read back from JSON.
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct Comparison {
     /// One entry per model present in BOTH reports (unmatched models are
     /// skipped -- see [`compare`]), in baseline iteration order.

@@ -1,0 +1,393 @@
+{
+  "per_model": [
+    {
+      "model": "teacup",
+      "samples": [
+        {
+          "seed": 0,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 1,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 2,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 3,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 4,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 5,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 6,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 7,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 42,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 123,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 456,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        },
+        {
+          "seed": 789,
+          "metrics": {
+            "node_overlap": 0.05039334765728716,
+            "node_connector_overlap": 0.0,
+            "label_overlap": 0.0,
+            "crossings": 0.25,
+            "sprawl": 0.774985901426613,
+            "edge_length_cv": 0.3203457592744067,
+            "aspect_penalty": 0.0,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.5742262628325421
+        }
+      ],
+      "median_cost": 0.5742262628325421,
+      "spread": [
+        0.5742262628325421,
+        0.5742262628325421
+      ],
+      "best_of_k_cost": 0.5742262628325421,
+      "best_seed": 0,
+      "median_seed": 0,
+      "worst_seed": 0
+    },
+    {
+      "model": "sir",
+      "samples": [
+        {
+          "seed": 0,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 1,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 2,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 3,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 4,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 5,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 6,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 7,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 42,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 123,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 456,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        },
+        {
+          "seed": 789,
+          "metrics": {
+            "node_overlap": 0.05327008392222038,
+            "node_connector_overlap": 0.007868550165242162,
+            "label_overlap": 0.004184421171500422,
+            "crossings": 0.3333333333333333,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
+            "chain_straightness": 0.0,
+            "loop_compactness": 0.0
+          },
+          "weighted_cost": 0.6996784533732872
+        }
+      ],
+      "median_cost": 0.6996784533732872,
+      "spread": [
+        0.6996784533732872,
+        0.6996784533732872
+      ],
+      "best_of_k_cost": 0.6996784533732872,
+      "best_seed": 0,
+      "median_seed": 0,
+      "worst_seed": 0
+    }
+  ],
+  "geomean_of_medians": 0.6338562482653269
+}
