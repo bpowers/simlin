@@ -39,6 +39,75 @@ fn cv_link(uid: i32, from_uid: i32, to_uid: i32, shape: LinkShape) -> ViewElemen
     })
 }
 
+fn cv_stock(uid: i32, x: f64, y: f64) -> ViewElement {
+    ViewElement::Stock(view_element::Stock {
+        name: format!("s{uid}"),
+        uid,
+        x,
+        y,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    })
+}
+
+fn cv_cloud(uid: i32, flow_uid: i32, x: f64, y: f64) -> ViewElement {
+    ViewElement::Cloud(view_element::Cloud {
+        uid,
+        flow_uid,
+        x,
+        y,
+        compat: None,
+    })
+}
+
+/// A horizontal flow whose valve sits at (`x`, `y`), with its source end
+/// attached to `from_uid` (a cloud or stock to the left) and its sink end
+/// attached to `to_uid` (a stock to the right). The valve lies on the pipe,
+/// mid-span between the two attached endpoints.
+fn cv_flow(uid: i32, x: f64, y: f64, from_uid: i32, to_uid: i32) -> ViewElement {
+    cv_flow_pts(
+        uid,
+        x,
+        y,
+        (x - 60.0, y, Some(from_uid)),
+        (x + 60.0, y, Some(to_uid)),
+    )
+}
+
+/// A two-point flow with the valve at (`x`, `y`) and explicitly positioned
+/// source/sink points, each carrying an optional `attached_to_uid`. Lets a
+/// test reproduce a real reference geometry where the valve does not sit at the
+/// midpoint of the two points.
+fn cv_flow_pts(
+    uid: i32,
+    x: f64,
+    y: f64,
+    from: (f64, f64, Option<i32>),
+    to: (f64, f64, Option<i32>),
+) -> ViewElement {
+    ViewElement::Flow(view_element::Flow {
+        name: format!("f{uid}"),
+        uid,
+        x,
+        y,
+        label_side: LabelSide::Top,
+        points: vec![
+            view_element::FlowPoint {
+                x: from.0,
+                y: from.1,
+                attached_to_uid: from.2,
+            },
+            view_element::FlowPoint {
+                x: to.0,
+                y: to.1,
+                attached_to_uid: to.2,
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    })
+}
+
 fn cv_view(elements: Vec<ViewElement>) -> datamodel::StockFlow {
     datamodel::StockFlow {
         name: None,
@@ -217,5 +286,134 @@ fn test_count_view_crossings_module_incident_link_participates() {
         count_view_crossings(&view),
         1,
         "a Module-incident link must participate in crossing detection"
+    );
+}
+
+/// A link that TERMINATES at a flow's valve must not be counted as crossing the
+/// flow pipe at that shared connection point. This is the exact
+/// dp_logistic_growth reference geometry: the horizontal `net birth rate` flow
+/// (cloud -> valve -> Population stock) plus the `fractional growth rate ->
+/// net birth rate` link, whose drawn arc curves up to the valve from below and
+/// grazes the pipe at the connection point. The link's endpoint (`elem_2`, the
+/// flow's own element uid) and the pipe share the flow's element at the valve,
+/// so that graze is not a real crossing.
+#[test]
+fn test_count_view_crossings_link_to_flow_valve_no_crossing() {
+    let flow_uid = 2;
+    let view = cv_view(vec![
+        cv_stock(1, 602.4000244140625, 259.8000183105469),
+        cv_flow_pts(
+            flow_uid,
+            518.2726610523725,
+            258.60003662109375,
+            // source end attached to the cloud, sink end to the stock
+            (456.79998779296875, 258.60003662109375, Some(3)),
+            (579.9000244140625, 258.60003662109375, Some(1)),
+        ),
+        cv_cloud(3, flow_uid, 456.79998779296875, 258.60003662109375),
+        cv_aux(4, 498.0, 344.20001220703125),
+        // fractional growth rate -> net birth rate (to_uid == flow.uid): the
+        // drawn arc bulges up to graze the pipe at the valve connection point.
+        cv_link(10, 4, flow_uid, LinkShape::Arc(118.82198603295677)),
+    ]);
+
+    assert_eq!(
+        count_view_crossings(&view),
+        0,
+        "a link terminating at a flow valve must not count as crossing the pipe"
+    );
+}
+
+/// The flow-segment naming contract that the suppression relies on: a flow
+/// point attached to a stock/cloud names its pipe vertex `elem_{attached_uid}`
+/// (so a link incident on that stock/cloud, which uses the same name, is
+/// suppressed at the shared connection point), the valve is injected as an
+/// `elem_{flow.uid}` vertex on the pipe (so a link incident on the valve is
+/// suppressed there), and a free point keeps the per-flow `flow_{uid}#{i}`
+/// name (so a genuine mid-span crossing is still counted). This is the
+/// node-name contract; the end-to-end suppression is exercised by the valve and
+/// mid-span tests, since for an attached stock/cloud the link endpoint clips to
+/// the element boundary and only grazes the pipe through the shared vertex.
+#[test]
+fn test_build_view_segments_flow_vertex_naming() {
+    let flow_uid = 2;
+    let stock_uid = 1;
+    let cloud_uid = 3;
+    let view = cv_view(vec![
+        cv_stock(stock_uid, 602.4000244140625, 259.8000183105469),
+        cv_flow_pts(
+            flow_uid,
+            518.2726610523725,
+            258.60003662109375,
+            (456.79998779296875, 258.60003662109375, Some(cloud_uid)),
+            (579.9000244140625, 258.60003662109375, Some(stock_uid)),
+        ),
+        cv_cloud(cloud_uid, flow_uid, 456.79998779296875, 258.60003662109375),
+    ]);
+
+    let segs = build_view_segments(&view);
+    // The pipe splits at the valve into two sub-segments:
+    //   elem_3 (cloud) -> elem_2 (valve)  and  elem_2 (valve) -> elem_1 (stock)
+    let names: Vec<(String, String)> = segs
+        .iter()
+        .map(|s| (s.from_node.clone(), s.to_node.clone()))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("elem_3".to_string(), "elem_2".to_string()),
+            ("elem_2".to_string(), "elem_1".to_string()),
+        ],
+        "flow pipe must name attached endpoints elem_<attached> and split at the valve as elem_<flow>"
+    );
+
+    // A free (unattached) interior point keeps the per-flow name.
+    let free_view = cv_view(vec![cv_flow_pts(
+        flow_uid,
+        518.2726610523725,
+        258.60003662109375,
+        (456.79998779296875, 258.60003662109375, None),
+        (579.9000244140625, 258.60003662109375, None),
+    )]);
+    let free_segs = build_view_segments(&free_view);
+    let free_names: Vec<(String, String)> = free_segs
+        .iter()
+        .map(|s| (s.from_node.clone(), s.to_node.clone()))
+        .collect();
+    assert_eq!(
+        free_names,
+        vec![
+            (format!("flow_{flow_uid}#0"), format!("elem_{flow_uid}")),
+            (format!("elem_{flow_uid}"), format!("flow_{flow_uid}#1")),
+        ],
+        "an unattached flow point keeps its per-flow name; only the valve is elem_<flow>"
+    );
+}
+
+/// A GENUINE mid-span crossing of a flow pipe -- a link that crosses the pipe
+/// away from any element the flow shares -- must STILL be counted. This guards
+/// against the valve/attachment suppression over-suppressing real crossings.
+#[test]
+fn test_count_view_crossings_link_crosses_flow_pipe_midspan_counted() {
+    // Flow valve at (100, 100), pipe from x=40 to x=160 at y=100. A straight
+    // link runs vertically through x=70 (between the cloud end and the valve,
+    // so it does NOT touch the valve, the cloud, or the stock), crossing the
+    // pipe once.
+    let flow_uid = 20;
+    let view = cv_view(vec![
+        cv_cloud(1, flow_uid, 40.0, 100.0),
+        cv_stock(2, 200.0, 100.0),
+        cv_aux(3, 70.0, 50.0),
+        cv_aux(4, 70.0, 150.0),
+        cv_flow(flow_uid, 100.0, 100.0, 1, 2),
+        // Link from a3 (above the pipe) to a4 (below the pipe), crossing the
+        // pipe at x=70 -- nowhere near the valve or either attached element.
+        cv_link(30, 3, 4, LinkShape::Straight),
+    ]);
+
+    assert_eq!(
+        count_view_crossings(&view),
+        1,
+        "a genuine mid-span crossing of the flow pipe must still be counted"
     );
 }

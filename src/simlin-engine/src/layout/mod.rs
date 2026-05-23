@@ -4358,6 +4358,38 @@ fn detect_chains(
     chains
 }
 
+/// Whether `p` lies on the segment from flow point `a` to flow point `b`,
+/// within a small pixel tolerance. Used to find the pipe segment a flow's valve
+/// sits on so the valve can be injected as a shared `elem_{flow.uid}` vertex.
+///
+/// The perpendicular distance from `p` to the line must be tiny, and `p` must
+/// project within the segment (parameter in `[0, 1]`). A degenerate segment
+/// (`a == b`) only matches when `p` coincides with it.
+fn point_on_segment(
+    p: Position,
+    a: &datamodel::view_element::FlowPoint,
+    b: &datamodel::view_element::FlowPoint,
+) -> bool {
+    const TOL: f64 = 0.5; // pixels
+    let a = Position::new(a.x, a.y);
+    let b = Position::new(b.x, b.y);
+    let ab = b - a;
+    let ap = p - a;
+    let len_sq = ab.dot(ab);
+    if len_sq < f64::EPSILON {
+        // Degenerate segment: only "on" it if p coincides with the point.
+        return ap.dot(ap) < TOL * TOL;
+    }
+    // Project p onto the line; require it to fall within the segment.
+    let t = ap.dot(ab) / len_sq;
+    if !(0.0..=1.0).contains(&t) {
+        return false;
+    }
+    // Perpendicular distance: |ap x ab| / |ab|.
+    let perp = ap.cross_2d(ab).abs() / len_sq.sqrt();
+    perp < TOL
+}
+
 /// Build the set of [`LineSegment`]s that crossing detection runs over for a
 /// completed StockFlow view. This is the single source of geometry shared by
 /// [`count_view_crossings`] and the layout quality metric, so a layout's
@@ -4377,8 +4409,19 @@ fn detect_chains(
 /// `elem_{to_uid}` (so two connectors sharing an element endpoint never count),
 /// while internal arc-sample vertices are `link_{link.uid}#{i}` (so the
 /// consecutive segments of one arc share an internal node name and never count
-/// as self-crossings). Flow pipe segments keep the historic `flow_{uid}#{i}`
-/// naming.
+/// as self-crossings).
+///
+/// A flow's pipe vertices share those same `elem_{uid}` names with whatever
+/// element they connect to, so a link incident on the flow grazes but does not
+/// "cross" the pipe at the shared connection point. A point attached to a
+/// stock/cloud is named `elem_{attached_to_uid}` (matching a link whose
+/// endpoint is that stock/cloud), and the flow's valve -- which sits on the
+/// pipe, not necessarily at a stored point -- is injected as an extra vertex
+/// named `elem_{flow.uid}` so a link incident on the valve (its `to_uid`/
+/// `from_uid` is the flow's own element uid) is suppressed there too. A
+/// genuinely free interior point (no attachment, not the valve) keeps the
+/// historic per-flow `flow_{uid}#{i}` name, so a link that crosses the pipe
+/// mid-span -- sharing no element with the flow -- is still counted.
 fn build_view_segments(view: &datamodel::StockFlow) -> Vec<LineSegment> {
     if view.elements.is_empty() {
         return Vec::new();
@@ -4445,13 +4488,69 @@ fn build_view_segments(view: &datamodel::StockFlow) -> Vec<LineSegment> {
                 }
             }
             ViewElement::Flow(flow) => {
-                for i in 0..flow.points.len().saturating_sub(1) {
-                    segments.push(LineSegment {
-                        start: Position::new(flow.points[i].x, flow.points[i].y),
-                        end: Position::new(flow.points[i + 1].x, flow.points[i + 1].y),
-                        from_node: format!("flow_{}#{}", flow.uid, i),
-                        to_node: format!("flow_{}#{}", flow.uid, i + 1),
-                    });
+                if flow.points.len() < 2 {
+                    continue;
+                }
+
+                // Build the pipe as a sequence of named vertices. A point
+                // attached to a stock/cloud shares that element's `elem_{uid}`
+                // name; a free interior point keeps a per-flow `flow_{uid}#{i}`
+                // name. The valve (the flow's own element, at `flow.x/flow.y`)
+                // is injected as an `elem_{flow.uid}` vertex on the pipe segment
+                // whose span contains it, so a link incident on the valve is
+                // suppressed at that shared connection point. Consecutive
+                // segments of one flow always share the joining vertex name, so
+                // a flow never self-crosses.
+                let point_name = |i: usize| -> String {
+                    match flow.points[i].attached_to_uid {
+                        Some(uid) => format!("elem_{uid}"),
+                        None => format!("flow_{}#{}", flow.uid, i),
+                    }
+                };
+
+                let valve = Position::new(flow.x, flow.y);
+                let valve_name = format!("elem_{}", flow.uid);
+                // The pipe segment the valve sits strictly interior to. `None`
+                // when the valve coincides with a stored point or (in a
+                // hand-edited view) drifted off the polyline; the pipe is then
+                // not split and the existing point names hold.
+                let valve_seg = (0..flow.points.len() - 1).find(|&i| {
+                    let a = Position::new(flow.points[i].x, flow.points[i].y);
+                    let b = Position::new(flow.points[i + 1].x, flow.points[i + 1].y);
+                    valve != a
+                        && valve != b
+                        && point_on_segment(valve, &flow.points[i], &flow.points[i + 1])
+                });
+
+                for i in 0..flow.points.len() - 1 {
+                    let a = Position::new(flow.points[i].x, flow.points[i].y);
+                    let b = Position::new(flow.points[i + 1].x, flow.points[i + 1].y);
+                    let a_name = point_name(i);
+                    let b_name = point_name(i + 1);
+
+                    if Some(i) == valve_seg {
+                        // Split this pipe segment at the valve so both halves
+                        // share the `elem_{flow.uid}` vertex.
+                        segments.push(LineSegment {
+                            start: a,
+                            end: valve,
+                            from_node: a_name,
+                            to_node: valve_name.clone(),
+                        });
+                        segments.push(LineSegment {
+                            start: valve,
+                            end: b,
+                            from_node: valve_name.clone(),
+                            to_node: b_name,
+                        });
+                    } else {
+                        segments.push(LineSegment {
+                            start: a,
+                            end: b,
+                            from_node: a_name,
+                            to_node: b_name,
+                        });
+                    }
                 }
             }
             _ => {}
