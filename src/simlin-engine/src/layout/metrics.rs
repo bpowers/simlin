@@ -58,10 +58,14 @@ pub const TARGET_AR_MAX: f64 = 16.0 / 9.0;
 /// plain `f64`), so the derives carry no behavior.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayoutMetrics {
-    /// Sum of pairwise node-box overlap area, normalized by total node area.
+    /// Sum of pairwise node *shape*-box overlap area (label-free), normalized
+    /// by total shape-box area. Measures shapes overlapping shapes; label
+    /// collisions are charged by `label_overlap` instead.
     pub node_overlap: f64,
     /// Fraction of total connector length that passes through non-incident
-    /// node boxes.
+    /// node *shape* boxes (label-free). A connector under a node shape reads as
+    /// a false causal connection; a connector under only a label is not
+    /// charged here.
     pub node_connector_overlap: f64,
     /// Sum of label-vs-label and label-vs-node overlap area, normalized by
     /// total label area.
@@ -320,22 +324,41 @@ pub fn compute_layout_metrics(
     _config: &LayoutConfig,
 ) -> LayoutMetrics {
     // --- node boxes (with their owning element for incidence checks) ---
+    //
+    // Two box sets, used by different terms:
+    //   * `node_boxes` is the LABEL-MERGED box (`node_box`): each element's own
+    //     label unioned into its shape. The view's visual extent and its
+    //     characteristic node size both include labels, so `sprawl` and
+    //     `aspect_penalty` use this set.
+    //   * `node_shape_boxes` is the bare SHAPE box (`node_shape_box`):
+    //     label-free. `node_overlap` and `node_connector_overlap` use this set
+    //     so they measure exactly what the user cares about -- node SHAPES
+    //     overlapping other node shapes, and a connector passing under a node
+    //     SHAPE (a false-causal-connection at a glance). A connector passing
+    //     only under a node's LABEL is mild noise (labels are semi-transparent
+    //     and no connector terminates on one) and must NOT be charged here;
+    //     label collisions are the province of `label_overlap`.
     let node_boxes: Vec<(i32, Rect)> = view
         .elements
         .iter()
         .filter_map(|e| node_box(e).map(|r| (e.get_uid(), r)))
         .collect();
+    let node_shape_boxes: Vec<(i32, Rect)> = view
+        .elements
+        .iter()
+        .filter_map(|e| node_shape_box(e).map(|r| (e.get_uid(), r)))
+        .collect();
 
-    // --- node_overlap ---
-    let total_node_area: f64 = node_boxes.iter().map(|(_, r)| rect_area(r)).sum();
-    let node_overlap = if total_node_area > 0.0 {
+    // --- node_overlap (bare shape boxes, normalized by total shape-box area) ---
+    let total_shape_area: f64 = node_shape_boxes.iter().map(|(_, r)| rect_area(r)).sum();
+    let node_overlap = if total_shape_area > 0.0 {
         let mut overlap = 0.0;
-        for i in 0..node_boxes.len() {
-            for j in (i + 1)..node_boxes.len() {
-                overlap += rect_overlap_area(&node_boxes[i].1, &node_boxes[j].1);
+        for i in 0..node_shape_boxes.len() {
+            for j in (i + 1)..node_shape_boxes.len() {
+                overlap += rect_overlap_area(&node_shape_boxes[i].1, &node_shape_boxes[j].1);
             }
         }
-        overlap / total_node_area
+        overlap / total_shape_area
     } else {
         0.0
     };
@@ -344,11 +367,11 @@ pub fn compute_layout_metrics(
     let connectors = collect_connector_geometry(view);
     let total_connector_length: f64 = connectors.iter().map(|c| c.length).sum();
 
-    // --- node_connector_overlap ---
+    // --- node_connector_overlap (length inside non-incident shape boxes) ---
     let node_connector_overlap = if total_connector_length > 0.0 {
         let mut inside = 0.0;
         for c in &connectors {
-            for (uid, rect) in &node_boxes {
+            for (uid, rect) in &node_shape_boxes {
                 if c.incident_uids.contains(uid) {
                     continue; // skip the connector's own endpoints
                 }
@@ -383,11 +406,8 @@ pub fn compute_layout_metrics(
         .iter()
         .filter_map(|e| element_label_props(e).map(|props| (e.get_uid(), label_bounds(&props))))
         .collect();
-    let node_shape_boxes: Vec<(i32, Rect)> = view
-        .elements
-        .iter()
-        .filter_map(|e| node_shape_box(e).map(|r| (e.get_uid(), r)))
-        .collect();
+    // `node_shape_boxes` is computed once above (shared with node_overlap and
+    // node_connector_overlap).
     let total_label_area: f64 = label_boxes.iter().map(|(_, r)| rect_area(r)).sum();
     let label_overlap = if total_label_area > 0.0 {
         let mut overlap = 0.0;
@@ -623,29 +643,20 @@ mod tests {
 
     #[test]
     fn test_node_overlap_known_overlap_fraction() {
-        // Two stocks (45x35) whose centers are 20px apart horizontally and 10px
-        // apart vertically. With LabelSide::Bottom the label sits below the box
-        // and does not change the horizontal/vertical extent that matters for
-        // the box-box overlap of the *element* boxes; however `stock_bounds`
-        // merges the label, so we place the stocks far enough apart vertically
-        // that the labels do not collide, and compute the overlap from the full
-        // merged boxes directly.
+        // Two stocks (45x35) whose centers are 20px apart horizontally and at
+        // the same y. node_overlap is computed on the bare SHAPE boxes (not the
+        // label-merged boxes), so the expected value comes from
+        // `stock_shape_bounds` and is normalized by the total SHAPE-box area.
         let s1 = stock(1, "a", 100.0, 100.0);
         let s2 = stock(2, "b", 120.0, 100.0);
         let view = make_view(vec![s1.clone(), s2.clone()]);
 
         let m = compute_layout_metrics(&view, &cfg());
 
-        // Expected: compute directly from the two merged boxes the renderer
-        // would produce.
-        let b1 = stock_bounds(match &s1 {
-            ViewElement::Stock(s) => s,
-            _ => unreachable!(),
-        });
-        let b2 = stock_bounds(match &s2 {
-            ViewElement::Stock(s) => s,
-            _ => unreachable!(),
-        });
+        // Expected: compute directly from the two bare shape boxes the renderer
+        // draws (the rects, label-free).
+        let b1 = node_shape_box(&s1).unwrap();
+        let b2 = node_shape_box(&s2).unwrap();
         let expected_overlap = rect_overlap_area(&b1, &b2);
         let expected_total = rect_area(&b1) + rect_area(&b2);
         assert!(expected_overlap > 0.0, "fixture must actually overlap");
@@ -660,20 +671,16 @@ mod tests {
 
     #[test]
     fn test_node_overlap_simple_hand_computed() {
-        // Two stocks far apart vertically so labels never collide, and exactly
-        // 5px horizontal center separation so the element boxes overlap by a
-        // hand-computable amount in x while fully overlapping in y is avoided.
-        // To make the arithmetic exact and independent of label geometry, use
-        // LabelSide::Center is risky; instead verify against the helper-derived
-        // boxes (the renderer's own geometry) which is the contract.
+        // Two stocks with exactly one stock-width of horizontal center
+        // separation. node_overlap is a sum over the bare SHAPE boxes, so only
+        // the rects matter (labels are irrelevant to this term now).
         let s1 = stock(1, "a", 0.0, 0.0);
         let s2 = stock(2, "b", STOCK_WIDTH, 0.0); // centers exactly one width apart
         let view = make_view(vec![s1, s2]);
         let m = compute_layout_metrics(&view, &cfg());
-        // Centers one full width apart -> the 45-wide boxes just touch in x
-        // (right edge of #1 at +22.5, left edge of #2 at +22.5): zero element
-        // overlap. Labels (Bottom) are centered under each and 45px apart, each
-        // ~34px wide -> they do not overlap either. So node_overlap == 0.
+        // Centers one full width apart -> the 45-wide shape boxes just touch in
+        // x (right edge of #1 at +22.5, left edge of #2 at +22.5): zero shape
+        // overlap. So node_overlap == 0.
         assert_eq!(m.node_overlap, 0.0);
     }
 
@@ -688,6 +695,56 @@ mod tests {
         ]);
         let m = compute_layout_metrics(&view, &cfg());
         assert_eq!(m.node_overlap, 0.0);
+    }
+
+    // node_overlap is computed on the bare SHAPE boxes, NOT the label-merged
+    // boxes. The user cares about node shapes overlapping other node shapes;
+    // a label landing on another node's shape (or another label) is the
+    // province of `label_overlap`. This test distinguishes the two regimes and
+    // would FAIL against the prior label-merged-box implementation.
+
+    #[test]
+    fn test_node_overlap_labels_overlap_shapes_disjoint_is_zero() {
+        // Two `LabelSide::Bottom` auxes named "samename" (8 chars), 40px apart
+        // horizontally at the same y -- the same fixture as the label_overlap
+        // double-count regression test:
+        //   aux1 @ (0,0):  shape [-9,9]x[-9,9],   label [-29,29]x[13,27]
+        //   aux2 @ (40,0): shape [31,49]x[-9,9],  label [11,69]x[13,27]
+        // The SHAPE boxes are disjoint (9 < 31), so node_overlap == 0. The
+        // LABEL boxes overlap, but that collision belongs to label_overlap, not
+        // node_overlap. Under the old label-merged boxes node_overlap would be
+        // > 0 (the merged boxes [-29,29]x[-9,27] and [11,69]x[-9,27] overlap),
+        // so this assertion pins the new shape-only behavior.
+        let view = make_view(vec![
+            aux(1, "samename", 0.0, 0.0),
+            aux(2, "samename", 40.0, 0.0),
+        ]);
+        let m = compute_layout_metrics(&view, &cfg());
+        assert_eq!(
+            m.node_overlap, 0.0,
+            "node_overlap must ignore label-only overlap (shapes are disjoint)"
+        );
+        // Sanity: the label collision IS captured by label_overlap, confirming
+        // the overlap was not simply lost.
+        assert!(
+            m.label_overlap > 0.0,
+            "the label-vs-label overlap must still be charged by label_overlap"
+        );
+    }
+
+    #[test]
+    fn test_node_overlap_shapes_overlap_is_positive() {
+        // Two stocks (45x35) whose centers are 20px apart horizontally and at
+        // the same y -- their bare SHAPE boxes overlap, so node_overlap > 0.
+        let view = make_view(vec![
+            stock(1, "a", 100.0, 100.0),
+            stock(2, "b", 120.0, 100.0),
+        ]);
+        let m = compute_layout_metrics(&view, &cfg());
+        assert!(
+            m.node_overlap > 0.0,
+            "overlapping node shapes must produce positive node_overlap"
+        );
     }
 
     // --- AC1.3: node_connector_overlap ---
@@ -708,11 +765,15 @@ mod tests {
             "connector passing through a non-incident stock must contribute"
         );
 
-        // Expected = clipped length inside the stock box / total polyline len.
+        // Expected = clipped length inside the stock SHAPE box / total polyline
+        // len. node_connector_overlap charges against the bare shape box, not
+        // the label-merged box. (The connector is horizontal at y=0, so the
+        // clipped length happens to be identical to the label-merged box here;
+        // the SHAPE box is the contract regardless.)
         let connectors = collect_connector_geometry(&view);
         assert_eq!(connectors.len(), 1);
         let c = &connectors[0];
-        let stock_box = node_box(&stock(3, "s", 200.0, 0.0)).unwrap();
+        let stock_box = node_shape_box(&stock(3, "s", 200.0, 0.0)).unwrap();
         let mut inside = 0.0;
         for seg in c.polyline.windows(2) {
             inside += segment_length_in_rect(&seg[0], &seg[1], &stock_box);
@@ -736,6 +797,73 @@ mod tests {
         let view = make_view(vec![a, b, off, link]);
         let m = compute_layout_metrics(&view, &cfg());
         assert_eq!(m.node_connector_overlap, 0.0);
+    }
+
+    // node_connector_overlap charges a connector for the length it spends
+    // inside a non-incident node's bare SHAPE box, NOT its label-merged box.
+    // The user reads a connector passing under a node SHAPE as a false causal
+    // connection (high priority); a connector passing only under a node's LABEL
+    // is mild noise (labels are semi-transparent, no connector starts/ends on a
+    // label) and must NOT be charged. These two tests pin that distinction; the
+    // first would FAIL against the prior label-merged-box implementation.
+
+    #[test]
+    fn test_node_connector_overlap_under_label_only_is_zero() {
+        // Connector from aux #1 (0,0) to aux #2 (400,0): a horizontal line at
+        // y=0 (clipped to the 9px aux radii, so drawn x in [9, 391]). A
+        // non-incident `LabelSide::Bottom` stock #3 named "s" (1 char) is placed
+        // ABOVE the line so its SHAPE box clears y=0 but its label (which hangs
+        // BELOW the shape) reaches down across y=0:
+        //   stock #3 @ (200,-25):
+        //     shape box  x [177.5, 222.5], y [-42.5, -7.5]   (does NOT cross 0)
+        //     label box  x [192, 208],     y [-3.5, 10.5]    (DOES cross 0)
+        // The connector at y=0 passes through the label band but never enters
+        // the shape box, so node_connector_overlap == 0. Under the old
+        // label-merged box (which unions the label, y [-42.5, 10.5]) the line
+        // WOULD be charged, so this assertion is the load-bearing distinction.
+        let a = aux(1, "a", 0.0, 0.0);
+        let b = aux(2, "b", 400.0, 0.0);
+        let label_only = stock(3, "s", 200.0, -25.0);
+        let link = straight_link(10, 1, 2);
+        let view = make_view(vec![a, b, label_only, link]);
+
+        // Confirm the fixture geometry is what we claim before asserting on the
+        // metric: shape box clears the line, merged box does not.
+        let shape = node_shape_box(&stock(3, "s", 200.0, -25.0)).unwrap();
+        let merged = node_box(&stock(3, "s", 200.0, -25.0)).unwrap();
+        assert!(
+            shape.bottom < 0.0,
+            "shape box must clear the connector line (bottom {} < 0)",
+            shape.bottom
+        );
+        assert!(
+            merged.bottom > 0.0,
+            "merged box must cross the connector line via the label (bottom {} > 0)",
+            merged.bottom
+        );
+
+        let m = compute_layout_metrics(&view, &cfg());
+        assert_eq!(
+            m.node_connector_overlap, 0.0,
+            "a connector passing only under a node's LABEL must not be charged"
+        );
+    }
+
+    #[test]
+    fn test_node_connector_overlap_under_shape_is_positive() {
+        // Same connector, but the non-incident stock sits ON the line so the
+        // connector crosses its SHAPE box -- the false-causal-connection case
+        // the user cares about. node_connector_overlap > 0.
+        let a = aux(1, "a", 0.0, 0.0);
+        let b = aux(2, "b", 400.0, 0.0);
+        let on_line = stock(3, "s", 200.0, 0.0);
+        let link = straight_link(10, 1, 2);
+        let view = make_view(vec![a, b, on_line, link]);
+        let m = compute_layout_metrics(&view, &cfg());
+        assert!(
+            m.node_connector_overlap > 0.0,
+            "a connector passing under a node SHAPE must be charged"
+        );
     }
 
     // --- AC1.4: label_overlap ---
