@@ -132,6 +132,28 @@ const CORPUS: &[ModelSpec] = &[
         rel_path: "../../test/logistic_growth_ltm/logistic_growth.stmx",
         format: Xmile,
     },
+    // default_projects: the app's curated, hand-laid-out built-in projects.
+    // These are the primary "good layout" taste anchors for Phase 4 calibration.
+    ModelSpec {
+        key: "fishbanks",
+        rel_path: "../../default_projects/fishbanks/model.xmile",
+        format: Xmile,
+    },
+    ModelSpec {
+        key: "dp_logistic_growth",
+        rel_path: "../../default_projects/logistic-growth/model.xmile",
+        format: Xmile,
+    },
+    ModelSpec {
+        key: "population",
+        rel_path: "../../default_projects/population/model.xmile",
+        format: Xmile,
+    },
+    ModelSpec {
+        key: "reliability",
+        rel_path: "../../default_projects/reliability/model.xmile",
+        format: Xmile,
+    },
     // modules
     ModelSpec {
         key: "hares_and_foxes",
