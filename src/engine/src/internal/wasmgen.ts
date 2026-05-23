@@ -65,6 +65,8 @@ export interface WasmBlobExports {
   n_slots: WebAssembly.Global;
   n_chunks: WebAssembly.Global;
   results_offset: WebAssembly.Global;
+  /** Live count of saved rows: 0 before any run / after `reset`, `n_chunks` after a full run. */
+  saved_steps: WebAssembly.Global;
 }
 
 /**

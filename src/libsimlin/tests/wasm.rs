@@ -472,7 +472,8 @@ fn run_and_stride(wasm: &[u8], layout: &ParsedLayout, off: usize) -> Vec<f64> {
 /// kind) plus the two resumable functions added in Subcomponent A. The original
 /// set is `run`/`set_value`/`reset`/`clear_values` (funcs), `memory`, and the
 /// geometry globals `n_slots`/`n_chunks`/`results_offset`; the additions are
-/// `run_to`/`run_initials`. This pins the export-set growth as purely additive.
+/// `run_to`/`run_initials` (funcs) and `saved_steps` (the live saved-row counter
+/// global). This pins the export-set growth as purely additive.
 fn assert_blob_exports(wasm: &[u8]) {
     let info = validate(wasm).expect("validate");
     let mut store = Store::new(());
@@ -504,7 +505,7 @@ fn assert_blob_exports(wasm: &[u8]) {
             .is_some(),
         "export `memory` must be a memory"
     );
-    for name in ["n_slots", "n_chunks", "results_offset"] {
+    for name in ["n_slots", "n_chunks", "results_offset", "saved_steps"] {
         let exp = store
             .instance_export(inst, name)
             .unwrap_or_else(|_| panic!("blob must export `{name}`"));

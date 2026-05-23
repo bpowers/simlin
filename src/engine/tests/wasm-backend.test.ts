@@ -517,6 +517,49 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
     });
   });
 
+  // getStepCount reports COMPLETED steps, not the slab capacity (nChunks). A
+  // fresh or just-reset wasm sim has saved no rows yet, so it must report 0 --
+  // matching the documented "number of simulation steps completed" contract and
+  // the VM (whose count only becomes nonzero once a run has produced Results).
+  // After a full run the count equals nChunks and the VM's count (parity).
+  describe('getStepCount reflects completed steps (not slab capacity)', () => {
+    it('is 0 on a fresh wasm sim, equals the VM after a full run, 0 again after reset', () => {
+      const { vm, wasm, dispose } = openPair();
+
+      // Fresh: no run has happened, so no rows are saved.
+      expect(backend.simGetStepCount(wasm)).toBe(0);
+
+      // After a full run: equals nChunks (the slab capacity) and equals the VM.
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+      const fullCount = backend.simGetStepCount(vm);
+      expect(fullCount).toBeGreaterThan(0);
+      expect(backend.simGetStepCount(wasm)).toBe(fullCount);
+
+      // After reset (no re-run): back to 0.
+      backend.simReset(wasm);
+      expect(backend.simGetStepCount(wasm)).toBe(0);
+
+      // After re-running: the completed count returns to the full count.
+      backend.simRunToEnd(wasm);
+      expect(backend.simGetStepCount(wasm)).toBe(fullCount);
+      dispose();
+    });
+
+    it('is strictly between 0 and the full count after a partial runTo(t)', () => {
+      const { vm, wasm, dispose } = openPair();
+      backend.simRunToEnd(vm);
+      const fullCount = backend.simGetStepCount(vm);
+
+      // teacup: start 0, stop 30; run to a strictly-interior time.
+      backend.simRunTo(wasm, 15);
+      const partial = backend.simGetStepCount(wasm);
+      expect(partial).toBeGreaterThan(0);
+      expect(partial).toBeLessThan(fullCount);
+      dispose();
+    });
+  });
+
   describe('AC5.1/AC5.2/AC5.3: setValue (constants only) + mid-run', () => {
     it('setValue(const) then run matches the VM under the same override', () => {
       const { vm, wasm, dispose } = openPair();

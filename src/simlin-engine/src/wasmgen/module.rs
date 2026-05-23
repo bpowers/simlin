@@ -1993,6 +1993,11 @@ fn assemble_simulation(parts: AssembleParts) -> Vec<u8> {
     exports.export("n_slots", ExportKind::Global, G_N_SLOTS);
     exports.export("n_chunks", ExportKind::Global, G_N_CHUNKS);
     exports.export("results_offset", ExportKind::Global, G_RESULTS_OFFSET);
+    // The live saved-row counter (a mutable global): it is 0 before any run and
+    // after `reset`, and equals `n_chunks` after a full run. A host reads it as
+    // the number of completed steps (the VM's `results.step_count`), which the
+    // static `n_chunks` capacity cannot express mid-run / pre-run. Additive.
+    exports.export("saved_steps", ExportKind::Global, G_SAVED);
     wasm.section(&exports);
 
     // Code section order must match the function section: helper bodies, then the

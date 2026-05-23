@@ -565,8 +565,12 @@ export class DirectBackend implements EngineBackend {
   simGetStepCount(handle: SimHandle): number {
     const entry = this.getEntry(handle as number, 'sim');
     if (entry.engine === 'wasm') {
-      // nChunks is the saved-row count == the VM's results.step_count.
-      return entry.wasmLayout!.nChunks;
+      // Return COMPLETED steps, not the slab capacity. The blob's live G_SAVED
+      // counter (the `saved_steps` global) equals nChunks after a full run but
+      // is 0 before any run and after reset -- so reading nChunks here would
+      // falsely report a complete run on a fresh/just-reset sim. The exported
+      // i32 global's `.value` is typed `any`, so coerce through Number().
+      return Number(entry.wasmExports!.saved_steps.value);
     }
     return simlin_sim_get_stepcount(entry.ptr);
   }
