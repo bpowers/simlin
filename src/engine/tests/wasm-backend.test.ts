@@ -586,6 +586,48 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
     });
   });
 
+  // getSeries must truncate to the COMPLETED-step count, never the slab capacity
+  // (nChunks). The wasm results slab keeps its full capacity across a partial run
+  // and across reset (reset clears the run cursor but does NOT zero the slab), so
+  // reading nChunks rows unconditionally would surface uncommitted/stale tail
+  // rows. The VM truncates by step count -- it returns only saved rows mid-run
+  // and libsimlin further bounds the read by the passed count -- so the wasm twin
+  // must do the same to keep getSeries().length == getStepCount() at parity.
+  describe('getSeries truncates to completed steps (not slab capacity)', () => {
+    it('returns the VM full-run prefix after a partial runTo(t), with no stale tail', () => {
+      const { vm, wasm, dispose } = openPair();
+      backend.simRunToEnd(vm);
+      const vmFull = backend.simGetSeries(vm, 'teacup_temperature');
+
+      // teacup: start 0, stop 30; stop at a strictly-interior time so saved_steps
+      // is strictly less than nChunks -- the window where the bug surfaces.
+      backend.simRunTo(wasm, 15);
+      const partial = backend.simGetStepCount(wasm);
+      expect(partial).toBeGreaterThan(0);
+      expect(partial).toBeLessThan(vmFull.length);
+
+      const wasmPartial = backend.simGetSeries(wasm, 'teacup_temperature');
+      // Length tracks completed steps, not the slab capacity ...
+      expect(wasmPartial.length).toBe(partial);
+      // ... and the committed rows are exactly the VM full-run's prefix.
+      expectSeriesClose(wasmPartial, vmFull.slice(0, partial));
+      dispose();
+    });
+
+    it('returns an empty series after reset (the prior run is not surfaced as a stale tail)', () => {
+      const { wasm, dispose } = openPair();
+      backend.simRunToEnd(wasm);
+      expect(backend.simGetSeries(wasm, 'teacup_temperature').length).toBeGreaterThan(0);
+
+      backend.simReset(wasm);
+      // saved_steps is 0 after reset even though the slab still holds the prior
+      // run's rows; getSeries must agree with getStepCount and report 0 rows.
+      expect(backend.simGetStepCount(wasm)).toBe(0);
+      expect(backend.simGetSeries(wasm, 'teacup_temperature').length).toBe(0);
+      dispose();
+    });
+  });
+
   // getStepCount reports COMPLETED steps, not the slab capacity (nChunks). A
   // fresh or just-reset wasm sim has saved no rows yet, so it must report 0 --
   // matching the documented "number of simulation steps completed" contract and

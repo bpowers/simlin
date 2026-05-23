@@ -625,13 +625,18 @@ export class DirectBackend implements EngineBackend {
 
   simGetSeries(handle: SimHandle, name: string): Float64Array {
     const entry = this.getEntry(handle as number, 'sim');
+    // Both engines truncate the series to the completed-step count so a partially
+    // run -- or just-reset -- sim never exposes uncommitted/stale tail rows. On
+    // wasm the results slab keeps its full nChunks capacity even when saved_steps
+    // is smaller (reset clears the run cursor but not the slab), so slicing the
+    // strided read to the saved count is what keeps it at VM parity (the VM
+    // returns only saved rows mid-run and bounds the read by the passed count).
+    const stepCount = this.simGetStepCount(handle);
     if (entry.engine === 'wasm') {
-      // One Float64Array(nChunks) read strided from the blob's results region.
       // Read memory.buffer fresh per call (uniform with the singleton helpers).
       const slot = this.wasmSlot(entry.wasmLayout!, name);
-      return readStridedSeries(entry.wasmExports!.memory.buffer, entry.wasmLayout!, slot);
+      return readStridedSeries(entry.wasmExports!.memory.buffer, entry.wasmLayout!, slot, stepCount);
     }
-    const stepCount = this.simGetStepCount(handle);
     return simlin_sim_get_series(entry.ptr, name, stepCount);
   }
 

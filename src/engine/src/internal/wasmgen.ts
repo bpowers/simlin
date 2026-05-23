@@ -179,18 +179,33 @@ export function parseWasmLayout(bytes: Uint8Array): WasmLayout {
  *
  * Functional core: takes an `ArrayBufferLike` (the blob's linear memory, or any
  * buffer in a test) rather than a live `WebAssembly.Instance`, so it is
- * unit-testable in isolation. Allocates exactly one `Float64Array(nChunks)` and
+ * unit-testable in isolation. Allocates exactly one `Float64Array(count)` and
  * fills it via strided `DataView.getFloat64` reads -- no intermediate arrays.
+ *
+ * `count` is the number of COMPLETED steps to read (the blob's live
+ * `saved_steps`). It defaults to the full slab capacity (`nChunks`), but a
+ * partially run -- or just-reset -- sim has saved fewer rows than the slab
+ * holds, and the slab is not zeroed in between, so reading `nChunks` rows
+ * unconditionally would surface uncommitted/stale tail rows. `count` is clamped
+ * to `[0, nChunks]` so this pure reader never strides past the results region
+ * it was handed the geometry for.
  *
  * @param memory The linear-memory buffer holding the step-major results region.
  * @param layout The decoded layout (provides resultsOffset, nSlots, nChunks).
  * @param slot The variable's slot offset within a step (from `varOffsets`).
- * @returns A new `Float64Array` of length `nChunks` -- the variable's series.
+ * @param count Completed steps to read; defaults to and is capped at `nChunks`.
+ * @returns A new `Float64Array` of length `min(count, nChunks)` -- the series.
  */
-export function readStridedSeries(memory: ArrayBufferLike, layout: WasmLayout, slot: number): Float64Array {
+export function readStridedSeries(
+  memory: ArrayBufferLike,
+  layout: WasmLayout,
+  slot: number,
+  count: number = layout.nChunks,
+): Float64Array {
+  const rows = Math.max(0, Math.min(count, layout.nChunks));
   const view = new DataView(memory);
-  const series = new Float64Array(layout.nChunks);
-  for (let c = 0; c < layout.nChunks; c++) {
+  const series = new Float64Array(rows);
+  for (let c = 0; c < rows; c++) {
     series[c] = view.getFloat64(layout.resultsOffset + (c * layout.nSlots + slot) * 8, true);
   }
   return series;

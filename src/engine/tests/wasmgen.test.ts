@@ -235,6 +235,45 @@ describe('readStridedSeries', () => {
     expect(Array.from(readStridedSeries(buffer, layout, 1))).toEqual([1000, 1001, 1002]);
   });
 
+  it('reads only `count` rows when given a completed-step count below nChunks', () => {
+    const nSlots = 3;
+    const nChunks = 6;
+    const resultsOffset = 8;
+    const buffer = buildResultsBuffer({
+      nSlots,
+      nChunks,
+      resultsOffset,
+      cell: (c, s) => c * 10 + s,
+    });
+    const layout = makeLayout(nSlots, nChunks, resultsOffset);
+
+    // Only 3 of the 6 slab rows are completed; the read must stop there so the
+    // stale tail (rows 3..5) never reaches the caller.
+    expect(Array.from(readStridedSeries(buffer, layout, 1, 3))).toEqual([1, 11, 21]);
+  });
+
+  it('returns an empty series when count is 0 (a fresh or just-reset sim)', () => {
+    const layout = makeLayout(2, 5, 0);
+    const buffer = buildResultsBuffer({ nSlots: 2, nChunks: 5, resultsOffset: 0, cell: (c, s) => c + s });
+
+    expect(readStridedSeries(buffer, layout, 0, 0)).toEqual(new Float64Array(0));
+  });
+
+  it('defaults to nChunks rows when count is omitted', () => {
+    const layout = makeLayout(2, 4, 0);
+    const buffer = buildResultsBuffer({ nSlots: 2, nChunks: 4, resultsOffset: 0, cell: (c) => c });
+
+    expect(readStridedSeries(buffer, layout, 0).length).toBe(4);
+  });
+
+  it('clamps a count above nChunks so it never reads past the results region', () => {
+    const layout = makeLayout(2, 3, 0);
+    const buffer = buildResultsBuffer({ nSlots: 2, nChunks: 3, resultsOffset: 0, cell: (c) => c });
+
+    // A count larger than the slab capacity must be clamped, not read out of bounds.
+    expect(readStridedSeries(buffer, layout, 0, 99).length).toBe(3);
+  });
+
   it('allocates exactly one Float64Array of length nChunks and nothing else', () => {
     const nSlots = 2;
     const nChunks = 6;
