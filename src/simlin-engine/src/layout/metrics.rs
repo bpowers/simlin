@@ -1957,4 +1957,146 @@ mod tests {
         );
         assert!(base.loop_compactness > 0.0);
     }
+
+    // --- AC5.2: human-vs-auto reference-pair ordering under the committed weights ---
+    //
+    // The committed `MetricWeights::default()` must agree with the user's visual
+    // taste: on the agreed reference pairs the SHIPPED, hand-authored ("human")
+    // layout must score a lower `weighted_cost` than a machine-generated
+    // ("auto") layout of the SAME model. This is the objective validation of the
+    // calibration (Phase 4, AC5.2): if the metric and the weights did not agree
+    // with human taste on an obvious pair, the metric or the pair would be wrong.
+    //
+    // Construction (b) -- "human view vs generated layout" (design glossary): the
+    // four `default_projects` models each ship a hand-authored main view. We
+    // score that as-loaded view (human) and a fixed-seed `generate_layout_with_config`
+    // layout (auto) of the same model, and assert `human < auto`.
+    //
+    // Determinism + budget: layout is deterministic per seed (fix #633), so ONE
+    // fixed seed (not `generate_best_layout`'s multi-seed search) makes the test
+    // reproducible AND fast. The four default_projects are small (<= 42
+    // elements), so a single layout generation each is well under the per-test
+    // budget.
+    //
+    // Anchors: reliability, fishbanks, population, dp(logistic-growth). These all
+    // flip the right way under the committed weights (verified during
+    // calibration). `sir` is deliberately NOT a human<auto anchor -- its shipped
+    // reference genuinely obscures more labels than the auto layout, so the
+    // metric correctly prefers the auto; that direction is pinned separately by
+    // `test_sir_auto_beats_reference_under_default_weights` so the asymmetry is
+    // documented rather than silently dropped.
+
+    /// A fixed annealing seed for the auto layout. Any single fixed seed makes the
+    /// test deterministic; 42 matches the convention used elsewhere in the layout
+    /// config.
+    const REF_PAIR_SEED: u64 = 42;
+
+    /// Load a `default_projects` XMILE model by directory name, resolving the path
+    /// against `CARGO_MANIFEST_DIR` (= `src/simlin-engine`) like the layout
+    /// integration tests. Panics with a clear message on any I/O or parse failure
+    /// (a missing fixture is a test-environment bug, not a metric result).
+    fn load_default_project(dir: &str) -> datamodel::Project {
+        let path = format!(
+            "{}/../../default_projects/{}/model.xmile",
+            env!("CARGO_MANIFEST_DIR"),
+            dir
+        );
+        let file =
+            std::fs::File::open(&path).unwrap_or_else(|e| panic!("failed to open {path}: {e}"));
+        let mut reader = std::io::BufReader::new(file);
+        crate::compat::open_xmile(&mut reader)
+            .unwrap_or_else(|e| panic!("failed to parse {path}: {e:?}"))
+    }
+
+    /// The model's as-loaded, hand-authored main `StockFlow` view (the "human"
+    /// reference). Panics if the model has no such view -- every chosen anchor
+    /// ships one, so its absence is a fixture regression.
+    fn human_view(project: &datamodel::Project) -> datamodel::StockFlow {
+        let model = project
+            .get_model("main")
+            .expect("anchor model must have a 'main' model");
+        match model.views.first() {
+            Some(datamodel::View::StockFlow(sf)) if !sf.elements.is_empty() => sf.clone(),
+            _ => panic!("anchor model must ship a non-empty hand-authored main view"),
+        }
+    }
+
+    /// `weighted_cost` of the shipped human layout under the committed default
+    /// weights.
+    fn human_cost(project: &datamodel::Project) -> f64 {
+        let view = human_view(project);
+        compute_layout_metrics(&view, &LayoutConfig::default())
+            .weighted_cost(&MetricWeights::default())
+    }
+
+    /// `weighted_cost` of a single fixed-seed generated layout under the committed
+    /// default weights. Deterministic per seed, so the score is reproducible.
+    fn auto_cost(project: &datamodel::Project) -> f64 {
+        let cfg = LayoutConfig {
+            annealing_random_seed: REF_PAIR_SEED,
+            ..LayoutConfig::default()
+        };
+        let view = crate::layout::generate_layout_with_config(project, "main", cfg.clone(), None)
+            .expect("auto layout generation must succeed for the anchor model");
+        compute_layout_metrics(&view, &cfg).weighted_cost(&MetricWeights::default())
+    }
+
+    /// Assert the human reference beats the auto layout for one anchor model,
+    /// naming the model and both costs on failure (so a calibration regression is
+    /// immediately legible).
+    fn assert_human_beats_auto(dir: &str) {
+        let project = load_default_project(dir);
+        let human = human_cost(&project);
+        let auto = auto_cost(&project);
+        assert!(
+            human < auto,
+            "reference pair {dir}: expected human_cost ({human}) < auto_cost ({auto}) \
+             under MetricWeights::default()"
+        );
+    }
+
+    #[test]
+    fn test_reference_pair_reliability_human_beats_auto() {
+        assert_human_beats_auto("reliability");
+    }
+
+    #[test]
+    fn test_reference_pair_fishbanks_human_beats_auto() {
+        assert_human_beats_auto("fishbanks");
+    }
+
+    #[test]
+    fn test_reference_pair_population_human_beats_auto() {
+        assert_human_beats_auto("population");
+    }
+
+    #[test]
+    fn test_reference_pair_dp_logistic_growth_human_beats_auto() {
+        assert_human_beats_auto("logistic-growth");
+    }
+
+    #[test]
+    fn test_sir_auto_beats_reference_under_default_weights() {
+        // The documented NON-anchor: SIR's shipped reference obscures more labels
+        // than the auto layout, so the metric correctly prefers the auto. This
+        // pins that direction so the asymmetry (why SIR is excluded from the
+        // human<auto anchors) is recorded rather than silently assumed.
+        let path = format!(
+            "{}/../../test/test-models/samples/SIR/SIR.stmx",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let file =
+            std::fs::File::open(&path).unwrap_or_else(|e| panic!("failed to open {path}: {e}"));
+        let mut reader = std::io::BufReader::new(file);
+        let project = crate::compat::open_xmile(&mut reader)
+            .unwrap_or_else(|e| panic!("failed to parse {path}: {e:?}"));
+
+        let human = human_cost(&project);
+        let auto = auto_cost(&project);
+        assert!(
+            auto < human,
+            "sir is a documented non-anchor: expected auto_cost ({auto}) < human_cost ({human}) \
+             under MetricWeights::default() (its reference obscures more labels than the auto)"
+        );
+    }
 }
