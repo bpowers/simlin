@@ -568,16 +568,13 @@ export class DirectBackend implements EngineBackend {
   simReset(handle: SimHandle): void {
     const entry = this.getEntry(handle as number, 'sim');
     if (entry.engine === 'wasm') {
-      // The blob's reset clears the run cursor and preserves constant overrides,
-      // faithfully mirroring Vm::reset() -- which also leaves the previous run's
-      // values in the live curr chunk and defers re-init to the next run. The VM
-      // stack still presents a fresh pre-run state after reset (libsimlin recreates
-      // a zeroed VM), so the host must do the same: zero the live curr chunk
-      // (memory base 0, the nSlots f64 that simGetTime/simGetValue read). Without
-      // this, getTime()/getValue() return stale end-of-run values until the next
-      // run_to repopulates curr -- diverging from the VM, which reads 0.
+      // The blob's reset owns the entire fresh-state contract: it clears the run
+      // cursor AND re-establishes the live curr chunk (zeroed, with constant
+      // overrides reapplied), matching libsimlin's recreate-and-reapply reset
+      // (simulation.rs:314-330). The host therefore does NO shadow write into
+      // curr -- the previous host-side zero-fill clobbered the very overrides
+      // that set_value had mirrored into curr.
       entry.wasmExports!.reset();
-      new Float64Array(entry.wasmExports!.memory.buffer, 0, entry.wasmLayout!.nSlots).fill(0);
       return;
     }
     simlin_sim_reset(entry.ptr);
@@ -626,13 +623,10 @@ export class DirectBackend implements EngineBackend {
         // mirroring the VM's BadOverride rejection (constants only).
         throw new Error(`cannot set value of '${name}': not a simple constant`);
       }
-      // The blob's set_value writes only the constants-override region read by the
-      // NEXT evaluation; the VM's apply_override also writes the value into the
-      // live curr chunk immediately (set_value_now, vm.rs:869-873), so getValue()
-      // reflects an override before any run. Mirror that live write here (memory
-      // base 0, slot*8 -- the same cell simGetValue/simGetTime read) so an
-      // interactive read agrees with the VM rather than returning the prior value.
-      new DataView(entry.wasmExports!.memory.buffer).setFloat64(slot * 8, value, true);
+      // The blob's set_value writes both the constants-override region (read by the
+      // next evaluation) AND the live curr chunk (so getValue reflects the override
+      // before any run, matching the VM's set_value_now, vm.rs:869-873). The host
+      // therefore does NO shadow write into curr.
       return;
     }
     simlin_sim_set_value(entry.ptr, name, value);

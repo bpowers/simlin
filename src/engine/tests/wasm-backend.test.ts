@@ -562,6 +562,66 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
       expect(backend.simGetTime(wasm)).toBe(0);
       dispose();
     });
+
+    // Regression (PR #628 follow-up): a constant override must survive reset in
+    // the live curr state too -- getValue of the overridden constant after reset
+    // must return the override, matching the VM. The wasm reset used to zero-fill
+    // the curr chunk in the host, clobbering the override it had just mirrored;
+    // the blob now reapplies overrides into curr on reset, so the host does no
+    // shadow write into curr at all.
+    it('reset preserves an override in the live curr state (getValue matches VM)', () => {
+      const { vm, wasm, dispose } = openPair();
+
+      backend.simSetValue(vm, 'room temperature', 40);
+      backend.simSetValue(wasm, 'room temperature', 40);
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+      backend.simReset(vm);
+      backend.simReset(wasm);
+
+      // The overridden constant reads the override (not 0) on both engines.
+      expect(backend.simGetValue(wasm, 'room_temperature')).toBe(40);
+      expect(backend.simGetValue(wasm, 'room_temperature')).toBe(backend.simGetValue(vm, 'room_temperature'));
+      // A non-overridden variable still reads the fresh-zero state on both.
+      expect(backend.simGetValue(wasm, 'teacup_temperature')).toBe(backend.simGetValue(vm, 'teacup_temperature'));
+      expect(backend.simGetValue(wasm, 'teacup_temperature')).toBe(0);
+      dispose();
+    });
+  });
+
+  // Regression (PR #628 follow-up): re-running on an already-complete slab (a
+  // second runToEnd, or interactive scrubbing that stays at the end) must be a
+  // no-op. The blob's run_to used to re-enter its stepping loop and write one
+  // results row past the slab -- corrupting adjacent memory and pushing
+  // saved_steps to nChunks + 1. The loop now breaks at the top when the slab is
+  // full, so the completed-step count and every series stay put.
+  describe('re-running on a complete slab is a no-op (no out-of-bounds write)', () => {
+    it('runToEnd twice leaves the step count and series unchanged (matches VM)', () => {
+      const { vm, wasm, dispose } = openPair();
+      backend.simRunToEnd(vm);
+      backend.simRunToEnd(wasm);
+
+      const names = backend.simGetVarNames(wasm);
+      const before = names.map((n) => backend.simGetSeries(wasm, n));
+      const fullCount = backend.simGetStepCount(wasm);
+
+      // Re-trigger the run on the full slab: a second runToEnd and a runTo well
+      // past the stop time. Both must do nothing.
+      backend.simRunToEnd(wasm);
+      backend.simRunTo(wasm, 1e9);
+
+      // The completed-step count must not advance past the slab capacity (the OOB
+      // save used to bump saved_steps to nChunks + 1).
+      expect(backend.simGetStepCount(wasm)).toBe(fullCount);
+      expect(backend.simGetStepCount(wasm)).toBe(backend.simGetStepCount(vm));
+
+      // Every series is unchanged and still matches the VM.
+      for (let i = 0; i < names.length; i++) {
+        expectSeriesClose(backend.simGetSeries(wasm, names[i]), before[i]);
+        expectSeriesClose(backend.simGetSeries(wasm, names[i]), backend.simGetSeries(vm, names[i]));
+      }
+      dispose();
+    });
   });
 
   describe('AC4.1/AC4.2/AC4.4: by-name reads parity', () => {
