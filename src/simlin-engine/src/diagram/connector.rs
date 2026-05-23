@@ -13,6 +13,18 @@ use crate::diagram::common::{
 };
 use crate::diagram::constants::*;
 
+/// Number of straight segments used to approximate a drawn arc connector when
+/// producing its polyline for crossing detection and metric computation. 16
+/// segments closely tracks the curve: the maximum chord-to-arc deviation for a
+/// half-circle sampled this finely is well under a pixel at typical diagram
+/// radii, which is more than enough to detect whether the arc crosses another
+/// edge. It does not affect rendered SVG (the renderer still emits a single
+/// `A` arc command); it only governs the sampled geometry the metric sees.
+// Production callers (crate::layout::count_view_crossings / metrics.rs) arrive
+// in Tasks 4 and 5; remove this allow when the first crate-side caller lands.
+#[allow(dead_code)]
+pub(crate) const ARC_POLYLINE_SAMPLES: usize = 16;
+
 enum ElementShape {
     Circle { r: f64 },
     Rect { hw: f64, hh: f64 },
@@ -101,7 +113,10 @@ fn is_element_arrayed(element: &ViewElement, is_arrayed_fn: &dyn Fn(&str) -> boo
     }
 }
 
-fn get_visual_center(element: &ViewElement, is_arrayed_fn: &dyn Fn(&str) -> bool) -> (f64, f64) {
+pub(crate) fn get_visual_center(
+    element: &ViewElement,
+    is_arrayed_fn: &dyn Fn(&str) -> bool,
+) -> (f64, f64) {
     let (cx, cy) = match element {
         ViewElement::Aux(a) => (a.x, a.y),
         ViewElement::Stock(s) => (s.x, s.y),
@@ -140,7 +155,7 @@ fn circle_from_points(p1: Point, p2: Point, p3: Point) -> Result<Circle, &'stati
     Ok(Circle { x: cx, y: cy, r })
 }
 
-fn opposite_theta(theta: f64) -> f64 {
+pub(crate) fn opposite_theta(theta: f64) -> f64 {
     let mut t = theta + PI;
     if t > PI {
         t -= 2.0 * PI;
@@ -148,7 +163,7 @@ fn opposite_theta(theta: f64) -> f64 {
     t
 }
 
-fn intersect_element_straight(
+pub(crate) fn intersect_element_straight(
     element: &ViewElement,
     theta: f64,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
@@ -164,7 +179,7 @@ fn intersect_element_straight(
     }
 }
 
-fn intersect_element_arc(
+pub(crate) fn intersect_element_arc(
     element: &ViewElement,
     circ: &Circle,
     inv: bool,
@@ -215,7 +230,7 @@ fn intersect_element_arc(
     }
 }
 
-fn is_straight_line(
+pub(crate) fn is_straight_line(
     element: &view_element::Link,
     from: &ViewElement,
     to: &ViewElement,
@@ -234,7 +249,7 @@ fn is_straight_line(
     }
 }
 
-fn arc_circle(
+pub(crate) fn arc_circle(
     element: &view_element::Link,
     from: &ViewElement,
     to: &ViewElement,
@@ -342,24 +357,48 @@ fn render_straight_line(
     svg
 }
 
-fn render_arc(
+/// The exact scalars `render_arc` needs to format its SVG, plus what an arc
+/// sampler needs to reproduce the drawn curve as a polyline. All fields are
+/// raw f64 (no pre-rounding): rounding happens only at the `js_format_number`
+/// boundary in `render_arc`, so the SVG string stays byte-for-byte identical
+/// to the pre-factor-out code (and to the TypeScript renderer).
+#[derive(Clone, Copy)]
+struct ArcGeometry {
+    /// SVG path start (= `from_visual`, the source element center).
+    start: Point,
+    /// SVG path end (= `to_visual`, the target element center).
+    arc_end: Point,
+    /// Arc center and radius.
+    circ: Circle,
+    /// SVG large-arc-flag.
+    sweep: bool,
+    /// SVG sweep-flag.
+    inv: bool,
+    /// Arrowhead anchor point on the target element boundary.
+    end: Point,
+    /// Final arrowhead rotation in degrees (already adjusted for `inv`).
+    arrow_theta: f64,
+}
+
+/// Compute the drawn-arc geometry for a connector. Returns `None` in the two
+/// cases the renderer draws nothing: a non-`Arc` shape (e.g. `MultiPoint`) and
+/// a degenerate arc where `arc_circle` cannot be constructed. The body is the
+/// verbatim geometry the original `render_arc` computed (lines that produced
+/// `circ`, `inv`, `sweep`, `start`, `arc_end`, `end`, and `arrow_theta`).
+fn arc_geometry(
     element: &view_element::Link,
     from: &ViewElement,
     to: &ViewElement,
-    is_to_stock: bool,
     is_arrayed_fn: &dyn Fn(&str) -> bool,
-) -> String {
+) -> Option<ArcGeometry> {
     let from_visual = get_visual_center(from, is_arrayed_fn);
     let to_visual = get_visual_center(to, is_arrayed_fn);
 
-    let circ = match arc_circle(element, from, to, is_arrayed_fn) {
-        Some(c) => c,
-        None => return "<g></g>".to_string(),
-    };
+    let circ = arc_circle(element, from, to, is_arrayed_fn)?;
 
     let takeoff_angle = match &element.shape {
         LinkShape::Arc(arc) => deg_to_rad(*arc),
-        _ => return "<g></g>".to_string(),
+        _ => return None,
     };
 
     let from_theta = (from_visual.1 - circ.y).atan2(from_visual.0 - circ.x);
@@ -397,22 +436,125 @@ fn render_arc(
     };
     let end = intersect_element_arc(to, &circ, !inv, is_arrayed_fn);
 
-    let path = format!(
-        "M{},{}A{},{} 0 {},{} {},{}",
-        js_format_number(start.x),
-        js_format_number(start.y),
-        js_format_number(circ.r),
-        js_format_number(circ.r),
-        sweep as u8,
-        inv as u8,
-        js_format_number(arc_end.x),
-        js_format_number(arc_end.y)
-    );
-
     let mut arrow_theta = rad_to_deg((end.y - circ.y).atan2(end.x - circ.x)) - 90.0;
     if inv {
         arrow_theta += 180.0;
     }
+
+    Some(ArcGeometry {
+        start,
+        arc_end,
+        circ,
+        sweep,
+        inv,
+        end,
+        arrow_theta,
+    })
+}
+
+/// Sample the drawn SVG arc as a polyline from `g.start` to `g.arc_end` along
+/// `g.circ`, honoring the SVG large-arc (`g.sweep`) and sweep (`g.inv`) flags.
+/// Uses the standard SVG endpoint->center arc parametrization: derive the
+/// start angle and a signed sweep `delta` from the two endpoint angles, then
+/// adjust `delta` so its sign matches the sweep-flag and its magnitude matches
+/// the large-arc-flag. Returns `samples.max(2) + 1` points.
+// Reached only through `connector_polyline`, whose first non-test caller lands
+// in Task 4; remove this allow then.
+#[allow(dead_code)]
+fn sample_arc(g: &ArcGeometry, samples: usize) -> Vec<Point> {
+    let n = samples.max(2);
+    let theta0 = (g.start.y - g.circ.y).atan2(g.start.x - g.circ.x);
+    let theta1 = (g.arc_end.y - g.circ.y).atan2(g.arc_end.x - g.circ.x);
+    // SVG sweep-flag (g.inv) selects direction; large-arc-flag (g.sweep)
+    // selects the >180-degree arc. Normalize delta accordingly.
+    let mut delta = theta1 - theta0;
+    let two_pi = 2.0 * std::f64::consts::PI;
+    // bring delta into (-2pi, 2pi)
+    while delta <= -two_pi {
+        delta += two_pi;
+    }
+    while delta >= two_pi {
+        delta -= two_pi;
+    }
+    let sweep_positive = g.inv; // sweep-flag set => angles increase
+    if sweep_positive && delta < 0.0 {
+        delta += two_pi;
+    }
+    if !sweep_positive && delta > 0.0 {
+        delta -= two_pi;
+    }
+    let large = g.sweep; // large-arc-flag
+    if large && delta.abs() < std::f64::consts::PI {
+        delta += if delta >= 0.0 { two_pi } else { -two_pi };
+    }
+    if !large && delta.abs() > std::f64::consts::PI {
+        delta += if delta >= 0.0 { -two_pi } else { two_pi };
+    }
+    (0..=n)
+        .map(|i| {
+            let t = i as f64 / n as f64;
+            let th = theta0 + delta * t;
+            Point {
+                x: g.circ.x + g.circ.r * th.cos(),
+                y: g.circ.y + g.circ.r * th.sin(),
+            }
+        })
+        .collect()
+}
+
+/// The polyline the renderer draws for a connector, as the metric/crossing
+/// code sees it. Straight links are clipped to element boundaries (matching
+/// `render_straight_line`); arcs are sampled center-to-center along the arc
+/// circle (matching `render_arc`, which draws start=from_visual to
+/// arc_end=to_visual); MultiPoint links return an empty vec because the
+/// renderer draws nothing for them today (known gap).
+// First non-test caller (crate::layout::count_view_crossings) lands in Task 4;
+// remove this allow then.
+#[allow(dead_code)]
+pub(crate) fn connector_polyline(
+    element: &view_element::Link,
+    from: &ViewElement,
+    to: &ViewElement,
+    is_arrayed_fn: &dyn Fn(&str) -> bool,
+    arc_samples: usize,
+) -> Vec<Point> {
+    if is_straight_line(element, from, to, is_arrayed_fn) {
+        let from_visual = get_visual_center(from, is_arrayed_fn);
+        let to_visual = get_visual_center(to, is_arrayed_fn);
+        let theta = (to_visual.1 - from_visual.1).atan2(to_visual.0 - from_visual.0);
+        let start = intersect_element_straight(from, theta, is_arrayed_fn);
+        let end = intersect_element_straight(to, opposite_theta(theta), is_arrayed_fn);
+        return vec![start, end];
+    }
+    match arc_geometry(element, from, to, is_arrayed_fn) {
+        None => Vec::new(), // MultiPoint or degenerate arc: renderer draws nothing
+        Some(g) => sample_arc(&g, arc_samples),
+    }
+}
+
+fn render_arc(
+    element: &view_element::Link,
+    from: &ViewElement,
+    to: &ViewElement,
+    is_to_stock: bool,
+    is_arrayed_fn: &dyn Fn(&str) -> bool,
+) -> String {
+    let g = match arc_geometry(element, from, to, is_arrayed_fn) {
+        Some(g) => g,
+        None => return "<g></g>".to_string(),
+    };
+
+    let path = format!(
+        "M{},{}A{},{} 0 {},{} {},{}",
+        js_format_number(g.start.x),
+        js_format_number(g.start.y),
+        js_format_number(g.circ.r),
+        js_format_number(g.circ.r),
+        g.sweep as u8,
+        g.inv as u8,
+        js_format_number(g.arc_end.x),
+        js_format_number(g.arc_end.y)
+    );
 
     let connector_class = if is_to_stock {
         "simlin-connector simlin-connector-dashed"
@@ -432,9 +574,9 @@ fn render_arc(
         connector_class
     ));
     svg.push_str(&render_arrowhead(
-        end.x,
-        end.y,
-        arrow_theta,
+        g.end.x,
+        g.end.y,
+        g.arrow_theta,
         ARROWHEAD_RADIUS,
         ArrowheadType::Connector,
     ));
@@ -556,6 +698,116 @@ mod tests {
         let svg = render_connector(&link, &from, &to, &not_arrayed);
         assert!(svg.contains("<g>"));
         assert!(svg.contains("simlin-arrowhead-link"));
+    }
+
+    /// Byte-identical regression guard for the arc factor-out. The expected
+    /// string was captured from the pre-refactor `render_arc` output for this
+    /// exact Arc link; the geometry extraction must not change a single byte
+    /// (the `svg-rendering.test.ts` parity test asserts Rust SVG == TS SVG).
+    #[test]
+    fn test_render_arc_svg_byte_identical() {
+        let link = view_element::Link {
+            uid: 10,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::Arc(30.0),
+            polarity: None,
+        };
+        let from = make_aux_ve(100.0, 100.0, "a", 1);
+        let to = make_aux_ve(200.0, 200.0, "b", 2);
+
+        let svg = render_connector(&link, &from, &to, &not_arrayed);
+        let expected = "<g><path d=\"M100,100A273.20508075688764,273.20508075688764 0 0,1 200,200\" class=\"simlin-connector-bg\"></path><path d=\"M100,100A273.20508075688764,273.20508075688764 0 0,1 200,200\" class=\"simlin-connector\"></path><g><path d=\"M199.87072507234473,192.27852897536678L188.62072507234473,196.77852897536678A27,27 0 0,1 188.62072507234473,187.77852897536678z\" class=\"simlin-arrowhead-bg\" transform=\"rotate(58.1118629772876,195.37072507234473,192.27852897536678)\"></path><path d=\"M195.37072507234473,192.27852897536678L189.37072507234473,195.27852897536678A18,18 0 0,1 189.37072507234473,189.27852897536678z\" class=\"simlin-arrowhead-link\" transform=\"rotate(58.1118629772876,195.37072507234473,192.27852897536678)\"></path></g></g>";
+        assert_eq!(svg, expected);
+        assert!(svg.starts_with("<g><path d=\"M100,100A"));
+    }
+
+    #[test]
+    fn test_connector_polyline_straight_uses_boundary_endpoints() {
+        let link = view_element::Link {
+            uid: 10,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::Straight,
+            polarity: None,
+        };
+        let from = make_aux_ve(100.0, 100.0, "a", 1);
+        let to = make_aux_ve(200.0, 100.0, "b", 2);
+
+        let poly = connector_polyline(&link, &from, &to, &not_arrayed, ARC_POLYLINE_SAMPLES);
+        assert_eq!(poly.len(), 2, "straight link yields exactly two points");
+
+        // Endpoints are clipped to the element boundary (AUX_RADIUS), NOT the
+        // raw centers (100,100) and (200,100). theta = 0 along +x.
+        let expected_start = intersect_element_straight(&from, 0.0, &not_arrayed);
+        let expected_end = intersect_element_straight(&to, opposite_theta(0.0), &not_arrayed);
+        assert!((poly[0].x - expected_start.x).abs() < 1e-9);
+        assert!((poly[0].y - expected_start.y).abs() < 1e-9);
+        assert!((poly[1].x - expected_end.x).abs() < 1e-9);
+        assert!((poly[1].y - expected_end.y).abs() < 1e-9);
+        // Sanity: start is offset from the center by AUX_RADIUS, not at center.
+        assert!((poly[0].x - (100.0 + AUX_RADIUS)).abs() < 1e-9);
+        assert!((poly[1].x - (200.0 - AUX_RADIUS)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_connector_polyline_arc_samples_on_circle() {
+        let link = view_element::Link {
+            uid: 10,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::Arc(30.0),
+            polarity: None,
+        };
+        let from = make_aux_ve(100.0, 100.0, "a", 1);
+        let to = make_aux_ve(200.0, 200.0, "b", 2);
+
+        let poly = connector_polyline(&link, &from, &to, &not_arrayed, ARC_POLYLINE_SAMPLES);
+        assert_eq!(
+            poly.len(),
+            ARC_POLYLINE_SAMPLES + 1,
+            "arc yields ARC_POLYLINE_SAMPLES segments => N+1 points"
+        );
+
+        // The drawn arc goes center-to-center (start = from_visual,
+        // arc_end = to_visual).
+        let first = poly.first().unwrap();
+        let last = poly.last().unwrap();
+        assert!((first.x - 100.0).abs() < 1e-6 && (first.y - 100.0).abs() < 1e-6);
+        assert!((last.x - 200.0).abs() < 1e-6 && (last.y - 200.0).abs() < 1e-6);
+
+        // Every sampled point lies on the arc circle.
+        let circ = arc_circle(&link, &from, &to, &not_arrayed).unwrap();
+        for p in &poly {
+            let d = (square(p.x - circ.x) + square(p.y - circ.y)).sqrt();
+            assert!(
+                (d - circ.r).abs() < 1e-6,
+                "point ({}, {}) not on arc circle: dist {} vs r {}",
+                p.x,
+                p.y,
+                d,
+                circ.r
+            );
+        }
+    }
+
+    #[test]
+    fn test_connector_polyline_multipoint_is_empty() {
+        let link = view_element::Link {
+            uid: 10,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::MultiPoint(vec![]),
+            polarity: None,
+        };
+        let from = make_aux_ve(100.0, 100.0, "a", 1);
+        let to = make_aux_ve(200.0, 200.0, "b", 2);
+
+        let poly = connector_polyline(&link, &from, &to, &not_arrayed, ARC_POLYLINE_SAMPLES);
+        assert!(
+            poly.is_empty(),
+            "MultiPoint links draw nothing, so the polyline is empty"
+        );
     }
 
     // --- ray_rect_intersection tests ---
