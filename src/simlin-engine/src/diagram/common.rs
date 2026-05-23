@@ -137,6 +137,89 @@ pub fn rad_to_deg(r: f64) -> f64 {
     (r * 180.0) / PI
 }
 
+// These rectangle/segment geometry primitives are the load-bearing helpers for
+// the layout quality metric (`layout::metrics`, added in a later task of this
+// phase). They are exercised by the inline tests below; the production callers
+// (node-overlap, label-overlap, and node-connector-overlap terms) land in
+// subsequent tasks, so each is `#[allow(dead_code)]` until then.
+
+/// Width of a rect (right - left). May be negative for a degenerate/inverted rect.
+#[allow(dead_code)]
+pub(crate) fn rect_width(r: &Rect) -> f64 {
+    r.right - r.left
+}
+
+/// Height of a rect (bottom - top).
+#[allow(dead_code)]
+pub(crate) fn rect_height(r: &Rect) -> f64 {
+    r.bottom - r.top
+}
+
+/// Area of a rect, clamped to >= 0.
+#[allow(dead_code)]
+pub(crate) fn rect_area(r: &Rect) -> f64 {
+    (rect_width(r).max(0.0)) * (rect_height(r).max(0.0))
+}
+
+/// Area of the axis-aligned intersection of two rects (0 if they do not overlap).
+#[allow(dead_code)]
+pub(crate) fn rect_overlap_area(a: &Rect, b: &Rect) -> f64 {
+    let w = a.right.min(b.right) - a.left.max(b.left);
+    let h = a.bottom.min(b.bottom) - a.top.max(b.top);
+    if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
+}
+
+/// True if `p` lies inside (or on the boundary of) `r`.
+#[allow(dead_code)]
+pub(crate) fn rect_contains_point(r: &Rect, p: &Point) -> bool {
+    p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom
+}
+
+/// Length of the portion of segment p0->p1 that lies within axis-aligned rect r.
+/// Returns 0 if the segment never enters r. Pure; no allocation.
+#[allow(dead_code)]
+pub(crate) fn segment_length_in_rect(p0: &Point, p1: &Point, r: &Rect) -> f64 {
+    // Liang-Barsky clip of the parametric segment p0 + t*(p1-p0), t in [0,1],
+    // against left/right/top/bottom slabs.
+    let dx = p1.x - p0.x;
+    let dy = p1.y - p0.y;
+    let mut t0 = 0.0_f64;
+    let mut t1 = 1.0_f64;
+    // (p, q) pairs for the four half-planes; segment inside slab where p*t <= q.
+    let edges = [
+        (-dx, p0.x - r.left),
+        (dx, r.right - p0.x),
+        (-dy, p0.y - r.top),
+        (dy, r.bottom - p0.y),
+    ];
+    for (p, q) in edges {
+        if p == 0.0 {
+            if q < 0.0 {
+                return 0.0; // parallel and outside this slab
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                if t > t1 {
+                    return 0.0;
+                }
+                if t > t0 {
+                    t0 = t;
+                }
+            } else {
+                if t < t0 {
+                    return 0.0;
+                }
+                if t < t1 {
+                    t1 = t;
+                }
+            }
+        }
+    }
+    let seg_len = (dx * dx + dy * dy).sqrt();
+    (t1 - t0).max(0.0) * seg_len
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +364,195 @@ mod tests {
         assert!((deg_to_rad(90.0) - PI / 2.0).abs() < 1e-10);
         assert!((rad_to_deg(PI) - 180.0).abs() < 1e-10);
         assert!((rad_to_deg(PI / 2.0) - 90.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_rect_dimensions() {
+        let r = Rect {
+            top: 10.0,
+            left: 20.0,
+            right: 50.0,
+            bottom: 70.0,
+        };
+        assert_eq!(rect_width(&r), 30.0);
+        assert_eq!(rect_height(&r), 60.0);
+        assert_eq!(rect_area(&r), 30.0 * 60.0);
+    }
+
+    #[test]
+    fn test_rect_area_clamps_negative() {
+        // An inverted/degenerate rect (right < left, bottom < top) has
+        // negative width/height; rect_area clamps each to 0 so the result is 0.
+        let inverted = Rect {
+            top: 70.0,
+            left: 50.0,
+            right: 20.0,
+            bottom: 10.0,
+        };
+        assert!(rect_width(&inverted) < 0.0);
+        assert!(rect_height(&inverted) < 0.0);
+        assert_eq!(rect_area(&inverted), 0.0);
+    }
+
+    #[test]
+    fn test_rect_overlap_area_known_overlap() {
+        // a covers x in [0,10], y in [0,10]; b covers x in [5,15], y in [5,15].
+        // Their intersection is x in [5,10], y in [5,10] => 5 x 5 = 25.
+        let a = Rect {
+            top: 0.0,
+            left: 0.0,
+            right: 10.0,
+            bottom: 10.0,
+        };
+        let b = Rect {
+            top: 5.0,
+            left: 5.0,
+            right: 15.0,
+            bottom: 15.0,
+        };
+        assert_eq!(rect_overlap_area(&a, &b), 25.0);
+        // Overlap is symmetric in argument order.
+        assert_eq!(rect_overlap_area(&b, &a), 25.0);
+    }
+
+    #[test]
+    fn test_rect_overlap_area_disjoint() {
+        let a = Rect {
+            top: 0.0,
+            left: 0.0,
+            right: 10.0,
+            bottom: 10.0,
+        };
+        let b = Rect {
+            top: 20.0,
+            left: 20.0,
+            right: 30.0,
+            bottom: 30.0,
+        };
+        assert_eq!(rect_overlap_area(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn test_rect_overlap_area_identical() {
+        // Two identical rects overlap by their full area.
+        let r = Rect {
+            top: 0.0,
+            left: 0.0,
+            right: 10.0,
+            bottom: 4.0,
+        };
+        assert_eq!(rect_overlap_area(&r, &r), rect_area(&r));
+        assert_eq!(rect_overlap_area(&r, &r), 40.0);
+    }
+
+    #[test]
+    fn test_rect_overlap_area_touching_edge() {
+        // b's left edge touches a's right edge (both at x=10): zero-width overlap => 0.
+        let a = Rect {
+            top: 0.0,
+            left: 0.0,
+            right: 10.0,
+            bottom: 10.0,
+        };
+        let b = Rect {
+            top: 0.0,
+            left: 10.0,
+            right: 20.0,
+            bottom: 10.0,
+        };
+        assert_eq!(rect_overlap_area(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn test_rect_contains_point() {
+        let r = Rect {
+            top: 0.0,
+            left: 0.0,
+            right: 10.0,
+            bottom: 10.0,
+        };
+        // Strictly inside.
+        assert!(rect_contains_point(&r, &Point { x: 5.0, y: 5.0 }));
+        // On the boundary (inclusive).
+        assert!(rect_contains_point(&r, &Point { x: 0.0, y: 0.0 }));
+        assert!(rect_contains_point(&r, &Point { x: 10.0, y: 10.0 }));
+        assert!(rect_contains_point(&r, &Point { x: 0.0, y: 5.0 }));
+        // Outside on each side.
+        assert!(!rect_contains_point(&r, &Point { x: -1.0, y: 5.0 }));
+        assert!(!rect_contains_point(&r, &Point { x: 11.0, y: 5.0 }));
+        assert!(!rect_contains_point(&r, &Point { x: 5.0, y: -1.0 }));
+        assert!(!rect_contains_point(&r, &Point { x: 5.0, y: 11.0 }));
+    }
+
+    #[test]
+    fn test_segment_length_in_rect_crosses_fully() {
+        // Rect spans x in [0,10], y in [0,10]. A horizontal segment from
+        // (-5, 5) to (15, 5) enters at x=0 and exits at x=10 => inside length 10.
+        let r = Rect {
+            top: 0.0,
+            left: 0.0,
+            right: 10.0,
+            bottom: 10.0,
+        };
+        let got =
+            segment_length_in_rect(&Point { x: -5.0, y: 5.0 }, &Point { x: 15.0, y: 5.0 }, &r);
+        assert!((got - 10.0).abs() < 1e-9, "got {got}");
+    }
+
+    #[test]
+    fn test_segment_length_in_rect_entirely_outside() {
+        let r = Rect {
+            top: 0.0,
+            left: 0.0,
+            right: 10.0,
+            bottom: 10.0,
+        };
+        // Segment well above the rect, never enters.
+        let got =
+            segment_length_in_rect(&Point { x: -5.0, y: 50.0 }, &Point { x: 15.0, y: 50.0 }, &r);
+        assert_eq!(got, 0.0);
+    }
+
+    #[test]
+    fn test_segment_length_in_rect_entirely_inside() {
+        let r = Rect {
+            top: 0.0,
+            left: 0.0,
+            right: 10.0,
+            bottom: 10.0,
+        };
+        // Segment from (2,2) to (5,6): both endpoints inside; full length is
+        // sqrt(3^2 + 4^2) = 5.
+        let got = segment_length_in_rect(&Point { x: 2.0, y: 2.0 }, &Point { x: 5.0, y: 6.0 }, &r);
+        assert!((got - 5.0).abs() < 1e-9, "got {got}");
+    }
+
+    #[test]
+    fn test_segment_length_in_rect_one_endpoint_inside() {
+        let r = Rect {
+            top: 0.0,
+            left: 0.0,
+            right: 10.0,
+            bottom: 10.0,
+        };
+        // Horizontal segment from (5,5) (inside) to (25,5) (outside): the
+        // portion inside runs from x=5 to x=10 => length 5.
+        let got = segment_length_in_rect(&Point { x: 5.0, y: 5.0 }, &Point { x: 25.0, y: 5.0 }, &r);
+        assert!((got - 5.0).abs() < 1e-9, "got {got}");
+    }
+
+    #[test]
+    fn test_segment_length_in_rect_parallel_outside_slab() {
+        // A vertical segment to the left of the rect is parallel to the
+        // left/right slabs and outside them: dx == 0 with q < 0 => 0.
+        let r = Rect {
+            top: 0.0,
+            left: 0.0,
+            right: 10.0,
+            bottom: 10.0,
+        };
+        let got =
+            segment_length_in_rect(&Point { x: -5.0, y: -5.0 }, &Point { x: -5.0, y: 15.0 }, &r);
+        assert_eq!(got, 0.0);
     }
 }
