@@ -6,8 +6,10 @@ pub mod annealing;
 pub mod chain;
 pub mod config;
 pub mod connector;
+pub mod eval_stats;
 pub mod graph;
 pub mod metadata;
+pub mod metrics;
 pub mod placement;
 pub mod sfdp;
 pub mod text;
@@ -71,7 +73,11 @@ struct FlowAttachment {
 /// Result of a single layout generation, used to select the best among parallel attempts.
 struct LayoutResult {
     view: datamodel::StockFlow,
-    crossings: usize,
+    /// The full calibrated layout-quality metric for `view` (Sigma w_i * term_i,
+    /// with `MetricWeights::default()`). `select_best_layout` minimizes this; its
+    /// `crossings` term already captures the accurate connector-crossing count, so
+    /// there is no separate `crossings` field.
+    weighted_cost: f64,
     seed: u64,
 }
 
@@ -1117,23 +1123,38 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
     // Track which old links have been consumed so each is used at most once.
     let mut consumed_old_links: HashSet<(i32, i32)> = HashSet::new();
 
+    // Iterate edges in a deterministic order. `new_edges` is a HashSet, so its
+    // iteration order is per-process random; since each newly-created link both
+    // allocates a sequential `uid` and is appended to `state.elements` in this
+    // loop, hash order would otherwise assign different uids / element ordering
+    // to the same logical link run-to-run (the incremental analogue of #633).
+    let mut sorted_new_edges: Vec<(i32, i32)> = new_edges.iter().copied().collect();
+    sorted_new_edges.sort_unstable();
+
     // Add back preserved links (unchanged) and create new links
-    for &(from_uid, to_uid) in &new_edges {
+    for (from_uid, to_uid) in sorted_new_edges {
         if let Some(old_link) = old_links.get(&(from_uid, to_uid)) {
             // Preserved: keep the old link exactly as-is
             state.elements.push(old_link.clone());
             consumed_old_links.insert((from_uid, to_uid));
-        } else if let Some((&key, old_link)) = old_links.iter().find(|&(&(of, ot), _)| {
-            if consumed_old_links.contains(&(of, ot)) {
-                return false;
-            }
-            let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
-            let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
-            rf == from_uid && rt == to_uid
-        }) {
+        } else if let Some(key) = old_links
+            .keys()
+            .copied()
+            .filter(|&(of, ot)| {
+                if consumed_old_links.contains(&(of, ot)) {
+                    return false;
+                }
+                let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
+                let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
+                rf == from_uid && rt == to_uid
+            })
+            // Pick the lowest matching key so the alias-match selection is
+            // deterministic; HashMap iteration order would otherwise vary.
+            .min()
+        {
             // Preserved via alias: the old link targets an alias whose primary
             // variable matches this dependency edge. Keep the alias link as-is.
-            state.elements.push(old_link.clone());
+            state.elements.push(old_links[&key].clone());
             consumed_old_links.insert(key);
         } else if let Some((from_ident, to_ident)) = new_edge_idents.get(&(from_uid, to_uid)) {
             // Added: create new link with default shape
@@ -1170,14 +1191,19 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
     // match a valid dependency. Imported views may have multiple rendered
     // connectors for the same dependency (e.g., links to two different
     // aliases of the same variable).
-    for (&(of, ot), old_link) in &old_links {
+    // Iterate in a deterministic order for the same reason as the new-edge loop:
+    // the preserved links are appended to `state.elements`, so HashMap iteration
+    // order would otherwise perturb element ordering run-to-run.
+    let mut sorted_old_links: Vec<&(i32, i32)> = old_links.keys().collect();
+    sorted_old_links.sort_unstable();
+    for &(of, ot) in sorted_old_links {
         if consumed_old_links.contains(&(of, ot)) {
             continue;
         }
         let rf = alias_to_primary.get(&of).copied().unwrap_or(of);
         let rt = alias_to_primary.get(&ot).copied().unwrap_or(ot);
         if new_edges.contains(&(rf, rt)) {
-            state.elements.push(old_link.clone());
+            state.elements.push(old_links[&(of, ot)].clone());
         }
     }
 }
@@ -2454,7 +2480,16 @@ fn run_sfdp_with_rigid_chains(
     let mut center_y = config.start_y;
     let mut count = 0;
 
-    for (var_ident, node_id) in var_to_node {
+    // `var_to_node` is a HashMap, so its iteration order is per-process random.
+    // Two loops below are order-sensitive: the centroid accumulation sums floats
+    // (non-associative, so hash order perturbs the result) and the aux-placement
+    // loop assigns each unpositioned aux a polar seed angle by its iteration rank.
+    // Materialize a deterministic sorted view and iterate THAT in both loops so a
+    // fixed (model, seed) yields a bit-identical layout across repeated calls (#633).
+    let mut entries: Vec<(&String, &String)> = var_to_node.iter().collect();
+    entries.sort();
+
+    for &(var_ident, node_id) in &entries {
         if let Some(uid) = state.uid_manager.get_uid(var_ident)
             && let Some(&pos) = state.positions.get(&uid)
         {
@@ -2489,7 +2524,7 @@ fn run_sfdp_with_rigid_chains(
     }
 
     let mut aux_index = 0;
-    for node_id in var_to_node.values() {
+    for &(_var_ident, node_id) in &entries {
         if initial_layout.contains_key(node_id) {
             continue;
         }
@@ -4327,67 +4362,217 @@ fn detect_chains(
     chains
 }
 
-/// Count edge crossings in a completed StockFlow view.
+/// Whether `p` lies on the segment from flow point `a` to flow point `b`,
+/// within a small pixel tolerance. Used to find the pipe segment a flow's valve
+/// sits on so the valve can be injected as a shared `elem_{flow.uid}` vertex.
 ///
-/// Arc and multi-point link shapes are approximated as straight segments
-/// from source to target position, so counts for diagrams with curved
-/// connectors are approximate.
-pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
+/// The perpendicular distance from `p` to the line must be tiny, and `p` must
+/// project within the segment (parameter in `[0, 1]`). A degenerate segment
+/// (`a == b`) only matches when `p` coincides with it.
+fn point_on_segment(
+    p: Position,
+    a: &datamodel::view_element::FlowPoint,
+    b: &datamodel::view_element::FlowPoint,
+) -> bool {
+    const TOL: f64 = 0.5; // pixels
+    let a = Position::new(a.x, a.y);
+    let b = Position::new(b.x, b.y);
+    let ab = b - a;
+    let ap = p - a;
+    let len_sq = ab.dot(ab);
+    if len_sq < f64::EPSILON {
+        // Degenerate segment: only "on" it if p coincides with the point.
+        return ap.dot(ap) < TOL * TOL;
+    }
+    // Project p onto the line; require it to fall within the segment.
+    let t = ap.dot(ab) / len_sq;
+    if !(0.0..=1.0).contains(&t) {
+        return false;
+    }
+    // Perpendicular distance: |ap x ab| / |ab|.
+    let perp = ap.cross_2d(ab).abs() / len_sq.sqrt();
+    perp < TOL
+}
+
+/// Build the set of [`LineSegment`]s that crossing detection runs over for a
+/// completed StockFlow view. This is the single source of geometry shared by
+/// [`count_view_crossings`] and the layout quality metric, so a layout's
+/// crossing score can never disagree with the geometry the renderer draws.
+///
+/// Connector geometry comes from [`crate::diagram::connector::connector_polyline`],
+/// the exact polyline the SVG renderer draws: straight links are clipped to
+/// element boundaries, arcs are sampled along their arc circle, and MultiPoint
+/// links contribute nothing (the renderer draws nothing for them today).
+///
+/// Element endpoints are resolved over *all* element kinds, so a link incident
+/// on a Module or Alias is no longer dropped (the previous chord-based code
+/// only mapped Stock/Flow/Aux/Cloud, silently undercounting such crossings).
+///
+/// Node naming suppresses self- and shared-endpoint "crossings" exactly like
+/// before: a connector's first vertex is `elem_{from_uid}` and its last is
+/// `elem_{to_uid}` (so two connectors sharing an element endpoint never count),
+/// while internal arc-sample vertices are `link_{link.uid}#{i}` (so the
+/// consecutive segments of one arc share an internal node name and never count
+/// as self-crossings).
+///
+/// A flow's pipe vertices share those same `elem_{uid}` names with whatever
+/// element they connect to, so a link incident on the flow grazes but does not
+/// "cross" the pipe at the shared connection point. A point attached to a
+/// stock/cloud is named `elem_{attached_to_uid}` (matching a link whose
+/// endpoint is that stock/cloud), and the flow's valve -- which sits on the
+/// pipe, not necessarily at a stored point -- is injected as an extra vertex
+/// named `elem_{flow.uid}` so a link incident on the valve (its `to_uid`/
+/// `from_uid` is the flow's own element uid) is suppressed there too. A
+/// genuinely free interior point (no attachment, not the valve) keeps the
+/// historic per-flow `flow_{uid}#{i}` name, so a link that crosses the pipe
+/// mid-span -- sharing no element with the flow -- is still counted.
+fn build_view_segments(view: &datamodel::StockFlow) -> Vec<LineSegment> {
     if view.elements.is_empty() {
-        return 0;
+        return Vec::new();
     }
 
-    let mut uid_positions: HashMap<i32, Position> = HashMap::new();
+    // Resolve every element by uid so a link can find its endpoints regardless
+    // of the endpoint's kind (Module/Alias included).
+    let mut uid_elements: HashMap<i32, &ViewElement> = HashMap::new();
     for elem in &view.elements {
-        match elem {
-            ViewElement::Stock(s) => {
-                uid_positions.insert(s.uid, Position::new(s.x, s.y));
-            }
-            ViewElement::Flow(f) => {
-                uid_positions.insert(f.uid, Position::new(f.x, f.y));
-            }
-            ViewElement::Aux(a) => {
-                uid_positions.insert(a.uid, Position::new(a.x, a.y));
-            }
-            ViewElement::Cloud(c) => {
-                uid_positions.insert(c.uid, Position::new(c.x, c.y));
-            }
-            _ => {}
-        }
+        uid_elements.insert(elem.get_uid(), elem);
     }
+
+    // Crossing detection is center-based and deterministic; no element is
+    // treated as arrayed (matching the historic behavior).
+    let not_arrayed = |_: &str| false;
 
     let mut segments: Vec<LineSegment> = Vec::new();
 
     for elem in &view.elements {
         match elem {
             ViewElement::Link(link) => {
-                if let (Some(&from_pos), Some(&to_pos)) = (
-                    uid_positions.get(&link.from_uid),
-                    uid_positions.get(&link.to_uid),
-                ) {
+                let (Some(&from), Some(&to)) = (
+                    uid_elements.get(&link.from_uid),
+                    uid_elements.get(&link.to_uid),
+                ) else {
+                    continue; // an endpoint is genuinely missing
+                };
+
+                let polyline = crate::diagram::connector::connector_polyline(
+                    link,
+                    from,
+                    to,
+                    &not_arrayed,
+                    crate::diagram::connector::ARC_POLYLINE_SAMPLES,
+                );
+                if polyline.len() < 2 {
+                    continue; // MultiPoint / degenerate: nothing drawn
+                }
+
+                let last_idx = polyline.len() - 1;
+                // Name the first vertex after the source element and the last
+                // after the target element so two connectors sharing an element
+                // endpoint are suppressed; name internal vertices per-link so a
+                // connector never crosses itself.
+                let vertex_name = |i: usize| -> String {
+                    if i == 0 {
+                        format!("elem_{}", link.from_uid)
+                    } else if i == last_idx {
+                        format!("elem_{}", link.to_uid)
+                    } else {
+                        format!("link_{}#{}", link.uid, i)
+                    }
+                };
+
+                for i in 0..last_idx {
+                    let a = polyline[i];
+                    let b = polyline[i + 1];
                     segments.push(LineSegment {
-                        start: from_pos,
-                        end: to_pos,
-                        from_node: format!("elem_{}", link.from_uid),
-                        to_node: format!("elem_{}", link.to_uid),
+                        start: Position::new(a.x, a.y),
+                        end: Position::new(b.x, b.y),
+                        from_node: vertex_name(i),
+                        to_node: vertex_name(i + 1),
                     });
                 }
             }
             ViewElement::Flow(flow) => {
-                for i in 0..flow.points.len().saturating_sub(1) {
-                    segments.push(LineSegment {
-                        start: Position::new(flow.points[i].x, flow.points[i].y),
-                        end: Position::new(flow.points[i + 1].x, flow.points[i + 1].y),
-                        from_node: format!("flow_{}#{}", flow.uid, i),
-                        to_node: format!("flow_{}#{}", flow.uid, i + 1),
-                    });
+                if flow.points.len() < 2 {
+                    continue;
+                }
+
+                // Build the pipe as a sequence of named vertices. A point
+                // attached to a stock/cloud shares that element's `elem_{uid}`
+                // name; a free interior point keeps a per-flow `flow_{uid}#{i}`
+                // name. The valve (the flow's own element, at `flow.x/flow.y`)
+                // is injected as an `elem_{flow.uid}` vertex on the pipe segment
+                // whose span contains it, so a link incident on the valve is
+                // suppressed at that shared connection point. Consecutive
+                // segments of one flow always share the joining vertex name, so
+                // a flow never self-crosses.
+                let point_name = |i: usize| -> String {
+                    match flow.points[i].attached_to_uid {
+                        Some(uid) => format!("elem_{uid}"),
+                        None => format!("flow_{}#{}", flow.uid, i),
+                    }
+                };
+
+                let valve = Position::new(flow.x, flow.y);
+                let valve_name = format!("elem_{}", flow.uid);
+                // The pipe segment the valve sits strictly interior to. `None`
+                // when the valve coincides with a stored point or (in a
+                // hand-edited view) drifted off the polyline; the pipe is then
+                // not split and the existing point names hold.
+                let valve_seg = (0..flow.points.len() - 1).find(|&i| {
+                    let a = Position::new(flow.points[i].x, flow.points[i].y);
+                    let b = Position::new(flow.points[i + 1].x, flow.points[i + 1].y);
+                    valve != a
+                        && valve != b
+                        && point_on_segment(valve, &flow.points[i], &flow.points[i + 1])
+                });
+
+                for i in 0..flow.points.len() - 1 {
+                    let a = Position::new(flow.points[i].x, flow.points[i].y);
+                    let b = Position::new(flow.points[i + 1].x, flow.points[i + 1].y);
+                    let a_name = point_name(i);
+                    let b_name = point_name(i + 1);
+
+                    if Some(i) == valve_seg {
+                        // Split this pipe segment at the valve so both halves
+                        // share the `elem_{flow.uid}` vertex.
+                        segments.push(LineSegment {
+                            start: a,
+                            end: valve,
+                            from_node: a_name,
+                            to_node: valve_name.clone(),
+                        });
+                        segments.push(LineSegment {
+                            start: valve,
+                            end: b,
+                            from_node: valve_name.clone(),
+                            to_node: b_name,
+                        });
+                    } else {
+                        segments.push(LineSegment {
+                            start: a,
+                            end: b,
+                            from_node: a_name,
+                            to_node: b_name,
+                        });
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    annealing::count_crossings(&segments)
+    segments
+}
+
+/// Count edge crossings in a completed StockFlow view.
+///
+/// Crossings are counted on the connectors' sampled drawn polylines: straight
+/// links clipped to element boundaries, arcs sampled along their arc circle,
+/// and flow pipes as their point polylines. All element endpoints are resolved
+/// (Module/Alias included), so the count reflects the geometry the renderer
+/// actually draws rather than a straight chord approximation.
+pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
+    annealing::count_crossings(&build_view_segments(view))
 }
 
 /// Assemble a [`datamodel::StockFlow`] from finalized layout state, copying
@@ -4432,7 +4617,12 @@ fn build_stock_flow_from_state(
 
 /// Seeds for parallel layout generation. Each seed produces a different SFDP
 /// layout; the one with fewest connector crossings is selected.
-const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
+///
+/// These are also the layout-quality sweep's best-of-k production proxy: the
+/// `layout_eval` example scores the best layout over exactly this seed set to
+/// estimate what production (which picks best-of-`LAYOUT_SEEDS`) would ship,
+/// so it is exposed publicly. The value and behavior are unchanged.
+pub const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
 
 /// Apply a model patch incrementally to an existing diagram view,
 /// preserving existing element positions and only placing new or
@@ -5078,8 +5268,10 @@ pub fn generate_layout_with_config(
     fresh_layout(model, &metadata, &config)
 }
 
-/// Generate multiple layouts with different seeds in parallel and pick the
-/// one with fewest crossings. On tie, the lowest seed wins.
+/// Generate multiple layouts with different seeds in parallel and pick the one
+/// that minimizes the full calibrated layout-quality metric (`weighted_cost`,
+/// which includes the accurate connector-crossing count alongside node/label
+/// overlap and loop compactness). On tie, the lowest seed wins.
 pub fn generate_best_layout(
     project: &datamodel::Project,
     model_name: &str,
@@ -5095,10 +5287,14 @@ pub fn generate_best_layout(
         let mut cfg = config.clone();
         cfg.annealing_random_seed = seed;
         let view = fresh_layout(model, &metadata, &cfg)?;
-        let crossings = count_view_crossings(&view);
+        // Score the candidate with the full calibrated metric. Its `crossings`
+        // term computes the accurate connector-crossing count internally, so we
+        // no longer call `count_view_crossings` directly here.
+        let metrics = metrics::compute_layout_metrics(&view, &cfg);
+        let weighted_cost = metrics.weighted_cost(&metrics::MetricWeights::default());
         Ok(LayoutResult {
             view,
-            crossings,
+            weighted_cost,
             seed,
         })
     };
@@ -5128,7 +5324,12 @@ pub fn compute_layout_metadata(
     compute_metadata(project, model_name, db_state)
 }
 
-/// Pick the layout with fewest crossings; on tie, the one from the lowest seed.
+/// Pick the layout that minimizes the full calibrated layout-quality metric
+/// (`weighted_cost`); on tie, the one from the lowest seed. NaN-cost candidates
+/// (degenerate layouts) never win over a finite one regardless of position in
+/// the result set; if ALL candidates are NaN the earliest is kept
+/// deterministically. The first `Err` short-circuits, and an empty result set is
+/// an error.
 fn select_best_layout(
     results: Vec<Result<LayoutResult, String>>,
 ) -> Result<datamodel::StockFlow, String> {
@@ -5139,13 +5340,24 @@ fn select_best_layout(
         best = Some(match best {
             None => lr,
             Some(prev) => {
-                if lr.crossings < prev.crossings
-                    || (lr.crossings == prev.crossings && lr.seed < prev.seed)
-                {
-                    lr
+                // NaN-safe and order-independent: a degenerate NaN-cost
+                // candidate never wins over a finite one regardless of which
+                // came first. A plain `<` already drops a NaN *challenger*
+                // (`NaN < finite` is false), but it would NOT let a finite
+                // challenger overtake a NaN *running best* (`finite < NaN` and
+                // `finite == NaN` are both false), so the first seed's NaN would
+                // be sticky. The explicit NaN branches fix that asymmetry. If
+                // ALL candidates are NaN the challenger is never better, so the
+                // earliest is kept -- deterministic regardless.
+                let better = if lr.weighted_cost.is_nan() {
+                    false // a NaN challenger never wins
+                } else if prev.weighted_cost.is_nan() {
+                    true // a finite challenger always beats a NaN running best
                 } else {
-                    prev
-                }
+                    lr.weighted_cost < prev.weighted_cost
+                        || (lr.weighted_cost == prev.weighted_cost && lr.seed < prev.seed)
+                };
+                if better { lr } else { prev }
             }
         });
     }
@@ -5157,3 +5369,11 @@ fn select_best_layout(
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "crossings_tests.rs"]
+mod crossings_tests;
+
+#[cfg(test)]
+#[path = "layout_selection_tests.rs"]
+mod layout_selection_tests;

@@ -2223,3 +2223,113 @@ fn test_incremental_add_chain_rebuilds_existing_cloud_flow() {
         "chain_flow and waste_flow should not overlap after incremental add (dist={dist})"
     );
 }
+
+/// Count how many elements differ between two views generated for the same
+/// model.  Element ordering is structurally stable (see
+/// `test_layout_structural_consistency`), so a positional comparison can be
+/// done index-by-index; `ViewElement` derives `PartialEq` over its f64
+/// coordinates (and flow `points`), giving an exact byte-for-byte comparison.
+/// Returns `(differing, total)`.
+fn count_layout_differences(
+    a: &simlin_engine::datamodel::StockFlow,
+    b: &simlin_engine::datamodel::StockFlow,
+) -> (usize, usize) {
+    assert_eq!(
+        a.elements.len(),
+        b.elements.len(),
+        "layouts must have the same number of elements to compare"
+    );
+    let differing = a
+        .elements
+        .iter()
+        .zip(b.elements.iter())
+        .filter(|(ea, eb)| ea != eb)
+        .count();
+    (differing, a.elements.len())
+}
+
+/// A layout produced for a fixed (model, annealing_random_seed) must be
+/// bit-identical across repeated serial calls in one process (issue #633).
+/// The RNG is already seeded deterministically; the only remaining source of
+/// run-to-run drift was per-instance-random `HashMap` iteration order inside
+/// `run_sfdp_with_rigid_chains` (centroid float accumulation and aux initial
+/// placement).  SIR has auxiliaries, so it exercises the aux-placement loop.
+#[test]
+fn test_layout_deterministic_per_seed() {
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+
+    let config = LayoutConfig {
+        annealing_random_seed: 42,
+        ..Default::default()
+    };
+
+    let view1 = generate_layout_with_config(&project, MAIN_MODEL, config.clone(), None)
+        .expect("first layout should succeed");
+    let view2 = generate_layout_with_config(&project, MAIN_MODEL, config, None)
+        .expect("second layout should succeed");
+
+    let (differing, total) = count_layout_differences(&view1, &view2);
+    assert_eq!(
+        differing, 0,
+        "layout for a fixed seed must be deterministic: {differing}/{total} elements differ \
+         between two serial calls"
+    );
+}
+
+/// The incremental layout path (`incremental_layout` ->
+/// `compute_new_element_positions`) must also be deterministic for a fixed
+/// model + patch.  This guards against the same class of HashMap-iteration
+/// nondeterminism in the incremental code paths.
+#[test]
+fn test_incremental_layout_deterministic() {
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::incremental_layout;
+    use simlin_engine::{ModelOperation, ModelPatch};
+
+    let project = load_project("test/test-models/samples/SIR/SIR.stmx");
+    let old_view =
+        generate_layout(&project, MAIN_MODEL, None).expect("initial layout should succeed");
+
+    let mut patched_project = project.clone();
+    let model = patched_project.get_model_mut(MAIN_MODEL).unwrap();
+    model
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "vaccination_rate".to_string(),
+            equation: datamodel::Equation::Scalar("susceptible * 0.01".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Default::default(),
+        }));
+
+    let make_patch = || ModelPatch {
+        name: String::new(),
+        ops: vec![ModelOperation::UpsertAux(datamodel::Aux {
+            ident: "vaccination_rate".to_string(),
+            equation: datamodel::Equation::Scalar("susceptible * 0.01".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Default::default(),
+        })],
+    };
+
+    let new_view1 =
+        incremental_layout(&old_view, &patched_project, MAIN_MODEL, &make_patch(), None)
+            .expect("first incremental layout should succeed");
+    let new_view2 =
+        incremental_layout(&old_view, &patched_project, MAIN_MODEL, &make_patch(), None)
+            .expect("second incremental layout should succeed");
+
+    let (differing, total) = count_layout_differences(&new_view1, &new_view2);
+    assert_eq!(
+        differing, 0,
+        "incremental layout must be deterministic: {differing}/{total} elements differ \
+         between two serial calls"
+    );
+}

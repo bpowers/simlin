@@ -4,11 +4,11 @@
 
 mod arrowhead;
 pub mod common;
-mod connector;
+pub(crate) mod connector;
 pub mod constants;
-mod elements;
-mod flow;
-mod label;
+pub(crate) mod elements;
+pub(crate) mod flow;
+pub(crate) mod label;
 mod render;
 #[cfg(feature = "png_render")]
 mod render_png;

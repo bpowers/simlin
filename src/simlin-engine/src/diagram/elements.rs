@@ -49,16 +49,26 @@ pub fn render_aux(element: &view_element::Aux, is_arrayed: bool) -> String {
     svg
 }
 
-pub fn aux_bounds(element: &view_element::Aux) -> Rect {
+/// The aux's bare *shape* box (the circle's bounding rect), WITHOUT its label.
+/// `aux_bounds` is this box merged with the label; quality metrics that already
+/// account for labels separately (e.g. label-vs-node overlap) need the
+/// label-free shape to avoid double-counting the label area.
+pub(crate) fn aux_shape_bounds(element: &view_element::Aux) -> Rect {
     let cx = element.x;
     let cy = element.y;
     let r = AUX_RADIUS;
-    let bounds = Rect {
+    Rect {
         top: cy - r,
         left: cx - r,
         right: cx + r,
         bottom: cy + r,
-    };
+    }
+}
+
+pub fn aux_bounds(element: &view_element::Aux) -> Rect {
+    let cx = element.x;
+    let cy = element.y;
+    let bounds = aux_shape_bounds(element);
 
     let label_props = LabelProps::new(cx, cy, element.label_side, display_name(&element.name));
     element_with_label_bounds(bounds, &label_props)
@@ -108,17 +118,27 @@ pub fn render_stock(element: &view_element::Stock, is_arrayed: bool) -> String {
     svg
 }
 
+/// The stock's bare *shape* box (the rect), WITHOUT its label. See
+/// `aux_shape_bounds` for why the label-free shape is exposed separately.
+pub(crate) fn stock_shape_bounds(element: &view_element::Stock) -> Rect {
+    let cx = element.x;
+    let cy = element.y;
+    let w = STOCK_WIDTH;
+    let h = STOCK_HEIGHT;
+    Rect {
+        top: cy - h / 2.0,
+        left: cx - w / 2.0,
+        right: cx + w / 2.0,
+        bottom: cy + h / 2.0,
+    }
+}
+
 pub fn stock_bounds(element: &view_element::Stock) -> Rect {
     let cx = element.x;
     let cy = element.y;
     let w = STOCK_WIDTH;
     let h = STOCK_HEIGHT;
-    let bounds = Rect {
-        top: cy - h / 2.0,
-        left: cx - w / 2.0,
-        right: cx + w / 2.0,
-        bottom: cy + h / 2.0,
-    };
+    let bounds = stock_shape_bounds(element);
 
     let label_props = LabelProps::new(cx, cy, element.label_side, display_name(&element.name))
         .with_radii(w / 2.0, h / 2.0);
