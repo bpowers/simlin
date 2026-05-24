@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use crate::datamodel::{self, ViewElement};
 use crate::diagram::common::{
     self, Point, Rect, display_name, merge_bounds, rect_area, rect_overlap_area,
-    segment_length_in_rect,
+    segment_clip_interval_in_rect,
 };
 use crate::diagram::connector::{ARC_POLYLINE_SAMPLES, connector_polyline, get_visual_center};
 use crate::diagram::elements::{
@@ -178,6 +178,32 @@ struct ConnectorGeometry {
     polyline: Vec<Point>,
     /// Total polyline length.
     length: f64,
+}
+
+/// Total length of the UNION of parameter intervals `[t0, t1]` (each `t` in
+/// [0,1]), counting each covered sub-length once. Sorts by start then sweep-
+/// merges, so overlapping/adjacent intervals collapse. The next interval merges
+/// when its start is `<= ` the current end (no epsilon needed; equality is
+/// tolerated as adjacency). Mutates `intervals` (sorts in place); empty input
+/// yields 0.0. Order-independent in its result. PURE.
+fn merged_interval_length(intervals: &mut [(f64, f64)]) -> f64 {
+    if intervals.is_empty() {
+        return 0.0;
+    }
+    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut total = 0.0;
+    let mut cur = intervals[0];
+    for &(t0, t1) in &intervals[1..] {
+        if t0 <= cur.1 {
+            // Overlapping or adjacent: extend the current run.
+            cur.1 = cur.1.max(t1);
+        } else {
+            total += cur.1 - cur.0;
+            cur = (t0, t1);
+        }
+    }
+    total += cur.1 - cur.0;
+    total
 }
 
 /// Polyline length: sum of segment lengths.
@@ -669,16 +695,40 @@ pub fn compute_layout_metrics(
     let total_connector_length: f64 = connectors.iter().map(|c| c.length).sum();
 
     // --- node_connector_overlap (length inside non-incident shape boxes) ---
+    //
+    // Documented as a "fraction of total connector length", so each physical
+    // sub-length of connector covered by ANY non-incident node shape box must be
+    // counted AT MOST ONCE. Summing the per-box clipped length double-counts the
+    // region where two non-incident boxes overlap, which can push the normalized
+    // value above 1.0 (overlapping shape boxes are common -- a Flow's shape box is
+    // its whole-pipe bounding box, which frequently overlaps stocks/auxes/other
+    // flows). Instead, for EACH segment we collect the clip intervals over all
+    // non-incident boxes and UNION them (merge overlapping/adjacent intervals)
+    // before summing, so each covered sub-length contributes once and the term is
+    // a true fraction in [0, 1]. The per-segment merge result is order-independent,
+    // so this is deterministic regardless of `node_shape_boxes` iteration order.
     let node_connector_overlap = if total_connector_length > 0.0 {
         let mut inside = 0.0;
         for c in &connectors {
-            for (uid, rect) in &node_shape_boxes {
-                if c.incident_uids.contains(uid) {
-                    continue; // skip the connector's own endpoints
+            for seg in c.polyline.windows(2) {
+                let dx = seg[1].x - seg[0].x;
+                let dy = seg[1].y - seg[0].y;
+                let seg_len = (dx * dx + dy * dy).sqrt();
+                if seg_len == 0.0 {
+                    continue; // degenerate segment covers no length
                 }
-                for seg in c.polyline.windows(2) {
-                    inside += segment_length_in_rect(&seg[0], &seg[1], rect);
+                // Clip interval [t0, t1] of this segment within each non-incident
+                // box, in segment-parameter space (t in [0,1]).
+                let mut intervals: Vec<(f64, f64)> = Vec::new();
+                for (uid, rect) in &node_shape_boxes {
+                    if c.incident_uids.contains(uid) {
+                        continue; // skip the connector's own endpoints
+                    }
+                    if let Some(iv) = segment_clip_interval_in_rect(&seg[0], &seg[1], rect) {
+                        intervals.push(iv);
+                    }
                 }
+                inside += merged_interval_length(&mut intervals) * seg_len;
             }
         }
         inside / total_connector_length
@@ -848,6 +898,10 @@ fn view_bounding_box(node_boxes: &[(i32, Rect)]) -> Option<Rect> {
 mod tests {
     use super::*;
     use crate::datamodel::view_element::{self, LabelSide, LinkShape};
+    // `segment_length_in_rect` is the simple single-box clip; the AC1.3 tests and
+    // the union tests use it as an independent reference oracle to cross-check the
+    // production union path (which composes `segment_clip_interval_in_rect`).
+    use crate::diagram::common::segment_length_in_rect;
     use crate::diagram::constants::STOCK_WIDTH;
     use proptest::prelude::*;
 
@@ -1233,6 +1287,195 @@ mod tests {
         assert!(
             m.node_connector_overlap > 0.0,
             "a connector passing under a node SHAPE must be charged"
+        );
+    }
+
+    // node_connector_overlap is documented as a "fraction of total connector
+    // length", so it must count each physical sub-length of connector covered by
+    // ANY non-incident node shape box AT MOST ONCE. When two non-incident shape
+    // boxes overlap, the prior implementation summed the per-box clipped lengths,
+    // double-counting the connector segment that lies in the overlap region; the
+    // normalized value could then exceed 1.0 and over-inflate weighted_cost. The
+    // correct value is the UNION length covered by (box A OR box B) over the total
+    // connector length. These two tests pin the union contract.
+
+    /// Length of segment p0->p1 covered by the UNION of `rects` (each physical
+    /// sub-length counted once). Independent reference implementation used by the
+    /// union tests: collect each rect's Liang-Barsky clip interval, merge, sum.
+    fn union_segment_length_in_rects(p0: &Point, p1: &Point, rects: &[Rect]) -> f64 {
+        let seg_len = {
+            let dx = p1.x - p0.x;
+            let dy = p1.y - p0.y;
+            (dx * dx + dy * dy).sqrt()
+        };
+        if seg_len == 0.0 {
+            return 0.0;
+        }
+        let mut intervals: Vec<(f64, f64)> = Vec::new();
+        for r in rects {
+            // Recover [t0, t1] from segment_length_in_rect's reported length: the
+            // tests use axis-aligned horizontal segments, so the clipped length is
+            // an exact multiple of seg_len. We instead build intervals from the
+            // covered length by reconstructing endpoints via the rect bounds for a
+            // horizontal segment at constant y (the only geometry these tests use).
+            let covered = segment_length_in_rect(p0, p1, r);
+            if covered <= 0.0 {
+                continue;
+            }
+            // For a horizontal segment (y constant) inside [left,right], the
+            // covered x-range is [max(min_x,left), min(max_x,right)]. Convert to t.
+            let (xa, xb) = (p0.x.min(p1.x), p0.x.max(p1.x));
+            let lo_x = xa.max(r.left);
+            let hi_x = xb.min(r.right);
+            let span = p1.x - p0.x;
+            let t_lo = ((lo_x - p0.x) / span).clamp(0.0, 1.0);
+            let t_hi = ((hi_x - p0.x) / span).clamp(0.0, 1.0);
+            let (t0, t1) = if t_lo <= t_hi {
+                (t_lo, t_hi)
+            } else {
+                (t_hi, t_lo)
+            };
+            intervals.push((t0, t1));
+        }
+        intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mut total = 0.0;
+        let mut cur: Option<(f64, f64)> = None;
+        for (t0, t1) in intervals {
+            match cur {
+                None => cur = Some((t0, t1)),
+                Some((c0, c1)) => {
+                    if t0 <= c1 {
+                        cur = Some((c0, c1.max(t1)));
+                    } else {
+                        total += c1 - c0;
+                        cur = Some((t0, t1));
+                    }
+                }
+            }
+        }
+        if let Some((c0, c1)) = cur {
+            total += c1 - c0;
+        }
+        total * seg_len
+    }
+
+    #[test]
+    fn test_node_connector_overlap_union_of_overlapping_boxes() {
+        // A horizontal Link between aux #1 (0,0) and aux #2 (400,0) at y=0. Two
+        // NON-incident stocks straddle the line AND overlap each other:
+        //   stock #3 @ (200,0): shape x [177.5, 222.5]
+        //   stock #4 @ (210,0): shape x [187.5, 232.5]
+        // Their shape boxes overlap in x [187.5, 222.5]. The OLD code charged the
+        // connector for box A (length 45) PLUS box B (length 45) = 90, but the
+        // physical connector length under (A OR B) is the union x [177.5, 232.5]
+        // = 55. The new metric must equal union/total, and the old sum/total
+        // strictly exceeds it.
+        let a = aux(1, "a", 0.0, 0.0);
+        let b = aux(2, "b", 400.0, 0.0);
+        let s3 = stock(3, "s3", 200.0, 0.0);
+        let s4 = stock(4, "s4", 210.0, 0.0);
+        let link = straight_link(10, 1, 2);
+        let view = make_view(vec![a, b, s3.clone(), s4.clone(), link]);
+
+        let m = compute_layout_metrics(&view, &cfg());
+
+        let connectors = collect_connector_geometry(&view);
+        assert_eq!(connectors.len(), 1);
+        let c = &connectors[0];
+        let box3 = node_shape_box(&s3).unwrap();
+        let box4 = node_shape_box(&s4).unwrap();
+
+        // Independent union reference and the old (double-counting) sum.
+        let mut union_len = 0.0;
+        let mut old_sum_len = 0.0;
+        for seg in c.polyline.windows(2) {
+            union_len += union_segment_length_in_rects(&seg[0], &seg[1], &[box3, box4]);
+            old_sum_len += segment_length_in_rect(&seg[0], &seg[1], &box3)
+                + segment_length_in_rect(&seg[0], &seg[1], &box4);
+        }
+        let expected = union_len / c.length;
+        let old_value = old_sum_len / c.length;
+
+        // The fixture must actually overlap so the old sum strictly exceeds the
+        // union (otherwise the test proves nothing).
+        assert!(
+            old_value > expected + 1e-9,
+            "fixture must double-count: old {old_value} should exceed union {expected}"
+        );
+        assert!(
+            (m.node_connector_overlap - expected).abs() < 1e-9,
+            "node_connector_overlap must equal the union fraction: got {} expected {} \
+             (old double-counted value was {})",
+            m.node_connector_overlap,
+            expected,
+            old_value
+        );
+        assert!(
+            m.node_connector_overlap <= 1.0,
+            "node_connector_overlap is a fraction and must be <= 1.0, got {}",
+            m.node_connector_overlap
+        );
+    }
+
+    #[test]
+    fn test_node_connector_overlap_coincident_boxes_counted_once() {
+        // Starker variant: a connector sub-length fully inside TWO COINCIDENT
+        // non-incident boxes is counted ONCE, not twice. Two stocks at the same
+        // position (200,0) each fully contain the connector segment x [177.5,
+        // 222.5]. The OLD code would count that length twice (~2x); the union
+        // counts it once. We also build the fixture so the total connector length
+        // is small enough that the OLD value EXCEEDS 1.0 -- impossible for a
+        // documented fraction. Auxes are placed close in (x 180 and 220) so the
+        // drawn connector is short and lies entirely within the coincident boxes.
+        let a = aux(1, "a", 180.0, 0.0);
+        let b = aux(2, "b", 220.0, 0.0);
+        let s3 = stock(3, "s3", 200.0, 0.0);
+        let s4 = stock(4, "s4", 200.0, 0.0);
+        let link = straight_link(10, 1, 2);
+        let view = make_view(vec![a, b, s3.clone(), s4.clone(), link]);
+
+        let m = compute_layout_metrics(&view, &cfg());
+
+        let connectors = collect_connector_geometry(&view);
+        assert_eq!(connectors.len(), 1);
+        let c = &connectors[0];
+        let box3 = node_shape_box(&s3).unwrap();
+        let box4 = node_shape_box(&s4).unwrap();
+
+        let mut union_len = 0.0;
+        let mut old_sum_len = 0.0;
+        for seg in c.polyline.windows(2) {
+            union_len += union_segment_length_in_rects(&seg[0], &seg[1], &[box3, box4]);
+            old_sum_len += segment_length_in_rect(&seg[0], &seg[1], &box3)
+                + segment_length_in_rect(&seg[0], &seg[1], &box4);
+        }
+        let expected = union_len / c.length;
+        let old_value = old_sum_len / c.length;
+
+        // With two coincident boxes both covering the whole drawn connector, the
+        // union fraction is 1.0 and the old value is ~2.0 (> 1.0, impossible for a
+        // fraction).
+        assert!(
+            old_value > 1.0,
+            "coincident-box fixture must drive the OLD value above 1.0 (got {old_value})"
+        );
+        assert!(
+            (expected - 1.0).abs() < 1e-9,
+            "union of two coincident boxes covering the whole connector is the full \
+             length (fraction 1.0), got {expected}"
+        );
+        assert!(
+            (m.node_connector_overlap - expected).abs() < 1e-9,
+            "coincident non-incident boxes must be counted once: got {} expected {} \
+             (old double-counted value was {})",
+            m.node_connector_overlap,
+            expected,
+            old_value
+        );
+        assert!(
+            m.node_connector_overlap <= 1.0 + 1e-9,
+            "node_connector_overlap is a fraction and must be <= 1.0, got {}",
+            m.node_connector_overlap
         );
     }
 

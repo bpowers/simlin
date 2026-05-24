@@ -139,11 +139,13 @@ pub fn rad_to_deg(r: f64) -> f64 {
 
 // These rectangle/segment geometry primitives are the load-bearing helpers for
 // the layout quality metric (`layout::metrics`). `rect_width`/`rect_height`/
-// `rect_area`/`rect_overlap_area`/`segment_length_in_rect` are consumed there
-// (node-overlap, label-overlap, node-connector-overlap, sprawl, and aspect
-// terms); `rect_contains_point` is a primitive kept for completeness and
-// exercised by the inline tests below, so it stays `#[allow(dead_code)]` until
-// a caller needs it.
+// `rect_area`/`rect_overlap_area` are consumed there (node-overlap,
+// label-overlap, sprawl, and aspect terms), and `segment_clip_interval_in_rect`
+// is the Liang-Barsky core that `node_connector_overlap` unions across boxes.
+// `rect_contains_point` and `segment_length_in_rect` are primitives kept for
+// completeness and as the single-box reference oracle the metric's tests check
+// the union path against, so each stays `#[allow(dead_code)]` until a non-test
+// caller needs it.
 
 /// Width of a rect (right - left). May be negative for a degenerate/inverted rect.
 pub(crate) fn rect_width(r: &Rect) -> f64 {
@@ -173,9 +175,19 @@ pub(crate) fn rect_contains_point(r: &Rect, p: &Point) -> bool {
     p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom
 }
 
-/// Length of the portion of segment p0->p1 that lies within axis-aligned rect r.
-/// Returns 0 if the segment never enters r. Pure; no allocation.
-pub(crate) fn segment_length_in_rect(p0: &Point, p1: &Point, r: &Rect) -> f64 {
+/// Clipped parameter interval `[t0, t1]` of segment `p0 + t*(p1-p0)` (t in
+/// [0,1]) that lies within axis-aligned rect `r`, or `None` if the segment never
+/// enters `r`. When `Some`, `0.0 <= t0 < t1 <= 1.0` (a zero-thickness touch
+/// where `t0 == t1` returns `None`, contributing no length). This is the
+/// Liang-Barsky core; `segment_length_in_rect` delegates to it, and
+/// `layout::metrics` uses the raw intervals to UNION a connector's coverage
+/// across multiple boxes so each physical sub-length is counted at most once.
+/// Pure; no allocation.
+pub(crate) fn segment_clip_interval_in_rect(
+    p0: &Point,
+    p1: &Point,
+    r: &Rect,
+) -> Option<(f64, f64)> {
     // Liang-Barsky clip of the parametric segment p0 + t*(p1-p0), t in [0,1],
     // against left/right/top/bottom slabs.
     let dx = p1.x - p0.x;
@@ -192,20 +204,20 @@ pub(crate) fn segment_length_in_rect(p0: &Point, p1: &Point, r: &Rect) -> f64 {
     for (p, q) in edges {
         if p == 0.0 {
             if q < 0.0 {
-                return 0.0; // parallel and outside this slab
+                return None; // parallel and outside this slab
             }
         } else {
             let t = q / p;
             if p < 0.0 {
                 if t > t1 {
-                    return 0.0;
+                    return None;
                 }
                 if t > t0 {
                     t0 = t;
                 }
             } else {
                 if t < t0 {
-                    return 0.0;
+                    return None;
                 }
                 if t < t1 {
                     t1 = t;
@@ -213,8 +225,23 @@ pub(crate) fn segment_length_in_rect(p0: &Point, p1: &Point, r: &Rect) -> f64 {
             }
         }
     }
-    let seg_len = (dx * dx + dy * dy).sqrt();
-    (t1 - t0).max(0.0) * seg_len
+    if t1 > t0 { Some((t0, t1)) } else { None }
+}
+
+/// Length of the portion of segment p0->p1 that lies within axis-aligned rect r.
+/// Returns 0 if the segment never enters r. Pure; no allocation. Delegates to
+/// `segment_clip_interval_in_rect` so the clip math lives in exactly one place.
+#[allow(dead_code)]
+pub(crate) fn segment_length_in_rect(p0: &Point, p1: &Point, r: &Rect) -> f64 {
+    match segment_clip_interval_in_rect(p0, p1, r) {
+        Some((t0, t1)) => {
+            let dx = p1.x - p0.x;
+            let dy = p1.y - p0.y;
+            let seg_len = (dx * dx + dy * dy).sqrt();
+            (t1 - t0) * seg_len
+        }
+        None => 0.0,
+    }
 }
 
 #[cfg(test)]
