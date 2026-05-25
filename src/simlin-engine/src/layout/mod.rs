@@ -6,6 +6,7 @@ pub mod annealing;
 pub mod chain;
 pub mod config;
 pub mod connector;
+pub mod declutter;
 pub mod eval_stats;
 pub mod graph;
 pub mod metadata;
@@ -3612,6 +3613,15 @@ pub fn fresh_layout(
 
     // Phase 4: Apply optimal label placement
     optimize_labels(&mut state, model, metadata);
+
+    // Phase 4b: Deterministic label-aware declutter -- choose label sides and
+    // push overlapping element footprints (shape + label boxes) apart by the
+    // minimal amount, on the exact geometry the quality metric scores. This is
+    // where `label_overlap` (the dominant cost and the entire source of
+    // seed-to-seed variance) is driven down deterministically.
+    if config.declutter {
+        declutter::declutter_view(&mut state.elements);
+    }
 
     // Phase 5: Normalize coordinates
     normalize_coordinates(&mut state.elements, DIAGRAM_ORIGIN_MARGIN);

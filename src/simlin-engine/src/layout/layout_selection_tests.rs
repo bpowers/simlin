@@ -303,11 +303,14 @@ fn test_select_best_layout_all_nan_keeps_earliest() {
 // Lowering a ceiling that no longer matches reality is fine; raising one to
 // paper over a real regression is not.
 //
-// Observed at seed 42 (2026-05-23): pop = 0.0533, chain = 0.0,
-// two_stock = 0.1646.
-const GUARD_POP_COST_CEILING: f64 = 0.06;
-const GUARD_CHAIN_COST_CEILING: f64 = 0.05;
-const GUARD_TWO_STOCK_COST_CEILING: f64 = 0.19;
+// Observed at seed 42 with the label-aware declutter pass and the gentle
+// `sprawl = 0.1` compactness counterweight (2026-05-23): pop = 0.1612,
+// chain = 0.0893, two_stock = 0.2850. (These rose from the pre-declutter values
+// purely because the counterweight gives the small residual `sprawl` of these
+// tiny models a non-zero weight; the layouts themselves are overlap-free.)
+const GUARD_POP_COST_CEILING: f64 = 0.18;
+const GUARD_CHAIN_COST_CEILING: f64 = 0.10;
+const GUARD_TWO_STOCK_COST_CEILING: f64 = 0.31;
 
 /// Lay `project`'s `main` model out at the fixed seed 42 and return its
 /// calibrated `weighted_cost`. Seeding explicitly (rather than relying on the
