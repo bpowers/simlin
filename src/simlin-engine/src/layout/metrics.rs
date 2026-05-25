@@ -125,24 +125,11 @@ impl Default for MetricWeights {
     ///     (`node_connector_overlap`), obscured labels (`label_overlap`), and
     ///     edge `crossings`. These are the things that make a diagram unreadable
     ///     or assert false causal connections, so they dominate the cost.
-    ///   * `sprawl` is a GENTLE compactness counterweight (0.1). The readability
-    ///     terms above can be driven to zero just by spreading a diagram out
-    ///     (labels are a fixed pixel size, so enough spacing always separates
-    ///     them), and nothing else here resists that -- `crossings` and
-    ///     `node_connector_overlap` are scale-invariant and `aspect_penalty` is
-    ///     off. Without a counterweight "lower cost" can mean "merely bigger",
-    ///     and an optimizer (or the best-of-k seed picker) would prefer endlessly
-    ///     inflated, unviewable layouts. A small `sprawl` weight makes spreading
-    ///     past the point where labels separate strictly costly, so the cost has
-    ///     a finite optimum at "spread just enough" and "lower cost" once again
-    ///     means "genuinely better". It is kept far below the readability terms
-    ///     (readability >> compactness still holds): at the healthy spread the
-    ///     declutter pass produces, `sprawl` is ~1, contributing ~0.1 -- enough
-    ///     to break ties toward compactness and deter inflation, not enough to
-    ///     pull a layout back into label collisions.
-    ///   * `edge_length_cv` and `aspect_penalty` stay 0.0: even edge lengths are
-    ///     not a goal, and aspect-ratio penalties actively punished good wide
-    ///     layouts during calibration.
+    ///   * `sprawl`, `edge_length_cv`, and `aspect_penalty` are intentionally
+    ///     0.0: compactness and aspect ratio are NOT goals. Spreading nodes out
+    ///     to keep labels legible and feedback loops visible is GOOD, not
+    ///     something to penalize, so these terms must not pull against
+    ///     readability.
     ///   * `loop_compactness` is a low 0.25: it gently REWARDS drawing feedback
     ///     loops as visible circles (a readability aid), but must never dominate
     ///     the overlap/crossings family, so it stays well below 1.0.
@@ -154,7 +141,7 @@ impl Default for MetricWeights {
             node_connector_overlap: 1.0,
             label_overlap: 1.0,
             crossings: 1.0,
-            sprawl: 0.1,
+            sprawl: 0.0,
             edge_length_cv: 0.0,
             aspect_penalty: 0.0,
             chain_straightness: 0.0,
@@ -253,7 +240,7 @@ fn node_box(element: &ViewElement) -> Option<Rect> {
 /// `module_bounds`/`cloud_bounds` already exclude the label (modules render a
 /// label that their bounds omit; clouds render none), so they are their own
 /// shape box.
-pub(crate) fn node_shape_box(element: &ViewElement) -> Option<Rect> {
+fn node_shape_box(element: &ViewElement) -> Option<Rect> {
     match element {
         ViewElement::Aux(a) => Some(aux_shape_bounds(a)),
         ViewElement::Stock(s) => Some(stock_shape_bounds(s)),
@@ -264,36 +251,29 @@ pub(crate) fn node_shape_box(element: &ViewElement) -> Option<Rect> {
     }
 }
 
-/// Build a `LabelProps` for a labeled element placed on `side`, matching the
-/// renderer's label geometry (center, display name, and the element's radii).
-/// Only elements that render a label return `Some`. The radii match the
-/// per-element `with_radii` calls in `diagram::elements`/`diagram::flow`.
-///
-/// Exposed `pub(crate)` so the declutter pass (`layout::declutter`) can probe
-/// the label box an element *would* occupy on an alternative side, scoring
-/// against the identical geometry this metric uses.
-pub(crate) fn element_label_props_for(
-    element: &ViewElement,
-    side: crate::datamodel::view_element::LabelSide,
-) -> Option<LabelProps> {
+/// Build a `LabelProps` for a labeled element, matching the renderer's label
+/// geometry (center, label side, display name, and the element's radii). Only
+/// elements that render a label return `Some`. The radii match the per-element
+/// `with_radii` calls in `diagram::elements`/`diagram::flow`.
+fn element_label_props(element: &ViewElement) -> Option<LabelProps> {
     use crate::diagram::constants::{
         AUX_RADIUS, FLOW_VALVE_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
     };
     match element {
         ViewElement::Aux(a) => Some(
-            LabelProps::new(a.x, a.y, side, display_name(&a.name))
+            LabelProps::new(a.x, a.y, a.label_side, display_name(&a.name))
                 .with_radii(AUX_RADIUS, AUX_RADIUS),
         ),
         ViewElement::Stock(s) => Some(
-            LabelProps::new(s.x, s.y, side, display_name(&s.name))
+            LabelProps::new(s.x, s.y, s.label_side, display_name(&s.name))
                 .with_radii(STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0),
         ),
         ViewElement::Module(m) => Some(
-            LabelProps::new(m.x, m.y, side, display_name(&m.name))
+            LabelProps::new(m.x, m.y, m.label_side, display_name(&m.name))
                 .with_radii(MODULE_WIDTH / 2.0, MODULE_HEIGHT / 2.0),
         ),
         ViewElement::Flow(f) => Some(
-            LabelProps::new(f.x, f.y, side, display_name(&f.name))
+            LabelProps::new(f.x, f.y, f.label_side, display_name(&f.name))
                 .with_radii(FLOW_VALVE_RADIUS, FLOW_VALVE_RADIUS),
         ),
         // Aliases do render a label, but they have no `*_bounds` helper and are
@@ -305,27 +285,6 @@ pub(crate) fn element_label_props_for(
         | ViewElement::Cloud(_)
         | ViewElement::Group(_) => None,
     }
-}
-
-/// The element's own current label side, or `None` for kinds the metric does
-/// not score a label for (the same set `element_label_props_for` returns `Some`
-/// for). Lets `element_label_props` resolve "the label as currently placed".
-fn element_label_side(element: &ViewElement) -> Option<crate::datamodel::view_element::LabelSide> {
-    match element {
-        ViewElement::Aux(a) => Some(a.label_side),
-        ViewElement::Stock(s) => Some(s.label_side),
-        ViewElement::Module(m) => Some(m.label_side),
-        ViewElement::Flow(f) => Some(f.label_side),
-        ViewElement::Alias(_)
-        | ViewElement::Link(_)
-        | ViewElement::Cloud(_)
-        | ViewElement::Group(_) => None,
-    }
-}
-
-/// Build a `LabelProps` for a labeled element on its *current* label side.
-fn element_label_props(element: &ViewElement) -> Option<LabelProps> {
-    element_label_props_for(element, element_label_side(element)?)
 }
 
 /// Collect the drawn geometry of every connector (Link or Flow) that draws
@@ -1803,23 +1762,9 @@ mod tests {
             }
         }
 
-        // `sprawl` is a GENTLE compactness counterweight: strictly positive (so
-        // unbounded inflation is penalized and the cost has a finite optimum at
-        // "spread just enough"), but far below the dominant readability family
-        // (checked by the dominant>compactness loop above), so readability still
-        // wins decisively over compactness.
-        assert!(
-            w.sprawl > 0.0,
-            "sprawl must be a positive compactness counterweight, got {}",
-            w.sprawl
-        );
-        assert!(
-            w.sprawl < 0.5 * w.label_overlap,
-            "sprawl ({}) must stay well below the readability terms ({})",
-            w.sprawl,
-            w.label_overlap
-        );
-        // Edge-length uniformity and aspect ratio remain non-goals.
+        // Compactness/aspect are intentionally zero: spreading out to keep labels
+        // legible and feedback loops visible is good, not penalized.
+        assert_eq!(w.sprawl, 0.0, "sprawl is not a goal");
         assert_eq!(
             w.edge_length_cv, 0.0,
             "edge-length uniformity is not a goal"
@@ -2492,26 +2437,9 @@ mod tests {
         assert_human_beats_auto("population");
     }
 
-    // logistic-growth was a human<auto anchor, but the label-aware declutter pass
-    // closed the gap on this trivial model (1 stock, 1 flow, one small feedback
-    // loop): the auto layout is now within a few percent of -- in fact marginally
-    // better than -- the hand-authored reference (a visual check confirms both are
-    // overlap-free with clear labels; the reference only draws a slightly cleaner
-    // loop arc). The strict human<auto invariant no longer holds here, so assert
-    // PARITY: the metric must rate the two layouts as near-equivalent, neither
-    // wildly preferred. The robust human<auto anchors remain reliability /
-    // fishbanks / population, where the reference is still clearly better.
     #[test]
-    fn test_reference_pair_logistic_growth_auto_reaches_parity_with_human() {
-        let project = load_default_project("logistic-growth");
-        let human = human_cost(&project);
-        let auto = auto_cost(&project);
-        let rel = (auto - human).abs() / human.max(1e-9);
-        assert!(
-            rel < 0.15,
-            "logistic-growth: expected auto ({auto}) within 15% of human ({human}) \
-             after declutter, got rel={rel}"
-        );
+    fn test_reference_pair_dp_logistic_growth_human_beats_auto() {
+        assert_human_beats_auto("logistic-growth");
     }
 
     #[test]

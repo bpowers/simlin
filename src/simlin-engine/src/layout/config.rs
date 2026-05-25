@@ -59,12 +59,6 @@ pub struct LayoutConfig {
     pub annealing_max_delta_aux: f64,
     /// Maximum displacement for chain nodes (stocks/flows) during annealing.
     pub annealing_max_delta_chain: f64,
-
-    /// Run the deterministic label-aware declutter pass (`layout::declutter`)
-    /// after placement: choose label sides and push overlapping element
-    /// footprints apart so labels/shapes stop colliding. On by default; the
-    /// layout-quality eval can disable it for A/B comparison.
-    pub declutter: bool,
 }
 
 impl LayoutConfig {
@@ -125,7 +119,6 @@ impl Default for LayoutConfig {
             annealing_temperature_scale: 0.4,
             annealing_max_delta_aux: 200.0,
             annealing_max_delta_chain: 25.0,
-            declutter: true,
         }
     }
 }

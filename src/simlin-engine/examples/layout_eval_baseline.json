@@ -16,7 +16,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 1,
@@ -31,7 +31,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 2,
@@ -46,7 +46,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 3,
@@ -61,7 +61,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 4,
@@ -76,7 +76,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 5,
@@ -91,7 +91,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 6,
@@ -106,7 +106,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 7,
@@ -121,7 +121,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 42,
@@ -136,7 +136,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 123,
@@ -151,7 +151,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 456,
@@ -166,7 +166,7 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         },
         {
           "seed": 789,
@@ -181,15 +181,15 @@
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.11651593118312373
+          "weighted_cost": 0.03901734104046243
         }
       ],
-      "median_cost": 0.11651593118312373,
+      "median_cost": 0.03901734104046243,
       "spread": [
-        0.11651593118312373,
-        0.11651593118312373
+        0.03901734104046243,
+        0.03901734104046243
       ],
-      "best_of_k_cost": 0.11651593118312373,
+      "best_of_k_cost": 0.03901734104046243,
       "best_seed": 0,
       "median_seed": 0,
       "worst_seed": 0
@@ -202,192 +202,192 @@
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 1,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 2,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 3,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 4,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 5,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 6,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 7,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 42,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 123,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 456,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         },
         {
           "seed": 789,
           "metrics": {
             "node_overlap": 0.0,
             "node_connector_overlap": 0.0,
-            "label_overlap": 0.0,
+            "label_overlap": 0.038540721316451254,
             "crossings": 0.0,
-            "sprawl": 0.7127642526860908,
-            "edge_length_cv": 0.3852145712314533,
-            "aspect_penalty": 0.7430555555555558,
+            "sprawl": 0.7423022923087866,
+            "edge_length_cv": 0.39340989843910823,
+            "aspect_penalty": 0.06837606837606858,
             "chain_straightness": 0.0,
             "loop_compactness": 0.0
           },
-          "weighted_cost": 0.07127642526860908
+          "weighted_cost": 0.038540721316451254
         }
       ],
-      "median_cost": 0.07127642526860908,
+      "median_cost": 0.038540721316451254,
       "spread": [
-        0.07127642526860908,
-        0.07127642526860908
+        0.038540721316451254,
+        0.038540721316451254
       ],
-      "best_of_k_cost": 0.07127642526860908,
+      "best_of_k_cost": 0.038540721316451254,
       "best_seed": 0,
       "median_seed": 0,
       "worst_seed": 0
     }
   ],
-  "geomean_of_medians": 0.09113088972229073
+  "geomean_of_medians": 0.03877829892542217
 }
