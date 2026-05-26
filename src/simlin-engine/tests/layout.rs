@@ -11,7 +11,10 @@ use simlin_engine::datamodel::ViewElement;
 use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
 use simlin_engine::layout::LayoutState;
 use simlin_engine::layout::config::LayoutConfig;
-use simlin_engine::layout::{generate_best_layout, generate_layout, generate_layout_with_config};
+use simlin_engine::layout::{
+    compute_layout_metadata, count_view_crossings, generate_best_layout, generate_layout,
+    generate_layout_with_config,
+};
 use simlin_engine::open_xmile;
 
 /// The main model name in single-model XMILE files is the empty string;
@@ -253,6 +256,75 @@ fn test_layout_logistic_growth() {
     let view =
         generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
     verify_layout(&view, model, "logistic_growth");
+}
+
+#[test]
+fn test_layout_modules_hares_and_foxes_has_module_links() {
+    let project = load_project("test/modules_hares_and_foxes/modules_hares_and_foxes.stmx");
+    let metadata = compute_layout_metadata(&project, MAIN_MODEL, None)
+        .expect("hares_and_foxes metadata should compute");
+
+    let hares_deps = metadata
+        .dep_graph
+        .get("hares")
+        .expect("hares module should be in the dependency graph");
+    assert!(
+        hares_deps.contains("area") && hares_deps.contains("lynxes"),
+        "hares should depend on area and lynxes, got {hares_deps:?}",
+    );
+
+    let lynxes_deps = metadata
+        .dep_graph
+        .get("lynxes")
+        .expect("lynxes module should be in the dependency graph");
+    assert!(
+        lynxes_deps.contains("hares") && lynxes_deps.contains("size_of_one_time_lynx_harvest"),
+        "lynxes should depend on hares and harvest size, got {lynxes_deps:?}",
+    );
+
+    let view =
+        generate_layout(&project, MAIN_MODEL, None).expect("layout generation should succeed");
+    let uid_by_ident: std::collections::HashMap<String, i32> = view
+        .elements
+        .iter()
+        .filter_map(|elem| match elem {
+            ViewElement::Aux(a) => {
+                Some((canonicalize(&a.name.replace('\n', "_")).into_owned(), a.uid))
+            }
+            ViewElement::Module(m) => {
+                Some((canonicalize(&m.name.replace('\n', "_")).into_owned(), m.uid))
+            }
+            _ => None,
+        })
+        .collect();
+    let links: HashSet<(i32, i32)> = view
+        .elements
+        .iter()
+        .filter_map(|elem| match elem {
+            ViewElement::Link(link) => Some((link.from_uid, link.to_uid)),
+            _ => None,
+        })
+        .collect();
+
+    for (from, to) in [
+        ("area", "hares"),
+        ("lynxes", "hares"),
+        ("hares", "lynxes"),
+        ("size_of_one_time_lynx_harvest", "lynxes"),
+    ] {
+        let from_uid = uid_by_ident[from];
+        let to_uid = uid_by_ident[to];
+        assert!(
+            links.contains(&(from_uid, to_uid)),
+            "expected generated link {from}->{to}; links={links:?}",
+        );
+    }
+
+    assert_eq!(
+        count_view_crossings(&view),
+        0,
+        "reciprocal module links should be curved apart rather than crossing",
+    );
 }
 
 #[test]

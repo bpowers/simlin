@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 pub mod annealing;
+mod aux_placement;
 pub mod chain;
 pub mod config;
 pub mod connector;
@@ -19,10 +20,17 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::f64::consts::PI;
 
 use self::annealing::{FlowTemplate, LineSegment, run_annealing_with_filter};
+#[cfg(test)]
+use self::aux_placement::MIN_AUX_LANE_OFFSET;
+use self::aux_placement::{
+    AuxiliaryPlacementContext, auxiliary_initial_position, enforce_auxiliary_lane_clearance,
+    positioned_variables_from_layout, spread_auxiliary_initial_positions,
+};
 use self::chain::{DIAGRAM_ORIGIN_MARGIN, compute_chain_positions, make_cloud_node_ident};
 use self::config::LayoutConfig;
 use self::connector::{
     FlowOrientation, calc_stock_flow_arc_angle, calculate_loop_arc_angle, compute_flow_orientation,
+    normalize_angle,
 };
 use self::graph::{ConstrainedGraphBuilder, Graph, GraphBuilder, Layout, Position};
 use self::metadata::{ComputedMetadata, LoopPolarity, StockFlowChain};
@@ -1169,6 +1177,19 @@ pub fn diff_connectors(state: &mut LayoutState, metadata: &ComputedMetadata) {
                     (state.positions.get(&from_uid), state.positions.get(&to_uid))
                 {
                     calc_stock_flow_arc_angle(s_pos, f_pos)
+                } else {
+                    -45.0
+                };
+                LinkShape::Arc(arc_angle)
+            } else if metadata
+                .dep_graph
+                .get(from_ident)
+                .is_some_and(|deps| deps.contains(to_ident))
+            {
+                let arc_angle = if let (Some(&from_pos), Some(&to_pos)) =
+                    (state.positions.get(&from_uid), state.positions.get(&to_uid))
+                {
+                    calc_reciprocal_arc_angle(from_pos, to_pos)
                 } else {
                     -45.0
                 };
@@ -2523,21 +2544,48 @@ fn run_sfdp_with_rigid_chains(
         center_y /= (count + 1) as f64;
     }
 
-    let mut aux_index = 0;
+    let positioned_by_ident = positioned_variables_from_layout(var_to_node, &initial_layout);
+    let aux_ctx = AuxiliaryPlacementContext::new(
+        &metadata.dep_graph,
+        &metadata.reverse_dep_graph,
+        &metadata.flow_to_stocks,
+        &metadata.feedback_loops,
+    );
+    let global_center = Position::new(center_x, center_y);
+    let mut proposals = Vec::new();
+    let mut fallback_index = 0;
+    for &(var_ident, node_id) in &entries {
+        if initial_layout.contains_key(node_id) {
+            continue;
+        }
+        if let Some(proposal) = auxiliary_initial_position(
+            var_ident,
+            &positioned_by_ident,
+            &aux_ctx,
+            global_center,
+            fallback_index,
+        ) {
+            proposals.push((var_ident.clone(), node_id.clone(), proposal));
+        }
+        fallback_index += 1;
+    }
+    for (node_id, pos) in spread_auxiliary_initial_positions(proposals) {
+        initial_layout.insert(node_id, pos);
+    }
+
     for &(_var_ident, node_id) in &entries {
         if initial_layout.contains_key(node_id) {
             continue;
         }
-        let angle = aux_index as f64 * 2.0 * PI / 8.0;
-        let radius = 100.0;
+        let angle = fallback_index as f64 * 2.0 * PI / 8.0;
         initial_layout.insert(
             node_id.clone(),
             Position::new(
-                center_x + radius * angle.cos(),
-                center_y + radius * angle.sin(),
+                center_x + 120.0 * angle.cos(),
+                center_y + 120.0 * angle.sin(),
             ),
         );
-        aux_index += 1;
+        fallback_index += 1;
     }
 
     // Match Praxis `runSFDPWithAnnealing`: only K/C/MaxIter/CoolFactor
@@ -2568,16 +2616,26 @@ fn run_sfdp_with_rigid_chains(
         .iter()
         .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
         .collect();
-    let aux_node_ids: HashSet<String> = model
+    let point_node_ids: HashSet<String> = model
         .variables
         .iter()
         .filter_map(|var| {
-            if let datamodel::Variable::Aux(aux) = var {
-                let canonical = canonicalize(&aux.ident);
-                var_to_node.get(canonical.as_ref()).cloned()
-            } else {
-                None
-            }
+            let ident = match var {
+                datamodel::Variable::Aux(aux) => &aux.ident,
+                datamodel::Variable::Module(module) => &module.ident,
+                _ => return None,
+            };
+            let canonical = canonicalize(ident);
+            var_to_node.get(canonical.as_ref()).cloned()
+        })
+        .collect();
+    let point_idents: HashSet<String> = model
+        .variables
+        .iter()
+        .filter_map(|var| match var {
+            datamodel::Variable::Aux(aux) => Some(canonicalize(&aux.ident).into_owned()),
+            datamodel::Variable::Module(module) => Some(canonicalize(&module.ident).into_owned()),
+            _ => None,
         })
         .collect();
 
@@ -2680,9 +2738,9 @@ fn run_sfdp_with_rigid_chains(
                 build_segments,
                 &annealing_config,
                 annealing_seed.wrapping_add(annealing_round as u64),
-                |node_id: &String| aux_node_ids.contains(node_id),
+                |node_id: &String| point_node_ids.contains(node_id),
                 |node_id: &String| {
-                    if aux_node_ids.contains(node_id) {
+                    if point_node_ids.contains(node_id) {
                         max_delta_aux
                     } else {
                         max_delta_chain
@@ -2709,10 +2767,26 @@ fn run_sfdp_with_rigid_chains(
     if let Some(saved) = best_layout {
         let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
         if final_crossings > best_crossings {
+            let mut saved = saved;
+            enforce_auxiliary_lane_clearance(
+                &mut saved,
+                var_to_node,
+                &aux_ctx,
+                &point_idents,
+                metadata.chains.len() <= 1,
+            );
             return Ok(saved);
         }
     }
 
+    let mut final_layout = final_layout;
+    enforce_auxiliary_lane_clearance(
+        &mut final_layout,
+        var_to_node,
+        &aux_ctx,
+        &point_idents,
+        metadata.chains.len() <= 1,
+    );
     Ok(final_layout)
 }
 
@@ -3015,6 +3089,19 @@ fn build_connectors(
                     (state.positions.get(&from_uid), state.positions.get(&to_uid))
                 {
                     calc_stock_flow_arc_angle(s_pos, f_pos)
+                } else {
+                    -45.0
+                };
+                shape = LinkShape::Arc(arc_angle);
+            } else if metadata
+                .dep_graph
+                .get(from_ident)
+                .is_some_and(|deps| deps.contains(to_ident))
+            {
+                let arc_angle = if let (Some(&from_pos), Some(&to_pos)) =
+                    (state.positions.get(&from_uid), state.positions.get(&to_uid))
+                {
+                    calc_reciprocal_arc_angle(from_pos, to_pos)
                 } else {
                     -45.0
                 };
@@ -3693,6 +3780,13 @@ fn is_structural_stock_flow(
     false
 }
 
+fn calc_reciprocal_arc_angle(from_pos: Position, to_pos: Position) -> f64 {
+    let base_angle = (to_pos.y - from_pos.y)
+        .atan2(to_pos.x - from_pos.x)
+        .to_degrees();
+    normalize_angle(base_angle - 45.0)
+}
+
 /// Try to compile the project and return the compiled model for AST-based
 /// dependency extraction. Returns `None` if compilation fails or the model
 /// isn't found, in which case callers should fall back to string heuristics.
@@ -3790,6 +3884,35 @@ fn contains_ident(equation_lower: &str, ident: &str) -> bool {
         search_from = abs_pos + 1;
     }
     false
+}
+
+fn rendered_dependency_ident(
+    dep: &str,
+    dependent: &str,
+    all_idents: &HashSet<String>,
+) -> Option<String> {
+    let mut mapped = None;
+
+    if let Some(root_ident) = dep.strip_prefix('·').or_else(|| dep.strip_prefix('.'))
+        && all_idents.contains(root_ident)
+    {
+        mapped = Some(root_ident.to_string());
+    }
+
+    if mapped.is_none() && all_idents.contains(dep) {
+        mapped = Some(dep.to_string());
+    }
+
+    if mapped.is_none()
+        && let Some(prefix) = dep.split('·').next()
+        && !prefix.is_empty()
+        && prefix != dep
+        && all_idents.contains(prefix)
+    {
+        mapped = Some(prefix.to_string());
+    }
+
+    mapped.filter(|ident| ident != dependent)
 }
 
 /// Build feedback loops from the persisted model loop_metadata (UIDs only,
@@ -4079,7 +4202,9 @@ pub fn compute_metadata(
         if let datamodel::Variable::Module(module) = var {
             for reference in &module.references {
                 let src_ident = canonicalize(&reference.src).into_owned();
-                if src_ident != var_ident && all_idents.contains(&src_ident) {
+                if let Some(src_ident) =
+                    rendered_dependency_ident(&src_ident, &var_ident, &all_idents)
+                {
                     dep_graph
                         .entry(var_ident.clone())
                         .or_default()
@@ -4140,21 +4265,9 @@ pub fn compute_metadata(
         // init expressions, SMOOTH/DELAY patterns, etc.).
         let deps: Vec<String> = deps
             .into_iter()
-            .filter_map(|d| {
-                if d == var_ident {
-                    return None;
-                }
-                if all_idents.contains(&d) {
-                    return Some(d);
-                }
-                if let Some(prefix) = d.split('·').next()
-                    && prefix != d
-                    && all_idents.contains(prefix)
-                {
-                    return Some(prefix.to_string());
-                }
-                None
-            })
+            .filter_map(|d| rendered_dependency_ident(&d, &var_ident, &all_idents))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect();
 
         if deps.is_empty() && !matches!(var, datamodel::Variable::Stock(_)) {

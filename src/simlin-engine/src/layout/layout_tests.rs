@@ -5165,6 +5165,234 @@ fn test_pinned_settlement_multiple_new_elements() {
     }
 }
 
+#[test]
+fn test_module_root_and_output_refs_map_to_rendered_dependencies() {
+    let all_idents: HashSet<String> = ["area", "hares", "lynxes"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+    assert_eq!(
+        rendered_dependency_ident("·area", "hares", &all_idents).as_deref(),
+        Some("area"),
+        "a leading module-root ref should map to the top-level variable",
+    );
+    assert_eq!(
+        rendered_dependency_ident("lynxes·lynxes", "hares", &all_idents).as_deref(),
+        Some("lynxes"),
+        "a module output ref should map to the rendered module element",
+    );
+    assert_eq!(
+        rendered_dependency_ident("hares·hare_density", "hares", &all_idents),
+        None,
+        "a module output ref that maps back to the dependent is a self-edge",
+    );
+}
+
+#[test]
+fn test_dependency_aware_aux_seed_offsets_single_chain_anchor() {
+    let positioned = HashMap::from([("births".to_string(), Position::new(200.0, 100.0))]);
+    let mut dep_graph = BTreeMap::new();
+    dep_graph.insert("birth_rate".to_string(), BTreeSet::new());
+    let reverse_dep_graph = BTreeMap::from([(
+        "birth_rate".to_string(),
+        BTreeSet::from(["births".to_string()]),
+    )]);
+    let flow_to_stocks = HashMap::new();
+    let ctx = AuxiliaryPlacementContext::new(&dep_graph, &reverse_dep_graph, &flow_to_stocks, &[]);
+
+    let proposal = auxiliary_initial_position(
+        "birth_rate",
+        &positioned,
+        &ctx,
+        Position::new(200.0, 100.0),
+        0,
+    )
+    .expect("birth_rate should seed from its flow anchor");
+
+    assert!(
+        (proposal.position.y - 100.0).abs() >= MIN_AUX_LANE_OFFSET - 1.0,
+        "birth_rate should be lifted off the chain axis, got {:?}",
+        proposal.position,
+    );
+}
+
+#[test]
+fn test_aux_lane_clearance_lifts_balanced_horizontal_aux() {
+    let mut layout = BTreeMap::from([
+        ("stock_node".to_string(), Position::new(100.0, 100.0)),
+        ("flow_node".to_string(), Position::new(200.0, 100.0)),
+        ("rate_node".to_string(), Position::new(300.0, 100.0)),
+    ]);
+    let var_to_node = HashMap::from([
+        ("population".to_string(), "stock_node".to_string()),
+        ("births".to_string(), "flow_node".to_string()),
+        ("birth_rate".to_string(), "rate_node".to_string()),
+    ]);
+    let dep_graph = BTreeMap::from([(
+        "birth_rate".to_string(),
+        BTreeSet::from(["population".to_string()]),
+    )]);
+    let reverse_dep_graph = BTreeMap::from([(
+        "birth_rate".to_string(),
+        BTreeSet::from(["births".to_string()]),
+    )]);
+    let flow_to_stocks = HashMap::from([("births".to_string(), (None, None))]);
+    let ctx = AuxiliaryPlacementContext::new(&dep_graph, &reverse_dep_graph, &flow_to_stocks, &[]);
+
+    enforce_auxiliary_lane_clearance(
+        &mut layout,
+        &var_to_node,
+        &ctx,
+        &HashSet::from(["birth_rate".to_string()]),
+        true,
+    );
+
+    let rate = layout
+        .get("rate_node")
+        .expect("birth_rate node should still be present");
+    assert!(
+        (rate.y - 100.0).abs() >= MIN_AUX_LANE_OFFSET - 1.0,
+        "balanced aux should be lifted off the horizontal chain axis, got {:?}",
+        rate,
+    );
+}
+
+#[test]
+fn test_aux_lane_clearance_keeps_single_flow_input_on_preferred_lane() {
+    let mut layout = BTreeMap::from([
+        ("flow_node".to_string(), Position::new(200.0, 100.0)),
+        ("rate_node".to_string(), Position::new(200.0, 20.0)),
+    ]);
+    let var_to_node = HashMap::from([
+        ("births".to_string(), "flow_node".to_string()),
+        ("birth_rate".to_string(), "rate_node".to_string()),
+    ]);
+    let dep_graph = BTreeMap::from([("birth_rate".to_string(), BTreeSet::new())]);
+    let reverse_dep_graph = BTreeMap::from([(
+        "birth_rate".to_string(),
+        BTreeSet::from(["births".to_string()]),
+    )]);
+    let flow_to_stocks = HashMap::from([("births".to_string(), (None, None))]);
+    let ctx = AuxiliaryPlacementContext::new(&dep_graph, &reverse_dep_graph, &flow_to_stocks, &[]);
+
+    enforce_auxiliary_lane_clearance(
+        &mut layout,
+        &var_to_node,
+        &ctx,
+        &HashSet::from(["birth_rate".to_string()]),
+        true,
+    );
+
+    let rate = layout
+        .get("rate_node")
+        .expect("birth_rate node should still be present");
+    assert!(
+        (rate.y - 100.0).abs() >= MIN_AUX_LANE_OFFSET - 1.0,
+        "single flow input should remain off the chain lane, got {:?}",
+        rate,
+    );
+}
+
+#[test]
+fn test_aux_lane_clearance_moves_single_flow_input_to_preferred_side() {
+    let mut layout = BTreeMap::from([
+        ("flow_node".to_string(), Position::new(200.0, 100.0)),
+        ("rate_node".to_string(), Position::new(170.0, 180.0)),
+    ]);
+    let var_to_node = HashMap::from([
+        ("births".to_string(), "flow_node".to_string()),
+        ("birth_rate".to_string(), "rate_node".to_string()),
+    ]);
+    let dep_graph = BTreeMap::from([("birth_rate".to_string(), BTreeSet::new())]);
+    let reverse_dep_graph = BTreeMap::from([(
+        "birth_rate".to_string(),
+        BTreeSet::from(["births".to_string()]),
+    )]);
+    let flow_to_stocks = HashMap::from([("births".to_string(), (None, None))]);
+    let ctx = AuxiliaryPlacementContext::new(&dep_graph, &reverse_dep_graph, &flow_to_stocks, &[]);
+
+    enforce_auxiliary_lane_clearance(
+        &mut layout,
+        &var_to_node,
+        &ctx,
+        &HashSet::from(["birth_rate".to_string()]),
+        true,
+    );
+
+    let rate = layout
+        .get("rate_node")
+        .expect("birth_rate node should still be present");
+    assert!(
+        rate.y < 100.0 - MIN_AUX_LANE_OFFSET + 1.0,
+        "single flow input should be moved above the horizontal chain lane, got {:?}",
+        rate,
+    );
+}
+
+#[test]
+fn test_aux_lane_clearance_fans_multiple_direct_flow_inputs() {
+    let mut layout = BTreeMap::from([
+        ("stock_node".to_string(), Position::new(100.0, 100.0)),
+        ("flow_node".to_string(), Position::new(200.0, 100.0)),
+        ("rate_node".to_string(), Position::new(190.0, 40.0)),
+        ("effect_node".to_string(), Position::new(210.0, 40.0)),
+    ]);
+    let var_to_node = HashMap::from([
+        ("population".to_string(), "stock_node".to_string()),
+        ("births".to_string(), "flow_node".to_string()),
+        ("birth_rate".to_string(), "rate_node".to_string()),
+        ("population_effect".to_string(), "effect_node".to_string()),
+    ]);
+    let dep_graph = BTreeMap::from([
+        ("birth_rate".to_string(), BTreeSet::new()),
+        (
+            "population_effect".to_string(),
+            BTreeSet::from(["population".to_string()]),
+        ),
+    ]);
+    let reverse_dep_graph = BTreeMap::from([
+        (
+            "birth_rate".to_string(),
+            BTreeSet::from(["births".to_string()]),
+        ),
+        (
+            "population_effect".to_string(),
+            BTreeSet::from(["births".to_string()]),
+        ),
+    ]);
+    let flow_to_stocks =
+        HashMap::from([("births".to_string(), (Some("population".to_string()), None))]);
+    let ctx = AuxiliaryPlacementContext::new(&dep_graph, &reverse_dep_graph, &flow_to_stocks, &[]);
+
+    enforce_auxiliary_lane_clearance(
+        &mut layout,
+        &var_to_node,
+        &ctx,
+        &HashSet::from(["birth_rate".to_string(), "population_effect".to_string()]),
+        true,
+    );
+
+    let rate = layout
+        .get("rate_node")
+        .expect("birth_rate node should still be present");
+    let effect = layout
+        .get("effect_node")
+        .expect("population_effect node should still be present");
+    assert!(
+        rate.x < 200.0 && effect.x > 200.0,
+        "direct flow inputs should fan to opposite sides of the flow, got rate={:?} effect={:?}",
+        rate,
+        effect,
+    );
+    assert!(
+        rate.y < 100.0 && effect.y < 100.0,
+        "direct flow inputs should stay above the horizontal chain lane, got rate={:?} effect={:?}",
+        rate,
+        effect,
+    );
+}
+
 /// When an aux references a module output via a dotted name
 /// (e.g., `my_module.the_output` which canonicalizes to `my_module·the_output`),
 /// the salsa AST path produces a dependency on the dotted form. The dep_graph
