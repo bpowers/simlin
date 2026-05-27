@@ -3769,7 +3769,7 @@ fn compile_implicit_var_fragment(
     // the per-phase compile returns (absent implicit index / equation
     // errors).
     let module_ident_context =
-        module_ident_context_for_model(db, model, project, module_input_names);
+        model_module_ident_context(db, model, project, module_input_names.to_vec());
     let (implicit_name, _lowered) =
         lower_implicit_var(db, meta, model, project, module_ident_context)?;
     let var_ident_str = canonicalize(&implicit_name).into_owned();
@@ -3863,7 +3863,7 @@ fn compile_implicit_var_phase_bytecodes(
     use crate::compiler::symbolic::{ReverseOffsetMap, VariableLayout};
 
     let module_ident_context =
-        module_ident_context_for_model(db, model, project, module_input_names);
+        model_module_ident_context(db, model, project, module_input_names.to_vec());
 
     // Shared parent→implicit→parse→lower prefix (the single relation, also
     // consumed by `compile_implicit_var_fragment`). `ModuleIdentContext`
