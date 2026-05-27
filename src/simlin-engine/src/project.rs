@@ -74,7 +74,7 @@ impl Project {
         use crate::db::{
             CompilationDiagnostic, DiagnosticError, model_module_ident_context,
             parse_source_variable_with_module_context, project_datamodel_dims,
-            project_units_context,
+            project_dimensions_context, project_units_context,
         };
         use crate::model::{ModelStage0, VariableStage0, enumerate_modules};
 
@@ -98,7 +98,9 @@ impl Project {
                 })
                 .collect();
         let dm_dims = project_datamodel_dims(db, source_project);
-        let dims_ctx = DimensionsContext::from(dm_dims.as_slice());
+        // Read the project-global dimension context from the salsa-cached query
+        // rather than rebuilding it here (it is canonicalized once per project).
+        let dims_ctx = project_dimensions_context(db, source_project);
 
         // Build ModelStage0 from salsa-parsed variables for all models.
         let project_models = source_project.models(db);
@@ -172,7 +174,7 @@ impl Project {
             .map(|ms0| {
                 let scope = ScopeStage0 {
                     models: &models_s0,
-                    dimensions: &dims_ctx,
+                    dimensions: dims_ctx,
                     model_name: ms0.ident.as_str(),
                 };
                 ModelStage1::new(&scope, ms0)
@@ -235,7 +237,10 @@ impl Project {
             models,
             model_order: ordered_models,
             errors: project_errors,
-            dimensions_ctx: dims_ctx,
+            // Owned field: clone the cached project-global context (the
+            // interned-backed dimensions clone cheaply; only the
+            // relationship-cache memo is rebuilt cold).
+            dimensions_ctx: (*dims_ctx).clone(),
         }
     }
 }

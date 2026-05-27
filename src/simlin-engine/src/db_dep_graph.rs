@@ -1474,14 +1474,11 @@ pub(crate) fn var_noninitial_lowered_exprs(
         );
     };
 
-    // Caller-owned, lowering-independent context, built EXACTLY as
-    // `crate::db::compile_var_fragment` builds it.
-    let dm_dims = crate::db::source_dims_to_datamodel(project.dimensions(db));
-    let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
-    let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
-        .iter()
-        .map(crate::dimensions::Dimension::from)
-        .collect();
+    // Caller-owned, lowering-independent context, read EXACTLY as
+    // `crate::db::compile_var_fragment` reads it (the salsa-cached
+    // project-global dimension context + converted dims).
+    let dim_context = crate::db::project_dimensions_context(db, project);
+    let converted_dims = crate::db::project_converted_dimensions(db, project);
     let model_name_ident = Ident::new(model.name(db));
     let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     let module_models = crate::db::model_module_map(db, model, project).clone();
@@ -1493,8 +1490,8 @@ pub(crate) fn var_noninitial_lowered_exprs(
         project,
         true,
         &[],
-        &converted_dims,
-        &dim_context,
+        converted_dims,
+        dim_context,
         &model_name_ident,
         &module_models,
         &inputs,

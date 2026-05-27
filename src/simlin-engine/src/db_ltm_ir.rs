@@ -555,11 +555,11 @@ pub(crate) fn model_ltm_reference_sites(
 
     // Dimension context for the #511 iterated-subscript recognition: the
     // mapped-dimension case (`State[i]` over a source declared with
-    // `Region[i]`, `State` maps to `Region`) needs `has_mapping_to`. The
-    // datamodel dim list (and hence this context) is salsa-tracked, so the
-    // IR is recomputed when a dimension's mappings change.
-    let dm_dims = crate::db::project_datamodel_dims(db, project);
-    let dim_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    // `Region[i]`, `State` maps to `Region`) needs `has_mapping_to`. Read the
+    // project-global context from the salsa-cached query; it depends only on
+    // the salsa-tracked dimensions input, so the IR is recomputed when a
+    // dimension's mappings change.
+    let dim_ctx = crate::db::project_dimensions_context(db, project);
 
     // Per-source dimension lookup, cached: a source's dims are needed to
     // resolve literal subscripts and are reused across many edges.
@@ -590,7 +590,7 @@ pub(crate) fn model_ltm_reference_sites(
         let to_name_str = to_name.as_str();
 
         let raw_by_source =
-            collect_all_reference_sites(to_var, &variables, &dim_ctx, &mut lookup_dims);
+            collect_all_reference_sites(to_var, &variables, dim_ctx, &mut lookup_dims);
         if raw_by_source.is_empty() {
             continue;
         }

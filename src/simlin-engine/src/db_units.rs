@@ -36,7 +36,7 @@ use crate::datamodel;
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel,
     SourceProject, model_module_ident_context, parse_source_variable_with_module_context,
-    project_datamodel_dims, project_units_context,
+    project_datamodel_dims, project_dimensions_context, project_units_context,
 };
 
 /// Collect the identifiers that must share units because they sit in the
@@ -163,7 +163,6 @@ fn init_value_equivalence_group(
 #[salsa::tracked]
 pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject) {
     use crate::common::{ErrorCode, ErrorKind};
-    use crate::dimensions::DimensionsContext;
     use crate::model::{ModelStage0, ModelStage1, ScopeStage0, VariableStage0};
 
     // Skip stdlib models -- they are generic and unit checking doesn't
@@ -185,7 +184,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     let model_name = model.name(db).clone();
     let units_ctx = project_units_context(db, project);
     let dm_dims = project_datamodel_dims(db, project);
-    let dim_context = DimensionsContext::from(dm_dims.as_slice());
+    let dim_context = project_dimensions_context(db, project);
 
     // Helper: build a ModelStage0 from a SourceModel's parsed variables.
     let build_model_s0 = |src_model: &SourceModel, is_stdlib: bool| -> ModelStage0 {
@@ -240,7 +239,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
         .map(|ms0| {
             let scope = ScopeStage0 {
                 models: &models_s0,
-                dimensions: &dim_context,
+                dimensions: dim_context,
                 model_name: ms0.ident.as_str(),
             };
             ModelStage1::new(&scope, ms0)
