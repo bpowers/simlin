@@ -28,6 +28,10 @@ prost = "0.14"
 float-cmp = "0.10"
 ordered-float = "5"
 smallvec = { version = "1", features = [ "union" ] }
+# Fast, deterministic (fixed-seed) hasher for hot internal maps in the
+# dependency-graph cycle gate. Wasm-safe (no getrandom). FxHash's fixed seed
+# keeps map iteration deterministic where it is intentionally not order-leaking.
+rustc-hash = "2"
 ed25519 = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }
 serde = { version = "1", features = ["derive"] }

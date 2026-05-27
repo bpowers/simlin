@@ -1249,8 +1249,17 @@ pub struct ResolvedScc {
 
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct ModelDepGraphResult {
-    pub dt_dependencies: HashMap<String, BTreeSet<String>>,
-    pub initial_dependencies: HashMap<String, BTreeSet<String>>,
+    /// Interned-ident-keyed dependency maps. `Ident<Canonical>` derives
+    /// `salsa::Update`, and salsa's blanket impls cover
+    /// `std::collections::HashMap<K,V>` / `BTreeSet<K>` for `K,V: Update`, so
+    /// these stay on the std `HashMap` (default hasher) -- only the hot
+    /// internal working maps in `model_dependency_graph_impl` use FxHash.
+    /// `Ident<Canonical>` keys/values are cheap Arc-refcount clones and the
+    /// `BTreeSet`s iterate in the same lexicographic order the former
+    /// `BTreeSet<String>` did, so a consumer probing by `&str` (via
+    /// `Borrow<str>`) sees byte-identical behavior.
+    pub dt_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+    pub initial_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
     pub runlist_initials: Vec<String>,
     pub runlist_flows: Vec<String>,
     pub runlist_stocks: Vec<String>,

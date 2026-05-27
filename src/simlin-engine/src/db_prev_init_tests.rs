@@ -53,7 +53,7 @@ fn test_model_dependency_graph_prunes_lagged_deps_for_implicit_helpers() {
     let helper = graph
         .dt_dependencies
         .iter()
-        .find(|(name, _)| name.contains("arg0"))
+        .find(|(name, _)| name.as_str().contains("arg0"))
         .expect("nested PREVIOUS should create an implicit arg helper");
 
     assert!(

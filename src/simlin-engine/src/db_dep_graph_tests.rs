@@ -32,22 +32,39 @@ use crate::test_common::TestProject;
 //   absent => empty (no panic).
 
 /// Build a bare `VarInfo` for the pure-unit `dt_walk_successors` tests.
+/// The dep names are already canonical (lowercase, underscore-joined), so
+/// `from_str_unchecked` (intern, no re-canonicalization) is sound.
 fn vi_for_test(is_stock: bool, is_module: bool, dt_deps: &[&str]) -> VarInfo {
     VarInfo {
         is_stock,
         is_module,
         is_table_only: false,
-        dt_deps: dt_deps.iter().map(|s| (*s).to_string()).collect(),
+        dt_deps: dt_deps
+            .iter()
+            .map(|s| Ident::from_str_unchecked(s))
+            .collect(),
         initial_deps: BTreeSet::new(),
     }
 }
 
+/// Insert a `VarInfo` keyed by the interned canonical `name`.
+fn vi_insert(map: &mut FxHashMap<Ident<Canonical>, VarInfo>, name: &str, info: VarInfo) {
+    map.insert(Ident::from_str_unchecked(name), info);
+}
+
+/// Compare a `dt_walk_successors`/`init_walk_successors` result (now
+/// `Vec<&Ident<Canonical>>`) against the expected canonical names, preserving
+/// the exact ordered-equality assertions the tests had against `Vec<&str>`.
+fn succ_strs<'a>(succ: &[&'a Ident<Canonical>]) -> Vec<&'a str> {
+    succ.iter().map(|i| i.as_str()).collect()
+}
+
 #[test]
 fn dt_walk_successors_stock_is_dt_sink() {
-    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
-    vinfo.insert("s".to_string(), vi_for_test(true, false, &["a", "b"]));
-    vinfo.insert("a".to_string(), vi_for_test(false, false, &[]));
-    vinfo.insert("b".to_string(), vi_for_test(false, false, &[]));
+    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    vi_insert(&mut vinfo, "s", vi_for_test(true, false, &["a", "b"]));
+    vi_insert(&mut vinfo, "a", vi_for_test(false, false, &[]));
+    vi_insert(&mut vinfo, "b", vi_for_test(false, false, &[]));
     // A Stock breaks the dt dependency chain: no cycle successors even
     // though its dt_deps are non-empty.
     assert!(dt_walk_successors(&vinfo, "s").is_empty());
@@ -55,9 +72,9 @@ fn dt_walk_successors_stock_is_dt_sink() {
 
 #[test]
 fn dt_walk_successors_module_has_no_cycle_successors() {
-    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
-    vinfo.insert("m".to_string(), vi_for_test(false, true, &["a"]));
-    vinfo.insert("a".to_string(), vi_for_test(false, false, &[]));
+    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    vi_insert(&mut vinfo, "m", vi_for_test(false, true, &["a"]));
+    vi_insert(&mut vinfo, "a", vi_for_test(false, false, &[]));
     // A Module returns before `processing.insert`, so it is never on the
     // DFS stack and can never carry a cycle: empty cycle-successor set.
     assert!(dt_walk_successors(&vinfo, "m").is_empty());
@@ -65,14 +82,15 @@ fn dt_walk_successors_module_has_no_cycle_successors() {
 
 #[test]
 fn dt_walk_successors_aux_filters_stock_and_unknown_keeps_module() {
-    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
-    vinfo.insert(
-        "x".to_string(),
+    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    vi_insert(
+        &mut vinfo,
+        "x",
         vi_for_test(false, false, &["aux2", "the_stock", "the_mod", "ghost"]),
     );
-    vinfo.insert("aux2".to_string(), vi_for_test(false, false, &[]));
-    vinfo.insert("the_stock".to_string(), vi_for_test(true, false, &[]));
-    vinfo.insert("the_mod".to_string(), vi_for_test(false, true, &[]));
+    vi_insert(&mut vinfo, "aux2", vi_for_test(false, false, &[]));
+    vi_insert(&mut vinfo, "the_stock", vi_for_test(true, false, &[]));
+    vi_insert(&mut vinfo, "the_mod", vi_for_test(false, true, &[]));
     // "ghost" is intentionally absent from var_info (an unknown dep).
     let succ = dt_walk_successors(&vinfo, "x");
     // Stock-targeted dep dropped (a stock breaks the dt chain), unknown
@@ -80,12 +98,12 @@ fn dt_walk_successors_aux_filters_stock_and_unknown_keeps_module() {
     // successors so Tarjan cannot route a cycle through it -- this
     // matches `compute_inner`, whose `!dep_info.is_module` guard only
     // controls transitive absorption, not iteration).
-    assert_eq!(succ, vec!["aux2", "the_mod"]);
+    assert_eq!(succ_strs(&succ), vec!["aux2", "the_mod"]);
 }
 
 #[test]
 fn dt_walk_successors_absent_name_is_empty() {
-    let vinfo: HashMap<String, VarInfo> = HashMap::new();
+    let vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     // A malformed/absent var_info entry must not panic; it yields no
     // successors.
     assert!(dt_walk_successors(&vinfo, "nope").is_empty());
@@ -93,19 +111,20 @@ fn dt_walk_successors_absent_name_is_empty() {
 
 #[test]
 fn dt_walk_successors_order_is_btreeset_sorted() {
-    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
-    vinfo.insert(
-        "x".to_string(),
+    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    vi_insert(
+        &mut vinfo,
+        "x",
         vi_for_test(false, false, &["zeta", "alpha", "mid"]),
     );
-    vinfo.insert("zeta".to_string(), vi_for_test(false, false, &[]));
-    vinfo.insert("alpha".to_string(), vi_for_test(false, false, &[]));
-    vinfo.insert("mid".to_string(), vi_for_test(false, false, &[]));
+    vi_insert(&mut vinfo, "zeta", vi_for_test(false, false, &[]));
+    vi_insert(&mut vinfo, "alpha", vi_for_test(false, false, &[]));
+    vi_insert(&mut vinfo, "mid", vi_for_test(false, false, &[]));
     // dt_deps is a BTreeSet; the successor list preserves its sorted
     // iteration order. This is what makes the cycle-detection
     // first-back-edge and the SCC adjacency byte-stable across runs.
     assert_eq!(
-        dt_walk_successors(&vinfo, "x"),
+        succ_strs(&dt_walk_successors(&vinfo, "x")),
         vec!["alpha", "mid", "zeta"]
     );
 }
@@ -138,15 +157,18 @@ fn vi_init_for_test(is_stock: bool, is_module: bool, initial_deps: &[&str]) -> V
         is_module,
         is_table_only: false,
         dt_deps: BTreeSet::new(),
-        initial_deps: initial_deps.iter().map(|s| (*s).to_string()).collect(),
+        initial_deps: initial_deps
+            .iter()
+            .map(|s| Ident::from_str_unchecked(s))
+            .collect(),
     }
 }
 
 #[test]
 fn init_walk_successors_module_has_no_cycle_successors() {
-    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
-    vinfo.insert("m".to_string(), vi_init_for_test(false, true, &["a"]));
-    vinfo.insert("a".to_string(), vi_init_for_test(false, false, &[]));
+    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    vi_insert(&mut vinfo, "m", vi_init_for_test(false, true, &["a"]));
+    vi_insert(&mut vinfo, "a", vi_init_for_test(false, false, &[]));
     // The module early-return in `compute_inner` fires before
     // `processing.insert` in BOTH phases, so a module is never on the
     // DFS stack and can never carry a cycle in the init phase either:
@@ -156,9 +178,9 @@ fn init_walk_successors_module_has_no_cycle_successors() {
 
 #[test]
 fn init_walk_successors_stock_is_not_an_init_sink() {
-    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
-    vinfo.insert("s".to_string(), vi_init_for_test(true, false, &["s", "a"]));
-    vinfo.insert("a".to_string(), vi_init_for_test(false, false, &[]));
+    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    vi_insert(&mut vinfo, "s", vi_init_for_test(true, false, &["s", "a"]));
+    vi_insert(&mut vinfo, "a", vi_init_for_test(false, false, &[]));
     // A Stock is NOT an init-phase sink: the dt stock sink in
     // `compute_inner` is `!is_initial`-gated, so in the init phase a
     // stock's `initial_deps` ARE its cycle successors. A stock whose
@@ -166,44 +188,52 @@ fn init_walk_successors_stock_is_not_an_init_sink() {
     // genuine init self-loop, so `s` MUST appear in its own successor
     // set (this is exactly what an init-phase recurrence behind a stock
     // relies on).
-    assert_eq!(init_walk_successors(&vinfo, "s"), vec!["a", "s"]);
+    assert_eq!(
+        succ_strs(&init_walk_successors(&vinfo, "s")),
+        vec!["a", "s"]
+    );
 }
 
 #[test]
 fn init_walk_successors_keeps_stock_targeted_deps() {
-    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
-    vinfo.insert(
-        "x".to_string(),
+    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    vi_insert(
+        &mut vinfo,
+        "x",
         vi_init_for_test(false, false, &["the_stock", "aux2"]),
     );
-    vinfo.insert("the_stock".to_string(), vi_init_for_test(true, false, &[]));
-    vinfo.insert("aux2".to_string(), vi_init_for_test(false, false, &[]));
+    vi_insert(&mut vinfo, "the_stock", vi_init_for_test(true, false, &[]));
+    vi_insert(&mut vinfo, "aux2", vi_init_for_test(false, false, &[]));
     // Unlike `dt_walk_successors` (which drops stock-targeted deps
     // because a stock breaks the dt chain), the init relation KEEPS a
     // stock-targeted dep: a stock's initial value is a real init-phase
     // dependency. NO stock filter on the deps.
-    assert_eq!(init_walk_successors(&vinfo, "x"), vec!["aux2", "the_stock"]);
+    assert_eq!(
+        succ_strs(&init_walk_successors(&vinfo, "x")),
+        vec!["aux2", "the_stock"]
+    );
 }
 
 #[test]
 fn init_walk_successors_filters_unknown_deps() {
-    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
-    vinfo.insert(
-        "x".to_string(),
+    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    vi_insert(
+        &mut vinfo,
+        "x",
         vi_init_for_test(false, false, &["known", "ghost"]),
     );
-    vinfo.insert("known".to_string(), vi_init_for_test(false, false, &[]));
+    vi_insert(&mut vinfo, "known", vi_init_for_test(false, false, &[]));
     // "ghost" is intentionally absent from var_info.
     // This is exactly the inlined `compute_inner` init semantics
     // (`info.initial_deps.iter().filter(|dep|
     // var_info.contains_key(dep))`): unknown deps dropped, no other
     // filter.
-    assert_eq!(init_walk_successors(&vinfo, "x"), vec!["known"]);
+    assert_eq!(succ_strs(&init_walk_successors(&vinfo, "x")), vec!["known"]);
 }
 
 #[test]
 fn init_walk_successors_absent_name_is_empty() {
-    let vinfo: HashMap<String, VarInfo> = HashMap::new();
+    let vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     // A malformed/absent var_info entry must not panic; it yields no
     // successors (mirrors `dt_walk_successors`; `compute_inner` likewise
     // early-returns `Ok(())` for an unknown name).
@@ -212,20 +242,21 @@ fn init_walk_successors_absent_name_is_empty() {
 
 #[test]
 fn init_walk_successors_order_is_btreeset_sorted() {
-    let mut vinfo: HashMap<String, VarInfo> = HashMap::new();
-    vinfo.insert(
-        "x".to_string(),
+    let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
+    vi_insert(
+        &mut vinfo,
+        "x",
         vi_init_for_test(false, false, &["zeta", "alpha", "mid"]),
     );
-    vinfo.insert("zeta".to_string(), vi_init_for_test(false, false, &[]));
-    vinfo.insert("alpha".to_string(), vi_init_for_test(false, false, &[]));
-    vinfo.insert("mid".to_string(), vi_init_for_test(false, false, &[]));
+    vi_insert(&mut vinfo, "zeta", vi_init_for_test(false, false, &[]));
+    vi_insert(&mut vinfo, "alpha", vi_init_for_test(false, false, &[]));
+    vi_insert(&mut vinfo, "mid", vi_init_for_test(false, false, &[]));
     // initial_deps is a BTreeSet; the successor list preserves its
     // sorted iteration order, so init cycle detection and the init SCC
     // adjacency are byte-stable across runs (same discipline as
     // `dt_walk_successors`).
     assert_eq!(
-        init_walk_successors(&vinfo, "x"),
+        succ_strs(&init_walk_successors(&vinfo, "x")),
         vec!["alpha", "mid", "zeta"]
     );
 }
@@ -3188,7 +3219,10 @@ fn initials_runlist_is_sorted_topological_order() {
     // order, not this helper.
     fn emit(
         name: &str,
-        deps: &std::collections::HashMap<String, std::collections::BTreeSet<String>>,
+        deps: &std::collections::HashMap<
+            Ident<Canonical>,
+            std::collections::BTreeSet<Ident<Canonical>>,
+        >,
         members: &std::collections::BTreeSet<String>,
         emitted: &mut std::collections::BTreeSet<String>,
         out: &mut Vec<String>,
@@ -3197,10 +3231,13 @@ fn initials_runlist_is_sorted_topological_order() {
             return;
         }
         emitted.insert(name.to_string());
+        // `deps` is interned-keyed now; probe by `&str` (Borrow) and recurse
+        // on each dep's `as_str()`. Behavior is unchanged from the former
+        // `String`-keyed map (same `BTreeSet` lexicographic dep order).
         if let Some(ds) = deps.get(name) {
             for d in ds.iter() {
                 if members.contains(d.as_str()) {
-                    emit(d, deps, members, emitted, out);
+                    emit(d.as_str(), deps, members, emitted, out);
                 }
             }
         }
