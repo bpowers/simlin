@@ -169,3 +169,67 @@ fn series_arms_race_matches_vm() {
 fn series_decoupled_stocks_matches_vm() {
     assert_ltm_series_match("decoupled_stocks/decoupled.stmx");
 }
+
+// ---------------------------------------------------------------------------
+// AC4.1: ratcheting floor gate
+// ---------------------------------------------------------------------------
+
+/// Monotonically rising floor on the count of LTM corpus models that lower
+/// to wasm. Phase 1 covers the scalar corpus (three `.stmx` models); Phase 4
+/// ratchets this up to include arrayed/cross-element models. A regression
+/// that drops a previously-supported model below this floor must fail the
+/// suite (wasm-ltm.AC4.2). The value is therefore only raised, never lowered;
+/// if a corpus model unexpectedly stops lowering, investigate the root cause
+/// rather than relax the constant.
+const MIN_LTM_MODELS_LOWERED: usize = 3;
+
+/// Full LTM corpus driven by the floor gate. Kept colocated with the per-model
+/// `series_*` tests so a model added to the floor is always also added to
+/// the per-model series comparator (and vice versa); a future arrayed-LTM
+/// addition flows through this list.
+const LTM_CORPUS: &[&str] = &[
+    "logistic_growth_ltm/logistic_growth.stmx",
+    "arms_race_3party/arms_race.stmx",
+    "decoupled_stocks/decoupled.stmx",
+];
+
+/// Run every model in [`LTM_CORPUS`] through `wasm_results_for_ltm` and
+/// assert that *at least* `MIN_LTM_MODELS_LOWERED` of them lower cleanly.
+/// A model that returns `Err` (`WasmGenError::Unsupported` rendered, or an
+/// incremental-compile failure) is logged via `eprintln!` and treated as a
+/// skip during rollout -- so a regression on a single model surfaces here
+/// without masking other progress, but the count threshold prevents a
+/// silent slide back to zero.
+///
+/// Heavy models (`#[ignore]`) are reserved for the discovery/arrayed phases
+/// (e.g. C-LEARN, World3); the scalar Phase 1 corpus runs well under the
+/// per-test budget so none of these need ignoring today (see
+/// `tests/ltm_discovery_large_models.rs` for the `#[ignore]` precedent).
+#[test]
+fn ltm_corpus_floor_gate() {
+    let mut lowered = 0usize;
+    let mut skipped: Vec<(&str, String)> = Vec::new();
+
+    for &model_rel in LTM_CORPUS {
+        let project = load(model_rel);
+        match wasm_results_for_ltm(&project, "main") {
+            Ok(_) => {
+                lowered += 1;
+            }
+            Err(msg) => {
+                skipped.push((model_rel, msg));
+            }
+        }
+    }
+
+    for (model, msg) in &skipped {
+        eprintln!("ltm_corpus_floor_gate: {model} did not lower to wasm: {msg}");
+    }
+
+    assert!(
+        lowered >= MIN_LTM_MODELS_LOWERED,
+        "LTM-on-wasm corpus regression: only {lowered} of {} models lowered, \
+         floor is {MIN_LTM_MODELS_LOWERED}. Skipped: {skipped:?}",
+        LTM_CORPUS.len()
+    );
+}
