@@ -328,7 +328,7 @@ describe('WorkerBackend wasm engine parity (Phase 3)', () => {
   });
 
   describe('worker-boundary error propagation (no silent VM fallback)', () => {
-    it('rejects a wasm-unsupported model rather than silently falling back to the VM', async () => {
+    it('rejects a wasm-unsupported model rather than silently switching to the VM', async () => {
       const { backend } = createWorkerWasmPair();
       await backend.init(loadWasmSource());
       const projHandle = await backend.projectOpenXmile(new TextEncoder().encode(WASM_UNSUPPORTED_XMILE));

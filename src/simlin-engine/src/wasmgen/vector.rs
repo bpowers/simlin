@@ -500,7 +500,8 @@ pub(crate) fn emit_vector_select(
 /// `VectorSelect`'s dynamic-view rejection. The op reduces to a scalar (no temp
 /// region), so an invalid view would push one NaN; rather than emit that gate
 /// (and the runtime-offset folding the gather would need), a dynamically-
-/// subscripted input falls back to the VM.
+/// subscripted input is reported as `WasmGenError::Unsupported` for the caller
+/// to surface as an explicit error (no silent VM fallback).
 fn is_dynamic_select(sel_view: &ViewDesc, expr_view: &ViewDesc) -> bool {
     is_dynamic(sel_view) || is_dynamic(expr_view)
 }

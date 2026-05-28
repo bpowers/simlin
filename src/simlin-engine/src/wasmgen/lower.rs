@@ -1072,9 +1072,9 @@ struct EmitState {
     /// body re-emission -- charges its iteration count here. Nested iterations
     /// multiply naturally: an inner site is reached once per outer iteration, so
     /// each inner charge already reflects the outer multiplier. When the running
-    /// total would exceed the cap, lowering aborts with `Unsupported` so the
-    /// model cleanly falls back to the VM instead of emitting a multi-megabyte
-    /// function body that a wasm engine would reject.
+    /// total would exceed the cap, lowering aborts with `Unsupported` (the caller
+    /// receives an explicit error, no silent VM fallback) instead of emitting a
+    /// multi-megabyte function body that a wasm engine would reject.
     unroll_units: usize,
 }
 
@@ -1107,17 +1107,19 @@ const MAX_UNROLL_UNITS: usize = 65_536;
 
 impl EmitState {
     /// Charge `units` against the per-function unroll budget, returning
-    /// `Unsupported` (so the model falls back to the VM) if the running total
-    /// would exceed [`MAX_UNROLL_UNITS`]. Called *before* an unroll site emits
-    /// its body, so an over-budget model is rejected without ever materializing
-    /// the oversized function. `units` saturates rather than wrapping, so a
-    /// pathological multi-dimensional product can never alias back under the cap.
+    /// `Unsupported` (an explicit error to the caller, no silent VM fallback)
+    /// if the running total would exceed [`MAX_UNROLL_UNITS`]. Called *before*
+    /// an unroll site emits its body, so an over-budget model is rejected
+    /// without ever materializing the oversized function. `units` saturates
+    /// rather than wrapping, so a pathological multi-dimensional product can
+    /// never alias back under the cap.
     fn charge_unroll(&mut self, units: usize) -> Result<(), WasmGenError> {
         self.unroll_units = self.unroll_units.saturating_add(units);
         if self.unroll_units > MAX_UNROLL_UNITS {
             return Err(WasmGenError::Unsupported(format!(
                 "wasmgen: array unrolling exceeds the per-function budget of \
-                 {MAX_UNROLL_UNITS} elements (a large arrayed model); falling back to the VM"
+                 {MAX_UNROLL_UNITS} elements (a large arrayed model); the caller \
+                 receives an explicit Unsupported error (no silent VM fallback)"
             )));
         }
         Ok(())
