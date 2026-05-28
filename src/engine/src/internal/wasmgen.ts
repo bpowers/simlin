@@ -86,10 +86,21 @@ export interface WasmBlobExports {
  * bytes). On an unsupported model the FFI stores a `SimlinErrorCode::Generic`
  * error, which surfaces here as a thrown `SimlinError` (no VM fallback).
  *
+ * The caller receives the raw `layout` bytes alongside the parsed geometry's
+ * upstream input so the same buffer can be reshipped to libsimlin for the
+ * from-wasm analysis FFI (`simlin_analyze_links_from_wasm_results`) without
+ * re-serializing -- libsimlin treats those bytes as the canonical layout.
+ *
  * @param model Model pointer (owned by the caller).
+ * @param enableLtm When true, requests the LTM-instrumented codegen path so
+ *   the blob's result slab carries the per-step LTM series that the from-wasm
+ *   analysis FFI consumes.
  * @returns The wasm blob bytes and the serialized WasmLayout bytes.
  */
-export function simlin_model_compile_to_wasm(model: SimlinModelPtr): { wasm: Uint8Array; layout: Uint8Array } {
+export function simlin_model_compile_to_wasm(
+  model: SimlinModelPtr,
+  enableLtm: boolean,
+): { wasm: Uint8Array; layout: Uint8Array } {
   const fn = getExports().simlin_model_compile_to_wasm as (
     model: number,
     ltmEnabled: number,
@@ -108,10 +119,10 @@ export function simlin_model_compile_to_wasm(model: SimlinModelPtr): { wasm: Uin
   const outErrPtr = allocOutPtr();
 
   try {
-    // LTM stays off across this wrapper for now; real `enableLtm` threading
-    // lands in Phase 3. The two `0` args keep the ABI in sync with the new
-    // libsimlin signature (the wrapper's external TS API is unchanged).
-    fn(model, 0, 0, outWasmPtr, outWasmLenPtr, outLayoutPtr, outLayoutLenPtr, outErrPtr);
+    // Discovery-mode is not yet exposed through this wrapper; LTM-on simply
+    // means the codegen path emits the per-step LTM series. The third arg
+    // stays 0 until a discovery-mode knob lands on the TS surface.
+    fn(model, enableLtm ? 1 : 0, 0, outWasmPtr, outWasmLenPtr, outLayoutPtr, outLayoutLenPtr, outErrPtr);
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {

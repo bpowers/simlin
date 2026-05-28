@@ -31,6 +31,7 @@ import {
   simlin_project_render_png,
 } from './internal/import-export';
 import {
+  simlin_model_ref,
   simlin_model_unref,
   simlin_model_get_name,
   simlin_model_get_incoming_links,
@@ -167,6 +168,17 @@ interface HandleEntry {
   // The model's stop time, captured at creation so simRunToEnd can drive the
   // blob's resumable run_to(stop) (mirroring the VM's run_to(specs.stop)).
   wasmStopTime?: number;
+  // Retained model pointer for the from-wasm analysis FFI. The wasm sim path
+  // does NOT go through `simlin_sim_new` (which would internally ref the
+  // model); it compiles the model to a blob directly. To keep the pointer
+  // valid for a later `simlin_analyze_links_from_wasm_results`, we bump the
+  // model refcount in simNewWasm and release it in releaseWasmSimState.
+  wasmModelPtr?: number;
+  // The raw serialized WasmLayout bytes returned from compile_to_wasm. We
+  // already parsed them into `wasmLayout` for the strided read path, but
+  // libsimlin's from-wasm analysis FFI takes the serialized form back -- so
+  // we keep the original bytes rather than re-serializing the parsed shape.
+  wasmLayoutBytes?: Uint8Array;
 }
 
 /** Optional fields carried onto a freshly-allocated handle entry. */
@@ -177,6 +189,8 @@ interface HandleExtra {
   wasmLayout?: WasmLayout;
   wasmExports?: WasmBlobExports;
   wasmStopTime?: number;
+  wasmModelPtr?: number;
+  wasmLayoutBytes?: Uint8Array;
 }
 
 export class DirectBackend implements EngineBackend {
@@ -196,6 +210,8 @@ export class DirectBackend implements EngineBackend {
       wasmLayout: extra?.wasmLayout,
       wasmExports: extra?.wasmExports,
       wasmStopTime: extra?.wasmStopTime,
+      wasmModelPtr: extra?.wasmModelPtr,
+      wasmLayoutBytes: extra?.wasmLayoutBytes,
     });
     if (kind === 'project') {
       this._projectChildren.set(handle, new Set());
@@ -456,17 +472,18 @@ export class DirectBackend implements EngineBackend {
    * instantiate it import-free, and store the instance + decoded layout + stop
    * time on the handle entry. There is intentionally no VM fallback -- an
    * unsupported model surfaces the compile error to the caller.
+   *
+   * When `enableLtm` is true the blob's result slab additionally carries the
+   * per-step LTM series, and we retain the model pointer (via simlin_model_ref)
+   * so the from-wasm analysis FFI in simGetLinks has a valid model handle to
+   * pair with the slab. Unlike the VM path -- which retains the model inside
+   * simlin_sim_new -- the wasm path never calls simlin_sim_new, so the model
+   * refcount is bumped here and released in releaseWasmSimState.
    */
   private simNewWasm(modelHandle: ModelHandle, modelEntry: HandleEntry, enableLtm: boolean): SimHandle {
-    // Reject LTM up front, before any compile work: the wasm backend does not
-    // emit LTM instrumentation, so a wasm sim can never satisfy enableLtm.
-    if (enableLtm) {
-      throw new Error("LTM is not supported on the wasm engine; use engine:'vm'");
-    }
-
     // Throws SimlinError on an unsupported model (e.g. a runtime view range);
     // we deliberately do not catch-and-fall-back to the VM.
-    const { wasm, layout } = simlin_model_compile_to_wasm(modelEntry.ptr);
+    const { wasm, layout } = simlin_model_compile_to_wasm(modelEntry.ptr, enableLtm);
     const parsed = parseWasmLayout(layout);
 
     // Capture the model's stop time so simRunToEnd can drive run_to(stop),
@@ -486,6 +503,11 @@ export class DirectBackend implements EngineBackend {
     const instance = new WebAssembly.Instance(new WebAssembly.Module(wasmBytes), {});
     const wasmExports = instance.exports as unknown as WasmBlobExports;
 
+    // Retain the model so its pointer stays valid for from-wasm analysis. The
+    // wasm path does not call simlin_sim_new (which would ref internally), so
+    // we ref explicitly; releaseWasmSimState undoes this on dispose.
+    simlin_model_ref(modelEntry.ptr);
+
     return this.allocHandle('sim', 0, {
       projectHandle: modelEntry.projectHandle,
       engine: 'wasm',
@@ -493,22 +515,32 @@ export class DirectBackend implements EngineBackend {
       wasmLayout: parsed,
       wasmExports,
       wasmStopTime,
+      wasmModelPtr: modelEntry.ptr,
+      wasmLayoutBytes: layout,
     }) as SimHandle;
   }
 
   /**
    * Release a wasm sim entry's heavy state (the WebAssembly.Instance, its
-   * exports, and the decoded layout). The disposed entry is intentionally kept
-   * in `_handles` as a tombstone so a use-after-dispose still throws the clear
-   * "has been disposed" diagnostic; but those heavy refs must be cleared, or the
-   * map would pin a whole WebAssembly.Instance + layout per disposed sim and
-   * memory would grow unbounded across create/dispose cycles. `wasmStopTime` is
-   * a plain number, so it costs nothing to leave -- only the heavy refs matter.
+   * exports, the decoded layout, and the retained model refcount). The
+   * disposed entry is intentionally kept in `_handles` as a tombstone so a
+   * use-after-dispose still throws the clear "has been disposed" diagnostic;
+   * but those heavy refs must be cleared, or the map would pin a whole
+   * WebAssembly.Instance + layout per disposed sim and memory would grow
+   * unbounded across create/dispose cycles. `wasmStopTime` is a plain number,
+   * so it costs nothing to leave -- only the heavy refs matter.
    */
   private releaseWasmSimState(entry: HandleEntry): void {
+    // Pair simNewWasm's simlin_model_ref -- the from-wasm analysis FFI no
+    // longer needs the model after dispose, so release the refcount we bumped.
+    if (entry.wasmModelPtr !== undefined) {
+      simlin_model_unref(entry.wasmModelPtr);
+      entry.wasmModelPtr = undefined;
+    }
     entry.wasmInstance = undefined;
     entry.wasmExports = undefined;
     entry.wasmLayout = undefined;
+    entry.wasmLayoutBytes = undefined;
   }
 
   simDispose(handle: SimHandle): void {

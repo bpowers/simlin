@@ -187,23 +187,6 @@ describe('Model/Sim engine selection (public API)', () => {
     });
   });
 
-  describe('AC6.2: enableLtm rejected on the wasm engine through the public facade', () => {
-    it("simulate({enableLtm:true, engine:'wasm'}) rejects with the LTM-not-supported error", async () => {
-      const model = await project.mainModel();
-      // The rejection is enforced authoritatively in DirectBackend.simNew; this
-      // closes the loop that the facade forwards the option (it does not swallow
-      // or default it away) and that the rejection surfaces as a rejected promise.
-      await expect(model.simulate({}, { enableLtm: true, engine: 'wasm' })).rejects.toThrow(
-        /not supported on the wasm engine/i,
-      );
-    });
-
-    it("run({analyzeLtm:true, engine:'wasm'}) rejects the same way (run forwards analyzeLtm)", async () => {
-      const model = await project.mainModel();
-      await expect(model.run({}, { analyzeLtm: true, engine: 'wasm' })).rejects.toThrow(/LTM/i);
-    });
-  });
-
   describe('Sim.reset() reset+reapply-overrides path on a wasm sim (public API)', () => {
     it('setValue(const) -> reset() -> runToEnd reproduces the override result (matches the VM)', async () => {
       const model = await project.mainModel();

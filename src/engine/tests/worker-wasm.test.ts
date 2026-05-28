@@ -316,17 +316,6 @@ describe('WorkerBackend wasm engine parity (Phase 3)', () => {
   });
 
   describe('worker-boundary error propagation (no silent VM fallback)', () => {
-    it('rejects enableLtm on the wasm engine across the worker boundary', async () => {
-      const { backend } = createWorkerWasmPair();
-      await backend.init(loadWasmSource());
-      const projHandle = await backend.projectOpenXmile(loadTeacupXmile());
-      const modelHandle = await backend.projectGetModel(projHandle, null);
-
-      // The DirectBackend inside the worker throws before any compile; the
-      // serialized error must round-trip and reject the main-thread promise.
-      await expect(backend.simNew(modelHandle, true, 'wasm')).rejects.toThrow(/not supported on the wasm engine/i);
-    });
-
     it('rejects a wasm-unsupported model rather than silently falling back to the VM', async () => {
       const { backend } = createWorkerWasmPair();
       await backend.init(loadWasmSource());
