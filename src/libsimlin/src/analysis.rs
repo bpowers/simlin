@@ -7,6 +7,7 @@
 //! Functions for extracting feedback loops, causal links with LTM scores,
 //! and relative loop scores from a simulation.
 
+use simlin_engine::db::{SourceModel, SourceProject};
 use simlin_engine::{self as engine, canonicalize};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -23,6 +24,177 @@ use crate::{
     require_model, require_sim, store_anyhow_error, store_error, SimlinErrorCode, SimlinModel,
     SimlinSim,
 };
+
+/// Backend-agnostic per-link result emitted by [`analyze_links_core`].
+///
+/// Owned `String`s and an owned `Vec<f64>` score series, so the value
+/// survives the db/sync_state lock drop -- the FFI boundary takes ownership
+/// of the strings (into `CString`) and the score buffer (into a `Box<[f64]>`
+/// freed by `simlin_free_links`).
+///
+/// This shape is shared by the VM-backed FFI (`simlin_analyze_get_links`)
+/// and by the from-wasm-results FFI added in a later task; concentrating
+/// the structure-and-scoring logic in one core (driven by `Option<&Results>`)
+/// guarantees the two backends cannot diverge.  See the divergence note in
+/// docs/implementation-plans/2026-05-26-wasm-ltm/phase_02.md (line 75) for
+/// why the design's single over-broad core is split into two focused cores
+/// (links here; relative-loop-score below): the links analysis is driven
+/// purely by structure + `Option<&Results>` and has no use for the LTM
+/// snapshots that the relative-loop-score core needs.
+pub(crate) struct OwnedLink {
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) polarity: engine::ltm::LinkPolarity,
+    pub(crate) score: Option<Vec<f64>>,
+}
+
+/// Resolve the model's unique causal edges and, when `results` is `Some`,
+/// look up each edge's LTM link-score series.
+///
+/// `model_causal_edges` returns `&CausalEdgesResult` borrowed against the
+/// db; callers (the VM FFI and the future from-wasm FFI) drop the db /
+/// sync_state locks immediately after this core returns, so this function
+/// materializes `unique_links` into owned `(String, String)` pairs while
+/// the borrow is still live and *only then* iterates over `results`.
+/// `compute_link_polarities` returns owned data, so the polarity map
+/// outlives the lock drop without further copying.
+///
+/// `results` is `Option` because non-LTM sims have no score series; the
+/// from-wasm callers always pass `Some(&results)` since they hold the
+/// rebuilt `Results` on the stack and only reach this core when LTM was
+/// part of the wasm compile.
+pub(crate) fn analyze_links_core(
+    db: &dyn engine::db::Db,
+    model: SourceModel,
+    project: SourceProject,
+    results: Option<&engine::Results>,
+) -> Vec<OwnedLink> {
+    let causal = engine::db::model_causal_edges(db, model, project);
+    let polarities = engine::db::compute_link_polarities(db, model, project);
+
+    // Materialize edges into owned Strings before touching `results`, so the
+    // db borrow held by `causal` is no longer needed past this point.  The
+    // caller can (and does) drop its locks the moment this function returns.
+    let mut unique_links: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for (from_name, to_set) in &causal.edges {
+        for to_name in to_set {
+            let key = (from_name.clone(), to_name.clone());
+            if seen.insert(key.clone()) {
+                unique_links.push(key);
+            }
+        }
+    }
+
+    unique_links
+        .into_iter()
+        .map(|(from, to)| {
+            let score = results.and_then(|r| {
+                let link_score_var =
+                    format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}");
+                let var_ident = canonicalize(&link_score_var);
+                r.offsets
+                    .get(&*var_ident)
+                    .map(|&off| r.iter().map(|row| row[off]).collect::<Vec<f64>>())
+            });
+            let polarity = polarities
+                .get(&(from.clone(), to.clone()))
+                .copied()
+                .unwrap_or(engine::ltm::LinkPolarity::Unknown);
+            OwnedLink {
+                from,
+                to,
+                polarity,
+                score,
+            }
+        })
+        .collect()
+}
+
+/// Convert a vector of `OwnedLink` into the C-ABI `*mut SimlinLinks`.
+///
+/// On a `CString::new` failure (interior NUL) the partial allocations are
+/// freed via `drop_links_vec`, a generic error is reported through
+/// `out_error`, and the function returns `ptr::null_mut()`.
+///
+/// Score arrays are allocated as `Box<[f64]>` (via `as_mut_ptr` +
+/// `mem::forget`) so the existing `simlin_free_links` -> `drop_link` ->
+/// `drop_f64_array` ownership chain frees them correctly.
+unsafe fn owned_links_to_ffi(
+    links: Vec<OwnedLink>,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinLinks {
+    if links.is_empty() {
+        return Box::into_raw(Box::new(SimlinLinks {
+            links: ptr::null_mut(),
+            count: 0,
+        }));
+    }
+
+    let mut c_links: Vec<SimlinLink> = Vec::with_capacity(links.len());
+    for owned in links {
+        let from = match CString::new(owned.from.as_str()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                drop_links_vec(&mut c_links);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("link source contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        let to = match CString::new(owned.to.as_str()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                drop_c_string(from);
+                drop_links_vec(&mut c_links);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("link destination contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+
+        let (score_ptr, score_len) = match owned.score {
+            Some(scores) => {
+                let score_len = scores.len();
+                let mut boxed = scores.into_boxed_slice();
+                let score_ptr = boxed.as_mut_ptr();
+                std::mem::forget(boxed);
+                (score_ptr, score_len)
+            }
+            None => (ptr::null_mut(), 0),
+        };
+
+        let polarity = match owned.polarity {
+            engine::ltm::LinkPolarity::Positive => SimlinLinkPolarity::Positive,
+            engine::ltm::LinkPolarity::Negative => SimlinLinkPolarity::Negative,
+            _ => SimlinLinkPolarity::Unknown,
+        };
+
+        c_links.push(SimlinLink {
+            from,
+            to,
+            polarity,
+            score: score_ptr,
+            score_len,
+        });
+    }
+
+    let count = c_links.len();
+    let mut boxed = c_links.into_boxed_slice();
+    let links_ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+
+    Box::into_raw(Box::new(SimlinLinks {
+        links: links_ptr,
+        count,
+    }))
+}
 
 /// Get the feedback loops detected in a model
 ///
@@ -197,7 +369,6 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
     };
     let model_ref = &*sim_ref.model;
 
-    // Use salsa db for causal edge extraction
     let db_locked = (*model_ref.project).db.lock().unwrap();
     let sync_state = (*model_ref.project).sync_state.lock().unwrap();
     let sync = match sync_state.as_ref() {
@@ -224,121 +395,24 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
         }
     };
 
-    let causal = engine::db::model_causal_edges(&*db_locked, synced_model.source, sync.project);
-
-    // Compute per-link polarity from variable ASTs before dropping locks.
-    let polarities =
-        engine::db::compute_link_polarities(&*db_locked, synced_model.source, sync.project);
-
-    // Build unique links from causal edges (from_var -> {to_var, ...})
-    let mut unique_links = std::collections::HashMap::new();
-    for (from_name, to_set) in &causal.edges {
-        for to_name in to_set {
-            let key = (from_name.clone(), to_name.clone());
-            unique_links
-                .entry(key)
-                .or_insert((from_name.clone(), to_name.clone()));
-        }
-    }
-
-    // Drop locks before accessing sim state for LTM scores
+    // Hold the sim state lock only as long as needed to evaluate the
+    // (enable_ltm && state.results.is_some()) gate and borrow `&Results`.
+    // `analyze_links_core`'s structure-resolution step still needs the db
+    // borrow, but the polarity map and the unique-links list are owned, so
+    // by the time this function returns to its callers all three locks are
+    // dropped along with this scope.
+    let state_guard = sim_ref.state.lock().unwrap();
+    let results: Option<&engine::Results> = if sim_ref.enable_ltm {
+        state_guard.results.as_ref()
+    } else {
+        None
+    };
+    let owned = analyze_links_core(&*db_locked, synced_model.source, sync.project, results);
+    drop(state_guard);
     drop(sync_state);
     drop(db_locked);
 
-    if unique_links.is_empty() {
-        return Box::into_raw(Box::new(SimlinLinks {
-            links: ptr::null_mut(),
-            count: 0,
-        }));
-    }
-
-    let has_ltm_scores = {
-        let state = sim_ref.state.lock().unwrap();
-        sim_ref.enable_ltm && state.results.is_some()
-    };
-
-    let mut c_links = Vec::with_capacity(unique_links.len());
-    for (_, (from_name, to_name)) in unique_links {
-        let from = match CString::new(from_name.as_str()) {
-            Ok(s) => s.into_raw(),
-            Err(_) => {
-                drop_links_vec(&mut c_links);
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic)
-                        .with_message("link source contains interior NUL byte"),
-                );
-                return ptr::null_mut();
-            }
-        };
-        let to = match CString::new(to_name.as_str()) {
-            Ok(s) => s.into_raw(),
-            Err(_) => {
-                drop_c_string(from);
-                drop_links_vec(&mut c_links);
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic)
-                        .with_message("link destination contains interior NUL byte"),
-                );
-                return ptr::null_mut();
-            }
-        };
-
-        let (score_ptr, score_len) = if has_ltm_scores {
-            let link_score_var = format!(
-                "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
-                from_name.as_str(),
-                to_name.as_str()
-            );
-            let var_ident = canonicalize(&link_score_var);
-
-            let state = sim_ref.state.lock().unwrap();
-            if let Some(ref results) = state.results {
-                if let Some(&offset) = results.offsets.get(&*var_ident) {
-                    let mut scores = Vec::with_capacity(results.step_count);
-                    for row in results.iter() {
-                        scores.push(row[offset]);
-                    }
-                    let score_len = scores.len();
-                    let mut boxed = scores.into_boxed_slice();
-                    let score_ptr = boxed.as_mut_ptr();
-                    std::mem::forget(boxed);
-                    (score_ptr, score_len)
-                } else {
-                    (ptr::null_mut(), 0)
-                }
-            } else {
-                (ptr::null_mut(), 0)
-            }
-        } else {
-            (ptr::null_mut(), 0)
-        };
-
-        let polarity = match polarities.get(&(from_name.clone(), to_name.clone())) {
-            Some(engine::ltm::LinkPolarity::Positive) => SimlinLinkPolarity::Positive,
-            Some(engine::ltm::LinkPolarity::Negative) => SimlinLinkPolarity::Negative,
-            _ => SimlinLinkPolarity::Unknown,
-        };
-
-        c_links.push(SimlinLink {
-            from,
-            to,
-            polarity,
-            score: score_ptr,
-            score_len,
-        });
-    }
-
-    let count = c_links.len();
-    let mut links = c_links.into_boxed_slice();
-    let links_ptr = links.as_mut_ptr();
-    std::mem::forget(links);
-
-    Box::into_raw(Box::new(SimlinLinks {
-        links: links_ptr,
-        count,
-    }))
+    owned_links_to_ffi(owned, out_error)
 }
 
 /// Frees a SimlinLinks structure
