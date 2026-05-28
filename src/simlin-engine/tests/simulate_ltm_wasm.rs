@@ -30,8 +30,8 @@ use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_datamodel_to_arti
 use simlin_engine::xmile;
 
 use test_helpers::{
-    assert_ltm_slabs_match, ltm_discovery_inputs, vm_results_for_ltm, wasm_results_for_ltm,
-    wasm_results_for_ltm_discovery,
+    LTM_SERIES_TOLERANCE, assert_ltm_slabs_match, ltm_discovery_inputs, vm_results_for_ltm,
+    wasm_results_for_ltm, wasm_results_for_ltm_discovery,
 };
 
 /// Shared LTM-synthetic-variable name prefix used by every link/loop/agg
@@ -395,22 +395,6 @@ fn unsupported_ltm_model_returns_wasmgen_error() {
 // AC2.5: discovery-mode loop parity (wasm vs VM)
 // ---------------------------------------------------------------------------
 
-/// Tolerance for per-timestep `FoundLoop.scores` agreement between the
-/// wasm and VM discovery runs.
-///
-/// A loop score is the product of its signed link scores; the underlying
-/// `$⁚ltm⁚link_score⁚*` series already agree within
-/// `LTM_SERIES_TOLERANCE` (1e-6) per `assert_ltm_slabs_match`, so a small
-/// constant chained product stays at the same relative scale. We use a
-/// relative-or-absolute tolerance with the same shape as the slab
-/// comparator -- the absolute floor (1.0) handles values near zero where
-/// a pure relative epsilon collapses; the relative branch handles large
-/// magnitudes. The tolerance is deliberately tight (1e-6) because both
-/// backends feed identical structural inputs into the same
-/// `discover_loops_with_graph`, so the only float drift is in the
-/// underlying link-score products.
-const DISCOVERY_SCORE_TOLERANCE: f64 = 1e-6;
-
 /// Canonical-rotation key for a discovered loop, built from its
 /// trimmed link sequence (the `(from, to)` ordered tuples reported by
 /// `discover_loops_with_graph`).
@@ -467,7 +451,7 @@ fn canonical_rotation_of_edges(edges: &[(String, String)]) -> Vec<(String, Strin
 /// `Results` carry specs reconstructed from the same compile, so the
 /// step-to-time formula `start + save_step * step` produces bit-
 /// identical results); scores must agree within
-/// `DISCOVERY_SCORE_TOLERANCE` using the same relative-or-absolute
+/// `LTM_SERIES_TOLERANCE` using the same relative-or-absolute
 /// shape as `assert_ltm_slabs_match`.
 fn assert_loop_score_series_match(model_rel_path: &str, vm: &FoundLoop, wasm: &FoundLoop) {
     assert_eq!(
@@ -495,7 +479,7 @@ fn assert_loop_score_series_match(model_rel_path: &str, vm: &FoundLoop, wasm: &F
             continue;
         }
         let max_abs = s_vm.abs().max(s_wasm.abs()).max(1.0);
-        let epsilon = DISCOVERY_SCORE_TOLERANCE * max_abs;
+        let epsilon = LTM_SERIES_TOLERANCE * max_abs;
         let diff = (s_vm - s_wasm).abs();
         assert!(
             diff <= epsilon,

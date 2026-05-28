@@ -36,6 +36,29 @@ use wasm::validate;
 /// tolerance used in `simulate_ltm.rs` (which compares against an external
 /// oracle whose intermediate algebra differs). A model that needs looser
 /// should document why inline rather than weakening the constant.
+///
+/// **Tolerance shape**: relative-or-absolute — `max(1.0, |vm|.max(|wasm|)) * tol`.
+/// The absolute floor (1.0) handles values near zero where a pure relative
+/// epsilon collapses; the relative branch handles large magnitudes where the
+/// absolute floor would be too strict.
+///
+/// **Loop scores stay at the same tight value**: a loop score is the product
+/// of its signed link scores. For corpus models like `arms_race_3party` the
+/// chain length is a small constant; the underlying `$⁚ltm⁚link_score⁚*`
+/// series already agree within this tolerance per `assert_ltm_slabs_match`,
+/// so the chained product stays at the same relative scale. Both backends
+/// feed the same salsa-compiled opcode sequence into `discover_loops_with_graph`,
+/// so per-operation rounding is bit-identical and there is no compounding
+/// divergence.
+///
+/// **Heavy-twin note** (`#[ignore]`d C-LEARN and World3): the wasm backend
+/// open-codes the transcendentals `exp`/`ln`/`sin`/`cos`/`tan`/`atan`/
+/// `asin`/`acos`/`log10`/`pow` in `src/simlin-engine/src/wasmgen/math.rs`,
+/// which can differ from Rust libm by a few ULP. For a link-score equation
+/// that routes through a transcendental, the propagation through a chain of
+/// `k` links stays well within the `1e-6` relative floor; the heavy twins
+/// are where this would surface in practice and they are `#[ignore]`d, so the
+/// risk is contained.
 #[allow(dead_code)]
 pub const LTM_SERIES_TOLERANCE: f64 = 1e-6;
 
