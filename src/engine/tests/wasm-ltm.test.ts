@@ -165,3 +165,66 @@ describe('LTM on the wasm engine (public API)', () => {
     }
   });
 });
+
+// AC3.2 (TS side): an LTM model the wasm backend cannot compile rejects from
+// Model.simulate({engine:'wasm', enableLtm:true}) as a thrown Error -- the
+// DirectBackend deliberately has no VM fallback (see src/engine/CLAUDE.md).
+// The fixture in test/ltm_dynamic_range_unsupported/ is the same XMILE the
+// engine/FFI Rust tests use (single source of truth), combining a feedback
+// loop (so LTM is genuinely enabled) with SUM(source[lo:hi]) which the
+// fully-unrolled wasm emitter cannot lower (GH #612). The VM still handles
+// the dynamic-range subscript, so the same model still simulates on
+// engine:'vm' -- confirming this is a wasm-only limitation.
+function loadDynamicRangeUnsupportedXmile(): Uint8Array {
+  const xmilePath = path.join(
+    __dirname,
+    '..',
+    '..',
+    '..',
+    'test',
+    'ltm_dynamic_range_unsupported',
+    'model.stmx',
+  );
+  if (!fs.existsSync(xmilePath)) {
+    throw new Error('Required test XMILE model not found: ' + xmilePath);
+  }
+  return fs.readFileSync(xmilePath);
+}
+
+describe('LTM on the wasm engine: unsupported model', () => {
+  let project: Project;
+
+  beforeAll(async () => {
+    await loadWasm();
+    project = await Project.open(loadDynamicRangeUnsupportedXmile());
+  });
+
+  afterAll(async () => {
+    await project.dispose();
+  });
+
+  it('unsupported LTM model rejects on wasm but runs on vm', async () => {
+    const model = await project.mainModel();
+
+    // The wasm path rejects: the compile FFI returns a SimlinError that the
+    // DirectBackend surfaces as a thrown Error (no silent VM fallback, no
+    // silently-wrong result slab). We do not pin the exact error text -- the
+    // message is allowed to evolve -- only that simulate rejects.
+    await expect(model.simulate({}, { engine: 'wasm', enableLtm: true })).rejects.toThrow();
+
+    // The same model simulates fine on the VM with LTM enabled: confirming
+    // the limitation is wasm-backend-specific, not a structural model error.
+    const vmSim = await model.simulate({}, { engine: 'vm', enableLtm: true });
+    await vmSim.runToEnd();
+    const stepCount = await vmSim.getStepCount();
+    expect(stepCount).toBeGreaterThan(0);
+
+    // The VM analyzer must have produced at least one causal link on the
+    // model (the feedback loop in the fixture); this is the secondary AC3.2
+    // sanity check that LTM is genuinely on.
+    const links = await vmSim.getLinks();
+    expect(links.length).toBeGreaterThan(0);
+
+    await vmSim.dispose();
+  });
+});
