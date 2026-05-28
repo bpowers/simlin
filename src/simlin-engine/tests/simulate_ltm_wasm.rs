@@ -25,10 +25,14 @@ use simlin_engine::datamodel;
 use simlin_engine::db::{
     SimlinDb, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
+use simlin_engine::ltm_finding::{self, FoundLoop};
 use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_datamodel_to_artifact};
 use simlin_engine::xmile;
 
-use test_helpers::{assert_ltm_slabs_match, vm_results_for_ltm, wasm_results_for_ltm};
+use test_helpers::{
+    assert_ltm_slabs_match, ltm_discovery_inputs, vm_results_for_ltm, wasm_results_for_ltm,
+    wasm_results_for_ltm_discovery,
+};
 
 /// Shared LTM-synthetic-variable name prefix used by every link/loop/agg
 /// score: `"$\u{205A}ltm\u{205A}"` (dollar sign + two-dot punctuation).
@@ -385,4 +389,346 @@ fn unsupported_ltm_model_returns_wasmgen_error() {
         vm.step_count > 0,
         "VM with LTM on must produce at least one saved step for the fixture"
     );
+}
+
+// ---------------------------------------------------------------------------
+// AC2.5: discovery-mode loop parity (wasm vs VM)
+// ---------------------------------------------------------------------------
+
+/// Tolerance for per-timestep `FoundLoop.scores` agreement between the
+/// wasm and VM discovery runs.
+///
+/// A loop score is the product of its signed link scores; the underlying
+/// `$⁚ltm⁚link_score⁚*` series already agree within
+/// `LTM_SERIES_TOLERANCE` (1e-6) per `assert_ltm_slabs_match`, so a small
+/// constant chained product stays at the same relative scale. We use a
+/// relative-or-absolute tolerance with the same shape as the slab
+/// comparator -- the absolute floor (1.0) handles values near zero where
+/// a pure relative epsilon collapses; the relative branch handles large
+/// magnitudes. The tolerance is deliberately tight (1e-6) because both
+/// backends feed identical structural inputs into the same
+/// `discover_loops_with_graph`, so the only float drift is in the
+/// underlying link-score products.
+const DISCOVERY_SCORE_TOLERANCE: f64 = 1e-6;
+
+/// Canonical-rotation key for a discovered loop, built from its
+/// trimmed link sequence (the `(from, to)` ordered tuples reported by
+/// `discover_loops_with_graph`).
+///
+/// Loop polarity is intentionally NOT part of the key: structural
+/// polarity is identical between backends (same `causal_graph`), and
+/// runtime polarity is derived from `scores` so a small float drift on
+/// the boundary could otherwise flip a `MostlyReinforcing` vs
+/// `Reinforcing` classification and falsely diverge the identity check.
+/// `Loop.id` is also excluded because `rank_and_filter` assigns IDs
+/// after a `sort_by(avg_abs_score)` whose tie-breaking is order-of-
+/// discovery -- not a stable identity surface.
+///
+/// The canonical rotation makes the key invariant to the discovery
+/// algorithm's choice of starting node on the cycle: two runs that walk
+/// the same cycle starting at different stocks still produce the same
+/// key.
+fn loop_identity_key(loop_info: &simlin_engine::ltm::Loop) -> Vec<(String, String)> {
+    let edges: Vec<(String, String)> = loop_info
+        .links
+        .iter()
+        .map(|l| (l.from.as_str().to_string(), l.to.as_str().to_string()))
+        .collect();
+    canonical_rotation_of_edges(&edges)
+}
+
+/// Lexicographically-smallest rotation of an edge sequence. Mirrors the
+/// crate-private `simlin_engine::ltm::canonical_rotation` semantics
+/// (used inside `discover_loops_with_graph` for its own dedup) so two
+/// discovery runs that walk the same cycle starting at different points
+/// produce the same identity key.
+///
+/// Cycles where every edge tuple is identical (degenerate self-loops)
+/// return the original sequence unchanged; for normal cycles the unique
+/// minimum rotation is well-defined.
+fn canonical_rotation_of_edges(edges: &[(String, String)]) -> Vec<(String, String)> {
+    if edges.is_empty() {
+        return Vec::new();
+    }
+    let n = edges.len();
+    let mut best: Vec<(String, String)> = edges.to_vec();
+    for start in 1..n {
+        let candidate: Vec<(String, String)> =
+            (0..n).map(|i| edges[(start + i) % n].clone()).collect();
+        if candidate < best {
+            best = candidate;
+        }
+    }
+    best
+}
+
+/// Compare two `FoundLoop`s on the same loop identity for per-timestep
+/// score-series agreement. Times must be exactly equal (both backends'
+/// `Results` carry specs reconstructed from the same compile, so the
+/// step-to-time formula `start + save_step * step` produces bit-
+/// identical results); scores must agree within
+/// `DISCOVERY_SCORE_TOLERANCE` using the same relative-or-absolute
+/// shape as `assert_ltm_slabs_match`.
+fn assert_loop_score_series_match(model_rel_path: &str, vm: &FoundLoop, wasm: &FoundLoop) {
+    assert_eq!(
+        vm.scores.len(),
+        wasm.scores.len(),
+        "[{model_rel_path}] loop {} score-series length mismatch: vm={} wasm={}",
+        vm.loop_info.id,
+        vm.scores.len(),
+        wasm.scores.len()
+    );
+    for (i, ((t_vm, s_vm), (t_wasm, s_wasm))) in
+        vm.scores.iter().zip(wasm.scores.iter()).enumerate()
+    {
+        assert_eq!(
+            t_vm, t_wasm,
+            "[{model_rel_path}] loop {} step {i}: time axis diverges: vm={t_vm} wasm={t_wasm} \
+             (specs should have been reconstructed identically)",
+            vm.loop_info.id
+        );
+        // Both-NaN counts as equal (mirrors `assert_ltm_slabs_match`'s
+        // dual-NaN branch). Step 0 of an LTM series can be NaN by
+        // design (PREVIOUS bootstrap) and propagates into the loop
+        // score product; a single-sided NaN is a real divergence.
+        if s_vm.is_nan() && s_wasm.is_nan() {
+            continue;
+        }
+        let max_abs = s_vm.abs().max(s_wasm.abs()).max(1.0);
+        let epsilon = DISCOVERY_SCORE_TOLERANCE * max_abs;
+        let diff = (s_vm - s_wasm).abs();
+        assert!(
+            diff <= epsilon,
+            "[{model_rel_path}] loop {} step {i} (t={t_vm}): score diverges by {diff}: \
+             vm={s_vm} wasm={s_wasm} (epsilon={epsilon})",
+            vm.loop_info.id,
+        );
+    }
+}
+
+/// Drive `discover_loops_with_graph` over both a VM-produced `Results`
+/// and a wasm-produced discovery-mode `Results` -- with the same
+/// structural inputs (assembled by `ltm_discovery_inputs` so the
+/// causal graph, stocks, ltm-vars, and dims come from a single source)
+/// -- and assert that the discovered loop **sets** match (by canonical
+/// edge-sequence key) and that every matched loop's per-timestep
+/// `(time, score)` series agree.
+///
+/// `ltm_finding::FoundLoop.loop_info.id` is *not* part of the identity
+/// key: `rank_and_filter` assigns IDs after a score-driven sort whose
+/// tie-breaking is order-of-discovery, not a stable surface to lock to.
+/// `loop_identity_key` keys on the trimmed link sequence (canonical
+/// rotation), which `discover_loops_with_graph` itself uses for
+/// internal dedup -- the most natural identity surface for a directed
+/// cycle.
+fn assert_discovery_matches(model_rel_path: &str) {
+    let project = load(model_rel_path);
+    let inputs = ltm_discovery_inputs(&project, "main");
+    let wasm = wasm_results_for_ltm_discovery(&project, "main").unwrap_or_else(|msg| {
+        panic!("discovery-mode LTM model {model_rel_path} should lower to wasm: {msg}")
+    });
+
+    // Sanity guard: the wasm `Results` must actually carry LTM link-
+    // score series, otherwise discovery would emit an empty loop set on
+    // the wasm side and a "0 loops" agreement would pass vacuously.
+    let wasm_has_ltm = wasm
+        .offsets
+        .keys()
+        .any(|k| k.as_str().starts_with(LTM_LINK_SCORE_PREFIX));
+    assert!(
+        wasm_has_ltm,
+        "[{model_rel_path}] wasm discovery `Results` carries no $⁚ltm⁚link_score⁚* keys -- \
+         silent regression to LTM-off?"
+    );
+
+    let vm_loops = ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+    )
+    .unwrap_or_else(|e| panic!("[{model_rel_path}] VM discovery returned Err: {e:?}"));
+
+    let wasm_loops = ltm_finding::discover_loops_with_graph(
+        &wasm,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+    )
+    .unwrap_or_else(|e| panic!("[{model_rel_path}] wasm discovery returned Err: {e:?}"));
+
+    assert!(
+        !vm_loops.is_empty(),
+        "[{model_rel_path}] VM discovery produced an empty loop set -- nothing to compare against"
+    );
+
+    // Identity-keyed maps for set comparison and pair-up.
+    use std::collections::HashMap;
+    let mut vm_by_key: HashMap<Vec<(String, String)>, &FoundLoop> = HashMap::new();
+    for fl in &vm_loops {
+        let key = loop_identity_key(&fl.loop_info);
+        vm_by_key.insert(key, fl);
+    }
+    let mut wasm_by_key: HashMap<Vec<(String, String)>, &FoundLoop> = HashMap::new();
+    for fl in &wasm_loops {
+        let key = loop_identity_key(&fl.loop_info);
+        wasm_by_key.insert(key, fl);
+    }
+
+    let vm_keys: std::collections::HashSet<_> = vm_by_key.keys().cloned().collect();
+    let wasm_keys: std::collections::HashSet<_> = wasm_by_key.keys().cloned().collect();
+
+    let only_vm: Vec<_> = vm_keys.difference(&wasm_keys).cloned().collect();
+    let only_wasm: Vec<_> = wasm_keys.difference(&vm_keys).cloned().collect();
+    assert!(
+        only_vm.is_empty() && only_wasm.is_empty(),
+        "[{model_rel_path}] discovered loop sets diverge -- only-VM={only_vm:?}, only-wasm={only_wasm:?}"
+    );
+    assert_eq!(
+        vm_loops.len(),
+        wasm_loops.len(),
+        "[{model_rel_path}] discovered loop counts diverge: vm={} wasm={} \
+         (sets matched by canonical edge key but length mismatch suggests duplicate keys)",
+        vm_loops.len(),
+        wasm_loops.len()
+    );
+
+    for (key, vm_fl) in &vm_by_key {
+        let wasm_fl = wasm_by_key
+            .get(key)
+            .expect("set difference was empty so every VM key must be in the wasm map");
+        assert_loop_score_series_match(model_rel_path, vm_fl, wasm_fl);
+    }
+}
+
+/// AC2.5: small-corpus parity. arms_race_3party is tractable (a
+/// 3-party arms race with a handful of loops, fast to simulate and
+/// discover) and exercises the full element-level discovery path
+/// (`discover_loops_with_graph` over the salsa-built element graph
+/// with populated `ltm_vars` / `dims`).
+#[test]
+fn discovery_arms_race_matches_vm() {
+    assert_discovery_matches("arms_race_3party/arms_race.stmx");
+}
+
+/// AC2.5 (heavy ignored twin): C-LEARN v77 discovery parity.
+///
+/// `#[ignore]`d because compiling C-LEARN's 1.4 MB MDL to wasm is slow
+/// (the wasm compile is heavier than the VM compile this test's
+/// VM-side peer `clearn_ltm_discovery_compiles` already runs at
+/// `#[ignore]`); running it counts against the 3-minute
+/// `cargo test --workspace` cap if left in the default suite. Run
+/// explicitly with:
+///     cargo test --release -p simlin-engine \
+///         --features file_io --test simulate_ltm_wasm -- --ignored \
+///         --nocapture discovery_clearn_matches_vm_wasm
+///
+/// The model lives outside the XMILE loader's `test/` root (it is a
+/// Vensim MDL under `test/xmutil_test_models/`), so it is loaded via
+/// `open_vensim` directly rather than through this binary's
+/// XMILE-only `load` helper.
+#[test]
+#[ignore = "wasm compile of 1.4 MB MDL is slow; run with `cargo test --release -- --ignored`"]
+fn discovery_clearn_matches_vm_wasm() {
+    let path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let mdl =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    let project = simlin_engine::open_vensim(&mdl)
+        .unwrap_or_else(|e| panic!("open_vensim should parse C-LEARN: {e:?}"));
+    discovery_matches_helper(&project, path);
+}
+
+/// AC2.5 (heavy ignored twin): World3-03 discovery parity.
+///
+/// `#[ignore]`d because (a) wasm-compiling a 166-variable Vensim
+/// model is slow, and (b) the VM-side discovery on World3 currently
+/// does not terminate -- see `world3_discovery_single_timestep` for
+/// the documented Finding 3 (GH #540) and the surrounding RSS/time-
+/// budget bound. Until #540 is fixed the VM run alone exhausts the
+/// budget, so this twin cannot complete; once #540 is fixed the
+/// twin's VM and wasm runs both terminate and this test asserts they
+/// agree on the discovered loop set and per-loop score series.
+///
+/// Run explicitly with:
+///     cargo test --release -p simlin-engine \
+///         --features file_io --test simulate_ltm_wasm -- --ignored \
+///         --nocapture discovery_world3_matches_vm_wasm
+#[test]
+#[ignore = "wasm compile of 166-var World3 is slow; VM discovery is also blocked on #540"]
+fn discovery_world3_matches_vm_wasm() {
+    let path = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
+    let mdl =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    let project = simlin_engine::open_vensim(&mdl)
+        .unwrap_or_else(|e| panic!("open_vensim should parse World3: {e:?}"));
+    discovery_matches_helper(&project, path);
+}
+
+/// Project-borrowing peer of `assert_discovery_matches`. The arms-race
+/// fast test uses `assert_discovery_matches` (which loads via the
+/// XMILE-only `load` helper); the Vensim MDL heavy twins load the
+/// project themselves (different file root) and pass it in here. The
+/// body is otherwise the same -- the wasm-vs-VM identity-and-scores
+/// comparison.
+fn discovery_matches_helper(project: &datamodel::Project, label: &str) {
+    let inputs = ltm_discovery_inputs(project, "main");
+    let wasm = wasm_results_for_ltm_discovery(project, "main").unwrap_or_else(|msg| {
+        panic!("discovery-mode LTM model {label} should lower to wasm: {msg}")
+    });
+
+    let wasm_has_ltm = wasm
+        .offsets
+        .keys()
+        .any(|k| k.as_str().starts_with(LTM_LINK_SCORE_PREFIX));
+    assert!(
+        wasm_has_ltm,
+        "[{label}] wasm discovery `Results` carries no $⁚ltm⁚link_score⁚* keys"
+    );
+
+    let vm_loops = ltm_finding::discover_loops_with_graph(
+        &inputs.vm_results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+    )
+    .unwrap_or_else(|e| panic!("[{label}] VM discovery returned Err: {e:?}"));
+    let wasm_loops = ltm_finding::discover_loops_with_graph(
+        &wasm,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+    )
+    .unwrap_or_else(|e| panic!("[{label}] wasm discovery returned Err: {e:?}"));
+
+    assert!(
+        !vm_loops.is_empty(),
+        "[{label}] VM discovery produced an empty loop set -- nothing to compare against"
+    );
+
+    use std::collections::{HashMap, HashSet};
+    let vm_by_key: HashMap<Vec<(String, String)>, &FoundLoop> = vm_loops
+        .iter()
+        .map(|fl| (loop_identity_key(&fl.loop_info), fl))
+        .collect();
+    let wasm_by_key: HashMap<Vec<(String, String)>, &FoundLoop> = wasm_loops
+        .iter()
+        .map(|fl| (loop_identity_key(&fl.loop_info), fl))
+        .collect();
+    let vm_keys: HashSet<_> = vm_by_key.keys().cloned().collect();
+    let wasm_keys: HashSet<_> = wasm_by_key.keys().cloned().collect();
+    let only_vm: Vec<_> = vm_keys.difference(&wasm_keys).cloned().collect();
+    let only_wasm: Vec<_> = wasm_keys.difference(&vm_keys).cloned().collect();
+    assert!(
+        only_vm.is_empty() && only_wasm.is_empty(),
+        "[{label}] discovered loop sets diverge -- only-VM={only_vm:?}, only-wasm={only_wasm:?}"
+    );
+    assert_eq!(vm_loops.len(), wasm_loops.len());
+    for (key, vm_fl) in &vm_by_key {
+        let wasm_fl = wasm_by_key.get(key).unwrap();
+        assert_loop_score_series_match(label, vm_fl, wasm_fl);
+    }
 }
