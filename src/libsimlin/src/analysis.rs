@@ -416,6 +416,173 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
     owned_links_to_ffi(owned, out_error)
 }
 
+/// Reinterpret a byte buffer of f64 values into a `&[f64]`.
+///
+/// The from-wasm FFIs accept the result slab as a `(*const u8, usize)` pair
+/// for consistency with the other byte-buffer-input functions in this crate
+/// (notably `simlin_project_open_protobuf`, which takes `*const u8` + len).
+/// f64 alignment is 8 bytes; wasm linear memory hands the host a tightly-packed
+/// little-endian array.  We validate that `slab_len` is a multiple of 8 and
+/// that the pointer is non-null; the slice itself is then `slab_len / 8`
+/// `f64` elements long.
+///
+/// `slab_ptr` is allowed to be 8-byte misaligned in pathological hosts; we
+/// copy through `f64::from_le_bytes` over an 8-byte byte slice rather than
+/// reinterpreting in place, so the returned `Vec<f64>` is the canonical
+/// owned form and any alignment concerns vanish at the boundary.
+unsafe fn slab_from_bytes(slab_ptr: *const u8, slab_len: usize) -> Result<Vec<f64>, SimlinError> {
+    if slab_ptr.is_null() {
+        return Err(SimlinError::new(SimlinErrorCode::Generic)
+            .with_message("wasm result slab pointer must not be NULL"));
+    }
+    if !slab_len.is_multiple_of(8) {
+        return Err(
+            SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
+                "wasm result slab byte length {slab_len} is not a multiple of 8 (f64 size)"
+            )),
+        );
+    }
+    let n_f64 = slab_len / 8;
+    let bytes = std::slice::from_raw_parts(slab_ptr, slab_len);
+    let mut out = Vec::with_capacity(n_f64);
+    for chunk in bytes.chunks_exact(8) {
+        out.push(f64::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    Ok(out)
+}
+
+/// Gets all causal links in a model with LTM link-score series derived from
+/// a wasm-produced result slab.
+///
+/// This is the wasm-backend twin of `simlin_analyze_get_links`: instead of
+/// reading the `Results` off a `SimlinSim`'s `SimState`, it rebuilds them
+/// from a `(slab, WasmLayout)` pair produced by running the blob returned
+/// from `simlin_model_compile_to_wasm(model, ltm_enabled=true, ..)`.  Both
+/// FFI functions funnel through the same `analyze_links_core` so the link
+/// set and per-link score series agree to within the underlying VM/wasm
+/// numeric tolerance.
+///
+/// The slab is the host-extracted `n_chunks * n_slots * 8` bytes starting
+/// at the blob's `results_offset` (the f64-array image of the results region,
+/// little-endian).  The layout buffer is the bytes returned in
+/// `simlin_model_compile_to_wasm`'s `out_layout`.  Both are owned by the
+/// caller and only read; this function copies them as needed.
+///
+/// Because the links analysis is structure-driven (the unique `(from, to)`
+/// edges come from `model_causal_edges`, which has no LTM dependency), this
+/// function does not need to toggle `ltm_enabled` on the salsa db -- it
+/// only needs the wasm-produced score columns from the slab.  The
+/// `recompute_ltm_snapshots` dance happens only in the rel-loop-score
+/// counterpart.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a `SimlinModel`.
+/// - `slab_ptr` must be a non-NULL pointer to `slab_len` valid bytes; the
+///   buffer is read but not retained.
+/// - `layout_ptr` must be a non-NULL pointer to `layout_len` valid bytes
+///   produced by `WasmLayout::serialize` (i.e. the `out_layout` buffer of
+///   `simlin_model_compile_to_wasm`).
+/// - The returned `SimlinLinks` must be freed with `simlin_free_links`.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
+    model: *mut SimlinModel,
+    slab_ptr: *const u8,
+    slab_len: usize,
+    layout_ptr: *const u8,
+    layout_len: usize,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinLinks {
+    clear_out_error(out_error);
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return ptr::null_mut();
+        }
+    };
+
+    // Deserialize the layout first: a malformed layout is the cheaper-to-fail
+    // path, so we surface it before touching the slab or locking the db.
+    if layout_ptr.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("wasm layout pointer must not be NULL"),
+        );
+        return ptr::null_mut();
+    }
+    let layout_bytes = std::slice::from_raw_parts(layout_ptr, layout_len);
+    let layout = match engine::wasmgen::WasmLayout::deserialize(layout_bytes) {
+        Some(l) => l,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("failed to deserialize wasm layout buffer"),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    let slab_vec = match slab_from_bytes(slab_ptr, slab_len) {
+        Ok(v) => v,
+        Err(err) => {
+            store_error(out_error, err);
+            return ptr::null_mut();
+        }
+    };
+
+    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
+    let sync = match sync_state.as_ref() {
+        Some(s) => s.to_sync_result(),
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
+            );
+            return ptr::null_mut();
+        }
+    };
+    let canonical_model = canonicalize(&model_ref.model_name);
+    let synced_model = match sync.models.get(canonical_model.as_ref()) {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    let results = match results_from_layout_and_slab(
+        &*db_locked,
+        synced_model.source,
+        sync.project,
+        &layout,
+        &slab_vec,
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            store_error(out_error, err);
+            return ptr::null_mut();
+        }
+    };
+
+    let owned = analyze_links_core(
+        &*db_locked,
+        synced_model.source,
+        sync.project,
+        Some(&results),
+    );
+    drop(sync_state);
+    drop(db_locked);
+
+    owned_links_to_ffi(owned, out_error)
+}
+
 /// Frees a SimlinLinks structure
 ///
 /// # Safety
@@ -606,12 +773,6 @@ pub(crate) fn rel_loop_score_series(
 /// `results.specs`, so the reconstructed `Specs` is only there to keep the
 /// `Results` value structurally well-formed -- there is no analytic
 /// sensitivity to its contents from these FFIs.
-//
-// The `allow(dead_code)` is intentional and scoped to this commit: tasks 4
-// and 5 of phase 2 wire this helper into the new from-wasm FFI functions.
-// Landing the helper in its own commit keeps the LTM-flag scope-guard
-// pattern reviewable in isolation from the FFI plumbing it supports.
-#[allow(dead_code)]
 pub(crate) fn results_from_layout_and_slab(
     db: &dyn engine::db::Db,
     model: SourceModel,

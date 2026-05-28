@@ -192,6 +192,45 @@ void simlin_free_loops(SimlinLoops *loops);
 // - The returned SimlinLinks must be freed with simlin_free_links
 SimlinLinks *simlin_analyze_get_links(SimlinSim *sim, SimlinError **out_error);
 
+// Gets all causal links in a model with LTM link-score series derived from
+// a wasm-produced result slab.
+//
+// This is the wasm-backend twin of `simlin_analyze_get_links`: instead of
+// reading the `Results` off a `SimlinSim`'s `SimState`, it rebuilds them
+// from a `(slab, WasmLayout)` pair produced by running the blob returned
+// from `simlin_model_compile_to_wasm(model, ltm_enabled=true, ..)`.  Both
+// FFI functions funnel through the same `analyze_links_core` so the link
+// set and per-link score series agree to within the underlying VM/wasm
+// numeric tolerance.
+//
+// The slab is the host-extracted `n_chunks * n_slots * 8` bytes starting
+// at the blob's `results_offset` (the f64-array image of the results region,
+// little-endian).  The layout buffer is the bytes returned in
+// `simlin_model_compile_to_wasm`'s `out_layout`.  Both are owned by the
+// caller and only read; this function copies them as needed.
+//
+// Because the links analysis is structure-driven (the unique `(from, to)`
+// edges come from `model_causal_edges`, which has no LTM dependency), this
+// function does not need to toggle `ltm_enabled` on the salsa db -- it
+// only needs the wasm-produced score columns from the slab.  The
+// `recompute_ltm_snapshots` dance happens only in the rel-loop-score
+// counterpart.
+//
+// # Safety
+// - `model` must be a valid pointer to a `SimlinModel`.
+// - `slab_ptr` must be a non-NULL pointer to `slab_len` valid bytes; the
+//   buffer is read but not retained.
+// - `layout_ptr` must be a non-NULL pointer to `layout_len` valid bytes
+//   produced by `WasmLayout::serialize` (i.e. the `out_layout` buffer of
+//   `simlin_model_compile_to_wasm`).
+// - The returned `SimlinLinks` must be freed with `simlin_free_links`.
+SimlinLinks *simlin_analyze_links_from_wasm_results(SimlinModel *model,
+                                                    const uint8_t *slab_ptr,
+                                                    uintptr_t slab_len,
+                                                    const uint8_t *layout_ptr,
+                                                    uintptr_t layout_len,
+                                                    SimlinError **out_error);
+
 // Frees a SimlinLinks structure
 //
 // # Safety
