@@ -782,6 +782,50 @@ pub fn project_datamodel_dims(db: &dyn Db, project: SourceProject) -> Vec<datamo
     source_dims_to_datamodel(project.dimensions(db))
 }
 
+/// Cached project-global dimension context -- computed once per project.
+///
+/// This is the project's immutable `DimensionsContext`, the same value the
+/// per-variable compile sites used to rebuild on every variable via
+/// `DimensionsContext::from(project_datamodel_dims(..))`. Building it
+/// canonicalizes every dimension element name, so doing it once per project
+/// (instead of once per explicit-and-implicit variable compilation) removes a
+/// dominant allocation cost on large models. Keyed only on `project` -- and
+/// reading `project_datamodel_dims`, which depends solely on the project's
+/// dimensions input -- so it recomputes exactly when the dimensions change, the
+/// SAME dependency granularity the inline rebuild took. The shared context's
+/// only interior mutability is its `relationship_cache` `Mutex`, so it is safe
+/// to share across the rayon-parallel variable compilations (and the
+/// subdimension-relationship memo is now computed once and reused rather than
+/// discarded per variable).
+#[salsa::tracked(returns(ref))]
+pub fn project_dimensions_context(
+    db: &dyn Db,
+    project: SourceProject,
+) -> crate::dimensions::DimensionsContext {
+    crate::dimensions::DimensionsContext::from(project_datamodel_dims(db, project).as_slice())
+}
+
+/// Cached project-global converted dimensions -- computed once per project.
+///
+/// The `Vec<crate::dimensions::Dimension>` form of `project_datamodel_dims`,
+/// previously rebuilt per variable via
+/// `project_datamodel_dims(..).iter().map(Dimension::from).collect()`. Each
+/// `Dimension::from` re-canonicalizes the dimension's element names, so caching
+/// it once per project removes that repeated work. Same input dependency
+/// (`project_datamodel_dims`) and hence same invalidation granularity as the
+/// inline rebuild. The interned-backed `Dimension`s clone cheaply, so a
+/// consumer that genuinely needs an owned `Vec` can still `.to_vec()` the slice.
+#[salsa::tracked(returns(ref))]
+pub fn project_converted_dimensions(
+    db: &dyn Db,
+    project: SourceProject,
+) -> Vec<crate::dimensions::Dimension> {
+    project_datamodel_dims(db, project)
+        .iter()
+        .map(crate::dimensions::Dimension::from)
+        .collect()
+}
+
 fn parse_source_variable_impl(
     db: &dyn Db,
     var: SourceVariable,
@@ -942,37 +986,36 @@ fn variable_direct_dependencies_impl(
         _ => {
             let parsed =
                 parse_source_variable_with_module_context(db, var, project, module_ident_context);
-            let dims = source_dims_to_datamodel(project.dimensions(db));
-            let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
+            // The datamodel-form dims are still needed for the implicit-var
+            // parse below; the canonicalized context + converted dims come from
+            // the project-global salsa-cached queries (no per-variable rebuild).
+            let dims = project_datamodel_dims(db, project);
+            let dim_context = project_dimensions_context(db, project);
+            let converted_dims = project_converted_dimensions(db, project);
             let models = HashMap::new();
             let scope = crate::model::ScopeStage0 {
                 models: &models,
-                dimensions: &dim_context,
+                dimensions: dim_context,
                 model_name: "",
             };
             let lowered = crate::model::lower_variable(&scope, &parsed.variable);
 
-            let converted_dims: Vec<crate::dimensions::Dimension> = dims
-                .iter()
-                .map(crate::dimensions::Dimension::from)
-                .collect();
-
             // Two calls to classify_dependencies replace 7 separate walker calls.
             let dt_classification = match lowered.ast() {
                 Some(ast) => {
-                    crate::variable::classify_dependencies(ast, &converted_dims, module_inputs)
+                    crate::variable::classify_dependencies(ast, converted_dims, module_inputs)
                 }
                 None => crate::variable::DepClassification::default(),
             };
             let init_classification = match lowered.init_ast() {
                 Some(ast) => {
-                    crate::variable::classify_dependencies(ast, &converted_dims, module_inputs)
+                    crate::variable::classify_dependencies(ast, converted_dims, module_inputs)
                 }
                 None => crate::variable::DepClassification::default(),
             };
 
             let implicit_vars =
-                extract_implicit_var_deps(parsed, &dims, &dim_context, module_inputs);
+                extract_implicit_var_deps(parsed, dims, dim_context, converted_dims, module_inputs);
 
             VariableDeps {
                 dt_deps: dt_classification
@@ -1082,7 +1125,7 @@ pub fn model_implicit_var_info(
     project: SourceProject,
 ) -> HashMap<String, ImplicitVarMeta> {
     let source_vars = model.variables(db);
-    let module_ident_context = module_ident_context_for_model(db, model, project, &[]);
+    let module_ident_context = model_module_ident_context(db, model, project, vec![]);
     let mut result = HashMap::new();
 
     for source_var in source_vars.values() {
@@ -1206,8 +1249,17 @@ pub struct ResolvedScc {
 
 #[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub struct ModelDepGraphResult {
-    pub dt_dependencies: HashMap<String, BTreeSet<String>>,
-    pub initial_dependencies: HashMap<String, BTreeSet<String>>,
+    /// Interned-ident-keyed dependency maps. `Ident<Canonical>` derives
+    /// `salsa::Update`, and salsa's blanket impls cover
+    /// `std::collections::HashMap<K,V>` / `BTreeSet<K>` for `K,V: Update`, so
+    /// these stay on the std `HashMap` (default hasher) -- only the hot
+    /// internal working maps in `model_dependency_graph_impl` use FxHash.
+    /// `Ident<Canonical>` keys/values are cheap Arc-refcount clones and the
+    /// `BTreeSet`s iterate in the same lexicographic order the former
+    /// `BTreeSet<String>` did, so a consumer probing by `&str` (via
+    /// `Borrow<str>`) sees byte-identical behavior.
+    pub dt_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+    pub initial_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
     pub runlist_initials: Vec<String>,
     pub runlist_flows: Vec<String>,
     pub runlist_stocks: Vec<String>,
@@ -2541,8 +2593,7 @@ pub fn compute_layout(
     // depend on compute_layout.
     if project.ltm_enabled(db) {
         let ltm_vars = model_ltm_variables(db, model, project);
-        let dims = project_datamodel_dims(db, project);
-        let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
+        let dim_context = project_dimensions_context(db, project);
 
         let mut sorted_ltm_vars: Vec<&LtmSyntheticVar> = ltm_vars.vars.iter().collect();
         sorted_ltm_vars.sort_unstable_by_key(|v| &v.name);
@@ -3090,15 +3141,11 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     };
     let var_ident_canonical: Ident<Canonical> = Ident::new(var_name);
 
-    // Caller-owned, lowering-independent context, built EXACTLY as
-    // `compile_var_fragment` builds it (mirror byte-for-byte; same
-    // helpers, same order).
-    let dm_dims = source_dims_to_datamodel(project.dimensions(db));
-    let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
-    let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
-        .iter()
-        .map(crate::dimensions::Dimension::from)
-        .collect();
+    // Caller-owned, lowering-independent context, read EXACTLY as
+    // `compile_var_fragment` reads it (mirror byte-for-byte): the
+    // salsa-cached project-global dimension context and converted dims.
+    let dim_context = project_dimensions_context(db, project);
+    let converted_dims = project_converted_dimensions(db, project);
     let model_name_ident = Ident::new(model.name(db));
     let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     let module_models = model_module_map(db, model, project).clone();
@@ -3110,8 +3157,8 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
         project,
         true,
         &[],
-        &converted_dims,
-        &dim_context,
+        converted_dims,
+        dim_context,
         &model_name_ident,
         &module_models,
         &inputs,
@@ -3156,8 +3203,8 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
         &tables,
         &module_refs,
         mini_offset,
-        &converted_dims,
-        &dim_context,
+        converted_dims,
+        dim_context,
         &model_name_ident,
         &var_ident_canonical,
         &inputs,
@@ -3413,16 +3460,14 @@ pub fn compile_var_fragment(
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
 
     // Caller-owned, lowering-independent context (built only from
-    // project/variable data, never from the lowered equation). Use the
-    // salsa-cached project dims (returns(ref)) rather than re-running
-    // source_dims_to_datamodel on every variable -- this fragment compiler is
-    // invoked once per variable, and the datamodel dims are project-global.
-    let dm_dims = project_datamodel_dims(db, project);
-    let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
-    let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
-        .iter()
-        .map(crate::dimensions::Dimension::from)
-        .collect();
+    // project/variable data, never from the lowered equation). Read the
+    // salsa-cached project-global dimension context and converted dims
+    // (returns(ref)) rather than rebuilding them on every variable -- this
+    // fragment compiler is invoked once per variable, and the context is
+    // project-global and immutable. Building it canonicalizes every dimension
+    // element name, so caching it removes a dominant per-variable allocation.
+    let dim_context = project_dimensions_context(db, project);
+    let converted_dims = project_converted_dimensions(db, project);
     let model_name_ident = Ident::new(model.name(db));
     let inputs = canonical_module_input_set(&module_input_names);
     let module_models = model_module_map(db, model, project).clone();
@@ -3434,8 +3479,8 @@ pub fn compile_var_fragment(
         project,
         is_root,
         &module_input_names,
-        &converted_dims,
-        &dim_context,
+        converted_dims,
+        dim_context,
         &model_name_ident,
         &module_models,
         &inputs,
@@ -3512,8 +3557,8 @@ pub fn compile_var_fragment(
             &tables,
             &module_refs,
             mini_offset,
-            &converted_dims,
-            &dim_context,
+            converted_dims,
+            dim_context,
             &model_name_ident,
             &var_ident_canonical,
             &inputs,
@@ -3639,7 +3684,7 @@ fn lower_implicit_var<'db>(
     let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
 
     let dm_dims = project_datamodel_dims(db, project);
-    let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    let dim_context = project_dimensions_context(db, project);
 
     let units_ctx = project_units_context(db, project);
 
@@ -3700,7 +3745,7 @@ fn lower_implicit_var<'db>(
         let models = HashMap::new();
         let scope = crate::model::ScopeStage0 {
             models: &models,
-            dimensions: &dim_context,
+            dimensions: dim_context,
             model_name: "",
         };
         let lowered = crate::model::lower_variable(&scope, &parsed_implicit);
@@ -3769,7 +3814,7 @@ fn compile_implicit_var_fragment(
     // the per-phase compile returns (absent implicit index / equation
     // errors).
     let module_ident_context =
-        module_ident_context_for_model(db, model, project, module_input_names);
+        model_module_ident_context(db, model, project, module_input_names.to_vec());
     let (implicit_name, _lowered) =
         lower_implicit_var(db, meta, model, project, module_ident_context)?;
     let var_ident_str = canonicalize(&implicit_name).into_owned();
@@ -3863,7 +3908,7 @@ fn compile_implicit_var_phase_bytecodes(
     use crate::compiler::symbolic::{ReverseOffsetMap, VariableLayout};
 
     let module_ident_context =
-        module_ident_context_for_model(db, model, project, module_input_names);
+        model_module_ident_context(db, model, project, module_input_names.to_vec());
 
     // Shared parent→implicit→parse→lower prefix (the single relation, also
     // consumed by `compile_implicit_var_fragment`). `ModuleIdentContext`
@@ -3885,12 +3930,10 @@ fn compile_implicit_var_phase_bytecodes(
     );
     let implicit_dm_var = parsed.implicit_vars.get(meta.index_in_parent)?;
 
-    let dm_dims = project_datamodel_dims(db, project);
-    let dim_context = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
-    let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
-        .iter()
-        .map(crate::dimensions::Dimension::from)
-        .collect();
+    // Project-global dimension context + converted dims, read from the
+    // salsa-cached queries rather than rebuilt per implicit variable.
+    let dim_context = project_dimensions_context(db, project);
+    let converted_dims = project_converted_dimensions(db, project);
 
     let model_name_ident = Ident::new(model.name(db));
     let var_ident_canonical: Ident<Canonical> = Ident::new(&implicit_name);
@@ -4333,8 +4376,8 @@ fn compile_implicit_var_phase_bytecodes(
     module_refs.extend(extra_module_refs);
 
     let core = crate::compiler::ContextCore {
-        dimensions: &converted_dims,
-        dimensions_ctx: &dim_context,
+        dimensions: converted_dims,
+        dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
         module_models: &module_models,
@@ -4372,8 +4415,8 @@ fn compile_implicit_var_phase_bytecodes(
         &tables,
         &module_refs,
         mini_offset,
-        &converted_dims,
-        &dim_context,
+        converted_dims,
+        dim_context,
         &model_name_ident,
         &var_ident_canonical,
         &inputs,
@@ -4961,12 +5004,10 @@ pub fn assemble_module(
             );
         })?;
 
-    // Build dimension metadata from project dimensions (mirrors Compiler::populate_dimension_metadata)
-    let dm_dims = source_dims_to_datamodel(project.dimensions(db));
-    let converted_dims: Vec<crate::dimensions::Dimension> = dm_dims
-        .iter()
-        .map(crate::dimensions::Dimension::from)
-        .collect();
+    // Build dimension metadata from project dimensions (mirrors
+    // Compiler::populate_dimension_metadata). Read the project-global converted
+    // dims from the salsa-cached query instead of rebuilding them here.
+    let converted_dims = project_converted_dimensions(db, project);
 
     let mut dim_names: Vec<String> = Vec::new();
     let mut dim_infos: Vec<crate::bytecode::DimensionInfo> = Vec::new();
@@ -4980,7 +5021,7 @@ pub fn assemble_module(
         id
     };
 
-    for dim in &converted_dims {
+    for dim in converted_dims {
         match dim {
             crate::dimensions::Dimension::Indexed(dim_name, size) => {
                 let name_id = intern_name(&mut dim_names, dim_name.as_str());
@@ -5249,7 +5290,7 @@ fn enumerate_module_instances_inner(
                 name, sub_model_name,
             ));
         }
-        let module_ident_context = module_ident_context_for_model(db, *source_model, project, &[]);
+        let module_ident_context = model_module_ident_context(db, *source_model, project, vec![]);
         let parsed = parse_source_variable_with_module_context(
             db,
             meta.parent_source_var,
@@ -5604,6 +5645,9 @@ mod db_diagnostic_tests;
 #[cfg(test)]
 #[path = "db_differential_tests.rs"]
 mod db_differential_tests;
+#[cfg(test)]
+#[path = "db_dimension_context_cache_tests.rs"]
+mod db_dimension_context_cache_tests;
 #[cfg(test)]
 #[path = "db_dimension_invalidation_tests.rs"]
 mod db_dimension_invalidation_tests;

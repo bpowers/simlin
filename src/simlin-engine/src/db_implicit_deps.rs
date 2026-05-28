@@ -23,10 +23,16 @@ pub struct ImplicitVarDeps {
     pub referenced_tables: BTreeSet<String>,
 }
 
+/// `dims`, `dim_context`, and `converted_dims` are three views of the *same*
+/// project dimension list (datamodel form, context form, and converted form);
+/// the caller sources all three from the per-project salsa caches, so they are
+/// consistent by construction. Passing inconsistent slices would silently
+/// misclassify dependencies.
 pub(super) fn extract_implicit_var_deps(
     parsed: &ParsedVariableResult,
     dims: &[datamodel::Dimension],
     dim_context: &crate::dimensions::DimensionsContext,
+    converted_dims: &[crate::dimensions::Dimension],
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> Vec<ImplicitVarDeps> {
     if parsed.implicit_vars.is_empty() {
@@ -34,10 +40,6 @@ pub(super) fn extract_implicit_var_deps(
     }
 
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let converted_dims: Vec<crate::dimensions::Dimension> = dims
-        .iter()
-        .map(crate::dimensions::Dimension::from)
-        .collect();
 
     parsed
         .implicit_vars
@@ -93,13 +95,13 @@ pub(super) fn extract_implicit_var_deps(
             // Two calls to classify_dependencies replace 5 separate walker calls.
             let dt_classification = match lowered.ast() {
                 Some(ast) => {
-                    crate::variable::classify_dependencies(ast, &converted_dims, module_inputs)
+                    crate::variable::classify_dependencies(ast, converted_dims, module_inputs)
                 }
                 None => crate::variable::DepClassification::default(),
             };
             let init_classification = match lowered.init_ast() {
                 Some(ast) => {
-                    crate::variable::classify_dependencies(ast, &converted_dims, module_inputs)
+                    crate::variable::classify_dependencies(ast, converted_dims, module_inputs)
                 }
                 None => crate::variable::DepClassification::default(),
             };

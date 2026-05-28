@@ -14,6 +14,287 @@ use crate::ast::Loc;
 pub type DimensionName = String;
 pub type ElementName = String;
 
+// ===== Canonical-identifier string interner =====
+//
+// A global, thread-safe, de-duplicating, *non-leaking* string interner. It
+// backs all three canonical identifier newtypes so that constructing one for a
+// string that has already been seen is a hashmap probe plus an `Arc` clone --
+// no fresh `String` allocation -- and `Clone` is an atomic refcount bump.
+//
+// Why a hand-rolled interner rather than the `internment` crate: the obvious
+// choice (`internment::ArcIntern<str>`) is backed by `dashmap`, which pulls in
+// `ahash` -> `getrandom`. `getrandom` does not build for the
+// `wasm32-unknown-unknown` target without a `wasm_js` cfg, and the engine ships
+// in the libsimlin wasm bundle (`src/engine/build.sh`). The previous engine
+// dependency graph had no `getrandom` edge, so adopting `internment` would
+// break the wasm build (which is part of the pre-commit hook and CI). This
+// std-only interner avoids that entirely while preserving the same semantics
+// (dedup, O(1) clone, refcount-reclaim on last drop, thread-safe).
+
+/// The heap-allocated, refcounted payload of one interned canonical string.
+/// Held behind an `Arc`; when the last `Arc` drops, the `Drop` impl evicts the
+/// now-dead entry from the interner so the table does not grow without bound
+/// across the lifetime of a long-running process.
+struct Interned {
+    /// The shard this entry lives in, cached so `Drop` can re-lock the right
+    /// shard in O(1) without recomputing it from the hash.
+    shard: usize,
+    s: Box<str>,
+}
+
+/// Number of shards. A power of two so the shard index is a cheap mask of the
+/// hash. Compilation fans out across rayon threads, so sharding keeps lock
+/// contention low without a concurrent-map dependency.
+const INTERNER_SHARDS: usize = 64;
+
+/// One shard: a content-keyed map from string -> weak handle. A `Weak`
+/// (not `Arc`) is stored so the entry does not itself keep the payload alive;
+/// the payload is reclaimed when the last *external* `Arc` drops.
+///
+/// Keyed with `FxHashMap` (rustc's fixed-seed FxHash) rather than the std
+/// default SipHash: identifier strings are short and the interner is on the
+/// hottest compile path (`canonicalize`/`Ident::new` -> `intern`), so the
+/// per-shard get/insert hashing is a measurable share of compile self-time.
+/// The hasher is purely a performance detail here -- the map still de-dups by
+/// string CONTENT, so which strings share a payload is unaffected.
+type Shard = rustc_hash::FxHashMap<Box<str>, std::sync::Weak<Interned>>;
+
+/// The global interner: a fixed array of independently-locked shards.
+///
+/// Shard selection hashes the key with `FxBuildHasher` (the per-shard map
+/// rehashes the key with its own FxHash hasher). `FxBuildHasher` is a
+/// zero-size, fixed-seed unit type, so there is nothing to store: the shard
+/// chosen for a given string at insert is the same shard `hash_of` recomputes
+/// for `contains` and that `Drop` recomputes for eviction. The hasher being
+/// fixed-seed (vs the old `RandomState`'s per-process random seed) only makes
+/// shard selection deterministic across runs; dedup-by-content is unchanged.
+struct Interner {
+    shards: [std::sync::Mutex<Shard>; INTERNER_SHARDS],
+}
+
+impl Interner {
+    fn global() -> &'static Interner {
+        // `std::sync::OnceLock` (std-only) lazily initializes the global.
+        static GLOBAL: std::sync::OnceLock<Interner> = std::sync::OnceLock::new();
+        GLOBAL.get_or_init(|| Interner {
+            shards: std::array::from_fn(|_| std::sync::Mutex::new(Shard::default())),
+        })
+    }
+
+    fn hash_of(&self, s: &str) -> u64 {
+        use std::hash::BuildHasher;
+        // `FxBuildHasher` is a fixed-seed zero-size unit type, so a fresh
+        // `default()` is the same hasher every call -- shard selection stays
+        // self-consistent between insert, `contains`, and eviction.
+        rustc_hash::FxBuildHasher.hash_one(s)
+    }
+
+    /// Total number of entries currently held across all shards. Test-only:
+    /// used to assert that dropping the last handle reclaims the entry (the
+    /// non-leaking invariant). Not exact under concurrency, but the unit tests
+    /// that call it use process-unique strings on a single thread.
+    #[cfg(test)]
+    fn live_entry_count(&self) -> usize {
+        self.shards.iter().map(|m| m.lock().unwrap().len()).sum()
+    }
+
+    /// Whether a specific string currently has a live interned entry.
+    /// Test-only reclaim probe.
+    #[cfg(test)]
+    fn contains(&self, s: &str) -> bool {
+        let hash = self.hash_of(s);
+        let shard_idx = (hash as usize) & (INTERNER_SHARDS - 1);
+        let shard = self.shards[shard_idx].lock().unwrap();
+        shard.get(s).map(|w| w.upgrade().is_some()).unwrap_or(false)
+    }
+
+    /// Intern `s`: return an `Arc<Interned>` shared with any live handle for the
+    /// same content, allocating a new payload only on the first sighting.
+    fn intern(&self, s: &str) -> std::sync::Arc<Interned> {
+        let hash = self.hash_of(s);
+        let shard_idx = (hash as usize) & (INTERNER_SHARDS - 1);
+        // `.unwrap()` on the shard lock: poisoning is unreachable here and in
+        // `Drop` -- the only work done while holding a shard lock is hashmap
+        // operations and the `Box`/`Arc` allocations below, none of which can
+        // unwind (allocation failure aborts), so the `Mutex` can never be
+        // poisoned.
+        let mut shard = self.shards[shard_idx].lock().unwrap();
+
+        if let Some(weak) = shard.get(s)
+            && let Some(arc) = weak.upgrade()
+        {
+            // Live entry: share it. (If `upgrade` fails the payload is mid-drop
+            // -- its `Drop` will remove the dead weak; we fall through and
+            // replace it below, which is safe because the guard in `Drop`
+            // only removes an entry whose weak still points at the dead payload.)
+            return arc;
+        }
+
+        let arc = std::sync::Arc::new(Interned {
+            shard: shard_idx,
+            s: Box::from(s),
+        });
+        // Insert (or overwrite a dead weak) keyed by an owned copy of the
+        // string. Overwriting a dead weak here is what makes the `Drop` guard
+        // (`std::ptr::eq` on the weak target) necessary for correctness.
+        //
+        // This allocates a second `Box<str>` for the map key (the payload owns
+        // the first). It is deliberately left simple: this is the cold
+        // first-sighting path (one distinct canonical string ever reaches it
+        // once), not the hot reuse path that the `upgrade()` fast path above
+        // serves, so the extra allocation does not show up in the compile
+        // profile. Sharing one allocation would mean keying the map on an
+        // `Arc<str>` cloned from the payload, trading the allocation for a
+        // second `Arc` indirection on every access -- not worth it here.
+        shard.insert(Box::from(s), std::sync::Arc::downgrade(&arc));
+        arc
+    }
+}
+
+impl Drop for Interned {
+    fn drop(&mut self) {
+        // Reclaim the table entry for this now-dead payload. Re-lock the same
+        // shard and remove the entry *only if* its weak still refers to this
+        // payload: a concurrent `intern` of the same string after our strong
+        // count hit zero may have installed a fresh `Arc` (and overwritten the
+        // weak); we must not evict that live replacement.
+        let interner = Interner::global();
+        let mut shard = interner.shards[self.shard].lock().unwrap();
+        if let Some(weak) = shard.get(self.s.as_ref()) {
+            // `Weak::as_ptr` is stable across upgrade/downgrade and identifies
+            // the payload. If it points at `self`, this entry is ours to evict.
+            if std::ptr::eq(weak.as_ptr(), self as *const Interned) {
+                shard.remove(self.s.as_ref());
+            }
+        }
+    }
+}
+
+/// Interned, de-duplicated storage for a canonical identifier string.
+///
+/// This is the single backing store for all three canonical identifier
+/// newtypes (`Ident<Canonical>`, `CanonicalElementName`,
+/// `CanonicalDimensionName`). Constructing one for a string that has already
+/// been interned is a hashmap hit plus an atomic refcount bump -- no new
+/// `String` allocation -- and `Clone` is likewise a refcount bump, so cloning
+/// identifiers (which the compiler does constantly) is O(1). Entries are
+/// reclaimed when the last handle drops (see `Drop for Interned`), so a
+/// long-lived process that compiles many distinct models does not leak.
+///
+/// The string stored here is assumed to already be in canonical form; callers
+/// canonicalize before constructing (see `Ident::new` / `from_raw`). The
+/// `_unchecked` constructors trust the caller, matching the previous
+/// `String`-backed contract.
+///
+/// ## Trait impls (and why they are manual)
+///
+/// We implement the comparison/hash traits deliberately and let the three
+/// public newtypes simply `#[derive(...)]` (which delegates to the impls here):
+/// - `Hash` is **value based** (`self.as_str().hash()`). This is required so
+///   `HashMap<Ident, _>` lookups via the `Borrow<str>` path stay sound: the map
+///   hashes the `&str` key with `str`'s hasher and must find the entry whose
+///   key hashes identically.
+/// - `PartialEq`/`Eq` use `Arc` pointer equality, which is value-correct
+///   precisely because the interner de-duplicates (one payload per distinct
+///   string), and is consistent with the value-based `Hash`.
+/// - `Ord`/`PartialOrd` are **lexicographic by string content**. Many
+///   `BTreeSet`/`BTreeMap` orderings and the deterministic byte-stable runlists
+///   depend on this; a pointer-address ordering would be non-deterministic
+///   across runs.
+/// - `salsa::Update`: interned values are immutable, so `maybe_update`
+///   overwrites and reports a change iff the new value differs from the old by
+///   string content. `Arc<Interned>`/`str` are not covered by salsa's blanket
+///   `Update` impls, so this is provided manually here; the public newtypes
+///   keep `#[derive(salsa::Update)]`, whose per-field dispatch finds this impl.
+#[derive(Clone)]
+pub(crate) struct CanonicalStorage(std::sync::Arc<Interned>);
+
+// `Debug` is unconditional (not gated on the `debug-derive` feature) because
+// `Ident<State>` derives `Debug` unconditionally (it predates the feature),
+// and a field type must be `Debug` for that derive to hold with the feature
+// off. Printing the canonical string is the useful representation anyway.
+impl fmt::Debug for CanonicalStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl CanonicalStorage {
+    /// Intern a string that is already in canonical form. A hashmap hit plus an
+    /// `Arc` refcount bump when the string has been seen before; otherwise
+    /// allocates the backing payload once.
+    fn intern(canonical: &str) -> Self {
+        CanonicalStorage(Interner::global().intern(canonical))
+    }
+
+    /// Borrow the canonical string.
+    fn as_str(&self) -> &str {
+        &self.0.s
+    }
+}
+
+impl PartialEq for CanonicalStorage {
+    fn eq(&self, other: &Self) -> bool {
+        // De-duplication guarantees one payload per distinct string, so O(1)
+        // `Arc` pointer equality is exactly value equality. (Fast path; falls
+        // back to nothing -- distinct pointers always mean distinct strings.)
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for CanonicalStorage {}
+
+impl std::hash::Hash for CanonicalStorage {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Value-based, consistent with `str`'s Hash so `Borrow<str>` HashMap
+        // lookups work (see the type-level docs). Must NOT hash the pointer.
+        self.as_str().hash(state);
+    }
+}
+
+impl PartialOrd for CanonicalStorage {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CanonicalStorage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Lexicographic by string content: runlist determinism and BTree
+        // ordering depend on this (NOT pointer address).
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+// SAFETY: `CanonicalStorage` is an owned, immutable interned handle. It owns
+// its (refcounted) data, contains no borrowed `'db` references, and its `Eq`
+// is value equality (consistent with `Hash`), so comparing an old-revision
+// value with a new-revision value is well defined. `maybe_update` therefore
+// follows the standard owned-`Eq` pattern: overwrite and report a change iff
+// the values differ. This mirrors salsa's `update_fallback` but is written by
+// hand because neither `Arc<Interned>` nor `str` is covered by salsa's blanket
+// `Update` impls.
+//
+// The crate is `#![deny(unsafe_code)]`; this is the one opt-in here, mirroring
+// the precedent in `vm.rs`. The `unsafe` is confined to dereferencing the
+// `*mut Self` salsa hands us, under the documented `Update` contract.
+#[allow(unsafe_code)]
+unsafe impl salsa::Update for CanonicalStorage {
+    unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
+        // SAFETY: by the `Update` contract `old_pointer` points to a valid,
+        // fully-owned `CanonicalStorage` from a (possibly older) revision; an
+        // owned interned handle has no dangling borrows, so taking a `&mut` is
+        // sound.
+        let old = unsafe { &mut *old_pointer };
+        if *old != new_value {
+            *old = new_value;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// A canonicalized identifier - guaranteed to be in canonical form (OLD - being replaced)
 ///
 /// Canonical form means:
@@ -28,9 +309,15 @@ pub type ElementName = String;
 pub struct RawIdent(String);
 
 /// A canonicalized dimension name
+///
+/// Backed by interned, de-duplicated storage (see [`CanonicalStorage`]): the
+/// derived `PartialEq`/`Eq`/`Hash`/`Ord`/`PartialOrd`/`salsa::Update` all
+/// delegate to that handle's manual impls (value equality + value hash +
+/// lexicographic order), so the observable behavior is identical to the old
+/// `String` backing while construction and clone avoid allocation.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
-pub struct CanonicalDimensionName(String);
+pub struct CanonicalDimensionName(CanonicalStorage);
 
 /// A raw dimension name as it appears in source
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -38,9 +325,13 @@ pub struct CanonicalDimensionName(String);
 pub struct RawDimensionName(String);
 
 /// A canonicalized element name (dimension element)
+///
+/// Backed by interned, de-duplicated storage (see [`CanonicalStorage`]); the
+/// derived trait impls delegate to that handle, matching the old `String`
+/// backing's behavior without per-construction allocation.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
-pub struct CanonicalElementName(String);
+pub struct CanonicalElementName(CanonicalStorage);
 
 /// A raw element name as it appears in source
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -1025,6 +1316,413 @@ fn test_fmt_display_implementations() {
     assert_eq!(format!("{canonical_str}"), "model·var");
 }
 
+/// Tests for the interned storage backing the canonical identifier newtypes
+/// (`Ident<Canonical>`, `CanonicalElementName`, `CanonicalDimensionName`).
+///
+/// The behavioral contract these pin down:
+/// - lexicographic `Ord`/`PartialOrd` (determinism of runlists / `BTreeSet`
+///   ordering), which must equal sorting the equivalent `&str`s even though
+///   the interned handle's natural `Ord` could be pointer-based;
+/// - value equality + de-duplication: two values built from strings that
+///   canonicalize to the same form are `==`, hash equal, AND share one
+///   backing allocation (the whole point of interning);
+/// - `Clone` is a cheap handle copy that shares the backing allocation rather
+///   than re-allocating a `String`;
+/// - HashMap lookups keyed by these types still work both by value and via
+///   the `Borrow<str>` path, which requires the manual `Hash` to be value
+///   based (consistent with `str`'s `Hash`), not pointer based;
+/// - the canonicalization edge cases (idempotency, the `LITERAL_PERIOD_SENTINEL`
+///   quoted-period idents) and source round-trip continue to hold.
+#[cfg(test)]
+mod interned_identifier_tests {
+    use super::*;
+    use std::collections::{BTreeSet, HashMap};
+
+    /// The data pointer behind a canonical `&str`. Two interned handles that
+    /// dedup to the same string share this pointer; two independent `String`
+    /// allocations of the same content do not.
+    fn data_ptr(s: &str) -> *const u8 {
+        s.as_ptr()
+    }
+
+    // ----- Constraint 2: lexicographic Ord / PartialOrd -----
+
+    #[test]
+    fn ident_sort_order_matches_str_sort_order() {
+        // Deliberately includes the `·` module separator and unicode so the
+        // ordering exercises more than ASCII; the canonical forms are stable.
+        let raws = [
+            "zebra",
+            "apple",
+            "model·variable",
+            "model·alpha",
+            "café",
+            "a_b_c",
+            "Apple", // canonicalizes to "apple" -> dedups with index 1
+            "MODEL·Variable",
+        ];
+        let idents: Vec<Ident<Canonical>> = raws.iter().map(|s| Ident::new(s)).collect();
+
+        let mut by_ident = idents.clone();
+        by_ident.sort();
+
+        let mut by_str: Vec<Ident<Canonical>> = idents.clone();
+        by_str.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        let ident_order: Vec<&str> = by_ident.iter().map(|i| i.as_str()).collect();
+        let str_order: Vec<&str> = by_str.iter().map(|i| i.as_str()).collect();
+        assert_eq!(
+            ident_order, str_order,
+            "Ident sort order must equal &str sort order"
+        );
+
+        // And explicit pairwise lexicographic checks (independent of the sort).
+        let a = Ident::new("apple");
+        let z = Ident::new("zebra");
+        assert!(a < z);
+        assert!(z > a);
+        assert_eq!(a.cmp(&z), std::cmp::Ordering::Less);
+        assert_eq!(a.cmp(&a.clone()), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn element_name_sort_order_matches_str_sort_order() {
+        let raws = ["Boston", "atlanta", "nyc", "Chicago", "denver"];
+        let names: Vec<CanonicalElementName> = raws
+            .iter()
+            .map(|s| CanonicalElementName::from_raw(s))
+            .collect();
+
+        let mut by_name = names.clone();
+        by_name.sort();
+        let mut by_str = names.clone();
+        by_str.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert_eq!(
+            by_name.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+            by_str.iter().map(|n| n.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dimension_name_sort_order_matches_str_sort_order() {
+        let raws = ["Region", "age_group", "scenario", "Cohort"];
+        let names: Vec<CanonicalDimensionName> = raws
+            .iter()
+            .map(|s| CanonicalDimensionName::from_raw(s))
+            .collect();
+
+        let mut by_name = names.clone();
+        by_name.sort();
+        let mut by_str = names.clone();
+        by_str.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert_eq!(
+            by_name.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+            by_str.iter().map(|n| n.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn btreeset_of_idents_is_lexicographically_ordered() {
+        // BTreeSet ordering is the runlist-determinism-critical case.
+        let set: BTreeSet<Ident<Canonical>> = ["gamma", "alpha", "beta", "Alpha"]
+            .iter()
+            .map(|s| Ident::new(s))
+            .collect();
+        // "Alpha" dedups with "alpha", so 3 distinct elements.
+        let ordered: Vec<&str> = set.iter().map(|i| i.as_str()).collect();
+        assert_eq!(ordered, vec!["alpha", "beta", "gamma"]);
+    }
+
+    // ----- Constraint 3: value equality + de-duplication -----
+
+    #[test]
+    fn equal_inputs_are_equal_and_dedup_to_one_allocation() {
+        // Two independent constructions of an equal canonical value.
+        let a = Ident::new("Hello World");
+        let b = Ident::new("hello world"); // canonicalizes identically
+        assert_eq!(a, b, "values that canonicalize equally must be ==");
+        assert_eq!(
+            data_ptr(a.as_str()),
+            data_ptr(b.as_str()),
+            "equal interned idents must share one backing allocation"
+        );
+
+        // A distinct value must NOT share the allocation.
+        let c = Ident::new("different");
+        assert_ne!(a, c);
+        assert_ne!(data_ptr(a.as_str()), data_ptr(c.as_str()));
+    }
+
+    #[test]
+    fn clone_shares_backing_allocation() {
+        let a = Ident::new("some_variable_name");
+        let b = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(
+            data_ptr(a.as_str()),
+            data_ptr(b.as_str()),
+            "Clone must be a cheap handle copy sharing the allocation, not a fresh String"
+        );
+    }
+
+    #[test]
+    fn element_and_dimension_names_dedup() {
+        let e1 = CanonicalElementName::from_raw("New York");
+        let e2 = CanonicalElementName::from_raw("new_york");
+        assert_eq!(e1, e2);
+        assert_eq!(data_ptr(e1.as_str()), data_ptr(e2.as_str()));
+
+        let d1 = CanonicalDimensionName::from_raw("Region");
+        let d2 = CanonicalDimensionName::from_raw("region");
+        assert_eq!(d1, d2);
+        assert_eq!(data_ptr(d1.as_str()), data_ptr(d2.as_str()));
+    }
+
+    #[test]
+    fn from_unchecked_paths_dedup_with_new() {
+        // The *_unchecked constructors assume canonical input; they must still
+        // route through the interner so they dedup with Ident::new.
+        let canonical = "already_canonical_ident";
+        let a = Ident::new(canonical);
+        let b = Ident::<Canonical>::from_unchecked(canonical.to_string());
+        let c = Ident::<Canonical>::from_str_unchecked(canonical);
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_eq!(data_ptr(a.as_str()), data_ptr(b.as_str()));
+        assert_eq!(data_ptr(a.as_str()), data_ptr(c.as_str()));
+    }
+
+    // ----- Constraint 3: Hash consistent with Eq AND the Borrow<str> path -----
+
+    #[test]
+    fn hashmap_lookup_by_value_and_by_borrowed_str() {
+        let mut map: HashMap<Ident<Canonical>, i32> = HashMap::new();
+        map.insert(Ident::new("Population"), 42);
+
+        // Look up with an independently-constructed equal key (value path).
+        assert_eq!(map.get(&Ident::new("population")), Some(&42));
+
+        // Look up via Borrow<str> with the canonical string slice.
+        assert_eq!(map.get("population"), Some(&42));
+
+        // A non-present key.
+        assert_eq!(map.get("nonexistent"), None);
+    }
+
+    #[test]
+    fn hash_is_value_based_consistent_with_str() {
+        use std::hash::{BuildHasher, RandomState};
+        let state = RandomState::new();
+        let ident = Ident::new("hello world");
+        // Hashing the Ident must equal hashing its canonical &str, otherwise
+        // the Borrow<str> HashMap lookup path is unsound.
+        let h_ident = state.hash_one(&ident);
+        let h_str = state.hash_one(ident.as_str());
+        assert_eq!(
+            h_ident, h_str,
+            "Ident Hash must be value-based and match str Hash"
+        );
+    }
+
+    // ----- Constraint 1: idempotency, sentinel, round-trip preserved -----
+
+    #[test]
+    fn canonicalization_is_idempotent_through_idents() {
+        for raw in [
+            "Hello World",
+            "a.b",
+            "\"a.b\"",
+            "\"Goal 1.5 for Temperature\"",
+            "model.sub.variable",
+        ] {
+            let once = Ident::new(raw);
+            let twice = Ident::new(once.as_str());
+            assert_eq!(once, twice, "Ident::new not idempotent for {raw:?}");
+            assert_eq!(once.as_str(), twice.as_str());
+        }
+    }
+
+    #[test]
+    fn quoted_literal_period_sentinel_survives_through_ident() {
+        // The U+2024 sentinel must be preserved in canonical form and reverse
+        // back to a literal `.` for source output (#559).
+        let ident = Ident::new("\"a.b\"");
+        assert_eq!(ident.as_str(), "a\u{2024}b");
+        assert!(!ident.as_str().contains('.'));
+        assert!(!ident.as_str().contains('·'));
+        assert_eq!(ident.to_source_repr(), "a.b");
+
+        // Re-interning the canonical sentinel form is a no-op and dedups.
+        let again = Ident::new(ident.as_str());
+        assert_eq!(ident, again);
+        assert_eq!(data_ptr(ident.as_str()), data_ptr(again.as_str()));
+    }
+
+    #[test]
+    fn source_round_trip_via_as_str_and_to_source_repr() {
+        let cases = [
+            ("model.variable", "model·variable", "model.variable"),
+            ("\"a.b\"", "a\u{2024}b", "a.b"),
+            ("plain_name", "plain_name", "plain_name"),
+        ];
+        for (raw, canonical, source) in cases {
+            let ident = Ident::new(raw);
+            assert_eq!(ident.as_str(), canonical);
+            assert_eq!(ident.to_source_repr(), source);
+        }
+    }
+
+    // ----- Constraint 6: non-leaking (refcount reclaim) -----
+
+    #[test]
+    fn dropping_all_handles_reclaims_the_interned_entry() {
+        // Use a process-unique string so no other test/global holds a reference
+        // and the reclaim assertion is deterministic on this single thread.
+        let unique = "interner_reclaim_probe_\u{2024}_unique_value_xyz_42";
+        let interner = Interner::global();
+        assert!(!interner.contains(unique), "precondition: not yet interned");
+
+        {
+            let a = Ident::new(unique);
+            let b = Ident::new(unique);
+            assert!(interner.contains(unique), "entry must be live while held");
+            // While both live, they share the allocation.
+            assert_eq!(data_ptr(a.as_str()), data_ptr(b.as_str()));
+        }
+
+        // After both handles drop, the entry MUST be reclaimed (non-leaking).
+        assert!(
+            !interner.contains(unique),
+            "interner leaked: entry survived after all handles dropped"
+        );
+
+        // Re-interning works and is observable again.
+        let c = Ident::new(unique);
+        assert_eq!(c.as_str(), unique);
+        assert!(interner.contains(unique));
+    }
+
+    #[test]
+    fn many_distinct_strings_are_all_reclaimed_after_drop() {
+        // The global interner is shared across the whole test binary, so we
+        // can't assert an exact global count (other tests intern concurrently).
+        // Instead probe a batch of process-unique strings: all present while
+        // held, all reclaimed once dropped. `live_entry_count` is exercised
+        // here only as a coarse monotonicity sanity check.
+        let interner = Interner::global();
+        let words: Vec<String> = (0..50)
+            .map(|i| format!("batch_reclaim_probe_unique_\u{2024}_{i}"))
+            .collect();
+        for w in &words {
+            assert!(!interner.contains(w), "precondition: {w:?} not interned");
+        }
+
+        let names: Vec<Ident<Canonical>> = words.iter().map(|w| Ident::new(w)).collect();
+        let count_with_batch = interner.live_entry_count();
+        for w in &words {
+            assert!(interner.contains(w), "{w:?} must be live while held");
+        }
+        assert!(
+            count_with_batch >= 50,
+            "the batch contributes at least its own entries"
+        );
+
+        drop(names);
+        for w in &words {
+            assert!(
+                !interner.contains(w),
+                "{w:?} leaked after all handles dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_intern_and_drop_is_consistent_and_reclaims() {
+        // Stress the drop/intern race across rayon-like contention: many
+        // threads repeatedly intern and drop a small shared set of strings.
+        // Afterwards every string must be reclaimed (no live entry remains)
+        // and equality must remain pointer-shared for concurrent live handles.
+        use std::sync::Arc as StdArc;
+        use std::thread;
+
+        let interner = Interner::global();
+        let words: StdArc<Vec<String>> = StdArc::new(
+            (0..16)
+                .map(|i| format!("concurrent_interner_probe_word_{i}"))
+                .collect(),
+        );
+        // Ensure clean baseline for these specific words.
+        for w in words.iter() {
+            assert!(!interner.contains(w));
+        }
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let words = StdArc::clone(&words);
+            handles.push(thread::spawn(move || {
+                for _ in 0..2000 {
+                    for w in words.iter() {
+                        let a = Ident::new(w);
+                        let b = Ident::new(w);
+                        // Concurrent live handles of equal content always share
+                        // the backing payload (dedup holds under contention).
+                        assert_eq!(a, b);
+                        assert_eq!(a.as_str(), w.as_str());
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All transient handles are gone -> every word must be reclaimed.
+        for w in words.iter() {
+            assert!(
+                !interner.contains(w),
+                "word {w:?} leaked after concurrent stress"
+            );
+        }
+    }
+
+    // ----- Constraint 4: salsa::Update semantics on the handle -----
+
+    #[test]
+    fn salsa_update_reports_change_only_on_value_difference() {
+        use salsa::Update;
+
+        // Different value -> overwrite and report changed.
+        let mut slot = CanonicalStorage::intern("old_value");
+        let changed = {
+            // SAFETY (test): `&mut slot` is a valid, owned `CanonicalStorage`;
+            // we pass its pointer and a fresh owned value, matching the
+            // `Update::maybe_update` contract.
+            #[allow(unsafe_code)]
+            unsafe {
+                CanonicalStorage::maybe_update(
+                    &mut slot as *mut _,
+                    CanonicalStorage::intern("new_value"),
+                )
+            }
+        };
+        assert!(changed, "differing values must report a change");
+        assert_eq!(slot.as_str(), "new_value");
+
+        // Equal value -> no overwrite, report unchanged.
+        let unchanged = {
+            #[allow(unsafe_code)]
+            unsafe {
+                CanonicalStorage::maybe_update(
+                    &mut slot as *mut _,
+                    CanonicalStorage::intern("new_value"),
+                )
+            }
+        };
+        assert!(!unchanged, "equal values must report no change");
+        assert_eq!(slot.as_str(), "new_value");
+    }
+}
+
 // Implementations for identifier types
 
 impl RawIdent {
@@ -1053,22 +1751,22 @@ impl CanonicalDimensionName {
     /// Create from an already-canonicalized string (internal use only)
     #[allow(dead_code)]
     pub(crate) fn from_canonical_unchecked(s: String) -> Self {
-        CanonicalDimensionName(s)
+        CanonicalDimensionName(CanonicalStorage::intern(&s))
     }
 
     /// Create from a raw string, canonicalizing it
     pub fn from_raw(s: &str) -> Self {
-        CanonicalDimensionName(canonicalize(s).into_owned())
+        CanonicalDimensionName(CanonicalStorage::intern(&canonicalize(s)))
     }
 
     /// Get the underlying canonical string
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 
     /// Convert to the legacy DimensionName type (for gradual migration)
     pub fn to_dimension_name(&self) -> DimensionName {
-        self.0.clone()
+        self.0.as_str().to_owned()
     }
 }
 
@@ -1080,7 +1778,7 @@ impl RawDimensionName {
 
     /// Canonicalize this dimension name
     pub fn canonicalize(&self) -> CanonicalDimensionName {
-        CanonicalDimensionName(canonicalize(&self.0).into_owned())
+        CanonicalDimensionName(CanonicalStorage::intern(&canonicalize(&self.0)))
     }
 
     /// Get the underlying raw string
@@ -1093,22 +1791,22 @@ impl CanonicalElementName {
     /// Create from an already-canonicalized string (internal use only)
     #[allow(dead_code)]
     pub(crate) fn from_canonical_unchecked(s: String) -> Self {
-        CanonicalElementName(s)
+        CanonicalElementName(CanonicalStorage::intern(&s))
     }
 
     /// Create from a raw string, canonicalizing it
     pub fn from_raw(s: &str) -> Self {
-        CanonicalElementName(canonicalize(s).into_owned())
+        CanonicalElementName(CanonicalStorage::intern(&canonicalize(s)))
     }
 
     /// Get the underlying canonical string
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 
     /// Convert to the legacy ElementName type (for gradual migration)
     pub fn to_element_name(&self) -> ElementName {
-        self.0.clone()
+        self.0.as_str().to_owned()
     }
 }
 
@@ -1120,7 +1818,7 @@ impl RawElementName {
 
     /// Canonicalize this element name
     pub fn canonicalize(&self) -> CanonicalElementName {
-        CanonicalElementName(canonicalize(&self.0).into_owned())
+        CanonicalElementName(CanonicalStorage::intern(&canonicalize(&self.0)))
     }
 
     /// Get the underlying raw string
@@ -1139,7 +1837,7 @@ impl fmt::Display for RawIdent {
 
 impl fmt::Display for CanonicalDimensionName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.0.as_str())
     }
 }
 
@@ -1151,7 +1849,7 @@ impl fmt::Display for RawDimensionName {
 
 impl fmt::Display for CanonicalElementName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.0.as_str())
     }
 }
 
@@ -1163,13 +1861,13 @@ impl fmt::Display for RawElementName {
 
 impl From<CanonicalDimensionName> for DimensionName {
     fn from(canonical: CanonicalDimensionName) -> Self {
-        canonical.0
+        canonical.0.as_str().to_owned()
     }
 }
 
 impl From<CanonicalElementName> for ElementName {
     fn from(canonical: CanonicalElementName) -> Self {
-        canonical.0
+        canonical.0.as_str().to_owned()
     }
 }
 
@@ -1183,7 +1881,7 @@ impl AsRef<str> for RawIdent {
 
 impl AsRef<str> for CanonicalDimensionName {
     fn as_ref(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -1195,7 +1893,7 @@ impl AsRef<str> for RawDimensionName {
 
 impl AsRef<str> for CanonicalElementName {
     fn as_ref(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -1217,10 +1915,18 @@ pub struct Canonical;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Raw;
 
-/// An owned identifier with state tracking (canonical or raw)
+/// An owned identifier with state tracking (canonical or raw).
+///
+/// In practice the inner string is always canonical (`Ident<Raw>` is never
+/// instantiated), so the storage is the interned [`CanonicalStorage`] handle:
+/// constructing an `Ident` for an already-seen identifier is allocation-free
+/// and `Clone` is a refcount bump. The derived `PartialEq`/`Eq`/`Hash`/`Ord`/
+/// `PartialOrd`/`salsa::Update` delegate to that handle's manual impls (value
+/// equality, value-based hash consistent with `Borrow<str>`, lexicographic
+/// ordering), preserving the previous `String`-backed semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, salsa::Update)]
 pub struct Ident<State = Canonical> {
-    inner: String,
+    inner: CanonicalStorage,
     _phantom: PhantomData<State>,
 }
 
@@ -1297,7 +2003,10 @@ impl Ident<Canonical> {
     /// avoids allocation when the input is already canonical.
     pub fn new(s: &str) -> Self {
         Ident {
-            inner: canonicalize(s).into_owned(),
+            // `canonicalize` borrows when already canonical; the interner takes
+            // a `&str` either way, allocating the backing storage only on the
+            // first sighting of this canonical form.
+            inner: CanonicalStorage::intern(&canonicalize(s)),
             _phantom: PhantomData,
         }
     }
@@ -1307,7 +2016,7 @@ impl Ident<Canonical> {
     /// Note: Caller must guarantee the string is already canonical
     pub fn from_unchecked(s: String) -> Self {
         Ident {
-            inner: s,
+            inner: CanonicalStorage::intern(&s),
             _phantom: PhantomData,
         }
     }
@@ -1317,7 +2026,7 @@ impl Ident<Canonical> {
     /// Note: Caller must guarantee the string is already canonical
     pub fn from_str_unchecked(s: &str) -> Self {
         Ident {
-            inner: s.to_string(),
+            inner: CanonicalStorage::intern(s),
             _phantom: PhantomData,
         }
     }
@@ -1325,20 +2034,20 @@ impl Ident<Canonical> {
     /// Get a borrowed reference to this identifier
     pub fn as_ref(&self) -> IdentRef<'_, Canonical> {
         IdentRef {
-            inner: &self.inner,
+            inner: self.inner.as_str(),
             _phantom: PhantomData,
         }
     }
 
     /// Get as a CanonicalStr
     pub fn as_canonical_str(&self) -> CanonicalStr<'_> {
-        CanonicalStr::from_canonical_unchecked(&self.inner)
+        CanonicalStr::from_canonical_unchecked(self.inner.as_str())
     }
 
     /// Join two canonical identifiers with a middle dot separator
     pub fn join(module: &CanonicalStr, var: &CanonicalStr) -> Self {
         Ident {
-            inner: format!("{}·{}", module.as_str(), var.as_str()),
+            inner: CanonicalStorage::intern(&format!("{}·{}", module.as_str(), var.as_str())),
             _phantom: PhantomData,
         }
     }
@@ -1346,19 +2055,19 @@ impl Ident<Canonical> {
     /// Create an identifier with array subscript notation
     pub fn with_subscript(&self, subscript: &str) -> Self {
         Ident {
-            inner: format!("{}[{}]", self.to_source_repr(), subscript),
+            inner: CanonicalStorage::intern(&format!("{}[{}]", self.to_source_repr(), subscript)),
             _phantom: PhantomData,
         }
     }
 
     /// Get the underlying canonical string
     pub fn as_str(&self) -> &str {
-        &self.inner
+        self.inner.as_str()
     }
 
     /// Consume self and return the underlying String
     pub fn into_string(self) -> String {
-        self.inner
+        self.inner.as_str().to_owned()
     }
 
     /// Convert canonical identifier to source code representation.
@@ -1374,12 +2083,12 @@ impl Ident<Canonical> {
     /// periods to middle dots to distinguish module separators from literal
     /// periods in quoted identifiers.
     pub fn to_source_repr(&self) -> String {
-        canonical_to_source(&self.inner).into_owned()
+        canonical_to_source(self.inner.as_str()).into_owned()
     }
 
     /// Strip a prefix, returning a borrowed view if successful
     pub fn strip_prefix<'a>(&'a self, prefix: &str) -> Option<IdentRef<'a, Canonical>> {
-        self.inner.strip_prefix(prefix).map(|s| IdentRef {
+        self.inner.as_str().strip_prefix(prefix).map(|s| IdentRef {
             inner: s,
             _phantom: PhantomData,
         })
@@ -1410,7 +2119,7 @@ impl<'a> IdentRef<'a, Canonical> {
     /// Convert to an owned Ident
     pub fn to_owned(&self) -> Ident<Canonical> {
         Ident {
-            inner: self.inner.to_string(),
+            inner: CanonicalStorage::intern(self.inner),
             _phantom: PhantomData,
         }
     }
@@ -1435,14 +2144,19 @@ impl<'a> IdentRef<'a, Canonical> {
 // Implement AsRef for convenient usage
 impl AsRef<str> for Ident<Canonical> {
     fn as_ref(&self) -> &str {
-        &self.inner
+        self.inner.as_str()
     }
 }
 
-// Implement Borrow for HashMap lookups
+// Implement Borrow for HashMap lookups.
+//
+// NB: this is what makes the value-based `Hash` on `CanonicalStorage`
+// mandatory -- a `HashMap<Ident<Canonical>, V>` can be probed with a `&str`
+// key, which is hashed with `str`'s hasher; the stored key's hash (delegated
+// through the derive to `CanonicalStorage::hash`) must match it.
 impl std::borrow::Borrow<str> for Ident<Canonical> {
     fn borrow(&self) -> &str {
-        &self.inner
+        self.inner.as_str()
     }
 }
 
@@ -1461,7 +2175,7 @@ impl<'a> AsRef<str> for CanonicalStr<'a> {
 // Display implementations
 impl fmt::Display for Ident<Canonical> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner)
+        write!(f, "{}", self.inner.as_str())
     }
 }
 

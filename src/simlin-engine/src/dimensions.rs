@@ -219,6 +219,49 @@ impl PartialEq for DimensionsContext {
     }
 }
 
+// SAFETY: A `DimensionsContext` is value-defined by its `dimensions` and
+// `indexed_parents` maps -- exactly what its manual `PartialEq` above compares.
+// The `relationship_cache` is a pure memoization (subdimension offset lookups)
+// that does NOT affect identity, so two contexts built from the same dimensions
+// are equal regardless of which one has populated its cache. This makes a
+// by-`PartialEq` `maybe_update` sound: salsa treats the cached value as
+// immutable across revisions and rebuilds the (cold) cache on overwrite, so
+// overwriting on a genuine value change and skipping on equality never loses or
+// corrupts memoized data. This is needed so `DimensionsContext` can be a salsa
+// `returns(ref)` query value (`db::project_dimensions_context`), computed once
+// per project instead of rebuilt per variable.
+//
+// We hand-write this (rather than deriving) because the type intentionally does
+// NOT derive `salsa::Update`: it has a `Mutex<HashMap<...>>` cache field that is
+// neither `Eq` nor `Update`-derivable. The impl mirrors salsa's own
+// `update_fallback` (overwrite-and-report-changed iff `*old != new`) but keys on
+// this type's manual `PartialEq`.
+//
+// The crate is `#![deny(unsafe_code)]`; this is a targeted opt-in, mirroring the
+// precedent in `common.rs` (`CanonicalStorage`) and `vm.rs`. The `unsafe` is
+// confined to dereferencing the `*mut Self` salsa hands us, under the documented
+// `Update` contract.
+#[allow(unsafe_code)]
+unsafe impl salsa::Update for DimensionsContext {
+    unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
+        // SAFETY: by the `Update` contract `old_pointer` points to a valid,
+        // fully-owned `DimensionsContext` from a (possibly older) revision. It
+        // owns its maps and cache (no borrowed `'db` references), so taking a
+        // `&mut` is sound.
+        let old = unsafe { &mut *old_pointer };
+        if *old != new_value {
+            *old = new_value;
+            true
+        } else {
+            // The values are equal by the manual `PartialEq` (same dimensions
+            // and indexed_parents); the cache difference is immaterial, so we do
+            // not overwrite and report no change -- salsa's early-cutoff then
+            // avoids invalidating downstream queries.
+            false
+        }
+    }
+}
+
 impl DimensionsContext {
     pub(crate) fn from(dimensions: &[datamodel::Dimension]) -> DimensionsContext {
         // Validate: indexed dimensions should not have mappings set.
@@ -1814,6 +1857,102 @@ mod tests {
         assert_eq!(
             dim.get_offset(&CanonicalElementName::from_raw("3")),
             Some(2)
+        );
+    }
+
+    // ========== salsa::Update smoke test ==========
+
+    /// `DimensionsContext` is a salsa `returns(ref)` value via a manual
+    /// `unsafe impl salsa::Update`. Its identity is its `dimensions` +
+    /// `indexed_parents` maps (its manual `PartialEq`); the relationship
+    /// cache is pure memoization and must not affect update semantics.
+    #[test]
+    fn salsa_update_reports_change_only_on_value_difference() {
+        use salsa::Update;
+
+        let dim_a = datamodel::Dimension::named(
+            "DimA".to_string(),
+            vec!["a1".to_string(), "a2".to_string()],
+        );
+        let dim_a3 = datamodel::Dimension::named(
+            "DimA".to_string(),
+            vec!["a1".to_string(), "a2".to_string(), "a3".to_string()],
+        );
+
+        // Changed value -> overwrite and report changed.
+        let mut slot = DimensionsContext::from(std::slice::from_ref(&dim_a));
+        let changed = {
+            // SAFETY (test): `&mut slot` is a valid, owned `DimensionsContext`;
+            // we pass its pointer and a fresh owned value, matching the
+            // `Update::maybe_update` contract.
+            #[allow(unsafe_code)]
+            unsafe {
+                DimensionsContext::maybe_update(
+                    &mut slot as *mut _,
+                    DimensionsContext::from(std::slice::from_ref(&dim_a3)),
+                )
+            }
+        };
+        assert!(changed, "a changed dimension must report an update");
+        assert_eq!(
+            slot.get(&crate::common::CanonicalDimensionName::from_raw("DimA"))
+                .unwrap()
+                .len(),
+            3,
+            "the overwritten value must be observable"
+        );
+
+        // Equal value -> no overwrite, report unchanged.
+        let unchanged = {
+            #[allow(unsafe_code)]
+            unsafe {
+                DimensionsContext::maybe_update(
+                    &mut slot as *mut _,
+                    DimensionsContext::from(std::slice::from_ref(&dim_a3)),
+                )
+            }
+        };
+        assert!(!unchanged, "an equal value must report no update");
+    }
+
+    /// The relationship cache is pure memoization: two contexts built from
+    /// the same dimensions are equal even when one has populated its cache,
+    /// so `maybe_update` must report no change (no spurious salsa invalidation).
+    #[test]
+    fn salsa_update_ignores_relationship_cache_state() {
+        use salsa::Update;
+
+        let parent = datamodel::Dimension::named(
+            "DimA".to_string(),
+            vec!["a1".to_string(), "a2".to_string(), "a3".to_string()],
+        );
+        let mut child = datamodel::Dimension::named(
+            "SubA".to_string(),
+            vec!["a2".to_string(), "a3".to_string()],
+        );
+        child.parent = Some("DimA".to_string());
+
+        let dims = vec![parent, child];
+        let mut slot = DimensionsContext::from(dims.as_slice());
+
+        // Populate the relationship cache on `slot` via a lookup.
+        let sub_name = crate::common::CanonicalDimensionName::from_raw("SubA");
+        let parent_name = crate::common::CanonicalDimensionName::from_raw("DimA");
+        let _ = slot.get_subdimension_relation(&sub_name, &parent_name);
+
+        // A value-equal context with a *cold* cache must still compare equal.
+        let unchanged = {
+            #[allow(unsafe_code)]
+            unsafe {
+                DimensionsContext::maybe_update(
+                    &mut slot as *mut _,
+                    DimensionsContext::from(dims.as_slice()),
+                )
+            }
+        };
+        assert!(
+            !unchanged,
+            "cache state must not affect update semantics: equal dims => no update"
         );
     }
 }

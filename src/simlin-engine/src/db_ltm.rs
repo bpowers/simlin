@@ -22,8 +22,9 @@ use super::{
     SourceModel, SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs,
     build_stub_variable, build_submodel_metadata, canonical_module_input_set, compute_layout,
     link_score_equation_text, model_implicit_var_info, model_module_ident_context,
-    model_module_map, parse_source_variable_with_module_context, project_datamodel_dims,
-    project_units_context, variable_dimensions, variable_size,
+    model_module_map, parse_source_variable_with_module_context, project_converted_dimensions,
+    project_datamodel_dims, project_dimensions_context, project_units_context, variable_dimensions,
+    variable_size,
 };
 
 pub(super) fn ltm_module_idents(
@@ -143,8 +144,7 @@ pub(super) fn reconstruct_ltm_var_lowered(
     model: SourceModel,
     project: SourceProject,
 ) -> Option<crate::variable::Variable> {
-    let dims = project_datamodel_dims(db, project);
-    let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
+    let dim_context = project_dimensions_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
     let parsed =
         parse_ltm_equation_for_model_with_ids(db, var_name, equation, project, &module_idents);
@@ -158,7 +158,7 @@ pub(super) fn reconstruct_ltm_var_lowered(
     let models = HashMap::new();
     let scope = crate::model::ScopeStage0 {
         models: &models,
-        dimensions: &dim_context,
+        dimensions: dim_context,
         model_name: "",
     };
     Some(crate::model::lower_variable(&scope, &parsed.variable))
@@ -426,10 +426,10 @@ pub fn link_score_equation_text_shaped<'db>(
     // The project's `DimensionsContext` is threaded into the GH #511
     // iterated-dimension recognition for the mapped-dimension case
     // (`x[State]` over a source declared with `Region`, `State` maps to
-    // `Region`); the datamodel dim list is salsa-tracked, so this fn is
-    // recomputed when a dimension's mappings change.
-    let dm_dims = project_datamodel_dims(db, project);
-    let dim_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+    // `Region`); the cached context depends only on the salsa-tracked
+    // dimensions input, so this fn is recomputed when a dimension's
+    // mappings change.
+    let dim_ctx = project_dimensions_context(db, project);
     // The generator returns the equation already tagged with the target's
     // dimensionality (`Scalar`, `ApplyToAll`, or `Arrayed`). `dimensions`
     // and `compile_directly` are left at defaults here; the emission loop
@@ -443,7 +443,7 @@ pub fn link_score_equation_text_shaped<'db>(
         &source_dim_elements,
         &to_var,
         &all_vars,
-        Some(&dim_ctx),
+        Some(dim_ctx),
     );
 
     Some(LtmSyntheticVar {
@@ -570,12 +570,12 @@ pub(super) fn compile_ltm_equation_fragment(
         CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
     };
 
+    // Project-global dims (datamodel form needed by `parse_ltm_equation`) plus
+    // the canonicalized context + converted dims, all from the salsa-cached
+    // queries rather than rebuilt per LTM fragment.
     let dims = project_datamodel_dims(db, project);
-    let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
-    let converted_dims: Vec<crate::dimensions::Dimension> = dims
-        .iter()
-        .map(crate::dimensions::Dimension::from)
-        .collect();
+    let dim_context = project_dimensions_context(db, project);
+    let converted_dims = project_converted_dimensions(db, project);
 
     let units_ctx = project_units_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
@@ -599,7 +599,7 @@ pub(super) fn compile_ltm_equation_fragment(
     let models = HashMap::new();
     let scope = crate::model::ScopeStage0 {
         models: &models,
-        dimensions: &dim_context,
+        dimensions: dim_context,
         model_name: "",
     };
     let lowered = crate::model::lower_variable(&scope, &parsed.variable);
@@ -1189,8 +1189,8 @@ pub(super) fn compile_ltm_equation_fragment(
     }
 
     let core = crate::compiler::ContextCore {
-        dimensions: &converted_dims,
-        dimensions_ctx: &dim_context,
+        dimensions: converted_dims,
+        dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
         module_models: &module_models,
@@ -1233,8 +1233,13 @@ pub(super) fn compile_ltm_equation_fragment(
                 .collect(),
             runlist_order: vec![var_ident_canonical.clone()],
             tables: tables.clone(),
-            dimensions: converted_dims.clone(),
-            dimensions_ctx: dim_context.clone(),
+            // Owned Module fields: the slice/context come from the cached
+            // queries by reference, so materialize owned copies here. The
+            // interned-backed `Dimension`s clone cheaply -- the expensive
+            // rebuild (re-canonicalizing every element) is what the cache
+            // removes; only the relationship-cache memo is rebuilt cold.
+            dimensions: converted_dims.to_vec(),
+            dimensions_ctx: (*dim_context).clone(),
             module_refs: implicit_module_refs.clone(),
         };
 
@@ -1503,12 +1508,11 @@ pub(super) fn compile_ltm_implicit_var_fragment(
     let implicit_dm_var = parsed.implicit_vars.get(idx)?;
     let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
 
+    // Project-global dims (datamodel form needed by `parse_var`) plus the
+    // canonicalized context + converted dims, from the salsa-cached queries.
     let dims = project_datamodel_dims(db, project);
-    let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
-    let converted_dims: Vec<crate::dimensions::Dimension> = dims
-        .iter()
-        .map(crate::dimensions::Dimension::from)
-        .collect();
+    let dim_context = project_dimensions_context(db, project);
+    let converted_dims = project_converted_dimensions(db, project);
 
     let units_ctx = project_units_context(db, project);
 
@@ -1568,7 +1572,7 @@ pub(super) fn compile_ltm_implicit_var_fragment(
         let models = HashMap::new();
         let scope = crate::model::ScopeStage0 {
             models: &models,
-            dimensions: &dim_context,
+            dimensions: dim_context,
             model_name: "",
         };
         crate::model::lower_variable(&scope, &parsed_implicit)
@@ -1975,8 +1979,8 @@ pub(super) fn compile_ltm_implicit_var_fragment(
     }
 
     let core = crate::compiler::ContextCore {
-        dimensions: &converted_dims,
-        dimensions_ctx: &dim_context,
+        dimensions: converted_dims,
+        dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
         module_models: &module_models,
@@ -2019,8 +2023,13 @@ pub(super) fn compile_ltm_implicit_var_fragment(
                 .collect(),
             runlist_order: vec![var_ident_canonical.clone()],
             tables: tables.clone(),
-            dimensions: converted_dims.clone(),
-            dimensions_ctx: dim_context.clone(),
+            // Owned Module fields: the slice/context come from the cached
+            // queries by reference, so materialize owned copies here. The
+            // interned-backed `Dimension`s clone cheaply -- the expensive
+            // rebuild (re-canonicalizing every element) is what the cache
+            // removes; only the relationship-cache memo is rebuilt cold.
+            dimensions: converted_dims.to_vec(),
+            dimensions_ctx: (*dim_context).clone(),
             module_refs: module_refs.clone(),
         };
 

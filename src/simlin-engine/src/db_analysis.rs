@@ -26,8 +26,8 @@ use crate::datamodel;
 
 use super::{
     Db, SourceModel, SourceProject, SourceVariableKind, build_module_inputs,
-    model_module_ident_context, parse_source_variable_with_module_context,
-    source_dims_to_datamodel, variable_direct_dependencies,
+    model_module_ident_context, parse_source_variable_with_module_context, project_datamodel_dims,
+    project_dimensions_context, variable_direct_dependencies,
 };
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -2127,12 +2127,14 @@ pub(crate) fn reconstruct_model_variables(
 
     let source_vars = model.variables(db);
     let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    let dims = source_dims_to_datamodel(project.dimensions(db));
-    let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
+    // The datamodel dims are needed by `reconstruct_implicit_variable`; the
+    // canonicalized context comes from the project-global salsa-cached query.
+    let dims = project_datamodel_dims(db, project);
+    let dim_context = project_dimensions_context(db, project);
     let models = HashMap::new();
     let scope = crate::model::ScopeStage0 {
         models: &models,
-        dimensions: &dim_context,
+        dimensions: dim_context,
         model_name: "",
     };
 
@@ -2148,7 +2150,7 @@ pub(crate) fn reconstruct_model_variables(
         for implicit_dm_var in &parsed.implicit_vars {
             let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
             let lowered_imp =
-                reconstruct_implicit_variable(db, model, &dims, &scope, implicit_dm_var);
+                reconstruct_implicit_variable(db, model, dims, &scope, implicit_dm_var);
             variables.insert(Ident::new(&imp_name), lowered_imp);
         }
     }
@@ -2171,12 +2173,14 @@ pub(super) fn reconstruct_single_variable(
 
     let source_vars = model.variables(db);
     let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    let dims = source_dims_to_datamodel(project.dimensions(db));
-    let dim_context = crate::dimensions::DimensionsContext::from(dims.as_slice());
+    // The datamodel dims are needed by `reconstruct_implicit_variable`; the
+    // canonicalized context comes from the project-global salsa-cached query.
+    let dims = project_datamodel_dims(db, project);
+    let dim_context = project_dimensions_context(db, project);
     let models = HashMap::new();
     let scope = crate::model::ScopeStage0 {
         models: &models,
-        dimensions: &dim_context,
+        dimensions: dim_context,
         model_name: "",
     };
 
@@ -2198,7 +2202,7 @@ pub(super) fn reconstruct_single_variable(
             let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
             if Ident::<Canonical>::new(&imp_name) == canonical_target {
                 let lowered_imp =
-                    reconstruct_implicit_variable(db, model, &dims, &scope, implicit_dm_var);
+                    reconstruct_implicit_variable(db, model, dims, &scope, implicit_dm_var);
                 return Some(lowered_imp);
             }
         }
