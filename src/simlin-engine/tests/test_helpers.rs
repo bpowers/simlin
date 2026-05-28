@@ -75,6 +75,7 @@ fn is_excluded_var(ident: &str, excluded: &[&str]) -> bool {
 /// (modules, internal flows, etc.) don't cause failures. Uses absolute
 /// epsilon of 2e-3 for non-Vensim data, with relative comparison for
 /// Vensim-sourced data.
+#[allow(dead_code)]
 pub fn ensure_results(expected: &Results, results: &Results) {
     ensure_results_excluding(expected, results, &[]);
 }
