@@ -128,7 +128,6 @@ fn layout_omits_ltm_series_when_disabled() {
 /// distinct from the layout-shape gate above: it catches a silent regression
 /// where both runs would have been LTM-off and the comparison would have
 /// passed vacuously.
-#[allow(dead_code)]
 fn assert_ltm_series_match(model_rel_path: &str) {
     let project = load(model_rel_path);
     let vm = vm_results_for_ltm(&project, "main");
@@ -147,4 +146,26 @@ fn assert_ltm_series_match(model_rel_path: &str) {
     );
 
     assert_ltm_slabs_match(&vm, &wasm);
+}
+
+// The scalar LTM corpus: the three `.stmx` models that lower cleanly today
+// and whose `$⁚ltm⁚*` columns are expected to match the VM bit-for-bit.
+// `hero_culture_ltm/hero_culture.sd.json` is deliberately excluded -- its
+// `.sd.json` extension needs a different loader, and that follow-up is
+// scoped outside Phase 1 so the corpus stays loadable through the single
+// `xmile::project_from_reader` path.
+
+#[test]
+fn series_logistic_growth_matches_vm() {
+    assert_ltm_series_match("logistic_growth_ltm/logistic_growth.stmx");
+}
+
+#[test]
+fn series_arms_race_matches_vm() {
+    assert_ltm_series_match("arms_race_3party/arms_race.stmx");
+}
+
+#[test]
+fn series_decoupled_stocks_matches_vm() {
+    assert_ltm_series_match("decoupled_stocks/decoupled.stmx");
 }
