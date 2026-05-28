@@ -21,8 +21,20 @@ use checked::Store;
 use float_cmp::approx_eq;
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_simulation};
-use simlin_engine::{Results, SimSpecs};
+use simlin_engine::{Results, SimSpecs, Vm};
 use wasm::validate;
+
+/// Tolerance for `$⁚ltm⁚*` series-parity assertions between the wasm backend
+/// and the bytecode VM. The synthetic LTM equations are emitted by the same
+/// salsa pipeline and lowered by the same per-opcode emitter into both
+/// backends, so the columns should agree to floating-point round-off (the
+/// remaining difference is only the integration loop's accumulation order,
+/// which is identical here). This is far tighter than the 0.05 rel-loop-score
+/// tolerance used in `simulate_ltm.rs` (which compares against an external
+/// oracle whose intermediate algebra differs). A model that needs looser
+/// should document why inline rather than weakening the constant.
+#[allow(dead_code)]
+pub const LTM_SERIES_TOLERANCE: f64 = 1e-6;
 
 /// Columns that are vendor-specific or otherwise not important for
 /// simulation correctness.
@@ -242,6 +254,154 @@ pub fn wasm_results_for(
     let slab = run_wasm_results(&artifact.wasm, &artifact.layout);
     let specs = SimSpecs::from(&datamodel.sim_specs);
     Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
+}
+
+/// LTM-enabled VM oracle: compile `model_name` of `datamodel` with
+/// `ltm_enabled = true` on its freshly-synced salsa `SourceProject`, run it
+/// to completion in the bytecode VM, and return the resulting [`Results`].
+///
+/// Mirrors `simulate_ltm.rs::compile_ltm_incremental_with_partitions` but
+/// stops at `Vm::into_results` (no `loop_partitions` book-keeping -- the
+/// caller compares the `$⁚ltm⁚*` slot series directly, not the post-sim
+/// relative loop scores). The `db` is owned by this function, so the flag
+/// flip never leaks (same rationale as `wasmgen::compile_datamodel_to_artifact`).
+///
+/// Imperative Shell: drives the salsa compile pipeline and the VM.
+#[allow(dead_code)]
+pub fn vm_results_for_ltm(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Results {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, set_project_ltm_enabled,
+        sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, model_name)
+        .expect("LTM-enabled incremental compile should succeed for the LTM corpus");
+    let mut vm = Vm::new(compiled).expect("Vm::new should succeed on a salsa-compiled model");
+    vm.run_to_end()
+        .expect("Vm::run_to_end should succeed on the LTM corpus");
+    vm.into_results()
+}
+
+/// LTM-enabled wasm peer of [`vm_results_for_ltm`]: compile `model_name` of
+/// `datamodel` with `ltm_enabled = true`, lower to wasm, run under the DLR-FT
+/// interpreter, and reshape the slab into a [`Results`]. Returns
+/// `Err(message)` on wasm-codegen `Unsupported` or an incremental-compile
+/// failure, so the caller (the ratcheting floor gate) can classify a model
+/// as "did not lower" vs. "lowered but wrong" -- the latter would have
+/// produced an `Ok` and then panicked in [`assert_ltm_slabs_match`].
+///
+/// Mirrors the body of [`wasm_results_for`] with `set_project_ltm_enabled`
+/// inserted before `compile_project_incremental`; the reshape goes through
+/// the private `wasm_results_from_slab` (reachable from this sibling `pub fn`
+/// in the same module).
+///
+/// Imperative Shell: drives the salsa compile pipeline and the wasm
+/// interpreter, delegating the reshape to the pure [`wasm_results_from_slab`].
+#[allow(dead_code)]
+pub fn wasm_results_for_ltm(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Result<Results, String> {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, set_project_ltm_enabled,
+        sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let sim = compile_project_incremental(&db, sync.project, model_name)
+        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+
+    let artifact = match compile_simulation(&sim) {
+        Ok(artifact) => artifact,
+        Err(WasmGenError::Unsupported(msg)) => return Err(msg),
+    };
+
+    let slab = run_wasm_results(&artifact.wasm, &artifact.layout);
+    let specs = SimSpecs::from(&datamodel.sim_specs);
+    Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
+}
+
+/// Whole-slab equality assertion for two [`Results`] built from the *same*
+/// `CompiledSimulation` (one via the VM, one via the wasm backend). Asserts
+/// shape (`step_size`, `step_count`) first, then compares the entire data
+/// slab element-wise within [`LTM_SERIES_TOLERANCE`] using a relative-or-
+/// absolute tolerance matching the style of [`ensure_results`].
+///
+/// **Why a whole-slab compare and not a per-`$⁚ltm⁚*`-column scan.** Both
+/// `Results` share their `var_offsets` (it is a verbatim copy of
+/// `CompiledSimulation.offsets`), so slot `i` denotes the identical
+/// variable+element on both sides. A full-slab compare therefore covers
+/// every `$⁚ltm⁚link_score⁚*` and `$⁚ltm⁚loop_score⁚*` column *including
+/// each element of an arrayed/cross-element LTM variable* (whose elements
+/// occupy contiguous slots), with no per-variable slot-span bookkeeping --
+/// and it incidentally verifies the rest of the model agrees too, which
+/// keeps the gate honest.
+///
+/// This is the single comparator the arrayed LTM phase (Phase 4) reuses to
+/// carry wasm-ltm.AC2.4 without modification.
+///
+/// Pure: no I/O.
+#[allow(dead_code)]
+pub fn assert_ltm_slabs_match(vm: &Results, wasm: &Results) {
+    assert_eq!(
+        vm.step_size, wasm.step_size,
+        "LTM slab step_size mismatch: vm={} wasm={}",
+        vm.step_size, wasm.step_size
+    );
+    assert_eq!(
+        vm.step_count, wasm.step_count,
+        "LTM slab step_count mismatch: vm={} wasm={}",
+        vm.step_count, wasm.step_count
+    );
+    let n = vm.step_count * vm.step_size;
+    assert!(
+        vm.data.len() >= n && wasm.data.len() >= n,
+        "LTM slab data too short: vm.len={} wasm.len={} expected>={n}",
+        vm.data.len(),
+        wasm.data.len()
+    );
+    for i in 0..n {
+        let v = vm.data[i];
+        let w = wasm.data[i];
+        // Relative-or-absolute tolerance: the absolute floor catches values
+        // near zero (where a relative epsilon collapses); the relative
+        // branch catches large magnitudes (where the absolute floor would
+        // be too strict). Both sides are *Simlin* runs, so we never need
+        // the Vensim ~6-sig-fig allowance.
+        if v.is_nan() && w.is_nan() {
+            // Both produced NaN (e.g. an out-of-range vector read on a
+            // step where the LTM source is :NA:): treat as equal, just
+            // like `ensure_results_excluding`'s around-zero branch treats
+            // dual zeros as equal.
+            continue;
+        }
+        let max_abs = v.abs().max(w.abs()).max(1.0);
+        let epsilon = LTM_SERIES_TOLERANCE * max_abs;
+        if !approx_eq!(f64, v, w, epsilon = epsilon) {
+            let step = i / vm.step_size;
+            let slot = i % vm.step_size;
+            // Recover the canonical name of the diverging slot for a
+            // useful failure message (linear scan over `offsets`; this
+            // only runs on a panic path so the cost is irrelevant).
+            let name = vm
+                .offsets
+                .iter()
+                .find_map(|(k, &off)| if off == slot { Some(k.as_str()) } else { None })
+                .unwrap_or("<unknown>");
+            panic!(
+                "LTM slab mismatch at step {step} slot {slot} ({name}): \
+                 vm={v} wasm={w} (epsilon={epsilon})"
+            );
+        }
+    }
 }
 
 /// Resumable-ABI peer of [`wasm_results_for`]: compile `model_name` of
