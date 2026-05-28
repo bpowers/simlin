@@ -175,10 +175,13 @@ fn series_decoupled_stocks_matches_vm() {
 /// arrayed (multi-slot) LTM column, not silently passing on a scalar
 /// reduction of the model.
 ///
-/// The whole-slab comparator in `assert_ltm_slabs_match` already covers
-/// every element of every `$⁚ltm⁚*` var (Bare A2A strided, FixedIndex
-/// name-baked, scalar->arrayed, and `$⁚ltm⁚agg⁚*` synthetic-agg columns)
-/// because both `Results` share their `var_offsets`. The extra guard
+/// The whole-slab comparator in `assert_ltm_slabs_match` covers each
+/// `$⁚ltm⁚*` form that the current fixtures actually emit: Bare A2A
+/// strided slots in `arrayed_population`; Bare A2A + FixedIndex name-baked
+/// slots in `cross_element`. The comparator is *capable* of covering
+/// scalar→arrayed and `$⁚ltm⁚agg⁚*` synthetic-agg columns if a future
+/// fixture emits them -- adding such a fixture would extend coverage to
+/// those forms without changing the comparator itself. The extra guard
 /// below is the authoritative "this model actually emits a multi-element
 /// LTM var" check: a regression that collapses an A2A target's link/loop
 /// score to a single slot would still pass `assert_ltm_slabs_match` (both
@@ -213,6 +216,8 @@ fn assert_ltm_series_match_arrayed(model_rel_path: &str) {
     // rather than scanning result offsets, since a Bare A2A var occupies
     // contiguous slots under a single offset entry -- multi-slot-ness is
     // not visible from `var_offsets` alone.
+    // Builds a third SimlinDb; sharing with vm_results_for_ltm could be
+    // a Phase-5 polish (small fixtures so cost is negligible).
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
@@ -242,10 +247,10 @@ fn series_arrayed_population_matches_vm() {
 }
 
 /// AC2.4: cross-element arrayed loops over `Region = {NYC, Boston}` (N=2)
-/// plus a whole-extent `SUM(population[*])` reducer that hoists to a
-/// `$⁚ltm⁚agg⁚*` synthetic node. Exercises the FixedIndex name-baked
-/// element form (`{from}[{e}]→{to}`) and the agg-routed `source→agg→to`
-/// link-score columns alongside the Bare slots.
+/// plus a whole-extent `SUM(population[*])` reducer. The reducer is
+/// variable-backed (the variable itself is the aggregate), so no synthetic
+/// `$⁚ltm⁚agg⁚*` node is emitted; what IS emitted are FixedIndex name-baked
+/// element forms (`{from}[{e}]→{to}`) alongside the Bare A2A slots.
 #[test]
 fn series_cross_element_matches_vm() {
     assert_ltm_series_match_arrayed("cross_element_ltm/cross_element.stmx");
@@ -293,10 +298,14 @@ const MIN_LTM_MODELS_LOWERED: usize = EXPECTED_SUPPORTED_LTM_MODELS.len();
 /// the suite -- no "rollout skip" leniency; the list now names exactly the
 /// models the wasm backend is expected to handle.
 ///
-/// The redundant `lowered >= MIN_LTM_MODELS_LOWERED` floor check is kept
-/// alongside the per-model assertion so a *missing* entry (someone deletes
-/// a model from the list without bumping the const) still fails the gate,
-/// not just an `Unsupported` from a listed entry.
+/// The `lowered >= MIN_LTM_MODELS_LOWERED` floor check is currently
+/// structurally redundant: because `MIN_LTM_MODELS_LOWERED` is derived
+/// directly from `EXPECTED_SUPPORTED_LTM_MODELS.len()`, removing an entry
+/// from the list also shrinks the const, so the floor would still pass even
+/// after the deletion.  The check is kept as defense-in-depth for the
+/// scenario where the const is later decoupled from the list (e.g. pinned
+/// as a hard numeric literal in a future refactor), at which point it
+/// becomes a real regression net again.
 ///
 /// Heavy models (`#[ignore]`) are reserved for the discovery / large-model
 /// phases (e.g. C-LEARN, World3); the listed corpus runs well under the
