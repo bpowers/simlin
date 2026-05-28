@@ -1125,7 +1125,7 @@ pub fn model_implicit_var_info(
     project: SourceProject,
 ) -> HashMap<String, ImplicitVarMeta> {
     let source_vars = model.variables(db);
-    let module_ident_context = module_ident_context_for_model(db, model, project, &[]);
+    let module_ident_context = model_module_ident_context(db, model, project, vec![]);
     let mut result = HashMap::new();
 
     for source_var in source_vars.values() {
@@ -5290,7 +5290,7 @@ fn enumerate_module_instances_inner(
                 name, sub_model_name,
             ));
         }
-        let module_ident_context = module_ident_context_for_model(db, *source_model, project, &[]);
+        let module_ident_context = model_module_ident_context(db, *source_model, project, vec![]);
         let parsed = parse_source_variable_with_module_context(
             db,
             meta.parent_source_var,
