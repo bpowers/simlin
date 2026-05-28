@@ -141,7 +141,7 @@ function convertLinks(linksPtr: number): Link[] {
       from: link.from,
       to: link.to,
       polarity: convertLinkPolarity(link.polarity),
-      score: link.score || undefined,
+      score: link.score ?? undefined,
     }));
   } finally {
     simlin_free_links(linksPtr);
@@ -151,7 +151,7 @@ function convertLinks(linksPtr: number): Link[] {
 
 type HandleKind = 'project' | 'model' | 'sim';
 
-interface HandleEntry {
+type HandleEntry = {
   kind: HandleKind;
   ptr: number;
   disposed: boolean;
@@ -180,10 +180,10 @@ interface HandleEntry {
   // libsimlin's from-wasm analysis FFI takes the serialized form back -- so
   // we keep the original bytes rather than re-serializing the parsed shape.
   wasmLayoutBytes?: Uint8Array;
-}
+};
 
 /** Optional fields carried onto a freshly-allocated handle entry. */
-interface HandleExtra {
+type HandleExtra = {
   projectHandle?: number;
   engine?: SimEngine;
   wasmInstance?: WebAssembly.Instance;
@@ -192,7 +192,7 @@ interface HandleExtra {
   wasmStopTime?: number;
   wasmModelPtr?: number;
   wasmLayoutBytes?: Uint8Array;
-}
+};
 
 export class DirectBackend implements EngineBackend {
   private _nextHandle = 1;
@@ -705,10 +705,10 @@ export class DirectBackend implements EngineBackend {
       // libsimlin's from-wasm analysis FFI, which deserializes the layout,
       // maps the slab to the model's LTM series, and computes link scores
       // through the SAME analysis pipeline the VM path uses (no logic is
-      // duplicated between backends). `.slice()` is load-bearing: the wasm
-      // memory view is backed by the live blob memory, which may grow and
-      // detach the view between the read and the copyToWasm that follows;
-      // slice forces a fresh, decoupled Uint8Array.
+      // duplicated between backends). `.slice()` is load-bearing: it produces
+      // a JS-side independent copy so the slab is decoupled from the live blob
+      // memory before we marshal it into libsimlin (copyToWasm), preventing any
+      // aliasing between the blob's ArrayBuffer and the libsimlin allocation.
       const { resultsOffset, nSlots, nChunks } = entry.wasmLayout!;
       const slabBytes = new Uint8Array(entry.wasmExports!.memory.buffer, resultsOffset, nSlots * nChunks * 8).slice();
       const linksPtr = simlin_analyze_links_from_wasm_results(entry.wasmModelPtr!, slabBytes, entry.wasmLayoutBytes!);

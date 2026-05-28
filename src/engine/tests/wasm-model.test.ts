@@ -222,7 +222,7 @@ describe('Model/Sim engine selection (public API)', () => {
     });
   });
 
-  describe('AC6.3: run({engine:wasm}) yields a Run with empty links and never calls getLinks', () => {
+  describe('run({engine:wasm}) without analyzeLtm yields a Run with empty links', () => {
     it('resolves to a Run whose links array is empty', async () => {
       const model = await project.mainModel();
       const run = await model.run({}, { engine: 'wasm' });
@@ -231,10 +231,10 @@ describe('Model/Sim engine selection (public API)', () => {
       expect(run.links).toEqual([]);
     });
 
-    it('does not throw despite getLinks being unsupported on the wasm engine', async () => {
+    it('resolves successfully when analyzeLtm is omitted', async () => {
       const model = await project.mainModel();
-      // getRun must not call getLinks() on the wasm sim (which would throw the
-      // "not supported on the wasm engine" error); LTM gating skips it instead.
+      // LTM analysis is opt-in; omitting analyzeLtm must produce a valid Run
+      // with empty links on the wasm engine (the LTM-on path is tested in wasm-ltm.test.ts).
       await expect(model.run({}, { engine: 'wasm' })).resolves.toBeInstanceOf(Run);
     });
   });
