@@ -442,6 +442,9 @@ unsafe fn slab_from_bytes(slab_ptr: *const u8, slab_len: usize) -> Result<Vec<f6
             )),
         );
     }
+    // Only the alignment multiple-of-8 invariant is checked here; the geometry
+    // check that the element count equals `n_chunks * n_slots` lives in
+    // `results_from_layout_and_slab`, which has access to the WasmLayout.
     let n_f64 = slab_len / 8;
     let bytes = std::slice::from_raw_parts(slab_ptr, slab_len);
     let mut out = Vec::with_capacity(n_f64);
@@ -869,6 +872,11 @@ impl<'a> LtmEnabledGuard<'a> {
 
 impl<'a> Drop for LtmEnabledGuard<'a> {
     fn drop(&mut self) {
+        // Panic-safe: `set_project_ltm_enabled` only mutates the salsa input when
+        // the flag actually changed (the inner `if ltm_enabled(db) != value` guard),
+        // so a no-op restore (flag already matched) never touches salsa at all.
+        // On a valid db handle -- which the FFI has been using throughout the guard's
+        // lifetime -- the setter does not panic.
         engine::db::set_project_ltm_enabled(self.db, self.project, self.restore_to);
     }
 }
@@ -910,11 +918,10 @@ pub(crate) fn recompute_ltm_snapshots(
     let ltm_vars = engine::db::model_ltm_variables(guard.db(), model, project);
     let project_dims = engine::db::project_datamodel_dims(guard.db(), project);
     let element_index = engine::ltm_post::build_loop_element_index(&ltm_vars.vars, project_dims);
-    // `model_name` is preserved as a parameter for API symmetry with
-    // `simulation.rs`'s snapshot capture, which keys the lookup on the
-    // model name; in this from-wasm path the caller has already resolved
-    // the `SourceModel` from that name, so the name is unused inside.
-    let _ = model_name;
+    // The caller has already resolved `model` from `model_name`, so the name
+    // has no work to do inside this function.  Assert that the two agree in
+    // debug builds to make the invariant machine-checkable.
+    debug_assert_eq!(model.name(guard.db()), model_name);
     let snapshots = (ltm_vars.loop_partitions.clone(), element_index);
     // Drop the guard explicitly so the `ltm_enabled` reset happens before
     // returning -- the explicit drop is redundant with Rust's scope rules
