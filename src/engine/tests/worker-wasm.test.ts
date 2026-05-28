@@ -20,11 +20,23 @@ import { WorkerServer } from '../src/worker-server';
 import { DirectBackend } from '../src/direct-backend';
 import type { WorkerRequest, WorkerResponse } from '../src/worker-protocol';
 import type { ModelHandle } from '../src/backend';
+import type { Link } from '../src/types';
 
 const wasmPath = join(__dirname, '..', 'core', 'libsimlin.wasm');
 
 function loadTeacupXmile(): Uint8Array {
   const xmilePath = join(__dirname, '..', '..', 'pysimlin', 'tests', 'fixtures', 'teacup.stmx');
+  return readFileSync(xmilePath);
+}
+
+// Scalar LTM fixture (one stock + one flow + three auxes) committed in-tree at
+// test/logistic_growth_ltm/. The wasm backend supports every equation in this
+// model, so the wasm compile with enableLtm must succeed; the LTM analysis
+// surfaces nontrivial per-link scores against a known feedback structure. Same
+// fixture wasm-ltm.test.ts uses, so the worker leg here exercises the identical
+// model the DirectBackend parity test pins.
+function loadLogisticGrowthLtmXmile(): Uint8Array {
+  const xmilePath = join(__dirname, '..', '..', '..', 'test', 'logistic_growth_ltm', 'logistic_growth.stmx');
   return readFileSync(xmilePath);
 }
 
@@ -346,5 +358,119 @@ describe('WorkerBackend wasm engine parity (Phase 3)', () => {
       oracle.modelDispose(oracleModel);
       oracle.projectDispose(oracleProject);
     });
+  });
+});
+
+// AC1.4: LTM on the wasm engine survives the worker boundary. The Phase 3
+// DirectBackend change (cc0abdd) enabled enableLtm + engine:'wasm' end-to-end;
+// because WorkerServer wraps a DirectBackend and simGetLinks is already in the
+// worker protocol (the VM path used it), no protocol change is needed -- this
+// test pins that promise by exercising the full WorkerBackend round-trip and
+// comparing against the same model on node DirectBackend (exact) and on the VM
+// (within the engine's parity tolerance). 1e-6 mirrors wasm-ltm.test.ts's
+// SCORE_TOL: LTM scores are produced by the same analysis function over the
+// same per-step f64 series on both engines, but the wasm-vs-VM eval already
+// accumulates a tiny reassociation noise inside those series.
+const LTM_SCORE_TOL = 1e-6;
+
+function linkKey(link: Link): string {
+  return link.from + '␟' + link.to;
+}
+
+function linksByKey(links: readonly Link[]): Map<string, Link> {
+  const out = new Map<string, Link>();
+  for (const link of links) {
+    out.set(linkKey(link), link);
+  }
+  return out;
+}
+
+function expectScoresClose(actual: Float64Array, expected: Float64Array): void {
+  expect(actual.length).toBe(expected.length);
+  for (let i = 0; i < expected.length; i++) {
+    expect(Math.abs(actual[i] - expected[i])).toBeLessThanOrEqual(LTM_SCORE_TOL);
+  }
+}
+
+describe('WorkerBackend LTM on the wasm engine (Phase 6)', () => {
+  let oracle: DirectBackend;
+
+  beforeAll(async () => {
+    oracle = new DirectBackend();
+    oracle.reset();
+    oracle.configureWasm({ source: loadWasmSource() });
+    await oracle.init();
+  });
+
+  afterAll(() => {
+    oracle.reset();
+  });
+
+  // AC1.4: identical link set, identical polarities, identical per-step scores
+  // against the node DirectBackend (the same compiled blob and the same
+  // analytic core, so exact); also within 1e-6 of the VM run (the parity
+  // oracle) for a three-way pin.
+  it('worker wasm getLinks matches node + VM', async () => {
+    const { backend } = createWorkerWasmPair();
+    await backend.init(loadWasmSource());
+    const projHandle = await backend.projectOpenXmile(loadLogisticGrowthLtmXmile());
+    const modelHandle = await backend.projectGetModel(projHandle, null);
+    const simHandle = await backend.simNew(modelHandle, true, 'wasm');
+    await backend.simRunToEnd(simHandle);
+    const workerLinks = await backend.simGetLinks(simHandle);
+
+    const oracleProject = oracle.projectOpenXmile(loadLogisticGrowthLtmXmile());
+    const oracleModel = oracle.projectGetModel(oracleProject, null);
+    const nodeWasmSim = oracle.simNew(oracleModel, true, 'wasm');
+    const vmSim = oracle.simNew(oracleModel, true, 'vm');
+    oracle.simRunToEnd(nodeWasmSim);
+    oracle.simRunToEnd(vmSim);
+    const nodeLinks = oracle.simGetLinks(nodeWasmSim);
+    const vmLinks = oracle.simGetLinks(vmSim);
+
+    // The LTM analysis genuinely fired on this feedback model: at least one
+    // link carries a per-step score series, otherwise the comparison would be
+    // vacuous.
+    expect(workerLinks.length).toBeGreaterThan(0);
+    expect(workerLinks.some((l) => l.score !== undefined)).toBe(true);
+
+    const workerByKey = linksByKey(workerLinks);
+    const nodeByKey = linksByKey(nodeLinks);
+    const vmByKey = linksByKey(vmLinks);
+
+    // The (from, to) edge set is identical across all three -- analyses agree
+    // on causal structure regardless of which backend produced the series.
+    expect([...workerByKey.keys()].sort()).toEqual([...nodeByKey.keys()].sort());
+    expect([...workerByKey.keys()].sort()).toEqual([...vmByKey.keys()].sort());
+
+    for (const [key, nodeLink] of nodeByKey) {
+      const workerLink = workerByKey.get(key);
+      const vmLink = vmByKey.get(key);
+      expect(workerLink).toBeDefined();
+      expect(vmLink).toBeDefined();
+      // Worker -> node: same compiled wasm blob, same analytic core, so the
+      // polarities and per-step scores must agree byte-for-byte.
+      expect(workerLink!.polarity).toBe(nodeLink.polarity);
+      if (nodeLink.score === undefined) {
+        expect(workerLink!.score).toBeUndefined();
+      } else {
+        expect(workerLink!.score).toBeDefined();
+        expect(Array.from(workerLink!.score!)).toEqual(Array.from(nodeLink.score));
+      }
+      // Worker -> VM: same model, different evaluators; polarities are still
+      // exact, scores agree within the documented LTM tolerance.
+      expect(workerLink!.polarity).toBe(vmLink!.polarity);
+      if (vmLink!.score === undefined) {
+        expect(workerLink!.score).toBeUndefined();
+      } else {
+        expect(workerLink!.score).toBeDefined();
+        expectScoresClose(workerLink!.score!, vmLink!.score);
+      }
+    }
+
+    oracle.simDispose(nodeWasmSim);
+    oracle.simDispose(vmSim);
+    oracle.modelDispose(oracleModel);
+    oracle.projectDispose(oracleProject);
   });
 });
