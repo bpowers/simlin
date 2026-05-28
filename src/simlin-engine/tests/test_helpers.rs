@@ -20,6 +20,9 @@
 use checked::Store;
 use float_cmp::approx_eq;
 use simlin_engine::common::{Canonical, Ident};
+use simlin_engine::datamodel;
+use simlin_engine::db::LtmSyntheticVar;
+use simlin_engine::ltm::CausalGraph;
 use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_simulation};
 use simlin_engine::{Results, SimSpecs, Vm};
 use wasm::validate;
@@ -566,4 +569,139 @@ pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f
             })
             .collect()
     })
+}
+
+/// Discovery-mode peer of [`wasm_results_for_ltm`]: compile `model_name`
+/// of `datamodel` with **both** `ltm_enabled = true` and
+/// `ltm_discovery_mode = true`, lower to wasm, run under the DLR-FT
+/// interpreter, and reshape the slab into a [`Results`]. Returns
+/// `Err(message)` on wasm-codegen `Unsupported` or an incremental-compile
+/// failure.
+///
+/// Discovery mode causes `db_ltm::model_ltm_variables` to emit a
+/// `$⁚ltm⁚link_score⁚{from}→{to}` synthetic for **every** causal edge
+/// (not just loop-participating ones), so the reconstructed `Results`
+/// can drive `ltm_finding::discover_loops_with_graph` end-to-end. The
+/// reconstructed `Results` carries `specs` populated from the
+/// datamodel, which `discover_loops_with_graph` relies on for each
+/// `FoundLoop.scores` time axis (`results.specs.start + save_step * step`).
+///
+/// Imperative Shell: drives the salsa compile pipeline and the wasm
+/// interpreter, delegating the reshape to the pure [`wasm_results_from_slab`].
+#[allow(dead_code)]
+pub fn wasm_results_for_ltm_discovery(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Result<Results, String> {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, set_project_ltm_discovery_mode,
+        set_project_ltm_enabled, sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let sim = compile_project_incremental(&db, sync.project, model_name)
+        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+
+    let artifact = match compile_simulation(&sim) {
+        Ok(artifact) => artifact,
+        Err(WasmGenError::Unsupported(msg)) => return Err(msg),
+    };
+
+    let slab = run_wasm_results(&artifact.wasm, &artifact.layout);
+    let specs = SimSpecs::from(&datamodel.sim_specs);
+    Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
+}
+
+/// Owned, `'static` inputs for the element-level LTM discovery
+/// production path. `ltm_finding::discover_loops_with_graph` borrows all
+/// of these by reference; bundling them as owned values lets a caller
+/// thread the same structural inputs through both the VM `Results` (here)
+/// and a wasm-backed `Results` peer for parity testing, or move the
+/// whole bundle into a worker-thread closure (the existing
+/// `ltm_discovery_large_models.rs` use case).
+///
+/// All fields are owned data, so the returned value is naturally
+/// `'static` (no borrows) -- no `Box::leak` is needed to produce it.
+///
+/// `vm_results` is the LTM-discovery-mode VM oracle; `causal_graph`,
+/// `stocks`, `ltm_vars`, and `dims` are the four backend-independent
+/// structural inputs `discover_loops_with_graph` accepts in production
+/// (assembled exactly as `analysis.rs::run_ltm_pipeline` does).
+#[allow(dead_code)]
+pub struct LtmDiscoveryInputs {
+    pub vm_results: Results,
+    pub causal_graph: CausalGraph,
+    pub stocks: Vec<Ident<Canonical>>,
+    pub ltm_vars: Vec<LtmSyntheticVar>,
+    pub dims: Vec<datamodel::Dimension>,
+}
+
+/// Compile (LTM discovery mode), simulate via the bytecode VM, and
+/// assemble the element-level discovery inputs for an arbitrary
+/// datamodel project.
+///
+/// Mirrors the production discovery path in
+/// `analysis.rs::run_ltm_pipeline`: the element-level `CausalGraph` (via
+/// `model_element_causal_edges` + `causal_graph_from_element_edges`),
+/// the element-level `stocks` list, the `LtmSyntheticVar` metadata, and
+/// the project dimensions -- the four arguments
+/// `ltm_finding::discover_loops_with_graph` receives in production. The
+/// salsa-borrowed values are cloned into owned ones so the bundle is
+/// `'static`.
+///
+/// Single shared builder used by both the VM-side
+/// `ltm_discovery_large_models.rs` test bundle and the wasm-vs-VM parity
+/// harness in `simulate_ltm_wasm.rs`: keeping the structural-input
+/// assembly in exactly one place satisfies the anti-divergence
+/// principle at the harness level so the parity check truly compares
+/// identical inputs.
+///
+/// Imperative Shell: drives the salsa compile pipeline and the VM.
+#[allow(dead_code)]
+pub fn ltm_discovery_inputs(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> LtmDiscoveryInputs {
+    use simlin_engine::db::{
+        SimlinDb, causal_graph_from_element_edges, compile_project_incremental,
+        model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
+        set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, model_name)
+        .expect("project should compile with LTM discovery enabled");
+
+    let mut vm = Vm::new(compiled).expect("LTM VM construction should succeed");
+    vm.run_to_end()
+        .expect("LTM simulation should run to completion");
+    let vm_results = vm.into_results();
+
+    // Assemble the element-level discovery inputs exactly as the
+    // production path does -- see `analysis.rs::run_ltm_pipeline`. These
+    // four salsa-tracked results are `returns(ref)` (they borrow `db`);
+    // clone them into owned values so the bundle outlives `db`.
+    let source_model = sync.models[model_name].source_model;
+    let element_edges = model_element_causal_edges(&db, source_model, sync.project);
+    let causal_graph = causal_graph_from_element_edges(element_edges);
+    let stocks: Vec<Ident<Canonical>> =
+        element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project)
+        .vars
+        .clone();
+    let dims = project_datamodel_dims(&db, sync.project).clone();
+
+    LtmDiscoveryInputs {
+        vm_results,
+        causal_graph,
+        stocks,
+        ltm_vars,
+        dims,
+    }
 }

@@ -107,6 +107,8 @@
 //!
 //! Tracked as GH #540 (linked from epic #488).
 
+mod test_helpers;
+
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -114,13 +116,14 @@ use std::time::{Duration, Instant};
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::datamodel;
 use simlin_engine::db::{
-    LtmSyntheticVar, SimlinDb, causal_graph_from_element_edges, compile_project_incremental,
-    model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
-    set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    LtmSyntheticVar, SimlinDb, compile_project_incremental, set_project_ltm_discovery_mode,
+    set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
 use simlin_engine::ltm::CausalGraph;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{Results, Vm, ltm_finding, open_vensim};
+use simlin_engine::{Results, ltm_finding, open_vensim};
+
+use test_helpers::ltm_discovery_inputs;
 
 /// World3-03 in Vensim MDL form. Paths are relative to the
 /// `simlin-engine` crate directory (where `cargo test` runs).
@@ -174,53 +177,24 @@ struct DiscoveryInputs {
 /// Compile (LTM discovery mode), simulate, and assemble the
 /// element-level discovery inputs for an arbitrary datamodel project.
 ///
-/// This mirrors the production discovery path in
-/// `analysis.rs::run_ltm_pipeline` exactly: the element-level
-/// `CausalGraph` (via `model_element_causal_edges` +
-/// `causal_graph_from_element_edges`), the element-level `stocks` list,
-/// the `LtmSyntheticVar` metadata, and the project dimensions -- the four
-/// arguments `discover_loops_with_graph` receives in production. The
-/// salsa-borrowed values are cloned into owned ones so the caller can
-/// move them into a worker thread.
+/// Thin wrapper over the shared `test_helpers::ltm_discovery_inputs`
+/// builder: the structural-input body lives in exactly one place
+/// (across `simulate_ltm_wasm.rs` and this file's binary), satisfying
+/// the anti-divergence principle at the harness level so the wasm-vs-VM
+/// parity test in Phase 5 truly compares identical inputs to what this
+/// VM-side bundle exercises.
 ///
-/// Generic over the project so the same recipe drives both the World3
-/// fixture and the tractable companion fixture -- the companion test is
-/// only a faithful proxy for the World3 test if it runs the *identical*
-/// assembly path.
+/// Always targets the canonical "main" model; the World3 fixture and
+/// the tractable companion fixture both bind their top-level model to
+/// that name.
 fn discovery_inputs(datamodel_project: &datamodel::Project) -> DiscoveryInputs {
-    let mut db = SimlinDb::default();
-    let sync = sync_from_datamodel_incremental(&mut db, datamodel_project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("project should compile with LTM discovery enabled");
-
-    let mut vm = Vm::new(compiled).expect("LTM VM construction should succeed");
-    vm.run_to_end()
-        .expect("LTM simulation should run to completion");
-    let results = vm.into_results();
-
-    // Assemble the element-level discovery inputs exactly as the
-    // production path does -- see `analysis.rs::run_ltm_pipeline`. These
-    // four salsa-tracked results are `returns(ref)` (they borrow `db`);
-    // clone them into owned values so the caller can move the bundle into
-    // a worker thread that outlives `db`.
-    let source_model = sync.models["main"].source_model;
-    let element_edges = model_element_causal_edges(&db, source_model, sync.project);
-    let causal_graph = causal_graph_from_element_edges(element_edges);
-    let stocks: Vec<Ident<Canonical>> =
-        element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
-    let ltm_vars = model_ltm_variables(&db, source_model, sync.project)
-        .vars
-        .clone();
-    let dims = project_datamodel_dims(&db, sync.project).clone();
-
+    let shared = ltm_discovery_inputs(datamodel_project, "main");
     DiscoveryInputs {
-        results,
-        causal_graph,
-        stocks,
-        ltm_vars,
-        dims,
+        results: shared.vm_results,
+        causal_graph: shared.causal_graph,
+        stocks: shared.stocks,
+        ltm_vars: shared.ltm_vars,
+        dims: shared.dims,
     }
 }
 
