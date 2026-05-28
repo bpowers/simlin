@@ -9,6 +9,7 @@ import { defined } from '@simlin/core/common';
 
 import { Point, Rect, square } from './common';
 import { CloudRadius, CloudWidth } from './default';
+import { jsFormatNumber as f } from '../render-common';
 
 import styles from './Cloud.module.css';
 
@@ -69,7 +70,7 @@ export class Cloud extends React.PureComponent<CloudProps> {
     const diameter = radius * 2;
 
     const scale = diameter / CloudWidth;
-    const t = `matrix(${scale}, 0, 0, ${scale}, ${x - radius}, ${y - radius})`;
+    const t = `matrix(${f(scale)}, 0, 0, ${f(scale)}, ${f(x - radius)}, ${f(y - radius)})`;
 
     // Keep cloud in DOM (for pointer capture) but visually hidden when dragging
     const style = isHidden ? { visibility: 'hidden' as const } : undefined;

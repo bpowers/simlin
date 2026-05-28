@@ -15,6 +15,44 @@ import { Canvas } from './drawing/Canvas';
 import { Box, Point } from './drawing/common';
 import { renderStyles } from './drawing/render-styles';
 
+/**
+ * Format a JavaScript number for emission into an SVG attribute or `d=`
+ * path string. Mirrors `Number.toString()` (no trailing `.0`, no trailing
+ * zeros) and additionally **quantizes the value to 6 decimal places** so
+ * 1-ULP f64 differences from compiler/hardware variation cannot leak into
+ * the SVG bytes. The Rust counterpart is `js_format_number` in
+ * `src/simlin-engine/src/diagram/common.rs`; the two must stay in sync
+ * because `src/diagram/tests/svg-rendering.test.ts` asserts the two
+ * renderers' outputs are byte-identical. Sub-micropixel precision is far
+ * above any visible rendering threshold and well below the ~7e-14 ULP at
+ * coordinate magnitudes around 300.
+ */
+export function jsFormatNumber(n: number): string {
+  if (Number.isNaN(n)) {
+    return 'NaN';
+  }
+  if (!Number.isFinite(n)) {
+    return n > 0 ? 'Infinity' : '-Infinity';
+  }
+
+  // Round to 6 decimal places; renormalize -0 so a tiny negative input that
+  // rounded down to zero doesn't print as "-0".
+  let r = Math.round(n * 1e6) / 1e6;
+  if (r === 0) {
+    r = 0;
+  }
+
+  // After quantization, an integer prints without a decimal point.
+  if (r === Math.trunc(r) && Math.abs(r) < 1e21) {
+    return r.toString();
+  }
+
+  // Up to 6 fractional digits, then strip trailing zeros and any dangling
+  // decimal point so "0.5" stays "0.5" rather than "0.500000".
+  const s = r.toFixed(6);
+  return s.replace(/0+$/, '').replace(/\.$/, '');
+}
+
 export function renderSvgToString(project: Project, modelName: string): [string, Box] {
   const model = getOrThrow(project.models, modelName);
 

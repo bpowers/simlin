@@ -13,6 +13,7 @@ import { displayName, mergeBounds, Point, Rect, square } from './common';
 import { AuxRadius } from './default';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
+import { jsFormatNumber as f } from '../render-common';
 
 import styles from './Auxiliary.module.css';
 
@@ -101,7 +102,7 @@ export class Aux extends React.PureComponent<AuxProps> {
     const r = this.radius();
 
     return (
-      <g transform={`translate(${cx + 1 - r / 2} ${cy + 1 - r / 2})`}>
+      <g transform={`translate(${f(cx + 1 - r / 2)} ${f(cy + 1 - r / 2)})`}>
         <Sparkline series={series} width={r - 2} height={r - 2} />
       </g>
     );

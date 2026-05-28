@@ -13,6 +13,7 @@ import { displayName, mergeBounds, Point, Rect } from './common';
 import { StockWidth, StockHeight } from './default';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
+import { jsFormatNumber as f } from '../render-common';
 
 import styles from './Stock.module.css';
 
@@ -111,7 +112,7 @@ export class Stock extends React.PureComponent<StockProps> {
     const h = StockHeight;
 
     return (
-      <g transform={`translate(${cx + 1 - w / 2} ${cy + 1 - h / 2})`}>
+      <g transform={`translate(${f(cx + 1 - w / 2)} ${f(cy + 1 - h / 2)})`}>
         <Sparkline series={series} width={w - 2} height={h - 2} />
       </g>
     );

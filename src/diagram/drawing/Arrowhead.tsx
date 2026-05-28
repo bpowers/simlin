@@ -5,6 +5,7 @@
 import * as React from 'react';
 
 import { Point } from './common';
+import { jsFormatNumber as f } from '../render-common';
 
 import styles from './Arrowhead.module.css';
 
@@ -28,11 +29,13 @@ export class Arrowhead extends React.PureComponent<ArrowheadProps> {
     const { type, isSelected } = this.props;
     const { x, y } = this.props.point;
     let r = this.props.size;
-    const path = `M${x},${y}L${x - r},${y + r / 2}A${r * 3},${r * 3} 0 0,1 ${x - r},${y - r / 2}z`;
+    // Quantize SVG path coordinates -- see `Connector.tsx::renderStraightLine`
+    // for the byte-identical Rust-vs-TS parity invariant the formatter enforces.
+    const path = `M${f(x)},${f(y)}L${f(x - r)},${f(y + r / 2)}A${f(r * 3)},${f(r * 3)} 0 0,1 ${f(x - r)},${f(y - r / 2)}z`;
     r *= 1.5;
-    const bgPath = `M${x + 0.5 * r},${y}L${x - 0.75 * r},${y + r / 2}A${r * 3},${r * 3} 0 0,1 ${x - 0.75 * r},${
-      y - r / 2
-    }z`;
+    const bgPath = `M${f(x + 0.5 * r)},${f(y)}L${f(x - 0.75 * r)},${f(y + r / 2)}A${f(r * 3)},${f(r * 3)} 0 0,1 ${f(x - 0.75 * r)},${f(
+      y - r / 2,
+    )}z`;
 
     let pathClassName: string;
     let staticClass: string;
@@ -44,7 +47,7 @@ export class Arrowhead extends React.PureComponent<ArrowheadProps> {
       staticClass = isSelected ? 'simlin-arrowhead-flow simlin-selected' : 'simlin-arrowhead-flow';
     }
 
-    const transform = `rotate(${this.props.angle},${x},${y})`;
+    const transform = `rotate(${f(this.props.angle)},${f(x)},${f(y)})`;
 
     return (
       <g>

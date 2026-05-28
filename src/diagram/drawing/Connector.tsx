@@ -15,6 +15,7 @@ import { Arrowhead } from './Arrowhead';
 import { Circle, isInf, isZero, Point, Rect, square } from './common';
 import { ArrowheadRadius, AuxRadius, StockWidth, StockHeight, ModuleWidth, ModuleHeight, StraightLineMax } from './default';
 import { degToRad, radToDeg } from '../arc-utils';
+import { jsFormatNumber as f } from '../render-common';
 import styles from './Connector.module.css';
 
 export const ArrayedOffset = 3;
@@ -328,7 +329,11 @@ export class Connector extends React.PureComponent<ConnectorProps> {
     const end = Connector.intersectElementStraight(to, oppositeθ(θ));
 
     const arrowθ = radToDeg(θ);
-    const path = `M${start.x},${start.y}L${end.x},${end.y}`;
+    // Quantize SVG coordinates so 1-ULP f64 differences between the Rust and
+    // TypeScript renderers don't produce divergent SVG bytes (the parity test
+    // at `tests/svg-rendering.test.ts` asserts the two outputs are byte-
+    // identical). See `jsFormatNumber` in `render-common.tsx`.
+    const path = `M${f(start.x)},${f(start.y)}L${f(end.x)},${f(end.y)}`;
 
     let connectorClass = isSelected
       ? `${styles.connectorSelected} simlin-connector simlin-connector-selected`
@@ -477,7 +482,7 @@ export class Connector extends React.PureComponent<ConnectorProps> {
     const arcEnd = { x: toVisual.cx, y: toVisual.cy };
     const end = intersectElementArc(to, circ, !inv);
 
-    const path = `M${start.x},${start.y}A${circ.r},${circ.r} 0 ${+sweep},${+inv} ${arcEnd.x},${arcEnd.y}`;
+    const path = `M${f(start.x)},${f(start.y)}A${f(circ.r)},${f(circ.r)} 0 ${+sweep},${+inv} ${f(arcEnd.x)},${f(arcEnd.y)}`;
 
     let arrowθ = radToDeg(atan2(end.y - circ.y, end.x - circ.x)) - 90;
     if (inv) {
