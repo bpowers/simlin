@@ -588,7 +588,19 @@ fn source_units_to_datamodel(units: &[SourceUnit]) -> Vec<datamodel::Unit> {
         .collect()
 }
 
-fn source_sim_specs_to_datamodel(specs: &SourceSimSpecs) -> datamodel::SimSpecs {
+/// Lower a salsa-input `SourceSimSpecs` into the datamodel form expected by
+/// `vm::Specs::from`.
+///
+/// Two consumers besides the in-crate `assemble_simulation` need this lowering:
+/// the libsimlin from-wasm analyze FFI (which rebuilds a `Results` from a
+/// `(slab, WasmLayout)` pair and therefore needs to reconstruct `Specs` outside
+/// the compile pipeline), and any future host that re-derives `Specs` from a
+/// db-resident `SourceProject` without going through `compile_project_incremental`.
+/// There is no single salsa query that returns `datamodel::SimSpecs` directly --
+/// the spec input is split between `SourceProject::sim_specs` (project-level
+/// default) and `SourceModel::model_sim_specs` (per-model override) -- so the
+/// caller composes the two and feeds the chosen one through here.
+pub fn source_sim_specs_to_datamodel(specs: &SourceSimSpecs) -> datamodel::SimSpecs {
     datamodel::SimSpecs {
         start: specs.start,
         stop: specs.stop,

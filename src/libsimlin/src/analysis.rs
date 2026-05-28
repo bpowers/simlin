@@ -7,6 +7,7 @@
 //! Functions for extracting feedback loops, causal links with LTM scores,
 //! and relative loop scores from a simulation.
 
+use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::db::{SourceModel, SourceProject};
 use simlin_engine::{self as engine, canonicalize};
 use std::collections::HashMap;
@@ -582,6 +583,198 @@ pub(crate) fn rel_loop_score_series(
             )
         }
     }
+}
+
+/// Reconstruct an `engine::Results` from a wasm-blob result slab and its
+/// matching `WasmLayout`.
+///
+/// The slab is the *already-extracted* `n_chunks * n_slots` f64 region the
+/// host strided out of the wasm linear memory (i.e. the bytes at the blob's
+/// `results_offset`).  The serialized `WasmLayout`'s `results_offset` itself
+/// is a wasm-linear-memory byte offset and is irrelevant once the slab has
+/// been lifted out of the wasm side -- callers pass the slab as a flat
+/// `[f64]`.
+///
+/// `Specs` cannot be looked up through a single salsa query (the spec input
+/// is split between `SourceProject::sim_specs` and `SourceModel::model_sim_specs`,
+/// the per-model override path `assemble_simulation` takes); we mirror its
+/// branch here through `engine::db::source_sim_specs_to_datamodel` →
+/// `engine::SimSpecs::from`.  The shape mirrors `Vm::into_results()`:
+/// `offsets` is the layout's canonical-name → slot map, `step_size` is
+/// `n_slots`, `step_count` is `n_chunks`, `is_vensim` is false.  Neither
+/// analytic core (`analyze_links_core`, `rel_loop_score_series`) reads
+/// `results.specs`, so the reconstructed `Specs` is only there to keep the
+/// `Results` value structurally well-formed -- there is no analytic
+/// sensitivity to its contents from these FFIs.
+//
+// The `allow(dead_code)` is intentional and scoped to this commit: tasks 4
+// and 5 of phase 2 wire this helper into the new from-wasm FFI functions.
+// Landing the helper in its own commit keeps the LTM-flag scope-guard
+// pattern reviewable in isolation from the FFI plumbing it supports.
+#[allow(dead_code)]
+pub(crate) fn results_from_layout_and_slab(
+    db: &dyn engine::db::Db,
+    model: SourceModel,
+    project: SourceProject,
+    layout: &engine::wasmgen::WasmLayout,
+    slab: &[f64],
+) -> Result<engine::Results, SimlinError> {
+    let expected = layout.n_chunks.checked_mul(layout.n_slots).ok_or_else(|| {
+        SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
+            "wasm layout geometry overflow: n_chunks={} * n_slots={}",
+            layout.n_chunks, layout.n_slots
+        ))
+    })?;
+    if slab.len() != expected {
+        return Err(SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
+            "wasm result slab length mismatch: got {} f64 elements, expected n_chunks * n_slots = {} * {} = {}",
+            slab.len(),
+            layout.n_chunks,
+            layout.n_slots,
+            expected
+        )));
+    }
+
+    let offsets: HashMap<Ident<Canonical>, usize> = layout
+        .var_offsets
+        .iter()
+        .map(|(name, off)| (Ident::<Canonical>::new(name), *off))
+        .collect();
+
+    // Mirror `assemble_simulation`'s `Specs` branch (db.rs:5173-5183): prefer
+    // the per-model override when present, else fall back to the project-level
+    // default.  Neither analytic core reads `Specs`, but the field must be
+    // present and structurally valid.
+    let specs_dm = match model.model_sim_specs(db) {
+        Some(ms) => engine::db::source_sim_specs_to_datamodel(ms),
+        None => engine::db::source_sim_specs_to_datamodel(project.sim_specs(db)),
+    };
+    let specs = engine::SimSpecs::from(&specs_dm);
+
+    Ok(engine::Results {
+        offsets,
+        data: slab.to_vec().into_boxed_slice(),
+        step_size: layout.n_slots,
+        step_count: layout.n_chunks,
+        specs,
+        is_vensim: false,
+    })
+}
+
+/// Salsa reset guard: flip `ltm_enabled` to a chosen value on construction
+/// and unconditionally restore it on drop.
+///
+/// The from-wasm rel-loop FFI runs the same salsa queries
+/// `simlin_sim_new` uses to capture `(loop_partitions, loop_element_index)`
+/// (`model_ltm_variables` + `project_datamodel_dims` + `build_loop_element_index`),
+/// which only return non-empty results when the `SourceProject` input has
+/// `ltm_enabled = true`.  We set it true for the duration of those queries
+/// and restore it before returning, mirroring `simlin_sim_new`'s
+/// `set_project_ltm_enabled(.., true)` ... `set_project_ltm_enabled(.., false)`
+/// bookends (`simulation.rs:70` / `:136-138`).
+///
+/// The `SourceProject` salsa input is shared across every consumer of the
+/// project (patch validation, subsequent sim_new calls, the other analyze
+/// FFIs); leaking `ltm_enabled = true` past the snapshot recompute would
+/// silently change the next consumer's analysis output.  A scope guard
+/// (rather than an explicit `set_project_ltm_enabled(.., false)` line
+/// somewhere down the function) makes it impossible for an early return
+/// or a panic in the middle of the queries to skip the reset.
+//
+// `allow(dead_code)` scoped to this commit; consumed by `recompute_ltm_snapshots`
+// (also dead-code-allowed) which lands its FFI caller in task 5.
+#[allow(dead_code)]
+struct LtmEnabledGuard<'a> {
+    db: &'a mut engine::db::SimlinDb,
+    project: SourceProject,
+    restore_to: bool,
+}
+
+#[allow(dead_code)]
+impl<'a> LtmEnabledGuard<'a> {
+    fn enable(
+        db: &'a mut engine::db::SimlinDb,
+        project: SourceProject,
+        desired: bool,
+    ) -> LtmEnabledGuard<'a> {
+        let restore_to = project.ltm_enabled(db);
+        engine::db::set_project_ltm_enabled(db, project, desired);
+        LtmEnabledGuard {
+            db,
+            project,
+            restore_to,
+        }
+    }
+
+    fn db(&self) -> &engine::db::SimlinDb {
+        self.db
+    }
+}
+
+impl<'a> Drop for LtmEnabledGuard<'a> {
+    fn drop(&mut self) {
+        engine::db::set_project_ltm_enabled(self.db, self.project, self.restore_to);
+    }
+}
+
+/// The `(loop_partitions, loop_element_index)` pair `simlin_sim_new` snapshots
+/// off the salsa db (and `recompute_ltm_snapshots` re-derives for the from-wasm
+/// path) -- the per-slot cycle-partition vector for each loop and the per-loop
+/// dimension metadata `rel_loop_score_series` needs to resolve a subscripted
+/// loop id and walk the partition denominator cache.  The fields' types match
+/// `SimState::loop_partitions` and `SimState::loop_element_index`.
+//
+// `allow(dead_code)` while only the from-wasm FFI (task 5) is the consumer of
+// this alias; landing the alias in its own commit keeps it co-located with
+// the helper that returns it.
+#[allow(dead_code)]
+pub(crate) type LtmSnapshots = (
+    HashMap<String, Vec<Option<usize>>>,
+    HashMap<String, engine::ltm_post::LoopElementIndex>,
+);
+
+/// Recompute the per-loop `(loop_partitions, loop_element_index)` snapshots
+/// the rel-loop-score core needs.
+///
+/// Mirrors the snapshot capture in `simlin_sim_new` (simulation.rs:84-89):
+/// `model_ltm_variables` only emits a non-empty `loop_partitions` map when
+/// the `SourceProject` salsa input has `ltm_enabled = true`, so we toggle
+/// the flag for the duration of the queries.  Because the flag lives on a
+/// shared `SourceProject` consumed by every other operation against the
+/// project (patch validation, subsequent `simlin_sim_new` calls, etc.),
+/// always restoring it is non-negotiable -- the `LtmEnabledGuard` makes the
+/// reset structurally unmissable, even on a panic in the salsa queries.
+///
+/// Returns empty maps when the model isn't present in the sync result; the
+/// caller's downstream `rel_loop_score_series` then naturally fails the
+/// `loop_partitions.get(loop_id)` lookup and the FFI surface that with a
+/// "loop unknown" error, matching the VM FFI's behavior.
+//
+// `allow(dead_code)` scoped to this commit; the from-wasm rel-loop FFI in
+// task 5 is the sole caller.  Lands here in its own commit for review-isolation
+// of the LTM-flag scope-guard pattern.
+#[allow(dead_code)]
+pub(crate) fn recompute_ltm_snapshots(
+    db: &mut engine::db::SimlinDb,
+    project: SourceProject,
+    model: SourceModel,
+    model_name: &str,
+) -> LtmSnapshots {
+    let guard = LtmEnabledGuard::enable(db, project, true);
+    let ltm_vars = engine::db::model_ltm_variables(guard.db(), model, project);
+    let project_dims = engine::db::project_datamodel_dims(guard.db(), project);
+    let element_index = engine::ltm_post::build_loop_element_index(&ltm_vars.vars, project_dims);
+    // `model_name` is preserved as a parameter for API symmetry with
+    // `simulation.rs`'s snapshot capture, which keys the lookup on the
+    // model name; in this from-wasm path the caller has already resolved
+    // the `SourceModel` from that name, so the name is unused inside.
+    let _ = model_name;
+    let snapshots = (ltm_vars.loop_partitions.clone(), element_index);
+    // Drop the guard explicitly so the `ltm_enabled` reset happens before
+    // returning -- the explicit drop is redundant with Rust's scope rules
+    // but documents the ordering at the call site.
+    drop(guard);
+    snapshots
 }
 
 /// Gets the relative loop score time series for a specific loop
