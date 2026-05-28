@@ -841,17 +841,12 @@ pub(crate) fn results_from_layout_and_slab(
 /// (rather than an explicit `set_project_ltm_enabled(.., false)` line
 /// somewhere down the function) makes it impossible for an early return
 /// or a panic in the middle of the queries to skip the reset.
-//
-// `allow(dead_code)` scoped to this commit; consumed by `recompute_ltm_snapshots`
-// (also dead-code-allowed) which lands its FFI caller in task 5.
-#[allow(dead_code)]
 struct LtmEnabledGuard<'a> {
     db: &'a mut engine::db::SimlinDb,
     project: SourceProject,
     restore_to: bool,
 }
 
-#[allow(dead_code)]
 impl<'a> LtmEnabledGuard<'a> {
     fn enable(
         db: &'a mut engine::db::SimlinDb,
@@ -884,11 +879,6 @@ impl<'a> Drop for LtmEnabledGuard<'a> {
 /// dimension metadata `rel_loop_score_series` needs to resolve a subscripted
 /// loop id and walk the partition denominator cache.  The fields' types match
 /// `SimState::loop_partitions` and `SimState::loop_element_index`.
-//
-// `allow(dead_code)` while only the from-wasm FFI (task 5) is the consumer of
-// this alias; landing the alias in its own commit keeps it co-located with
-// the helper that returns it.
-#[allow(dead_code)]
 pub(crate) type LtmSnapshots = (
     HashMap<String, Vec<Option<usize>>>,
     HashMap<String, engine::ltm_post::LoopElementIndex>,
@@ -910,11 +900,6 @@ pub(crate) type LtmSnapshots = (
 /// caller's downstream `rel_loop_score_series` then naturally fails the
 /// `loop_partitions.get(loop_id)` lookup and the FFI surface that with a
 /// "loop unknown" error, matching the VM FFI's behavior.
-//
-// `allow(dead_code)` scoped to this commit; the from-wasm rel-loop FFI in
-// task 5 is the sole caller.  Lands here in its own commit for review-isolation
-// of the LTM-flag scope-guard pattern.
-#[allow(dead_code)]
 pub(crate) fn recompute_ltm_snapshots(
     db: &mut engine::db::SimlinDb,
     project: SourceProject,
@@ -936,6 +921,344 @@ pub(crate) fn recompute_ltm_snapshots(
     // but documents the ordering at the call site.
     drop(guard);
     snapshots
+}
+
+/// Resolved form of a loop-id query: `(base_id, element_index, n_slots)`.
+///
+/// `element_index` follows the rel-loop-score-core dispatch convention
+/// (`Some(k)` = specific slot; `None` = argmax-abs aggregator across all
+/// slots of an arrayed bare-id loop).  `n_slots` is the loop's slot count
+/// (1 for scalar, the dim-element-space size for an arrayed loop).
+pub(crate) struct ResolvedLoopQuery<'a> {
+    pub base: &'a str,
+    pub element_index: Option<usize>,
+    pub n_slots: usize,
+}
+
+/// Parse a user-supplied `loop_id` string (`r1`, `r1[Boston]`, `r1[Boston, 2]`)
+/// and resolve its subscripts against the LTM snapshots.
+///
+/// Shared by `simlin_analyze_get_relative_loop_score` (VM-backed; reads the
+/// snapshots from a `SimState`) and `simlin_analyze_rel_loop_score_from_wasm_results`
+/// (from-wasm; reads them from a `recompute_ltm_snapshots` call).  Both call
+/// sites need identical messages for malformed loop ids and unknown loops,
+/// so concentrating the resolution here keeps the two FFIs in lockstep on
+/// the error surface as well as the analytic dispatch.
+pub(crate) fn resolve_loop_query<'a>(
+    raw_loop_id: &'a str,
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_element_index: &HashMap<String, engine::ltm_post::LoopElementIndex>,
+) -> Result<ResolvedLoopQuery<'a>, SimlinError> {
+    let parsed = match parse_subscripted_loop_id(raw_loop_id) {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = match e {
+                LoopIdParseError::Malformed => format!(
+                    "loop_id '{raw_loop_id}' is malformed: expected `id` or `id[subscript, ...]`"
+                ),
+                LoopIdParseError::EmptyBrackets => format!(
+                    "loop_id '{raw_loop_id}' has empty brackets; specify at least one subscript"
+                ),
+                LoopIdParseError::UnsupportedSyntax => {
+                    format!("loop_id '{raw_loop_id}' uses unsupported subscript syntax")
+                }
+                LoopIdParseError::EmptySubscript => {
+                    format!("loop_id '{raw_loop_id}' has an empty subscript inside brackets")
+                }
+            };
+            return Err(SimlinError::new(SimlinErrorCode::Generic).with_message(msg));
+        }
+    };
+
+    if !loop_partitions.contains_key(parsed.base) {
+        return Err(
+            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                "loop '{}' does not have relative score data",
+                parsed.base
+            )),
+        );
+    }
+
+    let element_meta = loop_element_index.get(parsed.base).cloned();
+    let n_slots = element_meta.as_ref().map(|m| m.n_slots).unwrap_or(1).max(1);
+
+    let element_index: Option<usize> = if parsed.subscripts.is_empty() {
+        if n_slots <= 1 {
+            Some(0)
+        } else {
+            None
+        }
+    } else {
+        let Some(meta) = element_meta.as_ref() else {
+            return Err(
+                SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
+                    "loop '{}' is not arrayed; subscripts are not allowed",
+                    parsed.base
+                )),
+            );
+        };
+        match meta.resolve(&parsed.subscripts) {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                let msg = match e {
+                    engine::ltm_post::ResolveError::DimCountMismatch { expected, got } => {
+                        if expected == 0 {
+                            format!(
+                                "loop '{}' is not arrayed; subscripts are not allowed",
+                                parsed.base
+                            )
+                        } else {
+                            format!(
+                                "loop '{}' has {} dimension(s) but {} subscript(s) were provided",
+                                parsed.base, expected, got
+                            )
+                        }
+                    }
+                    engine::ltm_post::ResolveError::ElementNotFound { dim, value } => format!(
+                        "loop '{}' dimension '{}' has no element '{}'",
+                        parsed.base, dim, value
+                    ),
+                    engine::ltm_post::ResolveError::IndexOutOfRange { dim, value, max } => {
+                        format!(
+                            "loop '{}' dimension '{}' index '{}' is out of range (1..={max})",
+                            parsed.base, dim, value
+                        )
+                    }
+                    engine::ltm_post::ResolveError::InvalidIntegerSubscript { dim, value } => {
+                        format!(
+                            "loop '{}' dimension '{}' expects a 1-based integer subscript, got '{}'",
+                            parsed.base, dim, value
+                        )
+                    }
+                };
+                return Err(SimlinError::new(SimlinErrorCode::Generic).with_message(msg));
+            }
+        }
+    };
+
+    Ok(ResolvedLoopQuery {
+        base: parsed.base,
+        element_index,
+        n_slots,
+    })
+}
+
+/// Compute a loop's relative-loop-score series from a wasm-produced result
+/// slab.
+///
+/// The wasm-backend twin of `simlin_analyze_get_relative_loop_score`.  Both
+/// FFIs funnel through `rel_loop_score_series` (extracted in Subcomponent A)
+/// over an `engine::Results` and the `(loop_partitions, loop_element_index)`
+/// snapshots, so the per-loop time series they produce cannot diverge by
+/// construction.
+///
+/// Unlike the links twin (task 4), the rel-loop-score path needs the
+/// snapshots that only `model_ltm_variables` produces when the
+/// `SourceProject` salsa input has `ltm_enabled = true`.  This function
+/// runs the salsa queries through `recompute_ltm_snapshots`, which uses
+/// an `LtmEnabledGuard` to set the flag for the duration of the queries
+/// and unconditionally restore it on guard drop.  The reset is mandatory:
+/// the flag lives on a shared `SourceProject` input consumed by every
+/// other operation on the project, and leaking it would silently change
+/// the next consumer's analysis.
+///
+/// The `loop_id` is parsed in the FFI shell (the engine-side core takes
+/// a base id + `(element_index, n_slots)` pair); a bare id on a scalar
+/// loop resolves to slot 0, a bare id on an arrayed loop resolves to the
+/// argmax-abs aggregator across all slots, and a subscripted id
+/// (`r1[Boston]`, `r1[Boston, 2]`) resolves to a specific slot via
+/// `LoopElementIndex::resolve`.  See `resolve_loop_query` for the
+/// resolution shared with the VM FFI.
+///
+/// The series is copied into `results_ptr` clamped to `len` entries; the
+/// number written is reported through `out_written`, matching the out-buffer
+/// semantics of `simlin_analyze_get_relative_loop_score`.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a `SimlinModel`.
+/// - `slab_ptr` / `layout_ptr` are the byte buffers produced by the wasm
+///   blob's results region and `simlin_model_compile_to_wasm`'s `out_layout`,
+///   respectively; both are read but not retained.
+/// - `loop_id` must be a valid null-terminated C string.
+/// - `results_ptr` must point to a writable array of at least `len` doubles.
+/// - `out_written` must be a writable `*mut usize`.
+/// - `out_error` may be null or a writable `**mut SimlinError`.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_analyze_rel_loop_score_from_wasm_results(
+    model: *mut SimlinModel,
+    slab_ptr: *const u8,
+    slab_len: usize,
+    layout_ptr: *const u8,
+    layout_len: usize,
+    loop_id: *const c_char,
+    results_ptr: *mut c_double,
+    len: usize,
+    out_written: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_written.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("out_written pointer must not be NULL"),
+        );
+        return;
+    }
+    if results_ptr.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("results pointer must not be NULL"),
+        );
+        return;
+    }
+    if loop_id.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("loop_id pointer must not be NULL"),
+        );
+        return;
+    }
+    if layout_ptr.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("wasm layout pointer must not be NULL"),
+        );
+        return;
+    }
+
+    let model_ref = ffi_try!(out_error, require_model(model));
+    let raw_loop_id = match CStr::from_ptr(loop_id).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("loop_id is not valid UTF-8"),
+            );
+            return;
+        }
+    };
+
+    let layout_bytes = std::slice::from_raw_parts(layout_ptr, layout_len);
+    let layout = match engine::wasmgen::WasmLayout::deserialize(layout_bytes) {
+        Some(l) => l,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("failed to deserialize wasm layout buffer"),
+            );
+            return;
+        }
+    };
+
+    let slab_vec = match slab_from_bytes(slab_ptr, slab_len) {
+        Ok(v) => v,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
+    };
+
+    // The mutable db lock is required because the LTM-snapshot recompute
+    // flips `ltm_enabled` on the salsa input (it must be true for the
+    // queries to emit non-empty snapshots).  An RAII guard in
+    // `recompute_ltm_snapshots` resets the flag before returning.
+    let mut db_locked = (*model_ref.project).db.lock().unwrap();
+    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
+    let sync = match sync_state.as_ref() {
+        Some(s) => s.to_sync_result(),
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
+            );
+            return;
+        }
+    };
+    let canonical_model = canonicalize(&model_ref.model_name);
+    let synced_model = match sync.models.get(canonical_model.as_ref()) {
+        Some(m) => m,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName)
+                    .with_message(format!("model '{}' not found", model_ref.model_name)),
+            );
+            return;
+        }
+    };
+
+    let (loop_partitions, loop_element_index) = recompute_ltm_snapshots(
+        &mut db_locked,
+        sync.project,
+        synced_model.source,
+        &model_ref.model_name,
+    );
+
+    let resolved = match resolve_loop_query(raw_loop_id, &loop_partitions, &loop_element_index) {
+        Ok(r) => r,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
+    };
+
+    let results = match results_from_layout_and_slab(
+        &*db_locked,
+        synced_model.source,
+        sync.project,
+        &layout,
+        &slab_vec,
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            store_error(out_error, err);
+            return;
+        }
+    };
+
+    // No persistent simulation backs this FFI, so the partition-denominator
+    // cache lives on the stack for this call.  Repeated FFI queries against
+    // the same model will recompute denominators each time -- a trade-off the
+    // from-wasm path accepts in exchange for not maintaining a per-call cache
+    // on the wasm side (the wasm interactive-scrubbing flow re-runs the blob
+    // and reaches this FFI fresh).
+    let mut cache: HashMap<(Option<usize>, usize), Vec<f64>> = HashMap::new();
+    let series = match rel_loop_score_series(
+        &results,
+        &loop_partitions,
+        &loop_element_index,
+        &mut cache,
+        resolved.base,
+        resolved.element_index,
+        resolved.n_slots,
+    ) {
+        Some(s) => s,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                    "loop '{}' does not have relative score data",
+                    resolved.base
+                )),
+            );
+            return;
+        }
+    };
+
+    let count = std::cmp::min(series.len(), len);
+    for (i, v) in series.iter().take(count).enumerate() {
+        *results_ptr.add(i) = *v;
+    }
+    *out_written = count;
+
+    drop(sync_state);
+    drop(db_locked);
 }
 
 /// Gets the relative loop score time series for a specific loop
@@ -994,34 +1317,6 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         }
     };
 
-    // Parse the loop ID -- callers may pass a bare ID (`r1`) or a
-    // subscripted form (`r1[Boston]`, `r1[Boston, 2]`) to address a
-    // specific element of an arrayed loop.  Issue #463.
-    let parsed = match parse_subscripted_loop_id(raw_loop_id) {
-        Ok(p) => p,
-        Err(e) => {
-            let msg = match e {
-                LoopIdParseError::Malformed => format!(
-                    "loop_id '{raw_loop_id}' is malformed: expected `id` or `id[subscript, ...]`"
-                ),
-                LoopIdParseError::EmptyBrackets => format!(
-                    "loop_id '{raw_loop_id}' has empty brackets; specify at least one subscript"
-                ),
-                LoopIdParseError::UnsupportedSyntax => {
-                    format!("loop_id '{raw_loop_id}' uses unsupported subscript syntax")
-                }
-                LoopIdParseError::EmptySubscript => {
-                    format!("loop_id '{raw_loop_id}' has an empty subscript inside brackets")
-                }
-            };
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
-            );
-            return;
-        }
-    };
-
     // `rel_loop_score` is no longer materialized as a VM-computed
     // variable (it caused O(P²) compile-time text blowup on dense
     // models; see
@@ -1038,95 +1333,18 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     let mut state_guard = sim_ref.state.lock().unwrap();
     let state = &mut *state_guard;
 
-    // `loop_partitions` maps each loop id to its per-slot cycle-partition
-    // vector (length 1 for a scalar/cross-element/mixed loop, one entry per
-    // element for an A2A loop).  This lookup confirms the loop exists; the
-    // partition key for a query is read from the *queried slot*, not slot 0,
-    // so an element-wise-uncoupled A2A loop normalizes per element (matching
-    // `ltm_post::compute_rel_loop_scores_per_element`'s `(partition, slot)`
-    // bucketing).
-    if !state.loop_partitions.contains_key(parsed.base) {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
-                "loop '{}' does not have relative score data",
-                parsed.base
-            )),
-        );
-        return;
-    }
-
-    // Look up the loop's dim metadata.  Loops without an entry are
-    // treated as scalar (n_slots=1) via the `unwrap_or` fallback below
-    // so legacy bare-ID callers on scalar models continue to work
-    // even if the snapshot wasn't populated for some reason.
-    let element_meta = state.loop_element_index.get(parsed.base).cloned();
-    let n_slots = element_meta.as_ref().map(|m| m.n_slots).unwrap_or(1).max(1);
-
-    // Resolve the requested element_index based on the parsed
-    // subscripts and the loop's actual dimensionality.  Three cases:
-    //   1. No subscripts on a scalar loop -> element 0.
-    //   2. No subscripts on an arrayed loop -> aggregate via argmax-abs
-    //      across all slots.  Encoded as `None` here; the dispatch
-    //      below recognizes it.
-    //   3. Subscripts -> resolve to a specific slot via LoopElementIndex.
-    let element_index: Option<usize> = if parsed.subscripts.is_empty() {
-        if n_slots <= 1 {
-            Some(0)
-        } else {
-            None // arrayed bare ID: aggregator
-        }
-    } else {
-        let Some(meta) = element_meta.as_ref() else {
-            store_error(
-                out_error,
-                SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
-                    "loop '{}' is not arrayed; subscripts are not allowed",
-                    parsed.base
-                )),
-            );
+    // Parse loop_id (bare or subscripted -- issue #463) and resolve
+    // subscripts against the snapshot via the shared helper so the
+    // VM and from-wasm FFIs surface identical error messages.
+    let resolved = match resolve_loop_query(
+        raw_loop_id,
+        &state.loop_partitions,
+        &state.loop_element_index,
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            store_error(out_error, err);
             return;
-        };
-        match meta.resolve(&parsed.subscripts) {
-            Ok(idx) => Some(idx),
-            Err(e) => {
-                let msg = match e {
-                    engine::ltm_post::ResolveError::DimCountMismatch { expected, got } => {
-                        if expected == 0 {
-                            format!(
-                                "loop '{}' is not arrayed; subscripts are not allowed",
-                                parsed.base
-                            )
-                        } else {
-                            format!(
-                                "loop '{}' has {} dimension(s) but {} subscript(s) were provided",
-                                parsed.base, expected, got
-                            )
-                        }
-                    }
-                    engine::ltm_post::ResolveError::ElementNotFound { dim, value } => format!(
-                        "loop '{}' dimension '{}' has no element '{}'",
-                        parsed.base, dim, value
-                    ),
-                    engine::ltm_post::ResolveError::IndexOutOfRange { dim, value, max } => {
-                        format!(
-                            "loop '{}' dimension '{}' index '{}' is out of range (1..={})",
-                            parsed.base, dim, value, max
-                        )
-                    }
-                    engine::ltm_post::ResolveError::InvalidIntegerSubscript { dim, value } => {
-                        format!(
-                            "loop '{}' dimension '{}' expects a 1-based integer subscript, got '{}'",
-                            parsed.base, dim, value
-                        )
-                    }
-                };
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic).with_message(msg),
-                );
-                return;
-            }
         }
     };
 
@@ -1146,9 +1364,9 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         &state.loop_partitions,
         &state.loop_element_index,
         &mut state.cached_partition_denominators,
-        parsed.base,
-        element_index,
-        n_slots,
+        resolved.base,
+        resolved.element_index,
+        resolved.n_slots,
     ) {
         Some(s) => s,
         None => {
@@ -1156,7 +1374,7 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
                 out_error,
                 SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
                     "loop '{}' does not have relative score data",
-                    parsed.base
+                    resolved.base
                 )),
             );
             return;

@@ -237,6 +237,57 @@ SimlinLinks *simlin_analyze_links_from_wasm_results(SimlinModel *model,
 // - `links` must be valid pointer returned by simlin_analyze_get_links
 void simlin_free_links(SimlinLinks *links);
 
+// Compute a loop's relative-loop-score series from a wasm-produced result
+// slab.
+//
+// The wasm-backend twin of `simlin_analyze_get_relative_loop_score`.  Both
+// FFIs funnel through `rel_loop_score_series` (extracted in Subcomponent A)
+// over an `engine::Results` and the `(loop_partitions, loop_element_index)`
+// snapshots, so the per-loop time series they produce cannot diverge by
+// construction.
+//
+// Unlike the links twin (task 4), the rel-loop-score path needs the
+// snapshots that only `model_ltm_variables` produces when the
+// `SourceProject` salsa input has `ltm_enabled = true`.  This function
+// runs the salsa queries through `recompute_ltm_snapshots`, which uses
+// an `LtmEnabledGuard` to set the flag for the duration of the queries
+// and unconditionally restore it on guard drop.  The reset is mandatory:
+// the flag lives on a shared `SourceProject` input consumed by every
+// other operation on the project, and leaking it would silently change
+// the next consumer's analysis.
+//
+// The `loop_id` is parsed in the FFI shell (the engine-side core takes
+// a base id + `(element_index, n_slots)` pair); a bare id on a scalar
+// loop resolves to slot 0, a bare id on an arrayed loop resolves to the
+// argmax-abs aggregator across all slots, and a subscripted id
+// (`r1[Boston]`, `r1[Boston, 2]`) resolves to a specific slot via
+// `LoopElementIndex::resolve`.  See `resolve_loop_query` for the
+// resolution shared with the VM FFI.
+//
+// The series is copied into `results_ptr` clamped to `len` entries; the
+// number written is reported through `out_written`, matching the out-buffer
+// semantics of `simlin_analyze_get_relative_loop_score`.
+//
+// # Safety
+// - `model` must be a valid pointer to a `SimlinModel`.
+// - `slab_ptr` / `layout_ptr` are the byte buffers produced by the wasm
+//   blob's results region and `simlin_model_compile_to_wasm`'s `out_layout`,
+//   respectively; both are read but not retained.
+// - `loop_id` must be a valid null-terminated C string.
+// - `results_ptr` must point to a writable array of at least `len` doubles.
+// - `out_written` must be a writable `*mut usize`.
+// - `out_error` may be null or a writable `**mut SimlinError`.
+void simlin_analyze_rel_loop_score_from_wasm_results(SimlinModel *model,
+                                                     const uint8_t *slab_ptr,
+                                                     uintptr_t slab_len,
+                                                     const uint8_t *layout_ptr,
+                                                     uintptr_t layout_len,
+                                                     const char *loop_id,
+                                                     double *results_ptr,
+                                                     uintptr_t len,
+                                                     uintptr_t *out_written,
+                                                     SimlinError **out_error);
+
 // Gets the relative loop score time series for a specific loop
 //
 // Renamed for clarity from simlin_analyze_get_rel_loop_score
