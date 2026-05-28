@@ -434,6 +434,156 @@ pub unsafe extern "C" fn simlin_free_links(links: *mut SimlinLinks) {
     }
 }
 
+/// The partition of loop `pv` at slot `k`.  For an arrayed loop this is
+/// `pv[k]` (out-of-range slots and genuinely-`None` partitions both yield
+/// `None`); for a scalar loop (`len <= 1`) the single partition `pv[0]` is
+/// broadcast across every slot it is compared in -- a scalar loop has no
+/// elements, so it carries its one partition into every slot.  This is the
+/// same `slot_partition` convention `ltm_post::compute_rel_loop_scores_per_element`
+/// uses to bucket loops into the `(partition, slot)` grid.
+fn slot_partition_at(pv: &[Option<usize>], k: usize) -> Option<usize> {
+    if pv.len() <= 1 {
+        pv.first().copied().flatten()
+    } else {
+        pv.get(k).copied().flatten()
+    }
+}
+
+/// Compute the per-(partition, slot) denominator series, lazily populating
+/// the cache.  A loop `other` is a member of bucket `(partition_key,
+/// element_k)` iff its slot-`element_k` partition equals `partition_key`;
+/// each member then contributes `|loop_score[other, k']|` where `k'` is
+/// `effective_slot(n_slots[other], element_k)` -- 0 for a broadcast scalar
+/// member, `element_k` for an arrayed member with `element_k < n_slots`, and
+/// skipped entirely for an arrayed member past its own slots.  This
+/// reproduces `ltm_post::compute_rel_loop_scores_per_element`'s bucket sums
+/// exactly via the streaming `compute_partition_denominator_for_element`
+/// helper, just amortized across repeated FFI queries on the same bucket.
+fn ensure_denom_for_element(
+    cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
+    results: &engine::Results,
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    element_index_map: &HashMap<String, engine::ltm_post::LoopElementIndex>,
+    partition_key: Option<usize>,
+    element_k: usize,
+) -> Vec<f64> {
+    if let Some(cached) = cache.get(&(partition_key, element_k)) {
+        return cached.clone();
+    }
+    let members: Vec<(&str, usize)> = loop_partitions
+        .iter()
+        .filter_map(|(id, pv)| {
+            if slot_partition_at(pv, element_k) == partition_key {
+                let n = element_index_map
+                    .get(id)
+                    .map(|m| m.n_slots)
+                    .unwrap_or(1)
+                    .max(1);
+                Some((id.as_str(), n))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let denom = engine::ltm_post::compute_partition_denominator_for_element(
+        results,
+        members.iter().copied(),
+        element_k,
+    );
+    cache.insert((partition_key, element_k), denom.clone());
+    denom
+}
+
+/// Backend-agnostic relative-loop-score time series for a *resolved*
+/// (base, element_index, n_slots) query.
+///
+/// `element_index` follows the FFI dispatch convention: `Some(k)` requests
+/// a single slot (a scalar loop's only slot, or an arrayed loop's specific
+/// element resolved from a `r1[Boston]`-style subscript); `None` requests
+/// the argmax-abs aggregator across all `n_slots` (a bare ID on an arrayed
+/// loop).  This split is the *only* analytic dispatch in libsimlin's
+/// rel-loop-score path, so concentrating it here ensures the VM FFI
+/// (`simlin_analyze_get_relative_loop_score`) and the from-wasm FFI added
+/// in a later task drive identical math.
+///
+/// `cache` is a `&mut HashMap<(Option<usize>, usize), Vec<f64>>` shaped
+/// exactly like `SimState::cached_partition_denominators`.  The VM FFI
+/// passes the persistent on-state cache (so repeated queries amortize);
+/// the from-wasm FFI passes a stack-local empty cache (no persistent
+/// sim).  The split-borrow against `&mut state` is preserved -- callers
+/// borrow `results`, `loop_partitions`, and `loop_element_index` from
+/// `state` immutably while passing `&mut state.cached_partition_denominators`
+/// as the cache argument.
+///
+/// Returns `None` only for the engine's own missing-data signal
+/// (`compute_rel_loop_score_for_element` / `compute_rel_loop_score_argmax_abs`
+/// both `None` when `loop_score_{loop_id}` is absent from `results.offsets`);
+/// the FFI shell maps that to a `DoesNotExist` error.  Lookup of `loop_id`
+/// in `loop_partitions` is the FFI shell's responsibility (its absence is
+/// also `DoesNotExist`, but with a different message), so the core
+/// indexes `loop_partitions[loop_id]` directly.
+///
+/// Divergence from the design doc's single-core proposal: see the note
+/// on `OwnedLink` and the phase plan -- splitting into two focused cores
+/// (this one + the links core) more honestly satisfies AC5.1 than a
+/// single signature carrying snapshots that the links analysis never
+/// reads.
+pub(crate) fn rel_loop_score_series(
+    results: &engine::Results,
+    loop_partitions: &HashMap<String, Vec<Option<usize>>>,
+    loop_element_index: &HashMap<String, engine::ltm_post::LoopElementIndex>,
+    cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
+    loop_id: &str,
+    element_index: Option<usize>,
+    n_slots: usize,
+) -> Option<Vec<f64>> {
+    let partitions = loop_partitions.get(loop_id)?;
+    match element_index {
+        Some(k) => {
+            // Group the denominator by the *queried slot's* partition (slot 0
+            // for a scalar loop), so an uncoupled A2A loop normalizes per
+            // element rather than against a pooled slot-0 bucket.
+            let partition_key = slot_partition_at(partitions, k);
+            let denom = ensure_denom_for_element(
+                cache,
+                results,
+                loop_partitions,
+                loop_element_index,
+                partition_key,
+                k,
+            );
+            engine::ltm_post::compute_rel_loop_score_for_element(
+                results, loop_id, n_slots, k, &denom,
+            )
+        }
+        None => {
+            // Argmax-abs aggregator over all slots; each slot's denominator is
+            // keyed on *that slot's* partition (matching the per-element
+            // helper), not slot 0's.
+            let mut denoms: Vec<Vec<f64>> = Vec::with_capacity(n_slots);
+            for k in 0..n_slots {
+                let partition_key = slot_partition_at(partitions, k);
+                let denom = ensure_denom_for_element(
+                    cache,
+                    results,
+                    loop_partitions,
+                    loop_element_index,
+                    partition_key,
+                    k,
+                );
+                denoms.push(denom);
+            }
+            let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
+            engine::ltm_post::compute_rel_loop_score_argmax_abs(
+                results,
+                loop_id,
+                n_slots,
+                &denom_refs,
+            )
+        }
+    }
+}
+
 /// Gets the relative loop score time series for a specific loop
 ///
 /// Renamed for clarity from simlin_analyze_get_rel_loop_score
@@ -626,7 +776,7 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         }
     };
 
-    let Some(ref results) = state.results else {
+    let Some(results) = state.results.as_ref() else {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::Generic)
@@ -635,138 +785,27 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
         return;
     };
 
-    // The partition of loop `pv` at slot `k`.  For an arrayed loop this is
-    // `pv[k]` (out-of-range slots and genuinely-`None` partitions both yield
-    // `None`); for a scalar loop (`len <= 1`) the single partition `pv[0]` is
-    // broadcast across every slot it is compared in -- a scalar loop has no
-    // elements, so it carries its one partition into every slot.  This is the
-    // same `slot_partition` convention `ltm_post::compute_rel_loop_scores_per_element`
-    // uses to bucket loops into the `(partition, slot)` grid.
-    fn slot_partition_at(pv: &[Option<usize>], k: usize) -> Option<usize> {
-        if pv.len() <= 1 {
-            pv.first().copied().flatten()
-        } else {
-            pv.get(k).copied().flatten()
-        }
-    }
-
-    // Compute the per-(partition, slot) denominator series, lazily populating
-    // the cache.  A loop `other` is a member of bucket `(partition_key,
-    // element_k)` iff its slot-`element_k` partition equals `partition_key`;
-    // each member then contributes `|loop_score[other, k']|` where `k'` is
-    // `effective_slot(n_slots[other], element_k)` -- 0 for a broadcast scalar
-    // member, `element_k` for an arrayed member with `element_k < n_slots`, and
-    // skipped entirely for an arrayed member past its own slots.  This
-    // reproduces `ltm_post::compute_rel_loop_scores_per_element`'s bucket sums
-    // exactly via the streaming `compute_partition_denominator_for_element`
-    // helper, just amortized across repeated FFI queries on the same bucket.
-    fn ensure_denom_for_element(
-        cache: &mut HashMap<(Option<usize>, usize), Vec<f64>>,
-        results: &engine::Results,
-        loop_partitions: &HashMap<String, Vec<Option<usize>>>,
-        element_index_map: &HashMap<String, engine::ltm_post::LoopElementIndex>,
-        partition_key: Option<usize>,
-        element_k: usize,
-    ) -> Vec<f64> {
-        if let Some(cached) = cache.get(&(partition_key, element_k)) {
-            return cached.clone();
-        }
-        let members: Vec<(&str, usize)> = loop_partitions
-            .iter()
-            .filter_map(|(id, pv)| {
-                if slot_partition_at(pv, element_k) == partition_key {
-                    let n = element_index_map
-                        .get(id)
-                        .map(|m| m.n_slots)
-                        .unwrap_or(1)
-                        .max(1);
-                    Some((id.as_str(), n))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let denom = engine::ltm_post::compute_partition_denominator_for_element(
-            results,
-            members.iter().copied(),
-            element_k,
-        );
-        cache.insert((partition_key, element_k), denom.clone());
-        denom
-    }
-
-    // Borrow-split so cache mutation doesn't conflict with the
-    // results / partition / element-index reads.
-    let series = match element_index {
-        Some(k) => {
-            // Group the denominator by the *queried slot's* partition (slot 0
-            // for a scalar loop), so an uncoupled A2A loop normalizes per
-            // element rather than against a pooled slot-0 bucket.
-            let partition_key = slot_partition_at(&state.loop_partitions[parsed.base], k);
-            let denom = ensure_denom_for_element(
-                &mut state.cached_partition_denominators,
-                results,
-                &state.loop_partitions,
-                &state.loop_element_index,
-                partition_key,
-                k,
-            );
-            match engine::ltm_post::compute_rel_loop_score_for_element(
-                results,
-                parsed.base,
-                n_slots,
-                k,
-                &denom,
-            ) {
-                Some(s) => s,
-                None => {
-                    store_error(
-                        out_error,
-                        SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
-                            "loop '{}' does not have relative score data",
-                            parsed.base
-                        )),
-                    );
-                    return;
-                }
-            }
-        }
+    // Split-borrow `&mut state`: the cache (mutated) is borrowed disjointly
+    // from `results`/`loop_partitions`/`loop_element_index` (read-only).
+    let series = match rel_loop_score_series(
+        results,
+        &state.loop_partitions,
+        &state.loop_element_index,
+        &mut state.cached_partition_denominators,
+        parsed.base,
+        element_index,
+        n_slots,
+    ) {
+        Some(s) => s,
         None => {
-            // Argmax-abs aggregator over all slots; each slot's denominator is
-            // keyed on *that slot's* partition (matching the per-element
-            // helper), not slot 0's.
-            let mut denoms: Vec<Vec<f64>> = Vec::with_capacity(n_slots);
-            for k in 0..n_slots {
-                let partition_key = slot_partition_at(&state.loop_partitions[parsed.base], k);
-                let denom = ensure_denom_for_element(
-                    &mut state.cached_partition_denominators,
-                    results,
-                    &state.loop_partitions,
-                    &state.loop_element_index,
-                    partition_key,
-                    k,
-                );
-                denoms.push(denom);
-            }
-            let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
-            match engine::ltm_post::compute_rel_loop_score_argmax_abs(
-                results,
-                parsed.base,
-                n_slots,
-                &denom_refs,
-            ) {
-                Some(s) => s,
-                None => {
-                    store_error(
-                        out_error,
-                        SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
-                            "loop '{}' does not have relative score data",
-                            parsed.base
-                        )),
-                    );
-                    return;
-                }
-            }
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(format!(
+                    "loop '{}' does not have relative score data",
+                    parsed.base
+                )),
+            );
+            return;
         }
     };
 
