@@ -104,6 +104,8 @@ fn compile_to_wasm_returns_blob_and_layout() {
         let mut err: *mut SimlinError = ptr::null_mut();
         simlin_model_compile_to_wasm(
             model,
+            false,
+            false,
             &mut out_wasm,
             &mut out_wasm_len,
             &mut out_layout,
@@ -222,6 +224,8 @@ fn compile_to_wasm_blob_supports_resumable_run() {
         let mut err: *mut SimlinError = ptr::null_mut();
         simlin_model_compile_to_wasm(
             model,
+            false,
+            false,
             &mut out_wasm,
             &mut out_wasm_len,
             &mut out_layout,
@@ -372,6 +376,8 @@ fn compile_to_wasm_unsupported_model_surfaces_error() {
         let mut err: *mut SimlinError = ptr::null_mut();
         simlin_model_compile_to_wasm(
             model,
+            false,
+            false,
             &mut out_wasm,
             &mut out_wasm_len,
             &mut out_layout,
@@ -422,6 +428,8 @@ fn compile_to_wasm_null_outputs_error() {
         // A NULL out_layout pointer must be rejected.
         simlin_model_compile_to_wasm(
             model,
+            false,
+            false,
             &mut out_wasm,
             &mut out_wasm_len,
             ptr::null_mut(),

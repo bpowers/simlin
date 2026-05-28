@@ -104,9 +104,10 @@ const outLen = outPtr();
 const outLayout = outPtr();
 const outLayoutLen = outPtr();
 ep = outPtr();
-// New 6-arg signature: returns the wasm blob AND a serialized WasmLayout
-// (name -> slot offset map + geometry), each via the malloc-return convention.
-E.simlin_model_compile_to_wasm(model, outBuf, outLen, outLayout, outLayoutLen, ep);
+// 8-arg signature: (model, ltm_enabled, ltm_discovery_mode, out_wasm,
+// out_wasm_len, out_layout, out_layout_len, out_error). LTM stays off in this
+// exploratory script; the script doesn't read LTM series.
+E.simlin_model_compile_to_wasm(model, 0, 0, outBuf, outLen, outLayout, outLayoutLen, ep);
 checkErr(ep, 'compile_to_wasm');
 const blobPtr = u32(outBuf);
 const blobLen = u32(outLen);

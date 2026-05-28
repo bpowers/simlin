@@ -92,6 +92,8 @@ export interface WasmBlobExports {
 export function simlin_model_compile_to_wasm(model: SimlinModelPtr): { wasm: Uint8Array; layout: Uint8Array } {
   const fn = getExports().simlin_model_compile_to_wasm as (
     model: number,
+    ltmEnabled: number,
+    ltmDiscoveryMode: number,
     outWasm: number,
     outWasmLen: number,
     outLayout: number,
@@ -106,7 +108,10 @@ export function simlin_model_compile_to_wasm(model: SimlinModelPtr): { wasm: Uin
   const outErrPtr = allocOutPtr();
 
   try {
-    fn(model, outWasmPtr, outWasmLenPtr, outLayoutPtr, outLayoutLenPtr, outErrPtr);
+    // LTM stays off across this wrapper for now; real `enableLtm` threading
+    // lands in Phase 3. The two `0` args keep the ABI in sync with the new
+    // libsimlin signature (the wrapper's external TS API is unchanged).
+    fn(model, 0, 0, outWasmPtr, outWasmLenPtr, outLayoutPtr, outLayoutLenPtr, outErrPtr);
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {

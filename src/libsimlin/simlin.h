@@ -372,12 +372,19 @@ void simlin_free_string(char *s);
 // compile or codegen failure stores a `SimlinError` (never panics across the
 // boundary) and leaves both output buffers NULL.
 //
+// `ltm_enabled` and `ltm_discovery_mode` flip the same flags
+// `simlin_project_enable_ltm` sets on a `SimlinProject`, but locally for this
+// compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
+// synthetic series iff `ltm_enabled` is true.
+//
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
 // - `out_wasm`, `out_wasm_len`, `out_layout`, and `out_layout_len` must be
 //   valid, non-null pointers
 // - `out_error` may be null
 void simlin_model_compile_to_wasm(SimlinModel *model,
+                                  bool ltm_enabled,
+                                  bool ltm_discovery_mode,
                                   uint8_t **out_wasm,
                                   uintptr_t *out_wasm_len,
                                   uint8_t **out_layout,
