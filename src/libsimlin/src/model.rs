@@ -154,9 +154,13 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
     let project_ref = &*model_ref.project;
     let datamodel = project_ref.datamodel.lock().unwrap();
 
+    // LTM is off across this FFI today; Task 2 adds the two flag params to
+    // `simlin_model_compile_to_wasm` itself and forwards them here.
     let artifact = match engine::wasmgen::compile_datamodel_to_artifact(
         &datamodel,
         model_ref.model_name.as_str(),
+        false,
+        false,
     ) {
         Ok(artifact) => artifact,
         Err(err) => {

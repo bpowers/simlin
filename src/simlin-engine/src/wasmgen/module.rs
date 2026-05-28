@@ -114,9 +114,17 @@ const L_DST: u32 = 2;
 pub fn compile_datamodel_to_artifact(
     datamodel: &crate::datamodel::Project,
     model_name: &str,
+    ltm_enabled: bool,
+    ltm_discovery_mode: bool,
 ) -> Result<WasmArtifact, WasmGenError> {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
+    // The flags ride on the freshly-synced `SourceProject`; no reset dance is
+    // needed (contrast `simlin_sim_new`, which mutates a *shared* persistent
+    // `SourceProject` and must restore prior LTM state). `db` is owned by this
+    // function and dropped at return, so flag changes can never leak.
+    crate::db::set_project_ltm_enabled(&mut db, sync.project, ltm_enabled);
+    crate::db::set_project_ltm_discovery_mode(&mut db, sync.project, ltm_discovery_mode);
     let sim =
         crate::db::compile_project_incremental(&db, sync.project, model_name).map_err(|e| {
             WasmGenError::Unsupported(format!("wasmgen: incremental compile failed: {e:?}"))
@@ -131,8 +139,10 @@ pub fn compile_datamodel_to_artifact(
 pub fn compile_datamodel_to_wasm(
     datamodel: &crate::datamodel::Project,
     model_name: &str,
+    ltm_enabled: bool,
+    ltm_discovery_mode: bool,
 ) -> Result<Vec<u8>, WasmGenError> {
-    Ok(compile_datamodel_to_artifact(datamodel, model_name)?.wasm)
+    Ok(compile_datamodel_to_artifact(datamodel, model_name, ltm_enabled, ltm_discovery_mode)?.wasm)
 }
 
 // ============================================================================
@@ -2526,7 +2536,8 @@ mod tests {
         let mut reader = BufReader::new(file);
         let datamodel = open_xmile(&mut reader).expect("parse population xmile");
 
-        let wasm = compile_datamodel_to_wasm(&datamodel, "main").expect("wasm codegen");
+        let wasm =
+            compile_datamodel_to_wasm(&datamodel, "main", false, false).expect("wasm codegen");
         assert!(!wasm.is_empty(), "blob should be non-empty");
         validate(&wasm).expect("blob must validate under the interpreter");
     }
