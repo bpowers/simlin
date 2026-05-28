@@ -50,18 +50,26 @@ const INTERNER_SHARDS: usize = 64;
 /// One shard: a content-keyed map from string -> weak handle. A `Weak`
 /// (not `Arc`) is stored so the entry does not itself keep the payload alive;
 /// the payload is reclaimed when the last *external* `Arc` drops.
-type Shard = std::collections::HashMap<Box<str>, std::sync::Weak<Interned>>;
+///
+/// Keyed with `FxHashMap` (rustc's fixed-seed FxHash) rather than the std
+/// default SipHash: identifier strings are short and the interner is on the
+/// hottest compile path (`canonicalize`/`Ident::new` -> `intern`), so the
+/// per-shard get/insert hashing is a measurable share of compile self-time.
+/// The hasher is purely a performance detail here -- the map still de-dups by
+/// string CONTENT, so which strings share a payload is unaffected.
+type Shard = rustc_hash::FxHashMap<Box<str>, std::sync::Weak<Interned>>;
 
 /// The global interner: a fixed array of independently-locked shards.
 ///
-/// `hasher` is used only to pick a shard (the per-shard `HashMap` rehashes the
-/// key with its own hasher). It is created once and reused for the life of the
-/// process, so the shard chosen for a given string at insert is the same shard
-/// `Drop` recomputes for eviction. The seed value itself is irrelevant to
-/// correctness -- only its consistency within the process matters.
+/// Shard selection hashes the key with `FxBuildHasher` (the per-shard map
+/// rehashes the key with its own FxHash hasher). `FxBuildHasher` is a
+/// zero-size, fixed-seed unit type, so there is nothing to store: the shard
+/// chosen for a given string at insert is the same shard `hash_of` recomputes
+/// for `contains` and that `Drop` recomputes for eviction. The hasher being
+/// fixed-seed (vs the old `RandomState`'s per-process random seed) only makes
+/// shard selection deterministic across runs; dedup-by-content is unchanged.
 struct Interner {
     shards: [std::sync::Mutex<Shard>; INTERNER_SHARDS],
-    hasher: std::hash::RandomState,
 }
 
 impl Interner {
@@ -69,17 +77,16 @@ impl Interner {
         // `std::sync::OnceLock` (std-only) lazily initializes the global.
         static GLOBAL: std::sync::OnceLock<Interner> = std::sync::OnceLock::new();
         GLOBAL.get_or_init(|| Interner {
-            shards: std::array::from_fn(|_| std::sync::Mutex::new(Shard::new())),
-            // One `RandomState` instance, created once and reused for the life
-            // of the process so shard selection is self-consistent between
-            // insert and eviction.
-            hasher: std::hash::RandomState::new(),
+            shards: std::array::from_fn(|_| std::sync::Mutex::new(Shard::default())),
         })
     }
 
     fn hash_of(&self, s: &str) -> u64 {
         use std::hash::BuildHasher;
-        self.hasher.hash_one(s)
+        // `FxBuildHasher` is a fixed-seed zero-size unit type, so a fresh
+        // `default()` is the same hasher every call -- shard selection stays
+        // self-consistent between insert, `contains`, and eviction.
+        rustc_hash::FxBuildHasher.hash_one(s)
     }
 
     /// Total number of entries currently held across all shards. Test-only:
