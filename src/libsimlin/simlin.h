@@ -203,11 +203,18 @@ SimlinLinks *simlin_analyze_get_links(SimlinSim *sim, SimlinError **out_error);
 // set and per-link score series agree to within the underlying VM/wasm
 // numeric tolerance.
 //
-// The slab is the host-extracted `n_chunks * n_slots * 8` bytes starting
-// at the blob's `results_offset` (the f64-array image of the results region,
-// little-endian).  The layout buffer is the bytes returned in
-// `simlin_model_compile_to_wasm`'s `out_layout`.  Both are owned by the
-// caller and only read; this function copies them as needed.
+// The slab is the host-extracted bytes starting at the blob's
+// `results_offset` (the f64-array image of the results region, little-endian).
+// Its byte length encodes how many rows the blob has actually written:
+// `saved_steps * n_slots * 8`, where `saved_steps` is the live `G_SAVED`
+// counter the blob exposes (which equals `n_chunks` after a full run but is
+// 0 for a fresh or just-reset sim and `< n_chunks` mid-run via `run_to`).
+// Passing the slab at its saved length -- not its `n_chunks * n_slots * 8`
+// capacity -- keeps the analytic core from seeing uninit/stale tail rows
+// and mirrors what `simlin_sim_get_series` already does on the VM side.
+// The layout buffer is the bytes returned in `simlin_model_compile_to_wasm`'s
+// `out_layout`.  Both buffers are owned by the caller and only read; this
+// function copies them as needed.
 //
 // Because the links analysis is structure-driven (the unique `(from, to)`
 // edges come from `model_causal_edges`, which has no LTM dependency), this
@@ -266,7 +273,10 @@ void simlin_free_links(SimlinLinks *links);
 //
 // The series is copied into `results_ptr` clamped to `len` entries; the
 // number written is reported through `out_written`, matching the out-buffer
-// semantics of `simlin_analyze_get_relative_loop_score`.
+// semantics of `simlin_analyze_get_relative_loop_score`.  The number written
+// is bounded by the slab's row count -- callers should pass the saved-rows
+// slab (`saved_steps * n_slots * 8` bytes), not the blob's full capacity,
+// for the same reason as the links twin above.
 //
 // # Safety
 // - `model` must be a valid pointer to a `SimlinModel`.

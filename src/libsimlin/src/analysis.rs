@@ -465,11 +465,18 @@ unsafe fn slab_from_bytes(slab_ptr: *const u8, slab_len: usize) -> Result<Vec<f6
 /// set and per-link score series agree to within the underlying VM/wasm
 /// numeric tolerance.
 ///
-/// The slab is the host-extracted `n_chunks * n_slots * 8` bytes starting
-/// at the blob's `results_offset` (the f64-array image of the results region,
-/// little-endian).  The layout buffer is the bytes returned in
-/// `simlin_model_compile_to_wasm`'s `out_layout`.  Both are owned by the
-/// caller and only read; this function copies them as needed.
+/// The slab is the host-extracted bytes starting at the blob's
+/// `results_offset` (the f64-array image of the results region, little-endian).
+/// Its byte length encodes how many rows the blob has actually written:
+/// `saved_steps * n_slots * 8`, where `saved_steps` is the live `G_SAVED`
+/// counter the blob exposes (which equals `n_chunks` after a full run but is
+/// 0 for a fresh or just-reset sim and `< n_chunks` mid-run via `run_to`).
+/// Passing the slab at its saved length -- not its `n_chunks * n_slots * 8`
+/// capacity -- keeps the analytic core from seeing uninit/stale tail rows
+/// and mirrors what `simlin_sim_get_series` already does on the VM side.
+/// The layout buffer is the bytes returned in `simlin_model_compile_to_wasm`'s
+/// `out_layout`.  Both buffers are owned by the caller and only read; this
+/// function copies them as needed.
 ///
 /// Because the links analysis is structure-driven (the unique `(from, to)`
 /// edges come from `model_causal_edges`, which has no LTM dependency), this
@@ -758,12 +765,22 @@ pub(crate) fn rel_loop_score_series(
 /// Reconstruct an `engine::Results` from a wasm-blob result slab and its
 /// matching `WasmLayout`.
 ///
-/// The slab is the *already-extracted* `n_chunks * n_slots` f64 region the
-/// host strided out of the wasm linear memory (i.e. the bytes at the blob's
-/// `results_offset`).  The serialized `WasmLayout`'s `results_offset` itself
-/// is a wasm-linear-memory byte offset and is irrelevant once the slab has
-/// been lifted out of the wasm side -- callers pass the slab as a flat
-/// `[f64]`.
+/// The slab is the *already-extracted* f64 region the host strided out of the
+/// wasm linear memory (i.e. the bytes at the blob's `results_offset`).  The
+/// serialized `WasmLayout`'s `results_offset` itself is a wasm-linear-memory
+/// byte offset and is irrelevant once the slab has been lifted out of the wasm
+/// side -- callers pass the slab as a flat `[f64]`.
+///
+/// The slab encodes the *valid* (saved) row count, not the blob's full
+/// `n_chunks` capacity: it must be a multiple of `n_slots`, and the resulting
+/// row count (`slab.len() / n_slots`) must not exceed `n_chunks`.  The wasm
+/// blob's results region is allocated for `n_chunks` rows but the live
+/// `G_SAVED` counter records how many of those rows the simulation has
+/// actually written -- the rest are uninit/stale (e.g. on a fresh sim, after
+/// `reset`, or mid-run via `run_to`).  Callers (typescript `simGetLinks`,
+/// the libsimlin tests, etc.) extract `saved_steps * n_slots * 8` bytes
+/// rather than the slab's full capacity so the analytic core only sees rows
+/// the blob has computed, matching the strided `simGetSeries` contract.
 ///
 /// `Specs` cannot be looked up through a single salsa query (the spec input
 /// is split between `SourceProject::sim_specs` and `SourceModel::model_sim_specs`,
@@ -771,10 +788,10 @@ pub(crate) fn rel_loop_score_series(
 /// branch here through `engine::db::source_sim_specs_to_datamodel` →
 /// `engine::SimSpecs::from`.  The shape mirrors `Vm::into_results()`:
 /// `offsets` is the layout's canonical-name → slot map, `step_size` is
-/// `n_slots`, `step_count` is `n_chunks`, `is_vensim` is false.  Neither
-/// analytic core (`analyze_links_core`, `rel_loop_score_series`) reads
-/// `results.specs`, so the reconstructed `Specs` is only there to keep the
-/// `Results` value structurally well-formed -- there is no analytic
+/// `n_slots`, `step_count` is `slab.len() / n_slots`, `is_vensim` is false.
+/// Neither analytic core (`analyze_links_core`, `rel_loop_score_series`)
+/// reads `results.specs`, so the reconstructed `Specs` is only there to
+/// keep the `Results` value structurally well-formed -- there is no analytic
 /// sensitivity to its contents from these FFIs.
 pub(crate) fn results_from_layout_and_slab(
     db: &dyn engine::db::Db,
@@ -783,21 +800,35 @@ pub(crate) fn results_from_layout_and_slab(
     layout: &engine::wasmgen::WasmLayout,
     slab: &[f64],
 ) -> Result<engine::Results, SimlinError> {
-    let expected = layout.n_chunks.checked_mul(layout.n_slots).ok_or_else(|| {
+    let capacity = layout.n_chunks.checked_mul(layout.n_slots).ok_or_else(|| {
         SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
             "wasm layout geometry overflow: n_chunks={} * n_slots={}",
             layout.n_chunks, layout.n_slots
         ))
     })?;
-    if slab.len() != expected {
+    if layout.n_slots == 0 {
+        return Err(SimlinError::new(SimlinErrorCode::Generic)
+            .with_message("wasm layout has zero n_slots (no variables to analyze)"));
+    }
+    if !slab.len().is_multiple_of(layout.n_slots) {
+        return Err(
+            SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
+                "wasm result slab length {} f64 elements is not a multiple of n_slots {}",
+                slab.len(),
+                layout.n_slots,
+            )),
+        );
+    }
+    if slab.len() > capacity {
         return Err(SimlinError::new(SimlinErrorCode::Generic).with_message(format!(
-            "wasm result slab length mismatch: got {} f64 elements, expected n_chunks * n_slots = {} * {} = {}",
+            "wasm result slab length {} f64 elements exceeds capacity n_chunks * n_slots = {} * {} = {}",
             slab.len(),
             layout.n_chunks,
             layout.n_slots,
-            expected
+            capacity
         )));
     }
+    let step_count = slab.len() / layout.n_slots;
 
     let offsets: HashMap<Ident<Canonical>, usize> = layout
         .var_offsets
@@ -819,7 +850,7 @@ pub(crate) fn results_from_layout_and_slab(
         offsets,
         data: slab.to_vec().into_boxed_slice(),
         step_size: layout.n_slots,
-        step_count: layout.n_chunks,
+        step_count,
         specs,
         is_vensim: false,
     })
@@ -1079,7 +1110,10 @@ pub(crate) fn resolve_loop_query<'a>(
 ///
 /// The series is copied into `results_ptr` clamped to `len` entries; the
 /// number written is reported through `out_written`, matching the out-buffer
-/// semantics of `simlin_analyze_get_relative_loop_score`.
+/// semantics of `simlin_analyze_get_relative_loop_score`.  The number written
+/// is bounded by the slab's row count -- callers should pass the saved-rows
+/// slab (`saved_steps * n_slots * 8` bytes), not the blob's full capacity,
+/// for the same reason as the links twin above.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a `SimlinModel`.

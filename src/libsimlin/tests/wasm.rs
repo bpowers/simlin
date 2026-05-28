@@ -1204,3 +1204,161 @@ fn rel_loop_score_from_wasm_matches_vm() {
         let _ = subscripted_seen;
     }
 }
+
+/// The wasm blob's results region is allocated for the full `n_chunks`
+/// capacity, but the live `G_SAVED` counter records how many rows the
+/// simulation has actually written.  Hosts are expected to extract only
+/// `saved_steps * n_slots * 8` bytes -- not the slab's full capacity -- so
+/// the analytic core never sees uninit/stale tail rows on a fresh,
+/// just-reset, or partially-run sim.  This test exercises that contract on
+/// `simlin_analyze_links_from_wasm_results`: it computes link scores from
+/// the full slab as the oracle, then re-computes them from a truncated
+/// (first-half) slab and asserts each per-link score series is exactly the
+/// first-half of the oracle (elementwise equality -- both runs share the
+/// same f64 inputs, so the truncated answer should be bit-identical, not
+/// just within tolerance).
+#[test]
+fn links_from_wasm_truncated_slab_matches_prefix() {
+    unsafe {
+        let run = compile_and_run_logistic_growth_ltm();
+        let layout = parse_layout(std::slice::from_raw_parts(
+            run.layout_bytes_ptr,
+            run.layout_bytes_len,
+        ));
+        // Sanity check the fixture: at least 4 saved rows, so truncating to
+        // half still leaves a meaningful series for the per-link assertion.
+        assert!(
+            layout.n_chunks >= 4,
+            "fixture must have >=4 saved rows to make truncation meaningful"
+        );
+        let full_rows = layout.n_chunks;
+        let half_rows = full_rows / 2;
+        assert!(
+            half_rows > 0 && half_rows < full_rows,
+            "half_rows={half_rows} must be a strict prefix of full_rows={full_rows}"
+        );
+
+        // Oracle: link scores computed from the full saved slab.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let full_links = simlin_analyze_links_from_wasm_results(
+            run.model,
+            run.slab_bytes.as_ptr(),
+            run.slab_bytes.len(),
+            run.layout_bytes_ptr,
+            run.layout_bytes_len,
+            &mut err,
+        );
+        assert!(err.is_null(), "full-slab links call must succeed");
+        let full = snapshot_links(full_links);
+        simlin_free_links(full_links);
+
+        // Truncated: only the first `half_rows` rows -- mirrors what a host
+        // would marshal mid-run via `runTo` (or for a just-reset sim).
+        let half_slab_bytes = &run.slab_bytes[..half_rows * layout.n_slots * 8];
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let half_links = simlin_analyze_links_from_wasm_results(
+            run.model,
+            half_slab_bytes.as_ptr(),
+            half_slab_bytes.len(),
+            run.layout_bytes_ptr,
+            run.layout_bytes_len,
+            &mut err,
+        );
+        assert!(
+            err.is_null(),
+            "truncated-slab links call must succeed (saved-rows contract)"
+        );
+        let half = snapshot_links(half_links);
+        simlin_free_links(half_links);
+
+        // Same link topology: both runs share the same SourceProject, so
+        // structure-driven keys are identical.
+        let key = |l: &(String, String, SimlinLinkPolarity, Vec<f64>)| (l.0.clone(), l.1.clone());
+        let mut full_map: std::collections::HashMap<(String, String), Vec<f64>> =
+            full.into_iter().map(|l| (key(&l), l.3)).collect();
+        for h in &half {
+            let k = key(h);
+            let full_scores = full_map
+                .remove(&k)
+                .unwrap_or_else(|| panic!("truncated run produced unknown link {:?}", k));
+            // Empty score series means "this edge has no LTM column" (e.g.
+            // self-loops); both calls agree on that by construction.
+            if full_scores.is_empty() {
+                assert!(h.3.is_empty(), "link {:?} should also be unscored", k);
+                continue;
+            }
+            assert_eq!(
+                h.3.len(),
+                half_rows,
+                "truncated link {:?} score length must equal the row count passed in",
+                k
+            );
+            for (i, (full_v, half_v)) in full_scores
+                .iter()
+                .take(half_rows)
+                .zip(h.3.iter())
+                .enumerate()
+            {
+                // Bit-exact: same f64 inputs, same analytic core.
+                assert!(
+                    (full_v - half_v).abs() == 0.0,
+                    "link {:?} score divergence at step {i}: full={full_v} truncated={half_v}",
+                    k,
+                );
+            }
+        }
+        assert!(
+            full_map.is_empty(),
+            "full slab produced links the truncated slab did not: {:?}",
+            full_map.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+/// The saved-rows contract is enforced (not silently rounded): a slab whose
+/// f64 length is not a multiple of `n_slots`, or that exceeds the blob's
+/// `n_chunks * n_slots` capacity, returns a `SimlinError` rather than
+/// reconstructing a malformed `Results`.
+#[test]
+fn links_from_wasm_rejects_invalid_slab_lengths() {
+    unsafe {
+        let run = compile_and_run_logistic_growth_ltm();
+        let layout = parse_layout(std::slice::from_raw_parts(
+            run.layout_bytes_ptr,
+            run.layout_bytes_len,
+        ));
+
+        // Length not a multiple of n_slots: drop a single f64 (8 bytes) so the
+        // remaining slab can't be evenly divided into rows.
+        let oversize_step_bytes = run.slab_bytes.len() - 8;
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let p = simlin_analyze_links_from_wasm_results(
+            run.model,
+            run.slab_bytes.as_ptr(),
+            oversize_step_bytes,
+            run.layout_bytes_ptr,
+            run.layout_bytes_len,
+            &mut err,
+        );
+        assert!(p.is_null(), "non-multiple slab length must return null");
+        assert!(!err.is_null(), "non-multiple slab length must set an error");
+        simlin_error_free(err);
+
+        // Length exceeds the blob's capacity: append one extra row worth of
+        // bytes (all zeros) to push past `n_chunks * n_slots * 8`.
+        let mut overflow = run.slab_bytes.clone();
+        overflow.extend(std::iter::repeat_n(0u8, layout.n_slots * 8));
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let p = simlin_analyze_links_from_wasm_results(
+            run.model,
+            overflow.as_ptr(),
+            overflow.len(),
+            run.layout_bytes_ptr,
+            run.layout_bytes_len,
+            &mut err,
+        );
+        assert!(p.is_null(), "over-capacity slab must return null");
+        assert!(!err.is_null(), "over-capacity slab must set an error");
+        simlin_error_free(err);
+    }
+}

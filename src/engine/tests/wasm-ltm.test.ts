@@ -114,6 +114,70 @@ describe('LTM on the wasm engine (public API)', () => {
     await wasmSim.dispose();
   });
 
+  // The wasm blob's results region is allocated for the full nChunks capacity,
+  // but G_SAVED records how many rows the sim has actually written.  Mid-run
+  // (via runTo) getLinks() must marshal only the saved rows, not the entire
+  // capacity -- otherwise the from-wasm analyzer would see uninit/stale tail
+  // rows and getLinks()/Run.links would diverge from getSeries(), which
+  // already truncates to saved_steps.  This test pins that contract: a
+  // partial run produces per-link score arrays whose length equals
+  // getStepCount(), and whose values match the first getStepCount() elements
+  // of the VM oracle's full run.
+  it('wasm getLinks after partial run matches VM prefix (no stale tail)', async () => {
+    const model = await project.mainModel();
+    const wasmSim = await model.simulate({}, { engine: 'wasm', enableLtm: true });
+    // logistic_growth.stmx is t in [0, 100] dt=1 -> 101 saved samples.
+    // Halfway through the run exercises the saved_steps < nChunks path.
+    await wasmSim.runTo(50);
+    const savedSteps = await wasmSim.getStepCount();
+    expect(savedSteps).toBeGreaterThan(0);
+    expect(savedSteps).toBeLessThan(101);
+
+    const wasmLinks = await wasmSim.getLinks();
+    const scored = wasmLinks.filter((l) => l.score !== undefined);
+    expect(scored.length).toBeGreaterThan(0);
+    for (const link of scored) {
+      // The score array length is bounded by saved_steps, not nChunks;
+      // a regression to the full-capacity slab would surface as
+      // link.score!.length === 101 here.
+      expect(link.score!.length).toBe(savedSteps);
+      // No stale tail: every value is a finite f64 produced by the blob,
+      // not uninit garbage.
+      for (let i = 0; i < link.score!.length; i++) {
+        expect(Number.isFinite(link.score![i])).toBe(true);
+      }
+    }
+
+    // The partial-run wasm scores must match the first savedSteps elements
+    // of the VM oracle's full-run scores: same model, same inputs, same
+    // analytic core -- the difference is purely how many rows are passed
+    // through the from-wasm FFI.  This is the strongest assertion against
+    // stale-tail data because uninit slab bytes would produce arbitrary
+    // values that the VM oracle does not.
+    const vmSim = await model.simulate({}, { engine: 'vm', enableLtm: true });
+    await vmSim.runToEnd();
+    const vmLinks = await vmSim.getLinks();
+
+    const vmByKey = linksByKey(vmLinks);
+    const wasmByKey = linksByKey(wasmLinks);
+    for (const [key, vmLink] of vmByKey) {
+      const wasmLink = wasmByKey.get(key);
+      expect(wasmLink).toBeDefined();
+      if (vmLink.score === undefined) {
+        expect(wasmLink!.score).toBeUndefined();
+      } else {
+        expect(wasmLink!.score).toBeDefined();
+        expect(wasmLink!.score!.length).toBe(savedSteps);
+        // VM score is the full-run series; take its first savedSteps to
+        // compare against the partial-run wasm series.
+        expectScoresClose(wasmLink!.score!, vmLink.score.subarray(0, savedSteps));
+      }
+    }
+
+    await wasmSim.dispose();
+    await vmSim.dispose();
+  });
+
   it('Run.links populated for wasm LTM run', async () => {
     const model = await project.mainModel();
     const vmRun = await model.run({}, { analyzeLtm: true, engine: 'vm' });

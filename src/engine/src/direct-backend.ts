@@ -701,16 +701,26 @@ export class DirectBackend implements EngineBackend {
   simGetLinks(handle: SimHandle): Link[] {
     const entry = this.getEntry(handle as number, 'sim');
     if (entry.engine === 'wasm') {
-      // Marshal the blob's complete result slab + the layout bytes back to
-      // libsimlin's from-wasm analysis FFI, which deserializes the layout,
-      // maps the slab to the model's LTM series, and computes link scores
-      // through the SAME analysis pipeline the VM path uses (no logic is
-      // duplicated between backends). `.slice()` is load-bearing: it produces
-      // a JS-side independent copy so the slab is decoupled from the live blob
-      // memory before we marshal it into libsimlin (copyToWasm), preventing any
-      // aliasing between the blob's ArrayBuffer and the libsimlin allocation.
-      const { resultsOffset, nSlots, nChunks } = entry.wasmLayout!;
-      const slabBytes = new Uint8Array(entry.wasmExports!.memory.buffer, resultsOffset, nSlots * nChunks * 8).slice();
+      // Marshal the saved rows of the blob's result slab + the layout bytes
+      // back to libsimlin's from-wasm analysis FFI, which deserializes the
+      // layout, maps the slab to the model's LTM series, and computes link
+      // scores through the SAME analysis pipeline the VM path uses (no logic
+      // is duplicated between backends). The slab is sized by the live
+      // `saved_steps` counter (which `simGetStepCount` reads), not the blob's
+      // `nChunks` capacity, so a fresh, just-reset, or partially-run sim
+      // does not include uninit/stale tail rows in the analysis -- matching
+      // the strided `simGetSeries` contract above. `.slice()` is load-bearing:
+      // it produces a JS-side independent copy so the slab is decoupled from
+      // the live blob memory before we marshal it into libsimlin (copyToWasm),
+      // preventing any aliasing between the blob's ArrayBuffer and the
+      // libsimlin allocation.
+      const { resultsOffset, nSlots } = entry.wasmLayout!;
+      const savedSteps = this.simGetStepCount(handle);
+      const slabBytes = new Uint8Array(
+        entry.wasmExports!.memory.buffer,
+        resultsOffset,
+        savedSteps * nSlots * 8,
+      ).slice();
       const linksPtr = simlin_analyze_links_from_wasm_results(entry.wasmModelPtr!, slabBytes, entry.wasmLayoutBytes!);
       return convertLinks(linksPtr);
     }
