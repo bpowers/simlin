@@ -25,16 +25,7 @@ use simlin_engine::datamodel;
 use simlin_engine::wasmgen::{WasmLayout, compile_datamodel_to_artifact};
 use simlin_engine::xmile;
 
-use test_helpers::{
-    LTM_SERIES_TOLERANCE, assert_ltm_slabs_match, vm_results_for_ltm, wasm_results_for_ltm,
-};
-
-// `LTM_SERIES_TOLERANCE` is re-exported via the use above so a future
-// per-model carve-out has a single named constant to reference; the
-// compiler accepts an unused import here without a warning when the
-// tolerance is consumed transitively through `assert_ltm_slabs_match`.
-#[allow(dead_code)]
-const _LTM_SERIES_TOLERANCE_REF: f64 = LTM_SERIES_TOLERANCE;
+use test_helpers::{assert_ltm_slabs_match, vm_results_for_ltm, wasm_results_for_ltm};
 
 /// Shared LTM-synthetic-variable name prefix used by every link/loop/agg
 /// score: `"$\u{205A}ltm\u{205A}"` (dollar sign + two-dot punctuation).

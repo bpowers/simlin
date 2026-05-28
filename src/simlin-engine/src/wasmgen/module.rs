@@ -111,6 +111,11 @@ const L_DST: u32 = 2;
 /// `Vm`/`SimlinSim`, returning both the blob and the name->offset layout. An
 /// incremental-compile failure or an unsupported construct surfaces as
 /// [`WasmGenError`] (the FFI maps it to a `SimlinError`, never a panic).
+///
+/// When `ltm_enabled` is true, the synthesized `$⁚ltm⁚*` link/loop score
+/// variables are included in the emitted layout and blob. `ltm_discovery_mode`
+/// flips the same flag `simlin_project_enable_ltm` sets on a `SimlinProject`,
+/// but locally for this compile only.
 pub fn compile_datamodel_to_artifact(
     datamodel: &crate::datamodel::Project,
     model_name: &str,
@@ -134,8 +139,10 @@ pub fn compile_datamodel_to_artifact(
 
 /// Compile the named model of a datamodel `Project` to a self-contained wasm
 /// module, dropping the [`WasmLayout`] (callers that need the layout use
-/// [`compile_datamodel_to_artifact`]). Kept as the stable raw-bytes entry point
-/// for the `wasm-backend-poc.mjs` exploratory script and any blob-only consumer.
+/// [`compile_datamodel_to_artifact`]). Currently called only from the inline
+/// `compile_datamodel_to_wasm_validates` unit test; blob-only consumers that
+/// once used this entry point now call [`compile_datamodel_to_artifact`]
+/// directly.
 pub fn compile_datamodel_to_wasm(
     datamodel: &crate::datamodel::Project,
     model_name: &str,
