@@ -46,6 +46,8 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 - `tests/cleanup.test.ts` -- Resource cleanup tests
 - `tests/wasmgen.test.ts`, `tests/canonicalize.test.ts` -- Unit tests for the pure layout decoders and `canonicalizeIdent`
 - `tests/wasm-backend.test.ts`, `tests/wasm-model.test.ts`, `tests/worker-wasm.test.ts` -- wasm-vs-VM parity through `DirectBackend`, the `Model`/`Sim` facade, and the Web Worker
+- `tests/wasm-ltm.test.ts` -- LTM-on-wasm parity through the TypeScript surface: drives `Model.simulate({ engine: 'wasm', enableLtm: true })` end-to-end and asserts the resulting `Run.links` match the VM (link set, polarities, per-step scores). Includes a `WorkerBackend` twin and an Unsupported-LTM case that surfaces as a rejection without falling back to the VM
+- `tests/ltm-test-helpers.ts` -- shared helpers for the LTM tests (`linksByKey`, `expectScoresClose`); kept separate from the test files so the wasm and worker LTM suites compare links the same way
 
 ## Benchmarks
 
