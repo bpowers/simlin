@@ -22,6 +22,9 @@ use std::fs::File;
 use std::io::BufReader;
 
 use simlin_engine::datamodel;
+use simlin_engine::db::{
+    SimlinDb, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
+};
 use simlin_engine::wasmgen::{WasmLayout, compile_datamodel_to_artifact};
 use simlin_engine::xmile;
 
@@ -159,6 +162,93 @@ fn series_arms_race_matches_vm() {
 #[test]
 fn series_decoupled_stocks_matches_vm() {
     assert_ltm_series_match("decoupled_stocks/decoupled.stmx");
+}
+
+// ---------------------------------------------------------------------------
+// AC2.4: arrayed / cross-element series-parity (wasm vs VM)
+// ---------------------------------------------------------------------------
+
+/// Drive both backends for an *arrayed* LTM model and assert their entire
+/// results slabs agree element-for-element within `LTM_SERIES_TOLERANCE`,
+/// PLUS that at least one emitted `LtmSyntheticVar` carries a non-empty
+/// `dimensions` list -- i.e. the comparator is actually exercising an
+/// arrayed (multi-slot) LTM column, not silently passing on a scalar
+/// reduction of the model.
+///
+/// The whole-slab comparator in `assert_ltm_slabs_match` already covers
+/// every element of every `$⁚ltm⁚*` var (Bare A2A strided, FixedIndex
+/// name-baked, scalar->arrayed, and `$⁚ltm⁚agg⁚*` synthetic-agg columns)
+/// because both `Results` share their `var_offsets`. The extra guard
+/// below is the authoritative "this model actually emits a multi-element
+/// LTM var" check: a regression that collapses an A2A target's link/loop
+/// score to a single slot would still pass `assert_ltm_slabs_match` (both
+/// backends would agree on a scalar value) but fail this guard.
+///
+/// The dimensions check is sourced from the salsa-tracked
+/// `LtmVariablesResult.vars`, the same surface that drives slot allocation
+/// for arrayed LTM vars (`ltm_synthetic_equation` over a non-empty `dims`
+/// produces an `ApplyToAll`, which `assemble_module` lays out as N
+/// contiguous slots), so this is exactly the authoritative shape signal.
+fn assert_ltm_series_match_arrayed(model_rel_path: &str) {
+    let project = load(model_rel_path);
+    let vm = vm_results_for_ltm(&project, "main");
+    let wasm = wasm_results_for_ltm(&project, "main").unwrap_or_else(|msg| {
+        panic!("arrayed LTM model {model_rel_path} should lower to wasm: {msg}")
+    });
+
+    let wasm_has_ltm = wasm
+        .offsets
+        .keys()
+        .any(|k| k.as_str().starts_with(LTM_PREFIX));
+    assert!(
+        wasm_has_ltm,
+        "wasm offsets for {model_rel_path} contain no $⁚ltm⁚* keys -- \
+         silent regression to LTM-off?"
+    );
+
+    // The multi-slot guard: at least one `LtmSyntheticVar` must carry a
+    // non-empty `dimensions` list, so the comparator can't pass vacuously
+    // on a scalar reduction of an arrayed model. Read from the salsa-
+    // tracked `LtmVariablesResult.vars` (the authoritative shape source)
+    // rather than scanning result offsets, since a Bare A2A var occupies
+    // contiguous slots under a single offset entry -- multi-slot-ness is
+    // not visible from `var_offsets` alone.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+    let multi_slot_count = ltm_vars
+        .vars
+        .iter()
+        .filter(|v| !v.dimensions.is_empty())
+        .count();
+    assert!(
+        multi_slot_count > 0,
+        "arrayed LTM model {model_rel_path} emitted no LtmSyntheticVar \
+         with element count > 1 -- the comparator would pass vacuously \
+         on a scalar reduction; investigate before relaxing"
+    );
+
+    assert_ltm_slabs_match(&vm, &wasm);
+}
+
+/// AC2.4: A2A (same-element) arrayed feedback loops over `Region = {NYC,
+/// Boston, LA}` (N=3). Exercises the Bare A2A strided `$⁚ltm⁚*` slot
+/// layout the whole-slab comparator transparently covers.
+#[test]
+fn series_arrayed_population_matches_vm() {
+    assert_ltm_series_match_arrayed("arrayed_population_ltm/arrayed_population.stmx");
+}
+
+/// AC2.4: cross-element arrayed loops over `Region = {NYC, Boston}` (N=2)
+/// plus a whole-extent `SUM(population[*])` reducer that hoists to a
+/// `$⁚ltm⁚agg⁚*` synthetic node. Exercises the FixedIndex name-baked
+/// element form (`{from}[{e}]→{to}`) and the agg-routed `source→agg→to`
+/// link-score columns alongside the Bare slots.
+#[test]
+fn series_cross_element_matches_vm() {
+    assert_ltm_series_match_arrayed("cross_element_ltm/cross_element.stmx");
 }
 
 // ---------------------------------------------------------------------------
