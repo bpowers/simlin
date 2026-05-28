@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>ltm-dynamic-range-unsupported</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler">
+        <start>0</start>
+        <stop>5</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="A" size="5"/>
+    </dimensions>
+    <model>
+        <variables>
+            <stock name="population">
+                <eqn>10</eqn>
+                <inflow>growth</inflow>
+            </stock>
+            <flow name="growth">
+                <eqn>population * rate</eqn>
+            </flow>
+            <aux name="rate">
+                <eqn>0.1</eqn>
+            </aux>
+            <aux name="source">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="A"/>
+                </dimensions>
+            </aux>
+            <aux name="lo">
+                <eqn>2</eqn>
+            </aux>
+            <aux name="hi">
+                <eqn>4</eqn>
+            </aux>
+            <aux name="total">
+                <eqn>SUM(source[lo:hi])</eqn>
+            </aux>
+        </variables>
+    </model>
+</xmile>

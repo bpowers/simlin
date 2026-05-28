@@ -410,6 +410,81 @@ fn compile_to_wasm_unsupported_model_surfaces_error() {
     }
 }
 
+/// wasm-ltm.AC3.1 (FFI side): an LTM-enabled compile of an unlowerable model
+/// returns a clean `SimlinError` with both output buffers NULL and never
+/// panics across the FFI boundary. The fixture combines a real feedback loop
+/// (so LTM is genuinely enabled and link/loop scores would be emitted on the
+/// VM path) with `SUM(source[lo:hi])` -- the dynamic-range subscript the
+/// fully-unrolled emitter cannot express (GH #612). Loaded from a real XMILE
+/// file rather than a `TestProject` builder so the same fixture serves the
+/// engine-level twin (`unsupported_ltm_model_returns_wasmgen_error` in
+/// `simulate_ltm_wasm.rs`) and the TS twin in `wasm-ltm.test.ts`.
+#[test]
+fn compile_to_wasm_unsupported_ltm_model_surfaces_error() {
+    let path = std::path::Path::new("../../test/ltm_dynamic_range_unsupported/model.stmx");
+    let stmx =
+        std::fs::read(path).unwrap_or_else(|e| panic!("missing fixture {}: {e}", path.display()));
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let project = simlin_project_open_xmile(stmx.as_ptr(), stmx.len(), &mut err);
+        assert!(err.is_null(), "open_xmile must succeed for a valid XMILE");
+        assert!(!project.is_null());
+
+        let model_name = std::ffi::CString::new("main").unwrap();
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(project, model_name.as_ptr(), &mut err);
+        assert!(err.is_null(), "get_model must succeed");
+        assert!(!model.is_null());
+
+        let mut out_wasm: *mut u8 = ptr::null_mut();
+        let mut out_wasm_len: usize = 0;
+        let mut out_layout: *mut u8 = ptr::null_mut();
+        let mut out_layout_len: usize = 0;
+        let mut err: *mut SimlinError = ptr::null_mut();
+        // Phase 1's 8-arg signature with the LTM flag set: this is the path
+        // an LTM-on-wasm caller takes, and the failure must surface cleanly
+        // here -- not panic across the FFI boundary and not silently fall
+        // back to a non-LTM blob.
+        simlin_model_compile_to_wasm(
+            model,
+            /* ltm_enabled */ true,
+            /* ltm_discovery_mode */ false,
+            &mut out_wasm,
+            &mut out_wasm_len,
+            &mut out_layout,
+            &mut out_layout_len,
+            &mut err,
+        );
+
+        assert!(
+            !err.is_null(),
+            "an unsupported LTM model must populate out_error (no panic, no silent success)"
+        );
+        let msg_ptr = simlin_error_get_message(err);
+        assert!(!msg_ptr.is_null(), "the error must carry a message");
+        let msg = std::ffi::CStr::from_ptr(msg_ptr).to_str().unwrap();
+        assert!(
+            msg.contains("ViewRangeDynamic") || msg.contains("code generation failed"),
+            "error message should describe the codegen failure, got: {msg}"
+        );
+
+        // Both output buffers stay NULL on failure -- no half-populated blob,
+        // no layout-without-blob (or vice versa) the caller could misread.
+        assert!(
+            out_wasm.is_null() && out_wasm_len == 0,
+            "wasm buffer stays NULL on error"
+        );
+        assert!(
+            out_layout.is_null() && out_layout_len == 0,
+            "layout buffer stays NULL on error"
+        );
+
+        simlin_error_free(err);
+        simlin_model_unref(model);
+        simlin_project_unref(project);
+    }
+}
+
 /// NULL output pointers are rejected with an error rather than a crash.
 #[test]
 fn compile_to_wasm_null_outputs_error() {

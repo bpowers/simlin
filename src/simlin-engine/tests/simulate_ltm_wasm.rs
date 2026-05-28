@@ -25,7 +25,7 @@ use simlin_engine::datamodel;
 use simlin_engine::db::{
     SimlinDb, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
-use simlin_engine::wasmgen::{WasmLayout, compile_datamodel_to_artifact};
+use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_datamodel_to_artifact};
 use simlin_engine::xmile;
 
 use test_helpers::{assert_ltm_slabs_match, vm_results_for_ltm, wasm_results_for_ltm};
@@ -334,5 +334,46 @@ fn ltm_corpus_floor_gate() {
         "LTM-on-wasm corpus shrank: only {lowered} of {} expected-supported models lowered, \
          floor is {MIN_LTM_MODELS_LOWERED}",
         EXPECTED_SUPPORTED_LTM_MODELS.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC3.1: Unsupported LTM model surfaces a clean WasmGenError (no panic)
+// ---------------------------------------------------------------------------
+
+/// AC3.1: an LTM model the wasm backend cannot lower returns a clean
+/// `WasmGenError::Unsupported` from `compile_datamodel_to_artifact` -- never a
+/// panic, never a silently-wrong blob. The fixture combines a small one-stock
+/// feedback loop (so LTM genuinely emits link/loop scores) with a non-constant
+/// subscript range (`SUM(source[lo:hi])`, GH #612) that the fully-unrolled
+/// emitter can't express, mirroring the FFI-side
+/// `compile_to_wasm_unsupported_model_surfaces_error` (`libsimlin/tests/wasm.rs`)
+/// but loaded from a real XMILE file so the same fixture serves the TS twin.
+///
+/// The companion `vm_results_for_ltm` assertion proves the model is fine on
+/// the bytecode VM -- the limitation is wasm-backend-specific, not a
+/// structural model error -- so AC3.2's TS clause (the VM path still
+/// simulates) has a single source of truth.
+#[test]
+fn unsupported_ltm_model_returns_wasmgen_error() {
+    let project = load("ltm_dynamic_range_unsupported/model.stmx");
+
+    match compile_datamodel_to_artifact(&project, "main", true, false) {
+        Ok(_) => panic!("wasm compile of a dynamic-range LTM model must fail, not succeed"),
+        Err(WasmGenError::Unsupported(msg)) => {
+            assert!(
+                !msg.is_empty(),
+                "WasmGenError::Unsupported must carry a non-empty message"
+            );
+        }
+    }
+
+    // The same model simulates fine on the bytecode VM with LTM on (this is
+    // a wasm-backend-only limitation; if it ever regresses to "broken on the
+    // VM too" the AC3.2 TS clause loses its oracle).
+    let vm = vm_results_for_ltm(&project, "main");
+    assert!(
+        vm.step_count > 0,
+        "VM with LTM on must produce at least one saved step for the fixture"
     );
 }
