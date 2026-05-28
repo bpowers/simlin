@@ -252,65 +252,87 @@ fn series_cross_element_matches_vm() {
 }
 
 // ---------------------------------------------------------------------------
-// AC4.1: ratcheting floor gate
+// AC4.2: end-state floor gate
 // ---------------------------------------------------------------------------
 
-/// Monotonically rising floor on the count of LTM corpus models that lower
-/// to wasm. Phase 1 covers the scalar corpus (three `.stmx` models); Phase 4
-/// ratchets this up to include arrayed/cross-element models. A regression
-/// that drops a previously-supported model below this floor must fail the
-/// suite (wasm-ltm.AC4.2). The value is therefore only raised, never lowered;
-/// if a corpus model unexpectedly stops lowering, investigate the root cause
-/// rather than relax the constant.
-const MIN_LTM_MODELS_LOWERED: usize = 3;
-
-/// Full LTM corpus driven by the floor gate. Kept colocated with the per-model
-/// `series_*` tests so a model added to the floor is always also added to
-/// the per-model series comparator (and vice versa); a future arrayed-LTM
-/// addition flows through this list.
-const LTM_CORPUS: &[&str] = &[
+/// The end-state expected-supported LTM corpus: every model listed here
+/// MUST lower to wasm (and match the VM via its `series_*` peer). Phase 1
+/// seeded this with the three scalar `.stmx` models; Phase 4 ratchets it
+/// up to include the two arrayed/cross-element models, turning the floor
+/// into a true regression net -- any `Unsupported` from a listed model
+/// fails the suite (wasm-ltm.AC4.2), and so does any model added to the
+/// per-model `series_*` tests but missing here (the two lists are kept in
+/// sync by convention; the `series_*` peer for each entry below names it
+/// in its `#[test]` docstring).
+///
+/// `MIN_LTM_MODELS_LOWERED` rises in lockstep with this list, so a future
+/// expansion need only append a path and bump the constant.
+const EXPECTED_SUPPORTED_LTM_MODELS: &[&str] = &[
+    // Scalar (Phase 1):
     "logistic_growth_ltm/logistic_growth.stmx",
     "arms_race_3party/arms_race.stmx",
     "decoupled_stocks/decoupled.stmx",
+    // Arrayed / cross-element (Phase 4):
+    "arrayed_population_ltm/arrayed_population.stmx",
+    "cross_element_ltm/cross_element.stmx",
 ];
 
-/// Run every model in [`LTM_CORPUS`] through `wasm_results_for_ltm` and
-/// assert that *at least* `MIN_LTM_MODELS_LOWERED` of them lower cleanly.
+/// Monotonically rising floor on the count of LTM corpus models that lower
+/// to wasm. Equal to `EXPECTED_SUPPORTED_LTM_MODELS.len()` -- the floor and
+/// the per-model `Ok` assertion below now move together, so a regression
+/// that drops any expected-supported model fails the suite (both falls
+/// below the floor and breaks the per-model `Ok` assertion). The value is
+/// only raised, never lowered; if a corpus model unexpectedly stops
+/// lowering, investigate the root cause rather than relax this constant.
+const MIN_LTM_MODELS_LOWERED: usize = EXPECTED_SUPPORTED_LTM_MODELS.len();
+
+/// End-state floor gate (wasm-ltm.AC4.2): every model in
+/// [`EXPECTED_SUPPORTED_LTM_MODELS`] MUST lower to wasm with LTM enabled.
 /// A model that returns `Err` (`WasmGenError::Unsupported` rendered, or an
-/// incremental-compile failure) is logged via `eprintln!` and treated as a
-/// skip during rollout -- so a regression on a single model surfaces here
-/// without masking other progress, but the count threshold prevents a
-/// silent slide back to zero.
+/// incremental-compile failure) is reported via `eprintln!` and then fails
+/// the suite -- no "rollout skip" leniency; the list now names exactly the
+/// models the wasm backend is expected to handle.
 ///
-/// Heavy models (`#[ignore]`) are reserved for the discovery/arrayed phases
-/// (e.g. C-LEARN, World3); the scalar Phase 1 corpus runs well under the
-/// per-test budget so none of these need ignoring today (see
+/// The redundant `lowered >= MIN_LTM_MODELS_LOWERED` floor check is kept
+/// alongside the per-model assertion so a *missing* entry (someone deletes
+/// a model from the list without bumping the const) still fails the gate,
+/// not just an `Unsupported` from a listed entry.
+///
+/// Heavy models (`#[ignore]`) are reserved for the discovery / large-model
+/// phases (e.g. C-LEARN, World3); the listed corpus runs well under the
+/// per-test budget so none need ignoring (see
 /// `tests/ltm_discovery_large_models.rs` for the `#[ignore]` precedent).
 #[test]
 fn ltm_corpus_floor_gate() {
     let mut lowered = 0usize;
-    let mut skipped: Vec<(&str, String)> = Vec::new();
+    let mut failures: Vec<(&str, String)> = Vec::new();
 
-    for &model_rel in LTM_CORPUS {
+    for &model_rel in EXPECTED_SUPPORTED_LTM_MODELS {
         let project = load(model_rel);
         match wasm_results_for_ltm(&project, "main") {
             Ok(_) => {
                 lowered += 1;
             }
             Err(msg) => {
-                skipped.push((model_rel, msg));
+                failures.push((model_rel, msg));
             }
         }
     }
 
-    for (model, msg) in &skipped {
+    for (model, msg) in &failures {
         eprintln!("ltm_corpus_floor_gate: {model} did not lower to wasm: {msg}");
     }
 
     assert!(
+        failures.is_empty(),
+        "LTM-on-wasm regression: {} of {} expected-supported models failed to lower: {failures:?}",
+        failures.len(),
+        EXPECTED_SUPPORTED_LTM_MODELS.len()
+    );
+    assert!(
         lowered >= MIN_LTM_MODELS_LOWERED,
-        "LTM-on-wasm corpus regression: only {lowered} of {} models lowered, \
-         floor is {MIN_LTM_MODELS_LOWERED}. Skipped: {skipped:?}",
-        LTM_CORPUS.len()
+        "LTM-on-wasm corpus shrank: only {lowered} of {} expected-supported models lowered, \
+         floor is {MIN_LTM_MODELS_LOWERED}",
+        EXPECTED_SUPPORTED_LTM_MODELS.len()
     );
 }
