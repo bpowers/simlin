@@ -15,6 +15,7 @@ import {
   readOutUsize,
   readFloat64Array,
   malloc,
+  copyToWasm,
 } from './memory';
 import {
   SimlinModelPtr,
@@ -99,6 +100,65 @@ export function simlin_analyze_get_links(sim: SimlinSimPtr): SimlinLinksPtr {
 
     return result;
   } finally {
+    free(outErrPtr);
+  }
+}
+
+/**
+ * Analyze a wasm-produced result slab and get links with LTM scores -- the
+ * from-wasm twin of `simlin_analyze_get_links` for the per-model wasm blob
+ * backend. The blob runs the LTM-instrumented model and accumulates the
+ * per-step LTM series into its result slab; libsimlin re-uses the VM's
+ * analysis pipeline by treating those serialized bytes (slab + layout) as
+ * input, so no analysis logic is duplicated between backends.
+ *
+ * The caller-owned `slab` and `layoutBytes` are copied into the libsimlin
+ * singleton's linear memory for the FFI call (libsimlin reads but does not
+ * retain them); the copies are freed on success and on error.
+ *
+ * @param model Model pointer (caller-retained for the lifetime of the call).
+ * @param slab The blob's complete result slab (step-major f64, exactly
+ *   `nSlots * nChunks * 8` bytes).
+ * @param layoutBytes The serialized WasmLayout returned from
+ *   `simlin_model_compile_to_wasm` -- libsimlin deserializes it to recover the
+ *   variable-name -> slot-offset map needed to map slab columns to the model.
+ * @returns A `SimlinLinks` pointer (caller frees with `simlin_free_links`).
+ */
+export function simlin_analyze_links_from_wasm_results(
+  model: SimlinModelPtr,
+  slab: Uint8Array,
+  layoutBytes: Uint8Array,
+): SimlinLinksPtr {
+  const exports = getExports();
+  const fn = exports.simlin_analyze_links_from_wasm_results as (
+    model: number,
+    slabPtr: number,
+    slabLen: number,
+    layoutPtr: number,
+    layoutLen: number,
+    outErr: number,
+  ) => number;
+
+  const slabPtr = copyToWasm(slab);
+  const layoutPtr = copyToWasm(layoutBytes);
+  const outErrPtr = allocOutPtr();
+
+  try {
+    const result = fn(model, slabPtr, slab.length, layoutPtr, layoutBytes.length, outErrPtr);
+    const errPtr = readOutPtr(outErrPtr);
+
+    if (errPtr !== 0) {
+      const code = simlin_error_get_code(errPtr);
+      const message = simlin_error_get_message(errPtr) ?? 'Unknown error';
+      const details = readAllErrorDetails(errPtr);
+      simlin_error_free(errPtr);
+      throw new SimlinError(message, code, details);
+    }
+
+    return result;
+  } finally {
+    free(slabPtr);
+    free(layoutPtr);
     free(outErrPtr);
   }
 }

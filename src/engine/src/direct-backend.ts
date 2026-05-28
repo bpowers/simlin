@@ -56,6 +56,7 @@ import {
 import {
   simlin_analyze_get_loops,
   simlin_analyze_get_links,
+  simlin_analyze_links_from_wasm_results,
   readLoops,
   readLinks,
   simlin_free_loops,
@@ -700,8 +701,18 @@ export class DirectBackend implements EngineBackend {
   simGetLinks(handle: SimHandle): Link[] {
     const entry = this.getEntry(handle as number, 'sim');
     if (entry.engine === 'wasm') {
-      // LTM link scores are a VM-only analysis; a wasm sim never enables LTM.
-      throw new Error("getLinks is not supported on the wasm engine; use engine:'vm'");
+      // Marshal the blob's complete result slab + the layout bytes back to
+      // libsimlin's from-wasm analysis FFI, which deserializes the layout,
+      // maps the slab to the model's LTM series, and computes link scores
+      // through the SAME analysis pipeline the VM path uses (no logic is
+      // duplicated between backends). `.slice()` is load-bearing: the wasm
+      // memory view is backed by the live blob memory, which may grow and
+      // detach the view between the read and the copyToWasm that follows;
+      // slice forces a fresh, decoupled Uint8Array.
+      const { resultsOffset, nSlots, nChunks } = entry.wasmLayout!;
+      const slabBytes = new Uint8Array(entry.wasmExports!.memory.buffer, resultsOffset, nSlots * nChunks * 8).slice();
+      const linksPtr = simlin_analyze_links_from_wasm_results(entry.wasmModelPtr!, slabBytes, entry.wasmLayoutBytes!);
+      return convertLinks(linksPtr);
     }
     const linksPtr = simlin_analyze_get_links(entry.ptr);
     return convertLinks(linksPtr);

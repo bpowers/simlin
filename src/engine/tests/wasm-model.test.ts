@@ -92,25 +92,6 @@ describe('Model/Sim engine selection (public API)', () => {
       await wasmSim.dispose();
     });
 
-    it('actually drives the wasm backend, not the VM, for engine:wasm', async () => {
-      // The behavioral discriminator at the facade level: a wasm-backed Sim
-      // rejects getLinks ("not supported on the wasm engine"), whereas the VM
-      // and default sims return a links array. This fails if engine selection
-      // is silently dropped and a VM sim is created instead.
-      const model = await project.mainModel();
-      const wasmSim = await model.simulate({}, { engine: 'wasm' });
-      const vmSim = await model.simulate({}, { engine: 'vm' });
-      const defaultSim = await model.simulate();
-
-      await expect(wasmSim.getLinks()).rejects.toThrow(/not supported on the wasm engine/i);
-      await expect(vmSim.getLinks()).resolves.toEqual(expect.any(Array));
-      await expect(defaultSim.getLinks()).resolves.toEqual(expect.any(Array));
-
-      await wasmSim.dispose();
-      await vmSim.dispose();
-      await defaultSim.dispose();
-    });
-
     it("simulate() and simulate({engine:'vm'}) agree (both VM-backed)", async () => {
       const model = await project.mainModel();
       const defaultSim = await model.simulate();

@@ -807,15 +807,6 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
     });
   });
 
-  describe('AC6.1: getLinks rejected on the wasm engine', () => {
-    it('getLinks on a wasm sim throws a clear error', () => {
-      const { vm, wasm, dispose } = openPair();
-      // The VM path returns links (empty with LTM off); the wasm path rejects.
-      expect(() => backend.simGetLinks(vm)).not.toThrow();
-      expect(() => backend.simGetLinks(wasm)).toThrow(/not supported on the wasm engine/i);
-      dispose();
-    });
-  });
 });
 
 // A statically-arrayed model the wasm backend supports. `source` is dimensioned
