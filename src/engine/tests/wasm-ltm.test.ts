@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { Project, Sim, Run, configureWasm, ready, resetWasm } from '../src';
-import { expectScoresClose, linkKey, linksByKey } from './ltm-test-helpers';
+import { expectScoresClose, linksByKey } from './ltm-test-helpers';
 
 async function loadWasm(): Promise<void> {
   const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');

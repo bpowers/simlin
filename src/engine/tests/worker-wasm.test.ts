@@ -20,7 +20,7 @@ import { WorkerServer } from '../src/worker-server';
 import { DirectBackend } from '../src/direct-backend';
 import type { WorkerRequest, WorkerResponse } from '../src/worker-protocol';
 import type { ModelHandle } from '../src/backend';
-import { expectScoresClose, linkKey, linksByKey } from './ltm-test-helpers';
+import { expectScoresClose, linksByKey } from './ltm-test-helpers';
 
 const wasmPath = join(__dirname, '..', 'core', 'libsimlin.wasm');
 
