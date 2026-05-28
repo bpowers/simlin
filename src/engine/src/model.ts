@@ -419,9 +419,9 @@ export class Model {
    * Create low-level simulation for step-by-step execution.
    * @param overrides Variable value overrides
    * @param options Simulation options. `engine` selects the execution backend
-   *   ('vm', the default, or 'wasm' for fast repeated re-runs). The
-   *   enableLtm+wasm rejection is enforced authoritatively in the backend's
-   *   simNew (covering the worker path too); this method only forwards.
+   *   ('vm', the default, or 'wasm' for fast repeated re-runs). Both engines
+   *   support `enableLtm`; on `'wasm'`, link scores are produced via the
+   *   from-wasm analysis FFI after the run completes.
    * @returns Sim instance for step-by-step execution
    */
   async simulate(
@@ -443,8 +443,9 @@ export class Model {
    *
    * @param overrides Override values for any model variables
    * @param options Run options. `engine` selects the execution backend ('vm',
-   *   the default, or 'wasm'); a wasm run never enables LTM, so its Run carries
-   *   empty links.
+   *   the default, or 'wasm'). `analyzeLtm: true` works on both engines; when
+   *   `analyzeLtm` is false (the default), `Run.links` is empty regardless of
+   *   engine.
    * @returns Run object with results and analysis
    */
   async run(

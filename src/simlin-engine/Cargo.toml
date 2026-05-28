@@ -87,6 +87,10 @@ name = "simulate_ltm"
 required-features = ["file_io"]
 
 [[test]]
+name = "simulate_ltm_wasm"
+required-features = ["file_io"]
+
+[[test]]
 name = "simulate_systems"
 required-features = ["file_io"]
 

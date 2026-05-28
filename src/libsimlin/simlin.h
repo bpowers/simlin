@@ -192,11 +192,111 @@ void simlin_free_loops(SimlinLoops *loops);
 // - The returned SimlinLinks must be freed with simlin_free_links
 SimlinLinks *simlin_analyze_get_links(SimlinSim *sim, SimlinError **out_error);
 
+// Gets all causal links in a model with LTM link-score series derived from
+// a wasm-produced result slab.
+//
+// This is the wasm-backend twin of `simlin_analyze_get_links`: instead of
+// reading the `Results` off a `SimlinSim`'s `SimState`, it rebuilds them
+// from a `(slab, WasmLayout)` pair produced by running the blob returned
+// from `simlin_model_compile_to_wasm(model, ltm_enabled=true, ..)`.  Both
+// FFI functions funnel through the same `analyze_links_core` so the link
+// set and per-link score series agree to within the underlying VM/wasm
+// numeric tolerance.
+//
+// The slab is the host-extracted bytes starting at the blob's
+// `results_offset` (the f64-array image of the results region, little-endian).
+// Its byte length encodes how many rows the blob has actually written:
+// `saved_steps * n_slots * 8`, where `saved_steps` is the live `G_SAVED`
+// counter the blob exposes (which equals `n_chunks` after a full run but is
+// 0 for a fresh or just-reset sim and `< n_chunks` mid-run via `run_to`).
+// Passing the slab at its saved length -- not its `n_chunks * n_slots * 8`
+// capacity -- keeps the analytic core from seeing uninit/stale tail rows
+// and mirrors what `simlin_sim_get_series` already does on the VM side.
+// The layout buffer is the bytes returned in `simlin_model_compile_to_wasm`'s
+// `out_layout`.  Both buffers are owned by the caller and only read; this
+// function copies them as needed.
+//
+// Because the links analysis is structure-driven (the unique `(from, to)`
+// edges come from `model_causal_edges`, which has no LTM dependency), this
+// function does not need to toggle `ltm_enabled` on the salsa db -- it
+// only needs the wasm-produced score columns from the slab.  The
+// `recompute_ltm_snapshots` dance happens only in the rel-loop-score
+// counterpart.
+//
+// # Safety
+// - `model` must be a valid pointer to a `SimlinModel`.
+// - `slab_ptr` must be a non-NULL pointer to `slab_len` valid bytes; the
+//   buffer is read but not retained.
+// - `layout_ptr` must be a non-NULL pointer to `layout_len` valid bytes
+//   produced by `WasmLayout::serialize` (i.e. the `out_layout` buffer of
+//   `simlin_model_compile_to_wasm`).
+// - The returned `SimlinLinks` must be freed with `simlin_free_links`.
+SimlinLinks *simlin_analyze_links_from_wasm_results(SimlinModel *model,
+                                                    const uint8_t *slab_ptr,
+                                                    uintptr_t slab_len,
+                                                    const uint8_t *layout_ptr,
+                                                    uintptr_t layout_len,
+                                                    SimlinError **out_error);
+
 // Frees a SimlinLinks structure
 //
 // # Safety
 // - `links` must be valid pointer returned by simlin_analyze_get_links
 void simlin_free_links(SimlinLinks *links);
+
+// Compute a loop's relative-loop-score series from a wasm-produced result
+// slab.
+//
+// The wasm-backend twin of `simlin_analyze_get_relative_loop_score`.  Both
+// FFIs funnel through `rel_loop_score_series` (extracted in Subcomponent A)
+// over an `engine::Results` and the `(loop_partitions, loop_element_index)`
+// snapshots, so the per-loop time series they produce cannot diverge by
+// construction.
+//
+// Unlike the links twin (task 4), the rel-loop-score path needs the
+// snapshots that only `model_ltm_variables` produces when the
+// `SourceProject` salsa input has `ltm_enabled = true`.  This function
+// runs the salsa queries through `recompute_ltm_snapshots`, which uses
+// an `LtmEnabledGuard` to set the flag for the duration of the queries
+// and unconditionally restore it on guard drop.  The reset is mandatory:
+// the flag lives on a shared `SourceProject` input consumed by every
+// other operation on the project, and leaking it would silently change
+// the next consumer's analysis.
+//
+// The `loop_id` is parsed in the FFI shell (the engine-side core takes
+// a base id + `(element_index, n_slots)` pair); a bare id on a scalar
+// loop resolves to slot 0, a bare id on an arrayed loop resolves to the
+// argmax-abs aggregator across all slots, and a subscripted id
+// (`r1[Boston]`, `r1[Boston, 2]`) resolves to a specific slot via
+// `LoopElementIndex::resolve`.  See `resolve_loop_query` for the
+// resolution shared with the VM FFI.
+//
+// The series is copied into `results_ptr` clamped to `len` entries; the
+// number written is reported through `out_written`, matching the out-buffer
+// semantics of `simlin_analyze_get_relative_loop_score`.  The number written
+// is bounded by the slab's row count -- callers should pass the saved-rows
+// slab (`saved_steps * n_slots * 8` bytes), not the blob's full capacity,
+// for the same reason as the links twin above.
+//
+// # Safety
+// - `model` must be a valid pointer to a `SimlinModel`.
+// - `slab_ptr` / `layout_ptr` are the byte buffers produced by the wasm
+//   blob's results region and `simlin_model_compile_to_wasm`'s `out_layout`,
+//   respectively; both are read but not retained.
+// - `loop_id` must be a valid null-terminated C string.
+// - `results_ptr` must point to a writable array of at least `len` doubles.
+// - `out_written` must be a writable `*mut usize`.
+// - `out_error` may be null or a writable `**mut SimlinError`.
+void simlin_analyze_rel_loop_score_from_wasm_results(SimlinModel *model,
+                                                     const uint8_t *slab_ptr,
+                                                     uintptr_t slab_len,
+                                                     const uint8_t *layout_ptr,
+                                                     uintptr_t layout_len,
+                                                     const char *loop_id,
+                                                     double *results_ptr,
+                                                     uintptr_t len,
+                                                     uintptr_t *out_written,
+                                                     SimlinError **out_error);
 
 // Gets the relative loop score time series for a specific loop
 //
@@ -372,12 +472,19 @@ void simlin_free_string(char *s);
 // compile or codegen failure stores a `SimlinError` (never panics across the
 // boundary) and leaves both output buffers NULL.
 //
+// `ltm_enabled` and `ltm_discovery_mode` flip the same flags
+// `simlin_project_enable_ltm` sets on a `SimlinProject`, but locally for this
+// compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
+// synthetic series iff `ltm_enabled` is true.
+//
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
 // - `out_wasm`, `out_wasm_len`, `out_layout`, and `out_layout_len` must be
 //   valid, non-null pointers
 // - `out_error` may be null
 void simlin_model_compile_to_wasm(SimlinModel *model,
+                                  bool ltm_enabled,
+                                  bool ltm_discovery_mode,
                                   uint8_t **out_wasm,
                                   uintptr_t *out_wasm_len,
                                   uint8_t **out_layout,

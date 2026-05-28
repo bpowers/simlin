@@ -20,9 +20,47 @@
 use checked::Store;
 use float_cmp::approx_eq;
 use simlin_engine::common::{Canonical, Ident};
+use simlin_engine::datamodel;
+use simlin_engine::db::LtmSyntheticVar;
+use simlin_engine::ltm::CausalGraph;
 use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_simulation};
-use simlin_engine::{Results, SimSpecs};
+use simlin_engine::{Results, SimSpecs, Vm};
 use wasm::validate;
+
+/// Tolerance for `$⁚ltm⁚*` series-parity assertions between the wasm backend
+/// and the bytecode VM. The synthetic LTM equations are emitted by the same
+/// salsa pipeline and lowered by the same per-opcode emitter into both
+/// backends, so the columns should agree to floating-point round-off (the
+/// remaining difference is only the integration loop's accumulation order,
+/// which is identical here). This is far tighter than the 0.05 rel-loop-score
+/// tolerance used in `simulate_ltm.rs` (which compares against an external
+/// oracle whose intermediate algebra differs). A model that needs looser
+/// should document why inline rather than weakening the constant.
+///
+/// **Tolerance shape**: relative-or-absolute — `max(1.0, |vm|.max(|wasm|)) * tol`.
+/// The absolute floor (1.0) handles values near zero where a pure relative
+/// epsilon collapses; the relative branch handles large magnitudes where the
+/// absolute floor would be too strict.
+///
+/// **Loop scores stay at the same tight value**: a loop score is the product
+/// of its signed link scores. For corpus models like `arms_race_3party` the
+/// chain length is a small constant; the underlying `$⁚ltm⁚link_score⁚*`
+/// series already agree within this tolerance per `assert_ltm_slabs_match`,
+/// so the chained product stays at the same relative scale. Both backends
+/// feed the same salsa-compiled opcode sequence into `discover_loops_with_graph`,
+/// so per-operation rounding is bit-identical and there is no compounding
+/// divergence.
+///
+/// **Heavy-twin note** (`#[ignore]`d C-LEARN and World3): the wasm backend
+/// open-codes the transcendentals `exp`/`ln`/`sin`/`cos`/`tan`/`atan`/
+/// `asin`/`acos`/`log10`/`pow` in `src/simlin-engine/src/wasmgen/math.rs`,
+/// which can differ from Rust libm by a few ULP. For a link-score equation
+/// that routes through a transcendental, the propagation through a chain of
+/// `k` links stays well within the `1e-6` relative floor; the heavy twins
+/// are where this would surface in practice and they are `#[ignore]`d, so the
+/// risk is contained.
+#[allow(dead_code)]
+pub const LTM_SERIES_TOLERANCE: f64 = 1e-6;
 
 /// Columns that are vendor-specific or otherwise not important for
 /// simulation correctness.
@@ -63,6 +101,7 @@ fn is_excluded_var(ident: &str, excluded: &[&str]) -> bool {
 /// (modules, internal flows, etc.) don't cause failures. Uses absolute
 /// epsilon of 2e-3 for non-Vensim data, with relative comparison for
 /// Vensim-sourced data.
+#[allow(dead_code)]
 pub fn ensure_results(expected: &Results, results: &Results) {
     ensure_results_excluding(expected, results, &[]);
 }
@@ -244,6 +283,154 @@ pub fn wasm_results_for(
     Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
 }
 
+/// LTM-enabled VM oracle: compile `model_name` of `datamodel` with
+/// `ltm_enabled = true` on its freshly-synced salsa `SourceProject`, run it
+/// to completion in the bytecode VM, and return the resulting [`Results`].
+///
+/// Mirrors `simulate_ltm.rs::compile_ltm_incremental_with_partitions` but
+/// stops at `Vm::into_results` (no `loop_partitions` book-keeping -- the
+/// caller compares the `$⁚ltm⁚*` slot series directly, not the post-sim
+/// relative loop scores). The `db` is owned by this function, so the flag
+/// flip never leaks (same rationale as `wasmgen::compile_datamodel_to_artifact`).
+///
+/// Imperative Shell: drives the salsa compile pipeline and the VM.
+#[allow(dead_code)]
+pub fn vm_results_for_ltm(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Results {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, set_project_ltm_enabled,
+        sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, model_name)
+        .expect("LTM-enabled incremental compile should succeed for the LTM corpus");
+    let mut vm = Vm::new(compiled).expect("Vm::new should succeed on a salsa-compiled model");
+    vm.run_to_end()
+        .expect("Vm::run_to_end should succeed on the LTM corpus");
+    vm.into_results()
+}
+
+/// LTM-enabled wasm peer of [`vm_results_for_ltm`]: compile `model_name` of
+/// `datamodel` with `ltm_enabled = true`, lower to wasm, run under the DLR-FT
+/// interpreter, and reshape the slab into a [`Results`]. Returns
+/// `Err(message)` on wasm-codegen `Unsupported` or an incremental-compile
+/// failure, so the caller (the ratcheting floor gate) can classify a model
+/// as "did not lower" vs. "lowered but wrong" -- the latter would have
+/// produced an `Ok` and then panicked in [`assert_ltm_slabs_match`].
+///
+/// Mirrors the body of [`wasm_results_for`] with `set_project_ltm_enabled`
+/// inserted before `compile_project_incremental`; the reshape goes through
+/// the private `wasm_results_from_slab` (reachable from this sibling `pub fn`
+/// in the same module).
+///
+/// Imperative Shell: drives the salsa compile pipeline and the wasm
+/// interpreter, delegating the reshape to the pure [`wasm_results_from_slab`].
+#[allow(dead_code)]
+pub fn wasm_results_for_ltm(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Result<Results, String> {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, set_project_ltm_enabled,
+        sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let sim = compile_project_incremental(&db, sync.project, model_name)
+        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+
+    let artifact = match compile_simulation(&sim) {
+        Ok(artifact) => artifact,
+        Err(WasmGenError::Unsupported(msg)) => return Err(msg),
+    };
+
+    let slab = run_wasm_results(&artifact.wasm, &artifact.layout);
+    let specs = SimSpecs::from(&datamodel.sim_specs);
+    Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
+}
+
+/// Whole-slab equality assertion for two [`Results`] built from the *same*
+/// `CompiledSimulation` (one via the VM, one via the wasm backend). Asserts
+/// shape (`step_size`, `step_count`) first, then compares the entire data
+/// slab element-wise within [`LTM_SERIES_TOLERANCE`] using a relative-or-
+/// absolute tolerance matching the style of [`ensure_results`].
+///
+/// **Why a whole-slab compare and not a per-`$⁚ltm⁚*`-column scan.** Both
+/// `Results` share their `var_offsets` (it is a verbatim copy of
+/// `CompiledSimulation.offsets`), so slot `i` denotes the identical
+/// variable+element on both sides. A full-slab compare therefore covers
+/// every `$⁚ltm⁚link_score⁚*` and `$⁚ltm⁚loop_score⁚*` column *including
+/// each element of an arrayed/cross-element LTM variable* (whose elements
+/// occupy contiguous slots), with no per-variable slot-span bookkeeping --
+/// and it incidentally verifies the rest of the model agrees too, which
+/// keeps the gate honest.
+///
+/// This is the single comparator the arrayed LTM phase (Phase 4) reuses to
+/// carry wasm-ltm.AC2.4 without modification.
+///
+/// Pure: no I/O.
+#[allow(dead_code)]
+pub fn assert_ltm_slabs_match(vm: &Results, wasm: &Results) {
+    assert_eq!(
+        vm.step_size, wasm.step_size,
+        "LTM slab step_size mismatch: vm={} wasm={}",
+        vm.step_size, wasm.step_size
+    );
+    assert_eq!(
+        vm.step_count, wasm.step_count,
+        "LTM slab step_count mismatch: vm={} wasm={}",
+        vm.step_count, wasm.step_count
+    );
+    let n = vm.step_count * vm.step_size;
+    assert!(
+        vm.data.len() >= n && wasm.data.len() >= n,
+        "LTM slab data too short: vm.len={} wasm.len={} expected>={n}",
+        vm.data.len(),
+        wasm.data.len()
+    );
+    for i in 0..n {
+        let v = vm.data[i];
+        let w = wasm.data[i];
+        // Relative-or-absolute tolerance: the absolute floor catches values
+        // near zero (where a relative epsilon collapses); the relative
+        // branch catches large magnitudes (where the absolute floor would
+        // be too strict). Both sides are *Simlin* runs, so we never need
+        // the Vensim ~6-sig-fig allowance.
+        if v.is_nan() && w.is_nan() {
+            // Both produced NaN (e.g. an out-of-range vector read on a
+            // step where the LTM source is :NA:): treat as equal, just
+            // like `ensure_results_excluding`'s around-zero branch treats
+            // dual zeros as equal.
+            continue;
+        }
+        let max_abs = v.abs().max(w.abs()).max(1.0);
+        let epsilon = LTM_SERIES_TOLERANCE * max_abs;
+        if !approx_eq!(f64, v, w, epsilon = epsilon) {
+            let step = i / vm.step_size;
+            let slot = i % vm.step_size;
+            // Recover the canonical name of the diverging slot for a
+            // useful failure message (linear scan over `offsets`; this
+            // only runs on a panic path so the cost is irrelevant).
+            let name = vm
+                .offsets
+                .iter()
+                .find_map(|(k, &off)| if off == slot { Some(k.as_str()) } else { None })
+                .unwrap_or("<unknown>");
+            panic!(
+                "LTM slab mismatch at step {step} slot {slot} ({name}): \
+                 vm={v} wasm={w} (epsilon={epsilon})"
+            );
+        }
+    }
+}
+
 /// Resumable-ABI peer of [`wasm_results_for`]: compile `model_name` of
 /// `datamodel` to wasm, then drive the blob through the segmented
 /// `run_initials`-then-per-target-`run_to` path (rather than the single-shot
@@ -405,4 +592,139 @@ pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f
             })
             .collect()
     })
+}
+
+/// Discovery-mode peer of [`wasm_results_for_ltm`]: compile `model_name`
+/// of `datamodel` with **both** `ltm_enabled = true` and
+/// `ltm_discovery_mode = true`, lower to wasm, run under the DLR-FT
+/// interpreter, and reshape the slab into a [`Results`]. Returns
+/// `Err(message)` on wasm-codegen `Unsupported` or an incremental-compile
+/// failure.
+///
+/// Discovery mode causes `db_ltm::model_ltm_variables` to emit a
+/// `$⁚ltm⁚link_score⁚{from}→{to}` synthetic for **every** causal edge
+/// (not just loop-participating ones), so the reconstructed `Results`
+/// can drive `ltm_finding::discover_loops_with_graph` end-to-end. The
+/// reconstructed `Results` carries `specs` populated from the
+/// datamodel, which `discover_loops_with_graph` relies on for each
+/// `FoundLoop.scores` time axis (`results.specs.start + save_step * step`).
+///
+/// Imperative Shell: drives the salsa compile pipeline and the wasm
+/// interpreter, delegating the reshape to the pure [`wasm_results_from_slab`].
+#[allow(dead_code)]
+pub fn wasm_results_for_ltm_discovery(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> Result<Results, String> {
+    use simlin_engine::db::{
+        SimlinDb, compile_project_incremental, set_project_ltm_discovery_mode,
+        set_project_ltm_enabled, sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let sim = compile_project_incremental(&db, sync.project, model_name)
+        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+
+    let artifact = match compile_simulation(&sim) {
+        Ok(artifact) => artifact,
+        Err(WasmGenError::Unsupported(msg)) => return Err(msg),
+    };
+
+    let slab = run_wasm_results(&artifact.wasm, &artifact.layout);
+    let specs = SimSpecs::from(&datamodel.sim_specs);
+    Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
+}
+
+/// Owned, `'static` inputs for the element-level LTM discovery
+/// production path. `ltm_finding::discover_loops_with_graph` borrows all
+/// of these by reference; bundling them as owned values lets a caller
+/// thread the same structural inputs through both the VM `Results` (here)
+/// and a wasm-backed `Results` peer for parity testing, or move the
+/// whole bundle into a worker-thread closure (the existing
+/// `ltm_discovery_large_models.rs` use case).
+///
+/// All fields are owned data, so the returned value is naturally
+/// `'static` (no borrows) -- no `Box::leak` is needed to produce it.
+///
+/// `vm_results` is the LTM-discovery-mode VM oracle; `causal_graph`,
+/// `stocks`, `ltm_vars`, and `dims` are the four backend-independent
+/// structural inputs `discover_loops_with_graph` accepts in production
+/// (assembled exactly as `analysis.rs::run_ltm_pipeline` does).
+#[allow(dead_code)]
+pub struct LtmDiscoveryInputs {
+    pub vm_results: Results,
+    pub causal_graph: CausalGraph,
+    pub stocks: Vec<Ident<Canonical>>,
+    pub ltm_vars: Vec<LtmSyntheticVar>,
+    pub dims: Vec<datamodel::Dimension>,
+}
+
+/// Compile (LTM discovery mode), simulate via the bytecode VM, and
+/// assemble the element-level discovery inputs for an arbitrary
+/// datamodel project.
+///
+/// Mirrors the production discovery path in
+/// `analysis.rs::run_ltm_pipeline`: the element-level `CausalGraph` (via
+/// `model_element_causal_edges` + `causal_graph_from_element_edges`),
+/// the element-level `stocks` list, the `LtmSyntheticVar` metadata, and
+/// the project dimensions -- the four arguments
+/// `ltm_finding::discover_loops_with_graph` receives in production. The
+/// salsa-borrowed values are cloned into owned ones so the bundle is
+/// `'static`.
+///
+/// Single shared builder used by both the VM-side
+/// `ltm_discovery_large_models.rs` test bundle and the wasm-vs-VM parity
+/// harness in `simulate_ltm_wasm.rs`: keeping the structural-input
+/// assembly in exactly one place satisfies the anti-divergence
+/// principle at the harness level so the parity check truly compares
+/// identical inputs.
+///
+/// Imperative Shell: drives the salsa compile pipeline and the VM.
+#[allow(dead_code)]
+pub fn ltm_discovery_inputs(
+    datamodel: &simlin_engine::datamodel::Project,
+    model_name: &str,
+) -> LtmDiscoveryInputs {
+    use simlin_engine::db::{
+        SimlinDb, causal_graph_from_element_edges, compile_project_incremental,
+        model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
+        set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, model_name)
+        .expect("project should compile with LTM discovery enabled");
+
+    let mut vm = Vm::new(compiled).expect("LTM VM construction should succeed");
+    vm.run_to_end()
+        .expect("LTM simulation should run to completion");
+    let vm_results = vm.into_results();
+
+    // Assemble the element-level discovery inputs exactly as the
+    // production path does -- see `analysis.rs::run_ltm_pipeline`. These
+    // four salsa-tracked results are `returns(ref)` (they borrow `db`);
+    // clone them into owned values so the bundle outlives `db`.
+    let source_model = sync.models[model_name].source_model;
+    let element_edges = model_element_causal_edges(&db, source_model, sync.project);
+    let causal_graph = causal_graph_from_element_edges(element_edges);
+    let stocks: Vec<Ident<Canonical>> =
+        element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project)
+        .vars
+        .clone();
+    let dims = project_datamodel_dims(&db, sync.project).clone();
+
+    LtmDiscoveryInputs {
+        vm_results,
+        causal_graph,
+        stocks,
+        ltm_vars,
+        dims,
+    }
 }

@@ -120,24 +120,6 @@ describe('DirectBackend wasm engine: sim creation and disposal (Task 3)', () => 
     });
   });
 
-  describe('AC6.2: enableLtm rejected on wasm engine', () => {
-    it('throws a clear error and creates no sim', () => {
-      const projectHandle = backend.projectOpenXmile(loadTeacupXmile());
-      const modelHandle = backend.projectGetModel(projectHandle, null);
-      expect(() => backend.simNew(modelHandle, true, 'wasm')).toThrow(/LTM/i);
-      backend.modelDispose(modelHandle);
-      backend.projectDispose(projectHandle);
-    });
-
-    it('rejects enableLtm before attempting any compile (clear message)', () => {
-      const projectHandle = backend.projectOpenXmile(loadTeacupXmile());
-      const modelHandle = backend.projectGetModel(projectHandle, null);
-      expect(() => backend.simNew(modelHandle, true, 'wasm')).toThrow(/not supported on the wasm engine/i);
-      backend.modelDispose(modelHandle);
-      backend.projectDispose(projectHandle);
-    });
-  });
-
   describe('AC7.1/AC7.2: unsupported model errors on wasm, runs on vm', () => {
     it('throws on wasm with no VM fallback', () => {
       const projectHandle = backend.projectOpenXmile(new TextEncoder().encode(WASM_UNSUPPORTED_XMILE));
@@ -825,15 +807,6 @@ describe('DirectBackend wasm engine: per-op vm/wasm parity (Task 4)', () => {
     });
   });
 
-  describe('AC6.1: getLinks rejected on the wasm engine', () => {
-    it('getLinks on a wasm sim throws a clear error', () => {
-      const { vm, wasm, dispose } = openPair();
-      // The VM path returns links (empty with LTM off); the wasm path rejects.
-      expect(() => backend.simGetLinks(vm)).not.toThrow();
-      expect(() => backend.simGetLinks(wasm)).toThrow(/not supported on the wasm engine/i);
-      dispose();
-    });
-  });
 });
 
 // A statically-arrayed model the wasm backend supports. `source` is dimensioned

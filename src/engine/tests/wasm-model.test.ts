@@ -92,25 +92,6 @@ describe('Model/Sim engine selection (public API)', () => {
       await wasmSim.dispose();
     });
 
-    it('actually drives the wasm backend, not the VM, for engine:wasm', async () => {
-      // The behavioral discriminator at the facade level: a wasm-backed Sim
-      // rejects getLinks ("not supported on the wasm engine"), whereas the VM
-      // and default sims return a links array. This fails if engine selection
-      // is silently dropped and a VM sim is created instead.
-      const model = await project.mainModel();
-      const wasmSim = await model.simulate({}, { engine: 'wasm' });
-      const vmSim = await model.simulate({}, { engine: 'vm' });
-      const defaultSim = await model.simulate();
-
-      await expect(wasmSim.getLinks()).rejects.toThrow(/not supported on the wasm engine/i);
-      await expect(vmSim.getLinks()).resolves.toEqual(expect.any(Array));
-      await expect(defaultSim.getLinks()).resolves.toEqual(expect.any(Array));
-
-      await wasmSim.dispose();
-      await vmSim.dispose();
-      await defaultSim.dispose();
-    });
-
     it("simulate() and simulate({engine:'vm'}) agree (both VM-backed)", async () => {
       const model = await project.mainModel();
       const defaultSim = await model.simulate();
@@ -187,23 +168,6 @@ describe('Model/Sim engine selection (public API)', () => {
     });
   });
 
-  describe('AC6.2: enableLtm rejected on the wasm engine through the public facade', () => {
-    it("simulate({enableLtm:true, engine:'wasm'}) rejects with the LTM-not-supported error", async () => {
-      const model = await project.mainModel();
-      // The rejection is enforced authoritatively in DirectBackend.simNew; this
-      // closes the loop that the facade forwards the option (it does not swallow
-      // or default it away) and that the rejection surfaces as a rejected promise.
-      await expect(model.simulate({}, { enableLtm: true, engine: 'wasm' })).rejects.toThrow(
-        /not supported on the wasm engine/i,
-      );
-    });
-
-    it("run({analyzeLtm:true, engine:'wasm'}) rejects the same way (run forwards analyzeLtm)", async () => {
-      const model = await project.mainModel();
-      await expect(model.run({}, { analyzeLtm: true, engine: 'wasm' })).rejects.toThrow(/LTM/i);
-    });
-  });
-
   describe('Sim.reset() reset+reapply-overrides path on a wasm sim (public API)', () => {
     it('setValue(const) -> reset() -> runToEnd reproduces the override result (matches the VM)', async () => {
       const model = await project.mainModel();
@@ -258,7 +222,7 @@ describe('Model/Sim engine selection (public API)', () => {
     });
   });
 
-  describe('AC6.3: run({engine:wasm}) yields a Run with empty links and never calls getLinks', () => {
+  describe('run({engine:wasm}) without analyzeLtm yields a Run with empty links', () => {
     it('resolves to a Run whose links array is empty', async () => {
       const model = await project.mainModel();
       const run = await model.run({}, { engine: 'wasm' });
@@ -267,10 +231,10 @@ describe('Model/Sim engine selection (public API)', () => {
       expect(run.links).toEqual([]);
     });
 
-    it('does not throw despite getLinks being unsupported on the wasm engine', async () => {
+    it('resolves successfully when analyzeLtm is omitted', async () => {
       const model = await project.mainModel();
-      // getRun must not call getLinks() on the wasm sim (which would throw the
-      // "not supported on the wasm engine" error); LTM gating skips it instead.
+      // LTM analysis is opt-in; omitting analyzeLtm must produce a valid Run
+      // with empty links on the wasm engine (the LTM-on path is tested in wasm-ltm.test.ts).
       await expect(model.run({}, { engine: 'wasm' })).resolves.toBeInstanceOf(Run);
     });
   });

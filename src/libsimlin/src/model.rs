@@ -108,6 +108,11 @@ unsafe fn write_bytes_to_ffi_output(
 /// compile or codegen failure stores a `SimlinError` (never panics across the
 /// boundary) and leaves both output buffers NULL.
 ///
+/// `ltm_enabled` and `ltm_discovery_mode` flip the same flags
+/// `simlin_project_enable_ltm` sets on a `SimlinProject`, but locally for this
+/// compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
+/// synthetic series iff `ltm_enabled` is true.
+///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
 /// - `out_wasm`, `out_wasm_len`, `out_layout`, and `out_layout_len` must be
@@ -116,6 +121,8 @@ unsafe fn write_bytes_to_ffi_output(
 #[no_mangle]
 pub unsafe extern "C" fn simlin_model_compile_to_wasm(
     model: *mut SimlinModel,
+    ltm_enabled: bool,
+    ltm_discovery_mode: bool,
     out_wasm: *mut *mut u8,
     out_wasm_len: *mut usize,
     out_layout: *mut *mut u8,
@@ -157,6 +164,8 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
     let artifact = match engine::wasmgen::compile_datamodel_to_artifact(
         &datamodel,
         model_ref.model_name.as_str(),
+        ltm_enabled,
+        ltm_discovery_mode,
     ) {
         Ok(artifact) => artifact,
         Err(err) => {

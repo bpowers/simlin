@@ -28,8 +28,9 @@ change a constant, continue — affecting only the remainder), the blob's ABI is
 Rust with a resumable run interface (`run_to` / `run_initials` / `reset`) mirroring `vm.rs`,
 backed by a persistent step cursor stored in mutable wasm globals. The VM remains the
 correctness oracle throughout: the wasm path is parity-tested against it within the engine's
-existing tolerances. LTM (loop) analysis stays VM-only and raises explicit errors on the
-wasm engine rather than silently falling back. Work is sequenced node-first (the Rust ABI,
+existing tolerances. LTM (loop) analysis is out of scope here and raises explicit errors on the
+wasm engine rather than silently falling back; it was subsequently delivered by the
+[wasm-ltm follow-up](./2026-05-26-wasm-ltm.md). Work is sequenced node-first (the Rust ABI,
 then the TypeScript core and a VM-vs-wasm benchmark), with the browser path requiring only a
 single additive `engine` field on the existing worker message.
 
@@ -95,7 +96,7 @@ model either on the bytecode VM (today's behavior) or on a JIT-compiled wasm blo
    `Float64Array` zero-copy).
 
 ### Out of scope
-- LTM / loop-score analysis over the wasm backend (`getLinks` stays VM-only).
+- LTM / loop-score analysis over the wasm backend (deferred to a follow-up; the wasm path here explicitly errors on LTM rather than silently falling back). Subsequently delivered by the [wasm-ltm follow-up](./2026-05-26-wasm-ltm.md): `getLinks` now reads the wasm blob's LTM slab and runs the shared analytic core, with no protocol or `Sim` API change. The original AC6 rejection contract has been superseded by that plan's parity contract; the historical AC6 wording below is retained as the record of this plan's scope at the time it was implemented.
 - Changing the bytecode VM.
 - The diagram/app interactive scrubbing UX end-to-end (the engine mechanisms here are in
   scope; wiring them into the app's live graphs is a separate effort).
@@ -196,10 +197,12 @@ model either on the bytecode VM (today's behavior) or on a JIT-compiled wasm blo
 - **Euler / RK2 / RK4**: Numerical integration methods (Euler and second-/fourth-order
   Runge-Kutta) the simulation supports; both backends implement all three.
 - **LTM (Loops That Matter)**: The engine's feedback-loop scoring analysis (link/loop
-  scores). It is VM-only here; requesting it on the wasm engine is an explicit error, not a
-  fallback.
+  scores). Out of scope for *this* design (the wasm engine raises explicit errors instead of
+  silently falling back to the VM); delivered by the
+  [wasm-ltm follow-up](./2026-05-26-wasm-ltm.md), which extends the wasm blob to carry the
+  LTM series and runs the shared analytic core from it.
 - **`getLinks` / `Link`**: API for retrieving a model's causal links, optionally annotated
-  with LTM scores. On the wasm engine this throws.
+  with LTM scores. Was VM-only here; the wasm-ltm follow-up made it work over a wasm sim too.
 - **`WasmGenError` / `Unsupported`**: The error the `wasmgen` backend returns for a model
   using a construct it cannot lower (e.g. a true runtime-range subscript, or array unrolling
   beyond the per-function budget). Surfaced to wasm-engine callers instead of silently using

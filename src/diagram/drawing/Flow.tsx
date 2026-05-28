@@ -16,6 +16,7 @@ import { AuxRadius, CloudRadius, FlowArrowheadRadius } from './default';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 import { StockHeight, StockWidth } from './Stock';
+import { jsFormatNumber as ff } from '../render-common';
 
 import styles from './Flow.module.css';
 
@@ -1675,7 +1676,7 @@ export class Flow extends React.PureComponent<FlowProps> {
     const r = this.radius();
 
     return (
-      <g transform={`translate(${cx + 1 - r / 2} ${cy + 1 - r / 2})`}>
+      <g transform={`translate(${ff(cx + 1 - r / 2)} ${ff(cy + 1 - r / 2)})`}>
         <Sparkline series={series} width={r - 2} height={r - 2} />
       </g>
     );
@@ -1739,7 +1740,9 @@ export class Flow extends React.PureComponent<FlowProps> {
         }
       }
       const prefix = j === 0 ? 'M' : 'L';
-      spath += `${prefix}${x},${y}`;
+      // Quantize flow path coordinates -- see `jsFormatNumber` in
+      // `render-common.tsx` for the cross-toolchain SVG parity invariant.
+      spath += `${prefix}${ff(x)},${ff(y)}`;
     }
 
     const cx = element.x;

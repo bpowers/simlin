@@ -691,10 +691,16 @@ mod tests {
         assert!(svg.contains("simlin-arrowhead-link"));
     }
 
-    /// Byte-identical regression guard for the arc factor-out. The expected
-    /// string was captured from the pre-refactor `render_arc` output for this
-    /// exact Arc link; the geometry extraction must not change a single byte
-    /// (the `svg-rendering.test.ts` parity test asserts Rust SVG == TS SVG).
+    /// Byte-identical regression guard for the arc factor-out *and* the
+    /// cross-toolchain portability of emitted SVG coordinates. The expected
+    /// string is the OUTPUT of the coordinate-quantization helper
+    /// `common::js_format_number` (6 decimal places, trailing-zero-trimmed);
+    /// without quantization, 1-ULP f64 differences from compiler or hardware
+    /// variation would change individual bytes (e.g. `273.2050807568877` vs
+    /// `273.20508075688764`) and trip this guard on otherwise-equivalent
+    /// builds. The TypeScript renderer must format coordinates identically so
+    /// the cross-language parity at `src/diagram/tests/svg-rendering.test.ts`
+    /// (`expect(rustSvg).toBe(tsSvg)`) keeps holding.
     #[test]
     fn test_render_arc_svg_byte_identical() {
         let link = view_element::Link {
@@ -708,7 +714,7 @@ mod tests {
         let to = make_aux_ve(200.0, 200.0, "b", 2);
 
         let svg = render_connector(&link, &from, &to, &not_arrayed);
-        let expected = "<g><path d=\"M100,100A273.20508075688764,273.20508075688764 0 0,1 200,200\" class=\"simlin-connector-bg\"></path><path d=\"M100,100A273.20508075688764,273.20508075688764 0 0,1 200,200\" class=\"simlin-connector\"></path><g><path d=\"M199.87072507234473,192.27852897536678L188.62072507234473,196.77852897536678A27,27 0 0,1 188.62072507234473,187.77852897536678z\" class=\"simlin-arrowhead-bg\" transform=\"rotate(58.1118629772876,195.37072507234473,192.27852897536678)\"></path><path d=\"M195.37072507234473,192.27852897536678L189.37072507234473,195.27852897536678A18,18 0 0,1 189.37072507234473,189.27852897536678z\" class=\"simlin-arrowhead-link\" transform=\"rotate(58.1118629772876,195.37072507234473,192.27852897536678)\"></path></g></g>";
+        let expected = "<g><path d=\"M100,100A273.205081,273.205081 0 0,1 200,200\" class=\"simlin-connector-bg\"></path><path d=\"M100,100A273.205081,273.205081 0 0,1 200,200\" class=\"simlin-connector\"></path><g><path d=\"M199.870725,192.278529L188.620725,196.778529A27,27 0 0,1 188.620725,187.778529z\" class=\"simlin-arrowhead-bg\" transform=\"rotate(58.111863,195.370725,192.278529)\"></path><path d=\"M195.370725,192.278529L189.370725,195.278529A18,18 0 0,1 189.370725,189.278529z\" class=\"simlin-arrowhead-link\" transform=\"rotate(58.111863,195.370725,192.278529)\"></path></g></g>";
         assert_eq!(svg, expected);
         assert!(svg.starts_with("<g><path d=\"M100,100A"));
     }

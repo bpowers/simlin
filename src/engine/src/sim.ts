@@ -28,9 +28,6 @@ export class Sim {
   private _overrides: Record<string, number>;
   private _disposed: boolean = false;
   private _enableLtm: boolean;
-  // Which execution backend this sim runs on. Kept private so getRun and
-  // diagnostics can branch on it without widening the public surface.
-  private _engine: SimEngine;
 
   /** @internal Use Sim.create() instead. */
   private constructor(
@@ -38,13 +35,11 @@ export class Sim {
     model: Model,
     overrides: Record<string, number>,
     enableLtm: boolean,
-    engine: SimEngine,
   ) {
     this._handle = handle;
     this._model = model;
     this._overrides = { ...overrides };
     this._enableLtm = enableLtm;
-    this._engine = engine;
   }
 
   /**
@@ -68,7 +63,7 @@ export class Sim {
       await backend.simSetValue(handle, name, value);
     }
 
-    return new Sim(handle, model, overrides, enableLtm, engine);
+    return new Sim(handle, model, overrides, enableLtm);
   }
 
   /** @internal */
@@ -224,14 +219,13 @@ export class Sim {
       results.set(allNames[i], seriesArrays[i]);
     }
 
-    // Fetch LTM link scores only when this sim can actually produce them: LTM
-    // must be enabled, and the wasm engine never supports getLinks (it throws).
-    // The two are correlated -- LTM-on-wasm is rejected at sim creation -- but
-    // reading `_engine` here makes the guard self-evidently safe and keeps
-    // Model.run({engine:'wasm'}) working (empty links, no getLinks call). The
-    // VM path with LTM off also carries empty links. loops() is model-level
-    // (engine-agnostic) and stays unconditional.
-    const wantLinks = this.ltmEnabled && this._engine !== 'wasm';
+    // Fetch LTM link scores only when this sim can actually produce them.
+    // Both the VM and the wasm backends now support getLinks on an LTM sim
+    // (the wasm path reads the blob's results slab and runs the analysis via
+    // the from-series FFI), so the engine kind no longer participates in the
+    // guard -- LTM-off runs on either backend still carry empty links, and
+    // loops() is model-level (engine-agnostic) and stays unconditional.
+    const wantLinks = this.ltmEnabled;
     const [loops, links, stepCount] = await Promise.all([
       this._model.loops(),
       wantLinks ? this.getLinks() : Promise.resolve<readonly Link[]>([]),

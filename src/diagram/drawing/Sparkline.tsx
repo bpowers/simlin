@@ -6,6 +6,7 @@ import * as React from 'react';
 
 import { defined, Series } from '@simlin/core/common';
 import { Dark2 } from '../colors';
+import { jsFormatNumber as f } from '../render-common';
 
 import styles from './Sparkline.module.css';
 
@@ -88,7 +89,9 @@ export class Sparkline extends React.PureComponent<SparklineProps> {
           continue;
         }
         const prefix = i === 0 ? 'M' : 'L';
-        p += `${prefix}${x + (w * (time[i] - xMin)) / xSpan},${y + h - (h * (values[i] - yMin)) / ySpan}`;
+        // Quantize sparkline path coordinates for cross-toolchain SVG parity;
+        // see `jsFormatNumber` in `render-common.tsx`.
+        p += `${prefix}${f(x + (w * (time[i] - xMin)) / xSpan)},${f(y + h - (h * (values[i] - yMin)) / ySpan)}`;
       }
       const style = this.props.series.length === 1 ? undefined : { stroke: colors[i % colors.length] };
       sparklines.push(
@@ -97,7 +100,7 @@ export class Sparkline extends React.PureComponent<SparklineProps> {
       i++;
     }
 
-    this.pAxis = `M${x},${y + h - (h * (0 - yMin)) / ySpan}L${x + w},${y + h - (h * (0 - yMin)) / ySpan}`;
+    this.pAxis = `M${f(x)},${f(y + h - (h * (0 - yMin)) / ySpan)}L${f(x + w)},${f(y + h - (h * (0 - yMin)) / ySpan)}`;
     this.sparklines = sparklines;
     this.cachedSeries = this.props.series;
   }

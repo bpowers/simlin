@@ -59,8 +59,21 @@ pub fn escape_xml_attr(s: &str) -> String {
     result
 }
 
-/// Format a floating point number to match JavaScript's Number.toString() behavior.
-/// Key differences: no trailing .0 for integers, minimal decimal places.
+/// Format a floating point number for emission into an SVG attribute.
+///
+/// Mirrors JavaScript's `Number.toString()` (no trailing `.0` for integers, no
+/// trailing zeros) and additionally **quantizes the value to 6 decimal places**
+/// before formatting. Quantization is what keeps Rust SVG and TypeScript SVG
+/// byte-identical (`src/diagram/tests/svg-rendering.test.ts` and the connector
+/// arc regression guard `diagram::connector::tests::test_render_arc_svg_byte_identical`)
+/// across compiler/hardware variation: 1-ULP f64 differences (e.g.
+/// 273.2050807568877 vs 273.20508075688764) collapse to the same printed
+/// string. Sub-micropixel precision is far above any visible rendering
+/// threshold and well below the 7e-14 ULP at coordinate magnitudes around 300.
+///
+/// The TypeScript helper `jsFormatNumber` in `src/diagram/render-common.tsx`
+/// must mirror this function exactly (same precision, same trimming, same
+/// NaN/Infinity strings, same -0 normalization).
 pub fn js_format_number(n: f64) -> String {
     if n.is_nan() {
         return "NaN".to_string();
@@ -73,12 +86,23 @@ pub fn js_format_number(n: f64) -> String {
         };
     }
 
-    // For integers, JS outputs no decimal point
-    if n == n.trunc() && n.abs() < 1e21 {
-        return format!("{}", n as i64);
+    // Round to 6 decimal places, then renormalize -0 (so a tiny negative input
+    // that rounded down to zero doesn't print as "-0").
+    let mut r = (n * 1e6).round() / 1e6;
+    if r == 0.0 {
+        r = 0.0;
     }
 
-    format!("{}", n)
+    // For integers (after quantization), JS outputs no decimal point.
+    if r == r.trunc() && r.abs() < 1e21 {
+        return format!("{}", r as i64);
+    }
+
+    // Format with up to 6 fractional digits, then strip trailing zeros (and a
+    // dangling decimal point) so "0.5" stays "0.5" rather than "0.500000".
+    let s = format!("{r:.6}");
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    trimmed.to_string()
 }
 
 pub fn merge_bounds(a: Rect, b: Rect) -> Rect {
@@ -288,6 +312,45 @@ mod tests {
         assert_eq!(js_format_number(f64::NAN), "NaN");
         assert_eq!(js_format_number(f64::INFINITY), "Infinity");
         assert_eq!(js_format_number(f64::NEG_INFINITY), "-Infinity");
+    }
+
+    /// Coordinates emitted into SVG are quantized to 6 decimal places (well
+    /// below any visible threshold) so 1-ULP f64 differences from compiler or
+    /// hardware variation no longer leak into the byte-identical SVG parity
+    /// (`svg-rendering.test.ts` and the connector arc regression guard).
+    /// The TypeScript `jsFormatNumber` helper in `src/diagram/render-common.tsx`
+    /// must mirror these cases exactly.
+    #[test]
+    fn test_js_format_number_quantizes_to_six_decimals() {
+        // A value that rounds to a "clean" integer collapses to that integer.
+        assert_eq!(js_format_number(100.0000004), "100");
+        // A value above .5 in the seventh decimal rounds up.
+        assert_eq!(js_format_number(0.1234567), "0.123457");
+        // A value below .5 in the seventh decimal rounds down (banker's-style
+        // rounding does NOT apply here -- `(x * 1e6).round()` is half-away-
+        // from-zero, matching JS `Math.round` to-half-up for positives).
+        assert_eq!(js_format_number(0.1234564), "0.123456");
+        // 1-ULP siblings of a 6-decimal-clean number both collapse to it.
+        let clean = 273.205081_f64;
+        let ulp_above = f64::from_bits(clean.to_bits() + 1);
+        let ulp_below = f64::from_bits(clean.to_bits() - 1);
+        assert_eq!(js_format_number(ulp_above), js_format_number(clean));
+        assert_eq!(js_format_number(ulp_below), js_format_number(clean));
+        // The two ULP-different arc-radius values from the bug repro both
+        // collapse to the same printed string.
+        assert_eq!(
+            js_format_number(273.2050807568877),
+            js_format_number(273.20508075688764)
+        );
+        // Trailing zeros are trimmed.
+        assert_eq!(js_format_number(1.5), "1.5");
+        assert_eq!(js_format_number(1.500000), "1.5");
+        // A value whose fractional part rounds to .0 prints without a decimal.
+        assert_eq!(js_format_number(2.0000004), "2");
+        // -0 normalizes to 0 even after rounding.
+        assert_eq!(js_format_number(-0.0000001), "0");
+        // Negative values round symmetrically to positive ones.
+        assert_eq!(js_format_number(-0.1234567), "-0.123457");
     }
 
     #[test]
