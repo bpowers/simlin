@@ -20,7 +20,7 @@ import { WorkerServer } from '../src/worker-server';
 import { DirectBackend } from '../src/direct-backend';
 import type { WorkerRequest, WorkerResponse } from '../src/worker-protocol';
 import type { ModelHandle } from '../src/backend';
-import type { Link } from '../src/types';
+import { expectScoresClose, linkKey, linksByKey } from './ltm-test-helpers';
 
 const wasmPath = join(__dirname, '..', 'core', 'libsimlin.wasm');
 
@@ -367,31 +367,9 @@ describe('WorkerBackend wasm engine parity (Phase 3)', () => {
 // worker protocol (the VM path used it), no protocol change is needed -- this
 // test pins that promise by exercising the full WorkerBackend round-trip and
 // comparing against the same model on node DirectBackend (exact) and on the VM
-// (within the engine's parity tolerance). 1e-6 mirrors wasm-ltm.test.ts's
-// SCORE_TOL: LTM scores are produced by the same analysis function over the
-// same per-step f64 series on both engines, but the wasm-vs-VM eval already
-// accumulates a tiny reassociation noise inside those series.
-const LTM_SCORE_TOL = 1e-6;
-
-function linkKey(link: Link): string {
-  return link.from + '␟' + link.to;
-}
-
-function linksByKey(links: readonly Link[]): Map<string, Link> {
-  const out = new Map<string, Link>();
-  for (const link of links) {
-    out.set(linkKey(link), link);
-  }
-  return out;
-}
-
-function expectScoresClose(actual: Float64Array, expected: Float64Array): void {
-  expect(actual.length).toBe(expected.length);
-  for (let i = 0; i < expected.length; i++) {
-    expect(Math.abs(actual[i] - expected[i])).toBeLessThanOrEqual(LTM_SCORE_TOL);
-  }
-}
-
+// (within the engine's parity tolerance). The shared helpers (expectScoresClose,
+// linkKey, linksByKey) are imported from ltm-test-helpers.ts, which also
+// documents the 1e-6 tolerance rationale.
 describe('WorkerBackend LTM on the wasm engine (Phase 6)', () => {
   let oracle: DirectBackend;
 

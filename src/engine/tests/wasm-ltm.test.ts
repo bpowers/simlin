@@ -13,7 +13,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { Project, Sim, Run, Link, configureWasm, ready, resetWasm } from '../src';
+import { Project, Sim, Run, configureWasm, ready, resetWasm } from '../src';
+import { expectScoresClose, linkKey, linksByKey } from './ltm-test-helpers';
 
 async function loadWasm(): Promise<void> {
   const wasmPath = path.join(__dirname, '..', 'core', 'libsimlin.wasm');
@@ -34,31 +35,6 @@ function loadLogisticGrowthLtmXmile(): Uint8Array {
     throw new Error('Required test XMILE model not found: ' + xmilePath);
   }
   return fs.readFileSync(xmilePath);
-}
-
-// LTM scores from VM-vs-wasm are produced by the same analysis function over
-// the same per-step f64 series, so identical scores are expected. 1e-6 mirrors
-// the design's stated tolerance (more permissive than the eval-parity 1e-9 in
-// wasm-backend.test.ts to leave room for any cumulative reassociation).
-const SCORE_TOL = 1e-6;
-
-function expectScoresClose(actual: Float64Array, expected: Float64Array): void {
-  expect(actual.length).toBe(expected.length);
-  for (let i = 0; i < expected.length; i++) {
-    expect(Math.abs(actual[i] - expected[i])).toBeLessThanOrEqual(SCORE_TOL);
-  }
-}
-
-function linkKey(link: Link): string {
-  return link.from + ' ' + link.to;
-}
-
-function linksByKey(links: readonly Link[]): Map<string, Link> {
-  const out = new Map<string, Link>();
-  for (const link of links) {
-    out.set(linkKey(link), link);
-  }
-  return out;
 }
 
 describe('LTM on the wasm engine (public API)', () => {
