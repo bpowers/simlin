@@ -14,11 +14,11 @@
 //! (`resolve_recurrence_sccs` and friends), and the production cycle gate
 //! itself (`model_dependency_graph_impl` -- the transitive-closure DFS,
 //! the SCC-aware back-edge break, the SCC-as-collapsed-node accumulation,
-//! and the SCC-contiguous topological runlist sort). The thin
-//! `#[salsa::tracked]` wrapper (`crate::db::model_dependency_graph`, keyed
-//! on an interned `ModuleInputSet`) stays in `db.rs` because the
-//! `ModelDepGraphResult` salsa input/return types do; it delegates straight
-//! to `model_dependency_graph_impl` here.
+//! and the SCC-contiguous topological runlist sort). The dep-graph result
+//! types (`SccPhase`, `ResolvedScc`, `ModelDepGraphResult`) and the thin
+//! `#[salsa::tracked]` wrapper (`model_dependency_graph`, keyed on an
+//! interned `ModuleInputSet`, re-exported at the `db.rs` root) live here
+//! too; the wrapper delegates straight to `model_dependency_graph_impl`.
 //!
 //! The cycle relation has exactly one definition (`walk_successors`,
 //! phase-parameterized), consumed by BOTH the production cycle gate and
@@ -43,13 +43,10 @@ use crate::canonicalize;
 // `#[cfg(test)]` SCC accessors.
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity,
-    ModelDepGraphResult, ModuleInputSet, ResolvedScc, SccPhase, SourceModel, SourceProject,
-    SourceVariableKind, VariableDeps, model_module_ident_context, variable_direct_dependencies,
+    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ModuleInputSet,
+    SourceModel, SourceProject, SourceVariableKind, VariableDeps, model_module_ident_context,
+    variable_direct_dependencies,
 };
-
-#[cfg(test)]
-use crate::db::model_dependency_graph;
 
 /// Per-variable dependency facts used to build the model dependency
 /// graph.
@@ -1593,17 +1590,105 @@ impl Drop for UnsourceableVarsGuard {
 #[path = "dep_graph_tests.rs"]
 mod dep_graph_tests;
 
+// ── Dependency-graph result types ──────────────────────────────────────
+
+/// Which dependency phase a resolved recurrence SCC belongs to.
+///
+/// `model_dependency_graph_impl` runs the cycle gate twice -- once for
+/// the dt-phase relation and once for the init-phase relation. A
+/// `ResolvedScc` records which run proved its element graph acyclic so
+/// the consumer applies the right per-element order. Phase 1 only
+/// produces `Dt` (single-variable dt self-recurrence); `Initial` is
+/// reserved for the Phase 2 init-cycle resolution.
+///
+/// Derives the same trait set as `ModelDepGraphResult` (it is reachable
+/// from a salsa return value, so it must participate in salsa equality).
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub enum SccPhase {
+    Dt,
+    Initial,
+}
+
+/// A recurrence SCC whose induced element graph the cycle gate proved
+/// acyclic. `members` is byte-stable (BTreeSet); `element_order` is the
+/// per-element topological evaluation order `(member, element-offset)`.
+///
+/// `ResolvedScc` plays a dual role: besides recording the cycle gate's
+/// element-acyclicity verdict, it is the compiler's per-element
+/// interleaving INPUT unit -- its `element_order` is consumed by
+/// `combine_scc_fragment`/`assemble_module` to interleave each SCC
+/// member's per-element symbolic segments into one combined
+/// `PerVarBytecodes`.
+///
+/// Reachable from `ModelDepGraphResult` (a salsa return value), so it
+/// derives the identical trait set -- in particular `PartialEq`/`Eq`/
+/// `salsa::Update` so a change in the resolved-SCC set invalidates the
+/// salsa cache. `Ident<Canonical>` derives `Ord` + `salsa::Update`,
+/// which makes the `BTreeSet`/`Vec` field types well-formed here.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct ResolvedScc {
+    pub members: BTreeSet<Ident<Canonical>>,
+    pub element_order: Vec<(Ident<Canonical>, usize)>,
+    pub phase: SccPhase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct ModelDepGraphResult {
+    /// Interned-ident-keyed dependency maps. `Ident<Canonical>` derives
+    /// `salsa::Update`, and salsa's blanket impls cover
+    /// `std::collections::HashMap<K,V>` / `BTreeSet<K>` for `K,V: Update`, so
+    /// these stay on the std `HashMap` (default hasher) -- only the hot
+    /// internal working maps in `model_dependency_graph_impl` use FxHash.
+    /// `Ident<Canonical>` keys/values are cheap Arc-refcount clones and the
+    /// `BTreeSet`s iterate in the same lexicographic order the former
+    /// `BTreeSet<String>` did, so a consumer probing by `&str` (via
+    /// `Borrow<str>`) sees byte-identical behavior.
+    pub dt_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+    pub initial_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+    pub runlist_initials: Vec<String>,
+    pub runlist_flows: Vec<String>,
+    pub runlist_stocks: Vec<String>,
+    pub has_cycle: bool,
+    /// Recurrence SCCs whose induced element graph the cycle gate proved
+    /// acyclic and element-sourceable, so they are resolved rather than
+    /// rejected with `CircularDependency`. Empty on the acyclic happy
+    /// path (zero extra work) and whenever the conservative loud-safe
+    /// fallback fires. Populated by the Phase 1 Subcomponent B
+    /// element-cycle refinement; every construction site initializes it
+    /// explicitly (`Vec::new()` on the early-return/error paths).
+    pub resolved_sccs: Vec<ResolvedScc>,
+}
+
+/// Per-model tracked dependency graph, keyed on the module-instance input
+/// wiring (`module_inputs`). The empty `ModuleInputSet` is the no-inputs case;
+/// because it is a single interned id, every no-input caller shares one cache
+/// entry. Models instantiated with different input wiring can have different
+/// dependency sets when `isModuleInput(...)` appears in equations.
+///
+/// This thin salsa wrapper lives alongside the dependency-graph cycle gate
+/// it delegates to (`model_dependency_graph_impl`, the SCC-aware back-edge
+/// break, the collapsed-node transitive accumulation) and the shared cycle
+/// relation that gate consumes (`walk_successors`/`build_var_info`/
+/// `resolve_recurrence_sccs`); it is re-exported at the `db.rs` root.
+#[salsa::tracked(returns(ref))]
+pub fn model_dependency_graph<'db>(
+    db: &'db dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    module_inputs: ModuleInputSet<'db>,
+) -> ModelDepGraphResult {
+    let module_input_names = module_inputs.names(db);
+    model_dependency_graph_impl(db, model, project, module_input_names)
+}
+
 // ── Model dependency graph (the cycle gate) ────────────────────────────
 //
 // `model_dependency_graph_impl` is the production consumer of this
 // module's shared cycle relation (`walk_successors` / `build_var_info`)
 // and the element-cycle refinement (`resolve_recurrence_sccs`). It lives
-// here, alongside the
-// relation it consumes, rather than in `db.rs` -- a `db` submodule
-// (like `ltm_ir` / `macro_registry`) split out purely for
-// the per-file line cap. The thin `#[salsa::tracked]` wrapper
-// (`model_dependency_graph`, keyed on an interned `ModuleInputSet`)
-// stays in `db.rs` because the `ModelDepGraphResult` salsa types do.
+// here, alongside the relation it consumes -- a `db` submodule (like
+// `ltm_ir` / `macro_registry`) split out purely for the per-file line
+// cap.
 
 /// Accumulate a model-level `CircularDependency` diagnostic for
 /// `var_name` (the variable the dependency walk reported the back-edge

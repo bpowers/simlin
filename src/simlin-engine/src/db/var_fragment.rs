@@ -2,7 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Per-variable lowering to the pre-bytecode `Var` form.
+//! Per-variable lowering to the pre-bytecode `Var` form (the *lowering
+//! half* of per-variable compilation; the *emission half* -- the
+//! salsa-tracked `compile_var_fragment` and the implicit-var compilers --
+//! lives in the sibling `db/fragment_compile.rs`).
 //!
 //! `lower_var_fragment` performs the lowering half of per-variable
 //! compilation: parse the source variable, lower its equation, build the
@@ -10,8 +13,8 @@
 //! per-phase `Var` construction (`crate::compiler::Var::new`) that yields
 //! the lowered `Vec<Expr>` for each phase. The bytecode-emission half
 //! (`compile_phase`) stays with the salsa-tracked caller in
-//! `crate::db::compile_var_fragment`, which consumes the owned,
-//! lowering-independent values this returns.
+//! `crate::db::compile_var_fragment` (in `db/fragment_compile.rs`), which
+//! consumes the owned, lowering-independent values this returns.
 //!
 //! The split exists for two reasons. First, the lowered `Vec<Expr>` is
 //! the natural reuse surface for read-only structural probes that need
