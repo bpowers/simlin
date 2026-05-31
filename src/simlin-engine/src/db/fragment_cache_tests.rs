@@ -8,9 +8,9 @@ use salsa::plumbing::AsId;
 
 use crate::datamodel;
 use crate::db::{
-    DiagnosticSeverity, SimlinDb, assemble_module, assemble_simulation, collect_all_diagnostics,
-    compile_project_incremental, compile_var_fragment, model_dependency_graph,
-    model_dependency_graph_with_inputs, sync_from_datamodel, sync_from_datamodel_incremental,
+    DiagnosticSeverity, ModuleInputSet, SimlinDb, assemble_module, assemble_simulation,
+    collect_all_diagnostics, compile_project_incremental, compile_var_fragment,
+    model_dependency_graph, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
 
@@ -88,9 +88,22 @@ fn test_compile_var_fragment_caching() {
         let alpha_var = sync1.models["main"].variables["alpha"].source;
         let beta_var = sync1.models["main"].variables["beta"].source;
 
-        let alpha_result1 =
-            compile_var_fragment(&db, alpha_var, model, sync1.project, true, vec![]);
-        let beta_result1 = compile_var_fragment(&db, beta_var, model, sync1.project, true, vec![]);
+        let alpha_result1 = compile_var_fragment(
+            &db,
+            alpha_var,
+            model,
+            sync1.project,
+            true,
+            ModuleInputSet::empty(&db),
+        );
+        let beta_result1 = compile_var_fragment(
+            &db,
+            beta_var,
+            model,
+            sync1.project,
+            true,
+            ModuleInputSet::empty(&db),
+        );
         assert!(alpha_result1.is_some());
         assert!(beta_result1.is_some());
 
@@ -138,10 +151,24 @@ fn test_compile_var_fragment_caching() {
     );
 
     let alpha_var2 = sync2.models["main"].variables["alpha"].source;
-    let alpha_result2 = compile_var_fragment(&db, alpha_var2, model2, sync2.project, true, vec![]);
+    let alpha_result2 = compile_var_fragment(
+        &db,
+        alpha_var2,
+        model2,
+        sync2.project,
+        true,
+        ModuleInputSet::empty(&db),
+    );
     assert!(alpha_result2.is_some());
 
-    let beta_result2 = compile_var_fragment(&db, beta_var2, model2, sync2.project, true, vec![]);
+    let beta_result2 = compile_var_fragment(
+        &db,
+        beta_var2,
+        model2,
+        sync2.project,
+        true,
+        ModuleInputSet::empty(&db),
+    );
     assert!(beta_result2.is_some());
     let beta_ptr_after = beta_result2 as *const _;
     assert_eq!(
@@ -206,7 +233,7 @@ fn test_previous_lagged_feedback_does_not_create_cycle() {
 
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
     assert!(
         !dep_graph.has_cycle,
         "PREVIOUS(b) should be treated as a lagged dependency, not a same-step cycle"
@@ -257,7 +284,7 @@ fn test_previous_plus_current_keeps_current_step_dependency() {
 
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
         dep_graph.dt_dependencies["a"].contains("b"),
@@ -337,7 +364,7 @@ fn test_active_initial_previous_is_lagged_in_initial_graph() {
 
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
         !dep_graph.has_cycle,
@@ -445,7 +472,7 @@ fn test_previous_module_output_is_pruned_from_dt_dependencies() {
 
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
         !dep_graph.dt_dependencies["a"].contains("sub"),
@@ -557,7 +584,7 @@ fn test_previous_module_output_keeps_non_lagged_same_module_dependency() {
 
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
         dep_graph.dt_dependencies["a"].contains("sub"),
@@ -609,9 +636,15 @@ fn test_init_feedback_does_not_create_dt_cycle() {
 
     let sync = sync_from_datamodel(&db, &project);
     let a_var = sync.models["main"].variables["a"].source;
-    let deps = crate::db::variable_direct_dependencies(&db, a_var, sync.project);
+    let deps = crate::db::variable_direct_dependencies(
+        &db,
+        a_var,
+        sync.project,
+        crate::db::ModuleIdentContext::new(&db, vec![]),
+        ModuleInputSet::empty(&db),
+    );
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
         deps.dt_deps.contains("b"),
@@ -671,7 +704,7 @@ fn test_init_plus_current_keeps_current_step_dependency() {
 
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
         dep_graph.dt_dependencies["a"].contains("b"),
@@ -726,7 +759,7 @@ fn test_previous_plus_init_does_not_keep_current_step_dependency() {
 
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
         !dep_graph.has_cycle,
@@ -787,7 +820,14 @@ fn test_compile_fragment_init_expression_temp_arg_compiles() {
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
     let frozen_var = sync.models["main"].variables["frozen"].source;
-    let fragment = compile_var_fragment(&db, frozen_var, model, sync.project, true, vec![]);
+    let fragment = compile_var_fragment(
+        &db,
+        frozen_var,
+        model,
+        sync.project,
+        true,
+        ModuleInputSet::empty(&db),
+    );
     assert!(
         fragment.is_some(),
         "INIT(expr) should compile in fragment mode with generated temp-arg metadata"
@@ -842,7 +882,14 @@ fn test_compile_fragment_init_dep_kept_for_active_initial_override() {
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
     let x_var = sync.models["main"].variables["x"].source;
-    let fragment = compile_var_fragment(&db, x_var, model, sync.project, true, vec![]);
+    let fragment = compile_var_fragment(
+        &db,
+        x_var,
+        model,
+        sync.project,
+        true,
+        ModuleInputSet::empty(&db),
+    );
     assert!(
         fragment.is_some(),
         "INIT(y) with active_initial override should still compile in fragment mode"
@@ -1001,14 +1048,18 @@ fn test_module_input_branch_prunes_previous_only_dt_dep() {
     let sync = sync_from_datamodel(&db, &project);
     let sub_model = sync.models["submodel"].source;
 
-    let active =
-        model_dependency_graph_with_inputs(&db, sub_model, sync.project, vec!["input".to_string()]);
+    let active = model_dependency_graph(
+        &db,
+        sub_model,
+        sync.project,
+        ModuleInputSet::from_names(&db, &["input".to_string()]),
+    );
     assert!(
         !active.dt_dependencies["z"].contains("y"),
         "active isModuleInput branch uses PREVIOUS(y), so z should not have same-step dt dep on y"
     );
 
-    let inactive = model_dependency_graph_with_inputs(&db, sub_model, sync.project, vec![]);
+    let inactive = model_dependency_graph(&db, sub_model, sync.project, ModuleInputSet::empty(&db));
     assert!(
         inactive.dt_dependencies["z"].contains("y"),
         "inactive branch falls back to y, so z should depend on y"
@@ -1110,14 +1161,18 @@ fn test_module_input_branch_prunes_init_only_dt_dep() {
     let sync = sync_from_datamodel(&db, &project);
     let sub_model = sync.models["submodel"].source;
 
-    let active =
-        model_dependency_graph_with_inputs(&db, sub_model, sync.project, vec!["input".to_string()]);
+    let active = model_dependency_graph(
+        &db,
+        sub_model,
+        sync.project,
+        ModuleInputSet::from_names(&db, &["input".to_string()]),
+    );
     assert!(
         !active.dt_dependencies["z"].contains("y"),
         "active isModuleInput branch uses INIT(y), so z should not have same-step dt dep on y"
     );
 
-    let inactive = model_dependency_graph_with_inputs(&db, sub_model, sync.project, vec![]);
+    let inactive = model_dependency_graph(&db, sub_model, sync.project, ModuleInputSet::empty(&db));
     assert!(
         inactive.dt_dependencies["z"].contains("y"),
         "inactive branch falls back to y, so z should depend on y"
@@ -1278,12 +1333,19 @@ fn test_assemble_module_unchanged_submodule_is_cache_hit() {
 
     // `sub` wires `src -> producer.input`, so producer's instance input set is
     // `{input}` -- assemble it directly with that key (mirroring how
-    // assemble_simulation builds the module-input name vec).
-    let producer_inputs = vec!["input".to_string()];
-    let root_main1 = assemble_module(&db, main1, project1, true, vec![])
+    // assemble_simulation builds the module-input set). The interned
+    // `ModuleInputSet` borrows `db`, so it is built fresh at each use site
+    // around the later `&mut db` sync; interning dedups it to the same id.
+    let root_main1 = assemble_module(&db, main1, project1, true, ModuleInputSet::empty(&db))
         .expect("root assemble_module should succeed");
-    let sub_producer1 = assemble_module(&db, producer1, project1, false, producer_inputs.clone())
-        .expect("submodule assemble_module should succeed");
+    let sub_producer1 = assemble_module(
+        &db,
+        producer1,
+        project1,
+        false,
+        ModuleInputSet::from_names(&db, &["input".to_string()]),
+    )
+    .expect("submodule assemble_module should succeed");
 
     // Change ONLY `main.driver`'s equation. `producer` never reads `driver`,
     // so producer's assembly inputs are bit-identical across the edit.
@@ -1298,10 +1360,16 @@ fn test_assemble_module_unchanged_submodule_is_cache_hit() {
         )
     };
 
-    let root_main2 = assemble_module(&db, main2, project2, true, vec![])
+    let root_main2 = assemble_module(&db, main2, project2, true, ModuleInputSet::empty(&db))
         .expect("root assemble_module should succeed after edit");
-    let sub_producer2 = assemble_module(&db, producer2, project2, false, producer_inputs)
-        .expect("submodule assemble_module should succeed after edit");
+    let sub_producer2 = assemble_module(
+        &db,
+        producer2,
+        project2,
+        false,
+        ModuleInputSet::from_names(&db, &["input".to_string()]),
+    )
+    .expect("submodule assemble_module should succeed after edit");
 
     assert!(
         Arc::ptr_eq(&sub_producer1, &sub_producer2),

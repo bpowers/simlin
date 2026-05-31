@@ -162,6 +162,62 @@ pub struct ModuleIdentContext<'db> {
     #[returns(ref)]
     pub idents: Vec<String>,
 }
+
+/// Interned identity for a module instance's input-variable wiring: the
+/// sorted, canonical names of the variables a parent supplies to a sub-model
+/// instance (the `isModuleInput(...)` set). Replaces the per-query
+/// `Vec<String>` module-input key that salsa hashed string-by-string on every
+/// lookup, and the `Option::None`/empty-`Vec` "no inputs" sentinel: because
+/// salsa interning deduplicates, the empty set (`ModuleInputSet::empty`) is a
+/// single id shared across all no-input callers, so the common no-inputs case
+/// collapses to one cache entry per query rather than one per caller.
+#[salsa::interned(debug)]
+pub struct ModuleInputSet<'db> {
+    #[returns(ref)]
+    pub names: Vec<String>,
+}
+
+impl<'db> ModuleInputSet<'db> {
+    /// The canonical no-inputs key. Because interning deduplicates, this is the
+    /// same id every time, so it shares one cache entry across all callers.
+    pub fn empty(db: &'db dyn Db) -> Self {
+        ModuleInputSet::new(db, Vec::new())
+    }
+
+    /// Build a `ModuleInputSet` from the canonical module-input idents the
+    /// dependency/assembly logic consumes. The stored `names` are the sorted
+    /// canonical strings, so a round-trip back through `canonical_input_set`
+    /// (or `Ident::new`, idempotent on an already-canonical string) reproduces
+    /// the original `BTreeSet<Ident<Canonical>>` exactly.
+    pub fn from_canonical_set(db: &'db dyn Db, inputs: &BTreeSet<Ident<Canonical>>) -> Self {
+        // `BTreeSet` already iterates in sorted order, so the resulting `Vec`
+        // is sorted; collecting from it preserves the canonical ordering the
+        // interning key relies on for deduplication.
+        let names: Vec<String> = inputs.iter().map(|id| id.as_str().to_owned()).collect();
+        ModuleInputSet::new(db, names)
+    }
+
+    /// Build a `ModuleInputSet` from raw (possibly non-canonical, unsorted)
+    /// module-input name strings, canonicalizing and sorting them. This is the
+    /// exact inverse of `ModuleInputSet::names` for an interned set built from
+    /// canonical idents (canonicalization is idempotent on canonical strings),
+    /// and reproduces the old `canonical_module_input_set` derivation so the
+    /// dependency classification is byte-identical.
+    pub fn from_names(db: &'db dyn Db, names: &[String]) -> Self {
+        let canonical = canonical_module_input_set(names);
+        ModuleInputSet::from_canonical_set(db, &canonical)
+    }
+
+    /// Reconstruct the `BTreeSet<Ident<Canonical>>` the assembly/dependency
+    /// logic consumes. The exact inverse of `from_canonical_set`: each stored
+    /// name is already canonical, so `Ident::new` is idempotent.
+    pub fn canonical_input_set(self, db: &'db dyn Db) -> BTreeSet<Ident<Canonical>> {
+        self.names(db)
+            .iter()
+            .map(|name| Ident::<Canonical>::new(name))
+            .collect()
+    }
+}
 // ── Variable kind ──────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
@@ -695,56 +751,41 @@ fn variable_direct_dependencies_impl(
     }
 }
 
-#[salsa::tracked(returns(ref))]
-/// Default direct dependency extraction (no module-input specialization).
-/// Uses an empty module-ident context since the caller's model is unknown.
-pub fn variable_direct_dependencies(
-    db: &dyn Db,
-    var: SourceVariable,
-    project: SourceProject,
-) -> VariableDeps {
-    let empty_context = ModuleIdentContext::new(db, vec![]);
-    variable_direct_dependencies_impl(db, var, project, None, empty_context)
-}
-
-/// Per-variable dependency extraction for a specific module input set.
+/// Per-variable direct dependency extraction.
 ///
-/// This is required for module instances that use `isModuleInput(...)` in
-/// their equations (for example stdlib DELAY/SMOOTH variants), where the
-/// dependency set changes by instance wiring.
+/// `module_ident_context` is the caller's module-ident set (the empty
+/// `ModuleIdentContext` for callers whose model is unknown), and
+/// `module_inputs` is the module instance's input wiring (the empty
+/// `ModuleInputSet` for the no-inputs case).
+///
+/// This collapses what were four separately-keyed tracked variants
+/// (`variable_direct_dependencies`, `_with_inputs`, `_with_context`,
+/// `_with_context_and_inputs`) into one. The empty `ModuleInputSet` is treated
+/// IDENTICALLY to the old `None`-inputs path: `classify_dependencies`
+/// special-cases an `isModuleInput(...)` conditional only when given
+/// `Some(inputs)` (then walks the matching branch), so `None` and
+/// `Some(empty_set)` are NOT equivalent there -- `None` walks all three
+/// branches. The old no-inputs variants passed `None`, and the only live
+/// inputs caller (`build_var_info`) passed `Some(..)` exclusively for a
+/// non-empty set. Mapping the empty `ModuleInputSet` to `None` therefore
+/// preserves the old behavior exactly.
 #[salsa::tracked(returns(ref))]
-pub fn variable_direct_dependencies_with_inputs(
-    db: &dyn Db,
-    var: SourceVariable,
-    project: SourceProject,
-    module_input_names: Vec<String>,
-) -> VariableDeps {
-    let module_inputs = canonical_module_input_set(&module_input_names);
-    let empty_context = ModuleIdentContext::new(db, vec![]);
-    variable_direct_dependencies_impl(db, var, project, Some(&module_inputs), empty_context)
-}
-
-#[salsa::tracked(returns(ref))]
-/// Dependency extraction using caller-provided module-ident context.
-pub fn variable_direct_dependencies_with_context<'db>(
+pub fn variable_direct_dependencies<'db>(
     db: &'db dyn Db,
     var: SourceVariable,
     project: SourceProject,
     module_ident_context: ModuleIdentContext<'db>,
+    module_inputs: ModuleInputSet<'db>,
 ) -> VariableDeps {
-    variable_direct_dependencies_impl(db, var, project, None, module_ident_context)
-}
-
-#[salsa::tracked(returns(ref))]
-pub fn variable_direct_dependencies_with_context_and_inputs<'db>(
-    db: &'db dyn Db,
-    var: SourceVariable,
-    project: SourceProject,
-    module_ident_context: ModuleIdentContext<'db>,
-    module_input_names: Vec<String>,
-) -> VariableDeps {
-    let module_inputs = canonical_module_input_set(&module_input_names);
-    variable_direct_dependencies_impl(db, var, project, Some(&module_inputs), module_ident_context)
+    let canonical_inputs = module_inputs.canonical_input_set(db);
+    // An empty input set is the old `None` path (no `isModuleInput` branch
+    // selection); a non-empty set is the old `Some(&set)` path.
+    let module_inputs_opt = if canonical_inputs.is_empty() {
+        None
+    } else {
+        Some(&canonical_inputs)
+    };
+    variable_direct_dependencies_impl(db, var, project, module_inputs_opt, module_ident_context)
 }
 
 /// Metadata for a single implicit variable generated by builtin expansion.
@@ -926,9 +967,10 @@ pub struct ModelDepGraphResult {
     pub resolved_sccs: Vec<ResolvedScc>,
 }
 
-/// Per-model tracked dependency graph for a specific module-input set.
-///
-/// Models instantiated with different input wiring can have different
+/// Per-model tracked dependency graph, keyed on the module-instance input
+/// wiring (`module_inputs`). The empty `ModuleInputSet` is the no-inputs case;
+/// because it is a single interned id, every no-input caller shares one cache
+/// entry. Models instantiated with different input wiring can have different
 /// dependency sets when `isModuleInput(...)` appears in equations.
 ///
 /// The dependency-graph cycle gate itself
@@ -938,26 +980,17 @@ pub struct ModelDepGraphResult {
 /// (`dt_walk_successors`/`init_walk_successors`/`build_var_info`/
 /// `resolve_recurrence_sccs`) -- a `db` submodule, like
 /// `ltm_ir`/`macro_registry`, only to keep `db.rs` under the
-/// per-file line cap. These thin salsa wrappers stay here because the
+/// per-file line cap. This thin salsa wrapper stays here because the
 /// `ModelDepGraphResult` salsa input/return types do.
 #[salsa::tracked(returns(ref))]
-pub fn model_dependency_graph_with_inputs(
-    db: &dyn Db,
+pub fn model_dependency_graph<'db>(
+    db: &'db dyn Db,
     model: SourceModel,
     project: SourceProject,
-    module_input_names: Vec<String>,
+    module_inputs: ModuleInputSet<'db>,
 ) -> ModelDepGraphResult {
-    crate::db::dep_graph::model_dependency_graph_impl(db, model, project, &module_input_names)
-}
-
-/// Default per-model tracked dependency graph (no module inputs).
-#[salsa::tracked(returns(ref))]
-pub fn model_dependency_graph(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> ModelDepGraphResult {
-    crate::db::dep_graph::model_dependency_graph_impl(db, model, project, &[])
+    let module_input_names = module_inputs.names(db);
+    crate::db::dep_graph::model_dependency_graph_impl(db, model, project, module_input_names)
 }
 
 // ── Diagnostic collection ──────────────────────────────────────────────
@@ -989,14 +1022,15 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // for equation parse errors, then proceeds with compilation which can
     // surface additional errors like BadTable, MismatchedDimensions, etc.
     //
-    // We use is_root: true and empty module_input_names for diagnostic
+    // We use is_root: true and the empty module-input set for diagnostic
     // purposes. The is_root flag only affects offset layout (whether
     // implicit time/dt vars are included); using true ensures variables
     // referencing TIME or DT don't produce false-positive missing-ref
-    // errors. The module_input_names are empty because we are not in an
+    // errors. The module inputs are empty because we are not in an
     // assembly context -- this is purely for error detection.
+    let empty_inputs = ModuleInputSet::empty(db);
     for (_var_name, source_var) in source_vars.iter() {
-        let _fragment = compile_var_fragment(db, *source_var, model, project, true, vec![]);
+        let _fragment = compile_var_fragment(db, *source_var, model, project, true, empty_inputs);
     }
 
     // Trigger unit checking. This is a separate tracked function so
@@ -3074,19 +3108,24 @@ pub(crate) fn combine_scc_fragment(
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn compile_var_fragment(
-    db: &dyn Db,
+pub fn compile_var_fragment<'db>(
+    db: &'db dyn Db,
     var: SourceVariable,
     model: SourceModel,
     project: SourceProject,
     is_root: bool,
-    module_input_names: Vec<String>,
+    module_inputs: ModuleInputSet<'db>,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
     use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
 
     let var_ident = var.ident(db).clone();
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
+
+    // The interned input set stores the sorted canonical names; the plain
+    // lowering helpers (`lower_var_fragment`/`build_caller_module_refs`) still
+    // take `&[String]`, so read it back as a slice.
+    let module_input_names = module_inputs.names(db);
 
     // Caller-owned, lowering-independent context (built only from
     // project/variable data, never from the lowered equation). Read the
@@ -3098,7 +3137,7 @@ pub fn compile_var_fragment(
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
     let model_name_ident = Ident::new(model.name(db));
-    let inputs = canonical_module_input_set(&module_input_names);
+    let inputs = canonical_module_input_set(module_input_names);
     let module_models = model_module_map(db, model, project).clone();
 
     let lowered = lower_var_fragment(
@@ -3107,7 +3146,7 @@ pub fn compile_var_fragment(
         model,
         project,
         is_root,
-        &module_input_names,
+        module_input_names,
         converted_dims,
         dim_context,
         &model_name_ident,
@@ -3154,11 +3193,7 @@ pub fn compile_var_fragment(
     }
 
     // Determine which runlists this variable belongs to
-    let dep_graph = if module_input_names.is_empty() {
-        model_dependency_graph(db, model, project)
-    } else {
-        model_dependency_graph_with_inputs(db, model, project, module_input_names.clone())
-    };
+    let dep_graph = model_dependency_graph(db, model, project, module_inputs);
     let is_stock = var.kind(db) == SourceVariableKind::Stock;
     let is_module = var.kind(db) == SourceVariableKind::Module;
     let is_module_input = inputs.contains(&var_ident_canonical);
@@ -3169,7 +3204,7 @@ pub fn compile_var_fragment(
         model,
         project,
         is_root,
-        &module_input_names,
+        module_input_names,
     );
 
     // Compile for each phase and symbolize. The closure now delegates to
@@ -3696,12 +3731,14 @@ fn compile_implicit_var_phase_bytecodes(
 
     // Implicit vars' deps are always explicit vars in the same model (or other implicit vars)
     // Keep dependency context conservative for implicit vars as well: both
-    // branches of `if isModuleInput(...)` may still be compiled.
-    let deps = variable_direct_dependencies_with_context(
+    // branches of `if isModuleInput(...)` may still be compiled. The empty
+    // `ModuleInputSet` reproduces the old `None`-inputs path.
+    let deps = variable_direct_dependencies(
         db,
         meta.parent_source_var,
         project,
         module_ident_context,
+        ModuleInputSet::empty(db),
     );
     let implicit_dep = deps
         .implicit_vars
@@ -4056,7 +4093,7 @@ fn compile_implicit_var_phase_bytecodes(
 ///
 /// Salsa-tracked: the per-module assembly (fragment concatenation, SCC
 /// combined-fragment build, GF dedup, resolve) is memoized so an unchanged
-/// module (same `model`/`project`/`is_root`/`module_input_names`) is a pure
+/// module (same `model`/`project`/`is_root`/`module_inputs`) is a pure
 /// cache hit -- no re-concatenation, no re-resolve. The success payload rides
 /// behind an `Arc` so the tracked-fn return value is `salsa::Update` (its
 /// inner `CompiledModule` derives `Update` via the per-field `PartialEq`
@@ -4064,35 +4101,31 @@ fn compile_implicit_var_phase_bytecodes(
 /// each cache-hit read is a single refcount bump rather than a deep bytecode
 /// clone.
 ///
-/// `module_input_names` is an owned `Vec<String>` (canonicalized internally),
-/// matching the existing `model_dependency_graph_with_inputs` key convention.
-/// A later task interns these into a `ModuleInputSet`.
+/// `module_inputs` is an interned `ModuleInputSet` (the sorted canonical input
+/// names). The empty set is the no-inputs case and, being a single interned
+/// id, shares one cache entry across all no-input callers.
 #[salsa::tracked]
-pub fn assemble_module(
-    db: &dyn Db,
+pub fn assemble_module<'db>(
+    db: &'db dyn Db,
     model: SourceModel,
     project: SourceProject,
     is_root: bool,
-    module_input_names: Vec<String>,
+    module_inputs: ModuleInputSet<'db>,
 ) -> Result<std::sync::Arc<crate::bytecode::CompiledModule>, String> {
     use crate::compiler::symbolic::{
         ContextResourceCounts, SymbolicCompiledInitial, SymbolicCompiledModule,
         concatenate_fragments_with_gf, resolve_module,
     };
 
-    // Canonicalize the owned name key back into the `BTreeSet<Ident<Canonical>>`
-    // the assembly logic (the `is_module_input` predicate, the module-input
-    // exclusion in the stocks phase) consumes -- the byte-identical inverse of
-    // the previous `module_inputs.iter().map(as_str).collect()` key derivation.
-    let module_inputs: BTreeSet<Ident<Canonical>> = module_input_names
-        .iter()
-        .map(|name| Ident::<Canonical>::new(name))
-        .collect();
-    let dep_graph = if module_input_names.is_empty() {
-        model_dependency_graph(db, model, project)
-    } else {
-        model_dependency_graph_with_inputs(db, model, project, module_input_names.clone())
-    };
+    // The interned set stores the sorted canonical names; the plain lowering
+    // helpers (`compile_implicit_var_fragment` and friends) still take
+    // `&[String]`, so read it back as a slice.
+    let module_input_names = module_inputs.names(db);
+    // Reconstruct the `BTreeSet<Ident<Canonical>>` the assembly logic (the
+    // `is_module_input` predicate, the module-input exclusion in the stocks
+    // phase) consumes -- the exact inverse of the input set's key derivation.
+    let canonical_inputs = module_inputs.canonical_input_set(db);
+    let dep_graph = model_dependency_graph(db, model, project, module_inputs);
     if dep_graph.has_cycle {
         let msg = format!("model '{}' has circular dependencies", model.name(db));
         try_accumulate_diagnostic(
@@ -4115,14 +4148,9 @@ pub fn assemble_module(
     let mut all_fragments: HashMap<String, VarFragmentResult> = HashMap::new();
 
     for (name, svar) in source_vars.iter() {
-        if let Some(result) = compile_var_fragment(
-            db,
-            *svar,
-            model,
-            project,
-            is_root,
-            module_input_names.clone(),
-        ) {
+        if let Some(result) =
+            compile_var_fragment(db, *svar, model, project, is_root, module_inputs)
+        {
             all_fragments.insert(name.clone(), result.clone());
         }
     }
@@ -4135,7 +4163,7 @@ pub fn assemble_module(
             project,
             is_root,
             dep_graph,
-            &module_input_names,
+            module_input_names,
         ) {
             all_fragments.insert(name.clone(), result);
         }
@@ -4208,7 +4236,7 @@ pub fn assemble_module(
                         model,
                         project,
                         dep_graph,
-                        &module_input_names,
+                        module_input_names,
                     );
                     if let Some(result) = im_fragment {
                         // Same layout check as for main LTM vars above.
@@ -4232,7 +4260,7 @@ pub fn assemble_module(
     // excludes module inputs (matching the monolithic path which uses
     // `!instantiation.contains(id) && (is_stock || is_module)` for stocks).
     let is_module_input =
-        |var_name: &str| -> bool { module_inputs.contains(&*canonicalize(var_name)) };
+        |var_name: &str| -> bool { canonical_inputs.contains(&*canonicalize(var_name)) };
 
     // ── Combined per-element fragments for resolved recurrence SCCs ─────
     //
@@ -4821,15 +4849,11 @@ pub fn assemble_simulation(
             })?;
 
             let is_root = canonicalize(name.as_str()) == main_model_canonical;
-            // The tracked `assemble_module` keys on an owned `Vec<String>`
-            // module-input name set (canonicalized internally), consistent
-            // with `model_dependency_graph_with_inputs`.
-            let module_input_names: Vec<String> = inputs
-                .iter()
-                .map(|ident| ident.as_str().to_string())
-                .collect();
-            let compiled =
-                assemble_module(db, *source_model, project, is_root, module_input_names)?;
+            // The tracked `assemble_module` keys on an interned `ModuleInputSet`
+            // (the sorted canonical input names). `inputs` is already a
+            // `BTreeSet<Ident<Canonical>>`, so this is the canonical round-trip.
+            let module_inputs = ModuleInputSet::from_canonical_set(db, inputs);
+            let compiled = assemble_module(db, *source_model, project, is_root, module_inputs)?;
             let module_key: crate::vm::ModuleKey = ((*name).clone(), inputs.clone());
             // Clone the `CompiledModule` out of the salsa-owned `Arc`: the
             // `CompiledSimulation.modules` map stores it by value (its bytecode

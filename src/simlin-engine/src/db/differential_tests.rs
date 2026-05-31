@@ -18,7 +18,7 @@ use crate::datamodel;
 /// can be in a runlist but produce no bytecodes if it has no equation
 /// or its compilation yields empty output).
 fn assert_fragment_phase_agreement(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    let dep_graph = model_dependency_graph(db, model, project);
+    let dep_graph = model_dependency_graph(db, model, project, ModuleInputSet::empty(db));
 
     for &var in model.variables(db).values() {
         let var_name = var.ident(db);
@@ -29,7 +29,8 @@ fn assert_fragment_phase_agreement(db: &dyn Db, model: SourceModel, project: Sou
         // module expansions, which is out of scope for this phase.
         let is_root = true;
 
-        let fragment_result = compile_var_fragment(db, var, model, project, is_root, vec![]);
+        let fragment_result =
+            compile_var_fragment(db, var, model, project, is_root, ModuleInputSet::empty(db));
 
         // Determine which phases the dep graph includes this variable in
         let in_initials = dep_graph.runlist_initials.contains(&canonical_name);

@@ -4226,7 +4226,17 @@ pub fn compute_metadata(
         let deps: Vec<String> = source_model
             .and_then(|sm| {
                 let sv = sm.variables(db).get(&var_ident)?.to_owned();
-                let var_deps = crate::db::variable_direct_dependencies(db, sv, source_project);
+                // The old no-arg variant used an empty module-ident context and
+                // the `None`-inputs path; reproduce that with the empty sets.
+                let empty_ctx = crate::db::ModuleIdentContext::new(db, vec![]);
+                let empty_inputs = crate::db::ModuleInputSet::empty(db);
+                let var_deps = crate::db::variable_direct_dependencies(
+                    db,
+                    sv,
+                    source_project,
+                    empty_ctx,
+                    empty_inputs,
+                );
                 let mut combined: Vec<String> = var_deps
                     .dt_deps
                     .iter()

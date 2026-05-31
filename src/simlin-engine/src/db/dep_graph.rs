@@ -14,10 +14,10 @@
 //! itself (`model_dependency_graph_impl` -- the transitive-closure DFS,
 //! the SCC-aware back-edge break, the SCC-as-collapsed-node accumulation,
 //! and the SCC-contiguous topological runlist sort). The thin
-//! `#[salsa::tracked]` wrappers (`crate::db::model_dependency_graph` /
-//! `model_dependency_graph_with_inputs`) stay in `db.rs` because the
-//! `ModelDepGraphResult` salsa input/return types do; they delegate
-//! straight to `model_dependency_graph_impl` here.
+//! `#[salsa::tracked]` wrapper (`crate::db::model_dependency_graph`, keyed
+//! on an interned `ModuleInputSet`) stays in `db.rs` because the
+//! `ModelDepGraphResult` salsa input/return types do; it delegates straight
+//! to `model_dependency_graph_impl` here.
 //!
 //! Each cycle relation has exactly one definition, consumed by BOTH the
 //! production cycle gate and the `#[cfg(test)]` SCC introspection
@@ -42,9 +42,8 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity,
-    ModelDepGraphResult, ResolvedScc, SccPhase, SourceModel, SourceProject, SourceVariableKind,
-    VariableDeps, model_module_ident_context, variable_direct_dependencies_with_context,
-    variable_direct_dependencies_with_context_and_inputs,
+    ModelDepGraphResult, ModuleInputSet, ResolvedScc, SccPhase, SourceModel, SourceProject,
+    SourceVariableKind, VariableDeps, model_module_ident_context, variable_direct_dependencies,
 };
 
 #[cfg(test)]
@@ -213,6 +212,11 @@ pub(crate) fn build_var_info(
     let module_input_names = module_input_names.to_vec();
     let module_ident_context =
         model_module_ident_context(db, model, project, module_input_names.clone());
+    // Intern the module-input wiring once. An empty set is the no-inputs case
+    // (the old `None`-inputs path); `variable_direct_dependencies` maps it back
+    // to `None` internally, so the classification is byte-identical to the old
+    // empty-vs-nonempty dispatch.
+    let module_inputs = ModuleInputSet::from_names(db, &module_input_names);
 
     let mut var_info: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     let mut all_init_referenced: FxHashSet<Ident<Canonical>> = FxHashSet::default();
@@ -243,22 +247,13 @@ pub(crate) fn build_var_info(
     let var_deps: Vec<(&String, &VariableDeps)> = source_vars
         .iter()
         .map(|(name, source_var)| {
-            let deps = if module_input_names.is_empty() {
-                variable_direct_dependencies_with_context(
-                    db,
-                    *source_var,
-                    project,
-                    module_ident_context,
-                )
-            } else {
-                variable_direct_dependencies_with_context_and_inputs(
-                    db,
-                    *source_var,
-                    project,
-                    module_ident_context,
-                    module_input_names.clone(),
-                )
-            };
+            let deps = variable_direct_dependencies(
+                db,
+                *source_var,
+                project,
+                module_ident_context,
+                module_inputs,
+            );
             (name, deps)
         })
         .collect();
@@ -639,9 +634,15 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
     project: SourceProject,
 ) -> DtCycleSccs {
     let sccs = dt_cycle_sccs(db, model, project);
-    let dep_graph = model_dependency_graph(db, model, project);
+    let empty_inputs = ModuleInputSet::empty(db);
+    let dep_graph = model_dependency_graph(db, model, project, empty_inputs);
     let resolved_sccs = dep_graph.resolved_sccs.clone();
-    let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(db, model, project);
+    let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
+        db,
+        model,
+        project,
+        empty_inputs,
+    );
     let engine_raises_circular = diags.iter().any(|d| {
         matches!(
             d.0.error,
@@ -1615,9 +1616,9 @@ mod dep_graph_tests;
 // refinement (`resolve_recurrence_sccs`). It lives here, alongside the
 // relation it consumes, rather than in `db.rs` -- a `db` submodule
 // (like `ltm_ir` / `macro_registry`) split out purely for
-// the per-file line cap. The thin `#[salsa::tracked]` wrappers
-// (`model_dependency_graph` / `model_dependency_graph_with_inputs`)
-// stay in `db.rs` because the `ModelDepGraphResult` salsa types do.
+// the per-file line cap. The thin `#[salsa::tracked]` wrapper
+// (`model_dependency_graph`, keyed on an interned `ModuleInputSet`)
+// stays in `db.rs` because the `ModelDepGraphResult` salsa types do.
 
 /// Accumulate a model-level `CircularDependency` diagnostic for
 /// `var_name` (the variable the dependency walk reported the back-edge

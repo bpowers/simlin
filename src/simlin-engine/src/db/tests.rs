@@ -14,6 +14,19 @@ fn parse_var_no_module_ctx(
     parse_source_variable_with_module_context(db, var, project, ModuleIdentContext::new(db, vec![]))
 }
 
+/// Direct dependencies with an empty module-ident context and no module
+/// inputs -- the default (input-agnostic) path the old no-arg
+/// `variable_direct_dependencies` took. A test convenience.
+fn deps_no_inputs(db: &dyn Db, var: SourceVariable, project: SourceProject) -> &VariableDeps {
+    variable_direct_dependencies(
+        db,
+        var,
+        project,
+        ModuleIdentContext::new(db, vec![]),
+        ModuleInputSet::empty(db),
+    )
+}
+
 fn simple_project() -> datamodel::Project {
     datamodel::Project {
         name: "test".to_string(),
@@ -723,7 +736,7 @@ fn test_variable_direct_dependencies_constant() {
     let result = sync_from_datamodel(&db, &project);
 
     let pop_var = result.models["main"].variables["population"].source;
-    let deps = variable_direct_dependencies(&db, pop_var, result.project);
+    let deps = deps_no_inputs(&db, pop_var, result.project);
 
     assert!(deps.dt_deps.is_empty(), "constant has no deps");
     assert!(deps.initial_deps.is_empty(), "constant has no initial deps");
@@ -784,7 +797,7 @@ fn test_variable_direct_dependencies_with_refs() {
     let result = sync_from_datamodel(&db, &project);
 
     let births_var = result.models["main"].variables["births"].source;
-    let deps = variable_direct_dependencies(&db, births_var, result.project);
+    let deps = deps_no_inputs(&db, births_var, result.project);
 
     assert_eq!(
         deps.dt_deps,
@@ -828,7 +841,7 @@ fn test_variable_direct_dependencies_stock() {
 
     let result = sync_from_datamodel(&db, &project);
     let stock_var = result.models["main"].variables["inventory"].source;
-    let deps = variable_direct_dependencies(&db, stock_var, result.project);
+    let deps = deps_no_inputs(&db, stock_var, result.project);
 
     // Stock's init equation references "initial_value"
     assert!(deps.dt_deps.contains("initial_value"));
@@ -876,7 +889,7 @@ fn test_variable_direct_dependencies_module() {
 
     let result = sync_from_datamodel(&db, &project);
     let mod_var = result.models["main"].variables["submodel"].source;
-    let deps = variable_direct_dependencies(&db, mod_var, result.project);
+    let deps = deps_no_inputs(&db, mod_var, result.project);
 
     assert_eq!(
         deps.dt_deps,
@@ -953,7 +966,7 @@ fn test_incrementality_same_deps_no_recompute() {
 
     // Prime the cache: compute deps and dep graph
     let (beta_dt_before, beta_init_before) = {
-        let deps = variable_direct_dependencies(&db, beta_src, source_project);
+        let deps = deps_no_inputs(&db, beta_src, source_project);
         assert_eq!(
             deps.dt_deps,
             ["alpha", "gamma"]
@@ -964,7 +977,12 @@ fn test_incrementality_same_deps_no_recompute() {
         (deps.dt_deps.clone(), deps.initial_deps.clone())
     };
 
-    let graph_before = model_dependency_graph(&db, source_model, source_project);
+    let graph_before = model_dependency_graph(
+        &db,
+        source_model,
+        source_project,
+        ModuleInputSet::empty(&db),
+    );
     let graph_ptr_before = graph_before as *const ModelDepGraphResult;
 
     // Change beta's equation from "alpha + gamma" to "alpha * gamma"
@@ -974,12 +992,17 @@ fn test_incrementality_same_deps_no_recompute() {
         .to(datamodel::Equation::Scalar("alpha * gamma".to_string()));
 
     // Beta's deps should be the same (alpha, gamma)
-    let beta_deps_after = variable_direct_dependencies(&db, beta_src, source_project);
+    let beta_deps_after = deps_no_inputs(&db, beta_src, source_project);
     assert_eq!(beta_dt_before, beta_deps_after.dt_deps);
     assert_eq!(beta_init_before, beta_deps_after.initial_deps);
 
     // The dep graph should be returned from cache (pointer-equal)
-    let graph_after = model_dependency_graph(&db, source_model, source_project);
+    let graph_after = model_dependency_graph(
+        &db,
+        source_model,
+        source_project,
+        ModuleInputSet::empty(&db),
+    );
     let graph_ptr_after = graph_after as *const ModelDepGraphResult;
     assert_eq!(
         graph_ptr_before, graph_ptr_after,
@@ -1051,7 +1074,12 @@ fn test_incrementality_different_deps_recompute() {
     };
 
     // Prime the cache
-    let graph_before = model_dependency_graph(&db, source_model, source_project);
+    let graph_before = model_dependency_graph(
+        &db,
+        source_model,
+        source_project,
+        ModuleInputSet::empty(&db),
+    );
     let graph_ptr_before = graph_before as *const ModelDepGraphResult;
 
     // Change beta's equation from "alpha" to "gamma" -- different deps
@@ -1060,7 +1088,12 @@ fn test_incrementality_different_deps_recompute() {
         .to(datamodel::Equation::Scalar("gamma".to_string()));
 
     // The dep graph should be recomputed (different pointer)
-    let graph_after = model_dependency_graph(&db, source_model, source_project);
+    let graph_after = model_dependency_graph(
+        &db,
+        source_model,
+        source_project,
+        ModuleInputSet::empty(&db),
+    );
     let graph_ptr_after = graph_after as *const ModelDepGraphResult;
     assert_ne!(
         graph_ptr_before, graph_ptr_after,
@@ -1121,7 +1154,12 @@ fn test_model_dependency_graph_basic() {
     };
 
     let result = sync_from_datamodel(&db, &project);
-    let graph = model_dependency_graph(&db, result.models["main"].source, result.project);
+    let graph = model_dependency_graph(
+        &db,
+        result.models["main"].source,
+        result.project,
+        ModuleInputSet::empty(&db),
+    );
 
     // growth depends on rate (transitively)
     assert!(graph.dt_dependencies["growth"].contains("rate"));
@@ -1189,7 +1227,12 @@ fn test_model_dependency_graph_stock_breaks_chain() {
     };
 
     let result = sync_from_datamodel(&db, &project);
-    let graph = model_dependency_graph(&db, result.models["main"].source, result.project);
+    let graph = model_dependency_graph(
+        &db,
+        result.models["main"].source,
+        result.project,
+        ModuleInputSet::empty(&db),
+    );
 
     // In dt phase, stocks have empty deps (chain breaks)
     assert!(
@@ -1254,13 +1297,19 @@ fn test_model_dependency_graph_circular_emits_diagnostic() {
     };
 
     let result = sync_from_datamodel(&db, &project);
-    let _graph = model_dependency_graph(&db, result.models["main"].source, result.project);
+    let _graph = model_dependency_graph(
+        &db,
+        result.models["main"].source,
+        result.project,
+        ModuleInputSet::empty(&db),
+    );
 
     // Collect diagnostics emitted by model_dependency_graph
     let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
         &db,
         result.models["main"].source,
         result.project,
+        ModuleInputSet::empty(&db),
     );
     let has_circular = diags.iter().any(|d| {
         matches!(
@@ -2982,7 +3031,14 @@ fn test_compile_var_fragment_produces_result() {
     let model = sync.models["main"].source;
     let alpha_var = sync.models["main"].variables["alpha"].source;
 
-    let result = compile_var_fragment(&db, alpha_var, model, sync.project, true, vec![]);
+    let result = compile_var_fragment(
+        &db,
+        alpha_var,
+        model,
+        sync.project,
+        true,
+        ModuleInputSet::empty(&db),
+    );
     assert!(result.is_some(), "alpha should compile successfully");
 
     let frag = &result.as_ref().unwrap().fragment;
@@ -3196,7 +3252,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model1,
         sync1.project,
         true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3209,7 +3265,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model1,
         sync1.project,
         true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3224,7 +3280,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model2,
         sync2.project,
         true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3237,7 +3293,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model2,
         sync2.project,
         true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3272,7 +3328,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model3,
         sync3.project,
         true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3285,7 +3341,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model3,
         sync3.project,
         true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3379,7 +3435,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model1,
         sync1.project,
         true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3392,7 +3448,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model1,
         sync1.project,
         true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3417,7 +3473,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model2,
         sync2.project,
         true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3436,7 +3492,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model2,
         sync2.project,
         true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3523,7 +3579,8 @@ fn test_ac1_6_cross_model_isolation() {
 
     // Prime model_a's dep graph
     let graph_a_ptr1 =
-        model_dependency_graph(&db, model_a_src, sync1.project) as *const ModelDepGraphResult;
+        model_dependency_graph(&db, model_a_src, sync1.project, ModuleInputSet::empty(&db))
+            as *const ModelDepGraphResult;
 
     // Change model_b's module connections
     let mut project2 = project.clone();
@@ -3546,7 +3603,8 @@ fn test_ac1_6_cross_model_isolation() {
 
     // Model A's dep graph should be a cache hit (pointer-equal)
     let graph_a_ptr2 =
-        model_dependency_graph(&db, model_a_src2, sync2.project) as *const ModelDepGraphResult;
+        model_dependency_graph(&db, model_a_src2, sync2.project, ModuleInputSet::empty(&db))
+            as *const ModelDepGraphResult;
     assert_eq!(
         graph_a_ptr1, graph_a_ptr2,
         "AC1.6: model A's dependency graph should be cached when only model B changes"
@@ -3828,7 +3886,12 @@ fn test_circular_dependency_blocks_incremental_compilation() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
 
-    let dep_graph = model_dependency_graph(&db, sync.models["main"].source, sync.project);
+    let dep_graph = model_dependency_graph(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
     assert!(dep_graph.has_cycle, "should detect circular dependency");
 
     let result = assemble_simulation(&db, sync.project, "main".to_string());
@@ -3899,7 +3962,14 @@ fn test_malformed_graphical_function_fails_fragment() {
     let model = sync.models["main"].source;
     let var = sync.models["main"].variables["lookup_var"].source;
 
-    let result = compile_var_fragment(&db, var, model, sync.project, true, vec![]);
+    let result = compile_var_fragment(
+        &db,
+        var,
+        model,
+        sync.project,
+        true,
+        ModuleInputSet::empty(&db),
+    );
     assert!(
         result.is_none(),
         "compile_var_fragment should return None for malformed graphical function"
@@ -5621,7 +5691,8 @@ fn test_previous_self_initial_value() {
     // Verify the initials runlist includes switch (transitive dep of the
     // implicit intermediate variable $:f:0:arg1).
     let source_model = sync.models.get("main").unwrap().source_model;
-    let dep_graph = model_dependency_graph(&db, source_model, sync.project);
+    let dep_graph =
+        model_dependency_graph(&db, source_model, sync.project, ModuleInputSet::empty(&db));
     assert!(
         dep_graph.runlist_initials.contains(&"switch".to_string()),
         "switch must be in the initials runlist so PREVIOUS fallback helpers \
@@ -5818,7 +5889,8 @@ fn test_dependency_graph_includes_previous_helper_for_module_backed_var() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, source_model, sync.project);
+    let dep_graph =
+        model_dependency_graph(&db, source_model, sync.project, ModuleInputSet::empty(&db));
 
     let has_previous_helper = dep_graph
         .runlist_initials

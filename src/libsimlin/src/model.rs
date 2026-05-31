@@ -534,7 +534,17 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
-    let var_deps = engine::db::variable_direct_dependencies(&*db_locked, source_var, sync.project);
+    // The empty module-ident context and empty input set reproduce the old
+    // no-arg `variable_direct_dependencies` default path.
+    let empty_ctx = engine::db::ModuleIdentContext::new(&*db_locked, vec![]);
+    let empty_inputs = engine::db::ModuleInputSet::empty(&*db_locked);
+    let var_deps = engine::db::variable_direct_dependencies(
+        &*db_locked,
+        source_var,
+        sync.project,
+        empty_ctx,
+        empty_inputs,
+    );
     // Combine dt and initial deps from the variable itself plus any
     // implicit variables. Implicit vars arise from SMOOTH/DELAY expansion
     // and carry the transitive public deps we need.

@@ -575,7 +575,12 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
     // Precondition (Task 5b): the multi-member SCC must be resolved and
     // the gate must NOT report a cycle, otherwise `assemble_module`
     // early-returns before injecting anything.
-    let dep_graph = crate::db::model_dependency_graph(&db, model, project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "Task 5b precondition: the element-acyclic {{ce,ecc}} SCC must \
@@ -609,8 +614,14 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
     // Assemble the module: Task 6 must inject the combined `{ce,ecc}`
     // fragment into the flows phase (skipping the per-variable pushes),
     // its writes keeping their original `(name, element_offset)`.
-    let module = crate::db::assemble_module(&db, model, project, true, Vec::new())
-        .expect("ref-shaped resolved SCC must assemble (no CircularDependency)");
+    let module = crate::db::assemble_module(
+        &db,
+        model,
+        project,
+        true,
+        crate::db::ModuleInputSet::empty(&db),
+    )
+    .expect("ref-shaped resolved SCC must assemble (no CircularDependency)");
 
     // The assembled flows bytecode's AssignCurr target offsets, re-derived
     // from the resolved bytecode exactly as `resolve_module` does.
@@ -805,7 +816,12 @@ fn fresh_resolved_scc_and_combined_fragment(
     let result = sync_from_datamodel(&db, dm);
     let model = result.models["main"].source;
     let project = result.project;
-    let dep_graph = crate::db::model_dependency_graph(&db, model, project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert_eq!(
         dep_graph.resolved_sccs.len(),
         1,

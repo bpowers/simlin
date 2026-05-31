@@ -25,9 +25,9 @@ use crate::canonicalize;
 use crate::datamodel;
 
 use super::{
-    Db, SourceModel, SourceProject, SourceVariableKind, build_module_inputs,
-    model_module_ident_context, parse_source_variable_with_module_context, project_datamodel_dims,
-    project_dimensions_context, variable_direct_dependencies,
+    Db, ModuleIdentContext, ModuleInputSet, SourceModel, SourceProject, SourceVariableKind,
+    build_module_inputs, model_module_ident_context, parse_source_variable_with_module_context,
+    project_datamodel_dims, project_dimensions_context, variable_direct_dependencies,
 };
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -975,6 +975,11 @@ pub fn model_causal_edges(
 ) -> CausalEdgesResult {
     let source_vars = model.variables(db);
     let module_ctx = model_module_ident_context(db, model, project, vec![]);
+    // The old no-arg `variable_direct_dependencies` used a literally-empty
+    // module-ident context (NOT `module_ctx`) and the `None`-inputs path;
+    // reproduce that exactly with the empty context and empty input set.
+    let empty_ctx = ModuleIdentContext::new(db, vec![]);
+    let empty_inputs = ModuleInputSet::empty(db);
     let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut stocks = BTreeSet::new();
     let mut dynamic_modules = HashMap::new();
@@ -1016,7 +1021,8 @@ pub fn model_causal_edges(
                 }
             }
             _ => {
-                let deps = variable_direct_dependencies(db, *source_var, project);
+                let deps =
+                    variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
                 for dep in &deps.dt_deps {
                     let normalized = normalize_module_ref_str(dep);
                     edges.entry(normalized).or_default().insert(name.clone());
@@ -1059,7 +1065,13 @@ pub fn model_causal_edges(
                 _ => {
                     // For implicit flows/auxes, get deps from the parent's
                     // variable_direct_dependencies result.
-                    let deps = variable_direct_dependencies(db, *source_var, project);
+                    let deps = variable_direct_dependencies(
+                        db,
+                        *source_var,
+                        project,
+                        empty_ctx,
+                        empty_inputs,
+                    );
                     if let Some(implicit_dep) =
                         deps.implicit_vars.iter().find(|iv| iv.name == imp_name)
                     {

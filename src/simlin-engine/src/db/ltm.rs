@@ -2145,6 +2145,10 @@ fn find_model_output_ports(
     let model_name = model.name(db);
     let project_models = project.models(db);
     let middot = '\u{00B7}';
+    // The old no-arg `variable_direct_dependencies` used a literally-empty
+    // module-ident context and the `None`-inputs path; reproduce that exactly.
+    let empty_ctx = super::ModuleIdentContext::new(db, vec![]);
+    let empty_inputs = super::ModuleInputSet::empty(db);
     let mut output_ports: HashSet<Ident<Canonical>> = HashSet::new();
 
     for (_, other_model) in project_models.iter() {
@@ -2169,7 +2173,13 @@ fn find_model_output_ports(
         let other_vars = other_model.variables(db);
         let module_ctx = super::model_module_ident_context(db, *other_model, project, vec![]);
         for (_, source_var) in other_vars.iter() {
-            let deps = super::variable_direct_dependencies(db, *source_var, project);
+            let deps = super::variable_direct_dependencies(
+                db,
+                *source_var,
+                project,
+                empty_ctx,
+                empty_inputs,
+            );
             for dep in &deps.dt_deps {
                 if let Some(dot_pos) = dep.find(middot) {
                     let module_part = &dep[..dot_pos];
@@ -2192,7 +2202,13 @@ fn find_model_output_ports(
                 if let datamodel::Variable::Module(_) = implicit_dm_var {
                     continue;
                 }
-                let deps = super::variable_direct_dependencies(db, *source_var, project);
+                let deps = super::variable_direct_dependencies(
+                    db,
+                    *source_var,
+                    project,
+                    empty_ctx,
+                    empty_inputs,
+                );
                 for iv_dep in &deps.implicit_vars {
                     for dep in &iv_dep.dt_deps {
                         if let Some(dot_pos) = dep.find(middot) {

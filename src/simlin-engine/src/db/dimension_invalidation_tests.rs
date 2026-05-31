@@ -186,16 +186,30 @@ fn test_dimension_invalidation_different_dim_immune() {
     let model1 = sync1.models["main"].source;
     let model2 = sync2.models["main"].source;
 
-    let frag1 = compile_var_fragment(&db, y_src, model1, sync1.project, true, vec![])
-        .as_ref()
-        .unwrap()
-        .fragment
-        .clone();
-    let frag2 = compile_var_fragment(&db, y_src2, model2, sync2.project, true, vec![])
-        .as_ref()
-        .unwrap()
-        .fragment
-        .clone();
+    let frag1 = compile_var_fragment(
+        &db,
+        y_src,
+        model1,
+        sync1.project,
+        true,
+        ModuleInputSet::empty(&db),
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
+    let frag2 = compile_var_fragment(
+        &db,
+        y_src2,
+        model2,
+        sync2.project,
+        true,
+        ModuleInputSet::empty(&db),
+    )
+    .as_ref()
+    .unwrap()
+    .fragment
+    .clone();
 
     assert_eq!(
         frag1, frag2,

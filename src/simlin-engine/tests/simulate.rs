@@ -2697,7 +2697,7 @@ fn interleaved_mdl_element_interleave_simulates() {
 #[test]
 fn init_recurrence_mdl_multi_member_init_scc_simulates() {
     use simlin_engine::common::Ident;
-    use simlin_engine::db::{SccPhase, model_dependency_graph};
+    use simlin_engine::db::{ModuleInputSet, SccPhase, model_dependency_graph};
     use std::collections::BTreeSet;
 
     let path = "../../test/sdeverywhere/models/init_recurrence/init_recurrence.mdl";
@@ -2713,7 +2713,7 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
     let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
     let sync = sync.to_sync_result();
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
         !dep_graph.has_cycle,
@@ -2828,7 +2828,9 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
 #[test]
 fn helper_recurrence_mdl_synthetic_helper_in_scc_simulates() {
     use simlin_engine::common::ErrorCode;
-    use simlin_engine::db::{SccPhase, model_dependency_graph, model_implicit_var_info};
+    use simlin_engine::db::{
+        ModuleInputSet, SccPhase, model_dependency_graph, model_implicit_var_info,
+    };
 
     let path = "../../test/sdeverywhere/models/helper_recurrence/helper_recurrence.mdl";
     let contents =
@@ -2839,7 +2841,7 @@ fn helper_recurrence_mdl_synthetic_helper_in_scc_simulates() {
     let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
     let sync = sync.to_sync_result();
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     // (1) It compiles via the incremental path -- NO false
     // `CircularDependency`. RED before Task 2: the no-`SourceVariable`

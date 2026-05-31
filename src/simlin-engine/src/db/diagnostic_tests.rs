@@ -904,7 +904,14 @@ fn test_compile_var_fragment_per_phase_var_new_failure() {
     // failure drops only the failing phase's bytecode, it does not abort
     // the whole variable (unlike the parse / lowering / unknown-dependency
     // / table-build sites, which return `None`).
-    let frag = compile_var_fragment(&db, y_var, model, sync.project, true, vec![]);
+    let frag = compile_var_fragment(
+        &db,
+        y_var,
+        model,
+        sync.project,
+        true,
+        ModuleInputSet::empty(&db),
+    );
     assert!(
         frag.is_some(),
         "per-phase Var::new failure must still return a fragment (not whole-variable None)"

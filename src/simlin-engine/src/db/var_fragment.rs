@@ -57,11 +57,11 @@ use crate::canonicalize;
 use crate::common::{Canonical, Error, Ident};
 use crate::datamodel;
 use crate::db::{
-    Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, build_module_inputs, build_stub_variable,
+    Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ModuleInputSet, SourceModel,
+    SourceProject, SourceVariable, SourceVariableKind, build_module_inputs, build_stub_variable,
     build_submodel_metadata, compute_layout, extract_tables_from_source_var,
     model_implicit_var_info, model_module_ident_context, parse_source_variable_with_module_context,
-    variable_dimensions, variable_direct_dependencies_with_context, variable_size,
+    variable_dimensions, variable_direct_dependencies, variable_size,
 };
 
 /// Per-model variable -> (offset, size) projection of the minimal
@@ -189,7 +189,16 @@ fn collect_var_dependencies(
     let module_ident_context =
         model_module_ident_context(db, model, project, module_input_names.to_vec());
     let parsed = parse_source_variable_with_module_context(db, var, project, module_ident_context);
-    let deps = variable_direct_dependencies_with_context(db, var, project, module_ident_context);
+    // The empty `ModuleInputSet` reproduces the old `None`-inputs (input-agnostic)
+    // path: metadata is built from the full dependency set so both branches of
+    // `if isModuleInput(...)` stay compilable in the mini-context.
+    let deps = variable_direct_dependencies(
+        db,
+        var,
+        project,
+        module_ident_context,
+        ModuleInputSet::empty(db),
+    );
     let project_models = project.models(db);
 
     // `existing_keys` is the exact pre-loop key set: `{self}` plus the
@@ -592,7 +601,14 @@ pub(crate) fn lower_var_fragment(
 
     // Build metadata from the full, input-agnostic dependency set so both
     // branches of `if isModuleInput(...)` remain compilable in the mini-context.
-    let deps = variable_direct_dependencies_with_context(db, var, project, module_ident_context);
+    // The empty `ModuleInputSet` reproduces the old `None`-inputs path.
+    let deps = variable_direct_dependencies(
+        db,
+        var,
+        project,
+        module_ident_context,
+        ModuleInputSet::empty(db),
+    );
 
     // A bare reference to a standalone lookup-only table -- the table used as a
     // value rather than called via `LOOKUP(table, x)` -- has no scalar value of
