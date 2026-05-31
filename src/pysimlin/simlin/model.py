@@ -41,6 +41,7 @@ from .json_types import (
     JsonModelPatch,
     JsonProjectPatch,
     RenameVariable,
+    SetLoopName,
     UpsertAux,
     UpsertFlow,
     UpsertModule,
@@ -266,6 +267,34 @@ class ModelPatchBuilder:
 
     def delete_view(self, index: int) -> None:
         self._ops.append(DeleteView(index=index))
+
+    def set_loop_name(
+        self, name: str, variables: list[str], description: str | None = None
+    ) -> None:
+        """Pin (name) a feedback loop by the variables forming its cycle.
+
+        Pinning forces the LTM engine to ALWAYS score this loop, even in
+        discovery mode where the heuristic search might not surface it. The
+        pinned loop then appears in ``model.loops`` / ``run.loops`` and its
+        score is readable via ``Sim.get_relative_loop_score`` by the loop's
+        ``pin{n}`` id. ``variables`` lists the loop's member variables (order
+        is irrelevant; the cycle is recovered from the causal graph).
+
+        .. note::
+            A pinned loop occupies its own single-slot cycle partition.  When
+            it is the only loop scored in that partition -- always so in
+            discovery mode, where no enumerated loop scores exist --
+            ``Sim.get_relative_loop_score`` degenerates to ``+1``/``-1``
+            (active/inactive) because there is nothing to normalize against.
+            The RAW ``loop_score`` series is the informative one for a lone
+            pin; read it via ``Sim.get_series`` using the synthetic variable
+            name for the loop's raw score (the ``loop_score`` synthetic with
+            the ``pin{n}`` id, joined by the U+205A separator).  Multiple pins
+            on stocks in the same SCC partition DO normalize against each other.
+        """
+        self._ops.append(
+            SetLoopName(variables=list(variables), name=name, description=description)
+        )
 
 
 class _ModelEditContext:

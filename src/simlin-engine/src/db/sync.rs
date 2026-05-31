@@ -162,6 +162,56 @@ fn macro_declarations_from_datamodel(
         .collect()
 }
 
+/// Project a model's `loop_metadata` into the salsa-input `PinnedLoopSpec`
+/// list, resolving each non-deleted entry's variable UIDs to canonical
+/// variable names.
+///
+/// UIDs live only on the datamodel `Variable`s and are never synced into the
+/// db, so we must resolve them here at sync time. A UID with no matching
+/// variable (a stale reference after a delete) is dropped from that loop's
+/// set; the LTM pin-resolution query then validates whatever survives against
+/// the causal graph (an incomplete set fails the cycle check and surfaces a
+/// diagnostic rather than scoring a partial loop). Deleted entries are
+/// excluded entirely -- a deleted pin contributes no `loop_score`.
+fn pinned_loops_from_datamodel(model: &datamodel::Model) -> Vec<PinnedLoopSpec> {
+    use std::collections::BTreeSet;
+
+    if model.loop_metadata.is_empty() {
+        return Vec::new();
+    }
+
+    let uid_to_name: HashMap<i32, String> = model
+        .variables
+        .iter()
+        .filter_map(|v| {
+            crate::patch::variable_uid(v).map(|uid| (uid, canonicalize(v.get_ident()).into_owned()))
+        })
+        .collect();
+
+    model
+        .loop_metadata
+        .iter()
+        .filter(|lm| !lm.deleted)
+        .map(|lm| {
+            // Dedup + sort: a loop's identity is its node SET, so the spec is
+            // order-independent. The cycle order is recovered from the causal
+            // graph in `model_pinned_loops`.
+            let variables: Vec<String> = lm
+                .uids
+                .iter()
+                .filter_map(|uid| uid_to_name.get(uid).cloned())
+                .collect::<BTreeSet<String>>()
+                .into_iter()
+                .collect();
+            PinnedLoopSpec {
+                name: lm.name.clone(),
+                variables,
+                description: lm.description.clone(),
+            }
+        })
+        .collect()
+}
+
 /// Build the immutable stdlib model inputs ONCE, for `SimlinDb::stdlib_models`.
 ///
 /// Creates a `SourceModel`/`SourceVariable` salsa input set for every
@@ -197,6 +247,8 @@ pub(crate) fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
             source_var_map,
             dm_model.sim_specs.clone(),
             None,
+            // Stdlib models carry no diagram loop_metadata.
+            Vec::new(),
         );
 
         by_canonical.insert(
@@ -253,6 +305,7 @@ pub fn sync_from_datamodel(db: &SimlinDb, project: &datamodel::Project) -> SyncR
             source_var_map,
             model_sim_specs,
             dm_model.macro_spec.clone(),
+            pinned_loops_from_datamodel(dm_model),
         );
 
         source_model_map.insert(canonical_model_name.clone(), source_model);
@@ -550,6 +603,11 @@ pub fn sync_from_datamodel_incremental(
                     .to(dm_model.macro_spec.clone());
             }
 
+            let new_pinned_loops = pinned_loops_from_datamodel(dm_model);
+            if *source_model.pinned_loops(&*db) != new_pinned_loops {
+                source_model.set_pinned_loops(db).to(new_pinned_loops);
+            }
+
             // Process variables
             let mut new_vars = HashMap::new();
             let mut source_var_map = HashMap::new();
@@ -617,6 +675,7 @@ pub fn sync_from_datamodel_incremental(
                 source_var_map,
                 model_sim_specs,
                 dm_model.macro_spec.clone(),
+                pinned_loops_from_datamodel(dm_model),
             );
 
             new_models.insert(

@@ -110,6 +110,32 @@ impl SourceVariableKind {
     }
 }
 
+// ── Pinned loops ───────────────────────────────────────────────────────
+
+/// A modeler-pinned feedback loop, identified by the *set* of variables it
+/// passes through. This is the salsa-input projection of a non-deleted
+/// `datamodel::LoopMetadata`: its `uids` are resolved to canonical variable
+/// names at sync time (UIDs live only on the datamodel `Variable`s and are
+/// never synced into the db), so the LTM queries can reconstruct the loop's
+/// cycle from `model_causal_edges` alone.
+///
+/// Pinning lets a practitioner force a specific loop to ALWAYS be scored,
+/// regardless of whether the (heuristic) discovery search surfaced it -- the
+/// `LOOPSCORE` capability from the LTM papers (section 10), built on the
+/// existing loop-naming primitive rather than a new equation builtin.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub struct PinnedLoopSpec {
+    /// The user-supplied loop name. Preserved so callers can map the
+    /// generated `pin{n}` loop id back to a human label.
+    pub name: String,
+    /// Canonical variable names forming the loop's variable set, sorted and
+    /// deduplicated so the spec is order-independent (a loop's identity is
+    /// its node set; the cycle order is recovered from the causal graph).
+    pub variables: Vec<String>,
+    /// The user-supplied description (empty when none was given).
+    pub description: String,
+}
+
 // ── Input types ────────────────────────────────────────────────────────
 
 #[salsa::input]
@@ -166,6 +192,12 @@ pub struct SourceModel {
     /// models (editing a non-macro variable does not invalidate it).
     #[returns(ref)]
     pub macro_spec: Option<datamodel::MacroSpec>,
+    /// Modeler-pinned feedback loops, resolved from the model's non-deleted
+    /// `loop_metadata` (UIDs -> canonical variable names) at sync time. The
+    /// LTM pipeline reads this to always emit a `loop_score` for each pinned
+    /// loop, even in discovery mode where the heuristic search may miss it.
+    #[returns(ref)]
+    pub pinned_loops: Vec<PinnedLoopSpec>,
 }
 
 #[salsa::input]

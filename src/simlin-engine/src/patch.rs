@@ -192,6 +192,13 @@ fn canonicalize_module(module: &mut datamodel::Module) {
 }
 
 fn get_uid(var: &Variable) -> Option<i32> {
+    variable_uid(var)
+}
+
+/// The datamodel UID of a variable, or `None` if it has not been assigned
+/// one yet. Pinned-loop sync (`db::sync`) reads this to resolve a
+/// `LoopMetadata`'s UID references back to canonical variable names.
+pub fn variable_uid(var: &Variable) -> Option<i32> {
     match var {
         Variable::Stock(s) => s.uid,
         Variable::Flow(f) => f.uid,

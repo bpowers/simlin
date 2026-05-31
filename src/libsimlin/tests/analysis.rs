@@ -2094,3 +2094,155 @@ fn collapsed_macro_edge_carries_composite_score() {
         simlin_project_unref(proj);
     }
 }
+
+/// Build a datamodel with a 60-stock ring (forcing LTM discovery mode) plus a
+/// small two-stock loop pinned by name, serialized to protobuf.
+///
+/// The ring's 60-node SCC trips the auto-flip gate, so exhaustive enumeration
+/// is skipped and `simlin_analyze_get_loops` would normally report nothing.
+/// The pinned `a<->b` loop is the LOOPSCORE escape hatch: it must still be
+/// surfaced and readable through the FFI.
+fn build_discovery_with_pin_protobuf() -> Vec<u8> {
+    use simlin_engine::datamodel;
+
+    let mut builder = TestProject::new("discovery_pin").with_sim_time(0.0, 5.0, 0.25);
+    const RING: usize = 60;
+    for i in 0..RING {
+        let next = (i + 1) % RING;
+        builder = builder.flow(&format!("f{i}"), &format!("stock_{next} * 0.001"), None);
+        builder = builder.stock(&format!("stock_{i}"), "10", &[&format!("f{i}")], &[], None);
+    }
+    builder = builder
+        .stock("a", "100", &["to_a"], &[], None)
+        .stock("b", "100", &["to_b"], &[], None)
+        .flow("to_b", "a * 0.05", None)
+        .flow("to_a", "b * 0.05", None);
+
+    let mut datamodel_project = builder.build_datamodel();
+    // Assign UIDs and pin the a<->b loop.
+    let model = &mut datamodel_project.models[0];
+    for (i, var) in model.variables.iter_mut().enumerate() {
+        let uid = (i as i32) + 1;
+        match var {
+            datamodel::Variable::Stock(s) => s.uid = Some(uid),
+            datamodel::Variable::Flow(f) => f.uid = Some(uid),
+            datamodel::Variable::Aux(a) => a.uid = Some(uid),
+            datamodel::Variable::Module(m) => m.uid = Some(uid),
+        }
+    }
+    let pin_vars = ["a", "to_b", "b", "to_a"];
+    let uids: Vec<i32> = pin_vars
+        .iter()
+        .map(|v| {
+            let canon = simlin_engine::canonicalize(v);
+            model
+                .variables
+                .iter()
+                .find(|var| simlin_engine::canonicalize(var.get_ident()) == canon)
+                .and_then(|var| match var {
+                    datamodel::Variable::Stock(s) => s.uid,
+                    datamodel::Variable::Flow(f) => f.uid,
+                    datamodel::Variable::Aux(a) => a.uid,
+                    datamodel::Variable::Module(m) => m.uid,
+                })
+                .unwrap()
+        })
+        .collect();
+    model.loop_metadata.push(datamodel::LoopMetadata {
+        uids,
+        deleted: false,
+        name: "ab loop".to_string(),
+        description: String::new(),
+    });
+
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+    buf
+}
+
+/// The pinned loop must surface through `simlin_analyze_get_loops` and be
+/// readable by id via `simlin_analyze_get_relative_loop_score` even in
+/// discovery mode, where exhaustive enumeration is skipped.
+#[test]
+fn pinned_loop_surfaces_through_ffi_in_discovery_mode() {
+    let buf = build_discovery_with_pin_protobuf();
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(err.is_null());
+        assert!(!proj.is_null());
+
+        let mut errm: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut errm);
+        assert!(errm.is_null());
+
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        // Discovery mode is in effect (the 60-node ring tripped the gate).
+        err = ptr::null_mut();
+        let mode = simlin_sim_get_ltm_mode(sim, &mut err);
+        assert!(err.is_null());
+        assert_eq!(mode, SimlinLtmMode::Discovery);
+
+        // The pinned loop is the ONLY loop reported (enumeration is skipped).
+        err = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!loops.is_null());
+        assert_eq!((*loops).count, 1, "only the pinned loop should surface");
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let loop_id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(loop_id, "pin1");
+
+        // Its relative loop score is readable by id and finite & non-zero.
+        let mut step_count: usize = 0;
+        err = ptr::null_mut();
+        simlin_sim_get_stepcount(sim, &mut step_count, &mut err);
+        assert!(err.is_null());
+        let id_c = CString::new(loop_id).unwrap();
+        let mut scores = vec![0.0_f64; step_count];
+        let mut written: usize = 0;
+        err = ptr::null_mut();
+        simlin_analyze_get_relative_loop_score(
+            sim,
+            id_c.as_ptr(),
+            scores.as_mut_ptr(),
+            scores.len(),
+            &mut written,
+            &mut err,
+        );
+        assert!(err.is_null(), "pinned loop rel score must be readable");
+        assert_eq!(written, scores.len());
+        for s in &scores {
+            assert!(s.is_finite(), "no NaN from the API");
+        }
+        // The pin is the only loop, so its rel score is +/-1 once active.
+        let nonzero: Vec<f64> = scores.iter().copied().filter(|s| *s != 0.0).collect();
+        assert!(
+            !nonzero.is_empty(),
+            "pinned loop should have non-zero score"
+        );
+
+        // Element count for the scalar pinned loop is 1.
+        let id_c2 = CString::new("pin1").unwrap();
+        let mut count: usize = 0;
+        err = ptr::null_mut();
+        simlin_analyze_get_loop_element_count(sim, id_c2.as_ptr(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 1, "scalar pinned loop has 1 element slot");
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

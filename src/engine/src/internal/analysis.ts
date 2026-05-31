@@ -200,6 +200,15 @@ export function simlin_free_links(links: SimlinLinksPtr): void {
 
 /**
  * Get relative loop score for a specific loop.
+ *
+ * The relative score normalizes a loop's raw `loop_score` against the
+ * magnitudes of all loops sharing its cycle-partition. Caveat: a modeler-pinned
+ * loop (`pin{n}` id) sits in its own single-slot partition, so when it is the
+ * only loop scored there (always so in discovery mode) the relative score
+ * degenerates to +/-1 (active/inactive) -- the raw `$⁚ltm⁚loop_score⁚pin{n}`
+ * series is the informative one for a lone pin. See the engine's
+ * `compute_rel_loop_scores` rustdoc.
+ *
  * @param sim Simulation pointer
  * @param loopId Loop identifier
  * @param stepCount Number of steps

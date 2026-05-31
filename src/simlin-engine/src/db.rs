@@ -54,8 +54,8 @@ pub use diagnostic::{
 mod input;
 pub(crate) use input::source_var_is_table_only;
 pub use input::{
-    LtmLinkId, ModuleIdentContext, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, datamodel_variable_from_source,
+    LtmLinkId, ModuleIdentContext, ModuleInputSet, PinnedLoopSpec, SourceModel, SourceProject,
+    SourceVariable, SourceVariableKind, datamodel_variable_from_source,
 };
 
 mod query;
@@ -105,7 +105,7 @@ mod ltm;
 use ltm::*;
 pub use ltm::{
     LtmImplicitVarMeta, compile_ltm_var_fragment, link_score_equation_text_shaped,
-    model_ltm_implicit_var_info, model_ltm_variables,
+    model_ltm_implicit_var_info, model_ltm_mode, model_ltm_variables,
 };
 
 mod analysis;

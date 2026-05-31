@@ -64,7 +64,7 @@ All public FFI functions are prefixed with `simlin_` and declared `extern "C"`. 
 ### Patching
 
 - **`src/patch.rs`** - JSON patch application:
-  - JSON patch types (`JsonProjectPatch`, `JsonModelPatch`, `JsonProjectOperation`, `JsonModelOperation`)
+  - JSON patch types (`JsonProjectPatch`, `JsonModelPatch`, `JsonProjectOperation`, `JsonModelOperation`). The `setLoopName` model op (`{variables, name, description?}`) pins a feedback loop by its variable set; the engine then always emits that loop's LTM score (the LOOPSCORE escape hatch -- see `/src/simlin-engine/CLAUDE.md`), surfaced through `simlin_analyze_get_loops` (id `pin{n}`) and `simlin_analyze_get_relative_loop_score` even in discovery mode
   - `simlin_project_apply_patch()` with dry-run support
   - `convert_json_project_patch()`, `convert_json_model_patch()` - JSON to engine patch conversion
   - `gather_error_details_with_db()` collects errors from the salsa accumulator path (`collect_all_diagnostics`) plus an optional VM validation error, using the datamodel for snippet/squiggle formatting

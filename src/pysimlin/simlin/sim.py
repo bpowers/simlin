@@ -352,7 +352,28 @@ class Sim:
     ) -> NDArray[np.float64]:
         """Get the relative loop score time series for a specific loop.
 
+        The relative loop score normalizes a loop's raw ``loop_score`` by the
+        magnitudes of all loops that share its cycle-partition, so it reads as
+        the loop's fractional contribution to model behavior at each step.
+
         This requires the simulation to have been run with enable_ltm=True.
+
+        .. note::
+            **Pinned loops (``pin{n}`` ids) alone in their partition.** A
+            pinned loop is placed in its own single-slot cycle partition.  When
+            it is the *only* loop scored in that partition -- always the case in
+            discovery mode (where no enumerated loop scores exist), and in
+            exhaustive mode whenever the pin is the lone loop through its stock
+            -- normalization has nothing else to divide against, so the relative
+            score degenerates to exactly ``+1`` while the loop is active and
+            ``-1`` while it opposes (the sign of the raw score).  This is
+            expected, not a bug.  For a lone pin the **raw** ``loop_score``
+            series is the informative one: read it via :meth:`get_series` using
+            the loop's raw ``loop_score`` synthetic variable name (the
+            ``loop_score`` synthetic carrying the loop id, joined by the U+205A
+            separator).  When **multiple** pins (or a pin plus enumerated loops)
+            sit on stocks in the same SCC partition, they DO normalize against
+            each other and the relative score is meaningful as usual.
 
         Args:
             loop_id: The identifier of the loop (e.g. ``"r1"``).

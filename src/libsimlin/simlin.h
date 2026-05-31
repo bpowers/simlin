@@ -430,6 +430,20 @@ void simlin_analyze_rel_loop_score_from_wasm_results(SimlinModel *model,
 //
 // Renamed for clarity from simlin_analyze_get_rel_loop_score
 //
+// The relative score normalizes a loop's raw `loop_score` against the
+// magnitudes of all loops sharing its cycle-partition, so it reads as the
+// loop's fractional contribution to behavior.
+//
+// **Lone-pin caveat**: a modeler-pinned loop (`pin{n}` id) occupies its own
+// single-slot partition. When it is the only loop scored there -- always so
+// in discovery mode (no enumerated loop scores exist), and in exhaustive mode
+// when it is the lone loop through its stock -- the relative score degenerates
+// to exactly `+1`/`-1` (active/inactive) because there is nothing else to
+// normalize against. For a lone pin the RAW `loop_score` series
+// (`simlin_sim_get_series("$⁚ltm⁚loop_score⁚pin{n}")`) is the informative one.
+// Multiple pins on stocks in the same SCC partition normalize against each
+// other normally. See `engine::ltm_post::compute_rel_loop_scores`.
+//
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim that has been run to completion
 // - `loop_id` must be a valid C string

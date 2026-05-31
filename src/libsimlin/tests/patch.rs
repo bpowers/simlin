@@ -2447,3 +2447,79 @@ fn test_delete_module_input_source_does_not_panic() {
         simlin_project_unref(proj);
     }
 }
+
+/// The `setLoopName` JSON model operation must round-trip through the FFI
+/// patch path and write a `LoopMetadata` entry (the diagram-level loop-naming
+/// primitive the LOOPSCORE escape hatch builds on).
+#[test]
+fn test_apply_patch_set_loop_name() {
+    let mut datamodel = TestProject::new("loop_name_patch")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * 0.05", None)
+        .build_datamodel();
+    // SetLoopName resolves variables by UID, so assign UIDs first.
+    for (i, var) in datamodel.models[0].variables.iter_mut().enumerate() {
+        let uid = (i as i32) + 1;
+        match var {
+            engine::datamodel::Variable::Stock(s) => s.uid = Some(uid),
+            engine::datamodel::Variable::Flow(f) => f.uid = Some(uid),
+            engine::datamodel::Variable::Aux(a) => a.uid = Some(uid),
+            engine::datamodel::Variable::Module(m) => m.uid = Some(uid),
+        }
+    }
+    let proj = open_project_from_datamodel(&datamodel);
+
+    let patch_json = r#"{
+        "models": [
+            {
+                "name": "main",
+                "ops": [
+                    {
+                        "type": "setLoopName",
+                        "payload": {
+                            "variables": ["population", "births"],
+                            "name": "growth loop",
+                            "description": "the reinforcing birth loop"
+                        }
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let patch_bytes = patch_json.as_bytes();
+
+    unsafe {
+        let mut collected_errors: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected_errors as *mut *mut SimlinError,
+            &mut out_error as *mut *mut SimlinError,
+        );
+        assert!(out_error.is_null(), "setLoopName patch should apply");
+
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        let model = project_locked.get_model("main").unwrap();
+        assert_eq!(
+            model.loop_metadata.len(),
+            1,
+            "loop_metadata should be written"
+        );
+        let lm = &model.loop_metadata[0];
+        assert_eq!(lm.name, "growth loop");
+        assert_eq!(lm.description, "the reinforcing birth loop");
+        assert!(!lm.deleted);
+        assert_eq!(lm.uids.len(), 2);
+        drop(project_locked);
+
+        if !collected_errors.is_null() {
+            simlin_error_free(collected_errors);
+        }
+        simlin_project_unref(proj);
+    }
+}
