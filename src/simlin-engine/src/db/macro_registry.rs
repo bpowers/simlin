@@ -145,6 +145,14 @@ fn reconstruct_project_models(db: &dyn Db, project: SourceProject) -> Vec<datamo
             } else {
                 Vec::new()
             };
+            // Naming asymmetry vs the valid-path rebuild in
+            // `project_macro_registry` (which uses the raw `source_model.name`):
+            // this error-path build only consumes the (always-canonicalized)
+            // message text and the discarded error-path registry, so passing the
+            // canonical name here is fine -- `MacroRegistry::build` re-canonicalizes
+            // it idempotently. The valid-path rebuild uses the raw name because it
+            // keeps the registry, whose descriptors expose `model_name` as the
+            // human-readable source name.
             datamodel::Model {
                 name: canonical_name.clone(),
                 sim_specs: None,
@@ -461,6 +469,43 @@ mod tests {
         assert_propagates_build_code(&models);
         let surfaced = build_error_via_query(&x_project(Default::default(), &models)).unwrap();
         assert_eq!(surfaced.0, ErrorCode::DuplicateMacroName);
+    }
+
+    /// Non-canonical-name byte-identity proof. Every other oracle fixture uses
+    /// an already-canonical name ("main", "foo", "a"), so it would pass whether
+    /// `reconstruct_project_models` carried the raw or the canonical name. This
+    /// fixture names both the colliding macro and model "My Macro" (a space and
+    /// capitals -- raw != canonical "my_macro"), so it empirically proves the
+    /// canonical name reaches the build-error message identically on both paths:
+    /// (a) the surfaced error still equals `MacroRegistry::build` on the
+    /// ORIGINAL datamodel models (the un-driftable oracle, via
+    /// `assert_propagates_build_code`), AND (b) the message text contains the
+    /// canonicalized "my_macro" (not the raw "My Macro"). If `reconstruct_*`
+    /// regressed to passing the raw name, `MacroRegistry::build` would still
+    /// canonicalize it -- but this guards the intent and pins the message form.
+    #[test]
+    fn non_canonical_macro_name_collision_message_is_byte_identical() {
+        let models = vec![
+            plain_model("My Macro"),
+            macro_model("My Macro", &["a"], "a"),
+        ];
+        // Oracle (a): byte-identical (ErrorCode, message) vs build over the
+        // original datamodel models.
+        assert_propagates_build_code(&models);
+
+        let surfaced = build_error_via_query(&x_project(Default::default(), &models)).unwrap();
+        assert_eq!(surfaced.0, ErrorCode::DuplicateMacroName);
+        // (b) the message carries the CANONICAL name, never the raw one.
+        assert!(
+            surfaced.1.contains("my_macro"),
+            "collision message must name the canonical macro \"my_macro\", got: {:?}",
+            surfaced.1,
+        );
+        assert!(
+            !surfaced.1.contains("My Macro"),
+            "collision message must not leak the raw name \"My Macro\", got: {:?}",
+            surfaced.1,
+        );
     }
 
     /// Invalidation contract: `project_macro_registry` depends only on
