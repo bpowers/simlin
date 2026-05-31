@@ -1457,8 +1457,9 @@ pub struct SyncedVariable {
 
 // ── Persistent sync state ──────────────────────────────────────────────
 //
-// Lifetime-erased versions of SyncResult handles, safe to store across
-// salsa revisions within the same database instance.
+// Owned, Clone-able snapshots of the SyncResult handles, stored between
+// sync calls and reused across salsa revisions within the same database
+// instance.
 
 /// Stores salsa input handles between sync calls so that
 /// `sync_from_datamodel_incremental` can reuse them instead of
@@ -1582,9 +1583,9 @@ fn macro_declarations_from_datamodel(
 ///
 /// Creates a `SourceModel`/`SourceVariable` salsa input set for every
 /// `crate::stdlib::MODEL_NAMES` entry (SMOOTH/DELAY/TREND/systems_*), exactly
-/// as the old per-sync stdlib loop did, returning the lifetime-erased
-/// `PersistentModelState` handles keyed by canonical name plus the ordered
-/// `(canonical, display)` name list. Stdlib models are never macros (the
+/// as the old per-sync stdlib loop did, returning the `PersistentModelState`
+/// handles keyed by canonical name plus the ordered `(canonical, display)`
+/// name list. Stdlib models are never macros (the
 /// registry only tracks project macros; stdlib lookup goes through
 /// `stdlib_descriptor`), so each `macro_spec` is `None`.
 fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {

@@ -574,7 +574,8 @@ fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
 ///
 /// `collect_all_diagnostics` is a trivial wrapper over
 /// `collect_model_diagnostics`; we assert on the per-model collector
-/// here to sidestep `SyncResult`'s db borrow.
+/// here because it is the exact entry point `libsimlin` and `simlin-mcp`
+/// drive.
 #[test]
 fn test_auto_flip_warning_surfaces_via_collect_model_diagnostics() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
