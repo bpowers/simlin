@@ -30,6 +30,31 @@ class LinkPolarity(IntEnum):
             return "?"
 
 
+class LtmMode(IntEnum):
+    """The loop-enumeration mode a simulation resolved to under LTM.
+
+    Integer values mirror the C ``SimlinLtmMode`` enum:
+
+    - ``DISABLED`` (0): the simulation was created without LTM
+      (``enable_ltm=False``), so no loop enumeration ran.
+    - ``EXHAUSTIVE`` (1): every elementary feedback circuit was enumerated
+      (Johnson). Used for small models.
+    - ``DISCOVERY`` (2): the model's causal graph exceeded the SCC-size gate
+      (or discovery was requested directly), so loops are ranked by the
+      per-timestep strongest-path heuristic instead of enumerated.
+
+    ``str(mode)`` yields the lowercase name (``"disabled"`` / ``"exhaustive"``
+    / ``"discovery"``), which is what :attr:`Run.ltm_mode` returns.
+    """
+
+    DISABLED = 0
+    EXHAUSTIVE = 1
+    DISCOVERY = 2
+
+    def __str__(self) -> str:
+        return self.name.lower()
+
+
 # Threshold above which a loop with mixed-sign runtime scores is classified
 # as MOSTLY_REINFORCING / MOSTLY_BALANCING (Rux / Bux) instead of UNDETERMINED.
 # Mirrors `POLARITY_CONFIDENCE_THRESHOLD` in `src/simlin-engine/src/ltm.rs`;

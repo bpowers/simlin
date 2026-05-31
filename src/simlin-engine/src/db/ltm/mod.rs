@@ -220,12 +220,17 @@ pub fn model_ltm_variables(
         model_loop_circuits_tiered, module_input_pathways_from_edges,
     };
 
+    use super::LtmMode;
+
     let edges_result = model_causal_edges(db, model, project);
     if edges_result.stocks.is_empty() {
+        // A stock-free model has no feedback loops to enumerate, so no
+        // mode flip can occur; report the exhaustive default.
         return LtmVariablesResult {
             vars: vec![],
             loop_partitions: HashMap::new(),
             agg_recovery_truncated: false,
+            mode: LtmMode::Exhaustive,
         };
     }
 
@@ -408,10 +413,13 @@ pub fn model_ltm_variables(
             None
         } else if tiered.fast_path.is_empty() && tiered.slow_path.is_empty() {
             if !has_input_ports {
+                // No loops and no input ports: nothing to score. `is_discovery`
+                // was never flipped on this branch, so report exhaustive.
                 return LtmVariablesResult {
                     vars: vec![],
                     loop_partitions: HashMap::new(),
                     agg_recovery_truncated: false,
+                    mode: LtmMode::Exhaustive,
                 };
             }
             None
@@ -784,6 +792,14 @@ pub fn model_ltm_variables(
         vars,
         loop_partitions,
         agg_recovery_truncated,
+        // `is_discovery` carries the resolved decision: the user-requested
+        // flag OR'd with the early variable-level SCC gate, plus any late
+        // flip from the cross-element slow-path SCC gate above.
+        mode: if is_discovery {
+            LtmMode::Discovery
+        } else {
+            LtmMode::Exhaustive
+        },
     }
 }
 

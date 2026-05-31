@@ -575,7 +575,7 @@ fn test_analyze_get_links() {
         assert!(!sim.is_null());
 
         err = ptr::null_mut();
-        let links = simlin_analyze_get_links(sim, &mut err as *mut *mut SimlinError);
+        let links = simlin_analyze_get_links(sim, false, &mut err as *mut *mut SimlinError);
         assert!(err.is_null());
         assert!(!links.is_null());
         assert!((*links).count > 0, "Should have detected causal links");
@@ -647,7 +647,7 @@ fn test_analyze_get_links() {
         // Get links with scores
         err = ptr::null_mut();
         let links_with_scores =
-            simlin_analyze_get_links(sim_ltm, &mut err as *mut *mut SimlinError);
+            simlin_analyze_get_links(sim_ltm, false, &mut err as *mut *mut SimlinError);
         assert!(err.is_null());
         assert!(!links_with_scores.is_null());
         assert!((*links_with_scores).count > 0);
@@ -728,7 +728,7 @@ fn test_analyze_get_links_no_loops() {
         assert!(!sim.is_null());
 
         err = ptr::null_mut();
-        let links = simlin_analyze_get_links(sim, &mut err as *mut *mut SimlinError);
+        let links = simlin_analyze_get_links(sim, false, &mut err as *mut *mut SimlinError);
         assert!(err.is_null());
         assert!(!links.is_null());
 
@@ -761,7 +761,8 @@ fn test_analyze_get_links_null_safety() {
     unsafe {
         // Test with null sim
         let mut err: *mut SimlinError = ptr::null_mut();
-        let links = simlin_analyze_get_links(ptr::null_mut(), &mut err as *mut *mut SimlinError);
+        let links =
+            simlin_analyze_get_links(ptr::null_mut(), false, &mut err as *mut *mut SimlinError);
         assert!(links.is_null());
 
         // Test free with null (should not crash)
@@ -1893,5 +1894,203 @@ fn discover_loops_null_model_errors_without_panic() {
 
         // Freeing a null result is a no-op.
         simlin_free_discovery_result(ptr::null_mut());
+    }
+}
+
+// === LTM mode signal (Task A) and macro-internal link collapse (Task B) ===
+
+/// Build a SMTH1-in-feedback-loop protobuf (mirrors the engine's
+/// `smooth_polarity` fixture). SMTH1 expands to a stdlib module, so the causal
+/// graph gains a `$⁚smoothed_level⁚0⁚smth1` synthetic node and a synthetic arg
+/// helper -- exactly the macro/module internals Task B collapses.
+fn build_smooth_feedback_protobuf() -> Vec<u8> {
+    let test_project = TestProject::new("smooth_feedback")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("goal", "100", None)
+        .stock("level", "50", &["adjustment"], &[], None)
+        .aux("smoothed_level", "SMTH1(level, 3)", None)
+        .aux("gap", "goal - smoothed_level", None)
+        .flow("adjustment", "gap / 5", None);
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+    buf
+}
+
+unsafe fn open_project_and_model(buf: &[u8]) -> (*mut SimlinProject, *mut SimlinModel) {
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+    assert!(err.is_null());
+    assert!(!proj.is_null());
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+    assert!(err.is_null());
+    assert!(!model.is_null());
+    (proj, model)
+}
+
+unsafe fn snapshot_link_edges(links: *mut SimlinLinks) -> Vec<(String, String)> {
+    let count = (*links).count;
+    let slice = if count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts((*links).links, count)
+    };
+    slice
+        .iter()
+        .map(|l| {
+            let from = CStr::from_ptr(l.from).to_str().unwrap().to_string();
+            let to = CStr::from_ptr(l.to).to_str().unwrap().to_string();
+            (from, to)
+        })
+        .collect()
+}
+
+#[test]
+fn ltm_mode_is_exhaustive_for_small_model() {
+    let buf = build_smooth_feedback_protobuf();
+    unsafe {
+        let (proj, model) = open_project_and_model(&buf);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let mode = simlin_sim_get_ltm_mode(sim, &mut err);
+        assert!(err.is_null());
+        assert_eq!(mode, SimlinLtmMode::Exhaustive);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn ltm_mode_is_disabled_when_ltm_off() {
+    let buf = build_smooth_feedback_protobuf();
+    unsafe {
+        let (proj, model) = open_project_and_model(&buf);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut err);
+        assert!(err.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let mode = simlin_sim_get_ltm_mode(sim, &mut err);
+        assert!(err.is_null());
+        assert_eq!(mode, SimlinLtmMode::Disabled);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn ltm_mode_null_sim_errors_without_panic() {
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let mode = simlin_sim_get_ltm_mode(ptr::null_mut(), &mut err);
+        assert_eq!(mode, SimlinLtmMode::Disabled);
+        assert!(!err.is_null());
+        simlin_error_free(err);
+    }
+}
+
+#[test]
+fn get_links_collapses_macro_internals_by_default() {
+    let buf = build_smooth_feedback_protobuf();
+    unsafe {
+        let (proj, model) = open_project_and_model(&buf);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        // Default (include_internal = false): no synthetic node survives, and
+        // the macro chain `level -> smth1 -> smoothed_level` collapses to one
+        // composite edge `level -> smoothed_level`.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let collapsed_ptr = simlin_analyze_get_links(sim, false, &mut err);
+        assert!(err.is_null());
+        let collapsed = snapshot_link_edges(collapsed_ptr);
+        simlin_free_links(collapsed_ptr);
+
+        assert!(
+            collapsed
+                .iter()
+                .all(|(f, t)| !f.starts_with('$') && !t.starts_with('$')),
+            "collapsed view leaked a synthetic node: {collapsed:?}"
+        );
+        assert!(
+            collapsed
+                .iter()
+                .any(|(f, t)| f == "level" && t == "smoothed_level"),
+            "composite level -> smoothed_level edge missing: {collapsed:?}"
+        );
+
+        // Raw view (include_internal = true): synthetic macro nodes are
+        // present, and there are strictly more edges than the collapsed view.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let raw_ptr = simlin_analyze_get_links(sim, true, &mut err);
+        assert!(err.is_null());
+        let raw = snapshot_link_edges(raw_ptr);
+        simlin_free_links(raw_ptr);
+
+        assert!(
+            raw.iter()
+                .any(|(f, t)| f.starts_with('$') || t.starts_with('$')),
+            "raw view should expose a synthetic macro node: {raw:?}"
+        );
+        assert!(
+            collapsed.len() < raw.len(),
+            "collapsed view ({}) should have fewer edges than raw ({})",
+            collapsed.len(),
+            raw.len()
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn collapsed_macro_edge_carries_composite_score() {
+    let buf = build_smooth_feedback_protobuf();
+    unsafe {
+        let (proj, model) = open_project_and_model(&buf);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let links_ptr = simlin_analyze_get_links(sim, false, &mut err);
+        assert!(err.is_null());
+        let count = (*links_ptr).count;
+        let slice = std::slice::from_raw_parts((*links_ptr).links, count);
+        let through = slice
+            .iter()
+            .find(|l| {
+                let from = CStr::from_ptr(l.from).to_str().unwrap();
+                let to = CStr::from_ptr(l.to).to_str().unwrap();
+                from == "level" && to == "smoothed_level"
+            })
+            .expect("composite level -> smoothed_level edge");
+        // The composite edge through the macro carries a score series (the
+        // product/strongest-path path score), not a dropped/null one.
+        assert!(!through.score.is_null());
+        assert!(through.score_len > 0);
+        simlin_free_links(links_ptr);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
     }
 }

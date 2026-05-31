@@ -84,6 +84,7 @@ pub use simulation::*;
 pub use ffi::{
     SimlinDiscoveredLoop, SimlinDiscoveryResult, SimlinDominantPeriod, SimlinJsonFormat,
     SimlinLink, SimlinLinkPolarity, SimlinLinks, SimlinLoop, SimlinLoopPolarity, SimlinLoops,
+    SimlinLtmMode,
 };
 pub use ffi_error::{ErrorDetail as ErrorDetailData, FfiError, SimlinError};
 
@@ -353,6 +354,14 @@ pub(crate) struct SimState {
     /// from the map and the resolver naturally falls back to the
     /// "loop unknown" error.
     pub(crate) loop_element_index: HashMap<String, engine::ltm_post::LoopElementIndex>,
+    /// The loop-enumeration mode the LTM pipeline resolved at
+    /// `simlin_sim_new` time (captured while `ltm_enabled` was set and the
+    /// db locked, like `loop_partitions`).  `None` when the sim was created
+    /// with `enable_ltm = false` or compilation failed; `Some(mode)`
+    /// otherwise.  Surfaced through `simlin_sim_get_ltm_mode` so a caller can
+    /// tell exhaustive Johnson enumeration apart from the auto-flipped
+    /// discovery heuristic.
+    pub(crate) ltm_mode: Option<engine::db::LtmMode>,
     /// Per-(partition, slot) denominator series cached across FFI calls to
     /// `simlin_analyze_get_relative_loop_score`.  The rel-loop-score
     /// definition is `loop_score / Σ|loop_score|` *within a cycle

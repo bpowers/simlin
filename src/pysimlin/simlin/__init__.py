@@ -16,6 +16,7 @@ from .analysis import (
     LinkPolarity,
     Loop,
     LoopPolarity,
+    LtmMode,
 )
 from .errors import (
     ErrorCode,
@@ -127,6 +128,7 @@ __all__ = [
     "LinkPolarity",
     "Loop",
     "LoopPolarity",
+    "LtmMode",
     "Model",
     "ModelIssue",
     "Project",

@@ -22,7 +22,7 @@ from ._ffi import (
     lib,
     string_to_c,
 )
-from .analysis import Link, LinkPolarity
+from .analysis import Link, LinkPolarity, LtmMode
 from .errors import SimlinRuntimeError
 
 if TYPE_CHECKING:
@@ -262,10 +262,23 @@ class Sim:
         check_out_error(err_ptr, "Get step count")
         return int(count_ptr[0])
 
-    def get_links(self) -> list[Link]:
+    def get_links(self, include_internal: bool = False) -> list[Link]:
         """Get all causal links from the simulation.
 
         If the simulation was run with LTM enabled, link scores will be included.
+
+        Args:
+            include_internal: When ``False`` (the default), macro/module-internal
+                synthetic nodes (the ``$:{var}:{n}:{func}`` macro-instantiation
+                internals and ``$:ltm:...`` LTM nodes, where ``:`` is the
+                reserved U+205A separator) are collapsed out of the returned
+                graph. Each chain ``X -> internal -> Y`` becomes a
+                single composite edge ``X -> Y`` whose polarity is the product
+                of the collapsed links and whose score is the composite
+                (largest-magnitude path) link score, so the contribution that
+                flows *through* a SMOOTH/DELAY/module is preserved rather than
+                dropped. When ``True``, the raw causal graph (including every
+                synthetic node) is returned.
 
         Returns:
             List of Link objects with optional score data
@@ -273,7 +286,9 @@ class Sim:
         with self._lock:
             self._check_alive()
             err_ptr = ffi.new("SimlinError **")
-            links_ptr = lib.simlin_analyze_get_links(self._ptr, err_ptr)
+            links_ptr = lib.simlin_analyze_get_links(
+                self._ptr, include_internal, err_ptr
+            )
             check_out_error(err_ptr, "Get links")
 
         if links_ptr == ffi.NULL:
@@ -306,6 +321,29 @@ class Sim:
 
         finally:
             lib.simlin_free_links(links_ptr)
+
+    def get_ltm_mode(self) -> LtmMode:
+        """Return the LTM loop-enumeration mode this simulation resolved to.
+
+        The mode is determined when the simulation is created, so this is
+        available without running the simulation.
+
+        Returns:
+            :class:`~simlin.analysis.LtmMode`: ``DISABLED`` when the sim was
+            created with ``enable_ltm=False``, ``EXHAUSTIVE`` when every
+            feedback loop was enumerated, or ``DISCOVERY`` when the model
+            tripped the SCC-size gate (or discovery was requested directly)
+            so loops are ranked by the strongest-path heuristic.
+
+        Raises:
+            SimlinRuntimeError: If the underlying query fails.
+        """
+        with self._lock:
+            self._check_alive()
+            err_ptr = ffi.new("SimlinError **")
+            mode = lib.simlin_sim_get_ltm_mode(self._ptr, err_ptr)
+            check_out_error(err_ptr, "Get LTM mode")
+            return LtmMode(int(mode))
 
     def get_relative_loop_score(
         self,

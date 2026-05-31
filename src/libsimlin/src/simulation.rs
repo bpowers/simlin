@@ -60,8 +60,14 @@ pub unsafe extern "C" fn simlin_sim_new(
         std::result::Result<engine::CompiledSimulation, engine::Error>,
         HashMap<String, Vec<Option<usize>>>,
         HashMap<String, engine::ltm_post::LoopElementIndex>,
+        Option<engine::db::LtmMode>,
     );
-    let (incremental_result, captured_loop_partitions, captured_loop_element_index): CompileSnapshot = {
+    let (
+        incremental_result,
+        captured_loop_partitions,
+        captured_loop_element_index,
+        captured_ltm_mode,
+    ): CompileSnapshot = {
         let mut db = project_ref.db.lock().unwrap();
         if let Some(source_project) = db.current_source_project() {
             engine::db::set_project_ltm_enabled(&mut db, source_project, enable_ltm);
@@ -77,7 +83,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             // also lets the FFI accept subscripted IDs like `r1[Boston]`
             // and resolve them against the loop_score's actual slot
             // layout (issue #463).
-            let (loop_partitions, loop_element_index) = if enable_ltm && result.is_ok() {
+            let (loop_partitions, loop_element_index, ltm_mode) = if enable_ltm && result.is_ok() {
                 let canonical = engine::canonicalize(&model_ref.model_name);
                 if let Some(sm) = source_project.models(&*db).get(canonical.as_ref()).copied() {
                     let ltm_vars = engine::db::model_ltm_variables(&*db, sm, source_project);
@@ -120,12 +126,16 @@ pub unsafe extern "C" fn simlin_sim_new(
                         "loop_partitions slot counts must match loop_element_index n_slots \
                          when both are genuinely arrayed (> 1 slot)"
                     );
-                    (ltm_vars.loop_partitions.clone(), element_index)
+                    (
+                        ltm_vars.loop_partitions.clone(),
+                        element_index,
+                        Some(ltm_vars.mode),
+                    )
                 } else {
-                    (HashMap::new(), HashMap::new())
+                    (HashMap::new(), HashMap::new(), None)
                 }
             } else {
-                (HashMap::new(), HashMap::new())
+                (HashMap::new(), HashMap::new(), None)
             };
             // Always reset ltm_enabled to avoid leaking the flag to
             // subsequent operations (e.g. patch validation) that share
@@ -133,7 +143,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             if enable_ltm {
                 engine::db::set_project_ltm_enabled(&mut db, source_project, false);
             }
-            (result, loop_partitions, loop_element_index)
+            (result, loop_partitions, loop_element_index, ltm_mode)
         } else {
             (
                 Err(engine::Error {
@@ -143,6 +153,7 @@ pub unsafe extern "C" fn simlin_sim_new(
                 }),
                 HashMap::new(),
                 HashMap::new(),
+                None,
             )
         }
     };
@@ -167,6 +178,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             overrides: HashMap::new(),
             loop_partitions: captured_loop_partitions,
             loop_element_index: captured_loop_element_index,
+            ltm_mode: captured_ltm_mode,
             cached_partition_denominators: HashMap::new(),
         }),
         ref_count: AtomicUsize::new(1),

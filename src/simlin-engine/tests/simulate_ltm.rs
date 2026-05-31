@@ -705,6 +705,115 @@ fn test_smooth_goal_seeking_ltm() {
     );
 }
 
+/// Task C: characterize whether a loop running *through* a SMOOTH macro
+/// captures the macro's composite contribution in its loop SCORE.
+///
+/// FINDING -- this pins a REAL GAP (GH #548, in the module-LTM cluster), not a
+/// fix.  For the goal-seeking model
+/// `level (stock) -> SMTH1(level) -> gap -> adjustment -> level`:
+///
+///   * The module computes its own internal composite correctly:
+///     `$⁚smoothed_level⁚0⁚smth1·$⁚ltm⁚composite⁚input` is non-zero and varies
+///     over the run (it carries the input->output path score through the
+///     macro's internal stock).
+///   * The module's OUTPUT-side root link score
+///     `$⁚ltm⁚link_score⁚$⁚…smth1→smoothed_level` is the expected ~1.
+///   * BUT the INPUT-side root link score
+///     `$⁚ltm⁚link_score⁚level→$⁚…smth1` is identically 0.  Its equation
+///     (the exhaustive `!from_is_module && to_is_module` branch of
+///     `link_score_equation_text` in db.rs) references
+///     `"$⁚…smth1·$⁚ltm⁚composite⁚input"`, but that cross-module reference
+///     resolves to a constant 0 at root-model assembly -- the silent-stub
+///     path the engine CLAUDE.md flags (`compile_ltm_synthetic_fragment`).
+///   * Because the root loop score is the product of its link scores, the 0
+///     on `level->smth1` zeros the entire root `$⁚ltm⁚loop_score⁚b1`.
+///
+/// Net: the macro's composite contribution is computed but does NOT flow into
+/// the *parent* loop score.  This test pins that current behavior so a future
+/// fix (making the cross-module composite reference resolve) trips here and
+/// prompts flipping the assertions.  See the report in the task summary.
+#[test]
+fn smooth_macro_composite_does_not_flow_into_parent_loop_score_gh548() {
+    let with_smooth = TestProject::new("with_smooth")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .aux("goal", "100", None)
+        .stock("level", "50", &["adjustment"], &[], None)
+        .aux("smoothed_level", "SMTH1(level, 3)", None)
+        .aux("gap", "goal - smoothed_level", None)
+        .aux("adjustment_time", "5", None)
+        .flow("adjustment", "gap / adjustment_time", None)
+        .build_datamodel();
+
+    // The loop IS discovered structurally (names trimmed correctly).
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &with_smooth, None);
+    let source_model = sync.models["main"].source_model;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert!(
+        !detected.loops.is_empty(),
+        "the SMOOTH feedback loop must be discovered structurally"
+    );
+
+    let compiled = compile_ltm_incremental(&with_smooth);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let series = |name: &str| -> Option<Vec<f64>> {
+        let ident = Ident::<Canonical>::new(name);
+        results
+            .offsets
+            .get(&ident)
+            .map(|&off| results.iter().map(|row| row[off]).collect())
+    };
+    let max_abs = |s: &[f64]| {
+        s.iter()
+            .filter(|v| v.is_finite())
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max)
+    };
+
+    // The module's OWN internal composite carries a real, varying signal.
+    let internal_composite = series("$⁚smoothed_level⁚0⁚smth1·$⁚ltm⁚composite⁚input")
+        .expect("module-internal composite var must be emitted");
+    assert!(
+        max_abs(&internal_composite) > 1.0,
+        "the macro computes a non-trivial internal composite (its contribution \
+         exists -- the gap is that it does not propagate to the parent)"
+    );
+
+    // The OUTPUT-side root link score works (~1).
+    let out_side = series("$⁚ltm⁚link_score⁚$⁚smoothed_level⁚0⁚smth1→smoothed_level")
+        .expect("module->downstream root link score must be emitted");
+    assert!(
+        max_abs(&out_side) > 0.5,
+        "module->downstream link score should be ~1"
+    );
+
+    // THE GAP: the input-side root link score (which references the internal
+    // composite) is identically 0, so the parent loop score is zeroed.
+    let in_side = series("$⁚ltm⁚link_score⁚level→$⁚smoothed_level⁚0⁚smth1")
+        .expect("input->module root link score must be emitted");
+    assert_eq!(
+        max_abs(&in_side),
+        0.0,
+        "GAP (GH #548): the input->module composite reference resolves to 0 at \
+         root assembly, so the macro's composite contribution never reaches the \
+         parent loop; if this now carries signal, the gap is fixed -- update \
+         this test"
+    );
+
+    if let Some(loop_b1) = series("$⁚ltm⁚loop_score⁚b1") {
+        assert_eq!(
+            max_abs(&loop_b1),
+            0.0,
+            "GAP (GH #548): the parent loop score is zeroed by the dropped \
+             input->module composite; if non-zero, the gap is fixed -- update \
+             this test"
+        );
+    }
+}
+
 // Issue #419: discovery mode should find loops through SMOOTH composite paths.
 #[test]
 fn test_smooth_model_discovery_mode() {

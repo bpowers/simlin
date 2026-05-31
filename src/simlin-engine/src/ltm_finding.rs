@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel;
 use crate::db::LtmSyntheticVar;
-use crate::ltm::{CausalGraph, CyclePartitions, Link, Loop, LoopPolarity};
+use crate::ltm::{CausalGraph, CyclePartitions, Link, LinkPolarity, Loop, LoopPolarity};
 use crate::project::Project;
 use crate::results::Results;
 
@@ -728,6 +728,275 @@ fn trim_synthetic_aggs_from_loop_links(links: &[Link]) -> Option<Vec<Link>> {
     Some(links)
 }
 
+/// A directed causal link, optionally carrying its per-timestep LTM link-score
+/// series, suitable for synthetic-node collapse.
+///
+/// This is the abstract shape [`collapse_synthetic_links`] operates on so the
+/// collapse lives in the engine (and every binding benefits) while the caller
+/// owns whatever string/score representation it ultimately serializes.
+/// `score` is `None` for a structural-only caller (no simulation results) and
+/// `Some(series)` for an LTM run; the collapse preserves the distinction.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
+pub struct CollapsibleLink {
+    pub from: Ident<Canonical>,
+    pub to: Ident<Canonical>,
+    pub polarity: LinkPolarity,
+    /// Per-timestep link-score series. `None` when no LTM results back this
+    /// link (the structural-only path), `Some` after an LTM simulation.
+    pub score: Option<Vec<f64>>,
+}
+
+/// Per-timestep product of two link-score series (the LTM *path score*: the
+/// product of the link scores along a path -- ref 6.3 / section 5.1).
+///
+/// `None` if either operand is absent (a path-score is only defined when every
+/// edge in the path has a score series). When both are present they are
+/// elementwise multiplied over the common prefix; a `NaN` factor propagates,
+/// correctly marking that step's path score undefined.
+fn multiply_score_series(a: &Option<Vec<f64>>, b: &Option<Vec<f64>>) -> Option<Vec<f64>> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let n = a.len().min(b.len());
+            Some((0..n).map(|i| a[i] * b[i]).collect())
+        }
+        _ => None,
+    }
+}
+
+/// Per-timestep, larger-magnitude selection between two candidate composite
+/// series (the LTM *composite link score*: the path score with the largest
+/// magnitude at each interval -- ref 6.3). Sign is preserved.
+///
+/// Mirrors the engine's `generate_max_abs_chain_str` selection
+/// (`if ABS(a) >= ABS(b) then a else b`): because `NaN` comparisons are
+/// false, a `NaN` candidate loses to a finite one at that step. A present
+/// series always beats an absent one (we cannot compare against nothing).
+fn max_abs_score_series(a: Option<Vec<f64>>, b: Option<Vec<f64>>) -> Option<Vec<f64>> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let n = a.len().min(b.len());
+            Some(
+                (0..n)
+                    .map(|i| if a[i].abs() >= b[i].abs() { a[i] } else { b[i] })
+                    .collect(),
+            )
+        }
+        (Some(s), None) | (None, Some(s)) => Some(s),
+        (None, None) => None,
+    }
+}
+
+/// Collapse synthetic/macro/module-internal nodes out of a causal link set,
+/// preserving the loop-score contribution that flows *through* them.
+///
+/// A synthetic node is any whose canonical name carries the reserved `$⁚`
+/// prefix ([`crate::ltm::is_synthetic_node_name`]) -- macro-instantiation
+/// internals (`$⁚{var}⁚{n}⁚{func}`) and LTM-internal nodes
+/// (`$⁚ltm⁚agg⁚{n}`, etc.). Real model variables never start with `$`.
+///
+/// This is the link-set generalization of
+/// [`trim_synthetic_aggs_from_loop_links`] (which collapses only `$⁚ltm⁚agg⁚{n}`
+/// nodes out of a single loop's link *cycle*). Per LTM ref 6.4, trimming a
+/// macro/module means **collapse, not delete**: a chain
+/// `[X -> $⁚…internal…, … -> Y]` becomes one composite edge `[X -> Y]` whose
+/// polarity is the product of the collapsed links and whose score is the
+/// **composite link score** -- the largest-magnitude path score through the
+/// macro/module (ref 6.3). Deleting the internal links instead would
+/// disconnect feedback paths through SMOOTH/DELAY/modules and silently drop
+/// their contribution.
+///
+/// Concretely: every direct real -> real edge passes through unchanged, and
+/// for every path `R0 -> s1 -> … -> sk -> R1` (each `si` synthetic, `R0`/`R1`
+/// real) a composite edge `R0 -> R1` is emitted. The composite polarity is the
+/// product along the path; the composite score is the per-timestep
+/// max-magnitude over all such paths between the same endpoints, each path
+/// score being the per-timestep product of its constituent link scores. A
+/// purely-internal cycle (a synthetic node only reachable from synthetics,
+/// like a macro's `$⁚…⁚arg1` helper, or an internal feedback loop) yields no
+/// real -> real edge and is dropped -- LTM ref 6.4 "internal loop suppression".
+///
+/// The traversal never re-enters a real node and visits each synthetic node at
+/// most once per path, so a synthetic-internal cycle cannot loop forever.
+/// The accumulated composite payload for one collapsed edge: its current
+/// (strongest-path) polarity and its composite score series (`None` until a
+/// scored path contributes).
+type CompositePayload = (LinkPolarity, Option<Vec<f64>>);
+
+/// One real endpoint reached by a synthetic chain, with the chain's accumulated
+/// polarity and path score, produced by `collapse_synthetic_links`'s walk.
+type ReachedEndpoint = (String, LinkPolarity, Option<Vec<f64>>);
+
+pub fn collapse_synthetic_links(links: Vec<CollapsibleLink>) -> Vec<CollapsibleLink> {
+    use crate::ltm::is_synthetic_node_name;
+
+    let has_synthetic = links
+        .iter()
+        .any(|l| is_synthetic_node_name(l.from.as_str()) || is_synthetic_node_name(l.to.as_str()));
+    if !has_synthetic {
+        return links;
+    }
+
+    // Adjacency: from-node -> list of outgoing (to, polarity, score).
+    let mut adj: HashMap<&str, Vec<&CollapsibleLink>> = HashMap::new();
+    for l in &links {
+        adj.entry(l.from.as_str()).or_default().push(l);
+    }
+
+    // Accumulated composite edges keyed on (real from, real to). Multiple
+    // paths between the same endpoints fold together by per-timestep
+    // max-magnitude (the composite link score, ref 6.3). The value is wrapped
+    // in `Option` so `None` is an unambiguous "no contribution yet" marker:
+    // `(Unknown, None)` is itself a legitimate first contribution (a
+    // structural-only edge whose polarity is genuinely Unknown), so it must not
+    // double as the uninitialized sentinel -- doing so would drop the first of
+    // two disagreeing structural paths instead of folding them to Unknown.
+    let mut composite: HashMap<(String, String), Option<CompositePayload>> = HashMap::new();
+
+    // Walk every synthetic chain starting at the synthetic successor of a real
+    // node, accumulating polarity and path score, until reaching the next real
+    // node. `visited` guards against synthetic-internal cycles. There is no
+    // explicit path-count budget: the enumeration is bounded only because the
+    // synthetic interior of a macro/module is small (a handful of nodes); a
+    // pathological synthetic subgraph with many internal diamonds could
+    // enumerate exponentially many paths, but no real construct produces one.
+    fn walk(
+        adj: &HashMap<&str, Vec<&CollapsibleLink>>,
+        node: &str,
+        acc_polarity: LinkPolarity,
+        acc_score: &Option<Vec<f64>>,
+        visited: &mut HashSet<String>,
+        out: &mut Vec<ReachedEndpoint>,
+    ) {
+        let Some(edges) = adj.get(node) else {
+            return;
+        };
+        for edge in edges {
+            let to = edge.to.as_str();
+            let next_polarity = acc_polarity.compose(edge.polarity);
+            let next_score = multiply_score_series(acc_score, &edge.score);
+            if crate::ltm::is_synthetic_node_name(to) {
+                // Visit each synthetic node at most once per path so an
+                // internal cycle terminates.
+                if !visited.insert(to.to_string()) {
+                    continue;
+                }
+                walk(adj, to, next_polarity, &next_score, visited, out);
+                visited.remove(to);
+            } else {
+                // Reached a real node: the chain `R0 -> … -> to` is a complete
+                // composite path.
+                out.push((to.to_string(), next_polarity, next_score));
+            }
+        }
+    }
+
+    for l in &links {
+        // Only start a collapse from a real source node. A path that begins at
+        // a synthetic node (e.g. a macro's argument helper) has no real
+        // origin, so it produces no user-visible edge.
+        if is_synthetic_node_name(l.from.as_str()) {
+            continue;
+        }
+        if !is_synthetic_node_name(l.to.as_str()) {
+            // Direct real -> real edge: pass through, folding into any
+            // composite the same endpoints accumulate.
+            let key = (l.from.as_str().to_string(), l.to.as_str().to_string());
+            let slot = composite.entry(key).or_insert(None);
+            if let Some((pol, sc)) = slot {
+                *pol = pick_stronger_polarity(*pol, sc, l.polarity, &l.score);
+                *sc = max_abs_score_series(sc.take(), l.score.clone());
+            } else {
+                // First contribution for this key: take it verbatim.
+                *slot = Some((l.polarity, l.score.clone()));
+            }
+            continue;
+        }
+        // Synthetic successor: walk every chain through synthetics to the next
+        // real node and emit a composite edge per reached endpoint.
+        let mut reached = Vec::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(l.to.as_str().to_string());
+        walk(
+            &adj,
+            l.to.as_str(),
+            l.polarity,
+            &l.score,
+            &mut visited,
+            &mut reached,
+        );
+        for (to_real, polarity, score) in reached {
+            let key = (l.from.as_str().to_string(), to_real);
+            let slot = composite.entry(key).or_insert(None);
+            if let Some((pol, sc)) = slot {
+                *pol = pick_stronger_polarity(*pol, sc, polarity, &score);
+                *sc = max_abs_score_series(sc.take(), score);
+            } else {
+                *slot = Some((polarity, score));
+            }
+        }
+    }
+
+    let mut result: Vec<CollapsibleLink> = composite
+        .into_iter()
+        .filter_map(|((from, to), payload)| {
+            payload.map(|(polarity, score)| CollapsibleLink {
+                from: Ident::new(&from),
+                to: Ident::new(&to),
+                polarity,
+                score,
+            })
+        })
+        .collect();
+    // Deterministic ordering so callers (and tests) see a stable link set.
+    result.sort_by(|a, b| {
+        a.from
+            .as_str()
+            .cmp(b.from.as_str())
+            .then_with(|| a.to.as_str().cmp(b.to.as_str()))
+    });
+    result
+}
+
+/// When two candidate composites collapse onto the same `(from, to)` edge,
+/// the reported polarity should follow the *stronger* (larger-magnitude)
+/// path -- the same path whose score wins the max-abs selection -- so polarity
+/// and score stay mutually consistent. When neither carries a comparable score
+/// series (both `None`, the structural-only path) we fall back to composing:
+/// an `Unknown` in either makes the merged polarity `Unknown`, since we cannot
+/// say which path dominates.
+fn pick_stronger_polarity(
+    a_polarity: LinkPolarity,
+    a_score: &Option<Vec<f64>>,
+    b_polarity: LinkPolarity,
+    b_score: &Option<Vec<f64>>,
+) -> LinkPolarity {
+    match (a_score, b_score) {
+        (Some(a), Some(b)) => {
+            // Compare aggregate magnitude (sum of |score| over finite steps);
+            // the larger total magnitude is the dominant path overall.
+            let mag =
+                |s: &[f64]| -> f64 { s.iter().filter(|v| v.is_finite()).map(|v| v.abs()).sum() };
+            if mag(a) >= mag(b) {
+                a_polarity
+            } else {
+                b_polarity
+            }
+        }
+        (Some(_), None) => a_polarity,
+        (None, Some(_)) => b_polarity,
+        (None, None) => {
+            // No score to disambiguate: if both paths agree, keep it; else
+            // the edge's polarity is genuinely ambiguous.
+            if a_polarity == b_polarity {
+                a_polarity
+            } else {
+                LinkPolarity::Unknown
+            }
+        }
+    }
+}
+
 /// Integer-indexed search graph shared across all timesteps.
 ///
 /// The graph *topology* -- which `(from -> to)` edges exist and which
@@ -1426,6 +1695,162 @@ mod tests {
         let mut set: Vec<String> = path.iter().map(|id| id.as_str().to_string()).collect();
         set.sort();
         set
+    }
+
+    // --- collapse_synthetic_links ---
+
+    fn clink(
+        from: &str,
+        to: &str,
+        polarity: LinkPolarity,
+        score: Option<Vec<f64>>,
+    ) -> CollapsibleLink {
+        CollapsibleLink {
+            from: Ident::new(from),
+            to: Ident::new(to),
+            polarity,
+            score,
+        }
+    }
+
+    /// Look up a collapsed edge by (from, to) in the result.
+    fn find_edge<'a>(
+        links: &'a [CollapsibleLink],
+        from: &str,
+        to: &str,
+    ) -> Option<&'a CollapsibleLink> {
+        links
+            .iter()
+            .find(|l| l.from.as_str() == from && l.to.as_str() == to)
+    }
+
+    #[test]
+    fn collapse_passes_through_a_graph_with_no_synthetic_nodes() {
+        // A purely real graph is returned unchanged (modulo nothing).
+        let input = vec![
+            clink("a", "b", LinkPolarity::Positive, Some(vec![1.0, 2.0])),
+            clink("b", "c", LinkPolarity::Negative, Some(vec![3.0, 4.0])),
+        ];
+        let out = collapse_synthetic_links(input);
+        assert_eq!(out.len(), 2);
+        assert!(find_edge(&out, "a", "b").is_some());
+        assert!(find_edge(&out, "b", "c").is_some());
+    }
+
+    #[test]
+    fn collapse_single_chain_through_a_macro_node() {
+        // Mirrors the SMTH1 edge structure from model_causal_edges:
+        //   level -> $⁚smoothed_level⁚0⁚smth1 -> smoothed_level
+        // plus a dangling synthetic arg helper feeding the module that has no
+        // real predecessor. The chain collapses to one composite edge
+        // `level -> smoothed_level` (product polarity, product score); the
+        // arg-helper chain is dropped (no real source).
+        let smth = "$\u{205A}smoothed_level\u{205A}0\u{205A}smth1";
+        let arg = "$\u{205A}smoothed_level\u{205A}0\u{205A}arg1";
+        let input = vec![
+            clink("level", smth, LinkPolarity::Positive, Some(vec![2.0, -3.0])),
+            clink(
+                smth,
+                "smoothed_level",
+                LinkPolarity::Negative,
+                Some(vec![5.0, 7.0]),
+            ),
+            clink(arg, smth, LinkPolarity::Positive, Some(vec![9.0, 9.0])),
+        ];
+        let out = collapse_synthetic_links(input);
+        // No synthetic node survives.
+        assert!(
+            out.iter()
+                .all(|l| !l.from.as_str().starts_with('$') && !l.to.as_str().starts_with('$')),
+            "no synthetic node should remain: {:?}",
+            out.iter()
+                .map(|l| (l.from.as_str(), l.to.as_str()))
+                .collect::<Vec<_>>()
+        );
+        // The composite `level -> smoothed_level` carries product polarity and
+        // per-step product score.
+        let edge = find_edge(&out, "level", "smoothed_level")
+            .expect("level -> smoothed_level composite edge");
+        assert_eq!(edge.polarity, LinkPolarity::Negative); // + composed with -
+        assert_eq!(edge.score.as_deref(), Some(&[10.0, -21.0][..]));
+        // The arg-helper chain produced no edge (it has no real source).
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn collapse_picks_max_magnitude_path_score() {
+        // Two disjoint synthetic paths from a -> z. The composite link score is
+        // the per-timestep larger-magnitude path score (ref 6.3); the reported
+        // polarity follows the dominant path.
+        let s1 = "$\u{205A}m\u{205A}0\u{205A}f"; // path 1 internal
+        let s2 = "$\u{205A}m\u{205A}1\u{205A}g"; // path 2 internal
+        let input = vec![
+            // path 1: a -> s1 -> z, scores 1*1 and 1*1 = [1, 1], Positive
+            clink("a", s1, LinkPolarity::Positive, Some(vec![1.0, 1.0])),
+            clink(s1, "z", LinkPolarity::Positive, Some(vec![1.0, 1.0])),
+            // path 2: a -> s2 -> z, scores 10*1 and 0.5*0.5 = [10, 0.25], Negative
+            clink("a", s2, LinkPolarity::Negative, Some(vec![10.0, 0.5])),
+            clink(s2, "z", LinkPolarity::Positive, Some(vec![1.0, 0.5])),
+        ];
+        let out = collapse_synthetic_links(input);
+        let edge = find_edge(&out, "a", "z").expect("a -> z composite");
+        // step 0: |10| > |1| -> path 2 (10, Negative); step 1: |1| > |0.25| ->
+        // path 1 (1). Max-abs keeps the per-step winner's sign.
+        assert_eq!(edge.score.as_deref(), Some(&[10.0, 1.0][..]));
+        // Aggregate magnitude: path2 sum |10|+|0.25| = 10.25 > path1 sum 2.0,
+        // so the dominant-path polarity is Negative.
+        assert_eq!(edge.polarity, LinkPolarity::Negative);
+    }
+
+    #[test]
+    fn collapse_drops_a_fully_internal_cycle() {
+        // A synthetic-only cycle (s1 -> s2 -> s1) with no real entry/exit must
+        // not loop forever and must produce no user-visible edge.
+        let s1 = "$\u{205A}m\u{205A}0\u{205A}f";
+        let s2 = "$\u{205A}m\u{205A}1\u{205A}g";
+        let input = vec![
+            clink(s1, s2, LinkPolarity::Positive, Some(vec![1.0])),
+            clink(s2, s1, LinkPolarity::Positive, Some(vec![1.0])),
+        ];
+        let out = collapse_synthetic_links(input);
+        assert!(out.is_empty(), "fully-internal cycle yields no edges");
+    }
+
+    #[test]
+    fn collapse_structural_only_path_has_no_scores() {
+        // No score series (structural-only caller): the composite still
+        // collapses, polarity composes, and the score stays None.
+        let smth = "$\u{205A}v\u{205A}0\u{205A}smth1";
+        let input = vec![
+            clink("x", smth, LinkPolarity::Negative, None),
+            clink(smth, "y", LinkPolarity::Negative, None),
+        ];
+        let out = collapse_synthetic_links(input);
+        let edge = find_edge(&out, "x", "y").expect("x -> y composite");
+        assert_eq!(edge.polarity, LinkPolarity::Positive); // - composed with -
+        assert!(edge.score.is_none());
+    }
+
+    #[test]
+    fn collapse_folds_two_disagreeing_structural_paths_to_unknown() {
+        // Two scoreless (structural-only) paths reach the same real endpoint
+        // with disagreeing polarity, and the FIRST is genuinely Unknown:
+        //   a --Unknown--> c                          (direct)
+        //   a --+--> $synth --+--> c                  (composes to Positive)
+        // The merged edge must be Unknown (two disagreeing structural paths,
+        // per pick_stronger_polarity's both-None arm). Regression guard: when
+        // (Unknown, None) doubled as the uninitialized map sentinel, the first
+        // path was silently overwritten and the edge wrongly reported Positive.
+        let smth = "$\u{205A}v\u{205A}0\u{205A}smth1";
+        let input = vec![
+            clink("a", "c", LinkPolarity::Unknown, None),
+            clink("a", smth, LinkPolarity::Positive, None),
+            clink(smth, "c", LinkPolarity::Positive, None),
+        ];
+        let out = collapse_synthetic_links(input);
+        let edge = find_edge(&out, "a", "c").expect("a -> c composite");
+        assert_eq!(edge.polarity, LinkPolarity::Unknown);
+        assert!(edge.score.is_none());
     }
 
     // --- Test 1: SearchGraph construction ---

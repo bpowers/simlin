@@ -17,7 +17,7 @@ use std::ptr;
 
 use crate::ffi::{
     SimlinDiscoveredLoop, SimlinDiscoveryResult, SimlinDominantPeriod, SimlinLink,
-    SimlinLinkPolarity, SimlinLinks, SimlinLoop, SimlinLoopPolarity, SimlinLoops,
+    SimlinLinkPolarity, SimlinLinks, SimlinLoop, SimlinLoopPolarity, SimlinLoops, SimlinLtmMode,
 };
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
@@ -66,11 +66,23 @@ pub(crate) struct OwnedLink {
 /// from-wasm callers always pass `Some(&results)` since they hold the
 /// rebuilt `Results` on the stack and only reach this core when LTM was
 /// part of the wasm compile.
+///
+/// `include_internal` controls whether macro/module-internal synthetic nodes
+/// (`$⁚{var}⁚{n}⁚{func}`, `$⁚ltm⁚agg⁚{n}`, etc.) are surfaced.  When `false`
+/// (the default user-facing view) the raw graph is run through
+/// `engine::ltm_finding::collapse_synthetic_links`, which collapses each chain
+/// `X -> $⁚…internal… -> Y` into one composite edge `X -> Y` whose polarity is
+/// the product of the collapsed links and whose score is the composite link
+/// score (the largest-magnitude path score through the macro/module -- LTM ref
+/// 6.3/6.4).  When `true` the raw causal graph is returned unchanged.  The
+/// collapse runs in the engine so every binding shares one implementation and
+/// it mirrors the loop-level `trim_synthetic_aggs_from_loop_links` trimming.
 pub(crate) fn analyze_links_core(
     db: &dyn engine::db::Db,
     model: SourceModel,
     project: SourceProject,
     results: Option<&engine::Results>,
+    include_internal: bool,
 ) -> Vec<OwnedLink> {
     let causal = engine::db::model_causal_edges(db, model, project);
     let polarities = engine::db::compute_link_polarities(db, model, project);
@@ -89,7 +101,7 @@ pub(crate) fn analyze_links_core(
         }
     }
 
-    unique_links
+    let raw: Vec<OwnedLink> = unique_links
         .into_iter()
         .map(|(from, to)| {
             let score = results.and_then(|r| {
@@ -110,6 +122,31 @@ pub(crate) fn analyze_links_core(
                 polarity,
                 score,
             }
+        })
+        .collect();
+
+    if include_internal {
+        return raw;
+    }
+
+    // Collapse macro/module-internal synthetic nodes via the engine, then map
+    // the engine's `CollapsibleLink` shape back to `OwnedLink`.
+    let collapsible: Vec<engine::ltm_finding::CollapsibleLink> = raw
+        .into_iter()
+        .map(|l| engine::ltm_finding::CollapsibleLink {
+            from: Ident::<Canonical>::new(&l.from),
+            to: Ident::<Canonical>::new(&l.to),
+            polarity: l.polarity,
+            score: l.score,
+        })
+        .collect();
+    engine::ltm_finding::collapse_synthetic_links(collapsible)
+        .into_iter()
+        .map(|l| OwnedLink {
+            from: l.from.as_str().to_string(),
+            to: l.to.as_str().to_string(),
+            polarity: l.polarity,
+            score: l.score,
         })
         .collect()
 }
@@ -629,12 +666,20 @@ pub unsafe extern "C" fn simlin_free_discovery_result(result: *mut SimlinDiscove
 /// This includes flow-to-stock, stock-to-flow, and auxiliary-to-auxiliary links.
 /// If the simulation has been run with LTM enabled, link scores will be included.
 ///
+/// `include_internal` selects the view: when `false`, macro/module-internal
+/// synthetic nodes (`$⁚{var}⁚{n}⁚{func}`, `$⁚ltm⁚agg⁚{n}`, etc.) are collapsed
+/// out -- each chain `X -> internal -> Y` becomes one composite edge `X -> Y`
+/// carrying the composite (largest-magnitude path) link score, so the
+/// through-contribution is preserved (LTM ref 6.4).  When `true`, the raw
+/// causal graph (including every synthetic node) is returned.
+///
 /// # Safety
 /// - `sim` must be a valid pointer to a SimlinSim
 /// - The returned SimlinLinks must be freed with simlin_free_links
 #[no_mangle]
 pub unsafe extern "C" fn simlin_analyze_get_links(
     sim: *mut SimlinSim,
+    include_internal: bool,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLinks {
     clear_out_error(out_error);
@@ -687,11 +732,53 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
     } else {
         None
     };
-    let owned = analyze_links_core(&*db_locked, source_model, source_project, results);
+    let owned = analyze_links_core(
+        &*db_locked,
+        source_model,
+        source_project,
+        results,
+        include_internal,
+    );
     drop(state_guard);
     drop(db_locked);
 
     owned_links_to_ffi(owned, out_error)
+}
+
+/// Reports the LTM loop-enumeration mode the simulation resolved to.
+///
+/// Returns `Disabled` when the sim was created with `enable_ltm = false` (or
+/// compilation failed before LTM could run), `Exhaustive` when every
+/// elementary circuit was enumerated, and `Discovery` when the model tripped
+/// the SCC-size gate (or discovery was requested directly) so loops are
+/// ranked by the per-timestep strongest-path heuristic.  The mode is captured
+/// at `simlin_sim_new` time, so it is available without running the
+/// simulation.
+///
+/// On a NULL `sim` the function reports the error through `out_error` and
+/// returns `Disabled`.
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a `SimlinSim`.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_get_ltm_mode(
+    sim: *mut SimlinSim,
+    out_error: *mut *mut SimlinError,
+) -> SimlinLtmMode {
+    clear_out_error(out_error);
+    let sim_ref = match require_sim(sim) {
+        Ok(s) => s,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return SimlinLtmMode::Disabled;
+        }
+    };
+    let state = sim_ref.state.lock().unwrap();
+    match state.ltm_mode {
+        None => SimlinLtmMode::Disabled,
+        Some(engine::db::LtmMode::Exhaustive) => SimlinLtmMode::Exhaustive,
+        Some(engine::db::LtmMode::Discovery) => SimlinLtmMode::Discovery,
+    }
 }
 
 /// Reinterpret a byte buffer of f64 values into a `&[f64]`.
@@ -771,6 +858,10 @@ unsafe fn slab_from_bytes(slab_ptr: *const u8, slab_len: usize) -> Result<Vec<f6
 ///   produced by `WasmLayout::serialize` (i.e. the `out_layout` buffer of
 ///   `simlin_model_compile_to_wasm`).
 /// - The returned `SimlinLinks` must be freed with `simlin_free_links`.
+///
+/// `include_internal` matches `simlin_analyze_get_links`: `false` collapses
+/// macro/module-internal synthetic nodes (preserving the composite
+/// through-contribution); `true` returns the raw causal graph.
 #[no_mangle]
 pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
     model: *mut SimlinModel,
@@ -778,6 +869,7 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
     slab_len: usize,
     layout_ptr: *const u8,
     layout_len: usize,
+    include_internal: bool,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLinks {
     clear_out_error(out_error);
@@ -861,7 +953,13 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
         }
     };
 
-    let owned = analyze_links_core(&*db_locked, source_model, source_project, Some(&results));
+    let owned = analyze_links_core(
+        &*db_locked,
+        source_model,
+        source_project,
+        Some(&results),
+        include_internal,
+    );
     drop(db_locked);
 
     owned_links_to_ffi(owned, out_error)

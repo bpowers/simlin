@@ -921,7 +921,10 @@ unsafe fn vm_oracle_links(project: *mut SimlinProject) -> *mut SimlinLinks {
     simlin_sim_run_to_end(sim, &mut err);
     assert!(err.is_null(), "VM run_to_end must succeed");
     let mut err: *mut SimlinError = ptr::null_mut();
-    let links = simlin_analyze_get_links(sim, &mut err);
+    // Raw graph (include_internal=true) so the VM/wasm parity test below
+    // compares the same view on both sides; logistic_growth has no macros, so
+    // the collapsed view would be identical anyway.
+    let links = simlin_analyze_get_links(sim, true, &mut err);
     assert!(err.is_null(), "VM analyze_get_links must succeed");
     assert!(!links.is_null());
     simlin_sim_unref(sim);
@@ -975,6 +978,7 @@ fn links_from_wasm_match_vm() {
             run.slab_bytes.len(),
             run.layout_bytes_ptr,
             run.layout_bytes_len,
+            true,
             &mut err,
         );
         assert!(
@@ -1246,6 +1250,7 @@ fn links_from_wasm_truncated_slab_matches_prefix() {
             run.slab_bytes.len(),
             run.layout_bytes_ptr,
             run.layout_bytes_len,
+            true,
             &mut err,
         );
         assert!(err.is_null(), "full-slab links call must succeed");
@@ -1262,6 +1267,7 @@ fn links_from_wasm_truncated_slab_matches_prefix() {
             half_slab_bytes.len(),
             run.layout_bytes_ptr,
             run.layout_bytes_len,
+            true,
             &mut err,
         );
         assert!(
@@ -1338,6 +1344,7 @@ fn links_from_wasm_rejects_invalid_slab_lengths() {
             oversize_step_bytes,
             run.layout_bytes_ptr,
             run.layout_bytes_len,
+            true,
             &mut err,
         );
         assert!(p.is_null(), "non-multiple slab length must return null");
@@ -1355,6 +1362,7 @@ fn links_from_wasm_rejects_invalid_slab_lengths() {
             overflow.len(),
             run.layout_bytes_ptr,
             run.layout_bytes_len,
+            true,
             &mut err,
         );
         assert!(p.is_null(), "over-capacity slab must return null");

@@ -36,6 +36,21 @@ typedef enum {
   SIMLIN_LINK_POLARITY_UNKNOWN = 2,
 } SimlinLinkPolarity;
 
+// The LTM loop-enumeration mode a simulation resolved to.
+//
+// `Disabled` means the simulation was created without LTM (`enable_ltm =
+// false`), so no loop enumeration ran. `Exhaustive` means every elementary
+// circuit was enumerated (Johnson). `Discovery` means the model tripped the
+// SCC-size gate (or discovery was requested directly) and loops are ranked
+// by the per-timestep strongest-path heuristic instead. Without this signal
+// a caller cannot tell why an LTM-enabled run produced empty or different
+// loop results.
+typedef enum {
+  SIMLIN_LTM_MODE_DISABLED = 0,
+  SIMLIN_LTM_MODE_EXHAUSTIVE = 1,
+  SIMLIN_LTM_MODE_DISCOVERY = 2,
+} SimlinLtmMode;
+
 // Error codes for the C API
 typedef enum {
   // Success - no error
@@ -269,10 +284,36 @@ void simlin_free_discovery_result(SimlinDiscoveryResult *result);
 // This includes flow-to-stock, stock-to-flow, and auxiliary-to-auxiliary links.
 // If the simulation has been run with LTM enabled, link scores will be included.
 //
+// `include_internal` selects the view: when `false`, macro/module-internal
+// synthetic nodes (`$⁚{var}⁚{n}⁚{func}`, `$⁚ltm⁚agg⁚{n}`, etc.) are collapsed
+// out -- each chain `X -> internal -> Y` becomes one composite edge `X -> Y`
+// carrying the composite (largest-magnitude path) link score, so the
+// through-contribution is preserved (LTM ref 6.4).  When `true`, the raw
+// causal graph (including every synthetic node) is returned.
+//
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
 // - The returned SimlinLinks must be freed with simlin_free_links
-SimlinLinks *simlin_analyze_get_links(SimlinSim *sim, SimlinError **out_error);
+SimlinLinks *simlin_analyze_get_links(SimlinSim *sim,
+                                      bool include_internal,
+                                      SimlinError **out_error);
+
+// Reports the LTM loop-enumeration mode the simulation resolved to.
+//
+// Returns `Disabled` when the sim was created with `enable_ltm = false` (or
+// compilation failed before LTM could run), `Exhaustive` when every
+// elementary circuit was enumerated, and `Discovery` when the model tripped
+// the SCC-size gate (or discovery was requested directly) so loops are
+// ranked by the per-timestep strongest-path heuristic.  The mode is captured
+// at `simlin_sim_new` time, so it is available without running the
+// simulation.
+//
+// On a NULL `sim` the function reports the error through `out_error` and
+// returns `Disabled`.
+//
+// # Safety
+// - `sim` must be a valid pointer to a `SimlinSim`.
+SimlinLtmMode simlin_sim_get_ltm_mode(SimlinSim *sim, SimlinError **out_error);
 
 // Gets all causal links in a model with LTM link-score series derived from
 // a wasm-produced result slab.
@@ -313,11 +354,16 @@ SimlinLinks *simlin_analyze_get_links(SimlinSim *sim, SimlinError **out_error);
 //   produced by `WasmLayout::serialize` (i.e. the `out_layout` buffer of
 //   `simlin_model_compile_to_wasm`).
 // - The returned `SimlinLinks` must be freed with `simlin_free_links`.
+//
+// `include_internal` matches `simlin_analyze_get_links`: `false` collapses
+// macro/module-internal synthetic nodes (preserving the composite
+// through-contribution); `true` returns the raw causal graph.
 SimlinLinks *simlin_analyze_links_from_wasm_results(SimlinModel *model,
                                                     const uint8_t *slab_ptr,
                                                     uintptr_t slab_len,
                                                     const uint8_t *layout_ptr,
                                                     uintptr_t layout_len,
+                                                    bool include_internal,
                                                     SimlinError **out_error);
 
 // Frees a SimlinLinks structure

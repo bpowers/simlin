@@ -57,6 +57,23 @@ pub enum SimlinLinkPolarity {
     Unknown = 2,
 }
 
+/// The LTM loop-enumeration mode a simulation resolved to.
+///
+/// `Disabled` means the simulation was created without LTM (`enable_ltm =
+/// false`), so no loop enumeration ran. `Exhaustive` means every elementary
+/// circuit was enumerated (Johnson). `Discovery` means the model tripped the
+/// SCC-size gate (or discovery was requested directly) and loops are ranked
+/// by the per-timestep strongest-path heuristic instead. Without this signal
+/// a caller cannot tell why an LTM-enabled run produced empty or different
+/// loop results.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimlinLtmMode {
+    Disabled = 0,
+    Exhaustive = 1,
+    Discovery = 2,
+}
+
 /// JSON format specifier for C API
 #[repr(C)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]

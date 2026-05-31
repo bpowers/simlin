@@ -115,6 +115,12 @@ fn test_model_ltm_variables_discovery_mode() {
 
     let ltm = model_ltm_variables(&db, model, source_project);
 
+    assert_eq!(
+        ltm.mode,
+        crate::db::LtmMode::Discovery,
+        "explicitly requesting discovery mode resolves to Discovery"
+    );
+
     assert!(!ltm.vars.is_empty(), "should generate link score variables");
 
     let has_link_score = ltm.vars.iter().any(|v| v.name.contains("link_score"));
@@ -472,6 +478,12 @@ fn test_model_ltm_variables_auto_flip_above_scc_threshold() {
 
     let ltm = model_ltm_variables(&db, model, sync.project);
 
+    assert_eq!(
+        ltm.mode,
+        crate::db::LtmMode::Discovery,
+        "a 51-node SCC must auto-flip the resolved mode to Discovery"
+    );
+
     assert!(
         !ltm.vars.is_empty(),
         "auto-flipped LTM should still produce link score variables"
@@ -519,6 +531,12 @@ fn test_model_ltm_variables_stays_exhaustive_below_scc_threshold() {
     let model = sync.models["main"].source;
 
     let ltm = model_ltm_variables(&db, model, sync.project);
+
+    assert_eq!(
+        ltm.mode,
+        crate::db::LtmMode::Exhaustive,
+        "a 49-node SCC stays under the threshold and resolves to Exhaustive"
+    );
 
     let has_loop_score = ltm
         .vars
