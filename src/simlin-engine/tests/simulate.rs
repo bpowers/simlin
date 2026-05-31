@@ -5125,7 +5125,7 @@ fn compiles_and_runs_clearn_structural() {
 ///
 /// The flows-phase cycle `captured -> smth1·output -> smth1(module) -> input ->
 /// captured` is hidden from CYCLE DETECTION because a module is a sink in the
-/// cycle relation (`dt_walk_successors`), so the model compiles (no
+/// cycle relation (`walk_successors`), so the model compiles (no
 /// `CircularDependency`). But `captured` reads the SMOOTH *stock* output, which
 /// in the dt phase is a prior-timestep read and must NOT impose a same-step
 /// ordering on the module: before the fix, the salsa runlist

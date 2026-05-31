@@ -1057,7 +1057,7 @@ pub struct ModelDepGraphResult {
 /// (`model_dependency_graph_impl`, the SCC-aware back-edge break, the
 /// collapsed-node transitive accumulation) lives in `db/dep_graph.rs`
 /// alongside the shared cycle relation it consumes
-/// (`dt_walk_successors`/`init_walk_successors`/`build_var_info`/
+/// (`walk_successors`/`build_var_info`/
 /// `resolve_recurrence_sccs`) -- a `db` submodule, like
 /// `ltm_ir`/`macro_registry`, only to keep `db.rs` under the
 /// per-file line cap. This thin salsa wrapper stays here because the
