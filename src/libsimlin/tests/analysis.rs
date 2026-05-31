@@ -1719,3 +1719,179 @@ fn test_two_a2a_subsystems_per_slot_rel_score_round_trips() {
         simlin_project_unref(proj);
     }
 }
+
+/// Build a tiny reinforcing-loop project (population grows proportionally to
+/// itself) and open it via the protobuf FFI, returning `(project, model)`.
+///
+/// population[t] is a stock fed by `births = population * growth_rate`, so the
+/// strongest-path discovery finds a single reinforcing loop
+/// `population -> births -> population` with a non-trivial importance series.
+unsafe fn open_reinforcing_loop_model() -> (*mut SimlinProject, *mut SimlinModel) {
+    let test_project = TestProject::new("main")
+        .with_sim_time(0.0, 20.0, 1.0)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * growth_rate", None)
+        .aux("growth_rate", "0.1", None);
+
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+    assert!(err.is_null(), "project open should not error");
+    assert!(!proj.is_null());
+
+    let mut err_model: *mut SimlinError = ptr::null_mut();
+    let model = simlin_project_get_model(proj, ptr::null(), &mut err_model);
+    assert!(err_model.is_null(), "get_model should not error");
+    assert!(!model.is_null());
+
+    (proj, model)
+}
+
+/// Collect the C string array at `(ptr, count)` into owned Rust strings.
+unsafe fn c_string_array(ptr: *mut *mut c_char, count: usize) -> Vec<String> {
+    if ptr.is_null() || count == 0 {
+        return Vec::new();
+    }
+    let slice = std::slice::from_raw_parts(ptr, count);
+    slice
+        .iter()
+        .map(|&p| {
+            assert!(!p.is_null(), "string entry must not be NULL");
+            CStr::from_ptr(p).to_string_lossy().into_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn discover_loops_returns_loops_periods_and_importance() {
+    unsafe {
+        let (proj, model) = open_reinforcing_loop_model();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        // budget_ms = 0 => unlimited; the model is tiny so this completes.
+        let result = simlin_analyze_discover_loops(model, 0, &mut err);
+        assert!(err.is_null(), "discovery should not error");
+        assert!(!result.is_null(), "discovery result must not be NULL");
+
+        let res = &*result;
+        assert!(
+            !res.truncated,
+            "an unbudgeted run on a tiny model must not be truncated"
+        );
+        assert!(
+            res.loop_count > 0,
+            "discovery should find at least one loop in a reinforcing model"
+        );
+
+        // Each discovered loop carries an id, a closed variable chain, and a
+        // per-step importance series.
+        let loops = std::slice::from_raw_parts(res.loops, res.loop_count);
+        for lp in loops {
+            let id = CStr::from_ptr(lp.id).to_string_lossy().into_owned();
+            assert!(!id.is_empty(), "loop id must not be empty");
+            assert!(
+                lp.var_count >= 2,
+                "loop {id} must have at least two variables in its chain"
+            );
+            let vars = c_string_array(lp.variables, lp.var_count);
+            assert!(
+                vars.iter().any(|v| v == "population"),
+                "loop {id} should include population, got {vars:?}"
+            );
+            assert!(
+                lp.importance_len > 0,
+                "loop {id} must have a non-empty importance series"
+            );
+            let importance = std::slice::from_raw_parts(lp.importance, lp.importance_len);
+            assert!(
+                importance.iter().all(|v| v.is_finite()),
+                "loop {id} importance series must be finite"
+            );
+        }
+
+        // Dominant periods cover the simulation with valid bounds.
+        assert!(
+            res.period_count > 0,
+            "a model with loops should produce at least one dominant period"
+        );
+        let periods = std::slice::from_raw_parts(res.periods, res.period_count);
+        for p in periods {
+            assert!(p.start <= p.end, "period start must not exceed its end");
+            let names = c_string_array(p.dominant_loops, p.dominant_loop_count);
+            assert!(
+                !names.is_empty(),
+                "a dominant period must name at least one loop"
+            );
+        }
+
+        simlin_free_discovery_result(result);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn discover_loops_tiny_budget_truncates() {
+    unsafe {
+        // A goal-seeking (balancing) model over many saved timesteps. Values
+        // stay bounded (population converges toward the goal), and the large
+        // step count makes the per-timestep discovery sweep reliably take well
+        // over a millisecond -- so a 1ms budget trips the per-step elapsed
+        // check and reports truncation. The budget is checked at the top of
+        // each step, so the sweep stops promptly rather than hanging.
+        let test_project = TestProject::new("main")
+            .with_sim_time(0.0, 200_000.0, 1.0)
+            .stock("population", "10", &["adjustment"], &[], None)
+            .flow("adjustment", "(goal - population) * 0.1", None)
+            .aux("goal", "1000", None);
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine_serde::serialize(&datamodel_project).unwrap();
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(err.is_null());
+        assert!(!proj.is_null());
+        let mut err_model: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err_model);
+        assert!(err_model.is_null());
+        assert!(!model.is_null());
+
+        err = ptr::null_mut();
+        let result = simlin_analyze_discover_loops(model, 1, &mut err);
+        assert!(
+            err.is_null(),
+            "discovery should not error even when truncated"
+        );
+        assert!(!result.is_null());
+
+        let res = &*result;
+        assert!(
+            res.truncated,
+            "a 1ms budget on a 200k-step sweep must report truncated discovery"
+        );
+
+        simlin_free_discovery_result(result);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn discover_loops_null_model_errors_without_panic() {
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let result = simlin_analyze_discover_loops(ptr::null_mut(), 0, &mut err);
+        assert!(result.is_null(), "null model must yield a null result");
+        assert!(!err.is_null(), "null model must surface an error");
+        simlin_error_free(err);
+
+        // Freeing a null result is a no-op.
+        simlin_free_discovery_result(ptr::null_mut());
+    }
+}

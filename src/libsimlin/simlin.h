@@ -127,6 +127,58 @@ typedef struct {
   uint8_t _private[0];
 } SimlinError;
 
+// A single loop discovered via the strongest-path LTM discovery algorithm.
+//
+// This mirrors `SimlinLoop` but adds a per-timestep `importance` series.
+// We do NOT reuse `SimlinLoop` (despite the score-on-loop suggestion in the
+// task brief): `SimlinLoop` has no score field, and adding one would change
+// its wasm32 layout, which `@simlin/engine` asserts is exactly 16 bytes via
+// `simlin_sizeof_loop`.  A separate struct keeps the discovery surface from
+// disturbing the existing structural-loop ABI that TypeScript/Python read.
+typedef struct {
+  // Deterministic loop id (`r1`, `b1`, `u1`, ...).
+  char *id;
+  // Variable names around the loop, with the first variable repeated at the
+  // end so the chain closes.  `var_count` entries.
+  char **variables;
+  uintptr_t var_count;
+  SimlinLoopPolarity polarity;
+  // Per-timestep |importance| series (length `importance_len`, matching the
+  // analysis time array).  Owned `f64` buffer freed with the loop.
+  double *importance;
+  uintptr_t importance_len;
+} SimlinDiscoveredLoop;
+
+// A time interval during which a specific set of loops dominates behavior.
+typedef struct {
+  // Start time of this period.
+  double start;
+  // End time of this period.
+  double end;
+  // Names of the dominant loops during this period (`dominant_loop_count`).
+  char **dominant_loops;
+  uintptr_t dominant_loop_count;
+  // Combined relative score of the dominant loops.
+  double combined_score;
+} SimlinDominantPeriod;
+
+// The cohesive output of one discovery run: discovered loops, dominant
+// periods, and whether the time budget elapsed before discovery finished.
+//
+// Returning loops + periods + truncated together is a deliberate exception to
+// libsimlin's "keep the FFI small/orthogonal, no bulk endpoints" rule: these
+// three are the single result of ONE expensive analysis run, not a batch
+// convenience.  Splitting them across separate FFIs would force the caller to
+// re-run discovery (the costly part) once per output.
+typedef struct {
+  SimlinDiscoveredLoop *loops;
+  uintptr_t loop_count;
+  SimlinDominantPeriod *periods;
+  uintptr_t period_count;
+  // Non-zero when discovery hit its `budget_ms` before finishing.
+  bool truncated;
+} SimlinDiscoveryResult;
+
 // Single causal link structure
 typedef struct {
   char *from;
@@ -180,6 +232,36 @@ SimlinLoops *simlin_analyze_get_loops(SimlinModel *model, SimlinError **out_erro
 // # Safety
 // - `loops` must be a valid pointer returned by simlin_analyze_get_loops
 void simlin_free_loops(SimlinLoops *loops);
+
+// Run strongest-path LTM loop discovery on a model and return the discovered
+// loops (with per-step importance series), the dominant periods, and a
+// truncation flag, as one `SimlinDiscoveryResult`.
+//
+// `budget_ms` bounds the wall-clock time spent in discovery's per-timestep
+// DFS sweep; `0` means unlimited.  When the budget elapses before discovery
+// finishes, `truncated` is set and the returned loops/periods reflect only
+// the timesteps processed so far.  Discovery on very large models can be
+// infeasibly slow (GH #647), so the budget lets callers bound it.
+//
+// This deliberately returns loops + periods + truncated together rather than
+// as three orthogonal FFIs (see the `SimlinDiscoveryResult` doc comment):
+// they are the cohesive output of ONE expensive analysis run, not a batch
+// convenience, so splitting them would force re-running discovery per output.
+//
+// # Safety
+// - `model` must be a valid pointer to a `SimlinModel`.
+// - The returned `SimlinDiscoveryResult` must be freed with
+//   `simlin_free_discovery_result`.
+SimlinDiscoveryResult *simlin_analyze_discover_loops(SimlinModel *model,
+                                                     uint64_t budget_ms,
+                                                     SimlinError **out_error);
+
+// Frees a `SimlinDiscoveryResult` returned by `simlin_analyze_discover_loops`.
+//
+// # Safety
+// - `result` must be a valid pointer returned by `simlin_analyze_discover_loops`
+//   (or NULL, in which case this is a no-op).
+void simlin_free_discovery_result(SimlinDiscoveryResult *result);
 
 // Gets all causal links in a model
 //

@@ -16,14 +16,16 @@ use std::os::raw::{c_char, c_double};
 use std::ptr;
 
 use crate::ffi::{
-    SimlinLink, SimlinLinkPolarity, SimlinLinks, SimlinLoop, SimlinLoopPolarity, SimlinLoops,
+    SimlinDiscoveredLoop, SimlinDiscoveryResult, SimlinDominantPeriod, SimlinLink,
+    SimlinLinkPolarity, SimlinLinks, SimlinLoop, SimlinLoopPolarity, SimlinLoops,
 };
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
 use crate::{
-    clear_out_error, drop_c_string, drop_link, drop_links_vec, drop_loop, drop_loops_vec,
-    require_model, require_sim, store_anyhow_error, store_error, SimlinErrorCode, SimlinModel,
-    SimlinSim,
+    clear_out_error, drop_c_string, drop_c_string_array, drop_discovered_loops_vec,
+    drop_dominant_periods_vec, drop_f64_array, drop_link, drop_links_vec, drop_loop,
+    drop_loops_vec, require_model, require_sim, store_anyhow_error, store_error, SimlinErrorCode,
+    SimlinModel, SimlinSim,
 };
 
 /// Backend-agnostic per-link result emitted by [`analyze_links_core`].
@@ -345,6 +347,279 @@ pub unsafe extern "C" fn simlin_free_loops(loops: *mut SimlinLoops) {
             drop_loop(loop_item);
         }
         let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(loops.loops, loops.count));
+    }
+}
+
+/// Convert a slice of owned `String`s into a malloc'd `*mut *mut c_char`
+/// array (`Box<[*mut c_char]>` leaked via `into_raw`), so the
+/// `drop_c_string_array` ownership chain frees it.
+///
+/// Returns `Err` with a partially-cleaned-up state on an interior NUL: any
+/// `CString`s built before the failure are dropped, and the caller surfaces
+/// a generic error.  An empty input yields `(null, 0)`.
+unsafe fn strings_to_c_array(values: &[String]) -> Result<(*mut *mut c_char, usize), ()> {
+    if values.is_empty() {
+        return Ok((ptr::null_mut(), 0));
+    }
+    let mut built: Vec<*mut c_char> = Vec::with_capacity(values.len());
+    for v in values {
+        match CString::new(v.as_str()) {
+            Ok(s) => built.push(s.into_raw()),
+            Err(_) => {
+                for p in &built {
+                    drop_c_string(*p);
+                }
+                return Err(());
+            }
+        }
+    }
+    let count = built.len();
+    let mut boxed = built.into_boxed_slice();
+    let arr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    Ok((arr, count))
+}
+
+/// Box a `Vec` of C structs into a `(ptr, count)` pair, leaking the boxed
+/// slice so the matching free function reclaims it.  An empty vec yields
+/// `(null, 0)`.
+unsafe fn vec_into_raw_parts<T>(items: Vec<T>) -> (*mut T, usize) {
+    if items.is_empty() {
+        return (ptr::null_mut(), 0);
+    }
+    let count = items.len();
+    let mut boxed = items.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    (ptr, count)
+}
+
+/// Map the discovery polarity string (`LoopSummary::polarity`) to the
+/// three-way C ABI surface.  The "mostly_*" variants fold into their dominant
+/// cousin, matching `simlin_analyze_get_loops`.
+fn discovery_polarity(polarity: &str) -> SimlinLoopPolarity {
+    match polarity {
+        "reinforcing" | "mostly_reinforcing" => SimlinLoopPolarity::Reinforcing,
+        "balancing" | "mostly_balancing" => SimlinLoopPolarity::Balancing,
+        _ => SimlinLoopPolarity::Undetermined,
+    }
+}
+
+/// Run strongest-path LTM loop discovery on a model and return the discovered
+/// loops (with per-step importance series), the dominant periods, and a
+/// truncation flag, as one `SimlinDiscoveryResult`.
+///
+/// `budget_ms` bounds the wall-clock time spent in discovery's per-timestep
+/// DFS sweep; `0` means unlimited.  When the budget elapses before discovery
+/// finishes, `truncated` is set and the returned loops/periods reflect only
+/// the timesteps processed so far.  Discovery on very large models can be
+/// infeasibly slow (GH #647), so the budget lets callers bound it.
+///
+/// This deliberately returns loops + periods + truncated together rather than
+/// as three orthogonal FFIs (see the `SimlinDiscoveryResult` doc comment):
+/// they are the cohesive output of ONE expensive analysis run, not a batch
+/// convenience, so splitting them would force re-running discovery per output.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a `SimlinModel`.
+/// - The returned `SimlinDiscoveryResult` must be freed with
+///   `simlin_free_discovery_result`.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_analyze_discover_loops(
+    model: *mut SimlinModel,
+    budget_ms: u64,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinDiscoveryResult {
+    clear_out_error(out_error);
+    let model_ref = match require_model(model) {
+        Ok(m) => m,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return ptr::null_mut();
+        }
+    };
+
+    let budget = if budget_ms == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_millis(budget_ms))
+    };
+
+    // `analyze_model` needs the datamodel project (for the model snapshot and
+    // UID resolution) plus a `&mut SimlinDb` and the current `SourceProject`.
+    // Lock both: the datamodel guard outlives the call, and `analyze_model`
+    // toggles `ltm_enabled`/`ltm_discovery_mode` on the shared `SourceProject`
+    // and restores them before returning, so the db state stays clean.
+    let datamodel_guard = match (*model_ref.project).datamodel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message("project datamodel lock poisoned"),
+            );
+            return ptr::null_mut();
+        }
+    };
+    let mut db_locked = (*model_ref.project).db.lock().unwrap();
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
+        None => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic).with_message("project not initialized"),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    let analysis = match engine::analysis::analyze_model(
+        &datamodel_guard,
+        &mut db_locked,
+        source_project,
+        &model_ref.model_name,
+        budget,
+    ) {
+        Ok(a) => a,
+        Err(msg) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::BadModelName).with_message(msg),
+            );
+            return ptr::null_mut();
+        }
+    };
+    drop(db_locked);
+    drop(datamodel_guard);
+
+    discovery_to_ffi(analysis, out_error)
+}
+
+/// Convert a `ModelAnalysis` into the C-ABI `*mut SimlinDiscoveryResult`.
+///
+/// On any interior-NUL failure while building the C strings, every allocation
+/// made so far is freed, a generic error is reported through `out_error`, and
+/// the function returns `ptr::null_mut()`.
+unsafe fn discovery_to_ffi(
+    analysis: engine::analysis::ModelAnalysis,
+    out_error: *mut *mut SimlinError,
+) -> *mut SimlinDiscoveryResult {
+    let mut c_loops: Vec<SimlinDiscoveredLoop> = Vec::with_capacity(analysis.loop_dominance.len());
+    for summary in &analysis.loop_dominance {
+        let id = match CString::new(summary.loop_id.as_str()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                drop_discovered_loops_vec(&mut c_loops);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("loop id contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        let (variables, var_count) = match strings_to_c_array(&summary.variables) {
+            Ok(v) => v,
+            Err(()) => {
+                drop_c_string(id);
+                drop_discovered_loops_vec(&mut c_loops);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("loop variable name contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        let importance_len = summary.importance.len();
+        let (importance, importance_len) = if importance_len == 0 {
+            (ptr::null_mut(), 0)
+        } else {
+            let mut boxed = summary.importance.clone().into_boxed_slice();
+            let p = boxed.as_mut_ptr();
+            std::mem::forget(boxed);
+            (p, importance_len)
+        };
+        c_loops.push(SimlinDiscoveredLoop {
+            id,
+            variables,
+            var_count,
+            polarity: discovery_polarity(&summary.polarity),
+            importance,
+            importance_len,
+        });
+    }
+
+    let mut c_periods: Vec<SimlinDominantPeriod> =
+        Vec::with_capacity(analysis.dominant_loops_by_period.len());
+    for period in &analysis.dominant_loops_by_period {
+        let (dominant_loops, dominant_loop_count) = match strings_to_c_array(&period.dominant_loops)
+        {
+            Ok(v) => v,
+            Err(()) => {
+                drop_dominant_periods_vec(&mut c_periods);
+                drop_discovered_loops_vec(&mut c_loops);
+                store_error(
+                    out_error,
+                    SimlinError::new(SimlinErrorCode::Generic)
+                        .with_message("dominant loop name contains interior NUL byte"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        c_periods.push(SimlinDominantPeriod {
+            start: period.start,
+            end: period.end,
+            dominant_loops,
+            dominant_loop_count,
+            combined_score: period.combined_score,
+        });
+    }
+
+    let (loops, loop_count) = vec_into_raw_parts(c_loops);
+    let (periods, period_count) = vec_into_raw_parts(c_periods);
+
+    Box::into_raw(Box::new(SimlinDiscoveryResult {
+        loops,
+        loop_count,
+        periods,
+        period_count,
+        truncated: analysis.truncated,
+    }))
+}
+
+/// Frees a `SimlinDiscoveryResult` returned by `simlin_analyze_discover_loops`.
+///
+/// # Safety
+/// - `result` must be a valid pointer returned by `simlin_analyze_discover_loops`
+///   (or NULL, in which case this is a no-op).
+#[no_mangle]
+pub unsafe extern "C" fn simlin_free_discovery_result(result: *mut SimlinDiscoveryResult) {
+    if result.is_null() {
+        return;
+    }
+    let result = Box::from_raw(result);
+    if !result.loops.is_null() && result.loop_count > 0 {
+        let loop_slice = std::slice::from_raw_parts_mut(result.loops, result.loop_count);
+        for loop_item in loop_slice.iter_mut() {
+            drop_c_string(loop_item.id);
+            drop_c_string_array(loop_item.variables, loop_item.var_count);
+            drop_f64_array(loop_item.importance, loop_item.importance_len);
+        }
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            result.loops,
+            result.loop_count,
+        ));
+    }
+    if !result.periods.is_null() && result.period_count > 0 {
+        let period_slice = std::slice::from_raw_parts_mut(result.periods, result.period_count);
+        for period in period_slice.iter_mut() {
+            drop_c_string_array(period.dominant_loops, period.dominant_loop_count);
+        }
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            result.periods,
+            result.period_count,
+        ));
     }
 }
 

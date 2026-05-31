@@ -82,8 +82,8 @@ pub use serialization::*;
 pub use simulation::*;
 
 pub use ffi::{
-    SimlinJsonFormat, SimlinLink, SimlinLinkPolarity, SimlinLinks, SimlinLoop, SimlinLoopPolarity,
-    SimlinLoops,
+    SimlinDiscoveredLoop, SimlinDiscoveryResult, SimlinDominantPeriod, SimlinJsonFormat,
+    SimlinLink, SimlinLinkPolarity, SimlinLinks, SimlinLoop, SimlinLoopPolarity, SimlinLoops,
 };
 pub use ffi_error::{ErrorDetail as ErrorDetailData, FfiError, SimlinError};
 
@@ -470,6 +470,28 @@ pub(crate) unsafe fn drop_loops_vec(loops: &mut Vec<SimlinLoop>) {
 pub(crate) unsafe fn drop_links_vec(links: &mut Vec<SimlinLink>) {
     for mut link in links.drain(..) {
         drop_link(&mut link);
+    }
+}
+
+pub(crate) unsafe fn drop_discovered_loop(loop_item: &mut ffi::SimlinDiscoveredLoop) {
+    drop_c_string(loop_item.id);
+    drop_c_string_array(loop_item.variables, loop_item.var_count);
+    drop_f64_array(loop_item.importance, loop_item.importance_len);
+}
+
+pub(crate) unsafe fn drop_discovered_loops_vec(loops: &mut Vec<ffi::SimlinDiscoveredLoop>) {
+    for mut loop_item in loops.drain(..) {
+        drop_discovered_loop(&mut loop_item);
+    }
+}
+
+pub(crate) unsafe fn drop_dominant_period(period: &mut ffi::SimlinDominantPeriod) {
+    drop_c_string_array(period.dominant_loops, period.dominant_loop_count);
+}
+
+pub(crate) unsafe fn drop_dominant_periods_vec(periods: &mut Vec<ffi::SimlinDominantPeriod>) {
+    for mut period in periods.drain(..) {
+        drop_dominant_period(&mut period);
     }
 }
 

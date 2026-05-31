@@ -110,3 +110,58 @@ pub struct SimlinLinks {
     pub links: *mut SimlinLink,
     pub count: usize,
 }
+
+/// A single loop discovered via the strongest-path LTM discovery algorithm.
+///
+/// This mirrors `SimlinLoop` but adds a per-timestep `importance` series.
+/// We do NOT reuse `SimlinLoop` (despite the score-on-loop suggestion in the
+/// task brief): `SimlinLoop` has no score field, and adding one would change
+/// its wasm32 layout, which `@simlin/engine` asserts is exactly 16 bytes via
+/// `simlin_sizeof_loop`.  A separate struct keeps the discovery surface from
+/// disturbing the existing structural-loop ABI that TypeScript/Python read.
+#[repr(C)]
+pub struct SimlinDiscoveredLoop {
+    /// Deterministic loop id (`r1`, `b1`, `u1`, ...).
+    pub id: *mut c_char,
+    /// Variable names around the loop, with the first variable repeated at the
+    /// end so the chain closes.  `var_count` entries.
+    pub variables: *mut *mut c_char,
+    pub var_count: usize,
+    pub polarity: SimlinLoopPolarity,
+    /// Per-timestep |importance| series (length `importance_len`, matching the
+    /// analysis time array).  Owned `f64` buffer freed with the loop.
+    pub importance: *mut f64,
+    pub importance_len: usize,
+}
+
+/// A time interval during which a specific set of loops dominates behavior.
+#[repr(C)]
+pub struct SimlinDominantPeriod {
+    /// Start time of this period.
+    pub start: f64,
+    /// End time of this period.
+    pub end: f64,
+    /// Names of the dominant loops during this period (`dominant_loop_count`).
+    pub dominant_loops: *mut *mut c_char,
+    pub dominant_loop_count: usize,
+    /// Combined relative score of the dominant loops.
+    pub combined_score: f64,
+}
+
+/// The cohesive output of one discovery run: discovered loops, dominant
+/// periods, and whether the time budget elapsed before discovery finished.
+///
+/// Returning loops + periods + truncated together is a deliberate exception to
+/// libsimlin's "keep the FFI small/orthogonal, no bulk endpoints" rule: these
+/// three are the single result of ONE expensive analysis run, not a batch
+/// convenience.  Splitting them across separate FFIs would force the caller to
+/// re-run discovery (the costly part) once per output.
+#[repr(C)]
+pub struct SimlinDiscoveryResult {
+    pub loops: *mut SimlinDiscoveredLoop,
+    pub loop_count: usize,
+    pub periods: *mut SimlinDominantPeriod,
+    pub period_count: usize,
+    /// Non-zero when discovery hit its `budget_ms` before finishing.
+    pub truncated: bool,
+}
