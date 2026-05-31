@@ -928,7 +928,17 @@ impl<'module> Compiler<'module> {
                         if c.is_some() {
                             self.walk_expr(c.as_ref().unwrap())?.unwrap()
                         } else {
-                            self.push(Opcode::LoadVar {
+                            // A 2-arg RAMP defaults its end time to `final_time`,
+                            // which lives at the fixed absolute slot
+                            // FINAL_TIME_OFF (an implicit global, not a body
+                            // variable). It must be read with LoadGlobalVar -- an
+                            // absolute-slot load with no `module_off` relocation --
+                            // exactly like BuiltinFn::FinalTime. A module-relative
+                            // LoadVar happens to alias `final_time` only at the
+                            // root model (where slot 3 IS final_time); inside a
+                            // submodule it reads an unrelated body slot (or drops
+                            // the fragment when that slot has no symbolic mapping).
+                            self.push(Opcode::LoadGlobalVar {
                                 off: FINAL_TIME_OFF as u16,
                             });
                         };
