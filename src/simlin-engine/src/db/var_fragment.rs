@@ -148,17 +148,20 @@ pub(crate) struct VarDepCollection {
 /// lived inline in `compile_var_fragment`. The original consulted the
 /// incrementally-built minimal metadata map (`mini_metadata`) to skip
 /// already-present entries; this relocation instead consults
-/// `existing_keys` = `{self} ∪ {time, dt, initial_time, final_time}`
-/// (the implicit-time entries present only when `is_root`). That
-/// substitution is byte-equivalent for both loops, but for two
+/// `existing_keys` = `{self}` (the body mini-layout no longer inserts the
+/// implicit `time`/`dt`/`initial_time`/`final_time` entries -- those lower
+/// to `LoadGlobalVar` at fixed slots, never through this layout, and the
+/// dependency loop already `continue`s on those names unconditionally).
+/// That substitution is byte-equivalent for both loops, but for two
 /// *different* reasons -- the original map was not a single frozen set
 /// across both:
 ///
 /// * Dependency loop: when the inline dep loop ran its `contains_key`
-///   skip, `mini_metadata` held *exactly* `{self} ∪ {implicit-if-root}`
-///   -- the inline code inserts the `dep_variables` keys only *after*
-///   the dep loop finishes -- so `existing_keys` is precisely that map
-///   and the skip outcome is identical.
+///   skip, `mini_metadata` held *exactly* `{self}` (plus the implicit-
+///   time entries that the loop independently skips by name) -- the
+///   inline code inserts the `dep_variables` keys only *after* the dep
+///   loop finishes -- so `existing_keys` is precisely that map and the
+///   skip outcome is identical.
 /// * Implicit-module loop: the inline code inserts the `dep_variables`
 ///   keys *between* the two loops, so at the inline implicit-module
 ///   skip `mini_metadata` *additionally* held those dep keys -- it was
@@ -181,7 +184,6 @@ fn collect_var_dependencies(
     var: SourceVariable,
     model: SourceModel,
     project: SourceProject,
-    is_root: bool,
     module_input_names: &[String],
 ) -> VarDepCollection {
     let var_ident = var.ident(db).clone();
@@ -201,23 +203,21 @@ fn collect_var_dependencies(
     );
     let project_models = project.models(db);
 
-    // `existing_keys` is the exact pre-loop key set: `{self}` plus the
-    // implicit `time`/`dt`/`initial_time`/`final_time` entries when
-    // `is_root`. The original inline `mini_metadata.contains_key(..)`
-    // skip checks are equivalent to `existing_keys` membership for both
-    // loops, but not because the map is frozen across both: for the
-    // dependency loop `existing_keys` IS `mini_metadata` at that skip;
-    // for the implicit-module loop `mini_metadata` additionally holds the
-    // dep keys, yet the outcome is unchanged by the name-space
-    // disjointness argued on `collect_var_dependencies` above.
+    // `existing_keys` is the exact pre-loop key set: just `{self}`. The
+    // implicit `time`/`dt`/`initial_time`/`final_time` entries are NOT
+    // included: those names lower to `LoadGlobalVar` at fixed slots, never
+    // through this layout, and the dependency loop already unconditionally
+    // `continue`s on them (the `matches!` guard below), so adding them to
+    // `existing_keys` was redundant even when the root prelude inserted
+    // them. The original inline `mini_metadata.contains_key(..)` skip
+    // checks remain equivalent to `existing_keys` membership for both
+    // loops: for the dependency loop `existing_keys` IS `mini_metadata`'s
+    // body-key set at that skip; for the implicit-module loop
+    // `mini_metadata` additionally holds the dep keys, yet the outcome is
+    // unchanged by the name-space disjointness argued on
+    // `collect_var_dependencies` above.
     let mut existing_keys: HashSet<Ident<Canonical>> = HashSet::new();
     existing_keys.insert(var_ident_canonical.clone());
-    if is_root {
-        existing_keys.insert(Ident::new("time"));
-        existing_keys.insert(Ident::new("dt"));
-        existing_keys.insert(Ident::new("initial_time"));
-        existing_keys.insert(Ident::new("final_time"));
-    }
 
     // Collect all dep names from both dt and initial deps, plus the lookup
     // tables this variable references. A table reference is a layout reference
@@ -291,7 +291,7 @@ fn collect_var_dependencies(
                     let sub_canonical = canonicalize(mod_model_name);
                     let sub_size = project_models
                         .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .map(|sm| compute_layout(db, *sm, project).n_slots)
                         .unwrap_or(1);
 
                     // Build Module variable with resolved inputs
@@ -439,7 +439,7 @@ fn collect_var_dependencies(
             let sub_canonical = canonicalize(&dm_module.model_name);
             let sub_size = project_models
                 .get(sub_canonical.as_ref())
-                .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                .map(|sm| compute_layout(db, *sm, project).n_slots)
                 .unwrap_or(1);
 
             let im_var = crate::variable::Variable::Module {
@@ -498,14 +498,13 @@ pub(crate) fn build_caller_module_refs(
     var: SourceVariable,
     model: SourceModel,
     project: SourceProject,
-    is_root: bool,
     module_input_names: &[String],
 ) -> HashMap<Ident<Canonical>, crate::vm::ModuleKey> {
     let var_ident = var.ident(db).clone();
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
     let is_module = var.kind(db) == SourceVariableKind::Module;
 
-    let deps = collect_var_dependencies(db, var, model, project, is_root, module_input_names);
+    let deps = collect_var_dependencies(db, var, model, project, module_input_names);
 
     // We need module_refs for module variables (explicit or implicit)
     let mut module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = if is_module {
@@ -548,7 +547,6 @@ pub(crate) fn lower_var_fragment(
     var: SourceVariable,
     model: SourceModel,
     project: SourceProject,
-    is_root: bool,
     module_input_names: &[String],
     converted_dims: &[crate::dimensions::Dimension],
     dim_context: &crate::dimensions::DimensionsContext,
@@ -764,107 +762,19 @@ pub(crate) fn lower_var_fragment(
     // Arena for sub-model stub variables allocated by build_submodel_metadata
     let arena = bumpalo::Bump::new();
 
-    // Assign sequential offsets for the minimal context
+    // Assign sequential offsets for the minimal context. The mini-layout is
+    // always body-relative (offset 0): the implicit globals
+    // (time/dt/initial_time/final_time) are NOT inserted because they lower
+    // to `LoadGlobalVar` at fixed absolute slots, never through this
+    // metadata/rmap. Symbolization round-trips each offset back to its
+    // `SymVarRef { name, element_offset }`, so the produced symbolic
+    // fragment is independent of where the body starts -- the root
+    // +IMPLICIT_VAR_COUNT shift is applied later, at assembly, via
+    // `VariableLayout::root_shifted`. This is what makes the diagnostic pass
+    // and assembly share one salsa cache entry per variable.
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
         HashMap::new();
-    let mut mini_offset = if is_root {
-        crate::vm::IMPLICIT_VAR_COUNT
-    } else {
-        0
-    };
-
-    // Add implicit vars if root
-    if is_root {
-        use std::sync::LazyLock;
-        static IMPLICIT_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_DT: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("dt"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_INITIAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("initial_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_FINAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("final_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        mini_metadata.insert(
-            Ident::new("time"),
-            crate::compiler::VariableMetadata {
-                offset: 0,
-                size: 1,
-                var: &IMPLICIT_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("dt"),
-            crate::compiler::VariableMetadata {
-                offset: 1,
-                size: 1,
-                var: &IMPLICIT_DT,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("initial_time"),
-            crate::compiler::VariableMetadata {
-                offset: 2,
-                size: 1,
-                var: &IMPLICIT_INITIAL_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("final_time"),
-            crate::compiler::VariableMetadata {
-                offset: 3,
-                size: 1,
-                var: &IMPLICIT_FINAL_TIME,
-            },
-        );
-    }
+    let mut mini_offset = 0;
 
     // Add self
     mini_metadata.insert(
@@ -886,7 +796,7 @@ pub(crate) fn lower_var_fragment(
         implicit_submodels,
         unknown_dependency,
         ..
-    } = collect_var_dependencies(db, var, model, project, is_root, module_input_names);
+    } = collect_var_dependencies(db, var, model, project, module_input_names);
 
     if let Some(diag) = unknown_dependency {
         return LoweredVarFragment::Fatal {

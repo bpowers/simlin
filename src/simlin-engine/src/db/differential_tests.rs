@@ -27,10 +27,8 @@ fn assert_fragment_phase_agreement(db: &dyn Db, model: SourceModel, project: Sou
         // through the root model path and their phase membership is validated
         // transitively. Extending this to sub-models would require iterating
         // module expansions, which is out of scope for this phase.
-        let is_root = true;
-
         let fragment_result =
-            compile_var_fragment(db, var, model, project, is_root, ModuleInputSet::empty(db));
+            compile_var_fragment(db, var, model, project, ModuleInputSet::empty(db));
 
         // Determine which phases the dep graph includes this variable in
         let in_initials = dep_graph.runlist_initials.contains(&canonical_name);

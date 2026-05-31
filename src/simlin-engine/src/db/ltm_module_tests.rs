@@ -61,9 +61,9 @@ fn test_ltm_smooth_model_compiles_with_ltm() {
         "LTM vars should include at least one link_score variable"
     );
 
-    let n_slots_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
     source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
     assert!(
         n_slots_ltm > n_slots_no_ltm,
         "LTM-enabled layout should have more slots: ltm={n_slots_ltm}, no_ltm={n_slots_no_ltm}"
@@ -121,9 +121,9 @@ fn test_ltm_delay_model_compiles() {
         "LTM vars should include at least one link_score variable"
     );
 
-    let n_slots_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
     source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
     assert!(
         n_slots_ltm > n_slots_no_ltm,
         "LTM-enabled layout should have more slots: ltm={n_slots_ltm}, no_ltm={n_slots_no_ltm}"
@@ -394,10 +394,10 @@ fn test_ltm_multiple_smooth_instances_compile() {
         "should have link_score vars for multiple feedback paths, got {link_score_count}"
     );
 
-    let n_slots_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     assert!(
         n_slots_ltm > n_slots_no_ltm,

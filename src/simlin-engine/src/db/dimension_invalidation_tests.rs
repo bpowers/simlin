@@ -191,7 +191,6 @@ fn test_dimension_invalidation_different_dim_immune() {
         y_src,
         model1,
         sync1.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -203,7 +202,6 @@ fn test_dimension_invalidation_different_dim_immune() {
         y_src2,
         model2,
         sync2.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()

@@ -238,7 +238,7 @@ pub fn model_ltm_implicit_var_info(
                         let sub_canonical = canonicalize(mn);
                         project_models
                             .get(sub_canonical.as_ref())
-                            .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                            .map(|sm| compute_layout(db, *sm, project).n_slots)
                     })
                     .unwrap_or(1)
             } else {
@@ -784,7 +784,7 @@ pub(super) fn compile_ltm_equation_fragment(
                     let sub_canonical = canonicalize(mod_model_name);
                     let sub_size = project_models
                         .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .map(|sm| compute_layout(db, *sm, project).n_slots)
                         .unwrap_or(1);
 
                     let mod_input_prefix = format!("{module_var_name}\u{00B7}");
@@ -829,7 +829,7 @@ pub(super) fn compile_ltm_equation_fragment(
                     let sub_canonical = canonicalize(&dm_module.model_name);
                     let sub_size = project_models
                         .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .map(|sm| compute_layout(db, *sm, project).n_slots)
                         .unwrap_or(1);
 
                     let input_prefix = format!("{module_var_name}\u{00B7}");
@@ -877,7 +877,7 @@ pub(super) fn compile_ltm_equation_fragment(
                     let sub_canonical = canonicalize(im_model_name);
                     let sub_size = project_models
                         .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .map(|sm| compute_layout(db, *sm, project).n_slots)
                         .unwrap_or(1);
 
                     let module_ctx = model_module_ident_context(db, model, project, vec![]);
@@ -935,7 +935,7 @@ pub(super) fn compile_ltm_equation_fragment(
                     let sub_canonical = canonicalize(im_model_name);
                     let sub_size = project_models
                         .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .map(|sm| compute_layout(db, *sm, project).n_slots)
                         .unwrap_or(1);
 
                     // Parse the parent LTM equation to get implicit var references
@@ -1022,7 +1022,7 @@ pub(super) fn compile_ltm_equation_fragment(
                     let sub_canonical = canonicalize(mn);
                     project_models
                         .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .map(|sm| compute_layout(db, *sm, project).n_slots)
                         .unwrap_or(1)
                 };
                 dep_variables.push((
@@ -1852,7 +1852,7 @@ pub(super) fn compile_ltm_implicit_var_fragment(
                     let sub_canonical = canonicalize(mod_model_name);
                     let sub_size = project_models
                         .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .map(|sm| compute_layout(db, *sm, project).n_slots)
                         .unwrap_or(1);
                     dep_variables.push((
                         dep_ident.clone(),

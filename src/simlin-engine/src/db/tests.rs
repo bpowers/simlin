@@ -3004,22 +3004,39 @@ fn test_compute_layout_simple() {
     let sync = sync_from_datamodel(&db, &project);
 
     let model = sync.models["main"].source;
-    let layout = compute_layout(&db, model, sync.project, true);
+    // `compute_layout` is now the role-independent *body* layout: no implicit
+    // globals, body offsets start at 0.
+    let layout = compute_layout(&db, model, sync.project);
 
-    // Should have implicit vars (time, dt, initial_time, final_time) + 2 user vars
+    assert!(
+        layout.get("time").is_none(),
+        "the body layout must NOT contain the implicit global `time` -- it is \
+         added only by the root shift at assembly"
+    );
     let alpha_entry = layout.get("alpha").expect("alpha should be in layout");
     let beta_entry = layout.get("beta").expect("beta should be in layout");
-    let time_entry = layout.get("time").expect("time should be in layout");
-
-    assert_eq!(time_entry.offset, 0);
-    assert_eq!(time_entry.size, 1);
-
-    // Alpha and beta should be after implicit vars (offset >= 4)
-    assert!(alpha_entry.offset >= 4);
-    assert!(beta_entry.offset >= 4);
+    // Two user vars occupy offsets 0 and 1 (in canonical-sorted order).
+    assert!(alpha_entry.offset < 2);
+    assert!(beta_entry.offset < 2);
     assert_ne!(alpha_entry.offset, beta_entry.offset);
     assert_eq!(alpha_entry.size, 1);
     assert_eq!(beta_entry.size, 1);
+    assert_eq!(layout.n_slots, 2);
+
+    // The root shift relocates the body and inserts the implicit globals at
+    // their fixed slots. This is the single shared shift that
+    // `assemble_module`'s root path applies.
+    let root = layout.root_shifted();
+    let time_entry = root.get("time").expect("time should be in root layout");
+    assert_eq!(time_entry.offset, 0);
+    assert_eq!(time_entry.size, 1);
+    assert_eq!(root.get("dt").expect("dt").offset, 1);
+    assert_eq!(root.get("initial_time").expect("initial_time").offset, 2);
+    assert_eq!(root.get("final_time").expect("final_time").offset, 3);
+    // Body vars shifted past the implicit globals (offset >= 4).
+    assert!(root.get("alpha").expect("alpha").offset >= 4);
+    assert!(root.get("beta").expect("beta").offset >= 4);
+    assert_eq!(root.n_slots, layout.n_slots + 4);
 }
 
 #[test]
@@ -3036,7 +3053,6 @@ fn test_compile_var_fragment_produces_result() {
         alpha_var,
         model,
         sync.project,
-        true,
         ModuleInputSet::empty(&db),
     );
     assert!(result.is_some(), "alpha should compile successfully");
@@ -3223,7 +3239,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
     let model1 = sync1.models["main"].source;
 
     // Prime layout cache
-    let layout_ptr1 = compute_layout(&db, model1, sync1.project, true)
+    let layout_ptr1 = compute_layout(&db, model1, sync1.project)
         as *const crate::compiler::symbolic::VariableLayout;
 
     // Add a new variable "gamma"
@@ -3251,7 +3267,6 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync1.models["main"].variables["alpha"].source,
         model1,
         sync1.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -3264,7 +3279,6 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync1.models["main"].variables["beta"].source,
         model1,
         sync1.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -3279,7 +3293,6 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync2.models["main"].variables["alpha"].source,
         model2,
         sync2.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -3292,7 +3305,6 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync2.models["main"].variables["beta"].source,
         model2,
         sync2.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -3310,7 +3322,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
     );
 
     // Layout MUST change (gamma added)
-    let layout_ptr2 = compute_layout(&db, model2, sync2.project, true)
+    let layout_ptr2 = compute_layout(&db, model2, sync2.project)
         as *const crate::compiler::symbolic::VariableLayout;
     assert_ne!(
         layout_ptr1, layout_ptr2,
@@ -3327,7 +3339,6 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync3.models["main"].variables["alpha"].source,
         model3,
         sync3.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -3340,7 +3351,6 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync3.models["main"].variables["beta"].source,
         model3,
         sync3.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -3358,7 +3368,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
     );
 
     // Layout should change again (back to 2 variables)
-    let layout_ptr3 = compute_layout(&db, model3, sync3.project, true)
+    let layout_ptr3 = compute_layout(&db, model3, sync3.project)
         as *const crate::compiler::symbolic::VariableLayout;
     assert_ne!(
         layout_ptr2, layout_ptr3,
@@ -3434,7 +3444,6 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         sync1.models["main"].variables["price"].source,
         model1,
         sync1.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -3447,7 +3456,6 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         sync1.models["main"].variables["sales"].source,
         model1,
         sync1.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -3472,7 +3480,6 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         sync2.models["main"].variables["price"].source,
         model2,
         sync2.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -3491,7 +3498,6 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         sync2.models["main"].variables["sales"].source,
         model2,
         sync2.project,
-        true,
         ModuleInputSet::empty(&db),
     )
     .as_ref()
@@ -3962,14 +3968,7 @@ fn test_malformed_graphical_function_fails_fragment() {
     let model = sync.models["main"].source;
     let var = sync.models["main"].variables["lookup_var"].source;
 
-    let result = compile_var_fragment(
-        &db,
-        var,
-        model,
-        sync.project,
-        true,
-        ModuleInputSet::empty(&db),
-    );
+    let result = compile_var_fragment(&db, var, model, sync.project, ModuleInputSet::empty(&db));
     assert!(
         result.is_none(),
         "compile_var_fragment should return None for malformed graphical function"
@@ -4745,8 +4744,11 @@ fn test_implicit_module_offsets_in_flattened_map() {
         .expect("SMOOTH model should compile incrementally");
 
     // The flattened offsets should match the layout: implicit MODULE vars
-    // must occupy their sub-model's full slot count.
-    let layout = compute_layout(&db, sync.models["main"].source, sync.project, true);
+    // must occupy their sub-model's full slot count. `calc_flattened_offsets`
+    // is computed as root (it reserves the implicit-global slots), so compare
+    // against the root-shifted layout -- the SAME final layout
+    // `assemble_module`'s root path resolves against (the lockstep guarantee).
+    let layout = compute_layout(&db, sync.models["main"].source, sync.project).root_shifted();
     let offsets = calc_flattened_offsets_incremental(&db, sync.project, "main", true);
 
     // The total size from offsets should equal the layout's n_slots.
@@ -5215,11 +5217,11 @@ fn test_ltm_no_loops_zero_overhead() {
 
     // Layout slot count with LTM enabled
     source_project.set_ltm_enabled(&mut db).to(true);
-    let n_slots_with_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_with_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     // Layout slot count without LTM
     source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_without_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_without_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     // Both layouts should have the same number of slots because there
     // are no feedback loops and thus no LTM synthetic variables
@@ -5346,10 +5348,10 @@ fn test_ltm_incremental_produces_synthetic_variables() {
     // Verify LTM increases the layout slot count. Extract n_slots
     // before toggling ltm_enabled to avoid holding a salsa ref across
     // a &mut db call.
-    let n_slots_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     assert!(
         n_slots_ltm > n_slots_no_ltm,

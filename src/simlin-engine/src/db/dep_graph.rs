@@ -1458,7 +1458,8 @@ pub(crate) fn array_producing_vars(
 /// caller (same helpers, same order: `project_datamodel_dims` ->
 /// `DimensionsContext`/`Dimension`, `model.name`, `model_module_map`)
 /// and the default no-module-input wiring `dt_cycle_sccs` uses
-/// (`build_var_info(.., &[])` => `is_root = true`, empty module inputs).
+/// (`build_var_info(.., &[])`, empty module inputs -- the lowering is
+/// role-independent, so there is no `is_root` selector to match).
 /// This is the engine's real lowering, never a re-derivation. The
 /// non-initial phase is the dt phase, so membership is
 /// dt-phase-consistent with the cycle set it is intersected against.
@@ -1510,7 +1511,6 @@ pub(crate) fn var_noninitial_lowered_exprs(
         *sv,
         model,
         project,
-        true,
         &[],
         converted_dims,
         dim_context,

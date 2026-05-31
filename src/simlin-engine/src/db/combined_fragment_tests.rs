@@ -600,12 +600,14 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
     );
     assert_eq!(dep_graph.resolved_sccs[0].phase, SccPhase::Dt);
 
-    // The SCC-agnostic "hypothetical acyclic equivalent" offset map.
-    // `compute_layout` is `#[salsa::tracked(returns(ref))]`, so this is
-    // already a `&VariableLayout`.
-    let layout = crate::db::compute_layout(&db, model, project, true);
-    let mut acyclic_ce = layout_slots(layout, "ce");
-    let mut acyclic_ecc = layout_slots(layout, "ecc");
+    // The SCC-agnostic "hypothetical acyclic equivalent" offset map. The
+    // module is assembled as root below, so compare against the root-shifted
+    // layout (the same one `assemble_module`'s root path resolves against):
+    // `compute_layout` now returns the body layout (0-based) and the root
+    // shift relocates every entry by `IMPLICIT_VAR_COUNT`.
+    let layout = crate::db::compute_layout(&db, model, project).root_shifted();
+    let mut acyclic_ce = layout_slots(&layout, "ce");
+    let mut acyclic_ecc = layout_slots(&layout, "ecc");
     acyclic_ce.sort_unstable();
     acyclic_ecc.sort_unstable();
     assert_eq!(acyclic_ce.len(), 3, "ce occupies 3 element slots");

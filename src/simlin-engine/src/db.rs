@@ -1061,15 +1061,15 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // for equation parse errors, then proceeds with compilation which can
     // surface additional errors like BadTable, MismatchedDimensions, etc.
     //
-    // We use is_root: true and the empty module-input set for diagnostic
-    // purposes. The is_root flag only affects offset layout (whether
-    // implicit time/dt vars are included); using true ensures variables
-    // referencing TIME or DT don't produce false-positive missing-ref
-    // errors. The module inputs are empty because we are not in an
-    // assembly context -- this is purely for error detection.
+    // The symbolic fragment is role-independent (`time`/`dt` lower to
+    // `LoadGlobalVar` at fixed slots, never through the layout), so this
+    // diagnostic pass produces byte-identical fragments to assembly and the
+    // two SHARE one salsa cache entry per variable -- the win from dropping
+    // `is_root`. The module inputs are empty because we are not in an
+    // assembly context: this is purely for error detection.
     let empty_inputs = ModuleInputSet::empty(db);
     for (_var_name, source_var) in source_vars.iter() {
-        let _fragment = compile_var_fragment(db, *source_var, model, project, true, empty_inputs);
+        let _fragment = compile_var_fragment(db, *source_var, model, project, empty_inputs);
     }
 
     // Trigger unit checking. This is a separate tracked function so
@@ -2233,7 +2233,6 @@ pub fn compute_layout(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-    is_root: bool,
 ) -> crate::compiler::symbolic::VariableLayout {
     use crate::compiler::symbolic::{LayoutEntry, VariableLayout};
 
@@ -2243,20 +2242,15 @@ pub fn compute_layout(
     let mut sorted_names: Vec<&String> = var_names.iter().collect();
     sorted_names.sort_unstable();
 
+    // This is the role-independent *body* layout: offsets always start at
+    // 0. The root (main) module's +IMPLICIT_VAR_COUNT shift for the implicit
+    // globals (time/dt/initial_time/final_time) is applied later, at
+    // assembly, via `VariableLayout::root_shifted`. Keeping this query body-
+    // only makes a submodel's layout byte-identical whether it is reached as
+    // the root or as a submodule, so the diagnostic pass and assembly share
+    // one salsa cache entry per submodule variable.
     let mut entries = HashMap::new();
-    let mut offset = if is_root {
-        // Implicit vars: time, dt, initial_time, final_time
-        entries.insert("time".to_string(), LayoutEntry { offset: 0, size: 1 });
-        entries.insert("dt".to_string(), LayoutEntry { offset: 1, size: 1 });
-        entries.insert(
-            "initial_time".to_string(),
-            LayoutEntry { offset: 2, size: 1 },
-        );
-        entries.insert("final_time".to_string(), LayoutEntry { offset: 3, size: 1 });
-        crate::vm::IMPLICIT_VAR_COUNT
-    } else {
-        0
-    };
+    let mut offset = 0;
 
     let project_models = project.models(db);
 
@@ -2266,7 +2260,7 @@ pub fn compute_layout(
                 // Module variables occupy the sub-model's total n_slots
                 let sub_model_name = canonicalize(svar.model_name(db));
                 if let Some(sub_model) = project_models.get(sub_model_name.as_ref()) {
-                    let sub_layout = compute_layout(db, *sub_model, project, false);
+                    let sub_layout = compute_layout(db, *sub_model, project);
                     sub_layout.n_slots
                 } else {
                     1
@@ -2294,7 +2288,7 @@ pub fn compute_layout(
                 let sub_canonical = canonicalize(sub_model_name);
                 project_models
                     .get(sub_canonical.as_ref())
-                    .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                    .map(|sm| compute_layout(db, *sm, project).n_slots)
                     .unwrap_or(info.size)
             } else {
                 info.size
@@ -2546,7 +2540,7 @@ pub(crate) fn build_submodel_metadata<'arena>(
         return;
     }
 
-    let layout = compute_layout(db, sub_model, project, false);
+    let layout = compute_layout(db, sub_model, project);
     let source_vars = sub_model.variables(db);
     let project_models = project.models(db);
 
@@ -2840,10 +2834,11 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     // compile → symbolize` chain `compile_implicit_var_fragment` runs), so
     // the element-graph builder consumes it exactly like a real member
     // (same layout-independent `SymVarRef` form). The element-cycle SCC
-    // identification uses the default no-module-input root wiring, so
-    // source the helper with `is_root = true`, `module_input_names = &[]`
-    // (matching the real-var arm's `lower_var_fragment(.., true, &[], ..)`
-    // below). Genuinely unsourceable (absent from `model_implicit_var_info`
+    // identification uses the default no-module-input wiring, so source the
+    // helper with `module_input_names = &[]` (matching the real-var arm's
+    // `lower_var_fragment(.., &[], ..)` below; the symbolic fragment is
+    // role-independent, so there is no longer an `is_root` selector).
+    // Genuinely unsourceable (absent from `model_implicit_var_info`
     // too, or the shared compile failed) ⇒ `None`, the loud-safe signal
     // (see the rustdoc's loud-safe contract): the SCC stays unresolved and
     // `CircularDependency` is kept -- no panic, no silent miscompile
@@ -2853,15 +2848,7 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
         let info = model_implicit_var_info(db, model, project);
         let meta = info.get(&canonical_name)?;
         let is_initial = matches!(phase, SccPhase::Initial);
-        return compile_implicit_var_phase_bytecodes(
-            db,
-            meta,
-            model,
-            project,
-            true,
-            &[],
-            is_initial,
-        );
+        return compile_implicit_var_phase_bytecodes(db, meta, model, project, &[], is_initial);
     };
     let var_ident_canonical: Ident<Canonical> = Ident::new(var_name);
 
@@ -2879,7 +2866,6 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
         *sv,
         model,
         project,
-        true,
         &[],
         converted_dims,
         dim_context,
@@ -2907,7 +2893,7 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     // `build_caller_module_refs(.., &module_input_names)` with empty
     // inputs).
     let module_refs =
-        crate::db::var_fragment::build_caller_module_refs(db, *sv, model, project, true, &[]);
+        crate::db::var_fragment::build_caller_module_refs(db, *sv, model, project, &[]);
 
     // `SccPhase::Dt` selects the non-initial (dt/flow) lowering;
     // `SccPhase::Initial` selects the initial lowering -- the same
@@ -3174,7 +3160,6 @@ pub fn compile_var_fragment<'db>(
     var: SourceVariable,
     model: SourceModel,
     project: SourceProject,
-    is_root: bool,
     module_inputs: ModuleInputSet<'db>,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
@@ -3206,7 +3191,6 @@ pub fn compile_var_fragment<'db>(
         var,
         model,
         project,
-        is_root,
         module_input_names,
         converted_dims,
         dim_context,
@@ -3264,7 +3248,6 @@ pub fn compile_var_fragment<'db>(
         var,
         model,
         project,
-        is_root,
         module_input_names,
     );
 
@@ -3503,7 +3486,6 @@ fn compile_implicit_var_fragment(
     meta: &ImplicitVarMeta,
     model: SourceModel,
     project: SourceProject,
-    is_root: bool,
     dep_graph: &ModelDepGraphResult,
     module_input_names: &[String],
 ) -> Option<VarFragmentResult> {
@@ -3537,7 +3519,6 @@ fn compile_implicit_var_fragment(
             meta,
             model,
             project,
-            is_root,
             module_input_names,
             is_initial,
         )
@@ -3589,8 +3570,8 @@ fn compile_implicit_var_fragment(
 /// arm of `var_phase_symbolic_fragment_prod` and `compile_var_fragment`
 /// use). The mini-layout/metadata/dep-collection glue between them is
 /// intrinsic to the implicit-var shape (the `meta.is_module` branch, the
-/// `is_root` implicit-time prelude, the dep-stub/sub-model collection) and
-/// is not separately extractable without restructuring this function.
+/// body-relative mini-layout, the dep-stub/sub-model collection) and is not
+/// separately extractable without restructuring this function.
 ///
 /// Loud-safe `None` (never panics): the shared prefix failed (absent
 /// implicit index / equation errors), a graphical-function table failed to
@@ -3602,7 +3583,6 @@ fn compile_implicit_var_phase_bytecodes(
     meta: &ImplicitVarMeta,
     model: SourceModel,
     project: SourceProject,
-    is_root: bool,
     module_input_names: &[String],
     is_initial: bool,
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
@@ -3642,105 +3622,15 @@ fn compile_implicit_var_phase_bytecodes(
     // Arena for sub-model stub variables allocated by build_submodel_metadata
     let arena = bumpalo::Bump::new();
 
+    // The mini-layout is always body-relative (offset 0). The implicit
+    // globals (time/dt/initial_time/final_time) are NOT inserted: they
+    // lower to `LoadGlobalVar` at fixed absolute slots, never through this
+    // metadata/rmap, so the symbolic fragment is role-independent. The root
+    // +IMPLICIT_VAR_COUNT shift is applied later in `assemble_module` via
+    // `VariableLayout::root_shifted`.
     let mut mini_metadata: HashMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>> =
         HashMap::new();
-    let mut mini_offset = if is_root {
-        crate::vm::IMPLICIT_VAR_COUNT
-    } else {
-        0
-    };
-
-    if is_root {
-        use std::sync::LazyLock;
-        static IMPLICIT_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_DT: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("dt"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_INITIAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("initial_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_FINAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("final_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        mini_metadata.insert(
-            Ident::new("time"),
-            crate::compiler::VariableMetadata {
-                offset: 0,
-                size: 1,
-                var: &IMPLICIT_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("dt"),
-            crate::compiler::VariableMetadata {
-                offset: 1,
-                size: 1,
-                var: &IMPLICIT_DT,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("initial_time"),
-            crate::compiler::VariableMetadata {
-                offset: 2,
-                size: 1,
-                var: &IMPLICIT_INITIAL_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("final_time"),
-            crate::compiler::VariableMetadata {
-                offset: 3,
-                size: 1,
-                var: &IMPLICIT_FINAL_TIME,
-            },
-        );
-    }
+    let mut mini_offset = 0;
 
     let project_models = project.models(db);
     let self_size = if meta.is_module {
@@ -3748,7 +3638,7 @@ fn compile_implicit_var_phase_bytecodes(
             let sub_canonical = canonicalize(sub_model_name);
             project_models
                 .get(sub_canonical.as_ref())
-                .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                .map(|sm| compute_layout(db, *sm, project).n_slots)
                 .unwrap_or(1)
         } else {
             1
@@ -3847,7 +3737,7 @@ fn compile_implicit_var_phase_bytecodes(
                     let sub_canonical = canonicalize(mod_model_name);
                     let sub_size = project_models
                         .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                        .map(|sm| compute_layout(db, *sm, project).n_slots)
                         .unwrap_or(1);
 
                     let mod_input_prefix = format!("{module_var_name}\u{00B7}");
@@ -3885,7 +3775,7 @@ fn compile_implicit_var_phase_bytecodes(
                 let sub_canonical = canonicalize(im_model_name);
                 let sub_size = project_models
                     .get(sub_canonical.as_ref())
-                    .map(|sm| compute_layout(db, *sm, project, false).n_slots)
+                    .map(|sm| compute_layout(db, *sm, project).n_slots)
                     .unwrap_or(1);
 
                 let input_prefix = format!("{module_var_name}\u{00B7}");
@@ -4167,7 +4057,23 @@ pub fn assemble_module<'db>(
         let msg = format!("model '{}' has circular dependencies", model.name(db));
         return Err(msg);
     }
-    let layout = compute_layout(db, model, project, is_root);
+    // `compute_layout` returns the role-independent *body* layout (offsets
+    // from 0). The root module relocates it by `IMPLICIT_VAR_COUNT` to
+    // reserve the implicit-global slots; every fragment `SymVarRef` and
+    // module-decl `off` is resolved against this final layout, so the root
+    // shift lands once here and the submodule path uses the body layout
+    // verbatim (the parent relocates a submodule via its module-decl `off`,
+    // which already comes from the parent's shifted layout). The shift logic
+    // lives in `VariableLayout::root_shifted`, shared with
+    // `calc_flattened_offsets_incremental` so the two stay in lockstep.
+    let body_layout = compute_layout(db, model, project);
+    let root_layout;
+    let layout: &crate::compiler::symbolic::VariableLayout = if is_root {
+        root_layout = body_layout.root_shifted();
+        &root_layout
+    } else {
+        body_layout
+    };
     let source_vars = model.variables(db);
     let implicit_info = model_implicit_var_info(db, model, project);
     let model_name = model.name(db).clone();
@@ -4176,23 +4082,15 @@ pub fn assemble_module<'db>(
     let mut all_fragments: HashMap<String, VarFragmentResult> = HashMap::new();
 
     for (name, svar) in source_vars.iter() {
-        if let Some(result) =
-            compile_var_fragment(db, *svar, model, project, is_root, module_inputs)
-        {
+        if let Some(result) = compile_var_fragment(db, *svar, model, project, module_inputs) {
             all_fragments.insert(name.clone(), result.clone());
         }
     }
 
     for (name, meta) in implicit_info.iter() {
-        if let Some(result) = compile_implicit_var_fragment(
-            db,
-            meta,
-            model,
-            project,
-            is_root,
-            dep_graph,
-            module_input_names,
-        ) {
+        if let Some(result) =
+            compile_implicit_var_fragment(db, meta, model, project, dep_graph, module_input_names)
+        {
             all_fragments.insert(name.clone(), result);
         }
     }
@@ -5108,8 +5006,22 @@ fn calc_flattened_offsets_incremental(
     // implicit helper/module vars) when LTM is enabled. Models without
     // feedback loops get empty LTM var lists. These occupy slots after the
     // implicit variables, matching compute_layout's Section 3 ordering.
+    //
+    // `compute_layout` now returns the body layout (0-based); the running
+    // `i` above is already root-shifted (it reserves `IMPLICIT_VAR_COUNT`
+    // when `is_root`), so the LTM section must read the SAME root-shifted
+    // entry offsets the assembled module resolves against. `root_shifted`
+    // is the single shared shift, so this stays in lockstep with
+    // `assemble_module`'s root path.
     if project.ltm_enabled(db) {
-        let layout = compute_layout(db, *source_model, project, is_root);
+        let body_layout = compute_layout(db, *source_model, project);
+        let shifted_layout;
+        let layout: &crate::compiler::symbolic::VariableLayout = if is_root {
+            shifted_layout = body_layout.root_shifted();
+            &shifted_layout
+        } else {
+            body_layout
+        };
 
         let ltm_vars = model_ltm_variables(db, *source_model, project);
 
