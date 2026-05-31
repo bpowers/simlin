@@ -245,6 +245,129 @@ pub(crate) fn build_submodel_metadata<'arena>(
         }
     }
 
+    // When LTM is enabled the sub-model is itself LTM-augmented: its layout
+    // (from `compute_layout`) carries the synthetic LTM variables, most
+    // importantly the per-input-port composite score `$⁚ltm⁚composite⁚{port}`.
+    // A parent equation can reference one of these across the module boundary
+    // -- the exhaustive-mode input→macro link score is the composite-reference
+    // form `"{module}·$⁚ltm⁚composite⁚{port}"` (GH #548) -- and `Context::
+    // get_submodel_offset` resolves that by looking the bare LTM var up in
+    // *this* sub-model's metadata. Without an entry here the lookup returns
+    // `DoesNotExist`, the parent fragment fails to compile, `assemble_module`
+    // drops it, and the link score reads a constant 0 -- silently zeroing every
+    // loop that runs through the macro. Register the LTM vars (and their
+    // implicit helpers) at their `compute_layout` offsets so the cross-module
+    // reference resolves the same way the full flattened-offset assembly does.
+    if project.ltm_enabled(db) {
+        let ltm_vars = model_ltm_variables(db, sub_model, project);
+        let dim_context = project_dimensions_context(db, project);
+        for ltm_var in &ltm_vars.vars {
+            let var_ident: Ident<Canonical> = Ident::new(&ltm_var.name);
+            if sub_metadata.contains_key(&var_ident) {
+                continue;
+            }
+            let Some(entry) = layout.get(&ltm_var.name) else {
+                continue;
+            };
+            // A2A link/loop scores carry dimensions; the stub's dummy AST
+            // mirrors the layout so any subscripted cross-module read resolves
+            // an element offset rather than collapsing to slot 0. Scalar LTM
+            // vars (the composite among them) get a plain `Var` stub.
+            let dummy_ast = if ltm_var.dimensions.is_empty() {
+                None
+            } else {
+                let dims: Vec<crate::dimensions::Dimension> = ltm_var
+                    .dimensions
+                    .iter()
+                    .filter_map(|name| {
+                        let canonical = crate::common::CanonicalDimensionName::from_raw(name);
+                        dim_context.get(&canonical).cloned()
+                    })
+                    .collect();
+                Some(crate::ast::Ast::ApplyToAll(
+                    dims,
+                    crate::ast::Expr2::Const("0".to_string(), 0.0, crate::ast::Loc::default()),
+                ))
+            };
+            let stub: &'arena crate::variable::Variable =
+                arena.alloc(crate::variable::Variable::Var {
+                    ident: var_ident.clone(),
+                    ast: dummy_ast,
+                    init_ast: None,
+                    eqn: None,
+                    units: None,
+                    tables: vec![],
+                    non_negative: false,
+                    is_flow: false,
+                    is_table_only: false,
+                    errors: vec![],
+                    unit_errors: vec![],
+                });
+            sub_metadata.insert(
+                var_ident,
+                crate::compiler::VariableMetadata {
+                    offset: entry.offset,
+                    size: entry.size,
+                    var: stub,
+                },
+            );
+        }
+
+        let ltm_implicit = model_ltm_implicit_var_info(db, sub_model, project);
+        for (im_name, meta) in ltm_implicit.iter() {
+            let var_ident: Ident<Canonical> = Ident::new(im_name);
+            if sub_metadata.contains_key(&var_ident) {
+                continue;
+            }
+            let Some(entry) = layout.get(im_name) else {
+                continue;
+            };
+            // Module-type LTM implicit helpers (PREVIOUS-of-module-output
+            // instances) need the `Module` variant and a recursion into their
+            // sub-model so a nested cross-module reference resolves; scalar
+            // helpers use a plain `Var` stub.
+            let stub: &'arena crate::variable::Variable = if meta.is_module {
+                let model_name = meta.model_name.as_deref().unwrap_or("");
+                if !model_name.is_empty() {
+                    let nested_canonical = canonicalize(model_name);
+                    if let Some(nested_model) = project_models.get(nested_canonical.as_ref()) {
+                        build_submodel_metadata(arena, db, *nested_model, project, all_metadata);
+                    }
+                }
+                arena.alloc(crate::variable::Variable::Module {
+                    ident: var_ident.clone(),
+                    model_name: Ident::new(model_name),
+                    units: None,
+                    inputs: vec![],
+                    errors: vec![],
+                    unit_errors: vec![],
+                })
+            } else {
+                arena.alloc(crate::variable::Variable::Var {
+                    ident: var_ident.clone(),
+                    ast: None,
+                    init_ast: None,
+                    eqn: None,
+                    units: None,
+                    tables: vec![],
+                    non_negative: false,
+                    is_flow: false,
+                    is_table_only: false,
+                    errors: vec![],
+                    unit_errors: vec![],
+                })
+            };
+            sub_metadata.insert(
+                var_ident,
+                crate::compiler::VariableMetadata {
+                    offset: entry.offset,
+                    size: entry.size,
+                    var: stub,
+                },
+            );
+        }
+    }
+
     all_metadata.insert(sub_model_name, sub_metadata);
 }
 

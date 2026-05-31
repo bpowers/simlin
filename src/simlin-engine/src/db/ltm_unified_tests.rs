@@ -661,26 +661,32 @@ fn test_ltm_disabled_does_not_surface_auto_flip_warning() {
 // LTM synthetic-fragment compile-failure diagnostics
 // ---------------------------------------------------------------------------
 
-/// Build a goal-seeking model with a `SMTH1` in the feedback path:
-/// `level -> smoothed_level (SMTH1) -> gap -> adjustment -> level`.
+/// Build a model whose LTM augmentation emits a synthetic equation the
+/// fragment compiler genuinely rejects, so the diagnostic pass has a real
+/// failure to surface.
 ///
-/// `SMTH1(level, 3)` expands into an implicit stdlib module instance, so
-/// the LTM augmentation layer emits a link score into the SMOOTH's
-/// module-internal stock (`$⁚ltm⁚link_score⁚level→$⁚smoothed_level⁚0⁚smth1`).
-/// That synthetic equation does not compile as a scalar ceteris-paribus
-/// equation -- `assemble_module` silently drops the fragment and the
-/// variable reads a constant 0. The model still simulates, which is
-/// exactly why the failure went unnoticed; the diagnostic pass makes it
-/// visible.
-fn build_smooth_loop_with_failing_fragment(name: &str) -> datamodel::Project {
+/// This used to be a `SMTH1`-in-loop model, but that hazard (the
+/// composite-reference link score into a stdlib-macro module) was fixed in
+/// GH #548 (`build_submodel_metadata` now registers the sub-model's LTM
+/// composite var, so the cross-module reference resolves). The fixture is
+/// retargeted at the still-open broadcast arrayed-aggregate case (GH #528):
+/// a strict-prefix broadcast reducer `SUM(matrix[D1,*])` over a `D1 x D2`
+/// matrix, closed into a feedback loop through a `D1` stock. The agg is
+/// over-subscribed into the cross-product, so the loop-score fragment fails
+/// to compile and `assemble_module` would silently stub it to 0. The
+/// diagnostic pass must surface that.
+///
+/// Using a genuinely-unfixed failure (rather than a once-broken-now-fixed
+/// one) keeps these diagnostic-infrastructure tests decoupled from any
+/// single bug's lifetime -- the test-coupling concern of GH #547.
+fn build_model_with_failing_ltm_fragment(name: &str) -> datamodel::Project {
     TestProject::new(name)
-        .with_sim_time(0.0, 20.0, 0.25)
-        .scalar_aux("goal", "100")
-        .stock("level", "50", &["adjustment"], &[], None)
-        .scalar_aux("smoothed_level", "SMTH1(level, 3)")
-        .scalar_aux("gap", "goal - smoothed_level")
-        .scalar_aux("adjustment_time", "5")
-        .flow("adjustment", "gap / adjustment_time", None)
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .named_dimension("D2", &["x", "y"])
+        .array_aux("matrix[D1,D2]", "stock[D1] * 0.1")
+        .array_stock("stock[D1]", "10", &["inflow"], &[], None)
+        .array_flow("inflow[D1]", "SUM(matrix[D1,*])", None)
         .build_datamodel()
 }
 
@@ -707,7 +713,7 @@ fn test_ltm_fragment_compile_failure_surfaces_warning() {
     use crate::db::collect_model_diagnostics;
     use salsa::Setter;
 
-    let project = build_smooth_loop_with_failing_fragment("smooth_frag_fail_surface");
+    let project = build_model_with_failing_ltm_fragment("frag_fail_surface");
     let mut db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
@@ -746,17 +752,25 @@ fn test_ltm_fragment_compile_failure_surfaces_warning() {
 #[test]
 fn test_model_ltm_fragment_diagnostics_emits_warning() {
     use crate::db::CompilationDiagnostic;
+    use salsa::Setter;
 
-    let project = build_smooth_loop_with_failing_fragment("smooth_frag_fail_direct");
-    let db = SimlinDb::default();
-    let sync = sync_from_datamodel(&db, &project);
-    let model = sync.models["main"].source;
+    let project = build_model_with_failing_ltm_fragment("frag_fail_direct");
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    // Mirror the production reachability of this pass (`model_all_diagnostics`
+    // only runs it when `ltm_enabled`); the broadcast-agg failure surfaces
+    // regardless of the flag, but enabling it keeps the test faithful to how
+    // the diagnostic is actually triggered.
+    source_project.set_ltm_enabled(&mut db).to(true);
 
-    model_ltm_fragment_diagnostics(&db, model, sync.project);
+    model_ltm_fragment_diagnostics(&db, model, source_project);
     let diags = model_ltm_fragment_diagnostics::accumulated::<CompilationDiagnostic>(
         &db,
         model,
-        sync.project,
+        source_project,
     );
 
     assert!(
@@ -764,7 +778,7 @@ fn test_model_ltm_fragment_diagnostics_emits_warning() {
             .iter()
             .any(|CompilationDiagnostic(d)| is_ltm_fragment_failure(d)),
         "model_ltm_fragment_diagnostics must accumulate a compile-failure \
-         Warning for the SMOOTH-internal link score; got: {:?}",
+         Warning for the broadcast arrayed-aggregate loop score; got: {:?}",
         diags.iter().map(|c| &c.0).collect::<Vec<_>>()
     );
 }
@@ -811,7 +825,7 @@ fn test_clean_ltm_model_emits_no_fragment_warning() {
 fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
     use crate::db::collect_model_diagnostics;
 
-    let project = build_smooth_loop_with_failing_fragment("smooth_frag_fail_disabled");
+    let project = build_model_with_failing_ltm_fragment("frag_fail_disabled");
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
