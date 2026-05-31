@@ -84,8 +84,8 @@ pub fn compile_ltm_var_fragment(
 ///
 /// Salsa-tracked so a per-shape link score is recomputed only when the
 /// involved variables (and their shape-classifying dimensions) change.
-/// Lives in `db/ltm.rs` rather than `db.rs` so the latter stays under
-/// the project's per-file line cap.
+/// Lives in `db/ltm/compile.rs` rather than `db.rs` so the latter stays
+/// under the project's per-file line cap.
 #[salsa::tracked(returns(ref))]
 pub fn link_score_equation_text_shaped<'db>(
     db: &'db dyn Db,

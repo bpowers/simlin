@@ -507,13 +507,13 @@ pub fn link_score_equation_text<'db>(
     })
 }
 
-// `link_score_equation_text_shaped` lives in `db/ltm.rs` (where the
-// emission loop calls it) so this file stays under the project's
+// `link_score_equation_text_shaped` lives in `db/ltm/compile.rs` (where
+// the emission loop calls it) so this file stays under the project's
 // per-file line cap; see `ltm::link_score_equation_text_shaped`.
 
 /// Build a causal graph from pre-computed edges and enumerate all pathways
 /// from each input port to the specified output ports (or auto-detect them).
-/// Used by `model_ltm_variables` in `db/ltm.rs` for pathway and composite
+/// Used by `model_ltm_variables` in `db/ltm/mod.rs` for pathway and composite
 /// score generation.
 fn module_input_pathways_from_edges(
     edges_result: &CausalEdgesResult,
