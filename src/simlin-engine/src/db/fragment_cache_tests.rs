@@ -1549,7 +1549,13 @@ fn test_submodule_fragment_shared_between_diagnostics_and_assembly() {
 /// It uses a model with a submodule so the nested module-decl `off`
 /// relocation is exercised: the submodule is assembled with the unshifted
 /// body layout and the parent relocates it via the (root-shifted) module-decl
-/// offset.
+/// offset. It also uses a SMOOTH builtin so the SMOOTH/DELAY implicit-var
+/// section is cross-checked: that is the ONE section
+/// `calc_flattened_offsets_incremental` computes INDEPENDENTLY (via its
+/// running `i`-arithmetic) rather than reading `root_shifted()` directly, so
+/// it is the divergence-prone section the entry-for-entry loop must cover.
+/// (The body section is also covered by the loop; the LTM section is
+/// tautologically consistent because both sides read `root_shifted()`.)
 #[test]
 fn test_is_root_shift_machineries_in_lockstep() {
     let db = SimlinDb::default();
@@ -1585,6 +1591,20 @@ fn test_is_root_shift_machineries_in_lockstep() {
                     datamodel::Variable::Aux(datamodel::Aux {
                         ident: "zzz".to_string(),
                         equation: datamodel::Equation::Scalar("aaa + 1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    // SMTH3 synthesizes implicit module/helper variables
+                    // (`$⁚smoothed⁚…`), exercising the SMOOTH/DELAY implicit-var
+                    // section that `calc_flattened_offsets_incremental` lays out
+                    // with its own independent `i`-arithmetic.
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "smoothed".to_string(),
+                        equation: datamodel::Equation::Scalar("SMTH3(aaa, 5)".to_string()),
                         documentation: String::new(),
                         units: None,
                         gf: None,
@@ -1660,9 +1680,12 @@ fn test_is_root_shift_machineries_in_lockstep() {
     let flat = crate::db::calc_flattened_offsets_incremental(&db, sync.project, "main", true);
 
     // Lockstep: every name the flattened results map exposes at the top level
-    // (the implicit globals + scalar body vars; submodule entries are dotted
-    // names absent from the parent layout) must match the root-shifted layout
-    // offset entry-for-entry.
+    // (the implicit globals + scalar body vars + SMOOTH/DELAY implicit vars;
+    // submodule entries are dotted names absent from the parent layout) must
+    // match the root-shifted layout offset entry-for-entry. We track which
+    // implicit-var (`$⁚`-prefixed) names were cross-checked so the test can
+    // assert it is non-vacuous for that independently-computed section.
+    let mut implicit_names_checked = 0usize;
     for (name, (off, _size)) in &flat {
         if let Some(entry) = root_layout.get(name.as_str()) {
             assert_eq!(
@@ -1674,8 +1697,25 @@ fn test_is_root_shift_machineries_in_lockstep() {
                 name.as_str(),
                 entry.offset
             );
+            if name.as_str().starts_with('$') {
+                implicit_names_checked += 1;
+            }
         }
     }
+
+    // Non-vacuity for the implicit-var section: SMTH3 synthesizes at least one
+    // `$⁚`-prefixed implicit variable that appears in BOTH the root layout and
+    // the flattened results map, so the entry-for-entry loop above actually
+    // cross-checked `calc_flattened_offsets_incremental`'s independent
+    // implicit-section arithmetic against `root_shifted()`. Without a SMOOTH/
+    // DELAY builtin this count would be 0 and the section would be uncovered.
+    assert!(
+        implicit_names_checked > 0,
+        "expected at least one SMOOTH/DELAY implicit variable cross-checked in \
+         both the root layout and the flattened results map; the implicit-var \
+         section would otherwise be uncovered. flat keys: {:?}",
+        flat.keys().map(|k| k.as_str()).collect::<Vec<_>>()
+    );
 
     // The submodule's `output` is relocated under `sub.output`. Its results
     // offset must equal the root layout's `sub` module-decl offset plus the
