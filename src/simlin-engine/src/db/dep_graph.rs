@@ -26,9 +26,9 @@
 //! Co-locating the gate with the relation it consumes keeps that
 //! "single shared relation, never re-derive" invariant structural.
 //!
-//! This is a top-level module (a sibling of `db`, like `db_ltm_ir` /
-//! `db_macro_registry`) rather than a submodule of `db.rs` purely to keep
-//! `db.rs` under the per-file line cap.
+//! This is a submodule of `db` (a child of `db.rs`, like `ltm_ir` /
+//! `macro_registry`) kept in its own file purely to keep `db.rs` under the
+//! per-file line cap; callers reach it via `crate::db::dep_graph::...`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -819,7 +819,7 @@ enum SccVerdict {
 /// - `SymLoadPrev` (PREVIOUS, `prev_values` snapshot, prior timestep):
 ///   contributes NO element edge in EITHER phase -- the analogue of
 ///   `build_var_info` retaining `dt_deps` against `lagged_dt_previous`
-///   (`deps.dt_previous_referenced_vars`, `db_dep_graph.rs:262`) AND
+///   (`deps.dt_previous_referenced_vars`, `db/dep_graph.rs:262`) AND
 ///   `initial_deps` against `lagged_initial_previous`
 ///   (`deps.initial_previous_referenced_vars`, `:264`).
 /// - `SymLoadInitial` (INIT, `initial_values` snapshot): NO edge in
@@ -956,7 +956,7 @@ fn symbolic_phase_element_order(
                 // This is the element-level analogue of `build_var_info`
                 // stripping `lagged_dt_previous`
                 // (`deps.dt_previous_referenced_vars`) from `dt_deps`
-                // (`db_dep_graph.rs:262`) AND `lagged_initial_previous`
+                // (`db/dep_graph.rs:262`) AND `lagged_initial_previous`
                 // (`deps.initial_previous_referenced_vars`) from
                 // `initial_deps` (`:264`) -- both phases. Contributing no
                 // edge makes the element graph MATCH the engine's actual
@@ -970,7 +970,7 @@ fn symbolic_phase_element_order(
                 // dt graph it is NOT a current-dt ordering edge -- the
                 // element-level analogue of `build_var_info` stripping
                 // `init_only_dt` (`deps.dt_init_only_referenced_vars`)
-                // from `dt_deps` (`db_dep_graph.rs:261`). In the init
+                // from `dt_deps` (`db/dep_graph.rs:261`). In the init
                 // graph it IS a genuine init-phase dependency: an INIT(x)
                 // read during the initial-value computation orders x's
                 // initial value before this element, and `build_var_info`
@@ -1450,7 +1450,7 @@ pub(crate) fn array_producing_vars(
 /// The engine's OWN per-variable production-lowered non-initial (dt/flow)
 /// `Vec<Expr>` for the canonical `var_name`.
 ///
-/// Sourced via `crate::db_var_fragment::lower_var_fragment` -- the exact
+/// Sourced via `crate::db::var_fragment::lower_var_fragment` -- the exact
 /// per-variable lowering the production caller
 /// `crate::db::compile_var_fragment` runs -- with the caller-owned,
 /// lowering-independent context constructed byte-identically to that
@@ -1483,7 +1483,7 @@ pub(crate) fn var_noninitial_lowered_exprs(
     project: SourceProject,
     var_name: &str,
 ) -> Vec<crate::compiler::Expr> {
-    use crate::db_var_fragment::{LoweredVarFragment, lower_var_fragment};
+    use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
 
     let source_vars = model.variables(db);
     let Some(sv) = source_vars.get(var_name) else {
@@ -1604,8 +1604,8 @@ impl Drop for UnsourceableVarsGuard {
 }
 
 #[cfg(test)]
-#[path = "db_dep_graph_tests.rs"]
-mod db_dep_graph_tests;
+#[path = "dep_graph_tests.rs"]
+mod dep_graph_tests;
 
 // ── Model dependency graph (the cycle gate) ────────────────────────────
 //
@@ -1613,8 +1613,8 @@ mod db_dep_graph_tests;
 // module's shared cycle relation (`dt_walk_successors` /
 // `init_walk_successors` / `build_var_info`) and the element-cycle
 // refinement (`resolve_recurrence_sccs`). It lives here, alongside the
-// relation it consumes, rather than in `db.rs` -- a sibling top-level
-// module (like `db_ltm_ir` / `db_macro_registry`) split out purely for
+// relation it consumes, rather than in `db.rs` -- a `db` submodule
+// (like `ltm_ir` / `macro_registry`) split out purely for
 // the per-file line cap. The thin `#[salsa::tracked]` wrappers
 // (`model_dependency_graph` / `model_dependency_graph_with_inputs`)
 // stay in `db.rs` because the `ModelDepGraphResult` salsa types do.
@@ -2028,7 +2028,7 @@ pub(crate) fn model_dependency_graph_impl(
     // loud-safe fallback => zero extra work).
     let dt_scc_map: BTreeMap<Ident<Canonical>, usize> = if dt_first.is_err() {
         let resolution =
-            crate::db_dep_graph::resolve_recurrence_sccs(db, model, project, SccPhase::Dt);
+            crate::db::dep_graph::resolve_recurrence_sccs(db, model, project, SccPhase::Dt);
         if !resolution.has_unresolved && !resolution.resolved.is_empty() {
             let mut map = BTreeMap::new();
             scc_map_from_resolved(&resolution.resolved, 0, &mut map);
@@ -2089,8 +2089,12 @@ pub(crate) fn model_dependency_graph_impl(
             // this never appeared as a dt SCC). Run the init-phase
             // recurrence resolution (Phase 2 Task 3), reusing the
             // phase-parameterized builder.
-            let init_resolution =
-                crate::db_dep_graph::resolve_recurrence_sccs(db, model, project, SccPhase::Initial);
+            let init_resolution = crate::db::dep_graph::resolve_recurrence_sccs(
+                db,
+                model,
+                project,
+                SccPhase::Initial,
+            );
 
             // Exclude init SCCs whose members the dt path already
             // resolved: a both-relations aux self-recurrence is

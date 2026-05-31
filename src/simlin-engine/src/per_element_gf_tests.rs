@@ -716,7 +716,7 @@ fn two_dim_non_sorted_axis_per_element_gf_row_major_flatten() {
 
 /// TEST (extract_tables_from_source_var, non-sorted declared order): the
 /// production salsa DEPENDENCY-table path (`extract_tables_from_source_var`,
-/// db.rs, consumed via `db_var_fragment.rs` / db.rs for `LOOKUP(dep, x)`
+/// db.rs, consumed via `db/var_fragment.rs` / db.rs for `LOOKUP(dep, x)`
 /// dependency tables) must also lay each element's table at its DECLARED
 /// dimension index, not its `Equation::Arrayed` Vec position. Declared order
 /// `Z, A, M` with the GF Vec in alphabetical order; assert the compiled tables

@@ -497,7 +497,7 @@ impl<'module> Compiler<'module> {
                             // -- e.g. a PREVIOUS whose arg survived helper
                             // rewriting as a non-variable expression
                             // (NotSimulatable) -- must flow back to the caller
-                            // (db_ltm.rs gracefully drops the un-compilable LTM
+                            // (db/ltm.rs gracefully drops the un-compilable LTM
                             // synthetic fragment), never escalate to a panic (#363).
                             self.walk_expr(expr)?.unwrap();
                             let bounds = bounds[i] as VariableOffset;
@@ -1633,7 +1633,7 @@ mod tests {
     /// helper rewriting as a non-variable expression) is `NotSimulatable`. When
     /// such a `PREVIOUS` sits inside a `Subscript` index expression, the scalar
     /// `Subscript` arm of `walk_expr` must *propagate* that recoverable `Err`
-    /// (so a caller like `db_ltm.rs`'s LTM-synthetic-fragment compile can
+    /// (so a caller like `db/ltm.rs`'s LTM-synthetic-fragment compile can
     /// gracefully drop the un-compilable fragment), not escalate it to a
     /// process-killing panic. This pins the converted condition behind #363
     /// (codegen.rs line 494 was a double-`unwrap` on this `Result`).

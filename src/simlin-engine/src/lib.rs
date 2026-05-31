@@ -28,29 +28,6 @@ mod compiler;
 pub mod data_provider;
 pub mod datamodel;
 pub mod db;
-#[cfg(test)]
-mod db_element_graph_proptest;
-// The LTM reference-site classification IR (`model_ltm_reference_sites`) and
-// the `Expr2` AST-walker helpers it owns. A sibling of `db` rather than a
-// submodule of `db.rs` so the latter stays under the per-file line cap
-// (`scripts/lint-project.sh` rule 2); `db_analysis` / `db_ltm` reach it via
-// `crate::db_ltm_ir::...`, mirroring how `ltm_agg` consumes `crate::db`.
-mod db_ltm_ir;
-// The per-project macro-registry salsa query (`project_macro_registry`) and
-// the sync-time `macro_registry_build_error`. A sibling of `db` rather than
-// a submodule of `db.rs` so the latter stays under the per-file line cap
-// (`scripts/lint-project.sh` rule 2); `db.rs` reaches it via
-// `crate::db_macro_registry::...`, mirroring `db_ltm_ir`.
-mod db_macro_registry;
-// The dt-phase dependency-graph cycle relation (`dt_walk_successors`),
-// the shared `VarInfo` builder (`build_var_info`), and the `#[cfg(test)]`
-// SCC introspection accessor. A sibling of `db` rather than a submodule
-// of `db.rs` so the latter stays under the per-file line cap
-// (`scripts/lint-project.sh` rule 2); `db.rs` reaches it via
-// `crate::db_dep_graph::...`, mirroring `db_ltm_ir` / `db_macro_registry`.
-mod db_dep_graph;
-mod db_units;
-mod db_var_fragment;
 pub mod diagram;
 mod dimensions;
 pub mod errors;

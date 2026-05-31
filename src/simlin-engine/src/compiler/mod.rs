@@ -1112,7 +1112,7 @@ fn contains_array_producing_builtin(expr: &Expr) -> bool {
 /// contains, an array-producing builtin (VectorElmMap/VectorSortOrder/
 /// Rank/AllocateAvailable/AllocateByPriority), including nested as a
 /// subexpression or hoisted into an `AssignTemp`.
-/// `crate::db_dep_graph::array_producing_vars` reuses this exact
+/// `crate::db::dep_graph::array_producing_vars` reuses this exact
 /// predicate rather than re-implementing the recursion.
 #[cfg(test)]
 pub(crate) fn exprs_contain_array_producing_builtin(exprs: &[Expr]) -> bool {

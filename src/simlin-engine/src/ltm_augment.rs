@@ -42,7 +42,7 @@ pub(crate) struct IteratedDimCtx<'a> {
 /// -- one whose indices are exactly the target equation's iterated
 /// dimensions, in the position matching the live source's declared
 /// dimension order -- the Expr0-AST sibling of
-/// `db_ltm_ir::classify_iterated_dim_shape` (GH #511).
+/// `db::ltm_ir::classify_iterated_dim_shape` (GH #511).
 ///
 /// `live_source[d_0, d_1, ...]` is the iterated-dim case iff:
 ///   1. it has exactly one index per source dimension (`indices.len() ==
@@ -155,7 +155,7 @@ fn is_other_dep_iterated_dim_subscript(
 
 /// Classify an `Expr0` subscript's shape based on its indices.
 ///
-/// Mirrors `db_ltm_ir::resolve_literal_index`'s classification logic but at
+/// Mirrors `db::ltm_ir::resolve_literal_index`'s classification logic but at
 /// the `Expr0` (parsed-AST) level — used by `wrap_non_matching_in_previous`
 /// before subscripts have been lowered to `Expr2`. Each input string in
 /// `source_dim_elements` is the canonical lowercase element name for the
@@ -195,7 +195,7 @@ fn is_literal_element_index(
 }
 
 /// Resolve a single subscript index to a literal element name, mirroring
-/// `db_ltm_ir::resolve_literal_index` (the Expr2 sibling) so both
+/// `db::ltm_ir::resolve_literal_index` (the Expr2 sibling) so both
 /// classifiers agree on what counts as a "literal element". The two
 /// must stay in sync: the edge emitter uses the Expr2 classifier and
 /// the partial-equation builder uses this Expr0 sibling -- if they
@@ -224,7 +224,7 @@ fn resolve_literal_element_index(
             // indexed dims. Canonicalize via parse-then-format so
             // non-canonical forms like `pop[01]` reduce to `"1"` and
             // match `dimension_element_names`'s `"1".."N"` output. The
-            // Expr2 sibling (`db_ltm_ir::resolve_literal_index`)
+            // Expr2 sibling (`db::ltm_ir::resolve_literal_index`)
             // does the same; without canonicalization here we'd
             // disagree on `01` (Expr2 -> FixedIndex(["1"]),
             // Expr0 -> DynamicIndex), the live-shape match would
@@ -263,7 +263,7 @@ fn classify_expr0_subscript_shape(
     // GH #511: an iterated-dimension subscript on the live source
     // (`row_sum[Region]` inside an apply-to-all-over-`Region x Age` equation)
     // reads the same source element -- it is `Bare`, mirroring
-    // `db_ltm_ir::classify_iterated_dim_shape`. Checked before the
+    // `db::ltm_ir::classify_iterated_dim_shape`. Checked before the
     // literal-element pass because a dimension name (`Region`) is not a
     // literal element, so it would otherwise fall to `DynamicIndex`.
     if is_live_source_iterated_dim_subscript(indices, iter_ctx) {
@@ -273,7 +273,7 @@ fn classify_expr0_subscript_shape(
     for (i, idx) in indices.iter().enumerate() {
         // Use the same resolver as `is_literal_element_index` so this
         // classifier and the Expr2 sibling
-        // (`db_ltm_ir::resolve_literal_index`) agree on what counts
+        // (`db::ltm_ir::resolve_literal_index`) agree on what counts
         // as a literal element. Integer literals are validated against
         // `source_dim_elements` (which contains `["1", ..., "size"]`
         // for indexed dims), so out-of-range integers like `pop[999]`
@@ -835,7 +835,7 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
 ///
 /// `element` is a single element name (`"nyc"`) for a one-dimensional
 /// target, or a comma-joined tuple (`"nyc,adult"`) for a multi-dimensional
-/// one -- the same form `db_ltm::cartesian_subscripts` produces and the
+/// one -- the same form `db::ltm::cartesian_subscripts` produces and the
 /// `parse_link_offsets` discovery parser expects on the `to` side.
 pub(crate) fn subscript_idents_at_element(
     equation_text: &str,
@@ -2658,7 +2658,7 @@ mod tests {
 
     /// Regression test for the integer-literal bounds asymmetry between
     /// the Expr0 and Expr2 classifiers. The Expr2 classifier
-    /// (`db_ltm_ir::resolve_literal_index`) validates integer
+    /// (`db::ltm_ir::resolve_literal_index`) validates integer
     /// literals against the indexed dimension's size and returns None
     /// (so the shape becomes `DynamicIndex`) for out-of-range values.
     /// The Expr0 classifier here previously accepted any `u32`-parseable
@@ -2715,7 +2715,7 @@ mod tests {
     /// the engine's "1"-based string form before lookup, so `pop[01]`
     /// (zero-padded) classifies as `FixedIndex(["1"])` -- the same form
     /// `dimension_element_names` produces and the same form the Expr2
-    /// edge emitter (`db_ltm_ir::resolve_literal_index`) returns
+    /// edge emitter (`db::ltm_ir::resolve_literal_index`) returns
     /// after this fix. Without canonicalization, `pop[01]` would be
     /// rejected as non-literal here (string "01" doesn't match "1" in
     /// `source_dim_elements`) while the Expr2 classifier accepted it

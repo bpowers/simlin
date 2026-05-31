@@ -22,10 +22,10 @@
 //! produces noise; their unit correctness is validated at each instantiation
 //! through the cross-module constraints `units_infer` generates.
 //!
-//! This is a top-level module (a sibling of `db`, like `db_macro_registry`
-//! and `db_dep_graph`) rather than a submodule of `db.rs` purely to keep
-//! `db.rs` under the per-file line cap (`scripts/lint-project.sh` rule 2);
-//! `db::model_all_diagnostics` reaches it via `crate::db_units::...`.
+//! This is a submodule of `db` (a child of `db.rs`, like `macro_registry`
+//! and `dep_graph`) kept in its own file purely to keep `db.rs` under the
+//! per-file line cap (`scripts/lint-project.sh` rule 2);
+//! `db::model_all_diagnostics` reaches it via `crate::db::units::...`.
 
 use std::collections::{HashMap, HashSet};
 

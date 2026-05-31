@@ -7,7 +7,7 @@
 //! Bug 1 (delay3 conflation): the stdlib `delay3` / `delay1` stock-init
 //!   equation has the form `(if isModuleInput(initial_value) then initial_value
 //!   else input) * delay_time`.  The stdlib-module argument compatibility check
-//!   in `db_units::check_model_units` extracts ALL identifiers referenced by the init
+//!   in `db::units::check_model_units` extracts ALL identifiers referenced by the init
 //!   AST and pairwise-compares their declared units, so `input` (pollution/year)
 //!   and `delay_time` (year) are wrongly flagged as conflicting even though
 //!   `delay_time` participates only as a coefficient.  Only the identifiers in

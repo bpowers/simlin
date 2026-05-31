@@ -4,8 +4,8 @@
 
 //! Tests for the dt-phase dependency-graph cycle-relation primitive and
 //! the `#[cfg(test)]` SCC accessor. Live in their own file alongside the
-//! production code in `db_dep_graph.rs` to keep both `db.rs` and
-//! `db_tests.rs` under the per-file line cap.
+//! production code in `db/dep_graph.rs` to keep both `db.rs` and
+//! `db/tests.rs` under the per-file line cap.
 
 use super::*;
 use crate::datamodel;
@@ -711,7 +711,7 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
     // Lowered-shape regression guards. Sourced from the same engine
     // per-variable production lowering `array_producing_vars` consumes
     // (`var_noninitial_lowered_exprs` ->
-    // `crate::db_var_fragment::lower_var_fragment`), partitioned by
+    // `crate::db::var_fragment::lower_var_fragment`), partitioned by
     // top-level element kind, then the same production predicate
     // (`exprs_contain_array_producing_builtin`) applied per partition --
     // no re-implementation of the array-producing recursion.
@@ -2034,7 +2034,7 @@ fn var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic() {
 #[test]
 fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
     use crate::db::SccPhase;
-    use crate::db_dep_graph::UnsourceableVarsGuard;
+    use crate::db::dep_graph::UnsourceableVarsGuard;
 
     // `ecc[t1]=1; ecc[t2]=ecc[t1]+1; ecc[t3]=ecc[t2]+1`: a single-variable
     // self-recurrence whose induced element graph (ecc,0)->(ecc,1)->(ecc,2)
@@ -2820,7 +2820,7 @@ fn model_dep_graph_single_var_self_recurrence_byte_identical_to_phase1() {
 // false `CircularDependency` (the verified C-LEARN root cause: 105
 // element-self-loops, every one a `SymLoadPrev`). After Part A the element
 // graph inherits `build_var_info`'s per-phase PREVIOUS/INIT strip
-// (`db_dep_graph.rs` real-var :261-264 / implicit :283-287; `SymLoadPrev`
+// (`db/dep_graph.rs` real-var :261-264 / implicit :283-287; `SymLoadPrev`
 // is the element-level analogue of `dt_previous_referenced_vars` /
 // `initial_previous_referenced_vars`, stripped in BOTH phases), so the
 // lagged self-read contributes no edge and the (acyclic, current-value)

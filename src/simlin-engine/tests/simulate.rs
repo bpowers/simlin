@@ -4442,7 +4442,7 @@ fn corpus_sstats_multi_output_materializes() {
 ///
 /// 1. **Macro-registry-build error** -- a project-level (`model` empty,
 ///    `variable` `None`) `Model` diagnostic with code `CircularDependency`
-///    or `DuplicateMacroName`. `db_macro_registry::project_macro_registry`
+///    or `DuplicateMacroName`. `db::macro_registry::project_macro_registry`
 ///    emits this when `MacroRegistry::build` rejects the macro set; an empty
 ///    registry then un-shadows every macro builtin (the #554 cascade:
 ///    `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO` calls become
@@ -4975,7 +4975,7 @@ fn compiles_and_runs_clearn_structural() {
 /// `CircularDependency`). But `captured` reads the SMOOTH *stock* output, which
 /// in the dt phase is a prior-timestep read and must NOT impose a same-step
 /// ordering on the module: before the fix, the salsa runlist
-/// (`db_dep_graph::build_var_info` / `topo_sort_str`) kept a `captured ->
+/// (`db::dep_graph::build_var_info` / `topo_sort_str`) kept a `captured ->
 /// smth1` dt edge anyway (the `·output` stock dep was not chain-broken for a
 /// NON-module reader), creating a false ordering cycle that `topo_sort_str`
 /// broke by emitting the SMOOTH module BEFORE its `input` for SOME elements

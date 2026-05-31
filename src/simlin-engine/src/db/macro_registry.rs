@@ -29,10 +29,10 @@
 //! `MacroRegistry::build`'s own `ErrorCode`, and returns it so
 //! `compile_project_incremental` can fail with a clear message.
 //!
-//! This is a top-level module (a sibling of `db`, like `db_ltm_ir` and
-//! `ltm_agg`) rather than a submodule of `db.rs` purely to keep `db.rs`
-//! under the per-file line cap (`scripts/lint-project.sh` rule 2); callers
-//! in the `db` submodules reach it via `crate::db_macro_registry::...`.
+//! This is a submodule of `db` (a child of `db.rs`, like `ltm_ir`) kept in
+//! its own file purely to keep `db.rs` under the per-file line cap
+//! (`scripts/lint-project.sh` rule 2); callers in the `db` submodules reach
+//! it via `crate::db::macro_registry::...`.
 
 use std::collections::HashMap;
 

@@ -11,7 +11,7 @@
 //! variable. These tests verify:
 //!   - the cached values equal the freshly-built ones (oracle), and
 //!   - the queries are memoized across calls / recompute when a dimension
-//!     changes (mirroring `db_dimension_invalidation_tests.rs`).
+//!     changes (mirroring `db/dimension_invalidation_tests.rs`).
 
 use super::*;
 use crate::datamodel;

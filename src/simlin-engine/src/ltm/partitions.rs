@@ -93,7 +93,7 @@ pub(crate) fn loop_dimension_element_tuples(
     }
     // Row-major cartesian product: `element_lists[0]` is the outermost
     // (slowest-varying) dimension, `element_lists[last]` the innermost.  This
-    // mirrors `db_ltm::cartesian_subscripts` and `LoopElementIndex::resolve`.
+    // mirrors `db::ltm::cartesian_subscripts` and `LoopElementIndex::resolve`.
     let mut result: Vec<String> = element_lists[0].clone();
     for next in &element_lists[1..] {
         let mut expanded = Vec::with_capacity(result.len() * next.len());

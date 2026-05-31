@@ -8,8 +8,8 @@
 //! combined `PerVarBytecodes` following `ResolvedScc.element_order`.
 //!
 //! Lives in its own file alongside the production code in `db.rs` to keep
-//! both `db.rs` and `db_tests.rs` under the per-file line cap (same
-//! convention as `db_dep_graph_tests.rs`).
+//! both `db.rs` and `db/tests.rs` under the per-file line cap (same
+//! convention as `db/dep_graph_tests.rs`).
 //!
 //! These tests are intentionally focused on STRUCTURAL well-formedness:
 //! segment ordering, write-ref identity preservation, the single trailing
@@ -711,7 +711,7 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
 /// the MULTI-member INIT recurrence `{cs,ecs}` -- exercising the
 /// synthetic-ident `SymbolicCompiledInitial` combined-init-fragment path
 /// (Task 6). Mirrors the `two_stock_init_recurrence_project` shape
-/// empirically confirmed in `db_dep_graph_tests.rs`; kept self-contained
+/// empirically confirmed in `db/dep_graph_tests.rs`; kept self-contained
 /// here so the combined-fragment determinism coverage lives in one file.
 fn two_stock_init_recurrence_datamodel() -> crate::datamodel::Project {
     use crate::datamodel::{self, Dimension, Equation, Flow, Stock, Variable};

@@ -11,21 +11,33 @@ use crate::canonicalize;
 use crate::common::{Canonical, EquationError, Error, Ident, UnitError};
 use crate::datamodel;
 
-#[path = "db_ltm.rs"]
-mod db_ltm;
-use db_ltm::*;
-pub use db_ltm::{
+// The LTM reference-site classification IR (`model_ltm_reference_sites`) and
+// the `Expr2` AST-walker helpers it owns, plus the per-project macro-registry
+// salsa query, the dt-phase dependency-graph cycle relation, the per-variable
+// fragment lowering, and the unit-check pass. Each lives in its own file so
+// `db.rs` stays under the per-file line cap (`scripts/lint-project.sh`
+// rule 2); they reach each other and the parent via `crate::db::...`.
+mod dep_graph;
+#[cfg(test)]
+mod element_graph_proptest;
+mod ltm_ir;
+mod macro_registry;
+mod units;
+mod var_fragment;
+
+mod ltm;
+use ltm::*;
+pub use ltm::{
     LtmImplicitVarMeta, compile_ltm_var_fragment, link_score_equation_text_shaped,
     model_ltm_implicit_var_info, model_ltm_variables,
 };
 
-#[path = "db_analysis.rs"]
-mod db_analysis;
-pub use db_analysis::RefShape;
-pub use db_analysis::causal_graph_from_edges;
-pub use db_analysis::causal_graph_from_element_edges;
-pub(crate) use db_analysis::reconstruct_model_variables;
-use db_analysis::*;
+mod analysis;
+pub use analysis::RefShape;
+pub use analysis::causal_graph_from_edges;
+pub use analysis::causal_graph_from_element_edges;
+pub(crate) use analysis::reconstruct_model_variables;
+use analysis::*;
 // `model_element_loop_circuits` is `#[deprecated]` for LTM consumers (the
 // LTM pipeline uses `model_loop_circuits_tiered` instead). The re-export
 // itself triggers the deprecation lint, but we need to keep it visible
@@ -34,8 +46,8 @@ use db_analysis::*;
 // deprecation warning automatically; existing callers are reviewed
 // individually.
 #[allow(deprecated)]
-pub use db_analysis::model_element_loop_circuits;
-pub use db_analysis::{
+pub use analysis::model_element_loop_circuits;
+pub use analysis::{
     CausalEdgesResult, CyclePartitionsResult, DetectedLoop, DetectedLoopPolarity,
     DetectedLoopsResult, EdgeShapesResult, ElementCausalEdgesResult, FastPathCircuit,
     LoopCircuitsResult, TieredCircuitsResult, compute_link_polarities, model_causal_edges,
@@ -43,10 +55,9 @@ pub use db_analysis::{
     model_element_cycle_partitions, model_loop_circuits, model_loop_circuits_tiered,
 };
 
-#[path = "db_implicit_deps.rs"]
-mod db_implicit_deps;
-pub use db_implicit_deps::ImplicitVarDeps;
-use db_implicit_deps::extract_implicit_var_deps;
+mod implicit_deps;
+pub use implicit_deps::ImplicitVarDeps;
+use implicit_deps::extract_implicit_var_deps;
 
 // ── Database ───────────────────────────────────────────────────────────
 
@@ -192,7 +203,7 @@ pub struct SourceProject {
     /// when valid). Computed at sync from the datamodel `Vec<Model>` (not
     /// here -- `models` is name-keyed, collapsing the AC5.3 duplicate /
     /// colliding names); the typed code rides through so the downstream
-    /// diagnostic isn't re-tagged from prose. See `crate::db_macro_registry`.
+    /// diagnostic isn't re-tagged from prose. See `crate::db::macro_registry`.
     #[returns(ref)]
     pub macro_registry_build_error: Option<(crate::common::ErrorCode, String)>,
     /// Whether LTM (Loops That Matter) synthetic variable compilation is
@@ -869,7 +880,7 @@ fn parse_source_variable_impl(
         |mi| Ok(Some(mi.clone())),
         module_idents,
         macro_registry,
-        crate::db_macro_registry::enclosing_macro_for_var(db, project, var), // #554
+        crate::db::macro_registry::enclosing_macro_for_var(db, project, var), // #554
     );
 
     ParsedVariableResult {
@@ -891,7 +902,7 @@ pub fn parse_source_variable_with_module_context<'db>(
         .map(|ident| Ident::new(ident.as_str()))
         .collect();
     // Reaches the BuiltinVisitor so a macro call expands (salsa-cached).
-    let macro_registry = &crate::db_macro_registry::project_macro_registry(db, project).registry;
+    let macro_registry = &crate::db::macro_registry::project_macro_registry(db, project).registry;
     parse_source_variable_impl(db, var, project, Some(&module_idents), Some(macro_registry))
 }
 
@@ -909,7 +920,7 @@ fn module_ident_context_for_model<'db>(
     // Pre-classification must recognize macro calls as module calls too
     // (so `PREVIOUS(y)` rewrites correctly when `y = MYMACRO(...)`), the
     // same way it already recognizes `y = SMTH1(...)`.
-    let macro_registry = &crate::db_macro_registry::project_macro_registry(db, project).registry;
+    let macro_registry = &crate::db::macro_registry::project_macro_registry(db, project).registry;
     let mut module_ident_list: Vec<String> =
         crate::model::collect_module_idents(&dm_vars, macro_registry)
             .into_iter()
@@ -1293,11 +1304,11 @@ pub struct ModelDepGraphResult {
 ///
 /// The dependency-graph cycle gate itself
 /// (`model_dependency_graph_impl`, the SCC-aware back-edge break, the
-/// collapsed-node transitive accumulation) lives in `db_dep_graph.rs`
+/// collapsed-node transitive accumulation) lives in `db/dep_graph.rs`
 /// alongside the shared cycle relation it consumes
 /// (`dt_walk_successors`/`init_walk_successors`/`build_var_info`/
-/// `resolve_recurrence_sccs`) -- a sibling top-level module, like
-/// `db_ltm_ir`/`db_macro_registry`, only to keep `db.rs` under the
+/// `resolve_recurrence_sccs`) -- a `db` submodule, like
+/// `ltm_ir`/`macro_registry`, only to keep `db.rs` under the
 /// per-file line cap. These thin salsa wrappers stay here because the
 /// `ModelDepGraphResult` salsa input/return types do.
 #[salsa::tracked(returns(ref))]
@@ -1307,7 +1318,7 @@ pub fn model_dependency_graph_with_inputs(
     project: SourceProject,
     module_input_names: Vec<String>,
 ) -> ModelDepGraphResult {
-    crate::db_dep_graph::model_dependency_graph_impl(db, model, project, &module_input_names)
+    crate::db::dep_graph::model_dependency_graph_impl(db, model, project, &module_input_names)
 }
 
 /// Default per-model tracked dependency graph (no module inputs).
@@ -1317,7 +1328,7 @@ pub fn model_dependency_graph(
     model: SourceModel,
     project: SourceProject,
 ) -> ModelDepGraphResult {
-    crate::db_dep_graph::model_dependency_graph_impl(db, model, project, &[])
+    crate::db::dep_graph::model_dependency_graph_impl(db, model, project, &[])
 }
 
 // ── Diagnostic collection ──────────────────────────────────────────────
@@ -1362,9 +1373,9 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // Trigger unit checking. This is a separate tracked function so
     // that unit inference results are individually cached and
     // invalidated only when unit-relevant inputs change. It lives in the
-    // sibling `db_units` module (kept out of `db.rs` for the per-file line
+    // `db::units` submodule (kept out of `db.rs` for the per-file line
     // cap).
-    crate::db_units::check_model_units(db, model, project);
+    crate::db::units::check_model_units(db, model, project);
 
     // When LTM is enabled, also trigger the LTM diagnostic pass so that
     // diagnostics accumulated by the LTM pipeline surface through
@@ -1433,7 +1444,7 @@ pub struct LtmSyntheticVar {
 ///
 /// `agg_recovery_truncated` is `true` when reconstruction of the
 /// cross-element-through-aggregate loops (`recover_cross_agg_loops`, GH
-/// #515) hit its loop-count budget (`db_ltm::MAX_CROSS_AGG_LOOPS`) or its
+/// #515) hit its loop-count budget (`ltm::MAX_CROSS_AGG_LOOPS`) or its
 /// per-aggregate petal cap, so the recovered loop list is incomplete (a
 /// `CompilationDiagnostic` `Warning` is also emitted then -- the flag is
 /// the robust signal, the `Warning`'s reachability being #466's concern).
@@ -1613,7 +1624,7 @@ pub fn link_score_equation_text<'db>(
     // produced an arrayed variant for an arrayed target, collapse it to a
     // scalar equation referencing the array vars directly -- the pre-Phase-3
     // behavior this function reproduces.
-    let equation = db_ltm::scalarize_ltm_equation(equation);
+    let equation = ltm::scalarize_ltm_equation(equation);
 
     Some(LtmSyntheticVar {
         name: var_name,
@@ -1623,13 +1634,13 @@ pub fn link_score_equation_text<'db>(
     })
 }
 
-// `link_score_equation_text_shaped` lives in `db_ltm.rs` (where the
+// `link_score_equation_text_shaped` lives in `db/ltm.rs` (where the
 // emission loop calls it) so this file stays under the project's
-// per-file line cap; see `db_ltm::link_score_equation_text_shaped`.
+// per-file line cap; see `ltm::link_score_equation_text_shaped`.
 
 /// Build a causal graph from pre-computed edges and enumerate all pathways
 /// from each input port to the specified output ports (or auto-detect them).
-/// Used by `model_ltm_variables` in `db_ltm.rs` for pathway and composite
+/// Used by `model_ltm_variables` in `db/ltm.rs` for pathway and composite
 /// score generation.
 fn module_input_pathways_from_edges(
     edges_result: &CausalEdgesResult,
@@ -1938,7 +1949,7 @@ pub fn sync_from_datamodel<'db>(
         project.units.iter().map(SourceUnit::from).collect(),
         model_names,
         source_model_map,
-        crate::db_macro_registry::macro_registry_build_error(project),
+        crate::db::macro_registry::macro_registry_build_error(project),
         false,
         false,
     );
@@ -2174,7 +2185,7 @@ pub fn sync_from_datamodel_incremental(
     // Recompute the macro-registry build error from the datamodel `Vec`
     // (duplicates / collisions are invisible once models collapse into the
     // name-keyed map below).
-    let new_macro_build_error = crate::db_macro_registry::macro_registry_build_error(project);
+    let new_macro_build_error = crate::db::macro_registry::macro_registry_build_error(project);
     if *source_project.macro_registry_build_error(&*db) != new_macro_build_error {
         source_project
             .set_macro_registry_build_error(db)
@@ -2886,7 +2897,7 @@ pub(crate) struct VarFragmentResult {
 /// `model_name -> (var_name -> (offset, size))`: the per-variable mini-
 /// layout offset map `lower_var_fragment` produces and the minimal
 /// per-phase `crate::compiler::Module` consumes. Structurally identical to
-/// `compiler::VariableOffsetMap` / `db_var_fragment::VarOffsets` (both
+/// `compiler::VariableOffsetMap` / `var_fragment::VarOffsets` (both
 /// private aliases in their modules); named here so the factored
 /// `compile_phase_to_per_var_bytecodes` signature is self-documenting
 /// rather than an inline nested-`HashMap` (which clippy flags as a very
@@ -2900,7 +2911,7 @@ pub(crate) type PerVarOffsetMap =
 ///
 /// This is the exact body of `compile_var_fragment`'s former
 /// `compile_phase` closure, factored out so the element-cycle SCC graph
-/// builder (`crate::db_dep_graph` via `var_phase_symbolic_fragment_prod`)
+/// builder (`crate::db::dep_graph` via `var_phase_symbolic_fragment_prod`)
 /// reuses the *exact* production compile+symbolize path rather than a
 /// re-derivation. `compile_var_fragment` calls this for each phase; the
 /// SCC accessor `var_phase_symbolic_fragment_prod` builds the caller-owned
@@ -3043,7 +3054,7 @@ pub(crate) fn compile_phase_to_per_var_bytecodes(
 /// reads kept), so the element graph MATCHES the engine's actual
 /// per-phase data-flow relation rather than over-collecting lagged reads.
 /// See that function's rustdoc for the AC4 soundness argument and the
-/// exact `db_dep_graph.rs` `build_var_info` line citations. The loud-safe
+/// exact `db/dep_graph.rs` `build_var_info` line citations. The loud-safe
 /// contract documented *here* is a distinct concern -- it is about a
 /// node failing to be element-*sourced* (always `None`, never a panic),
 /// not about which sourced opcodes are ordering edges.
@@ -3098,7 +3109,7 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     var_name: &str,
     phase: SccPhase,
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
-    use crate::db_var_fragment::{LoweredVarFragment, lower_var_fragment};
+    use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
 
     // `#[cfg(test)]` only: an active `UnsourceableVarsGuard` forces this
     // node to take the loud-safe `None` arm, so the AC3.2 regression test
@@ -3110,7 +3121,7 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     // node returns, so the test observes the real loud-safe behavior, not
     // a shim. No effect in non-test builds.
     #[cfg(test)]
-    if crate::db_dep_graph::var_is_forced_unsourceable(var_name) {
+    if crate::db::dep_graph::var_is_forced_unsourceable(var_name) {
         return None;
     }
 
@@ -3195,7 +3206,7 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     // `build_caller_module_refs(.., &module_input_names)` with empty
     // inputs).
     let module_refs =
-        crate::db_var_fragment::build_caller_module_refs(db, *sv, model, project, true, &[]);
+        crate::db::var_fragment::build_caller_module_refs(db, *sv, model, project, true, &[]);
 
     // `SccPhase::Dt` selects the non-initial (dt/flow) lowering;
     // `SccPhase::Initial` selects the initial lowering -- the same
@@ -3230,7 +3241,7 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
 /// including the **write** opcode whose `var.name == member` and
 /// `var.element_offset == e` (`AssignCurr | AssignConstCurr |
 /// BinOpAssignCurr`). This is the *exact* segmentation
-/// `crate::db_dep_graph::symbolic_phase_element_order` performs to build
+/// `crate::db::dep_graph::symbolic_phase_element_order` performs to build
 /// the SCC element graph (GH #575) -- the verdict and the combined
 /// fragment MUST agree on segment boundaries or `element_order` would
 /// reference a slice the combiner cannot reproduce, so the two share this
@@ -3466,7 +3477,7 @@ pub fn compile_var_fragment(
     module_input_names: Vec<String>,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
-    use crate::db_var_fragment::{LoweredVarFragment, lower_var_fragment};
+    use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
 
     let var_ident = var.ident(db).clone();
     let var_ident_canonical: Ident<Canonical> = Ident::new(&var_ident);
@@ -3546,7 +3557,7 @@ pub fn compile_var_fragment(
     let is_module = var.kind(db) == SourceVariableKind::Module;
     let is_module_input = inputs.contains(&var_ident_canonical);
 
-    let module_refs = crate::db_var_fragment::build_caller_module_refs(
+    let module_refs = crate::db::var_fragment::build_caller_module_refs(
         db,
         var,
         model,
@@ -4556,9 +4567,9 @@ pub fn assemble_module(
         // equations. These are module-type variables that need initial and
         // stock phase compilation like regular implicit modules.
         let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
-        let ltm_module_idents = db_ltm::ltm_module_idents(db, model, project);
+        let ltm_module_idents = ltm::ltm_module_idents(db, model, project);
         for ltm_var in &ltm_vars.vars {
-            let parsed = db_ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
+            let parsed = ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
             for (idx, implicit_dm_var) in parsed.implicit_vars.iter().enumerate() {
                 let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
                 if all_fragments.contains_key(&im_name) {
@@ -5341,13 +5352,13 @@ fn enumerate_module_instances_inner(
     // feedback loop instrumentation). These are only present when LTM is
     // enabled. Models without feedback loops produce empty lists.
     if project.ltm_enabled(db) {
-        let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
-        let ltm_module_idents = db_ltm::ltm_module_idents(db, *source_model, project);
+        let ltm_implicit = ltm::model_ltm_implicit_var_info(db, *source_model, project);
+        let ltm_module_idents = ltm::ltm_module_idents(db, *source_model, project);
 
         let ltm_vars = model_ltm_variables(db, *source_model, project);
 
         for ltm_var in &ltm_vars.vars {
-            let parsed = db_ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
+            let parsed = ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
 
             for implicit_dm_var in &parsed.implicit_vars {
                 let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
@@ -5533,8 +5544,8 @@ fn calc_flattened_offsets_incremental(
 
         let ltm_vars = model_ltm_variables(db, *source_model, project);
 
-        let ltm_implicit = db_ltm::model_ltm_implicit_var_info(db, *source_model, project);
-        let ltm_module_idents = db_ltm::ltm_module_idents(db, *source_model, project);
+        let ltm_implicit = ltm::model_ltm_implicit_var_info(db, *source_model, project);
+        let ltm_module_idents = ltm::ltm_module_idents(db, *source_model, project);
 
         // Add explicit LTM variables (loop scores, relative loop scores)
         for ltm_var in &ltm_vars.vars {
@@ -5549,7 +5560,7 @@ fn calc_flattened_offsets_incremental(
             }
 
             // Add implicit variables from this LTM equation
-            let parsed = db_ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
+            let parsed = ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
             for implicit_dm_var in &parsed.implicit_vars {
                 let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
                 if let Some(im_meta) = ltm_implicit.get(&im_name)
@@ -5635,7 +5646,7 @@ pub fn compile_project_incremental(
     // `NotSimulatable` (the build error's own typed code rides the
     // diagnostic `project_macro_registry` accumulated -- see that module).
     if let Some((_code, msg)) =
-        &crate::db_macro_registry::project_macro_registry(db, project).build_error
+        &crate::db::macro_registry::project_macro_registry(db, project).build_error
     {
         return crate::sim_err!(NotSimulatable, msg.clone());
     }
@@ -5646,35 +5657,24 @@ pub fn compile_project_incremental(
 }
 
 #[cfg(test)]
-#[path = "db_combined_fragment_tests.rs"]
-mod db_combined_fragment_tests;
+mod combined_fragment_tests;
 #[cfg(test)]
-#[path = "db_conversion_tests.rs"]
-mod db_conversion_tests;
+mod conversion_tests;
 #[cfg(test)]
-#[path = "db_diagnostic_tests.rs"]
-mod db_diagnostic_tests;
+mod diagnostic_tests;
 #[cfg(test)]
-#[path = "db_differential_tests.rs"]
-mod db_differential_tests;
+mod differential_tests;
 #[cfg(test)]
-#[path = "db_dimension_context_cache_tests.rs"]
-mod db_dimension_context_cache_tests;
+mod dimension_context_cache_tests;
 #[cfg(test)]
-#[path = "db_dimension_invalidation_tests.rs"]
-mod db_dimension_invalidation_tests;
+mod dimension_invalidation_tests;
 #[cfg(test)]
-#[path = "db_fragment_cache_tests.rs"]
-mod db_fragment_cache_tests;
+mod fragment_cache_tests;
 #[cfg(test)]
-#[path = "db_ltm_module_tests.rs"]
-mod db_ltm_module_tests;
+mod ltm_module_tests;
 #[cfg(test)]
-#[path = "db_ltm_unified_tests.rs"]
-mod db_ltm_unified_tests;
+mod ltm_unified_tests;
 #[cfg(test)]
-#[path = "db_prev_init_tests.rs"]
-mod db_prev_init_tests;
+mod prev_init_tests;
 #[cfg(test)]
-#[path = "db_tests.rs"]
-mod db_tests;
+mod tests;

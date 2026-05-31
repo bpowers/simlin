@@ -19,13 +19,13 @@
 //!
 //! The `Expr2` AST-walker helpers (`collect_all_reference_sites`,
 //! `classify_subscript_shape`, `resolve_literal_index`) moved here from
-//! `db_analysis.rs` (their previous home before the IR existed). `RefShape`,
+//! `db/analysis.rs` (their previous home before the IR existed). `RefShape`,
 //! `emit_edges_for_reference`, and the element-name expansion helpers stay in
-//! `db_analysis.rs`; this module imports `RefShape` via `crate::db::RefShape`.
+//! `db/analysis.rs`; this module imports `RefShape` via `crate::db::RefShape`.
 //!
-//! This is a top-level module (a sibling of `db`, like `ltm_agg`) rather than
-//! a submodule of `db.rs` purely to keep `db.rs` under the per-file line cap;
-//! callers in the `db` submodules use `crate::db_ltm_ir::...`.
+//! This is a submodule of `db` (a child of `db.rs`) kept in its own file
+//! purely to keep `db.rs` under the per-file line cap; callers in the `db`
+//! submodules use `crate::db::ltm_ir::...`.
 
 use std::collections::HashMap;
 
@@ -33,7 +33,7 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_variables};
 
-// ── AST-walker helpers (moved from db_analysis.rs) ─────────────────────────
+// ── AST-walker helpers (moved from db/analysis.rs) ─────────────────────────
 
 /// One occurrence of a source variable in a target's AST -- the IR builder's
 /// internal per-variable intermediate, before `in_reducer` + the hoisting
@@ -461,7 +461,7 @@ fn walk_all_in_expr(
 
 /// One classified reference site for a `(from, to)` causal edge.
 ///
-/// Successor of `db_analysis::ReferenceSite`, generalized to fold the
+/// Successor of `analysis::ReferenceSite`, generalized to fold the
 /// `in_reducer` flag plus the hoisting decision into [`SiteRouting`].
 #[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(crate) struct ClassifiedSite {
@@ -693,5 +693,5 @@ pub(crate) fn model_ltm_reference_sites(
 }
 
 #[cfg(test)]
-#[path = "db_ltm_ir_tests.rs"]
-mod db_ltm_ir_tests;
+#[path = "ltm_ir_tests.rs"]
+mod ltm_ir_tests;

@@ -312,7 +312,7 @@ pub fn compile_ltm_var_fragment(
 ///
 /// Salsa-tracked so a per-shape link score is recomputed only when the
 /// involved variables (and their shape-classifying dimensions) change.
-/// Lives in `db_ltm.rs` rather than `db.rs` so the latter stays under
+/// Lives in `db/ltm.rs` rather than `db.rs` so the latter stays under
 /// the project's per-file line cap.
 #[salsa::tracked(returns(ref))]
 pub fn link_score_equation_text_shaped<'db>(
@@ -2639,7 +2639,7 @@ fn build_element_subscripted_links(
 /// truncation `Warning`.
 ///
 /// Visibility is `pub(crate)` so unit tests in
-/// `db_ltm_unified_tests.rs` can drive this function directly to
+/// `db/ltm_unified_tests.rs` can drive this function directly to
 /// inspect the element-subscripted `Link.from` / `Link.to` strings the
 /// loop builder produces (e.g. `"population[nyc]"`) -- there is no
 /// separate per-link shape field, and these per-link strings aren't
@@ -4438,7 +4438,7 @@ pub fn model_ltm_variables(
         // `from[m]` reference; anything else (a dynamic index, or -- defensively
         // -- a `Wildcard`/`Bare`, which can't be a valid literal-element
         // reference into a disjoint-dim target) makes the edge unscoreable.
-        let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+        let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
         let sites = ir.sites.get(&(from.to_string(), to.to_string()))?;
         if sites.is_empty() {
             return None;
@@ -4543,7 +4543,7 @@ pub fn model_ltm_variables(
         skip_reducer_shapes: bool,
         vars: &mut Vec<LtmSyntheticVar>,
     ) {
-        let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+        let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
         // The distinct `shape` fields of `(from, to)`'s classified sites,
         // in AST-walk order of first occurrence (equivalent to the per-edge
         // shape set the AST walker produced before the IR).
@@ -5060,12 +5060,12 @@ pub fn model_ltm_variables(
         // restated -- it now lives only in the IR builder; here we just
         // project the result, resolving each `AggRef` to its `AggNode` for
         // the half-emitters.
-        let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+        let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
         let routed_aggs: Vec<&crate::ltm_agg::AggNode> = {
             let mut idxs: Vec<usize> = Vec::new();
             if let Some(sites) = ir.sites.get(&(from.to_string(), to.to_string())) {
                 for s in sites {
-                    if let crate::db_ltm_ir::SiteRouting::ThroughAgg { agg } = &s.routing
+                    if let crate::db::ltm_ir::SiteRouting::ThroughAgg { agg } = &s.routing
                         && !idxs.contains(&agg.0)
                     {
                         idxs.push(agg.0);
@@ -5467,5 +5467,5 @@ pub fn model_ltm_variables(
 }
 
 #[cfg(test)]
-#[path = "db_ltm_tests.rs"]
-mod db_ltm_tests;
+#[path = "ltm_tests.rs"]
+mod ltm_tests;

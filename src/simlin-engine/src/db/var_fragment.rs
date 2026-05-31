@@ -46,10 +46,10 @@
 //! so it must not outlive them; the caller never sees it -- it consumes
 //! only the owned `offsets` projection (variable -> (offset, size)).
 //!
-//! This is a top-level module (a sibling of `db`, like `db_dep_graph` /
-//! `db_ltm_ir` / `db_macro_registry`) rather than a submodule of `db.rs`
-//! purely to keep `db.rs` under the per-file line cap; the caller in
-//! `db` reaches it via `crate::db_var_fragment::lower_var_fragment`.
+//! This is a submodule of `db` (a child of `db.rs`, like `dep_graph` /
+//! `ltm_ir` / `macro_registry`) kept in its own file purely to keep `db.rs`
+//! under the per-file line cap; the caller in `db` reaches it via
+//! `crate::db::var_fragment::lower_var_fragment`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 

@@ -1429,7 +1429,7 @@ pub(crate) struct FragmentMerger {
     /// offset its first occurrence was appended at. A dependency arrayed GF
     /// referenced by N consumer fragments produces N fragments each carrying
     /// the *same* block (every consumer re-extracts the dependency's
-    /// `Vec<Table>` -- see `db_var_fragment.rs`); de-duplicating the block
+    /// `Vec<Table>` -- see `db/var_fragment.rs`); de-duplicating the block
     /// appends it once and remaps every consumer's `base_gf` by the single
     /// shared offset, matching the monolithic layout.
     ///
@@ -1500,7 +1500,7 @@ fn gf_block_key(tables: &[Vec<(f64, f64)>]) -> GfBlockKey {
 /// so opcode runs are only ever disjoint or nested -- never partially
 /// overlapping. The blocks are therefore the *maximal-by-inclusion* opcode
 /// runs (nested runs dropped), plus one block per maximal *un-referenced*
-/// gap (over-collected dependency tables `db_var_fragment.rs` gathered but
+/// gap (over-collected dependency tables `db/var_fragment.rs` gathered but
 /// no opcode reads -- never read, so an imperfect gap boundary cannot
 /// miscompile, only mildly affect the deduped count).
 ///
@@ -3989,7 +3989,7 @@ mod tests {
     // the renumbered `temp_id` past `u8::MAX` (the C-LEARN
     // `temp offset ... exceeds TempId capacity` failure). `combine_scc_fragment`
     // stays on the disjoint (sum) path because its per-element segments
-    // interleave (overlapping live ranges) -- see `db_combined_fragment_tests`.
+    // interleave (overlapping live ranges) -- see `db/combined_fragment_tests`.
     // ====================================================================
 
     /// Build a single-variable-shaped fragment carrying a `VectorSortOrder`
