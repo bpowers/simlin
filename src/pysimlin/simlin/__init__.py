@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Union
 
 from .analysis import (
+    Analysis,
     Link,
     LinkPolarity,
     Loop,
@@ -114,6 +115,7 @@ __all__ = [
     "VARTYPE_FLOW",
     "VARTYPE_MODULE",
     "VARTYPE_STOCK",
+    "Analysis",
     "Aux",
     "DominantPeriod",
     "ErrorCode",

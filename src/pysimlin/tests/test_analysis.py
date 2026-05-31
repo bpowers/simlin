@@ -1,5 +1,7 @@
 """Tests for analysis types."""
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -100,6 +102,34 @@ class TestLink:
         avg = link.average_score()
         assert avg is not None
         assert np.isnan(avg)
+
+    def test_link_average_score_all_nan_no_warning(self) -> None:
+        """An all-NaN score must not leak a numpy RuntimeWarning to callers.
+
+        On large models (e.g. C-LEARN) many causal links have an
+        all-NaN score series; reducing them with bare np.nanmean spams
+        'Mean of empty slice' warnings even though NaN is the intended
+        return value.
+        """
+        scores = np.array([np.nan, np.nan, np.nan])
+        link = Link(from_var="A", to_var="B", polarity=LinkPolarity.POSITIVE, score=scores)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            avg = link.average_score()
+        assert avg is not None
+        assert np.isnan(avg)
+
+    def test_link_max_score_all_nan_no_warning(self) -> None:
+        """An all-NaN score must not leak a numpy RuntimeWarning from max_score."""
+        scores = np.array([np.nan, np.nan, np.nan])
+        link = Link(from_var="A", to_var="B", polarity=LinkPolarity.POSITIVE, score=scores)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            mx = link.max_score()
+        assert mx is not None
+        assert np.isnan(mx)
 
 
 class TestLoop:
@@ -345,3 +375,35 @@ class TestLoop:
         avg = loop.average_importance()
         assert avg is not None
         assert np.isnan(avg)
+
+    def test_loop_average_importance_all_nan_no_warning(self) -> None:
+        """An all-NaN behavior series must not leak a RuntimeWarning."""
+        behavior = np.array([np.nan, np.nan, np.nan])
+        loop = Loop(
+            id="R1",
+            variables=("a", "b"),
+            polarity=LoopPolarity.REINFORCING,
+            behavior_time_series=behavior,
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            avg = loop.average_importance()
+        assert avg is not None
+        assert np.isnan(avg)
+
+    def test_loop_max_importance_all_nan_no_warning(self) -> None:
+        """An all-NaN behavior series must not leak a RuntimeWarning from max_importance."""
+        behavior = np.array([np.nan, np.nan, np.nan])
+        loop = Loop(
+            id="R1",
+            variables=("a", "b"),
+            polarity=LoopPolarity.REINFORCING,
+            behavior_time_series=behavior,
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            mx = loop.max_importance()
+        assert mx is not None
+        assert np.isnan(mx)

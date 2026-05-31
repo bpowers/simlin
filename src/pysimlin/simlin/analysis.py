@@ -1,11 +1,17 @@
 """Analysis types for the simlin package."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
-from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+    from .run import DominantPeriod
 
 
 class LinkPolarity(IntEnum):
@@ -71,7 +77,7 @@ class LoopPolarity(IntEnum):
             return "U"
 
     @classmethod
-    def from_runtime_scores(cls, scores: "NDArray[np.float64]") -> Optional["LoopPolarity"]:
+    def from_runtime_scores(cls, scores: NDArray[np.float64]) -> LoopPolarity | None:
         """Classify loop polarity based on actual runtime loop score values.
 
         Mirrors `LoopPolarity::from_runtime_scores` in
@@ -149,16 +155,35 @@ class Link:
         return self.score is not None and len(self.score) > 0
 
     def average_score(self) -> float | None:
-        """Calculate the average score across all time steps."""
+        """Calculate the average score across all time steps.
+
+        Returns ``None`` when there is no score series, and ``NaN``
+        when every step is ``NaN`` (a link that never produced a
+        defined score). The reduction runs over the finite subset so
+        the all-``NaN`` case does not leak numpy's "Mean of empty
+        slice" RuntimeWarning -- on large models a majority of causal
+        links can have all-``NaN`` scores.
+        """
         if self.score is None or len(self.score) == 0:
             return None
-        return float(np.nanmean(self.score))
+        valid = self.score[~np.isnan(self.score)]
+        if valid.size == 0:
+            return float("nan")
+        return float(valid.mean())
 
     def max_score(self) -> float | None:
-        """Get the maximum score across all time steps."""
+        """Get the maximum score across all time steps.
+
+        Returns ``None`` when there is no score series, and ``NaN``
+        when every step is ``NaN``; the reduction runs over the finite
+        subset so the all-``NaN`` case stays warning-free.
+        """
         if self.score is None or len(self.score) == 0:
             return None
-        return float(np.nanmax(self.score))
+        valid = self.score[~np.isnan(self.score)]
+        if valid.size == 0:
+            return float("nan")
+        return float(valid.max())
 
 
 @dataclass(frozen=True)
@@ -223,7 +248,11 @@ class Loop:
         """
         if self.behavior_time_series is None or len(self.behavior_time_series) == 0:
             return None
-        return float(np.nanmean(np.abs(self.behavior_time_series)))
+        abs_series = np.abs(self.behavior_time_series)
+        valid = abs_series[~np.isnan(abs_series)]
+        if valid.size == 0:
+            return float("nan")
+        return float(valid.mean())
 
     def max_importance(self) -> float | None:
         """
@@ -240,4 +269,35 @@ class Loop:
         """
         if self.behavior_time_series is None or len(self.behavior_time_series) == 0:
             return None
-        return float(np.nanmax(np.abs(self.behavior_time_series)))
+        abs_series = np.abs(self.behavior_time_series)
+        valid = abs_series[~np.isnan(abs_series)]
+        if valid.size == 0:
+            return float("nan")
+        return float(valid.max())
+
+
+@dataclass(frozen=True)
+class Analysis:
+    """Result of strongest-path loop *discovery* (`Model.analyze`).
+
+    Discovery is the heuristic "Loops That Matter" algorithm
+    (Eberlein & Schoenberg, 2020): instead of exhaustively enumerating every
+    feedback loop -- which is empty for large models that auto-flip to
+    discovery mode -- it finds the loops that drive behavior. Each discovered
+    `Loop` carries its `behavior_time_series` (the per-step importance series),
+    and `dominant_periods` records which loops dominate during each interval.
+
+    `truncated` is True when discovery hit its `timeout` before finishing, so
+    `loops`/`dominant_periods` may be partial. Discovery on very large models
+    can be infeasibly slow, so `Model.analyze` is an explicit, opt-in,
+    timeout-guarded call -- it is never run automatically by `Model.run`.
+    """
+
+    loops: tuple[Loop, ...]
+    """Discovered loops, ranked by importance, with behavior time series."""
+
+    dominant_periods: tuple[DominantPeriod, ...]
+    """Intervals where a specific set of loops dominates behavior."""
+
+    truncated: bool = False
+    """True when the `timeout` elapsed before discovery finished."""
