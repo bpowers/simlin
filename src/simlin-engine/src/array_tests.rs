@@ -4595,7 +4595,7 @@ mod rank_tests {
         let datamodel = project.build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diags = collect_all_diagnostics(&db, &sync);
+        let diags = collect_all_diagnostics(&db, sync.project);
 
         let has_bad_builtin_args = diags.iter().any(|d| {
             d.variable.as_deref() == Some(var_name)
@@ -4906,7 +4906,7 @@ TIME STEP = 1 ~~|
         let datamodel = open_vensim(mdl).expect("MDL should parse to a datamodel project");
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diags = collect_all_diagnostics(&db, &sync);
+        let diags = collect_all_diagnostics(&db, sync.project);
 
         let has_bad_builtin_args = diags.iter().any(|d| {
             d.variable.as_deref() == Some("result")

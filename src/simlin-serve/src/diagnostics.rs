@@ -71,7 +71,7 @@ pub fn compute_diagnostic_set(
 ) -> (BTreeSet<DiagnosticKey>, Vec<ValidationError>) {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
-    let diagnostics = collect_all_diagnostics(&db, &sync);
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
     let formatted = collect_formatted_errors(
         diagnostics
             .iter()

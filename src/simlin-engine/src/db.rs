@@ -65,13 +65,72 @@ use implicit_deps::extract_implicit_var_deps;
 pub trait Db: salsa::Database {}
 
 #[salsa::db]
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct SimlinDb {
     storage: salsa::Storage<Self>,
+    /// Salsa input handles from the most recent sync. Owned by the db so
+    /// callers get incrementality automatically (via `sync`/`sync_staged`)
+    /// without threading `prev_state` between calls. A plain non-salsa field
+    /// is fine: the `#[salsa::db]` macro locates `storage` by type, and this
+    /// field is only ever mutated via `&mut self` during sync (never during
+    /// parallel query execution, which uses a shared `&`), so no interior
+    /// mutability is required.
+    sync_state: Option<PersistentSyncState>,
 }
 
 #[salsa::db]
 impl salsa::Database for SimlinDb {}
+
+impl SimlinDb {
+    /// Sync a datamodel into the db, automatically reusing internal state for
+    /// incrementality. Returns the `SourceProject` handle for the synced
+    /// project.
+    ///
+    /// This is the blessed entry point: it threads the db's own `sync_state`
+    /// so a no-op re-sync of the same datamodel still hits the salsa caches,
+    /// without the caller having to remember to pass the prior state.
+    pub fn sync(&mut self, project: &datamodel::Project) -> SourceProject {
+        // `take()` is required: `sync_from_datamodel_incremental` borrows
+        // `&mut self`, and the `prev` argument cannot simultaneously borrow
+        // `self.sync_state`. Move it out to an owned local first, then store
+        // the result back.
+        let prev = self.sync_state.take();
+        let new = sync_from_datamodel_incremental(self, project, prev.as_ref());
+        let sp = new.project;
+        self.sync_state = Some(new);
+        sp
+    }
+
+    /// Sync `project` and ALSO return the prior state so the caller can roll
+    /// back (re-sync the prior datamodel) on validation failure. Used by the
+    /// patch stage/commit/rollback flow.
+    ///
+    /// The returned `Option<PersistentSyncState>` is the PRE-staging handle
+    /// set, required for an exact rollback via `restore`.
+    pub fn sync_staged(
+        &mut self,
+        project: &datamodel::Project,
+    ) -> (SourceProject, Option<PersistentSyncState>) {
+        let prev = self.sync_state.take();
+        let new = sync_from_datamodel_incremental(self, project, prev.as_ref());
+        let sp = new.project;
+        self.sync_state = Some(new);
+        (sp, prev)
+    }
+
+    /// Roll a staged sync back: re-sync `project` reusing the explicitly
+    /// provided prior state, restoring the inputs' prior field values
+    /// (and dropping variables added during staging).
+    pub fn restore(&mut self, project: &datamodel::Project, prev: Option<PersistentSyncState>) {
+        let restored = sync_from_datamodel_incremental(self, project, prev.as_ref());
+        self.sync_state = Some(restored);
+    }
+
+    /// The `SourceProject` from the most recent sync, if any.
+    pub fn current_source_project(&self) -> Option<SourceProject> {
+        self.sync_state.as_ref().map(|s| s.project)
+    }
+}
 
 #[salsa::db]
 impl Db for SimlinDb {}
@@ -1327,10 +1386,10 @@ pub fn collect_model_diagnostics(
 }
 
 /// Collect all diagnostics for every model in a synced project.
-pub fn collect_all_diagnostics(db: &SimlinDb, sync: &SyncResult<'_>) -> Vec<Diagnostic> {
+pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Diagnostic> {
     let mut all = Vec::new();
-    for synced_model in sync.models.values() {
-        let diags = collect_model_diagnostics(db, synced_model.source, sync.project);
+    for source_model in project.models(db).values() {
+        let diags = collect_model_diagnostics(db, *source_model, project);
         all.extend(diags);
     }
     all

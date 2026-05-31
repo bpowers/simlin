@@ -681,7 +681,7 @@ impl TestProject {
         let datamodel = self.build_datamodel();
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        collect_all_diagnostics(&db, &sync.to_sync_result())
+        collect_all_diagnostics(&db, sync.project)
     }
 
     /// Assert that incremental compilation produces the expected error code.

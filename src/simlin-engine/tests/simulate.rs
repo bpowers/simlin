@@ -4231,7 +4231,7 @@ fn collect_project_diagnostics(
     // Drive compilation so the diagnostic accumulators are populated; the
     // Result is intentionally ignored here (callers inspect diagnostics).
     let _ = compile_project_incremental(&db, sync.project, "main");
-    collect_all_diagnostics(&db, &sync)
+    collect_all_diagnostics(&db, sync.project)
 }
 
 /// Pure predicate: is `equation` EXACTLY the `{module_ident}.{output}`

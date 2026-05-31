@@ -328,11 +328,11 @@ impl ErrorDetailBuilder {
 /// providing variable equation text for equation and unit errors.
 pub(crate) fn gather_error_details_with_db(
     db: &engine::db::SimlinDb,
-    sync: &engine::db::SyncResult<'_>,
+    project: engine::db::SourceProject,
     vm_error: Option<&engine::Error>,
     datamodel: &engine::datamodel::Project,
 ) -> Vec<ErrorDetailData> {
-    let diags = engine::db::collect_all_diagnostics(db, sync);
+    let diags = engine::db::collect_all_diagnostics(db, project);
     let mut all_errors: Vec<ErrorDetailData> = diags
         .iter()
         .map(|d| {
@@ -441,14 +441,11 @@ pub(crate) unsafe fn apply_project_patch_internal(
         return;
     }
 
-    // Snapshot the pre-patch warning baseline atomically under
-    // db + sync_state locks.
+    // Snapshot the pre-patch warning baseline while holding the db lock.
     let models_with_existing_warnings = {
         let db_locked = project_ref.db.lock().unwrap();
-        let sync_state = project_ref.sync_state.lock().unwrap();
-        if let Some(ref state) = *sync_state {
-            let sync = state.to_sync_result();
-            let diags = engine::db::collect_all_diagnostics(&db_locked, &sync);
+        if let Some(source_project) = db_locked.current_source_project() {
+            let diags = engine::db::collect_all_diagnostics(&db_locked, source_project);
             collect_models_with_unit_warnings(&diags)
         } else {
             std::collections::HashSet::new()
@@ -472,32 +469,26 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // Hold the db lock for the entire sync-evaluate-decide cycle so that
     // concurrent readers (simlin_sim_new, simlin_project_get_errors) never
     // observe staged state for patches that are ultimately rejected or
-    // are dry runs.
+    // are dry runs. `sync_staged` stages the patched datamodel into the db's
+    // own sync state and hands back the PRE-staging handles (`prev`) so a
+    // rejected/dry-run patch can be rolled back exactly.
     let mut db = project_ref.db.lock().unwrap();
-    let prev_state = project_ref.sync_state.lock().unwrap().clone();
-    let staged_sync_state = engine::db::sync_from_datamodel_incremental(
-        &mut db,
-        &staged_datamodel,
-        prev_state.as_ref(),
-    );
+    let (staged_sp, prev) = db.sync_staged(&staged_datamodel);
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::StagedSyncWhileDbLocked, project_ref);
 
-    let staged_sync = staged_sync_state.to_sync_result();
-
     // Collect diagnostics from the tracked accumulator path.
-    let staged_diags = engine::db::collect_all_diagnostics(&db, &staged_sync);
+    let staged_diags = engine::db::collect_all_diagnostics(&db, staged_sp);
 
     // Attempt compilation + VM validation to detect assembly-level errors
     // that are not captured by per-variable diagnostics.
-    let sim_error = match engine::db::compile_project_incremental(&db, staged_sync.project, "main")
-    {
+    let sim_error = match engine::db::compile_project_incremental(&db, staged_sp, "main") {
         Ok(compiled) => Vm::new(compiled).err(),
         Err(err) => Some(err),
     };
 
     let all_errors =
-        gather_error_details_with_db(&db, &staged_sync, sim_error.as_ref(), &staged_datamodel);
+        gather_error_details_with_db(&db, staged_sp, sim_error.as_ref(), &staged_datamodel);
 
     // Check for blocking errors (not including unit warnings, which are handled separately)
     let maybe_first_code = if !allow_errors {
@@ -548,20 +539,16 @@ pub(crate) unsafe fn apply_project_patch_internal(
     }
 
     if rejected || dry_run {
-        // Restore the db and sync_state atomically (while still holding
-        // the db lock) so no concurrent reader can observe staged state.
-        let restored = engine::db::sync_from_datamodel_incremental(
-            &mut db,
-            &original_datamodel,
-            prev_state.as_ref(),
-        );
-        *project_ref.sync_state.lock().unwrap() = Some(restored);
+        // Roll back: re-sync the ORIGINAL datamodel with the PRE-staging
+        // handles (`prev`), restoring every input's prior field values and
+        // dropping variables added during staging -- still under the db lock,
+        // so no concurrent reader can observe staged state.
+        db.restore(&original_datamodel, prev);
         return;
     }
 
-    // Commit: the db already has the staged state from validation.
-    // Update sync_state and datamodel while holding both locks.
-    *project_ref.sync_state.lock().unwrap() = Some(staged_sync_state);
+    // Commit: the staged state is already the db's current sync state from
+    // `sync_staged`, so only the canonical datamodel needs to be written.
     *datamodel_locked = staged_datamodel;
 }
 

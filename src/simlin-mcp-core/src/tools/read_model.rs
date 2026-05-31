@@ -76,7 +76,7 @@ pub async fn read_model<A: ProjectAccess>(
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
     let source_project = sync.project;
 
-    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
     let errors: Vec<ErrorOutput> = {
         let has_errors = diagnostics
             .iter()

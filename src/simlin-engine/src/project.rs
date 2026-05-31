@@ -279,7 +279,7 @@ mod tests {
 
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &dm);
-        let diagnostics = collect_all_diagnostics(&db, &sync);
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
 
         let unit_errs: Vec<_> = diagnostics
             .iter()

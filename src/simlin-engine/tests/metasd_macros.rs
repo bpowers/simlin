@@ -396,7 +396,7 @@ fn compile_and_diagnose(path: &str) -> (Vec<Diagnostic>, usize, bool) {
     let sync_state = sync_from_datamodel_incremental(&mut db, &dm, None);
     let sync = sync_state.to_sync_result();
     let compiled_ok = compile_project_incremental(&db, sync.project, "main").is_ok();
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     let total = diags.len();
 
     let macro_models: std::collections::BTreeSet<&str> = dm
@@ -537,7 +537,7 @@ fn macro_models_and_diags(source: &str) -> (Vec<String>, Vec<Diagnostic>) {
     // Drive the compile so the registry-build / macro-resolution
     // diagnostics are accumulated (same as `compile_and_diagnose`).
     let _ = compile_project_incremental(&db, sync.project, "main");
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     let macro_models: Vec<String> = dm
         .models
         .iter()

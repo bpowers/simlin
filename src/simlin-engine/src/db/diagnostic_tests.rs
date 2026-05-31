@@ -108,7 +108,7 @@ fn test_model_all_diagnostics_triggers_all_sources() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
 
     // Check for equation error from syntax error
     let has_equation_error = diags.iter().any(|d| {
@@ -228,7 +228,7 @@ fn test_ac2_1_accumulator_parity_with_old_path() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     let mut error_codes: HashSet<ErrorCode> = HashSet::new();
     for d in &diags {
         if d.severity == DiagnosticSeverity::Error {
@@ -296,7 +296,7 @@ fn test_ac2_2_bad_table_specific_error() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
 
     let has_bad_table = diags.iter().any(|d| {
         d.variable.as_deref() == Some("lookup_var")
@@ -350,7 +350,7 @@ fn test_ac2_3_empty_equation() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
 
     let has_empty_equation = diags.iter().any(|d| {
         d.variable.as_deref() == Some("my_stock")
@@ -445,7 +445,7 @@ fn test_ac2_4_mismatched_dimensions() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
 
     // MismatchedDimensions can surface as either an EquationError
     // (from AST lowering in compile_var_fragment) or a Model error
@@ -534,7 +534,7 @@ fn test_ac2_5_unit_warnings_severity() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
 
     // Unit issues should be present as warnings, not errors
     let unit_warnings: Vec<_> = diags
@@ -704,7 +704,7 @@ fn test_ac2_7_assembly_errors_accumulated() {
     // The per-variable/model diagnostics from `model_all_diagnostics` DO capture
     // the circular dependency detected by `model_dependency_graph`, so that is
     // what `collect_all_diagnostics` returns here.
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     let has_circular = diags.iter().any(|d| {
         matches!(
             &d.error,
@@ -775,7 +775,7 @@ fn test_compile_var_fragment_malformed_unit_string() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
 
     let has_unit_error = diags.iter().any(|d| {
         d.variable.as_deref() == Some("bad_unit_var")
@@ -823,7 +823,7 @@ fn test_compile_var_fragment_unknown_dependency() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
 
     let has_unknown_dep = diags.iter().any(|d| {
         d.variable.as_deref() == Some("x")
@@ -916,7 +916,7 @@ fn test_compile_var_fragment_per_phase_var_new_failure() {
         "per-phase Var::new failure must still return a fragment (not whole-variable None)"
     );
 
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     let has_per_phase_failure = diags.iter().any(|d| {
         d.variable.as_deref() == Some("y")
             && d.severity == DiagnosticSeverity::Error

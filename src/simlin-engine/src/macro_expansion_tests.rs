@@ -102,7 +102,7 @@ fn diagnostics_for(source: &str) -> Vec<crate::db::Diagnostic> {
     let project = open_vensim(source).expect("MDL must parse into a datamodel project");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    collect_all_diagnostics(&db, &sync.to_sync_result())
+    collect_all_diagnostics(&db, sync.project)
 }
 
 /// True iff some Error-severity diagnostic carries a `Model` error with the
@@ -1168,7 +1168,7 @@ sibling=
     let project = open_vensim(&source).expect("MDL must parse");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diags = collect_all_diagnostics(&db, &sync.to_sync_result());
+    let diags = collect_all_diagnostics(&db, sync.project);
 
     let macro_models: std::collections::BTreeSet<&str> = project
         .models

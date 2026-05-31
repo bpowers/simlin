@@ -159,9 +159,8 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
     // Layout generation requires the salsa db for dependency extraction
     // and LTM analysis. The project must have been synced first.
     let mut db_locked = proj.db.lock().unwrap();
-    let sync_locked = proj.sync_state.lock().unwrap();
-    let source_project = match sync_locked.as_ref() {
-        Some(state) => state.project,
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
         None => {
             store_error(
                 out_error,
@@ -171,7 +170,6 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
             return;
         }
     };
-    drop(sync_locked);
 
     let db_state = Some((&mut *db_locked, source_project));
 

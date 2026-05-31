@@ -29,7 +29,7 @@ use crate::{
 /// Backend-agnostic per-link result emitted by [`analyze_links_core`].
 ///
 /// Owned `String`s and an owned `Vec<f64>` score series, so the value
-/// survives the db/sync_state lock drop -- the FFI boundary takes ownership
+/// survives the db lock drop -- the FFI boundary takes ownership
 /// of the strings (into `CString`) and the score buffer (into a `Box<[f64]>`
 /// freed by `simlin_free_links`).
 ///
@@ -53,8 +53,8 @@ pub(crate) struct OwnedLink {
 /// look up each edge's LTM link-score series.
 ///
 /// `model_causal_edges` returns `&CausalEdgesResult` borrowed against the
-/// db; callers (the VM FFI and the future from-wasm FFI) drop the db /
-/// sync_state locks immediately after this core returns, so this function
+/// db; callers (the VM FFI and the future from-wasm FFI) drop the db
+/// lock immediately after this core returns, so this function
 /// materializes `unique_links` into owned `(String, String)` pairs while
 /// the borrow is still live and *only then* iterates over `results`.
 /// `compute_link_polarities` returns owned data, so the polarity map
@@ -217,9 +217,8 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
     };
     // Use salsa db for loop detection with polarity and deterministic IDs
     let db_locked = (*model_ref.project).db.lock().unwrap();
-    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
-    let sync = match sync_state.as_ref() {
-        Some(s) => s.to_sync_result(),
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
         None => {
             store_error(
                 out_error,
@@ -230,8 +229,11 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
     };
 
     let canonical_model = canonicalize(&model_ref.model_name);
-    let synced_model = match sync.models.get(canonical_model.as_ref()) {
-        Some(m) => m,
+    let source_model = match source_project
+        .models(&*db_locked)
+        .get(canonical_model.as_ref())
+    {
+        Some(m) => *m,
         None => {
             store_error(
                 out_error,
@@ -242,7 +244,7 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
         }
     };
 
-    let detected = engine::db::model_detected_loops(&*db_locked, synced_model.source, sync.project);
+    let detected = engine::db::model_detected_loops(&*db_locked, source_model, source_project);
 
     if detected.loops.is_empty() {
         let result = Box::new(SimlinLoops {
@@ -371,9 +373,8 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
     let model_ref = &*sim_ref.model;
 
     let db_locked = (*model_ref.project).db.lock().unwrap();
-    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
-    let sync = match sync_state.as_ref() {
-        Some(s) => s.to_sync_result(),
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
         None => {
             store_error(
                 out_error,
@@ -384,8 +385,11 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
     };
 
     let canonical_model = canonicalize(&model_ref.model_name);
-    let synced_model = match sync.models.get(canonical_model.as_ref()) {
-        Some(m) => m,
+    let source_model = match source_project
+        .models(&*db_locked)
+        .get(canonical_model.as_ref())
+    {
+        Some(m) => *m,
         None => {
             store_error(
                 out_error,
@@ -408,9 +412,8 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
     } else {
         None
     };
-    let owned = analyze_links_core(&*db_locked, synced_model.source, sync.project, results);
+    let owned = analyze_links_core(&*db_locked, source_model, source_project, results);
     drop(state_guard);
-    drop(sync_state);
     drop(db_locked);
 
     owned_links_to_ffi(owned, out_error)
@@ -543,9 +546,8 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
     };
 
     let db_locked = (*model_ref.project).db.lock().unwrap();
-    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
-    let sync = match sync_state.as_ref() {
-        Some(s) => s.to_sync_result(),
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
         None => {
             store_error(
                 out_error,
@@ -555,8 +557,11 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
         }
     };
     let canonical_model = canonicalize(&model_ref.model_name);
-    let synced_model = match sync.models.get(canonical_model.as_ref()) {
-        Some(m) => m,
+    let source_model = match source_project
+        .models(&*db_locked)
+        .get(canonical_model.as_ref())
+    {
+        Some(m) => *m,
         None => {
             store_error(
                 out_error,
@@ -569,8 +574,8 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
 
     let results = match results_from_layout_and_slab(
         &*db_locked,
-        synced_model.source,
-        sync.project,
+        source_model,
+        source_project,
         &layout,
         &slab_vec,
     ) {
@@ -581,13 +586,7 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
         }
     };
 
-    let owned = analyze_links_core(
-        &*db_locked,
-        synced_model.source,
-        sync.project,
-        Some(&results),
-    );
-    drop(sync_state);
+    let owned = analyze_links_core(&*db_locked, source_model, source_project, Some(&results));
     drop(db_locked);
 
     owned_links_to_ffi(owned, out_error)
@@ -1211,9 +1210,8 @@ pub unsafe extern "C" fn simlin_analyze_rel_loop_score_from_wasm_results(
     // queries to emit non-empty snapshots).  An RAII guard in
     // `recompute_ltm_snapshots` resets the flag before returning.
     let mut db_locked = (*model_ref.project).db.lock().unwrap();
-    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
-    let sync = match sync_state.as_ref() {
-        Some(s) => s.to_sync_result(),
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
         None => {
             store_error(
                 out_error,
@@ -1223,8 +1221,11 @@ pub unsafe extern "C" fn simlin_analyze_rel_loop_score_from_wasm_results(
         }
     };
     let canonical_model = canonicalize(&model_ref.model_name);
-    let synced_model = match sync.models.get(canonical_model.as_ref()) {
-        Some(m) => m,
+    let source_model = match source_project
+        .models(&*db_locked)
+        .get(canonical_model.as_ref())
+    {
+        Some(m) => *m,
         None => {
             store_error(
                 out_error,
@@ -1237,8 +1238,8 @@ pub unsafe extern "C" fn simlin_analyze_rel_loop_score_from_wasm_results(
 
     let (loop_partitions, loop_element_index) = recompute_ltm_snapshots(
         &mut db_locked,
-        sync.project,
-        synced_model.source,
+        source_project,
+        source_model,
         &model_ref.model_name,
     );
 
@@ -1252,8 +1253,8 @@ pub unsafe extern "C" fn simlin_analyze_rel_loop_score_from_wasm_results(
 
     let results = match results_from_layout_and_slab(
         &*db_locked,
-        synced_model.source,
-        sync.project,
+        source_model,
+        source_project,
         &layout,
         &slab_vec,
     ) {
@@ -1299,7 +1300,6 @@ pub unsafe extern "C" fn simlin_analyze_rel_loop_score_from_wasm_results(
     }
     *out_written = count;
 
-    drop(sync_state);
     drop(db_locked);
 }
 

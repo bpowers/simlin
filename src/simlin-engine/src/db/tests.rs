@@ -2200,7 +2200,7 @@ fn test_accumulator_no_errors_for_valid_project() {
     let project = simple_project();
     let sync = sync_from_datamodel(&db, &project);
 
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     assert!(
         diags.is_empty(),
         "valid project should produce no diagnostics"
@@ -2251,7 +2251,7 @@ fn test_accumulator_parse_error_bad_equation() {
         "struct fields should show equation errors for 'if then'"
     );
 
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     assert!(!diags.is_empty(), "bad equation should produce diagnostics");
 
     let d = &diags[0];
@@ -2321,7 +2321,7 @@ fn test_accumulator_parity_with_struct_fields() {
     let sync = sync_from_datamodel(&db, &project);
 
     // Collect from accumulator
-    let accum_diags = collect_all_diagnostics(&db, &sync);
+    let accum_diags = collect_all_diagnostics(&db, sync.project);
 
     // Collect from struct fields (parse results)
     let mut field_equation_errors: HashSet<(String, crate::common::EquationError)> = HashSet::new();
@@ -2401,7 +2401,7 @@ fn test_accumulator_multiple_models() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
 
     let models_with_errors: std::collections::HashSet<&str> =
         diags.iter().map(|d| d.model.as_str()).collect();
@@ -2467,7 +2467,7 @@ fn test_accumulator_incrementality() {
         let source_project = sync.project;
 
         // Initially: alpha has errors, beta does not
-        let diags1 = collect_all_diagnostics(&db, &sync);
+        let diags1 = collect_all_diagnostics(&db, sync.project);
         assert_eq!(
             diags1
                 .iter()
@@ -2747,7 +2747,7 @@ fn test_persistent_state_to_sync_result() {
     }
 
     // Verify the reconstituted SyncResult works for diagnostic collection
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     assert!(
         diags.is_empty(),
         "simple project should have no diagnostics"

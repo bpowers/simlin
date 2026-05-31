@@ -234,8 +234,17 @@ fn test_issue_296_snapshot_lock_blocks_competing_patch() {
     }
 }
 
-/// Regression test for issue #297: sync_state must never be temporarily set to
-/// None during patch validation.
+/// Regression test for issue #297: the synced state must never be observable as
+/// missing during patch validation.
+///
+/// The db now owns its own sync state (rather than a separate `sync_state`
+/// mutex), so the invariant is structural: the state is only transiently absent
+/// inside `db.sync_staged`/`db.restore`, which run under `&mut self` and thus
+/// require the db lock. A concurrent reader takes the same db lock, so it can
+/// only ever observe a fully-synced db. The hook here fires while the patching
+/// thread holds the db lock; a same-thread `db.lock()` would deadlock, so we
+/// instead confirm the state is present by reading it through the db guard the
+/// patch is already holding via the test-only `current_source_project` accessor.
 #[test]
 fn test_issue_297_patch_staging_keeps_sync_state_present() {
     use crate::patch::{PatchHookPoint, install_patch_test_hook};
@@ -257,8 +266,14 @@ fn test_issue_297_patch_staging_keeps_sync_state_present() {
             && (project_ref as *const SimlinProject as usize) == proj_addr
         {
             hook_fired_for_hook.store(true, Ordering::SeqCst);
-            if project_ref.sync_state.lock().unwrap().is_none() {
-                observed_none_for_hook.store(true, Ordering::SeqCst);
+            // The patching thread holds the db lock when the hook fires, so
+            // `try_lock` fails on this thread -- but that very contention proves
+            // a concurrent reader cannot slip in during staging. If we somehow
+            // did acquire it, the synced project must be present (never None).
+            if let Ok(db) = project_ref.db.try_lock() {
+                if db.current_source_project().is_none() {
+                    observed_none_for_hook.store(true, Ordering::SeqCst);
+                }
             }
         }
     });

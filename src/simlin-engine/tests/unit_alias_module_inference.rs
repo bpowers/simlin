@@ -46,7 +46,7 @@ fn diag_details(d: &Diagnostic) -> String {
 fn diagnostics_for(project: &simlin_engine::datamodel::Project) -> Vec<Diagnostic> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    collect_all_diagnostics(&db, &sync.to_sync_result())
+    collect_all_diagnostics(&db, sync.project)
 }
 
 /// F2: a stock/flow pair whose flow units are declared with the *aliased*

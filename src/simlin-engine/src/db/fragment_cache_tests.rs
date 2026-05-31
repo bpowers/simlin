@@ -942,7 +942,7 @@ fn test_init_feedback_path_is_acyclic() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == DiagnosticSeverity::Error)
@@ -1239,6 +1239,64 @@ fn test_assemble_simulation_noop_recompile_is_cache_hit() {
     assert_eq!(
         owned, *sim2,
         "compile_project_incremental's CompiledSimulation must equal the cached one"
+    );
+}
+
+/// The db-owned `sync` API must preserve incrementality without the caller
+/// threading `prev_state`: a no-op `db.sync` of the SAME datamodel reuses the
+/// db's internal handles, so the next assemble is a salsa cache hit (the
+/// `Arc<CompiledSimulation>` payload is pointer-equal). This is the
+/// footgun-proof counterpart to `test_assemble_simulation_noop_recompile_is_cache_hit`.
+#[test]
+fn test_db_sync_noop_recompile_is_cache_hit() {
+    let mut db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "db_sync_noop_cache".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![scalar_aux("alpha", "10"), scalar_aux("beta", "alpha + 1")],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    // First sync primes the cache; the db retains the handles internally.
+    let project1 = db.sync(&project);
+    let sim1 = assemble_simulation(&db, project1, "main".to_string())
+        .expect("first assemble_simulation should succeed");
+
+    // Re-sync the IDENTICAL datamodel WITHOUT threading any prior state by
+    // hand -- the db reuses its own `sync_state`, so no input field value
+    // changes and the assemble is a cache hit.
+    let project2 = db.sync(&project);
+    let sim2 = assemble_simulation(&db, project2, "main".to_string())
+        .expect("second assemble_simulation should succeed");
+
+    assert!(
+        Arc::ptr_eq(&sim1, &sim2),
+        "no-op db.sync recompile must be a salsa cache hit (the Arc payload must \
+         be pointer-equal); the db-owned sync state failed to preserve incrementality"
+    );
+
+    // `current_source_project` returns the handle from the most recent sync.
+    assert!(
+        db.current_source_project() == Some(project2),
+        "current_source_project must reflect the latest db.sync"
     );
 }
 
