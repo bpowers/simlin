@@ -6,7 +6,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use salsa::Accumulator;
-use salsa::plumbing::AsId;
 
 use crate::canonicalize;
 use crate::common::{Canonical, EquationError, Error, Ident, UnitError};
@@ -106,8 +105,8 @@ pub struct SimlinDb {
 /// `format!`/`canonicalize`/`crate::stdlib::get` work.
 struct StdlibModels {
     /// Canonical name -> the stdlib model's persistent handles
-    /// (`model_interned_id`, `source_model`, per-variable handles,
-    /// `is_stdlib == true`). Cloned into each synced project's model map.
+    /// (`source_model`, per-variable handles, `is_stdlib == true`). Cloned
+    /// into each synced project's model map.
     by_canonical: HashMap<String, PersistentModelState>,
     /// `(canonical name, display "stdlib\u{205A}{name}")` pairs in
     /// `MODEL_NAMES` order. Splicing iterates this so the stdlib display names
@@ -220,18 +219,6 @@ pub enum DiagnosticError {
 }
 
 // ── Interned identifiers ───────────────────────────────────────────────
-
-#[salsa::interned(debug)]
-pub struct VariableId<'db> {
-    #[returns(ref)]
-    pub text: String,
-}
-
-#[salsa::interned(debug)]
-pub struct ModelId<'db> {
-    #[returns(ref)]
-    pub text: String,
-}
 
 /// Interned identity for a causal link between two variables.
 /// Used as a key for per-link tracked functions.
@@ -1452,21 +1439,19 @@ pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Dia
 // ── Sync result ────────────────────────────────────────────────────────
 
 /// Result of syncing a datamodel::Project into the salsa database.
-/// Maps names to their salsa input/interned IDs for subsequent lookups.
-pub struct SyncResult<'db> {
+/// Maps canonical names to their salsa input handles for subsequent lookups.
+pub struct SyncResult {
     pub project: SourceProject,
-    pub models: HashMap<String, SyncedModel<'db>>,
+    pub models: HashMap<String, SyncedModel>,
 }
 
-pub struct SyncedModel<'db> {
-    pub id: ModelId<'db>,
+pub struct SyncedModel {
     pub source: SourceModel,
-    pub variables: HashMap<String, SyncedVariable<'db>>,
+    pub variables: HashMap<String, SyncedVariable>,
     pub is_stdlib: bool,
 }
 
-pub struct SyncedVariable<'db> {
-    pub id: VariableId<'db>,
+pub struct SyncedVariable {
     pub source: SourceVariable,
 }
 
@@ -1486,8 +1471,6 @@ pub struct PersistentSyncState {
 
 #[derive(Clone)]
 pub struct PersistentModelState {
-    /// Lifetime-erased `ModelId<'db>` (interned, carries `'db`)
-    pub model_interned_id: salsa::Id,
     pub source_model: SourceModel,
     pub variables: HashMap<String, PersistentVariableState>,
     /// True when this entry came from the stdlib, false for user-defined models.
@@ -1495,14 +1478,12 @@ pub struct PersistentModelState {
 }
 
 impl PersistentModelState {
-    /// Reconstitute a `SyncedModel<'db>` from the lifetime-erased handles.
+    /// Reconstitute a `SyncedModel` from the stored handles.
     ///
     /// Used both by `PersistentSyncState::to_sync_result` and by the fresh
     /// `sync_from_datamodel` path when splicing the cached stdlib models into
-    /// the returned `SyncResult`. The `'db` lifetime is tied to the database
-    /// reference used when re-interning the `ModelId`/`VariableId` ids.
-    fn to_synced_model<'db>(&self) -> SyncedModel<'db> {
-        use salsa::plumbing::FromId;
+    /// the returned `SyncResult`.
+    fn to_synced_model(&self) -> SyncedModel {
         let variables = self
             .variables
             .iter()
@@ -1510,14 +1491,12 @@ impl PersistentModelState {
                 (
                     vname.clone(),
                     SyncedVariable {
-                        id: VariableId::from_id(pv.var_interned_id),
                         source: pv.source_var,
                     },
                 )
             })
             .collect();
         SyncedModel {
-            id: ModelId::from_id(self.model_interned_id),
             source: self.source_model,
             variables,
             is_stdlib: self.is_stdlib,
@@ -1527,18 +1506,12 @@ impl PersistentModelState {
 
 #[derive(Clone)]
 pub struct PersistentVariableState {
-    /// Lifetime-erased `VariableId<'db>` (interned, carries `'db`)
-    pub var_interned_id: salsa::Id,
     pub source_var: SourceVariable,
 }
 
 impl PersistentSyncState {
     /// Reconstitute a `SyncResult` from the stored handles.
-    ///
-    /// The returned `SyncResult` borrows the interned `ModelId`/`VariableId`
-    /// handles from the database, so the `'db` lifetime is tied to the
-    /// database reference used when interning.
-    pub fn to_sync_result(&self) -> SyncResult<'_> {
+    pub fn to_sync_result(&self) -> SyncResult {
         SyncResult {
             project: self.project,
             models: self
@@ -1549,7 +1522,7 @@ impl PersistentSyncState {
         }
     }
 
-    fn from_sync_result(sync: &SyncResult<'_>) -> Self {
+    fn from_sync_result(sync: &SyncResult) -> Self {
         PersistentSyncState {
             project: sync.project,
             models: sync
@@ -1563,7 +1536,6 @@ impl PersistentSyncState {
                             (
                                 vname.clone(),
                                 PersistentVariableState {
-                                    var_interned_id: sv.id.as_id(),
                                     source_var: sv.source,
                                 },
                             )
@@ -1572,7 +1544,6 @@ impl PersistentSyncState {
                     (
                         name.clone(),
                         PersistentModelState {
-                            model_interned_id: sm.id.as_id(),
                             source_model: sm.source,
                             variables,
                             is_stdlib: sm.is_stdlib,
@@ -1625,21 +1596,13 @@ fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
         let canonical = canonicalize(&full_name).into_owned();
         let dm_model = crate::stdlib::get(stdlib_name).unwrap();
 
-        let model_id = ModelId::new(db, canonical.clone());
         let mut variables = HashMap::new();
         let mut source_var_map = HashMap::new();
         for dm_var in &dm_model.variables {
             let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
-            let var_id = VariableId::new(db, canonical_var_name.clone());
             let source_var = source_variable_from_datamodel(db, dm_var);
             source_var_map.insert(canonical_var_name.clone(), source_var);
-            variables.insert(
-                canonical_var_name,
-                PersistentVariableState {
-                    var_interned_id: var_id.as_id(),
-                    source_var,
-                },
-            );
+            variables.insert(canonical_var_name, PersistentVariableState { source_var });
         }
         let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
         variable_names.sort();
@@ -1655,7 +1618,6 @@ fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
         by_canonical.insert(
             canonical.clone(),
             PersistentModelState {
-                model_interned_id: model_id.as_id(),
                 source_model,
                 variables,
                 is_stdlib: true,
@@ -1673,11 +1635,8 @@ fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
 /// Populate salsa inputs from a `datamodel::Project`.
 ///
 /// Creates `SourceProject`, `SourceModel`, and `SourceVariable` inputs in
-/// the database, along with interned `ModelId` and `VariableId` identifiers.
-pub fn sync_from_datamodel<'db>(
-    db: &'db SimlinDb,
-    project: &datamodel::Project,
-) -> SyncResult<'db> {
+/// the database, keyed by canonical name.
+pub fn sync_from_datamodel(db: &SimlinDb, project: &datamodel::Project) -> SyncResult {
     let model_names: Vec<String> = project.models.iter().map(|m| m.name.clone()).collect();
 
     let mut models = HashMap::new();
@@ -1685,25 +1644,17 @@ pub fn sync_from_datamodel<'db>(
 
     for dm_model in &project.models {
         let canonical_model_name = canonicalize(&dm_model.name).into_owned();
-        let model_id = ModelId::new(db, canonical_model_name.clone());
 
         let mut variables = HashMap::new();
         let mut source_var_map = HashMap::new();
 
         for dm_var in &dm_model.variables {
             let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
-            let var_id = VariableId::new(db, canonical_var_name.clone());
 
             let source_var = source_variable_from_datamodel(db, dm_var);
             source_var_map.insert(canonical_var_name.clone(), source_var);
 
-            variables.insert(
-                canonical_var_name,
-                SyncedVariable {
-                    id: var_id,
-                    source: source_var,
-                },
-            );
+            variables.insert(canonical_var_name, SyncedVariable { source: source_var });
         }
 
         // variable_names must use canonical names to match source_var_map keys
@@ -1725,7 +1676,6 @@ pub fn sync_from_datamodel<'db>(
         models.insert(
             canonical_model_name,
             SyncedModel {
-                id: model_id,
                 source: source_model,
                 variables,
                 is_stdlib: false,
@@ -2028,26 +1978,13 @@ pub fn sync_from_datamodel_incremental(
                     update_source_variable(db, source_var, dm_var);
                     source_var_map.insert(canonical_var_name.clone(), source_var);
 
-                    new_vars.insert(
-                        canonical_var_name,
-                        PersistentVariableState {
-                            var_interned_id: prev_var.var_interned_id,
-                            source_var,
-                        },
-                    );
+                    new_vars.insert(canonical_var_name, PersistentVariableState { source_var });
                 } else {
                     // New variable
-                    let var_id = VariableId::new(&*db, canonical_var_name.clone());
                     let source_var = source_variable_from_datamodel(&*db, dm_var);
                     source_var_map.insert(canonical_var_name.clone(), source_var);
 
-                    new_vars.insert(
-                        canonical_var_name,
-                        PersistentVariableState {
-                            var_interned_id: var_id.as_id(),
-                            source_var,
-                        },
-                    );
+                    new_vars.insert(canonical_var_name, PersistentVariableState { source_var });
                 }
             }
 
@@ -2066,7 +2003,6 @@ pub fn sync_from_datamodel_incremental(
             new_models.insert(
                 canonical_model_name,
                 PersistentModelState {
-                    model_interned_id: prev_model.model_interned_id,
                     source_model,
                     variables: new_vars,
                     is_stdlib: false,
@@ -2074,24 +2010,15 @@ pub fn sync_from_datamodel_incremental(
             );
         } else {
             // New model: create fresh
-            let model_id = ModelId::new(&*db, canonical_model_name.clone());
-
             let mut new_vars = HashMap::new();
             let mut source_var_map = HashMap::new();
 
             for dm_var in &dm_model.variables {
                 let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
-                let var_id = VariableId::new(&*db, canonical_var_name.clone());
                 let source_var = source_variable_from_datamodel(&*db, dm_var);
                 source_var_map.insert(canonical_var_name.clone(), source_var);
 
-                new_vars.insert(
-                    canonical_var_name,
-                    PersistentVariableState {
-                        var_interned_id: var_id.as_id(),
-                        source_var,
-                    },
-                );
+                new_vars.insert(canonical_var_name, PersistentVariableState { source_var });
             }
 
             // variable_names must use canonical names to match source_var_map keys
@@ -2111,7 +2038,6 @@ pub fn sync_from_datamodel_incremental(
             new_models.insert(
                 canonical_model_name,
                 PersistentModelState {
-                    model_interned_id: model_id.as_id(),
                     source_model,
                     variables: new_vars,
                     is_stdlib: false,

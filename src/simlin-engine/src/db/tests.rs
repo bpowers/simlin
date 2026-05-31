@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::datamodel;
+use salsa::plumbing::AsId;
 
 /// Parse with an empty module-ident context (test convenience).
 fn parse_var_no_module_ctx(
@@ -69,52 +70,6 @@ fn test_create_db() {
 }
 
 #[test]
-fn test_intern_variable_id_same_name() {
-    let db = SimlinDb::default();
-    let id1 = VariableId::new(&db, "population".to_string());
-    let id2 = VariableId::new(&db, "population".to_string());
-    assert_eq!(id1, id2);
-}
-
-#[test]
-fn test_intern_variable_id_different_names() {
-    let db = SimlinDb::default();
-    let id1 = VariableId::new(&db, "population".to_string());
-    let id2 = VariableId::new(&db, "birth_rate".to_string());
-    assert_ne!(id1, id2);
-}
-
-#[test]
-fn test_intern_model_id_same_name() {
-    let db = SimlinDb::default();
-    let id1 = ModelId::new(&db, "main".to_string());
-    let id2 = ModelId::new(&db, "main".to_string());
-    assert_eq!(id1, id2);
-}
-
-#[test]
-fn test_intern_model_id_different_names() {
-    let db = SimlinDb::default();
-    let id1 = ModelId::new(&db, "main".to_string());
-    let id2 = ModelId::new(&db, "submodel".to_string());
-    assert_ne!(id1, id2);
-}
-
-#[test]
-fn test_intern_variable_id_text_roundtrip() {
-    let db = SimlinDb::default();
-    let id = VariableId::new(&db, "birth_rate".to_string());
-    assert_eq!(id.text(&db), "birth_rate");
-}
-
-#[test]
-fn test_intern_model_id_text_roundtrip() {
-    let db = SimlinDb::default();
-    let id = ModelId::new(&db, "main".to_string());
-    assert_eq!(id.text(&db), "main");
-}
-
-#[test]
 fn test_sync_simple_project() {
     let db = SimlinDb::default();
     let project = simple_project();
@@ -145,7 +100,6 @@ fn test_sync_simple_project() {
     assert_eq!(main_model.source.variable_names(&db)[0], "population");
 
     let pop_var = &main_model.variables["population"];
-    assert_eq!(pop_var.id.text(&db), "population");
     assert_eq!(pop_var.source.kind(&db), SourceVariableKind::Aux);
     assert_eq!(pop_var.source.units(&db), &Some("people".to_string()));
     assert_eq!(
@@ -211,10 +165,10 @@ fn test_sync_multi_model() {
     assert!(result.models.contains_key("main"));
     assert!(result.models.contains_key("submodel"));
 
-    // Different model names get different IDs
-    let main_id = result.models["main"].id;
-    let sub_id = result.models["submodel"].id;
-    assert_ne!(main_id, sub_id);
+    // Different models get distinct SourceModel input handles
+    let main_source = result.models["main"].source;
+    let sub_source = result.models["submodel"].source;
+    assert_ne!(main_source.as_id(), sub_source.as_id());
 }
 
 #[test]
@@ -475,18 +429,6 @@ fn test_sync_resync_updates() {
         pop2.source.equation(&db),
         &datamodel::Equation::Scalar("200".to_string())
     );
-
-    // Interned IDs for the same canonical name should be the same
-    assert_eq!(pop1.id, pop2.id);
-}
-
-#[test]
-fn test_sync_empty_model_name_canonicalized() {
-    let db = SimlinDb::default();
-    let id1 = ModelId::new(&db, "".to_string());
-    let id2 = ModelId::new(&db, "main".to_string());
-    // Empty and "main" are different canonical strings
-    assert_ne!(id1, id2);
 }
 
 #[test]
@@ -2743,7 +2685,6 @@ fn test_persistent_state_to_sync_result() {
     for (name, sv) in &main_model.variables {
         let pv = &persistent_main.variables[name];
         assert_eq!(sv.source.as_id(), pv.source_var.as_id());
-        assert_eq!(sv.id.as_id(), pv.var_interned_id);
     }
 
     // Verify the reconstituted SyncResult works for diagnostic collection

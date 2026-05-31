@@ -1820,7 +1820,7 @@ fn test_stdlib_inputs_are_one_shot_and_stable_across_syncs() {
         let mut var_ids: Vec<(String, salsa::Id)> = smth3
             .variables
             .iter()
-            .map(|(name, sv)| (name.clone(), sv.id.as_id()))
+            .map(|(name, sv)| (name.clone(), sv.source.as_id()))
             .collect();
         var_ids.sort();
 
@@ -1871,7 +1871,7 @@ fn test_stdlib_inputs_are_one_shot_and_stable_across_syncs() {
     let mut var_ids_after: Vec<(String, salsa::Id)> = smth3_after
         .variables
         .iter()
-        .map(|(name, sv)| (name.clone(), sv.id.as_id()))
+        .map(|(name, sv)| (name.clone(), sv.source.as_id()))
         .collect();
     var_ids_after.sort();
     assert_eq!(
