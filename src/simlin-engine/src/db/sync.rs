@@ -67,7 +67,7 @@ impl PersistentModelState {
     /// Used both by `PersistentSyncState::to_sync_result` and by the fresh
     /// `sync_from_datamodel` path when splicing the cached stdlib models into
     /// the returned `SyncResult`.
-    pub(crate) fn to_synced_model(&self) -> SyncedModel {
+    fn to_synced_model(&self) -> SyncedModel {
         let variables = self
             .variables
             .iter()
