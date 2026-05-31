@@ -4054,24 +4054,39 @@ fn compile_implicit_var_phase_bytecodes(
 
 /// Assemble a complete CompiledModule from per-variable fragments.
 ///
-/// NOT a tracked function -- the caching happens at the per-variable level
-/// (compile_var_fragment, compute_layout, model_dependency_graph). This
-/// function reads cached results and concatenates them.
+/// Salsa-tracked: the per-module assembly (fragment concatenation, SCC
+/// combined-fragment build, GF dedup, resolve) is memoized so an unchanged
+/// module (same `model`/`project`/`is_root`/`module_input_names`) is a pure
+/// cache hit -- no re-concatenation, no re-resolve. The success payload rides
+/// behind an `Arc` so the tracked-fn return value is `salsa::Update` (its
+/// inner `CompiledModule` derives `Update` via the per-field `PartialEq`
+/// fallback for the opaque bytecode side-channels) and salsa's clone-out on
+/// each cache-hit read is a single refcount bump rather than a deep bytecode
+/// clone.
+///
+/// `module_input_names` is an owned `Vec<String>` (canonicalized internally),
+/// matching the existing `model_dependency_graph_with_inputs` key convention.
+/// A later task interns these into a `ModuleInputSet`.
+#[salsa::tracked]
 pub fn assemble_module(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     is_root: bool,
-    module_inputs: &BTreeSet<Ident<Canonical>>,
-) -> Result<crate::bytecode::CompiledModule, String> {
+    module_input_names: Vec<String>,
+) -> Result<std::sync::Arc<crate::bytecode::CompiledModule>, String> {
     use crate::compiler::symbolic::{
         ContextResourceCounts, SymbolicCompiledInitial, SymbolicCompiledModule,
         concatenate_fragments_with_gf, resolve_module,
     };
 
-    let module_input_names: Vec<String> = module_inputs
+    // Canonicalize the owned name key back into the `BTreeSet<Ident<Canonical>>`
+    // the assembly logic (the `is_module_input` predicate, the module-input
+    // exclusion in the stocks phase) consumes -- the byte-identical inverse of
+    // the previous `module_inputs.iter().map(as_str).collect()` key derivation.
+    let module_inputs: BTreeSet<Ident<Canonical>> = module_input_names
         .iter()
-        .map(|ident| ident.as_str().to_string())
+        .map(|name| Ident::<Canonical>::new(name))
         .collect();
     let dep_graph = if module_input_names.is_empty() {
         model_dependency_graph(db, model, project)
@@ -4696,40 +4711,53 @@ pub fn assemble_module(
     // Resolve symbolic -> concrete offsets. The CompiledModule stays a pure,
     // symbolizable artifact (the symbolic roundtrip tests symbolize it again,
     // and salsa caches it); the 3-address fusion (R2) is applied later, at
-    // Vm::new, to the execution copy of the bytecode.
-    resolve_module(&sym_module, layout).inspect_err(|msg| {
-        try_accumulate_diagnostic(
-            db,
-            Diagnostic {
-                model: model_name.clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg.clone()),
-                severity: DiagnosticSeverity::Error,
-            },
-        );
-    })
+    // Vm::new, to the execution copy of the bytecode. The success payload is
+    // wrapped in an `Arc` so this tracked fn's return type is `salsa::Update`
+    // and salsa's clone-out is a refcount bump (the inner bytecode is large).
+    resolve_module(&sym_module, layout)
+        .inspect_err(|msg| {
+            try_accumulate_diagnostic(
+                db,
+                Diagnostic {
+                    model: model_name.clone(),
+                    variable: None,
+                    error: DiagnosticError::Assembly(msg.clone()),
+                    severity: DiagnosticSeverity::Error,
+                },
+            );
+        })
+        .map(std::sync::Arc::new)
 }
 
 /// Assemble a full CompiledSimulation from assembled modules.
 ///
-/// NOT a tracked function -- caching is at the per-variable level.
+/// Salsa-tracked: enumerating module instances, assembling each unique
+/// `(model, input_set)` module, building the `Specs`, and computing the
+/// flattened offset map are all memoized, so a recompile with no input
+/// changes is a pure cache hit (zero re-assembly). When one variable
+/// changes, only the affected `assemble_module` instances re-execute;
+/// unchanged submodules cache-hit. `main_model_name` is an owned `String`
+/// (a salsa-compatible by-value key); the success payload rides behind an
+/// `Arc` so the return type is `salsa::Update` and clone-out is a refcount
+/// bump rather than a deep clone of the modules/offsets maps.
+#[salsa::tracked]
 pub fn assemble_simulation(
     db: &dyn Db,
     project: SourceProject,
-    main_model_name: &str,
-) -> Result<crate::vm::CompiledSimulation, String> {
+    main_model_name: String,
+) -> Result<std::sync::Arc<crate::vm::CompiledSimulation>, String> {
     use crate::common::{Canonical, Ident};
     use crate::vm::CompiledSimulation;
 
     let project_models = project.models(db);
-    let main_model_canonical = canonicalize(main_model_name);
+    let main_model_canonical = canonicalize(&main_model_name);
 
     if !project_models.contains_key(main_model_canonical.as_ref()) {
         let msg = format!("no model named '{}' to simulate", main_model_name);
         try_accumulate_diagnostic(
             db,
             Diagnostic {
-                model: main_model_name.to_string(),
+                model: main_model_name.clone(),
                 variable: None,
                 error: DiagnosticError::Assembly(msg.clone()),
                 severity: DiagnosticSeverity::Error,
@@ -4741,11 +4769,11 @@ pub fn assemble_simulation(
     // Enumerate module instances by walking module variables recursively.
     // Each unique (model_name, input_set) pair gets its own CompiledModule.
     let module_instances =
-        enumerate_module_instances(db, project, main_model_name).inspect_err(|msg| {
+        enumerate_module_instances(db, project, &main_model_name).inspect_err(|msg| {
             try_accumulate_diagnostic(
                 db,
                 Diagnostic {
-                    model: main_model_name.to_string(),
+                    model: main_model_name.clone(),
                     variable: None,
                     error: DiagnosticError::Assembly(msg.clone()),
                     severity: DiagnosticSeverity::Error,
@@ -4754,7 +4782,7 @@ pub fn assemble_simulation(
         })?;
 
     // Sort module names: main first, then all others alphabetically
-    let main_ident = Ident::<Canonical>::new(main_model_name);
+    let main_ident = Ident::<Canonical>::new(&main_model_name);
     let mut module_names: Vec<&Ident<Canonical>> = module_instances.keys().collect();
     module_names.sort_unstable();
     let mut sorted_names = vec![&main_ident];
@@ -4783,7 +4811,7 @@ pub fn assemble_simulation(
                 try_accumulate_diagnostic(
                     db,
                     Diagnostic {
-                        model: main_model_name.to_string(),
+                        model: main_model_name.clone(),
                         variable: None,
                         error: DiagnosticError::Assembly(msg.clone()),
                         severity: DiagnosticSeverity::Error,
@@ -4793,14 +4821,24 @@ pub fn assemble_simulation(
             })?;
 
             let is_root = canonicalize(name.as_str()) == main_model_canonical;
-            let compiled = assemble_module(db, *source_model, project, is_root, inputs)?;
+            // The tracked `assemble_module` keys on an owned `Vec<String>`
+            // module-input name set (canonicalized internally), consistent
+            // with `model_dependency_graph_with_inputs`.
+            let module_input_names: Vec<String> = inputs
+                .iter()
+                .map(|ident| ident.as_str().to_string())
+                .collect();
+            let compiled =
+                assemble_module(db, *source_model, project, is_root, module_input_names)?;
             let module_key: crate::vm::ModuleKey = ((*name).clone(), inputs.clone());
-            compiled_modules.insert(module_key, compiled);
+            // Clone the `CompiledModule` out of the salsa-owned `Arc`: the
+            // `CompiledSimulation.modules` map stores it by value (its bytecode
+            // is itself `Arc`-backed, so this clone is cheap refcount bumps).
+            compiled_modules.insert(module_key, (*compiled).clone());
         }
     }
 
     // Build Specs, preferring model-level sim_specs override when present
-    let main_model_canonical = canonicalize(main_model_name);
     let specs = if let Some(source_model) = project_models.get(main_model_canonical.as_ref())
         && let Some(ref model_specs) = *source_model.model_sim_specs(db)
     {
@@ -4810,16 +4848,16 @@ pub fn assemble_simulation(
     };
 
     // Compute flattened offsets for variable name -> offset mapping
-    let offsets = calc_flattened_offsets_incremental(db, project, main_model_name, true);
+    let offsets = calc_flattened_offsets_incremental(db, project, &main_model_name, true);
     let offsets: HashMap<Ident<Canonical>, usize> =
         offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
 
-    Ok(CompiledSimulation::new(
+    Ok(std::sync::Arc::new(CompiledSimulation::new(
         compiled_modules,
         specs,
         root_key,
         offsets,
-    ))
+    )))
 }
 
 type ModuleInstanceMap = HashMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canonical>>>>;
@@ -5254,9 +5292,14 @@ pub fn compile_project_incremental(
     {
         return crate::sim_err!(NotSimulatable, msg.clone());
     }
-    match assemble_simulation(db, project, main_model_name) {
-        Ok(compiled) => Ok(compiled),
-        Err(msg) => crate::sim_err!(NotSimulatable, msg),
+    // `assemble_simulation` is salsa-tracked, returning an `Arc` so its return
+    // type is `salsa::Update`; clone the `CompiledSimulation` out of the
+    // salsa-owned `Arc` to preserve this entry point's owned return type
+    // byte-for-byte. The error half stays a `String` mapped to
+    // `NotSimulatable`, identical to the prior plain-function behavior.
+    match assemble_simulation(db, project, main_model_name.to_string()) {
+        Ok(compiled) => Ok((*compiled).clone()),
+        Err(msg) => crate::sim_err!(NotSimulatable, msg.clone()),
     }
 }
 

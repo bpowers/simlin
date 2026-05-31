@@ -3000,7 +3000,7 @@ fn test_assemble_simulation_simple() {
     let project = two_var_project();
     let sync = sync_from_datamodel(&db, &project);
 
-    let result = assemble_simulation(&db, sync.project, "main");
+    let result = assemble_simulation(&db, sync.project, "main".to_string());
     assert!(
         result.is_ok(),
         "assemble_simulation failed: {:?}",
@@ -3124,8 +3124,8 @@ fn test_incremental_teacup_via_persistent_sync() {
     // Now reconstruct SyncResult from PersistentSyncState (like simlin_sim_new does)
     let sync = persistent_state.to_sync_result();
 
-    let incr_compiled =
-        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
+    let incr_compiled = assemble_simulation(&db, sync.project, "main".to_string())
+        .expect("incremental compilation failed");
 
     // Verify constant detection
     let room_temp_ident = crate::common::Ident::new("room_temperature");
@@ -3138,7 +3138,7 @@ fn test_incremental_teacup_via_persistent_sync() {
     );
 
     // Run simulation and verify results
-    let mut vm = Vm::new(incr_compiled).unwrap();
+    let mut vm = Vm::new((*incr_compiled).clone()).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
@@ -3624,8 +3624,8 @@ fn test_incremental_teacup_xmile_file() {
 
     let sync = persistent_state.to_sync_result();
 
-    let incr_compiled =
-        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
+    let incr_compiled = assemble_simulation(&db, sync.project, "main".to_string())
+        .expect("incremental compilation failed");
 
     // Constant detection must work for XMILE-loaded models
     let room_temp_ident = crate::common::Ident::new("room_temperature");
@@ -3638,7 +3638,7 @@ fn test_incremental_teacup_xmile_file() {
     );
 
     // Simulation must produce correct results
-    let mut vm = Vm::new(incr_compiled).unwrap();
+    let mut vm = Vm::new((*incr_compiled).clone()).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
@@ -3831,7 +3831,7 @@ fn test_circular_dependency_blocks_incremental_compilation() {
     let dep_graph = model_dependency_graph(&db, sync.models["main"].source, sync.project);
     assert!(dep_graph.has_cycle, "should detect circular dependency");
 
-    let result = assemble_simulation(&db, sync.project, "main");
+    let result = assemble_simulation(&db, sync.project, "main".to_string());
     assert!(
         result.is_err(),
         "incremental compilation should fail for circular dependencies"
@@ -4498,9 +4498,9 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
     let project = implicit_lookup_smth1_project();
     let ref_db = SimlinDb::default();
     let ref_sync = sync_from_datamodel(&ref_db, &project);
-    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main")
+    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main".to_string())
         .expect("reference incremental compile should succeed");
-    let ref_series = run_smoothed_series(ref_compiled);
+    let ref_series = run_smoothed_series((*ref_compiled).clone());
 
     let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
     let incr_compiled = compile_project_incremental(&db, state2.project, "main")
@@ -4536,9 +4536,9 @@ fn test_incremental_compile_implicit_lookup_dep_tables() {
     // Fresh incremental compile as reference
     let ref_db = SimlinDb::default();
     let ref_sync = sync_from_datamodel(&ref_db, &project);
-    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main")
+    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main".to_string())
         .expect("reference incremental compile should succeed");
-    let ref_series = run_smoothed_series(ref_compiled);
+    let ref_series = run_smoothed_series((*ref_compiled).clone());
     assert!(
         !ref_series.is_empty(),
         "reference smoothed series should not be empty"

@@ -609,7 +609,7 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
     // Assemble the module: Task 6 must inject the combined `{ce,ecc}`
     // fragment into the flows phase (skipping the per-variable pushes),
     // its writes keeping their original `(name, element_offset)`.
-    let module = crate::db::assemble_module(&db, model, project, true, &BTreeSet::new())
+    let module = crate::db::assemble_module(&db, model, project, true, Vec::new())
         .expect("ref-shaped resolved SCC must assemble (no CircularDependency)");
 
     // The assembled flows bytecode's AssignCurr target offsets, re-derived

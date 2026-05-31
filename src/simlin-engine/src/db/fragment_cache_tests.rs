@@ -2,15 +2,32 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::sync::Arc;
+
 use salsa::plumbing::AsId;
 
 use crate::datamodel;
 use crate::db::{
-    DiagnosticSeverity, SimlinDb, collect_all_diagnostics, compile_var_fragment,
-    model_dependency_graph, model_dependency_graph_with_inputs, sync_from_datamodel,
-    sync_from_datamodel_incremental,
+    DiagnosticSeverity, SimlinDb, assemble_module, assemble_simulation, collect_all_diagnostics,
+    compile_project_incremental, compile_var_fragment, model_dependency_graph,
+    model_dependency_graph_with_inputs, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
+
+/// Build a minimal `aux` variable with a scalar equation (keeps the test
+/// bodies below readable -- the datamodel `Aux` literal is verbose).
+fn scalar_aux(ident: &str, equation: &str) -> datamodel::Variable {
+    datamodel::Variable::Aux(datamodel::Aux {
+        ident: ident.to_string(),
+        equation: datamodel::Equation::Scalar(equation.to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    })
+}
 
 #[test]
 fn test_compile_var_fragment_caching() {
@@ -1104,5 +1121,196 @@ fn test_module_input_branch_prunes_init_only_dt_dep() {
     assert!(
         inactive.dt_dependencies["z"].contains("y"),
         "inactive branch falls back to y, so z should depend on y"
+    );
+}
+
+/// A no-op recompile (no input changes) must be a pure salsa cache hit for
+/// `assemble_simulation`: zero re-assembly work. Proof technique mirrors
+/// `test_compile_var_fragment_caching` -- the tracked fn returns its memoized
+/// value cloned out, and because the success payload is an `Arc`, a cache hit
+/// hands back the SAME allocation (pointer-equal). A re-execution would mint a
+/// fresh `Arc`, so `Arc::ptr_eq` failing loudly proves assembly re-ran.
+#[test]
+fn test_assemble_simulation_noop_recompile_is_cache_hit() {
+    let mut db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "assemble_noop_cache".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![scalar_aux("alpha", "10"), scalar_aux("beta", "alpha + 1")],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    // First sync + assemble primes the cache.
+    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+    let project1 = state1.to_sync_result().project;
+    let sim1 = assemble_simulation(&db, project1, "main".to_string())
+        .expect("first assemble_simulation should succeed");
+
+    // Re-sync the IDENTICAL datamodel: handles are reused, no input field
+    // value changes, so every transitively-read input is bit-identical.
+    let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
+    let project2 = state2.to_sync_result().project;
+    let sim2 = assemble_simulation(&db, project2, "main".to_string())
+        .expect("second assemble_simulation should succeed");
+
+    assert!(
+        Arc::ptr_eq(&sim1, &sim2),
+        "no-op recompile must be a salsa cache hit for assemble_simulation \
+         (the Arc payload must be pointer-equal); assembly re-ran instead"
+    );
+
+    // Structural equality sanity check: the cached simulation is byte-for-byte
+    // what `compile_project_incremental` returns (its public owned form).
+    let owned = compile_project_incremental(&db, project2, "main")
+        .expect("compile_project_incremental should succeed");
+    assert_eq!(
+        owned, *sim2,
+        "compile_project_incremental's CompiledSimulation must equal the cached one"
+    );
+}
+
+/// Editing ONE variable in the root model re-assembles the root module but
+/// cache-hits an UNCHANGED submodule: `assemble_module` is memoized per
+/// `(model, project, is_root, module_inputs)`, and an equation-only edit to a
+/// root variable that the submodel never reads leaves the submodel's assembled
+/// `Arc<CompiledModule>` pointer-stable while the root's changes.
+#[test]
+fn test_assemble_module_unchanged_submodule_is_cache_hit() {
+    let mut db = SimlinDb::default();
+    // `main` holds an independent aux `driver` plus a module `sub` wiring its
+    // `src` into `producer.input`; `producer` is the submodel we expect to
+    // cache-hit when only `driver` changes.
+    let make_project = |driver_eq: &str| datamodel::Project {
+        name: "assemble_submodule_cache".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    scalar_aux("driver", driver_eq),
+                    scalar_aux("src", "1"),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "sub".to_string(),
+                        model_name: "producer".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "src".to_string(),
+                            dst: "sub.input".to_string(),
+                        }],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+            datamodel::Model {
+                name: "producer".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    scalar_aux("output", "input * 2"),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let project_a = make_project("100");
+    let state1 = sync_from_datamodel_incremental(&mut db, &project_a, None);
+    let (main1, producer1, project1) = {
+        let sync1 = state1.to_sync_result();
+        (
+            sync1.models["main"].source,
+            sync1.models["producer"].source,
+            sync1.project,
+        )
+    };
+
+    // `sub` wires `src -> producer.input`, so producer's instance input set is
+    // `{input}` -- assemble it directly with that key (mirroring how
+    // assemble_simulation builds the module-input name vec).
+    let producer_inputs = vec!["input".to_string()];
+    let root_main1 = assemble_module(&db, main1, project1, true, vec![])
+        .expect("root assemble_module should succeed");
+    let sub_producer1 = assemble_module(&db, producer1, project1, false, producer_inputs.clone())
+        .expect("submodule assemble_module should succeed");
+
+    // Change ONLY `main.driver`'s equation. `producer` never reads `driver`,
+    // so producer's assembly inputs are bit-identical across the edit.
+    let project_b = make_project("200");
+    let state2 = sync_from_datamodel_incremental(&mut db, &project_b, Some(&state1));
+    let (main2, producer2, project2) = {
+        let sync2 = state2.to_sync_result();
+        (
+            sync2.models["main"].source,
+            sync2.models["producer"].source,
+            sync2.project,
+        )
+    };
+
+    let root_main2 = assemble_module(&db, main2, project2, true, vec![])
+        .expect("root assemble_module should succeed after edit");
+    let sub_producer2 = assemble_module(&db, producer2, project2, false, producer_inputs)
+        .expect("submodule assemble_module should succeed after edit");
+
+    assert!(
+        Arc::ptr_eq(&sub_producer1, &sub_producer2),
+        "the UNCHANGED submodule (producer) must be a salsa cache hit \
+         (pointer-equal Arc) when only a root-model variable changes; it re-assembled"
+    );
+    assert!(
+        !Arc::ptr_eq(&root_main1, &root_main2),
+        "the root module (main), whose `driver` variable changed, must re-assemble \
+         (a fresh Arc), not cache-hit"
     );
 }

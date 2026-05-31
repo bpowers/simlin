@@ -113,7 +113,7 @@ fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
 /// Identifies a literal in a specific bytecode object that must be mutated
 /// when a constant's value is overridden via `set_value`.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum BytecodeLocation {
     /// A literal in a flows or stocks module's shared bytecode.
     FlowOrStock {
@@ -130,7 +130,7 @@ enum BytecodeLocation {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct CompiledSimulation {
     pub(crate) modules: HashMap<ModuleKey, CompiledModule>,
     pub(crate) specs: Specs,
