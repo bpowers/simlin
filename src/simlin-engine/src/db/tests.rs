@@ -137,7 +137,7 @@ fn test_sync_simple_project() {
     assert_eq!(pop_var.source.units(&db), &Some("people".to_string()));
     assert_eq!(
         pop_var.source.equation(&db),
-        &SourceEquation::Scalar("100".to_string())
+        &datamodel::Equation::Scalar("100".to_string())
     );
     assert!(!pop_var.source.non_negative(&db));
     assert!(!pop_var.source.can_be_module_input(&db));
@@ -343,7 +343,7 @@ fn test_sync_variable_with_gf() {
     let gf = var.source.gf(&db);
     assert!(gf.is_some());
     let gf = gf.as_ref().unwrap();
-    assert_eq!(gf.kind, SourceGraphicalFunctionKind::Continuous);
+    assert_eq!(gf.kind, datamodel::GraphicalFunctionKind::Continuous);
     assert_eq!(gf.x_points, Some(vec![0.0, 1.0, 2.0]));
     assert_eq!(gf.y_points, vec![0.0, 5.0, 10.0]);
     assert_eq!(gf.x_scale.min, 0.0);
@@ -384,11 +384,11 @@ fn test_sync_dimensions() {
     assert_eq!(dims[0].name, "Region");
     assert_eq!(
         dims[0].elements,
-        SourceDimensionElements::Named(vec!["North".to_string(), "South".to_string()])
+        datamodel::DimensionElements::Named(vec!["North".to_string(), "South".to_string()])
     );
 
     assert_eq!(dims[1].name, "Periods");
-    assert_eq!(dims[1].elements, SourceDimensionElements::Indexed(5));
+    assert_eq!(dims[1].elements, datamodel::DimensionElements::Indexed(5));
 }
 
 #[test]
@@ -450,7 +450,7 @@ fn test_sync_resync_updates() {
     let pop1 = &result1.models["main"].variables["population"];
     assert_eq!(
         pop1.source.equation(&db),
-        &SourceEquation::Scalar("100".to_string())
+        &datamodel::Equation::Scalar("100".to_string())
     );
 
     // Modify the equation and re-sync
@@ -460,7 +460,7 @@ fn test_sync_resync_updates() {
     let pop2 = &result2.models["main"].variables["population"];
     assert_eq!(
         pop2.source.equation(&db),
-        &SourceEquation::Scalar("200".to_string())
+        &datamodel::Equation::Scalar("200".to_string())
     );
 
     // Interned IDs for the same canonical name should be the same
@@ -486,9 +486,9 @@ fn test_sync_sim_specs_dt_reciprocal() {
 
     let result = sync_from_datamodel(&db, &project);
     let specs = result.project.sim_specs(&db);
-    assert_eq!(specs.dt, SourceDt::Reciprocal(4.0));
-    assert_eq!(specs.save_step, Some(SourceDt::Dt(0.5)));
-    assert_eq!(specs.sim_method, SourceSimMethod::RungeKutta4);
+    assert_eq!(specs.dt, datamodel::Dt::Reciprocal(4.0));
+    assert_eq!(specs.save_step, Some(datamodel::Dt::Dt(0.5)));
+    assert_eq!(specs.sim_method, datamodel::SimMethod::RungeKutta4);
 }
 
 #[test]
@@ -690,7 +690,7 @@ fn test_incrementality_unchanged_variable_not_reparsed() {
     // Modify only alpha's equation; beta is unchanged
     alpha_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("42".to_string()));
+        .to(datamodel::Equation::Scalar("42".to_string()));
 
     // Re-parse both: alpha should have new result, beta should be cached
     let alpha_result_2 = parse_var_no_module_ctx(&db, alpha_src, source_project);
@@ -971,7 +971,7 @@ fn test_incrementality_same_deps_no_recompute() {
     // Same deps, different equation
     beta_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("alpha * gamma".to_string()));
+        .to(datamodel::Equation::Scalar("alpha * gamma".to_string()));
 
     // Beta's deps should be the same (alpha, gamma)
     let beta_deps_after = variable_direct_dependencies(&db, beta_src, source_project);
@@ -1057,7 +1057,7 @@ fn test_incrementality_different_deps_recompute() {
     // Change beta's equation from "alpha" to "gamma" -- different deps
     beta_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("gamma".to_string()));
+        .to(datamodel::Equation::Scalar("gamma".to_string()));
 
     // The dep graph should be recomputed (different pointer)
     let graph_after = model_dependency_graph(&db, source_model, source_project);
@@ -1878,9 +1878,11 @@ fn test_ltm_caching_equation_change_no_dep_change() {
 
     // Change births equation from "population * birth_rate" to
     // "birth_rate * population" -- same deps, different equation text
-    births_src.set_equation(&mut db).to(SourceEquation::Scalar(
-        "birth_rate * population".to_string(),
-    ));
+    births_src
+        .set_equation(&mut db)
+        .to(datamodel::Equation::Scalar(
+            "birth_rate * population".to_string(),
+        ));
 
     // Loop circuits should be pointer-equal (cached) because the
     // causal edge structure hasn't changed
@@ -1917,7 +1919,7 @@ fn test_ltm_caching_dep_change_recomputes_circuits() {
     // Change births to a constant -- breaks the feedback loop
     births_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("10".to_string()));
+        .to(datamodel::Equation::Scalar("10".to_string()));
 
     let circuits_after = model_loop_circuits(&db, source_model, source_project);
     assert!(
@@ -2057,7 +2059,9 @@ fn test_ltm_per_link_caching() {
     // Change births_a equation (affects loop A, should NOT affect loop B)
     births_a_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("stock_a * rate_a * 2".to_string()));
+        .to(datamodel::Equation::Scalar(
+            "stock_a * rate_a * 2".to_string(),
+        ));
 
     // Re-intern the link IDs (interning is idempotent, returns same ID)
     let link_b_id = LtmLinkId::new(&db, "stock_b".to_string(), "births_b".to_string());
@@ -2115,7 +2119,9 @@ fn test_ltm_per_link_caching_model_level() {
     // Change births_a equation
     births_a_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("stock_a * rate_a * 2".to_string()));
+        .to(datamodel::Equation::Scalar(
+            "stock_a * rate_a * 2".to_string(),
+        ));
 
     // Model-level result should still produce valid results
     let ltm_after = model_ltm_variables(&db, source_model, source_project);
@@ -2436,7 +2442,7 @@ fn test_accumulator_incrementality() {
     // Fix alpha's equation (needs &mut db)
     alpha_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("42".to_string()));
+        .to(datamodel::Equation::Scalar("42".to_string()));
 
     let diags2 = collect_model_diagnostics(&db, source_model, source_project);
     assert!(

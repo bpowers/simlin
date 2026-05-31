@@ -190,11 +190,11 @@ pub struct SourceProject {
     #[returns(ref)]
     pub name: String,
     #[returns(ref)]
-    pub sim_specs: SourceSimSpecs,
+    pub sim_specs: datamodel::SimSpecs,
     #[returns(ref)]
-    pub dimensions: Vec<SourceDimension>,
+    pub dimensions: Vec<datamodel::Dimension>,
     #[returns(ref)]
-    pub units: Vec<SourceUnit>,
+    pub units: Vec<datamodel::Unit>,
     #[returns(ref)]
     pub model_names: Vec<String>,
     #[returns(ref)]
@@ -226,7 +226,7 @@ pub struct SourceModel {
     pub variables: HashMap<String, SourceVariable>,
     /// Per-model sim_specs override (None means use project-level specs)
     #[returns(ref)]
-    pub model_sim_specs: Option<SourceSimSpecs>,
+    pub model_sim_specs: Option<datamodel::SimSpecs>,
     /// `Some` iff this model is a callable macro template. On the salsa
     /// input so `project_macro_registry` is keyed on the macro-marked
     /// models (editing a non-macro variable does not invalidate it).
@@ -239,18 +239,18 @@ pub struct SourceVariable {
     #[returns(ref)]
     pub ident: String,
     #[returns(ref)]
-    pub equation: SourceEquation,
+    pub equation: datamodel::Equation,
     pub kind: SourceVariableKind,
     #[returns(ref)]
     pub units: Option<String>,
     #[returns(ref)]
-    pub gf: Option<SourceGraphicalFunction>,
+    pub gf: Option<datamodel::GraphicalFunction>,
     #[returns(ref)]
     pub inflows: Vec<String>,
     #[returns(ref)]
     pub outflows: Vec<String>,
     #[returns(ref)]
-    pub module_refs: Vec<SourceModuleReference>,
+    pub module_refs: Vec<datamodel::ModuleReference>,
     #[returns(ref)]
     pub model_name: String,
     pub non_negative: bool,
@@ -265,9 +265,9 @@ pub struct SourceVariable {
 /// (`y = table(input)`), not a value-bearing variable -- it is excluded from the
 /// runlist and produces no saved series (issue #606). This is the salsa-layer
 /// twin of `crate::variable::var_is_lookup_only`, evaluated over the
-/// `SourceEquation` + `SourceGraphicalFunction` representation; both delegate to
-/// the shared `crate::variable::is_empty_or_sentinel` core (which also accepts
-/// the legacy `"0+0"` sentinel for back-compat).
+/// `datamodel::Equation` + `datamodel::GraphicalFunction` representation; both
+/// delegate to the shared `crate::variable::is_empty_or_sentinel` core (which
+/// also accepts the legacy `"0+0"` sentinel for back-compat).
 ///
 /// Salsa-tracked so its `bool` output backdates: callers in tracked contexts
 /// (`build_var_info` -> `model_dependency_graph`, `calc_flattened_offsets`)
@@ -278,413 +278,42 @@ pub(crate) fn source_var_is_table_only(db: &dyn Db, var: SourceVariable) -> bool
     use crate::variable::is_empty_or_sentinel;
     match var.equation(db) {
         // Scalar / A2A: one equation string plus a variable-level gf.
-        SourceEquation::Scalar(s) | SourceEquation::ApplyToAll(_, s) => {
+        datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => {
             var.gf(db).is_some() && is_empty_or_sentinel(s)
         }
         // Arrayed: a pure per-element table holder iff it has tables (a
         // variable-level or any per-element gf) and EVERY element equation (and
-        // the EXCEPT default, if any) is empty/sentinel.
-        SourceEquation::Arrayed(_, elements, default, _) => {
-            let has_tables = var.gf(db).is_some() || elements.iter().any(|e| e.gf.is_some());
+        // the EXCEPT default, if any) is empty/sentinel. The per-element gf is
+        // the 4th tuple field `(subscript, equation, gf_equation, gf)`.
+        datamodel::Equation::Arrayed(_, elements, default, _) => {
+            let has_tables =
+                var.gf(db).is_some() || elements.iter().any(|(_, _, _, gf)| gf.is_some());
             has_tables
                 && !elements.is_empty()
-                && elements.iter().all(|e| is_empty_or_sentinel(&e.equation))
+                && elements
+                    .iter()
+                    .all(|(_, eq, _, _)| is_empty_or_sentinel(eq))
                 && default.as_deref().map(is_empty_or_sentinel).unwrap_or(true)
         }
     }
 }
 
-// ── Mirror types for salsa compatibility ───────────────────────────────
-//
-// These types mirror the datamodel types but derive salsa::Update.
-// This avoids modifying the datamodel module (which is used for
-// serialization and has its own derive constraints).
-
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
-pub struct SourceSimSpecs {
-    pub start: f64,
-    pub stop: f64,
-    pub dt: SourceDt,
-    pub save_step: Option<SourceDt>,
-    pub sim_method: SourceSimMethod,
-    pub time_units: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
-pub enum SourceDt {
-    Dt(f64),
-    Reciprocal(f64),
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
-pub enum SourceSimMethod {
-    Euler,
-    RungeKutta2,
-    RungeKutta4,
-}
-
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
-pub struct SourceDimensionMapping {
-    pub target: String,
-    pub element_map: Vec<(String, String)>,
-}
-
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
-pub struct SourceDimension {
-    pub name: String,
-    pub elements: SourceDimensionElements,
-    pub maps_to: Option<String>,
-    pub mappings: Vec<SourceDimensionMapping>,
-    pub parent: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
-pub enum SourceDimensionElements {
-    Indexed(u32),
-    Named(Vec<String>),
-}
-
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
-pub enum SourceEquation {
-    Scalar(String),
-    ApplyToAll(Vec<String>, String),
-    Arrayed(
-        Vec<String>,
-        Vec<SourceArrayedEquationElement>,
-        Option<String>,
-        bool,
-    ),
-}
-
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
-pub struct SourceArrayedEquationElement {
-    pub subscript: String,
-    pub equation: String,
-    pub gf_equation: Option<String>,
-    pub gf: Option<SourceGraphicalFunction>,
-}
-
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
-pub struct SourceGraphicalFunction {
-    pub kind: SourceGraphicalFunctionKind,
-    pub x_points: Option<Vec<f64>>,
-    pub y_points: Vec<f64>,
-    pub x_scale: SourceGraphicalFunctionScale,
-    pub y_scale: SourceGraphicalFunctionScale,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, salsa::Update)]
-pub enum SourceGraphicalFunctionKind {
-    Continuous,
-    Extrapolate,
-    Discrete,
-}
-
-#[derive(Clone, Debug, PartialEq, salsa::Update)]
-pub struct SourceGraphicalFunctionScale {
-    pub min: f64,
-    pub max: f64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
-pub struct SourceModuleReference {
-    pub src: String,
-    pub dst: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
-pub struct SourceUnit {
-    pub name: String,
-    pub equation: Option<String>,
-    pub disabled: bool,
-    pub aliases: Vec<String>,
-}
-
-// ── Conversion from datamodel types ────────────────────────────────────
-
-impl From<&datamodel::SimSpecs> for SourceSimSpecs {
-    fn from(specs: &datamodel::SimSpecs) -> Self {
-        SourceSimSpecs {
-            start: specs.start,
-            stop: specs.stop,
-            dt: SourceDt::from(&specs.dt),
-            save_step: specs.save_step.as_ref().map(SourceDt::from),
-            sim_method: SourceSimMethod::from(specs.sim_method),
-            time_units: specs.time_units.clone(),
-        }
-    }
-}
-
-impl From<&datamodel::Dt> for SourceDt {
-    fn from(dt: &datamodel::Dt) -> Self {
-        match dt {
-            datamodel::Dt::Dt(v) => SourceDt::Dt(*v),
-            datamodel::Dt::Reciprocal(v) => SourceDt::Reciprocal(*v),
-        }
-    }
-}
-
-impl From<datamodel::SimMethod> for SourceSimMethod {
-    fn from(method: datamodel::SimMethod) -> Self {
-        match method {
-            datamodel::SimMethod::Euler => SourceSimMethod::Euler,
-            datamodel::SimMethod::RungeKutta2 => SourceSimMethod::RungeKutta2,
-            datamodel::SimMethod::RungeKutta4 => SourceSimMethod::RungeKutta4,
-        }
-    }
-}
-
-impl From<&datamodel::Dimension> for SourceDimension {
-    fn from(dim: &datamodel::Dimension) -> Self {
-        SourceDimension {
-            name: dim.name.clone(),
-            elements: SourceDimensionElements::from(&dim.elements),
-            maps_to: dim.maps_to().map(|s| s.to_owned()),
-            mappings: dim
-                .mappings
-                .iter()
-                .map(|m| SourceDimensionMapping {
-                    target: m.target.clone(),
-                    element_map: m.element_map.clone(),
-                })
-                .collect(),
-            parent: dim.parent.clone(),
-        }
-    }
-}
-
-impl From<&datamodel::DimensionElements> for SourceDimensionElements {
-    fn from(elements: &datamodel::DimensionElements) -> Self {
-        match elements {
-            datamodel::DimensionElements::Indexed(size) => SourceDimensionElements::Indexed(*size),
-            datamodel::DimensionElements::Named(names) => {
-                SourceDimensionElements::Named(names.clone())
-            }
-        }
-    }
-}
-
-impl From<&datamodel::Equation> for SourceEquation {
-    fn from(eq: &datamodel::Equation) -> Self {
-        match eq {
-            datamodel::Equation::Scalar(s) => SourceEquation::Scalar(s.clone()),
-            datamodel::Equation::ApplyToAll(dims, s) => {
-                SourceEquation::ApplyToAll(dims.clone(), s.clone())
-            }
-            datamodel::Equation::Arrayed(dims, elements, default_eq, has_except_default) => {
-                SourceEquation::Arrayed(
-                    dims.clone(),
-                    elements
-                        .iter()
-                        .map(|(subscript, eq, gf_eq, gf)| SourceArrayedEquationElement {
-                            subscript: subscript.clone(),
-                            equation: eq.clone(),
-                            gf_equation: gf_eq.clone(),
-                            gf: gf.as_ref().map(SourceGraphicalFunction::from),
-                        })
-                        .collect(),
-                    default_eq.clone(),
-                    *has_except_default,
-                )
-            }
-        }
-    }
-}
-
-impl From<&datamodel::GraphicalFunction> for SourceGraphicalFunction {
-    fn from(gf: &datamodel::GraphicalFunction) -> Self {
-        SourceGraphicalFunction {
-            kind: SourceGraphicalFunctionKind::from(gf.kind),
-            x_points: gf.x_points.clone(),
-            y_points: gf.y_points.clone(),
-            x_scale: SourceGraphicalFunctionScale::from(&gf.x_scale),
-            y_scale: SourceGraphicalFunctionScale::from(&gf.y_scale),
-        }
-    }
-}
-
-impl From<datamodel::GraphicalFunctionKind> for SourceGraphicalFunctionKind {
-    fn from(kind: datamodel::GraphicalFunctionKind) -> Self {
-        match kind {
-            datamodel::GraphicalFunctionKind::Continuous => SourceGraphicalFunctionKind::Continuous,
-            datamodel::GraphicalFunctionKind::Extrapolate => {
-                SourceGraphicalFunctionKind::Extrapolate
-            }
-            datamodel::GraphicalFunctionKind::Discrete => SourceGraphicalFunctionKind::Discrete,
-        }
-    }
-}
-
-impl From<&datamodel::GraphicalFunctionScale> for SourceGraphicalFunctionScale {
-    fn from(scale: &datamodel::GraphicalFunctionScale) -> Self {
-        SourceGraphicalFunctionScale {
-            min: scale.min,
-            max: scale.max,
-        }
-    }
-}
-
-impl From<&datamodel::ModuleReference> for SourceModuleReference {
-    fn from(mr: &datamodel::ModuleReference) -> Self {
-        SourceModuleReference {
-            src: mr.src.clone(),
-            dst: mr.dst.clone(),
-        }
-    }
-}
-
-impl From<&datamodel::Unit> for SourceUnit {
-    fn from(unit: &datamodel::Unit) -> Self {
-        SourceUnit {
-            name: unit.name.clone(),
-            equation: unit.equation.clone(),
-            disabled: unit.disabled,
-            aliases: unit.aliases.clone(),
-        }
-    }
-}
-
 // ── Reconstruct helpers ────────────────────────────────────────────────
-//
-// Convert Source* types back to datamodel types for use with the existing
-// parsing pipeline (parse_var, lower_variable).
 
-pub fn source_dims_to_datamodel(dims: &[SourceDimension]) -> Vec<datamodel::Dimension> {
-    dims.iter()
-        .map(|sd| {
-            let elements = match &sd.elements {
-                SourceDimensionElements::Indexed(size) => {
-                    datamodel::DimensionElements::Indexed(*size)
-                }
-                SourceDimensionElements::Named(names) => {
-                    datamodel::DimensionElements::Named(names.clone())
-                }
-            };
-            // Prefer the richer mappings field; fall back to maps_to.
-            let mappings = if !sd.mappings.is_empty() {
-                sd.mappings
-                    .iter()
-                    .map(|m| datamodel::DimensionMapping {
-                        target: m.target.clone(),
-                        element_map: m.element_map.clone(),
-                    })
-                    .collect()
-            } else if let Some(target) = sd.maps_to.clone() {
-                vec![datamodel::DimensionMapping {
-                    target,
-                    element_map: vec![],
-                }]
-            } else {
-                vec![]
-            };
-            datamodel::Dimension {
-                name: sd.name.clone(),
-                elements,
-                mappings,
-                parent: sd.parent.clone(),
-            }
-        })
-        .collect()
-}
-
-fn source_units_to_datamodel(units: &[SourceUnit]) -> Vec<datamodel::Unit> {
-    units
-        .iter()
-        .map(|su| datamodel::Unit {
-            name: su.name.clone(),
-            equation: su.equation.clone(),
-            disabled: su.disabled,
-            aliases: su.aliases.clone(),
-        })
-        .collect()
-}
-
-/// Lower a salsa-input `SourceSimSpecs` into the datamodel form expected by
-/// `vm::Specs::from`.
+/// Build a `datamodel::Variable` from the per-field `SourceVariable` salsa
+/// input for use with the existing parsing pipeline (parse_var,
+/// lower_variable). The input stores the datamodel `Equation`/`GraphicalFunction`/
+/// `ModuleReference` fields directly, so this is a cheap re-assembly into the
+/// kind-tagged enum the parser expects rather than a structural conversion.
 ///
-/// Two consumers besides the in-crate `assemble_simulation` need this lowering:
-/// the libsimlin from-wasm analyze FFI (which rebuilds a `Results` from a
-/// `(slab, WasmLayout)` pair and therefore needs to reconstruct `Specs` outside
-/// the compile pipeline), and any future host that re-derives `Specs` from a
-/// db-resident `SourceProject` without going through `compile_project_incremental`.
-/// There is no single salsa query that returns `datamodel::SimSpecs` directly --
-/// the spec input is split between `SourceProject::sim_specs` (project-level
-/// default) and `SourceModel::model_sim_specs` (per-model override) -- so the
-/// caller composes the two and feeds the chosen one through here.
-pub fn source_sim_specs_to_datamodel(specs: &SourceSimSpecs) -> datamodel::SimSpecs {
-    datamodel::SimSpecs {
-        start: specs.start,
-        stop: specs.stop,
-        dt: match &specs.dt {
-            SourceDt::Dt(v) => datamodel::Dt::Dt(*v),
-            SourceDt::Reciprocal(v) => datamodel::Dt::Reciprocal(*v),
-        },
-        save_step: specs.save_step.as_ref().map(|dt| match dt {
-            SourceDt::Dt(v) => datamodel::Dt::Dt(*v),
-            SourceDt::Reciprocal(v) => datamodel::Dt::Reciprocal(*v),
-        }),
-        sim_method: match specs.sim_method {
-            SourceSimMethod::Euler => datamodel::SimMethod::Euler,
-            SourceSimMethod::RungeKutta2 => datamodel::SimMethod::RungeKutta2,
-            SourceSimMethod::RungeKutta4 => datamodel::SimMethod::RungeKutta4,
-        },
-        time_units: specs.time_units.clone(),
-    }
-}
-
-fn source_gf_to_datamodel(gf: &SourceGraphicalFunction) -> datamodel::GraphicalFunction {
-    datamodel::GraphicalFunction {
-        kind: match gf.kind {
-            SourceGraphicalFunctionKind::Continuous => datamodel::GraphicalFunctionKind::Continuous,
-            SourceGraphicalFunctionKind::Extrapolate => {
-                datamodel::GraphicalFunctionKind::Extrapolate
-            }
-            SourceGraphicalFunctionKind::Discrete => datamodel::GraphicalFunctionKind::Discrete,
-        },
-        x_points: gf.x_points.clone(),
-        y_points: gf.y_points.clone(),
-        x_scale: datamodel::GraphicalFunctionScale {
-            min: gf.x_scale.min,
-            max: gf.x_scale.max,
-        },
-        y_scale: datamodel::GraphicalFunctionScale {
-            min: gf.y_scale.min,
-            max: gf.y_scale.max,
-        },
-    }
-}
-
-fn source_equation_to_datamodel(eq: &SourceEquation) -> datamodel::Equation {
-    match eq {
-        SourceEquation::Scalar(s) => datamodel::Equation::Scalar(s.clone()),
-        SourceEquation::ApplyToAll(dims, s) => {
-            datamodel::Equation::ApplyToAll(dims.clone(), s.clone())
-        }
-        SourceEquation::Arrayed(dims, elements, default_eq, has_except_default) => {
-            datamodel::Equation::Arrayed(
-                dims.clone(),
-                elements
-                    .iter()
-                    .map(|e| {
-                        (
-                            e.subscript.clone(),
-                            e.equation.clone(),
-                            e.gf_equation.clone(),
-                            e.gf.as_ref().map(source_gf_to_datamodel),
-                        )
-                    })
-                    .collect(),
-                default_eq.clone(),
-                *has_except_default,
-            )
-        }
-    }
-}
-
-/// Reconstruct a `datamodel::Variable` from a `SourceVariable`.
-pub fn reconstruct_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Variable {
+/// The fields the salsa input does not carry -- `documentation`, `ai_state`,
+/// `uid` -- are reconstructed as empty/None: parsing and lowering ignore them,
+/// so their absence is semantically identical to the original datamodel value.
+/// `compat.non_negative`/`can_be_module_input` are taken from the dedicated
+/// scalar input fields (the canonical source for those flags after sync).
+pub fn datamodel_variable_from_source(db: &dyn Db, var: SourceVariable) -> datamodel::Variable {
     let ident = var.ident(db).clone();
-    let equation = source_equation_to_datamodel(var.equation(db));
+    let equation = var.equation(db).clone();
     let units = var.units(db).clone();
     let non_negative = var.non_negative(db);
     let can_be_module_input = var.can_be_module_input(db);
@@ -709,7 +338,7 @@ pub fn reconstruct_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Vari
             equation,
             documentation: String::new(),
             units,
-            gf: var.gf(db).as_ref().map(source_gf_to_datamodel),
+            gf: var.gf(db).clone(),
             ai_state: None,
             uid: None,
             compat,
@@ -719,7 +348,7 @@ pub fn reconstruct_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Vari
             equation,
             documentation: String::new(),
             units,
-            gf: var.gf(db).as_ref().map(source_gf_to_datamodel),
+            gf: var.gf(db).clone(),
             ai_state: None,
             uid: None,
             compat,
@@ -729,14 +358,7 @@ pub fn reconstruct_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Vari
             model_name: var.model_name(db).clone(),
             documentation: String::new(),
             units,
-            references: var
-                .module_refs(db)
-                .iter()
-                .map(|mr| datamodel::ModuleReference {
-                    src: mr.src.clone(),
-                    dst: mr.dst.clone(),
-                })
-                .collect(),
+            references: var.module_refs(db).clone(),
             compat,
             ai_state: None,
             uid: None,
@@ -764,15 +386,18 @@ impl std::fmt::Debug for ParsedVariableResult {
 }
 
 /// Cached units context -- computed once per project, reused across all variables.
-/// Subsumes the per-variable source_units_to_datamodel + source_sim_specs_to_datamodel +
-/// Context::new_with_builtins calls.
+/// Subsumes the per-variable Context::new_with_builtins calls.
+///
+/// Reads the datamodel `Vec<Unit>` and `SimSpecs` directly off the salsa input
+/// (the inputs now store the datamodel types, so no per-call conversion is
+/// needed).
 ///
 /// Unit definition parsing errors are accumulated as diagnostics so they
 /// appear in `collect_all_diagnostics`.
 #[salsa::tracked(returns(ref))]
 pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::units::Context {
-    let dm_units = source_units_to_datamodel(project.units(db));
-    let dm_sim_specs = source_sim_specs_to_datamodel(project.sim_specs(db));
+    let dm_units = project.units(db);
+    let dm_sim_specs = project.sim_specs(db);
     // Construction is partial: keep the context built from the valid unit
     // declarations and surface each conflicting/duplicate declaration as a
     // project-level diagnostic, rather than discarding every unit definition on
@@ -780,8 +405,7 @@ pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::unit
     // project-wide (yr/year, person/people, model-defined equivalences) and
     // re-create a spurious unit-mismatch flood -- the context-layer parallel of
     // the inference partial-results fix (GH #614).
-    let (ctx, unit_parse_errors) =
-        crate::units::Context::new_with_builtins(&dm_units, &dm_sim_specs);
+    let (ctx, unit_parse_errors) = crate::units::Context::new_with_builtins(dm_units, dm_sim_specs);
     for (unit_name, eq_errors) in &unit_parse_errors {
         for eq_err in eq_errors {
             CompilationDiagnostic(Diagnostic {
@@ -800,9 +424,14 @@ pub fn project_units_context(db: &dyn Db, project: SourceProject) -> crate::unit
 }
 
 /// Cached datamodel dimensions -- computed once per project.
+///
+/// The dimensions input now stores `Vec<datamodel::Dimension>` directly, so
+/// this is a clone of the input field. It is retained as a tracked function
+/// so downstream queries (`project_dimensions_context`, `parse_source_variable`)
+/// keep their existing `returns(ref)` dependency edge on it.
 #[salsa::tracked(returns(ref))]
 pub fn project_datamodel_dims(db: &dyn Db, project: SourceProject) -> Vec<datamodel::Dimension> {
-    source_dims_to_datamodel(project.dimensions(db))
+    project.dimensions(db).clone()
 }
 
 /// Cached project-global dimension context -- computed once per project.
@@ -870,7 +499,7 @@ fn parse_source_variable_impl(
             .collect()
     };
     let units_ctx = project_units_context(db, project);
-    let dm_var = reconstruct_variable(db, var);
+    let dm_var = datamodel_variable_from_source(db, var);
     let mut implicit_vars = Vec::new();
     let variable = crate::variable::parse_var_with_module_context(
         &dims,
@@ -915,7 +544,7 @@ fn module_ident_context_for_model<'db>(
     let source_vars = model.variables(db);
     let dm_vars: Vec<datamodel::Variable> = source_vars
         .values()
-        .map(|source_var| reconstruct_variable(db, *source_var))
+        .map(|source_var| datamodel_variable_from_source(db, *source_var))
         .collect();
     // Pre-classification must recognize macro calls as module calls too
     // (so `PREVIOUS(y)` rewrites correctly when `y = MYMACRO(...)`), the
@@ -1863,7 +1492,7 @@ pub fn sync_from_datamodel<'db>(
         let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
         variable_names.sort();
 
-        let model_sim_specs = dm_model.sim_specs.as_ref().map(SourceSimSpecs::from);
+        let model_sim_specs = dm_model.sim_specs.clone();
         let source_model = SourceModel::new(
             db,
             dm_model.name.clone(),
@@ -1919,7 +1548,7 @@ pub fn sync_from_datamodel<'db>(
             full_name.clone(),
             variable_names,
             source_var_map,
-            dm_model.sim_specs.as_ref().map(SourceSimSpecs::from),
+            dm_model.sim_specs.clone(),
             // Stdlib models are not macros (the registry only tracks
             // project macros; stdlib lookup goes through `stdlib_descriptor`).
             None,
@@ -1940,13 +1569,9 @@ pub fn sync_from_datamodel<'db>(
     let source_project = SourceProject::new(
         db,
         project.name.clone(),
-        SourceSimSpecs::from(&project.sim_specs),
-        project
-            .dimensions
-            .iter()
-            .map(SourceDimension::from)
-            .collect(),
-        project.units.iter().map(SourceUnit::from).collect(),
+        project.sim_specs.clone(),
+        project.dimensions.clone(),
+        project.units.clone(),
         model_names,
         source_model_map,
         crate::db::macro_registry::macro_registry_build_error(project),
@@ -1966,14 +1591,14 @@ fn source_variable_from_datamodel(db: &SimlinDb, var: &datamodel::Variable) -> S
 
     let equation = var
         .get_equation()
-        .map(SourceEquation::from)
-        .unwrap_or_else(|| SourceEquation::Scalar(String::new()));
+        .cloned()
+        .unwrap_or_else(|| datamodel::Equation::Scalar(String::new()));
 
     let units = var.get_units().cloned();
 
     let gf = match var {
-        datamodel::Variable::Flow(f) => f.gf.as_ref().map(SourceGraphicalFunction::from),
-        datamodel::Variable::Aux(a) => a.gf.as_ref().map(SourceGraphicalFunction::from),
+        datamodel::Variable::Flow(f) => f.gf.clone(),
+        datamodel::Variable::Aux(a) => a.gf.clone(),
         _ => None,
     };
 
@@ -1988,13 +1613,7 @@ fn source_variable_from_datamodel(db: &SimlinDb, var: &datamodel::Variable) -> S
     };
 
     let (module_refs, referenced_model_name) = match var {
-        datamodel::Variable::Module(m) => (
-            m.references
-                .iter()
-                .map(SourceModuleReference::from)
-                .collect(),
-            m.model_name.clone(),
-        ),
+        datamodel::Variable::Module(m) => (m.references.clone(), m.model_name.clone()),
         _ => (Vec::new(), String::new()),
     };
 
@@ -2048,8 +1667,8 @@ fn update_source_variable(
 
     let new_equation = dm_var
         .get_equation()
-        .map(SourceEquation::from)
-        .unwrap_or_else(|| SourceEquation::Scalar(String::new()));
+        .cloned()
+        .unwrap_or_else(|| datamodel::Equation::Scalar(String::new()));
     if *source_var.equation(&*db) != new_equation {
         source_var.set_equation(db).to(new_equation);
     }
@@ -2065,8 +1684,8 @@ fn update_source_variable(
     }
 
     let new_gf = match dm_var {
-        datamodel::Variable::Flow(f) => f.gf.as_ref().map(SourceGraphicalFunction::from),
-        datamodel::Variable::Aux(a) => a.gf.as_ref().map(SourceGraphicalFunction::from),
+        datamodel::Variable::Flow(f) => f.gf.clone(),
+        datamodel::Variable::Aux(a) => a.gf.clone(),
         _ => None,
     };
     if *source_var.gf(&*db) != new_gf {
@@ -2090,13 +1709,7 @@ fn update_source_variable(
     }
 
     let (new_module_refs, new_model_name) = match dm_var {
-        datamodel::Variable::Module(m) => (
-            m.references
-                .iter()
-                .map(SourceModuleReference::from)
-                .collect(),
-            m.model_name.clone(),
-        ),
+        datamodel::Variable::Module(m) => (m.references.clone(), m.model_name.clone()),
         _ => (Vec::new(), String::new()),
     };
     if *source_var.module_refs(&*db) != new_module_refs {
@@ -2163,21 +1776,17 @@ pub fn sync_from_datamodel_incremental(
         source_project.set_name(db).to(new_name);
     }
 
-    let new_sim_specs = SourceSimSpecs::from(&project.sim_specs);
+    let new_sim_specs = project.sim_specs.clone();
     if *source_project.sim_specs(&*db) != new_sim_specs {
         source_project.set_sim_specs(db).to(new_sim_specs);
     }
 
-    let new_dims: Vec<SourceDimension> = project
-        .dimensions
-        .iter()
-        .map(SourceDimension::from)
-        .collect();
+    let new_dims: Vec<datamodel::Dimension> = project.dimensions.clone();
     if *source_project.dimensions(&*db) != new_dims {
         source_project.set_dimensions(db).to(new_dims);
     }
 
-    let new_units: Vec<SourceUnit> = project.units.iter().map(SourceUnit::from).collect();
+    let new_units: Vec<datamodel::Unit> = project.units.clone();
     if *source_project.units(&*db) != new_units {
         source_project.set_units(db).to(new_units);
     }
@@ -2208,7 +1817,7 @@ pub fn sync_from_datamodel_incremental(
                 source_model.set_name(db).to(dm_model.name.clone());
             }
 
-            let new_model_sim_specs = dm_model.sim_specs.as_ref().map(SourceSimSpecs::from);
+            let new_model_sim_specs = dm_model.sim_specs.clone();
             if *source_model.model_sim_specs(&*db) != new_model_sim_specs {
                 source_model.set_model_sim_specs(db).to(new_model_sim_specs);
             }
@@ -2301,7 +1910,7 @@ pub fn sync_from_datamodel_incremental(
             let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
             variable_names.sort();
 
-            let model_sim_specs = dm_model.sim_specs.as_ref().map(SourceSimSpecs::from);
+            let model_sim_specs = dm_model.sim_specs.clone();
             let source_model = SourceModel::new(
                 &*db,
                 dm_model.name.clone(),
@@ -2358,7 +1967,7 @@ pub fn sync_from_datamodel_incremental(
                 full_name.clone(),
                 variable_names,
                 source_var_map,
-                dm_model.sim_specs.as_ref().map(SourceSimSpecs::from),
+                dm_model.sim_specs.clone(),
                 // Stdlib models are not macros.
                 None,
             );
@@ -2415,10 +2024,10 @@ pub fn sync_from_datamodel_incremental(
 /// must be present in the DimensionsContext for the substitution to work.
 fn expand_maps_to_chains(
     dim_names: &BTreeSet<String>,
-    all_dims: &[SourceDimension],
+    all_dims: &[datamodel::Dimension],
 ) -> BTreeSet<String> {
-    // Dimension display names (`SourceDimension.name`, the as-written casing)
-    // and mapping targets (`maps_to` / `mappings[].target`, which the MDL/XMILE
+    // Dimension display names (`Dimension.name`, the as-written casing) and
+    // mapping targets (`maps_to()` / `mappings[].target`, which the MDL/XMILE
     // importers canonicalize to lowercase) are NOT necessarily the same string,
     // so every reachability comparison and lookup here must be on the canonical
     // form. The returned set is keyed by display name (the caller filters the
@@ -2428,7 +2037,7 @@ fn expand_maps_to_chains(
         .iter()
         .map(|d| (canonicalize(&d.name).into_owned(), d.name.clone()))
         .collect();
-    let dim_map: HashMap<String, &SourceDimension> = all_dims
+    let dim_map: HashMap<String, &datamodel::Dimension> = all_dims
         .iter()
         .map(|d| (canonicalize(&d.name).into_owned(), d))
         .collect();
@@ -2455,7 +2064,7 @@ fn expand_maps_to_chains(
 
         // Forward: follow maps_to and mappings targets from the current dim.
         if let Some(dim) = dim_map.get(&name_canon) {
-            if let Some(ref target) = dim.maps_to {
+            if let Some(target) = dim.maps_to() {
                 push_target(&mut expanded, &mut to_visit, &canonicalize(target));
             }
             for mapping in &dim.mappings {
@@ -2468,8 +2077,7 @@ fn expand_maps_to_chains(
         // so cross-dimension subscript substitution works in builtins_visitor.
         for source_dim in all_dims {
             let maps_to_current = source_dim
-                .maps_to
-                .as_deref()
+                .maps_to()
                 .is_some_and(|t| canonicalize(t) == name_canon)
                 || source_dim
                     .mappings
@@ -2493,9 +2101,9 @@ fn expand_maps_to_chains(
 #[salsa::tracked(returns(ref))]
 pub fn variable_relevant_dimensions(db: &dyn Db, var: SourceVariable) -> BTreeSet<String> {
     match var.equation(db) {
-        SourceEquation::Scalar(_) => BTreeSet::new(),
-        SourceEquation::ApplyToAll(dim_names, _) => dim_names.iter().cloned().collect(),
-        SourceEquation::Arrayed(dim_names, _, _, _) => dim_names.iter().cloned().collect(),
+        datamodel::Equation::Scalar(_) => BTreeSet::new(),
+        datamodel::Equation::ApplyToAll(dim_names, _) => dim_names.iter().cloned().collect(),
+        datamodel::Equation::Arrayed(dim_names, _, _, _) => dim_names.iter().cloned().collect(),
     }
 }
 
@@ -2678,25 +2286,26 @@ pub(crate) fn extract_tables_from_source_var(
     // table by the row-major dimension offset (vm.rs Lookup/LookupArray); see
     // `crate::variable::reorder_arrayed_element_tables`. Elements without a GF
     // get an empty placeholder so that table[element_offset] stays aligned.
-    if let SourceEquation::Arrayed(_, elements, _, _) = eq {
-        let has_element_gfs = elements.iter().any(|e| e.gf.is_some());
+    if let datamodel::Equation::Arrayed(_, elements, _, _) = eq {
+        // The per-element gf is the 4th tuple field
+        // `(subscript, equation, gf_equation, gf)`.
+        let has_element_gfs = elements.iter().any(|(_, _, _, gf)| gf.is_some());
         if has_element_gfs {
             // Parse present element tables, keyed by canonical (comma-joined)
             // subscript name.
             let mut present: HashMap<crate::common::CanonicalElementName, crate::compiler::Table> =
                 HashMap::new();
-            for e in elements {
-                if let Some(gf) = e.gf.as_ref() {
-                    let dm_gf = source_gf_to_datamodel(gf);
-                    if let Some(var_table) =
-                        crate::variable::parse_table(&Some(dm_gf)).ok().flatten()
-                        && let Ok(table) = crate::compiler::Table::new(ident, &var_table)
-                    {
-                        present.insert(
-                            crate::common::CanonicalElementName::from_raw(&e.subscript),
-                            table,
-                        );
-                    }
+            for (subscript, _, _, gf) in elements {
+                if let Some(gf) = gf.as_ref()
+                    && let Some(var_table) = crate::variable::parse_table(&Some(gf.clone()))
+                        .ok()
+                        .flatten()
+                    && let Ok(table) = crate::compiler::Table::new(ident, &var_table)
+                {
+                    present.insert(
+                        crate::common::CanonicalElementName::from_raw(subscript),
+                        table,
+                    );
                 }
             }
 
@@ -2708,9 +2317,9 @@ pub(crate) fn extract_tables_from_source_var(
             if dims.is_empty() {
                 return elements
                     .iter()
-                    .map(|e| {
+                    .map(|(subscript, _, _, _)| {
                         present
-                            .get(&crate::common::CanonicalElementName::from_raw(&e.subscript))
+                            .get(&crate::common::CanonicalElementName::from_raw(subscript))
                             .cloned()
                             .unwrap_or(crate::compiler::Table { data: vec![] })
                     })
@@ -2728,15 +2337,12 @@ pub(crate) fn extract_tables_from_source_var(
     // Scalar or apply-to-all: use the variable-level graphical function.
     let gf = source_var.gf(db);
     match gf {
-        Some(sgf) => {
-            let dm_gf = source_gf_to_datamodel(sgf);
-            crate::variable::parse_table(&Some(dm_gf))
-                .ok()
-                .flatten()
-                .and_then(|vt| crate::compiler::Table::new(ident, &vt).ok())
-                .into_iter()
-                .collect()
-        }
+        Some(gf) => crate::variable::parse_table(&Some(gf.clone()))
+            .ok()
+            .flatten()
+            .and_then(|vt| crate::compiler::Table::new(ident, &vt).ok())
+            .into_iter()
+            .collect(),
         None => vec![],
     }
 }
@@ -5198,11 +4804,9 @@ pub fn assemble_simulation(
     let specs = if let Some(source_model) = project_models.get(main_model_canonical.as_ref())
         && let Some(ref model_specs) = *source_model.model_sim_specs(db)
     {
-        let sim_specs_dm = source_sim_specs_to_datamodel(model_specs);
-        crate::vm::Specs::from(&sim_specs_dm)
+        crate::vm::Specs::from(model_specs)
     } else {
-        let sim_specs_dm = source_sim_specs_to_datamodel(project.sim_specs(db));
-        crate::vm::Specs::from(&sim_specs_dm)
+        crate::vm::Specs::from(project.sim_specs(db))
     };
 
     // Compute flattened offsets for variable name -> offset mapping
@@ -5658,8 +5262,6 @@ pub fn compile_project_incremental(
 
 #[cfg(test)]
 mod combined_fragment_tests;
-#[cfg(test)]
-mod conversion_tests;
 #[cfg(test)]
 mod diagnostic_tests;
 #[cfg(test)]

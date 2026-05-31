@@ -1454,7 +1454,7 @@ pub(crate) fn array_producing_vars(
 /// per-variable lowering the production caller
 /// `crate::db::compile_var_fragment` runs -- with the caller-owned,
 /// lowering-independent context constructed byte-identically to that
-/// caller (same helpers, same order: `source_dims_to_datamodel` ->
+/// caller (same helpers, same order: `project_datamodel_dims` ->
 /// `DimensionsContext`/`Dimension`, `model.name`, `model_module_map`)
 /// and the default no-module-input wiring `dt_cycle_sccs` uses
 /// (`build_var_info(.., &[])` => `is_root = true`, empty module inputs).

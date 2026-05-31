@@ -1136,7 +1136,7 @@ impl Dimension {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, salsa::Update)]
 pub struct Unit {
     pub name: String,
     pub equation: Option<String>,

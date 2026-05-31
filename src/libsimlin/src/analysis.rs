@@ -785,8 +785,8 @@ pub(crate) fn rel_loop_score_series(
 /// `Specs` cannot be looked up through a single salsa query (the spec input
 /// is split between `SourceProject::sim_specs` and `SourceModel::model_sim_specs`,
 /// the per-model override path `assemble_simulation` takes); we mirror its
-/// branch here through `engine::db::source_sim_specs_to_datamodel` →
-/// `engine::SimSpecs::from`.  The shape mirrors `Vm::into_results()`:
+/// branch here, reading the chosen `datamodel::SimSpecs` off the input and
+/// building `engine::SimSpecs::from` it.  The shape mirrors `Vm::into_results()`:
 /// `offsets` is the layout's canonical-name → slot map, `step_size` is
 /// `n_slots`, `step_count` is `slab.len() / n_slots`, `is_vensim` is false.
 /// Neither analytic core (`analyze_links_core`, `rel_loop_score_series`)
@@ -836,15 +836,16 @@ pub(crate) fn results_from_layout_and_slab(
         .map(|(name, off)| (Ident::<Canonical>::new(name), *off))
         .collect();
 
-    // Mirror `assemble_simulation`'s `Specs` branch (db.rs:5173-5183): prefer
-    // the per-model override when present, else fall back to the project-level
-    // default.  Neither analytic core reads `Specs`, but the field must be
-    // present and structurally valid.
+    // Mirror `assemble_simulation`'s `Specs` branch: prefer the per-model
+    // override when present, else fall back to the project-level default.  The
+    // salsa inputs now store `datamodel::SimSpecs` directly, so we read the
+    // chosen one off the input and build `Specs` from it.  Neither analytic core
+    // reads `Specs`, but the field must be present and structurally valid.
     let specs_dm = match model.model_sim_specs(db) {
-        Some(ms) => engine::db::source_sim_specs_to_datamodel(ms),
-        None => engine::db::source_sim_specs_to_datamodel(project.sim_specs(db)),
+        Some(ms) => ms,
+        None => project.sim_specs(db),
     };
-    let specs = engine::SimSpecs::from(&specs_dm);
+    let specs = engine::SimSpecs::from(specs_dm);
 
     Ok(engine::Results {
         offsets,

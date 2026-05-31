@@ -356,27 +356,21 @@ fn test_dimension_invalidation_maps_to_chain() {
 // ── expand_maps_to_chains: canonical-vs-display reachability (GH #580 Bug A) ──
 
 mod expand_maps_to_chains_tests {
-    use super::super::{
-        SourceDimension, SourceDimensionElements, SourceDimensionMapping, expand_maps_to_chains,
-    };
+    use super::super::expand_maps_to_chains;
+    use crate::datamodel::{Dimension, DimensionMapping};
     use std::collections::BTreeSet;
 
-    fn named(name: &str, elements: &[&str]) -> SourceDimension {
-        SourceDimension {
-            name: name.to_string(),
-            elements: SourceDimensionElements::Named(
-                elements.iter().map(|s| s.to_string()).collect(),
-            ),
-            maps_to: None,
-            mappings: vec![],
-            parent: None,
-        }
+    fn named(name: &str, elements: &[&str]) -> Dimension {
+        Dimension::named(
+            name.to_string(),
+            elements.iter().map(|s| s.to_string()).collect(),
+        )
     }
 
     /// Reverse reachability: a variable subscripted by the *target* dimension
     /// must pull the mapping *source* into the set so cross-dimension subscript
-    /// substitution can see it. `SourceDimension.name` keeps the as-written
-    /// display casing while the importers store `mappings[].target` canonical
+    /// substitution can see it. `Dimension.name` keeps the as-written display
+    /// casing while the importers store `mappings[].target` canonical
     /// (lowercase), so the reverse pass must compare on the canonical form --
     /// before the GH #580 Bug A fix the raw `==` here dropped the source
     /// dimension, leaving the bare full-dimension subscript that lowered to
@@ -385,7 +379,7 @@ mod expand_maps_to_chains_tests {
     fn reverse_pulls_in_group_mapped_source_despite_case_skew() {
         // `Small` (display) maps to `big` (canonical target) as a group mapping.
         let mut small = named("Small", &["s1", "s2"]);
-        small.mappings = vec![SourceDimensionMapping {
+        small.mappings = vec![DimensionMapping {
             target: "big".to_string(), // canonical, as the MDL/XMILE importers store it
             element_map: vec![
                 ("s1".to_string(), "e1".to_string()),
@@ -415,7 +409,7 @@ mod expand_maps_to_chains_tests {
     #[test]
     fn forward_pulls_in_target_resolved_to_display_name() {
         let mut small = named("Small", &["s1", "s2"]);
-        small.mappings = vec![SourceDimensionMapping {
+        small.mappings = vec![DimensionMapping {
             target: "big".to_string(),
             element_map: vec![],
         }];
@@ -456,7 +450,7 @@ mod expand_maps_to_chains_tests {
     #[test]
     fn reverse_pulls_in_maps_to_source_despite_case_skew() {
         let mut child = named("Child", &["c1", "c2"]);
-        child.maps_to = Some("parent".to_string()); // canonical
+        child.set_maps_to("parent".to_string()); // canonical
         let parent = named("Parent", &["p1", "p2"]);
         let all = [parent, child];
 

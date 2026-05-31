@@ -41,7 +41,7 @@ use salsa::Accumulator;
 use crate::datamodel;
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceProject,
-    SourceVariable, reconstruct_variable,
+    SourceVariable, datamodel_variable_from_source,
 };
 
 /// The result of building the per-project macro registry: the (possibly
@@ -164,7 +164,7 @@ pub(crate) fn project_macro_registry(db: &dyn Db, project: SourceProject) -> Mac
         let variables: Vec<datamodel::Variable> = source_model
             .variables(db)
             .values()
-            .map(|sv| reconstruct_variable(db, *sv))
+            .map(|sv| datamodel_variable_from_source(db, *sv))
             .collect();
         models.push(datamodel::Model {
             name: source_model.name(db).clone(),
