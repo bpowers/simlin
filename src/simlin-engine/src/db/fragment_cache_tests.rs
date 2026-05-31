@@ -1750,3 +1750,166 @@ fn test_is_root_shift_machineries_in_lockstep() {
         Some(crate::vm::IMPLICIT_VAR_COUNT)
     );
 }
+
+/// One-shot stdlib injection: the stdlib `SourceModel`/`SourceVariable` salsa
+/// inputs are built EXACTLY ONCE per `SimlinDb` session and reused unchanged on
+/// every subsequent sync. This is the key win of `SimlinDb::stdlib_models`: if
+/// a stdlib handle changed across a sync, salsa would treat the stdlib model as
+/// modified and re-run every query that depends on it -- e.g. a SMOOTH
+/// instantiation's compiled fragment -- on every unrelated user edit.
+///
+/// We prove it two ways across an unrelated edit (changing `aaa`, not the
+/// SMOOTH-using `smoothed`):
+///   1. the `stdlib⁚smth3` `SourceModel` handle id is identical, and
+///      every stdlib variable handle id is identical; and
+///   2. a stdlib variable's compiled fragment query is a pointer-equal cache
+///      hit (salsa never re-ran it because none of its stdlib inputs changed).
+#[test]
+fn test_stdlib_inputs_are_one_shot_and_stable_across_syncs() {
+    use crate::canonicalize;
+
+    let mut db = SimlinDb::default();
+    let project = datamodel::Project {
+        name: "stdlib_one_shot".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        source: None,
+        ai_information: None,
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                scalar_aux("aaa", "time * 2"),
+                // SMTH3 instantiates the `stdlib⁚smth3` module, so the synced
+                // project carries the stdlib SourceModel/SourceVariable inputs.
+                scalar_aux("smoothed", "SMTH3(aaa, 5)"),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+    };
+
+    let smth3_key = canonicalize("stdlib\u{205A}smth3").into_owned();
+
+    // First sync (fresh path -- builds the one-shot stdlib cache).
+    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+
+    // Capture the stdlib model + variable handle ids and a stable pointer for
+    // one stdlib variable's compiled fragment query.
+    let (smth3_model_id_before, stdlib_var_ids_before, frag1, frag_ptr_before, delay_time_var) = {
+        let sync1 = state1.to_sync_result();
+        let smth3 = sync1
+            .models
+            .get(&smth3_key)
+            .expect("stdlib⁚smth3 must be present after a SMTH3 instantiation");
+        assert!(
+            smth3.is_stdlib,
+            "the stdlib entry must be flagged is_stdlib"
+        );
+
+        let mut var_ids: Vec<(String, salsa::Id)> = smth3
+            .variables
+            .iter()
+            .map(|(name, sv)| (name.clone(), sv.id.as_id()))
+            .collect();
+        var_ids.sort();
+
+        let delay_time_var = smth3
+            .variables
+            .get(&canonicalize("delay_time").into_owned())
+            .expect("smth3 has a delay_time variable")
+            .source;
+
+        let frag = compile_var_fragment(
+            &db,
+            delay_time_var,
+            smth3.source,
+            sync1.project,
+            ModuleInputSet::empty(&db),
+        );
+        assert!(frag.is_some(), "stdlib variable fragment should compile");
+
+        (
+            smth3.source.as_id(),
+            var_ids,
+            frag.as_ref().unwrap().fragment.clone(),
+            frag as *const _,
+            delay_time_var,
+        )
+    };
+
+    // An unrelated edit: change `aaa` only. The stdlib models are untouched.
+    let mut project2 = project.clone();
+    project2.models[0].variables[0] = scalar_aux("aaa", "time * 3");
+
+    let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
+    let sync2 = state2.to_sync_result();
+    let smth3_after = sync2
+        .models
+        .get(&smth3_key)
+        .expect("stdlib⁚smth3 must still be present after the edit");
+
+    // (1) The stdlib SourceModel handle is byte-identical across syncs.
+    assert_eq!(
+        smth3_model_id_before,
+        smth3_after.source.as_id(),
+        "the stdlib⁚smth3 SourceModel handle must be the SAME salsa input \
+         across syncs -- otherwise salsa re-creates (and invalidates) it"
+    );
+
+    // ...and every stdlib variable handle id is identical too.
+    let mut var_ids_after: Vec<(String, salsa::Id)> = smth3_after
+        .variables
+        .iter()
+        .map(|(name, sv)| (name.clone(), sv.id.as_id()))
+        .collect();
+    var_ids_after.sort();
+    assert_eq!(
+        stdlib_var_ids_before, var_ids_after,
+        "every stdlib variable handle must be stable across syncs"
+    );
+
+    // (2) The stdlib variable's compiled-fragment query is a pointer-equal
+    // cache hit: salsa did not re-run it, because none of its (stdlib) inputs
+    // changed when only the unrelated user variable `aaa` was edited.
+    let delay_time_var_after = smth3_after
+        .variables
+        .get(&canonicalize("delay_time").into_owned())
+        .expect("smth3 still has a delay_time variable")
+        .source;
+    assert_eq!(
+        delay_time_var.as_id(),
+        delay_time_var_after.as_id(),
+        "the stdlib delay_time SourceVariable handle must be stable"
+    );
+
+    let frag2 = compile_var_fragment(
+        &db,
+        delay_time_var_after,
+        smth3_after.source,
+        sync2.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert!(frag2.is_some());
+    assert_eq!(
+        frag1,
+        frag2.as_ref().unwrap().fragment,
+        "the stdlib variable fragment must be unchanged across an unrelated edit"
+    );
+    assert_eq!(
+        frag_ptr_before, frag2 as *const _,
+        "the stdlib variable fragment query must be a pointer-equal cache hit \
+         across an unrelated user edit -- proving the stdlib salsa inputs are \
+         stable and never re-created"
+    );
+}

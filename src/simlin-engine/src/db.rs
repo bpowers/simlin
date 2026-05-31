@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 use salsa::Accumulator;
 use salsa::plumbing::AsId;
@@ -76,6 +77,44 @@ pub struct SimlinDb {
     /// parallel query execution, which uses a shared `&`), so no interior
     /// mutability is required.
     sync_state: Option<PersistentSyncState>,
+    /// The immutable stdlib model inputs (SMOOTH/DELAY/TREND/systems_*),
+    /// built EXACTLY ONCE per db session and reused by every sync.
+    ///
+    /// Stdlib models never change, so re-walking `crate::stdlib::MODEL_NAMES`
+    /// (with its per-name `format!`/`canonicalize`/`get`) and re-creating the
+    /// `SourceModel`/`SourceVariable` salsa inputs on every sync is pure
+    /// overhead on the interactive edit/sync hot path. Building the inputs once
+    /// and splicing the cached `PersistentModelState` handles into each synced
+    /// project keeps the stdlib salsa input handles IDENTICAL across syncs, so
+    /// salsa treats them as unchanged and never invalidates a query that
+    /// depends on a stdlib model (e.g. a SMOOTH instantiation's compiled
+    /// fragment stays cached across unrelated user edits).
+    ///
+    /// `OnceLock` (not the `&mut self`-only `sync_state` pattern) is required
+    /// because the fresh `sync_from_datamodel` path holds only `&db`; the
+    /// salsa inputs are created during the one-time init, which needs only the
+    /// same shared `&db` salsa-input creation uses elsewhere. `OnceLock` is
+    /// `Sync` (unlike `std::cell::OnceCell`), preserving the `SimlinDb: Sync`
+    /// bound salsa's parallel query execution requires.
+    stdlib_models: OnceLock<Arc<StdlibModels>>,
+}
+
+/// The one-shot stdlib salsa-input cache held by `SimlinDb::stdlib_models`.
+///
+/// Built once from `crate::stdlib::MODEL_NAMES`; thereafter both sync paths
+/// splice these handles in without re-walking `MODEL_NAMES` or re-doing the
+/// `format!`/`canonicalize`/`crate::stdlib::get` work.
+struct StdlibModels {
+    /// Canonical name -> the stdlib model's persistent handles
+    /// (`model_interned_id`, `source_model`, per-variable handles,
+    /// `is_stdlib == true`). Cloned into each synced project's model map.
+    by_canonical: HashMap<String, PersistentModelState>,
+    /// `(canonical name, display "stdlib\u{205A}{name}")` pairs in
+    /// `MODEL_NAMES` order. Splicing iterates this so the stdlib display names
+    /// are appended to `model_names` in the same order the old per-sync walk
+    /// produced (preserving the byte-identical ordering downstream consumers
+    /// see).
+    ordered: Vec<(String, String)>,
 }
 
 #[salsa::db]
@@ -129,6 +168,21 @@ impl SimlinDb {
     /// The `SourceProject` from the most recent sync, if any.
     pub fn current_source_project(&self) -> Option<SourceProject> {
         self.sync_state.as_ref().map(|s| s.project)
+    }
+
+    /// Get the one-shot stdlib model cache, building it the first time it is
+    /// needed and reusing it on every subsequent sync.
+    ///
+    /// The build creates the stdlib `SourceModel`/`SourceVariable` salsa inputs
+    /// exactly as the old per-sync walk did, but only once: the returned
+    /// `PersistentModelState` handles are stable for the db's lifetime, so
+    /// salsa never re-creates (and hence never invalidates) a stdlib input.
+    /// Takes `&self` (not `&mut self`) so the fresh `sync_from_datamodel` path,
+    /// which holds only `&db`, can build the cache too; salsa-input creation
+    /// only needs a shared `&db`.
+    fn stdlib_models(&self) -> &Arc<StdlibModels> {
+        self.stdlib_models
+            .get_or_init(|| Arc::new(build_stdlib_models(self)))
     }
 }
 
@@ -1440,6 +1494,37 @@ pub struct PersistentModelState {
     pub is_stdlib: bool,
 }
 
+impl PersistentModelState {
+    /// Reconstitute a `SyncedModel<'db>` from the lifetime-erased handles.
+    ///
+    /// Used both by `PersistentSyncState::to_sync_result` and by the fresh
+    /// `sync_from_datamodel` path when splicing the cached stdlib models into
+    /// the returned `SyncResult`. The `'db` lifetime is tied to the database
+    /// reference used when re-interning the `ModelId`/`VariableId` ids.
+    fn to_synced_model<'db>(&self) -> SyncedModel<'db> {
+        use salsa::plumbing::FromId;
+        let variables = self
+            .variables
+            .iter()
+            .map(|(vname, pv)| {
+                (
+                    vname.clone(),
+                    SyncedVariable {
+                        id: VariableId::from_id(pv.var_interned_id),
+                        source: pv.source_var,
+                    },
+                )
+            })
+            .collect();
+        SyncedModel {
+            id: ModelId::from_id(self.model_interned_id),
+            source: self.source_model,
+            variables,
+            is_stdlib: self.is_stdlib,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PersistentVariableState {
     /// Lifetime-erased `VariableId<'db>` (interned, carries `'db`)
@@ -1454,36 +1539,12 @@ impl PersistentSyncState {
     /// handles from the database, so the `'db` lifetime is tied to the
     /// database reference used when interning.
     pub fn to_sync_result(&self) -> SyncResult<'_> {
-        use salsa::plumbing::FromId;
         SyncResult {
             project: self.project,
             models: self
                 .models
                 .iter()
-                .map(|(name, pm)| {
-                    let variables = pm
-                        .variables
-                        .iter()
-                        .map(|(vname, pv)| {
-                            (
-                                vname.clone(),
-                                SyncedVariable {
-                                    id: VariableId::from_id(pv.var_interned_id),
-                                    source: pv.source_var,
-                                },
-                            )
-                        })
-                        .collect();
-                    (
-                        name.clone(),
-                        SyncedModel {
-                            id: ModelId::from_id(pm.model_interned_id),
-                            source: pm.source_model,
-                            variables,
-                            is_stdlib: pm.is_stdlib,
-                        },
-                    )
-                })
+                .map(|(name, pm)| (name.clone(), pm.to_synced_model()))
                 .collect(),
         }
     }
@@ -1544,6 +1605,69 @@ fn macro_declarations_from_datamodel(
         .iter()
         .map(|m| (canonicalize(&m.name).into_owned(), m.macro_spec.clone()))
         .collect()
+}
+
+/// Build the immutable stdlib model inputs ONCE, for `SimlinDb::stdlib_models`.
+///
+/// Creates a `SourceModel`/`SourceVariable` salsa input set for every
+/// `crate::stdlib::MODEL_NAMES` entry (SMOOTH/DELAY/TREND/systems_*), exactly
+/// as the old per-sync stdlib loop did, returning the lifetime-erased
+/// `PersistentModelState` handles keyed by canonical name plus the ordered
+/// `(canonical, display)` name list. Stdlib models are never macros (the
+/// registry only tracks project macros; stdlib lookup goes through
+/// `stdlib_descriptor`), so each `macro_spec` is `None`.
+fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
+    let mut by_canonical: HashMap<String, PersistentModelState> = HashMap::new();
+    let mut ordered: Vec<(String, String)> = Vec::with_capacity(crate::stdlib::MODEL_NAMES.len());
+
+    for stdlib_name in crate::stdlib::MODEL_NAMES {
+        let full_name = format!("stdlib\u{205A}{stdlib_name}");
+        let canonical = canonicalize(&full_name).into_owned();
+        let dm_model = crate::stdlib::get(stdlib_name).unwrap();
+
+        let model_id = ModelId::new(db, canonical.clone());
+        let mut variables = HashMap::new();
+        let mut source_var_map = HashMap::new();
+        for dm_var in &dm_model.variables {
+            let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
+            let var_id = VariableId::new(db, canonical_var_name.clone());
+            let source_var = source_variable_from_datamodel(db, dm_var);
+            source_var_map.insert(canonical_var_name.clone(), source_var);
+            variables.insert(
+                canonical_var_name,
+                PersistentVariableState {
+                    var_interned_id: var_id.as_id(),
+                    source_var,
+                },
+            );
+        }
+        let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
+        variable_names.sort();
+        let source_model = SourceModel::new(
+            db,
+            full_name.clone(),
+            variable_names,
+            source_var_map,
+            dm_model.sim_specs.clone(),
+            None,
+        );
+
+        by_canonical.insert(
+            canonical.clone(),
+            PersistentModelState {
+                model_interned_id: model_id.as_id(),
+                source_model,
+                variables,
+                is_stdlib: true,
+            },
+        );
+        ordered.push((canonical, full_name));
+    }
+
+    StdlibModels {
+        by_canonical,
+        ordered,
+    }
 }
 
 /// Populate salsa inputs from a `datamodel::Project`.
@@ -1609,55 +1733,24 @@ pub fn sync_from_datamodel<'db>(
         );
     }
 
-    // Add stdlib models so incremental compilation can find them
-    // when resolving implicit module references (DELAY, SMOOTH, etc.).
+    // Splice in the db's one-shot stdlib models so incremental compilation can
+    // find them when resolving implicit module references (DELAY, SMOOTH,
+    // etc.). The handles are built once per db session and reused on every
+    // sync, so salsa never re-creates a stdlib input (see
+    // `SimlinDb::stdlib_models`). A user model whose canonical name collides
+    // with a stdlib name shadows it (preserving the prior `contains_key`
+    // precedence). Stdlib display names are appended after the user names, in
+    // `MODEL_NAMES` order.
     let mut model_names = model_names;
-    for stdlib_name in crate::stdlib::MODEL_NAMES {
-        let full_name = format!("stdlib\u{205A}{stdlib_name}");
-        let canonical = canonicalize(&full_name).into_owned();
-        if source_model_map.contains_key(&canonical) {
+    let stdlib = db.stdlib_models();
+    for (canonical, full_name) in &stdlib.ordered {
+        if source_model_map.contains_key(canonical) {
             continue;
         }
-        let dm_model = crate::stdlib::get(stdlib_name).unwrap();
-        let model_id = ModelId::new(db, canonical.clone());
-        let mut variables = HashMap::new();
-        let mut source_var_map = HashMap::new();
-        for dm_var in &dm_model.variables {
-            let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
-            let var_id = VariableId::new(db, canonical_var_name.clone());
-            let source_var = source_variable_from_datamodel(db, dm_var);
-            source_var_map.insert(canonical_var_name.clone(), source_var);
-            variables.insert(
-                canonical_var_name,
-                SyncedVariable {
-                    id: var_id,
-                    source: source_var,
-                },
-            );
-        }
-        let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
-        variable_names.sort();
-        let source_model = SourceModel::new(
-            db,
-            full_name.clone(),
-            variable_names,
-            source_var_map,
-            dm_model.sim_specs.clone(),
-            // Stdlib models are not macros (the registry only tracks
-            // project macros; stdlib lookup goes through `stdlib_descriptor`).
-            None,
-        );
-        source_model_map.insert(canonical.clone(), source_model);
-        models.insert(
-            canonical,
-            SyncedModel {
-                id: model_id,
-                source: source_model,
-                variables,
-                is_stdlib: true,
-            },
-        );
-        model_names.push(full_name);
+        let pm = &stdlib.by_canonical[canonical];
+        source_model_map.insert(canonical.clone(), pm.source_model);
+        models.insert(canonical.clone(), pm.to_synced_model());
+        model_names.push(full_name.clone());
     }
 
     let source_project = SourceProject::new(
@@ -2027,64 +2120,32 @@ pub fn sync_from_datamodel_incremental(
         }
     }
 
-    // Add stdlib models, reusing prev_state handles when available so
-    // salsa recognizes unchanged stdlib inputs.
-    for stdlib_name in crate::stdlib::MODEL_NAMES {
-        let full_name = format!("stdlib\u{205A}{stdlib_name}");
-        let canonical = canonicalize(&full_name).into_owned();
-        if new_models.contains_key(&canonical) {
+    // Splice in the db's one-shot stdlib models. The handles were built once
+    // per db session (see `SimlinDb::stdlib_models`) and are reused on every
+    // sync, so salsa never re-creates a stdlib input -- a SMOOTH/DELAY
+    // instantiation's compiled fragment stays cached across unrelated user
+    // edits. The `Arc` is cloned to release the `&db` borrow before the
+    // `&mut db` salsa setters below. A user model whose canonical name collides
+    // with a stdlib name shadows it (preserving the prior `contains_key`
+    // precedence).
+    let stdlib = Arc::clone(db.stdlib_models());
+    for (canonical, _full_name) in &stdlib.ordered {
+        if new_models.contains_key(canonical) {
             continue;
         }
-        if let Some(prev_model) = prev.models.get(&canonical).filter(|pm| pm.is_stdlib) {
-            new_models.insert(canonical, prev_model.clone());
-        } else {
-            let dm_model = crate::stdlib::get(stdlib_name).unwrap();
-            let model_id = ModelId::new(&*db, canonical.clone());
-            let mut new_vars = HashMap::new();
-            let mut source_var_map = HashMap::new();
-            for dm_var in &dm_model.variables {
-                let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
-                let var_id = VariableId::new(&*db, canonical_var_name.clone());
-                let source_var = source_variable_from_datamodel(&*db, dm_var);
-                source_var_map.insert(canonical_var_name.clone(), source_var);
-                new_vars.insert(
-                    canonical_var_name,
-                    PersistentVariableState {
-                        var_interned_id: var_id.as_id(),
-                        source_var,
-                    },
-                );
-            }
-            let mut variable_names: Vec<String> = source_var_map.keys().cloned().collect();
-            variable_names.sort();
-            let source_model = SourceModel::new(
-                &*db,
-                full_name.clone(),
-                variable_names,
-                source_var_map,
-                dm_model.sim_specs.clone(),
-                // Stdlib models are not macros.
-                None,
-            );
-            new_models.insert(
-                canonical,
-                PersistentModelState {
-                    model_interned_id: model_id.as_id(),
-                    source_model,
-                    variables: new_vars,
-                    is_stdlib: true,
-                },
-            );
-        }
+        // Cloning copies the stable stdlib salsa handles, NOT the underlying
+        // inputs, so every synced project shares the identical stdlib inputs.
+        new_models.insert(canonical.clone(), stdlib.by_canonical[canonical].clone());
     }
 
-    // Update model_names to include stdlib
+    // Update model_names to include stdlib. The display name is pushed for
+    // every stdlib canonical now present in `new_models` (preserving the prior
+    // behavior, where a user model shadowing a stdlib canonical still emits the
+    // stdlib display name -- an extreme edge case kept byte-identical).
     let mut new_model_names: Vec<String> = project.models.iter().map(|m| m.name.clone()).collect();
-    for stdlib_name in crate::stdlib::MODEL_NAMES {
-        let full_name = format!("stdlib\u{205A}{stdlib_name}");
-        let canonical = canonicalize(&full_name).into_owned();
-        if new_models.contains_key(&canonical) {
-            new_model_names.push(full_name);
+    for (canonical, full_name) in &stdlib.ordered {
+        if new_models.contains_key(canonical) {
+            new_model_names.push(full_name.clone());
         }
     }
     if *source_project.model_names(&*db) != new_model_names {
