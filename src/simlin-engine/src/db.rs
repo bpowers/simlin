@@ -34,8 +34,9 @@ use std::collections::BTreeSet;
 // * `assemble`   -- module/simulation assembly + flattened-offset map.
 // * `dep_graph`  -- the dependency-graph cycle gate + its result types.
 // * `analysis`   -- causal-graph analysis tracked functions.
-// * `ltm` / `ltm_ir` / `macro_registry` / `units` -- LTM, the reference-site
-//   IR, the macro registry, and the unit-check pass.
+// * `ltm` / `ltm_ir` / `macro_registry` / `units` -- LTM (a `ltm/` directory:
+//   mod/parse/compile/loops/link_scores), the reference-site IR, the macro
+//   registry, and the unit-check pass.
 mod dep_graph;
 #[cfg(test)]
 mod element_graph_proptest;
