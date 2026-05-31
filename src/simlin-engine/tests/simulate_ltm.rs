@@ -8128,7 +8128,7 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
     // the `loop_score` matches one of the two products, consistently across
     // steps, and that it is non-zero somewhere. (The "scored on the un-trimmed
     // aggregate path" invariant proper is exercised exhaustively by
-    // `db_ltm_unified_tests::cross_element_loop_through_agg_is_recovered`,
+    // `db::ltm_unified_tests::cross_element_loop_through_agg_is_recovered`,
     // where the aggregate-path loop is a Loop in its own right rather than a
     // strongest-path candidate. Before GH #517 was fixed the bare-numerator
     // link score was identically `0.0` -- `pop / SUM(PREVIOUS(pop[*]))` -- so

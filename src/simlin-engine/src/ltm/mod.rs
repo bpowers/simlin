@@ -23,7 +23,7 @@
 //!   together: model adjacency, stock identity, variable AST references
 //!   for polarity, and recursively-built sub-graphs for dynamic
 //!   modules. Owns the elementary-circuit / cycle-partition / link-
-//!   polarity surface that callers like `db_analysis` and `ltm_finding`
+//!   polarity surface that callers like `db::analysis` and `ltm_finding`
 //!   consume.
 
 use crate::common::Result;
@@ -51,12 +51,12 @@ pub(crate) use partitions::loop_dimension_element_tuples;
 pub(crate) use types::normalize_module_ref;
 
 // Shared SCC primitive over an `Ident`-keyed adjacency list. Used in
-// production by the `db_dep_graph.rs` element-cycle refinement
+// production by the `db/dep_graph.rs` element-cycle refinement
 // (`resolve_recurrence_sccs` -- single-variable self-recurrence
 // resolution in the dt AND init cycle gates, which calls it over both
 // the whole-variable phase adjacency and each SCC's induced element
 // graph), plus the `#[cfg(test)]` dt-phase cycle accessor
-// (`crate::db_dep_graph::dt_cycle_sccs`).
+// (`crate::db::dep_graph::dt_cycle_sccs`).
 pub(crate) use indexed::scc_components;
 
 /// Maximum number of nodes in any single strongly-connected component
@@ -213,7 +213,7 @@ pub(crate) fn canonical_rotation<T: Ord + Clone>(circuit: &[T]) -> Vec<T> {
 /// `"population[nyc]"` -> `"population"`; multi-dimensional subscripts
 /// like `"x[nyc,boston]"` also collapse to `"x"` (the last `[` is the
 /// truncation point); a name without `[` is returned unchanged. Shared
-/// by the loop builder (`db::db_ltm`) and the LTM equation generators
+/// by the loop builder (`db::ltm`) and the LTM equation generators
 /// (`ltm_augment`), which both operate on these element-level
 /// identifier strings.
 pub(crate) fn strip_subscript(name: &str) -> &str {

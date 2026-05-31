@@ -495,9 +495,8 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
 
     // Use salsa db for dependency lookup
     let db_locked = (*model_ref.project).db.lock().unwrap();
-    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
-    let sync = match sync_state.as_ref() {
-        Some(s) => s.to_sync_result(),
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
         None => {
             store_error(
                 out_error,
@@ -508,8 +507,11 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
     };
 
     let canonical_model = canonicalize(&model_ref.model_name);
-    let synced_model = match sync.models.get(canonical_model.as_ref()) {
-        Some(m) => m,
+    let source_model = match source_project
+        .models(&*db_locked)
+        .get(canonical_model.as_ref())
+    {
+        Some(m) => *m,
         None => {
             store_error(
                 out_error,
@@ -520,8 +522,8 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
-    let source_var = match synced_model.variables.get(var_name.as_ref()) {
-        Some(sv) => sv.source,
+    let source_var = match source_model.variables(&*db_locked).get(var_name.as_ref()) {
+        Some(sv) => *sv,
         None => {
             store_error(
                 out_error,
@@ -534,11 +536,21 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
-    let var_deps = engine::db::variable_direct_dependencies(&*db_locked, source_var, sync.project);
+    // The empty module-ident context and empty input set reproduce the old
+    // no-arg `variable_direct_dependencies` default path.
+    let empty_ctx = engine::db::ModuleIdentContext::new(&*db_locked, vec![]);
+    let empty_inputs = engine::db::ModuleInputSet::empty(&*db_locked);
+    let var_deps = engine::db::variable_direct_dependencies(
+        &*db_locked,
+        source_var,
+        source_project,
+        empty_ctx,
+        empty_inputs,
+    );
     // Combine dt and initial deps from the variable itself plus any
     // implicit variables. Implicit vars arise from SMOOTH/DELAY expansion
     // and carry the transitive public deps we need.
-    let source_vars = synced_model.source.variables(&*db_locked);
+    let source_vars = source_model.variables(&*db_locked);
     let mut all_deps = std::collections::BTreeSet::new();
     for dep in var_deps.dt_deps.iter().chain(var_deps.initial_deps.iter()) {
         all_deps.insert(dep.clone());
@@ -633,9 +645,8 @@ pub unsafe extern "C" fn simlin_model_get_links(
     };
     // Use salsa db for causal edge extraction
     let db_locked = (*model_ref.project).db.lock().unwrap();
-    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
-    let sync = match sync_state.as_ref() {
-        Some(s) => s.to_sync_result(),
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
         None => {
             store_error(
                 out_error,
@@ -646,8 +657,11 @@ pub unsafe extern "C" fn simlin_model_get_links(
     };
 
     let canonical_model = canonicalize(&model_ref.model_name);
-    let synced_model = match sync.models.get(canonical_model.as_ref()) {
-        Some(m) => m,
+    let source_model = match source_project
+        .models(&*db_locked)
+        .get(canonical_model.as_ref())
+    {
+        Some(m) => *m,
         None => {
             store_error(
                 out_error,
@@ -658,7 +672,7 @@ pub unsafe extern "C" fn simlin_model_get_links(
         }
     };
 
-    let causal = engine::db::model_causal_edges(&*db_locked, synced_model.source, sync.project);
+    let causal = engine::db::model_causal_edges(&*db_locked, source_model, source_project);
 
     // Convert edges HashMap<from, Set<to>> into de-duplicated links
     let mut unique_links = std::collections::HashMap::new();
@@ -776,20 +790,22 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
 
     // Use salsa db for LaTeX rendering from parsed AST
     let db_locked = (*model_ref.project).db.lock().unwrap();
-    let sync_state = (*model_ref.project).sync_state.lock().unwrap();
-    let sync = match sync_state.as_ref() {
-        Some(s) => s.to_sync_result(),
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
         None => return ptr::null_mut(),
     };
 
     let canonical_model = canonicalize(&model_ref.model_name);
-    let synced_model = match sync.models.get(canonical_model.as_ref()) {
-        Some(m) => m,
+    let source_model = match source_project
+        .models(&*db_locked)
+        .get(canonical_model.as_ref())
+    {
+        Some(m) => *m,
         None => return ptr::null_mut(),
     };
 
-    let source_var = match synced_model.variables.get(ident_str.as_ref()) {
-        Some(sv) => sv.source,
+    let source_var = match source_model.variables(&*db_locked).get(ident_str.as_ref()) {
+        Some(sv) => *sv,
         None => return ptr::null_mut(),
     };
 
@@ -797,7 +813,7 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
     let parsed = engine::db::parse_source_variable_with_module_context(
         &*db_locked,
         source_var,
-        sync.project,
+        source_project,
         empty_ctx,
     );
     let ast = match parsed.variable.ast() {

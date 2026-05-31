@@ -1687,9 +1687,8 @@ fn test_patch_with_preexisting_unit_warnings_succeeds() {
     // units_infer). Both indicate unit-related problems.
     {
         let db = unsafe { (*proj).db.lock().unwrap() };
-        let sync_state = unsafe { (*proj).sync_state.lock().unwrap() };
-        let sync = sync_state.as_ref().unwrap().to_sync_result();
-        let diags = engine::db::collect_all_diagnostics(&db, &sync);
+        let source_project = db.current_source_project().unwrap();
+        let diags = engine::db::collect_all_diagnostics(&db, source_project);
         let has_unit_diags = diags.iter().any(|d| {
             d.severity == engine::db::DiagnosticSeverity::Warning
                 && (matches!(d.error, engine::db::DiagnosticError::Unit(_))
@@ -1776,9 +1775,8 @@ fn test_patch_introducing_new_unit_warning_rejected() {
     // Verify no unit warnings initially via salsa diagnostics
     {
         let db = unsafe { (*proj).db.lock().unwrap() };
-        let sync_state = unsafe { (*proj).sync_state.lock().unwrap() };
-        let sync = sync_state.as_ref().unwrap().to_sync_result();
-        let diags = engine::db::collect_all_diagnostics(&db, &sync);
+        let source_project = db.current_source_project().unwrap();
+        let diags = engine::db::collect_all_diagnostics(&db, source_project);
         let has_unit_diags = diags.iter().any(|d| {
             matches!(d.error, engine::db::DiagnosticError::Unit(_))
                 && d.severity == engine::db::DiagnosticSeverity::Warning

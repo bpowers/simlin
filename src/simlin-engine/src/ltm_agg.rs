@@ -167,7 +167,7 @@ pub(crate) fn reducer_name_is_monotone(name: &str) -> bool {
 /// `SIZE` is recognized as a reducer but never hoisted (its link score is
 /// always 0), and it never sets the element-graph walker's `in_reducer`
 /// marker. This is the predicate the reference-site IR's AST walk
-/// (`db_ltm_ir::walk_all_in_expr`) uses to flip `child_in_reducer`, and that
+/// (`db::ltm_ir::walk_all_in_expr`) uses to flip `child_in_reducer`, and that
 /// [`reducer_source_vars`] uses to gate which subexpressions become aggregate
 /// nodes, so the agg enumerator, the element graph, and the link-score
 /// generator all agree on the hoisted set.
@@ -845,7 +845,7 @@ fn compute_read_slice(
 
 /// Resolve a single subscript index to a literal element name (canonical
 /// lowercase) of `dim`, or `None` for any other shape. The `Expr2`-side
-/// sibling of `db_ltm_ir::resolve_literal_index` / `ltm_augment`'s Expr0
+/// sibling of `db::ltm_ir::resolve_literal_index` / `ltm_augment`'s Expr0
 /// `resolve_literal_element_index`: element names parse as `Expr2::Var`
 /// (the parser keeps the raw element identifier as a `Var`; numeric-offset
 /// resolution happens later in Expr3 lowering); integer literals (used for
@@ -1813,7 +1813,7 @@ mod tests {
     /// shape. (`classify_iterated_dim_shape`'s own mapped branch -- a
     /// whole-equation-iterated subscript, not a sliced reducer argument --
     /// is a separate path and stays `Bare`; see
-    /// `db_ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`.)
+    /// `db::ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`.)
     #[test]
     fn mapped_iterated_dim_sliced_reducer_is_not_hoisted() {
         let project = TestProject::new("mapped_iterated_slice")

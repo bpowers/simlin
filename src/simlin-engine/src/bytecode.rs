@@ -557,7 +557,7 @@ pub(crate) enum Op2 {
 /// - Array iteration (BeginIter, LoadIterElement, etc.)
 /// - Array reductions (ArraySum, ArrayMax, etc.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Opcode {
     // === ARITHMETIC & LOGIC ===
     Op2 {
@@ -1503,7 +1503,7 @@ impl Opcode {
 // ============================================================================
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct ModuleDeclaration {
     pub(crate) model_name: Ident<Canonical>,
     /// The set of input names for this module instantiation.
@@ -1581,7 +1581,7 @@ impl StaticArrayView {
 /// Context data shared across all bytecode runlists in a module.
 /// Contains tables that opcodes reference by index.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct ByteCodeContext {
     // === Existing fields ===
     /// Graphical function lookup tables
@@ -1698,7 +1698,7 @@ impl ByteCodeContext {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct ByteCode {
     pub(crate) literals: Vec<f64>,
     pub(crate) code: Vec<Opcode>,
@@ -4599,7 +4599,7 @@ mod tests {
 /// A single variable's compiled initial-value bytecode, along with the
 /// data-buffer offsets it writes to (from AssignCurr nodes).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct CompiledInitial {
     // Used for diagnostics in debug_print_bytecode and set_value error messages
     #[allow(dead_code)]
@@ -4612,7 +4612,7 @@ pub struct CompiledInitial {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct CompiledModule {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) n_slots: usize,

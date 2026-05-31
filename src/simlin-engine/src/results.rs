@@ -18,7 +18,7 @@ pub enum Method {
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Specs {
     pub start: f64,
     pub stop: f64,

@@ -56,7 +56,7 @@ impl LinkPolarity {
 /// `to` (`"mp[boston]"`); a loop running through an inlined reducer
 /// traverses `from[d] → $⁚ltm⁚agg⁚{n} → to[e]` (the agg name has no
 /// subscript). All other edges use variable-level names. See
-/// `db_ltm::build_element_level_loops` for the normalization rule.
+/// `db::ltm::build_element_level_loops` for the normalization rule.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Link {

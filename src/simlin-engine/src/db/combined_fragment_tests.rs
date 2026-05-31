@@ -8,8 +8,8 @@
 //! combined `PerVarBytecodes` following `ResolvedScc.element_order`.
 //!
 //! Lives in its own file alongside the production code in `db.rs` to keep
-//! both `db.rs` and `db_tests.rs` under the per-file line cap (same
-//! convention as `db_dep_graph_tests.rs`).
+//! both `db.rs` and `db/tests.rs` under the per-file line cap (same
+//! convention as `db/dep_graph_tests.rs`).
 //!
 //! These tests are intentionally focused on STRUCTURAL well-formedness:
 //! segment ordering, write-ref identity preservation, the single trailing
@@ -575,7 +575,12 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
     // Precondition (Task 5b): the multi-member SCC must be resolved and
     // the gate must NOT report a cycle, otherwise `assemble_module`
     // early-returns before injecting anything.
-    let dep_graph = crate::db::model_dependency_graph(&db, model, project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "Task 5b precondition: the element-acyclic {{ce,ecc}} SCC must \
@@ -595,12 +600,14 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
     );
     assert_eq!(dep_graph.resolved_sccs[0].phase, SccPhase::Dt);
 
-    // The SCC-agnostic "hypothetical acyclic equivalent" offset map.
-    // `compute_layout` is `#[salsa::tracked(returns(ref))]`, so this is
-    // already a `&VariableLayout`.
-    let layout = crate::db::compute_layout(&db, model, project, true);
-    let mut acyclic_ce = layout_slots(layout, "ce");
-    let mut acyclic_ecc = layout_slots(layout, "ecc");
+    // The SCC-agnostic "hypothetical acyclic equivalent" offset map. The
+    // module is assembled as root below, so compare against the root-shifted
+    // layout (the same one `assemble_module`'s root path resolves against):
+    // `compute_layout` now returns the body layout (0-based) and the root
+    // shift relocates every entry by `IMPLICIT_VAR_COUNT`.
+    let layout = crate::db::compute_layout(&db, model, project).root_shifted();
+    let mut acyclic_ce = layout_slots(&layout, "ce");
+    let mut acyclic_ecc = layout_slots(&layout, "ecc");
     acyclic_ce.sort_unstable();
     acyclic_ecc.sort_unstable();
     assert_eq!(acyclic_ce.len(), 3, "ce occupies 3 element slots");
@@ -609,8 +616,14 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
     // Assemble the module: Task 6 must inject the combined `{ce,ecc}`
     // fragment into the flows phase (skipping the per-variable pushes),
     // its writes keeping their original `(name, element_offset)`.
-    let module = crate::db::assemble_module(&db, model, project, true, &BTreeSet::new())
-        .expect("ref-shaped resolved SCC must assemble (no CircularDependency)");
+    let module = crate::db::assemble_module(
+        &db,
+        model,
+        project,
+        true,
+        crate::db::ModuleInputSet::empty(&db),
+    )
+    .expect("ref-shaped resolved SCC must assemble (no CircularDependency)");
 
     // The assembled flows bytecode's AssignCurr target offsets, re-derived
     // from the resolved bytecode exactly as `resolve_module` does.
@@ -711,7 +724,7 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
 /// the MULTI-member INIT recurrence `{cs,ecs}` -- exercising the
 /// synthetic-ident `SymbolicCompiledInitial` combined-init-fragment path
 /// (Task 6). Mirrors the `two_stock_init_recurrence_project` shape
-/// empirically confirmed in `db_dep_graph_tests.rs`; kept self-contained
+/// empirically confirmed in `db/dep_graph_tests.rs`; kept self-contained
 /// here so the combined-fragment determinism coverage lives in one file.
 fn two_stock_init_recurrence_datamodel() -> crate::datamodel::Project {
     use crate::datamodel::{self, Dimension, Equation, Flow, Stock, Variable};
@@ -805,7 +818,12 @@ fn fresh_resolved_scc_and_combined_fragment(
     let result = sync_from_datamodel(&db, dm);
     let model = result.models["main"].source;
     let project = result.project;
-    let dep_graph = crate::db::model_dependency_graph(&db, model, project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert_eq!(
         dep_graph.resolved_sccs.len(),
         1,

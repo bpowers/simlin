@@ -4,8 +4,8 @@
 
 //! Tests for the dt-phase dependency-graph cycle-relation primitive and
 //! the `#[cfg(test)]` SCC accessor. Live in their own file alongside the
-//! production code in `db_dep_graph.rs` to keep both `db.rs` and
-//! `db_tests.rs` under the per-file line cap.
+//! production code in `db/dep_graph.rs` to keep both `db.rs` and
+//! `db/tests.rs` under the per-file line cap.
 
 use super::*;
 use crate::datamodel;
@@ -14,8 +14,8 @@ use crate::test_common::TestProject;
 
 // ── dt-phase cycle introspection ────────────────────────────────────────
 //
-// `dt_walk_successors` is the single shared dt-phase cycle-successor
-// relation consumed by both the production cycle detector
+// `walk_successors(.., SccPhase::Dt)` is the single shared dt-phase
+// cycle-successor relation consumed by both the production cycle detector
 // (`compute_inner` inside `model_dependency_graph_impl`) and the
 // `#[cfg(test)]` SCC accessor (`dt_cycle_sccs`). Because there is exactly
 // one definition of the relation, used twice, the introspection accessor
@@ -31,7 +31,8 @@ use crate::test_common::TestProject;
 //             stock-targeted deps dropped, matching `compute_inner`),
 //   absent => empty (no panic).
 
-/// Build a bare `VarInfo` for the pure-unit `dt_walk_successors` tests.
+/// Build a bare `VarInfo` for the pure-unit dt-phase `walk_successors`
+/// tests.
 /// The dep names are already canonical (lowercase, underscore-joined), so
 /// `from_str_unchecked` (intern, no re-canonicalization) is sound.
 fn vi_for_test(is_stock: bool, is_module: bool, dt_deps: &[&str]) -> VarInfo {
@@ -52,7 +53,7 @@ fn vi_insert(map: &mut FxHashMap<Ident<Canonical>, VarInfo>, name: &str, info: V
     map.insert(Ident::from_str_unchecked(name), info);
 }
 
-/// Compare a `dt_walk_successors`/`init_walk_successors` result (now
+/// Compare a `walk_successors` result (now
 /// `Vec<&Ident<Canonical>>`) against the expected canonical names, preserving
 /// the exact ordered-equality assertions the tests had against `Vec<&str>`.
 fn succ_strs<'a>(succ: &[&'a Ident<Canonical>]) -> Vec<&'a str> {
@@ -67,7 +68,7 @@ fn dt_walk_successors_stock_is_dt_sink() {
     vi_insert(&mut vinfo, "b", vi_for_test(false, false, &[]));
     // A Stock breaks the dt dependency chain: no cycle successors even
     // though its dt_deps are non-empty.
-    assert!(dt_walk_successors(&vinfo, "s").is_empty());
+    assert!(walk_successors(&vinfo, "s", SccPhase::Dt).is_empty());
 }
 
 #[test]
@@ -77,7 +78,7 @@ fn dt_walk_successors_module_has_no_cycle_successors() {
     vi_insert(&mut vinfo, "a", vi_for_test(false, false, &[]));
     // A Module returns before `processing.insert`, so it is never on the
     // DFS stack and can never carry a cycle: empty cycle-successor set.
-    assert!(dt_walk_successors(&vinfo, "m").is_empty());
+    assert!(walk_successors(&vinfo, "m", SccPhase::Dt).is_empty());
 }
 
 #[test]
@@ -92,7 +93,7 @@ fn dt_walk_successors_aux_filters_stock_and_unknown_keeps_module() {
     vi_insert(&mut vinfo, "the_stock", vi_for_test(true, false, &[]));
     vi_insert(&mut vinfo, "the_mod", vi_for_test(false, true, &[]));
     // "ghost" is intentionally absent from var_info (an unknown dep).
-    let succ = dt_walk_successors(&vinfo, "x");
+    let succ = walk_successors(&vinfo, "x", SccPhase::Dt);
     // Stock-targeted dep dropped (a stock breaks the dt chain), unknown
     // dep dropped, module-targeted dep KEPT (a module node has no
     // successors so Tarjan cannot route a cycle through it -- this
@@ -106,7 +107,7 @@ fn dt_walk_successors_absent_name_is_empty() {
     let vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     // A malformed/absent var_info entry must not panic; it yields no
     // successors.
-    assert!(dt_walk_successors(&vinfo, "nope").is_empty());
+    assert!(walk_successors(&vinfo, "nope", SccPhase::Dt).is_empty());
 }
 
 #[test]
@@ -124,15 +125,15 @@ fn dt_walk_successors_order_is_btreeset_sorted() {
     // iteration order. This is what makes the cycle-detection
     // first-back-edge and the SCC adjacency byte-stable across runs.
     assert_eq!(
-        succ_strs(&dt_walk_successors(&vinfo, "x")),
+        succ_strs(&walk_successors(&vinfo, "x", SccPhase::Dt)),
         vec!["alpha", "mid", "zeta"]
     );
 }
 
-// ── init-phase cycle relation (`init_walk_successors`) ──────────────────
+// ── init-phase cycle relation (`walk_successors(.., SccPhase::Initial)`) ─
 //
-// `init_walk_successors` is the single shared init-phase cycle-successor
-// relation, the exact analogue of `dt_walk_successors` for the init
+// `walk_successors(.., SccPhase::Initial)` is the single shared init-phase
+// cycle-successor relation, the exact analogue of the dt phase for the init
 // phase. It is consumed by both the production cycle detector
 // (`compute_inner` inside `model_dependency_graph_impl`, init branch)
 // and the init-phase per-element recurrence resolution. These tests pin
@@ -149,8 +150,8 @@ fn dt_walk_successors_order_is_btreeset_sorted() {
 //   absent => empty (no panic).
 
 /// Build a bare `VarInfo` carrying `initial_deps` for the pure-unit
-/// `init_walk_successors` tests (the dt-only helper `vi_for_test` leaves
-/// `initial_deps` empty).
+/// init-phase `walk_successors` tests (the dt-only helper `vi_for_test`
+/// leaves `initial_deps` empty).
 fn vi_init_for_test(is_stock: bool, is_module: bool, initial_deps: &[&str]) -> VarInfo {
     VarInfo {
         is_stock,
@@ -172,8 +173,8 @@ fn init_walk_successors_module_has_no_cycle_successors() {
     // The module early-return in `compute_inner` fires before
     // `processing.insert` in BOTH phases, so a module is never on the
     // DFS stack and can never carry a cycle in the init phase either:
-    // empty cycle-successor set (mirrors `dt_walk_successors`).
-    assert!(init_walk_successors(&vinfo, "m").is_empty());
+    // empty cycle-successor set (mirrors the dt phase).
+    assert!(walk_successors(&vinfo, "m", SccPhase::Initial).is_empty());
 }
 
 #[test]
@@ -189,7 +190,7 @@ fn init_walk_successors_stock_is_not_an_init_sink() {
     // set (this is exactly what an init-phase recurrence behind a stock
     // relies on).
     assert_eq!(
-        succ_strs(&init_walk_successors(&vinfo, "s")),
+        succ_strs(&walk_successors(&vinfo, "s", SccPhase::Initial)),
         vec!["a", "s"]
     );
 }
@@ -204,12 +205,12 @@ fn init_walk_successors_keeps_stock_targeted_deps() {
     );
     vi_insert(&mut vinfo, "the_stock", vi_init_for_test(true, false, &[]));
     vi_insert(&mut vinfo, "aux2", vi_init_for_test(false, false, &[]));
-    // Unlike `dt_walk_successors` (which drops stock-targeted deps
-    // because a stock breaks the dt chain), the init relation KEEPS a
-    // stock-targeted dep: a stock's initial value is a real init-phase
-    // dependency. NO stock filter on the deps.
+    // Unlike the dt phase (which drops stock-targeted deps because a stock
+    // breaks the dt chain), the init relation KEEPS a stock-targeted dep:
+    // a stock's initial value is a real init-phase dependency. NO stock
+    // filter on the deps.
     assert_eq!(
-        succ_strs(&init_walk_successors(&vinfo, "x")),
+        succ_strs(&walk_successors(&vinfo, "x", SccPhase::Initial)),
         vec!["aux2", "the_stock"]
     );
 }
@@ -228,16 +229,19 @@ fn init_walk_successors_filters_unknown_deps() {
     // (`info.initial_deps.iter().filter(|dep|
     // var_info.contains_key(dep))`): unknown deps dropped, no other
     // filter.
-    assert_eq!(succ_strs(&init_walk_successors(&vinfo, "x")), vec!["known"]);
+    assert_eq!(
+        succ_strs(&walk_successors(&vinfo, "x", SccPhase::Initial)),
+        vec!["known"]
+    );
 }
 
 #[test]
 fn init_walk_successors_absent_name_is_empty() {
     let vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     // A malformed/absent var_info entry must not panic; it yields no
-    // successors (mirrors `dt_walk_successors`; `compute_inner` likewise
+    // successors (mirrors the dt phase; `compute_inner` likewise
     // early-returns `Ok(())` for an unknown name).
-    assert!(init_walk_successors(&vinfo, "nope").is_empty());
+    assert!(walk_successors(&vinfo, "nope", SccPhase::Initial).is_empty());
 }
 
 #[test]
@@ -253,10 +257,10 @@ fn init_walk_successors_order_is_btreeset_sorted() {
     vi_insert(&mut vinfo, "mid", vi_init_for_test(false, false, &[]));
     // initial_deps is a BTreeSet; the successor list preserves its
     // sorted iteration order, so init cycle detection and the init SCC
-    // adjacency are byte-stable across runs (same discipline as
-    // `dt_walk_successors`).
+    // adjacency are byte-stable across runs (same discipline as the dt
+    // phase).
     assert_eq!(
-        succ_strs(&init_walk_successors(&vinfo, "x")),
+        succ_strs(&walk_successors(&vinfo, "x", SccPhase::Initial)),
         vec!["alpha", "mid", "zeta"]
     );
 }
@@ -409,7 +413,12 @@ fn dt_cycle_sccs_resolved_self_recurrence_has_no_circular() {
     );
     // ...but the engine resolves it (no CircularDependency). Confirm the
     // diagnostic is absent and a `ResolvedScc` for `{ecc}` was emitted.
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "an element-acyclic single-variable self-recurrence must NOT set \
@@ -454,7 +463,12 @@ fn dt_cycle_sccs_genuine_two_cycle_still_circular() {
         "the 2-cycle is an instrumented >=2 SCC"
     );
     assert!(sccs.self_loops.is_empty());
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         dep_graph.has_cycle,
         "a genuine 2-cycle still sets has_cycle (Phase 1 does not resolve \
@@ -619,8 +633,8 @@ fn consistency_violation_none_for_init_only_resolved_scc_not_dt_instrumented() {
     // Phase 2 Task 3 generalization: a `phase: Initial` `ResolvedScc`
     // for an init-only recurrence (a per-element forward recurrence in a
     // stock's initial value) is BY DESIGN absent from the dt
-    // instrumentation -- a stock breaks the dt chain, so
-    // `dt_walk_successors` reports no dt SCC for it. The dt-phase
+    // instrumentation -- a stock breaks the dt chain, so the dt
+    // `walk_successors` relation reports no dt SCC for it. The dt-phase
     // consistency cross-check must therefore NOT treat a `phase:
     // Initial` resolved SCC as a "dt relation drifted" orphan (check 2
     // is scoped to `phase: Dt` SCCs; the dt instrumentation does not and
@@ -711,7 +725,7 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
     // Lowered-shape regression guards. Sourced from the same engine
     // per-variable production lowering `array_producing_vars` consumes
     // (`var_noninitial_lowered_exprs` ->
-    // `crate::db_var_fragment::lower_var_fragment`), partitioned by
+    // `crate::db::var_fragment::lower_var_fragment`), partitioned by
     // top-level element kind, then the same production predicate
     // (`exprs_contain_array_producing_builtin`) applied per partition --
     // no re-implementation of the array-producing recursion.
@@ -770,7 +784,8 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
 // ── Per-element dt SCC resolution (the cycle-gate refinement) ───────────
 //
 // `resolve_recurrence_sccs(.., SccPhase::Dt)` identifies the offending
-// dt SCC(s) over the same shared `dt_walk_successors` relation the
+// dt SCC(s) over the same shared `walk_successors(.., SccPhase::Dt)`
+// relation the
 // engine uses, refines each into an exact `(member, element-offset)`
 // graph from the engine's own production-lowered per-element exprs, and
 // renders a verdict:
@@ -957,9 +972,14 @@ fn model_dependency_graph_resolved_sccs_is_byte_stable_across_runs() {
         let db = SimlinDb::default();
         let result = sync_from_datamodel(&db, &dm);
         let model = result.models["main"].source;
-        crate::db::model_dependency_graph(&db, model, result.project)
-            .resolved_sccs
-            .clone()
+        crate::db::model_dependency_graph(
+            &db,
+            model,
+            result.project,
+            crate::db::ModuleInputSet::empty(&db),
+        )
+        .resolved_sccs
+        .clone()
     };
     let first = resolved();
     let second = resolved();
@@ -997,9 +1017,14 @@ fn model_dependency_graph_resolved_sccs_is_byte_stable_across_runs() {
         let db = SimlinDb::default();
         let result = sync_from_datamodel(&db, &project);
         let model = result.models["main"].source;
-        crate::db::model_dependency_graph(&db, model, result.project)
-            .resolved_sccs
-            .clone()
+        crate::db::model_dependency_graph(
+            &db,
+            model,
+            result.project,
+            crate::db::ModuleInputSet::empty(&db),
+        )
+        .resolved_sccs
+        .clone()
     };
     let acyclic_first = acyclic();
     let acyclic_second = acyclic();
@@ -1019,7 +1044,8 @@ fn model_dependency_graph_resolved_sccs_is_byte_stable_across_runs() {
 //
 // `resolve_recurrence_sccs(.., SccPhase::Initial)` is the init-phase
 // analogue of the dt resolution: it identifies the offending init SCC(s)
-// over the shared `init_walk_successors` relation (Task 2), refines each
+// over the shared `walk_successors(.., SccPhase::Initial)` relation
+// (Task 2), refines each
 // into its exact per-element graph from the engine's own production
 // *init*-phase symbolic fragment
 // (`var_phase_symbolic_fragment_prod(.., Initial)`, reused via the
@@ -1031,7 +1057,8 @@ fn model_dependency_graph_resolved_sccs_is_byte_stable_across_runs() {
 //
 // The init relation is structurally DISTINCT from dt only for a stock: a
 // stock's dt-equation is its flow (the stock breaks the dt chain --
-// `dt_walk_successors` returns `[]`), while its init-equation is its
+// `walk_successors(.., SccPhase::Dt)` returns `[]`), while its
+// init-equation is its
 // initial value, so a stock whose initial value is a per-element forward
 // recurrence has an init self-loop with NO corresponding dt cycle. This
 // is the case Phase 1's dt path cannot reach (Phase 1's
@@ -1187,7 +1214,12 @@ fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
     let result = sync_from_datamodel(&db, &project);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "an element-acyclic init-only recurrence behind a stock must NOT \
@@ -1215,6 +1247,7 @@ fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
         &db,
         model,
         result.project,
+        crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
         !diags.iter().any(|d| matches!(
@@ -1259,7 +1292,12 @@ fn init_same_element_self_cycle_behind_stock_is_unresolved() {
     );
 
     // End-to-end: the genuine init cycle is still flagged.
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         dep_graph.has_cycle,
         "a genuine init element self-cycle still sets has_cycle"
@@ -1293,7 +1331,12 @@ fn dt_self_recurrence_not_double_resolved_as_init_scc() {
     let result = sync_from_datamodel(&db, &dm);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "the aux self-recurrence must still resolve (no CircularDependency)"
@@ -1339,7 +1382,8 @@ fn dt_self_recurrence_not_double_resolved_as_init_scc() {
 ///
 /// Both stocks have a trivial constant inflow `g[t] = 0`, so each stock's
 /// dt-equation is its (acyclic) flow and the stock BREAKS the dt chain
-/// (`dt_walk_successors` returns `[]` for a stock): there is NO dt cycle.
+/// (`walk_successors(.., SccPhase::Dt)` returns `[]` for a stock): there is
+/// NO dt cycle.
 /// The INIT relation, however, has `cs`'s init referencing `ecs` and
 /// `ecs`'s init referencing `cs` -> a whole-variable init 2-cycle
 /// `{cs,ecs}` whose induced per-element INIT graph
@@ -1521,7 +1565,12 @@ fn two_stock_init_recurrence_model_dep_graph_resolves_no_circular() {
     let result = sync_from_datamodel(&db, &project);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "an element-acyclic MULTI-member init-only recurrence behind \
@@ -1588,7 +1637,12 @@ fn two_stock_init_genuine_element_cycle_is_unresolved() {
         init_res.resolved
     );
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         dep_graph.has_cycle,
         "a genuine multi-variable init element cycle still sets has_cycle"
@@ -1819,7 +1873,12 @@ fn resolve_dt_genuine_element_two_cycle_is_unresolved() {
     );
 
     // End-to-end: the genuine cycle still raises CircularDependency.
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         dep_graph.has_cycle,
         "a genuine multi-variable element 2-cycle still sets has_cycle"
@@ -2034,7 +2093,7 @@ fn var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic() {
 #[test]
 fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
     use crate::db::SccPhase;
-    use crate::db_dep_graph::UnsourceableVarsGuard;
+    use crate::db::dep_graph::UnsourceableVarsGuard;
 
     // `ecc[t1]=1; ecc[t2]=ecc[t1]+1; ecc[t3]=ecc[t2]+1`: a single-variable
     // self-recurrence whose induced element graph (ecc,0)->(ecc,1)->(ecc,2)
@@ -2059,7 +2118,12 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
         let db = SimlinDb::default();
         let result = sync_from_datamodel(&db, &dm);
         let model = result.models["main"].source;
-        let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+        let dep_graph = crate::db::model_dependency_graph(
+            &db,
+            model,
+            result.project,
+            crate::db::ModuleInputSet::empty(&db),
+        );
         assert!(
             !dep_graph.has_cycle,
             "positive control: the well-founded self-recurrence must \
@@ -2096,7 +2160,12 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
     let _guard = UnsourceableVarsGuard::new(&["ecc"]);
 
     // Must NOT panic.
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         dep_graph.has_cycle,
         "an unsourceable in-SCC node must fall back to CircularDependency \
@@ -2114,6 +2183,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
         &db,
         model,
         result.project,
+        crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
         diags.iter().any(|d| matches!(
@@ -2383,7 +2453,12 @@ fn model_dep_graph_two_member_ref_scc_resolves_with_external_deps() {
     let result = sync_from_datamodel(&db, &dm);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
 
     assert!(
         !dep_graph.has_cycle,
@@ -2536,7 +2611,12 @@ fn model_dep_graph_scc_members_contiguous_with_interposing_external_var() {
     let result = sync_from_datamodel(&db, &dm);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "the element-acyclic {{aaa,zzz}} SCC must NOT set has_cycle"
@@ -2586,7 +2666,12 @@ fn model_dep_graph_two_member_ref_scc_resolves_no_external_deps() {
     let result = sync_from_datamodel(&db, &dm);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "the bare ref-shaped {{ce,ecc}} SCC (no external dep) must NOT set \
@@ -2630,7 +2715,12 @@ fn model_dep_graph_interleaved_shaped_multi_member_scc_resolves() {
     let result = sync_from_datamodel(&db, &dm);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "x -> a[A1] -> y -> a[A2] is element-acyclic through the a<->y \
@@ -2681,7 +2771,12 @@ fn model_dep_graph_genuine_element_two_cycle_stays_circular() {
     let result = sync_from_datamodel(&db, &dm);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         dep_graph.has_cycle,
         "a genuine multi-variable element 2-cycle MUST still set \
@@ -2705,7 +2800,12 @@ fn model_dep_graph_genuine_scalar_two_cycle_stays_circular() {
     let result = sync_from_datamodel(&db, &project);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         dep_graph.has_cycle,
         "a genuine scalar 2-cycle MUST still set has_cycle (loud-safe)"
@@ -2732,7 +2832,12 @@ fn model_dep_graph_acyclic_control_unaffected_by_scc_aware_break() {
     let result = sync_from_datamodel(&db, &project);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(!dep_graph.has_cycle, "an acyclic model has no cycle");
     assert!(
         dep_graph.resolved_sccs.is_empty(),
@@ -2768,7 +2873,12 @@ fn model_dep_graph_single_var_self_recurrence_byte_identical_to_phase1() {
     let result = sync_from_datamodel(&db, &dm);
     let model = result.models["main"].source;
 
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "the N=1 self-recurrence (1-member SCC) must NOT set has_cycle"
@@ -2820,7 +2930,7 @@ fn model_dep_graph_single_var_self_recurrence_byte_identical_to_phase1() {
 // false `CircularDependency` (the verified C-LEARN root cause: 105
 // element-self-loops, every one a `SymLoadPrev`). After Part A the element
 // graph inherits `build_var_info`'s per-phase PREVIOUS/INIT strip
-// (`db_dep_graph.rs` real-var :261-264 / implicit :283-287; `SymLoadPrev`
+// (`db/dep_graph.rs` real-var :261-264 / implicit :283-287; `SymLoadPrev`
 // is the element-level analogue of `dt_previous_referenced_vars` /
 // `initial_previous_referenced_vars`, stripped in BOTH phases), so the
 // lagged self-read contributes no edge and the (acyclic, current-value)
@@ -2940,7 +3050,12 @@ fn resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read() {
 
     // End-to-end: the SCC survives the production dependency-graph gate
     // with no `CircularDependency` (the C-LEARN blocker, minimized).
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "the SAMPLE IF TRUE-shaped SCC must NOT set has_cycle once the \
@@ -3050,7 +3165,12 @@ fn resolve_dt_self_loop_subsumed_by_multi_scc_resolves_no_duplicate() {
 
     // End-to-end: the production gate resolves it with NO residual
     // `CircularDependency` (the minimized C-LEARN blocker).
-    let dep_graph = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep_graph = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     assert!(
         !dep_graph.has_cycle,
         "a self-edge subsumed by a resolved multi-member SCC must NOT \
@@ -3157,7 +3277,12 @@ fn init_runlist_once(project: &datamodel::Project) -> Vec<String> {
     let db = SimlinDb::default();
     let result = sync_from_datamodel(&db, project);
     let model = result.models["main"].source;
-    let dep = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     dep.runlist_initials.clone()
 }
 
@@ -3201,7 +3326,12 @@ fn initials_runlist_is_sorted_topological_order() {
     let db = SimlinDb::default();
     let result = sync_from_datamodel(&db, &project);
     let model = result.models["main"].source;
-    let dep = crate::db::model_dependency_graph(&db, model, result.project);
+    let dep = crate::db::model_dependency_graph(
+        &db,
+        model,
+        result.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
     let actual = dep.runlist_initials.clone();
 
     // Reference: visit the runlist's members in sorted order, emitting each

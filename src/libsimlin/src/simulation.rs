@@ -63,10 +63,7 @@ pub unsafe extern "C" fn simlin_sim_new(
     );
     let (incremental_result, captured_loop_partitions, captured_loop_element_index): CompileSnapshot = {
         let mut db = project_ref.db.lock().unwrap();
-        let sync_state = project_ref.sync_state.lock().unwrap();
-        if let Some(ref state) = *sync_state {
-            let sync = state.to_sync_result();
-            let source_project = sync.project;
+        if let Some(source_project) = db.current_source_project() {
             engine::db::set_project_ltm_enabled(&mut db, source_project, enable_ltm);
             let result =
                 engine::db::compile_project_incremental(&db, source_project, &model_ref.model_name);
@@ -82,8 +79,8 @@ pub unsafe extern "C" fn simlin_sim_new(
             // layout (issue #463).
             let (loop_partitions, loop_element_index) = if enable_ltm && result.is_ok() {
                 let canonical = engine::canonicalize(&model_ref.model_name);
-                if let Some(sm) = sync.models.get(canonical.as_ref()) {
-                    let ltm_vars = engine::db::model_ltm_variables(&*db, sm.source, source_project);
+                if let Some(sm) = source_project.models(&*db).get(canonical.as_ref()).copied() {
+                    let ltm_vars = engine::db::model_ltm_variables(&*db, sm, source_project);
                     let project_dims = engine::db::project_datamodel_dims(&*db, source_project);
                     let element_index =
                         engine::ltm_post::build_loop_element_index(&ltm_vars.vars, project_dims);

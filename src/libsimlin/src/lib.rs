@@ -295,9 +295,12 @@ pub struct SimlinErrorDetail {
 /// Opaque project structure
 pub struct SimlinProject {
     pub datamodel: Mutex<engine::datamodel::Project>,
+    /// The salsa database owns its own sync state (the salsa input handles
+    /// from the last sync), so incremental re-syncs are automatic: callers
+    /// use `db.sync`/`db.sync_staged`/`db.restore` and read the current
+    /// `SourceProject` via `db.current_source_project()`. There is no
+    /// separate `sync_state` mutex to keep in lockstep.
     pub db: Mutex<engine::db::SimlinDb>,
-    /// Salsa input handles from the last sync, enabling incremental updates.
-    pub sync_state: Mutex<Option<engine::db::PersistentSyncState>>,
     pub ref_count: AtomicUsize,
 }
 
@@ -378,12 +381,10 @@ pub struct SimlinSim {
 
 // ── shared helpers (pub(crate)) ────────────────────────────────────────
 
-pub(crate) fn new_synced_db(
-    datamodel: &engine::datamodel::Project,
-) -> (engine::db::SimlinDb, engine::db::PersistentSyncState) {
+pub(crate) fn new_synced_db(datamodel: &engine::datamodel::Project) -> engine::db::SimlinDb {
     let mut db = engine::db::SimlinDb::default();
-    let state = engine::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
-    (db, state)
+    db.sync(datamodel);
+    db
 }
 
 pub(crate) fn clear_out_error(out_error: *mut *mut SimlinError) {

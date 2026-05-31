@@ -49,7 +49,12 @@ fn test_model_dependency_graph_prunes_lagged_deps_for_implicit_helpers() {
 
     let result = sync_from_datamodel(&db, &project);
     let source_model = result.models["main"].source;
-    let graph = model_dependency_graph(&db, source_model, result.project);
+    let graph = model_dependency_graph(
+        &db,
+        source_model,
+        result.project,
+        ModuleInputSet::empty(&db),
+    );
     let helper = graph
         .dt_dependencies
         .iter()

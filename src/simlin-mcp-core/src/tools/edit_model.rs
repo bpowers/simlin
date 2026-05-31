@@ -259,7 +259,7 @@ pub async fn edit_model<A: ProjectAccess>(
     let pre_edit_error_keys: std::collections::HashSet<_> = {
         let pre_db = simlin_engine::db::SimlinDb::default();
         let pre_sync = simlin_engine::db::sync_from_datamodel(&pre_db, &project);
-        let all_diags = simlin_engine::db::collect_all_diagnostics(&pre_db, &pre_sync);
+        let all_diags = simlin_engine::db::collect_all_diagnostics(&pre_db, pre_sync.project);
         simlin_engine::errors::collect_formatted_errors(
             all_diags
                 .iter()
@@ -287,7 +287,7 @@ pub async fn edit_model<A: ProjectAccess>(
     let mut db = simlin_engine::db::SimlinDb::default();
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
 
-    let all_diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+    let all_diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
     let post_formatted = simlin_engine::errors::collect_formatted_errors(
         all_diagnostics
             .iter()

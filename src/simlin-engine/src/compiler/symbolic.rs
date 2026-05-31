@@ -395,6 +395,73 @@ impl VariableLayout {
     pub fn get(&self, name: &str) -> Option<&LayoutEntry> {
         self.entries.get(name)
     }
+
+    /// Produce the root-module layout from this body layout.
+    ///
+    /// `compute_layout` returns a role-independent *body* layout whose
+    /// offsets start at 0. The root (main) module additionally reserves
+    /// slots `0..IMPLICIT_VAR_COUNT` for the implicit globals
+    /// `time`/`dt`/`initial_time`/`final_time` (read at absolute fixed
+    /// slots by `LoadGlobalVar`, so the root data array must physically
+    /// contain them). This shift relocates every body entry by
+    /// `IMPLICIT_VAR_COUNT`, inserts the four implicit globals at their
+    /// fixed slots, and grows `n_slots` accordingly.
+    ///
+    /// This is the SINGLE place the root +`IMPLICIT_VAR_COUNT` shift is
+    /// computed. Both machineries that produce final root offsets consume
+    /// it: `assemble_module`'s root path (it resolves every fragment
+    /// `SymVarRef` and module-decl `off` against the shifted layout) and
+    /// `calc_flattened_offsets_incremental`'s LTM section (it reads the
+    /// shifted entry offsets so the results map agrees with the assembled
+    /// module entry-for-entry). Centralizing it keeps the two in lockstep:
+    /// they cannot diverge on the reservation amount, the implicit-global
+    /// slots, or the body offset.
+    pub(crate) fn root_shifted(&self) -> VariableLayout {
+        use crate::vm::{DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF};
+
+        let mut entries = HashMap::with_capacity(self.entries.len() + IMPLICIT_VAR_COUNT);
+        entries.insert(
+            "time".to_string(),
+            LayoutEntry {
+                offset: TIME_OFF,
+                size: 1,
+            },
+        );
+        entries.insert(
+            "dt".to_string(),
+            LayoutEntry {
+                offset: DT_OFF,
+                size: 1,
+            },
+        );
+        entries.insert(
+            "initial_time".to_string(),
+            LayoutEntry {
+                offset: INITIAL_TIME_OFF,
+                size: 1,
+            },
+        );
+        entries.insert(
+            "final_time".to_string(),
+            LayoutEntry {
+                offset: FINAL_TIME_OFF,
+                size: 1,
+            },
+        );
+        for (name, entry) in &self.entries {
+            entries.insert(
+                name.clone(),
+                LayoutEntry {
+                    offset: entry.offset + IMPLICIT_VAR_COUNT,
+                    size: entry.size,
+                },
+            );
+        }
+        VariableLayout {
+            entries,
+            n_slots: self.n_slots + IMPLICIT_VAR_COUNT,
+        }
+    }
 }
 
 // ============================================================================
@@ -1429,7 +1496,7 @@ pub(crate) struct FragmentMerger {
     /// offset its first occurrence was appended at. A dependency arrayed GF
     /// referenced by N consumer fragments produces N fragments each carrying
     /// the *same* block (every consumer re-extracts the dependency's
-    /// `Vec<Table>` -- see `db_var_fragment.rs`); de-duplicating the block
+    /// `Vec<Table>` -- see `db/var_fragment.rs`); de-duplicating the block
     /// appends it once and remaps every consumer's `base_gf` by the single
     /// shared offset, matching the monolithic layout.
     ///
@@ -1500,7 +1567,7 @@ fn gf_block_key(tables: &[Vec<(f64, f64)>]) -> GfBlockKey {
 /// so opcode runs are only ever disjoint or nested -- never partially
 /// overlapping. The blocks are therefore the *maximal-by-inclusion* opcode
 /// runs (nested runs dropped), plus one block per maximal *un-referenced*
-/// gap (over-collected dependency tables `db_var_fragment.rs` gathered but
+/// gap (over-collected dependency tables `db/var_fragment.rs` gathered but
 /// no opcode reads -- never read, so an imperfect gap boundary cannot
 /// miscompile, only mildly affect the deduped count).
 ///
@@ -2651,13 +2718,16 @@ mod tests {
         let compiled = &sim.modules[&sim.root];
 
         let source_model = sync.models[model_name].source_model;
-        let layout = crate::db::compute_layout(&db, source_model, sync.project, true);
+        // The root module is assembled against the root-shifted layout
+        // (implicit globals at fixed slots 0..3, body at +IMPLICIT_VAR_COUNT),
+        // so the symbolize/resolve roundtrip must use that same layout.
+        let layout = crate::db::compute_layout(&db, source_model, sync.project).root_shifted();
 
-        let sym = symbolize_module(compiled, layout)
+        let sym = symbolize_module(compiled, &layout)
             .unwrap_or_else(|e| panic!("symbolize_module failed: {e}"));
 
         let resolved =
-            resolve_module(&sym, layout).unwrap_or_else(|e| panic!("resolve_module failed: {e}"));
+            resolve_module(&sym, &layout).unwrap_or_else(|e| panic!("resolve_module failed: {e}"));
 
         // Verify structural equivalence
         assert_eq!(compiled.ident, resolved.ident);
@@ -2861,8 +2931,10 @@ mod tests {
         let compiled = &sim.modules[&sim.root];
 
         let source_model = sync.models["main"].source_model;
-        let layout = crate::db::compute_layout(&db, source_model, sync.project, true);
-        let sym = symbolize_module(compiled, layout).unwrap();
+        // The root module was assembled against the root-shifted layout, so
+        // symbolize it back with that same layout.
+        let layout = crate::db::compute_layout(&db, source_model, sync.project).root_shifted();
+        let sym = symbolize_module(compiled, &layout).unwrap();
 
         // Create a layout with more slots (simulating a variable addition)
         let mut bigger_entries = layout.entries.clone();
@@ -3989,7 +4061,7 @@ mod tests {
     // the renumbered `temp_id` past `u8::MAX` (the C-LEARN
     // `temp offset ... exceeds TempId capacity` failure). `combine_scc_fragment`
     // stays on the disjoint (sum) path because its per-element segments
-    // interleave (overlapping live ranges) -- see `db_combined_fragment_tests`.
+    // interleave (overlapping live ranges) -- see `db/combined_fragment_tests`.
     // ====================================================================
 
     /// Build a single-variable-shaped fragment carrying a `VectorSortOrder`

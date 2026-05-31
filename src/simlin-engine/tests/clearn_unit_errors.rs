@@ -113,7 +113,7 @@ fn dump_clearn_unit_diagnostics() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     let sync_result = sync.to_sync_result();
-    let diagnostics = collect_all_diagnostics(&db, &sync_result);
+    let diagnostics = collect_all_diagnostics(&db, sync_result.project);
 
     let unit_diags: Vec<&Diagnostic> = diagnostics.iter().filter(|d| is_unit_diag(d)).collect();
 
@@ -207,7 +207,7 @@ fn clearn_unit_error_flood_is_cleared() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diagnostics = collect_all_diagnostics(&db, &sync.to_sync_result());
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
     let unit_diags: Vec<&Diagnostic> = diagnostics.iter().filter(|d| is_unit_diag(d)).collect();
 
     let render = |ds: &[&Diagnostic]| {

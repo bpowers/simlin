@@ -437,7 +437,7 @@ fn collect_diagnostics_as_formatted(
     // Trigger compilation so that diagnostics are accumulated
     let _ = compile_project_incremental(db, source_project, "main");
     let sync = sync_state.to_sync_result();
-    let diagnostics = collect_all_diagnostics(db, &sync);
+    let diagnostics = collect_all_diagnostics(db, sync.project);
     let mut formatted = FormattedErrors::default();
     for diag in &diagnostics {
         let fe = format_diagnostic(diag);

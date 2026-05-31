@@ -346,7 +346,7 @@ mod tests {
             .build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diagnostics = collect_all_diagnostics(&db, &sync);
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
         let formatted = collect_formatted_errors(&diagnostics, &datamodel);
 
         assert!(formatted.has_variable_errors);
@@ -379,7 +379,7 @@ mod tests {
             .build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diagnostics = collect_all_diagnostics(&db, &sync);
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
         let formatted = collect_formatted_errors(&diagnostics, &datamodel);
 
         let error = formatted
@@ -465,7 +465,7 @@ mod tests {
             .build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diagnostics = collect_all_diagnostics(&db, &sync);
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
 
         // Pass a filtered iterator directly (the use case for issue #426).
         let formatted = collect_formatted_errors(

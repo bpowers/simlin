@@ -697,8 +697,8 @@ fn fold_per_element_table_polarity(tables: &[crate::variable::Table]) -> LinkPol
 /// element's table, or a dimension-iterator over a per-element GF). The caller
 /// composes this with the index argument's monotonicity.
 ///
-/// `ltm/polarity.rs` is *upstream* of `db_analysis.rs` (the module dependency
-/// runs `db_analysis -> crate::ltm`, not the reverse), so this can't reuse
+/// `ltm/polarity.rs` is *upstream* of `db/analysis.rs` (the module dependency
+/// runs `db::analysis -> crate::ltm`, not the reverse), so this can't reuse
 /// `classify_subscript_shape` / `RefShape` -- it classifies directly on
 /// `&[IndexExpr2]` using `Dimension::get_offset`. The classifier is *total*:
 /// every `IndexExpr2` variant and every `Expr2` table-expression form is

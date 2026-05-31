@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::datamodel;
+use salsa::plumbing::AsId;
 
 /// Parse with an empty module-ident context (test convenience).
 fn parse_var_no_module_ctx(
@@ -12,6 +13,19 @@ fn parse_var_no_module_ctx(
     project: SourceProject,
 ) -> &ParsedVariableResult {
     parse_source_variable_with_module_context(db, var, project, ModuleIdentContext::new(db, vec![]))
+}
+
+/// Direct dependencies with an empty module-ident context and no module
+/// inputs -- the default (input-agnostic) path the old no-arg
+/// `variable_direct_dependencies` took. A test convenience.
+fn deps_no_inputs(db: &dyn Db, var: SourceVariable, project: SourceProject) -> &VariableDeps {
+    variable_direct_dependencies(
+        db,
+        var,
+        project,
+        ModuleIdentContext::new(db, vec![]),
+        ModuleInputSet::empty(db),
+    )
 }
 
 fn simple_project() -> datamodel::Project {
@@ -56,52 +70,6 @@ fn test_create_db() {
 }
 
 #[test]
-fn test_intern_variable_id_same_name() {
-    let db = SimlinDb::default();
-    let id1 = VariableId::new(&db, "population".to_string());
-    let id2 = VariableId::new(&db, "population".to_string());
-    assert_eq!(id1, id2);
-}
-
-#[test]
-fn test_intern_variable_id_different_names() {
-    let db = SimlinDb::default();
-    let id1 = VariableId::new(&db, "population".to_string());
-    let id2 = VariableId::new(&db, "birth_rate".to_string());
-    assert_ne!(id1, id2);
-}
-
-#[test]
-fn test_intern_model_id_same_name() {
-    let db = SimlinDb::default();
-    let id1 = ModelId::new(&db, "main".to_string());
-    let id2 = ModelId::new(&db, "main".to_string());
-    assert_eq!(id1, id2);
-}
-
-#[test]
-fn test_intern_model_id_different_names() {
-    let db = SimlinDb::default();
-    let id1 = ModelId::new(&db, "main".to_string());
-    let id2 = ModelId::new(&db, "submodel".to_string());
-    assert_ne!(id1, id2);
-}
-
-#[test]
-fn test_intern_variable_id_text_roundtrip() {
-    let db = SimlinDb::default();
-    let id = VariableId::new(&db, "birth_rate".to_string());
-    assert_eq!(id.text(&db), "birth_rate");
-}
-
-#[test]
-fn test_intern_model_id_text_roundtrip() {
-    let db = SimlinDb::default();
-    let id = ModelId::new(&db, "main".to_string());
-    assert_eq!(id.text(&db), "main");
-}
-
-#[test]
 fn test_sync_simple_project() {
     let db = SimlinDb::default();
     let project = simple_project();
@@ -132,12 +100,11 @@ fn test_sync_simple_project() {
     assert_eq!(main_model.source.variable_names(&db)[0], "population");
 
     let pop_var = &main_model.variables["population"];
-    assert_eq!(pop_var.id.text(&db), "population");
     assert_eq!(pop_var.source.kind(&db), SourceVariableKind::Aux);
     assert_eq!(pop_var.source.units(&db), &Some("people".to_string()));
     assert_eq!(
         pop_var.source.equation(&db),
-        &SourceEquation::Scalar("100".to_string())
+        &datamodel::Equation::Scalar("100".to_string())
     );
     assert!(!pop_var.source.non_negative(&db));
     assert!(!pop_var.source.can_be_module_input(&db));
@@ -198,10 +165,10 @@ fn test_sync_multi_model() {
     assert!(result.models.contains_key("main"));
     assert!(result.models.contains_key("submodel"));
 
-    // Different model names get different IDs
-    let main_id = result.models["main"].id;
-    let sub_id = result.models["submodel"].id;
-    assert_ne!(main_id, sub_id);
+    // Different models get distinct SourceModel input handles
+    let main_source = result.models["main"].source;
+    let sub_source = result.models["submodel"].source;
+    assert_ne!(main_source.as_id(), sub_source.as_id());
 }
 
 #[test]
@@ -343,7 +310,7 @@ fn test_sync_variable_with_gf() {
     let gf = var.source.gf(&db);
     assert!(gf.is_some());
     let gf = gf.as_ref().unwrap();
-    assert_eq!(gf.kind, SourceGraphicalFunctionKind::Continuous);
+    assert_eq!(gf.kind, datamodel::GraphicalFunctionKind::Continuous);
     assert_eq!(gf.x_points, Some(vec![0.0, 1.0, 2.0]));
     assert_eq!(gf.y_points, vec![0.0, 5.0, 10.0]);
     assert_eq!(gf.x_scale.min, 0.0);
@@ -384,11 +351,11 @@ fn test_sync_dimensions() {
     assert_eq!(dims[0].name, "Region");
     assert_eq!(
         dims[0].elements,
-        SourceDimensionElements::Named(vec!["North".to_string(), "South".to_string()])
+        datamodel::DimensionElements::Named(vec!["North".to_string(), "South".to_string()])
     );
 
     assert_eq!(dims[1].name, "Periods");
-    assert_eq!(dims[1].elements, SourceDimensionElements::Indexed(5));
+    assert_eq!(dims[1].elements, datamodel::DimensionElements::Indexed(5));
 }
 
 #[test]
@@ -450,7 +417,7 @@ fn test_sync_resync_updates() {
     let pop1 = &result1.models["main"].variables["population"];
     assert_eq!(
         pop1.source.equation(&db),
-        &SourceEquation::Scalar("100".to_string())
+        &datamodel::Equation::Scalar("100".to_string())
     );
 
     // Modify the equation and re-sync
@@ -460,20 +427,8 @@ fn test_sync_resync_updates() {
     let pop2 = &result2.models["main"].variables["population"];
     assert_eq!(
         pop2.source.equation(&db),
-        &SourceEquation::Scalar("200".to_string())
+        &datamodel::Equation::Scalar("200".to_string())
     );
-
-    // Interned IDs for the same canonical name should be the same
-    assert_eq!(pop1.id, pop2.id);
-}
-
-#[test]
-fn test_sync_empty_model_name_canonicalized() {
-    let db = SimlinDb::default();
-    let id1 = ModelId::new(&db, "".to_string());
-    let id2 = ModelId::new(&db, "main".to_string());
-    // Empty and "main" are different canonical strings
-    assert_ne!(id1, id2);
 }
 
 #[test]
@@ -486,9 +441,9 @@ fn test_sync_sim_specs_dt_reciprocal() {
 
     let result = sync_from_datamodel(&db, &project);
     let specs = result.project.sim_specs(&db);
-    assert_eq!(specs.dt, SourceDt::Reciprocal(4.0));
-    assert_eq!(specs.save_step, Some(SourceDt::Dt(0.5)));
-    assert_eq!(specs.sim_method, SourceSimMethod::RungeKutta4);
+    assert_eq!(specs.dt, datamodel::Dt::Reciprocal(4.0));
+    assert_eq!(specs.save_step, Some(datamodel::Dt::Dt(0.5)));
+    assert_eq!(specs.sim_method, datamodel::SimMethod::RungeKutta4);
 }
 
 #[test]
@@ -690,7 +645,7 @@ fn test_incrementality_unchanged_variable_not_reparsed() {
     // Modify only alpha's equation; beta is unchanged
     alpha_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("42".to_string()));
+        .to(datamodel::Equation::Scalar("42".to_string()));
 
     // Re-parse both: alpha should have new result, beta should be cached
     let alpha_result_2 = parse_var_no_module_ctx(&db, alpha_src, source_project);
@@ -723,7 +678,7 @@ fn test_variable_direct_dependencies_constant() {
     let result = sync_from_datamodel(&db, &project);
 
     let pop_var = result.models["main"].variables["population"].source;
-    let deps = variable_direct_dependencies(&db, pop_var, result.project);
+    let deps = deps_no_inputs(&db, pop_var, result.project);
 
     assert!(deps.dt_deps.is_empty(), "constant has no deps");
     assert!(deps.initial_deps.is_empty(), "constant has no initial deps");
@@ -784,7 +739,7 @@ fn test_variable_direct_dependencies_with_refs() {
     let result = sync_from_datamodel(&db, &project);
 
     let births_var = result.models["main"].variables["births"].source;
-    let deps = variable_direct_dependencies(&db, births_var, result.project);
+    let deps = deps_no_inputs(&db, births_var, result.project);
 
     assert_eq!(
         deps.dt_deps,
@@ -828,7 +783,7 @@ fn test_variable_direct_dependencies_stock() {
 
     let result = sync_from_datamodel(&db, &project);
     let stock_var = result.models["main"].variables["inventory"].source;
-    let deps = variable_direct_dependencies(&db, stock_var, result.project);
+    let deps = deps_no_inputs(&db, stock_var, result.project);
 
     // Stock's init equation references "initial_value"
     assert!(deps.dt_deps.contains("initial_value"));
@@ -876,7 +831,7 @@ fn test_variable_direct_dependencies_module() {
 
     let result = sync_from_datamodel(&db, &project);
     let mod_var = result.models["main"].variables["submodel"].source;
-    let deps = variable_direct_dependencies(&db, mod_var, result.project);
+    let deps = deps_no_inputs(&db, mod_var, result.project);
 
     assert_eq!(
         deps.dt_deps,
@@ -953,7 +908,7 @@ fn test_incrementality_same_deps_no_recompute() {
 
     // Prime the cache: compute deps and dep graph
     let (beta_dt_before, beta_init_before) = {
-        let deps = variable_direct_dependencies(&db, beta_src, source_project);
+        let deps = deps_no_inputs(&db, beta_src, source_project);
         assert_eq!(
             deps.dt_deps,
             ["alpha", "gamma"]
@@ -964,22 +919,32 @@ fn test_incrementality_same_deps_no_recompute() {
         (deps.dt_deps.clone(), deps.initial_deps.clone())
     };
 
-    let graph_before = model_dependency_graph(&db, source_model, source_project);
+    let graph_before = model_dependency_graph(
+        &db,
+        source_model,
+        source_project,
+        ModuleInputSet::empty(&db),
+    );
     let graph_ptr_before = graph_before as *const ModelDepGraphResult;
 
     // Change beta's equation from "alpha + gamma" to "alpha * gamma"
     // Same deps, different equation
     beta_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("alpha * gamma".to_string()));
+        .to(datamodel::Equation::Scalar("alpha * gamma".to_string()));
 
     // Beta's deps should be the same (alpha, gamma)
-    let beta_deps_after = variable_direct_dependencies(&db, beta_src, source_project);
+    let beta_deps_after = deps_no_inputs(&db, beta_src, source_project);
     assert_eq!(beta_dt_before, beta_deps_after.dt_deps);
     assert_eq!(beta_init_before, beta_deps_after.initial_deps);
 
     // The dep graph should be returned from cache (pointer-equal)
-    let graph_after = model_dependency_graph(&db, source_model, source_project);
+    let graph_after = model_dependency_graph(
+        &db,
+        source_model,
+        source_project,
+        ModuleInputSet::empty(&db),
+    );
     let graph_ptr_after = graph_after as *const ModelDepGraphResult;
     assert_eq!(
         graph_ptr_before, graph_ptr_after,
@@ -1051,16 +1016,26 @@ fn test_incrementality_different_deps_recompute() {
     };
 
     // Prime the cache
-    let graph_before = model_dependency_graph(&db, source_model, source_project);
+    let graph_before = model_dependency_graph(
+        &db,
+        source_model,
+        source_project,
+        ModuleInputSet::empty(&db),
+    );
     let graph_ptr_before = graph_before as *const ModelDepGraphResult;
 
     // Change beta's equation from "alpha" to "gamma" -- different deps
     beta_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("gamma".to_string()));
+        .to(datamodel::Equation::Scalar("gamma".to_string()));
 
     // The dep graph should be recomputed (different pointer)
-    let graph_after = model_dependency_graph(&db, source_model, source_project);
+    let graph_after = model_dependency_graph(
+        &db,
+        source_model,
+        source_project,
+        ModuleInputSet::empty(&db),
+    );
     let graph_ptr_after = graph_after as *const ModelDepGraphResult;
     assert_ne!(
         graph_ptr_before, graph_ptr_after,
@@ -1121,7 +1096,12 @@ fn test_model_dependency_graph_basic() {
     };
 
     let result = sync_from_datamodel(&db, &project);
-    let graph = model_dependency_graph(&db, result.models["main"].source, result.project);
+    let graph = model_dependency_graph(
+        &db,
+        result.models["main"].source,
+        result.project,
+        ModuleInputSet::empty(&db),
+    );
 
     // growth depends on rate (transitively)
     assert!(graph.dt_dependencies["growth"].contains("rate"));
@@ -1189,7 +1169,12 @@ fn test_model_dependency_graph_stock_breaks_chain() {
     };
 
     let result = sync_from_datamodel(&db, &project);
-    let graph = model_dependency_graph(&db, result.models["main"].source, result.project);
+    let graph = model_dependency_graph(
+        &db,
+        result.models["main"].source,
+        result.project,
+        ModuleInputSet::empty(&db),
+    );
 
     // In dt phase, stocks have empty deps (chain breaks)
     assert!(
@@ -1254,13 +1239,19 @@ fn test_model_dependency_graph_circular_emits_diagnostic() {
     };
 
     let result = sync_from_datamodel(&db, &project);
-    let _graph = model_dependency_graph(&db, result.models["main"].source, result.project);
+    let _graph = model_dependency_graph(
+        &db,
+        result.models["main"].source,
+        result.project,
+        ModuleInputSet::empty(&db),
+    );
 
     // Collect diagnostics emitted by model_dependency_graph
     let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
         &db,
         result.models["main"].source,
         result.project,
+        ModuleInputSet::empty(&db),
     );
     let has_circular = diags.iter().any(|d| {
         matches!(
@@ -1878,9 +1869,11 @@ fn test_ltm_caching_equation_change_no_dep_change() {
 
     // Change births equation from "population * birth_rate" to
     // "birth_rate * population" -- same deps, different equation text
-    births_src.set_equation(&mut db).to(SourceEquation::Scalar(
-        "birth_rate * population".to_string(),
-    ));
+    births_src
+        .set_equation(&mut db)
+        .to(datamodel::Equation::Scalar(
+            "birth_rate * population".to_string(),
+        ));
 
     // Loop circuits should be pointer-equal (cached) because the
     // causal edge structure hasn't changed
@@ -1917,7 +1910,7 @@ fn test_ltm_caching_dep_change_recomputes_circuits() {
     // Change births to a constant -- breaks the feedback loop
     births_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("10".to_string()));
+        .to(datamodel::Equation::Scalar("10".to_string()));
 
     let circuits_after = model_loop_circuits(&db, source_model, source_project);
     assert!(
@@ -2057,7 +2050,9 @@ fn test_ltm_per_link_caching() {
     // Change births_a equation (affects loop A, should NOT affect loop B)
     births_a_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("stock_a * rate_a * 2".to_string()));
+        .to(datamodel::Equation::Scalar(
+            "stock_a * rate_a * 2".to_string(),
+        ));
 
     // Re-intern the link IDs (interning is idempotent, returns same ID)
     let link_b_id = LtmLinkId::new(&db, "stock_b".to_string(), "births_b".to_string());
@@ -2115,7 +2110,9 @@ fn test_ltm_per_link_caching_model_level() {
     // Change births_a equation
     births_a_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("stock_a * rate_a * 2".to_string()));
+        .to(datamodel::Equation::Scalar(
+            "stock_a * rate_a * 2".to_string(),
+        ));
 
     // Model-level result should still produce valid results
     let ltm_after = model_ltm_variables(&db, source_model, source_project);
@@ -2145,7 +2142,7 @@ fn test_accumulator_no_errors_for_valid_project() {
     let project = simple_project();
     let sync = sync_from_datamodel(&db, &project);
 
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     assert!(
         diags.is_empty(),
         "valid project should produce no diagnostics"
@@ -2196,7 +2193,7 @@ fn test_accumulator_parse_error_bad_equation() {
         "struct fields should show equation errors for 'if then'"
     );
 
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     assert!(!diags.is_empty(), "bad equation should produce diagnostics");
 
     let d = &diags[0];
@@ -2266,7 +2263,7 @@ fn test_accumulator_parity_with_struct_fields() {
     let sync = sync_from_datamodel(&db, &project);
 
     // Collect from accumulator
-    let accum_diags = collect_all_diagnostics(&db, &sync);
+    let accum_diags = collect_all_diagnostics(&db, sync.project);
 
     // Collect from struct fields (parse results)
     let mut field_equation_errors: HashSet<(String, crate::common::EquationError)> = HashSet::new();
@@ -2346,7 +2343,7 @@ fn test_accumulator_multiple_models() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
 
     let models_with_errors: std::collections::HashSet<&str> =
         diags.iter().map(|d| d.model.as_str()).collect();
@@ -2412,7 +2409,7 @@ fn test_accumulator_incrementality() {
         let source_project = sync.project;
 
         // Initially: alpha has errors, beta does not
-        let diags1 = collect_all_diagnostics(&db, &sync);
+        let diags1 = collect_all_diagnostics(&db, sync.project);
         assert_eq!(
             diags1
                 .iter()
@@ -2436,7 +2433,7 @@ fn test_accumulator_incrementality() {
     // Fix alpha's equation (needs &mut db)
     alpha_src
         .set_equation(&mut db)
-        .to(SourceEquation::Scalar("42".to_string()));
+        .to(datamodel::Equation::Scalar("42".to_string()));
 
     let diags2 = collect_model_diagnostics(&db, source_model, source_project);
     assert!(
@@ -2688,11 +2685,10 @@ fn test_persistent_state_to_sync_result() {
     for (name, sv) in &main_model.variables {
         let pv = &persistent_main.variables[name];
         assert_eq!(sv.source.as_id(), pv.source_var.as_id());
-        assert_eq!(sv.id.as_id(), pv.var_interned_id);
     }
 
     // Verify the reconstituted SyncResult works for diagnostic collection
-    let diags = collect_all_diagnostics(&db, &sync);
+    let diags = collect_all_diagnostics(&db, sync.project);
     assert!(
         diags.is_empty(),
         "simple project should have no diagnostics"
@@ -2949,22 +2945,39 @@ fn test_compute_layout_simple() {
     let sync = sync_from_datamodel(&db, &project);
 
     let model = sync.models["main"].source;
-    let layout = compute_layout(&db, model, sync.project, true);
+    // `compute_layout` is now the role-independent *body* layout: no implicit
+    // globals, body offsets start at 0.
+    let layout = compute_layout(&db, model, sync.project);
 
-    // Should have implicit vars (time, dt, initial_time, final_time) + 2 user vars
+    assert!(
+        layout.get("time").is_none(),
+        "the body layout must NOT contain the implicit global `time` -- it is \
+         added only by the root shift at assembly"
+    );
     let alpha_entry = layout.get("alpha").expect("alpha should be in layout");
     let beta_entry = layout.get("beta").expect("beta should be in layout");
-    let time_entry = layout.get("time").expect("time should be in layout");
-
-    assert_eq!(time_entry.offset, 0);
-    assert_eq!(time_entry.size, 1);
-
-    // Alpha and beta should be after implicit vars (offset >= 4)
-    assert!(alpha_entry.offset >= 4);
-    assert!(beta_entry.offset >= 4);
+    // Two user vars occupy offsets 0 and 1 (in canonical-sorted order).
+    assert!(alpha_entry.offset < 2);
+    assert!(beta_entry.offset < 2);
     assert_ne!(alpha_entry.offset, beta_entry.offset);
     assert_eq!(alpha_entry.size, 1);
     assert_eq!(beta_entry.size, 1);
+    assert_eq!(layout.n_slots, 2);
+
+    // The root shift relocates the body and inserts the implicit globals at
+    // their fixed slots. This is the single shared shift that
+    // `assemble_module`'s root path applies.
+    let root = layout.root_shifted();
+    let time_entry = root.get("time").expect("time should be in root layout");
+    assert_eq!(time_entry.offset, 0);
+    assert_eq!(time_entry.size, 1);
+    assert_eq!(root.get("dt").expect("dt").offset, 1);
+    assert_eq!(root.get("initial_time").expect("initial_time").offset, 2);
+    assert_eq!(root.get("final_time").expect("final_time").offset, 3);
+    // Body vars shifted past the implicit globals (offset >= 4).
+    assert!(root.get("alpha").expect("alpha").offset >= 4);
+    assert!(root.get("beta").expect("beta").offset >= 4);
+    assert_eq!(root.n_slots, layout.n_slots + 4);
 }
 
 #[test]
@@ -2976,7 +2989,13 @@ fn test_compile_var_fragment_produces_result() {
     let model = sync.models["main"].source;
     let alpha_var = sync.models["main"].variables["alpha"].source;
 
-    let result = compile_var_fragment(&db, alpha_var, model, sync.project, true, vec![]);
+    let result = compile_var_fragment(
+        &db,
+        alpha_var,
+        model,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
     assert!(result.is_some(), "alpha should compile successfully");
 
     let frag = &result.as_ref().unwrap().fragment;
@@ -2994,7 +3013,7 @@ fn test_assemble_simulation_simple() {
     let project = two_var_project();
     let sync = sync_from_datamodel(&db, &project);
 
-    let result = assemble_simulation(&db, sync.project, "main");
+    let result = assemble_simulation(&db, sync.project, "main".to_string());
     assert!(
         result.is_ok(),
         "assemble_simulation failed: {:?}",
@@ -3118,8 +3137,8 @@ fn test_incremental_teacup_via_persistent_sync() {
     // Now reconstruct SyncResult from PersistentSyncState (like simlin_sim_new does)
     let sync = persistent_state.to_sync_result();
 
-    let incr_compiled =
-        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
+    let incr_compiled = assemble_simulation(&db, sync.project, "main".to_string())
+        .expect("incremental compilation failed");
 
     // Verify constant detection
     let room_temp_ident = crate::common::Ident::new("room_temperature");
@@ -3132,7 +3151,7 @@ fn test_incremental_teacup_via_persistent_sync() {
     );
 
     // Run simulation and verify results
-    let mut vm = Vm::new(incr_compiled).unwrap();
+    let mut vm = Vm::new((*incr_compiled).clone()).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
@@ -3161,7 +3180,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
     let model1 = sync1.models["main"].source;
 
     // Prime layout cache
-    let layout_ptr1 = compute_layout(&db, model1, sync1.project, true)
+    let layout_ptr1 = compute_layout(&db, model1, sync1.project)
         as *const crate::compiler::symbolic::VariableLayout;
 
     // Add a new variable "gamma"
@@ -3189,8 +3208,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync1.models["main"].variables["alpha"].source,
         model1,
         sync1.project,
-        true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3202,8 +3220,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync1.models["main"].variables["beta"].source,
         model1,
         sync1.project,
-        true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3217,8 +3234,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync2.models["main"].variables["alpha"].source,
         model2,
         sync2.project,
-        true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3230,8 +3246,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync2.models["main"].variables["beta"].source,
         model2,
         sync2.project,
-        true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3248,7 +3263,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
     );
 
     // Layout MUST change (gamma added)
-    let layout_ptr2 = compute_layout(&db, model2, sync2.project, true)
+    let layout_ptr2 = compute_layout(&db, model2, sync2.project)
         as *const crate::compiler::symbolic::VariableLayout;
     assert_ne!(
         layout_ptr1, layout_ptr2,
@@ -3265,8 +3280,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync3.models["main"].variables["alpha"].source,
         model3,
         sync3.project,
-        true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3278,8 +3292,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         sync3.models["main"].variables["beta"].source,
         model3,
         sync3.project,
-        true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3296,7 +3309,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
     );
 
     // Layout should change again (back to 2 variables)
-    let layout_ptr3 = compute_layout(&db, model3, sync3.project, true)
+    let layout_ptr3 = compute_layout(&db, model3, sync3.project)
         as *const crate::compiler::symbolic::VariableLayout;
     assert_ne!(
         layout_ptr2, layout_ptr3,
@@ -3372,8 +3385,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         sync1.models["main"].variables["price"].source,
         model1,
         sync1.project,
-        true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3385,8 +3397,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         sync1.models["main"].variables["sales"].source,
         model1,
         sync1.project,
-        true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3410,8 +3421,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         sync2.models["main"].variables["price"].source,
         model2,
         sync2.project,
-        true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3429,8 +3439,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         sync2.models["main"].variables["sales"].source,
         model2,
         sync2.project,
-        true,
-        vec![],
+        ModuleInputSet::empty(&db),
     )
     .as_ref()
     .unwrap()
@@ -3517,7 +3526,8 @@ fn test_ac1_6_cross_model_isolation() {
 
     // Prime model_a's dep graph
     let graph_a_ptr1 =
-        model_dependency_graph(&db, model_a_src, sync1.project) as *const ModelDepGraphResult;
+        model_dependency_graph(&db, model_a_src, sync1.project, ModuleInputSet::empty(&db))
+            as *const ModelDepGraphResult;
 
     // Change model_b's module connections
     let mut project2 = project.clone();
@@ -3540,7 +3550,8 @@ fn test_ac1_6_cross_model_isolation() {
 
     // Model A's dep graph should be a cache hit (pointer-equal)
     let graph_a_ptr2 =
-        model_dependency_graph(&db, model_a_src2, sync2.project) as *const ModelDepGraphResult;
+        model_dependency_graph(&db, model_a_src2, sync2.project, ModuleInputSet::empty(&db))
+            as *const ModelDepGraphResult;
     assert_eq!(
         graph_a_ptr1, graph_a_ptr2,
         "AC1.6: model A's dependency graph should be cached when only model B changes"
@@ -3618,8 +3629,8 @@ fn test_incremental_teacup_xmile_file() {
 
     let sync = persistent_state.to_sync_result();
 
-    let incr_compiled =
-        assemble_simulation(&db, sync.project, "main").expect("incremental compilation failed");
+    let incr_compiled = assemble_simulation(&db, sync.project, "main".to_string())
+        .expect("incremental compilation failed");
 
     // Constant detection must work for XMILE-loaded models
     let room_temp_ident = crate::common::Ident::new("room_temperature");
@@ -3632,7 +3643,7 @@ fn test_incremental_teacup_xmile_file() {
     );
 
     // Simulation must produce correct results
-    let mut vm = Vm::new(incr_compiled).unwrap();
+    let mut vm = Vm::new((*incr_compiled).clone()).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
@@ -3822,10 +3833,15 @@ fn test_circular_dependency_blocks_incremental_compilation() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
 
-    let dep_graph = model_dependency_graph(&db, sync.models["main"].source, sync.project);
+    let dep_graph = model_dependency_graph(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
     assert!(dep_graph.has_cycle, "should detect circular dependency");
 
-    let result = assemble_simulation(&db, sync.project, "main");
+    let result = assemble_simulation(&db, sync.project, "main".to_string());
     assert!(
         result.is_err(),
         "incremental compilation should fail for circular dependencies"
@@ -3893,7 +3909,7 @@ fn test_malformed_graphical_function_fails_fragment() {
     let model = sync.models["main"].source;
     let var = sync.models["main"].variables["lookup_var"].source;
 
-    let result = compile_var_fragment(&db, var, model, sync.project, true, vec![]);
+    let result = compile_var_fragment(&db, var, model, sync.project, ModuleInputSet::empty(&db));
     assert!(
         result.is_none(),
         "compile_var_fragment should return None for malformed graphical function"
@@ -4492,9 +4508,9 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
     let project = implicit_lookup_smth1_project();
     let ref_db = SimlinDb::default();
     let ref_sync = sync_from_datamodel(&ref_db, &project);
-    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main")
+    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main".to_string())
         .expect("reference incremental compile should succeed");
-    let ref_series = run_smoothed_series(ref_compiled);
+    let ref_series = run_smoothed_series((*ref_compiled).clone());
 
     let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
     let incr_compiled = compile_project_incremental(&db, state2.project, "main")
@@ -4530,9 +4546,9 @@ fn test_incremental_compile_implicit_lookup_dep_tables() {
     // Fresh incremental compile as reference
     let ref_db = SimlinDb::default();
     let ref_sync = sync_from_datamodel(&ref_db, &project);
-    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main")
+    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main".to_string())
         .expect("reference incremental compile should succeed");
-    let ref_series = run_smoothed_series(ref_compiled);
+    let ref_series = run_smoothed_series((*ref_compiled).clone());
     assert!(
         !ref_series.is_empty(),
         "reference smoothed series should not be empty"
@@ -4669,8 +4685,11 @@ fn test_implicit_module_offsets_in_flattened_map() {
         .expect("SMOOTH model should compile incrementally");
 
     // The flattened offsets should match the layout: implicit MODULE vars
-    // must occupy their sub-model's full slot count.
-    let layout = compute_layout(&db, sync.models["main"].source, sync.project, true);
+    // must occupy their sub-model's full slot count. `calc_flattened_offsets`
+    // is computed as root (it reserves the implicit-global slots), so compare
+    // against the root-shifted layout -- the SAME final layout
+    // `assemble_module`'s root path resolves against (the lockstep guarantee).
+    let layout = compute_layout(&db, sync.models["main"].source, sync.project).root_shifted();
     let offsets = calc_flattened_offsets_incremental(&db, sync.project, "main", true);
 
     // The total size from offsets should equal the layout's n_slots.
@@ -5139,11 +5158,11 @@ fn test_ltm_no_loops_zero_overhead() {
 
     // Layout slot count with LTM enabled
     source_project.set_ltm_enabled(&mut db).to(true);
-    let n_slots_with_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_with_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     // Layout slot count without LTM
     source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_without_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_without_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     // Both layouts should have the same number of slots because there
     // are no feedback loops and thus no LTM synthetic variables
@@ -5270,10 +5289,10 @@ fn test_ltm_incremental_produces_synthetic_variables() {
     // Verify LTM increases the layout slot count. Extract n_slots
     // before toggling ltm_enabled to avoid holding a salsa ref across
     // a &mut db call.
-    let n_slots_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     assert!(
         n_slots_ltm > n_slots_no_ltm,
@@ -5615,7 +5634,8 @@ fn test_previous_self_initial_value() {
     // Verify the initials runlist includes switch (transitive dep of the
     // implicit intermediate variable $:f:0:arg1).
     let source_model = sync.models.get("main").unwrap().source_model;
-    let dep_graph = model_dependency_graph(&db, source_model, sync.project);
+    let dep_graph =
+        model_dependency_graph(&db, source_model, sync.project, ModuleInputSet::empty(&db));
     assert!(
         dep_graph.runlist_initials.contains(&"switch".to_string()),
         "switch must be in the initials runlist so PREVIOUS fallback helpers \
@@ -5812,7 +5832,8 @@ fn test_dependency_graph_includes_previous_helper_for_module_backed_var() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, source_model, sync.project);
+    let dep_graph =
+        model_dependency_graph(&db, source_model, sync.project, ModuleInputSet::empty(&db));
 
     let has_previous_helper = dep_graph
         .runlist_initials

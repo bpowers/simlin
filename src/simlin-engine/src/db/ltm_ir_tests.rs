@@ -6,7 +6,7 @@
 //!
 //! Two layers:
 //! 1. `collect_reference_sites_tests` -- the `(shape, in_reducer)` contract
-//!    per AST site (the Phase-1 regression guards, ported from `db_analysis.rs`).
+//!    per AST site (the Phase-1 regression guards, ported from `db/analysis.rs`).
 //!    These exercise the production all-sources walker `collect_all_reference_sites`
 //!    (the IR builds on it) and pin the per-AST-site shape + `in_reducer`
 //!    primitive that feeds the IR's routing decision.

@@ -842,7 +842,7 @@ mod tests {
 
         // Diagnostics should surface the unit mismatch (as Unit diagnostic
         // or as a Model-level UnitMismatch error from inference failure)
-        let diagnostics = collect_all_diagnostics(&db, &sync_result);
+        let diagnostics = collect_all_diagnostics(&db, sync_result.project);
         let has_unit_issues = diagnostics.iter().any(|d| {
             matches!(d.error, DiagnosticError::Unit(_))
                 || matches!(
@@ -919,7 +919,7 @@ mod tests {
         );
 
         // Diagnostics should surface the unit mismatch
-        let diagnostics = collect_all_diagnostics(&db, &sync_result);
+        let diagnostics = collect_all_diagnostics(&db, sync_result.project);
         let has_unit_issues = diagnostics.iter().any(|d| {
             matches!(d.error, DiagnosticError::Unit(_))
                 || matches!(

@@ -159,7 +159,7 @@ fn run_series(project: &datamodel::Project) -> std::collections::HashMap<String,
 fn diagnostics_of(project: &datamodel::Project) -> Vec<crate::db::Diagnostic> {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
-    collect_all_diagnostics(&db, &sync)
+    collect_all_diagnostics(&db, sync.project)
 }
 
 fn series_of<'a>(series: &'a std::collections::HashMap<String, Vec<f64>>, key: &str) -> &'a [f64] {

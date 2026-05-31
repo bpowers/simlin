@@ -6,29 +6,31 @@
 //! relations, the element-cycle (recurrence-SCC) refinement, and the
 //! `#[cfg(test)]` SCC introspection accessor.
 //!
-//! This module owns the single shared definitions of the **dt-phase**
-//! (`dt_walk_successors`) and **init-phase** (`init_walk_successors`)
-//! cycle relations, the `VarInfo` map builder (`build_var_info`), the
+//! This module owns the single shared definition of the per-phase cycle
+//! relation (`walk_successors`, parameterized by `SccPhase` -- a `Stock`
+//! is a dt sink but not an init sink), the `VarInfo` map builder
+//! (`build_var_info`), the
 //! recurrence-SCC element-acyclicity refinement
 //! (`resolve_recurrence_sccs` and friends), and the production cycle gate
 //! itself (`model_dependency_graph_impl` -- the transitive-closure DFS,
 //! the SCC-aware back-edge break, the SCC-as-collapsed-node accumulation,
-//! and the SCC-contiguous topological runlist sort). The thin
-//! `#[salsa::tracked]` wrappers (`crate::db::model_dependency_graph` /
-//! `model_dependency_graph_with_inputs`) stay in `db.rs` because the
-//! `ModelDepGraphResult` salsa input/return types do; they delegate
-//! straight to `model_dependency_graph_impl` here.
+//! and the SCC-contiguous topological runlist sort). The dep-graph result
+//! types (`SccPhase`, `ResolvedScc`, `ModelDepGraphResult`) and the thin
+//! `#[salsa::tracked]` wrapper (`model_dependency_graph`, keyed on an
+//! interned `ModuleInputSet`, re-exported at the `db.rs` root) live here
+//! too; the wrapper delegates straight to `model_dependency_graph_impl`.
 //!
-//! Each cycle relation has exactly one definition, consumed by BOTH the
-//! production cycle gate and the `#[cfg(test)]` SCC introspection
-//! accessor (`dt_cycle_sccs`), so the accessor observes the engine's
-//! actual relation rather than a re-derivation that could silently drift.
-//! Co-locating the gate with the relation it consumes keeps that
-//! "single shared relation, never re-derive" invariant structural.
+//! The cycle relation has exactly one definition (`walk_successors`,
+//! phase-parameterized), consumed by BOTH the production cycle gate and
+//! the `#[cfg(test)]` SCC introspection accessor (`dt_cycle_sccs`), so the
+//! accessor observes the engine's actual relation rather than a
+//! re-derivation that could silently drift. Co-locating the gate with the
+//! relation it consumes keeps that "single shared relation, never
+//! re-derive" invariant structural.
 //!
-//! This is a top-level module (a sibling of `db`, like `db_ltm_ir` /
-//! `db_macro_registry`) rather than a submodule of `db.rs` purely to keep
-//! `db.rs` under the per-file line cap.
+//! This is a submodule of `db` (a child of `db.rs`, like `ltm_ir` /
+//! `macro_registry`) kept in its own file purely to keep `db.rs` under the
+//! per-file line cap; callers reach it via `crate::db::dep_graph::...`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -41,24 +43,19 @@ use crate::canonicalize;
 // `#[cfg(test)]` SCC accessors.
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity,
-    ModelDepGraphResult, ResolvedScc, SccPhase, SourceModel, SourceProject, SourceVariableKind,
-    VariableDeps, model_module_ident_context, variable_direct_dependencies_with_context,
-    variable_direct_dependencies_with_context_and_inputs,
+    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ModuleInputSet,
+    SourceModel, SourceProject, SourceVariableKind, VariableDeps, model_module_ident_context,
+    variable_direct_dependencies,
 };
-
-#[cfg(test)]
-use crate::db::model_dependency_graph;
 
 /// Per-variable dependency facts used to build the model dependency
 /// graph.
 ///
 /// Lives at module scope (rather than fn-local in
 /// `model_dependency_graph_impl`) so the shared `build_var_info` builder
-/// and the `dt_walk_successors` cycle-relation primitive can both name
-/// it; `dt_walk_successors` is consumed by both the production cycle
-/// detector and the `#[cfg(test)]` `dt_cycle_sccs` introspection
-/// accessor.
+/// and the `walk_successors` cycle-relation primitive can both name it;
+/// `walk_successors` is consumed by both the production cycle detector and
+/// the `#[cfg(test)]` `dt_cycle_sccs` introspection accessor.
 pub(crate) struct VarInfo {
     pub(crate) is_stock: bool,
     pub(crate) is_module: bool,
@@ -76,75 +73,22 @@ pub(crate) struct VarInfo {
     pub(crate) initial_deps: BTreeSet<Ident<Canonical>>,
 }
 
-/// The dt-phase cycle-successor set of `name`: exactly the deps
-/// `compute_inner`'s normal-node loop iterates for cycle detection in the
-/// dt phase.
+/// The cycle-successor set of `name` for the given `phase`: exactly the
+/// deps `compute_inner`'s normal-node loop iterates for cycle detection in
+/// that phase.
 ///
-/// This is the single shared definition of the dt-phase cycle relation,
-/// consumed by both the production cycle detector (`compute_inner`, dt
-/// branch) and the `#[cfg(test)]` SCC introspection accessor
-/// (`dt_cycle_sccs`). Defining it once and using it in both places is
-/// what makes the accessor's relation the engine's relation by
-/// construction, with no opportunity for a re-derivation to drift.
-///
-/// Returns `[]` when `name`:
-/// * is absent from `var_info` (a malformed/unknown entry -- no panic;
-///   `compute_inner` likewise early-returns `Ok(())` for an unknown name,
-///   and the dep loop skips unknown deps before recursing),
-/// * is a Stock (a stock is a dt-phase sink -- the
-///   `info.is_stock && !is_initial` early-return in `compute_inner`),
-/// * is a Module (`compute_inner` returns for a module *before*
-///   `processing.insert`, so a module is never on the DFS stack and can
-///   never carry a cycle).
-///
-/// Otherwise returns `var_info[name].dt_deps` filtered to deps `d` with
-/// `var_info.contains_key(d) && !var_info[d].is_stock`: unknown deps
-/// dropped (error reported elsewhere) and stock-targeted deps dropped (a
-/// stock breaks the dt chain). Module-targeted deps are KEPT -- a module
-/// node has no successors so Tarjan cannot route a cycle through it,
-/// matching `compute_inner` exactly (its `!dep_info.is_module` guard
-/// governs only transitive *absorption*, not which deps the loop
-/// iterates). Lagged deps are already absent (pruned when
-/// `var_info.dt_deps` is built). The returned references borrow
-/// `var_info`'s interned `dt_deps` keys and iterate in `BTreeSet`
-/// (lexicographic) order -- the same order the former `BTreeSet<String>`
-/// produced -- so the relation is byte-stable across runs. Returning
-/// `&Ident<Canonical>` (not `&str`) lets `compute_inner` Arc-clone a
-/// successor into the transitive set instead of allocating a fresh
-/// `String`.
-pub(crate) fn dt_walk_successors<'a>(
-    var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>,
-    name: &str,
-) -> Vec<&'a Ident<Canonical>> {
-    let Some(info) = var_info.get(name) else {
-        return Vec::new();
-    };
-    if info.is_stock || info.is_module {
-        return Vec::new();
-    }
-    info.dt_deps
-        .iter()
-        .filter(|dep| {
-            var_info
-                .get(dep.as_str())
-                .map(|d| !d.is_stock)
-                .unwrap_or(false)
-        })
-        .collect()
-}
-
-/// The init-phase cycle-successor set of `name`: exactly the deps
-/// `compute_inner`'s normal-node loop iterates for cycle detection in the
-/// **init** phase.
-///
-/// This is the single shared definition of the init-phase cycle relation
-/// -- the exact analogue of `dt_walk_successors` -- consumed by both the
-/// production cycle detector (`compute_inner`, init branch) and the
-/// init-phase per-element recurrence resolution. Defining it once and
-/// using it in both places makes the resolution's relation the engine's
-/// relation by construction, with no opportunity for a re-derivation to
-/// drift (the same "single shared relation, never re-derive" pattern
-/// `dt_walk_successors` follows).
+/// This is the single shared definition of BOTH phase relations,
+/// parameterized by `SccPhase` (reused from `db.rs` -- it already keys
+/// `ResolvedScc.phase` and drives `combine_scc_for_phase`, so the dt/init
+/// distinction is exactly the dt/init distinction this relation makes; a
+/// parallel enum would be redundant). It is consumed by the production
+/// cycle detector (`compute_inner`, both phase branches), the
+/// SCC-as-collapsed-node accumulation in `model_dependency_graph_impl`,
+/// the recurrence-SCC resolution (`resolve_recurrence_sccs`), and the
+/// `#[cfg(test)]` SCC introspection accessor (`dt_cycle_sccs`). Defining
+/// it once and using it everywhere is what makes each consumer's relation
+/// the engine's relation by construction, with no opportunity for a
+/// re-derivation to drift.
 ///
 /// Returns `[]` when `name`:
 /// * is absent from `var_info` (a malformed/unknown entry -- no panic;
@@ -152,45 +96,82 @@ pub(crate) fn dt_walk_successors<'a>(
 ///   and the dep loop skips unknown deps before recursing),
 /// * is a Module (`compute_inner` returns for a module *before*
 ///   `processing.insert` in BOTH phases, so a module is never on the DFS
-///   stack and can never carry a cycle in the init phase either).
+///   stack and can never carry a cycle in either phase),
+/// * is a Stock **and `phase == Dt`** (a stock is a dt-phase sink -- the
+///   `info.is_stock && !is_initial` early-return in `compute_inner` --
+///   read from the prior timestep, so it breaks the dt chain).
 ///
-/// Crucially, a **Stock is NOT an init-phase sink** (unlike
-/// `dt_walk_successors`, where `info.is_stock` short-circuits to `[]`):
-/// `compute_inner`'s stock sink is `info.is_stock && !is_initial`, so it
-/// does not fire in the init phase. A stock's initial value is a genuine
-/// init-relation node, so a stock whose init equation references itself
-/// is a real init self-loop and its init deps are its cycle successors.
+/// **The one per-phase difference.** A `Stock` is a dt-phase SINK but
+/// **NOT** an init-phase sink: `compute_inner`'s stock sink is
+/// `info.is_stock && !is_initial`, so it does not fire in the init phase.
+/// A stock's initial value is a genuine init-relation node, so a stock
+/// whose init equation references itself is a real init self-loop and its
+/// init deps are its cycle successors. The two branch points that encode
+/// this are (1) whether a stock `name` short-circuits to `[]`, and (2)
+/// whether a stock-targeted *dep* `d` is filtered out -- both gated on
+/// `phase == Dt` (a stock breaks the dt chain as source AND as target).
 ///
-/// Otherwise returns `var_info[name].initial_deps` filtered ONLY to deps
-/// `d` with `var_info.contains_key(d)`: unknown deps dropped (error
-/// reported elsewhere) -- **no stock filter and no stock sink** (a
-/// stock-targeted init dep is a real init dependency, kept). This exactly
-/// reproduces the inlined init logic `compute_inner` runs
-/// (`info.initial_deps.iter().filter(|dep|
-/// var_info.contains_key(dep))`). `initial_previous_referenced_vars` are
-/// already absent (stripped when `var_info.initial_deps` is built in
-/// `build_var_info`). The returned references borrow `var_info`'s interned
-/// `initial_deps` keys and iterate in `BTreeSet` (lexicographic) order --
-/// the same order the former `BTreeSet<String>` produced -- so the relation
-/// is byte-stable across runs. Returning `&Ident<Canonical>` (not `&str`)
-/// lets `compute_inner` Arc-clone a successor into the transitive set
-/// instead of allocating a fresh `String`.
-pub(crate) fn init_walk_successors<'a>(
+/// Otherwise returns the phase's dep set filtered to known targets:
+/// * `Dt`: `var_info[name].dt_deps` filtered to deps `d` with
+///   `var_info.contains_key(d) && !var_info[d].is_stock` -- unknown deps
+///   dropped (error reported elsewhere) and stock-targeted deps dropped (a
+///   stock breaks the dt chain).
+/// * `Initial`: `var_info[name].initial_deps` filtered ONLY to deps `d`
+///   with `var_info.contains_key(d)` -- unknown deps dropped, **no stock
+///   filter** (a stock-targeted init dep is a real init dependency, kept).
+///   This exactly reproduces the inlined init logic `compute_inner` ran
+///   (`info.initial_deps.iter().filter(|dep| var_info.contains_key(dep))`).
+///
+/// In both phases module-targeted deps are KEPT -- a module node has no
+/// successors so Tarjan cannot route a cycle through it, matching
+/// `compute_inner` exactly (its `!dep_info.is_module` guard governs only
+/// transitive *absorption*, not which deps the loop iterates). Lagged deps
+/// are already absent (pruned when the phase's dep set is built in
+/// `build_var_info`: `dt_previous_referenced_vars` from `dt_deps`,
+/// `initial_previous_referenced_vars` from `initial_deps`). The returned
+/// references borrow `var_info`'s interned dep keys and iterate in
+/// `BTreeSet` (lexicographic) order -- the same order the former
+/// `BTreeSet<String>` produced -- so the relation is byte-stable across
+/// runs. Returning `&Ident<Canonical>` (not `&str`) lets `compute_inner`
+/// Arc-clone a successor into the transitive set instead of allocating a
+/// fresh `String`.
+pub(crate) fn walk_successors<'a>(
     var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>,
     name: &str,
+    phase: SccPhase,
 ) -> Vec<&'a Ident<Canonical>> {
     let Some(info) = var_info.get(name) else {
         return Vec::new();
     };
-    // Only the module early-return applies in the init phase; the stock
-    // sink is dt-only (`!is_initial`-gated in `compute_inner`).
-    if info.is_module {
+    let is_dt = matches!(phase, SccPhase::Dt);
+    // A module is a sink in both phases; a stock is a sink in dt only.
+    if info.is_module || (is_dt && info.is_stock) {
         return Vec::new();
     }
-    info.initial_deps
-        .iter()
-        .filter(|dep| var_info.contains_key(dep.as_str()))
+    let deps = match phase {
+        SccPhase::Dt => &info.dt_deps,
+        SccPhase::Initial => &info.initial_deps,
+    };
+    deps.iter()
+        .filter(|dep| match var_info.get(dep.as_str()) {
+            // dt drops stock-targeted deps (a stock breaks the dt chain);
+            // init keeps them (a stock's initial value is a real dep).
+            Some(d) => !is_dt || !d.is_stock,
+            None => false,
+        })
         .collect()
+}
+
+/// Map `compute_transitive`'s `is_initial: bool` (the gate threads the
+/// phase as a bool) to the `SccPhase` `walk_successors` consumes. Keeps
+/// the gate's existing bool plumbing while it calls the one shared
+/// phase-parameterized relation.
+fn phase_for(is_initial: bool) -> SccPhase {
+    if is_initial {
+        SccPhase::Initial
+    } else {
+        SccPhase::Dt
+    }
 }
 
 /// Build the per-variable `VarInfo` map (plus the set of variables
@@ -213,6 +194,11 @@ pub(crate) fn build_var_info(
     let module_input_names = module_input_names.to_vec();
     let module_ident_context =
         model_module_ident_context(db, model, project, module_input_names.clone());
+    // Intern the module-input wiring once. An empty set is the no-inputs case
+    // (the old `None`-inputs path); `variable_direct_dependencies` maps it back
+    // to `None` internally, so the classification is byte-identical to the old
+    // empty-vs-nonempty dispatch.
+    let module_inputs = ModuleInputSet::from_names(db, &module_input_names);
 
     let mut var_info: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     let mut all_init_referenced: FxHashSet<Ident<Canonical>> = FxHashSet::default();
@@ -243,22 +229,13 @@ pub(crate) fn build_var_info(
     let var_deps: Vec<(&String, &VariableDeps)> = source_vars
         .iter()
         .map(|(name, source_var)| {
-            let deps = if module_input_names.is_empty() {
-                variable_direct_dependencies_with_context(
-                    db,
-                    *source_var,
-                    project,
-                    module_ident_context,
-                )
-            } else {
-                variable_direct_dependencies_with_context_and_inputs(
-                    db,
-                    *source_var,
-                    project,
-                    module_ident_context,
-                    module_input_names.clone(),
-                )
-            };
+            let deps = variable_direct_dependencies(
+                db,
+                *source_var,
+                project,
+                module_ident_context,
+                module_inputs,
+            );
             (name, deps)
         })
         .collect();
@@ -303,7 +280,7 @@ pub(crate) fn build_var_info(
         // Otherwise `normalize_deps` collapses `submodel·output` to the bare
         // `submodel` module name and the reader gains a spurious `reader ->
         // module` dt edge; combined with the module being a sink in the cycle
-        // relation (`dt_walk_successors`) but carrying its input src as a
+        // relation (`walk_successors`) but carrying its input src as a
         // direct dep in `dt_dependencies`, this forms an ordering cycle invisible
         // to cycle detection that `topo_sort_str` breaks arbitrarily -- sometimes
         // emitting the module BEFORE its input, so the module reads a stale input
@@ -400,8 +377,8 @@ pub(crate) fn build_var_info(
 }
 
 /// Strongly-connected components of the real dt-phase cycle relation
-/// (`dt_walk_successors`), for the `#[cfg(test)]` cycle-introspection
-/// accessor.
+/// (`walk_successors(.., SccPhase::Dt)`), for the `#[cfg(test)]`
+/// cycle-introspection accessor.
 ///
 /// `multi` is every SCC of size >= 2 (a true multi-node cycle);
 /// `self_loops` is every node with a direct dt self-edge `v -> v` (a
@@ -419,12 +396,12 @@ pub(crate) struct DtCycleSccs {
 /// Builds `var_info` via the exact builder `model_dependency_graph_impl`
 /// uses (`build_var_info` -- never a reconstruction) and runs the
 /// uncapped iterative Tarjan (`crate::ltm::scc_components`) over the
-/// adjacency defined by `dt_walk_successors` for every node. Because this
-/// accessor and `compute_inner` consume the same `dt_walk_successors`,
-/// the reported SCC set is the engine's dt-phase cycle relation by
-/// construction -- nothing is re-derived. The accompanying tests
-/// cross-check `multi` against the engine actually raising
-/// `ErrorCode::CircularDependency`.
+/// adjacency defined by `walk_successors(.., SccPhase::Dt)` for every
+/// node. Because this accessor and `compute_inner` consume the same
+/// `walk_successors` relation, the reported SCC set is the engine's
+/// dt-phase cycle relation by construction -- nothing is re-derived. The
+/// accompanying tests cross-check `multi` against the engine actually
+/// raising `ErrorCode::CircularDependency`.
 ///
 /// `#[cfg(test)]` accessor only. Uses the default (no module-input)
 /// wiring -- the same `model_dependency_graph` the `simulates_clearn`
@@ -437,14 +414,14 @@ pub(crate) fn dt_cycle_sccs(
 ) -> DtCycleSccs {
     let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
 
-    // Adjacency = exactly `dt_walk_successors` for every node. var_info
-    // keys are canonical (canonicalized at sync time), so wrapping them
-    // unchecked is sound.
+    // Adjacency = exactly the dt-phase `walk_successors` for every node.
+    // var_info keys are canonical (canonicalized at sync time), so wrapping
+    // them unchecked is sound.
     let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> =
         HashMap::with_capacity(var_info.len());
     let mut self_loops: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     for name in var_info.keys() {
-        let succ = dt_walk_successors(&var_info, name.as_str());
+        let succ = walk_successors(&var_info, name.as_str(), SccPhase::Dt);
         // `succ` is now `Vec<&Ident<Canonical>>`; an `Ident` `==` is pointer
         // equality on the interned handle, so this self-edge check is exact.
         if succ.contains(&name) {
@@ -469,7 +446,7 @@ pub(crate) fn dt_cycle_sccs(
 /// "the engine raised `CircularDependency`" -- became false by design
 /// once the element-cycle refinement landed: a single-variable
 /// self-recurrence (`ecc[tNext]=ecc[tPrev]+1`) is still an instrumented
-/// dt self-loop (the *whole-variable* `dt_walk_successors` relation is
+/// dt self-loop (the *whole-variable* dt `walk_successors` relation is
 /// unchanged), yet its induced *element* graph is acyclic, so the engine
 /// resolves it (it appears in `ModelDepGraphResult.resolved_sccs`) and
 /// does **not** raise `CircularDependency`. The re-pointed invariant is:
@@ -500,8 +477,9 @@ pub(crate) fn dt_cycle_sccs(
 ///
 /// **Phase-scoping note.** This predicate cross-checks only the **dt**
 /// path: `sccs` is the dt instrumentation (`dt_cycle_sccs` over
-/// `dt_walk_successors`), so check (2) is scoped to `phase == Dt`
-/// resolved SCCs. Phase 2 Task 3 added `phase: Initial` resolution for
+/// `walk_successors(.., SccPhase::Dt)`), so check (2) is scoped to
+/// `phase == Dt` resolved SCCs. Phase 2 Task 3 added `phase: Initial`
+/// resolution for
 /// init-only recurrences (a per-element recurrence in a stock's initial
 /// value), which are *structurally distinct* from dt -- a stock breaks
 /// the dt chain, so an init-only SCC is correctly NOT dt-instrumented
@@ -585,8 +563,9 @@ fn dt_cycle_sccs_consistency_violation(
     // This is deliberately scoped to `phase == Dt`. A `phase: Initial`
     // `ResolvedScc` (Phase 2 Task 3 -- a per-element recurrence in a
     // stock's initial value) is *structurally distinct* from dt: a
-    // stock breaks the dt chain, so `dt_walk_successors` reports NO dt
-    // SCC for it. Cross-checking an init-only verdict against the dt
+    // stock breaks the dt chain, so the dt `walk_successors` relation
+    // reports NO dt SCC for it. Cross-checking an init-only verdict against
+    // the dt
     // instrumentation would falsely flag a correct resolution. The dt
     // cross-check stays exactly as strong for the dt path (an
     // un-instrumented `phase: Dt` SCC is still a hard divergence); the
@@ -625,8 +604,8 @@ fn dt_cycle_sccs_consistency_violation(
 /// diagnostic) iff its induced element graph is acyclic and
 /// element-sourceable; otherwise the engine flags it. Panics (do not gate
 /// on a mis-derived relation) on any divergence. A consumer therefore
-/// gets a relation that is the engine's by construction (shared
-/// `dt_walk_successors`) and additionally cross-checked on every
+/// gets a relation that is the engine's by construction (the shared
+/// `walk_successors`) and additionally cross-checked on every
 /// invocation. (Phase-1 scoping: the init-phase relation is acyclic by
 /// construction for every harness fixture today; Phase 2 generalizes
 /// this -- see `dt_cycle_sccs_consistency_violation`.)
@@ -639,9 +618,15 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
     project: SourceProject,
 ) -> DtCycleSccs {
     let sccs = dt_cycle_sccs(db, model, project);
-    let dep_graph = model_dependency_graph(db, model, project);
+    let empty_inputs = ModuleInputSet::empty(db);
+    let dep_graph = model_dependency_graph(db, model, project, empty_inputs);
     let resolved_sccs = dep_graph.resolved_sccs.clone();
-    let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(db, model, project);
+    let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
+        db,
+        model,
+        project,
+        empty_inputs,
+    );
     let engine_raises_circular = diags.iter().any(|d| {
         matches!(
             d.0.error,
@@ -819,7 +804,7 @@ enum SccVerdict {
 /// - `SymLoadPrev` (PREVIOUS, `prev_values` snapshot, prior timestep):
 ///   contributes NO element edge in EITHER phase -- the analogue of
 ///   `build_var_info` retaining `dt_deps` against `lagged_dt_previous`
-///   (`deps.dt_previous_referenced_vars`, `db_dep_graph.rs:262`) AND
+///   (`deps.dt_previous_referenced_vars`, `db/dep_graph.rs:262`) AND
 ///   `initial_deps` against `lagged_initial_previous`
 ///   (`deps.initial_previous_referenced_vars`, `:264`).
 /// - `SymLoadInitial` (INIT, `initial_values` snapshot): NO edge in
@@ -855,9 +840,9 @@ enum SccVerdict {
 /// `SymLoadPrev`). It is also why the upstream identification note still
 /// holds: a *PREVIOUS-only* self-recurrence
 /// (`x[tNext]=PREVIOUS(x[tPrev],0)`) is never even identified as an SCC
-/// (`build_var_info` strips its whole-variable self-edge, so
-/// `dt_walk_successors` reports none); for an SCC that IS identified via
-/// an un-lagged cross-member chain, this strip is what lets its acyclic
+/// (`build_var_info` strips its whole-variable self-edge, so the dt
+/// `walk_successors` relation reports none); for an SCC that IS identified
+/// via an un-lagged cross-member chain, this strip is what lets its acyclic
 /// current-value element graph resolve. dt stock-breaking is genuinely
 /// inherited (it is reflected in the symbolic bytecode `lower_var_fragment`
 /// + `compile_phase_to_per_var_bytecodes` produce, not re-implemented).
@@ -956,7 +941,7 @@ fn symbolic_phase_element_order(
                 // This is the element-level analogue of `build_var_info`
                 // stripping `lagged_dt_previous`
                 // (`deps.dt_previous_referenced_vars`) from `dt_deps`
-                // (`db_dep_graph.rs:262`) AND `lagged_initial_previous`
+                // (`db/dep_graph.rs:262`) AND `lagged_initial_previous`
                 // (`deps.initial_previous_referenced_vars`) from
                 // `initial_deps` (`:264`) -- both phases. Contributing no
                 // edge makes the element graph MATCH the engine's actual
@@ -970,7 +955,7 @@ fn symbolic_phase_element_order(
                 // dt graph it is NOT a current-dt ordering edge -- the
                 // element-level analogue of `build_var_info` stripping
                 // `init_only_dt` (`deps.dt_init_only_referenced_vars`)
-                // from `dt_deps` (`db_dep_graph.rs:261`). In the init
+                // from `dt_deps` (`db/dep_graph.rs:261`). In the init
                 // graph it IS a genuine init-phase dependency: an INIT(x)
                 // read during the initial-value computation orders x's
                 // initial value before this element, and `build_var_info`
@@ -1110,8 +1095,9 @@ fn symbolic_phase_element_order(
 /// **`SccPhase::Initial` (the init path -- Phase 2 Task 3).** Targets an
 /// init recurrence that is *structurally distinct* from dt: a stock's
 /// dt-equation is its flow (a stock breaks the dt chain --
-/// `dt_walk_successors` returns `[]`), while its init-equation is its
-/// initial value, so a stock whose initial value is a per-element
+/// `walk_successors(.., SccPhase::Dt)` returns `[]`), while its
+/// init-equation is its initial value, so a stock whose initial value is a
+/// per-element
 /// recurrence has an init self-loop with **no corresponding dt cycle**.
 /// Here only the **init** induced element graph is relevant: the dt
 /// precondition the `Dt` branch applies would be *wrong* (a stock has no
@@ -1223,11 +1209,13 @@ pub(crate) struct DtSccResolution {
 /// element-acyclicity verdict.
 ///
 /// *Step A -- SCC identification.* Builds the whole-variable adjacency
-/// for `phase` over the shared `build_var_info(.., &[])` universe: for
-/// `SccPhase::Dt` the edges are `dt_walk_successors` (exactly as
+/// for `phase` over the shared `build_var_info(.., &[])` universe via the
+/// single phase-parameterized `walk_successors`: for `SccPhase::Dt` the
+/// edges are `walk_successors(.., SccPhase::Dt)` (exactly as
 /// `dt_cycle_sccs` does); for `SccPhase::Initial` they are
-/// `init_walk_successors` (Phase 2 Task 2 -- the exact init-phase
-/// analogue, where a stock is NOT a sink). Multi-variable SCCs via the
+/// `walk_successors(.., SccPhase::Initial)` (Phase 2 Task 2 -- the exact
+/// init-phase analogue, where a stock is NOT a sink). Multi-variable SCCs
+/// via the
 /// promoted `crate::ltm::scc_components` filtered to `len() >= 2`,
 /// single-variable self-loops detected directly from adjacency (Tarjan
 /// reports a self-loop as a size-1 component). Defining each relation
@@ -1313,8 +1301,6 @@ pub(crate) fn resolve_recurrence_sccs(
     project: SourceProject,
     phase: crate::db::SccPhase,
 ) -> DtSccResolution {
-    use crate::db::SccPhase;
-
     let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
 
     // Whole-variable adjacency = exactly the phase's shared cycle
@@ -1324,10 +1310,7 @@ pub(crate) fn resolve_recurrence_sccs(
         HashMap::with_capacity(var_info.len());
     let mut self_loops: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     for name in var_info.keys() {
-        let succ = match phase {
-            SccPhase::Dt => dt_walk_successors(&var_info, name.as_str()),
-            SccPhase::Initial => init_walk_successors(&var_info, name.as_str()),
-        };
+        let succ = walk_successors(&var_info, name.as_str(), phase.clone());
         // `succ` is `Vec<&Ident<Canonical>>`; `Ident` `==` is pointer
         // equality on the interned handle, so this self-edge check is exact.
         if succ.contains(&name) {
@@ -1450,14 +1433,15 @@ pub(crate) fn array_producing_vars(
 /// The engine's OWN per-variable production-lowered non-initial (dt/flow)
 /// `Vec<Expr>` for the canonical `var_name`.
 ///
-/// Sourced via `crate::db_var_fragment::lower_var_fragment` -- the exact
+/// Sourced via `crate::db::var_fragment::lower_var_fragment` -- the exact
 /// per-variable lowering the production caller
 /// `crate::db::compile_var_fragment` runs -- with the caller-owned,
 /// lowering-independent context constructed byte-identically to that
-/// caller (same helpers, same order: `source_dims_to_datamodel` ->
+/// caller (same helpers, same order: `project_datamodel_dims` ->
 /// `DimensionsContext`/`Dimension`, `model.name`, `model_module_map`)
 /// and the default no-module-input wiring `dt_cycle_sccs` uses
-/// (`build_var_info(.., &[])` => `is_root = true`, empty module inputs).
+/// (`build_var_info(.., &[])`, empty module inputs -- the lowering is
+/// role-independent, so there is no `is_root` selector to match).
 /// This is the engine's real lowering, never a re-derivation. The
 /// non-initial phase is the dt phase, so membership is
 /// dt-phase-consistent with the cycle set it is intersected against.
@@ -1483,7 +1467,7 @@ pub(crate) fn var_noninitial_lowered_exprs(
     project: SourceProject,
     var_name: &str,
 ) -> Vec<crate::compiler::Expr> {
-    use crate::db_var_fragment::{LoweredVarFragment, lower_var_fragment};
+    use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
 
     let source_vars = model.variables(db);
     let Some(sv) = source_vars.get(var_name) else {
@@ -1509,7 +1493,6 @@ pub(crate) fn var_noninitial_lowered_exprs(
         *sv,
         model,
         project,
-        true,
         &[],
         converted_dims,
         dim_context,
@@ -1604,20 +1587,108 @@ impl Drop for UnsourceableVarsGuard {
 }
 
 #[cfg(test)]
-#[path = "db_dep_graph_tests.rs"]
-mod db_dep_graph_tests;
+#[path = "dep_graph_tests.rs"]
+mod dep_graph_tests;
+
+// ── Dependency-graph result types ──────────────────────────────────────
+
+/// Which dependency phase a resolved recurrence SCC belongs to.
+///
+/// `model_dependency_graph_impl` runs the cycle gate twice -- once for
+/// the dt-phase relation and once for the init-phase relation. A
+/// `ResolvedScc` records which run proved its element graph acyclic so
+/// the consumer applies the right per-element order. Phase 1 only
+/// produces `Dt` (single-variable dt self-recurrence); `Initial` is
+/// reserved for the Phase 2 init-cycle resolution.
+///
+/// Derives the same trait set as `ModelDepGraphResult` (it is reachable
+/// from a salsa return value, so it must participate in salsa equality).
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub enum SccPhase {
+    Dt,
+    Initial,
+}
+
+/// A recurrence SCC whose induced element graph the cycle gate proved
+/// acyclic. `members` is byte-stable (BTreeSet); `element_order` is the
+/// per-element topological evaluation order `(member, element-offset)`.
+///
+/// `ResolvedScc` plays a dual role: besides recording the cycle gate's
+/// element-acyclicity verdict, it is the compiler's per-element
+/// interleaving INPUT unit -- its `element_order` is consumed by
+/// `combine_scc_fragment`/`assemble_module` to interleave each SCC
+/// member's per-element symbolic segments into one combined
+/// `PerVarBytecodes`.
+///
+/// Reachable from `ModelDepGraphResult` (a salsa return value), so it
+/// derives the identical trait set -- in particular `PartialEq`/`Eq`/
+/// `salsa::Update` so a change in the resolved-SCC set invalidates the
+/// salsa cache. `Ident<Canonical>` derives `Ord` + `salsa::Update`,
+/// which makes the `BTreeSet`/`Vec` field types well-formed here.
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct ResolvedScc {
+    pub members: BTreeSet<Ident<Canonical>>,
+    pub element_order: Vec<(Ident<Canonical>, usize)>,
+    pub phase: SccPhase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+pub struct ModelDepGraphResult {
+    /// Interned-ident-keyed dependency maps. `Ident<Canonical>` derives
+    /// `salsa::Update`, and salsa's blanket impls cover
+    /// `std::collections::HashMap<K,V>` / `BTreeSet<K>` for `K,V: Update`, so
+    /// these stay on the std `HashMap` (default hasher) -- only the hot
+    /// internal working maps in `model_dependency_graph_impl` use FxHash.
+    /// `Ident<Canonical>` keys/values are cheap Arc-refcount clones and the
+    /// `BTreeSet`s iterate in the same lexicographic order the former
+    /// `BTreeSet<String>` did, so a consumer probing by `&str` (via
+    /// `Borrow<str>`) sees byte-identical behavior.
+    pub dt_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+    pub initial_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+    pub runlist_initials: Vec<String>,
+    pub runlist_flows: Vec<String>,
+    pub runlist_stocks: Vec<String>,
+    pub has_cycle: bool,
+    /// Recurrence SCCs whose induced element graph the cycle gate proved
+    /// acyclic and element-sourceable, so they are resolved rather than
+    /// rejected with `CircularDependency`. Empty on the acyclic happy
+    /// path (zero extra work) and whenever the conservative loud-safe
+    /// fallback fires. Populated by the Phase 1 Subcomponent B
+    /// element-cycle refinement; every construction site initializes it
+    /// explicitly (`Vec::new()` on the early-return/error paths).
+    pub resolved_sccs: Vec<ResolvedScc>,
+}
+
+/// Per-model tracked dependency graph, keyed on the module-instance input
+/// wiring (`module_inputs`). The empty `ModuleInputSet` is the no-inputs case;
+/// because it is a single interned id, every no-input caller shares one cache
+/// entry. Models instantiated with different input wiring can have different
+/// dependency sets when `isModuleInput(...)` appears in equations.
+///
+/// This thin salsa wrapper lives alongside the dependency-graph cycle gate
+/// it delegates to (`model_dependency_graph_impl`, the SCC-aware back-edge
+/// break, the collapsed-node transitive accumulation) and the shared cycle
+/// relation that gate consumes (`walk_successors`/`build_var_info`/
+/// `resolve_recurrence_sccs`); it is re-exported at the `db.rs` root.
+#[salsa::tracked(returns(ref))]
+pub fn model_dependency_graph<'db>(
+    db: &'db dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    module_inputs: ModuleInputSet<'db>,
+) -> ModelDepGraphResult {
+    let module_input_names = module_inputs.names(db);
+    model_dependency_graph_impl(db, model, project, module_input_names)
+}
 
 // ── Model dependency graph (the cycle gate) ────────────────────────────
 //
 // `model_dependency_graph_impl` is the production consumer of this
-// module's shared cycle relation (`dt_walk_successors` /
-// `init_walk_successors` / `build_var_info`) and the element-cycle
-// refinement (`resolve_recurrence_sccs`). It lives here, alongside the
-// relation it consumes, rather than in `db.rs` -- a sibling top-level
-// module (like `db_ltm_ir` / `db_macro_registry`) split out purely for
-// the per-file line cap. The thin `#[salsa::tracked]` wrappers
-// (`model_dependency_graph` / `model_dependency_graph_with_inputs`)
-// stay in `db.rs` because the `ModelDepGraphResult` salsa types do.
+// module's shared cycle relation (`walk_successors` / `build_var_info`)
+// and the element-cycle refinement (`resolve_recurrence_sccs`). It lives
+// here, alongside the relation it consumes -- a `db` submodule (like
+// `ltm_ir` / `macro_registry`) split out purely for the per-file line
+// cap.
 
 /// Accumulate a model-level `CircularDependency` diagnostic for
 /// `var_name` (the variable the dependency walk reported the back-edge
@@ -1846,11 +1917,8 @@ pub(crate) fn model_dependency_graph_impl(
                     // external set is order-independent (a BTreeSet), so the
                     // collapsed result is byte-stable.
                     for m in &members {
-                        let succ: Vec<&Ident<Canonical>> = if is_initial {
-                            init_walk_successors(var_info, m.as_str())
-                        } else {
-                            dt_walk_successors(var_info, m.as_str())
-                        };
+                        let succ: Vec<&Ident<Canonical>> =
+                            walk_successors(var_info, m.as_str(), phase_for(is_initial));
                         for dep in succ {
                             // Intra-SCC successor: resolved inside the
                             // combined fragment, contributes no whole-variable
@@ -1903,33 +1971,28 @@ pub(crate) fn model_dependency_graph_impl(
 
                 // The successor set this normal node contributes to cycle
                 // detection AND the `all_deps` transitive/ordering map. It
-                // is sourced from the SINGLE shared cycle relation for the
-                // phase: `dt_walk_successors` (dt) or `init_walk_successors`
-                // (init). In the init phase stocks do NOT break the chain
-                // (that filter is dt-only -- `compute_inner`'s
-                // `info.is_stock && !is_initial` sink does not fire here),
-                // so `init_walk_successors` is the init deps filtered only
-                // to known vars. Either way this is exactly the effective
-                // set the original `for dep in direct { if
-                // !var_info.contains_key {continue} if !is_initial &&
-                // dep_info.is_stock {continue} ... }` loop iterated, in the
-                // same `BTreeSet`-sorted order, so cycle detection (first
-                // back-edge) and the `all_deps` transitive map are
-                // byte-identical. `init_walk_successors`'s defensive
-                // absent/module guards never fire here -- the stock/module
-                // early-returns above already handled those before this
-                // point (the same way `dt_walk_successors`'s guards are
-                // redundant at this call site). Sharing the init relation by
-                // construction means the init-phase per-element recurrence
-                // resolution observes the engine's actual init relation, not
-                // a re-derivation. Only the iteration set is factored out;
-                // the stock/module early-returns above and the `transitive`
+                // is sourced from the SINGLE shared cycle relation
+                // (`walk_successors`), selected for this phase by
+                // `phase_for(is_initial)`. In the init phase stocks do NOT
+                // break the chain (that filter is dt-only -- `compute_inner`'s
+                // `info.is_stock && !is_initial` sink does not fire here), so
+                // the init relation is the init deps filtered only to known
+                // vars. Either way this is exactly the effective set the
+                // original `for dep in direct { if !var_info.contains_key
+                // {continue} if !is_initial && dep_info.is_stock {continue}
+                // ... }` loop iterated, in the same `BTreeSet`-sorted order,
+                // so cycle detection (first back-edge) and the `all_deps`
+                // transitive map are byte-identical. `walk_successors`'s
+                // defensive absent/module guards never fire here -- the
+                // stock/module early-returns above already handled those
+                // before this point. Sharing one relation by construction
+                // means the init-phase per-element recurrence resolution
+                // observes the engine's actual init relation, not a
+                // re-derivation. Only the iteration set is factored out; the
+                // stock/module early-returns above and the `transitive`
                 // accumulation below are untouched.
-                let successors: Vec<&Ident<Canonical>> = if is_initial {
-                    init_walk_successors(var_info, name.as_str())
-                } else {
-                    dt_walk_successors(var_info, name.as_str())
-                };
+                let successors: Vec<&Ident<Canonical>> =
+                    walk_successors(var_info, name.as_str(), phase_for(is_initial));
 
                 let mut transitive: BTreeSet<Ident<Canonical>> = BTreeSet::new();
                 for dep in successors {
@@ -1959,9 +2022,9 @@ pub(crate) fn model_dependency_graph_impl(
                         compute_inner(var_info, all_deps, processing, dep, is_initial, scc_map)?;
                     }
 
-                    // `successors` only contains known vars (dt: filtered
-                    // inside `dt_walk_successors`; init: the `contains_key`
-                    // filter above), so this lookup never misses. The
+                    // `successors` only contains known vars (`walk_successors`
+                    // filters to `var_info.contains_key` targets in both
+                    // phases), so this lookup never misses. The
                     // `!dep_info.is_module` transitive non-absorption guard
                     // is preserved exactly -- it governs only whether
                     // `dep`'s transitive set is absorbed, never iteration.
@@ -2028,7 +2091,7 @@ pub(crate) fn model_dependency_graph_impl(
     // loud-safe fallback => zero extra work).
     let dt_scc_map: BTreeMap<Ident<Canonical>, usize> = if dt_first.is_err() {
         let resolution =
-            crate::db_dep_graph::resolve_recurrence_sccs(db, model, project, SccPhase::Dt);
+            crate::db::dep_graph::resolve_recurrence_sccs(db, model, project, SccPhase::Dt);
         if !resolution.has_unresolved && !resolution.resolved.is_empty() {
             let mut map = BTreeMap::new();
             scc_map_from_resolved(&resolution.resolved, 0, &mut map);
@@ -2089,8 +2152,12 @@ pub(crate) fn model_dependency_graph_impl(
             // this never appeared as a dt SCC). Run the init-phase
             // recurrence resolution (Phase 2 Task 3), reusing the
             // phase-parameterized builder.
-            let init_resolution =
-                crate::db_dep_graph::resolve_recurrence_sccs(db, model, project, SccPhase::Initial);
+            let init_resolution = crate::db::dep_graph::resolve_recurrence_sccs(
+                db,
+                model,
+                project,
+                SccPhase::Initial,
+            );
 
             // Exclude init SCCs whose members the dt path already
             // resolved: a both-relations aux self-recurrence is

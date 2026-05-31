@@ -574,7 +574,8 @@ fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
 ///
 /// `collect_all_diagnostics` is a trivial wrapper over
 /// `collect_model_diagnostics`; we assert on the per-model collector
-/// here to sidestep `SyncResult`'s db borrow.
+/// here because it is the exact entry point `libsimlin` and `simlin-mcp`
+/// drive.
 #[test]
 fn test_auto_flip_warning_surfaces_via_collect_model_diagnostics() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
@@ -1625,7 +1626,7 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
 #[test]
 fn cross_element_loop_partitions_resolve_to_some() {
     // The cross-element wildcard-reducer fixture (used elsewhere by
-    // `cross_element_loop_through_sum_reducer` in db_element_graph_tests):
+    // `cross_element_loop_through_sum_reducer` in db/element_graph_tests):
     //
     //   population[Region] (stock, inflow=births)
     //   births[Region] = SUM(population[*]) * 0.01

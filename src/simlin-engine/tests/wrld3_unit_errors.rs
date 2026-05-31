@@ -7,7 +7,7 @@
 //! Bug 1 (delay3 conflation): the stdlib `delay3` / `delay1` stock-init
 //!   equation has the form `(if isModuleInput(initial_value) then initial_value
 //!   else input) * delay_time`.  The stdlib-module argument compatibility check
-//!   in `db_units::check_model_units` extracts ALL identifiers referenced by the init
+//!   in `db::units::check_model_units` extracts ALL identifiers referenced by the init
 //!   AST and pairwise-compares their declared units, so `input` (pollution/year)
 //!   and `delay_time` (year) are wrongly flagged as conflicting even though
 //!   `delay_time` participates only as a coefficient.  Only the identifiers in
@@ -113,7 +113,7 @@ fn wrld3_parses_without_hard_errors() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     let sync_result = sync.to_sync_result();
-    let diagnostics = collect_all_diagnostics(&db, &sync_result);
+    let diagnostics = collect_all_diagnostics(&db, sync_result.project);
 
     // Unit errors are non-fatal warnings -- they must NOT prevent the model from
     // having a parseable datamodel.  Check that no *blocking* equation errors exist.
@@ -151,7 +151,7 @@ fn wrld3_resource_unit_alias_should_not_conflict() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     let sync_result = sync.to_sync_result();
-    let diagnostics = collect_all_diagnostics(&db, &sync_result);
+    let diagnostics = collect_all_diagnostics(&db, sync_result.project);
 
     // Match ANY unit-related diagnostic that mentions BOTH `resource_unit` and
     // `resource_units` as distinct identifier tokens in its Debug string OR
@@ -229,7 +229,7 @@ fn delay3_input_and_delay_time_different_units_is_valid() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diagnostics = collect_all_diagnostics(&db, &sync.to_sync_result());
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
 
     let spurious: Vec<_> = diagnostics
         .iter()
@@ -283,7 +283,7 @@ fn delay3_with_explicit_initial_value_does_not_falsely_flag_delay_time() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diagnostics = collect_all_diagnostics(&db, &sync.to_sync_result());
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
 
     let spurious: Vec<_> = diagnostics
         .iter()
@@ -338,7 +338,7 @@ fn delay3_initial_value_unit_mismatch_is_caught() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diagnostics = collect_all_diagnostics(&db, &sync.to_sync_result());
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
 
     let real_mismatch: Vec<_> = diagnostics
         .iter()
@@ -394,7 +394,7 @@ fn smth3_input_and_averaging_time_different_units_is_valid() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diagnostics = collect_all_diagnostics(&db, &sync.to_sync_result());
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
 
     let spurious: Vec<_> = diagnostics
         .iter()
@@ -445,7 +445,7 @@ fn smth3_initial_value_unit_mismatch_is_caught() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diagnostics = collect_all_diagnostics(&db, &sync.to_sync_result());
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
 
     let real_mismatch: Vec<_> = diagnostics
         .iter()
@@ -482,7 +482,7 @@ fn wrld3_delay3_pollution_variable_has_no_spurious_unit_error() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     let sync_result = sync.to_sync_result();
-    let diagnostics = collect_all_diagnostics(&db, &sync_result);
+    let diagnostics = collect_all_diagnostics(&db, sync_result.project);
 
     // The variable name as it appears in the diagnostic (synthesized module name).
     let target_var_substring = "persistent_pollution_appearance_rate";
@@ -560,7 +560,7 @@ fn trend_does_not_conflate_value_rate_and_delay_args() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diagnostics = collect_all_diagnostics(&db, &sync.to_sync_result());
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
 
     // Any pairwise mismatch involving two of (revenue, averaging_time,
     // initial_growth_rate) is spurious -- none of them share units with

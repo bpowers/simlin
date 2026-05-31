@@ -60,11 +60,10 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
         })?;
 
         let datamodel_project: engine::datamodel::Project = engine_serde::deserialize(pb_project);
-        let (db, sync_state) = new_synced_db(&datamodel_project);
+        let db = new_synced_db(&datamodel_project);
         Ok(Box::into_raw(Box::new(SimlinProject {
             datamodel: Mutex::new(datamodel_project),
             db: Mutex::new(db),
-            sync_state: Mutex::new(Some(sync_state)),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -140,11 +139,10 @@ pub unsafe extern "C" fn simlin_project_open_json(
             }
         };
 
-        let (db, sync_state) = new_synced_db(&datamodel_project);
+        let db = new_synced_db(&datamodel_project);
         Ok(Box::into_raw(Box::new(SimlinProject {
             datamodel: Mutex::new(datamodel_project),
             db: Mutex::new(db),
-            sync_state: Mutex::new(Some(sync_state)),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -353,17 +351,12 @@ pub unsafe extern "C" fn simlin_project_add_model(
     // Add to datamodel
     datamodel_locked.models.push(new_model);
 
-    // Re-sync the persistent salsa DB incrementally.
-    // Hold the db lock until sync_state is restored so concurrent readers
-    // (simlin_sim_new) never observe sync_state = None.
+    // Re-sync the persistent salsa DB incrementally. The db owns its sync
+    // state, so `db.sync` reuses the prior handles automatically; holding the
+    // db lock across the call keeps concurrent readers (simlin_sim_new) from
+    // observing a half-synced db.
     let mut db = proj.db.lock().unwrap();
-    let prev_state = proj.sync_state.lock().unwrap().clone();
-    let new_state = engine::db::sync_from_datamodel_incremental(
-        &mut db,
-        &datamodel_locked,
-        prev_state.as_ref(),
-    );
-    *proj.sync_state.lock().unwrap() = Some(new_state);
+    db.sync(&datamodel_locked);
     drop(db);
 
     drop(datamodel_locked);
@@ -478,11 +471,10 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
 
     match simlin_engine::open_xmile(&mut reader) {
         Ok(datamodel_project) => {
-            let (db, sync_state) = new_synced_db(&datamodel_project);
+            let db = new_synced_db(&datamodel_project);
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
-                sync_state: Mutex::new(Some(sync_state)),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -538,11 +530,10 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
 
     match simlin_engine::open_vensim(contents) {
         Ok(datamodel_project) => {
-            let (db, sync_state) = new_synced_db(&datamodel_project);
+            let db = new_synced_db(&datamodel_project);
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
-                sync_state: Mutex::new(Some(sync_state)),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -634,11 +625,10 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
 
     match result {
         Ok(datamodel_project) => {
-            let (db, sync_state) = new_synced_db(&datamodel_project);
+            let db = new_synced_db(&datamodel_project);
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
-                sync_state: Mutex::new(Some(sync_state)),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -695,11 +685,10 @@ pub unsafe extern "C" fn simlin_project_open_systems(
 
     match simlin_engine::open_systems(contents) {
         Ok(datamodel_project) => {
-            let (db, sync_state) = new_synced_db(&datamodel_project);
+            let db = new_synced_db(&datamodel_project);
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
-                sync_state: Mutex::new(Some(sync_state)),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -752,9 +741,7 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
     };
 
     let db_locked = proj.db.lock().unwrap();
-    let sync_state = proj.sync_state.lock().unwrap();
-    if let Some(ref state) = *sync_state {
-        let source_project = state.to_sync_result().project;
+    if let Some(source_project) = db_locked.current_source_project() {
         engine::db::compile_project_incremental(&db_locked, source_project, model_name)
             .and_then(engine::Vm::new)
             .is_ok()
@@ -790,21 +777,25 @@ pub unsafe extern "C" fn simlin_project_get_errors(
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
     let db_locked = proj.db.lock().unwrap();
-    let sync_state = proj.sync_state.lock().unwrap();
-    let sync = match sync_state.as_ref() {
-        Some(state) => state.to_sync_result(),
+    let source_project = match db_locked.current_source_project() {
+        Some(sp) => sp,
         None => return ptr::null_mut(),
     };
 
     // Attempt compilation to detect assembly-level errors, then collect
     // all accumulator diagnostics plus any VM validation error.
-    let vm_error = match engine::db::compile_project_incremental(&db_locked, sync.project, "main") {
+    let vm_error = match engine::db::compile_project_incremental(&db_locked, source_project, "main")
+    {
         Ok(compiled) => engine::Vm::new(compiled).err(),
         Err(err) => Some(err),
     };
 
-    let all_errors =
-        gather_error_details_with_db(&db_locked, &sync, vm_error.as_ref(), &datamodel_locked);
+    let all_errors = gather_error_details_with_db(
+        &db_locked,
+        source_project,
+        vm_error.as_ref(),
+        &datamodel_locked,
+    );
 
     if all_errors.is_empty() {
         return ptr::null_mut();

@@ -265,7 +265,7 @@ fn assert_systems_model_compiles(txt_path: &str, rounds: u64) {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &datamodel_project);
 
-    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
     if !diagnostics.is_empty() {
         for diag in &diagnostics {
             eprintln!("  diagnostic: {:?}", diag);
@@ -395,7 +395,7 @@ fn open_systems_entry_point_works() {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &project);
 
-        let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, &sync);
+        let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
         let errors: Vec<_> = diagnostics
             .iter()
             .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))

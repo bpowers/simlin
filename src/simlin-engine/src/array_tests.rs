@@ -4595,7 +4595,7 @@ mod rank_tests {
         let datamodel = project.build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diags = collect_all_diagnostics(&db, &sync);
+        let diags = collect_all_diagnostics(&db, sync.project);
 
         let has_bad_builtin_args = diags.iter().any(|d| {
             d.variable.as_deref() == Some(var_name)
@@ -4906,7 +4906,7 @@ TIME STEP = 1 ~~|
         let datamodel = open_vensim(mdl).expect("MDL should parse to a datamodel project");
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diags = collect_all_diagnostics(&db, &sync);
+        let diags = collect_all_diagnostics(&db, sync.project);
 
         let has_bad_builtin_args = diags.iter().any(|d| {
             d.variable.as_deref() == Some("result")
@@ -5007,11 +5007,9 @@ TIME STEP = 1 ~~|
     /// `EmptyEquation`. Either way the residual must surface as a **clean,
     /// named error** -- the failing compile `Err` must name the specific
     /// `$⁚out⁚…⁚arg0⁚…` helper -- never a silent all-`None` fragment that reads
-    /// a wrong value. (The per-helper `DimensionInScalarContext` diagnostic is
-    /// also accumulated through `try_accumulate_diagnostic`, on the same
-    /// `IN_TRACKED_CONTEXT`-gated path as `assemble_module`'s aggregate `Err`
-    /// diagnostic; surfacing that gated channel through `collect_all_diagnostics`
-    /// is a separate, pre-existing concern.)
+    /// a wrong value. (Surfacing the residual through the per-variable
+    /// diagnostic API rather than only the aggregate `Err` is a separate,
+    /// pre-existing concern tracked as GH #466.)
     #[test]
     fn unresolvable_helper_fails_loudly_not_silently() {
         use crate::db::{compile_project_incremental, sync_from_datamodel_incremental};

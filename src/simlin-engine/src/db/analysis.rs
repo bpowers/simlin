@@ -8,7 +8,7 @@
 //! - CausalEdgesResult, LoopCircuitsResult, CyclePartitionsResult
 //! - ElementCausalEdgesResult, RefShape (element-level graph); the
 //!   reference-site classification (`ClassifiedSite`, the AST walker, the
-//!   agg-routing decision) lives in `db_ltm_ir.rs` and is consumed here via
+//!   agg-routing decision) lives in `db/ltm_ir.rs` and is consumed here via
 //!   `model_ltm_reference_sites`
 //! - `emit_edges_for_reference` and the element-name expansion helpers
 //! - DetectedLoop, DetectedLoopsResult (polarity-aware loop detection)
@@ -25,9 +25,9 @@ use crate::canonicalize;
 use crate::datamodel;
 
 use super::{
-    Db, SourceModel, SourceProject, SourceVariableKind, build_module_inputs,
-    model_module_ident_context, parse_source_variable_with_module_context, project_datamodel_dims,
-    project_dimensions_context, variable_direct_dependencies,
+    Db, ModuleIdentContext, ModuleInputSet, SourceModel, SourceProject, SourceVariableKind,
+    build_module_inputs, model_module_ident_context, parse_source_variable_with_module_context,
+    project_datamodel_dims, project_dimensions_context, variable_direct_dependencies,
 };
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -81,7 +81,7 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 ///
 /// The shape does *not* by itself decide whether a reference is rerouted
 /// through a hoisted `$⁚ltm⁚agg⁚{n}` aggregate node -- that is recorded in
-/// `db_ltm_ir::ClassifiedSite::routing` (`ThroughAgg` iff the site is
+/// `ltm_ir::ClassifiedSite::routing` (`ThroughAgg` iff the site is
 /// syntactically inside a hoisted reducer *and* a synthetic agg of `to`
 /// reads `from`). A `to` equation can hold both `SUM(pop[*])` (routed via
 /// the agg) and a direct `pop[idx]` (kept as a conservative cross-product
@@ -123,7 +123,7 @@ pub enum RefShape {
     /// `row_sum[D1] = SUM(matrix[D1,*])`) keeps this shape on its `Direct`
     /// site, where it projects to the conservative reduction / cross-product
     /// into the (variable-backed-agg) target. The not-hoistable dynamic-index
-    /// reducer carve-out (`SUM(pop[idx,*])`) is reclassified by `db_ltm_ir`
+    /// reducer carve-out (`SUM(pop[idx,*])`) is reclassified by `ltm_ir`
     /// as `DynamicIndex` rather than kept here (#514), so a `Direct`
     /// `Wildcard` site never carries an *un*-hoisted sliced reducer.
     Wildcard,
@@ -131,7 +131,7 @@ pub enum RefShape {
     /// a non-literal expression (`@N`, `Range`, an arbitrary `Expr`, or a
     /// *partial* `StarRange` mixed with literal indices) -- *or* the
     /// not-hoistable dynamic-index reducer carve-out (`SUM(pop[idx,*])`,
-    /// reclassified here from `Wildcard` by `db_ltm_ir` so the conservative
+    /// reclassified here from `Wildcard` by `ltm_ir` so the conservative
     /// cross-product path is `DynamicIndex`-only in `emit_edges_for_reference`).
     /// Conservative full cross-product. (A hoisted *synthetic*-agg reducer
     /// reference never has routing `Direct` with this shape -- it's
@@ -975,6 +975,11 @@ pub fn model_causal_edges(
 ) -> CausalEdgesResult {
     let source_vars = model.variables(db);
     let module_ctx = model_module_ident_context(db, model, project, vec![]);
+    // The old no-arg `variable_direct_dependencies` used a literally-empty
+    // module-ident context (NOT `module_ctx`) and the `None`-inputs path;
+    // reproduce that exactly with the empty context and empty input set.
+    let empty_ctx = ModuleIdentContext::new(db, vec![]);
+    let empty_inputs = ModuleInputSet::empty(db);
     let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut stocks = BTreeSet::new();
     let mut dynamic_modules = HashMap::new();
@@ -1016,7 +1021,8 @@ pub fn model_causal_edges(
                 }
             }
             _ => {
-                let deps = variable_direct_dependencies(db, *source_var, project);
+                let deps =
+                    variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
                 for dep in &deps.dt_deps {
                     let normalized = normalize_module_ref_str(dep);
                     edges.entry(normalized).or_default().insert(name.clone());
@@ -1059,7 +1065,13 @@ pub fn model_causal_edges(
                 _ => {
                     // For implicit flows/auxes, get deps from the parent's
                     // variable_direct_dependencies result.
-                    let deps = variable_direct_dependencies(db, *source_var, project);
+                    let deps = variable_direct_dependencies(
+                        db,
+                        *source_var,
+                        project,
+                        empty_ctx,
+                        empty_inputs,
+                    );
                     if let Some(implicit_dep) =
                         deps.implicit_vars.iter().find(|iv| iv.name == imp_name)
                     {
@@ -1139,7 +1151,7 @@ pub fn model_edge_shapes(
 ) -> EdgeShapesResult {
     let variable_edges = model_causal_edges(db, model, project);
     let source_vars = model.variables(db);
-    let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+    let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
 
     // Build a set of structural flow->stock edges so we can label them
     // `{Bare}` directly: stock equations contain only the initial value,
@@ -1370,7 +1382,7 @@ pub fn model_element_causal_edges(
     // `DynamicIndex` shape (`arr[i+1]`, a range, the not-hoisted dynamic-index
     // reducer carve-out `SUM(pop[idx,*])`) still expands to the conservative
     // full cross-product there.
-    let ir = crate::db_ltm_ir::model_ltm_reference_sites(db, model, project);
+    let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
 
     // Cache dimension lookups to avoid repeated calls for the same variable
@@ -1458,7 +1470,7 @@ pub fn model_element_causal_edges(
 
             for site in classified.expect("classified is Some -- checked above") {
                 match &site.routing {
-                    crate::db_ltm_ir::SiteRouting::Direct => {
+                    crate::db::ltm_ir::SiteRouting::Direct => {
                         emit_edges_for_reference(
                             from_name,
                             to_name,
@@ -1469,7 +1481,7 @@ pub fn model_element_causal_edges(
                             &mut element_edges,
                         );
                     }
-                    crate::db_ltm_ir::SiteRouting::ThroughAgg { agg } => {
+                    crate::db::ltm_ir::SiteRouting::ThroughAgg { agg } => {
                         // Route only the rows the reducer reads through the
                         // agg: `source[<pinned>,<iterated>,<reduced→all>] →
                         // agg[<iterated>]` per `Iterated`-axis combination,
@@ -2794,8 +2806,8 @@ mod polarity_confidence_tests {
 }
 
 #[cfg(test)]
-#[path = "db_element_graph_tests.rs"]
-mod db_element_graph_tests;
+#[path = "element_graph_tests.rs"]
+mod element_graph_tests;
 
 #[cfg(test)]
 mod tiered_circuits_tests {

@@ -234,13 +234,32 @@ fn test_issue_296_snapshot_lock_blocks_competing_patch() {
     }
 }
 
-/// Regression test for issue #297: sync_state must never be temporarily set to
-/// None during patch validation.
+/// Regression test for issue #297: a concurrent reader must never observe the
+/// db's sync state as missing (`None`) during patch validation.
+///
+/// The db now owns its own sync state (rather than a separate `sync_state`
+/// mutex), so the invariant is structural: the state is only transiently absent
+/// inside `db.sync_staged`/`db.restore`, which run under `&mut self` and thus
+/// require the db lock. Any concurrent reader takes the SAME db lock, so it can
+/// only ever observe a fully-synced db -- a reader that races a staging patch
+/// blocks until the patch decision releases the lock, then sees a consistent
+/// `Some(SourceProject)`, never a half-staged or `None` state.
+///
+/// This is a genuine CROSS-THREAD test: the patch hook holds the db lock during
+/// staging while a reader thread tries to `db.lock()` + `current_source_project`.
+/// (The reader probes `current_source_project` directly, the lowest-level form
+/// of the invariant; #298 covers the higher-level reader path through
+/// `simlin_sim_new` observing the committed value.) It would FAIL -- not merely
+/// pass vacuously -- if a reader could ever acquire the lock mid-staging and see
+/// `None`: the reader asserts `Some` while the staging thread is alive.
 #[test]
 fn test_issue_297_patch_staging_keeps_sync_state_present() {
     use crate::patch::{PatchHookPoint, install_patch_test_hook};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     let datamodel = TestProject::new("issue_297")
         .aux("alpha", "100", None)
@@ -248,33 +267,45 @@ fn test_issue_297_patch_staging_keeps_sync_state_present() {
     let proj = open_project_from_datamodel(&datamodel);
     let proj_addr = proj as usize;
 
-    let hook_fired = Arc::new(AtomicBool::new(false));
-    let observed_none = Arc::new(AtomicBool::new(false));
-    let hook_fired_for_hook = Arc::clone(&hook_fired);
-    let observed_none_for_hook = Arc::clone(&observed_none);
+    // The hook blocks the patching thread (holding the db lock) at the staging
+    // point until the main thread releases it, opening a deterministic window
+    // in which the reader thread is guaranteed to be contending for the lock.
+    let (hook_enter_tx, hook_enter_rx) = mpsc::channel::<()>();
+    let release = Arc::new(AtomicBool::new(false));
+    let release_for_hook = Arc::clone(&release);
     let hook = Arc::new(move |point: PatchHookPoint, project_ref: &SimlinProject| {
         if point == PatchHookPoint::StagedSyncWhileDbLocked
             && (project_ref as *const SimlinProject as usize) == proj_addr
         {
-            hook_fired_for_hook.store(true, Ordering::SeqCst);
-            if project_ref.sync_state.lock().unwrap().is_none() {
-                observed_none_for_hook.store(true, Ordering::SeqCst);
+            hook_enter_tx
+                .send(())
+                .expect("issue #297 hook enter send should succeed");
+            while !release_for_hook.load(Ordering::Acquire) {
+                std::thread::yield_now();
             }
         }
     });
     let _hook_guard = install_patch_test_hook(hook);
 
-    let patch = r#"{
-        "models": [{
-            "name": "main",
-            "ops": [{
-                "type": "upsertAux",
-                "payload": { "aux": { "name": "alpha", "equation": "123" } }
+    let patch = String::from(
+        r#"{
+            "models": [{
+                "name": "main",
+                "ops": [{
+                    "type": "upsertAux",
+                    "payload": { "aux": { "name": "alpha", "equation": "123" } }
+                }]
             }]
-        }]
-    }"#;
+        }"#,
+    );
 
     unsafe {
+        simlin_project_ref(proj);
+        simlin_project_ref(proj);
+    }
+
+    let writer = thread::spawn(move || unsafe {
+        let proj = proj_addr as *mut SimlinProject;
         let mut out_error: *mut SimlinError = std::ptr::null_mut();
         let mut collected: *mut SimlinError = std::ptr::null_mut();
         let bytes = patch.as_bytes();
@@ -291,16 +322,46 @@ fn test_issue_297_patch_staging_keeps_sync_state_present() {
             simlin_error_free(collected);
         }
         assert!(out_error.is_null(), "patch should succeed");
-    }
+        simlin_project_unref(proj);
+    });
 
+    hook_enter_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("issue #297 hook should have been reached during staging");
+
+    // Reader races the staging patch: it must block on the db lock until the
+    // patch releases it, then observe a consistent `Some` sync state.
+    let (reader_done_tx, reader_done_rx) = mpsc::channel::<bool>();
+    let reader = thread::spawn(move || {
+        let proj_ref = unsafe { &*(proj_addr as *const SimlinProject) };
+        let db = proj_ref.db.lock().unwrap();
+        let observed_some = db.current_source_project().is_some();
+        drop(db);
+        reader_done_tx
+            .send(observed_some)
+            .expect("reader result send should succeed");
+    });
+
+    // While the staging thread holds the lock, the reader cannot complete.
     assert!(
-        hook_fired.load(Ordering::SeqCst),
-        "issue #297 hook should be reached during patch staging"
+        reader_done_rx
+            .recv_timeout(Duration::from_millis(200))
+            .is_err(),
+        "reader should block while patch staging holds the db lock"
     );
+
+    release.store(true, Ordering::Release);
+
+    let observed_some = reader_done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("reader should complete after the patch decision releases the lock");
     assert!(
-        !observed_none.load(Ordering::SeqCst),
-        "sync_state should never be None during patch staging"
+        observed_some,
+        "concurrent reader must observe Some(SourceProject), never a None sync state"
     );
+
+    writer.join().expect("writer should not panic");
+    reader.join().expect("reader should not panic");
 
     unsafe {
         simlin_project_unref(proj);

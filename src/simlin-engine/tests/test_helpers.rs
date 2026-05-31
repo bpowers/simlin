@@ -601,7 +601,7 @@ pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f
 /// `Err(message)` on wasm-codegen `Unsupported` or an incremental-compile
 /// failure.
 ///
-/// Discovery mode causes `db_ltm::model_ltm_variables` to emit a
+/// Discovery mode causes `db::ltm::model_ltm_variables` to emit a
 /// `$⁚ltm⁚link_score⁚{from}→{to}` synthetic for **every** causal edge
 /// (not just loop-participating ones), so the reconstructed `Results`
 /// can drive `ltm_finding::discover_loops_with_graph` end-to-end. The

@@ -497,8 +497,8 @@ impl<'module> Compiler<'module> {
                             // -- e.g. a PREVIOUS whose arg survived helper
                             // rewriting as a non-variable expression
                             // (NotSimulatable) -- must flow back to the caller
-                            // (db_ltm.rs gracefully drops the un-compilable LTM
-                            // synthetic fragment), never escalate to a panic (#363).
+                            // (db/ltm/compile.rs gracefully drops the un-compilable
+                            // LTM synthetic fragment), never escalate to a panic (#363).
                             self.walk_expr(expr)?.unwrap();
                             let bounds = bounds[i] as VariableOffset;
                             self.push(Opcode::PushSubscriptIndex { bounds });
@@ -928,7 +928,17 @@ impl<'module> Compiler<'module> {
                         if c.is_some() {
                             self.walk_expr(c.as_ref().unwrap())?.unwrap()
                         } else {
-                            self.push(Opcode::LoadVar {
+                            // A 2-arg RAMP defaults its end time to `final_time`,
+                            // which lives at the fixed absolute slot
+                            // FINAL_TIME_OFF (an implicit global, not a body
+                            // variable). It must be read with LoadGlobalVar -- an
+                            // absolute-slot load with no `module_off` relocation --
+                            // exactly like BuiltinFn::FinalTime. A module-relative
+                            // LoadVar happens to alias `final_time` only at the
+                            // root model (where slot 3 IS final_time); inside a
+                            // submodule it reads an unrelated body slot (or drops
+                            // the fragment when that slot has no symbolic mapping).
+                            self.push(Opcode::LoadGlobalVar {
                                 off: FINAL_TIME_OFF as u16,
                             });
                         };
@@ -1633,7 +1643,7 @@ mod tests {
     /// helper rewriting as a non-variable expression) is `NotSimulatable`. When
     /// such a `PREVIOUS` sits inside a `Subscript` index expression, the scalar
     /// `Subscript` arm of `walk_expr` must *propagate* that recoverable `Err`
-    /// (so a caller like `db_ltm.rs`'s LTM-synthetic-fragment compile can
+    /// (so a caller like `db/ltm/compile.rs`'s LTM-synthetic-fragment compile can
     /// gracefully drop the un-compilable fragment), not escalate it to a
     /// process-killing panic. This pins the converted condition behind #363
     /// (codegen.rs line 494 was a double-`unwrap` on this `Result`).

@@ -936,6 +936,158 @@ fn ensure_wasm_matches_skips_unsupported_model() {
     }
 }
 
+/// A 2-arg `RAMP(slope, start)` (no end time) defaults its end time to the
+/// simulation's `final_time`. `final_time` is an implicit global living at the
+/// fixed absolute slot `FINAL_TIME_OFF` (= 3), NOT a layout-relative body
+/// variable, so the RAMP codegen must read it with the absolute-slot
+/// `LoadGlobalVar` (like `BuiltinFn::FinalTime`) rather than the module-relative
+/// `LoadVar`.
+///
+/// Inside a SUBMODULE the body layout starts at slot 0 with the submodule's own
+/// variables, so a module-relative load of slot 3 reads an unrelated body slot
+/// (or, through the symbolic layer's reverse-offset map, fails to resolve and
+/// the variable's fragment is silently dropped, making the model uncompilable).
+/// This regression model puts a distinct constant (`d_const = 7`) at the
+/// submodule's relative slot 3: the submodule's `RAMP(2, 3)` must cap at
+/// `2*(final_time-3)` using the root `final_time = 10` (=> 14), never at
+/// `2*(d_const-3)` (=> 8) nor the all-zero series a dropped fragment yields.
+///
+/// Asserts the correct RAMP semantics in the VM and then runs the model through
+/// the wasm backend for parity (the wasm backend lowers `LoadGlobalVar` to the
+/// same absolute slot the VM reads), so this guards both execution paths.
+#[test]
+fn two_arg_ramp_in_submodule_reads_root_final_time() {
+    use simlin_engine::common::Ident;
+    use simlin_engine::datamodel;
+
+    let sim_specs = datamodel::SimSpecs {
+        start: 0.0,
+        stop: 10.0,
+        dt: datamodel::Dt::Dt(1.0),
+        save_step: Some(datamodel::Dt::Dt(1.0)),
+        sim_method: datamodel::SimMethod::Euler,
+        time_units: None,
+    };
+
+    let const_aux = |ident: &str, value: &str| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar(value.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    };
+
+    let datamodel = datamodel::Project {
+        name: "ramp_submodule".to_string(),
+        sim_specs: sim_specs.clone(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![datamodel::Variable::Module(datamodel::Module {
+                    ident: "sub".to_string(),
+                    model_name: "ramp_model".to_string(),
+                    documentation: String::new(),
+                    units: None,
+                    references: vec![],
+                    compat: datamodel::Compat::default(),
+                    ai_state: None,
+                    uid: None,
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+            datamodel::Model {
+                name: "ramp_model".to_string(),
+                sim_specs: None,
+                // Names sort alphabetically into submodule slots 0..4:
+                // a_const(0), b_const(1), c_const(2), d_const(3), ramped(4).
+                // Slot 3 (`d_const = 7`) is what the buggy module-relative
+                // `LoadVar{3}` would read for the RAMP end time.
+                variables: vec![
+                    const_aux("a_const", "1"),
+                    const_aux("b_const", "1"),
+                    const_aux("c_const", "1"),
+                    const_aux("d_const", "7"),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "ramped".to_string(),
+                        equation: datamodel::Equation::Scalar("RAMP(2, 3)".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    // Saved steps are time = 0, 1, 2, ..., 10 (11 steps). With slope=2,
+    // start=3, end=final_time=10, the correct RAMP series is:
+    //   t <= 3        => 0
+    //   3 < t < 10    => 2 * (t - 3)
+    //   t >= 10       => 2 * (10 - 3) = 14
+    let expected_ramp: Vec<f64> = (0..=10)
+        .map(|t| {
+            let t = t as f64;
+            if t <= 3.0 {
+                0.0
+            } else if t < 10.0 {
+                2.0 * (t - 3.0)
+            } else {
+                14.0
+            }
+        })
+        .collect();
+
+    let compiled = compile_vm(&datamodel);
+    let mut vm = Vm::new(compiled).expect("submodule RAMP model should build a VM");
+    vm.run_to_end()
+        .expect("submodule RAMP simulation should run");
+    let ramped = vm
+        .get_series(&Ident::new("sub·ramped"))
+        .expect("sub·ramped missing from VM results");
+
+    assert_eq!(
+        ramped.len(),
+        expected_ramp.len(),
+        "unexpected number of saved steps for sub·ramped"
+    );
+    for (i, (actual, want)) in ramped.iter().zip(expected_ramp.iter()).enumerate() {
+        assert!(
+            (actual - want).abs() < 1e-9,
+            "sub·ramped at step {i} (time {i}): expected {want}, got {actual}"
+        );
+    }
+
+    // wasm-backend parity: the same model must lower and produce the same
+    // series under the wasm backend (LoadGlobalVar is read at the same
+    // absolute slot in both backends).
+    let expected = vm_results(&datamodel);
+    let outcome = ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "submodule RAMP model must run through the wasm backend, got {outcome:?}"
+    );
+}
+
 type CompileFn = fn(&simlin_engine::datamodel::Project) -> simlin_engine::CompiledSimulation;
 
 fn simulate_path(xmile_path: &str) {
@@ -2697,7 +2849,7 @@ fn interleaved_mdl_element_interleave_simulates() {
 #[test]
 fn init_recurrence_mdl_multi_member_init_scc_simulates() {
     use simlin_engine::common::Ident;
-    use simlin_engine::db::{SccPhase, model_dependency_graph};
+    use simlin_engine::db::{ModuleInputSet, SccPhase, model_dependency_graph};
     use std::collections::BTreeSet;
 
     let path = "../../test/sdeverywhere/models/init_recurrence/init_recurrence.mdl";
@@ -2713,7 +2865,7 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
     let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
     let sync = sync.to_sync_result();
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
         !dep_graph.has_cycle,
@@ -2828,7 +2980,9 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
 #[test]
 fn helper_recurrence_mdl_synthetic_helper_in_scc_simulates() {
     use simlin_engine::common::ErrorCode;
-    use simlin_engine::db::{SccPhase, model_dependency_graph, model_implicit_var_info};
+    use simlin_engine::db::{
+        ModuleInputSet, SccPhase, model_dependency_graph, model_implicit_var_info,
+    };
 
     let path = "../../test/sdeverywhere/models/helper_recurrence/helper_recurrence.mdl";
     let contents =
@@ -2839,7 +2993,7 @@ fn helper_recurrence_mdl_synthetic_helper_in_scc_simulates() {
     let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
     let sync = sync.to_sync_result();
     let model = sync.models["main"].source;
-    let dep_graph = model_dependency_graph(&db, model, sync.project);
+    let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     // (1) It compiles via the incremental path -- NO false
     // `CircularDependency`. RED before Task 2: the no-`SourceVariable`
@@ -4229,7 +4383,7 @@ fn collect_project_diagnostics(
     // Drive compilation so the diagnostic accumulators are populated; the
     // Result is intentionally ignored here (callers inspect diagnostics).
     let _ = compile_project_incremental(&db, sync.project, "main");
-    collect_all_diagnostics(&db, &sync)
+    collect_all_diagnostics(&db, sync.project)
 }
 
 /// Pure predicate: is `equation` EXACTLY the `{module_ident}.{output}`
@@ -4442,7 +4596,7 @@ fn corpus_sstats_multi_output_materializes() {
 ///
 /// 1. **Macro-registry-build error** -- a project-level (`model` empty,
 ///    `variable` `None`) `Model` diagnostic with code `CircularDependency`
-///    or `DuplicateMacroName`. `db_macro_registry::project_macro_registry`
+///    or `DuplicateMacroName`. `db::macro_registry::project_macro_registry`
 ///    emits this when `MacroRegistry::build` rejects the macro set; an empty
 ///    registry then un-shadows every macro builtin (the #554 cascade:
 ///    `SSHAPE`/`SAMPLE UNTIL`/`RAMP FROM TO` calls become
@@ -4971,11 +5125,11 @@ fn compiles_and_runs_clearn_structural() {
 ///
 /// The flows-phase cycle `captured -> smth1·output -> smth1(module) -> input ->
 /// captured` is hidden from CYCLE DETECTION because a module is a sink in the
-/// cycle relation (`dt_walk_successors`), so the model compiles (no
+/// cycle relation (`walk_successors`), so the model compiles (no
 /// `CircularDependency`). But `captured` reads the SMOOTH *stock* output, which
 /// in the dt phase is a prior-timestep read and must NOT impose a same-step
 /// ordering on the module: before the fix, the salsa runlist
-/// (`db_dep_graph::build_var_info` / `topo_sort_str`) kept a `captured ->
+/// (`db::dep_graph::build_var_info` / `topo_sort_str`) kept a `captured ->
 /// smth1` dt edge anyway (the `·output` stock dep was not chain-broken for a
 /// NON-module reader), creating a false ordering cycle that `topo_sort_str`
 /// broke by emitting the SMOOTH module BEFORE its `input` for SOME elements

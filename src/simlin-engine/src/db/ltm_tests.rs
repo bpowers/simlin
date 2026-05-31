@@ -221,10 +221,10 @@ fn test_a2a_ltm_layout_size() {
     };
     source_project.set_ltm_enabled(&mut db).to(true);
 
-    let n_slots_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project, true).n_slots;
+    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
 
     // With LTM enabled, layout should have more slots for LTM variables
     assert!(

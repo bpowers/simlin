@@ -462,7 +462,7 @@ fn a2a_produces_n_element_identical_loops() {
 /// population[boston] → agg → births[nyc] → ...`) visits `$⁚ltm⁚agg⁚0`
 /// twice -- it is NOT an elementary circuit, so Johnson can't emit it
 /// directly; the LTM loop builder reconstructs it (see the cross-element
-/// loop tests in `db_ltm_unified_tests.rs`).
+/// loop tests in `db/ltm_unified_tests.rs`).
 #[test]
 fn cross_element_loop_through_sum_reducer() {
     let project = TestProject::new("cross_element_loop")
@@ -1110,7 +1110,7 @@ fn element_graph_scalar_feeder_of_arrayed_hoisted_reducer_feeds_every_slot() {
 /// dependency by its *iterated dimension* (`growth[Region,Age] =
 /// row_sum[Region] * c`, `row_sum` over `Region`, `growth` over
 /// `Region x Age`) classifies the `row_sum[Region]` subscript as `Bare`
-/// (see `db_ltm_ir_tests::ir_iterated_dim_subscript_is_bare`), so the
+/// (see `ltm_ir_tests::ir_iterated_dim_subscript_is_bare`), so the
 /// element graph has the same-element-on-shared-dims projection
 /// `row_sum[r] -> growth[r,a]` for every `(r, a)` -- and NOT the full
 /// `row_sum[r1] -> growth[r2,*]` cross-product. Before the fix the subscript
@@ -1148,7 +1148,7 @@ fn element_graph_iterated_dim_subscript_same_element_projection() {
 /// AC3.5: a mapped-dimension iterated subscript (`x` over `Region`,
 /// `target` over `State`, a `State→Region` mapping, `target[State] =
 /// x[State] * c`) classifies `x[State]` as `Bare` (see
-/// `db_ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`), so the
+/// `ltm_ir_tests::ir_mapped_iterated_dim_subscript_is_bare`), so the
 /// element graph is *identical* to the one a bare `x` reference (`target[State]
 /// = x * c`) produces -- no new dimension-mapping behavior. `expand_same_element`
 /// matches dimension *names*, so a disjoint-named pair like `Region`/`State`
