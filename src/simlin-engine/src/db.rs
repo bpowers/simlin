@@ -228,13 +228,20 @@ pub struct SourceProject {
     pub model_names: Vec<String>,
     #[returns(ref)]
     pub models: HashMap<String, SourceModel>,
-    /// `MacroRegistry::build`'s own typed `(ErrorCode, message)` (`None`
-    /// when valid). Computed at sync from the datamodel `Vec<Model>` (not
-    /// here -- `models` is name-keyed, collapsing the AC5.3 duplicate /
-    /// colliding names); the typed code rides through so the downstream
-    /// diagnostic isn't re-tagged from prose. See `crate::db::macro_registry`.
+    /// The ordered, pre-dedup macro-declaration list: one entry per
+    /// *project*-declared model (NOT stdlib models), in datamodel
+    /// declaration order, carrying the model's CANONICAL name and its
+    /// `macro_spec.clone()`. This is the minimal raw data
+    /// `project_macro_registry` needs to re-derive the AC5.3 duplicate /
+    /// collision verdict (Passes 1-2 of `MacroRegistry::build`), which
+    /// `models` -- a name-keyed `HashMap` that collapses duplicate /
+    /// colliding model names -- cannot supply. Declaration order is
+    /// load-bearing: the build error reports the FIRST-detected duplicate /
+    /// collision, so the list must preserve the datamodel's model order.
+    /// `datamodel::MacroSpec` derives `salsa::Update`, so this field type is
+    /// well-formed. See `crate::db::macro_registry`.
     #[returns(ref)]
-    pub macro_registry_build_error: Option<(crate::common::ErrorCode, String)>,
+    pub macro_declarations: Vec<(String, Option<datamodel::MacroSpec>)>,
     /// Whether LTM (Loops That Matter) synthetic variable compilation is
     /// enabled. When true, `compute_layout` allocates slots and
     /// `assemble_module` compiles fragments for LTM variables.
@@ -1459,6 +1466,27 @@ impl PersistentSyncState {
 
 // ── Sync function ──────────────────────────────────────────────────────
 
+/// Build the ordered, pre-dedup macro-declaration list for
+/// `SourceProject::macro_declarations`: one entry per *project*-declared
+/// model (stdlib models are added later and excluded here), in datamodel
+/// declaration order, carrying the model's canonical name and its
+/// `macro_spec.clone()`.
+///
+/// Declaration order is load-bearing: `MacroRegistry::build` reports the
+/// FIRST-detected duplicate macro name / macro-model collision, and the
+/// canonical-name-keyed `models` map collapses the very duplicate / colliding
+/// names that validation needs -- so the demand-driven `project_macro_registry`
+/// query reconstructs the model list from this ordered raw data.
+fn macro_declarations_from_datamodel(
+    project: &datamodel::Project,
+) -> Vec<(String, Option<datamodel::MacroSpec>)> {
+    project
+        .models
+        .iter()
+        .map(|m| (canonicalize(&m.name).into_owned(), m.macro_spec.clone()))
+        .collect()
+}
+
 /// Populate salsa inputs from a `datamodel::Project`.
 ///
 /// Creates `SourceProject`, `SourceModel`, and `SourceVariable` inputs in
@@ -1581,7 +1609,7 @@ pub fn sync_from_datamodel<'db>(
         project.units.clone(),
         model_names,
         source_model_map,
-        crate::db::macro_registry::macro_registry_build_error(project),
+        macro_declarations_from_datamodel(project),
         false,
         false,
     );
@@ -1798,14 +1826,15 @@ pub fn sync_from_datamodel_incremental(
         source_project.set_units(db).to(new_units);
     }
 
-    // Recompute the macro-registry build error from the datamodel `Vec`
-    // (duplicates / collisions are invisible once models collapse into the
-    // name-keyed map below).
-    let new_macro_build_error = crate::db::macro_registry::macro_registry_build_error(project);
-    if *source_project.macro_registry_build_error(&*db) != new_macro_build_error {
+    // Re-derive the ordered, pre-dedup macro-declaration list from the
+    // datamodel models (duplicates / collisions are invisible once models
+    // collapse into the name-keyed map below). The demand-driven
+    // `project_macro_registry` query reads this to re-derive the build error.
+    let new_macro_declarations = macro_declarations_from_datamodel(project);
+    if *source_project.macro_declarations(&*db) != new_macro_declarations {
         source_project
-            .set_macro_registry_build_error(db)
-            .to(new_macro_build_error);
+            .set_macro_declarations(db)
+            .to(new_macro_declarations);
     }
 
     // model_names updated below after stdlib models are added

@@ -21,11 +21,13 @@
 //! duplicate macro name / macro-model name collision) cannot be re-derived
 //! from `SourceProject.models`: that map is keyed by canonical model name,
 //! so two same-named macros -- or a macro colliding with a model -- collapse
-//! into one entry and become indistinguishable post-sync. The validation is
-//! therefore run at sync time on the datamodel `Vec<Model>`
-//! (`macro_registry_build_error`) and its typed `(ErrorCode, message)`
-//! stored on the `SourceProject::macro_registry_build_error` input; this
-//! query reads it back, surfaces it as a project-level diagnostic carrying
+//! into one entry and become indistinguishable post-sync. The query instead
+//! derives the build error on demand from two salsa inputs: the ordered,
+//! pre-dedup `SourceProject::macro_declarations` list (canonical name +
+//! `macro_spec`, one entry per project model in declaration order) supplies
+//! the duplicate/collision data Passes 1-2 need, and the macro-marked
+//! models' body equations -- read from `models` -- drive Pass 3's recursion
+//! check. It surfaces the result as a project-level diagnostic carrying
 //! `MacroRegistry::build`'s own `ErrorCode`, and returns it so
 //! `compile_project_incremental` can fail with a clear message.
 //!
@@ -66,27 +68,45 @@ pub(crate) struct MacroRegistryResult {
     pub build_error: Option<(crate::common::ErrorCode, String)>,
 }
 
-/// Run `MacroRegistry::build` over the project's *datamodel* models and
-/// return its typed `(ErrorCode, message)`, if it failed. Done on the
-/// datamodel `Vec<Model>` (not the synced name-keyed map) so duplicate /
-/// colliding model names -- which collapse in the
-/// `HashMap<String, SourceModel>` -- are still detectable (macros.AC5.3).
-/// Returns `None` for a valid macro set, including every macro-free project
-/// (the build short-circuits when no model carries a `macro_spec`).
+/// Reconstruct the project's `datamodel::Model` list from salsa inputs in
+/// declaration order, then run the UNCHANGED `MacroRegistry::build` over it
+/// and return its typed `(ErrorCode, message)`, if it failed.
 ///
-/// The `ErrorCode` is taken directly from `MacroRegistry::build`'s `Err`
-/// (`CircularDependency` for an AC5.2 recursion cycle, `DuplicateMacroName`
-/// for an AC5.3 duplicate name / macro-model collision) and threaded through
-/// `SourceProject::macro_registry_build_error` so `project_macro_registry`
-/// can tag the diagnostic with the authoritative code instead of re-deriving
-/// it from the message prose.
+/// Strategy (a) of the salsa-pipeline cleanup: rather than store
+/// `MacroRegistry::build`'s result on the input (a derived value recomputed
+/// every sync), the build error is now derived on demand inside the tracked
+/// query. To guarantee the produced `(ErrorCode, message)` is BYTE-IDENTICAL
+/// to building over the original datamodel `Vec<Model>`, we reconstruct that
+/// `Vec<Model>` from the minimal raw inputs `build` actually reads and call
+/// the same function -- no logic is duplicated or re-derived:
 ///
-/// Called from `sync_from_datamodel` / `sync_from_datamodel_incremental`,
-/// which then store the result on `SourceProject::macro_registry_build_error`.
-pub(crate) fn macro_registry_build_error(
-    project: &datamodel::Project,
+/// - **Passes 1-2** (duplicate macro name, macro/model name collision) read
+///   each model's name + `macro_spec` IN DECLARATION ORDER and report the
+///   FIRST-detected duplicate/collision. The ordered, pre-dedup
+///   `macro_declarations` input carries exactly that -- the canonical name
+///   and `macro_spec` of every *project* model (stdlib excluded), preserving
+///   the duplicate / colliding entries the name-keyed `models` map collapses.
+///   `MacroRegistry::build` re-canonicalizes each `model.name`, and
+///   canonicalization is idempotent on an already-canonical string, so the
+///   error message text (which embeds the canonical name) is unchanged.
+/// - **Pass 3** (recursion cycle) parses the macro-marked models' body
+///   equations. Pass 3 only runs after Passes 1-2 confirm uniqueness, so for
+///   any model set that reaches it every macro name is unique and the body
+///   variables are fully recoverable from the (deduplicated) `models` map.
+///   `find_cycle` sorts roots and uses `BTreeSet` successors, so the reported
+///   cycle path is independent of model iteration order; declaration order
+///   here only matters for Passes 1-2.
+///
+/// Non-macro models get an empty body: Passes 1-2 never read non-macro bodies
+/// and Pass 3 skips non-macro models, so their absence cannot change the
+/// result. Returns `None` for a valid macro set, including every macro-free
+/// project (the build short-circuits when no model carries a `macro_spec`).
+fn build_error_from_inputs(
+    db: &dyn Db,
+    project: SourceProject,
 ) -> Option<(crate::common::ErrorCode, String)> {
-    match crate::module_functions::MacroRegistry::build(&project.models) {
+    let models = reconstruct_project_models(db, project);
+    match crate::module_functions::MacroRegistry::build(&models) {
         Ok(_) => None,
         Err(err) => Some((
             err.code,
@@ -96,38 +116,79 @@ pub(crate) fn macro_registry_build_error(
     }
 }
 
+/// Reconstruct the project's models in declaration order from salsa inputs,
+/// carrying just what `MacroRegistry::build` reads: each model's canonical
+/// name + `macro_spec` (from `macro_declarations`) plus the macro-marked
+/// models' body variables (from `models`, recovered by canonical name --
+/// safe because a duplicate macro name is caught by Pass 1 before Pass 3's
+/// body walk, so any name reaching Pass 3 is unique).
+fn reconstruct_project_models(db: &dyn Db, project: SourceProject) -> Vec<datamodel::Model> {
+    let source_models = project.models(db);
+    project
+        .macro_declarations(db)
+        .iter()
+        .map(|(canonical_name, macro_spec)| {
+            // Pass 3 only walks macro-marked models' bodies, so reconstruct
+            // body variables only for them; a non-macro model's empty body is
+            // never read.
+            let variables = if macro_spec.is_some() {
+                source_models
+                    .get(canonical_name)
+                    .map(|source_model| {
+                        source_model
+                            .variables(db)
+                            .values()
+                            .map(|sv| datamodel_variable_from_source(db, *sv))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            datamodel::Model {
+                name: canonical_name.clone(),
+                sim_specs: None,
+                variables,
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: macro_spec.clone(),
+            }
+        })
+        .collect()
+}
+
 /// Build the per-project macro registry, salsa-tracked and keyed on the
-/// project's `SourceModel`s. Only the macro-marked models'
-/// `macro_spec`/body-equation text feed `MacroRegistry::build`, so editing a
-/// non-macro variable does not invalidate this query.
+/// project's `SourceProject`. The query reads ONLY the `macro_declarations`
+/// input (Passes 1-2) and the macro-marked models' body equations (Pass 3),
+/// so editing a non-macro variable's equation does not invalidate it.
 ///
 /// Validation (macros.AC5.2 recursion cycle, macros.AC5.3 duplicate name /
-/// macro-model collision) is *not* re-run here: it was already computed at
-/// sync time on the datamodel `Vec<Model>` (the only representation where
-/// duplicate / colliding model names survive -- `SourceProject.models` is a
-/// name-keyed `HashMap` that collapses them) and is read back from
-/// `SourceProject::macro_registry_build_error` as the typed
-/// `(ErrorCode, message)` pair `MacroRegistry::build` produced. When that
-/// error is `Some`, it is accumulated as a project-level `Diagnostic`
-/// carrying that exact `ErrorCode` (so it surfaces through
-/// `collect_all_diagnostics`, mirroring `project_units_context`) and
-/// returned in `build_error` (so the plain `compile_project_incremental`
-/// entry can fail with a clear message), and the resolution registry is
-/// returned empty so the offending macros' callers are not treated as macro
-/// calls -- the compile fails with the registry error, not a confusing
-/// cascade.
+/// macro-model collision) is derived on demand by `build_error_from_inputs`,
+/// which reconstructs the project's `datamodel::Model` list (in declaration
+/// order, from the `macro_declarations` input plus the macro bodies) and runs
+/// the UNCHANGED `MacroRegistry::build` on it -- so its typed
+/// `(ErrorCode, message)` is byte-identical to building over the original
+/// datamodel `Vec<Model>`. When the build fails, the error is accumulated as
+/// a project-level `Diagnostic` carrying that exact `ErrorCode` (so it
+/// surfaces through `collect_all_diagnostics`, mirroring
+/// `project_units_context`) and returned in `build_error` (so the plain
+/// `compile_project_incremental` entry can fail with a clear message), and
+/// the resolution registry is returned empty so the offending macros' callers
+/// are not treated as macro calls -- the compile fails with the registry
+/// error, not a confusing cascade.
 ///
 /// For a *valid* project every model name is unique, so rebuilding the
 /// resolution map from the (deduplicated) `SourceModel`s here is exact.
 #[salsa::tracked(returns(ref))]
 pub(crate) fn project_macro_registry(db: &dyn Db, project: SourceProject) -> MacroRegistryResult {
-    // Authoritative validation result, computed at sync from the datamodel
-    // `Vec<Model>`. The `ErrorCode` is `MacroRegistry::build`'s own typed
-    // code (`CircularDependency` for an AC5.2 cycle, `DuplicateMacroName`
-    // for an AC5.3 duplicate / collision), threaded through verbatim -- not
-    // re-derived from the message prose -- so a future reword of the build
-    // error message cannot silently mis-tag this diagnostic.
-    if let Some((code, message)) = project.macro_registry_build_error(db).clone() {
+    // Derive the authoritative validation result on demand. The `ErrorCode`
+    // is `MacroRegistry::build`'s own typed code (`CircularDependency` for an
+    // AC5.2 cycle, `DuplicateMacroName` for an AC5.3 duplicate / collision),
+    // carried through verbatim from `build`'s `Err` -- not re-derived from the
+    // message prose -- so a future reword of the build error message cannot
+    // silently mis-tag this diagnostic.
+    if let Some((code, message)) = build_error_from_inputs(db, project) {
         // Surface through `collect_all_diagnostics` (project-level: no
         // specific model/variable). Accumulate directly like
         // `project_units_context` -- this query is in the call graph of
@@ -242,19 +303,36 @@ pub(crate) fn enclosing_macro_for_var(
 
 #[cfg(test)]
 mod tests {
-    //! Lock-in for the typed-`ErrorCode` propagation: `macro_registry_build_error`
+    //! Lock-in for the typed-`ErrorCode` propagation: `project_macro_registry`
     //! must surface `MacroRegistry::build`'s *own* `Err.code`, not a code
     //! re-derived from the message prose. The oracle assertion compares the
-    //! stored code against `MacroRegistry::build`'s actual returned `Err.code`
-    //! on the same models, so it can never drift from the producer -- and a
-    //! future reword of either build error message cannot silently mis-tag
-    //! the downstream diagnostic (the original Phase 3 Minor #4 hazard).
+    //! query's `build_error` against `MacroRegistry::build`'s actual returned
+    //! `Err.code` on the same datamodel models, so it can never drift from the
+    //! producer -- and a future reword of either build error message cannot
+    //! silently mis-tag the downstream diagnostic (the original Phase 3 Minor
+    //! #4 hazard). Driving the real salsa pipeline (sync -> query) also exercises
+    //! the demand-driven derivation end to end (`macro_declarations` input ->
+    //! `build_error_from_inputs` -> `MacroRegistry::build`).
 
-    use super::macro_registry_build_error;
+    use super::project_macro_registry;
     use crate::common::ErrorCode;
     use crate::datamodel::{Aux, Equation, MacroSpec, Model, Variable};
+    use crate::db::{SimlinDb, sync_from_datamodel, sync_from_datamodel_incremental};
     use crate::module_functions::MacroRegistry;
     use crate::testutils::x_project;
+
+    /// Drive the production salsa pipeline -- sync the project into a fresh
+    /// `SimlinDb`, then read `project_macro_registry`'s `build_error`. This is
+    /// what `compile_project_incremental` and the project-level diagnostic see,
+    /// so the oracle locks in the *query*'s observable behavior, not an
+    /// internal helper.
+    fn build_error_via_query(project: &crate::datamodel::Project) -> Option<(ErrorCode, String)> {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, project);
+        project_macro_registry(&db, sync.project)
+            .build_error
+            .clone()
+    }
 
     /// A non-macro scalar aux body variable.
     fn aux(ident: &str, equation: &str) -> Variable {
@@ -305,22 +383,25 @@ mod tests {
         }
     }
 
-    /// Oracle: whatever `ErrorCode` `MacroRegistry::build` returns in its
-    /// `Err`, `macro_registry_build_error` stores *that exact code* -- never
-    /// one heuristically recovered from the message text.
+    /// Oracle: whatever `ErrorCode`/message `MacroRegistry::build` returns in
+    /// its `Err` over the ORIGINAL datamodel models, `project_macro_registry`
+    /// surfaces *that exact code and text* -- never one heuristically recovered
+    /// from the message. Comparing against `MacroRegistry::build` directly is
+    /// what makes the byte-identity un-driftable: the demand-driven derivation
+    /// reconstructs the model list, but its build error must match building the
+    /// original list.
     fn assert_propagates_build_code(models: &[Model]) {
         let project = x_project(Default::default(), models);
         let build_err = MacroRegistry::build(&project.models)
             .expect_err("fixture is expected to fail registry build");
-        let stored =
-            macro_registry_build_error(&project).expect("a build failure must be surfaced");
+        let surfaced = build_error_via_query(&project).expect("a build failure must be surfaced");
         assert_eq!(
-            stored.0, build_err.code,
-            "stored ErrorCode must equal MacroRegistry::build's own Err.code, \
+            surfaced.0, build_err.code,
+            "surfaced ErrorCode must equal MacroRegistry::build's own Err.code, \
              not a code re-derived from the message",
         );
         assert_eq!(
-            stored.1,
+            surfaced.1,
             build_err.get_details().unwrap_or_default(),
             "the message text must be carried through verbatim",
         );
@@ -333,7 +414,7 @@ mod tests {
             macro_model("mymacro", &["a", "b"], "a * b"),
         ];
         assert!(
-            macro_registry_build_error(&x_project(Default::default(), &models)).is_none(),
+            build_error_via_query(&x_project(Default::default(), &models)).is_none(),
             "a valid macro set must not surface a build error",
         );
     }
@@ -344,8 +425,8 @@ mod tests {
         // through verbatim (not recovered from "recursive macro:" prose).
         let models = vec![macro_model("a", &["x"], "a(x) + 1")];
         assert_propagates_build_code(&models);
-        let stored = macro_registry_build_error(&x_project(Default::default(), &models)).unwrap();
-        assert_eq!(stored.0, ErrorCode::CircularDependency);
+        let surfaced = build_error_via_query(&x_project(Default::default(), &models)).unwrap();
+        assert_eq!(surfaced.0, ErrorCode::CircularDependency);
     }
 
     #[test]
@@ -356,8 +437,8 @@ mod tests {
             macro_model("b", &["y"], "a(y)"),
         ];
         assert_propagates_build_code(&models);
-        let stored = macro_registry_build_error(&x_project(Default::default(), &models)).unwrap();
-        assert_eq!(stored.0, ErrorCode::CircularDependency);
+        let surfaced = build_error_via_query(&x_project(Default::default(), &models)).unwrap();
+        assert_eq!(surfaced.0, ErrorCode::CircularDependency);
     }
 
     #[test]
@@ -369,8 +450,8 @@ mod tests {
             macro_model("foo", &["b"], "b + 1"),
         ];
         assert_propagates_build_code(&models);
-        let stored = macro_registry_build_error(&x_project(Default::default(), &models)).unwrap();
-        assert_eq!(stored.0, ErrorCode::DuplicateMacroName);
+        let surfaced = build_error_via_query(&x_project(Default::default(), &models)).unwrap();
+        assert_eq!(surfaced.0, ErrorCode::DuplicateMacroName);
     }
 
     #[test]
@@ -378,7 +459,58 @@ mod tests {
         // macros.AC5.3: a macro named `main` colliding with the `main` model.
         let models = vec![plain_model("main"), macro_model("main", &["a"], "a")];
         assert_propagates_build_code(&models);
-        let stored = macro_registry_build_error(&x_project(Default::default(), &models)).unwrap();
-        assert_eq!(stored.0, ErrorCode::DuplicateMacroName);
+        let surfaced = build_error_via_query(&x_project(Default::default(), &models)).unwrap();
+        assert_eq!(surfaced.0, ErrorCode::DuplicateMacroName);
+    }
+
+    /// Invalidation contract: `project_macro_registry` depends only on
+    /// `macro_declarations` + the macro-marked models' bodies. Editing a
+    /// NON-macro variable's equation must leave the query cached -- it is a
+    /// `returns(ref)` query, so a cache hit returns the SAME memoized value
+    /// (pointer-equal), mirroring `db/fragment_cache_tests.rs`. If the query
+    /// instead depended on every model's variables (or recomputed every sync,
+    /// as the old input-field design did), the pointer would differ.
+    #[test]
+    fn non_macro_equation_edit_does_not_invalidate_query() {
+        let models = vec![
+            plain_model("main"),
+            macro_model("mymacro", &["a", "b"], "a * b"),
+        ];
+        let project = x_project(Default::default(), &models);
+
+        let mut db = SimlinDb::default();
+        let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+
+        // Prime the cache and capture the memoized result's pointer.
+        let (ptr_before, build_error_before) = {
+            let sync1 = state1.to_sync_result();
+            let result = project_macro_registry(&db, sync1.project);
+            (result as *const _, result.build_error.clone())
+        };
+        assert!(
+            build_error_before.is_none(),
+            "the valid macro set must have no build error",
+        );
+
+        // Edit ONLY the non-macro `main` model's `x` variable equation.
+        let mut project2 = project.clone();
+        let main_idx = project2
+            .models
+            .iter()
+            .position(|m| m.name == "main")
+            .expect("main model present");
+        project2.models[main_idx].variables[0] = aux("x", "42");
+
+        let state2 = sync_from_datamodel_incremental(&mut db, &project2, Some(&state1));
+        let sync2 = state2.to_sync_result();
+        let result2 = project_macro_registry(&db, sync2.project);
+        let ptr_after = result2 as *const _;
+
+        assert_eq!(
+            ptr_before, ptr_after,
+            "project_macro_registry must be a cache hit (pointer-equal) when only \
+             a non-macro variable's equation changes -- the query depends solely on \
+             macro_declarations + the macro models' bodies",
+        );
     }
 }
