@@ -16,7 +16,7 @@ The implementation is split across three modules in `src/simlin-engine/src/`:
 | `ltm_post.rs` | Post-simulation computation: normalizes loop scores into relative loop scores using the cycle-partition mapping produced during LTM compilation |
 
 The production entry point is the `model_ltm_variables` tracked function in
-`db_ltm.rs`, invoked as part of `compile_project_incremental`. LTM compilation
+`db/ltm.rs`, invoked as part of `compile_project_incremental`. LTM compilation
 is controlled by two flags on `SourceProject`:
 
 - **`ltm_enabled`** -- When true, LTM synthetic variables are generated for every
@@ -89,7 +89,7 @@ and average absolute score for ranking.
 
 ### Exhaustive Mode (`ltm_discovery_mode = false`)
 
-1. `model_causal_edges` (salsa tracked, `db_analysis.rs`) builds the causal graph
+1. `model_causal_edges` (salsa tracked, `db/analysis.rs`) builds the causal graph
 2. `model_loop_circuits_tiered` runs Johnson's algorithm on the variable
    graph and partitions cycles by `RefShape` composition:
    - Pure-scalar / pure-A2A cycles emit a single `Loop` directly (fast path).
@@ -559,7 +559,7 @@ element.
 
 ### The reference-site classification IR
 
-`model_ltm_reference_sites` (salsa tracked, `db_ltm_ir.rs`) is the single
+`model_ltm_reference_sites` (salsa tracked, `db/ltm_ir.rs`) is the single
 place a causal edge's access shape *and* aggregate-node routing are decided.
 It walks each variable's `Expr2` AST exactly once, consults
 `enumerate_agg_nodes` (the sole "is this subexpression a hoistable maximal
@@ -570,7 +570,7 @@ reference by its `(from, to)` causal edge into a `Vec<ClassifiedSite>`. Each
 - `shape: RefShape` -- `Bare`, `FixedIndex(elems)`, `Wildcard`, or
   `DynamicIndex` (the AST-walker helpers `classify_subscript_shape` /
   `resolve_literal_index` / `classify_iterated_dim_shape` live in
-  `db_ltm_ir.rs`);
+  `db/ltm_ir.rs`);
 - `target_element: Option<String>` -- set when the reference is inside an
   `Ast::Arrayed` per-element expression, pinning the target node set to that
   one element tuple;
@@ -587,7 +587,7 @@ restates the agg-routing filter.
 
 ### Element-Level Causal Graph
 
-`model_element_causal_edges` (salsa tracked, `db_analysis.rs`) builds the
+`model_element_causal_edges` (salsa tracked, `db/analysis.rs`) builds the
 element-level graph by reading the IR's classified sites for each
 variable-level edge and emitting one or more element edges per site. A
 `Direct` site uses its `shape` / `target_element` via
@@ -1062,7 +1062,7 @@ cases remain deliberate carve-outs:
    exhaustive enumeration on a composite (max-score) network. The implementation
    does not build that composite pre-reduction: `ltm_enabled` runs exhaustive
    enumeration and `ltm_discovery_mode` runs `discover_loops()`. However,
-   `model_ltm_variables` in `src/simlin-engine/src/db_ltm.rs` does automatically
+   `model_ltm_variables` in `src/simlin-engine/src/db/ltm.rs` does automatically
    switch from exhaustive to discovery in two phases. The early gate fires on
    the variable-level causal graph's largest SCC (cheap Tarjan, no Johnson
    yet). The late gate fires on the slow-path element-level subgraph's largest
@@ -1147,17 +1147,17 @@ cases remain deliberate carve-outs:
 
 ### Salsa Pipeline Tests
 
-- **`db_ltm_tests.rs`**: LTM equation text generation via salsa tracked
+- **`db/ltm_tests.rs`**: LTM equation text generation via salsa tracked
   functions, link score caching behavior
 
-- **`db_ltm_unified_tests.rs`**: `model_ltm_variables` for simple models,
+- **`db/ltm_unified_tests.rs`**: `model_ltm_variables` for simple models,
   stdlib modules (SMOOTH), passthrough modules, and discovery mode
 
-- **`db_ltm_module_tests.rs`**: Module-specific LTM tests: SMOOTH models
+- **`db/ltm_module_tests.rs`**: Module-specific LTM tests: SMOOTH models
   compile with LTM, composite scores are generated for stdlib modules,
   user-defined modules with feedback receive LTM treatment
 
-- **`db_tests.rs`** (LTM subset): Salsa LTM caching, discovery vs exhaustive
+- **`db/tests.rs`** (LTM subset): Salsa LTM caching, discovery vs exhaustive
   variable counts, incremental invalidation, layout slot allocation with LTM
 
 ### Integration Tests (`tests/simulate_ltm.rs`)
