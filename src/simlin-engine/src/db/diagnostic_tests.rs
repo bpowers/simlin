@@ -699,12 +699,11 @@ fn test_ac2_7_assembly_errors_accumulated() {
         "compilation should fail for circular dependencies"
     );
 
-    // The diagnostics accumulator should also have the circular dep error.
-    // Since compile_project_incremental is not a tracked function, assembly
-    // errors are accumulated via try_accumulate_diagnostic (which silently
-    // drops when no tracked context is active). However, per-variable
-    // diagnostics from model_all_diagnostics SHOULD capture the circular
-    // dependency detected by model_dependency_graph.
+    // The assembly-stage `Assembly` error surfaces only via `assemble_module`'s
+    // `Result::Err` (the aggregate string), not the diagnostic accumulator.
+    // The per-variable/model diagnostics from `model_all_diagnostics` DO capture
+    // the circular dependency detected by `model_dependency_graph`, so that is
+    // what `collect_all_diagnostics` returns here.
     let diags = collect_all_diagnostics(&db, &sync);
     let has_circular = diags.iter().any(|d| {
         matches!(

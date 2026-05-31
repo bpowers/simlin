@@ -5007,11 +5007,9 @@ TIME STEP = 1 ~~|
     /// `EmptyEquation`. Either way the residual must surface as a **clean,
     /// named error** -- the failing compile `Err` must name the specific
     /// `$⁚out⁚…⁚arg0⁚…` helper -- never a silent all-`None` fragment that reads
-    /// a wrong value. (The per-helper `DimensionInScalarContext` diagnostic is
-    /// also accumulated through `try_accumulate_diagnostic`, on the same
-    /// `IN_TRACKED_CONTEXT`-gated path as `assemble_module`'s aggregate `Err`
-    /// diagnostic; surfacing that gated channel through `collect_all_diagnostics`
-    /// is a separate, pre-existing concern.)
+    /// a wrong value. (Surfacing the residual through the per-variable
+    /// diagnostic API rather than only the aggregate `Err` is a separate,
+    /// pre-existing concern tracked as GH #466.)
     #[test]
     fn unresolvable_helper_fails_loudly_not_silently() {
         use crate::db::{compile_project_incremental, sync_from_datamodel_incremental};

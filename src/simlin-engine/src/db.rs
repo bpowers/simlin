@@ -106,33 +106,6 @@ pub enum DiagnosticError {
     Assembly(String),
 }
 
-// Thread-local flag tracking whether we are inside a salsa tracked
-// function context. Used by `try_accumulate_diagnostic` to avoid calling
-// `accumulate` outside a tracked context (which would panic). The
-// previous `catch_unwind` approach does not work in WASM where
-// `panic = "abort"` is set in the release profile.
-thread_local! {
-    static IN_TRACKED_CONTEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Push a diagnostic into the salsa accumulator when called inside a
-/// tracked function (per the `IN_TRACKED_CONTEXT` flag); silently skip it
-/// otherwise (e.g. from the plain `compile_project_incremental`, where
-/// calling `accumulate` would panic -- and `catch_unwind` is ineffective
-/// in WASM, which is `panic = "abort"`). Scaffolding: the flag is never
-/// set to `true` today, so all calls are no-ops -- assembly errors are
-/// instead returned via `Result::Err` and surfaced through the patch
-/// pipeline's `gather_error_details_with_db`.
-fn try_accumulate_diagnostic(db: &dyn Db, diag: Diagnostic) {
-    let in_context = IN_TRACKED_CONTEXT.with(|flag| flag.get());
-    if in_context {
-        CompilationDiagnostic(diag).accumulate(db);
-    }
-    // Outside a tracked context the diagnostic is silently discarded.
-    // The error is still returned as the function's Result::Err value
-    // and handled by the caller.
-}
-
 // ── Interned identifiers ───────────────────────────────────────────────
 
 #[salsa::interned(debug)]
@@ -3421,34 +3394,10 @@ fn lower_implicit_var<'db>(
         // only inspects the *parsed* implicit; a lowering-stage error would
         // otherwise leave a helper with `ast == None` that
         // `compile_implicit_var_phase_bytecodes` -> `Var::new` rejects as
-        // `EmptyEquation`, surfacing only in the opaque aggregate `missing_vars`
-        // string with no per-variable diagnostic (the real-var path emits one
-        // via `accumulate_var_compile_error`). Mirror that: turn the residual
-        // into a legible per-helper diagnostic carrying the actual error code +
-        // span, then return `None`. Routed through `try_accumulate_diagnostic`
-        // because this whole assembly chain (`compile_project_incremental` ->
-        // `assemble_simulation` -> `assemble_module` -> `compile_implicit_var_*`
-        // -> here) runs OUTSIDE a salsa-tracked function, so a bare
-        // `.accumulate(db)` would panic; the helper accumulates only when a
-        // tracked frame is active and is otherwise a safe no-op (the error then
-        // rides out via the caller's `missing_vars` aggregate), exactly as the
-        // sibling aggregate-`Err` accumulation in `assemble_module` does. This
-        // is a no-op when lowering succeeds (`equation_errors()` is `None`), so
-        // it never perturbs the shared `var_phase_symbolic_fragment_prod`
-        // consumer on the SCC-resolution path -- it fires only on a genuine
-        // residual miscompile.
-        if let Some(errors) = lowered.equation_errors() {
-            for err in errors {
-                try_accumulate_diagnostic(
-                    db,
-                    Diagnostic {
-                        model: model.name(db).clone(),
-                        variable: Some(implicit_name.clone()),
-                        error: DiagnosticError::Equation(err),
-                        severity: DiagnosticSeverity::Error,
-                    },
-                );
-            }
+        // `EmptyEquation`. Bail out with `None` so the error rides out via the
+        // caller's aggregate `missing_vars` string (GH #466 tracks surfacing
+        // assembly-stage errors through the per-variable diagnostic API).
+        if lowered.equation_errors().is_some() {
             return None;
         }
 
@@ -4128,15 +4077,6 @@ pub fn assemble_module<'db>(
     let dep_graph = model_dependency_graph(db, model, project, module_inputs);
     if dep_graph.has_cycle {
         let msg = format!("model '{}' has circular dependencies", model.name(db));
-        try_accumulate_diagnostic(
-            db,
-            Diagnostic {
-                model: model.name(db).clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg.clone()),
-                severity: DiagnosticSeverity::Error,
-            },
-        );
         return Err(msg);
     }
     let layout = compute_layout(db, model, project, is_root);
@@ -4346,31 +4286,11 @@ pub fn assemble_module<'db>(
         Vec::with_capacity(resolved_sccs.len());
     for scc in resolved_sccs.iter() {
         let dt = if scc.phase == SccPhase::Dt {
-            Some(combine_scc_for_phase(scc, SccPhase::Dt).inspect_err(|msg| {
-                try_accumulate_diagnostic(
-                    db,
-                    Diagnostic {
-                        model: model_name.clone(),
-                        variable: None,
-                        error: DiagnosticError::Assembly(msg.clone()),
-                        severity: DiagnosticSeverity::Error,
-                    },
-                );
-            })?)
+            Some(combine_scc_for_phase(scc, SccPhase::Dt)?)
         } else {
             None
         };
-        let init = combine_scc_for_phase(scc, SccPhase::Initial).inspect_err(|msg| {
-            try_accumulate_diagnostic(
-                db,
-                Diagnostic {
-                    model: model_name.clone(),
-                    variable: None,
-                    error: DiagnosticError::Assembly(msg.clone()),
-                    severity: DiagnosticSeverity::Error,
-                },
-            );
-        })?;
+        let init = combine_scc_for_phase(scc, SccPhase::Initial)?;
         dt_combined.push(dt);
         init_combined.push(init);
     }
@@ -4501,15 +4421,6 @@ pub fn assemble_module<'db>(
             "failed to compile fragments for variables: {}",
             missing_vars.join(", ")
         );
-        try_accumulate_diagnostic(
-            db,
-            Diagnostic {
-                model: model_name.clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg.clone()),
-                severity: DiagnosticSeverity::Error,
-            },
-        );
         return Err(msg);
     }
 
@@ -4560,47 +4471,15 @@ pub fn assemble_module<'db>(
         .chain(flow_frags.iter().copied())
         .chain(stock_frags.iter().copied())
         .collect();
-    let gf_dedup = crate::compiler::symbolic::GfDedup::build(&all_frags).inspect_err(|msg| {
-        try_accumulate_diagnostic(
-            db,
-            Diagnostic {
-                model: model_name.clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg.clone()),
-                severity: DiagnosticSeverity::Error,
-            },
-        );
-    })?;
+    let gf_dedup = crate::compiler::symbolic::GfDedup::build(&all_frags)?;
     // Phase offsets into `all_frags` so each phase's fragments map to their
     // remap entry.
     let n_init = initial_frags.len();
     let n_flow = flow_frags.len();
 
-    let flows_concat = concatenate_fragments_with_gf(&flow_frags, &flow_base, &gf_dedup, n_init)
-        .inspect_err(|msg| {
-            try_accumulate_diagnostic(
-                db,
-                Diagnostic {
-                    model: model_name.clone(),
-                    variable: None,
-                    error: DiagnosticError::Assembly(msg.clone()),
-                    severity: DiagnosticSeverity::Error,
-                },
-            );
-        })?;
+    let flows_concat = concatenate_fragments_with_gf(&flow_frags, &flow_base, &gf_dedup, n_init)?;
     let stocks_concat =
-        concatenate_fragments_with_gf(&stock_frags, &stock_base, &gf_dedup, n_init + n_flow)
-            .inspect_err(|msg| {
-                try_accumulate_diagnostic(
-                    db,
-                    Diagnostic {
-                        model: model_name.clone(),
-                        variable: None,
-                        error: DiagnosticError::Assembly(msg.clone()),
-                        severity: DiagnosticSeverity::Error,
-                    },
-                );
-            })?;
+        concatenate_fragments_with_gf(&stock_frags, &stock_base, &gf_dedup, n_init + n_flow)?;
 
     // Build SymbolicCompiledInitial for each initial variable, renumbered
     // so context resource IDs (GFs, modules, views, temps, dim_lists) match
@@ -4632,18 +4511,7 @@ pub fn assemble_module<'db>(
                     init_dl_off,
                 )
             })
-            .collect::<Result<Vec<_>, _>>()
-            .inspect_err(|msg| {
-                try_accumulate_diagnostic(
-                    db,
-                    Diagnostic {
-                        model: model_name.clone(),
-                        variable: None,
-                        error: DiagnosticError::Assembly(msg.clone()),
-                        severity: DiagnosticSeverity::Error,
-                    },
-                );
-            })?;
+            .collect::<Result<Vec<_>, _>>()?;
         compiled_initials.push(SymbolicCompiledInitial {
             ident: Ident::new(name),
             bytecode: crate::compiler::symbolic::SymbolicByteCode {
@@ -4663,18 +4531,7 @@ pub fn assemble_module<'db>(
     // views, temps, dim_lists); its `graphical_functions` is the dedup's
     // single table (set by `concatenate_fragments_with_gf`), shared by all
     // three phases.
-    let merged =
-        concatenate_fragments_with_gf(&all_frags, &no_base, &gf_dedup, 0).inspect_err(|msg| {
-            try_accumulate_diagnostic(
-                db,
-                Diagnostic {
-                    model: model_name.clone(),
-                    variable: None,
-                    error: DiagnosticError::Assembly(msg.clone()),
-                    severity: DiagnosticSeverity::Error,
-                },
-            );
-        })?;
+    let merged = concatenate_fragments_with_gf(&all_frags, &no_base, &gf_dedup, 0)?;
 
     // Build dimension metadata from project dimensions (mirrors
     // Compiler::populate_dimension_metadata). Read the project-global converted
@@ -4742,19 +4599,7 @@ pub fn assemble_module<'db>(
     // Vm::new, to the execution copy of the bytecode. The success payload is
     // wrapped in an `Arc` so this tracked fn's return type is `salsa::Update`
     // and salsa's clone-out is a refcount bump (the inner bytecode is large).
-    resolve_module(&sym_module, layout)
-        .inspect_err(|msg| {
-            try_accumulate_diagnostic(
-                db,
-                Diagnostic {
-                    model: model_name.clone(),
-                    variable: None,
-                    error: DiagnosticError::Assembly(msg.clone()),
-                    severity: DiagnosticSeverity::Error,
-                },
-            );
-        })
-        .map(std::sync::Arc::new)
+    resolve_module(&sym_module, layout).map(std::sync::Arc::new)
 }
 
 /// Assemble a full CompiledSimulation from assembled modules.
@@ -4782,32 +4627,12 @@ pub fn assemble_simulation(
 
     if !project_models.contains_key(main_model_canonical.as_ref()) {
         let msg = format!("no model named '{}' to simulate", main_model_name);
-        try_accumulate_diagnostic(
-            db,
-            Diagnostic {
-                model: main_model_name.clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg.clone()),
-                severity: DiagnosticSeverity::Error,
-            },
-        );
         return Err(msg);
     }
 
     // Enumerate module instances by walking module variables recursively.
     // Each unique (model_name, input_set) pair gets its own CompiledModule.
-    let module_instances =
-        enumerate_module_instances(db, project, &main_model_name).inspect_err(|msg| {
-            try_accumulate_diagnostic(
-                db,
-                Diagnostic {
-                    model: main_model_name.clone(),
-                    variable: None,
-                    error: DiagnosticError::Assembly(msg.clone()),
-                    severity: DiagnosticSeverity::Error,
-                },
-            );
-        })?;
+    let module_instances = enumerate_module_instances(db, project, &main_model_name)?;
 
     // Sort module names: main first, then all others alphabetically
     let main_ident = Ident::<Canonical>::new(&main_model_name);
@@ -4832,20 +4657,10 @@ pub fn assemble_simulation(
             let model_name_str = name.as_str();
             let canonical_name = canonicalize(model_name_str);
             let source_model = project_models.get(canonical_name.as_ref()).ok_or_else(|| {
-                let msg = format!(
+                format!(
                     "model '{}' referenced as module but not found in project",
                     model_name_str,
-                );
-                try_accumulate_diagnostic(
-                    db,
-                    Diagnostic {
-                        model: main_model_name.clone(),
-                        variable: None,
-                        error: DiagnosticError::Assembly(msg.clone()),
-                        severity: DiagnosticSeverity::Error,
-                    },
-                );
-                msg
+                )
             })?;
 
             let is_root = canonicalize(name.as_str()) == main_model_canonical;
