@@ -315,9 +315,16 @@ pub async fn edit_model<A: ProjectAccess>(
     }
 
     let source_project = sync.project;
-    let analysis =
-        simlin_engine::analysis::analyze_model(&project, &mut db, source_project, &model_name)
-            .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
+    // No discovery budget here (see the rationale in read_model.rs): EditModel
+    // analyses the just-edited model for the MCP response, not a bulk run.
+    let analysis = simlin_engine::analysis::analyze_model(
+        &project,
+        &mut db,
+        source_project,
+        &model_name,
+        None,
+    )
+    .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
 
     if !dry_run {
         access

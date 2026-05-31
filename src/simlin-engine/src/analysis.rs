@@ -30,6 +30,9 @@ pub struct ModelAnalysis {
     pub time: Vec<f64>,
     pub loop_dominance: Vec<LoopSummary>,
     pub dominant_loops_by_period: Vec<DominantPeriod>,
+    /// True when loop discovery hit its time budget before finishing, so the
+    /// loop fields may be partial. See `discover_loops_with_graph`'s budget.
+    pub truncated: bool,
 }
 
 /// Build a `json::Model` from the named model in a `datamodel::Project`, with
@@ -66,6 +69,12 @@ fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json
 /// `Ok` is returned with the model snapshot but empty loop fields, giving
 /// callers graceful degradation rather than a hard error.
 ///
+/// `budget` optionally bounds the wall-clock time spent in loop discovery's
+/// per-timestep DFS sweep. Discovery on very large models can be infeasibly
+/// slow (GH #647), so callers that want a bounded run pass `Some(duration)`;
+/// the returned `ModelAnalysis::truncated` reports whether the budget elapsed
+/// before discovery finished. `None` runs discovery to completion.
+///
 /// Returns `Err` when `model_name` does not match any model in the project,
 /// unless `model_name` is `"main"` (which falls back to the first model for
 /// single-model project convenience).
@@ -74,6 +83,7 @@ pub fn analyze_model(
     db: &mut SimlinDb,
     source_project: SourceProject,
     model_name: &str,
+    budget: Option<std::time::Duration>,
 ) -> Result<ModelAnalysis, String> {
     use salsa::Setter;
 
@@ -85,25 +95,39 @@ pub fn analyze_model(
     source_project.set_ltm_enabled(db).to(true);
     source_project.set_ltm_discovery_mode(db).to(true);
 
-    let loop_result = run_ltm_pipeline(project, db, source_project, model_name);
+    let loop_result = run_ltm_pipeline(project, db, source_project, model_name, budget);
 
     source_project.set_ltm_enabled(db).to(false);
     source_project.set_ltm_discovery_mode(db).to(false);
 
     match loop_result {
-        Some((time, loop_dominance, dominant_loops_by_period)) => Ok(ModelAnalysis {
+        Some(result) => Ok(ModelAnalysis {
             model: json_model,
-            time,
-            loop_dominance,
-            dominant_loops_by_period,
+            time: result.time,
+            loop_dominance: result.loop_dominance,
+            dominant_loops_by_period: result.dominant_loops_by_period,
+            truncated: result.truncated,
         }),
         None => Ok(ModelAnalysis {
             model: json_model,
             time: vec![],
             loop_dominance: vec![],
             dominant_loops_by_period: vec![],
+            truncated: false,
         }),
     }
+}
+
+/// The loop-bearing half of a successful `run_ltm_pipeline` run: the time
+/// array, the discovered loop summaries, the dominant-period intervals, and
+/// whether discovery was truncated by the time budget. Named (rather than a
+/// bare tuple) so the signature stays readable and clippy's complex-type lint
+/// is satisfied.
+struct PipelineResult {
+    time: Vec<f64>,
+    loop_dominance: Vec<LoopSummary>,
+    dominant_loops_by_period: Vec<DominantPeriod>,
+    truncated: bool,
 }
 
 /// Run the full LTM discovery pipeline.  Returns `None` on any failure.
@@ -116,7 +140,8 @@ fn run_ltm_pipeline(
     db: &mut SimlinDb,
     source_project: SourceProject,
     model_name: &str,
-) -> Option<(Vec<f64>, Vec<LoopSummary>, Vec<DominantPeriod>)> {
+    budget: Option<std::time::Duration>,
+) -> Option<PipelineResult> {
     let matched_model = project.models.iter().find(|m| {
         crate::canonicalize(&m.name).as_ref() == crate::canonicalize(model_name).as_ref()
     });
@@ -157,14 +182,17 @@ fn run_ltm_pipeline(
     let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
     let dm_dims = crate::db::project_datamodel_dims(db, source_project);
 
-    let found_loops = crate::ltm_finding::discover_loops_with_graph(
+    let discovery = crate::ltm_finding::discover_loops_with_graph(
         &results,
         &causal_graph,
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        budget,
     )
     .ok()?;
+    let found_loops = discovery.loops;
+    let truncated = discovery.truncated;
 
     let time = build_time_array(&results);
 
@@ -181,7 +209,12 @@ fn run_ltm_pipeline(
         .map(|fl| to_loop_summary(fl, &uid_to_loop_name, original_name, project))
         .collect();
 
-    Some((time, loop_dominance, dominant_loops_by_period))
+    Some(PipelineResult {
+        time,
+        loop_dominance,
+        dominant_loops_by_period,
+        truncated,
+    })
 }
 
 /// Build a mapping from variable-UID sets to loop names using the model's
@@ -241,16 +274,17 @@ fn to_feedback_loop(fl: &crate::ltm_finding::FoundLoop) -> FeedbackLoop {
 
 /// Extract the ordered variable names from a `FoundLoop`.
 fn loop_variables(fl: &crate::ltm_finding::FoundLoop) -> Vec<String> {
-    let mut vars: Vec<String> = fl
-        .loop_info
+    // The bare node sequence around the cycle (each link's `from`), WITHOUT a
+    // trailing repeat of the first node. This matches the structural-loop
+    // convention (`db::analysis` `model_detected_loops`) so both kinds of loop
+    // populate the same `Loop` type consistently: consumers that render the
+    // cycle (e.g. pysimlin's `Loop.__str__`) close it themselves by appending
+    // the first variable, and a stored repeat would double that closing node.
+    fl.loop_info
         .links
         .iter()
         .map(|l| l.from.to_string())
-        .collect();
-    if let Some(first) = vars.first().cloned() {
-        vars.push(first);
-    }
-    vars
+        .collect()
 }
 
 /// Convert a `FoundLoop` to a `LoopSummary`, resolving a human-readable
@@ -397,7 +431,8 @@ mod tests {
         );
         let project = load_project(path);
         let (mut db, sp) = synced_db(&project);
-        let analysis = analyze_model(&project, &mut db, sp, "main").expect("analyze_model failed");
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
 
         assert!(
             !analysis.loop_dominance.is_empty(),
@@ -406,6 +441,63 @@ mod tests {
         assert!(
             !analysis.dominant_loops_by_period.is_empty(),
             "expected non-empty dominant_loops_by_period, got none"
+        );
+    }
+
+    // ---- budget: a generous budget completes; a near-zero budget truncates ----
+
+    #[test]
+    fn generous_budget_completes_without_truncation() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let project = load_project(path);
+        let (mut db, sp) = synced_db(&project);
+        // A budget far larger than this tiny model needs must complete fully.
+        let analysis = analyze_model(
+            &project,
+            &mut db,
+            sp,
+            "main",
+            Some(std::time::Duration::from_secs(60)),
+        )
+        .expect("analyze_model failed");
+
+        assert!(
+            !analysis.truncated,
+            "a 60s budget must not truncate discovery on a tiny model"
+        );
+        assert!(
+            !analysis.loop_dominance.is_empty(),
+            "a completed analysis must still return loops"
+        );
+    }
+
+    #[test]
+    fn zero_budget_truncates_without_hanging() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let project = load_project(path);
+        let (mut db, sp) = synced_db(&project);
+        // A zero budget is already elapsed before the first timestep, so the
+        // per-step sweep stops immediately and reports truncation. The loop
+        // fields are whatever (possibly nothing) was found first; the contract
+        // we assert is the truncation flag and that the call returns promptly.
+        let analysis = analyze_model(
+            &project,
+            &mut db,
+            sp,
+            "main",
+            Some(std::time::Duration::ZERO),
+        )
+        .expect("analyze_model failed");
+
+        assert!(
+            analysis.truncated,
+            "a zero budget must report truncated discovery"
         );
     }
 
@@ -419,7 +511,8 @@ mod tests {
         );
         let project = load_project(path);
         let (mut db, sp) = synced_db(&project);
-        let analysis = analyze_model(&project, &mut db, sp, "main").expect("analyze_model failed");
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
 
         // Time array must be non-empty and its length must match loop importance lengths.
         assert!(!analysis.time.is_empty(), "time array must not be empty");
@@ -469,7 +562,8 @@ mod tests {
         );
         let project = load_project(path);
         let (mut db, sp) = synced_db(&project);
-        let analysis = analyze_model(&project, &mut db, sp, "main").expect("analyze_model failed");
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
 
         assert!(
             analysis.model.views.is_empty(),
@@ -484,7 +578,7 @@ mod tests {
     fn ac2_6_broken_model_returns_empty_loops() {
         let project = broken_project();
         let (mut db, sp) = synced_db(&project);
-        let analysis = analyze_model(&project, &mut db, sp, "main")
+        let analysis = analyze_model(&project, &mut db, sp, "main", None)
             .expect("analyze_model should not return Err");
 
         // Model snapshot must still be present with the stock and flow.
@@ -519,7 +613,7 @@ mod tests {
             .build_datamodel();
 
         let (mut db, sp) = synced_db(&project);
-        let result = analyze_model(&project, &mut db, sp, "nonexistent");
+        let result = analyze_model(&project, &mut db, sp, "nonexistent", None);
         assert!(
             result.is_err(),
             "analyze_model with an unknown model name must return Err, got Ok"
@@ -542,7 +636,7 @@ mod tests {
             .build_datamodel();
 
         let (mut db, sp) = synced_db(&project);
-        let result = analyze_model(&project, &mut db, sp, "main");
+        let result = analyze_model(&project, &mut db, sp, "main", None);
         assert!(
             result.is_ok(),
             "analyze_model with 'main' alias must succeed even when the model is named 'Main'"
@@ -564,7 +658,8 @@ mod tests {
         project.models[0].name = "Main".to_string();
 
         let (mut db, sp) = synced_db(&project);
-        let analysis = analyze_model(&project, &mut db, sp, "Main").expect("analyze_model failed");
+        let analysis =
+            analyze_model(&project, &mut db, sp, "Main", None).expect("analyze_model failed");
 
         assert!(
             !analysis.loop_dominance.is_empty(),
@@ -582,7 +677,8 @@ mod tests {
         );
         let project = load_project(path);
         let (mut db, sp) = synced_db(&project);
-        let _analysis = analyze_model(&project, &mut db, sp, "main").expect("analyze_model failed");
+        let _analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
 
         // After analyze_model returns, LTM flags must be restored to false
         // so subsequent compilations don't unexpectedly run in LTM discovery mode.
@@ -600,7 +696,7 @@ mod tests {
     fn ltm_flags_reset_after_failed_analysis() {
         let project = broken_project();
         let (mut db, sp) = synced_db(&project);
-        let _analysis = analyze_model(&project, &mut db, sp, "main")
+        let _analysis = analyze_model(&project, &mut db, sp, "main", None)
             .expect("analyze_model should not return Err");
 
         assert!(

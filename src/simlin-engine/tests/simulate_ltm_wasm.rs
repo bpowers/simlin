@@ -531,8 +531,10 @@ fn assert_discovery_matches(model_rel_path: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        None,
     )
-    .unwrap_or_else(|e| panic!("[{model_rel_path}] VM discovery returned Err: {e:?}"));
+    .unwrap_or_else(|e| panic!("[{model_rel_path}] VM discovery returned Err: {e:?}"))
+    .loops;
 
     let wasm_loops = ltm_finding::discover_loops_with_graph(
         &wasm,
@@ -540,8 +542,10 @@ fn assert_discovery_matches(model_rel_path: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        None,
     )
-    .unwrap_or_else(|e| panic!("[{model_rel_path}] wasm discovery returned Err: {e:?}"));
+    .unwrap_or_else(|e| panic!("[{model_rel_path}] wasm discovery returned Err: {e:?}"))
+    .loops;
 
     assert!(
         !vm_loops.is_empty(),
@@ -677,16 +681,20 @@ fn discovery_matches_helper(project: &datamodel::Project, label: &str) {
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        None,
     )
-    .unwrap_or_else(|e| panic!("[{label}] VM discovery returned Err: {e:?}"));
+    .unwrap_or_else(|e| panic!("[{label}] VM discovery returned Err: {e:?}"))
+    .loops;
     let wasm_loops = ltm_finding::discover_loops_with_graph(
         &wasm,
         &inputs.causal_graph,
         &inputs.stocks,
         &inputs.ltm_vars,
         &inputs.dims,
+        None,
     )
-    .unwrap_or_else(|e| panic!("[{label}] wasm discovery returned Err: {e:?}"));
+    .unwrap_or_else(|e| panic!("[{label}] wasm discovery returned Err: {e:?}"))
+    .loops;
 
     assert!(
         !vm_loops.is_empty(),

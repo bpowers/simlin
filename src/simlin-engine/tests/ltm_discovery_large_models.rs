@@ -471,12 +471,19 @@ fn world3_discovery_single_timestep() {
 
     let t = Instant::now();
     let outcome = run_with_timeout(budget, rss_ceiling_bytes, move || {
-        ltm_finding::discover_loops_with_graph(&truncated, &causal_graph, &stocks, &ltm_vars, &dims)
+        ltm_finding::discover_loops_with_graph(
+            &truncated,
+            &causal_graph,
+            &stocks,
+            &ltm_vars,
+            &dims,
+            None,
+        )
     });
     let elapsed = t.elapsed();
 
     let found = match outcome {
-        WorkerOutcome::Completed(Ok(found)) => found,
+        WorkerOutcome::Completed(Ok(found)) => found.loops,
         WorkerOutcome::Completed(Err(e)) => {
             panic!("discover_loops_with_graph returned an Err on World3: {e:?}")
         }
@@ -595,8 +602,10 @@ fn discovery_contract_holds_on_tractable_arrayed_model() {
         &stocks,
         &ltm_vars,
         &dims,
+        None,
     )
-    .expect("discovery on the tractable arrayed fixture should not error");
+    .expect("discovery on the tractable arrayed fixture should not error")
+    .loops;
 
     assert_discovery_contract(&found);
 }

@@ -101,8 +101,11 @@ pub async fn read_model<A: ProjectAccess>(
         }
     };
 
+    // No discovery budget here: ReadModel runs on user-opened models that are
+    // already known-tractable for the MCP surface. The opt-in budgeted path is
+    // pysimlin's `Model.analyze(timeout=...)`.
     let analysis =
-        simlin_engine::analysis::analyze_model(&project, &mut db, source_project, model_name)
+        simlin_engine::analysis::analyze_model(&project, &mut db, source_project, model_name, None)
             .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
 
     let loop_dominance: Vec<LoopDominanceSummary> = analysis

@@ -4452,8 +4452,10 @@ fn discover_loops_element_level(
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        None,
     )
     .expect("discover_loops_with_graph should succeed")
+    .loops
 }
 
 /// AC7.1: Discovery mode on an arrayed model finds element-specific loops.
@@ -8039,8 +8041,10 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        None,
     )
-    .expect("discover_loops_with_graph should succeed");
+    .expect("discover_loops_with_graph should succeed")
+    .loops;
     assert!(
         !found.is_empty(),
         "discovery should find at least one loop in the inlined-reducer model"

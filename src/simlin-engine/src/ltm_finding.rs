@@ -14,6 +14,7 @@
 //! link score synthetic variables (generated with `ltm_discovery_mode` enabled).
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel;
@@ -47,6 +48,13 @@ const LTM_LINK_SEP: char = '→';
 // --- Internal types ---
 
 /// An outbound edge in the search graph: target variable and |link_score|.
+///
+/// `SearchGraph` is the original `Ident`-keyed, per-timestep-rebuilt reference
+/// implementation. Production discovery now runs over the integer-indexed
+/// `IndexedSearch` (built once, no per-step string hashing); `SearchGraph` is
+/// retained as the test-only correctness oracle that documents the reference
+/// algorithm and is cross-checked against `IndexedSearch` for equivalence.
+#[cfg(test)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 struct ScoredEdge {
     to: Ident<Canonical>,
@@ -55,6 +63,7 @@ struct ScoredEdge {
 }
 
 /// The search graph for one timestep: adjacency list with edges sorted by |score| desc.
+#[cfg(test)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 struct SearchGraph {
     /// variable -> outbound edges, sorted by |score| descending
@@ -77,6 +86,26 @@ pub struct FoundLoop {
     pub avg_abs_score: f64,
 }
 
+/// The outcome of a strongest-path discovery run.
+///
+/// `truncated` is `true` when a caller-supplied time budget elapsed before the
+/// per-timestep DFS sweep finished, so `loops` reflects only the timesteps
+/// processed before the budget ran out (and is therefore *possibly* partial:
+/// loops only dominant in unprocessed timesteps will be absent, and the
+/// per-step importance series of the loops that *were* found is complete,
+/// since each loop's score is recomputed across all steps once its path is
+/// known). Discovery on large models can be infeasibly slow (GH #647), so the
+/// budget lets callers bound wall-clock time and report partial results rather
+/// than hang.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+pub struct DiscoveryResult {
+    /// Loops discovered (ranked, filtered, and ID-assigned).
+    pub loops: Vec<FoundLoop>,
+    /// Whether the time budget elapsed before discovery finished.
+    pub truncated: bool,
+}
+
+#[cfg(test)]
 impl SearchGraph {
     /// Build from a list of (from, to, abs_score) triples.
     fn from_edges(
@@ -620,7 +649,9 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
         details: Some("No non-implicit model found for loop discovery".to_string()),
     })?;
     let causal_graph = CausalGraph::from_model(main_model, project)?;
-    discover_loops_with_graph(results, &causal_graph, &stocks, &[], &[])
+    // The convenience path is unbudgeted: it builds the graph from a `Project`
+    // and is used by small-model callers that never hit the GH #647 slowness.
+    Ok(discover_loops_with_graph(results, &causal_graph, &stocks, &[], &[], None)?.loops)
 }
 
 /// Collapse synthetic aggregate nodes out of a discovered loop's link chain.
@@ -697,6 +728,322 @@ fn trim_synthetic_aggs_from_loop_links(links: &[Link]) -> Option<Vec<Link>> {
     Some(links)
 }
 
+/// Integer-indexed search graph shared across all timesteps.
+///
+/// The graph *topology* -- which `(from -> to)` edges exist and which
+/// result slot each reads its score from -- is identical at every saved
+/// timestep; only the per-edge score value changes. `SearchGraph::from_results`
+/// rebuilt the entire `HashMap<Ident, Vec<ScoredEdge>>` (cloning every `Ident`,
+/// re-hashing every name) for each of the ~250 timesteps, and the DFS then
+/// keyed `best_score`/`visiting`/`adj` on `Ident` -- each access hashing the
+/// full (often long, element-level) identifier string. For a model like
+/// C-LEARN (thousands of edges, hundreds of stocks, 250 steps) that string
+/// hashing dominated, pushing discovery past 19 minutes.
+///
+/// This structure hoists the topology build once: every node that appears as
+/// a `from` or `to` endpoint (or is a stock) gets a dense `u32` id, edges are
+/// stored as `(to_id, result_offset)` in their original `link_offsets` order,
+/// and the per-timestep DFS runs entirely over integer-indexed `Vec`s. The
+/// result set is bit-identical to the `SearchGraph` path: same node universe,
+/// same per-stock `best_score` reset, same strict-less-than pruning, same
+/// stable score-descending edge order, same NaN->0 handling, same canonical
+/// rotation dedup.
+struct IndexedSearch {
+    /// node id -> canonical identifier (for reconstructing discovered paths)
+    idents: Vec<Ident<Canonical>>,
+    /// node id -> outbound edges, in original `link_offsets` insertion order.
+    /// The per-timestep DFS re-sorts a permutation of each list by |score|;
+    /// the static topology here never changes.
+    adj: Vec<Vec<IndexedEdge>>,
+    /// stock node ids, in the input `stocks` order (drives per-stock DFS order)
+    stock_ids: Vec<u32>,
+}
+
+/// A static outbound edge: target node id plus the result slot its score is
+/// read from each timestep.
+struct IndexedEdge {
+    to: u32,
+    offset: usize,
+}
+
+/// A timestep-resolved outbound edge: target node id and the |score| weight the
+/// DFS multiplies into the running path product. Built per timestep, already
+/// sorted by `score` descending (stable), so the DFS never sorts per visit.
+#[derive(Clone, Copy)]
+struct StepEdge {
+    to: u32,
+    score: f64,
+}
+
+/// Per-timestep mutable DFS state, allocated once per `discover_loops_with_graph`
+/// call and reused across stocks and timesteps to avoid per-search reallocation.
+struct DfsScratch {
+    /// node id -> highest path score seen at that node for the current target
+    /// stock (reset to 0.0 between stocks). Mirrors the original `best_score`
+    /// map, whose absent keys also defaulted to 0.0.
+    best_score: Vec<f64>,
+    /// node id -> whether it is on the current DFS path. A per-stock generation
+    /// stamp avoids clearing the whole vector between stocks: a node is
+    /// "visiting" iff `visiting_gen[id] == cur_gen`.
+    visiting_gen: Vec<u32>,
+    /// current generation counter for `visiting_gen`
+    cur_gen: u32,
+    /// current DFS path as node ids (mirrors the original `stack` of idents)
+    stack: Vec<u32>,
+    /// node id -> outbound edges for the current timestep, already sorted by
+    /// `|score|` descending (stable). Rebuilt once per timestep by
+    /// `load_step_scores`; the DFS reads it without sorting -- mirroring the
+    /// original `SearchGraph::from_results`, which sorted each adjacency list
+    /// once per timestep, NOT once per node visit. The per-visit sort was the
+    /// dominant DFS cost on a dense element graph (a node is re-entered many
+    /// times across the 116-stock x 250-step search).
+    step_adj: Vec<Vec<StepEdge>>,
+}
+
+impl DfsScratch {
+    /// Allocate reusable DFS state sized for `search`'s node universe, with each
+    /// node's per-timestep edge buffer pre-reserved to its static out-degree.
+    fn new(search: &IndexedSearch) -> Self {
+        let n_nodes = search.node_count();
+        DfsScratch {
+            best_score: vec![0.0; n_nodes],
+            visiting_gen: vec![0; n_nodes],
+            cur_gen: 0,
+            stack: Vec::with_capacity(n_nodes),
+            step_adj: search
+                .adj
+                .iter()
+                .map(|e| Vec::with_capacity(e.len()))
+                .collect(),
+        }
+    }
+}
+
+impl IndexedSearch {
+    /// Build the integer-indexed topology from the parsed link offsets and the
+    /// stock list. Node ids are assigned in first-seen order over the edge
+    /// endpoints (then any stock not yet seen), which is irrelevant to results
+    /// since every lookup is id-keyed and the output is reconstructed from
+    /// `idents`.
+    fn build(link_offsets: &[LinkOffset], stocks: &[Ident<Canonical>]) -> Self {
+        let mut id_of: HashMap<Ident<Canonical>, u32> =
+            HashMap::with_capacity(link_offsets.len() * 2 + stocks.len());
+        let mut idents: Vec<Ident<Canonical>> = Vec::new();
+
+        let intern = |ident: &Ident<Canonical>,
+                      id_of: &mut HashMap<Ident<Canonical>, u32>,
+                      idents: &mut Vec<Ident<Canonical>>|
+         -> u32 {
+            if let Some(&id) = id_of.get(ident) {
+                id
+            } else {
+                // Node ids are u32; SD models stay far below this (LTM paths
+                // are capped at MAX_LTM_SCC_NODES and real edge counts are in
+                // the thousands), but make the invariant explicit.
+                debug_assert!(idents.len() <= u32::MAX as usize);
+                let id = idents.len() as u32;
+                idents.push(ident.clone());
+                id_of.insert(ident.clone(), id);
+                id
+            }
+        };
+
+        // First pass: assign ids and collect edges. Edges keep their
+        // `link_offsets` insertion order within each `from` node so the
+        // per-timestep stable score sort breaks ties identically to the
+        // original `SearchGraph::from_edges` (which pushed in the same order
+        // before its stable `sort_by`).
+        let mut adj: Vec<Vec<IndexedEdge>> = Vec::new();
+        for ((from, to), offset) in link_offsets {
+            let from_id = intern(from, &mut id_of, &mut idents);
+            let to_id = intern(to, &mut id_of, &mut idents);
+            if adj.len() <= from_id as usize {
+                adj.resize_with(from_id as usize + 1, Vec::new);
+            }
+            adj[from_id as usize].push(IndexedEdge {
+                to: to_id,
+                offset: *offset,
+            });
+        }
+
+        // Stocks that never appeared as an edge endpoint still need ids (the
+        // DFS starts from every stock; a stock with no outbound edges simply
+        // has an empty adjacency list, matching the original behavior).
+        let stock_ids: Vec<u32> = stocks
+            .iter()
+            .map(|s| intern(s, &mut id_of, &mut idents))
+            .collect();
+
+        // Ensure `adj` is sized to the full node universe so every id is a
+        // valid index (nodes that are only edge targets have empty lists).
+        if adj.len() < idents.len() {
+            adj.resize_with(idents.len(), Vec::new);
+        }
+
+        IndexedSearch {
+            idents,
+            adj,
+            stock_ids,
+        }
+    }
+
+    /// Number of distinct nodes.
+    fn node_count(&self) -> usize {
+        self.idents.len()
+    }
+
+    /// Rebuild each node's sorted outbound-edge list for `step` into
+    /// `scratch.step_adj`.
+    ///
+    /// Reads each edge's result slot, applies the same NaN->0 then |value|
+    /// transform `SearchGraph::from_results`/`from_edges` did, then stable-sorts
+    /// the node's edges by `|score|` descending -- exactly the per-timestep sort
+    /// `SearchGraph::from_results` performed once per node. Doing it here (once
+    /// per timestep) rather than inside the DFS (once per node *visit*) is the
+    /// key cost reduction without changing the visited edge order.
+    fn load_step_scores(&self, results: &Results, step: usize, scratch: &mut DfsScratch) {
+        let base = step * results.step_size;
+        for (node, edges) in self.adj.iter().enumerate() {
+            let row = &mut scratch.step_adj[node];
+            row.clear();
+            for edge in edges {
+                let value = results.data[base + edge.offset];
+                let score = if value.is_nan() { 0.0 } else { value.abs() };
+                row.push(StepEdge { to: edge.to, score });
+            }
+
+            // Stable sort by score descending. `sort_by` is stable, so ties keep
+            // the `link_offsets` insertion order -- byte-identical to the
+            // original `SearchGraph::from_edges`/`from_results` ordering.
+            row.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    /// Run the strongest-path search at the current step, appending newly
+    /// discovered loops (deduped by canonical rotation) to `all_paths`.
+    ///
+    /// Equivalent to `SearchGraph::from_results(..).find_strongest_loops()`
+    /// followed by the caller's cross-step rotation dedup, but without
+    /// rebuilding the graph or hashing idents in the inner loop. The single
+    /// `seen_sets` passed in spans all timesteps, so the original's two dedup
+    /// layers (per-timestep inside `find_strongest_loops`, then cross-timestep
+    /// in `discover_loops_with_graph`) collapse to one without changing which
+    /// paths survive: a path is kept iff its canonical rotation is new, and the
+    /// per-stock/per-step visitation order is preserved.
+    fn discover_step(
+        &self,
+        scratch: &mut DfsScratch,
+        seen_sets: &mut HashSet<Vec<u32>>,
+        all_paths: &mut Vec<Vec<Ident<Canonical>>>,
+    ) {
+        for stock_idx in 0..self.stock_ids.len() {
+            let stock = self.stock_ids[stock_idx];
+
+            // Reset best_score for this target stock. A fresh generation marks
+            // the visiting set empty without touching every slot.
+            scratch.best_score.iter_mut().for_each(|b| *b = 0.0);
+            scratch.cur_gen = scratch.cur_gen.wrapping_add(1);
+            if scratch.cur_gen == 0 {
+                // Generation wrapped; clear so a stale stamp can't read as live.
+                scratch.visiting_gen.iter_mut().for_each(|g| *g = 0);
+                scratch.cur_gen = 1;
+            }
+            scratch.stack.clear();
+
+            self.dfs(stock, 1.0, stock, scratch, seen_sets, all_paths);
+        }
+    }
+
+    /// Recursive DFS mirroring `SearchGraph::check_outbound_uses`, but over
+    /// integer node ids and the pre-sorted per-timestep edge lists. The edge
+    /// order is established once per timestep in `load_step_scores`, so the DFS
+    /// just walks `scratch.step_adj[node]` -- no per-visit sorting.
+    fn dfs(
+        &self,
+        node: u32,
+        score: f64,
+        target: u32,
+        scratch: &mut DfsScratch,
+        seen_sets: &mut HashSet<Vec<u32>>,
+        all_paths: &mut Vec<Vec<Ident<Canonical>>>,
+    ) {
+        let idx = node as usize;
+
+        if scratch.visiting_gen[idx] == scratch.cur_gen {
+            if node == target {
+                self.record_loop(&scratch.stack, seen_sets, all_paths);
+            }
+            return;
+        }
+
+        // Strict less-than pruning, identical to the original.
+        if score < scratch.best_score[idx] {
+            return;
+        }
+        scratch.best_score[idx] = score;
+
+        scratch.visiting_gen[idx] = scratch.cur_gen;
+        scratch.stack.push(node);
+
+        // Walk the node's pre-sorted (|score| desc) edge list. `step_adj` is not
+        // mutated during the DFS, so we index it by position and copy each
+        // `StepEdge` (it is `Copy`) -- this keeps the recursive `&mut scratch`
+        // borrow legal without cloning the whole row.
+        let n_edges = scratch.step_adj[idx].len();
+        for k in 0..n_edges {
+            let edge = scratch.step_adj[idx][k];
+            self.dfs(
+                edge.to,
+                score * edge.score,
+                target,
+                scratch,
+                seen_sets,
+                all_paths,
+            );
+        }
+
+        scratch.visiting_gen[idx] = 0;
+        scratch.stack.pop();
+    }
+
+    /// Record the current path as a loop if its canonical rotation is new,
+    /// mirroring `SearchGraph::add_loop_if_unique` over reconstructed idents.
+    ///
+    /// The dedup key is the canonical rotation of the path's *node ids* rather
+    /// than its identifier strings. Within a single `IndexedSearch` the id <->
+    /// string map is a bijection, so two paths are rotations of one another in
+    /// id space iff they are in string space: the dedup equivalence classes are
+    /// identical. Keying on `u32` avoids allocating a `Vec<String>` (and hashing
+    /// long element-level names) on every loop closure -- the dominant
+    /// remaining per-closure cost. `canonical_rotation` over ids picks a
+    /// (possibly different) representative rotation, but that representative is
+    /// only used as a set key; the *stored* loop is the original `stack`, so the
+    /// reported paths and their first-seen order are unchanged.
+    fn record_loop(
+        &self,
+        stack: &[u32],
+        seen_sets: &mut HashSet<Vec<u32>>,
+        all_paths: &mut Vec<Vec<Ident<Canonical>>>,
+    ) {
+        if stack.is_empty() {
+            return;
+        }
+        let key = crate::ltm::canonical_rotation(stack);
+        if seen_sets.insert(key) {
+            all_paths.push(
+                stack
+                    .iter()
+                    .map(|&id| self.idents[id as usize].clone())
+                    .collect(),
+            );
+        }
+    }
+}
+
 /// Run the strongest-path loop discovery using a pre-built `CausalGraph`.
 ///
 /// This is the implementation shared by `discover_loops` (which builds
@@ -707,16 +1054,27 @@ fn trim_synthetic_aggs_from_loop_links(links: &[Link]) -> Option<Vec<Link>> {
 /// into per-element edges so the DFS operates on the element-level graph.
 /// When they are empty (convenience path), all link scores are treated as
 /// scalar.
+///
+/// `budget` optionally bounds the wall-clock time spent in the per-timestep DFS
+/// sweep. The elapsed time is checked once per timestep (cheap relative to the
+/// DFS over the whole graph), and the sweep stops early once the budget is
+/// exceeded. The returned `DiscoveryResult::truncated` records whether that
+/// happened. A `None` budget runs to completion. Discovery on very large models
+/// can be infeasibly slow (GH #647); the budget lets callers bound it.
 pub fn discover_loops_with_graph(
     results: &Results,
     causal_graph: &CausalGraph,
     stocks: &[Ident<Canonical>],
     ltm_vars: &[LtmSyntheticVar],
     dims: &[datamodel::Dimension],
-) -> Result<Vec<FoundLoop>> {
+    budget: Option<Duration>,
+) -> Result<DiscoveryResult> {
     let link_offsets = parse_link_offsets(results, ltm_vars, dims);
     if link_offsets.is_empty() {
-        return Ok(Vec::new());
+        return Ok(DiscoveryResult {
+            loops: Vec::new(),
+            truncated: false,
+        });
     }
 
     // Build HashMap for O(1) link offset lookups during score computation
@@ -726,35 +1084,62 @@ pub fn discover_loops_with_graph(
         .collect();
 
     if stocks.is_empty() {
-        return Ok(Vec::new());
+        return Ok(DiscoveryResult {
+            loops: Vec::new(),
+            truncated: false,
+        });
     }
 
     // Collect all unique loop paths across all timesteps, dedup-keyed
     // on the canonical edge-sequence rotation so opposite-direction
     // cycles over the same node set are kept as distinct loops (see
-    // `crate::ltm::canonical_rotation` and issue #308).
+    // `crate::ltm::canonical_rotation` and issue #308). The key is the
+    // rotation of the path's integer node ids (a bijection with the
+    // string names within this search), so the dedup classes match the
+    // string-keyed original without allocating a string per closure.
     let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    let mut seen_sets: HashSet<Vec<String>> = HashSet::new();
+    let mut seen_sets: HashSet<Vec<u32>> = HashSet::new();
 
     let step_count = results.step_count;
 
-    // Skip step 0 where link scores are NaN (PREVIOUS values don't exist)
+    // Hoist the integer-indexed topology build out of the per-timestep loop:
+    // the graph's edges and result slots are step-invariant, so rebuilding the
+    // `Ident`-keyed `SearchGraph` (and re-hashing every name) per step was pure
+    // waste. Only the per-edge scores change, which the DFS re-reads each step.
+    let search = IndexedSearch::build(&link_offsets, stocks);
+    let mut scratch = DfsScratch::new(&search);
+
+    // Skip step 0 where link scores are NaN (PREVIOUS values don't exist).
+    // The original ran a fresh per-step `find_strongest_loops` (whose own
+    // per-step `seen_sets` deduped within a step) and then deduped again across
+    // steps here; both layers keyed on the canonical rotation, so collapsing
+    // them onto the single cross-step `seen_sets` keeps exactly the paths the
+    // two-layer version kept, in the same first-seen order.
+    //
+    // The optional time budget is checked once per timestep, *before* running
+    // that step's DFS. The check is O(1) and dwarfed by the per-step DFS over
+    // the whole graph, so it adds no meaningful overhead. We stop before a step
+    // we can't afford rather than mid-DFS so each processed step's loop set is
+    // internally consistent. `start` is captured lazily so an unbudgeted run
+    // never reads the clock.
+    let mut truncated = false;
+    let start = budget.map(|_| Instant::now());
     for step in 1..step_count {
-        let graph = SearchGraph::from_results(results, step, &link_offsets, stocks);
-        let paths = graph.find_strongest_loops();
-
-        for path in paths {
-            let path_strings: Vec<String> = path.iter().map(|id| id.as_str().to_string()).collect();
-            let key = crate::ltm::canonical_rotation(&path_strings);
-
-            if seen_sets.insert(key) {
-                all_paths.push(path);
-            }
+        if let (Some(limit), Some(started)) = (budget, start)
+            && started.elapsed() >= limit
+        {
+            truncated = true;
+            break;
         }
+        search.load_step_scores(results, step, &mut scratch);
+        search.discover_step(&mut scratch, &mut seen_sets, &mut all_paths);
     }
 
     if all_paths.is_empty() {
-        return Ok(Vec::new());
+        return Ok(DiscoveryResult {
+            loops: Vec::new(),
+            truncated,
+        });
     }
 
     // Convert paths to FoundLoop objects with scores
@@ -865,7 +1250,10 @@ pub fn discover_loops_with_graph(
     let partitions = causal_graph.compute_cycle_partitions();
     rank_and_filter(&mut found_loops, &partitions);
 
-    Ok(found_loops)
+    Ok(DiscoveryResult {
+        loops: found_loops,
+        truncated,
+    })
 }
 
 /// Rank, truncate, filter, and assign IDs to discovered loops.
@@ -2346,5 +2734,213 @@ mod tests {
         assert_eq!(loops[0].avg_abs_score, 500.0);
         assert_eq!(loops[1].avg_abs_score, 400.0);
         assert!((loops[2].avg_abs_score - 0.01).abs() < 1e-10);
+    }
+
+    // --- IndexedSearch vs. SearchGraph equivalence oracle ---
+    //
+    // `discover_loops_with_graph` was optimized from a per-timestep
+    // `SearchGraph` rebuild (Ident-keyed HashMaps, full-string hashing in the
+    // DFS) to a once-built `IndexedSearch` over dense integer ids. The two
+    // must discover *exactly* the same loop paths in the same first-seen order.
+    // These tests lock that equivalence in by running both paths over a range
+    // of synthetic graphs and comparing the resulting `all_paths` verbatim.
+
+    /// The original cross-step discovery loop, reproduced over the retained
+    /// `SearchGraph` reference implementation. Returns the deduped `all_paths`
+    /// in first-seen order, exactly as the pre-optimization
+    /// `discover_loops_with_graph` body did.
+    fn reference_all_paths(
+        results: &Results,
+        link_offsets: &[LinkOffset],
+        stocks: &[Ident<Canonical>],
+    ) -> Vec<Vec<Ident<Canonical>>> {
+        let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
+        let mut seen_sets: HashSet<Vec<String>> = HashSet::new();
+        for step in 1..results.step_count {
+            let graph = SearchGraph::from_results(results, step, link_offsets, stocks);
+            for path in graph.find_strongest_loops() {
+                let path_strings: Vec<String> =
+                    path.iter().map(|id| id.as_str().to_string()).collect();
+                let key = crate::ltm::canonical_rotation(&path_strings);
+                if seen_sets.insert(key) {
+                    all_paths.push(path);
+                }
+            }
+        }
+        all_paths
+    }
+
+    /// The optimized discovery loop in isolation (the integer-indexed path
+    /// inside `discover_loops_with_graph`), returning the same `all_paths`.
+    fn indexed_all_paths(
+        results: &Results,
+        link_offsets: &[LinkOffset],
+        stocks: &[Ident<Canonical>],
+    ) -> Vec<Vec<Ident<Canonical>>> {
+        let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
+        let mut seen_sets: HashSet<Vec<u32>> = HashSet::new();
+        let search = IndexedSearch::build(link_offsets, stocks);
+        let mut scratch = DfsScratch::new(&search);
+        for step in 1..results.step_count {
+            search.load_step_scores(results, step, &mut scratch);
+            search.discover_step(&mut scratch, &mut seen_sets, &mut all_paths);
+        }
+        all_paths
+    }
+
+    fn paths_as_strings(paths: &[Vec<Ident<Canonical>>]) -> Vec<Vec<String>> {
+        paths
+            .iter()
+            .map(|p| p.iter().map(|id| id.as_str().to_string()).collect())
+            .collect()
+    }
+
+    /// Build a multi-step `Results` whose per-edge scores follow a deterministic
+    /// pseudo-random sequence, so the per-timestep edge sort order (and thus the
+    /// DFS traversal/pruning) varies across steps -- exercising the tie-breaking
+    /// and score-dependent branches in both implementations.
+    fn synthetic_results(n_offsets: usize, step_count: usize, seed: u64) -> Results {
+        let step_size = n_offsets;
+        let mut data = vec![0.0f64; step_size * step_count];
+        // Step 0 is all NaN (PREVIOUS values don't exist), matching production;
+        // discovery skips it. Remaining steps get varied finite scores, with a
+        // few deliberate zeros/NaNs to exercise those branches.
+        let mut state = seed | 1;
+        let mut next = || {
+            // xorshift64* -- deterministic, no external deps.
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545F4914F6CDD1D)
+        };
+        for slot in data.iter_mut().take(n_offsets) {
+            *slot = f64::NAN;
+        }
+        for step in 1..step_count {
+            for off in 0..n_offsets {
+                let r = next();
+                let v = match r % 16 {
+                    0 => 0.0,
+                    1 => f64::NAN,
+                    _ => {
+                        let mag = ((r >> 8) % 1000) as f64 / 100.0;
+                        if r & 1 == 0 { mag } else { -mag }
+                    }
+                };
+                data[step * step_size + off] = v;
+            }
+        }
+        Results {
+            offsets: HashMap::new(),
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: crate::results::Specs {
+                start: 0.0,
+                stop: (step_count - 1) as f64,
+                dt: 1.0,
+                save_step: 1.0,
+                method: crate::results::Method::Euler,
+                n_chunks: step_count,
+            },
+            is_vensim: false,
+        }
+    }
+
+    #[test]
+    fn indexed_search_matches_reference_on_synthetic_graphs() {
+        // A fully-connected-ish 5-node graph plus a couple of disconnected
+        // nodes, several stocks, parallel edges, and a self-loop -- the shapes
+        // the unit tests above exercise individually, combined and stressed
+        // over many timesteps with varying scores.
+        let names = ["a", "b", "c", "d", "e", "f", "g"];
+        let mut edge_pairs: Vec<(&str, &str)> = Vec::new();
+        for &from in &names[..5] {
+            for &to in &names[..5] {
+                edge_pairs.push((from, to)); // includes self-loops
+            }
+        }
+        // A node ("g") that is only ever an edge target (no outbound edges)
+        // and a duplicate (parallel) edge to stress tie-breaking / dedup.
+        edge_pairs.push(("a", "g"));
+        edge_pairs.push(("a", "b")); // parallel to the existing a->b
+
+        let link_offsets: Vec<LinkOffset> = edge_pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (from, to))| ((Ident::new(from), Ident::new(to)), i))
+            .collect();
+
+        // Stocks include a node with no incident edges ("f") to mirror the
+        // `test_stocks_without_outbound_edges` shape.
+        let stocks: Vec<Ident<Canonical>> =
+            ["a", "c", "e", "f"].iter().map(|s| Ident::new(s)).collect();
+
+        // Run several independent seeds so the per-step sort order (and the
+        // resulting traversal/pruning) varies widely.
+        for seed in [1u64, 7, 42, 1000, 999_983] {
+            let results = synthetic_results(link_offsets.len(), 40, seed);
+            let reference = reference_all_paths(&results, &link_offsets, &stocks);
+            let indexed = indexed_all_paths(&results, &link_offsets, &stocks);
+            // Guard against a vacuous pass: a future fixture edit that produced
+            // no loops would make the equality below trivially true.
+            assert!(
+                !reference.is_empty(),
+                "synthetic fixture must produce loops (seed {seed})"
+            );
+            assert_eq!(
+                paths_as_strings(&indexed),
+                paths_as_strings(&reference),
+                "IndexedSearch must discover the identical loop paths in the \
+                 identical first-seen order as the SearchGraph reference \
+                 (seed {seed})"
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_search_matches_reference_element_level_names() {
+        // Long element-level identifiers (the C-LEARN-style names whose string
+        // hashing the optimization eliminates) over a denser graph.
+        let names = [
+            "population[nyc]",
+            "births[nyc]",
+            "deaths[nyc]",
+            "population[boston]",
+            "births[boston]",
+            "migration_pressure[chicago]",
+        ];
+        let mut edge_pairs: Vec<(&str, &str)> = Vec::new();
+        for &from in &names {
+            for &to in &names {
+                if from != to {
+                    edge_pairs.push((from, to));
+                }
+            }
+        }
+        let link_offsets: Vec<LinkOffset> = edge_pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (from, to))| ((Ident::new(from), Ident::new(to)), i))
+            .collect();
+        let stocks: Vec<Ident<Canonical>> = ["population[nyc]", "population[boston]"]
+            .iter()
+            .map(|s| Ident::new(s))
+            .collect();
+
+        for seed in [3u64, 17, 55, 12_345] {
+            let results = synthetic_results(link_offsets.len(), 30, seed);
+            let reference = reference_all_paths(&results, &link_offsets, &stocks);
+            let indexed = indexed_all_paths(&results, &link_offsets, &stocks);
+            assert!(
+                !reference.is_empty(),
+                "element-level fixture must produce loops (seed {seed})"
+            );
+            assert_eq!(
+                paths_as_strings(&indexed),
+                paths_as_strings(&reference),
+                "element-level discovery must match the reference (seed {seed})"
+            );
+        }
     }
 }
