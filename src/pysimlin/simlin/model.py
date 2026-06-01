@@ -492,7 +492,13 @@ class Model:
     def get_links(self) -> list[Link]:
         """Get all causal links in the model (static analysis).
 
-        This returns the structural links in the model without simulation data.
+        This returns the structural links in the model without simulation data,
+        with each link's statically analyzed polarity (``+``, ``-``, or ``?``
+        when the equation's monotonicity cannot be determined). Macro/module
+        internals (e.g. the stocks inside a SMOOTH) are collapsed into composite
+        edges between the variables the modeler authored, matching
+        ``Sim.get_links()``'s default view.
+
         To get links with LTM scores, run a simulation with enable_ltm=True
         and call get_links() on the Sim instance.
 

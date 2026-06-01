@@ -13,12 +13,12 @@ use std::os::raw::c_char;
 use std::ptr;
 use std::sync::MutexGuard;
 
-use crate::ffi::{SimlinLink, SimlinLinkPolarity, SimlinLinks};
+use crate::ffi::SimlinLinks;
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
 use crate::memory::simlin_malloc;
 use crate::{
-    clear_out_error, drop_c_string, drop_links_vec, require_model, store_anyhow_error, store_error,
+    clear_out_error, drop_c_string, require_model, store_anyhow_error, store_error,
     SimlinErrorCode, SimlinModel,
 };
 
@@ -624,8 +624,15 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
 
 /// Gets all causal links in a model
 ///
-/// Returns all causal links detected in the model.
-/// This includes flow-to-stock, stock-to-flow, and auxiliary-to-auxiliary links.
+/// Returns all causal links detected in the model, with their statically
+/// analyzed polarities. This includes flow-to-stock, stock-to-flow, and
+/// auxiliary-to-auxiliary links.
+///
+/// The view matches `simlin_analyze_get_links`'s default
+/// (`include_internal = false`): macro/module-internal synthetic nodes are
+/// collapsed into composite real-variable edges. Both functions funnel
+/// through the same `analyze_links_core`, so the model-level (structural,
+/// score-less) and sim-level (scored) link sets cannot drift apart.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
@@ -672,75 +679,13 @@ pub unsafe extern "C" fn simlin_model_get_links(
         }
     };
 
-    let causal = engine::db::model_causal_edges(&*db_locked, source_model, source_project);
+    // Structural-only call into the shared links core: no Results (so no
+    // scores), synthetic nodes collapsed.
+    let owned =
+        crate::analysis::analyze_links_core(&*db_locked, source_model, source_project, None, false);
+    drop(db_locked);
 
-    // Convert edges HashMap<from, Set<to>> into de-duplicated links
-    let mut unique_links = std::collections::HashMap::new();
-    for (from_name, to_set) in &causal.edges {
-        for to_name in to_set {
-            let key = (from_name.clone(), to_name.clone());
-            unique_links.entry(key).or_insert(engine::ltm::Link {
-                from: engine::common::Ident::new(from_name),
-                to: engine::common::Ident::new(to_name),
-                polarity: engine::ltm::LinkPolarity::Unknown,
-            });
-        }
-    }
-
-    if unique_links.is_empty() {
-        return Box::into_raw(Box::new(SimlinLinks {
-            links: ptr::null_mut(),
-            count: 0,
-        }));
-    }
-
-    // Convert to C structures (without LTM scores since this is model-level)
-    let mut c_links = Vec::with_capacity(unique_links.len());
-    for (_, link) in unique_links {
-        let from = match CString::new(link.from.as_str()) {
-            Ok(s) => s.into_raw(),
-            Err(_) => {
-                drop_links_vec(&mut c_links);
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic)
-                        .with_message("link source contains interior NUL byte"),
-                );
-                return ptr::null_mut();
-            }
-        };
-        let to = match CString::new(link.to.as_str()) {
-            Ok(s) => s.into_raw(),
-            Err(_) => {
-                drop_c_string(from);
-                drop_links_vec(&mut c_links);
-                store_error(
-                    out_error,
-                    SimlinError::new(SimlinErrorCode::Generic)
-                        .with_message("link destination contains interior NUL byte"),
-                );
-                return ptr::null_mut();
-            }
-        };
-        c_links.push(SimlinLink {
-            from,
-            to,
-            polarity: match link.polarity {
-                engine::ltm::LinkPolarity::Positive => SimlinLinkPolarity::Positive,
-                engine::ltm::LinkPolarity::Negative => SimlinLinkPolarity::Negative,
-                engine::ltm::LinkPolarity::Unknown => SimlinLinkPolarity::Unknown,
-            },
-            score: ptr::null_mut(),
-            score_len: 0,
-        });
-    }
-
-    let links = Box::new(SimlinLinks {
-        links: c_links.as_mut_ptr(),
-        count: c_links.len(),
-    });
-    std::mem::forget(c_links);
-    Box::into_raw(links)
+    crate::analysis::owned_links_to_ffi(owned, out_error)
 }
 
 /// Gets the LaTeX representation of a variable's equation

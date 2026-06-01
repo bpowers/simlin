@@ -160,7 +160,7 @@ pub(crate) fn analyze_links_core(
 /// Score arrays are allocated as `Box<[f64]>` (via `as_mut_ptr` +
 /// `mem::forget`) so the existing `simlin_free_links` -> `drop_link` ->
 /// `drop_f64_array` ownership chain frees them correctly.
-unsafe fn owned_links_to_ffi(
+pub(crate) unsafe fn owned_links_to_ffi(
     links: Vec<OwnedLink>,
     out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLinks {

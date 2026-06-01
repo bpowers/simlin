@@ -707,8 +707,15 @@ void simlin_model_get_incoming_links(SimlinModel *model,
 
 // Gets all causal links in a model
 //
-// Returns all causal links detected in the model.
-// This includes flow-to-stock, stock-to-flow, and auxiliary-to-auxiliary links.
+// Returns all causal links detected in the model, with their statically
+// analyzed polarities. This includes flow-to-stock, stock-to-flow, and
+// auxiliary-to-auxiliary links.
+//
+// The view matches `simlin_analyze_get_links`'s default
+// (`include_internal = false`): macro/module-internal synthetic nodes are
+// collapsed into composite real-variable edges. Both functions funnel
+// through the same `analyze_links_core`, so the model-level (structural,
+// score-less) and sim-level (scored) link sets cannot drift apart.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel

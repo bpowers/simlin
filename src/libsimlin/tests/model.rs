@@ -1142,3 +1142,104 @@ fn test_model_null_safety() {
         simlin_error_free(err);
     }
 }
+
+#[test]
+fn test_model_get_links_reports_polarity() {
+    // simlin_model_get_links must populate real link polarities from the
+    // engine's static analysis (compute_link_polarities), not hard-code
+    // Unknown: a positive constant multiplier gives a Positive link, and a
+    // subtraction's right operand gives a Negative link.
+    let datamodel = TestProject::new("polarity_test")
+        .aux("input", "10", None)
+        .aux("doubled", "input * 2", None)
+        .aux("negated", "100 - input", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        assert!(!model.is_null());
+
+        let links = simlin_model_get_links(model, &mut err);
+        assert!(err.is_null());
+        assert!(!links.is_null());
+
+        let links_slice = std::slice::from_raw_parts((*links).links, (*links).count);
+        let mut doubled_polarity = None;
+        let mut negated_polarity = None;
+        for link in links_slice {
+            let from = CStr::from_ptr(link.from).to_str().unwrap();
+            let to = CStr::from_ptr(link.to).to_str().unwrap();
+            if from == "input" && to == "doubled" {
+                doubled_polarity = Some(link.polarity);
+            }
+            if from == "input" && to == "negated" {
+                negated_polarity = Some(link.polarity);
+            }
+        }
+
+        assert_eq!(
+            doubled_polarity,
+            Some(SimlinLinkPolarity::Positive),
+            "input -> doubled (input * 2) must be a Positive link"
+        );
+        assert_eq!(
+            negated_polarity,
+            Some(SimlinLinkPolarity::Negative),
+            "input -> negated (100 - input) must be a Negative link"
+        );
+
+        simlin_free_links(links);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn test_model_get_links_collapses_macro_internals() {
+    // The model-level link view must match the sim-level default
+    // (include_internal=false): macro/module-internal synthetic nodes
+    // ($-prefixed) are collapsed into composite real-variable edges, so the
+    // through-contribution of a SMOOTH is one `level -> smoothed` edge rather
+    // than a chain through `$⁚smoothed⁚0⁚smth1`.
+    let datamodel = TestProject::new("collapse_test")
+        .aux("level", "TIME * 2", None)
+        .aux("smoothed", "SMTH1(level, 5)", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        assert!(!model.is_null());
+
+        let links = simlin_model_get_links(model, &mut err);
+        assert!(err.is_null());
+        assert!(!links.is_null());
+
+        let links_slice = std::slice::from_raw_parts((*links).links, (*links).count);
+        let mut found_composite = false;
+        for link in links_slice {
+            let from = CStr::from_ptr(link.from).to_str().unwrap();
+            let to = CStr::from_ptr(link.to).to_str().unwrap();
+            assert!(
+                !from.starts_with('$') && !to.starts_with('$'),
+                "no synthetic node may appear in the collapsed link view: {from} -> {to}"
+            );
+            if from == "level" && to == "smoothed" {
+                found_composite = true;
+            }
+        }
+        assert!(
+            found_composite,
+            "the SMOOTH chain must collapse to a level -> smoothed composite edge"
+        );
+
+        simlin_free_links(links);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
