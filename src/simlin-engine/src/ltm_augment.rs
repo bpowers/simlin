@@ -1475,15 +1475,26 @@ fn generate_link_score_equation(
 /// expressions (already quoted or rendered as subscripts as the caller
 /// requires).
 fn link_score_guard_form(partial_eq: &str, target_ref: &str, source_ref: &str) -> String {
+    // The link score is |Δ_x(z) / Δ(z)| * sign(Δ_x(z) / Δ(x)) (LTM ref §3.1).
+    // Within the else branch the guard guarantees Δ(z) != 0 and Δ(x) != 0, so
+    // the formula is emitted in the algebraically identical single-numerator
+    // form
+    //
+    //   ABS(SAFEDIV(N, Δz, 0)) * SIGN(SAFEDIV(N, Δx, 0))
+    //     == |N|/|Δz| * sign(N) * sign(Δx)
+    //     == SAFEDIV(N, ABS(Δz), 0) * SIGN(Δx)
+    //
+    // so the numerator N -- which embeds the (potentially large) partial
+    // equation -- appears ONCE instead of twice. This halves the equation
+    // text, the helper-aux count for any helper-producing construct inside
+    // the partial, and the per-step evaluation cost.
     let numerator = format!("(({partial_eq}) - PREVIOUS({target_ref}))");
     let target_diff = format!("({target_ref} - PREVIOUS({target_ref}))");
     let source_diff = format!("({source_ref} - PREVIOUS({source_ref}))");
-    let abs_part = format!("ABS(SAFEDIV({numerator}, {target_diff}, 0))");
-    let sign_part = format!("SIGN(SAFEDIV({numerator}, {source_diff}, 0))");
     format!(
         "if (TIME = INITIAL_TIME) then 0 \
          else if ({target_diff} = 0) OR ({source_diff} = 0) then 0 \
-         else {abs_part} * {sign_part}"
+         else SAFEDIV({numerator}, ABS({target_diff}), 0) * SIGN({source_diff})"
     )
 }
 
@@ -2685,14 +2696,9 @@ fn build_element_reducer_link_score(
         ),
     };
 
-    // Standard link score formula wrapping the partial equation.
-    let abs_part = format!(
-        "ABS(SAFEDIV(({partial_eq} - PREVIOUS({target_ref})), ({target_ref} - PREVIOUS({target_ref})), 0))"
-    );
-    let sign_part = format!(
-        "SIGN(SAFEDIV(({partial_eq} - PREVIOUS({target_ref})), ({source_elem} - PREVIOUS({source_elem})), 0))"
-    );
-
+    // Standard link score formula wrapping the partial equation, in the
+    // single-numerator form (see `link_score_guard_form` for the algebra):
+    // the partial appears once instead of twice.
     format!(
         "if \
             (TIME = INITIAL_TIME) \
@@ -2700,7 +2706,7 @@ fn build_element_reducer_link_score(
             else if \
                 (({target_ref} - PREVIOUS({target_ref})) = 0) OR (({source_elem} - PREVIOUS({source_elem})) = 0) \
                 then 0 \
-                else {abs_part} * {sign_part}"
+                else SAFEDIV(({partial_eq} - PREVIOUS({target_ref})), ABS(({target_ref} - PREVIOUS({target_ref}))), 0) * SIGN(({source_elem} - PREVIOUS({source_elem})))"
     )
 }
 
@@ -3429,7 +3435,7 @@ mod tests {
         );
         assert_eq!(
             eq,
-            "if (TIME = INITIAL_TIME) then 0 else if ((total - PREVIOUS(total)) = 0) OR ((s[d1] - PREVIOUS(s[d1])) = 0) then 0 else ABS(SAFEDIV((sqrt((((s[d1] - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d2]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d3]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2)) / 3) - PREVIOUS(total)), (total - PREVIOUS(total)), 0)) * SIGN(SAFEDIV((sqrt((((s[d1] - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d2]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d3]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2)) / 3) - PREVIOUS(total)), (s[d1] - PREVIOUS(s[d1])), 0))"
+            "if (TIME = INITIAL_TIME) then 0 else if ((total - PREVIOUS(total)) = 0) OR ((s[d1] - PREVIOUS(s[d1])) = 0) then 0 else SAFEDIV((sqrt((((s[d1] - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d2]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2) + ((PREVIOUS(s[d3]) - ((s[d1] + PREVIOUS(s[d2]) + PREVIOUS(s[d3])) / 3))^2)) / 3) - PREVIOUS(total)), ABS((total - PREVIOUS(total))), 0) * SIGN((s[d1] - PREVIOUS(s[d1])))"
         );
         // The live source element drives the partial; the other elements
         // are frozen at PREVIOUS.
@@ -3533,9 +3539,11 @@ mod tests {
             eq.contains("(src[a] - PREVIOUS(src[a])) = 0"),
             "equation: {eq}"
         );
-        // Should have ABS and SIGN parts
-        assert!(eq.contains("ABS(SAFEDIV("), "equation: {eq}");
-        assert!(eq.contains("SIGN(SAFEDIV("), "equation: {eq}");
+        // Should have the single-numerator magnitude and sign parts
+        // (SAFEDIV(N, ABS(dT), 0) * SIGN(dS); see link_score_guard_form).
+        assert!(eq.contains("SAFEDIV("), "equation: {eq}");
+        assert!(eq.contains("ABS("), "equation: {eq}");
+        assert!(eq.contains("* SIGN("), "equation: {eq}");
     }
 
     #[test]
@@ -3601,9 +3609,10 @@ mod tests {
             !eq.contains("matrix[a,y]"),
             "SUM shortcut should not enumerate matrix[a,y]: {eq}"
         );
-        // No literal "(0)" partial -- a real partial expression is emitted.
-        assert!(eq.contains("ABS(SAFEDIV("), "equation: {eq}");
-        assert!(eq.contains("SIGN(SAFEDIV("), "equation: {eq}");
+        // No literal "(0)" partial -- a real partial expression is emitted,
+        // in the single-numerator guard form.
+        assert!(eq.contains("SAFEDIV("), "equation: {eq}");
+        assert!(eq.contains("* SIGN("), "equation: {eq}");
     }
 
     #[test]
@@ -3740,7 +3749,7 @@ mod tests {
         // stable (the explicit-string assertion below catches regressions).
         assert_eq!(
             scalar_eq,
-            "if (TIME = INITIAL_TIME) then 0 else if ((total_pop - PREVIOUS(total_pop)) = 0) OR ((population[nyc] - PREVIOUS(population[nyc])) = 0) then 0 else ABS(SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), (total_pop - PREVIOUS(total_pop)), 0)) * SIGN(SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), (population[nyc] - PREVIOUS(population[nyc])), 0))"
+            "if (TIME = INITIAL_TIME) then 0 else if ((total_pop - PREVIOUS(total_pop)) = 0) OR ((population[nyc] - PREVIOUS(population[nyc])) = 0) then 0 else SAFEDIV((PREVIOUS(total_pop) + (population[nyc] - PREVIOUS(population[nyc])) - PREVIOUS(total_pop)), ABS((total_pop - PREVIOUS(total_pop))), 0) * SIGN((population[nyc] - PREVIOUS(population[nyc])))"
         );
     }
 
