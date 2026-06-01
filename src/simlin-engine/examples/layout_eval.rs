@@ -340,6 +340,16 @@ fn baseline_path() -> String {
     format!("{}/{}", env!("CARGO_MANIFEST_DIR"), BASELINE_REL_PATH)
 }
 
+/// A/B knob: `LAYOUT_EVAL_DECLUTTER=0` disables the deterministic declutter
+/// pass so a run can be compared against the pre-declutter behavior. Any other
+/// value (or unset) leaves it on (the production default).
+fn declutter_enabled() -> bool {
+    !matches!(
+        env::var("LAYOUT_EVAL_DECLUTTER").unwrap_or_default().trim(),
+        "0" | "false"
+    )
+}
+
 // ── Per-model seed sweep ─────────────────────────────────────────────────────
 
 /// Lay out `project`'s main model once for each `seed`, score each layout, and
@@ -371,6 +381,7 @@ fn sweep_model(key: &str, project: &datamodel::Project, seeds: &[u64]) -> ModelS
         .filter_map(|&seed| {
             let cfg = LayoutConfig {
                 annealing_random_seed: seed,
+                declutter: declutter_enabled(),
                 ..LayoutConfig::default()
             };
             match generate_layout_with_config(project, MAIN_MODEL, cfg.clone(), None) {
@@ -483,6 +494,7 @@ fn render_generated(
 ) -> Option<Render> {
     let cfg = LayoutConfig {
         annealing_random_seed: seed,
+        declutter: declutter_enabled(),
         ..LayoutConfig::default()
     };
     let view = match generate_layout_with_config(project, MAIN_MODEL, cfg.clone(), None) {

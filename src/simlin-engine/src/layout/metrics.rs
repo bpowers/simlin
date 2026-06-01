@@ -253,7 +253,7 @@ fn node_box(element: &ViewElement) -> Option<Rect> {
 /// `module_bounds`/`cloud_bounds` already exclude the label (modules render a
 /// label that their bounds omit; clouds render none), so they are their own
 /// shape box.
-fn node_shape_box(element: &ViewElement) -> Option<Rect> {
+pub(crate) fn node_shape_box(element: &ViewElement) -> Option<Rect> {
     match element {
         ViewElement::Aux(a) => Some(aux_shape_bounds(a)),
         ViewElement::Stock(s) => Some(stock_shape_bounds(s)),
@@ -264,29 +264,36 @@ fn node_shape_box(element: &ViewElement) -> Option<Rect> {
     }
 }
 
-/// Build a `LabelProps` for a labeled element, matching the renderer's label
-/// geometry (center, label side, display name, and the element's radii). Only
-/// elements that render a label return `Some`. The radii match the per-element
-/// `with_radii` calls in `diagram::elements`/`diagram::flow`.
-fn element_label_props(element: &ViewElement) -> Option<LabelProps> {
+/// Build a `LabelProps` for a labeled element placed on `side`, matching the
+/// renderer's label geometry (center, display name, and the element's radii).
+/// Only elements that render a label return `Some`. The radii match the
+/// per-element `with_radii` calls in `diagram::elements`/`diagram::flow`.
+///
+/// Exposed `pub(crate)` so the declutter pass (`layout::declutter`) can probe
+/// the label box an element *would* occupy on an alternative side, scoring
+/// against the identical geometry this metric uses.
+pub(crate) fn element_label_props_for(
+    element: &ViewElement,
+    side: crate::datamodel::view_element::LabelSide,
+) -> Option<LabelProps> {
     use crate::diagram::constants::{
         AUX_RADIUS, FLOW_VALVE_RADIUS, MODULE_HEIGHT, MODULE_WIDTH, STOCK_HEIGHT, STOCK_WIDTH,
     };
     match element {
         ViewElement::Aux(a) => Some(
-            LabelProps::new(a.x, a.y, a.label_side, display_name(&a.name))
+            LabelProps::new(a.x, a.y, side, display_name(&a.name))
                 .with_radii(AUX_RADIUS, AUX_RADIUS),
         ),
         ViewElement::Stock(s) => Some(
-            LabelProps::new(s.x, s.y, s.label_side, display_name(&s.name))
+            LabelProps::new(s.x, s.y, side, display_name(&s.name))
                 .with_radii(STOCK_WIDTH / 2.0, STOCK_HEIGHT / 2.0),
         ),
         ViewElement::Module(m) => Some(
-            LabelProps::new(m.x, m.y, m.label_side, display_name(&m.name))
+            LabelProps::new(m.x, m.y, side, display_name(&m.name))
                 .with_radii(MODULE_WIDTH / 2.0, MODULE_HEIGHT / 2.0),
         ),
         ViewElement::Flow(f) => Some(
-            LabelProps::new(f.x, f.y, f.label_side, display_name(&f.name))
+            LabelProps::new(f.x, f.y, side, display_name(&f.name))
                 .with_radii(FLOW_VALVE_RADIUS, FLOW_VALVE_RADIUS),
         ),
         // Aliases do render a label, but they have no `*_bounds` helper and are
@@ -298,6 +305,27 @@ fn element_label_props(element: &ViewElement) -> Option<LabelProps> {
         | ViewElement::Cloud(_)
         | ViewElement::Group(_) => None,
     }
+}
+
+/// The element's own current label side, or `None` for kinds the metric does
+/// not score a label for (the same set `element_label_props_for` returns `Some`
+/// for).
+fn element_label_side(element: &ViewElement) -> Option<crate::datamodel::view_element::LabelSide> {
+    match element {
+        ViewElement::Aux(a) => Some(a.label_side),
+        ViewElement::Stock(s) => Some(s.label_side),
+        ViewElement::Module(m) => Some(m.label_side),
+        ViewElement::Flow(f) => Some(f.label_side),
+        ViewElement::Alias(_)
+        | ViewElement::Link(_)
+        | ViewElement::Cloud(_)
+        | ViewElement::Group(_) => None,
+    }
+}
+
+/// Build a `LabelProps` for a labeled element on its *current* label side.
+fn element_label_props(element: &ViewElement) -> Option<LabelProps> {
+    element_label_props_for(element, element_label_side(element)?)
 }
 
 /// Collect the drawn geometry of every connector (Link or Flow) that draws
