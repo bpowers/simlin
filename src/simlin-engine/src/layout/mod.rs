@@ -12,6 +12,7 @@ pub mod eval_stats;
 pub mod graph;
 pub mod metadata;
 pub mod metrics;
+mod objective;
 pub mod placement;
 pub mod sfdp;
 pub mod text;
@@ -35,6 +36,9 @@ use self::connector::{
 };
 use self::graph::{ConstrainedGraphBuilder, Graph, GraphBuilder, Layout, Position};
 use self::metadata::{ComputedMetadata, LoopPolarity, StockFlowChain};
+use self::objective::{
+    point_node_footprint_overlap, point_node_footprints, point_node_pileup_count,
+};
 use self::placement::{
     calculate_optimal_label_side, calculate_restricted_label_side, normalize_coordinates,
 };
@@ -2749,35 +2753,6 @@ fn reciprocal_arc_segments(
     segments
 }
 
-/// Minimum center-to-center distance between two point nodes (auxes/modules)
-/// before the annealing's cost charges them as piled up. Two auxes need at
-/// least their shapes (2 x AUX_RADIUS = 18) plus label breathing room apart;
-/// half a lane (50) is the same floor `MIN_AUX_LANE_OFFSET` builds on.
-const MIN_POINT_NODE_SEPARATION: f64 = 50.0;
-
-/// The number of point-node pairs in `layout` that sit closer than
-/// `MIN_POINT_NODE_SEPARATION`. Added to the annealing cost so the
-/// crossing-reduction pass cannot "fix" a crossing by piling nodes on top of
-/// each other -- crossings and pile-ups are both unreadable, and a
-/// crossings-only objective is blind to the latter (it once collapsed two
-/// auxes onto the same spot to remove a chord crossing).
-fn point_node_pileup_count(layout: &Layout<String>, point_node_ids: &HashSet<String>) -> usize {
-    let positions: Vec<Position> = point_node_ids
-        .iter()
-        .filter_map(|node_id| layout.get(node_id).copied())
-        .collect();
-    let mut count = 0;
-    for i in 0..positions.len() {
-        for j in (i + 1)..positions.len() {
-            let d = positions[i] - positions[j];
-            if d.length() < MIN_POINT_NODE_SEPARATION {
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
 /// Run SFDP with chain elements locked into rigid groups.
 fn run_sfdp_with_rigid_chains(
     state: &LayoutState,
@@ -3073,16 +3048,19 @@ fn run_sfdp_with_rigid_chains(
     let annealing_config = config.clone();
     let annealing_seed = config.annealing_random_seed;
 
-    // The annealing cost: drawn-geometry crossings PLUS a penalty for point
-    // nodes piled closer than `MIN_POINT_NODE_SEPARATION`. Without the penalty
-    // the search is free to remove a crossing by stacking two auxes on the
-    // same spot (both unreadable; only one was counted).
-    let pileup_penalty =
-        |layout: &Layout<String>| point_node_pileup_count(layout, &point_node_ids) as f64;
+    // The annealing cost: drawn-geometry crossings PLUS a continuous penalty
+    // for point-node footprints (shape + label box) overlapping. The penalty
+    // keeps the search from "fixing" a crossing by piling nodes onto each
+    // other or into each other's label space -- crossings and overlaps are
+    // both unreadable, and a crossings-only objective is blind to the latter.
+    // Each fully-overlapped pair costs 1.0, the same as one crossing.
+    let footprints = point_node_footprints(&point_idents, var_to_node, state);
+    let overlap_penalty =
+        |layout: &Layout<String>| point_node_footprint_overlap(layout, &footprints);
 
     // The full annealing cost of a layout, for keep-or-discard comparisons.
     let annealing_cost = |layout: &Layout<String>| -> f64 {
-        annealing::count_crossings(&build_segments(layout)) as f64 + pileup_penalty(layout)
+        annealing::count_crossings(&build_segments(layout)) as f64 + overlap_penalty(layout)
     };
 
     let mut annealing_round: usize = 0;
@@ -3109,7 +3087,7 @@ fn run_sfdp_with_rigid_chains(
             let result = run_annealing_with_filter(
                 layout,
                 build_segments,
-                pileup_penalty,
+                overlap_penalty,
                 &annealing_config,
                 annealing_seed.wrapping_add(annealing_round as u64),
                 |node_id: &String| point_node_ids.contains(node_id),
@@ -3164,7 +3142,7 @@ fn run_sfdp_with_rigid_chains(
     let settled_result = run_annealing_with_filter(
         &chosen,
         build_segments,
-        pileup_penalty,
+        overlap_penalty,
         &annealing_config,
         annealing_seed.wrapping_add(annealing_round as u64),
         |node_id: &String| point_node_ids.contains(node_id),
@@ -5912,3 +5890,7 @@ mod layout_isolated_tests;
 #[cfg(test)]
 #[path = "layout_branching_tests.rs"]
 mod layout_branching_tests;
+
+#[cfg(test)]
+#[path = "layout_objective_tests.rs"]
+mod layout_objective_tests;
