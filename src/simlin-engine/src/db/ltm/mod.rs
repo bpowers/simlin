@@ -229,6 +229,64 @@ pub fn model_ltm_implicit_var_info(
     result
 }
 
+/// The module-typed projection of [`model_ltm_implicit_var_info`]: each
+/// module-typed LTM implicit variable's canonical name mapped to its
+/// sub-model name.
+///
+/// `compile_ltm_implicit_var_fragment` runs once per LTM implicit variable,
+/// and a large arrayed model produces hundreds of thousands of those
+/// (C-LEARN v77: ~145k PREVIOUS-helper auxes). Each run merges the
+/// module-typed refs into its compilation context so cross-references
+/// between module-typed implicit vars resolve -- but scanning the full
+/// implicit-var map inside every run made LTM compilation O(K^2) in the
+/// implicit-var count (tens of seconds of pure HashMap iteration on
+/// C-LEARN). This query computes the projection once.
+///
+/// In the current architecture LTM equations are generated from
+/// post-module-expansion ASTs and never contain module-function calls, so
+/// this map is empty in practice; it exists so that if that ever changes,
+/// the cross-reference resolution keeps working.
+#[salsa::tracked(returns(ref))]
+pub fn model_ltm_implicit_module_refs(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> HashMap<Ident<Canonical>, Ident<Canonical>> {
+    let info = model_ltm_implicit_var_info(db, model, project);
+    info.iter()
+        .filter(|(_, meta)| meta.is_module)
+        .filter_map(|(name, meta)| {
+            meta.model_name
+                .as_ref()
+                .map(|mn| (Ident::new(name), Ident::new(mn.as_str())))
+        })
+        .collect()
+}
+
+/// Name -> first-occurrence-index lookup into [`model_ltm_variables`]'s
+/// `vars` list, mirroring `vars.iter().find(|v| v.name == name)` semantics.
+///
+/// Fragment compilation resolves dependencies that may themselves be LTM
+/// synthetic variables (an A2A loop score referencing link scores, a
+/// composite referencing pathway scores). A linear scan over all LTM vars
+/// per dependency lookup is O(N) per lookup and O(N^2) across a model's
+/// full LTM compile (C-LEARN: ~145k dependency lookups over 6.7k vars), so
+/// the index is built once and salsa-cached.
+#[salsa::tracked(returns(ref))]
+pub fn model_ltm_var_name_index(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> HashMap<String, usize> {
+    let ltm_vars = model_ltm_variables(db, model, project);
+    let mut index: HashMap<String, usize> = HashMap::with_capacity(ltm_vars.vars.len());
+    for (i, v) in ltm_vars.vars.iter().enumerate() {
+        // First occurrence wins, matching `.find()` on the vars list.
+        index.entry(v.name.clone()).or_insert(i);
+    }
+    index
+}
+
 /// Resolve a model's loop-enumeration mode (exhaustive vs. discovery).
 ///
 /// This is the single source of truth for the discovery gate, consulted by

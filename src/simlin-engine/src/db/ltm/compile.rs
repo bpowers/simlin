@@ -31,7 +31,8 @@ use crate::db::{
 
 use super::parse::{ltm_equation_dimensions, parse_ltm_equation};
 use super::{
-    LtmImplicitVarMeta, ltm_module_idents, model_ltm_implicit_var_info, model_ltm_variables,
+    LtmImplicitVarMeta, ltm_module_idents, model_ltm_implicit_module_refs,
+    model_ltm_implicit_var_info, model_ltm_var_name_index, model_ltm_variables,
 };
 
 /// Compile a single LTM synthetic variable's equation to symbolic
@@ -747,15 +748,18 @@ pub(crate) fn compile_ltm_equation_fragment(
         // per-element fetches; otherwise references collapse to slot 0
         // and every output slot reads the same numerator (tech-debt #34).
         //
-        // model_ltm_variables is salsa-cached, so this lookup is cheap
-        // and safe to call from within compile_ltm_equation_fragment --
-        // the same pattern is used by the implicit-module branch above.
+        // model_ltm_variables and the name index are salsa-cached, so this
+        // lookup is cheap and safe to call from within
+        // compile_ltm_equation_fragment -- the same pattern is used by the
+        // implicit-module branch above. The indexed lookup matters: most
+        // unresolved deps here are PREVIOUS-helper names that are NOT LTM
+        // vars, and a linear scan over all LTM vars per dep was O(N^2)
+        // across a model's compile (~145k lookups over 6.7k vars on
+        // C-LEARN).
         else {
-            let ltm_dep = model_ltm_variables(db, model, project)
-                .vars
-                .iter()
-                .find(|v| v.name == effective)
-                .cloned();
+            let ltm_dep = model_ltm_var_name_index(db, model, project)
+                .get(effective)
+                .map(|&i| model_ltm_variables(db, model, project).vars[i].clone());
             let (dep_size, dep_ast) = match ltm_dep {
                 Some(lsv) if !lsv.dimensions.is_empty() => {
                     let canonical_dims: Vec<crate::dimensions::Dimension> = lsv
@@ -854,24 +858,35 @@ pub(crate) fn compile_ltm_equation_fragment(
     let tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
 
     let inputs = BTreeSet::new();
-    let mut module_models = model_module_map(db, model, project).clone();
 
     // Merge LTM implicit module references from LTM equation parsing into the
     // module_models map so the compiler context can resolve module_var_name ->
-    // sub_model_name lookups.
-    if !implicit_module_refs.is_empty() {
-        let current_model_modules = module_models.entry(model_name_ident.clone()).or_default();
-        for (var_ident, (sub_model_name, _input_set)) in &implicit_module_refs {
-            current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
-        }
-    }
+    // sub_model_name lookups. Copy-on-write: the salsa-cached base map is only
+    // cloned when this equation actually has implicit module refs (this
+    // function runs once per LTM synthetic var, ~6.7k times on C-LEARN).
+    let base_module_models = model_module_map(db, model, project);
+    let merged_module_models;
+    let module_models: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        if implicit_module_refs.is_empty() {
+            base_module_models
+        } else {
+            merged_module_models = {
+                let mut merged = base_module_models.clone();
+                let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
+                for (var_ident, (sub_model_name, _input_set)) in &implicit_module_refs {
+                    current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
+                }
+                merged
+            };
+            &merged_module_models
+        };
 
     let core = crate::compiler::ContextCore {
         dimensions: converted_dims,
         dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
-        module_models: &module_models,
+        module_models,
         inputs: &inputs,
     };
 
@@ -1632,36 +1647,44 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
 
     let tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
     let inputs = canonical_module_input_set(module_input_names);
-    let mut module_models = model_module_map(db, model, project).clone();
 
-    // Merge ALL LTM implicit module references into the module_models map.
-    // A module's inputs may reference outputs from OTHER LTM implicit modules
-    // (e.g., PREVIOUS instance #6 reading from PREVIOUS instance #5's output),
-    // so we must include all LTM implicit modules, not just the current one.
-    {
-        let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
-        let current_model_modules = module_models.entry(model_name_ident.clone()).or_default();
-        // Add the current variable's own module refs
-        for (var_ident, (sub_model_name, _input_set)) in &module_refs {
-            current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
-        }
-        // Add all other LTM implicit module refs so cross-references resolve
-        for (name, im_meta) in ltm_implicit.iter() {
-            if im_meta.is_module
-                && let Some(mn) = &im_meta.model_name
-            {
-                let im_ident: Ident<Canonical> = Ident::new(name);
-                current_model_modules.insert(im_ident, Ident::new(mn.as_str()));
-            }
-        }
-    }
+    // Merge the current variable's own module refs plus the module-typed LTM
+    // implicit refs into the model module map so cross-references resolve (a
+    // module's inputs may reference outputs from OTHER LTM implicit modules,
+    // e.g. one PREVIOUS instance reading another's output).
+    //
+    // Both source maps are salsa-cached and the merge is copy-on-write. This
+    // function runs once per LTM implicit variable -- ~145k times on a model
+    // like C-LEARN -- so the previous per-call clone-and-rescan of the full
+    // `model_ltm_implicit_var_info` map was O(K^2) in the implicit-var count
+    // and dominated LTM compile time (tens of seconds of HashMap iteration).
+    let base_module_models = model_module_map(db, model, project);
+    let ltm_module_refs = model_ltm_implicit_module_refs(db, model, project);
+    let merged_module_models;
+    let module_models: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
+        if module_refs.is_empty() && ltm_module_refs.is_empty() {
+            base_module_models
+        } else {
+            merged_module_models = {
+                let mut merged = base_module_models.clone();
+                let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
+                for (var_ident, (sub_model_name, _input_set)) in &module_refs {
+                    current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
+                }
+                for (im_ident, sub_model_name) in ltm_module_refs.iter() {
+                    current_model_modules.insert(im_ident.clone(), sub_model_name.clone());
+                }
+                merged
+            };
+            &merged_module_models
+        };
 
     let core = crate::compiler::ContextCore {
         dimensions: converted_dims,
         dimensions_ctx: dim_context,
         model_name: &model_name_ident,
         metadata: &all_metadata,
-        module_models: &module_models,
+        module_models,
         inputs: &inputs,
     };
 

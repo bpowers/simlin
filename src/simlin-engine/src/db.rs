@@ -105,7 +105,8 @@ mod ltm;
 use ltm::*;
 pub use ltm::{
     LtmImplicitVarMeta, compile_ltm_var_fragment, link_score_equation_text_shaped,
-    model_ltm_implicit_var_info, model_ltm_mode, model_ltm_variables,
+    model_ltm_implicit_module_refs, model_ltm_implicit_var_info, model_ltm_mode,
+    model_ltm_var_name_index, model_ltm_variables,
 };
 
 mod analysis;

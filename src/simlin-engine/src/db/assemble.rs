@@ -1751,55 +1751,79 @@ fn enumerate_module_instances_inner(
     // Include LTM implicit MODULE variables (e.g. PREVIOUS instances from
     // feedback loop instrumentation). These are only present when LTM is
     // enabled. Models without feedback loops produce empty lists.
+    //
+    // Module-typed LTM implicit vars are the only ones that contribute module
+    // instances, and they are rare (in the current architecture LTM equations
+    // never contain module-function calls, so there are usually none). Drive
+    // the loop from the salsa-cached module-typed projection and re-parse
+    // only those vars' parent equations -- previously every LTM equation was
+    // re-parsed here (a full pass over ~20 MB of equation text on C-LEARN)
+    // just to discover there was nothing to do.
     if project.ltm_enabled(db) {
         let ltm_implicit = ltm::model_ltm_implicit_var_info(db, *source_model, project);
-        let ltm_module_idents = ltm::ltm_module_idents(db, *source_model, project);
+        let mut module_typed: Vec<(&String, &crate::db::LtmImplicitVarMeta)> = ltm_implicit
+            .iter()
+            .filter(|(_, meta)| meta.is_module)
+            .collect();
+        // Deterministic processing order: the recursive sub-model discovery
+        // below allocates entries in `modules` as it goes.
+        module_typed.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
-        let ltm_vars = model_ltm_variables(db, *source_model, project);
+        if !module_typed.is_empty() {
+            let ltm_module_idents = ltm::ltm_module_idents(db, *source_model, project);
+            let ltm_vars = model_ltm_variables(db, *source_model, project);
+            let name_index = ltm::model_ltm_var_name_index(db, *source_model, project);
 
-        for ltm_var in &ltm_vars.vars {
-            let parsed = ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
+            for (im_name, im_meta) in module_typed {
+                let sub_model_name = match &im_meta.model_name {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let sub_canonical = canonicalize(sub_model_name);
+                if !project_models.contains_key(sub_canonical.as_ref()) {
+                    continue;
+                }
 
-            for implicit_dm_var in &parsed.implicit_vars {
-                let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-                if let Some(im_meta) = ltm_implicit.get(&im_name) {
-                    if !im_meta.is_module {
-                        continue;
-                    }
-                    let sub_model_name = match &im_meta.model_name {
-                        Some(n) => n,
-                        None => continue,
+                // Re-parse just this var's parent equation to recover the
+                // implicit module's input references.
+                let Some(&parent_idx) = name_index.get(&im_meta.ltm_parent_name) else {
+                    continue;
+                };
+                let parsed = ltm::parse_ltm_var_with_ids(
+                    db,
+                    &ltm_vars.vars[parent_idx],
+                    project,
+                    &ltm_module_idents,
+                );
+                let Some(implicit_dm_var) = parsed.implicit_vars.get(im_meta.index_in_parent)
+                else {
+                    continue;
+                };
+
+                // Extract input set from the implicit module's references
+                let input_prefix = format!("{im_name}\u{00B7}");
+                let inputs: BTreeSet<Ident<Canonical>> =
+                    if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+                        dm_module
+                            .references
+                            .iter()
+                            .filter_map(|mr| {
+                                let dst_canonical = canonicalize(&mr.dst);
+                                let bare = dst_canonical.strip_prefix(&input_prefix)?;
+                                Some(Ident::new(bare))
+                            })
+                            .collect()
+                    } else {
+                        BTreeSet::new()
                     };
-                    let sub_canonical = canonicalize(sub_model_name);
-                    if !project_models.contains_key(sub_canonical.as_ref()) {
-                        continue;
-                    }
 
-                    // Extract input set from the implicit module's references
-                    let input_prefix = format!("{im_name}\u{00B7}");
-                    let inputs: BTreeSet<Ident<Canonical>> =
-                        if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
-                            dm_module
-                                .references
-                                .iter()
-                                .filter_map(|mr| {
-                                    let dst_canonical = canonicalize(&mr.dst);
-                                    let bare = dst_canonical.strip_prefix(&input_prefix)?;
-                                    Some(Ident::new(bare))
-                                })
-                                .collect()
-                        } else {
-                            BTreeSet::new()
-                        };
+                let key = Ident::<Canonical>::new(sub_model_name);
+                let is_new = !modules.contains_key(&key);
 
-                    let key = Ident::<Canonical>::new(sub_model_name);
-                    let is_new = !modules.contains_key(&key);
+                modules.entry(key).or_default().insert(inputs);
 
-                    modules.entry(key).or_default().insert(inputs);
-
-                    if is_new {
-                        enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
-                    }
+                if is_new {
+                    enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
                 }
             }
         }
@@ -1959,7 +1983,6 @@ pub(crate) fn calc_flattened_offsets_incremental(
         let ltm_vars = model_ltm_variables(db, *source_model, project);
 
         let ltm_implicit = ltm::model_ltm_implicit_var_info(db, *source_model, project);
-        let ltm_module_idents = ltm::ltm_module_idents(db, *source_model, project);
 
         // Add explicit LTM variables (loop scores, relative loop scores)
         for ltm_var in &ltm_vars.vars {
@@ -1972,49 +1995,45 @@ pub(crate) fn calc_flattened_offsets_incremental(
                     (entry.offset, entry.size),
                 );
             }
+        }
 
-            // Add implicit variables from this LTM equation
-            let parsed = ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
-            for implicit_dm_var in &parsed.implicit_vars {
-                let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-                if let Some(im_meta) = ltm_implicit.get(&im_name)
-                    && let Some(entry) = layout.get(&im_name)
-                {
-                    if im_meta.is_module {
-                        // Module-type: include sub-model variable offsets
-                        if let Some(sub_model_name) = &im_meta.model_name {
-                            let sub_offsets = calc_flattened_offsets_incremental(
-                                db,
-                                project,
-                                sub_model_name,
-                                false,
-                            );
-                            let mut sub_var_names: Vec<&Ident<Canonical>> =
-                                sub_offsets.keys().collect();
-                            sub_var_names.sort_unstable();
-                            let im_ident = Ident::new(im_name.as_str());
-                            for sub_name in &sub_var_names {
-                                let (sub_off, sub_size) = sub_offsets[*sub_name];
-                                let sub_canonical = Ident::new(sub_name.as_str());
-                                offsets.insert(
-                                    Ident::<Canonical>::from_unchecked(format!(
-                                        "{}.{}",
-                                        im_ident.to_source_repr(),
-                                        sub_canonical.to_source_repr()
-                                    )),
-                                    (entry.offset + sub_off, sub_size),
-                                );
-                            }
-                        }
-                    } else {
+        // Add implicit variables from LTM equations. `model_ltm_implicit_var_info`
+        // already maps every parse-synthesized implicit var (keyed by its
+        // parent-embedding unique name) to its metadata, so iterate it directly --
+        // re-parsing every LTM equation here just to re-discover the same names
+        // was a full pass over ~20 MB of equation text on C-LEARN.
+        for (im_name, im_meta) in ltm_implicit.iter() {
+            let Some(entry) = layout.get(im_name) else {
+                continue;
+            };
+            if im_meta.is_module {
+                // Module-type: include sub-model variable offsets
+                if let Some(sub_model_name) = &im_meta.model_name {
+                    let sub_offsets =
+                        calc_flattened_offsets_incremental(db, project, sub_model_name, false);
+                    let mut sub_var_names: Vec<&Ident<Canonical>> = sub_offsets.keys().collect();
+                    sub_var_names.sort_unstable();
+                    let im_ident = Ident::new(im_name.as_str());
+                    for sub_name in &sub_var_names {
+                        let (sub_off, sub_size) = sub_offsets[*sub_name];
+                        let sub_canonical = Ident::new(sub_name.as_str());
                         offsets.insert(
-                            Ident::<Canonical>::from_unchecked(
-                                Ident::<Canonical>::new(&im_name).to_source_repr(),
-                            ),
-                            (entry.offset, entry.size),
+                            Ident::<Canonical>::from_unchecked(format!(
+                                "{}.{}",
+                                im_ident.to_source_repr(),
+                                sub_canonical.to_source_repr()
+                            )),
+                            (entry.offset + sub_off, sub_size),
                         );
                     }
                 }
+            } else {
+                offsets.insert(
+                    Ident::<Canonical>::from_unchecked(
+                        Ident::<Canonical>::new(im_name.as_str()).to_source_repr(),
+                    ),
+                    (entry.offset, entry.size),
+                );
             }
         }
     }

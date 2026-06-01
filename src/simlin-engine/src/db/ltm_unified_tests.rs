@@ -5,7 +5,7 @@
 use super::*;
 use crate::datamodel;
 use crate::test_common::TestProject;
-use crate::testutils::{feedback_loop_project, x_aux, x_model};
+use crate::testutils::{feedback_loop_project, x_aux, x_flow, x_model, x_stock};
 
 #[test]
 fn test_model_ltm_variables_generates_scores() {
@@ -3026,6 +3026,127 @@ fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
                 .all(|v| !v.contains("\u{205A}agg\u{205A}")),
             "model_detected_loops should not surface synthetic agg nodes; got: {:?}",
             l.variables
+        );
+    }
+}
+
+/// `model_ltm_implicit_module_refs` is the module-typed projection of
+/// `model_ltm_implicit_var_info`: exactly the entries whose meta has
+/// `is_module == true`, mapped to their sub-model names.
+///
+/// Why the projection exists: `compile_ltm_implicit_var_fragment` runs once
+/// per LTM implicit variable, and a large arrayed model produces hundreds of
+/// thousands of those (C-LEARN v77: ~145k PREVIOUS-helper auxes). Each run
+/// merges the module-typed refs into its compilation context so
+/// cross-references between module-typed implicit vars resolve, but scanning
+/// the full implicit-var map inside every run made LTM compilation O(K^2)
+/// in the implicit-var count and dominated C-LEARN's compile time. The
+/// salsa-cached projection is computed once instead.
+#[test]
+fn test_ltm_implicit_module_refs_is_module_projection() {
+    use crate::common::{Canonical, Ident};
+    use salsa::Setter;
+    use std::collections::HashMap;
+
+    // A SMOOTH-in-a-feedback-loop model: its link-score equations wrap the
+    // module's inputs/outputs in PREVIOUS(), so parsing them synthesizes
+    // implicit helper variables.
+    let project = datamodel::Project {
+        name: "smooth_feedback".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![x_model(
+            "main",
+            vec![
+                x_aux("goal", "100", None),
+                x_stock("level", "50", &["adjustment"], &[], None),
+                x_aux("smoothed_level", "SMTH1(level, 3)", None),
+                x_aux("gap", "goal - smoothed_level", None),
+                x_flow("adjustment", "gap / 5", None),
+            ],
+        )],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let info = model_ltm_implicit_var_info(&db, source_model, source_project);
+    // Pre-condition: the model produces LTM implicit vars at all, so the
+    // projection assertion below is not vacuous.
+    assert!(
+        !info.is_empty(),
+        "SMOOTH feedback model should synthesize LTM implicit helper vars"
+    );
+
+    let refs = model_ltm_implicit_module_refs(&db, source_model, source_project);
+    let expected: HashMap<Ident<Canonical>, Ident<Canonical>> = info
+        .iter()
+        .filter(|(_, meta)| meta.is_module)
+        .filter_map(|(name, meta)| {
+            meta.model_name
+                .as_ref()
+                .map(|mn| (Ident::new(name), Ident::new(mn.as_str())))
+        })
+        .collect();
+    assert_eq!(
+        *refs, expected,
+        "module-refs projection must contain exactly the module-typed implicit vars"
+    );
+}
+
+/// `model_ltm_var_name_index` maps each LTM synthetic variable's name to the
+/// index of its first occurrence in `model_ltm_variables(..).vars`, mirroring
+/// `vars.iter().find(|v| v.name == name)` semantics.
+///
+/// Fragment compilation resolves dependencies that may themselves be LTM
+/// synthetic variables (an A2A loop score referencing link scores, etc.). A
+/// linear scan over all LTM vars per dependency lookup is O(N) per lookup and
+/// O(N^2) across a model's full LTM compile (C-LEARN: ~145k lookups over 6.7k
+/// vars), so the index is built once and salsa-cached.
+#[test]
+fn test_ltm_var_name_index_matches_vars() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm = model_ltm_variables(&db, source_model, source_project);
+    assert!(
+        !ltm.vars.is_empty(),
+        "feedback model should have LTM synthetic vars"
+    );
+
+    let index = model_ltm_var_name_index(&db, source_model, source_project);
+    for (i, v) in ltm.vars.iter().enumerate() {
+        let first_occurrence = ltm
+            .vars
+            .iter()
+            .position(|other| other.name == v.name)
+            .expect("var must find itself");
+        assert_eq!(
+            index.get(&v.name),
+            Some(&first_occurrence),
+            "index must map {} to its first occurrence (found at {i})",
+            v.name,
+        );
+    }
+    // Every index entry refers back to a var with that exact name.
+    for (name, &i) in index.iter() {
+        assert_eq!(
+            &ltm.vars[i].name, name,
+            "index entry for {name} must point at a var with that name"
         );
     }
 }
