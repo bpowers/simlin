@@ -985,3 +985,121 @@ fn user_forced_discovery_on_small_model_surfaces_pin() {
         "pinned loop must register a partition in user-forced discovery mode"
     );
 }
+
+/// GH #653 / pin-dims.AC8.1: pin one of C-LEARN's climate feedback loops --
+/// "Feedback cooling", the planet's blackbody-radiation balancing loop -- and
+/// assert it is genuinely scored on the real model.
+///
+/// This is the issue's headline scenario: C-LEARN is a large arrayed
+/// Vensim-imported model whose per-element-equation variables (arrayed over
+/// `scenario`) made every pinned loop silently score 0. The pin is applied
+/// through the production `SetLoopName` patch path (which mints variable UIDs
+/// on demand, exactly like pysimlin's `patch.set_loop_name`), the model
+/// auto-flips to discovery mode, and the pin must come back as one arrayed
+/// loop score over `scenario` whose deterministic-scenario slot is finite,
+/// eventually non-zero, and negative (it is a balancing loop).
+///
+/// `#[ignore]`d for runtime class only: C-LEARN's debug-mode parse +
+/// LTM-discovery compile measures ~40s against the 3-minute
+/// `cargo test --workspace` budget (see the design plan's "Additional
+/// Considerations"). Run explicitly with:
+///   cargo test --release -p simlin-engine --test simulate_ltm_pinned -- --ignored clearn
+#[test]
+#[ignore]
+fn clearn_pinned_climate_loop_is_scored() {
+    use simlin_engine::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
+
+    let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+    let mut project = simlin_engine::open_vensim(&contents)
+        .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    // Pin "Feedback cooling" via the production patch path (the importer does
+    // not assign variable UIDs; SetLoopName mints them on demand).
+    let feedback_cooling_cycle = [
+        "heat_in_atmosphere_and_upper_ocean",
+        "temperature_change_from_preindustrial",
+        "feedback_cooling",
+        "heat_in_atmosphere_and_upper_ocean_net_flow",
+    ];
+    apply_patch(
+        &mut project,
+        ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: feedback_cooling_cycle
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                    name: "Feedback cooling".to_string(),
+                    description: None,
+                }],
+            }],
+        },
+    )
+    .expect("SetLoopName patch must apply to the imported C-LEARN project");
+
+    // LTM-enabled compile + run. C-LEARN's variable-level SCC exceeds
+    // MAX_LTM_SCC_NODES, so LTM auto-flips to discovery -- the mode where a
+    // pin is the only way to score a specific loop.
+    let (results, loop_partitions, mode) = run_ltm(&project);
+    assert_eq!(
+        mode,
+        LtmMode::Discovery,
+        "C-LEARN must auto-flip LTM to discovery mode"
+    );
+
+    // The pin collapses to ONE arrayed loop score over the scenario dimension
+    // (its per-element circuits form a diagonal family), with one partition
+    // entry per scenario element.
+    let parts = loop_partitions
+        .get("pin1")
+        .unwrap_or_else(|| panic!("pin1 must register a partition; got {loop_partitions:?}"));
+    assert_eq!(
+        parts.len(),
+        3,
+        "the scenario dimension has 3 elements (Deterministic / Low / High 2xCO2 sensitivity); \
+         got {parts:?}"
+    );
+
+    let pin_offset = *results
+        .offsets
+        .get("$\u{205A}ltm\u{205A}loop_score\u{205A}pin1")
+        .unwrap_or_else(|| {
+            panic!(
+                "pin1 loop score must be in results; loop_score offsets: {:?}",
+                results
+                    .offsets
+                    .keys()
+                    .filter(|k| k.as_str().contains("loop_score"))
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    // Slot 0 is the Deterministic scenario (declared first in the MDL's
+    // scenario dimension). Feedback cooling is a balancing loop: its score
+    // must be finite at every step, non-zero once the climate system is
+    // changing, and negative whenever non-zero.
+    let det_series: Vec<f64> = (0..results.step_count)
+        .map(|step| results.data[step * results.step_size + pin_offset])
+        .collect();
+    assert!(
+        det_series.iter().all(|v| v.is_finite()),
+        "the deterministic-scenario pin score must be finite at every step"
+    );
+    let nonzero: Vec<f64> = det_series.iter().copied().filter(|v| *v != 0.0).collect();
+    assert!(
+        !nonzero.is_empty(),
+        "the deterministic-scenario pin score must be non-zero once behavior begins \
+         (a constant-0 series is the GH #653 silent-stub failure)"
+    );
+    assert!(
+        nonzero.iter().all(|v| *v < 0.0),
+        "Feedback cooling is a balancing loop; every non-zero score must be negative. \
+         First few non-zero values: {:?}",
+        &nonzero[..nonzero.len().min(5)]
+    );
+}

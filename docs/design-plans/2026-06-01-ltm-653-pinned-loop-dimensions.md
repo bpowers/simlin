@@ -110,10 +110,15 @@ generation as shared machinery used by **both** the pin path and the enumerated 
 ### pin-dims.AC3: Mixed scalar/arrayed pins are scored per element
 - **AC3.1 Success:** A pinned cycle mixing scalar and arrayed variables (arrayed stock
   -> per-source-element reduce -> scalar aux -> per-target-element broadcast -> arrayed
-  flow) emits one `Equation::Arrayed` loop-score var over the arrayed variables' shared
-  dimension, each slot referencing the per-element link-score names that exist
-  (`from[e]→to`, `from→to[e]`, `"from→to"[e]`).
-- **AC3.2 Success:** every element slot's score is finite and eventually non-zero.
+  flow) is scored per element instance, each instance's equation referencing the
+  per-element link-score names that exist (`from[e]→to`, `from→to[e]`, `"from→to"[e]`).
+  *(As implemented: one scalar loop score per instance with ids `pin{n}⁚{j}` --
+  consistent with how the enumerator scores the same cycle through its mixed branch --
+  rather than the originally-sketched single Arrayed var. Collapsing mixed diagonal
+  families into one arrayed score is a tracked follow-up that would benefit the
+  enumerator and pins symmetrically.)*
+- **AC3.2 Success:** every element instance's score is finite and eventually non-zero,
+  and no pinned loop-score fragment fails to compile.
 
 ### pin-dims.AC4: Genuinely cross-element pins keep working
 - **AC4.1 Success:** A pinned migration-style cycle (`pop -> migration_pressure ->
@@ -392,3 +397,21 @@ types; `LoopMetadata` (the persisted pin spec) is unchanged.
 surface a Warning naming the pin (`model_pinned_loops` invalid list -> the existing
 Warning emission in `model_ltm_variables`), never fall through to a silently-zero
 equation. The fragment-diagnostics pass remains the backstop for compile failures.
+
+## Outcome (implemented 2026-06-01)
+
+All six phases landed on `main` (`90287d13`..`f071c3bd` plus the docs/notebook commit).
+Measured results:
+
+- **C-LEARN end-to-end** (`clearn_pinned_climate_loop_is_scored`, release mode): pinning
+  "Feedback cooling" through the production `SetLoopName` patch path produces one
+  arrayed loop score over the 3-element `scenario` dimension; the deterministic-scenario
+  slot is finite, non-zero, and negative (balancing) at every step. 6.4s wall-clock.
+- **All nine notebook climate loops** pin and score per scenario; the notebook's
+  dominance analysis now reads engine pin scores directly (with a hand-composed Eq. 3
+  cross-check asserting equality), and the executed notebook has 0 cell errors.
+- **Mixed pins** (AC3) score per instance under `pin{n}⁚{j}` ids, matching the
+  enumerator's treatment of the same cycle (see the AC3 note above for the follow-up).
+- The enumerated A2A-collapse fix (AC5) is pinned by
+  `ltm_array_agg::per_element_equation_a2a_loop_scores_correct_for_every_slot` with
+  analytically-known per-slot values.

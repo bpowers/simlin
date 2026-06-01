@@ -63,16 +63,16 @@ This notebook does four things, in order:
 
 1. **Explores C-LEARN itself** -- structure, behavior, and its climate feedback loops.
 2. **Runs LTM's loop-dominance analysis on C-LEARN's climate core** -- automatic loop discovery,
-   plus a curated analysis composed from the engine's link scores, showing how dominance shifts
-   from the balancing carbon-uptake loops toward the reinforcing carbon-climate feedbacks over
-   the 21st century.
+   plus a curated analysis of nine pinned climate loops scored by the engine, showing how
+   dominance shifts from the balancing carbon-uptake loops toward the reinforcing carbon-climate
+   feedbacks over the 21st century.
 3. **Demonstrates the engine-native LTM experience** on models where it works end-to-end (the
    logistic growth model, and the three-party arms race model from the LTM papers).
 4. **Reports honestly on the gaps**: what still doesn't work, why, and what was fixed and filed
    along the way. This notebook was itself the test that drove six engine/API fixes (plus four
    LTM compilation fixes that landed on `main` between its first and final drafts).
 
-> Built against pysimlin from `main` at `46d62884` (2026-06-01).
+> Built against pysimlin from `main` after the GH #653 pinned-loop fixes (2026-06-01).
 """)
 
 # ============================================================================
@@ -377,11 +377,12 @@ around two coupled stocks -- carbon in the atmosphere, and heat in the atmospher
 | **Feedback cooling** | balancing | A hotter planet radiates more heat to space (the Planck response) |
 | **Deep-ocean heat uptake** | balancing | Surface warming drives heat into the deep ocean, slowing surface warming |
 | **Ocean carbon uptake** | balancing | More atmospheric CO2 -> more dissolves into the surface ocean |
-| **Biomass carbon uptake** | balancing | CO2 fertilization: plants grow faster, absorbing carbon |
-| **Soil carbon cycle** | balancing | The longer path: biomass -> soil humus -> back to atmosphere |
+| **CO2 fertilization** | balancing | More atmospheric CO2 -> plants grow faster, absorbing carbon |
+| **Biomass carbon recycling** | reinforcing | Carbon taken up by plants flows back out as they decay |
+| **Soil carbon recycling** | reinforcing | The longer return path: biomass -> soil humus -> back to atmosphere |
 | **Permafrost carbon release** | reinforcing | Warming melts permafrost, releasing CO2, causing more warming |
-| **Ocean uptake weakening** | reinforcing | Warming reduces CO2 solubility in seawater, so more stays in the air |
-| **Biomass uptake weakening** | reinforcing | Warming stresses ecosystems, reducing their carbon uptake |
+| **Warming weakens ocean uptake** | reinforcing | Warming reduces CO2 solubility in seawater, so more stays in the air |
+| **Warming weakens land uptake** | reinforcing | Warming stresses ecosystems, reducing their carbon uptake |
 
 Whether the balancing loops keep winning -- and when the reinforcing ones start to matter -- *is*
 the climate question, stated in feedback terms. This is exactly what LTM is supposed to quantify.
@@ -395,52 +396,46 @@ components of 50 nodes). For models like this, the LTM literature's answer is to
 pinning*: `set_loop_name()` registers a loop by its variable cycle, and the engine then always
 tracks it.
 
-Until this week pinning didn't work at all on Vensim-imported models (the `SetLoopName` operation
-required variable UIDs that the importer never assigns -- now fixed). Here it is working:
+(Pinning didn't work at all on Vensim-imported models until recently -- the `SetLoopName`
+operation required variable UIDs that the importer never assigns. UIDs are now minted on demand.)
 """)
 
 code("""
+HEAT, NETFLOW = "heat_in_atmosphere_and_upper_ocean", "heat_in_atmosphere_and_upper_ocean_net_flow"
+TEMP, CATM = "temperature_change_from_preindustrial", "c_in_atmosphere"
+
 CLIMATE_LOOPS = {
-    "Feedback cooling (B)": [
-        "heat_in_atmosphere_and_upper_ocean", "temperature_change_from_preindustrial",
-        "feedback_cooling", "heat_in_atmosphere_and_upper_ocean_net_flow",
+    "Feedback cooling": [HEAT, TEMP, "feedback_cooling", NETFLOW],
+    "Deep ocean heat uptake": [HEAT, TEMP, "heat_transfer", NETFLOW],
+    "Ocean carbon uptake": [CATM, "equil_c_in_mixed_layer", "flux_atm_to_ocean"],
+    "CO2 fertilization": [CATM, "flux_atm_to_biomass"],
+    "Biomass carbon recycling": [
+        CATM, "flux_atm_to_biomass", "c_in_biomass", "flux_biomass_to_atmosphere",
     ],
-    "Deep ocean heat uptake (B)": [
-        "heat_in_atmosphere_and_upper_ocean", "temperature_change_from_preindustrial",
-        "heat_transfer", "heat_in_atmosphere_and_upper_ocean_net_flow",
-    ],
-    "Ocean carbon uptake (B)": [
-        "c_in_atmosphere", "equil_c_in_mixed_layer", "flux_atm_to_ocean",
-    ],
-    "Biomass carbon uptake (B)": [
-        "c_in_atmosphere", "flux_atm_to_biomass", "c_in_biomass", "flux_biomass_to_atmosphere",
-    ],
-    "Soil carbon cycle (B)": [
-        "c_in_atmosphere", "flux_atm_to_biomass", "c_in_biomass", "flux_biomass_to_humus",
+    "Soil carbon recycling": [
+        CATM, "flux_atm_to_biomass", "c_in_biomass", "flux_biomass_to_humus",
         "c_in_humus", "flux_humus_to_atmosphere",
     ],
-    "Permafrost carbon release (R)": [
-        "c_in_atmosphere", "co2_radiative_forcing", "total_radiative_forcing",
-        "heat_in_atmosphere_and_upper_ocean_net_flow", "heat_in_atmosphere_and_upper_ocean",
-        "temperature_change_from_preindustrial", "flux_c_from_permafrost_release",
+    "Warming weakens ocean uptake": [
+        HEAT, TEMP, "effect_of_temp_on_dic_pco2", "equil_c_in_mixed_layer", "flux_atm_to_ocean",
+        CATM, "co2_radiative_forcing", "total_radiative_forcing", NETFLOW,
     ],
-    "Ocean uptake weakening (R)": [
-        "heat_in_atmosphere_and_upper_ocean", "temperature_change_from_preindustrial",
-        "effect_of_temp_on_dic_pco2", "equil_c_in_mixed_layer", "flux_atm_to_ocean",
-        "c_in_atmosphere", "co2_radiative_forcing", "total_radiative_forcing",
-        "heat_in_atmosphere_and_upper_ocean_net_flow",
+    "Warming weakens land uptake": [
+        HEAT, TEMP, "effect_of_warming_on_c_flux_to_biomass", "flux_atm_to_biomass",
+        CATM, "co2_radiative_forcing", "total_radiative_forcing", NETFLOW,
     ],
-    "Biomass uptake weakening (R)": [
-        "heat_in_atmosphere_and_upper_ocean", "temperature_change_from_preindustrial",
-        "effect_of_warming_on_c_flux_to_biomass", "flux_atm_to_biomass",
-        "c_in_atmosphere", "co2_radiative_forcing", "total_radiative_forcing",
-        "heat_in_atmosphere_and_upper_ocean_net_flow",
+    "Permafrost carbon release": [
+        CATM, "co2_radiative_forcing", "total_radiative_forcing", NETFLOW, HEAT, TEMP,
+        "flux_c_from_permafrost_release",
     ],
 }
 
 with model.edit() as (current, patch):
     for name, variables in CLIMATE_LOOPS.items():
         patch.set_loop_name(name, variables)
+
+# pin{n} ids are assigned in pinning order.
+PIN_IDS = {name: f"pin{i + 1}" for i, name in enumerate(CLIMATE_LOOPS)}
 
 print(f"pinned {len(CLIMATE_LOOPS)} loops\\n")
 for loop in model.loops:
@@ -453,12 +448,15 @@ The engine recovered each loop's cycle from the unordered variable sets, and the
 appear in `model.loops` with stable `pin{n}` ids -- even though this model is in "discovery" LTM
 territory where nothing else is enumerated.
 
-### The remaining gap: pin *scores* read as zero
+### Pinned loops are scored, per scenario
 
 Scoring a pinned loop means running with LTM instrumentation and reading the loop's score series.
-The run itself now works (more on that below) -- but on arrayed models like C-LEARN, the engine's
-generated pin-score equations mix scalar and arrayed references, fail to compile, and silently fall
-back to zero ([#653](https://github.com/bpowers/simlin/issues/653)):
+On arrayed models like C-LEARN this used to fail silently -- the generated pin-score equations
+mixed scalar and arrayed references, failed to compile, and read as constant zero
+([#653](https://github.com/bpowers/simlin/issues/653), now fixed). The engine now classifies each
+pinned cycle's dimensionality the same way it classifies enumerated loops, so every pin comes back
+as an *arrayed* loop score: one slot per `scenario` element, each slot's equation referencing that
+scenario's own link scores.
 """)
 
 code("""
@@ -468,27 +466,27 @@ sim = model.simulate(enable_ltm=True)
 sim.run_to_end()
 print(f"LTM-instrumented run succeeded (mode: {sim.get_ltm_mode()})\\n")
 
-run_ltm = sim.get_run()
-for loop in run_ltm.loops:
-    ts = loop.behavior_time_series
-    finite = ts[np.isfinite(ts)] if ts is not None else np.array([])
-    n_nonzero = int((finite != 0).sum()) if len(finite) else 0
-    n_total = len(ts) if ts is not None else 0
-    print(f"  {loop.id}: {n_nonzero} non-zero score values out of {n_total}")
+# Each pin is scored per scenario element. Read the deterministic
+# (best-estimate climate sensitivity) scenario's relative score for each.
+print(f"{'pin':6s} {'scenario slots':>14s} {'non-zero deterministic-scenario values':>40s}")
+for loop in model.loops:
+    n_slots = sim.get_loop_element_count(loop.id)
+    series = sim.get_relative_loop_score(loop.id, element="Deterministic")
+    finite = series[np.isfinite(series)]
+    n_nonzero = int((finite != 0).sum())
+    print(f"  {loop.id:6s} {n_slots:>10d} {n_nonzero:>30d} / {len(series)}")
 """)
 
 md("""
-(That an LTM-instrumented C-LEARN run *succeeds at all* is new as of this week: previously the
-~171k result slots of instrumentation silently overflowed the engine's 16-bit slot addressing and
+(That an LTM-instrumented C-LEARN run *succeeds at all* is also recent: previously the ~171k
+result slots of instrumentation silently overflowed the engine's 16-bit slot addressing and
 corrupted every result -- the variable that landed on slot 0 overwrote simulated *time*. After
-that became a hard error, four O(N^2)-blowup fixes on `main` shrank the instrumentation enough to
-fit. The remaining issues are tracked in
-[#647](https://github.com/bpowers/simlin/issues/647),
-[#651](https://github.com/bpowers/simlin/issues/651), and
-[#653](https://github.com/bpowers/simlin/issues/653).)
-
-So the engine computes and carries every link score, but the final pin-score composition step is
-broken for arrayed loops.
+that became a hard error, four O(N^2)-blowup fixes shrank the instrumentation under the limit, the
+discovery-feasibility work made the strongest-path search tractable
+([#647](https://github.com/bpowers/simlin/issues/647), resolved), and the pinned-loop dimension
+classification ([#653](https://github.com/bpowers/simlin/issues/653), resolved) made the pin
+scores real. The importer-side instrumentation multiplier is still tracked in
+[#651](https://github.com/bpowers/simlin/issues/651).)
 
 ### Automatic loop discovery
 
@@ -528,26 +526,63 @@ look for. The two compose: discover, then pin.
 """)
 
 # ============================================================================
-# Section 6: manual loop-score composition -- the dominance analysis
+# Section 6: pinned loop scores -- the dominance analysis
 # ============================================================================
 
 md("""
 ## 6. The loops that matter in C-LEARN
 
-To get named, signed, per-scenario loop scores (what pinning will provide once
-[#653](https://github.com/bpowers/simlin/issues/653) is fixed), we compose them ourselves. LTM's
-design makes this easy: a **loop score is just the product of the link scores around the loop's
-cycle** -- that *is* the definition (Schoenberg et al. 2020, Eq. 3), and the engine's per-link
-scores are all present in the LTM-instrumented run as synthetic result series.
+The pinned loops give us exactly what the dominance analysis needs: named, signed, per-scenario
+loop scores, computed by the engine. A **loop score is the product of the link scores around the
+loop's cycle** (Schoenberg et al. 2020, Eq. 3); each pin's score variable is arrayed over
+`scenario`, and its first slot is the `deterministic` (best-estimate climate sensitivity)
+scenario we analyze here.
 
-We analyze the `deterministic` (best-estimate climate sensitivity) scenario.
+Until [#653](https://github.com/bpowers/simlin/issues/653) was fixed, this section had to compose
+every one of these series by hand from the engine's per-link scores; now it reads the engine's own
+pin scores (and keeps one hand-composed loop as a cross-check that the two are identical).
 """)
 
 code("""
 SEP, ARROW = "\\u205a", "\\u2192"  # the reserved separators in synthetic LTM variable names
 SCEN = "deterministic"
 
+time_years = sim.get_series("time")
 
+
+def pinned_loop_score(name: str) -> np.ndarray:
+    \"\"\"The engine's raw loop score for a pinned loop (LTM Eq. 3), deterministic scenario.
+
+    Each pin's `loop_score` variable is arrayed over `scenario`; the series at the
+    variable's base offset is its first element slot, which is `deterministic` (the
+    dimension's first declared element).
+    \"\"\"
+    return sim.get_series(f"${SEP}ltm{SEP}loop_score{SEP}{PIN_IDS[name]}")
+
+
+scores = pd.DataFrame(
+    {name: pinned_loop_score(name) for name in CLIMATE_LOOPS},
+    index=pd.Index(time_years, name="year"),
+)
+
+# A loop's polarity is the sign of its score: negative = balancing, positive = reinforcing.
+summary = pd.DataFrame({
+    "polarity": ["B (balancing)" if scores[c].mean() < 0 else "R (reinforcing)" for c in scores],
+    "score @ 1950": scores.iloc[100].round(2),
+    "score @ 2000": scores.iloc[150].round(2),
+    "score @ 2050": scores.iloc[200].round(2),
+    "score @ 2095": scores.iloc[245].round(2),
+})
+summary
+""")
+
+md("""
+**Cross-check:** the pinned score the engine computes is, by definition, the product of the link
+scores around the loop's cycle. Composing "Feedback cooling" by hand from the engine's per-link
+score series must reproduce `pin1`'s series exactly:
+""")
+
+code("""
 def link_score(frm: str, to: str) -> np.ndarray:
     \"\"\"Read the LTM link-score series for the causal link `frm -> to`.
 
@@ -568,70 +603,15 @@ def link_score(frm: str, to: str) -> np.ndarray:
     raise KeyError(f"no link-score series found for {frm} -> {to}")
 
 
-def loop_score(chain: list[tuple[str, str]]) -> np.ndarray:
-    \"\"\"A loop's score series: the product of its link scores (LTM Eq. 3).\"\"\"
-    score = np.ones(len(time_years))
-    for frm, to in chain:
-        score = score * link_score(frm, to)
-    return score
+feedback_cooling_chain = [
+    (HEAT, TEMP), (TEMP, "feedback_cooling"), ("feedback_cooling", NETFLOW), (NETFLOW, HEAT)]
+by_hand = np.ones(len(time_years))
+for frm, to in feedback_cooling_chain:
+    by_hand = by_hand * link_score(frm, to)
 
-
-time_years = sim.get_series("time")
-
-HEAT, NETFLOW = "heat_in_atmosphere_and_upper_ocean", "heat_in_atmosphere_and_upper_ocean_net_flow"
-TEMP, CATM = "temperature_change_from_preindustrial", "c_in_atmosphere"
-
-# The nine climate feedback loops, as causal-link chains.
-CLIMATE_LOOP_CHAINS = {
-    "Feedback cooling": [
-        (HEAT, TEMP), (TEMP, "feedback_cooling"), ("feedback_cooling", NETFLOW), (NETFLOW, HEAT)],
-    "Deep ocean heat uptake": [
-        (HEAT, TEMP), (TEMP, "heat_transfer"), ("heat_transfer", NETFLOW), (NETFLOW, HEAT)],
-    "Ocean carbon uptake": [
-        (CATM, "equil_c_in_mixed_layer"), ("equil_c_in_mixed_layer", "flux_atm_to_ocean"),
-        ("flux_atm_to_ocean", CATM)],
-    "CO2 fertilization": [
-        (CATM, "flux_atm_to_biomass"), ("flux_atm_to_biomass", CATM)],
-    "Biomass carbon recycling": [
-        (CATM, "flux_atm_to_biomass"), ("flux_atm_to_biomass", "c_in_biomass"),
-        ("c_in_biomass", "flux_biomass_to_atmosphere"), ("flux_biomass_to_atmosphere", CATM)],
-    "Soil carbon recycling": [
-        (CATM, "flux_atm_to_biomass"), ("flux_atm_to_biomass", "c_in_biomass"),
-        ("c_in_biomass", "flux_biomass_to_humus"), ("flux_biomass_to_humus", "c_in_humus"),
-        ("c_in_humus", "flux_humus_to_atmosphere"), ("flux_humus_to_atmosphere", CATM)],
-    "Warming weakens ocean uptake": [
-        (HEAT, TEMP), (TEMP, "effect_of_temp_on_dic_pco2"),
-        ("effect_of_temp_on_dic_pco2", "equil_c_in_mixed_layer"),
-        ("equil_c_in_mixed_layer", "flux_atm_to_ocean"), ("flux_atm_to_ocean", CATM),
-        (CATM, "co2_radiative_forcing"), ("co2_radiative_forcing", "total_radiative_forcing"),
-        ("total_radiative_forcing", NETFLOW), (NETFLOW, HEAT)],
-    "Warming weakens land uptake": [
-        (HEAT, TEMP), (TEMP, "effect_of_warming_on_c_flux_to_biomass"),
-        ("effect_of_warming_on_c_flux_to_biomass", "flux_atm_to_biomass"),
-        ("flux_atm_to_biomass", CATM),
-        (CATM, "co2_radiative_forcing"), ("co2_radiative_forcing", "total_radiative_forcing"),
-        ("total_radiative_forcing", NETFLOW), (NETFLOW, HEAT)],
-    "Permafrost carbon release": [
-        (HEAT, TEMP), (TEMP, "flux_c_from_permafrost_release"),
-        ("flux_c_from_permafrost_release", CATM),
-        (CATM, "co2_radiative_forcing"), ("co2_radiative_forcing", "total_radiative_forcing"),
-        ("total_radiative_forcing", NETFLOW), (NETFLOW, HEAT)],
-}
-
-scores = pd.DataFrame(
-    {name: loop_score(chain) for name, chain in CLIMATE_LOOP_CHAINS.items()},
-    index=pd.Index(time_years, name="year"),
-)
-
-# A loop's polarity is the sign of its score: negative = balancing, positive = reinforcing.
-summary = pd.DataFrame({
-    "polarity": ["B (balancing)" if scores[c].mean() < 0 else "R (reinforcing)" for c in scores],
-    "score @ 1950": scores.iloc[100].round(2),
-    "score @ 2000": scores.iloc[150].round(2),
-    "score @ 2050": scores.iloc[200].round(2),
-    "score @ 2095": scores.iloc[245].round(2),
-})
-summary
+engine = pinned_loop_score("Feedback cooling")
+assert np.allclose(by_hand, engine, equal_nan=True), "engine pin score != hand-composed product"
+print("engine pin score == hand-composed product of link scores (LTM Eq. 3) at every step")
 """)
 
 md("""
@@ -755,10 +735,9 @@ intuition* means.
 md("""
 ## 7. The engine-native LTM experience
 
-Section 6 composed loop scores by hand because of the pinned-loop bug. On models where LTM works
-end-to-end, the engine does all of that itself -- loops, relative scores, and dominance periods
-arrive ready-made on every `run()`. Two examples show what that looks like (and what C-LEARN's
-API experience will be once #653 lands).
+Section 6 used pinned loops because C-LEARN is too large to enumerate. On models small enough for
+exhaustive enumeration, the engine needs no pinning at all -- loops, relative scores, and dominance
+periods arrive ready-made on every `run()`. Two examples show what that looks like.
 
 ### 7a. Logistic growth: the textbook dominance shift
 
@@ -890,10 +869,10 @@ equilibrium. The runaway growth comes from the two long loops that route through
 parties, and LTM picks them out cleanly: by the end of the run they account for essentially all of
 the behavior.
 
-For C-LEARN, the equivalent result would be: *which* of the eight climate loops dominates in which
-decade, and when (under what emissions path) the reinforcing permafrost/ocean-weakening loops start
-to outweigh the balancing uptake loops. That is the analysis this notebook is set up to run, as
-soon as the engine can score pinned loops at this scale.
+For C-LEARN, the equivalent result is exactly what section 6 showed: *which* of the nine climate
+loops dominates in which decade, and when the reinforcing warming feedbacks start to outweigh the
+balancing uptake loops -- with pinning standing in for the exhaustive enumeration that is impossible
+at that scale.
 """)
 
 # ============================================================================
@@ -903,11 +882,13 @@ soon as the engine can score pinned loops at this scale.
 md("""
 ## 8. Experience report
 
-This notebook doubled as a stress test of the LTM implementation and the pysimlin API, across two
-days and two waves of fixes. Verdict: **the method works, the engine's link-score layer now works
-at C-LEARN scale, and the remaining gaps are specific and tracked.** Section 6 -- a quantified,
-time-resolved decomposition of a real climate model's feedback structure -- was impossible when
-this notebook was started: every LTM number on C-LEARN was silently corrupted memory.
+This notebook doubled as a stress test of the LTM implementation and the pysimlin API, across
+several waves of fixes. Verdict: **the method works, and the full pipeline -- link scores, pinned
+loop scores, and discovery -- now works at C-LEARN scale.** Section 6 -- a quantified,
+time-resolved decomposition of a real climate model's feedback structure, computed by the engine's
+own pinned-loop scores -- was impossible when this notebook was started: every LTM number on
+C-LEARN was silently corrupted memory, and even after that was fixed, every pinned loop score on an
+arrayed model silently read as zero.
 
 ### What worked well
 
@@ -926,7 +907,8 @@ this notebook was started: every LTM number on C-LEARN was silently corrupted me
   notebook mapped by hand -- independent confirmation from a structure-blind algorithm.
 * **Loop pinning workflow**: naming the loops you care about (rather than enumerating millions) is
   the right interaction model for big models, and the `model.edit()` / `set_loop_name()` API makes
-  it natural.
+  it natural. With GH #653 fixed, a pin on an arrayed model comes back as a per-scenario score --
+  section 6's whole analysis is nine pins plus `get_series`.
 * **Honest degradation**: every "can't" is now a clear warning or error with a suggested next
   step, instead of silence or garbage.
 
@@ -948,10 +930,11 @@ analysis in section 6.)
 
 ### Issues filed for the remaining gaps
 
-* [#653](https://github.com/bpowers/simlin/issues/653) -- **the gap that matters most now**:
-  pinned loop-score equations on arrayed variables produce dimension mismatches and silently read
-  as zero. Section 6's manual composition is the workaround; once fixed, that whole section becomes
-  `run.loops` + `loop.behavior_time_series`.
+* [#653](https://github.com/bpowers/simlin/issues/653) -- **resolved during this exercise**:
+  pinned loop-score equations on arrayed variables produced dimension mismatches and silently read
+  as zero. The engine now classifies each pinned cycle's dimensionality (scalar / per-element /
+  cross-element) the same way it classifies enumerated loops, so section 6 reads real per-scenario
+  pin scores instead of composing them by hand.
 * [#651](https://github.com/bpowers/simlin/issues/651) -- the MDL importer expands apply-to-all
   equations into N identical per-element copies: datamodel noise and the main multiplier behind
   LTM's element-level instrumentation size.
@@ -969,10 +952,11 @@ analysis in section 6.)
    in #648) plus the new warnings handle this -- but the deeper point is that an API whose default
    path costs 90x and returns nothing on big models needed to fail toward *cheap and explained*,
    not *expensive and silent*.
-2. **Pinning is the right abstraction; finish it.** The pin workflow (name a loop -> engine always
-   scores it) is exactly right for big models, and everything it needs is computed during the run.
-   #653 is the last step: make the generated pin-score equations dimension-aware so section 6's
-   numpy becomes one engine call.
+2. **Pinning is the right abstraction -- and it is now finished.** The pin workflow (name a loop ->
+   engine always scores it) is exactly right for big models, and with #653 fixed the generated
+   pin-score equations are dimension-aware: an arrayed pin reads back per element
+   (`get_relative_loop_score("pin1", element="Deterministic")`), and section 6's analysis is one
+   engine call per loop.
 3. **Score singularities need a first-class presentation answer.** LTM scores legitimately diverge
    when a stock's acceleration crosses zero (sec. 6 found C-LEARN's soil-carbon loop at +1,740 by
    2095 for exactly this reason). The papers handle it with relative scores and careful framing;

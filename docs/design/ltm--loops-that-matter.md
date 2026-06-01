@@ -1031,6 +1031,76 @@ When `ltm_discovery_mode = true`, element-level discovery proceeds as:
    exhaustive mode via `build_element_level_loops`; the synthetic agg nodes are
    trimmed from each reported `FoundLoop`'s node sequence.
 
+### Per-Slot Loop Score Equations
+
+A dimensioned loop's score variable carries one of two equation shapes,
+decided by `ltm_augment::generate_loop_score_variables`:
+
+- **`Equation::ApplyToAll`** when every link of the cycle resolves to an
+  emitted Bare A2A link-score name (`{from}→{to}`). Each element slot of the
+  loop score reads its own slot of each link score diagonally -- the compact
+  form, used for apply-to-all (Bare-reference) models.
+- **`Equation::Arrayed`** (one equation per dimension element) when the
+  cycle's link scores only exist as per-element names -- FixedIndex
+  (`{from}[{e}]→{to}`) or per-target-element (`{from}→{to}[{e}]`) forms, the
+  shape per-element-equation (MDL-imported) models produce. Each slot's
+  equation is the link product of that element's own circuit, built from
+  `Loop::slot_links` (the per-slot element-subscripted link cycles captured by
+  `build_element_level_loops`' pure-dimension collapse). Slots with no backing
+  circuit score a constant 0.
+
+Before the per-slot form existed (GH #653), the A2A-collapse emitted an
+ApplyToAll equation referencing one arbitrary (lexicographically-first)
+element's FixedIndex link score for every slot: that element's slot was
+correct, and every other slot read a frozen ceteris-paribus partial and scored
+0.
+
+## Pinned Loops (LOOPSCORE)
+
+A modeler pins a loop by naming its variable set (the `SetLoopName` patch
+primitive, persisted as `LoopMetadata`; see LTM ref section 10). The engine
+then ALWAYS emits that loop's `loop_score` -- in both modes. In discovery mode
+this is the only way to score a specific loop, since the heuristic search
+emits no per-loop score variables at all.
+
+`db/ltm/pinned.rs::model_pinned_loops` resolves each pin:
+
+1. Order the variable set into a closed cycle against the causal graph
+   (`order_variable_cycle`); validate it contains a stock.
+2. Dimension-classify the cycle with the same `classify_cycle` machinery the
+   tiered enumerator uses:
+   - **PureScalar**: one scalar `Loop`.
+   - **PureSameElementA2A**: one `Loop` carrying the cycle's dimensions and
+     element-level stocks -- its loop score is an arrayed (ApplyToAll)
+     variable, one slot per element.
+   - **CrossElementOrMixed** (literal-element references, mixed scalar/arrayed
+     variables, reducer shapes): the cycle is expanded on the element graph
+     (`expand_pin_on_element_graph`): project `model_element_causal_edges`
+     onto the pin's variables plus synthetic agg nodes, guard the subgraph SCC
+     against `MAX_LTM_SCC_NODES`, run Johnson, keep the circuits whose
+     agg-trimmed variable set equals the pin's, and group them with
+     `build_element_level_loops`. A diagonal family collapses into one arrayed
+     `Loop` with `slot_links` (per-slot Arrayed score); genuinely
+     cross-element instances become element-subscripted scalar `Loop`s.
+3. Assign pin-derived ids: `pin{n}` for single-loop pins, `pin{n}⁚{j}` for
+   multi-instance ones. These never collide with the enumerator's
+   `r{n}`/`b{n}`/`u{n}` namespace.
+
+A pin that fails any step (unordered set, no stock, oversized expansion SCC,
+no element-level instantiation) is reported in `PinnedLoopsResult::invalid`
+and surfaced as a compilation `Warning` -- never silently scored 0.
+
+In exhaustive mode, a scored pin loop whose variable-cycle rotation matches an
+enumerated loop is skipped (the enumerated loop already carries a correct
+score; the pin's name transfers onto it in `model_detected_loops`). In
+discovery mode nothing is enumerated, so every scored pin loop is emitted.
+Per-slot cycle partitions are registered through the same
+`partition_for_loop` resolution enumerated loops use, so post-simulation
+relative-score normalization (`ltm_post`) and the FFI's subscripted access
+(`simlin_analyze_get_relative_loop_score("pin1[elem]")`,
+`simlin_analyze_get_loop_element_count`) work identically for pins and
+enumerated loops.
+
 ## Current Limitations
 
 ### Euler Integration Only
