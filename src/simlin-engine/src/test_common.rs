@@ -428,6 +428,34 @@ impl TestProject {
         self
     }
 
+    /// Add an array *flow* with different equations for different subscript
+    /// ranges (a per-element `Equation::Arrayed` flow, the shape the MDL
+    /// importer produces for Vensim flows -- each element's equation
+    /// references other variables by literal element subscripts).
+    pub fn array_flow_with_ranges(
+        mut self,
+        name_with_dims: &str,
+        equations: Vec<(&str, &str)>, // (element_name, equation)
+    ) -> Self {
+        let (name, dims) = parse_array_declaration(name_with_dims);
+        let arrayed_equations = equations
+            .into_iter()
+            .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None, None))
+            .collect();
+
+        self.variables.push(Variable::Flow(datamodel::Flow {
+            ident: name,
+            equation: Equation::Arrayed(dims, arrayed_equations, None, false),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+        self
+    }
+
     /// Add an array variable with a default equation and per-element overrides (EXCEPT semantics)
     pub fn array_with_default_and_overrides(
         mut self,

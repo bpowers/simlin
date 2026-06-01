@@ -291,6 +291,97 @@ fn arrayed_isolated_loop_link_scores_match_scalar() {
     }
 }
 
+/// GH #653 (pin-dims.AC5.1): the enumerator's A2A-collapse on a
+/// *per-element-equation* model -- `Equation::Arrayed` flows whose slot
+/// equations reference the stock by literal element subscripts, the shape
+/// the MDL importer produces -- must score EVERY element slot correctly,
+/// not just the lexicographically-first one.
+///
+/// On this model the only emitted link scores for the `population -> births`
+/// / `population -> deaths` edges are the per-element FixedIndex forms
+/// (`population[nyc]→births`, `population[boston]→births`, ...), each an
+/// arrayed variable whose only meaningful slot is its own element. Before
+/// the slot-aware loop-score generation, the A2A-collapsed loop score was an
+/// `ApplyToAll` equation referencing one arbitrary (lex-first:
+/// `[boston]`) FixedIndex variable for every slot -- so the non-lex-first
+/// slot (NYC, slot 0) read a frozen ceteris-paribus partial and scored 0.
+///
+/// The fixture couples two loops (births + deaths) on one stock with
+/// heterogeneous per-element rates, so each loop's raw score is
+/// rate-dependent and analytically known: for `births = pop*b`,
+/// `deaths = pop*d` the birth loop scores `b/(b-d)` and the death loop
+/// `-d/(b-d)` at every post-startup step.
+#[test]
+fn per_element_equation_a2a_loop_scores_correct_for_every_slot() {
+    let project = TestProject::new("per_elem_a2a")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("population[Region]", "100", &["births"], &["deaths"], None)
+        .array_flow_with_ranges(
+            "births[Region]",
+            vec![
+                ("NYC", "population[NYC] * 0.10"),
+                ("Boston", "population[Boston] * 0.40"),
+            ],
+        )
+        .array_flow_with_ranges(
+            "deaths[Region]",
+            vec![
+                ("NYC", "population[NYC] * 0.03"),
+                ("Boston", "population[Boston] * 0.05"),
+            ],
+        )
+        .build_datamodel();
+
+    let (results, ltm_vars) = run_ltm(&project);
+
+    // Two coupled loops on the `population` stock -> a reinforcing birth
+    // loop (r1) and a balancing death loop (b1), each A2A over Region.
+    let loop_names: Vec<String> = ltm_score_var_names(&results)
+        .into_iter()
+        .filter(|n| n.starts_with(LOOP_SCORE_PREFIX))
+        .collect();
+    assert_eq!(
+        loop_names.len(),
+        2,
+        "the births and deaths loops should each produce one loop_score variable; got {loop_names:?}"
+    );
+
+    // Expected per-slot raw loop scores (slot 0 = NYC, slot 1 = Boston,
+    // following the dimension's declared element order).
+    //   birth loop:  b / (b - d)  ->  NYC 0.10/0.07,  Boston 0.40/0.35
+    //   death loop: -d / (b - d)  ->  NYC -0.03/0.07, Boston -0.05/0.35
+    let expected: &[(&str, [f64; 2])] = &[
+        ("r1", [0.10 / 0.07, 0.40 / 0.35]),
+        ("b1", [-0.03 / 0.07, -0.05 / 0.35]),
+    ];
+
+    const TOL: f64 = 1e-9;
+    for (loop_id, expected_slots) in expected {
+        let name = format!("{LOOP_SCORE_PREFIX}{loop_id}");
+        let var = ltm_var(&ltm_vars, &name);
+        assert_eq!(
+            var.dimensions,
+            vec!["Region".to_string()],
+            "loop score {name} must be dimensioned over Region"
+        );
+        let base = offset_of(&results, &name);
+        for (slot, &expected_score) in expected_slots.iter().enumerate() {
+            let series = series_at(&results, base + slot);
+            // Skip the startup steps (flow-to-stock scores need two steps
+            // of history) plus one for the PREVIOUS-shifted timing.
+            for (step, &v) in series.iter().enumerate().skip(STARTUP_STEPS + 1) {
+                assert!(
+                    (v - expected_score).abs() <= TOL * expected_score.abs().max(1.0),
+                    "{name} slot {slot} at step {step}: got {v}, expected {expected_score}. \
+                     A wrong (or zero) value here means the A2A-collapsed loop score is not \
+                     referencing this element's own per-element link scores (GH #653)."
+                );
+            }
+        }
+    }
+}
+
 /// A minimum magnitude for a loop score at a discoverable step to count
 /// as a real, non-degenerate score rather than a silent stub. The genuine
 /// agg-routed loop scores in this fixture settle at ~0.25-0.5;

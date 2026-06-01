@@ -1446,6 +1446,27 @@ fn equation_text_len(equation: &datamodel::Equation) -> usize {
     }
 }
 
+/// `true` when every variable-level link of `loop_item` resolves to an
+/// emitted Bare A2A link-score name (`{from}→{to}` with subscripts stripped
+/// from both ends).
+///
+/// When this holds, the compact `Equation::ApplyToAll` form is correct: each
+/// element slot of the loop score reads its own slot of each (A2A) link-score
+/// variable diagonally. When any link only exists as a per-element name
+/// (FixedIndex `from[e]→to`, per-target-element `from→to[e]`), the
+/// ApplyToAll form would reference one arbitrary element's variable for every
+/// slot, so the per-slot `Arrayed` form (from `slot_links`) is required.
+fn all_links_resolve_bare(loop_item: &Loop, emitted: &HashSet<String>) -> bool {
+    loop_item.links.iter().all(|link| {
+        let bare = link_score_var_name(
+            strip_subscript(link.from.as_str()),
+            strip_subscript(link.to.as_str()),
+            &RefShape::Bare,
+        );
+        emitted.contains(&bare)
+    })
+}
+
 /// Build the dimension-shaped `datamodel::Equation` for one loop's score
 /// variable. See [`generate_loop_score_variables`] for the three cases.
 fn generate_dimensioned_loop_score_equation(
@@ -1456,7 +1477,14 @@ fn generate_dimensioned_loop_score_equation(
     if loop_item.dimensions.is_empty() {
         return datamodel::Equation::Scalar(generate_loop_score_equation(loop_item, emitted));
     }
-    if loop_item.slot_links.is_empty() {
+    // Prefer the compact ApplyToAll form whenever it is correct (every link
+    // resolves through a Bare A2A name), regardless of whether per-slot
+    // circuit info is available. Otherwise use the per-slot Arrayed form.
+    // A dimensioned loop with per-element-only link scores AND no slot_links
+    // (a builder that predates slot capture) keeps the legacy ApplyToAll
+    // emission -- the fragment-diagnostics Warning remains the backstop for
+    // the mis-resolution that produces.
+    if loop_item.slot_links.is_empty() || all_links_resolve_bare(loop_item, emitted) {
         return datamodel::Equation::ApplyToAll(
             loop_item.dimensions.clone(),
             generate_loop_score_equation(loop_item, emitted),
@@ -5842,6 +5870,65 @@ mod tests {
                 assert!(by_elem["boston,old"].contains("link_score"));
             }
             other => panic!("expected Equation::Arrayed; got: {other:?}"),
+        }
+    }
+
+    /// When every link of a dimensioned loop resolves to an emitted Bare A2A
+    /// link-score name, the compact `ApplyToAll` form is preferred even when
+    /// per-slot circuit info (`slot_links`) is available -- the diagonal A2A
+    /// read is correct, and the compact form keeps Bare-shaped models'
+    /// equations byte-identical to the pre-#653 output.
+    #[test]
+    fn loop_score_variables_prefer_apply_to_all_when_all_links_bare() {
+        use crate::ltm::{Loop, LoopPolarity};
+
+        let slot_links = vec![
+            (
+                "nyc".to_string(),
+                vec![
+                    make_link("pop[nyc]", "births[nyc]"),
+                    make_link("births[nyc]", "pop[nyc]"),
+                ],
+            ),
+            (
+                "boston".to_string(),
+                vec![
+                    make_link("pop[boston]", "births[boston]"),
+                    make_link("births[boston]", "pop[boston]"),
+                ],
+            ),
+        ];
+        let loop_item = Loop {
+            id: "r1".to_string(),
+            links: vec![make_link("pop", "births"), make_link("births", "pop")],
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+            dimensions: vec!["region".to_string()],
+            slot_links,
+        };
+        // Both Bare A2A names are emitted -> ApplyToAll wins over slot_links.
+        let mut emitted = HashSet::new();
+        emitted.insert(ls_name("pop", "births"));
+        emitted.insert(ls_name("births", "pop"));
+        let dims = vec![dm_named_dimension("region", &["nyc", "boston"])];
+
+        let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &dims);
+        let (_, equation) = &vars[0];
+        match equation {
+            Equation::ApplyToAll(eq_dims, text) => {
+                assert_eq!(eq_dims, &vec!["region".to_string()]);
+                assert_eq!(
+                    text,
+                    &format!(
+                        "\"{}\" * \"{}\"",
+                        ls_name("pop", "births"),
+                        ls_name("births", "pop")
+                    ),
+                );
+            }
+            other => panic!(
+                "all-Bare dimensioned loop must keep the compact ApplyToAll form; got: {other:?}"
+            ),
         }
     }
 }

@@ -722,13 +722,62 @@ pub(crate) fn build_element_level_loops(
             // and mixed branches below already follow).
             let stocks = build_a2a_loop_stocks(&var_stocks, &dimensions, dm_dims);
 
+            // Capture each circuit's element-subscripted link cycle, keyed by
+            // its slot tuple (the subscript of node 0, the variable whose
+            // dimensions define the loop's `dimensions`). This is what lets
+            // the loop-score generator emit per-slot equations when the
+            // group's link scores only exist as per-element FixedIndex /
+            // per-target-element names (per-element-equation models, GH #653)
+            // -- the ApplyToAll form would otherwise reference one arbitrary
+            // element's link score for every slot. The generator still
+            // prefers ApplyToAll whenever every link resolves to a Bare A2A
+            // name, so Bare-shaped models keep their compact form.
+            //
+            // Skip the capture (leaving the legacy behavior) when two
+            // circuits map to the same slot tuple -- the partial-collapse
+            // case where node 0's variable carries fewer dimensions than the
+            // cycle's full element space, so per-slot equations would be
+            // ambiguous.
+            let mut slot_links: Vec<(String, Vec<crate::ltm::Link>)> = Vec::new();
+            let mut slot_keys_seen: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut slots_collide = false;
+            for circuit in &circuits_in_group {
+                let slot_tuple = match circuit[0].find('[') {
+                    Some(start) => circuit[0][start + 1..circuit[0].len() - 1].to_string(),
+                    // All nodes are subscripted in this branch; defensive.
+                    None => continue,
+                };
+                if !slot_keys_seen.insert(slot_tuple.clone()) {
+                    slots_collide = true;
+                    break;
+                }
+                let circuit_var_links = var_graph.circuit_to_links(
+                    &circuit
+                        .iter()
+                        .map(|n| Ident::new(strip_subscript(n)))
+                        .collect::<Vec<_>>(),
+                );
+                let links = build_element_subscripted_links(
+                    circuit,
+                    &circuit_var_links,
+                    source_vars,
+                    db,
+                    project,
+                );
+                slot_links.push((slot_tuple, links));
+            }
+            if slots_collide {
+                slot_links.clear();
+            }
+
             all_loops.push(Loop {
                 id: String::new(),
                 links,
                 stocks,
                 polarity,
                 dimensions,
-                slot_links: vec![],
+                slot_links,
             });
         } else if is_cross_element || representative_has_synthetic_agg {
             // Cross-element circuits: a circuit that genuinely visits
