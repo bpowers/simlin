@@ -886,10 +886,12 @@ pub fn model_ltm_variables(
     // and skip re-emitting; the enumerated loop already carries a score under
     // its `r{n}`/`b{n}`/`u{n}` id.
     //
-    // Pinned loops are scalar: the cycle order is over variable-level names and
-    // the loop_score is the product of the (possibly per-element) link scores
-    // along the cycle. We register a single-slot partition so the post-sim
-    // relative-loop-score normalization (`ltm_post`) includes the pin.
+    // A pin's cycle is dimension-classified by `model_pinned_loops` (GH #653):
+    // a pure-A2A pin carries `dimensions` and emits an arrayed (per-element)
+    // loop score with a per-slot partition vector; a scalar pin emits a scalar
+    // score with a single-slot partition. Both ride the same
+    // `generate_loop_score_variables` / `partition_for_loop` machinery as
+    // enumerated loops.
     let pinned = model_pinned_loops(db, model, project);
     for (name, reason) in &pinned.invalid {
         // Surface invalid pins the same way the auto-flip gate surfaces its
@@ -914,14 +916,22 @@ pub fn model_ltm_variables(
             .map(|ls| ls.iter().map(canonical_variable_rotation).collect())
             .unwrap_or_default();
 
-        // The element-keyed stock partition map, so a pin can resolve which
-        // cycle partition it belongs to (matching how enumerated loops do).
+        // The element-keyed cycle partitions, so a pin resolves its per-slot
+        // partition(s) the same way enumerated loops do: one entry per element
+        // slot for a dimensioned (A2A) pin, a singleton for a scalar one.
         let partitions_result = model_element_cycle_partitions(db, model, project);
-        let stock_partition: HashMap<String, usize> = partitions_result
-            .stock_partition
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
+        let pin_partitions = CyclePartitions {
+            partitions: partitions_result
+                .partitions
+                .iter()
+                .map(|p| p.iter().map(|s| Ident::new(s)).collect())
+                .collect(),
+            stock_partition: partitions_result
+                .stock_partition
+                .iter()
+                .map(|(k, v)| (Ident::new(k), *v))
+                .collect(),
+        };
 
         // Track which `(from, to)` edges already have a link-score var so a
         // pin only emits the link scores its cycle still needs (in exhaustive
@@ -962,15 +972,13 @@ pub fn model_ltm_variables(
                 );
             }
 
-            // Register the pin's single-slot cycle partition. A pinned loop is
-            // scalar (one slot); its partition is the partition of any stock it
-            // passes through (all of a loop's stocks share a partition).
-            let partition = pin
-                .loop_
-                .stocks
-                .iter()
-                .find_map(|s| stock_partition.get(s.as_str()).copied());
-            loop_partitions.insert(pin.loop_.id.clone(), vec![partition]);
+            // Register the pin's cycle partition(s): a per-slot vector for a
+            // dimensioned (A2A) pin, a singleton for a scalar one -- the same
+            // `partition_for_loop` resolution enumerated loops use.
+            loop_partitions.insert(
+                pin.loop_.id.clone(),
+                pin_partitions.partition_for_loop(&pin.loop_, dm_dims),
+            );
 
             // Emit the pinned loop_score var. The equation is the product of
             // the cycle's link scores, resolved against the names emitted so

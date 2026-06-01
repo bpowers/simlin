@@ -19,8 +19,13 @@
 use std::collections::HashSet;
 
 use crate::common::{Canonical, Ident};
-use crate::db::{Db, SourceModel, SourceProject, causal_graph_with_modules, model_causal_edges};
+use crate::db::{
+    CycleClass, Db, SourceModel, SourceProject, causal_graph_with_modules, classify_cycle,
+    model_causal_edges, model_edge_shapes, project_datamodel_dims, variable_dimensions,
+};
 use crate::ltm::Loop;
+
+use super::loops::build_a2a_loop_stocks;
 
 /// A pinned loop the LTM pipeline must always score, paired with the user's
 /// chosen name so a caller can map the synthetic `pin{n}` id back to a label.
@@ -59,6 +64,20 @@ pub struct PinnedLoopsResult {
 /// collide with the enumerator's `r{n}`/`b{n}`/`u{n}` namespace). Pins that
 /// fail any check land in `invalid` rather than producing a garbage score.
 ///
+/// The resolved cycle is then dimension-classified exactly the way the
+/// exhaustive enumerator classifies cycles ([`classify_cycle`], GH #653):
+///
+/// - **PureScalar** -> a scalar `Loop` (the pre-#653 behavior, correct for
+///   scalar models).
+/// - **PureSameElementA2A** -> the `Loop` carries the cycle's shared
+///   `dimensions` and element-level stocks, so its loop score is emitted as
+///   an arrayed (per-element) variable and its cycle partition resolves per
+///   slot.
+/// - **CrossElementOrMixed** -> currently still the scalar fallback (its
+///   loop-score equation may fail to compile and surface the
+///   fragment-diagnostics Warning); element-level expansion for these cycles
+///   is the next step of GH #653.
+///
 /// Returned by value (not `salsa::tracked`) because `Loop` does not implement
 /// the `PartialEq`/`Update` salsa caching requires; callers invoke it directly
 /// off the salsa-tracked `causal_graph_with_modules` / `pinned_loops` inputs,
@@ -76,6 +95,11 @@ pub(crate) fn model_pinned_loops(
     // A stock-free model has no feedback loops at all; every pin is invalid.
     let edges = model_causal_edges(db, model, project);
     let graph = causal_graph_with_modules(db, model, project);
+    // Classification inputs: per-edge access shapes and per-variable
+    // dimensions, the same data the tiered enumerator classifies cycles with.
+    let edge_shapes = model_edge_shapes(db, model, project);
+    let source_vars = model.variables(db);
+    let dm_dims = project_datamodel_dims(db, project);
 
     let mut result = PinnedLoopsResult::default();
     for (idx, spec) in specs.iter().enumerate() {
@@ -126,7 +150,29 @@ pub(crate) fn model_pinned_loops(
             continue;
         }
 
-        let loop_ = graph.build_loop_from_cycle(&cycle, id);
+        // Dimension-classify the cycle (GH #653). Module nodes report empty
+        // dimensions, matching the tiered enumerator's treatment of modules
+        // as scalar graph nodes.
+        let cycle_strs: Vec<String> = cycle.iter().map(|c| c.as_str().to_string()).collect();
+        let dim_lookup = |name: &str| -> Vec<crate::dimensions::Dimension> {
+            source_vars
+                .get(name)
+                .map(|sv| variable_dimensions(db, *sv, project).to_vec())
+                .unwrap_or_default()
+        };
+        let loop_ = match classify_cycle(&cycle_strs, edge_shapes, &dim_lookup) {
+            CycleClass::PureSameElementA2A { dimensions } => {
+                build_a2a_pin_loop(&graph, &cycle, id, &dimensions, dm_dims)
+            }
+            // PureScalar: the pre-#653 scalar construction is correct.
+            // CrossElementOrMixed: element-level expansion is the next step
+            // of GH #653; until then these keep the scalar fallback (whose
+            // mis-resolved equation surfaces the fragment-diagnostics
+            // Warning rather than passing silently).
+            CycleClass::PureScalar | CycleClass::CrossElementOrMixed => {
+                graph.build_loop_from_cycle(&cycle, id)
+            }
+        };
         result.loops.push(PinnedLoop {
             loop_,
             name: spec.name.clone(),
@@ -134,4 +180,45 @@ pub(crate) fn model_pinned_loops(
     }
 
     result
+}
+
+/// Build the `Loop` for a pinned PureSameElementA2A cycle: variable-level
+/// links, the cycle's shared dimensions (mapped to datamodel casing so the
+/// loop-score equation parses), and element-level stocks (the `Loop`
+/// docstring's granularity invariant, required for per-slot partition
+/// resolution).
+///
+/// Mirrors `build_loops_from_tiered`'s fast-path construction. Module stock
+/// enrichment is not needed: a cycle containing a module node classifies as
+/// CrossElementOrMixed (modules are scalar graph nodes), so it never reaches
+/// this function.
+fn build_a2a_pin_loop(
+    graph: &crate::ltm::CausalGraph,
+    cycle: &[Ident<Canonical>],
+    id: String,
+    canonical_dims: &[String],
+    dm_dims: &[crate::datamodel::Dimension],
+) -> Loop {
+    let links = graph.circuit_to_links(cycle);
+    let var_stocks = graph.find_stocks_in_loop(cycle);
+    let polarity = graph.calculate_polarity(&links);
+    let dimensions: Vec<String> = canonical_dims
+        .iter()
+        .map(|canonical| {
+            dm_dims
+                .iter()
+                .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical.as_str())
+                .map(|dm| dm.name().to_string())
+                .unwrap_or_else(|| canonical.to_string())
+        })
+        .collect();
+    let stocks = build_a2a_loop_stocks(&var_stocks, &dimensions, dm_dims);
+    Loop {
+        id,
+        links,
+        stocks,
+        polarity,
+        dimensions,
+        slot_links: vec![],
+    }
 }

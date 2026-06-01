@@ -276,7 +276,7 @@ pub(super) fn read_slice_rows(
 /// returned unchanged -- `partition_for_loop` then falls back to whatever
 /// suffixes are present (none, here), bucketing the loop into the `None`
 /// group, the same degradation the pre-element-level code exhibited.
-fn build_a2a_loop_stocks(
+pub(super) fn build_a2a_loop_stocks(
     var_stocks: &[Ident<Canonical>],
     dimensions: &[String],
     dm_dims: &[crate::datamodel::Dimension],

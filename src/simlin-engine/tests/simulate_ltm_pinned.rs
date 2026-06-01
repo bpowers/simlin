@@ -13,9 +13,9 @@
 
 use simlin_engine::datamodel;
 use simlin_engine::db::{
-    LtmMode, SimlinDb, collect_all_diagnostics, compile_project_incremental, model_detected_loops,
-    model_ltm_mode, model_ltm_variables, set_project_ltm_discovery_mode, set_project_ltm_enabled,
-    sync_from_datamodel_incremental,
+    LtmMode, LtmSyntheticVar, SimlinDb, collect_all_diagnostics, compile_project_incremental,
+    model_detected_loops, model_ltm_mode, model_ltm_variables, set_project_ltm_discovery_mode,
+    set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{Vm, canonicalize};
@@ -402,6 +402,204 @@ fn exhaustive_dedup_survivor_inherits_pin_name() {
             .map(|l| (&l.id, &l.name))
             .collect::<Vec<_>>()
     );
+}
+
+/// The two-coupled-loop population model (births inflow + deaths outflow on
+/// one stock) arrayed over `Region` with heterogeneous per-element rates and
+/// Bare (apply-to-all) flow equations, so the pinned birth loop's raw score
+/// is analytically known per element: `births = population * birth_rate`
+/// scores `b / (b - d)` -- NYC `0.10/0.07`, Boston `0.40/0.35` -- at every
+/// post-startup step.
+fn two_region_population() -> datamodel::Project {
+    let mut p = TestProject::new("a2a_pin_pop")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_with_ranges(
+            "birth_rate[Region]",
+            vec![("NYC", "0.10"), ("Boston", "0.40")],
+        )
+        .array_with_ranges(
+            "death_rate[Region]",
+            vec![("NYC", "0.03"), ("Boston", "0.05")],
+        )
+        .array_stock("population[Region]", "100", &["births"], &["deaths"], None)
+        .array_flow("births[Region]", "population * birth_rate", None)
+        .array_flow("deaths[Region]", "population * death_rate", None)
+        .build_datamodel();
+    assign_uids(&mut p);
+    p
+}
+
+/// Compile with LTM enabled and discovery mode forced, run, and return
+/// results + partitions + the LTM synthetic-var metadata.
+fn run_ltm_discovery(
+    project: &datamodel::Project,
+) -> (
+    simlin_engine::Results,
+    std::collections::HashMap<String, Vec<Option<usize>>>,
+    Vec<LtmSyntheticVar>,
+) {
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    let loop_partitions = ltm.loop_partitions.clone();
+    let ltm_vars = ltm.vars.clone();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    (vm.into_results(), loop_partitions, ltm_vars)
+}
+
+/// GH #653 / pin-dims.AC1: a pinned pure-A2A loop -- every variable arrayed
+/// over the same dimension with Bare (apply-to-all) references -- must be
+/// scored per element, in discovery mode where the pin is the only loop
+/// scored at all.
+///
+/// Pre-#653 behavior: the pin's loop score was a *scalar* equation
+/// referencing the arrayed link scores bare -- a dimension mismatch that
+/// failed to compile and silently stubbed the score to constant 0 (with only
+/// a fragment-diagnostics Warning), and `loop_partitions["pin1"]` was the
+/// broken `[None]` single-slot entry.
+#[test]
+fn pinned_pure_a2a_loop_scored_per_element_in_discovery_mode() {
+    let mut project = two_region_population();
+    pin_loop(&mut project, "main", "growth", &["population", "births"]);
+
+    let (results, loop_partitions, ltm_vars) = run_ltm_discovery(&project);
+
+    // The pin's loop score var must be dimensioned over Region.
+    let pin_var = ltm_vars
+        .iter()
+        .find(|v| v.name == "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1")
+        .expect("discovery mode must emit the pinned loop_score var");
+    assert_eq!(
+        pin_var.dimensions,
+        vec!["Region".to_string()],
+        "a pinned pure-A2A loop must carry the cycle's shared dimension"
+    );
+
+    // Per-slot partitions: one entry per Region element, each resolved (the
+    // pre-fix behavior was the broken single-slot `[None]`).
+    let parts = loop_partitions
+        .get("pin1")
+        .expect("pinned loop must register a partition");
+    assert_eq!(
+        parts.len(),
+        2,
+        "an A2A pin over a 2-element dimension must register one partition entry per slot; \
+         got {parts:?}"
+    );
+    assert!(
+        parts.iter().all(|p| p.is_some()),
+        "every slot of the pinned A2A loop resolves to a real partition; got {parts:?}"
+    );
+
+    // Per-slot scores: slot 0 = NYC = 0.10/0.07, slot 1 = Boston = 0.40/0.35
+    // at every post-startup step.
+    let base = *results
+        .offsets
+        .get("$\u{205A}ltm\u{205A}loop_score\u{205A}pin1")
+        .expect("pin1 loop score must be in results");
+    let expected = [0.10 / 0.07, 0.40 / 0.35];
+    const TOL: f64 = 1e-9;
+    for (slot, &expected_score) in expected.iter().enumerate() {
+        for step in 3..results.step_count {
+            let v = results.data[step * results.step_size + base + slot];
+            assert!(
+                (v - expected_score).abs() <= TOL * expected_score.abs(),
+                "pin1 slot {slot} at step {step}: got {v}, expected {expected_score}. A zero \
+                 here means the pinned A2A loop score equation failed to compile and was \
+                 silently stubbed (GH #653)."
+            );
+        }
+    }
+}
+
+/// pin-dims.AC1.3: in exhaustive mode the same A2A pin dedups against the
+/// enumerated A2A loop exactly as scalar pins dedup today -- no second
+/// loop_score var, no pin partition entry.
+#[test]
+fn pinned_pure_a2a_loop_dedups_in_exhaustive_mode() {
+    let mut project = two_region_population();
+    pin_loop(&mut project, "main", "growth", &["population", "births"]);
+
+    let (results, loop_partitions, mode) = run_ltm(&project);
+    assert_eq!(
+        mode,
+        LtmMode::Exhaustive,
+        "the small two-region model stays in exhaustive mode"
+    );
+    let pin_score_vars: Vec<_> = results
+        .offsets
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}pin")
+        })
+        .collect();
+    assert!(
+        pin_score_vars.is_empty(),
+        "exhaustive-mode A2A pin that duplicates an enumerated loop must not double-emit; \
+         got {pin_score_vars:?}"
+    );
+    assert!(
+        !loop_partitions.keys().any(|k| k.starts_with("pin")),
+        "deduped A2A pin must not register a partition"
+    );
+}
+
+/// pin-dims.AC1.4: a pinned A2A cycle over a multi-dimensional variable
+/// carries both dimensions and one slot per element pair.
+#[test]
+fn pinned_multi_dim_a2a_loop_scored_per_slot() {
+    let mut project = TestProject::new("multi_dim_pin")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .named_dimension("Age", &["young", "old"])
+        .array_stock("pop[Region,Age]", "100", &["growth"], &[], None)
+        .array_flow("growth[Region,Age]", "pop * 0.1", None)
+        .build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(&mut project, "main", "growth loop", &["pop", "growth"]);
+
+    let (results, loop_partitions, ltm_vars) = run_ltm_discovery(&project);
+
+    let pin_var = ltm_vars
+        .iter()
+        .find(|v| v.name == "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1")
+        .expect("discovery mode must emit the pinned loop_score var");
+    assert_eq!(
+        pin_var.dimensions,
+        vec!["Region".to_string(), "Age".to_string()],
+        "a multi-dim A2A pin must carry both dimensions"
+    );
+    let parts = loop_partitions
+        .get("pin1")
+        .expect("pinned loop must register a partition");
+    assert_eq!(
+        parts.len(),
+        4,
+        "2x2 element space -> 4 slots; got {parts:?}"
+    );
+
+    // An isolated reinforcing loop scores exactly +1 in every slot
+    // (LTM ref 4.1: an isolated loop's score is +/-1 regardless of gain).
+    let base = *results
+        .offsets
+        .get("$\u{205A}ltm\u{205A}loop_score\u{205A}pin1")
+        .expect("pin1 loop score must be in results");
+    for slot in 0..4 {
+        for step in 3..results.step_count {
+            let v = results.data[step * results.step_size + base + slot];
+            assert!(
+                (v - 1.0).abs() <= 1e-9,
+                "pin1 slot {slot} at step {step}: got {v}, expected 1.0 (isolated loop)"
+            );
+        }
+    }
 }
 
 /// Important #1: forcing discovery mode on a SMALL model with a pin must keep
