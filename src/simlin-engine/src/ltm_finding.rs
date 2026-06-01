@@ -1044,6 +1044,15 @@ struct StepEdge {
     score: f64,
 }
 
+/// How many DFS node visits to allow between wall-clock deadline checks.
+///
+/// Reading `Instant::now()` on every visit would dominate the per-visit cost
+/// on dense graphs, so the check is amortized: with a power-of-two interval
+/// the counter test is a single mask. 8192 visits is well under a millisecond
+/// of DFS work, so deadline overshoot stays negligible while clock reads stay
+/// under 0.1% of visits.
+const DEADLINE_CHECK_INTERVAL: u32 = 8192;
+
 /// Per-timestep mutable DFS state, allocated once per `discover_loops_with_graph`
 /// call and reused across stocks and timesteps to avoid per-search reallocation.
 struct DfsScratch {
@@ -1067,6 +1076,17 @@ struct DfsScratch {
     /// dominant DFS cost on a dense element graph (a node is re-entered many
     /// times across the 116-stock x 250-step search).
     step_adj: Vec<Vec<StepEdge>>,
+    /// Wall-clock deadline for the discovery sweep, or `None` for an
+    /// unbudgeted run (which never reads the clock). On a graph where a
+    /// SINGLE timestep's DFS can run for hours (GH #647's element-level
+    /// blowup), checking the budget only between timesteps is not enough to
+    /// honor the caller's time budget -- the DFS itself must notice expiry.
+    deadline: Option<Instant>,
+    /// Node-visit counter used to amortize deadline clock reads.
+    visit_count: u32,
+    /// Set once `deadline` has passed; every DFS level then unwinds
+    /// immediately and the sweep stops.
+    deadline_expired: bool,
 }
 
 impl DfsScratch {
@@ -1084,6 +1104,9 @@ impl DfsScratch {
                 .iter()
                 .map(|e| Vec::with_capacity(e.len()))
                 .collect(),
+            deadline: None,
+            visit_count: 0,
+            deadline_expired: false,
         }
     }
 }
@@ -1210,6 +1233,11 @@ impl IndexedSearch {
         all_paths: &mut Vec<Vec<Ident<Canonical>>>,
     ) {
         for stock_idx in 0..self.stock_ids.len() {
+            // A deadline that expired during the previous stock's DFS ends the
+            // whole step: the caller observes `deadline_expired` and truncates.
+            if scratch.deadline_expired {
+                return;
+            }
             let stock = self.stock_ids[stock_idx];
 
             // Reset best_score for this target stock. A fresh generation marks
@@ -1240,6 +1268,22 @@ impl IndexedSearch {
         seen_sets: &mut HashSet<Vec<u32>>,
         all_paths: &mut Vec<Vec<Ident<Canonical>>>,
     ) {
+        // Once the deadline has passed every level unwinds immediately, so an
+        // expired budget collapses even a deep recursion in O(depth) time. The
+        // clock itself is read only every DEADLINE_CHECK_INTERVAL visits --
+        // checking it per visit would dominate the per-visit cost.
+        if scratch.deadline_expired {
+            return;
+        }
+        scratch.visit_count = scratch.visit_count.wrapping_add(1);
+        if scratch.visit_count & (DEADLINE_CHECK_INTERVAL - 1) == 0
+            && let Some(deadline) = scratch.deadline
+            && Instant::now() >= deadline
+        {
+            scratch.deadline_expired = true;
+            return;
+        }
+
         let idx = node as usize;
 
         if scratch.visiting_gen[idx] == scratch.cur_gen {
@@ -1325,11 +1369,13 @@ impl IndexedSearch {
 /// scalar.
 ///
 /// `budget` optionally bounds the wall-clock time spent in the per-timestep DFS
-/// sweep. The elapsed time is checked once per timestep (cheap relative to the
-/// DFS over the whole graph), and the sweep stops early once the budget is
-/// exceeded. The returned `DiscoveryResult::truncated` records whether that
-/// happened. A `None` budget runs to completion. Discovery on very large models
-/// can be infeasibly slow (GH #647); the budget lets callers bound it.
+/// sweep. Expiry is checked both between timesteps and *inside* each step's
+/// DFS (every `DEADLINE_CHECK_INTERVAL` node visits), so even a model whose
+/// single-step DFS would run for hours (GH #647) returns within roughly the
+/// budget. The returned `DiscoveryResult::truncated` records whether the
+/// budget elapsed before the sweep finished. A `None` budget runs to
+/// completion. Note the budget covers only this discovery sweep -- the
+/// caller's compilation and simulation time are outside it.
 pub fn discover_loops_with_graph(
     results: &Results,
     causal_graph: &CausalGraph,
@@ -1385,14 +1431,18 @@ pub fn discover_loops_with_graph(
     // them onto the single cross-step `seen_sets` keeps exactly the paths the
     // two-layer version kept, in the same first-seen order.
     //
-    // The optional time budget is checked once per timestep, *before* running
-    // that step's DFS. The check is O(1) and dwarfed by the per-step DFS over
-    // the whole graph, so it adds no meaningful overhead. We stop before a step
-    // we can't afford rather than mid-DFS so each processed step's loop set is
-    // internally consistent. `start` is captured lazily so an unbudgeted run
-    // never reads the clock.
+    // The optional time budget is enforced at two granularities. Between
+    // timesteps, the cheap check below stops before starting a step we can't
+    // afford. *Within* a step, the DFS itself checks the same deadline every
+    // `DEADLINE_CHECK_INTERVAL` node visits (see `IndexedSearch::dfs`):
+    // on dense element-level graphs a SINGLE step's DFS can run for hours
+    // (GH #647), so a between-steps-only check would not honor the budget at
+    // all. Loops recorded before mid-step expiry are kept -- each is a real,
+    // fully-traversed cycle, so partial-step results are still valid loops.
+    // `start` is captured lazily so an unbudgeted run never reads the clock.
     let mut truncated = false;
     let start = budget.map(|_| Instant::now());
+    scratch.deadline = budget.zip(start).map(|(limit, started)| started + limit);
     for step in 1..step_count {
         if let (Some(limit), Some(started)) = (budget, start)
             && started.elapsed() >= limit
@@ -1402,6 +1452,10 @@ pub fn discover_loops_with_graph(
         }
         search.load_step_scores(results, step, &mut scratch);
         search.discover_step(&mut scratch, &mut seen_sets, &mut all_paths);
+        if scratch.deadline_expired {
+            truncated = true;
+            break;
+        }
     }
 
     if all_paths.is_empty() {
@@ -3367,5 +3421,93 @@ mod tests {
                 "element-level discovery must match the reference (seed {seed})"
             );
         }
+    }
+
+    // --- Mid-step deadline enforcement (the in-DFS budget check) ---
+
+    /// Build an IndexedSearch over `a -> b -> c -> a` (single stock `a`) with
+    /// every per-step edge score populated as 1.0, plus a scratch ready for
+    /// `discover_step`. Bypasses `load_step_scores` so no `Results` is needed.
+    fn cycle_search_and_scratch() -> (IndexedSearch, DfsScratch) {
+        let link_offsets: Vec<LinkOffset> = vec![
+            ((Ident::new("a"), Ident::new("b")), 0),
+            ((Ident::new("b"), Ident::new("c")), 1),
+            ((Ident::new("c"), Ident::new("a")), 2),
+        ];
+        let stocks = stock_list(&["a"]);
+        let search = IndexedSearch::build(&link_offsets, &stocks);
+        let mut scratch = DfsScratch::new(&search);
+        for (node, edges) in search.adj.iter().enumerate() {
+            scratch.step_adj[node] = edges
+                .iter()
+                .map(|e| StepEdge {
+                    to: e.to,
+                    score: 1.0,
+                })
+                .collect();
+        }
+        (search, scratch)
+    }
+
+    #[test]
+    fn dfs_deadline_expires_mid_step() {
+        // On dense element-level graphs a SINGLE timestep's DFS can run for
+        // hours (GH #647), so the budget must be enforced inside the DFS, not
+        // only between timesteps. With an already-passed deadline and the
+        // visit counter seeded so the very first visit performs the
+        // (interval-amortized) clock check, the DFS must flag expiry and bail
+        // without recording the cycle. The counter seeding stands in for the
+        // thousands of visits a large graph would need to reach the check
+        // naturally -- per the test-budget policy, tests must not build
+        // fixtures big enough to trip production thresholds for real.
+        let (search, mut scratch) = cycle_search_and_scratch();
+        scratch.deadline = Some(Instant::now());
+        scratch.visit_count = DEADLINE_CHECK_INTERVAL - 1;
+
+        let mut seen: HashSet<Vec<u32>> = HashSet::new();
+        let mut paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
+        search.discover_step(&mut scratch, &mut seen, &mut paths);
+
+        assert!(
+            scratch.deadline_expired,
+            "an expired deadline must be detected inside the step's DFS"
+        );
+        assert!(
+            paths.is_empty(),
+            "the DFS must unwind without recording loops once the deadline expired"
+        );
+    }
+
+    #[test]
+    fn dfs_unexpired_deadline_still_finds_loops() {
+        // The deadline machinery must not suppress discovery: with no deadline
+        // the cycle is found, and with a far-future deadline (clock check
+        // exercised via the seeded counter) it is found too.
+        let (search, mut scratch) = cycle_search_and_scratch();
+        let mut seen: HashSet<Vec<u32>> = HashSet::new();
+        let mut paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
+        search.discover_step(&mut scratch, &mut seen, &mut paths);
+        assert!(!scratch.deadline_expired);
+        assert_eq!(
+            paths_as_strings(&paths),
+            vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]],
+            "the a -> b -> c cycle must be discovered on an unbudgeted run"
+        );
+
+        let (search2, mut scratch2) = cycle_search_and_scratch();
+        scratch2.deadline = Some(Instant::now() + Duration::from_secs(3600));
+        scratch2.visit_count = DEADLINE_CHECK_INTERVAL - 1;
+        let mut seen2: HashSet<Vec<u32>> = HashSet::new();
+        let mut paths2: Vec<Vec<Ident<Canonical>>> = Vec::new();
+        search2.discover_step(&mut scratch2, &mut seen2, &mut paths2);
+        assert!(
+            !scratch2.deadline_expired,
+            "a far-future deadline must not be reported as expired"
+        );
+        assert_eq!(
+            paths_as_strings(&paths2),
+            vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]],
+            "the cycle must still be discovered when the deadline check fires but has not passed"
+        );
     }
 }
