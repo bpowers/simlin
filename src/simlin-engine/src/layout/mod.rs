@@ -809,15 +809,7 @@ pub fn settle_new_elements(
         }
     }
 
-    let sfdp_config = SfdpConfig {
-        k: 75.0,
-        max_iterations: 5000,
-        convergence_threshold: 0.001,
-        initial_step_size: 0.1,
-        cooling_factor: 0.9995,
-        c: 3.0,
-        ..SfdpConfig::default()
-    };
+    let sfdp_config = SfdpConfig::for_aux_placement();
 
     let node_to_ident: HashMap<String, String> = var_to_node
         .iter()
@@ -914,7 +906,7 @@ pub fn settle_new_elements(
 
     let mut annealing_round: usize = 0;
     let mut last_annealing_iter: usize = 0;
-    let mut best_crossings: usize = usize::MAX;
+    let mut best_cost: usize = usize::MAX;
     let mut best_layout: Option<Layout<String>> = None;
 
     let final_layout = compute_layout_from_initial_with_callback(
@@ -936,6 +928,10 @@ pub fn settle_new_elements(
             let result = run_annealing_with_filter(
                 layout,
                 build_segments,
+                // Incremental settling perturbs only the new elements around
+                // pinned existing ones; a new element must still not land on
+                // top of another node.
+                |layout: &Layout<String>| point_node_pileup_count(layout, &new_node_ids),
                 &annealing_config,
                 annealing_seed.wrapping_add(annealing_round as u64),
                 |node_id: &String| new_node_ids.contains(node_id),
@@ -952,8 +948,8 @@ pub fn settle_new_elements(
             last_annealing_iter = iter;
             annealing_round += 1;
 
-            if result.crossings < best_crossings {
-                best_crossings = result.crossings;
+            if result.cost < best_cost {
+                best_cost = result.cost;
                 best_layout = Some(result.layout.clone());
                 Some(result.layout)
             } else {
@@ -964,7 +960,7 @@ pub fn settle_new_elements(
 
     let settled_layout = if let Some(saved) = best_layout {
         let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
-        if final_crossings > best_crossings {
+        if final_crossings > best_cost {
             saved
         } else {
             final_layout
@@ -2595,6 +2591,114 @@ fn park_isolated_nodes(
     }
 }
 
+/// The polyline segments the renderer will draw for a RECIPROCAL dependency
+/// pair (A depends on B and B depends on A) at the candidate positions: two
+/// arcs, sampled with the renderer's own arc geometry.
+///
+/// `build_connectors` turns each direction of a reciprocal pair into an
+/// `Arc(calc_reciprocal_arc_angle(..))` link, so the drawn geometry bulges away
+/// from the straight chord. The annealing must count crossings on that drawn
+/// geometry: a straight chord between reciprocal nodes never crosses what the
+/// arc crosses, which previously left arc-vs-link crossings invisible to (and
+/// therefore never fixed by) the crossing-reduction pass.
+///
+/// Interior polyline vertices get per-arc names so two arcs of the same pair
+/// (which share both endpoints) never count as crossing each other, while
+/// arc-vs-other-link crossings are counted normally.
+fn reciprocal_arc_segments(
+    from_pos: Position,
+    to_pos: Position,
+    from_node: &str,
+    to_node: &str,
+) -> Vec<LineSegment> {
+    let make_aux = |uid: i32, pos: Position| {
+        ViewElement::Aux(view_element::Aux {
+            name: String::new(),
+            uid,
+            x: pos.x,
+            y: pos.y,
+            label_side: LabelSide::Bottom,
+            compat: None,
+        })
+    };
+    let not_arrayed = |_: &str| false;
+
+    let mut segments = Vec::new();
+    // Both directions of the pair are drawn, each with its own arc angle.
+    for (a_pos, b_pos, a_node, b_node) in [
+        (from_pos, to_pos, from_node, to_node),
+        (to_pos, from_pos, to_node, from_node),
+    ] {
+        let from_elem = make_aux(1, a_pos);
+        let to_elem = make_aux(2, b_pos);
+        let link = view_element::Link {
+            uid: 3,
+            from_uid: 1,
+            to_uid: 2,
+            shape: LinkShape::Arc(calc_reciprocal_arc_angle(a_pos, b_pos)),
+            polarity: None,
+        };
+        let polyline = crate::diagram::connector::connector_polyline(
+            &link,
+            &from_elem,
+            &to_elem,
+            &not_arrayed,
+            crate::diagram::connector::ARC_POLYLINE_SAMPLES,
+        );
+        let last = polyline.len().saturating_sub(1);
+        for (i, w) in polyline.windows(2).enumerate() {
+            // Endpoints keep the node names (shared-endpoint suppression);
+            // interior vertices are unique to this arc.
+            let seg_from = if i == 0 {
+                a_node.to_string()
+            } else {
+                format!("{a_node}\u{2192}{b_node}#{i}")
+            };
+            let seg_to = if i + 1 == last {
+                b_node.to_string()
+            } else {
+                format!("{a_node}\u{2192}{b_node}#{}", i + 1)
+            };
+            segments.push(LineSegment {
+                start: Position::new(w[0].x, w[0].y),
+                end: Position::new(w[1].x, w[1].y),
+                from_node: seg_from,
+                to_node: seg_to,
+            });
+        }
+    }
+    segments
+}
+
+/// Minimum center-to-center distance between two point nodes (auxes/modules)
+/// before the annealing's cost charges them as piled up. Two auxes need at
+/// least their shapes (2 x AUX_RADIUS = 18) plus label breathing room apart;
+/// half a lane (50) is the same floor `MIN_AUX_LANE_OFFSET` builds on.
+const MIN_POINT_NODE_SEPARATION: f64 = 50.0;
+
+/// The number of point-node pairs in `layout` that sit closer than
+/// `MIN_POINT_NODE_SEPARATION`. Added to the annealing cost so the
+/// crossing-reduction pass cannot "fix" a crossing by piling nodes on top of
+/// each other -- crossings and pile-ups are both unreadable, and a
+/// crossings-only objective is blind to the latter (it once collapsed two
+/// auxes onto the same spot to remove a chord crossing).
+fn point_node_pileup_count(layout: &Layout<String>, point_node_ids: &HashSet<String>) -> usize {
+    let positions: Vec<Position> = point_node_ids
+        .iter()
+        .filter_map(|node_id| layout.get(node_id).copied())
+        .collect();
+    let mut count = 0;
+    for i in 0..positions.len() {
+        for j in (i + 1)..positions.len() {
+            let d = positions[i] - positions[j];
+            if d.length() < MIN_POINT_NODE_SEPARATION {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 /// Run SFDP with chain elements locked into rigid groups.
 fn run_sfdp_with_rigid_chains(
     state: &LayoutState,
@@ -2752,19 +2856,7 @@ fn run_sfdp_with_rigid_chains(
         fallback_index += 1;
     }
 
-    // Match Praxis `runSFDPWithAnnealing`: only K/C/MaxIter/CoolFactor
-    // are overridden for auxiliary layout. Other SFDP parameters stay at
-    // their defaults (notably p=-1.0 and step size=0.1) to avoid runaway
-    // repulsion that can fling disconnected chains far apart.
-    let sfdp_config = SfdpConfig {
-        k: 75.0,
-        max_iterations: 5000,
-        convergence_threshold: 0.001,
-        initial_step_size: 0.1,
-        cooling_factor: 0.9995,
-        c: 3.0,
-        ..SfdpConfig::default()
-    };
+    let sfdp_config = SfdpConfig::for_aux_placement();
 
     let node_to_ident: HashMap<String, String> = var_to_node
         .iter()
@@ -2803,6 +2895,25 @@ fn run_sfdp_with_rigid_chains(
         })
         .collect();
 
+    // Reciprocal dependency pairs (A depends on B AND B depends on A) will be
+    // drawn as a pair of arcs by `build_connectors`; the annealing must count
+    // crossings on that arc geometry, not on the straight chord (see
+    // `reciprocal_arc_segments`).
+    let reciprocal_idents: HashSet<(String, String)> = metadata
+        .dep_graph
+        .iter()
+        .flat_map(|(from, deps)| {
+            deps.iter()
+                .filter(|to| {
+                    metadata
+                        .dep_graph
+                        .get(*to)
+                        .is_some_and(|back| back.contains(from))
+                })
+                .map(|to| (from.clone(), to.clone()))
+        })
+        .collect();
+
     let build_segments = |candidate_layout: &Layout<String>| -> Vec<LineSegment> {
         let mut segments = Vec::new();
 
@@ -2814,11 +2925,18 @@ fn run_sfdp_with_rigid_chains(
                 continue;
             };
 
-            if let (Some(from_ident), Some(to_ident)) =
-                (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to))
-                && is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows)
-            {
-                continue;
+            let idents = (node_to_ident.get(&edge.from), node_to_ident.get(&edge.to));
+            if let (Some(from_ident), Some(to_ident)) = idents {
+                if is_structural_stock_flow(from_ident, to_ident, &stock_inflows, &stock_outflows) {
+                    continue;
+                }
+                if reciprocal_idents.contains(&(from_ident.clone(), to_ident.clone())) {
+                    // Drawn as two arcs; count crossings on the drawn geometry.
+                    segments.extend(reciprocal_arc_segments(
+                        from_pos, to_pos, &edge.from, &edge.to,
+                    ));
+                    continue;
+                }
             }
 
             segments.push(LineSegment {
@@ -2876,9 +2994,20 @@ fn run_sfdp_with_rigid_chains(
     let annealing_config = config.clone();
     let annealing_seed = config.annealing_random_seed;
 
+    // The annealing cost: drawn-geometry crossings PLUS a penalty for point
+    // nodes piled closer than `MIN_POINT_NODE_SEPARATION`. Without the penalty
+    // the search is free to remove a crossing by stacking two auxes on the
+    // same spot (both unreadable; only one was counted).
+    let pileup_penalty = |layout: &Layout<String>| point_node_pileup_count(layout, &point_node_ids);
+
+    // The full annealing cost of a layout, for keep-or-discard comparisons.
+    let annealing_cost = |layout: &Layout<String>| -> usize {
+        annealing::count_crossings(&build_segments(layout)) + pileup_penalty(layout)
+    };
+
     let mut annealing_round: usize = 0;
     let mut last_annealing_iter: usize = 0;
-    let mut best_crossings: usize = usize::MAX;
+    let mut best_cost: usize = usize::MAX;
     let mut best_layout: Option<Layout<String>> = None;
 
     let final_layout = compute_layout_from_initial_with_callback(
@@ -2900,6 +3029,7 @@ fn run_sfdp_with_rigid_chains(
             let result = run_annealing_with_filter(
                 layout,
                 build_segments,
+                pileup_penalty,
                 &annealing_config,
                 annealing_seed.wrapping_add(annealing_round as u64),
                 |node_id: &String| point_node_ids.contains(node_id),
@@ -2916,8 +3046,8 @@ fn run_sfdp_with_rigid_chains(
             last_annealing_iter = iter;
             annealing_round += 1;
 
-            if result.crossings < best_crossings {
-                best_crossings = result.crossings;
+            if result.cost < best_cost {
+                best_cost = result.cost;
                 best_layout = Some(result.layout.clone());
                 Some(result.layout)
             } else {
@@ -2929,14 +3059,14 @@ fn run_sfdp_with_rigid_chains(
     // If SFDP drifted after a good annealing round, the final layout
     // may be worse than the best we found. Compare and keep the better one.
     let mut chosen = match best_layout {
-        Some(saved)
-            if annealing::count_crossings(&build_segments(&final_layout)) > best_crossings =>
-        {
-            saved
-        }
+        Some(saved) if annealing_cost(&final_layout) > best_cost => saved,
         _ => final_layout,
     };
 
+    // Lane clearance pushes auxes off the lines connecting their anchors. It is
+    // crossing-OBLIVIOUS, so it must run before the final crossing-reduction
+    // pass below -- otherwise it silently undoes the annealing's work (it once
+    // turned a crossing-free 4-element layout into one with two crossings).
     enforce_auxiliary_lane_clearance(
         &mut chosen,
         var_to_node,
@@ -2944,6 +3074,32 @@ fn run_sfdp_with_rigid_chains(
         &point_idents,
         metadata.chains.len() <= 1,
     );
+
+    // The LAST positioning word goes to a crossing-reduction pass on the
+    // settled, lane-cleared layout. This both cleans up anything lane clearance
+    // disturbed and guarantees at least one annealing pass runs even for
+    // layouts that converge before the first interleaved annealing interval
+    // (`annealing_interval` SFDP iterations -- which small models finish well
+    // within).
+    let settled_result = run_annealing_with_filter(
+        &chosen,
+        build_segments,
+        pileup_penalty,
+        &annealing_config,
+        annealing_seed.wrapping_add(annealing_round as u64),
+        |node_id: &String| point_node_ids.contains(node_id),
+        |node_id: &String| {
+            if point_node_ids.contains(node_id) {
+                max_delta_aux
+            } else {
+                max_delta_chain
+            }
+        },
+        &adjacency,
+    );
+    if settled_result.cost < annealing_cost(&chosen) {
+        chosen = settled_result.layout;
+    }
 
     // Isolated variables took no part in the force simulation; give them tidy
     // parking positions below everything that did.

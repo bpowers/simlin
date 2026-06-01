@@ -488,6 +488,56 @@ impl<N: NodeId> ConstrainedGraph<N> {
     pub fn is_in_rigid_group(&self, node: &N) -> Option<usize> {
         self.node_to_group.get(node).copied()
     }
+
+    /// Number of connected components, where both edges and shared rigid-group
+    /// membership connect nodes (rigid-group members translate as one body, so
+    /// they are never "disconnected" from each other even without an edge).
+    ///
+    /// The force simulation uses this to decide whether to apply gravity: a
+    /// connected graph reaches a repulsion/attraction equilibrium on its own,
+    /// but mutually-disconnected components feel only repulsion from each other
+    /// and would drift apart without bound under a properly-converging step
+    /// scheme.
+    pub fn connected_component_count(&self) -> usize {
+        let nodes: Vec<&N> = self.graph.nodes().collect();
+        if nodes.is_empty() {
+            return 0;
+        }
+        let index: HashMap<&N, usize> = nodes.iter().enumerate().map(|(i, n)| (*n, i)).collect();
+
+        // Union-find with path halving.
+        let mut parent: Vec<usize> = (0..nodes.len()).collect();
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        fn union(parent: &mut [usize], a: usize, b: usize) {
+            let ra = find(parent, a);
+            let rb = find(parent, b);
+            if ra != rb {
+                parent[ra] = rb;
+            }
+        }
+
+        for edge in self.graph.edges() {
+            if let (Some(&a), Some(&b)) = (index.get(&edge.from), index.get(&edge.to)) {
+                union(&mut parent, a, b);
+            }
+        }
+        for group in &self.rigid_groups {
+            for pair in group.members.windows(2) {
+                if let (Some(&a), Some(&b)) = (index.get(&pair[0]), index.get(&pair[1])) {
+                    union(&mut parent, a, b);
+                }
+            }
+        }
+
+        let roots: BTreeSet<usize> = (0..nodes.len()).map(|i| find(&mut parent, i)).collect();
+        roots.len()
+    }
 }
 
 /// Builder for `ConstrainedGraph`.
@@ -775,5 +825,45 @@ mod tests {
 
         assert_eq!(cg.rigid_groups().len(), 1);
         assert_eq!(cg.rigid_groups()[0].members.len(), 2);
+    }
+
+    #[test]
+    fn test_component_count_connected_graph_is_one() {
+        let mut builder = GraphBuilder::<String>::new_undirected();
+        builder.add_edge("a".into(), "b".into(), 1.0);
+        builder.add_edge("b".into(), "c".into(), 1.0);
+        let cg = ConstrainedGraphBuilder::new(builder.build()).build();
+        assert_eq!(cg.connected_component_count(), 1);
+    }
+
+    #[test]
+    fn test_component_count_disconnected_pieces() {
+        // Two edges that share no node, plus an isolated node: 3 components.
+        let mut builder = GraphBuilder::<String>::new_undirected();
+        builder.add_edge("a".into(), "b".into(), 1.0);
+        builder.add_edge("c".into(), "d".into(), 1.0);
+        builder.add_node("e".into());
+        let cg = ConstrainedGraphBuilder::new(builder.build()).build();
+        assert_eq!(cg.connected_component_count(), 3);
+    }
+
+    #[test]
+    fn test_component_count_rigid_group_connects() {
+        // No edge between {a,b} and {c,d}, but a rigid group spanning b and c
+        // makes them one body -> one component.
+        let mut builder = GraphBuilder::<String>::new_undirected();
+        builder.add_edge("a".into(), "b".into(), 1.0);
+        builder.add_edge("c".into(), "d".into(), 1.0);
+        let mut cb = ConstrainedGraphBuilder::new(builder.build());
+        cb.add_rigid_group(vec!["b".into(), "c".into()]);
+        let cg = cb.build();
+        assert_eq!(cg.connected_component_count(), 1);
+    }
+
+    #[test]
+    fn test_component_count_empty_graph_is_zero() {
+        let builder = GraphBuilder::<String>::new_undirected();
+        let cg = ConstrainedGraphBuilder::new(builder.build()).build();
+        assert_eq!(cg.connected_component_count(), 0);
     }
 }

@@ -207,17 +207,7 @@ pub fn compute_chain_positions(
         }
     }
 
-    // Match Praxis chain-phase SFDP tuning: larger ideal edge length and
-    // weaker attraction, plus long/slow cooling schedule.
-    let sfdp_config = SfdpConfig {
-        k: 150.0,
-        max_iterations: 5000,
-        convergence_threshold: 0.001,
-        initial_step_size: 0.1,
-        cooling_factor: 0.9995,
-        c: 0.5,
-        ..SfdpConfig::default()
-    };
+    let sfdp_config = SfdpConfig::for_chain_positioning();
 
     let build_segments = |candidate_layout: &BTreeMap<String, Position>| -> Vec<LineSegment> {
         let mut segments = Vec::new();
@@ -282,6 +272,9 @@ pub fn compute_chain_positions(
             let result = run_annealing_with_filter(
                 current_layout,
                 build_segments,
+                // Chains are large rigid bodies positioned lanes apart; the
+                // pile-up failure mode of point nodes does not apply here.
+                |_| 0,
                 &round_config,
                 config
                     .annealing_random_seed
@@ -291,8 +284,8 @@ pub fn compute_chain_positions(
                 &HashMap::new(),
             );
 
-            if result.crossings < last_best_crossings {
-                last_best_crossings = result.crossings;
+            if result.cost < last_best_crossings {
+                last_best_crossings = result.cost;
                 best_annealed_layout = Some(result.layout.clone());
             }
 
@@ -301,6 +294,26 @@ pub fn compute_chain_positions(
             Some(result.layout)
         },
     );
+
+    // One more crossing-reduction pass on the SETTLED layout: a fast-converging
+    // chain layout can finish before the first interleaved annealing interval
+    // elapses, leaving chain crossings never optimized at all.
+    let settled_result = run_annealing_with_filter(
+        &layout,
+        build_segments,
+        |_| 0,
+        config,
+        config
+            .annealing_random_seed
+            .wrapping_add(annealing_round as u64),
+        |node_id: &String| node_id.starts_with("chain_"),
+        |_| max_delta,
+        &HashMap::new(),
+    );
+    if settled_result.cost < last_best_crossings {
+        last_best_crossings = settled_result.cost;
+        best_annealed_layout = Some(settled_result.layout);
+    }
 
     // Subsequent SFDP iterations after the last annealing round may have
     // degraded the layout.  Use the best annealed layout if it has fewer

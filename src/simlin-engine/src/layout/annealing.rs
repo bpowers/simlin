@@ -124,7 +124,9 @@ fn generate_step(rng: &mut StdRng, temperature: f64) -> (f64, f64) {
 /// Result of a simulated annealing run.
 pub struct AnnealingResult<N: NodeId> {
     pub layout: Layout<N>,
-    pub crossings: usize,
+    /// The best layout's cost: segment crossings plus the caller's
+    /// position penalty (see `run_annealing_with_filter`).
+    pub cost: usize,
     pub improved: bool,
     pub iterations: usize,
 }
@@ -156,6 +158,7 @@ where
     run_annealing_with_filter(
         initial_layout,
         build_segments,
+        |_| 0,
         config,
         seed,
         |_| true,
@@ -168,9 +171,22 @@ where
 /// `can_perturb`. `displacement_limit` returns the max displacement for each node.
 /// `adjacency` enables coupled motion: after moving a node, its strongest neighbor
 /// is moved by 50% of the same displacement.
-pub fn run_annealing_with_filter<N, F, P, D>(
+///
+/// The cost minimized is `crossings + position_penalty(layout)`. The penalty
+/// term lets callers charge for layout defects that segment crossings cannot
+/// express -- without it, the search is free to "fix" a crossing by piling
+/// nodes on top of each other (both are unreadable; only one was counted).
+//
+// 8 parameters: the cost (segments + penalty), the schedule (config/seed), and
+// the move set (filter/limits/adjacency) are all genuinely independent inputs.
+// When the cost becomes fully metric-driven (the planned annealing objective
+// upgrade), segments + penalty collapse into one cost closure and this drops
+// back under the lint's threshold.
+#[allow(clippy::too_many_arguments)]
+pub fn run_annealing_with_filter<N, F, G, P, D>(
     initial_layout: &Layout<N>,
     build_segments: F,
+    position_penalty: G,
     config: &LayoutConfig,
     seed: u64,
     can_perturb: P,
@@ -180,6 +196,7 @@ pub fn run_annealing_with_filter<N, F, P, D>(
 where
     N: NodeId,
     F: Fn(&Layout<N>) -> Vec<LineSegment>,
+    G: Fn(&Layout<N>) -> usize,
     P: Fn(&N) -> bool,
     D: Fn(&N) -> f64,
 {
@@ -190,7 +207,11 @@ where
 
     let mut rng = StdRng::seed_from_u64(seed);
 
-    let initial_crossings = count_crossings(&build_segments(initial_layout));
+    let cost_of = |layout: &Layout<N>| -> usize {
+        count_crossings(&build_segments(layout)) + position_penalty(layout)
+    };
+
+    let initial_cost = cost_of(initial_layout);
 
     let base_temperature = config.annealing_temperature.max(derive_initial_temperature(
         initial_layout,
@@ -203,10 +224,10 @@ where
         base_temperature
     };
 
-    if initial_crossings == 0 {
+    if initial_cost == 0 {
         return AnnealingResult {
             layout: initial_layout.clone(),
-            crossings: 0,
+            cost: 0,
             improved: false,
             iterations: 0,
         };
@@ -216,10 +237,10 @@ where
     let baseline: BTreeMap<N, Position> = initial_layout.clone();
 
     let mut best_layout = initial_layout.clone();
-    let mut best_crossings = initial_crossings;
+    let mut best_cost = initial_cost;
 
     let mut test_layout = initial_layout.clone();
-    let mut current_crossings = initial_crossings;
+    let mut current_cost = initial_cost;
 
     let mut improved = false;
     let mut temperature = base_temperature;
@@ -235,7 +256,7 @@ where
     let mut total_iters = 0;
 
     for iter in 0..iterations {
-        if best_crossings == 0 {
+        if best_cost == 0 {
             break;
         }
 
@@ -248,9 +269,9 @@ where
             &displacement_limit,
             adjacency,
         );
-        let perturbed_crossings = count_crossings(&build_segments(&perturbed));
+        let perturbed_cost = cost_of(&perturbed);
 
-        let delta = perturbed_crossings as f64 - current_crossings as f64;
+        let delta = perturbed_cost as f64 - current_cost as f64;
         let accept_prob = if delta > 0.0 {
             (-delta / temperature).exp()
         } else {
@@ -259,11 +280,11 @@ where
 
         if rng.random::<f64>() < accept_prob {
             test_layout = perturbed;
-            current_crossings = perturbed_crossings;
+            current_cost = perturbed_cost;
 
-            if current_crossings < best_crossings {
+            if current_cost < best_cost {
                 best_layout = test_layout.clone();
-                best_crossings = current_crossings;
+                best_cost = current_cost;
                 improved = true;
             }
         }
@@ -271,7 +292,7 @@ where
         temperature *= cooling_rate;
 
         // Periodic reheating to escape local minima
-        if (iter + 1) % reheat_period == 0 && best_crossings > 0 {
+        if (iter + 1) % reheat_period == 0 && best_cost > 0 {
             temperature = effective_reheat;
         }
 
@@ -280,7 +301,7 @@ where
 
     AnnealingResult {
         layout: best_layout,
-        crossings: best_crossings,
+        cost: best_cost,
         improved,
         iterations: total_iters,
     }
@@ -565,9 +586,9 @@ mod tests {
 
         // The annealer should not make things worse
         assert!(
-            result.crossings <= initial_crossings,
-            "crossings should not increase: got {} vs initial {}",
-            result.crossings,
+            result.cost <= initial_crossings,
+            "cost should not increase: got {} vs initial {}",
+            result.cost,
             initial_crossings,
         );
     }
@@ -591,9 +612,82 @@ mod tests {
         let config = LayoutConfig::default();
         let result = run_annealing(&layout, build_segments, &config, 42);
 
-        assert_eq!(result.crossings, 0);
+        assert_eq!(result.cost, 0);
         assert!(!result.improved);
         assert_eq!(result.iterations, 0);
+    }
+
+    /// The position penalty must keep the search from "fixing" a crossing by
+    /// piling nodes on top of each other: with a penalty that charges close
+    /// pairs, the returned layout never contains one.
+    #[test]
+    fn test_position_penalty_prevents_pileups() {
+        // Two crossing edges (an X). Collapsing b onto a would remove the
+        // crossing -- and is exactly what a crossings-only objective does.
+        let mut layout: Layout<String> = BTreeMap::new();
+        layout.insert("a".to_string(), Position::new(0.0, 0.0));
+        layout.insert("b".to_string(), Position::new(0.0, 100.0));
+        layout.insert("c".to_string(), Position::new(100.0, 100.0));
+        layout.insert("d".to_string(), Position::new(100.0, 0.0));
+
+        let build_segments = |lay: &Layout<String>| -> Vec<LineSegment> {
+            vec![
+                LineSegment {
+                    start: lay["a"],
+                    end: lay["c"],
+                    from_node: "a".to_string(),
+                    to_node: "c".to_string(),
+                },
+                LineSegment {
+                    start: lay["b"],
+                    end: lay["d"],
+                    from_node: "b".to_string(),
+                    to_node: "d".to_string(),
+                },
+            ]
+        };
+        const MIN_SEP: f64 = 50.0;
+        let pileups = |lay: &Layout<String>| -> usize {
+            let pts: Vec<Position> = lay.values().copied().collect();
+            let mut n = 0;
+            for i in 0..pts.len() {
+                for j in (i + 1)..pts.len() {
+                    if (pts[i] - pts[j]).length() < MIN_SEP {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+
+        let config = LayoutConfig {
+            annealing_iterations: 400,
+            annealing_temperature: 30.0,
+            annealing_cooling_rate: 0.99,
+            annealing_reheat_period: 50,
+            annealing_temperature_scale: 0.0,
+            ..LayoutConfig::default()
+        };
+
+        let result = run_annealing_with_filter(
+            &layout,
+            build_segments,
+            pileups,
+            &config,
+            42,
+            |_| true,
+            |_| 200.0,
+            &HashMap::new(),
+        );
+
+        // Whatever the search returned, it must not contain a pile-up: the
+        // penalty makes piled layouts cost at least as much as the crossing
+        // they would remove.
+        assert_eq!(
+            pileups(&result.layout),
+            0,
+            "annealing must not return piled-up nodes when the penalty charges them"
+        );
     }
 
     #[test]
@@ -654,6 +748,7 @@ mod tests {
         let result = run_annealing_with_filter(
             &layout,
             build_segments,
+            |_| 0,
             &config,
             42,
             |_node| false,
@@ -852,6 +947,7 @@ mod tests {
         let result = run_annealing_with_filter(
             &layout,
             build_segments,
+            |_| 0,
             &config,
             42,
             |node| node != "b",
