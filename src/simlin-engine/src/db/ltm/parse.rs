@@ -153,19 +153,6 @@ pub(super) fn ltm_equation_dimensions(equation: &datamodel::Equation) -> &[Strin
     }
 }
 
-/// Build the `Equation` variant an `LtmSyntheticVar` should carry given
-/// its synthetic equation *text* and dimension list: empty `dimensions`
-/// ⇒ `Equation::Scalar`, non-empty ⇒ `Equation::ApplyToAll` over exactly
-/// those names. (`Equation::Arrayed` link-score equations are built
-/// directly by the augmentation layer, not via this helper.)
-pub(super) fn ltm_synthetic_equation(text: String, dimensions: &[String]) -> datamodel::Equation {
-    if dimensions.is_empty() {
-        datamodel::Equation::Scalar(text)
-    } else {
-        datamodel::Equation::ApplyToAll(dimensions.to_vec(), text)
-    }
-}
-
 /// Reduce an LTM equation to a scalar one, keeping the equation text.
 /// Used by the legacy `(from, to)`-keyed link-score path
 /// (`link_score_equation_text`), which always emits a scalar variable

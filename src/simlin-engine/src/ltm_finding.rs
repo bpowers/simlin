@@ -1994,6 +1994,7 @@ pub fn discover_loops_with_graph(
             stocks: loop_stocks,
             polarity,
             dimensions: vec![],
+            slot_links: vec![],
         };
 
         found_loops.push(FoundLoop {
@@ -3300,6 +3301,7 @@ mod tests {
                     stocks: vec![],
                     polarity: LoopPolarity::Reinforcing,
                     dimensions: vec![],
+                    slot_links: vec![],
                 },
                 scores: vec![],
                 avg_abs_score: 1.0,
@@ -3322,6 +3324,7 @@ mod tests {
                     stocks: vec![],
                     polarity: LoopPolarity::Balancing,
                     dimensions: vec![],
+                    slot_links: vec![],
                 },
                 scores: vec![],
                 avg_abs_score: 0.5,
@@ -3393,6 +3396,7 @@ mod tests {
                 stocks: stocks.iter().map(|s| Ident::new(s)).collect(),
                 polarity,
                 dimensions: vec![],
+                slot_links: vec![],
             },
             scores,
             avg_abs_score,

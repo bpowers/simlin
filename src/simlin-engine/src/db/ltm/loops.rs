@@ -397,6 +397,7 @@ pub(crate) fn build_loops_from_tiered(
             stocks,
             polarity,
             dimensions,
+            slot_links: vec![],
         });
     }
 
@@ -727,6 +728,7 @@ pub(crate) fn build_element_level_loops(
                 stocks,
                 polarity,
                 dimensions,
+                slot_links: vec![],
             });
         } else if is_cross_element || representative_has_synthetic_agg {
             // Cross-element circuits: a circuit that genuinely visits
@@ -800,6 +802,7 @@ pub(crate) fn build_element_level_loops(
                     stocks,
                     polarity,
                     dimensions: vec![], // scalar: cross-element loops visit fixed elements
+                    slot_links: vec![],
                 });
             }
         } else {
@@ -950,6 +953,7 @@ pub(crate) fn build_element_level_loops(
                     stocks,
                     polarity,
                     dimensions: vec![],
+                    slot_links: vec![],
                 });
             }
         }
@@ -1330,6 +1334,7 @@ fn recover_cross_agg_loops(
                     polarity,
                     // Cross-element loops visit fixed elements -- scalar loop score.
                     dimensions: vec![],
+                    slot_links: vec![],
                 });
                 emitted += 1;
                 if emitted >= agg_loop_budget {

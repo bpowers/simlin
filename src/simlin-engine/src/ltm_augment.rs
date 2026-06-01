@@ -15,9 +15,7 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident, RawIdent};
 use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
-use crate::ltm::{
-    CyclePartitions, Loop, normalize_module_ref, split_node_subscript, strip_subscript,
-};
+use crate::ltm::{Loop, normalize_module_ref, split_node_subscript, strip_subscript};
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
@@ -1363,22 +1361,33 @@ pub(crate) fn link_score_var_name(from: &str, to: &str, shape: &RefShape) -> Str
 
 /// Generate absolute loop score variables for all loops.
 ///
-/// Emits one `$⁚ltm⁚loop_score⁚{id}` synthetic aux per loop (product of
-/// the loop's link scores).  Relative loop scores are no longer emitted
-/// here: the per-partition `rel_loop_score` was O(P²) text per partition
-/// and dominated compile memory on dense models (see
-/// `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`).  The
-/// normalization now happens post-simulation in
-/// [`crate::ltm_post::compute_rel_loop_scores`].  `partitions` is still
-/// accepted so the signature matches the call site's precomputed data
-/// and to keep the option open for future partition-aware emission
-/// (e.g., a bounded per-partition denominator aux if we ever need one).
+/// Emits one `$⁚ltm⁚loop_score⁚{id}` entry per loop, returning the variable
+/// name plus the *dimension-shaped* `datamodel::Equation` it should carry:
+///
+/// - **Scalar loops** (`dimensions` empty): `Equation::Scalar`, the product of
+///   the loop's link-score references.
+/// - **Dimensioned loops with empty `slot_links`** (the Bare-A2A fast path):
+///   `Equation::ApplyToAll` over the loop's dimensions -- the compact form,
+///   correct because every link resolves to a Bare A2A link-score variable
+///   that the A2A expansion evaluates per element.
+/// - **Dimensioned loops with `slot_links`** (per-element circuits whose link
+///   scores only exist as per-element names -- the enumerator's A2A-collapse
+///   on per-element-equation models, and dimensioned pinned loops, GH #653):
+///   `Equation::Arrayed` over the loop's dimensions, one slot equation per
+///   element tuple of the dimension space (row-major declared order, from
+///   `dm_dims`). Slots without a backing circuit score a constant 0.
+///
+/// Relative loop scores are not emitted here: the per-partition
+/// `rel_loop_score` was O(P²) text per partition and dominated compile memory
+/// on dense models (see `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`).
+/// The normalization happens post-simulation in
+/// [`crate::ltm_post::compute_rel_loop_scores`].
 pub(crate) fn generate_loop_score_variables(
     loops: &[Loop],
-    partitions: &CyclePartitions,
     emitted_link_score_names: &HashSet<String>,
-) -> HashMap<Ident<Canonical>, datamodel::Variable> {
-    let mut loop_vars = HashMap::new();
+    dm_dims: &[datamodel::Dimension],
+) -> Vec<(String, datamodel::Equation)> {
+    let mut loop_vars = Vec::with_capacity(loops.len());
 
     // Tracing is opt-in via LTM_BENCH_TRACE=1.  When disabled, the only
     // per-iteration overhead is an integer add for the byte counter and
@@ -1390,20 +1399,18 @@ pub(crate) fn generate_loop_score_variables(
 
     if trace_on {
         eprintln!(
-            "[ltm-trace] generate_loop_score_variables start loops={} partitions={} \
-             rss_mib={:.1}",
+            "[ltm-trace] generate_loop_score_variables start loops={} rss_mib={:.1}",
             loops.len(),
-            partitions.partitions.len(),
             read_rss_mib().unwrap_or(0.0),
         );
     }
 
     for (i, loop_item) in loops.iter().enumerate() {
         let var_name = format!("$⁚ltm⁚loop_score⁚{}", loop_item.id);
-        let equation = generate_loop_score_equation(loop_item, emitted_link_score_names);
-        loop_score_bytes += equation.len() as u64;
-        let ltm_var = create_aux_variable(&var_name, &equation);
-        loop_vars.insert(Ident::new(&var_name), ltm_var);
+        let equation =
+            generate_dimensioned_loop_score_equation(loop_item, emitted_link_score_names, dm_dims);
+        loop_score_bytes += equation_text_len(&equation) as u64;
+        loop_vars.push((var_name, equation));
         if trace_on && should_trace(i + 1) {
             eprintln!(
                 "[ltm-trace] pass=loop_score i={} cum_loop_bytes={} rss_mib={:.1}",
@@ -1425,6 +1432,71 @@ pub(crate) fn generate_loop_score_variables(
     }
 
     loop_vars
+}
+
+/// Total equation-text bytes of a `datamodel::Equation`, for the
+/// `LTM_BENCH_TRACE` instrumentation.
+fn equation_text_len(equation: &datamodel::Equation) -> usize {
+    match equation {
+        datamodel::Equation::Scalar(text) | datamodel::Equation::ApplyToAll(_, text) => text.len(),
+        datamodel::Equation::Arrayed(_, elements, default, _) => {
+            elements.iter().map(|(_, eq, _, _)| eq.len()).sum::<usize>()
+                + default.as_ref().map(String::len).unwrap_or(0)
+        }
+    }
+}
+
+/// Build the dimension-shaped `datamodel::Equation` for one loop's score
+/// variable. See [`generate_loop_score_variables`] for the three cases.
+fn generate_dimensioned_loop_score_equation(
+    loop_item: &Loop,
+    emitted: &HashSet<String>,
+    dm_dims: &[datamodel::Dimension],
+) -> datamodel::Equation {
+    if loop_item.dimensions.is_empty() {
+        return datamodel::Equation::Scalar(generate_loop_score_equation(loop_item, emitted));
+    }
+    if loop_item.slot_links.is_empty() {
+        return datamodel::Equation::ApplyToAll(
+            loop_item.dimensions.clone(),
+            generate_loop_score_equation(loop_item, emitted),
+        );
+    }
+
+    // Per-slot equations: enumerate the loop's full dimension element space
+    // (row-major declared order) so the Arrayed equation is total over the
+    // dimension space; element tuples without a backing circuit score 0.
+    //
+    // Fall back to the slot_links' own keys when `dm_dims` doesn't cover the
+    // loop's declared dimensions (a mid-edit inconsistency where the cached
+    // loop structure outran a still-being-edited dimension list) -- sparse
+    // but deterministic, matching `partition_for_loop`'s fallback.
+    let tuples = crate::ltm::loop_dimension_element_tuples(&loop_item.dimensions, dm_dims);
+    let slot_keys: Vec<String> = if tuples.is_empty() {
+        loop_item
+            .slot_links
+            .iter()
+            .map(|(t, _)| t.clone())
+            .collect()
+    } else {
+        tuples
+    };
+    let by_tuple: HashMap<&str, &[crate::ltm::Link]> = loop_item
+        .slot_links
+        .iter()
+        .map(|(t, l)| (t.as_str(), l.as_slice()))
+        .collect();
+    let elements = slot_keys
+        .iter()
+        .map(|tuple| {
+            let text = match by_tuple.get(tuple.as_str()) {
+                Some(links) => generate_link_product(links, emitted),
+                None => "0".to_string(),
+            };
+            (tuple.clone(), text, None, None)
+        })
+        .collect();
+    datamodel::Equation::Arrayed(loop_item.dimensions.clone(), elements, None, false)
 }
 
 /// Decide whether iteration `n` (1-based) should emit a trace line.
@@ -2351,8 +2423,19 @@ fn generate_loop_score_equation(
     loop_item: &Loop,
     emitted_link_score_names: &HashSet<String>,
 ) -> String {
-    let link_score_names: Vec<String> = loop_item
-        .links
+    generate_link_product(&loop_item.links, emitted_link_score_names)
+}
+
+/// The product-of-link-score-references text for one link cycle.
+///
+/// Shared by the whole-loop path ([`generate_loop_score_equation`]) and the
+/// per-slot path (a dimensioned loop's `slot_links`, where each slot's
+/// element-subscripted link cycle produces its own product).
+fn generate_link_product(
+    links: &[crate::ltm::Link],
+    emitted_link_score_names: &HashSet<String>,
+) -> String {
+    let link_score_names: Vec<String> = links
         .iter()
         .map(|link| loop_link_score_ref(link, emitted_link_score_names))
         .collect();
@@ -2430,25 +2513,6 @@ fn loop_link_score_ref(link: &crate::ltm::Link, emitted: &HashSet<String>) -> St
         Some(elem) => format!("\"{name}\"[{elem}]"),
         None => format!("\"{name}\""),
     }
-}
-
-/// Create an auxiliary variable with the given equation
-fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable {
-    use crate::datamodel;
-
-    datamodel::Variable::Aux(datamodel::Aux {
-        ident: canonicalize(name).into_owned(),
-        equation: datamodel::Equation::Scalar(equation.to_string()),
-        documentation: "LTM".to_string(),
-        units: None, // LTM scores are dimensionless by design, no need to declare
-        gf: None,
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat {
-            visibility: datamodel::Visibility::Public,
-            ..datamodel::Compat::default()
-        },
-    })
 }
 
 /// Classification of array-reducing builtins for cross-dimensional link score
@@ -4347,6 +4411,7 @@ mod tests {
             stocks: vec![],
             polarity: LoopPolarity::Reinforcing,
             dimensions: vec![],
+            slot_links: vec![],
         };
 
         // Pretend both candidates were emitted as Bare; the resolver
@@ -4467,6 +4532,7 @@ mod tests {
             stocks: vec![],
             polarity: LoopPolarity::Reinforcing,
             dimensions: vec![],
+            slot_links: vec![],
         };
         let mut emitted = HashSet::new();
         emitted.insert("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}births".to_string());
@@ -4552,6 +4618,7 @@ mod tests {
             stocks: vec![],
             polarity: LoopPolarity::Undetermined,
             dimensions: vec![],
+            slot_links: vec![],
         };
         let mut emitted = HashSet::new();
         emitted.insert(
@@ -4587,6 +4654,7 @@ mod tests {
             stocks: vec![Ident::<Canonical>::new("population[nyc]")],
             polarity: LoopPolarity::Undetermined,
             dimensions: vec![],
+            slot_links: vec![],
         };
         let mut emitted = HashSet::new();
         emitted.insert(
@@ -4629,6 +4697,7 @@ mod tests {
             stocks: vec![Ident::<Canonical>::new("population[nyc]")],
             polarity: LoopPolarity::Undetermined,
             dimensions: vec![],
+            slot_links: vec![],
         };
         let mut emitted = HashSet::new();
         emitted.insert(
@@ -5464,5 +5533,315 @@ mod tests {
             text.contains("PREVIOUS(PREVIOUS(deaths[region]))"),
             "outflow must still be subscripted; got: {text}"
         );
+    }
+
+    // -- GH #653 Phase 1: dimension-aware loop-score equation generation --
+    //
+    // `generate_loop_score_variables` returns the real `datamodel::Equation`
+    // each loop score should carry: Scalar for scalar loops, ApplyToAll for
+    // dimensioned loops whose links resolve through Bare A2A names, and
+    // Arrayed (per-slot equations) for dimensioned loops backed by per-element
+    // circuits (`Loop.slot_links`).
+
+    /// Helper: a `datamodel::Dimension` for the dimension-aware loop-score
+    /// tests (these need datamodel dims, not `dimensions::Dimension`, because
+    /// the Arrayed slot enumeration reads the project's declared element
+    /// order).
+    fn dm_named_dimension(name: &str, elements: &[&str]) -> crate::datamodel::Dimension {
+        crate::datamodel::Dimension::named(
+            name.to_string(),
+            elements.iter().map(|s| s.to_string()).collect(),
+        )
+    }
+
+    fn ls_name(from: &str, to: &str) -> String {
+        format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}")
+    }
+
+    fn make_link(from: &str, to: &str) -> crate::ltm::Link {
+        crate::ltm::Link {
+            from: Ident::<Canonical>::new(from),
+            to: Ident::<Canonical>::new(to),
+            polarity: crate::ltm::LinkPolarity::Positive,
+        }
+    }
+
+    /// A scalar loop produces an `Equation::Scalar` whose text is the plain
+    /// product of its (Bare-resolved) link-score references.
+    #[test]
+    fn loop_score_variables_scalar_loop_yields_scalar_equation() {
+        use crate::ltm::{Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "r1".to_string(),
+            links: vec![make_link("pop", "births"), make_link("births", "pop")],
+            stocks: vec![Ident::<Canonical>::new("pop")],
+            polarity: LoopPolarity::Reinforcing,
+            dimensions: vec![],
+            slot_links: vec![],
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert(ls_name("pop", "births"));
+        emitted.insert(ls_name("births", "pop"));
+
+        let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &[]);
+        assert_eq!(vars.len(), 1);
+        let (name, equation) = &vars[0];
+        assert_eq!(name, "$\u{205A}ltm\u{205A}loop_score\u{205A}r1");
+        match equation {
+            Equation::Scalar(text) => {
+                assert_eq!(
+                    text,
+                    &format!(
+                        "\"{}\" * \"{}\"",
+                        ls_name("pop", "births"),
+                        ls_name("births", "pop")
+                    ),
+                    "scalar loop score must be the plain product of Bare link-score refs"
+                );
+            }
+            other => panic!("scalar loop must yield Equation::Scalar; got: {other:?}"),
+        }
+    }
+
+    /// A dimensioned loop with no `slot_links` (the Bare-A2A fast path)
+    /// produces the compact `Equation::ApplyToAll` form -- byte-identical
+    /// reference text to the scalar case, tagged with the loop's dimensions.
+    #[test]
+    fn loop_score_variables_a2a_without_slot_links_yields_apply_to_all() {
+        use crate::ltm::{Loop, LoopPolarity};
+
+        let loop_item = Loop {
+            id: "r1".to_string(),
+            links: vec![make_link("pop", "births"), make_link("births", "pop")],
+            stocks: vec![
+                Ident::<Canonical>::new("pop[nyc]"),
+                Ident::<Canonical>::new("pop[boston]"),
+            ],
+            polarity: LoopPolarity::Reinforcing,
+            dimensions: vec!["region".to_string()],
+            slot_links: vec![],
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert(ls_name("pop", "births"));
+        emitted.insert(ls_name("births", "pop"));
+        let dims = vec![dm_named_dimension("region", &["nyc", "boston"])];
+
+        let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &dims);
+        assert_eq!(vars.len(), 1);
+        let (_, equation) = &vars[0];
+        match equation {
+            Equation::ApplyToAll(eq_dims, text) => {
+                assert_eq!(eq_dims, &vec!["region".to_string()]);
+                assert_eq!(
+                    text,
+                    &format!(
+                        "\"{}\" * \"{}\"",
+                        ls_name("pop", "births"),
+                        ls_name("births", "pop")
+                    ),
+                    "Bare-A2A loop score must keep the compact ApplyToAll product form"
+                );
+            }
+            other => panic!("Bare-A2A loop must yield Equation::ApplyToAll; got: {other:?}"),
+        }
+    }
+
+    /// A dimensioned loop backed by per-element circuits (`slot_links`)
+    /// produces an `Equation::Arrayed` whose slot equations reference each
+    /// element's own per-element link-score names: the FixedIndex form
+    /// (`heat[det]→temp`, an arrayed var) is referenced subscripted at the
+    /// slot's element, and the per-target-element scalar form
+    /// (`pressure→production[det]`) is referenced bare.
+    #[test]
+    fn loop_score_variables_slot_links_yield_arrayed_per_slot_equations() {
+        use crate::ltm::{Loop, LoopPolarity};
+
+        // Two-element scenario dimension; per-element circuits reference
+        // FixedIndex link scores (the C-LEARN / MDL-importer shape).
+        let slot_links = vec![
+            (
+                "det".to_string(),
+                vec![
+                    make_link("heat[det]", "temp[det]"),
+                    make_link("temp[det]", "heat[det]"),
+                ],
+            ),
+            (
+                "low".to_string(),
+                vec![
+                    make_link("heat[low]", "temp[low]"),
+                    make_link("temp[low]", "heat[low]"),
+                ],
+            ),
+        ];
+        let loop_item = Loop {
+            id: "pin1".to_string(),
+            links: vec![make_link("heat", "temp"), make_link("temp", "heat")],
+            stocks: vec![
+                Ident::<Canonical>::new("heat[det]"),
+                Ident::<Canonical>::new("heat[low]"),
+            ],
+            polarity: LoopPolarity::Balancing,
+            dimensions: vec!["scenario".to_string()],
+            slot_links,
+        };
+        // The emitted link scores are the per-element FixedIndex forms (each
+        // an arrayed var over [scenario]); the Bare names do NOT exist.
+        let mut emitted = HashSet::new();
+        emitted.insert(ls_name("heat[det]", "temp"));
+        emitted.insert(ls_name("heat[low]", "temp"));
+        emitted.insert(ls_name("temp[det]", "heat"));
+        emitted.insert(ls_name("temp[low]", "heat"));
+        let dims = vec![dm_named_dimension("scenario", &["det", "low"])];
+
+        let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &dims);
+        assert_eq!(vars.len(), 1);
+        let (name, equation) = &vars[0];
+        assert_eq!(name, "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1");
+        match equation {
+            Equation::Arrayed(eq_dims, elements, default, _) => {
+                assert_eq!(eq_dims, &vec!["scenario".to_string()]);
+                assert!(default.is_none());
+                assert_eq!(
+                    elements.len(),
+                    2,
+                    "one slot equation per scenario element; got: {elements:?}"
+                );
+                // Slot order follows the dimension's declared element order.
+                assert_eq!(elements[0].0, "det");
+                assert_eq!(elements[1].0, "low");
+                // The det slot references det's FixedIndex link scores
+                // subscripted at det (they are arrayed vars), and must not
+                // reference low's.
+                let det_eq = &elements[0].1;
+                assert!(
+                    det_eq.contains(&format!("\"{}\"[det]", ls_name("heat[det]", "temp"))),
+                    "det slot must reference heat[det]→temp subscripted at [det]; got: {det_eq}"
+                );
+                assert!(
+                    !det_eq.contains("low"),
+                    "det slot must not reference the low element's link scores; got: {det_eq}"
+                );
+                let low_eq = &elements[1].1;
+                assert!(
+                    low_eq.contains(&format!("\"{}\"[low]", ls_name("heat[low]", "temp"))),
+                    "low slot must reference heat[low]→temp subscripted at [low]; got: {low_eq}"
+                );
+            }
+            other => panic!("slot_links loop must yield Equation::Arrayed; got: {other:?}"),
+        }
+    }
+
+    /// A dimension element with no backing circuit (a structurally absent
+    /// per-element instance) gets a constant-0 slot equation so the Arrayed
+    /// equation stays total over the dimension's element space.
+    #[test]
+    fn loop_score_variables_missing_slot_scores_zero() {
+        use crate::ltm::{Loop, LoopPolarity};
+
+        let slot_links = vec![(
+            "det".to_string(),
+            vec![
+                make_link("heat[det]", "temp[det]"),
+                make_link("temp[det]", "heat[det]"),
+            ],
+        )];
+        let loop_item = Loop {
+            id: "pin1".to_string(),
+            links: vec![make_link("heat", "temp"), make_link("temp", "heat")],
+            stocks: vec![Ident::<Canonical>::new("heat[det]")],
+            polarity: LoopPolarity::Balancing,
+            dimensions: vec!["scenario".to_string()],
+            slot_links,
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert(ls_name("heat[det]", "temp"));
+        emitted.insert(ls_name("temp[det]", "heat"));
+        // Three declared elements; only `det` has a circuit.
+        let dims = vec![dm_named_dimension("scenario", &["det", "low", "high"])];
+
+        let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &dims);
+        let (_, equation) = &vars[0];
+        match equation {
+            Equation::Arrayed(_, elements, _, _) => {
+                assert_eq!(elements.len(), 3, "every declared element gets a slot");
+                let by_elem: std::collections::HashMap<&str, &str> = elements
+                    .iter()
+                    .map(|(e, eq, _, _)| (e.as_str(), eq.as_str()))
+                    .collect();
+                assert!(by_elem["det"].contains("link_score"));
+                assert_eq!(
+                    by_elem["low"], "0",
+                    "a slot with no backing circuit must score a constant 0"
+                );
+                assert_eq!(by_elem["high"], "0");
+            }
+            other => panic!("expected Equation::Arrayed; got: {other:?}"),
+        }
+    }
+
+    /// Multi-dimensional slot tuples: a loop over `[region, age]` keys its
+    /// slots by the comma-joined element tuple, in row-major declared order.
+    #[test]
+    fn loop_score_variables_multi_dim_slot_tuples() {
+        use crate::ltm::{Loop, LoopPolarity};
+
+        let slot_links = vec![
+            (
+                "nyc,young".to_string(),
+                vec![
+                    make_link("pop[nyc,young]", "births[nyc,young]"),
+                    make_link("births[nyc,young]", "pop[nyc,young]"),
+                ],
+            ),
+            (
+                "boston,old".to_string(),
+                vec![
+                    make_link("pop[boston,old]", "births[boston,old]"),
+                    make_link("births[boston,old]", "pop[boston,old]"),
+                ],
+            ),
+        ];
+        let loop_item = Loop {
+            id: "pin1".to_string(),
+            links: vec![make_link("pop", "births"), make_link("births", "pop")],
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+            dimensions: vec!["region".to_string(), "age".to_string()],
+            slot_links,
+        };
+        let mut emitted = HashSet::new();
+        emitted.insert(ls_name("pop[nyc,young]", "births"));
+        emitted.insert(ls_name("births[nyc,young]", "pop"));
+        emitted.insert(ls_name("pop[boston,old]", "births"));
+        emitted.insert(ls_name("births[boston,old]", "pop"));
+        let dims = vec![
+            dm_named_dimension("region", &["nyc", "boston"]),
+            dm_named_dimension("age", &["young", "old"]),
+        ];
+
+        let vars = generate_loop_score_variables(std::slice::from_ref(&loop_item), &emitted, &dims);
+        let (_, equation) = &vars[0];
+        match equation {
+            Equation::Arrayed(_, elements, _, _) => {
+                // Row-major over declared order: nyc,young / nyc,old /
+                // boston,young / boston,old.
+                let keys: Vec<&str> = elements.iter().map(|(e, _, _, _)| e.as_str()).collect();
+                assert_eq!(
+                    keys,
+                    vec!["nyc,young", "nyc,old", "boston,young", "boston,old"]
+                );
+                let by_elem: std::collections::HashMap<&str, &str> = elements
+                    .iter()
+                    .map(|(e, eq, _, _)| (e.as_str(), eq.as_str()))
+                    .collect();
+                assert!(by_elem["nyc,young"].contains("link_score"));
+                assert_eq!(by_elem["nyc,old"], "0");
+                assert_eq!(by_elem["boston,young"], "0");
+                assert!(by_elem["boston,old"].contains("link_score"));
+            }
+            other => panic!("expected Equation::Arrayed; got: {other:?}"),
+        }
     }
 }

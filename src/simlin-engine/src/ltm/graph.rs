@@ -214,6 +214,7 @@ impl CausalGraph {
                     stocks,
                     polarity,
                     dimensions: vec![],
+                    slot_links: vec![],
                 });
             }
         }
@@ -801,6 +802,7 @@ impl CausalGraph {
             stocks,
             polarity,
             dimensions: vec![],
+            slot_links: vec![],
         }
     }
 

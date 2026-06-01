@@ -68,7 +68,7 @@ use link_scores::{
     emit_agg_to_target_link_scores, emit_link_scores_for_edge, emit_source_to_agg_link_scores,
 };
 use loops::{cross_agg_loop_budget, find_model_output_ports, recover_agg_hop_polarities};
-use parse::{ltm_synthetic_equation, parse_ltm_equation};
+use parse::parse_ltm_equation;
 
 /// The model's full variable-name set, for the LTM equation parse path.
 ///
@@ -856,30 +856,17 @@ pub fn model_ltm_variables(
             .collect();
         let loop_vars = crate::ltm_augment::generate_loop_score_variables(
             detected_loops,
-            &partitions,
             &emitted_link_score_names,
+            dm_dims,
         );
-        for (name, var) in loop_vars {
-            let equation_text = match var.get_equation() {
-                Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),
-                _ => String::new(),
-            };
-            // Carry forward dimensions from the Loop struct for A2A loops.
-            let loop_item = detected_loops
-                .iter()
-                .find(|l| name.as_str().ends_with(&l.id));
-            let dimensions = loop_item
-                .and_then(|l| {
-                    if l.dimensions.is_empty() {
-                        None
-                    } else {
-                        Some(l.dimensions.clone())
-                    }
-                })
-                .unwrap_or_default();
+        for (name, equation) in loop_vars {
+            // The equation carries its own dimension shape (Scalar /
+            // ApplyToAll / Arrayed); mirror it onto the layout-sizing
+            // `dimensions` field.
+            let dimensions = parse::ltm_equation_dimensions(&equation).to_vec();
             vars.push(LtmSyntheticVar {
-                name: name.to_string(),
-                equation: ltm_synthetic_equation(equation_text, &dimensions),
+                name,
+                equation,
                 dimensions,
                 // Loop scores aren't link scores; `assemble_module` compiles
                 // them directly via the non-link-score branch already.
@@ -987,33 +974,25 @@ pub fn model_ltm_variables(
 
             // Emit the pinned loop_score var. The equation is the product of
             // the cycle's link scores, resolved against the names emitted so
-            // far -- identical machinery to enumerated loops.
+            // far -- identical machinery to enumerated loops, including the
+            // dimension shaping (a dimensioned pin yields an ApplyToAll /
+            // Arrayed equation exactly like an enumerated A2A loop).
             let emitted_link_score_names: HashSet<String> = vars
                 .iter()
                 .filter(|v| v.name.contains("\u{205A}link_score\u{205A}"))
                 .map(|v| v.name.clone())
                 .collect();
-            // `generate_loop_score_variables` no longer reads `partitions`
-            // for emission (only the call-site precomputed data signature
-            // keeps the argument), so an empty partition set is fine here.
-            let empty_partitions = CyclePartitions {
-                partitions: vec![],
-                stock_partition: HashMap::new(),
-            };
             let pin_loop_vars = crate::ltm_augment::generate_loop_score_variables(
                 std::slice::from_ref(&pin.loop_),
-                &empty_partitions,
                 &emitted_link_score_names,
+                dm_dims,
             );
-            for (lname, var) in pin_loop_vars {
-                let equation_text = match var.get_equation() {
-                    Some(crate::datamodel::Equation::Scalar(eq)) => eq.clone(),
-                    _ => String::new(),
-                };
+            for (lname, equation) in pin_loop_vars {
+                let dimensions = parse::ltm_equation_dimensions(&equation).to_vec();
                 vars.push(LtmSyntheticVar {
-                    name: lname.to_string(),
-                    equation: ltm_synthetic_equation(equation_text, &[]),
-                    dimensions: vec![],
+                    name: lname,
+                    equation,
+                    dimensions,
                     compile_directly: false,
                 });
             }

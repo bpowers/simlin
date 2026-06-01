@@ -193,9 +193,10 @@ fn series_decoupled_stocks_matches_vm() {
 ///
 /// The dimensions check is sourced from the salsa-tracked
 /// `LtmVariablesResult.vars`, the same surface that drives slot allocation
-/// for arrayed LTM vars (`ltm_synthetic_equation` over a non-empty `dims`
-/// produces an `ApplyToAll`, which `assemble_module` lays out as N
-/// contiguous slots), so this is exactly the authoritative shape signal.
+/// for arrayed LTM vars (a loop-score `Equation` over a non-empty `dims`
+/// list -- `ApplyToAll` or per-slot `Arrayed` -- is laid out by
+/// `assemble_module` as N contiguous slots), so this is exactly the
+/// authoritative shape signal.
 fn assert_ltm_series_match_arrayed(model_rel_path: &str) {
     let project = load(model_rel_path);
     let vm = vm_results_for_ltm(&project, "main");

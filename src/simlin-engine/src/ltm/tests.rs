@@ -323,6 +323,7 @@ fn test_format_path_empty_loop() {
         stocks: vec![],
         polarity: LoopPolarity::Reinforcing,
         dimensions: vec![],
+        slot_links: vec![],
     };
 
     let path = loop_item.format_path();
@@ -2118,6 +2119,7 @@ fn test_loop_id_assignment_undetermined_polarity() {
             stocks: vec![],
             polarity: LoopPolarity::Undetermined,
             dimensions: vec![],
+            slot_links: vec![],
         },
         Loop {
             id: String::new(),
@@ -2136,6 +2138,7 @@ fn test_loop_id_assignment_undetermined_polarity() {
             stocks: vec![],
             polarity: LoopPolarity::Reinforcing,
             dimensions: vec![],
+            slot_links: vec![],
         },
     ];
 
@@ -3127,6 +3130,7 @@ fn test_partition_for_loop_scalar_singleton() {
         stocks: vec![Ident::new("stock_a")],
         polarity: LoopPolarity::Reinforcing,
         dimensions: vec![],
+        slot_links: vec![],
     };
     assert_eq!(
         partitions.partition_for_loop(&loop_item, &[]),
@@ -3146,6 +3150,7 @@ fn test_partition_for_loop_cross_element_singleton() {
         stocks: vec![Ident::new("pop[nyc]"), Ident::new("pop[boston]")],
         polarity: LoopPolarity::Reinforcing,
         dimensions: vec![],
+        slot_links: vec![],
     };
     assert_eq!(
         partitions.partition_for_loop(&loop_item, &[]),
@@ -3164,6 +3169,7 @@ fn test_partition_for_loop_below_parent_graph_is_none() {
         stocks: vec![Ident::new("smooth·smoothed")],
         polarity: LoopPolarity::Undetermined,
         dimensions: vec![],
+        slot_links: vec![],
     };
     assert_eq!(partitions.partition_for_loop(&loop_item, &[]), vec![None]);
 }
@@ -3189,6 +3195,7 @@ fn test_partition_for_loop_a2a_uncoupled_distinct_partitions() {
         ],
         polarity: LoopPolarity::Reinforcing,
         dimensions: vec!["Region".to_string()],
+        slot_links: vec![],
     };
     // Row-major over the dimension's *declared* order (NYC, Boston, LA),
     // which is NOT lexical (Boston < LA < NYC) -- so this also pins that
@@ -3220,6 +3227,7 @@ fn test_partition_for_loop_a2a_coupled_partitions_coincide() {
         ],
         polarity: LoopPolarity::Reinforcing,
         dimensions: vec!["Region".to_string()],
+        slot_links: vec![],
     };
     assert_eq!(
         partitions.partition_for_loop(&loop_item, &dims),
@@ -3259,6 +3267,7 @@ fn test_partition_for_loop_a2a_two_dim_row_major() {
         ],
         polarity: LoopPolarity::Reinforcing,
         dimensions: vec!["Region".to_string(), "Age".to_string()],
+        slot_links: vec![],
     };
     assert_eq!(
         partitions.partition_for_loop(&loop_item, &dims),
@@ -3279,6 +3288,7 @@ fn test_partition_for_loop_a2a_indexed_dimension() {
         stocks: vec![Ident::new("q[1]"), Ident::new("q[2]"), Ident::new("q[3]")],
         polarity: LoopPolarity::Balancing,
         dimensions: vec!["Periods".to_string()],
+        slot_links: vec![],
     };
     assert_eq!(
         partitions.partition_for_loop(&loop_item, &dims),
@@ -3299,6 +3309,7 @@ fn test_partition_for_loop_a2a_unresolved_dim_falls_back_to_present_suffixes() {
         stocks: vec![Ident::new("pop[nyc]"), Ident::new("pop[boston]")],
         polarity: LoopPolarity::Reinforcing,
         dimensions: vec!["Region".to_string()],
+        slot_links: vec![],
     };
     // No `Region` in `dims` -> fall back to sorted suffixes: "boston" < "nyc".
     assert_eq!(

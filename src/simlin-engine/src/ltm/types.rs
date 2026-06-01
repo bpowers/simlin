@@ -119,6 +119,28 @@ pub struct Loop {
     pub polarity: LoopPolarity,
     /// Dimension names for A2A loop scores. Empty for scalar or mixed loops.
     pub dimensions: Vec<String>,
+    /// Per-slot element-subscripted link cycles for a dimensioned loop whose
+    /// underlying element circuits reference *per-element* link-score names
+    /// (FixedIndex `from[e]→to`, per-target-element `from→to[e]`) rather than
+    /// a single Bare A2A name per edge.
+    ///
+    /// Each entry is `(element_tuple, links)` where `element_tuple` is the
+    /// comma-joined canonical element names of the slot (matching
+    /// [`crate::ltm::loop_dimension_element_tuples`]'s tuple format) and
+    /// `links` is that slot's element-subscripted link cycle (the same
+    /// `Link.from` / `Link.to` subscript conventions cross-element loops use).
+    /// The loop-score generator emits an `Equation::Arrayed` whose slot
+    /// equations are built from these links; element tuples of the loop's
+    /// dimension space with no entry here score a constant 0 (a structurally
+    /// absent per-element instance).
+    ///
+    /// Empty when the loop's links resolve uniformly through Bare A2A
+    /// link-score names (the compact `Equation::ApplyToAll` form is used) or
+    /// when the loop is scalar (`dimensions` empty). Only dimensioned loops
+    /// built from per-element circuits (the enumerator's A2A-collapse on
+    /// per-element-equation models, and dimensioned pinned loops -- GH #653)
+    /// populate it.
+    pub slot_links: Vec<(String, Vec<Link>)>,
 }
 
 impl Loop {
