@@ -117,3 +117,87 @@ class TestPinnedLoopInDiscoveryMode:
             assert series.size > 0
             assert np.all(np.isfinite(series))
             assert sim.get_loop_element_count("pin1") == 1
+
+
+def _arrayed_pin_in_discovery_model(arrayed_population_ltm_path) -> simlin.Model:
+    """Load the arrayed population model, force discovery mode, and pin the
+    arrayed births loop.
+
+    The arrayed population model (`population[Region]` with births/deaths over
+    NYC/Boston/LA) is small enough that LTM would enumerate it exhaustively, so
+    a 60-stock scalar ring is patched in to trip the SCC auto-flip gate -- in
+    discovery mode the pinned loop is the only loop scored at all (GH #653's
+    headline scenario).
+    """
+    model = simlin.load(arrayed_population_ltm_path)
+    with model.edit() as (_current, patch):
+        ring = 60
+        for i in range(ring):
+            nxt = (i + 1) % ring
+            patch.upsert_flow(Flow(name=f"f{i}", equation=f"ring_{nxt} * 0.001"))
+            patch.upsert_stock(
+                Stock(name=f"ring_{i}", initial_equation="10", inflows=[f"f{i}"], outflows=[])
+            )
+        # Pin the arrayed births loop (population -> births -> population, all
+        # variables A2A over Region).
+        patch.set_loop_name("regional growth", ["population", "births"])
+    return model
+
+
+class TestArrayedPinnedLoop:
+    """GH #653: a pinned loop over arrayed variables is scored per element."""
+
+    def test_arrayed_pin_scored_per_element(self, arrayed_population_ltm_path) -> None:
+        model = _arrayed_pin_in_discovery_model(arrayed_population_ltm_path)
+
+        with model.simulate(enable_ltm=True) as sim:
+            sim.run_to_end()
+            assert str(sim.get_ltm_mode()) == "discovery"
+
+            # The arrayed pin occupies one slot per Region element.
+            assert sim.get_loop_element_count("pin1") == 3
+
+            # Per-element relative scores: NYC and Boston are growing (births
+            # rate exceeds deaths rate), and the pin is the only scored loop in
+            # their partitions, so their relative score is +1 once active. LA
+            # sits at equilibrium (birth_rate == death_rate == 0.01), so every
+            # link score -- and therefore the loop score -- is 0 there.
+            for element, expect_active in [("NYC", True), ("Boston", True), ("LA", False)]:
+                series = sim.get_relative_loop_score("pin1", element=element)
+                assert series.size > 0, f"pin1[{element}] must have a score series"
+                assert np.all(np.isfinite(series)), f"pin1[{element}] must be finite"
+                nonzero = series[series != 0.0]
+                if expect_active:
+                    assert nonzero.size > 0, f"pin1[{element}] should be active"
+                    assert np.allclose(np.abs(nonzero), 1.0), (
+                        f"pin1[{element}] is the only scored loop in its partition, so its "
+                        f"relative score is +/-1 while active; got {nonzero[:5]}"
+                    )
+                else:
+                    assert nonzero.size == 0, (
+                        f"pin1[{element}] is at equilibrium (births == deaths) and must "
+                        f"score 0 at every step; got {nonzero[:5]}"
+                    )
+
+            # The unsubscripted form returns the argmax-abs aggregate across
+            # the pin's element slots.
+            by_name = sim.get_relative_loop_score("pin1", element="NYC")
+            aggregate = sim.get_relative_loop_score("pin1")
+            assert aggregate.size == by_name.size
+            assert np.all(np.isfinite(aggregate))
+
+    def test_arrayed_pin_surfaces_in_run_loops(self, arrayed_population_ltm_path) -> None:
+        model = _arrayed_pin_in_discovery_model(arrayed_population_ltm_path)
+        run = model.run(analyze_loops=True)
+
+        assert run.ltm_mode == "discovery"
+        loop_ids = {loop.id for loop in run.loops}
+        assert "pin1" in loop_ids, f"the arrayed pin must surface in run.loops; got {loop_ids}"
+
+        pin_loop = next(loop for loop in run.loops if loop.id == "pin1")
+        # The behavior series (the argmax-abs aggregate across element slots
+        # for an arrayed loop) is present and finite.
+        assert pin_loop.behavior_time_series is not None
+        assert np.all(np.isfinite(pin_loop.behavior_time_series))
+        nonzero = pin_loop.behavior_time_series[pin_loop.behavior_time_series != 0.0]
+        assert nonzero.size > 0, "the arrayed pin should have non-zero behavior"

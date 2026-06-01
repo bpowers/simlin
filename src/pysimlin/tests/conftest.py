@@ -102,3 +102,9 @@ def subscripted_model_path() -> Path:
 def cross_element_ltm_path() -> Path:
     """Return path to a model whose arrayed variables use per-element equations."""
     return get_repo_root() / "test" / "cross_element_ltm" / "cross_element.stmx"
+
+
+@pytest.fixture
+def arrayed_population_ltm_path() -> Path:
+    """Return path to the arrayed (apply-to-all) population LTM model."""
+    return get_repo_root() / "test" / "arrayed_population_ltm" / "arrayed_population.stmx"
