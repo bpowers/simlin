@@ -12,7 +12,7 @@
 use crate::ast::{Expr0, IndexExpr0, print_eqn};
 use crate::builtins::UntypedBuiltinFn;
 use crate::canonicalize;
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, RawIdent};
 use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
 use crate::ltm::{
@@ -415,6 +415,14 @@ fn expr0_contains_live_match(
 /// per-element / per-slice expression rather than the (possibly
 /// multi-dimensional) bare `live_source`, which would be a dimension error
 /// in a scalar link-score equation. Pass `&mut None` to ignore it.
+///
+/// `dims_ctx` is the project-wide dimensions context used by
+/// [`qualify_element_index`] to recognize (and qualify) subscript indices
+/// that name dimension elements -- so they are never PREVIOUS-wrapped as if
+/// they were causal references (GH #587). `None` (test-only callers, or
+/// paths without project dims in scope) disables qualification, keeping the
+/// conservative wrapping behavior.
+#[allow(clippy::too_many_arguments)]
 fn wrap_non_matching_in_previous(
     expr: Expr0,
     live_source: &Ident<Canonical>,
@@ -422,6 +430,7 @@ fn wrap_non_matching_in_previous(
     other_deps: &HashSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
     live_ref: &mut Option<Expr0>,
 ) -> Expr0 {
     match expr {
@@ -469,6 +478,7 @@ fn wrap_non_matching_in_previous(
                         other_deps,
                         source_dim_elements,
                         iter_ctx,
+                        dims_ctx,
                         live_ref,
                     );
                 }
@@ -482,6 +492,7 @@ fn wrap_non_matching_in_previous(
                     other_deps,
                     source_dim_elements,
                     iter_ctx,
+                    dims_ctx,
                     live_ref,
                 );
             }
@@ -530,6 +541,7 @@ fn wrap_non_matching_in_previous(
                                 other_deps,
                                 source_dim_elements,
                                 iter_ctx,
+                                dims_ctx,
                             )
                         }
                     })
@@ -554,6 +566,7 @@ fn wrap_non_matching_in_previous(
                         other_deps,
                         source_dim_elements,
                         iter_ctx,
+                        dims_ctx,
                     )
                 })
                 .collect();
@@ -606,6 +619,7 @@ fn wrap_non_matching_in_previous(
                         other_deps,
                         source_dim_elements,
                         iter_ctx,
+                        dims_ctx,
                         live_ref,
                     )
                 })
@@ -621,6 +635,7 @@ fn wrap_non_matching_in_previous(
                 other_deps,
                 source_dim_elements,
                 iter_ctx,
+                dims_ctx,
                 live_ref,
             )),
             loc,
@@ -634,6 +649,7 @@ fn wrap_non_matching_in_previous(
                 other_deps,
                 source_dim_elements,
                 iter_ctx,
+                dims_ctx,
                 live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
@@ -643,6 +659,7 @@ fn wrap_non_matching_in_previous(
                 other_deps,
                 source_dim_elements,
                 iter_ctx,
+                dims_ctx,
                 live_ref,
             )),
             loc,
@@ -655,6 +672,7 @@ fn wrap_non_matching_in_previous(
                 other_deps,
                 source_dim_elements,
                 iter_ctx,
+                dims_ctx,
                 live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
@@ -664,6 +682,7 @@ fn wrap_non_matching_in_previous(
                 other_deps,
                 source_dim_elements,
                 iter_ctx,
+                dims_ctx,
                 live_ref,
             )),
             Box::new(wrap_non_matching_in_previous(
@@ -673,11 +692,56 @@ fn wrap_non_matching_in_previous(
                 other_deps,
                 source_dim_elements,
                 iter_ctx,
+                dims_ctx,
                 live_ref,
             )),
             loc,
         ),
     }
+}
+
+/// If `index` is a bare identifier that unambiguously names a dimension
+/// element (per `dims_ctx`), return its qualified `dimension·element` form;
+/// otherwise `None`.
+///
+/// Subscript indices that name dimension elements are *element selectors*,
+/// not causal references. Treating them like variable references and
+/// PREVIOUS-wrapping them (the pre-GH#587 behavior) turns a statically
+/// resolvable index into a dynamic expression: the resulting
+/// `dep[PREVIOUS(elem)]` needs a helper-aux chain whose innermost helper
+/// (`$arg = elem`, a bare element name as an equation) cannot compile, so the
+/// link score silently stubs to zero. Qualifying instead keeps the index a
+/// compile-time constant: it can never be confused with a variable reference
+/// (XMILE forbids dimension/variable name collisions, so `dim·elem` is
+/// unambiguous), and `PREVIOUS(dep[dim·elem])` compiles to a direct LoadPrev
+/// at the element's slot.
+///
+/// Qualification requires knowing *which* dimension the element belongs to.
+/// The wrapper does not know the subscripted variable's declared dimensions,
+/// so it only qualifies names that exactly one project dimension declares
+/// (`dimension_uniquely_containing_element`); names shared by multiple
+/// dimensions -- or shadowed cases the caller cannot distinguish -- keep the
+/// conservative wrapping behavior.
+fn qualify_element_index(
+    index: &IndexExpr0,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+) -> Option<IndexExpr0> {
+    let ctx = dims_ctx?;
+    let IndexExpr0::Expr(Expr0::Var(name, loc)) = index else {
+        return None;
+    };
+    let canonical = canonicalize(name.as_str());
+    // Already-qualified `dim·element` references resolve via `lookup`; keep
+    // them verbatim (they are already static).
+    if ctx.lookup(&canonical).is_some() {
+        return Some(index.clone());
+    }
+    let elem = crate::common::CanonicalElementName::from_raw(&canonical);
+    let dim_name = ctx.dimension_uniquely_containing_element(&elem)?;
+    Some(IndexExpr0::Expr(Expr0::Var(
+        RawIdent::new_from_str(&format!("{}\u{B7}{}", dim_name.as_str(), canonical)),
+        *loc,
+    )))
 }
 
 fn wrap_index_non_matching_in_previous(
@@ -687,7 +751,15 @@ fn wrap_index_non_matching_in_previous(
     other_deps: &HashSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> IndexExpr0 {
+    // An index that unambiguously names a dimension element is an element
+    // selector, never a causal reference: qualify it and leave it unwrapped
+    // (GH #587). This must be checked BEFORE the recursive wrap below, which
+    // would otherwise treat the element name as a dep reference.
+    if let Some(qualified) = qualify_element_index(&index, dims_ctx) {
+        return qualified;
+    }
     // Indices are inner content of a live reference (or of a
     // PREVIOUS-wrapped one); a `live_source` occurrence reachable only
     // through an index is not the live reference itself, so do not
@@ -700,6 +772,7 @@ fn wrap_index_non_matching_in_previous(
             other_deps,
             source_dim_elements,
             iter_ctx,
+            dims_ctx,
             &mut None,
         )),
         IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
@@ -710,6 +783,7 @@ fn wrap_index_non_matching_in_previous(
                 other_deps,
                 source_dim_elements,
                 iter_ctx,
+                dims_ctx,
                 &mut None,
             ),
             wrap_non_matching_in_previous(
@@ -719,6 +793,7 @@ fn wrap_index_non_matching_in_previous(
                 other_deps,
                 source_dim_elements,
                 iter_ctx,
+                dims_ctx,
                 &mut None,
             ),
             loc,
@@ -746,6 +821,7 @@ fn wrap_index_non_matching_in_previous(
 /// iterated dims + the source's declared dim names + a `DimensionsContext`);
 /// pass `None` when the live source is scalar (no source subscripts to
 /// recognize). See [`wrap_non_matching_in_previous`] and [`IteratedDimCtx`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_partial_equation_shaped(
     equation_text: &str,
     deps: &HashSet<Ident<Canonical>>,
@@ -753,6 +829,7 @@ pub(crate) fn build_partial_equation_shaped(
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> String {
     build_partial_equation_shaped_with_live_ref(
         equation_text,
@@ -761,6 +838,7 @@ pub(crate) fn build_partial_equation_shaped(
         live_shape,
         source_dim_elements,
         iter_ctx,
+        dims_ctx,
     )
     .0
 }
@@ -782,6 +860,7 @@ pub(crate) fn build_partial_equation_shaped(
 /// Returns `None` for the second element when the equation fails to parse
 /// (the partial then degrades to the lowercased input) or contains no
 /// left-live `live_source` occurrence at all.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_partial_equation_shaped_with_live_ref(
     equation_text: &str,
     deps: &HashSet<Ident<Canonical>>,
@@ -789,6 +868,7 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> (String, Option<Expr0>) {
     let other_deps: HashSet<Ident<Canonical>> = deps
         .iter()
@@ -808,6 +888,7 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
         &other_deps,
         source_dim_elements,
         iter_ctx,
+        dims_ctx,
         &mut live_ref,
     );
     (print_eqn(&transformed), live_ref)
@@ -937,6 +1018,7 @@ fn subscript_idents_in_expr0(
 /// indexes the same agg slot the link-score name and the (subscripted-in-the-
 /// partial) numerator do; a bare agg reference in a scalar equation would not
 /// compile and the link score would stub to zero.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_scalar_to_element_equation(
     from: &str,
     to: &str,
@@ -945,6 +1027,7 @@ pub(crate) fn generate_scalar_to_element_equation(
     to_deps: &HashSet<Ident<Canonical>>,
     to_deps_to_subscript: &HashSet<Ident<Canonical>>,
     source_ref_override: Option<&str>,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> String {
     let from_canonical = Ident::new(from);
     let from_q = quote_ident(from);
@@ -962,6 +1045,7 @@ pub(crate) fn generate_scalar_to_element_equation(
         &RefShape::Bare,
         &[],
         None,
+        dims_ctx,
     );
     let partial = subscript_idents_at_element(&partial, to_deps_to_subscript, element);
     let source_ref = source_ref_override.unwrap_or(&from_q);
@@ -983,6 +1067,7 @@ pub(crate) fn generate_agg_to_scalar_target_equation(
     to_name: &str,
     to_eqn_text: &str,
     to_deps: &HashSet<Ident<Canonical>>,
+    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
 ) -> String {
     let agg_canonical = Ident::new(agg_name);
     let agg_q = quote_ident(agg_name);
@@ -995,6 +1080,7 @@ pub(crate) fn generate_agg_to_scalar_target_equation(
         &RefShape::Bare,
         &[],
         None,
+        dims_ctx,
     );
     link_score_guard_form(&partial, &to_q, &agg_q)
 }
@@ -1527,8 +1613,15 @@ fn build_arrayed_link_score_equation(
             shape,
             source_dim_elements,
             Some(&iter_ctx),
+            dim_ctx,
         );
-        let source_ref = source_ref_for_guard(from, shape, live_ref.as_ref());
+        let source_ref = source_ref_for_guard(
+            from,
+            shape,
+            live_ref.as_ref(),
+            source_dim_names,
+            source_dim_elements,
+        );
         link_score_guard_form(&partial_e, target_ref, &source_ref)
     };
 
@@ -1666,9 +1759,16 @@ fn generate_auxiliary_to_auxiliary_equation(
         shape,
         source_dim_elements,
         Some(&iter_ctx),
+        dim_ctx,
     );
 
-    let from_source_q = source_ref_for_guard(from, shape, live_ref.as_ref());
+    let from_source_q = source_ref_for_guard(
+        from,
+        shape,
+        live_ref.as_ref(),
+        source_dim_names,
+        source_dim_elements,
+    );
 
     let text = link_score_guard_form(&partial_eq, &to_q, &from_source_q);
     link_score_equation_for_target(text, to_var)
@@ -1695,9 +1795,13 @@ fn source_ref_for_guard(
     from: &Ident<Canonical>,
     shape: &RefShape,
     live_ref: Option<&Expr0>,
+    source_dim_names: &[String],
+    source_dim_elements: &[Vec<String>],
 ) -> String {
     match shape {
-        RefShape::Bare | RefShape::FixedIndex(_) => shape_aware_source_ref(from.as_str(), shape),
+        RefShape::Bare | RefShape::FixedIndex(_) => {
+            shape_aware_source_ref(from.as_str(), shape, source_dim_names, source_dim_elements)
+        }
         RefShape::Wildcard | RefShape::DynamicIndex => match live_ref {
             Some(r) => format!("SUM({})", print_eqn(r)),
             None => format!("SUM({})", quote_ident(from.as_str())),
@@ -1730,14 +1834,47 @@ fn source_ref_for_guard(
 /// by Δagg; the conservative-slice and bare-dynamic-index cases that
 /// `enumerate_agg_nodes` does not hoist are what `source_ref_for_guard`
 /// handles.)
-fn shape_aware_source_ref(from: &str, shape: &RefShape) -> String {
+fn shape_aware_source_ref(
+    from: &str,
+    shape: &RefShape,
+    source_dim_names: &[String],
+    source_dim_elements: &[Vec<String>],
+) -> String {
     match shape {
         RefShape::FixedIndex(elems) if !elems.is_empty() => {
             // Subscript syntax, NOT quote_ident: a literal `pop[nyc]`
             // parses as a Subscript node (per-element reference), while
             // `"pop[nyc]"` would parse as a quoted ident referring to
             // a synthetic variable that doesn't exist.
-            format!("{}[{}]", quote_ident(from), elems.join(","))
+            //
+            // Each element is qualified with its positional dimension name
+            // (`pop[region\u{B7}nyc]`) when it verifiably belongs to that
+            // dimension, so the guard form's PREVIOUS-wrapped occurrence of
+            // this reference resolves to a static slot (a direct LoadPrev)
+            // instead of forcing a synthesized helper aux per occurrence.
+            // Numeric elements (indexed dims) are already static; elements
+            // that don't match their positional dimension fall back to the
+            // bare form (defensive -- never change what the reference
+            // resolves to).
+            let qualified: Vec<String> = elems
+                .iter()
+                .enumerate()
+                .map(|(i, elem)| {
+                    if elem.parse::<u32>().is_ok() {
+                        return elem.clone();
+                    }
+                    let in_positional_dim = source_dim_elements
+                        .get(i)
+                        .is_some_and(|dim_elems| dim_elems.iter().any(|e| e == elem));
+                    match (in_positional_dim, source_dim_names.get(i)) {
+                        (true, Some(dim_name)) => {
+                            format!("{}\u{B7}{}", canonicalize(dim_name), elem)
+                        }
+                        _ => elem.clone(),
+                    }
+                })
+                .collect();
+            format!("{}[{}]", quote_ident(from), qualified.join(","))
         }
         _ => quote_ident(from),
     }
@@ -1906,6 +2043,7 @@ fn generate_stock_to_flow_equation(
         shape,
         source_dim_elements,
         Some(&iter_ctx),
+        dim_ctx,
     );
 
     // Link score formula from LTM paper: |Δxz/Δz| × sign(Δxz/Δx)
@@ -1915,7 +2053,13 @@ fn generate_stock_to_flow_equation(
     // DynamicIndex source slice is scalarized (`SUM(stock[PREVIOUS(idx)])`)
     // because bare arrayed `stock` in a scalar equation is a dimension
     // error -- see `source_ref_for_guard`.
-    let stock_source_q = source_ref_for_guard(stock, shape, live_ref.as_ref());
+    let stock_source_q = source_ref_for_guard(
+        stock,
+        shape,
+        live_ref.as_ref(),
+        source_dim_names,
+        source_dim_elements,
+    );
     let text = link_score_guard_form(&partial_eq, target_ref, &stock_source_q);
     link_score_equation_for_target(text, flow_var)
 }
@@ -2177,6 +2321,55 @@ pub(crate) fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec
             (1..=*size).map(|i| i.to_string()).collect()
         }
     }
+}
+
+/// Qualify each part of a comma-joined element tuple with its dimension's
+/// name, position-matched against `dims`: `"nyc,adult"` over `[Region, Age]`
+/// becomes `"region·nyc,age·adult"`. For use in generated *equation text*
+/// (link-score variable names keep the bare form).
+///
+/// A bare element name in equation text is ambiguous -- XMILE allows element
+/// names to shadow variable names -- so `PREVIOUS(source[nyc])` cannot be
+/// statically resolved at parse time and forces a synthesized helper aux per
+/// occurrence (one extra variable, result slot, and per-step copy each). The
+/// qualified `dimension·element` form folds to a constant during Expr1
+/// lowering (`constify_dimensions`), so `PREVIOUS(source[region·nyc])`
+/// compiles to a direct LoadPrev at the element's slot. On large arrayed
+/// models the difference is decisive: C-LEARN's LTM instrumentation needs
+/// ~140k helper slots with bare elements, far past the bytecode's 65,536-slot
+/// limit.
+///
+/// Indexed-dimension parts (numeric subscripts) are already static and pass
+/// through unchanged. A part that doesn't match its positional dimension (or
+/// a tuple whose arity doesn't match `dims`) falls back to the bare form --
+/// defensive: never produce a reference that resolves differently than the
+/// bare original would.
+pub(crate) fn qualify_element_csv(
+    element_csv: &str,
+    dims: &[crate::dimensions::Dimension],
+) -> String {
+    let parts: Vec<&str> = element_csv.split(',').collect();
+    if parts.len() != dims.len() {
+        return element_csv.to_string();
+    }
+    let qualified: Vec<String> = parts
+        .iter()
+        .zip(dims)
+        .map(|(part, dim)| match dim {
+            crate::dimensions::Dimension::Named(dim_name, named) => {
+                let canonical_part = canonicalize(part);
+                let elem = crate::common::CanonicalElementName::from_raw(&canonical_part);
+                if named.indexed_elements.contains_key(&elem) {
+                    format!("{}\u{B7}{}", dim_name.as_str(), canonical_part)
+                } else {
+                    part.to_string()
+                }
+            }
+            // Numeric subscripts over indexed dims are already static.
+            crate::dimensions::Dimension::Indexed(_, _) => part.to_string(),
+        })
+        .collect();
+    qualified.join(",")
 }
 
 /// Examine the target variable's Expr2 AST to find the array-reducing function
@@ -3575,8 +3768,15 @@ mod tests {
         let equation = "population / SUM(population[*])";
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
-        let partial =
-            build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[], None);
+        let partial = build_partial_equation_shaped(
+            equation,
+            &deps,
+            &source,
+            &RefShape::Bare,
+            &[],
+            None,
+            None,
+        );
         assert_eq!(partial, "population / PREVIOUS(sum(population[*]))");
     }
 
@@ -3612,6 +3812,7 @@ mod tests {
             // identified by name via `iter_ctx`, not by element membership.
             &[],
             Some(&iter_ctx),
+            None,
         );
         assert_eq!(
             partial, "row_sum * PREVIOUS(c)",
@@ -3629,6 +3830,7 @@ mod tests {
             &RefShape::Bare,
             &[],
             Some(&iter_ctx),
+            None,
         );
         assert!(
             partial_c.contains("PREVIOUS(row_sum)"),
@@ -3658,6 +3860,7 @@ mod tests {
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             &dims,
             None,
+            None,
         );
         assert_eq!(partial, "pop[nyc] + PREVIOUS(sum(pop[*]))");
     }
@@ -3671,8 +3874,15 @@ mod tests {
         let equation = "(c + SUM(a[*])) / SUM(b[*])";
         let deps = deps_set(&["a", "b", "c"]);
         let source = Ident::<Canonical>::new("c");
-        let partial =
-            build_partial_equation_shaped(equation, &deps, &source, &RefShape::Bare, &[], None);
+        let partial = build_partial_equation_shaped(
+            equation,
+            &deps,
+            &source,
+            &RefShape::Bare,
+            &[],
+            None,
+            None,
+        );
         assert_eq!(partial, "(c + PREVIOUS(sum(a[*]))) / PREVIOUS(sum(b[*]))");
     }
 
@@ -3689,8 +3899,15 @@ mod tests {
         let equation = "population / SUM(population[*])";
         let deps = deps_set(&["population"]);
         let source = Ident::<Canonical>::new("population");
-        let partial =
-            build_partial_equation_shaped(equation, &deps, &source, &RefShape::Wildcard, &[], None);
+        let partial = build_partial_equation_shaped(
+            equation,
+            &deps,
+            &source,
+            &RefShape::Wildcard,
+            &[],
+            None,
+            None,
+        );
         assert_eq!(partial, "PREVIOUS(population) / sum(population[*])");
     }
 
@@ -3712,6 +3929,7 @@ mod tests {
             &source,
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             &dims,
+            None,
             None,
         );
         assert_eq!(
@@ -3737,6 +3955,7 @@ mod tests {
             &source,
             &RefShape::FixedIndex(vec!["boston".to_string()]),
             &dims,
+            None,
             None,
         );
         assert_eq!(
@@ -3766,7 +3985,7 @@ mod tests {
         let dims = region_dim_elements();
 
         let partial =
-            build_partial_equation_shaped("pop * helper", &deps, &live, &shape, &dims, None);
+            build_partial_equation_shaped("pop * helper", &deps, &live, &shape, &dims, None, None);
         assert!(partial.contains("PREVIOUS(helper)"), "partial: {partial}");
         assert!(!partial.contains("PREVIOUS(pop)"), "partial: {partial}");
     }
@@ -3781,7 +4000,7 @@ mod tests {
         let dims = region_dim_elements();
 
         let partial =
-            build_partial_equation_shaped("pop + unknown", &deps, &live, &shape, &dims, None);
+            build_partial_equation_shaped("pop + unknown", &deps, &live, &shape, &dims, None, None);
         assert!(partial.contains("unknown"), "partial: {partial}");
         assert!(!partial.contains("PREVIOUS(unknown)"), "partial: {partial}");
     }
@@ -4190,8 +4409,15 @@ mod tests {
         let live = Ident::new("arr");
         let shape = RefShape::DynamicIndex;
 
-        let partial =
-            build_partial_equation_shaped("arr[idx + helper]", &deps, &live, &shape, &dims, None);
+        let partial = build_partial_equation_shaped(
+            "arr[idx + helper]",
+            &deps,
+            &live,
+            &shape,
+            &dims,
+            None,
+            None,
+        );
 
         assert!(
             partial.contains("PREVIOUS(idx)"),
@@ -4226,7 +4452,8 @@ mod tests {
         let live = Ident::new("pop");
         let shape = RefShape::FixedIndex(vec!["nyc".to_string()]);
 
-        let partial = build_partial_equation_shaped("pop[NYC]", &deps, &live, &shape, &dims, None);
+        let partial =
+            build_partial_equation_shaped("pop[NYC]", &deps, &live, &shape, &dims, None, None);
 
         // The live reference must remain unwrapped.
         assert!(
@@ -4238,6 +4465,110 @@ mod tests {
         assert!(
             !partial.contains("PREVIOUS(nyc)"),
             "literal element subscript wrongly treated as variable; got: {partial}",
+        );
+    }
+
+    /// GH #587: an index identifier that names a dimension element must NOT
+    /// be PREVIOUS-wrapped when its enclosing (non-live) subscripted
+    /// reference is wrapped for ceteris-paribus -- it is an element selector,
+    /// not a causal reference. Wrapping it produced `dep[PREVIOUS(elem)]`,
+    /// whose helper-aux chain cannot compile (PREVIOUS of a bare element name
+    /// is meaningless), so the link score silently stubbed to zero.
+    ///
+    /// The element index is also *qualified* (`dimension·element`) so the
+    /// PREVIOUS-wrapped reference stays statically resolvable: the
+    /// builtins-visitor compiles `PREVIOUS(dep[dim·elem])` to a direct
+    /// LoadPrev at the element's slot instead of synthesizing a helper aux.
+    #[test]
+    fn partial_equation_element_index_in_wrapped_dep_not_wrapped() {
+        // Equation: `gwp_of_hfc[hfc134a] * input`, live source `input`
+        // (scalar). `gwp_of_hfc` is an other-dep (must be wrapped); its
+        // index `hfc134a` is an element of the `hfc_type` dimension and --
+        // because `identifier_set` over-collects subscript identifiers --
+        // also lands in the dep set.
+        let deps = deps_set(&["gwp_of_hfc", "hfc134a", "input"]);
+        let live = Ident::new("input");
+        let shape = RefShape::Bare;
+
+        let dm_dims = vec![crate::datamodel::Dimension::named(
+            "hfc_type".to_string(),
+            vec!["hfc134a".to_string(), "hfc125".to_string()],
+        )];
+        let dims_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+
+        let partial = build_partial_equation_shaped(
+            "gwp_of_hfc[hfc134a] * input",
+            &deps,
+            &live,
+            &shape,
+            &[],
+            None,
+            Some(&dims_ctx),
+        );
+
+        // The dep itself is wrapped for ceteris-paribus...
+        assert!(
+            partial.contains("PREVIOUS("),
+            "the gwp_of_hfc dep must be PREVIOUS-wrapped; got: {partial}",
+        );
+        // ...but its element-name index must NOT be wrapped...
+        assert!(
+            !partial.to_lowercase().contains("previous(hfc134a)"),
+            "element-name index must not be PREVIOUS-wrapped (GH #587); got: {partial}",
+        );
+        // ...and is qualified to the unambiguous `dimension·element` form.
+        assert!(
+            partial.contains("hfc_type\u{B7}hfc134a"),
+            "element index should be qualified as dimension·element; got: {partial}",
+        );
+        // The live source stays live.
+        assert!(
+            !partial.to_lowercase().contains("previous(input)"),
+            "live ref must stay live; got: {partial}",
+        );
+    }
+
+    /// An element name shared by MORE THAN ONE dimension cannot be
+    /// unambiguously qualified, so it keeps the conservative wrapping
+    /// behavior (no qualification, PREVIOUS-wrapped when in the dep set).
+    #[test]
+    fn partial_equation_ambiguous_element_index_keeps_wrapping() {
+        let deps = deps_set(&["arr", "shared", "input"]);
+        let live = Ident::new("input");
+        let shape = RefShape::Bare;
+
+        // `shared` is an element of BOTH dimensions.
+        let dm_dims = vec![
+            crate::datamodel::Dimension::named(
+                "dim_a".to_string(),
+                vec!["shared".to_string(), "a2".to_string()],
+            ),
+            crate::datamodel::Dimension::named(
+                "dim_b".to_string(),
+                vec!["shared".to_string(), "b2".to_string()],
+            ),
+        ];
+        let dims_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+
+        let partial = build_partial_equation_shaped(
+            "arr[shared] * input",
+            &deps,
+            &live,
+            &shape,
+            &[],
+            None,
+            Some(&dims_ctx),
+        );
+
+        // Ambiguous element membership: no qualification happens, and the
+        // index is wrapped exactly as before (the dep-set membership rule).
+        assert!(
+            !partial.contains('\u{B7}'),
+            "ambiguous element must not be qualified; got: {partial}",
+        );
+        assert!(
+            partial.to_lowercase().contains("previous(shared)"),
+            "ambiguous element index keeps the conservative wrap; got: {partial}",
         );
     }
 

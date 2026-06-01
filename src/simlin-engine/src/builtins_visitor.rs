@@ -266,6 +266,19 @@ impl<'a> BuiltinVisitor<'a> {
         self
     }
 
+    /// Set the dimensions context so PREVIOUS/INIT can recognize statically
+    /// resolvable subscript indices (qualified `dimension·element` references)
+    /// outside of A2A per-element walks. The A2A constructor
+    /// (`new_with_subscript_context`) already receives it.
+    fn with_dimensions_ctx(mut self, dimensions_ctx: Option<&'a DimensionsContext>) -> Self {
+        // Keep an existing context (set by `new_with_subscript_context`) if the
+        // caller passes None.
+        if dimensions_ctx.is_some() {
+            self.dimensions_ctx = dimensions_ctx;
+        }
+        self
+    }
+
     /// Returns true when the identifier names a module variable in either
     /// the parent model (`module_idents`) or modules synthesized in this pass.
     fn is_known_module_ident(&self, ident: &Ident<Canonical>) -> bool {
@@ -290,6 +303,30 @@ impl<'a> BuiltinVisitor<'a> {
             .as_str()
             .split_once('·')
             .is_some_and(|(base, _)| self.is_known_module_ident(&Ident::new(&canonicalize(base))))
+    }
+
+    /// Is this subscript index expression *certainly* statically resolvable
+    /// at compile time?
+    ///
+    /// Returns true only for the unambiguous forms: a numeric constant, or a
+    /// qualified `dimension·element` reference (which `constify_dimensions`
+    /// folds to a constant during Expr1 lowering, regardless of context).
+    ///
+    /// Bare identifiers are NOT considered static even when they name a
+    /// dimension element: XMILE explicitly allows element names to shadow
+    /// variable names ("the Element names can be the same as Variable
+    /// names"), and only the compiler -- which knows the subscripted
+    /// variable's declared dimensions -- can disambiguate element-vs-variable
+    /// for them. A bare identifier index therefore stays on the conservative
+    /// helper-aux path for PREVIOUS/INIT.
+    fn index_is_static(&self, idx: &IndexExpr0) -> bool {
+        match idx {
+            IndexExpr0::Expr(Expr0::Const(_, _, _)) => true,
+            IndexExpr0::Expr(Expr0::Var(ident, _)) => self
+                .dimensions_ctx
+                .is_some_and(|ctx| ctx.lookup(&canonicalize(ident.as_str())).is_some()),
+            _ => false,
+        }
     }
 
     /// Substitute dimension references in the expression with concrete element names.
@@ -686,41 +723,64 @@ impl<'a> BuiltinVisitor<'a> {
                 };
                 // PREVIOUS and INIT opcode routing:
                 //
-                // PREVIOUS compiles to the intrinsic opcode path for both
-                // unary and binary syntax. When arg0 is not a direct scalar
-                // slot (nested PREVIOUS, PREVIOUS(expr), PREVIOUS(module_var),
-                // module inputs inside implicit models, etc.), rewrite arg0
-                // to a synthesized scalar temp variable.
-                let previous_needs_temp_arg = func == "previous"
-                    && args.len() == 2
-                    && args.first().is_some_and(|a| match a {
-                        Var(ident, _) => self.is_module_backed_ident(ident),
-                        _ => true,
-                    });
-                // LoadInitial only supports direct variable offsets. Rewrite
-                // INIT(expr) and INIT(module_var) to INIT($temp_arg), where
-                // $temp_arg captures expr/module_var each timestep and INIT
-                // freezes the t=0 snapshot of that scalar.
-                let init_needs_temp_arg = func == "init"
-                    && args.len() == 1
-                    && args.first().is_some_and(|a| match a {
-                        Var(ident, _) => self.is_module_backed_ident(ident),
-                        _ => true,
-                    });
-                if previous_needs_temp_arg {
+                // Both compile to intrinsic opcodes (LoadPrev / LoadInitial)
+                // that read a fixed slot, so arg0 must resolve to a static
+                // location:
+                //   * a direct (non-module-backed) scalar variable reference, or
+                //   * a subscripted reference whose base is not module-backed
+                //     and whose every index is statically resolvable -- a
+                //     numeric constant or a qualified `dimension·element`
+                //     reference (see `index_is_static`).
+                //
+                // Anything else (nested PREVIOUS, PREVIOUS(expr),
+                // PREVIOUS(module_var), dynamic subscript indices) is rewritten
+                // through a synthesized scalar temp variable that captures the
+                // value each timestep -- which also gives dynamic indices the
+                // correct lagged semantics (the index itself is read at the
+                // *previous* step).
+                //
+                // In A2A per-element context, dimension references inside a
+                // subscripted arg0 are substituted to qualified element
+                // references FIRST, so `PREVIOUS(x[Dim], ...)` in an
+                // apply-to-all equation resolves to a per-element static slot
+                // instead of synthesizing one helper aux per element.
+                let is_prev_routing = func == "previous" && args.len() == 2;
+                let is_init_routing = func == "init" && args.len() == 1;
+                if is_prev_routing || is_init_routing {
                     let mut args = args.into_iter();
-                    let arg0 = args.next().expect("previous arity checked");
-                    let fallback = args.next().expect("previous arity checked");
-                    let id = self.make_temp_arg(arg0);
-                    return Ok(App(
-                        UntypedBuiltinFn(func, vec![Var(id, loc), fallback]),
-                        loc,
-                    ));
-                }
-                if init_needs_temp_arg {
-                    let arg = args.into_iter().next().expect("init arity checked");
-                    let id = self.make_temp_arg(arg);
-                    return Ok(App(UntypedBuiltinFn(func, vec![Var(id, loc)]), loc));
+                    let arg0 = args.next().expect("previous/init arity checked");
+                    // Only subscripted args benefit from the substitution (it
+                    // makes their indices statically resolvable); other shapes
+                    // keep their original form so behavior is unchanged for
+                    // them (`make_temp_arg` substitutes internally, and the
+                    // substitution is idempotent).
+                    let arg0 = match arg0 {
+                        Subscript(_, _, _) if self.active_subscript.is_some() => {
+                            self.substitute_dimension_refs(arg0)
+                        }
+                        other => other,
+                    };
+                    let needs_temp_arg = match &arg0 {
+                        Var(ident, _) => self.is_module_backed_ident(ident),
+                        Subscript(id, indices, _) => {
+                            self.is_module_backed_ident(id)
+                                || !indices.iter().all(|idx| self.index_is_static(idx))
+                        }
+                        _ => true,
+                    };
+                    let arg0 = if needs_temp_arg {
+                        let id = self.make_temp_arg(arg0);
+                        Var(id, loc)
+                    } else {
+                        arg0
+                    };
+                    let new_args = if is_prev_routing {
+                        let fallback = args.next().expect("previous arity checked");
+                        vec![arg0, fallback]
+                    } else {
+                        vec![arg0]
+                    };
+                    return Ok(App(UntypedBuiltinFn(func, new_args), loc));
                 }
                 if is_builtin_fn(&func) {
                     // Builtins that survive routing stay as builtins (e.g.
@@ -796,6 +856,7 @@ pub fn instantiate_implicit_modules(
     match ast {
         Ast::Scalar(ast) => {
             let mut builtin_visitor = BuiltinVisitor::new(variable_name)
+                .with_dimensions_ctx(dimensions_ctx)
                 .with_module_idents(module_idents)
                 .with_macro_registry(macro_registry)
                 .with_enclosing_model(enclosing_model);
@@ -833,6 +894,7 @@ pub fn instantiate_implicit_modules(
             } else {
                 // No module-function calls - original behavior
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
+                    .with_dimensions_ctx(dimensions_ctx)
                     .with_module_idents(module_idents)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
@@ -872,6 +934,7 @@ pub fn instantiate_implicit_modules(
                 }
                 let transformed_default = if let Some(default_expr) = default_expr {
                     let mut default_visitor = BuiltinVisitor::new(variable_name)
+                        .with_dimensions_ctx(dimensions_ctx)
                         .with_module_idents(module_idents)
                         .with_macro_registry(macro_registry)
                         .with_enclosing_model(enclosing_model);
@@ -892,6 +955,7 @@ pub fn instantiate_implicit_modules(
                 ))
             } else {
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
+                    .with_dimensions_ctx(dimensions_ctx)
                     .with_module_idents(module_idents)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);

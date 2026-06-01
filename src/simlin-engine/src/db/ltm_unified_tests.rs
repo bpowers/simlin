@@ -343,12 +343,14 @@ fn test_model_ltm_variables_scalar_to_arrayed_link_score() {
             "per-target-element link score {expected:?} must be scalar (empty dimensions), got {:?}",
             lsv.dimensions
         );
-        // The equation references the target element on the `to` side, the
-        // scalar source unsubscripted, and is a guard-form expression.
+        // The equation references the target element on the `to` side (in the
+        // statically-resolvable qualified `dimension·element` form -- the
+        // variable NAME keeps the bare form), the scalar source
+        // unsubscripted, and is a guard-form expression.
         let eq = lsv.equation.source_text();
         assert!(
-            eq.contains(&format!("births[{elem}]")),
-            "equation for {expected:?} should reference births[{elem}], got: {eq}"
+            eq.contains(&format!("births[region·{elem}]")),
+            "equation for {expected:?} should reference births[region·{elem}], got: {eq}"
         );
         assert!(
             eq.contains("growth_factor") && !eq.contains(&format!("growth_factor[{elem}]")),
@@ -1219,11 +1221,14 @@ fn fixed_index_link_score_denominator_uses_fixed_element() {
     let fixed_eq = fixed.equation.source_text();
 
     // The denominator that drives the SIGN of the link score must
-    // reference `pop[nyc]` (the FixedIndex element kept live in the
-    // partial), not the bare variable-level `pop`.
+    // reference the NYC element of pop (the FixedIndex element kept live
+    // in the partial), not the bare variable-level `pop`. The element is
+    // spelled in the statically-resolvable qualified `dimension·element`
+    // form so the PREVIOUS-wrapped occurrence compiles to a direct
+    // LoadPrev (no helper aux).
     assert!(
-        fixed_eq.contains("(pop[nyc] - PREVIOUS(pop[nyc]))"),
-        "FixedIndex link score denominator must reference pop[nyc]; got: {fixed_eq}",
+        fixed_eq.contains("(pop[region·nyc] - PREVIOUS(pop[region·nyc]))"),
+        "FixedIndex link score denominator must reference pop[region·nyc]; got: {fixed_eq}",
     );
     // It must NOT contain the unsuffixed `(pop - PREVIOUS(pop))` form,
     // which under A2A becomes `Δpop[r]` and normalizes by the wrong
@@ -2056,15 +2061,17 @@ fn partial_reduce_emits_per_source_element_scalar_link_scores() {
             lsv.dimensions
         );
         // The equation must reference the row element on the target side
-        // and the full source tuple on the source side.
+        // and the full source tuple on the source side, both in the
+        // statically-resolvable qualified `dimension·element` form (the
+        // variable NAME keeps the bare form).
         let eq = lsv.equation.source_text();
         assert!(
-            eq.contains(&format!("agg[{d1}]")),
-            "link score {name} equation should reference agg[{d1}]: {eq}"
+            eq.contains(&format!("agg[d1·{d1}]")),
+            "link score {name} equation should reference agg[d1·{d1}]: {eq}"
         );
         assert!(
-            eq.contains(&format!("matrix[{d1},{d2}]")),
-            "link score {name} equation should reference matrix[{d1},{d2}]: {eq}"
+            eq.contains(&format!("matrix[d1·{d1},d2·{d2}]")),
+            "link score {name} equation should reference matrix[d1·{d1},d2·{d2}]: {eq}"
         );
     }
 

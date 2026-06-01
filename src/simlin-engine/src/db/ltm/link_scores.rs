@@ -19,7 +19,7 @@ use crate::datamodel;
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmLinkId,
     LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariable, SourceVariableKind,
-    reconstruct_single_variable, variable_dimensions,
+    project_dimensions_context, reconstruct_single_variable, variable_dimensions,
 };
 
 use super::compile::link_score_equation_text_shaped;
@@ -235,8 +235,17 @@ pub(super) fn try_cross_dimensional_link_scores(
 
     if result_axis_names.is_empty() {
         // Full reduce: one scalar link score per source element.
+        // Equation text uses the qualified `dim·element` form so its
+        // PREVIOUS(source[elem]) references compile to direct LoadPrevs
+        // instead of synthesizing one helper aux per occurrence; the
+        // variable NAME keeps the bare element form (it is the
+        // user-facing / discovery-parsed identity).
+        let qualified_elements: Vec<String> = source_elements
+            .iter()
+            .map(|e| crate::ltm_augment::qualify_element_csv(e, from_dims))
+            .collect();
         let mut cross_vars = Vec::with_capacity(source_elements.len());
-        for element in &source_elements {
+        for (element, qualified_element) in source_elements.iter().zip(&qualified_elements) {
             let var_name = format!(
                 "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}",
                 from, element, to
@@ -244,8 +253,8 @@ pub(super) fn try_cross_dimensional_link_scores(
             let equation = crate::ltm_augment::generate_element_to_scalar_equation(
                 from,
                 to,
-                element,
-                &source_elements,
+                qualified_element,
+                &qualified_elements,
                 &reducer_kind,
                 reducer_name,
                 is_bare,
@@ -307,12 +316,18 @@ pub(super) fn try_cross_dimensional_link_scores(
             "$\u{205A}ltm\u{205A}link_score\u{205A}{}[{}]\u{2192}{}[{}]",
             from, source_elem, to, result_elem
         );
+        // Equation text uses qualified `dim·element` references (direct
+        // LoadPrev, no helper auxes); the name keeps the bare form.
+        let qualified_coreduced: Vec<String> = coreduced
+            .iter()
+            .map(|e| crate::ltm_augment::qualify_element_csv(e, from_dims))
+            .collect();
         let equation = crate::ltm_augment::generate_element_to_reduced_equation(
             from,
             to,
-            source_elem,
-            &result_elem,
-            coreduced,
+            &crate::ltm_augment::qualify_element_csv(source_elem, from_dims),
+            &crate::ltm_augment::qualify_element_csv(&result_elem, to_dims),
+            &qualified_coreduced,
             &reducer_kind,
             reducer_name,
             is_bare,
@@ -456,13 +471,16 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             crate::ltm_augment::generate_scalar_to_element_equation(
                 from,
                 to,
-                element,
+                // Equation text uses the qualified `dim·element` form (direct
+                // LoadPrev, no helper auxes); the NAME below keeps the bare form.
+                &crate::ltm_augment::qualify_element_csv(element, &to_dims),
                 elem_text,
                 elem_deps,
                 deps_to_sub,
                 // A true scalar source: the bare `quote_ident(from)`
                 // denominator is correct.
                 None,
+                Some(project_dimensions_context(db, project)),
             )
         };
         LtmSyntheticVar {
@@ -895,6 +913,13 @@ pub(super) fn emit_source_to_agg_link_scores(
         coreduced,
     } in &rows
     {
+        // Equation text uses qualified `dim·element` references (direct
+        // LoadPrev, no helper auxes); names keep the bare element form.
+        let qualified_row = crate::ltm_augment::qualify_element_csv(row, from_dims);
+        let qualified_coreduced: Vec<String> = coreduced
+            .iter()
+            .map(|e| crate::ltm_augment::qualify_element_csv(e, from_dims))
+            .collect();
         let (var_name, equation) = if slot.is_empty() {
             (
                 format!(
@@ -904,8 +929,8 @@ pub(super) fn emit_source_to_agg_link_scores(
                 crate::ltm_augment::generate_element_to_scalar_equation(
                     from,
                     &agg.name,
-                    row,
-                    coreduced,
+                    &qualified_row,
+                    &qualified_coreduced,
                     &reducer_kind,
                     reducer_name,
                     /* is_bare = */ true,
@@ -920,9 +945,9 @@ pub(super) fn emit_source_to_agg_link_scores(
                 crate::ltm_augment::generate_element_to_reduced_equation(
                     from,
                     &agg.name,
-                    row,
+                    &qualified_row,
                     slot,
-                    coreduced,
+                    &qualified_coreduced,
                     &reducer_kind,
                     reducer_name,
                     /* is_bare = */ true,
@@ -1104,6 +1129,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 to,
                 &substituted,
                 &all_deps,
+                Some(project_dimensions_context(db, project)),
             );
             vars.push(LtmSyntheticVar {
                 name: format!(
@@ -1136,11 +1162,13 @@ pub(super) fn emit_agg_to_target_link_scores(
                 let equation = crate::ltm_augment::generate_scalar_to_element_equation(
                     &agg.name,
                     to,
-                    element,
+                    // Qualified for equation text; the name keeps the bare form.
+                    &crate::ltm_augment::qualify_element_csv(element, &to_dims),
                     &substituted,
                     &all_deps,
                     &deps_to_subscript,
                     Some(&agg_source_ref_for_target(element)),
+                    Some(project_dimensions_context(db, project)),
                 );
                 vars.push(LtmSyntheticVar {
                     name: format!(
@@ -1191,11 +1219,13 @@ pub(super) fn emit_agg_to_target_link_scores(
                         crate::ltm_augment::generate_scalar_to_element_equation(
                             &agg.name,
                             to,
-                            element,
+                            // Qualified for equation text; the name keeps the bare form.
+                            &crate::ltm_augment::qualify_element_csv(element, &to_dims),
                             &substituted,
                             &slot_deps,
                             &deps_to_subscript,
                             Some(&agg_source_ref_for_target(element)),
+                            Some(project_dimensions_context(db, project)),
                         )
                     }
                 };

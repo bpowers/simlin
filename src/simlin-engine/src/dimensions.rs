@@ -330,6 +330,32 @@ impl DimensionsContext {
         None
     }
 
+    /// The single named dimension containing `element`, or `None` if no
+    /// dimension -- or more than one -- contains it.
+    ///
+    /// Used to decide whether a bare identifier in subscript position can be
+    /// unambiguously qualified to its `dimension·element` form: XMILE allows
+    /// element names to overlap across dimensions (and to shadow variable
+    /// names), so qualification is only safe when exactly one dimension
+    /// declares the element.
+    pub(crate) fn dimension_uniquely_containing_element(
+        &self,
+        element: &CanonicalElementName,
+    ) -> Option<&CanonicalDimensionName> {
+        let mut found: Option<&CanonicalDimensionName> = None;
+        for (dim_name, dim) in self.dimensions.iter() {
+            if let Dimension::Named(_, named) = dim
+                && named.indexed_elements.contains_key(element)
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(dim_name);
+            }
+        }
+        found
+    }
+
     /// Get the maps_to target for a dimension (e.g., DimA -> DimB).
     /// Returns None for indexed dimensions or dimensions without a mapping.
     /// For dimensions with multiple mapping targets, returns the first one.

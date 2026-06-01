@@ -58,6 +58,85 @@ fn main() {
     println!("  saved steps: {}", results.step_count);
     println!("  result slots/step: {}", results.step_size);
 
+    // Spot-check: dump a specific simple link score plus its endpoint
+    // variables so the ceteris-paribus formula can be verified by hand.
+    // Set CLEARN_DUMP_LINK to a link-score column name (or a substring).
+    if let Ok(needle) = std::env::var("CLEARN_DUMP_LINK") {
+        let col = |name: &str| -> Option<Vec<f64>> {
+            results.offsets.iter().find_map(|(n, &off)| {
+                if n.as_str() == name {
+                    Some(
+                        (0..results.step_count)
+                            .map(|s| results.data[s * results.step_size + off])
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            })
+        };
+        // "NONZERO_REAL" is a special needle: real (non-helper) link-score
+        // columns carrying a finite non-zero value somewhere in the run.
+        let matching: Vec<String> = if needle == "NONZERO_REAL" {
+            results
+                .offsets
+                .iter()
+                .filter(|(n, off)| {
+                    n.as_str()
+                        .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}")
+                        && (0..results.step_count).any(|s| {
+                            let v = results.data[s * results.step_size + **off];
+                            v.is_finite() && v != 0.0
+                        })
+                })
+                .map(|(n, _)| n.as_str().to_string())
+                .collect()
+        } else {
+            results
+                .offsets
+                .iter()
+                .filter(|(n, _)| n.as_str().contains(&needle))
+                .map(|(n, _)| n.as_str().to_string())
+                .collect()
+        };
+        println!("  columns matching {needle:?}: {}", matching.len());
+        for name in matching.iter().take(8) {
+            let series = col(name).unwrap();
+            println!("    {} = {:?}", name, &series[..6.min(series.len())]);
+        }
+
+        // Offset-collision check: how many result slots have more than one
+        // name mapped to them? A link-score column showing a model variable's
+        // value means either the offsets map collides or the bytecode
+        // double-writes a slot.
+        let mut by_offset: std::collections::HashMap<usize, Vec<&str>> =
+            std::collections::HashMap::new();
+        for (n, &off) in results.offsets.iter() {
+            by_offset.entry(off).or_default().push(n.as_str());
+        }
+        let collisions: Vec<(&usize, &Vec<&str>)> = by_offset
+            .iter()
+            .filter(|(_, names)| names.len() > 1)
+            .collect();
+        let ltm_collisions = collisions
+            .iter()
+            .filter(|(_, names)| names.iter().any(|n| n.contains("ltm")))
+            .count();
+        println!(
+            "  offset collisions: {} slots with >1 name ({} involving LTM vars) of {} total slots",
+            collisions.len(),
+            ltm_collisions,
+            by_offset.len()
+        );
+        for (off, names) in collisions.iter().take(6) {
+            println!(
+                "    slot {}: {:?}",
+                off,
+                names.iter().take(3).collect::<Vec<_>>()
+            );
+        }
+    }
+
     // Degenerate-workload guard: the strongest-path DFS prunes on link-score
     // magnitude, so if the LTM link-score columns are all zero/NaN the discovery
     // benchmark is meaningless. Count how many link-score columns carry at least

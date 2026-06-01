@@ -530,3 +530,147 @@ fn test_module_composite_equation_size_is_linear_in_pathways() {
         }
     }
 }
+
+/// The results offsets map (`calc_flattened_offsets_incremental`, what
+/// `CompiledSimulation.offsets` / `Results.offsets` is built from) and the
+/// compiled layout (`compute_layout`, what `resolve_module` assigns bytecode
+/// slot offsets from) MUST agree on every variable's slot. If they diverge,
+/// every results column after the divergence point reads some other
+/// variable's data -- silently.
+///
+/// This is exercised with LTM enabled on a model containing a SMOOTH module:
+/// the module variable's size is computed by both functions independently
+/// (`compute_layout` uses the sub-model's `n_slots`; the offsets map sums its
+/// own recursive entries), and with LTM enabled the sub-model's layout
+/// includes LTM synthetic variables, which is where the two historically
+/// diverged.
+#[test]
+fn test_results_offsets_agree_with_layout_under_ltm() {
+    use crate::db::calc_flattened_offsets_incremental;
+    use salsa::Setter;
+
+    let project = datamodel::Project {
+        name: "offsets_vs_layout".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![x_model(
+            "main",
+            vec![
+                x_aux("goal", "100", None),
+                x_stock("level", "50", &["adjustment"], &[], None),
+                x_aux("smoothed_level", "SMTH1(level, 3)", None),
+                x_aux("gap", "goal - smoothed_level", None),
+                x_flow("adjustment", "gap / 5", None),
+                // Variables that sort alphabetically AFTER "smoothed_level":
+                // any module-size divergence shifts these.
+                x_aux("z_downstream_a", "gap * 2", None),
+                x_aux("z_downstream_b", "level + 1", None),
+            ],
+        )],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let (source_project, source_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let offsets = calc_flattened_offsets_incremental(&db, source_project, "main", true);
+    let layout = compute_layout(&db, source_model, source_project).root_shifted();
+
+    let mut mismatches: Vec<String> = Vec::new();
+    for (name, (off, _size)) in offsets.iter() {
+        // Only names that exist verbatim in the layout are directly
+        // comparable (per-element `x[a1]` and module-flattened `mod·sub`
+        // names are offsets-map-only expansions).
+        if let Some(entry) = layout.get(name.as_str())
+            && entry.offset != *off
+        {
+            mismatches.push(format!(
+                "{name}: offsets-map says {off}, layout says {}",
+                entry.offset
+            ));
+        }
+    }
+    mismatches.sort();
+    assert!(
+        mismatches.is_empty(),
+        "results offsets map and compiled layout disagree on {} slots:\n  {}",
+        mismatches.len(),
+        mismatches.join("\n  ")
+    );
+}
+
+/// C-LEARN-scale version of the offsets-vs-layout consistency check.
+/// Ignored by default (loads a 1.4 MB model); run explicitly with
+/// `cargo test -- --ignored test_clearn_results_offsets_agree_with_layout`.
+#[test]
+#[ignore]
+fn test_clearn_results_offsets_agree_with_layout() {
+    use crate::db::calc_flattened_offsets_incremental;
+    use salsa::Setter;
+
+    let path = format!(
+        "{}/../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let contents = std::fs::read_to_string(&path).expect("read C-LEARN mdl");
+    let project = crate::open_vensim(&contents).expect("parse C-LEARN");
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source_project = sync.project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+    let source_model = source_project
+        .models(&db)
+        .get(crate::canonicalize("main").as_ref())
+        .copied()
+        .expect("main model");
+
+    let offsets = calc_flattened_offsets_incremental(&db, source_project, "main", true);
+    let layout = compute_layout(&db, source_model, source_project).root_shifted();
+
+    let mut mismatches: Vec<(usize, String)> = Vec::new();
+    let mut compared = 0usize;
+    for (name, (off, _size)) in offsets.iter() {
+        if let Some(entry) = layout.get(name.as_str()) {
+            compared += 1;
+            if entry.offset != *off {
+                mismatches.push((
+                    *off.min(&entry.offset),
+                    format!(
+                        "{}: offsets-map={off} layout={} (delta {})",
+                        name.as_str(),
+                        entry.offset,
+                        *off as i64 - entry.offset as i64
+                    ),
+                ));
+            }
+        }
+    }
+    mismatches.sort();
+    eprintln!(
+        "compared {compared} names; {} mismatches; earliest 15:",
+        mismatches.len()
+    );
+    for (_, msg) in mismatches.iter().take(15) {
+        eprintln!("  {msg}");
+    }
+    assert!(
+        mismatches.is_empty(),
+        "results offsets map and compiled layout disagree on {} of {compared} comparable slots",
+        mismatches.len(),
+    );
+}

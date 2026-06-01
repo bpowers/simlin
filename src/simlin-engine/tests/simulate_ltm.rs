@@ -9181,3 +9181,81 @@ fn test_four_petal_cyclic_orderings_share_loop_score_series() {
         );
     }
 }
+
+/// Enabling LTM must not change (or break) the model's own simulation:
+/// C-LEARN compiled with `ltm_enabled` + discovery mode (the production
+/// `analyze_model` configuration) must produce the SAME values for every
+/// model variable as the plain (LTM-disabled) compile. LTM synthetic
+/// variables are appended to the end of the flows runlist and never feed
+/// back into model equations, so any divergence here means LTM
+/// instrumentation corrupted the simulation itself.
+///
+/// `#[ignore]`d for runtime only (C-LEARN is ~53k lines / 1.4 MB and the LTM
+/// compile is heavy); run explicitly with:
+///   cargo test --release --features file_io --test simulate_ltm -- --ignored clearn_with_ltm
+#[test]
+#[ignore]
+fn clearn_with_ltm_simulates_model_vars_identically() {
+    let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
+    let contents = std::fs::read_to_string(mdl_path)
+        .unwrap_or_else(|e| panic!("failed to read {mdl_path}: {e}"));
+    let project = simlin_engine::open_vensim(&contents)
+        .unwrap_or_else(|e| panic!("failed to parse {mdl_path}: {e}"));
+
+    // Plain (LTM-disabled) run: the known-good baseline. `simulates_clearn`
+    // gates this configuration against genuine Vensim reference output.
+    let plain = {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        vm.into_results()
+    };
+
+    // LTM discovery run: the production analyze_model configuration for a
+    // model of this scale (exhaustive mode auto-flips to discovery anyway).
+    let ltm = {
+        let compiled = compile_ltm_discovery_incremental(&project);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        vm.into_results()
+    };
+
+    assert_eq!(
+        plain.step_count, ltm.step_count,
+        "step counts must match between plain and LTM-enabled runs"
+    );
+
+    // Every model variable (every offsets-map name in the PLAIN run) must
+    // have an identical series in the LTM-enabled run.
+    let mut checked = 0usize;
+    let mut mismatched: Vec<String> = Vec::new();
+    for (name, &plain_off) in plain.offsets.iter() {
+        let Some(&ltm_off) = ltm.offsets.get(name) else {
+            mismatched.push(format!("{}: missing from LTM run offsets", name.as_str()));
+            continue;
+        };
+        checked += 1;
+        for step in 0..plain.step_count {
+            let p = plain.data[step * plain.step_size + plain_off];
+            let l = ltm.data[step * ltm.step_size + ltm_off];
+            let same = (p.is_nan() && l.is_nan())
+                || (p == l)
+                || ((p - l).abs() <= 1e-9 * p.abs().max(l.abs()));
+            if !same {
+                mismatched.push(format!("{}: step {step}: plain={p} ltm={l}", name.as_str()));
+                break;
+            }
+        }
+        if mismatched.len() > 25 {
+            break;
+        }
+    }
+    assert!(
+        mismatched.is_empty(),
+        "enabling LTM changed/broke {} of {checked} model variable series; first mismatches:\n  {}",
+        mismatched.len(),
+        mismatched.join("\n  ")
+    );
+}

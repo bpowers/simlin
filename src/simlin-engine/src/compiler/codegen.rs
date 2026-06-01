@@ -798,16 +798,34 @@ impl<'module> Compiler<'module> {
                 // read from curr[] (previous timestep) or the initial-value
                 // buffer, respectively.  Handle them before the general
                 // builtin dispatch because they do not use CallBuiltin.
+                //
+                // Both opcodes read a fixed slot, so the argument must have
+                // resolved to a static location: either a scalar variable
+                // (Expr::Var) or a statically-resolved single-element array
+                // reference (Expr::StaticSubscript whose view collapsed to a
+                // scalar -- e.g. `arr[Dim.elem]` or `arr[2]`). The latter is
+                // what the builtins-visitor lets through instead of
+                // synthesizing a helper aux when every subscript index is a
+                // compile-time constant. Anything else (dynamic indices,
+                // expressions) was rewritten through a helper aux at parse
+                // time, so reaching here with one is a compiler bug.
+                let static_slot_offset = |arg: &Expr| -> Option<VariableOffset> {
+                    match arg {
+                        Expr::Var(off, _) => Some(*off as VariableOffset),
+                        Expr::StaticSubscript(off, view, _) if view.dims.is_empty() => {
+                            Some((*off + view.offset) as VariableOffset)
+                        }
+                        _ => None,
+                    }
+                };
                 match builtin {
                     BuiltinFn::Previous(arg, fallback) => {
                         self.walk_expr(fallback)?.unwrap();
-                        match arg.as_ref() {
-                            Expr::Var(off, _) => {
-                                self.push(Opcode::LoadPrev {
-                                    off: *off as VariableOffset,
-                                });
+                        match static_slot_offset(arg.as_ref()) {
+                            Some(off) => {
+                                self.push(Opcode::LoadPrev { off });
                             }
-                            _ => {
+                            None => {
                                 return sim_err!(
                                     NotSimulatable,
                                     "PREVIOUS requires a variable reference after helper rewriting"
@@ -818,9 +836,9 @@ impl<'module> Compiler<'module> {
                         return Ok(Some(()));
                     }
                     BuiltinFn::Init(arg) => {
-                        let off = match arg.as_ref() {
-                            Expr::Var(off, _) => *off as VariableOffset,
-                            _ => {
+                        let off = match static_slot_offset(arg.as_ref()) {
+                            Some(off) => off,
+                            None => {
                                 return sim_err!(
                                     NotSimulatable,
                                     "INIT requires a variable reference argument".to_string()
