@@ -593,6 +593,37 @@ fn wrap_non_matching_in_previous(
             if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
                 return Expr0::App(UntypedBuiltinFn(name, args), loc);
             }
+            // A LOOKUP call's first argument names a graphical-function table
+            // (a lookup-only variable, or the WITH-LOOKUP self-reference); it
+            // is static data the compiler resolves to a table id, not a causal
+            // value reference. Wrapping it in PREVIOUS produces
+            // `lookup(PREVIOUS(table), ...)`, which cannot compile (a
+            // table-only variable has no value slot), so the whole link-score
+            // fragment silently zeroes -- the failure mode behind WRLD3's
+            // identically-zero table-mediated link scores. Hold the table
+            // argument verbatim and transform only the index argument(s).
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "lookup" | "lookup_forward" | "lookup_backward"
+            ) && !args.is_empty()
+            {
+                let mut args_iter = args.into_iter();
+                let table_arg = args_iter.next().expect("checked non-empty");
+                let mut new_args = vec![table_arg];
+                new_args.extend(args_iter.map(|a| {
+                    wrap_non_matching_in_previous(
+                        a,
+                        live_source,
+                        live_shape,
+                        other_deps,
+                        source_dim_elements,
+                        iter_ctx,
+                        dims_ctx,
+                        live_ref,
+                    )
+                }));
+                return Expr0::App(UntypedBuiltinFn(name, new_args), loc);
+            }
             // GH #517: an array-reducer subexpression (`SUM(pop[*])`,
             // `MEAN(...)`, `SUM(m[D1,*])`, ...) that does not itself carry
             // the live reference is "other content" for ceteris-paribus
@@ -3799,6 +3830,73 @@ mod tests {
             None,
         );
         assert_eq!(partial, "population / PREVIOUS(sum(population[*]))");
+    }
+
+    /// A LOOKUP call's first argument names a graphical-function table, not a
+    /// causal value reference: it must never be wrapped in PREVIOUS. Wrapping
+    /// it produces `lookup(PREVIOUS(table), ...)`, which cannot compile (a
+    /// lookup-only table variable has no value slot), so the link-score
+    /// fragment silently zeroes -- the WRLD3 failure mode where every
+    /// table-mediated link (`food_per_capita -> lifetime_multiplier_from_food`,
+    /// etc.) scored identically 0.
+    #[test]
+    fn test_partial_equation_lookup_table_arg_not_wrapped() {
+        // lifetime_multiplier_from_food =
+        //   lookup(lifetime_multiplier_from_food_table, food_per_capita / subsistence)
+        let equation = "lookup(food_table, food_per_capita / subsistence)";
+        let deps = deps_set(&["food_table", "food_per_capita", "subsistence"]);
+        let source = Ident::<Canonical>::new("food_per_capita");
+        let partial = build_partial_equation_shaped(
+            equation,
+            &deps,
+            &source,
+            &RefShape::Bare,
+            &[],
+            None,
+            None,
+        );
+        assert_eq!(
+            partial, "lookup(food_table, food_per_capita / PREVIOUS(subsistence))",
+            "the table argument must stay a bare identifier; only value deps are wrapped"
+        );
+
+        // Same invariant for the extrapolating variants.
+        for func in ["lookup_forward", "lookup_backward"] {
+            let equation = format!("{func}(food_table, food_per_capita / subsistence)");
+            let partial = build_partial_equation_shaped(
+                &equation,
+                &deps,
+                &source,
+                &RefShape::Bare,
+                &[],
+                None,
+                None,
+            );
+            assert_eq!(
+                partial,
+                format!("{func}(food_table, food_per_capita / PREVIOUS(subsistence))")
+            );
+        }
+    }
+
+    /// The WITH LOOKUP lowering references the variable's own table as
+    /// `lookup(self_var, input)`. The self-reference is the table holder, so
+    /// it stays bare; the (live) input is held live and other deps wrapped.
+    #[test]
+    fn test_partial_equation_with_lookup_self_table_not_wrapped() {
+        let equation = "lookup(target_var, input / scale)";
+        let deps = deps_set(&["target_var", "input", "scale"]);
+        let source = Ident::<Canonical>::new("input");
+        let partial = build_partial_equation_shaped(
+            equation,
+            &deps,
+            &source,
+            &RefShape::Bare,
+            &[],
+            None,
+            None,
+        );
+        assert_eq!(partial, "lookup(target_var, input / PREVIOUS(scale))");
     }
 
     /// GH #511: an iterated-dimension source subscript (`row_sum[D1]` inside

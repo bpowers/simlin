@@ -9259,3 +9259,196 @@ fn clearn_with_ltm_simulates_model_vars_identically() {
         mismatched.join("\n  ")
     );
 }
+
+/// Build a model whose only feedback runs through a Vensim-style lookup
+/// table call: `birth_multiplier = LOOKUP(birth_table, population)` where
+/// `birth_table` is a standalone lookup-only table variable (no equation,
+/// only a graphical function -- exactly what the MDL importer produces for
+/// `table_var(input)` calls, e.g. WRLD3's
+/// `lifetime multiplier from food table(food per capita / ...)`).
+///
+///   population (stock) -> birth_multiplier (via LOOKUP) -> births -> population
+///   population -> births (direct reference)               -> population
+fn build_lookup_table_feedback_model() -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel::{self, Equation, Variable};
+    datamodel::Project {
+        name: "lookup_feedback".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "population".to_string(),
+                    equation: Equation::Scalar("50".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["births".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // Standalone lookup-only table: empty equation + graphical
+                // function. Consumers must call it via LOOKUP(table, x).
+                Variable::Aux(datamodel::Aux {
+                    ident: "birth_table".to_string(),
+                    equation: Equation::Scalar(String::new()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: Some(datamodel::GraphicalFunction {
+                        kind: datamodel::GraphicalFunctionKind::Continuous,
+                        x_points: Some(vec![0.0, 50.0, 100.0, 200.0]),
+                        y_points: vec![2.0, 1.5, 0.8, 0.1],
+                        x_scale: datamodel::GraphicalFunctionScale {
+                            min: 0.0,
+                            max: 200.0,
+                        },
+                        y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+                    }),
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "birth_multiplier".to_string(),
+                    equation: Equation::Scalar("LOOKUP(birth_table, population)".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "births".to_string(),
+                    equation: Equation::Scalar("population * birth_multiplier * 0.05".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// A link score *through a lookup-table call* must carry real (nonzero)
+/// values: the table reference is static data, not a causal dependency, so
+/// the ceteris-paribus partial holds it verbatim and the fragment compiles.
+///
+/// Regression test for the WRLD3 failure mode where every table-mediated
+/// link score (`food_per_capita -> lifetime_multiplier_from_food`, ...) was
+/// identically zero: the partial wrapped the table in PREVIOUS() (making the
+/// equation uncompilable), and the LTM fragment compiler didn't thread the
+/// referenced table's graphical-function data into its mini-Module, so the
+/// fragment silently stubbed to a constant 0.
+#[test]
+fn test_lookup_table_link_score_is_nonzero() {
+    let project = build_lookup_table_feedback_model();
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    // The model variables themselves must vary (sanity: the loop is active).
+    let pop_off = results.offsets[&Ident::<Canonical>::new("population")];
+    let mult_off = results.offsets[&Ident::<Canonical>::new("birth_multiplier")];
+    let at = |step: usize, off: usize| results.data[step * results.step_size + off];
+    assert!(
+        (at(1, pop_off) - at(results.step_count - 1, pop_off)).abs() > 1.0,
+        "population must change over the run"
+    );
+    assert!(
+        (at(1, mult_off) - at(results.step_count - 1, mult_off)).abs() > 1e-6,
+        "birth_multiplier must change over the run"
+    );
+
+    // The lookup-mediated link score must be nonzero at some step.
+    let ls_name = "$\u{205A}ltm\u{205A}link_score\u{205A}population\u{2192}birth_multiplier";
+    let ls_off = *results
+        .offsets
+        .get(&Ident::<Canonical>::new(ls_name))
+        .unwrap_or_else(|| panic!("missing link score column {ls_name}"));
+    let nonzero_steps = (1..results.step_count)
+        .filter(|&step| {
+            let v = at(step, ls_off);
+            v.is_finite() && v != 0.0
+        })
+        .count();
+    assert!(
+        nonzero_steps > 0,
+        "the population -> birth_multiplier link score (through LOOKUP) must be nonzero \
+         at some step; series: {:?}",
+        (0..results.step_count)
+            .map(|s| at(s, ls_off))
+            .collect::<Vec<_>>()
+    );
+
+    // And there must be no link score from the *table* variable itself: the
+    // table is static data, not a causal node.
+    let table_link_scores: Vec<&str> = results
+        .offsets
+        .keys()
+        .map(|k| k.as_str())
+        .filter(|k| k.contains("link_score") && k.contains("birth_table"))
+        .collect();
+    assert!(
+        table_link_scores.is_empty(),
+        "no link score should involve the lookup-only table variable: {table_link_scores:?}"
+    );
+
+    // Discovery must find the loop through the lookup table.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let source_model = sync.models["main"].source_model;
+    let element_edges = model_element_causal_edges(&db, source_model, sync.project);
+    let causal_graph = causal_graph_from_element_edges(element_edges);
+    let stocks: Vec<Ident<Canonical>> =
+        element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+    let dm_dims = project_datamodel_dims(&db, sync.project);
+    let found = ltm_finding::discover_loops_with_graph(
+        &results,
+        &causal_graph,
+        &stocks,
+        &ltm_vars.vars,
+        dm_dims,
+        None,
+    )
+    .expect("discovery should succeed")
+    .loops;
+    let has_lookup_loop = found.iter().any(|fl| {
+        fl.loop_info
+            .links
+            .iter()
+            .any(|l| l.to.as_str() == "birth_multiplier" || l.from.as_str() == "birth_multiplier")
+    });
+    assert!(
+        has_lookup_loop,
+        "discovery must find the loop through the lookup-mediated birth_multiplier; found: {:?}",
+        found
+            .iter()
+            .map(|fl| fl.loop_info.format_path())
+            .collect::<Vec<_>>()
+    );
+}

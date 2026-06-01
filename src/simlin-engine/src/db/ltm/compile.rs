@@ -23,10 +23,10 @@ use crate::db::{
     Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, ParsedVariableResult, RefShape,
     SourceModel, SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs,
     build_stub_variable, build_submodel_metadata, canonical_module_input_set, compute_layout,
-    link_score_equation_text, model_implicit_var_info, model_module_ident_context,
-    model_module_map, parse_source_variable_with_module_context, project_converted_dimensions,
-    project_datamodel_dims, project_dimensions_context, project_units_context,
-    reconstruct_single_variable, variable_dimensions, variable_size,
+    extract_tables_from_source_var, link_score_equation_text, model_implicit_var_info,
+    model_module_ident_context, model_module_map, parse_source_variable_with_module_context,
+    project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
+    project_units_context, reconstruct_single_variable, variable_dimensions, variable_size,
 };
 
 use super::parse::{ltm_equation_dimensions, parse_ltm_equation};
@@ -414,11 +414,15 @@ pub(crate) fn compile_ltm_equation_fragment(
     );
     mini_offset += var_size;
 
-    // Collect dependency variable names from the lowered AST
-    let dep_idents = if let Some(ast) = lowered.ast() {
-        crate::variable::identifier_set(ast, &[], None)
+    // Collect dependency variable names from the lowered AST. Lookup-table
+    // references are not data-flow deps (issue #606 keeps them in
+    // `referenced_tables`, off the causal graph), but the fragment still
+    // needs them: see the referenced-tables pass below.
+    let (dep_idents, referenced_tables) = if let Some(ast) = lowered.ast() {
+        let classification = crate::variable::classify_dependencies(ast, &[], None);
+        (classification.all, classification.referenced_tables)
     } else {
-        HashSet::new()
+        (HashSet::new(), std::collections::BTreeSet::new())
     };
 
     let source_vars = model.variables(db);
@@ -807,6 +811,43 @@ pub(crate) fn compile_ltm_equation_fragment(
         }
     }
 
+    // Lookup-table references (issue #606): a `LOOKUP(table, x)` call's table
+    // argument is not a data-flow dep, but the fragment still needs (a) a
+    // metadata stub so lowering resolves the table ident to a layout offset
+    // (the lookup codegen recovers the table identity by reverse offset
+    // lookup), and (b) the table's graphical-function data in the
+    // mini-Module's tables map so the Lookup opcode gets a base_gf. Without
+    // both, the fragment fails to compile and the link score silently reads a
+    // constant 0 -- the failure mode behind WRLD3's identically-zero
+    // table-mediated link scores (food_per_capita -> lifetime_multiplier_from_food
+    // and 50+ siblings).
+    let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
+    for table_name in &referenced_tables {
+        let effective = table_name
+            .strip_prefix('\u{00B7}')
+            .unwrap_or(table_name.as_str());
+        // Module-namespaced tables can't be referenced from LTM equations.
+        if effective.contains('\u{00B7}') {
+            continue;
+        }
+        let table_ident: Ident<Canonical> = Ident::new(effective);
+        let Some(table_sv) = source_vars.get(effective) else {
+            continue;
+        };
+        let table_data = extract_tables_from_source_var(db, table_sv, project);
+        if !table_data.is_empty() {
+            tables.insert(table_ident.clone(), table_data);
+        }
+        let already_present = mini_metadata.contains_key(&table_ident)
+            || dep_variables.iter().any(|(id, _, _)| id == &table_ident);
+        if !already_present {
+            let table_dims = variable_dimensions(db, *table_sv, project);
+            let table_size = variable_size(db, *table_sv, project);
+            let table_var = build_stub_variable(db, table_sv, &table_ident, table_dims);
+            dep_variables.push((table_ident, table_var, table_size));
+        }
+    }
+
     // Add dep metadata
     for (dep_ident, dep_var, dep_size) in &dep_variables {
         if !mini_metadata.contains_key(dep_ident) {
@@ -853,9 +894,6 @@ pub(crate) fn compile_ltm_equation_fragment(
         crate::compiler::symbolic::layout_from_metadata(&all_metadata, &model_name_ident)
             .unwrap_or_else(|_| VariableLayout::new(HashMap::new(), 0));
     let rmap = ReverseOffsetMap::from_layout(&mini_layout);
-
-    // LTM vars don't have graphical functions or lookup tables
-    let tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
 
     let inputs = BTreeSet::new();
 
@@ -1392,6 +1430,11 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     let source_vars = model.variables(db);
     let mut dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> = Vec::new();
     let mut module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
+    // Lookup tables referenced by this implicit var's equation (issue #606):
+    // populated by the non-module dependency pass below, consumed by the
+    // mini-Module construction.
+    let mut fragment_tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> =
+        HashMap::new();
 
     // For module-type implicit vars, build module_refs from the dm_module references
     if meta.is_module
@@ -1489,10 +1532,15 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         // Non-module implicit vars (e.g., temp args from PREVIOUS rewrite)
         // may reference module variables from the parent model. Collect
         // those dependencies so the compilation context can resolve them.
-        let dep_idents = if let Some(ast) = lowered.ast() {
-            crate::variable::identifier_set(ast, &[], None)
+        // Lookup-table references are handled separately below (they are not
+        // data-flow deps -- issue #606 -- but the fragment needs their layout
+        // stub and graphical-function data so a `lookup(table, ...)` inside a
+        // synthesized helper compiles; see compile_ltm_equation_fragment).
+        let (dep_idents, referenced_tables) = if let Some(ast) = lowered.ast() {
+            let classification = crate::variable::classify_dependencies(ast, &[], None);
+            (classification.all, classification.referenced_tables)
         } else {
-            HashSet::new()
+            (HashSet::new(), std::collections::BTreeSet::new())
         };
 
         let implicit_info = model_implicit_var_info(db, model, project);
@@ -1599,6 +1647,33 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
                 ));
             }
         }
+
+        // Referenced lookup tables: layout stub + graphical-function data
+        // (mirrors compile_ltm_equation_fragment's referenced-tables pass).
+        for table_name in &referenced_tables {
+            let effective = table_name
+                .strip_prefix('\u{00B7}')
+                .unwrap_or(table_name.as_str());
+            if effective.contains('\u{00B7}') {
+                continue;
+            }
+            let table_ident: Ident<Canonical> = Ident::new(effective);
+            let Some(table_sv) = source_vars.get(effective) else {
+                continue;
+            };
+            let table_data = extract_tables_from_source_var(db, table_sv, project);
+            if !table_data.is_empty() {
+                fragment_tables.insert(table_ident.clone(), table_data);
+            }
+            let already_present = mini_metadata.contains_key(&table_ident)
+                || dep_variables.iter().any(|(id, _, _)| id == &table_ident);
+            if !already_present {
+                let table_dims = variable_dimensions(db, *table_sv, project);
+                let table_size = variable_size(db, *table_sv, project);
+                let table_var = build_stub_variable(db, table_sv, &table_ident, table_dims);
+                dep_variables.push((table_ident, table_var, table_size));
+            }
+        }
     }
 
     for (dep_ident, dep_var, dep_size) in &dep_variables {
@@ -1645,7 +1720,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
             .unwrap_or_else(|_| VariableLayout::new(HashMap::new(), 0));
     let rmap = ReverseOffsetMap::from_layout(&mini_layout);
 
-    let tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
+    let tables = fragment_tables;
     let inputs = canonical_module_input_set(module_input_names);
 
     // Merge the current variable's own module refs plus the module-typed LTM
