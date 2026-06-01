@@ -581,6 +581,18 @@ fn wrap_non_matching_in_previous(
             }
         }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
+            // A PREVIOUS(...) / INIT(...) call from the original equation:
+            // everything inside it is already lagged (read at the prior step)
+            // or frozen (read at t=0), so it is already ceteris-paribus -- the
+            // current-step perturbation cannot affect it. Wrapping its
+            // contents again would read values from TWO steps ago
+            // (semantically wrong) and force a nested-PREVIOUS helper chain
+            // (one synthesized helper variable per occurrence; on
+            // SAMPLE-IF-TRUE-heavy models like C-LEARN this was the dominant
+            // helper source). Leave the whole call untouched.
+            if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
+                return Expr0::App(UntypedBuiltinFn(name, args), loc);
+            }
             // GH #517: an array-reducer subexpression (`SUM(pop[*])`,
             // `MEAN(...)`, `SUM(m[D1,*])`, ...) that does not itself carry
             // the live reference is "other content" for ceteris-paribus
@@ -4528,16 +4540,65 @@ mod tests {
         );
     }
 
-    /// An element name shared by MORE THAN ONE dimension cannot be
-    /// unambiguously qualified, so it keeps the conservative wrapping
-    /// behavior (no qualification, PREVIOUS-wrapped when in the dep set).
+    /// An element name declared by multiple dimensions at DIFFERENT positions
+    /// is genuinely ambiguous (qualification through different dimensions
+    /// would resolve to different indices), so it keeps the conservative
+    /// wrapping behavior (no qualification, PREVIOUS-wrapped when in the dep
+    /// set).
     #[test]
     fn partial_equation_ambiguous_element_index_keeps_wrapping() {
         let deps = deps_set(&["arr", "shared", "input"]);
         let live = Ident::new("input");
         let shape = RefShape::Bare;
 
-        // `shared` is an element of BOTH dimensions.
+        // `shared` is an element of BOTH dimensions, at different positions
+        // (index 1 in dim_a, index 2 in dim_b).
+        let dm_dims = vec![
+            crate::datamodel::Dimension::named(
+                "dim_a".to_string(),
+                vec!["shared".to_string(), "a2".to_string()],
+            ),
+            crate::datamodel::Dimension::named(
+                "dim_b".to_string(),
+                vec!["b1".to_string(), "shared".to_string()],
+            ),
+        ];
+        let dims_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
+
+        let partial = build_partial_equation_shaped(
+            "arr[shared] * input",
+            &deps,
+            &live,
+            &shape,
+            &[],
+            None,
+            Some(&dims_ctx),
+        );
+
+        // Ambiguous element index: no qualification happens, and the index
+        // is wrapped exactly as before (the dep-set membership rule).
+        assert!(
+            !partial.contains('\u{B7}'),
+            "ambiguous element must not be qualified; got: {partial}",
+        );
+        assert!(
+            partial.to_lowercase().contains("previous(shared)"),
+            "ambiguous element index keeps the conservative wrap; got: {partial}",
+        );
+    }
+
+    /// An element name declared by multiple dimensions at the SAME position
+    /// is still unambiguous: qualification through any of the declaring
+    /// dimensions resolves to the same constant index. Models commonly
+    /// declare several same-shaped region/category dimensions, so this case
+    /// must qualify (C-LEARN's region dimensions are exactly this shape).
+    #[test]
+    fn partial_equation_same_position_shared_element_qualifies() {
+        let deps = deps_set(&["arr", "shared", "input"]);
+        let live = Ident::new("input");
+        let shape = RefShape::Bare;
+
+        // `shared` is the FIRST element of both dimensions.
         let dm_dims = vec![
             crate::datamodel::Dimension::named(
                 "dim_a".to_string(),
@@ -4560,15 +4621,59 @@ mod tests {
             Some(&dims_ctx),
         );
 
-        // Ambiguous element membership: no qualification happens, and the
-        // index is wrapped exactly as before (the dep-set membership rule).
+        // Same-position sharing: qualified (deterministically against the
+        // lexicographically smallest dimension name) and never wrapped.
         assert!(
-            !partial.contains('\u{B7}'),
-            "ambiguous element must not be qualified; got: {partial}",
+            partial.contains("dim_a\u{B7}shared"),
+            "same-position shared element should be qualified against dim_a; got: {partial}",
         );
         assert!(
-            partial.to_lowercase().contains("previous(shared)"),
-            "ambiguous element index keeps the conservative wrap; got: {partial}",
+            !partial.to_lowercase().contains("previous(shared)"),
+            "same-position shared element must not be wrapped; got: {partial}",
+        );
+    }
+
+    /// References that are already inside a PREVIOUS() call's argument are
+    /// already lagged: their value is fixed at the prior step and cannot be
+    /// affected by the current-step ceteris-paribus perturbation, so the
+    /// wrapper must NOT wrap them again. Double-wrapping reads the value from
+    /// two steps ago (semantically wrong) and forces a nested-PREVIOUS helper
+    /// chain (one synthesized helper variable per occurrence -- the dominant
+    /// remaining helper source on SAMPLE-IF-TRUE-heavy models like C-LEARN).
+    #[test]
+    fn partial_equation_does_not_rewrap_inside_previous() {
+        // Target equation shape: `if cond then input else previous(self, input)`
+        // -- the SAMPLE IF TRUE pattern. `target` (the self-reference) and
+        // `cond` are other-deps; `input` is the live source.
+        let deps = deps_set(&["target", "cond", "input"]);
+        let live = Ident::new("input");
+        let shape = RefShape::Bare;
+
+        let partial = build_partial_equation_shaped(
+            "if cond then input else PREVIOUS(target, input)",
+            &deps,
+            &live,
+            &shape,
+            &[],
+            None,
+            None,
+        );
+
+        // The dep `cond` (outside any PREVIOUS) is wrapped...
+        assert!(
+            partial.to_lowercase().contains("previous(cond)"),
+            "cond must be wrapped for ceteris-paribus; got: {partial}",
+        );
+        // ...but `target` inside the original PREVIOUS call is already
+        // lagged and must NOT be double-wrapped.
+        assert!(
+            !partial.to_lowercase().contains("previous(previous(target)"),
+            "reference inside PREVIOUS must not be double-wrapped; got: {partial}",
+        );
+        // The original previous(target, input) call survives intact.
+        assert!(
+            partial.to_lowercase().contains("previous(target,"),
+            "the original lagged self-reference must survive; got: {partial}",
         );
     }
 

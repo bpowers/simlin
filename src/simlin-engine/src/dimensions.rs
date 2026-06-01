@@ -330,30 +330,44 @@ impl DimensionsContext {
         None
     }
 
-    /// The single named dimension containing `element`, or `None` if no
-    /// dimension -- or more than one -- contains it.
+    /// A named dimension `element` can be unambiguously qualified against, or
+    /// `None` if its index is ambiguous (or no dimension declares it).
     ///
     /// Used to decide whether a bare identifier in subscript position can be
-    /// unambiguously qualified to its `dimension·element` form: XMILE allows
-    /// element names to overlap across dimensions (and to shadow variable
-    /// names), so qualification is only safe when exactly one dimension
-    /// declares the element.
+    /// qualified to a `dimension·element` form. XMILE allows element names to
+    /// overlap across dimensions (and to shadow variable names). The qualified
+    /// form resolves to the element's 1-based index *within the qualifying
+    /// dimension* (a plain integer constant by the time subscripts are
+    /// normalized), so qualification is sound whenever every dimension that
+    /// declares `element` agrees on that index -- the common case of a model
+    /// declaring several same-shaped region/category dimensions. If the
+    /// declaring dimensions disagree on the index, the element is genuinely
+    /// ambiguous and `None` is returned.
+    ///
+    /// The returned dimension is the lexicographically smallest matching name,
+    /// so generated equation text is deterministic (HashMap iteration order is
+    /// not).
     pub(crate) fn dimension_uniquely_containing_element(
         &self,
         element: &CanonicalElementName,
     ) -> Option<&CanonicalDimensionName> {
-        let mut found: Option<&CanonicalDimensionName> = None;
-        for (dim_name, dim) in self.dimensions.iter() {
-            if let Dimension::Named(_, named) = dim
-                && named.indexed_elements.contains_key(element)
-            {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(dim_name);
-            }
+        let mut matches: Vec<(&CanonicalDimensionName, usize)> = self
+            .dimensions
+            .iter()
+            .filter_map(|(dim_name, dim)| match dim {
+                Dimension::Named(_, named) => named
+                    .indexed_elements
+                    .get(element)
+                    .map(|&idx| (dim_name, idx)),
+                Dimension::Indexed(_, _) => None,
+            })
+            .collect();
+        let (&(_, first_idx), rest) = matches.split_first()?;
+        if rest.iter().any(|&(_, idx)| idx != first_idx) {
+            return None;
         }
-        found
+        matches.sort_by_key(|&(name, _)| name.as_str());
+        matches.first().map(|&(d, _)| d)
     }
 
     /// Get the maps_to target for a dimension (e.g., DimA -> DimB).
