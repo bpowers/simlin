@@ -112,3 +112,8 @@ __pycache__/
 /src/simlin-serve/npm
 /src/simlin-serve/dist
 
+# generated notebook artifacts (regenerate with notebooks/build_notebook.py)
+/notebooks/*.ipynb
+/notebooks/*.html
+/notebooks/*.png
+
