@@ -40,6 +40,7 @@ pub(super) fn parse_ltm_equation(
     dims: &[datamodel::Dimension],
     units_ctx: &crate::units::Context,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
+    model_var_names: Option<&HashSet<Ident<Canonical>>>,
 ) -> ParsedVariableResult {
     let dm_var = datamodel::Variable::Aux(datamodel::Aux {
         ident: canonicalize(var_name).into_owned(),
@@ -60,6 +61,12 @@ pub(super) fn parse_ltm_equation(
         units_ctx,
         |mi| Ok(Some(mi.clone())),
         module_idents,
+        // The model's variable-name set: lets PREVIOUS/INIT accept
+        // non-shadowed bare element subscripts as static (no helper aux) --
+        // GH #654. Every LTM parse site must thread the same set so layout
+        // (model_ltm_implicit_var_info) and compilation agree on which
+        // helpers exist.
+        model_var_names,
         // LTM synthetic equations (link/loop scores) are engine-generated
         // and never contain user macro invocations -> no registry needed.
         None,
@@ -79,10 +86,18 @@ pub(super) fn parse_ltm_equation_for_model_with_ids(
     equation: &datamodel::Equation,
     project: SourceProject,
     module_idents: &HashSet<Ident<Canonical>>,
+    model_var_names: &HashSet<Ident<Canonical>>,
 ) -> ParsedVariableResult {
     let dims = project_datamodel_dims(db, project);
     let units_ctx = project_units_context(db, project);
-    parse_ltm_equation(var_name, equation, dims, units_ctx, Some(module_idents))
+    parse_ltm_equation(
+        var_name,
+        equation,
+        dims,
+        units_ctx,
+        Some(module_idents),
+        Some(model_var_names),
+    )
 }
 
 pub(crate) fn parse_ltm_var_with_ids(
@@ -90,6 +105,7 @@ pub(crate) fn parse_ltm_var_with_ids(
     ltm_var: &crate::db::LtmSyntheticVar,
     project: SourceProject,
     module_idents: &HashSet<Ident<Canonical>>,
+    model_var_names: &HashSet<Ident<Canonical>>,
 ) -> ParsedVariableResult {
     parse_ltm_equation_for_model_with_ids(
         db,
@@ -97,6 +113,7 @@ pub(crate) fn parse_ltm_var_with_ids(
         &ltm_var.equation,
         project,
         module_idents,
+        model_var_names,
     )
 }
 
@@ -114,8 +131,15 @@ pub(super) fn reconstruct_ltm_var_lowered(
 ) -> Option<crate::variable::Variable> {
     let dim_context = project_dimensions_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
-    let parsed =
-        parse_ltm_equation_for_model_with_ids(db, var_name, equation, project, &module_idents);
+    let model_var_names = super::ltm_model_var_names(db, model, project);
+    let parsed = parse_ltm_equation_for_model_with_ids(
+        db,
+        var_name,
+        equation,
+        project,
+        &module_idents,
+        model_var_names,
+    );
     if parsed
         .variable
         .equation_errors()

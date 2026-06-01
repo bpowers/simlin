@@ -347,6 +347,22 @@ impl DimensionsContext {
     /// The returned dimension is the lexicographically smallest matching name,
     /// so generated equation text is deterministic (HashMap iteration order is
     /// not).
+    /// Whether `element` is declared by at least one *named* dimension.
+    ///
+    /// Unlike [`Self::dimension_uniquely_containing_element`], this makes no
+    /// uniqueness or index-agreement demand: it answers only "could this name
+    /// be a dimension element at all?". Callers that know the *subscripted
+    /// variable's* declared dimensions use this as the cheap pre-check before
+    /// relying on the compiler's own position-matched element resolution
+    /// (which always prefers the element interpretation over a variable
+    /// reference -- see `compiler::context`'s subscript lowering).
+    pub(crate) fn is_element_of_any_dimension(&self, element: &CanonicalElementName) -> bool {
+        self.dimensions.values().any(|dim| match dim {
+            Dimension::Named(_, named) => named.indexed_elements.contains_key(element),
+            Dimension::Indexed(_, _) => false,
+        })
+    }
+
     pub(crate) fn dimension_uniquely_containing_element(
         &self,
         element: &CanonicalElementName,

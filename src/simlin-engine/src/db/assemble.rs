@@ -1076,8 +1076,15 @@ pub fn assemble_module<'db>(
         // stock phase compilation like regular implicit modules.
         let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
         let ltm_module_idents = ltm::ltm_module_idents(db, model, project);
+        let ltm_var_names = ltm::ltm_model_var_names(db, model, project);
         for ltm_var in &ltm_vars.vars {
-            let parsed = ltm::parse_ltm_var_with_ids(db, ltm_var, project, &ltm_module_idents);
+            let parsed = ltm::parse_ltm_var_with_ids(
+                db,
+                ltm_var,
+                project,
+                &ltm_module_idents,
+                ltm_var_names,
+            );
             for (idx, implicit_dm_var) in parsed.implicit_vars.iter().enumerate() {
                 let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
                 if all_fragments.contains_key(&im_name) {
@@ -1771,6 +1778,7 @@ fn enumerate_module_instances_inner(
 
         if !module_typed.is_empty() {
             let ltm_module_idents = ltm::ltm_module_idents(db, *source_model, project);
+            let ltm_var_names = ltm::ltm_model_var_names(db, *source_model, project);
             let ltm_vars = model_ltm_variables(db, *source_model, project);
             let name_index = ltm::model_ltm_var_name_index(db, *source_model, project);
 
@@ -1794,6 +1802,7 @@ fn enumerate_module_instances_inner(
                     &ltm_vars.vars[parent_idx],
                     project,
                     &ltm_module_idents,
+                    ltm_var_names,
                 );
                 let Some(implicit_dm_var) = parsed.implicit_vars.get(im_meta.index_in_parent)
                 else {

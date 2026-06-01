@@ -376,3 +376,173 @@ fn test_init_qualified_element_subscript_no_helper() {
         );
     }
 }
+
+/// PREVIOUS of an array element selected by a *bare* element name compiles to
+/// a direct LoadPrev (no helper aux) when the parse knows the model's
+/// variable-name set -- even when the element is declared by multiple
+/// dimensions at different positions, which defeats project-unique
+/// qualification.
+///
+/// A bare name that is a dimension element AND not any variable's name cannot
+/// be a dynamic-index reference, so the compiler resolves it against the
+/// subscripted variable's own declared dimension (the element interpretation
+/// always wins in subscript lowering). This is the GH #654 case: C-LEARN's
+/// generated LTM equations carry ~24k such call sites, each of which
+/// previously synthesized a helper aux.
+#[test]
+fn test_previous_bare_element_no_helper_with_var_names() {
+    use std::collections::HashSet;
+
+    use crate::common::{Canonical, Ident};
+
+    // `b2` is declared by DimA (position 2) and DimB (position 1):
+    // project-unique qualification fails, only the variable's declared
+    // dimensions can disambiguate.
+    let dims = vec![
+        datamodel::Dimension::named("DimA".to_string(), vec!["a1".to_string(), "b2".to_string()]),
+        datamodel::Dimension::named("DimB".to_string(), vec!["b2".to_string(), "x1".to_string()]),
+    ];
+    let aux = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "lagged".to_string(),
+        equation: datamodel::Equation::Scalar("PREVIOUS(base_val[b2], 0)".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
+
+    // With the model's variable names known (and `b2` not among them), the
+    // bare element index is static: no helper.
+    let var_names: HashSet<Ident<Canonical>> =
+        [Ident::new("base_val"), Ident::new("lagged")].into();
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
+        crate::variable::parse_var_with_module_context(
+            &dims,
+            &aux,
+            &mut implicit_vars,
+            &units_ctx,
+            |mi| Ok(Some(mi.clone())),
+            None,
+            Some(&var_names),
+            None,
+            None,
+        );
+    assert!(
+        parsed.equation_errors().is_none(),
+        "equation should parse cleanly: {:?}",
+        parsed.equation_errors()
+    );
+    assert!(
+        implicit_vars.is_empty(),
+        "non-shadowed bare-element PREVIOUS must not synthesize helper vars; got: {:?}",
+        implicit_vars
+            .iter()
+            .map(|v| v.get_ident().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // Shadowed case: a variable named `b2` exists, so the index could be a
+    // dynamic reference -- the conservative helper path must be kept.
+    let var_names_with_shadow: HashSet<Ident<Canonical>> = [
+        Ident::new("base_val"),
+        Ident::new("lagged"),
+        Ident::new("b2"),
+    ]
+    .into();
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
+        crate::variable::parse_var_with_module_context(
+            &dims,
+            &aux,
+            &mut implicit_vars,
+            &units_ctx,
+            |mi| Ok(Some(mi.clone())),
+            None,
+            Some(&var_names_with_shadow),
+            None,
+            None,
+        );
+    assert!(parsed.equation_errors().is_none());
+    assert_eq!(
+        implicit_vars.len(),
+        1,
+        "an element name shadowed by a variable must keep the helper-aux path; got: {:?}",
+        implicit_vars
+            .iter()
+            .map(|v| v.get_ident().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // Without the variable-name set (the user-equation parse path), the
+    // conservative helper path is also kept.
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
+        crate::variable::parse_var(&dims, &aux, &mut implicit_vars, &units_ctx, |mi| {
+            Ok(Some(mi.clone()))
+        });
+    assert!(parsed.equation_errors().is_none());
+    assert_eq!(
+        implicit_vars.len(),
+        1,
+        "without the variable-name set, bare element indices keep the helper path"
+    );
+}
+
+/// End-to-end (salsa + VM): an LTM-instrumented model whose A2A target
+/// references arrayed deps with bare element subscripts (declared by multiple
+/// dimensions) compiles its LTM link scores without synthesizing any helper
+/// auxes, and produces the same simulation values either way.
+#[test]
+fn test_ltm_bare_element_subscripts_no_helpers() {
+    use salsa::Setter;
+
+    use crate::db::{model_ltm_implicit_var_info, model_ltm_variables};
+    use crate::test_common::TestProject;
+
+    // `b2` is in both DimA and DimB at different positions. The model's
+    // equations reference `base[b2]` (FixedIndex with a bare element) and
+    // `other[DimA]` (the A2A iterated form).
+    let tp = TestProject::new("ltm_bare_elem_no_helpers")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("DimA", &["a1", "b2"])
+        .named_dimension("DimB", &["b2", "x1"])
+        .array_stock("pop[DimA]", "100", &["grow"], &[], None)
+        .array_flow("grow[DimA]", "pop[DimA] * rate[b2] * other[DimA]", None)
+        .array_aux("rate[DimA]", "0.01 + pop[DimA] / 10000")
+        .array_aux("other[DimA]", "1 + pop[b2] / 1000");
+
+    tp.assert_compiles_incremental();
+
+    let db = crate::db::SimlinDb::default();
+    let project = tp.build_datamodel();
+    let sync = crate::db::sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
+    let mut db = db;
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    sync.project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
+    assert!(
+        !ltm_vars.vars.is_empty(),
+        "LTM discovery must emit link scores for this model"
+    );
+
+    let info = model_ltm_implicit_var_info(&db, source_model, sync.project);
+    // The only helpers allowed are the flow-to-stock link score's nested
+    // PREVIOUS(PREVIOUS(...)) captures (semantically necessary: the VM keeps
+    // one step of history, so a two-step lag needs a helper that re-lags a
+    // lagged value). Bare-element subscripts (`rate[b2]`, `pop[b2]`) must not
+    // synthesize any.
+    let non_flow_to_stock: Vec<&String> = info
+        .keys()
+        .filter(|name| !name.contains("grow\u{2192}pop"))
+        .collect();
+    assert!(
+        non_flow_to_stock.is_empty(),
+        "only the flow-to-stock nested-PREVIOUS helpers may remain; unexpected: {non_flow_to_stock:?}"
+    );
+}

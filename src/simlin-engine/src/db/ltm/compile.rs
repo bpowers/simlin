@@ -258,10 +258,18 @@ pub(crate) fn compile_ltm_equation_fragment(
 
     let units_ctx = project_units_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
+    let model_var_names = super::ltm_model_var_names(db, model, project);
 
     let var_dimensions = ltm_equation_dimensions(equation);
 
-    let parsed = parse_ltm_equation(var_name, equation, dims, units_ctx, Some(&module_idents));
+    let parsed = parse_ltm_equation(
+        var_name,
+        equation,
+        dims,
+        units_ctx,
+        Some(&module_idents),
+        Some(model_var_names),
+    );
 
     // Check for parse errors
     if parsed
@@ -634,6 +642,7 @@ pub(crate) fn compile_ltm_equation_fragment(
                             dims,
                             units_ctx,
                             Some(&module_idents),
+                            Some(model_var_names),
                         );
                         let input_prefix = format!("{module_var_name}\u{00B7}");
                         parent_parsed

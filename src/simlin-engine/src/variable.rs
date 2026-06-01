@@ -653,6 +653,7 @@ where
         module_input_mapper,
         None,
         None,
+        None,
         // `parse_var` is the no-project-macros convenience path, so there is
         // never an enclosing macro body here.
         None,
@@ -665,6 +666,16 @@ where
 /// `module_idents`: when provided, `PREVIOUS(module_var)` in equations
 /// synthesizes a scalar helper aux instead of compiling `LoadPrev` directly
 /// against a multi-slot module.
+///
+/// `model_var_names`: when provided, the model's full variable-name set;
+/// `PREVIOUS`/`INIT` then accept a non-shadowed bare element name as a static
+/// subscript index instead of synthesizing a helper aux per call site (see
+/// `BuiltinVisitor::index_is_static`). The salsa per-variable parse path
+/// passes `None` to preserve incremental invalidation granularity (the parse
+/// must not depend on the model's full name set); the LTM equation parse path
+/// -- whose equations are regenerated wholesale on model changes anyway --
+/// passes the set, which is what keeps large arrayed models' LTM helper
+/// volume bounded (GH #654).
 ///
 /// `macro_registry`: when provided, a call resolving to a project macro
 /// expands into a synthetic `Variable::Module` (and shadows an identically
@@ -684,6 +695,7 @@ pub fn parse_var_with_module_context<MI, F>(
     units_ctx: &units::Context,
     module_input_mapper: F,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
+    model_var_names: Option<&HashSet<Ident<Canonical>>>,
     macro_registry: Option<&MacroRegistry>,
     enclosing_model: Option<&str>,
 ) -> Variable<MI, Expr0>
@@ -715,6 +727,7 @@ where
                     ast,
                     Some(&dimensions_ctx),
                     module_idents,
+                    model_var_names,
                     registry,
                     enclosing_model,
                 ) {

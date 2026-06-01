@@ -162,6 +162,13 @@ fn parse_source_variable_impl(
         units_ctx,
         |mi| Ok(Some(mi.clone())),
         module_idents,
+        // No model-var-names set: the per-variable parse must not depend on
+        // the model's full name set, or any variable add/remove/rename would
+        // invalidate every cached parse (dimension-granularity incrementality).
+        // Bare element subscripts in user equations therefore keep the
+        // conservative helper-aux path; the LTM parse path (whose equations
+        // are regenerated wholesale anyway) passes the set instead.
+        None,
         macro_registry,
         crate::db::macro_registry::enclosing_macro_for_var(db, project, var), // #554
     );

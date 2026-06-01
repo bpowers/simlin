@@ -70,6 +70,33 @@ use link_scores::{
 use loops::{cross_agg_loop_budget, find_model_output_ports, recover_agg_hop_polarities};
 use parse::{ltm_synthetic_equation, parse_ltm_equation};
 
+/// The model's full variable-name set, for the LTM equation parse path.
+///
+/// Threaded into `parse_ltm_equation` so PREVIOUS/INIT can accept a
+/// non-shadowed bare element name as a static subscript index instead of
+/// synthesizing a helper aux per call site (GH #654: C-LEARN's generated LTM
+/// equations carry ~24k such call sites). Salsa-tracked because the LTM
+/// fragment compilers parse equations once per synthetic variable -- tens of
+/// thousands of times on large models -- and rebuilding a several-thousand-
+/// entry set per parse would be pure waste.
+///
+/// Every LTM parse site MUST pass the same set: `model_ltm_implicit_var_info`
+/// (which decides which helpers exist and get layout slots) and the fragment
+/// compilers / `assemble_module` (which compile them) have to agree on
+/// whether a given PREVIOUS argument synthesizes a helper.
+#[salsa::tracked(returns(ref))]
+pub(super) fn ltm_model_var_names(
+    db: &dyn Db,
+    model: SourceModel,
+    _project: SourceProject,
+) -> HashSet<Ident<Canonical>> {
+    model
+        .variables(db)
+        .keys()
+        .map(|name| Ident::new(name))
+        .collect()
+}
+
 pub(super) fn ltm_module_idents(
     db: &dyn Db,
     model: SourceModel,
@@ -175,6 +202,7 @@ pub fn model_ltm_implicit_var_info(
     let dims = project_datamodel_dims(db, project);
     let units_ctx = project_units_context(db, project);
     let module_idents = ltm_module_idents(db, model, project);
+    let model_var_names = ltm_model_var_names(db, model, project);
 
     let mut result = HashMap::new();
 
@@ -185,6 +213,7 @@ pub fn model_ltm_implicit_var_info(
             dims,
             units_ctx,
             Some(&module_idents),
+            Some(model_var_names),
         );
 
         let project_models = project.models(db);

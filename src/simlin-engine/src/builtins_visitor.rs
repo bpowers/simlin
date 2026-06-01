@@ -159,6 +159,18 @@ pub struct BuiltinVisitor<'a> {
     /// PREVIOUS(module_var) must synthesize a scalar temp arg rather than
     /// reading a flat slot directly, because modules occupy multiple slots.
     module_idents: Option<&'a HashSet<Ident<Canonical>>>,
+    /// Identifiers of *all* variables in the parent model, when known.
+    ///
+    /// Used by `index_is_static` to accept a *bare* element name as a static
+    /// subscript index: a name that is a dimension element AND not any
+    /// variable's name cannot be a dynamic-index reference, so the compiler
+    /// is guaranteed to resolve it against the subscripted variable's
+    /// declared dimensions (the element interpretation always wins -- see
+    /// `compiler::context`'s subscript lowering). `None` (the user-equation
+    /// parse path, which must stay incremental under variable renames)
+    /// disables the check, keeping bare element indices on the conservative
+    /// helper path.
+    model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
     /// The per-project macro registry. A call name that resolves here is
     /// expanded as a macro -- *before* alias-normalization, `is_builtin_fn`,
     /// or the stdlib lookup -- so a project macro shadows an identically
@@ -198,6 +210,7 @@ impl<'a> BuiltinVisitor<'a> {
             active_subscript: None,
             dimensions_ctx: None,
             module_idents: None,
+            model_var_names: None,
             macro_registry: &EMPTY_MACRO_REGISTRY,
             enclosing_model: None,
         }
@@ -220,6 +233,7 @@ impl<'a> BuiltinVisitor<'a> {
             active_subscript: Some(subscript.to_vec()),
             dimensions_ctx,
             module_idents: None,
+            model_var_names: None,
             macro_registry: &EMPTY_MACRO_REGISTRY,
             enclosing_model: None,
         }
@@ -266,6 +280,16 @@ impl<'a> BuiltinVisitor<'a> {
         self
     }
 
+    /// Set the model's full variable-name set so `index_is_static` can accept
+    /// non-shadowed bare element names (see the `model_var_names` field doc).
+    fn with_model_var_names(
+        mut self,
+        model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
+    ) -> Self {
+        self.model_var_names = model_var_names;
+        self
+    }
+
     /// Set the dimensions context so PREVIOUS/INIT can recognize statically
     /// resolvable subscript indices (qualified `dimension·element` references)
     /// outside of A2A per-element walks. The A2A constructor
@@ -308,23 +332,46 @@ impl<'a> BuiltinVisitor<'a> {
     /// Is this subscript index expression *certainly* statically resolvable
     /// at compile time?
     ///
-    /// Returns true only for the unambiguous forms: a numeric constant, or a
-    /// qualified `dimension·element` reference (which `constify_dimensions`
-    /// folds to a constant during Expr1 lowering, regardless of context).
+    /// Returns true for:
+    ///   * a numeric constant;
+    ///   * a qualified `dimension·element` reference (which
+    ///     `constify_dimensions` folds to a constant during Expr1 lowering,
+    ///     regardless of context);
+    ///   * when the model's variable-name set is known (`model_var_names`),
+    ///     a bare identifier that is a dimension element and is NOT shadowed
+    ///     by any variable (model variable, module, or implicit var
+    ///     synthesized during this walk). Such a name cannot be a
+    ///     dynamic-index reference, so the compiler is guaranteed to resolve
+    ///     it against the subscripted variable's declared dimensions -- the
+    ///     element interpretation always wins in subscript lowering.
     ///
-    /// Bare identifiers are NOT considered static even when they name a
-    /// dimension element: XMILE explicitly allows element names to shadow
-    /// variable names ("the Element names can be the same as Variable
-    /// names"), and only the compiler -- which knows the subscripted
-    /// variable's declared dimensions -- can disambiguate element-vs-variable
-    /// for them. A bare identifier index therefore stays on the conservative
-    /// helper-aux path for PREVIOUS/INIT.
+    /// Without `model_var_names`, bare identifiers are NOT considered static
+    /// even when they name a dimension element: XMILE explicitly allows
+    /// element names to shadow variable names ("the Element names can be the
+    /// same as Variable names"), and only the compiler -- which knows the
+    /// subscripted variable's declared dimensions -- can disambiguate
+    /// element-vs-variable for them. A bare identifier index therefore stays
+    /// on the conservative helper-aux path for PREVIOUS/INIT.
     fn index_is_static(&self, idx: &IndexExpr0) -> bool {
         match idx {
             IndexExpr0::Expr(Expr0::Const(_, _, _)) => true,
-            IndexExpr0::Expr(Expr0::Var(ident, _)) => self
-                .dimensions_ctx
-                .is_some_and(|ctx| ctx.lookup(&canonicalize(ident.as_str())).is_some()),
+            IndexExpr0::Expr(Expr0::Var(ident, _)) => {
+                let canonical = canonicalize(ident.as_str());
+                let Some(ctx) = self.dimensions_ctx else {
+                    return false;
+                };
+                if ctx.lookup(&canonical).is_some() {
+                    return true;
+                }
+                let Some(var_names) = self.model_var_names else {
+                    return false;
+                };
+                let elem = crate::common::CanonicalElementName::from_raw(&canonical);
+                let canonical_ident = Ident::new(&canonical);
+                ctx.is_element_of_any_dimension(&elem)
+                    && !var_names.contains(&canonical_ident)
+                    && !self.vars.contains_key(&canonical_ident)
+            }
             _ => false,
         }
     }
@@ -845,11 +892,17 @@ impl<'a> BuiltinVisitor<'a> {
 /// same-named-opcode-intrinsic exception in `BuiltinVisitor::walk` so a
 /// macro body's renamed-builtin call (`init` inside macro `INIT`) resolves to
 /// the intrinsic instead of recursing into the macro forever.
+///
+/// `model_var_names`, when provided, is the model's full variable-name set;
+/// it lets `PREVIOUS`/`INIT` accept a non-shadowed bare element name as a
+/// static subscript index instead of synthesizing a helper aux (see
+/// `BuiltinVisitor::index_is_static`).
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,
     dimensions_ctx: Option<&DimensionsContext>,
     module_idents: Option<&HashSet<Ident<Canonical>>>,
+    model_var_names: Option<&HashSet<Ident<Canonical>>>,
     macro_registry: &MacroRegistry,
     enclosing_model: Option<&str>,
 ) -> std::result::Result<(Ast<Expr0>, Vec<datamodel::Variable>), EquationError> {
@@ -858,6 +911,7 @@ pub fn instantiate_implicit_modules(
             let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                 .with_dimensions_ctx(dimensions_ctx)
                 .with_module_idents(module_idents)
+                .with_model_var_names(model_var_names)
                 .with_macro_registry(macro_registry)
                 .with_enclosing_model(enclosing_model);
             let transformed = builtin_visitor.walk(ast)?;
@@ -882,6 +936,7 @@ pub fn instantiate_implicit_modules(
                         dimensions_ctx,
                     )
                     .with_module_idents(module_idents)
+                    .with_model_var_names(model_var_names)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
                     let transformed_ast = visitor.walk(ast_clone)?;
@@ -896,6 +951,7 @@ pub fn instantiate_implicit_modules(
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                     .with_dimensions_ctx(dimensions_ctx)
                     .with_module_idents(module_idents)
+                    .with_model_var_names(model_var_names)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
                 let transformed = builtin_visitor.walk(ast)?;
@@ -926,6 +982,7 @@ pub fn instantiate_implicit_modules(
                         dimensions_ctx,
                     )
                     .with_module_idents(module_idents)
+                    .with_model_var_names(model_var_names)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
                     let transformed = visitor.walk(equation)?;
@@ -957,6 +1014,7 @@ pub fn instantiate_implicit_modules(
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                     .with_dimensions_ctx(dimensions_ctx)
                     .with_module_idents(module_idents)
+                    .with_model_var_names(model_var_names)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
                 let elements: std::result::Result<HashMap<_, _>, EquationError> = elements

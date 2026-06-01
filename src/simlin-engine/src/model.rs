@@ -963,6 +963,7 @@ impl ModelStage0 {
                     units_ctx,
                     |mi| Ok(Some(mi.clone())),
                     Some(&module_idents),
+                    None,
                     Some(&macro_registry),
                     enclosing_model,
                 )
@@ -1065,6 +1066,7 @@ impl ModelStage0 {
                     units_ctx,
                     |mi| Ok(Some(mi.clone())),
                     Some(&module_idents),
+                    None,
                     Some(&macro_registry),
                     enclosing_model,
                 ));

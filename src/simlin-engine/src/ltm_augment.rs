@@ -803,6 +803,25 @@ fn wrap_index_non_matching_in_previous(
     if let Some(qualified) = qualify_element_index(&index, dims_ctx) {
         return qualified;
     }
+    // An index that names a dimension element which *cannot* be qualified
+    // (declared by multiple dimensions at different positions, e.g. C-LEARN's
+    // region elements) is still left verbatim rather than PREVIOUS-wrapped.
+    // Wrapping it would make the subscript dynamic (`dep[PREVIOUS(elem)]`),
+    // forcing a synthesized helper aux per call site -- the dominant residual
+    // helper source on large arrayed models (GH #654) -- and is also
+    // semantically wrong for a genuinely-dynamic index (the index would be
+    // read from two steps ago instead of one). The downstream parse decides:
+    // a non-shadowed element compiles to a static subscript (direct
+    // LoadPrev), a genuinely-dynamic index still synthesizes its helper
+    // there, with single-lag semantics.
+    if let IndexExpr0::Expr(Expr0::Var(name, _)) = &index
+        && let Some(ctx) = dims_ctx
+        && ctx.is_element_of_any_dimension(&crate::common::CanonicalElementName::from_raw(
+            &canonicalize(name.as_str()),
+        ))
+    {
+        return index;
+    }
     // Indices are inner content of a live reference (or of a
     // PREVIOUS-wrapped one); a `live_source` occurrence reachable only
     // through an index is not the live reference itself, so do not
@@ -957,10 +976,12 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
 /// canonical equation format (via parse + `print_eqn`); a parse failure
 /// degrades to the lowercased input, matching `build_partial_equation_shaped`.
 ///
-/// `element` is a single element name (`"nyc"`) for a one-dimensional
-/// target, or a comma-joined tuple (`"nyc,adult"`) for a multi-dimensional
-/// one -- the same form `db::ltm::cartesian_subscripts` produces and the
-/// `parse_link_offsets` discovery parser expects on the `to` side.
+/// `element` is a single element name (`"nyc"`, or qualified `"region·nyc"`)
+/// for a one-dimensional target, or a comma-joined tuple (`"nyc,adult"` /
+/// `"region·nyc,age·adult"`) for a multi-dimensional one -- the same form
+/// `db::ltm::cartesian_subscripts` produces (and `qualify_element_csv`
+/// qualifies) and the `parse_link_offsets` discovery parser expects on the
+/// `to` side.
 pub(crate) fn subscript_idents_at_element(
     equation_text: &str,
     idents: &HashSet<Ident<Canonical>>,
@@ -981,13 +1002,33 @@ pub(crate) fn subscript_idents_at_element(
             ))
         })
         .collect();
-    print_eqn(&subscript_idents_in_expr0(ast, idents, &index_exprs))
+    // Qualified element parts (`region·nyc`) also pin *dimension-name*
+    // subscript indices: a dep referenced as `dep[Region]` (the A2A iterated
+    // form) reads the same element a bare `dep` reference would, so in a
+    // per-element scalar equation it must be pinned to that element. The map
+    // is keyed by the canonical dimension name each qualified part names.
+    let dim_to_index: Vec<(String, IndexExpr0)> = element
+        .split(',')
+        .zip(index_exprs.iter())
+        .filter_map(|(part, idx_expr)| {
+            let part = part.trim();
+            part.split_once('\u{00B7}')
+                .map(|(dim, _)| (canonicalize(dim).into_owned(), idx_expr.clone()))
+        })
+        .collect();
+    print_eqn(&subscript_idents_in_expr0(
+        ast,
+        idents,
+        &index_exprs,
+        &dim_to_index,
+    ))
 }
 
 fn subscript_idents_in_expr0(
     expr: Expr0,
     idents: &HashSet<Ident<Canonical>>,
     index_exprs: &[IndexExpr0],
+    dim_to_index: &[(String, IndexExpr0)],
 ) -> Expr0 {
     match expr {
         Expr0::Const(..) => expr,
@@ -999,31 +1040,88 @@ fn subscript_idents_in_expr0(
                 expr
             }
         }
-        // Already-subscripted references are element-pinned by their own
-        // index; leave them (and their indices) untouched.
-        Expr0::Subscript(..) => expr,
+        // An already-subscripted reference to a pinned dep: indices that are
+        // *element literals* are already pinned and stay, but an index that
+        // names one of the pinned DIMENSIONS (`dep[Region]`, the A2A iterated
+        // reference form) reads "the current element" -- which in a
+        // per-element scalar equation is exactly the element being pinned.
+        // Left unpinned, such an index is unresolvable in scalar context and
+        // forces a synthesized helper aux per occurrence (GH #654: ~27k of
+        // C-LEARN's ~30k residual helpers came from this form).
+        Expr0::Subscript(ident, indices, loc) => {
+            let canonical = Ident::new(ident.as_str());
+            if !idents.contains(&canonical) || dim_to_index.is_empty() {
+                return Expr0::Subscript(ident, indices, loc);
+            }
+            let indices = indices
+                .into_iter()
+                .map(|idx| {
+                    if let IndexExpr0::Expr(Expr0::Var(name, _)) = &idx {
+                        let idx_canonical = canonicalize(name.as_str());
+                        if let Some((_, pinned)) = dim_to_index
+                            .iter()
+                            .find(|(dim, _)| dim.as_str() == idx_canonical.as_ref())
+                        {
+                            return pinned.clone();
+                        }
+                    }
+                    idx
+                })
+                .collect();
+            Expr0::Subscript(ident, indices, loc)
+        }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => {
             let args = args
                 .into_iter()
-                .map(|a| subscript_idents_in_expr0(a, idents, index_exprs))
+                .map(|a| subscript_idents_in_expr0(a, idents, index_exprs, dim_to_index))
                 .collect();
             Expr0::App(UntypedBuiltinFn(name, args), loc)
         }
         Expr0::Op1(op, inner, loc) => Expr0::Op1(
             op,
-            Box::new(subscript_idents_in_expr0(*inner, idents, index_exprs)),
+            Box::new(subscript_idents_in_expr0(
+                *inner,
+                idents,
+                index_exprs,
+                dim_to_index,
+            )),
             loc,
         ),
         Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
             op,
-            Box::new(subscript_idents_in_expr0(*lhs, idents, index_exprs)),
-            Box::new(subscript_idents_in_expr0(*rhs, idents, index_exprs)),
+            Box::new(subscript_idents_in_expr0(
+                *lhs,
+                idents,
+                index_exprs,
+                dim_to_index,
+            )),
+            Box::new(subscript_idents_in_expr0(
+                *rhs,
+                idents,
+                index_exprs,
+                dim_to_index,
+            )),
             loc,
         ),
         Expr0::If(cond, then_expr, else_expr, loc) => Expr0::If(
-            Box::new(subscript_idents_in_expr0(*cond, idents, index_exprs)),
-            Box::new(subscript_idents_in_expr0(*then_expr, idents, index_exprs)),
-            Box::new(subscript_idents_in_expr0(*else_expr, idents, index_exprs)),
+            Box::new(subscript_idents_in_expr0(
+                *cond,
+                idents,
+                index_exprs,
+                dim_to_index,
+            )),
+            Box::new(subscript_idents_in_expr0(
+                *then_expr,
+                idents,
+                index_exprs,
+                dim_to_index,
+            )),
+            Box::new(subscript_idents_in_expr0(
+                *else_expr,
+                idents,
+                index_exprs,
+                dim_to_index,
+            )),
             loc,
         ),
     }
@@ -3065,6 +3163,59 @@ mod tests {
         assert_eq!(out, "pop[*]");
     }
 
+    // -- subscript_idents_at_element tests --
+
+    /// A dep referenced through the *dimension-name* subscript form
+    /// (`reference_emissions[cop]`, the A2A iterated reference) must be
+    /// pinned to the element exactly like a bare reference: in the
+    /// per-target-element scalar link score, `[cop]` is meaningless (there is
+    /// no active A2A dimension) and forces a synthesized helper aux per
+    /// occurrence -- the dominant residual helper source on C-LEARN
+    /// (~27k call sites, GH #654).
+    #[test]
+    fn test_subscript_idents_at_element_pins_dimension_name_indices() {
+        let idents = deps_set(&["reference_emissions", "pct_change"]);
+        // Parsed function names round-trip lowercased through print_eqn, so
+        // the expected text spells `previous(...)`.
+        let result = subscript_idents_at_element(
+            "PREVIOUS(reference_emissions[cop]) * (PREVIOUS(pct_change[cop]) / c + 1)",
+            &idents,
+            "cop·oecd_us",
+        );
+        assert_eq!(
+            result,
+            "previous(reference_emissions[cop·oecd_us]) * (previous(pct_change[cop·oecd_us]) / c + 1)"
+        );
+    }
+
+    /// Multi-dimensional pinning matches indices to dimensions by NAME, so a
+    /// dep declared over a subset of the target's dimensions (or with them in
+    /// a different order) pins each index to the right element.
+    #[test]
+    fn test_subscript_idents_at_element_pins_by_dimension_name() {
+        let idents = deps_set(&["row_input", "matrix"]);
+        let result = subscript_idents_at_element(
+            "row_input[age] + matrix[age,region]",
+            &idents,
+            "region·nyc,age·adult",
+        );
+        assert_eq!(
+            result,
+            "row_input[age·adult] + matrix[age·adult, region·nyc]"
+        );
+    }
+
+    /// Indices that are already element literals (not dimension names) are
+    /// left untouched, and unqualified pinned elements (no `dim·` part)
+    /// cannot pin dimension-name indices -- those keep the conservative form.
+    #[test]
+    fn test_subscript_idents_at_element_leaves_literal_indices() {
+        let idents = deps_set(&["dep"]);
+        // `nyc` is an element literal, not the dimension name `region`.
+        let result = subscript_idents_at_element("dep[nyc] + dep[region]", &idents, "region·la");
+        assert_eq!(result, "dep[nyc] + dep[region·la]");
+    }
+
     // -- dimension_element_names tests --
 
     #[test]
@@ -4653,7 +4804,7 @@ mod tests {
     /// wrapping behavior (no qualification, PREVIOUS-wrapped when in the dep
     /// set).
     #[test]
-    fn partial_equation_ambiguous_element_index_keeps_wrapping() {
+    fn partial_equation_ambiguous_element_index_left_verbatim() {
         let deps = deps_set(&["arr", "shared", "input"]);
         let live = Ident::new("input");
         let shape = RefShape::Bare;
@@ -4682,15 +4833,20 @@ mod tests {
             Some(&dims_ctx),
         );
 
-        // Ambiguous element index: no qualification happens, and the index
-        // is wrapped exactly as before (the dep-set membership rule).
+        // Ambiguous element index: it cannot be qualified (the declaring
+        // dimensions disagree on its index), but it is still an element
+        // selector, never a causal reference -- so it is left verbatim, NOT
+        // PREVIOUS-wrapped (GH #654). The downstream parse decides whether it
+        // compiles to a static subscript (non-shadowed element) or needs a
+        // helper aux (genuinely-dynamic index), with single-lag semantics
+        // either way.
         assert!(
             !partial.contains('\u{B7}'),
             "ambiguous element must not be qualified; got: {partial}",
         );
         assert!(
-            partial.to_lowercase().contains("previous(shared)"),
-            "ambiguous element index keeps the conservative wrap; got: {partial}",
+            partial.to_lowercase().contains("previous(arr[shared])"),
+            "ambiguous element index is left verbatim inside the wrapped dep; got: {partial}",
         );
     }
 
