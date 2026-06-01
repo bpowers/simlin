@@ -602,6 +602,328 @@ fn pinned_multi_dim_a2a_loop_scored_per_slot() {
     }
 }
 
+/// GH #653 / pin-dims.AC2: a pinned *per-element-equation* loop -- the
+/// MDL-importer shape, where the cycle's variables carry `Equation::Arrayed`
+/// equations referencing literal element subscripts (FixedIndex shapes) --
+/// must be scored per element in discovery mode.
+///
+/// The cycle classifies CrossElementOrMixed (FixedIndex shapes), so the pin is
+/// expanded on the element graph; its diagonal element circuits collapse back
+/// into one arrayed loop score whose slot equations reference each element's
+/// own FixedIndex link scores. Same fixture/expected values as the
+/// enumerated-path test
+/// (`ltm_array_agg::per_element_equation_a2a_loop_scores_correct_for_every_slot`):
+/// birth loop scores `b/(b-d)` per element.
+#[test]
+fn pinned_per_element_equation_loop_scored_per_element_in_discovery_mode() {
+    let mut project = TestProject::new("per_elem_pin")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("population[Region]", "100", &["births"], &["deaths"], None)
+        .array_flow_with_ranges(
+            "births[Region]",
+            vec![
+                ("NYC", "population[NYC] * 0.10"),
+                ("Boston", "population[Boston] * 0.40"),
+            ],
+        )
+        .array_flow_with_ranges(
+            "deaths[Region]",
+            vec![
+                ("NYC", "population[NYC] * 0.03"),
+                ("Boston", "population[Boston] * 0.05"),
+            ],
+        )
+        .build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(&mut project, "main", "growth", &["population", "births"]);
+
+    let (results, loop_partitions, ltm_vars) = run_ltm_discovery(&project);
+
+    let pin_var = ltm_vars
+        .iter()
+        .find(|v| v.name == "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1")
+        .expect("discovery mode must emit the pinned loop_score var");
+    assert_eq!(
+        pin_var.dimensions,
+        vec!["Region".to_string()],
+        "the pinned per-element-equation loop must collapse to one arrayed score over Region"
+    );
+    let parts = loop_partitions
+        .get("pin1")
+        .expect("pinned loop must register a partition");
+    assert_eq!(
+        parts.len(),
+        2,
+        "one partition entry per slot; got {parts:?}"
+    );
+
+    // Per-slot scores: slot 0 = NYC = 0.10/0.07, slot 1 = Boston = 0.40/0.35.
+    let base = *results
+        .offsets
+        .get("$\u{205A}ltm\u{205A}loop_score\u{205A}pin1")
+        .expect("pin1 loop score must be in results");
+    let expected = [0.10 / 0.07, 0.40 / 0.35];
+    const TOL: f64 = 1e-9;
+    for (slot, &expected_score) in expected.iter().enumerate() {
+        for step in 3..results.step_count {
+            let v = results.data[step * results.step_size + base + slot];
+            assert!(
+                (v - expected_score).abs() <= TOL * expected_score.abs(),
+                "pin1 slot {slot} at step {step}: got {v}, expected {expected_score}. A zero \
+                 here means the pin's slot equation references the wrong element's link \
+                 scores or failed to compile (GH #653)."
+            );
+        }
+    }
+}
+
+/// GH #653 / pin-dims.AC3: a pinned *mixed* scalar/arrayed cycle (arrayed
+/// stock -> scalar SUM aggregate -> scalar pressure -> arrayed flow) expands
+/// to one element-level instance per element, each scored by its own scalar
+/// loop-score variable -- exactly how the enumerator scores the same cycle.
+///
+/// Multi-instance pins use the deterministic id scheme `pin{n}⁚{j}`.
+#[test]
+fn pinned_mixed_scalar_arrayed_loop_scored_per_instance_in_discovery_mode() {
+    let mut project = TestProject::new("mixed_pin")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("Product", &["widgets", "gadgets"])
+        .array_stock("inventory[Product]", "100", &["production"], &[], None)
+        .aux("total_inventory", "SUM(inventory[*])", None)
+        .aux("pressure", "1000 / total_inventory", None)
+        .array_flow("production[Product]", "pressure * 2", None)
+        .build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(
+        &mut project,
+        "main",
+        "production control",
+        &["inventory", "total_inventory", "pressure", "production"],
+    );
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+
+    // One scalar loop-score var per element instance, ids pin1⁚1 / pin1⁚2.
+    let pin_vars: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|v| {
+            v.name
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}pin1")
+        })
+        .collect();
+    assert_eq!(
+        pin_vars.len(),
+        2,
+        "the mixed pin expands to one instance per Product element; got {:?}",
+        pin_vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    for v in &pin_vars {
+        assert!(
+            v.dimensions.is_empty(),
+            "each mixed-pin instance is a scalar loop score; {} has dims {:?}",
+            v.name,
+            v.dimensions
+        );
+    }
+
+    // Both instances register partitions and produce finite, eventually
+    // non-zero scores (the pre-fix behavior was a compile failure -> silent
+    // constant 0 backed by a fragment-diagnostics Warning).
+    let no_pin_warnings = collect_all_diagnostics(&db, sync.project)
+        .iter()
+        .all(|d| !format!("{:?}", d.error).contains("loop_score\u{205A}pin"));
+    assert!(
+        no_pin_warnings,
+        "no pinned loop-score fragment may fail to compile"
+    );
+
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+    for v in &pin_vars {
+        let id = v
+            .name
+            .strip_prefix("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+            .unwrap();
+        assert!(
+            ltm.loop_partitions.contains_key(id),
+            "pin instance {id} must register a partition; got {:?}",
+            ltm.loop_partitions.keys().collect::<Vec<_>>()
+        );
+        let off = *results
+            .offsets
+            .get(v.name.as_str())
+            .unwrap_or_else(|| panic!("{} must be in results", v.name));
+        let mut saw_nonzero = false;
+        for step in 0..results.step_count {
+            let val = results.data[step * results.step_size + off];
+            assert!(
+                val.is_finite(),
+                "{} at step {step} must be finite, got {val}",
+                v.name
+            );
+            if val != 0.0 {
+                saw_nonzero = true;
+            }
+        }
+        assert!(
+            saw_nonzero,
+            "{} must be non-zero at some step (silent-stub regression)",
+            v.name
+        );
+    }
+}
+
+/// GH #653 / pin-dims.AC4: a pinned genuinely-cross-element cycle (migration:
+/// each region's pressure reads the *other* region's population) expands to a
+/// single element circuit visiting both elements, scored by one scalar
+/// loop-score variable under the plain `pin1` id.
+#[test]
+fn pinned_cross_element_migration_loop_scored_in_discovery_mode() {
+    let mut project = TestProject::new("migration_pin")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("population[Region]", "100", &["migration_in"], &[], None)
+        .array_with_ranges(
+            "migration_pressure[Region]",
+            vec![
+                ("NYC", "population[Boston] * 0.1"),
+                ("Boston", "population[NYC] * 0.2"),
+            ],
+        )
+        .array_flow("migration_in[Region]", "migration_pressure[Region]", None)
+        .build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(
+        &mut project,
+        "main",
+        "migration",
+        &["population", "migration_pressure", "migration_in"],
+    );
+
+    let (results, loop_partitions, ltm_vars) = run_ltm_discovery(&project);
+
+    // Exactly one element-level instance (the 6-node walk through both
+    // regions) -> the pin keeps its plain id and a scalar loop score.
+    let pin_vars: Vec<&LtmSyntheticVar> = ltm_vars
+        .iter()
+        .filter(|v| {
+            v.name
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}pin")
+        })
+        .collect();
+    assert_eq!(
+        pin_vars.len(),
+        1,
+        "the cross-element migration cycle has exactly one element-level instance; got {:?}",
+        pin_vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        pin_vars[0].name,
+        "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1"
+    );
+    assert!(
+        pin_vars[0].dimensions.is_empty(),
+        "a cross-element pin instance is a scalar loop score"
+    );
+    assert!(
+        loop_partitions.contains_key("pin1"),
+        "the cross-element pin must register a partition"
+    );
+    assert_loop_score_is_link_product(&results, "pin1");
+}
+
+/// GH #653 / pin-dims.AC6.2: a pin whose variable cycle exists in the
+/// variable-level causal graph but has NO element-level instantiation (the
+/// per-element equations never close a cycle at any element) is reported
+/// invalid with a clear reason -- never silently scored 0.
+#[test]
+fn pin_without_element_level_instantiation_is_invalid() {
+    // Variable-level cycle: s -> g -> f -> s. Element-level: f[nyc] reads
+    // g[nyc], g[boston] reads s[boston] -- the per-element edges never close
+    // a cycle (s[nyc]'s only feedback path needs g[nyc] -> ... -> s[nyc], but
+    // g[nyc] is a constant; s[boston] needs f[boston] to read g[boston], but
+    // f[boston] is a constant).
+    let mut project = TestProject::new("no_elem_cycle")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["NYC", "Boston"])
+        .array_stock("s[Region]", "100", &["f"], &[], None)
+        .array_flow_with_ranges("f[Region]", vec![("NYC", "g[NYC]"), ("Boston", "5")])
+        .array_with_ranges("g[Region]", vec![("NYC", "10"), ("Boston", "s[Boston]")])
+        .build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(&mut project, "main", "phantom", &["s", "g", "f"]);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+
+    let has_warning = diagnostics.iter().any(|d| {
+        let msg = format!("{:?}", d.error);
+        msg.contains("phantom") && msg.to_lowercase().contains("element-level")
+    });
+    assert!(
+        has_warning,
+        "a pin with no element-level instantiation must surface a diagnostic naming it; got: {:?}",
+        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+    );
+
+    // And no loop_score var was emitted for it.
+    let source_model = sync.models["main"].source_model;
+    let ltm = model_ltm_variables(&db, source_model, sync.project);
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("loop_score\u{205A}pin")),
+        "an uninstantiable pin must not emit a loop_score var"
+    );
+}
+
+/// GH #653 / pin-dims.AC6.1: a pin whose element-level expansion subgraph
+/// exceeds MAX_LTM_SCC_NODES is reported invalid with a clear reason rather
+/// than hung on (element-level Johnson at that scale is intractable) or
+/// silently zeroed.
+#[test]
+fn pin_with_oversized_element_expansion_is_invalid() {
+    // 30 elements x (stock + agg + flow) -> a 61-node element-level SCC,
+    // exceeding MAX_LTM_SCC_NODES = 50. The inlined SUM reducer couples every
+    // element to every other through the synthetic agg node.
+    let mut project = TestProject::new("oversized_pin")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .indexed_dimension("D", 30)
+        .array_stock("s[D]", "100", &["f"], &[], None)
+        .array_flow("f[D]", "SUM(s[*]) * 0.01", None)
+        .build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(&mut project, "main", "big loop", &["s", "f"]);
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+
+    let has_warning = diagnostics.iter().any(|d| {
+        let msg = format!("{:?}", d.error);
+        msg.contains("big loop") && msg.contains("strongly-connected")
+    });
+    assert!(
+        has_warning,
+        "an oversized pin expansion must surface a diagnostic naming it; got: {:?}",
+        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+    );
+}
+
 /// Important #1: forcing discovery mode on a SMALL model with a pin must keep
 /// the two query surfaces (`model_ltm_variables` and `model_detected_loops`) in
 /// agreement on the discovery gate. Before the shared `model_ltm_mode` query,

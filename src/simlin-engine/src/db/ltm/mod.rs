@@ -49,7 +49,7 @@ pub(crate) use compile::{
 pub use compile::{compile_ltm_var_fragment, link_score_equation_text_shaped};
 pub(crate) use loops::build_loops_from_tiered;
 pub(crate) use parse::scalarize_ltm_equation;
-pub(crate) use pinned::{PinnedLoop, model_pinned_loops};
+pub(crate) use pinned::model_pinned_loops;
 
 // Test-only re-exports. These names are consumed solely by the LTM test
 // modules -- `ltm_tests` (mounted here, reached via `super::`) and the
@@ -942,67 +942,113 @@ pub fn model_ltm_variables(
             .filter_map(|v| link_score_edge_endpoints(&v.name))
             .collect();
 
+        // Helper: look up the `AggNode` for a synthetic-agg node name (a pin
+        // whose cycle traverses an inlined reducer has agg hops in its links,
+        // exactly like enumerated loops).
+        let agg_by_name = |name: &str| -> Option<&crate::ltm_agg::AggNode> {
+            if crate::ltm_agg::is_synthetic_agg_name(name) {
+                agg_nodes.aggs.iter().find(|a| a.name == name)
+            } else {
+                None
+            }
+        };
+
         for pin in &pinned.loops {
-            let rotation = canonical_variable_rotation(&pin.loop_);
-            if enumerated_rotations.contains(&rotation) {
-                // Exhaustive-mode duplicate: the enumerated loop already scores
-                // this cycle. Prefer keeping the enumerated emission (its id is
-                // already wired through `loop_partitions`); skip the pin to
-                // avoid two loop_score vars for the same cycle.
-                continue;
-            }
-
-            // Emit any link scores the pin's cycle needs that aren't present.
-            for link in &pin.loop_.links {
-                let key = (link.from.as_str().to_string(), link.to.as_str().to_string());
-                if !emitted_edges.insert(key) {
-                    continue;
-                }
-                emit_link_scores_for_edge(
-                    db,
-                    source_vars,
-                    agg_nodes,
-                    link.from.as_str(),
-                    link.to.as_str(),
-                    model,
-                    project,
-                    dm_dims,
-                    /* skip_agg_halves = */ false,
-                    &mut vars,
-                );
-            }
-
-            // Register the pin's cycle partition(s): a per-slot vector for a
-            // dimensioned (A2A) pin, a singleton for a scalar one -- the same
-            // `partition_for_loop` resolution enumerated loops use.
-            loop_partitions.insert(
-                pin.loop_.id.clone(),
-                pin_partitions.partition_for_loop(&pin.loop_, dm_dims),
-            );
-
-            // Emit the pinned loop_score var. The equation is the product of
-            // the cycle's link scores, resolved against the names emitted so
-            // far -- identical machinery to enumerated loops, including the
-            // dimension shaping (a dimensioned pin yields an ApplyToAll /
-            // Arrayed equation exactly like an enumerated A2A loop).
-            let emitted_link_score_names: HashSet<String> = vars
+            // Per scored loop: skip any whose variable-level cycle an
+            // enumerated loop already scores (exhaustive mode -- the
+            // enumerated emission is preferred, whatever shape the enumerator
+            // gave it: A2A, per-element scalars, or cross-element). In
+            // discovery mode `enumerated_rotations` is empty, so every scored
+            // loop is emitted -- the escape-hatch behavior.
+            let loops_to_emit: Vec<&Loop> = pin
+                .loops
                 .iter()
-                .filter(|v| v.name.contains("\u{205A}link_score\u{205A}"))
-                .map(|v| v.name.clone())
+                .filter(|l| !enumerated_rotations.contains(&canonical_variable_rotation(l)))
                 .collect();
-            let pin_loop_vars = crate::ltm_augment::generate_loop_score_variables(
-                std::slice::from_ref(&pin.loop_),
-                &emitted_link_score_names,
-                dm_dims,
-            );
-            for (lname, equation) in pin_loop_vars {
-                let dimensions = parse::ltm_equation_dimensions(&equation).to_vec();
-                vars.push(LtmSyntheticVar {
-                    name: lname,
-                    equation,
-                    dimensions,
-                    compile_directly: false,
-                });
+
+            for pin_loop in loops_to_emit {
+                // Emit any link scores this loop's cycle needs that aren't
+                // present, with the same per-link agg-hop dispatch the
+                // enumerated path uses (links may carry element subscripts
+                // and traverse synthetic agg nodes).
+                for link in &pin_loop.links {
+                    let from_var_level = strip_subscript(link.from.as_str());
+                    let to_var_level = strip_subscript(link.to.as_str());
+                    let key = (from_var_level.to_string(), to_var_level.to_string());
+                    if !emitted_edges.insert(key) {
+                        continue;
+                    }
+                    if let Some(agg) = agg_by_name(to_var_level) {
+                        emit_source_to_agg_link_scores(
+                            db,
+                            source_vars,
+                            from_var_level,
+                            agg,
+                            model,
+                            project,
+                            &mut vars,
+                        );
+                    } else if let Some(agg) = agg_by_name(from_var_level) {
+                        emit_agg_to_target_link_scores(
+                            db,
+                            source_vars,
+                            agg_nodes,
+                            agg,
+                            to_var_level,
+                            model,
+                            project,
+                            &mut vars,
+                        );
+                    } else {
+                        emit_link_scores_for_edge(
+                            db,
+                            source_vars,
+                            agg_nodes,
+                            from_var_level,
+                            to_var_level,
+                            model,
+                            project,
+                            dm_dims,
+                            /* skip_agg_halves = */ true,
+                            &mut vars,
+                        );
+                    }
+                }
+
+                // Register this loop's cycle partition(s): a per-slot vector
+                // for a dimensioned (A2A) pin, a singleton for a scalar one --
+                // the same `partition_for_loop` resolution enumerated loops
+                // use.
+                loop_partitions.insert(
+                    pin_loop.id.clone(),
+                    pin_partitions.partition_for_loop(pin_loop, dm_dims),
+                );
+
+                // Emit the pinned loop_score var. The equation is the product
+                // of the cycle's link scores, resolved against the names
+                // emitted so far -- identical machinery to enumerated loops,
+                // including the dimension shaping (a dimensioned pin yields an
+                // ApplyToAll / per-slot Arrayed equation exactly like an
+                // enumerated A2A loop).
+                let emitted_link_score_names: HashSet<String> = vars
+                    .iter()
+                    .filter(|v| v.name.contains("\u{205A}link_score\u{205A}"))
+                    .map(|v| v.name.clone())
+                    .collect();
+                let pin_loop_vars = crate::ltm_augment::generate_loop_score_variables(
+                    std::slice::from_ref(pin_loop),
+                    &emitted_link_score_names,
+                    dm_dims,
+                );
+                for (lname, equation) in pin_loop_vars {
+                    let dimensions = parse::ltm_equation_dimensions(&equation).to_vec();
+                    vars.push(LtmSyntheticVar {
+                        name: lname,
+                        equation,
+                        dimensions,
+                        compile_directly: false,
+                    });
+                }
             }
         }
     }

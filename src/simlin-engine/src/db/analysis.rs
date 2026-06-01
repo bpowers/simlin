@@ -1600,21 +1600,26 @@ pub fn model_detected_loops(
         // blow up, or the caller requested discovery). The only loops we
         // report are the pinned ones -- and crucially they are the ones
         // `model_ltm_variables` emits a `loop_score` for, so they are
-        // consistent with what the simulation actually scores.
+        // consistent with what the simulation actually scores. A pin that
+        // expanded to several element-level instances reports each instance
+        // (`pin{n}⁚{j}` ids), all carrying the user's name.
         return DetectedLoopsResult {
-            loops: pinned.loops.iter().map(detected_loop_from_loop).collect(),
+            loops: pinned
+                .loops
+                .iter()
+                .flat_map(|p| p.loops.iter().map(|l| detected_loop_from_loop(l, &p.name)))
+                .collect(),
         };
     }
 
     let loops = graph
         .find_loops_with_limit(usize::MAX)
         .expect("usize::MAX cannot exhaust the enumeration budget");
-    // Variable-level canonical rotation of a pinned loop, used both to dedup a
-    // pin against the enumerated set and to transfer the pin's name onto the
-    // surviving enumerated loop it duplicates.
-    let pin_rotation = |p: &crate::db::PinnedLoop| -> Vec<String> {
-        let seq: Vec<String> = p
-            .loop_
+    // Variable-level canonical rotation of a scored loop, used both to dedup a
+    // pin's loops against the enumerated set and to transfer the pin's name
+    // onto the surviving enumerated loop it duplicates.
+    let loop_rotation = |l: &crate::ltm::Loop| -> Vec<String> {
+        let seq: Vec<String> = l
             .links
             .iter()
             .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
@@ -1629,7 +1634,7 @@ pub fn model_detected_loops(
     let pin_name_by_rotation: std::collections::HashMap<Vec<String>, String> = pinned
         .loops
         .iter()
-        .map(|p| (pin_rotation(p), p.name.clone()))
+        .flat_map(|p| p.loops.iter().map(|l| (loop_rotation(l), p.name.clone())))
         .collect();
     // Canonical rotations of the enumerated loops, so a pinned loop that
     // duplicates one is not surfaced twice (its name is transferred instead).
@@ -1647,8 +1652,12 @@ pub fn model_detected_loops(
     let extra_pins: Vec<DetectedLoop> = pinned
         .loops
         .iter()
-        .filter(|p| !enumerated.contains(&pin_rotation(p)))
-        .map(detected_loop_from_loop)
+        .flat_map(|p| {
+            p.loops
+                .iter()
+                .filter(|l| !enumerated.contains(&loop_rotation(l)))
+                .map(|l| detected_loop_from_loop(l, &p.name))
+        })
         .collect();
     DetectedLoopsResult {
         loops: loops
@@ -1713,13 +1722,13 @@ pub fn model_detected_loops(
     }
 }
 
-/// Build a `DetectedLoop` (the FFI loop surface) from a resolved pinned loop,
-/// preserving its `pin{n}` id. Mirrors the per-loop body of
-/// `model_detected_loops`: the variable list is the cycle's ordered node
-/// sequence; structural polarity confidence is binary (1.0 for a fully-known
-/// polarity loop, 0.0 when any link is Unknown).
-fn detected_loop_from_loop(pin: &crate::db::PinnedLoop) -> DetectedLoop {
-    let l = &pin.loop_;
+/// Build a `DetectedLoop` (the FFI loop surface) from one of a pin's scored
+/// loops, preserving its pin-derived id (`pin{n}` / `pin{n}⁚{j}`). Mirrors the
+/// per-loop body of `model_detected_loops`: the variable list is the cycle's
+/// ordered node sequence (element-subscripted for cross-element instances);
+/// structural polarity confidence is binary (1.0 for a fully-known polarity
+/// loop, 0.0 when any link is Unknown).
+fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop {
     let mut vars = Vec::new();
     let mut seen = std::collections::HashSet::new();
     if !l.links.is_empty() {
@@ -1748,7 +1757,7 @@ fn detected_loop_from_loop(pin: &crate::db::PinnedLoop) -> DetectedLoop {
         variables: vars,
         polarity,
         polarity_confidence,
-        name: Some(pin.name.clone()),
+        name: Some(pin_name.to_string()),
     }
 }
 

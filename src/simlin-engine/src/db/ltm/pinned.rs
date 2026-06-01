@@ -16,25 +16,36 @@
 //! `loop_score` synthetic var) and `model_detected_loops` (the FFI loop
 //! surface) read it, so a pinned loop appears identically through both paths.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    CycleClass, Db, SourceModel, SourceProject, causal_graph_with_modules, classify_cycle,
-    model_causal_edges, model_edge_shapes, project_datamodel_dims, variable_dimensions,
+    CycleClass, Db, LoopCircuitsResult, SourceModel, SourceProject, SourceVariable,
+    causal_graph_with_modules, classify_cycle, model_causal_edges, model_edge_shapes,
+    model_element_causal_edges, project_datamodel_dims, variable_dimensions,
 };
-use crate::ltm::Loop;
+use crate::ltm::{Loop, strip_subscript};
 
-use super::loops::build_a2a_loop_stocks;
+use super::loops::{build_a2a_loop_stocks, build_element_level_loops, cross_agg_loop_budget};
 
 /// A pinned loop the LTM pipeline must always score, paired with the user's
 /// chosen name so a caller can map the synthetic `pin{n}` id back to a label.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct PinnedLoop {
-    /// The fully-annotated loop (links, polarity, stocks), with a stable
-    /// `pin{n}` id assigned in declaration order.
-    pub loop_: Loop,
+    /// The fully-annotated scored loop(s) this pin resolves to, with stable
+    /// pin-derived ids assigned in declaration order:
+    ///
+    /// - exactly one `Loop` (id `pin{n}`) for scalar, pure-A2A, and
+    ///   diagonal-family pins (the per-element circuits collapse into one
+    ///   arrayed loop score);
+    /// - one `Loop` per element-level instance (ids `pin{n}` when there is
+    ///   one, `pin{n}⁚{j}` when there are several) for cross-element / mixed
+    ///   pins whose instances cannot share a single arrayed score.
+    ///
+    /// The pin-derived ids never collide with the enumerator's
+    /// `r{n}`/`b{n}`/`u{n}` namespace.
+    pub loops: Vec<Loop>,
     /// The user-supplied loop name. Preserved so a caller can recover the
     /// label behind a `pin{n}` id (the FFI loop surface reports the id +
     /// variable set + this name; callers that prefer can match on the variable
@@ -73,10 +84,15 @@ pub struct PinnedLoopsResult {
 ///   `dimensions` and element-level stocks, so its loop score is emitted as
 ///   an arrayed (per-element) variable and its cycle partition resolves per
 ///   slot.
-/// - **CrossElementOrMixed** -> currently still the scalar fallback (its
-///   loop-score equation may fail to compile and surface the
-///   fragment-diagnostics Warning); element-level expansion for these cycles
-///   is the next step of GH #653.
+/// - **CrossElementOrMixed** -> the cycle is expanded on the element-level
+///   causal graph ([`expand_pin_on_element_graph`]): the element circuits
+///   that instantiate the pinned variable cycle flow through the same
+///   grouping machinery the enumerator's slow path uses
+///   ([`build_element_level_loops`]), so a diagonal family collapses into
+///   one arrayed loop (with per-slot equations) and genuinely cross-element
+///   instances each become a scalar loop with element-subscripted links.
+///   A pin whose expansion is intractable (oversized SCC) or empty (no
+///   element-level instantiation) is invalid, with a clear reason.
 ///
 /// Returned by value (not `salsa::tracked`) because `Loop` does not implement
 /// the `PartialEq`/`Update` salsa caching requires; callers invoke it directly
@@ -160,26 +176,180 @@ pub(crate) fn model_pinned_loops(
                 .map(|sv| variable_dimensions(db, *sv, project).to_vec())
                 .unwrap_or_default()
         };
-        let loop_ = match classify_cycle(&cycle_strs, edge_shapes, &dim_lookup) {
-            CycleClass::PureSameElementA2A { dimensions } => {
-                build_a2a_pin_loop(&graph, &cycle, id, &dimensions, dm_dims)
-            }
+        let loops = match classify_cycle(&cycle_strs, edge_shapes, &dim_lookup) {
             // PureScalar: the pre-#653 scalar construction is correct.
-            // CrossElementOrMixed: element-level expansion is the next step
-            // of GH #653; until then these keep the scalar fallback (whose
-            // mis-resolved equation surfaces the fragment-diagnostics
-            // Warning rather than passing silently).
-            CycleClass::PureScalar | CycleClass::CrossElementOrMixed => {
-                graph.build_loop_from_cycle(&cycle, id)
+            CycleClass::PureScalar => vec![graph.build_loop_from_cycle(&cycle, id)],
+            CycleClass::PureSameElementA2A { dimensions } => {
+                vec![build_a2a_pin_loop(&graph, &cycle, id, &dimensions, dm_dims)]
+            }
+            CycleClass::CrossElementOrMixed => {
+                match expand_pin_on_element_graph(
+                    db,
+                    model,
+                    project,
+                    &graph,
+                    &cycle,
+                    source_vars,
+                    dm_dims,
+                ) {
+                    Ok(mut loops) => {
+                        assign_pin_ids(&mut loops, &id);
+                        loops
+                    }
+                    Err(reason) => {
+                        result.invalid.push((
+                            spec.name.clone(),
+                            format!("pinned loop '{}' {reason}", spec.name),
+                        ));
+                        continue;
+                    }
+                }
             }
         };
         result.loops.push(PinnedLoop {
-            loop_,
+            loops,
             name: spec.name.clone(),
         });
     }
 
     result
+}
+
+/// Assign pin-derived ids to a pin's expanded loops: the plain `pin{n}` when
+/// the expansion produced exactly one loop, `pin{n}⁚{j}` (1-based, in the
+/// deterministic order [`build_element_level_loops`] produced) when it
+/// produced several. The `⁚` separator is the reserved synthetic-name
+/// separator, so multi-instance ids can never collide with user content or
+/// the enumerator's id namespace.
+fn assign_pin_ids(loops: &mut [Loop], pin_id: &str) {
+    if loops.len() == 1 {
+        loops[0].id = pin_id.to_string();
+    } else {
+        for (j, l) in loops.iter_mut().enumerate() {
+            l.id = format!("{pin_id}\u{205A}{}", j + 1);
+        }
+    }
+}
+
+/// Expand a CrossElementOrMixed pinned cycle on the element-level causal
+/// graph and group its instances into scored loops.
+///
+/// 1. Project [`model_element_causal_edges`] onto the pin's variables plus
+///    synthetic `$⁚ltm⁚agg⁚{n}` nodes (a cycle through an inlined reducer
+///    genuinely traverses its aggregate node) -- the same `keep_node` rule
+///    the tiered enumerator's slow path uses.
+/// 2. Reject the pin when the projected subgraph's largest SCC exceeds
+///    [`crate::ltm::MAX_LTM_SCC_NODES`] (element-level Johnson at that scale
+///    is the cost cliff the auto-flip gate exists to avoid).
+/// 3. Run Johnson on the subgraph and keep only the circuits that
+///    *instantiate the pinned cycle*: the circuit's variable set (subscripts
+///    stripped, agg nodes ignored) equals the pin's variable set. Sub-cycles
+///    over a strict subset of the pin's variables are not instances.
+/// 4. Reject the pin when no circuit matches (the variable-level cycle has no
+///    element-level instantiation).
+/// 5. Group the matching circuits with [`build_element_level_loops`] -- the
+///    same machinery the enumerator's slow path uses -- so diagonal families
+///    collapse into one arrayed loop (with `slot_links` driving per-slot
+///    equations) and cross-element instances become element-subscripted
+///    scalar loops.
+///
+/// On success the returned loops carry the enumerator's `r{n}`/`b{n}`/`u{n}`
+/// ids; the caller re-assigns pin-derived ids. On failure the returned string
+/// completes the sentence "pinned loop '{name}' ..." in the diagnostic.
+#[allow(clippy::too_many_arguments)]
+fn expand_pin_on_element_graph(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    var_graph: &crate::ltm::CausalGraph,
+    cycle: &[Ident<Canonical>],
+    source_vars: &HashMap<String, SourceVariable>,
+    dm_dims: &[crate::datamodel::Dimension],
+) -> Result<Vec<Loop>, String> {
+    let pin_var_set: HashSet<&str> = cycle.iter().map(|c| c.as_str()).collect();
+
+    // Step 1: project the element graph onto the pin's variables + agg nodes.
+    let element_edges = model_element_causal_edges(db, model, project);
+    let keep_node = |name: &str| -> bool {
+        pin_var_set.contains(strip_subscript(name)) || crate::ltm_agg::is_synthetic_agg_name(name)
+    };
+    let mut sub_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    for (from, tos) in &element_edges.edges {
+        if !keep_node(from) {
+            continue;
+        }
+        let filtered: Vec<Ident<Canonical>> = tos
+            .iter()
+            .filter(|to| keep_node(to))
+            .map(|to| Ident::new(to))
+            .collect();
+        if !filtered.is_empty() {
+            sub_edges.insert(Ident::new(from), filtered);
+        }
+    }
+    let sub_stocks: HashSet<Ident<Canonical>> = element_edges
+        .stocks
+        .iter()
+        .filter(|s| pin_var_set.contains(strip_subscript(s.as_str())))
+        .map(|s| Ident::new(s))
+        .collect();
+    let sub_graph = crate::ltm::CausalGraph {
+        edges: sub_edges,
+        stocks: sub_stocks,
+        variables: HashMap::new(),
+        module_graphs: HashMap::new(),
+    };
+
+    // Step 2: SCC guard.
+    let scc = sub_graph.largest_scc_size();
+    if scc > crate::ltm::MAX_LTM_SCC_NODES {
+        return Err(format!(
+            "cannot be scored: its element-level expansion forms a strongly-connected component \
+             of {scc} nodes, exceeding the tractable limit of {}",
+            crate::ltm::MAX_LTM_SCC_NODES
+        ));
+    }
+
+    // Step 3: Johnson + instance filtering.
+    let (names, circuits) = sub_graph
+        .find_indexed_circuits_with_limit(usize::MAX)
+        .expect("usize::MAX cannot exhaust the enumeration budget");
+    let matching: Vec<Vec<u32>> = circuits
+        .into_iter()
+        .filter(|circuit| {
+            let circuit_vars: HashSet<&str> = circuit
+                .iter()
+                .map(|&i| strip_subscript(&names[i as usize]))
+                .filter(|n| !crate::ltm_agg::is_synthetic_agg_name(n))
+                .collect();
+            circuit_vars == pin_var_set
+        })
+        .collect();
+
+    // Step 4: no instantiation -> invalid.
+    if matching.is_empty() {
+        return Err(
+            "cannot be scored: its variable-level cycle has no element-level instantiation \
+             (the per-element equations never close a cycle at any element)"
+                .to_string(),
+        );
+    }
+
+    // Step 5: group via the enumerator's machinery.
+    let filtered = LoopCircuitsResult {
+        names,
+        circuits: matching,
+    };
+    let (loops, _truncated_aggs) = build_element_level_loops(
+        &filtered,
+        var_graph,
+        source_vars,
+        db,
+        project,
+        dm_dims,
+        cross_agg_loop_budget(),
+    );
+    Ok(loops)
 }
 
 /// Build the `Loop` for a pinned PureSameElementA2A cycle: variable-level
