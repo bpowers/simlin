@@ -317,7 +317,7 @@ pub fn model_ltm_variables(
     use super::{
         CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmSyntheticVar,
         LtmVariablesResult, causal_graph_from_edges, causal_graph_with_modules,
-        generate_max_abs_chain_str, model_causal_edges, model_element_cycle_partitions,
+        generate_max_abs_selection, model_causal_edges, model_element_cycle_partitions,
         model_loop_circuits_tiered, model_pinned_loops, module_input_pathways_from_edges,
     };
 
@@ -979,7 +979,14 @@ pub fn model_ltm_variables(
             "$\u{205A}ltm\u{205A}composite\u{205A}{}",
             input_port.as_str()
         );
-        let equation = generate_max_abs_chain_str(&pathway_names);
+        // The selection folds through O(1)-sized accumulator helper variables
+        // (named under the port's `⁚path⁚` prefix so they sort -- and therefore
+        // evaluate -- after the pathway vars they reference and before this
+        // composite). Inlining the fold into one expression would double the
+        // equation text per pathway; see `generate_max_abs_selection`.
+        let (equation, acc_helpers) =
+            generate_max_abs_selection(input_port.as_str(), &pathway_names);
+        vars.extend(acc_helpers);
         vars.push(LtmSyntheticVar {
             name: composite_name,
             equation: datamodel::Equation::Scalar(equation),

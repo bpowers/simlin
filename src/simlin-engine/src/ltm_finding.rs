@@ -768,7 +768,7 @@ fn multiply_score_series(a: &Option<Vec<f64>>, b: &Option<Vec<f64>>) -> Option<V
 /// series (the LTM *composite link score*: the path score with the largest
 /// magnitude at each interval -- ref 6.3). Sign is preserved.
 ///
-/// Mirrors the engine's `generate_max_abs_chain_str` selection
+/// Mirrors the engine's `generate_max_abs_selection` step
 /// (`if ABS(a) >= ABS(b) then a else b`): because `NaN` comparisons are
 /// false, a `NaN` candidate loses to a finite one at that step. A present
 /// series always beats an absent one (we cannot compare against nothing).

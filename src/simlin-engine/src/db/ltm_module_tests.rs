@@ -404,3 +404,129 @@ fn test_ltm_multiple_smooth_instances_compile() {
         "LTM-enabled layout should have more slots: ltm={n_slots_ltm}, no_ltm={n_slots_no_ltm}"
     );
 }
+
+/// A module input port with many internal pathways to the output must produce
+/// composite-selection equations whose TOTAL text is linear in the pathway
+/// count.
+///
+/// Regression guard for the exponential composite bug: the composite
+/// "pathway with the largest absolute score" equation was built by recursively
+/// nesting `if ABS(last) >= ABS((rest)) then last else (rest)` -- `rest`
+/// appears TWICE per level, so the equation text doubled per pathway
+/// (O(2^n) bytes). 20 parallel pathways produced a ~16MB equation; real Vensim
+/// macro modules with hundreds of pathways (covid19's SSTATS) exhausted all
+/// memory. The linear form folds the selection through O(1)-sized accumulator
+/// helper variables instead.
+#[test]
+fn test_module_composite_equation_size_is_linear_in_pathways() {
+    use salsa::Setter;
+
+    // A module body with PATHS parallel pathways:
+    // input -> mid_i -> total_flow -> output. The output is a STOCK because
+    // LTM generation skips stockless models entirely.
+    const PATHS: usize = 20;
+    let mut module_vars = vec![x_aux("input", "0", None)];
+    let mut total_flow_eq = String::new();
+    for i in 0..PATHS {
+        module_vars.push(x_aux(&format!("mid_{i}"), &format!("input * {i}"), None));
+        if i > 0 {
+            total_flow_eq.push_str(" + ");
+        }
+        total_flow_eq.push_str(&format!("mid_{i}"));
+    }
+    module_vars.push(x_flow("total_flow", &total_flow_eq, None));
+    module_vars.push(x_stock("output", "0", &["total_flow"], &[], None));
+
+    let project = datamodel::Project {
+        name: "many_pathways".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_aux("driver", "1", None),
+                    x_aux("reader", "m.output", None),
+                    x_module("m", &[("driver", "input")], None),
+                ],
+            ),
+            x_model("m", module_vars),
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let (source_project, sub_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["m"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let ltm_vars = model_ltm_variables(&db, sub_model, source_project);
+
+    // The composite selection must exist for the input port...
+    let composite_count = ltm_vars
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}composite\u{205A}"))
+        .count();
+    assert!(
+        composite_count >= 1,
+        "module with input pathways should emit a composite var; vars: {:?}",
+        ltm_vars.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+
+    // ...and the TOTAL equation text across every LTM synthetic variable must
+    // be linear in the pathway count: comfortably under 100KB for 20 pathways.
+    // (The exponential nested form produced ~16MB here.)
+    let total_equation_bytes: usize = ltm_vars
+        .vars
+        .iter()
+        .map(|v| v.equation.source_text().len())
+        .sum();
+    assert!(
+        total_equation_bytes < 100_000,
+        "total LTM equation text should be linear in pathway count; \
+         got {total_equation_bytes} bytes across {} vars",
+        ltm_vars.vars.len()
+    );
+
+    // Every selection step must reference variables that were ALREADY emitted
+    // (sort earlier in evaluation order): the runlist evaluates LTM fragments
+    // in `vars` order, so an accumulator referencing a later-sorted variable
+    // would read an unevaluated value.
+    let positions: std::collections::HashMap<&str, usize> = ltm_vars
+        .vars
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.name.as_str(), i))
+        .collect();
+    for (i, v) in ltm_vars.vars.iter().enumerate() {
+        if !v.name.contains("\u{205A}path\u{205A}") && !v.name.contains("\u{205A}composite\u{205A}")
+        {
+            continue;
+        }
+        let text = v.equation.source_text();
+        // Extract quoted identifiers and check each referenced LTM var that
+        // exists in this set sorts before the referencing var.
+        for referenced in text.split('"').skip(1).step_by(2) {
+            if let Some(&ref_pos) = positions.get(referenced) {
+                assert!(
+                    ref_pos < i,
+                    "{} (position {i}) references {referenced} (position {ref_pos}), \
+                     which would be evaluated AFTER it",
+                    v.name
+                );
+            }
+        }
+    }
+}

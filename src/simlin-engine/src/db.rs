@@ -547,20 +547,72 @@ fn module_input_pathways_from_edges(
     graph.enumerate_pathways_to_outputs(output_ports)
 }
 
-/// Generate a nested max-abs selection equation from pathway variable names.
-fn generate_max_abs_chain_str(pathway_names: &[String]) -> String {
-    match pathway_names.len() {
-        0 => "0".to_string(),
-        1 => format!("\"{}\"", pathway_names[0]),
-        2 => {
-            let p0 = &pathway_names[0];
-            let p1 = &pathway_names[1];
-            format!("if ABS(\"{p0}\") >= ABS(\"{p1}\") then \"{p0}\" else \"{p1}\"")
-        }
-        _ => {
-            let last = &pathway_names[pathway_names.len() - 1];
-            let rest = generate_max_abs_chain_str(&pathway_names[..pathway_names.len() - 1]);
-            format!("if ABS(\"{last}\") >= ABS(({rest})) then \"{last}\" else ({rest})")
+/// Build the composite "pathway with the largest absolute score" selection for
+/// one module input port: the composite's equation text plus any accumulator
+/// helper variables it folds through.
+///
+/// Every emitted equation is O(1) size, so the TOTAL text is linear in the
+/// pathway count. The selection is a left fold: each accumulator holds the
+/// running winner (the larger-|x| of the previous accumulator and the next
+/// pathway), and the composite is the final fold step. Ties keep the earlier
+/// pathway.
+///
+/// Why the fold is materialized as helper variables instead of one nested
+/// expression: a selection step needs its operand twice (`if ABS(a) >= ABS(b)
+/// then a else b`), so nesting expressions doubles the text per pathway --
+/// O(2^n) bytes. A real Vensim macro module with hundreds of input->output
+/// pathways (covid19's SSTATS) exhausted all memory building that string.
+/// Folding through variables keeps each step O(1) because the previous step is
+/// referenced by NAME, not inlined.
+///
+/// The accumulators are named `{input path prefix}⁚acc⁚{i:06}` so they sort
+/// (a) after the numeric pathway variables they reference (digits < 'a'), and
+/// (b) in fold order among themselves (zero-padded index) -- the LTM runlist
+/// evaluates fragments in sorted-name order within the "path" category, so
+/// this naming is what makes each accumulator's inputs already-evaluated when
+/// it runs.
+fn generate_max_abs_selection(
+    input_port: &str,
+    pathway_names: &[String],
+) -> (String, Vec<LtmSyntheticVar>) {
+    /// One selection step: the larger-|x| of `a` and `b`, ties keeping `a`.
+    fn select_step(a: &str, b: &str) -> String {
+        format!("if ABS(\"{a}\") >= ABS(\"{b}\") then \"{a}\" else \"{b}\"")
+    }
+
+    let acc_name =
+        |i: usize| format!("$\u{205A}ltm\u{205A}path\u{205A}{input_port}\u{205A}acc\u{205A}{i:06}");
+
+    match pathway_names {
+        [] => ("0".to_string(), vec![]),
+        [only] => (format!("\"{only}\""), vec![]),
+        [p0, p1] => (select_step(p0, p1), vec![]),
+        [p0, p1, rest @ .., last] => {
+            // Left fold. `selection` is the running winner's equation; before
+            // each fold step it is materialized as an accumulator variable so
+            // the step can reference it by name instead of inlining it.
+            let mut helpers: Vec<LtmSyntheticVar> = Vec::with_capacity(rest.len() + 1);
+            let mut selection = select_step(p0, p1);
+            for next in rest {
+                let acc = acc_name(helpers.len());
+                helpers.push(LtmSyntheticVar {
+                    name: acc.clone(),
+                    equation: datamodel::Equation::Scalar(selection),
+                    dimensions: vec![],
+                    compile_directly: false,
+                });
+                selection = select_step(&acc, next);
+            }
+            // The composite's own equation is the final fold step against the
+            // last pathway, referencing the materialized running winner.
+            let final_acc = acc_name(helpers.len());
+            helpers.push(LtmSyntheticVar {
+                name: final_acc.clone(),
+                equation: datamodel::Equation::Scalar(selection),
+                dimensions: vec![],
+                compile_directly: false,
+            });
+            (select_step(&final_acc, last), helpers)
         }
     }
 }

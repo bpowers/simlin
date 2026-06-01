@@ -1278,15 +1278,89 @@ fn test_normalize_module_ref_str() {
 }
 
 #[test]
-fn test_generate_max_abs_chain_str() {
-    assert_eq!(generate_max_abs_chain_str(&[]), "0");
-    assert_eq!(generate_max_abs_chain_str(&["p0".into()]), "\"p0\"");
-    let two = generate_max_abs_chain_str(&["p0".into(), "p1".into()]);
-    assert!(two.contains("ABS"));
-    assert!(two.contains("p0"));
-    assert!(two.contains("p1"));
-    let three = generate_max_abs_chain_str(&["p0".into(), "p1".into(), "p2".into()]);
-    assert!(three.contains("p2"));
+fn test_generate_max_abs_selection_small_counts() {
+    // 0 pathways: constant zero, no helpers.
+    let (eq, helpers) = generate_max_abs_selection("port", &[]);
+    assert_eq!(eq, "0");
+    assert!(helpers.is_empty());
+
+    // 1 pathway: a bare quoted reference, no helpers.
+    let (eq, helpers) = generate_max_abs_selection("port", &["p0".into()]);
+    assert_eq!(eq, "\"p0\"");
+    assert!(helpers.is_empty());
+
+    // 2 pathways: a single selection step, no helpers.
+    let (eq, helpers) = generate_max_abs_selection("port", &["p0".into(), "p1".into()]);
+    assert!(eq.contains("ABS"));
+    assert!(eq.contains("p0"));
+    assert!(eq.contains("p1"));
+    assert!(helpers.is_empty());
+}
+
+#[test]
+fn test_generate_max_abs_selection_folds_through_helpers() {
+    // 3+ pathways: n-2 accumulator helpers, each O(1); the composite equation
+    // references the final accumulator and the last pathway only.
+    let names: Vec<String> = (0..5).map(|i| format!("p{i}")).collect();
+    let (eq, helpers) = generate_max_abs_selection("port", &names);
+
+    assert_eq!(helpers.len(), 3, "5 pathways need 3 accumulators");
+    // acc_0 selects between p0 and p1.
+    assert!(helpers[0].equation.source_text().contains("p0"));
+    assert!(helpers[0].equation.source_text().contains("p1"));
+    // acc_i (i > 0) selects between acc_{i-1} and p_{i+1}.
+    for i in 1..helpers.len() {
+        let text = helpers[i].equation.source_text();
+        assert!(
+            text.contains(helpers[i - 1].name.as_str()),
+            "acc_{i} must reference acc_{}: {text}",
+            i - 1
+        );
+        assert!(text.contains(&format!("p{}", i + 1)), "acc_{i}: {text}");
+    }
+    // The composite references the final accumulator and the last pathway.
+    assert!(eq.contains(helpers.last().unwrap().name.as_str()));
+    assert!(eq.contains("p4"));
+
+    // Accumulator names sort in fold order, and after the (digit-suffixed)
+    // pathway names they reference -- this lexical order IS the runlist
+    // evaluation order within the LTM "path" category.
+    let mut sorted = helpers.iter().map(|h| h.name.clone()).collect::<Vec<_>>();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        helpers.iter().map(|h| h.name.clone()).collect::<Vec<_>>(),
+        "accumulators must already be in sorted (= evaluation) order"
+    );
+    for h in &helpers {
+        assert!(
+            "$\u{205A}ltm\u{205A}path\u{205A}port\u{205A}9" < h.name.as_str(),
+            "every digit-suffixed pathway name must sort before accumulator {}",
+            h.name
+        );
+    }
+}
+
+#[test]
+fn test_generate_max_abs_selection_total_size_is_linear() {
+    // The regression that motivated the fold: equation text must scale
+    // linearly with pathway count, never exponentially. 200 pathways with the
+    // old nested form would be ~2^198 bytes; linear form stays in the tens of
+    // kilobytes.
+    let names: Vec<String> = (0..200)
+        .map(|i| format!("$\u{205A}ltm\u{205A}path\u{205A}in\u{205A}{i}"))
+        .collect();
+    let (eq, helpers) = generate_max_abs_selection("in", &names);
+    let total: usize = eq.len()
+        + helpers
+            .iter()
+            .map(|h| h.name.len() + h.equation.source_text().len())
+            .sum::<usize>();
+    assert_eq!(helpers.len(), 198);
+    assert!(
+        total < 100_000,
+        "200 pathways must produce <100KB of equation text, got {total}"
+    );
 }
 
 #[test]
