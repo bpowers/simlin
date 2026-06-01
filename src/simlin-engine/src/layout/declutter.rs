@@ -290,15 +290,51 @@ fn is_movable(element: &ViewElement) -> bool {
 }
 
 /// Whether this element's label side should be (re)chosen by overlap. Aux,
-/// module, and stock labels are free to move to any cardinal side. Flow labels
-/// are left as the upstream pass set them: a flow's own pipe box is its "shape",
-/// which the metric does not charge a flow label against, so overlap scoring
-/// could not see (and would not avoid) a label lying along the pipe.
+/// module, stock, and flow labels are all (re)sideable; the kinds differ only
+/// in WHICH sides are candidates (see `candidate_sides`). Flow labels matter
+/// most in dense compartment models: parallel exchange pipes sit a fixed
+/// spacing apart, so their default Bottom labels always collide and nothing
+/// downstream can fix them if this pass does not.
 fn relabels(element: &ViewElement) -> bool {
     matches!(
         element,
-        ViewElement::Aux(_) | ViewElement::Module(_) | ViewElement::Stock(_)
+        ViewElement::Aux(_) | ViewElement::Module(_) | ViewElement::Stock(_) | ViewElement::Flow(_)
     )
+}
+
+/// The label sides an element may take, in preference order.
+///
+/// Free-floating elements (aux/module/stock) may use any cardinal side. A
+/// flow's label may only take the sides PERPENDICULAR to its pipe at the
+/// valve: an in-line side would sit the label directly on the pipe, and the
+/// side chooser cannot see that (a label is never charged against its own
+/// shape), so it would happily pick a side that looks free but reads as
+/// overlapping.
+fn candidate_sides(element: &ViewElement) -> &'static [LabelSide] {
+    match element {
+        ViewElement::Flow(f) => {
+            // Pipe orientation from the extent of its drawn points; a flow
+            // with no points (degenerate) is treated as horizontal.
+            let (mut min_x, mut max_x, mut min_y, mut max_y) = (
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            );
+            for p in &f.points {
+                min_x = min_x.min(p.x);
+                max_x = max_x.max(p.x);
+                min_y = min_y.min(p.y);
+                max_y = max_y.max(p.y);
+            }
+            if f.points.is_empty() || (max_x - min_x) >= (max_y - min_y) {
+                &[LabelSide::Bottom, LabelSide::Top]
+            } else {
+                &[LabelSide::Right, LabelSide::Left]
+            }
+        }
+        _ => &CANDIDATE_SIDES,
+    }
 }
 
 /// Set an element's label side (only the kinds `relabels` returns true for).
@@ -307,6 +343,7 @@ fn set_label_side(element: &mut ViewElement, side: LabelSide) {
         ViewElement::Aux(a) => a.label_side = side,
         ViewElement::Module(m) => m.label_side = side,
         ViewElement::Stock(s) => s.label_side = side,
+        ViewElement::Flow(f) => f.label_side = side,
         _ => {}
     }
 }
@@ -455,31 +492,22 @@ fn resnap_flow_endpoints_to_stocks(elements: &mut [ViewElement]) {
 /// Re-choose label sides (for `relabels` kinds) on the current geometry, writing
 /// the chosen sides back. Mutates `elements`.
 fn optimize_label_sides(elements: &mut [ViewElement]) {
-    let mut obstacle_boxes: Vec<(usize, Rect)> = elements
+    // Every element's shape box is an obstacle. Flow labels need no separate
+    // obstacle entry: flows are relabel-able (`relabels` includes them), so
+    // their label boxes participate as labels and are automatically avoided by
+    // every other label.
+    let obstacle_boxes: Vec<(usize, Rect)> = elements
         .iter()
         .enumerate()
         .filter_map(|(i, e)| node_shape_box(e).map(|r| (i, r)))
         .collect();
-    // Flow labels are not relabel-able (`relabels` excludes flows) but they ARE
-    // drawn, and the metric charges any label overlapping them. They must be in
-    // the obstacle set: this pass runs LAST in `declutter_view`, so a stock/aux
-    // label parked on top of a flow label here is never fixed afterwards (the
-    // fishbanks regression). A flow's element index never appears in `labels`,
-    // so the own-shape exclusion in `choose_label_sides` cannot misfire on these.
-    obstacle_boxes.extend(elements.iter().enumerate().filter_map(|(i, e)| {
-        if matches!(e, ViewElement::Flow(_)) {
-            current_label_box(e).map(|r| (i, r))
-        } else {
-            None
-        }
-    }));
 
     let labels: Vec<LabelOptions> = elements
         .iter()
         .enumerate()
         .filter(|(_, e)| relabels(e))
         .filter_map(|(i, e)| {
-            let options: Vec<(LabelSide, Rect)> = CANDIDATE_SIDES
+            let options: Vec<(LabelSide, Rect)> = candidate_sides(e)
                 .iter()
                 .filter_map(|&side| {
                     element_label_props_for(e, side).map(|p| (side, label_bounds(&p)))
@@ -822,9 +850,9 @@ mod tests {
 
         // A stock with a flow valve right of it. Both default to Bottom labels;
         // the flow's label is wide ("a very long flow name here") so the
-        // stock's Bottom label box overlaps it. The declutter must move the
-        // stock's label to a side where it does not overlap the flow's label
-        // (flow labels are fixed: `relabels()` excludes flows).
+        // stock's Bottom label box overlaps it. After decluttering the two
+        // labels must not overlap (both stock and flow labels are
+        // re-sideable; the chooser must keep them apart).
         let mut elements = vec![
             stock_at(1, 100.0, 100.0),
             flow_attached_to(2, (190.0, 100.0), (122.5, 100.0), 1, (260.0, 100.0)),
@@ -861,6 +889,83 @@ mod tests {
         // Sanity: label_bounds is what current_label_box uses internally; the
         // assertion above is on metric-identical geometry.
         let _ = label_bounds;
+    }
+
+    #[test]
+    fn test_parallel_flow_labels_get_distinct_sides() {
+        // Two horizontal flow pipes one PARALLEL_FLOW_SPACING (24) apart -- a
+        // bidirectional compartment-exchange pair as the chain layout draws it.
+        // Both default to Bottom labels, which overlap (a label is taller than
+        // the gap between the pipes). Flow labels must be re-sideable so the
+        // declutter can move one of them out of the way; a flow's candidates
+        // are the sides PERPENDICULAR to its pipe (Top/Bottom for these).
+        let mut elements = vec![
+            flow_attached_to(1, (100.0, 88.0), (50.0, 88.0), 99, (150.0, 88.0)),
+            flow_attached_to(2, (100.0, 112.0), (50.0, 112.0), 98, (150.0, 112.0)),
+        ];
+        if let ViewElement::Flow(f) = &mut elements[0] {
+            f.name = "exchange flow\none".to_string();
+        }
+        if let ViewElement::Flow(f) = &mut elements[1] {
+            f.name = "exchange flow\ntwo".to_string();
+        }
+
+        // Precondition: with both labels on Bottom, they overlap.
+        let l1 = current_label_box(&elements[0]).expect("flow 1 label");
+        let l2 = current_label_box(&elements[1]).expect("flow 2 label");
+        assert!(
+            rect_overlap_area(&l1, &l2) > 1.0,
+            "precondition: parallel pipes' Bottom labels must overlap before decluttering"
+        );
+
+        declutter_view(&mut elements);
+
+        let l1 = current_label_box(&elements[0]).expect("flow 1 label");
+        let l2 = current_label_box(&elements[1]).expect("flow 2 label");
+        let overlap = rect_overlap_area(&l1, &l2);
+        assert!(
+            overlap < 1e-9,
+            "parallel flows' labels must not overlap after decluttering \
+             (overlap area {overlap}); flow labels must be re-sideable"
+        );
+    }
+
+    #[test]
+    fn test_flow_label_sides_stay_perpendicular_to_pipe() {
+        // A horizontal flow's label may only take Top or Bottom: an in-line
+        // (Left/Right) side would sit the label directly on the pipe, which
+        // the side chooser cannot see (a label is never charged against its
+        // own shape). Surround a horizontal flow with obstacles above and
+        // below; even though Left/Right would score better, they must not be
+        // chosen.
+        let mut elements = vec![
+            flow_attached_to(1, (100.0, 100.0), (40.0, 100.0), 99, (160.0, 100.0)),
+            // Obstacle stocks above and below the valve, so Top and Bottom both
+            // overlap something and an in-line side would look "free".
+            stock_at(2, 100.0, 60.0),
+            stock_at(3, 100.0, 140.0),
+        ];
+        if let ViewElement::Flow(f) = &mut elements[0] {
+            f.name = "squeezed flow".to_string();
+        }
+
+        declutter_view(&mut elements);
+
+        let ViewElement::Flow(f) = &elements[0] else {
+            panic!("flow expected")
+        };
+        let side_name = match f.label_side {
+            LabelSide::Top => "Top",
+            LabelSide::Bottom => "Bottom",
+            LabelSide::Left => "Left",
+            LabelSide::Right => "Right",
+            LabelSide::Center => "Center",
+        };
+        assert!(
+            matches!(f.label_side, LabelSide::Top | LabelSide::Bottom),
+            "a horizontal flow's label must stay perpendicular to its pipe \
+             (Top or Bottom), got {side_name}"
+        );
     }
 
     // ── zoom + flow re-attachment (the fix for the original revert) ──
