@@ -72,7 +72,11 @@ class Stock:
     """Variable name"""
 
     initial_equation: str
-    """Initial value expression"""
+    """Initial value expression.
+
+    For arrayed stocks defined element-by-element, this is the common initial
+    expression when every element shares the same text, and empty otherwise
+    (see element_equations)."""
 
     inflows: tuple[str, ...]
     """Names of flows that increase this stock"""
@@ -92,6 +96,10 @@ class Stock:
     non_negative: bool = False
     """Whether this stock is constrained to be non-negative"""
 
+    element_equations: tuple[tuple[str, str], ...] = ()
+    """Per-element ``(subscript, initial expression)`` pairs for arrayed stocks
+    defined element-by-element. Empty for scalar and apply-to-all stocks."""
+
 
 @dataclass(frozen=True)
 class Flow:
@@ -109,7 +117,11 @@ class Flow:
     """Variable name"""
 
     equation: str
-    """Flow rate expression"""
+    """Flow rate expression.
+
+    For arrayed flows defined element-by-element, this is the common equation
+    when every element shares the same text, and empty otherwise (see
+    element_equations)."""
 
     units: str | None = None
     """Units (if specified)"""
@@ -125,6 +137,10 @@ class Flow:
 
     graphical_function: GraphicalFunction | None = None
     """Graphical/table function if this uses WITH LOOKUP"""
+
+    element_equations: tuple[tuple[str, str], ...] = ()
+    """Per-element ``(subscript, equation)`` pairs for arrayed flows defined
+    element-by-element. Empty for scalar and apply-to-all flows."""
 
 
 @dataclass(frozen=True)
@@ -146,7 +162,11 @@ class Aux:
     """Variable name"""
 
     equation: str
-    """Equation defining this variable"""
+    """Equation defining this variable.
+
+    For arrayed auxiliaries defined element-by-element, this is the common
+    equation when every element shares the same text, and empty otherwise (see
+    element_equations)."""
 
     active_initial: str | None = None
     """Active initial equation (Vensim ACTIVE INITIAL)"""
@@ -162,6 +182,10 @@ class Aux:
 
     graphical_function: GraphicalFunction | None = None
     """Graphical/table function if this uses WITH LOOKUP"""
+
+    element_equations: tuple[tuple[str, str], ...] = ()
+    """Per-element ``(subscript, equation)`` pairs for arrayed auxiliaries
+    defined element-by-element. Empty for scalar and apply-to-all variables."""
 
 
 @dataclass(frozen=True)

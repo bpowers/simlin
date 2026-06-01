@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
+import warnings
 from typing import TYPE_CHECKING, Any, Self, Union
 
 import numpy as np
@@ -124,15 +125,42 @@ def _parse_graphical_function_dict(gf_dict: dict[str, Any]) -> GraphicalFunction
     )
 
 
+def _parse_arrayed_elements(
+    arrayed: dict[str, Any] | None,
+) -> tuple[tuple[tuple[str, str], ...], str]:
+    """Extract per-element equations from an ``arrayedEquation`` JSON dict.
+
+    Returns ``(element_equations, common_equation)``: the per-element
+    ``(subscript, equation)`` pairs, and -- when every element carries the
+    same equation text (the shape the Vensim importer produces for
+    apply-to-all equations) -- that common text. ``common_equation`` is empty
+    when elements differ or there are no per-element equations.
+    """
+    if not arrayed:
+        return (), ""
+    elements = arrayed.get("elements") or []
+    pairs = tuple((elem.get("subscript", ""), elem.get("equation", "")) for elem in elements)
+    if not pairs:
+        return (), ""
+    first_eq = pairs[0][1]
+    common = first_eq if all(eq == first_eq for _, eq in pairs) else ""
+    return pairs, common
+
+
 def _stock_from_dict(d: dict[str, Any]) -> Stock:
     """Convert a tagged JSON variable dict (type=stock) to a Stock."""
     arrayed = d.get("arrayedEquation")
+    element_equations, common_eq = _parse_arrayed_elements(arrayed)
     initial_eq = d.get("initialEquation", "")
     if not initial_eq and arrayed:
         # For stocks, the initial value can come from two arrayed fields:
         # - initialEquation: JSON-sourced data with an explicit initial field
         # - equation: XMILE-sourced data (where <eqn> IS the initial value)
         initial_eq = arrayed.get("initialEquation", "") or arrayed.get("equation", "")
+    if not initial_eq:
+        # Element-by-element stocks: report the common initial when every
+        # element agrees (the Vensim-importer apply-to-all shape).
+        initial_eq = common_eq
     dimensions: tuple[str, ...] = ()
     if arrayed:
         dimensions = tuple(arrayed.get("dimensions", []))
@@ -146,15 +174,17 @@ def _stock_from_dict(d: dict[str, Any]) -> Stock:
         documentation=d.get("documentation") or None,
         dimensions=dimensions,
         non_negative=compat.get("nonNegative", d.get("nonNegative", False)),
+        element_equations=element_equations,
     )
 
 
 def _flow_from_dict(d: dict[str, Any]) -> Flow:
     """Convert a tagged JSON variable dict (type=flow) to a Flow."""
     arrayed = d.get("arrayedEquation")
+    element_equations, common_eq = _parse_arrayed_elements(arrayed)
     equation = d.get("equation", "")
     if not equation and arrayed:
-        equation = arrayed.get("equation", "")
+        equation = arrayed.get("equation", "") or common_eq
     dimensions: tuple[str, ...] = ()
     if arrayed:
         dimensions = tuple(arrayed.get("dimensions", []))
@@ -171,15 +201,17 @@ def _flow_from_dict(d: dict[str, Any]) -> Flow:
         dimensions=dimensions,
         non_negative=compat.get("nonNegative", d.get("nonNegative", False)),
         graphical_function=gf,
+        element_equations=element_equations,
     )
 
 
 def _aux_from_dict(d: dict[str, Any]) -> Aux:
     """Convert a tagged JSON variable dict (type=aux) to an Aux."""
     arrayed = d.get("arrayedEquation")
+    element_equations, common_eq = _parse_arrayed_elements(arrayed)
     equation = d.get("equation", "")
     if not equation and arrayed:
-        equation = arrayed.get("equation", "")
+        equation = arrayed.get("equation", "") or common_eq
     compat = d.get("compat") or {}
     active_initial = compat.get("activeInitial", "")
     if not active_initial and arrayed:
@@ -200,6 +232,7 @@ def _aux_from_dict(d: dict[str, Any]) -> Aux:
         documentation=d.get("documentation") or None,
         dimensions=dimensions,
         graphical_function=gf,
+        element_equations=element_equations,
     )
 
 
@@ -292,9 +325,7 @@ class ModelPatchBuilder:
             the ``pin{n}`` id, joined by the U+205A separator).  Multiple pins
             on stocks in the same SCC partition DO normalize against each other.
         """
-        self._ops.append(
-            SetLoopName(variables=list(variables), name=name, description=description)
-        )
+        self._ops.append(SetLoopName(variables=list(variables), name=name, description=description))
 
 
 class _ModelEditContext:
@@ -662,6 +693,12 @@ class Model:
         finishes, the returned :class:`Analysis` has ``truncated=True`` and its
         ``loops`` / ``dominant_periods`` reflect only the work done so far.
 
+        .. note::
+            The ``timeout`` bounds only the loop-discovery sweep itself. The
+            model must first be compiled with LTM instrumentation and simulated,
+            and that time is NOT counted against the timeout -- on large models
+            it can dominate the total wall-clock time of this call.
+
         The analysis runs against the model's base configuration (no overrides
         or time-range changes); it compiles and simulates internally in LTM
         discovery mode.
@@ -793,16 +830,20 @@ class Model:
     def run(
         self,
         overrides: dict[str, float] | None = None,
-        time_range: tuple[float, float] | None = None,
-        dt: float | None = None,
         analyze_loops: bool = True,
     ) -> Run:
         """Run simulation with optional variable overrides.
 
+        To run with different time bounds or a different time step, change the
+        project's simulation specs first via ``model.project.set_sim_specs()``.
+
+        When ``analyze_loops`` is True but the LTM-instrumented compile fails
+        (very large models can exceed engine limits), the run degrades
+        gracefully: a ``RuntimeWarning`` explains why, and the simulation
+        reruns without loop analysis so results are still produced.
+
         Args:
             overrides: Override values for any model variables (by name)
-            time_range: (start, stop) time bounds (uses model defaults if None)
-            dt: Time step (uses model default if None)
             analyze_loops: Whether to compute loop dominance analysis (LTM)
 
         Returns:
@@ -814,12 +855,54 @@ class Model:
         """
         from .run import Run
 
-        sim = self.simulate(overrides=overrides or {}, enable_ltm=analyze_loops)
-        sim.run_to_end()
+        sim: Sim
+        if analyze_loops:
+            # The engine defers compilation errors from sim creation to run time
+            # (sim_new stores them and run_to_end reports them), so BOTH calls
+            # must be inside the fallback's try block.
+            try:
+                sim = self.simulate(overrides=overrides or {}, enable_ltm=True)
+                sim.run_to_end()
+            except SimlinRuntimeError as ltm_err:
+                # LTM instrumentation can push very large models over engine
+                # limits (e.g. the bytecode VM's 65,536-result-slot ceiling).
+                # Retry without LTM so the user still gets correct results; if
+                # the model is broken independent of LTM, this second attempt
+                # raises and that error propagates.
+                sim = self.simulate(overrides=overrides or {}, enable_ltm=False)
+                sim.run_to_end()
+                warnings.warn(
+                    f"loop analysis (LTM) could not be enabled for this run, so it "
+                    f"was skipped and run.loops will be empty. Pass "
+                    f"analyze_loops=False to silence this warning. Underlying "
+                    f"error: {ltm_err}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        else:
+            sim = self.simulate(overrides=overrides or {}, enable_ltm=False)
+            sim.run_to_end()
 
         loops_structural = self.loops
+        run = Run(sim, overrides or {}, loops_structural)
 
-        return Run(sim, overrides or {}, loops_structural)
+        # Surface the discovery auto-flip: on models too large for exhaustive
+        # loop enumeration, LTM resolves to the strongest-path discovery
+        # heuristic, where run.loops contains only explicitly pinned loops.
+        # Without this warning an empty loop list is indistinguishable from
+        # "this model has no feedback loops".
+        if analyze_loops and not loops_structural and run.ltm_mode == "discovery":
+            warnings.warn(
+                "this model is too large for exhaustive feedback-loop enumeration, "
+                "so LTM resolved to discovery mode and run.loops is empty. Use "
+                "Model.analyze(timeout=...) for heuristic loop discovery, or pin "
+                "the loops you care about with set_loop_name() in model.edit() so "
+                "they are always scored.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        return run
 
     @property
     def base_case(self) -> Run:

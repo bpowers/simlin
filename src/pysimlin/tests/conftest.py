@@ -96,3 +96,9 @@ def subscripted_model_path() -> Path:
         / "subscript_multiples"
         / "test_multiple_subscripts.stmx"
     )
+
+
+@pytest.fixture
+def cross_element_ltm_path() -> Path:
+    """Return path to a model whose arrayed variables use per-element equations."""
+    return get_repo_root() / "test" / "cross_element_ltm" / "cross_element.stmx"

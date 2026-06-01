@@ -391,6 +391,7 @@ class TestModelStructuralProperties:
         for name in stock_names:
             var = model.get_variable(name)
             from simlin.types import Stock
+
             assert isinstance(var, Stock)
 
         flow_names = model.get_var_names(type_mask=VARTYPE_FLOW)
@@ -398,6 +399,7 @@ class TestModelStructuralProperties:
         for name in flow_names:
             var = model.get_variable(name)
             from simlin.types import Flow
+
             assert isinstance(var, Flow)
 
         aux_names = model.get_var_names(type_mask=VARTYPE_AUX)
@@ -405,6 +407,7 @@ class TestModelStructuralProperties:
         for name in aux_names:
             var = model.get_variable(name)
             from simlin.types import Aux
+
             assert isinstance(var, Aux)
 
     def test_get_var_names_with_filter(self, teacup_stmx_path) -> None:
@@ -665,6 +668,75 @@ class TestArrayedEquations:
         assert stock_a is not None
 
         assert stock_a.initial_equation == "0"
+
+    def test_per_element_equations_exposed(self, cross_element_ltm_path: Path) -> None:
+        """Arrayed variables defined element-by-element expose every element's
+        equation via element_equations.
+
+        Before this field existed, a per-element arrayed variable showed an
+        empty .equation and there was NO way to see its formulas at all.
+        """
+        from simlin.types import Aux
+
+        model = simlin.load(cross_element_ltm_path)
+        var = model.get_variable("migration_pressure")
+        assert isinstance(var, Aux)
+
+        # Subscript keys are canonical (lowercase) names, consistent with the
+        # rest of the API; equation text preserves the authored casing.
+        subs = dict(var.element_equations)
+        assert set(subs) == {"nyc", "boston"}
+        assert "population[NYC]" in subs["nyc"]
+        assert "population[Boston]" in subs["boston"]
+        # The two elements have different formulas, so there is no single
+        # representative equation.
+        assert var.equation == ""
+
+    def test_per_element_stock_initials_exposed(self, cross_element_ltm_path: Path) -> None:
+        """Per-element stock initial values are exposed via element_equations."""
+        from simlin.types import Stock
+
+        model = simlin.load(cross_element_ltm_path)
+        var = model.get_variable("population")
+        assert isinstance(var, Stock)
+
+        subs = dict(var.element_equations)
+        assert subs == {"nyc": "1000", "boston": "500"}
+        assert var.initial_equation == ""
+
+    def test_identical_per_element_equations_collapse(self) -> None:
+        """When every element carries the same equation text -- the shape the
+        Vensim importer produces for apply-to-all equations -- .equation reports
+        that common text instead of being empty."""
+        from simlin.model import _aux_from_dict
+
+        d: dict[str, Any] = {
+            "type": "aux",
+            "name": "atm_conc_co2",
+            "arrayedEquation": {
+                "dimensions": ["scenario"],
+                "elements": [
+                    {"subscript": "Deterministic", "equation": "C_in_Atmosphere[scenario] * ppm"},
+                    {"subscript": "High", "equation": "C_in_Atmosphere[scenario] * ppm"},
+                    {"subscript": "Low", "equation": "C_in_Atmosphere[scenario] * ppm"},
+                ],
+            },
+        }
+        aux = _aux_from_dict(d)
+        assert aux is not None
+        assert aux.equation == "C_in_Atmosphere[scenario] * ppm"
+        assert aux.element_equations == (
+            ("Deterministic", "C_in_Atmosphere[scenario] * ppm"),
+            ("High", "C_in_Atmosphere[scenario] * ppm"),
+            ("Low", "C_in_Atmosphere[scenario] * ppm"),
+        )
+
+    def test_scalar_variables_have_empty_element_equations(self, teacup_stmx_path: Path) -> None:
+        """Scalar variables report an empty element_equations tuple."""
+        model = simlin.load(teacup_stmx_path)
+        var = model.get_variable("room_temperature")
+        assert var is not None
+        assert var.element_equations == ()
 
 
 class TestGetVariable:

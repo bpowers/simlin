@@ -181,3 +181,128 @@ class TestGetLinksCollapse:
         )
         assert through.score is not None
         assert len(through.score) > 0
+
+
+class TestRunLtmDegradation:
+    """Model.run() degrades gracefully when LTM cannot be enabled, and explains
+    discovery mode instead of silently returning an empty loop list."""
+
+    def test_run_falls_back_when_ltm_compile_fails(
+        self, logistic_model: simlin.Model, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the LTM-instrumented compile fails (e.g. a very large model
+        exceeding the engine's bytecode slot limit), run() must warn, retry
+        without LTM, and still return correct results -- not raise."""
+        from simlin.errors import SimlinRuntimeError
+
+        real_simulate = simlin.Model.simulate
+
+        def failing_ltm_simulate(
+            self: simlin.Model,
+            overrides: dict[str, float] | None = None,
+            enable_ltm: bool = False,
+        ) -> simlin.Sim:
+            if enable_ltm:
+                raise SimlinRuntimeError(
+                    "Create simulation failed: model 'main' requires 171498 result "
+                    "slots, which exceeds the bytecode VM's addressable limit"
+                )
+            return real_simulate(self, overrides=overrides, enable_ltm=enable_ltm)
+
+        monkeypatch.setattr(simlin.Model, "simulate", failing_ltm_simulate)
+
+        with pytest.warns(RuntimeWarning, match="loop analysis"):
+            run = logistic_model.run(analyze_loops=True)
+
+        # The fallback run is a real, correct simulation without LTM.
+        assert run.ltm_mode == "disabled"
+        assert not run.results.empty
+
+    def test_run_falls_back_when_ltm_run_to_end_fails(
+        self, logistic_model: simlin.Model, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The engine defers compile errors from sim creation to run time
+        (sim_new stores them as vm_error; run_to_end reports them) -- this is
+        exactly how the too-many-result-slots error surfaces on C-LEARN. The
+        fallback must cover that path, not just simulate()-time failures."""
+        from simlin.errors import SimlinRuntimeError
+
+        real_run_to_end = simlin.Sim.run_to_end
+        calls = {"n": 0}
+
+        def failing_first_run(self: simlin.Sim) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise SimlinRuntimeError(
+                    "Run simulation to end failed: model 'main' requires 171597 "
+                    "result slots, which exceeds the bytecode VM's addressable limit"
+                )
+            real_run_to_end(self)
+
+        monkeypatch.setattr(simlin.Sim, "run_to_end", failing_first_run)
+
+        with pytest.warns(RuntimeWarning, match="loop analysis"):
+            run = logistic_model.run(analyze_loops=True)
+
+        assert run.ltm_mode == "disabled"
+        assert not run.results.empty
+        assert calls["n"] == 2, "the run must have been retried without LTM"
+
+    def test_run_does_not_swallow_non_ltm_failures(
+        self, logistic_model: simlin.Model, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A model that cannot compile at all (with or without LTM) must still
+        raise -- the fallback only covers LTM-specific failures."""
+        from simlin.errors import SimlinRuntimeError
+
+        def always_failing_simulate(
+            self: simlin.Model,
+            overrides: dict[str, float] | None = None,
+            enable_ltm: bool = False,
+        ) -> simlin.Sim:
+            raise SimlinRuntimeError("model is broken")
+
+        monkeypatch.setattr(simlin.Model, "simulate", always_failing_simulate)
+
+        with pytest.raises(SimlinRuntimeError, match="model is broken"):
+            logistic_model.run(analyze_loops=True)
+
+    def test_run_warns_on_discovery_mode_with_no_loops(self) -> None:
+        """A model that auto-flips to discovery mode (and has no pinned loops)
+        gets a warning explaining why run.loops is empty and what to do about
+        it; without the warning, an empty loop list is indistinguishable from
+        a loop-free model."""
+        model = _large_scc_model(51)
+        with pytest.warns(RuntimeWarning, match="discovery"):
+            run = model.run(analyze_loops=True)
+        assert run.ltm_mode == "discovery"
+        assert run.loops == ()
+
+    def test_run_does_not_warn_in_exhaustive_mode(self, logistic_model: simlin.Model) -> None:
+        """Small models (exhaustive mode) run without any warning."""
+        import warnings as warnings_module
+
+        with warnings_module.catch_warnings():
+            warnings_module.simplefilter("error")  # any warning -> test failure
+            run = logistic_model.run(analyze_loops=True)
+        assert run.ltm_mode == "exhaustive"
+
+    def test_run_does_not_warn_when_loops_disabled(self) -> None:
+        """analyze_loops=False on a discovery-scale model is silent: the user
+        explicitly opted out of loop analysis."""
+        import warnings as warnings_module
+
+        model = _large_scc_model(51)
+        with warnings_module.catch_warnings():
+            warnings_module.simplefilter("error")
+            run = model.run(analyze_loops=False)
+        assert run.ltm_mode == "disabled"
+
+    def test_run_rejects_removed_time_range_params(self, logistic_model: simlin.Model) -> None:
+        """run() no longer accepts time_range/dt: they were silently ignored
+        (accepted but never applied), which is worse than a loud TypeError.
+        Use project.set_sim_specs() to change simulation time bounds."""
+        with pytest.raises(TypeError):
+            logistic_model.run(time_range=(0.0, 5.0))  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            logistic_model.run(dt=0.5)  # type: ignore[call-arg]
