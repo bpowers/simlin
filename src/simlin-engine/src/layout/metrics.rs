@@ -125,11 +125,24 @@ impl Default for MetricWeights {
     ///     (`node_connector_overlap`), obscured labels (`label_overlap`), and
     ///     edge `crossings`. These are the things that make a diagram unreadable
     ///     or assert false causal connections, so they dominate the cost.
-    ///   * `sprawl`, `edge_length_cv`, and `aspect_penalty` are intentionally
-    ///     0.0: compactness and aspect ratio are NOT goals. Spreading nodes out
-    ///     to keep labels legible and feedback loops visible is GOOD, not
-    ///     something to penalize, so these terms must not pull against
-    ///     readability.
+    ///   * `sprawl` is a GENTLE compactness counterweight (0.1). The readability
+    ///     terms above can be driven to zero just by spreading a diagram out
+    ///     (labels are a fixed pixel size, so enough spacing always separates
+    ///     them), and nothing else here resists that -- `crossings` and
+    ///     `node_connector_overlap` are scale-invariant and `aspect_penalty` is
+    ///     off. Without a counterweight, "lower cost" can mean "merely bigger",
+    ///     and any optimizer driving this metric (best-of-k seed selection, a
+    ///     declutter pass, metric-driven annealing) would prefer endlessly
+    ///     inflated, unviewable layouts. A small `sprawl` weight makes spreading
+    ///     past the point where labels separate strictly costly, so the cost has
+    ///     a finite optimum at "spread just enough". It is kept far below the
+    ///     readability terms (readability >> compactness still holds): at a
+    ///     healthy spread `sprawl` is ~1, contributing ~0.1 -- enough to break
+    ///     ties toward compactness and deter inflation, not enough to pull a
+    ///     layout back into label collisions.
+    ///   * `edge_length_cv` and `aspect_penalty` stay 0.0: even edge lengths are
+    ///     not a goal, and aspect-ratio penalties actively punished good wide
+    ///     layouts during calibration.
     ///   * `loop_compactness` is a low 0.25: it gently REWARDS drawing feedback
     ///     loops as visible circles (a readability aid), but must never dominate
     ///     the overlap/crossings family, so it stays well below 1.0.
@@ -141,7 +154,7 @@ impl Default for MetricWeights {
             node_connector_overlap: 1.0,
             label_overlap: 1.0,
             crossings: 1.0,
-            sprawl: 0.0,
+            sprawl: 0.1,
             edge_length_cv: 0.0,
             aspect_penalty: 0.0,
             chain_straightness: 0.0,
@@ -1762,9 +1775,23 @@ mod tests {
             }
         }
 
-        // Compactness/aspect are intentionally zero: spreading out to keep labels
-        // legible and feedback loops visible is good, not penalized.
-        assert_eq!(w.sprawl, 0.0, "sprawl is not a goal");
+        // `sprawl` is a GENTLE compactness counterweight: strictly positive (so
+        // unbounded inflation is penalized and the cost has a finite optimum at
+        // "spread just enough"), but far below the dominant readability family
+        // (checked by the dominant>compactness loop above), so readability still
+        // wins decisively over compactness.
+        assert!(
+            w.sprawl > 0.0,
+            "sprawl must be a positive compactness counterweight, got {}",
+            w.sprawl
+        );
+        assert!(
+            w.sprawl < 0.5 * w.label_overlap,
+            "sprawl ({}) must stay well below the readability terms ({})",
+            w.sprawl,
+            w.label_overlap
+        );
+        // Edge-length uniformity and aspect ratio remain non-goals.
         assert_eq!(
             w.edge_length_cv, 0.0,
             "edge-length uniformity is not a goal"

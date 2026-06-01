@@ -13,10 +13,11 @@ LAYOUT_EVAL_SEEDS=8 LAYOUT_EVAL_WRITE_BASELINE=1 \
   cargo run --release -p simlin-engine --features png_render,file_io --example layout_eval
 ```
 
-It records the **layout behavior at the start of the layout-hill-climb work**
-(post the corpus expansion to multi-view Vensim models and the switch of the
-corpus aggregate to the shifted geomean `aggregate_cost`), scored with the
-committed calibrated `MetricWeights::default()`. Re-seeded on 2026-05-31.
+It records the layout behavior **after the quiescence work** (Hu's adaptive
+SFDP schedule, isolated-variable parking) and **with the sprawl compactness
+counterweight** (`MetricWeights::default().sprawl = 0.1`) -- re-seeded on
+2026-05-31 when that weight landed, since weighted costs under the old
+weights are not comparable.
 
 The sweep is minutes-scale (the wrld3/covid19 models dominate); the committed
 JSON is ~100-200KB. Both are acceptable for a tripwire that is regenerated
