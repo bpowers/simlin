@@ -106,6 +106,21 @@ path.simlin-cloud {
   stroke: #4444dd;
 }
 
+/* Group (sector / Vensim view-boundary box). Without an explicit rule the
+   rect takes SVG's default fill (opaque black) and hides everything inside. */
+.simlin-group rect {
+  stroke-width: 1px;
+  stroke: #999999;
+  fill: #f5f5f5;
+  fill-opacity: 0.5;
+}
+
+.simlin-group text {
+  font-weight: 500;
+  fill: #666666;
+  text-anchor: start;
+}
+
 /* Module */
 .simlin-module rect {
   stroke-width: 1px;

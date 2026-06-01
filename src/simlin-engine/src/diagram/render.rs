@@ -113,6 +113,21 @@ path.simlin-cloud {
   stroke: #4444dd;
 }
 
+/* Group (sector / Vensim view-boundary box). Without an explicit rule the
+   rect takes SVG's default fill (opaque black) and hides everything inside. */
+.simlin-group rect {
+  stroke-width: 1px;
+  stroke: #999999;
+  fill: #f5f5f5;
+  fill-opacity: 0.5;
+}
+
+.simlin-group text {
+  font-weight: 500;
+  fill: #666666;
+  text-anchor: start;
+}
+
 /* Module */
 .simlin-module rect {
   stroke-width: 1px;
@@ -719,6 +734,63 @@ mod tests {
         assert!(svg.contains("feGaussianBlur"));
         assert!(svg.contains("feColorMatrix"));
         assert!(svg.contains("feComposite"));
+    }
+
+    #[test]
+    fn test_render_svg_group_is_styled_not_default_black() {
+        // Vensim imports synthesize a Group element per source view (and users
+        // can draw sector boxes); the SVG <style> block must give
+        // `.simlin-group rect` an explicit light fill and stroke. Without a
+        // rule, SVG's default fill (solid black) covers everything inside the
+        // group -- which made every Vensim-imported multi-view model render as
+        // a stack of black rectangles.
+        let group = ViewElement::Group(view_element::Group {
+            uid: 1,
+            name: "climate_sector".to_string(),
+            x: 200.0,
+            y: 150.0,
+            width: 300.0,
+            height: 200.0,
+            is_mdl_view_marker: true,
+        });
+        let elements = vec![group, make_aux_ve("inside_var", 2, 200.0, 150.0)];
+        let variables = vec![make_scalar_aux_var("inside_var")];
+        let project = make_simple_project(elements, variables);
+
+        let svg = render_svg(&project, "main").unwrap();
+
+        // The group element is rendered...
+        assert!(svg.contains("<g class=\"simlin-group\">"));
+        // ...and the style block has explicit group rules: a translucent light
+        // fill (matching the web app's Group.module.css) rather than the SVG
+        // default of opaque black, and a left-anchored label.
+        assert!(
+            svg.contains(".simlin-group rect"),
+            "style block must contain a .simlin-group rect rule"
+        );
+        assert!(
+            svg.contains(".simlin-group text"),
+            "style block must contain a .simlin-group text rule"
+        );
+        let styles = &svg[..svg.find("</style>").unwrap()];
+        let group_rect_rule_start = styles.find(".simlin-group rect").unwrap();
+        let group_rect_rule = &styles[group_rect_rule_start
+            ..group_rect_rule_start + styles[group_rect_rule_start..].find('}').unwrap()];
+        assert!(
+            group_rect_rule.contains("fill: #f5f5f5"),
+            "group rect must have the light fill, got rule: {group_rect_rule}"
+        );
+        assert!(
+            group_rect_rule.contains("fill-opacity"),
+            "group rect fill must be translucent so contents stay visible: {group_rect_rule}"
+        );
+        let group_text_rule_start = styles.find(".simlin-group text").unwrap();
+        let group_text_rule = &styles[group_text_rule_start
+            ..group_text_rule_start + styles[group_text_rule_start..].find('}').unwrap()];
+        assert!(
+            group_text_rule.contains("text-anchor: start"),
+            "group label must be left-anchored, got rule: {group_text_rule}"
+        );
     }
 
     #[test]
