@@ -2123,6 +2123,35 @@ fn layout_chain(
         flow_attachments.extend(sides);
     }
 
+    // Flows connecting the same stock pair (bidirectional compartment
+    // exchange) draw as parallel pipes: precompute each flow's slot among its
+    // pair's flows so its valve takes a distinct perpendicular offset. Keyed by
+    // the canonically-ordered (sorted) pair so both directions of an exchange
+    // agree on the perpendicular axis. The map's CONTENT is deterministic
+    // (each sibling list comes from the deterministic `flows` slice order)
+    // even though the outer HashMap iteration order is not.
+    let pair_slots: HashMap<String, (usize, usize)> = {
+        let mut pair_flows: HashMap<(String, String), Vec<String>> = HashMap::new();
+        for flow_ident in flows {
+            let (from, to) = metadata.connected_stocks(flow_ident);
+            if let (Some(from), Some(to)) = (from, to) {
+                let key = if from <= to {
+                    (from.to_string(), to.to_string())
+                } else {
+                    (to.to_string(), from.to_string())
+                };
+                pair_flows.entry(key).or_default().push(flow_ident.clone());
+            }
+        }
+        let mut slots = HashMap::new();
+        for siblings in pair_flows.values() {
+            for (idx, flow_ident) in siblings.iter().enumerate() {
+                slots.insert(flow_ident.clone(), (idx, siblings.len()));
+            }
+        }
+        slots
+    };
+
     let mut positioned: HashMap<String, Position> = HashMap::new();
     positioned.insert(start_stock.clone(), base_position);
 
@@ -2225,12 +2254,16 @@ fn layout_chain(
                             }
                             // Valve at the midpoint of the two stocks it
                             // connects (a fanned branch stock is no longer at
-                            // the source's y).
+                            // the source's y), offset perpendicular when
+                            // several flows connect this same pair.
                             let to_pos = positioned[&to];
-                            Position::new(
-                                (item.position.x + to_pos.x) / 2.0,
-                                (item.position.y + to_pos.y) / 2.0,
-                            )
+                            let (a_pos, b_pos) = if from <= to {
+                                (item.position, to_pos)
+                            } else {
+                                (to_pos, item.position)
+                            };
+                            let (idx, count) = pair_slots.get(&item.id).copied().unwrap_or((0, 1));
+                            chain::stock_pair_valve_position(a_pos, b_pos, idx, count)
                         } else {
                             // Position source stock to the left, fanning past
                             // any stock already on that spot.
@@ -2252,11 +2285,16 @@ fn layout_chain(
                                     connected_to: String::new(),
                                 });
                             }
+                            // Mirror of the branch above: valve at the pair
+                            // midpoint with a perpendicular slot offset.
                             let from_pos = positioned[&from];
-                            Position::new(
-                                (from_pos.x + item.position.x) / 2.0,
-                                (from_pos.y + item.position.y) / 2.0,
-                            )
+                            let (a_pos, b_pos) = if from <= to {
+                                (from_pos, item.position)
+                            } else {
+                                (item.position, from_pos)
+                            };
+                            let (idx, count) = pair_slots.get(&item.id).copied().unwrap_or((0, 1));
+                            chain::stock_pair_valve_position(a_pos, b_pos, idx, count)
                         }
                     }
                     (Some(_), None) => {

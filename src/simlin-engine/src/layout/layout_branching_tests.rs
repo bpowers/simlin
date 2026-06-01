@@ -220,6 +220,48 @@ fn test_compartment_fan_stocks_not_stacked() {
     assert_flow_endpoints_attached(&result);
 }
 
+/// Two flows in opposite directions between the same stock pair (compartment
+/// exchange, like thyroid's plasma <-> fast flows): both valves would land on
+/// the exact midpoint of the two stocks, stacking the valve circles and their
+/// labels on top of each other. They must instead draw as parallel pipes with
+/// visually distinct valves.
+#[test]
+fn test_bidirectional_flows_get_distinct_valves() {
+    let model = make_model(vec![
+        make_stock("compartment_a", &["b_to_a"], &["a_to_b"]),
+        make_stock("compartment_b", &["a_to_b"], &["b_to_a"]),
+        make_flow("a_to_b"),
+        make_flow("b_to_a"),
+    ]);
+    let project = test_project(model);
+    let result = generate_layout(&project, TEST_MODEL, None).unwrap();
+
+    let valves: Vec<(String, f64, f64)> = result
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Flow(f) => Some((f.name.clone(), f.x, f.y)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(valves.len(), 2, "both flows must have view elements");
+    let d = ((valves[0].1 - valves[1].1).powi(2) + (valves[0].2 - valves[1].2).powi(2)).sqrt();
+    assert!(
+        d >= 20.0,
+        "bidirectional flow valves must be visually distinct (>= 20 units apart), \
+         got {d:.1}: '{}' at ({}, {}) vs '{}' at ({}, {})",
+        valves[0].0,
+        valves[0].1,
+        valves[0].2,
+        valves[1].0,
+        valves[1].1,
+        valves[1].2,
+    );
+    // The parallel pipes must still be attached to both stocks.
+    assert_flow_endpoints_attached(&result);
+    assert_no_stock_overlap(&result);
+}
+
 /// Layouts of branching models must remain deterministic per seed (#633).
 #[test]
 fn test_branching_layout_deterministic() {

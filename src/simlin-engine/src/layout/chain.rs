@@ -102,6 +102,44 @@ pub fn find_free_stock_position(
     Position::new(natural.x, max_y + config.vertical_spacing)
 }
 
+/// Center-to-center spacing between the parallel pipes of flows that connect
+/// the same stock pair (bidirectional compartment exchange). Two valves a full
+/// spacing apart read as separate flows; kept under the stock half-height
+/// (17.5) times two so a pair of pipes still attaches to the stocks' facing
+/// edges rather than wrapping onto the top/bottom faces.
+const PARALLEL_FLOW_SPACING: f64 = 24.0;
+
+/// Valve position for a stock-to-stock flow: the midpoint of the two stocks,
+/// offset perpendicular to the stock axis when several flows connect the same
+/// pair (bidirectional exchange like thyroid's plasma <-> fast compartments).
+/// Without the offset every such flow's valve lands on the exact midpoint,
+/// stacking the valve circles and their labels.
+///
+/// `pair_index` is this flow's slot among the `pair_count` flows connecting
+/// the pair (in deterministic chain-flow order); slots are centered around the
+/// midpoint so a pair draws symmetrically (-1/2, +1/2 spacing for two flows).
+pub fn stock_pair_valve_position(
+    a: Position,
+    b: Position,
+    pair_index: usize,
+    pair_count: usize,
+) -> Position {
+    let mid = Position::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+    if pair_count <= 1 {
+        return mid;
+    }
+    let offset = (pair_index as f64 - (pair_count as f64 - 1.0) / 2.0) * PARALLEL_FLOW_SPACING;
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-9 {
+        // Degenerate (coincident stocks): fall back to a vertical fan.
+        return Position::new(mid.x, mid.y + offset);
+    }
+    // Unit perpendicular to the a -> b axis.
+    Position::new(mid.x - dy / len * offset, mid.y + dx / len * offset)
+}
+
 /// Recursively follow incoming edges in the dependency graph until we
 /// reach a variable that belongs to a chain.  Returns the set of chain
 /// indices that are (transitively) upstream of `var`.
