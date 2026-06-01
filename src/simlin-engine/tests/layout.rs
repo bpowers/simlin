@@ -2486,5 +2486,30 @@ fn test_flow_endpoints_geometrically_attached_to_stocks() {
                 );
             }
         }
+
+        // Companion structural invariant: no two stocks may overlap. A stock
+        // stacked on another is permanently broken -- the annealing cannot
+        // separate them (stocks are not perturbable) and neither can the
+        // declutter (stocks are not movable there). The chain BFS once stacked
+        // every branch of a branching compartment topology on one spot.
+        let stock_list: Vec<(i32, f64, f64)> = view
+            .elements
+            .iter()
+            .filter_map(|elem| match elem {
+                ViewElement::Stock(s) => Some((s.uid, s.x, s.y)),
+                _ => None,
+            })
+            .collect();
+        for (i, &(uid_a, ax, ay)) in stock_list.iter().enumerate() {
+            for &(uid_b, bx, by) in &stock_list[i + 1..] {
+                let dx = (ax - bx).abs();
+                let dy = (ay - by).abs();
+                assert!(
+                    dx >= config.stock_width || dy >= config.stock_height,
+                    "{path}: stocks uid={uid_a} ({ax}, {ay}) and uid={uid_b} ({bx}, {by}) \
+                     overlap -- stacked stocks can never be separated downstream",
+                );
+            }
+        }
     }
 }

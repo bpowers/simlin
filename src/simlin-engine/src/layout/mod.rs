@@ -1828,18 +1828,33 @@ fn create_flow_view_element(
                 .get(&to_uid)
                 .copied()
                 .unwrap_or(Position::new(pos.x + 50.0, pos.y));
-            vec![
-                FlowPoint {
-                    x: from_pos.x + config.stock_width / 2.0,
-                    y: pos.y,
-                    attached_to_uid: Some(from_uid),
-                },
-                FlowPoint {
-                    x: to_pos.x - config.stock_width / 2.0,
-                    y: pos.y,
-                    attached_to_uid: Some(to_uid),
-                },
-            ]
+
+            // One endpoint per stock, on the face the valve approaches from --
+            // the same aspect-normalized rule `resnap_flow_endpoints` uses, so
+            // a later resnap of a chain-built flow is a no-op. For two stocks
+            // on the same horizontal line this reduces to the classic
+            // right-edge -> left-edge horizontal pipe; for a vertically fanned
+            // branch stock it exits/enters the top or bottom face instead.
+            let endpoint = |stock_pos: Position, stock_uid: i32| -> FlowPoint {
+                let half_w = config.stock_width / 2.0;
+                let half_h = config.stock_height / 2.0;
+                let dx = pos.x - stock_pos.x;
+                let dy = pos.y - stock_pos.y;
+                if half_h * dx.abs() >= half_w * dy.abs() {
+                    FlowPoint {
+                        x: stock_pos.x + dx.signum() * half_w,
+                        y: pos.y.clamp(stock_pos.y - half_h, stock_pos.y + half_h),
+                        attached_to_uid: Some(stock_uid),
+                    }
+                } else {
+                    FlowPoint {
+                        x: pos.x.clamp(stock_pos.x - half_w, stock_pos.x + half_w),
+                        y: stock_pos.y + dy.signum() * half_h,
+                        attached_to_uid: Some(stock_uid),
+                    }
+                }
+            };
+            vec![endpoint(from_pos, from_uid), endpoint(to_pos, to_uid)]
         }
         (Some(from), None) => {
             let from_uid = state.get_or_alloc_uid(from);
@@ -2171,19 +2186,35 @@ fn layout_chain(
 
                 let (from_stock, to_stock) = metadata.connected_stocks(&item.id);
 
+                // Positions of every stock placed so far in this chain. The
+                // `positioned` map also holds flow valves, so filter to the
+                // chain's stock idents (deterministic slice order).
+                let occupied_stock_positions = |positioned: &HashMap<String, Position>| {
+                    stocks
+                        .iter()
+                        .filter_map(|s| positioned.get(s).copied())
+                        .collect::<Vec<Position>>()
+                };
+
                 let flow_pos = match (from_stock, to_stock) {
                     (Some(from), Some(to)) => {
                         let from = from.to_string();
                         let to = to.to_string();
                         if item.connected_to == from {
-                            // Position sink stock to the right
+                            // Position sink stock to the right; if a stock
+                            // already occupies that spot (a branching
+                            // topology), fan vertically to the nearest free
+                            // position.
                             if !positioned.contains_key(&to) {
-                                let other_pos = Position::new(
+                                let natural = Position::new(
                                     item.position.x
                                         + config.stock_width
                                         + config.horizontal_spacing,
                                     item.position.y,
                                 );
+                                let occupied = occupied_stock_positions(&positioned);
+                                let other_pos =
+                                    chain::find_free_stock_position(natural, &occupied, config);
                                 positioned.insert(to.clone(), other_pos);
                                 queue.push_back(WorkItem {
                                     id: to.clone(),
@@ -2192,19 +2223,27 @@ fn layout_chain(
                                     connected_to: String::new(),
                                 });
                             }
+                            // Valve at the midpoint of the two stocks it
+                            // connects (a fanned branch stock is no longer at
+                            // the source's y).
+                            let to_pos = positioned[&to];
                             Position::new(
-                                (item.position.x + positioned[&to].x) / 2.0,
-                                item.position.y,
+                                (item.position.x + to_pos.x) / 2.0,
+                                (item.position.y + to_pos.y) / 2.0,
                             )
                         } else {
-                            // Position source stock to the left
+                            // Position source stock to the left, fanning past
+                            // any stock already on that spot.
                             if !positioned.contains_key(&from) {
-                                let other_pos = Position::new(
+                                let natural = Position::new(
                                     item.position.x
                                         - config.stock_width
                                         - config.horizontal_spacing,
                                     item.position.y,
                                 );
+                                let occupied = occupied_stock_positions(&positioned);
+                                let other_pos =
+                                    chain::find_free_stock_position(natural, &occupied, config);
                                 positioned.insert(from.clone(), other_pos);
                                 queue.push_back(WorkItem {
                                     id: from.clone(),
@@ -2213,9 +2252,10 @@ fn layout_chain(
                                     connected_to: String::new(),
                                 });
                             }
+                            let from_pos = positioned[&from];
                             Position::new(
-                                (positioned[&from].x + item.position.x) / 2.0,
-                                item.position.y,
+                                (from_pos.x + item.position.x) / 2.0,
+                                (from_pos.y + item.position.y) / 2.0,
                             )
                         }
                     }
@@ -5829,3 +5869,7 @@ mod layout_selection_tests;
 #[cfg(test)]
 #[path = "layout_isolated_tests.rs"]
 mod layout_isolated_tests;
+
+#[cfg(test)]
+#[path = "layout_branching_tests.rs"]
+mod layout_branching_tests;

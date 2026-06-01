@@ -46,6 +46,62 @@ pub fn parse_chain_cloud_ident(ident: &str) -> Option<(usize, usize)> {
     Some((chain_index, seq))
 }
 
+/// Extra clearance (beyond the stock box itself) required between two stocks
+/// before `find_free_stock_position` considers a candidate spot free. Keeps
+/// fanned branch stocks from touching even before labels are accounted for.
+const STOCK_CLEARANCE: f64 = 30.0;
+
+/// Upper bound on vertical fan steps tried by `find_free_stock_position`
+/// before falling back to "below everything". Branching factors above ~2N are
+/// not realistic for stock-flow models; the bound only guarantees termination.
+const MAX_FAN_STEPS: usize = 32;
+
+/// Find a non-colliding position for a newly-placed stock.
+///
+/// The chain BFS lays stocks out along a horizontal line: each stock goes one
+/// `stock_width + horizontal_spacing` left or right of the stock it connects
+/// to. For a BRANCHING topology -- one stock whose flows connect it to two or
+/// more other stocks (compartment models, SIR-style splits) -- every branch
+/// gets the same natural spot, stacking stocks exactly on top of each other.
+/// Stacking is permanent: the annealing cannot separate them (stocks are not
+/// perturbable) and neither can the declutter (stocks are not movable there).
+///
+/// `natural` is the linear-chain spot; `occupied` are the positions of every
+/// stock placed so far in this chain. Candidates are tried in order: the
+/// natural spot itself, then alternating below/above it at increasing
+/// multiples of `vertical_spacing`. The first collision-free candidate wins,
+/// so a non-branching chain is laid out exactly as before. Deterministic.
+pub fn find_free_stock_position(
+    natural: Position,
+    occupied: &[Position],
+    config: &LayoutConfig,
+) -> Position {
+    let collides = |cand: &Position| {
+        occupied.iter().any(|p| {
+            (p.x - cand.x).abs() < config.stock_width + STOCK_CLEARANCE
+                && (p.y - cand.y).abs() < config.stock_height + STOCK_CLEARANCE
+        })
+    };
+    if !collides(&natural) {
+        return natural;
+    }
+    for k in 1..=MAX_FAN_STEPS {
+        let dy = k as f64 * config.vertical_spacing;
+        for cand in [
+            Position::new(natural.x, natural.y + dy),
+            Position::new(natural.x, natural.y - dy),
+        ] {
+            if !collides(&cand) {
+                return cand;
+            }
+        }
+    }
+    // Pathological fallback (only reachable past MAX_FAN_STEPS branches):
+    // place strictly below every occupied stock.
+    let max_y = occupied.iter().map(|p| p.y).fold(natural.y, f64::max);
+    Position::new(natural.x, max_y + config.vertical_spacing)
+}
+
 /// Recursively follow incoming edges in the dependency graph until we
 /// reach a variable that belongs to a chain.  Returns the set of chain
 /// indices that are (transitively) upstream of `var`.
@@ -386,6 +442,67 @@ pub fn compute_chain_positions(
 mod tests {
     use super::*;
     use crate::layout::metadata::ComputedMetadata;
+
+    #[test]
+    fn test_find_free_stock_position_keeps_natural_when_unoccupied() {
+        let config = LayoutConfig::default();
+        let natural = Position::new(195.0, 50.0);
+        // No occupied stocks, and far-away stocks, both keep the natural spot.
+        assert_eq!(
+            find_free_stock_position(natural, &[], &config),
+            natural,
+            "empty diagram keeps the natural chain position"
+        );
+        let far = vec![Position::new(50.0, 50.0), Position::new(340.0, 50.0)];
+        assert_eq!(
+            find_free_stock_position(natural, &far, &config),
+            natural,
+            "stocks a full chain step away do not force a fan"
+        );
+    }
+
+    #[test]
+    fn test_find_free_stock_position_fans_below_first() {
+        let config = LayoutConfig::default();
+        let natural = Position::new(195.0, 50.0);
+        // The natural spot is taken: fan to directly below it.
+        let occupied = vec![Position::new(50.0, 50.0), natural];
+        let pos = find_free_stock_position(natural, &occupied, &config);
+        assert_eq!(
+            pos,
+            Position::new(195.0, 50.0 + config.vertical_spacing),
+            "first fan candidate is one vertical step below the natural spot"
+        );
+    }
+
+    #[test]
+    fn test_find_free_stock_position_fans_above_second() {
+        let config = LayoutConfig::default();
+        let natural = Position::new(195.0, 50.0);
+        // Natural AND below are taken: fan above.
+        let occupied = vec![
+            natural,
+            Position::new(195.0, 50.0 + config.vertical_spacing),
+        ];
+        let pos = find_free_stock_position(natural, &occupied, &config);
+        assert_eq!(
+            pos,
+            Position::new(195.0, 50.0 - config.vertical_spacing),
+            "second fan candidate is one vertical step above the natural spot"
+        );
+    }
+
+    #[test]
+    fn test_find_free_stock_position_near_collision_counts() {
+        let config = LayoutConfig::default();
+        let natural = Position::new(195.0, 50.0);
+        // A stock NEAR (not exactly on) the natural spot still forces a fan:
+        // boxes closer than stock dimensions + clearance overlap visually.
+        let occupied = vec![Position::new(195.0 + 20.0, 50.0 - 10.0)];
+        let pos = find_free_stock_position(natural, &occupied, &config);
+        assert_ne!(pos, natural, "a nearby stock must force fanning");
+        assert_eq!(pos.x, natural.x, "fanning is vertical (x unchanged)");
+    }
 
     #[test]
     fn test_cloud_node_ident_roundtrip() {
