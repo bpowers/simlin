@@ -108,6 +108,12 @@ pub struct DiscoveryResult {
 #[cfg(test)]
 impl SearchGraph {
     /// Build from a list of (from, to, abs_score) triples.
+    ///
+    /// Zero-score (and NaN) edges are excluded from the graph: a loop through
+    /// such a link has loop score exactly 0 at this timestep, so traversing
+    /// it cannot surface a loop that matters here (GH #647). Any loop that
+    /// ever matters has all-nonzero links at the timestep where it does, and
+    /// remains discoverable there.
     fn from_edges(
         edges: Vec<(Ident<Canonical>, Ident<Canonical>, f64)>,
         stocks: Vec<Ident<Canonical>>,
@@ -117,6 +123,9 @@ impl SearchGraph {
         for (from, to, score) in edges {
             // Treat NaN as 0
             let score = if score.is_nan() { 0.0 } else { score };
+            if score == 0.0 {
+                continue;
+            }
             adj.entry(from).or_default().push(ScoredEdge { to, score });
         }
 
@@ -156,38 +165,99 @@ impl SearchGraph {
         SearchGraph::from_edges(edges, stocks.to_vec())
     }
 
+    /// Compute the SCC id of every node (adjacency keys, edge targets, and
+    /// stocks) over this graph's edges. Returns the id map plus per-id sizes.
+    ///
+    /// The reference-oracle counterpart of the per-step SCC restriction in
+    /// `IndexedSearch`: loops can only exist within a strongly-connected
+    /// component, so each stock's DFS is confined to its own component.
+    fn scc_map(&self) -> (HashMap<Ident<Canonical>, u32>, Vec<u32>) {
+        // Assign dense indices to every node.
+        let mut index_of: HashMap<Ident<Canonical>, u32> = HashMap::new();
+        let mut order: Vec<Ident<Canonical>> = Vec::new();
+        let intern = |id: &Ident<Canonical>,
+                      index_of: &mut HashMap<Ident<Canonical>, u32>,
+                      order: &mut Vec<Ident<Canonical>>| {
+            *index_of.entry(id.clone()).or_insert_with(|| {
+                order.push(id.clone());
+                (order.len() - 1) as u32
+            })
+        };
+        for (from, edges) in &self.adj {
+            intern(from, &mut index_of, &mut order);
+            for e in edges {
+                intern(&e.to, &mut index_of, &mut order);
+            }
+        }
+        for s in &self.stocks {
+            intern(s, &mut index_of, &mut order);
+        }
+
+        let mut adj: Vec<Vec<u32>> = vec![Vec::new(); order.len()];
+        for (from, edges) in &self.adj {
+            let fi = index_of[from] as usize;
+            for e in edges {
+                adj[fi].push(index_of[&e.to]);
+            }
+        }
+        let (ids, sizes) = tarjan_scc_ids(&adj);
+        let id_map = index_of
+            .into_iter()
+            .map(|(ident, idx)| (ident, ids[idx as usize]))
+            .collect();
+        (id_map, sizes)
+    }
+
     /// Run the strongest-path search, returning discovered loop paths.
     ///
     /// Each returned path is a `Vec<Ident<Canonical>>` of variables forming
     /// the loop (not including the starting stock repeated at the end).
     ///
-    /// Implements the algorithm from Appendix I of Eberlein & Schoenberg (2020).
+    /// Implements the algorithm from Appendix I of Eberlein & Schoenberg
+    /// (2020), with the GH #647 scalability amendments: zero-score edges are
+    /// excluded (`from_edges`), each stock's DFS is restricted to its own
+    /// strongly-connected component (exact -- a loop cannot leave an SCC),
+    /// and the paper's `best_score` pruning is replaced by a per-node
+    /// expansion cap scaled to the component size
+    /// ([`EXPANSION_BUDGET_PER_SEARCH`]).
     fn find_strongest_loops(&self) -> Vec<Vec<Ident<Canonical>>> {
         let mut found_loops: Vec<Vec<Ident<Canonical>>> = Vec::new();
         let mut seen_sets: HashSet<Vec<String>> = HashSet::new();
 
-        // For each stock, set TARGET = stock and run the DFS.
-        // Reset best_score per stock so one stock's search does not prune
-        // loops reachable from another stock (Section 12.5 of the reference).
+        let (scc_ids, scc_sizes) = self.scc_map();
+
+        // For each stock, set TARGET = stock and run the DFS. Per-node
+        // expansion counts reset per stock so one stock's search does not
+        // limit loops reachable from another stock (the same isolation the
+        // paper's per-stock `best_score` reset provided -- Section 12.5).
         for stock in &self.stocks {
-            let mut best_score: HashMap<Ident<Canonical>, f64> = HashMap::new();
-            for var in self.adj.keys() {
-                best_score.insert(var.clone(), 0.0);
+            let stock_scc = scc_ids[stock];
+            // A stock in a single-node component can only be on a loop if it
+            // has a self-edge.
+            if scc_sizes[stock_scc as usize] < 2
+                && !self
+                    .adj
+                    .get(stock)
+                    .is_some_and(|edges| edges.iter().any(|e| &e.to == stock))
+            {
+                continue;
             }
-            for s in &self.stocks {
-                best_score.entry(s.clone()).or_insert(0.0);
-            }
+
+            let per_node_cap = (EXPANSION_BUDGET_PER_SEARCH / scc_sizes[stock_scc as usize]).max(1);
+            let mut expansions: HashMap<Ident<Canonical>, u32> = HashMap::new();
 
             let mut visiting: HashSet<Ident<Canonical>> = HashSet::new();
             let mut stack: Vec<Ident<Canonical>> = Vec::new();
 
             self.check_outbound_uses(
                 stock,
-                1.0,
                 stock,
+                stock_scc,
+                &scc_ids,
+                per_node_cap,
                 &mut visiting,
                 &mut stack,
-                &mut best_score,
+                &mut expansions,
                 &mut found_loops,
                 &mut seen_sets,
             );
@@ -196,14 +266,20 @@ impl SearchGraph {
         found_loops
     }
 
-    /// Recursive DFS from Appendix I of the paper.
+    /// Recursive DFS from Appendix I of the paper, amended per GH #647.
     ///
     /// `variable`: current variable being explored
-    /// `score`: accumulated path score (product of |link_scores| along the path)
     /// `target`: the stock we're trying to return to
+    /// `target_scc` / `scc_ids`: the per-graph SCC restriction -- only edges
+    ///   whose destination shares the target's component are followed
+    /// `per_node_cap`: per-node expansion cap for this search
     /// `visiting`: set of variables on the current DFS path
     /// `stack`: the current path for recording discovered loops
-    /// `best_score`: highest score seen at each variable (reset for each target stock)
+    /// `expansions`: per-node expansion counts (reset for each target stock)
+    ///
+    /// Edges are walked in descending |score| order (established at graph
+    /// build), which is where the "strongest path" character of the search
+    /// lives; accumulated path products are not tracked.
     ///
     /// Recursion depth is bounded by the number of unique variables in the model
     /// (the `visiting` set prevents revisiting nodes on the current path). For
@@ -213,11 +289,13 @@ impl SearchGraph {
     fn check_outbound_uses(
         &self,
         variable: &Ident<Canonical>,
-        score: f64,
         target: &Ident<Canonical>,
+        target_scc: u32,
+        scc_ids: &HashMap<Ident<Canonical>, u32>,
+        per_node_cap: u32,
         visiting: &mut HashSet<Ident<Canonical>>,
         stack: &mut Vec<Ident<Canonical>>,
-        best_score: &mut HashMap<Ident<Canonical>, f64>,
+        expansions: &mut HashMap<Ident<Canonical>, u32>,
         found_loops: &mut Vec<Vec<Ident<Canonical>>>,
         seen_sets: &mut HashSet<Vec<String>>,
     ) {
@@ -230,14 +308,12 @@ impl SearchGraph {
             return;
         }
 
-        // If score < variable.best_score: prune (strict less-than)
-        let current_best = best_score.get(variable).copied().unwrap_or(0.0);
-        if score < current_best {
+        // Bounded re-expansion (see [`EXPANSION_BUDGET_PER_SEARCH`]).
+        let expansion_count = expansions.entry(variable.clone()).or_insert(0);
+        if *expansion_count >= per_node_cap {
             return;
         }
-
-        // Set variable.best_score = score
-        best_score.insert(variable.clone(), score);
+        *expansion_count += 1;
 
         // Set variable.visiting = true, add to stack
         visiting.insert(variable.clone());
@@ -246,13 +322,19 @@ impl SearchGraph {
         // For each outbound edge (already sorted by |score| desc)
         if let Some(edges) = self.adj.get(variable) {
             for edge in edges {
+                // Stay inside the target's component.
+                if scc_ids.get(&edge.to) != Some(&target_scc) {
+                    continue;
+                }
                 self.check_outbound_uses(
                     &edge.to,
-                    score * edge.score.abs(),
                     target,
+                    target_scc,
+                    scc_ids,
+                    per_node_cap,
                     visiting,
                     stack,
-                    best_score,
+                    expansions,
                     found_loops,
                     seen_sets,
                 );
@@ -1013,10 +1095,10 @@ fn pick_stronger_polarity(
 /// a `from` or `to` endpoint (or is a stock) gets a dense `u32` id, edges are
 /// stored as `(to_id, result_offset)` in their original `link_offsets` order,
 /// and the per-timestep DFS runs entirely over integer-indexed `Vec`s. The
-/// result set is bit-identical to the `SearchGraph` path: same node universe,
-/// same per-stock `best_score` reset, same strict-less-than pruning, same
-/// stable score-descending edge order, same NaN->0 handling, same canonical
-/// rotation dedup.
+/// result set matches the `SearchGraph` test oracle: same node universe, same
+/// per-step zero-edge exclusion and SCC restriction, same per-node expansion
+/// caps, same stable score-descending edge order, same NaN->0 handling, same
+/// canonical rotation dedup.
 struct IndexedSearch {
     /// node id -> canonical identifier (for reconstructing discovered paths)
     idents: Vec<Ident<Canonical>>,
@@ -1035,8 +1117,8 @@ struct IndexedEdge {
     offset: usize,
 }
 
-/// A timestep-resolved outbound edge: target node id and the |score| weight the
-/// DFS multiplies into the running path product. Built per timestep, already
+/// A timestep-resolved outbound edge: target node id and the |score| weight
+/// that orders edge exploration (strongest first). Built per timestep, already
 /// sorted by `score` descending (stable), so the DFS never sorts per visit.
 #[derive(Clone, Copy)]
 struct StepEdge {
@@ -1053,13 +1135,37 @@ struct StepEdge {
 /// under 0.1% of visits.
 const DEADLINE_CHECK_INTERVAL: u32 = 8192;
 
+/// Total node-expansion budget for one (stock, timestep) search, divided by
+/// the size of the stock's strongly-connected component to give the per-node
+/// expansion cap: `per_node_cap = max(1, EXPANSION_BUDGET_PER_SEARCH / |SCC|)`.
+///
+/// This cap replaces the paper's `best_score` pruning as the search's
+/// work-bounding mechanism. The paper's pruning (`score < best_score`)
+/// assumes path-score products shrink as paths extend; two score patterns
+/// common in real models defeat it (GH #647): exact ties (chains of
+/// single-input links all score exactly 1.0, so re-arrivals are never
+/// strictly weaker) and super-unit scores (links with |score| > 1 -- C-LEARN
+/// has hundreds per timestep -- make products *grow* along paths). Each
+/// non-pruned re-arrival re-explores the node's full subtree, which is
+/// exponential in parallel-path structures. Worse, when the pruning *does*
+/// fire it costs completeness: a loop whose entry path is weaker than an
+/// already-explored sibling's is silently dropped (the paper's Figure 7
+/// failure mode).
+///
+/// The expansion cap inverts the trade-off. Work is bounded at
+/// `per_node_cap * SCC_edges` traversals per (stock, step) -- so roughly
+/// `EXPANSION_BUDGET_PER_SEARCH * avg_degree` regardless of component size --
+/// while small components (the common case once the search is restricted to
+/// per-step nonzero-score SCCs) get effectively exhaustive enumeration:
+/// every elementary cycle through the stock is found, strictly better than
+/// the paper's heuristic. Edges are explored in descending score order, so
+/// when the cap does bind on a large component, the strongest paths are the
+/// ones already explored.
+const EXPANSION_BUDGET_PER_SEARCH: u32 = 4096;
+
 /// Per-timestep mutable DFS state, allocated once per `discover_loops_with_graph`
 /// call and reused across stocks and timesteps to avoid per-search reallocation.
 struct DfsScratch {
-    /// node id -> highest path score seen at that node for the current target
-    /// stock (reset to 0.0 between stocks). Mirrors the original `best_score`
-    /// map, whose absent keys also defaulted to 0.0.
-    best_score: Vec<f64>,
     /// node id -> whether it is on the current DFS path. A per-stock generation
     /// stamp avoids clearing the whole vector between stocks: a node is
     /// "visiting" iff `visiting_gen[id] == cur_gen`.
@@ -1075,7 +1181,32 @@ struct DfsScratch {
     /// once per timestep, NOT once per node visit. The per-visit sort was the
     /// dominant DFS cost on a dense element graph (a node is re-entered many
     /// times across the 116-stock x 250-step search).
+    ///
+    /// Edges whose |score| is 0 (or NaN) at the current timestep are
+    /// excluded: a loop containing such a link has loop score exactly 0 at
+    /// this step, so it cannot be a "loop that matters" here, and any loop
+    /// that ever matters has all-nonzero links at the step where it does --
+    /// where it remains discoverable (GH #647).
     step_adj: Vec<Vec<StepEdge>>,
+    /// node id -> strongly-connected-component id of the current timestep's
+    /// nonzero-score subgraph. Computed once per step by `discover_step`.
+    /// Feedback loops can only exist within an SCC, so each stock's DFS is
+    /// restricted to its own component -- exploration outside it is provably
+    /// wasted work (GH #647).
+    scc_ids: Vec<u32>,
+    /// SCC id -> component node count for the current timestep.
+    scc_sizes: Vec<u32>,
+    /// Reusable projection buffer (`step_adj` stripped to target ids) for the
+    /// per-step Tarjan SCC computation. Inner `Vec`s keep their capacity
+    /// across steps.
+    scc_adj: Vec<Vec<u32>>,
+    /// node id -> number of times this node has been expanded in the current
+    /// (stock, timestep) search. See [`EXPANSION_BUDGET_PER_SEARCH`].
+    expansions: Vec<u32>,
+    /// Per-node expansion cap for the current (stock, timestep) search:
+    /// `max(1, EXPANSION_BUDGET_PER_SEARCH / |stock's SCC|)`. Set per stock by
+    /// `discover_step`.
+    per_node_cap: u32,
     /// Wall-clock deadline for the discovery sweep, or `None` for an
     /// unbudgeted run (which never reads the clock). On a graph where a
     /// SINGLE timestep's DFS can run for hours (GH #647's element-level
@@ -1095,7 +1226,6 @@ impl DfsScratch {
     fn new(search: &IndexedSearch) -> Self {
         let n_nodes = search.node_count();
         DfsScratch {
-            best_score: vec![0.0; n_nodes],
             visiting_gen: vec![0; n_nodes],
             cur_gen: 0,
             stack: Vec::with_capacity(n_nodes),
@@ -1104,10 +1234,28 @@ impl DfsScratch {
                 .iter()
                 .map(|e| Vec::with_capacity(e.len()))
                 .collect(),
+            scc_ids: vec![0; n_nodes],
+            scc_sizes: Vec::new(),
+            scc_adj: vec![Vec::new(); n_nodes],
+            expansions: vec![0; n_nodes],
+            per_node_cap: EXPANSION_BUDGET_PER_SEARCH,
             deadline: None,
             visit_count: 0,
             deadline_expired: false,
         }
+    }
+
+    /// Recompute the per-step SCC structure from the (already loaded,
+    /// zero-score-edge-free) `step_adj`.
+    fn compute_step_sccs(&mut self) {
+        for (node, row) in self.step_adj.iter().enumerate() {
+            let proj = &mut self.scc_adj[node];
+            proj.clear();
+            proj.extend(row.iter().map(|e| e.to));
+        }
+        let (ids, sizes) = tarjan_scc_ids(&self.scc_adj);
+        self.scc_ids = ids;
+        self.scc_sizes = sizes;
     }
 }
 
@@ -1193,6 +1341,12 @@ impl IndexedSearch {
     /// `SearchGraph::from_results` performed once per node. Doing it here (once
     /// per timestep) rather than inside the DFS (once per node *visit*) is the
     /// key cost reduction without changing the visited edge order.
+    ///
+    /// Zero-score edges (including NaN, which maps to 0) are dropped from the
+    /// per-step graph entirely: any loop through them has loop score exactly 0
+    /// at this step, so traversing them cannot surface a loop that matters
+    /// here, and on real models the zero edges are the overwhelming majority
+    /// (~94% of C-LEARN's edges at any given step -- GH #647).
     fn load_step_scores(&self, results: &Results, step: usize, scratch: &mut DfsScratch) {
         let base = step * results.step_size;
         for (node, edges) in self.adj.iter().enumerate() {
@@ -1201,7 +1355,9 @@ impl IndexedSearch {
             for edge in edges {
                 let value = results.data[base + edge.offset];
                 let score = if value.is_nan() { 0.0 } else { value.abs() };
-                row.push(StepEdge { to: edge.to, score });
+                if score != 0.0 {
+                    row.push(StepEdge { to: edge.to, score });
+                }
             }
 
             // Stable sort by score descending. `sort_by` is stable, so ties keep
@@ -1232,6 +1388,13 @@ impl IndexedSearch {
         seen_sets: &mut HashSet<Vec<u32>>,
         all_paths: &mut Vec<Vec<Ident<Canonical>>>,
     ) {
+        // Identify the step's cyclic core: the SCCs of the nonzero-score
+        // subgraph. Each stock's DFS is restricted to its own component, and
+        // stocks outside any cycle are skipped outright -- on large models
+        // this is the difference between searching a ~65-node component and
+        // wandering a ~4,700-node graph (GH #647).
+        scratch.compute_step_sccs();
+
         for stock_idx in 0..self.stock_ids.len() {
             // A deadline that expired during the previous stock's DFS ends the
             // whole step: the caller observes `deadline_expired` and truncates.
@@ -1239,10 +1402,27 @@ impl IndexedSearch {
                 return;
             }
             let stock = self.stock_ids[stock_idx];
+            let stock_scc = scratch.scc_ids[stock as usize];
 
-            // Reset best_score for this target stock. A fresh generation marks
+            // A stock in a single-node component can only be on a loop if it
+            // has a self-edge; otherwise no loop through it exists at this
+            // step and the whole search is skipped.
+            if scratch.scc_sizes[stock_scc as usize] < 2
+                && !scratch.step_adj[stock as usize]
+                    .iter()
+                    .any(|e| e.to == stock)
+            {
+                continue;
+            }
+
+            // Reset per-node expansion counts for this target stock and size
+            // its expansion cap to the component: small components get
+            // effectively exhaustive enumeration, large ones stay bounded
+            // (see [`EXPANSION_BUDGET_PER_SEARCH`]). A fresh generation marks
             // the visiting set empty without touching every slot.
-            scratch.best_score.iter_mut().for_each(|b| *b = 0.0);
+            scratch.expansions.iter_mut().for_each(|e| *e = 0);
+            scratch.per_node_cap =
+                (EXPANSION_BUDGET_PER_SEARCH / scratch.scc_sizes[stock_scc as usize]).max(1);
             scratch.cur_gen = scratch.cur_gen.wrapping_add(1);
             if scratch.cur_gen == 0 {
                 // Generation wrapped; clear so a stale stamp can't read as live.
@@ -1251,7 +1431,7 @@ impl IndexedSearch {
             }
             scratch.stack.clear();
 
-            self.dfs(stock, 1.0, stock, scratch, seen_sets, all_paths);
+            self.dfs(stock, stock, stock_scc, scratch, seen_sets, all_paths);
         }
     }
 
@@ -1259,11 +1439,23 @@ impl IndexedSearch {
     /// integer node ids and the pre-sorted per-timestep edge lists. The edge
     /// order is established once per timestep in `load_step_scores`, so the DFS
     /// just walks `scratch.step_adj[node]` -- no per-visit sorting.
+    ///
+    /// `target_scc` is the per-step SCC id of `target`; only edges whose
+    /// destination is in the same component are followed. A path that leaves
+    /// the component can never return to `target` (mutual reachability is
+    /// exactly what defines the SCC), so the restriction loses no loops.
+    ///
+    /// The "strongest path" character of the search lives in the edge order:
+    /// each node's edges are walked in descending |score| order, so when the
+    /// per-node expansion cap binds, the strongest paths are the ones that
+    /// have been explored. Accumulated path products are not tracked -- loop
+    /// scores are recomputed exactly from the link-score series after
+    /// discovery.
     fn dfs(
         &self,
         node: u32,
-        score: f64,
         target: u32,
+        target_scc: u32,
         scratch: &mut DfsScratch,
         seen_sets: &mut HashSet<Vec<u32>>,
         all_paths: &mut Vec<Vec<Ident<Canonical>>>,
@@ -1293,11 +1485,14 @@ impl IndexedSearch {
             return;
         }
 
-        // Strict less-than pruning, identical to the original.
-        if score < scratch.best_score[idx] {
+        // Bounded re-expansion -- the search's work-bounding mechanism,
+        // replacing the paper's `best_score` pruning (which both blows up on
+        // tied/super-unit scores and silently drops sibling loops). See
+        // [`EXPANSION_BUDGET_PER_SEARCH`].
+        if scratch.expansions[idx] >= scratch.per_node_cap {
             return;
         }
-        scratch.best_score[idx] = score;
+        scratch.expansions[idx] += 1;
 
         scratch.visiting_gen[idx] = scratch.cur_gen;
         scratch.stack.push(node);
@@ -1309,14 +1504,11 @@ impl IndexedSearch {
         let n_edges = scratch.step_adj[idx].len();
         for k in 0..n_edges {
             let edge = scratch.step_adj[idx][k];
-            self.dfs(
-                edge.to,
-                score * edge.score,
-                target,
-                scratch,
-                seen_sets,
-                all_paths,
-            );
+            // Stay inside the target's component (see fn doc).
+            if scratch.scc_ids[edge.to as usize] != target_scc {
+                continue;
+            }
+            self.dfs(edge.to, target, target_scc, scratch, seen_sets, all_paths);
         }
 
         scratch.visiting_gen[idx] = 0;
@@ -1354,6 +1546,247 @@ impl IndexedSearch {
                     .collect(),
             );
         }
+    }
+}
+
+/// Iterative Tarjan strongly-connected components over a dense
+/// integer-indexed adjacency list.
+///
+/// Returns `(component_id_per_node, component_sizes)`: two nodes share a
+/// component id iff they are mutually reachable, and `sizes[id]` is that
+/// component's node count. Component ids are dense but otherwise arbitrary.
+///
+/// Used by discovery to identify each graph's *cyclic core*: feedback loops
+/// can only exist within a strongly-connected component, so any DFS work
+/// outside the target stock's SCC is provably wasted (GH #647).
+fn tarjan_scc_ids(adj: &[Vec<u32>]) -> (Vec<u32>, Vec<u32>) {
+    const UNVISITED: i32 = -1;
+    let n = adj.len();
+    let mut indices: Vec<i32> = vec![UNVISITED; n];
+    let mut lowlinks: Vec<i32> = vec![0; n];
+    let mut on_stack: Vec<bool> = vec![false; n];
+    let mut stack: Vec<u32> = Vec::new();
+    let mut comp_ids: Vec<u32> = vec![0; n];
+    let mut comp_sizes: Vec<u32> = Vec::new();
+    let mut next_index: i32 = 0;
+
+    // Iterative frames mirroring `ltm::indexed::IndexedGraph::tarjan_scc`:
+    // Enter pushes a node onto Tarjan's stack; Resume continues iterating its
+    // successors and pops the SCC when this node is its own root.
+    enum Frame {
+        Enter(u32),
+        Resume { v: u32, next_child: u32 },
+    }
+
+    for start in 0..n as u32 {
+        if indices[start as usize] != UNVISITED {
+            continue;
+        }
+        let mut frames: Vec<Frame> = vec![Frame::Enter(start)];
+        while let Some(frame) = frames.pop() {
+            match frame {
+                Frame::Enter(v) => {
+                    indices[v as usize] = next_index;
+                    lowlinks[v as usize] = next_index;
+                    next_index += 1;
+                    stack.push(v);
+                    on_stack[v as usize] = true;
+                    frames.push(Frame::Resume { v, next_child: 0 });
+                }
+                Frame::Resume { v, next_child } => {
+                    let succs = &adj[v as usize];
+                    if (next_child as usize) < succs.len() {
+                        let w = succs[next_child as usize];
+                        frames.push(Frame::Resume {
+                            v,
+                            next_child: next_child + 1,
+                        });
+                        if indices[w as usize] == UNVISITED {
+                            frames.push(Frame::Enter(w));
+                        } else if on_stack[w as usize] && indices[w as usize] < lowlinks[v as usize]
+                        {
+                            lowlinks[v as usize] = indices[w as usize];
+                        }
+                    } else {
+                        if let Some(Frame::Resume { v: parent, .. }) = frames.last()
+                            && lowlinks[v as usize] < lowlinks[*parent as usize]
+                        {
+                            lowlinks[*parent as usize] = lowlinks[v as usize];
+                        }
+                        if lowlinks[v as usize] == indices[v as usize] {
+                            let comp_id = comp_sizes.len() as u32;
+                            let mut size = 0u32;
+                            loop {
+                                let w = stack.pop().unwrap();
+                                on_stack[w as usize] = false;
+                                comp_ids[w as usize] = comp_id;
+                                size += 1;
+                                if w == v {
+                                    break;
+                                }
+                            }
+                            comp_sizes.push(size);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (comp_ids, comp_sizes)
+}
+
+/// Per-sampled-timestep statistics about the discovery search graph.
+///
+/// See [`DiscoveryGraphStats`].
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+pub struct DiscoveryStepStats {
+    /// The sampled timestep index.
+    pub step: usize,
+    /// Edges whose |score| is 0 (or NaN) at this step.
+    pub zero_edges: usize,
+    /// Edges whose |score| is exactly 1.0 at this step.
+    pub unit_edges: usize,
+    /// Edges with 0 < |score| < 1 at this step.
+    pub sub_unit_edges: usize,
+    /// Edges with |score| > 1 at this step. These defeat the strongest-path
+    /// pruning assumption that path products shrink as paths extend.
+    pub super_unit_edges: usize,
+    /// Largest finite |score| at this step.
+    pub max_abs_score: f64,
+    /// Multi-node SCC sizes (descending) of the subgraph restricted to
+    /// edges with nonzero scores at this step. Loops with a nonzero score at
+    /// this step can only exist within these components.
+    pub nonzero_scc_sizes: Vec<usize>,
+    /// Number of stocks inside some multi-node nonzero-score SCC.
+    pub stocks_in_nonzero_core: usize,
+}
+
+/// Structural statistics about a discovery search graph, quantifying why the
+/// strongest-path DFS is or is not tractable on a given model (GH #647).
+///
+/// This is the diagnostics surface behind the discovery-feasibility
+/// benchmarks (`examples/clearn_discover.rs`). It reports the graph's size,
+/// its cyclic core (SCC structure -- the only place loops can live), and how
+/// many edges actually carry signal at sampled timesteps.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+pub struct DiscoveryGraphStats {
+    /// Total nodes in the search graph (link-score edge endpoints + stocks).
+    pub n_nodes: usize,
+    /// Total directed edges (parsed link-score columns, post-A2A expansion).
+    pub n_edges: usize,
+    /// Number of stocks (DFS start points).
+    pub n_stocks: usize,
+    /// Multi-node SCC sizes of the static topology, descending.
+    pub topology_scc_sizes: Vec<usize>,
+    /// Number of stocks inside some multi-node SCC of the static topology.
+    /// Only these stocks can participate in any feedback loop.
+    pub stocks_in_cyclic_core: usize,
+    /// Per-sampled-timestep stats, in the order requested.
+    pub step_stats: Vec<DiscoveryStepStats>,
+}
+
+/// Compute [`DiscoveryGraphStats`] for the given simulation results.
+///
+/// `sample_steps` selects which timesteps get per-step score/SCC analysis
+/// (full per-step analysis on every step would itself be a large cost on
+/// big models). Steps outside `1..results.step_count` are skipped.
+pub fn discovery_graph_stats(
+    results: &Results,
+    stocks: &[Ident<Canonical>],
+    ltm_vars: &[LtmSyntheticVar],
+    dims: &[datamodel::Dimension],
+    sample_steps: &[usize],
+) -> DiscoveryGraphStats {
+    let link_offsets = parse_link_offsets(results, ltm_vars, dims);
+    let search = IndexedSearch::build(&link_offsets, stocks);
+    let n_nodes = search.node_count();
+
+    // Static topology SCCs.
+    let topo_adj: Vec<Vec<u32>> = search
+        .adj
+        .iter()
+        .map(|edges| edges.iter().map(|e| e.to).collect())
+        .collect();
+    let (topo_ids, topo_sizes) = tarjan_scc_ids(&topo_adj);
+    let mut topology_scc_sizes: Vec<usize> = topo_sizes
+        .iter()
+        .filter(|&&s| s > 1)
+        .map(|&s| s as usize)
+        .collect();
+    topology_scc_sizes.sort_unstable_by(|a, b| b.cmp(a));
+    let stocks_in_cyclic_core = search
+        .stock_ids
+        .iter()
+        .filter(|&&sid| topo_sizes[topo_ids[sid as usize] as usize] > 1)
+        .count();
+
+    // Per-sampled-step score distribution + nonzero-subgraph SCCs.
+    let mut step_stats = Vec::with_capacity(sample_steps.len());
+    for &step in sample_steps {
+        if step == 0 || step >= results.step_count {
+            continue;
+        }
+        let base = step * results.step_size;
+        let mut zero_edges = 0usize;
+        let mut unit_edges = 0usize;
+        let mut sub_unit_edges = 0usize;
+        let mut super_unit_edges = 0usize;
+        let mut max_abs_score = 0.0f64;
+        let mut nonzero_adj: Vec<Vec<u32>> = vec![Vec::new(); n_nodes];
+        for (node, edges) in search.adj.iter().enumerate() {
+            for edge in edges {
+                let value = results.data[base + edge.offset];
+                let score = if value.is_nan() { 0.0 } else { value.abs() };
+                if score == 0.0 {
+                    zero_edges += 1;
+                } else {
+                    if score == 1.0 {
+                        unit_edges += 1;
+                    } else if score < 1.0 {
+                        sub_unit_edges += 1;
+                    } else {
+                        super_unit_edges += 1;
+                    }
+                    if score.is_finite() && score > max_abs_score {
+                        max_abs_score = score;
+                    }
+                    nonzero_adj[node].push(edge.to);
+                }
+            }
+        }
+        let (nz_ids, nz_sizes) = tarjan_scc_ids(&nonzero_adj);
+        let mut nonzero_scc_sizes: Vec<usize> = nz_sizes
+            .iter()
+            .filter(|&&s| s > 1)
+            .map(|&s| s as usize)
+            .collect();
+        nonzero_scc_sizes.sort_unstable_by(|a, b| b.cmp(a));
+        let stocks_in_nonzero_core = search
+            .stock_ids
+            .iter()
+            .filter(|&&sid| nz_sizes[nz_ids[sid as usize] as usize] > 1)
+            .count();
+
+        step_stats.push(DiscoveryStepStats {
+            step,
+            zero_edges,
+            unit_edges,
+            sub_unit_edges,
+            super_unit_edges,
+            max_abs_score,
+            nonzero_scc_sizes,
+            stocks_in_nonzero_core,
+        });
+    }
+
+    DiscoveryGraphStats {
+        n_nodes,
+        n_edges: link_offsets.len(),
+        n_stocks: stocks.len(),
+        topology_scc_sizes,
+        stocks_in_cyclic_core,
+        step_stats,
     }
 }
 
@@ -1569,6 +2002,39 @@ pub fn discover_loops_with_graph(
             avg_abs_score,
         });
     }
+
+    // Two distinct discovered cycles can trim to the same *reported* loop: a
+    // direct `pop[d] -> share[d]` numerator path and the
+    // `pop[d] -> $⁚ltm⁚agg⁚n -> share[d]` aggregate path differ only in the
+    // synthetic agg node, which the report hides. Keep one representative per
+    // reported link cycle -- the strongest (highest average |score|) --
+    // matching the composite-link-score rule (LTM ref 6.3): when several
+    // pathways collapse onto one reported link, the reported magnitude
+    // follows the dominant pathway. The kept loop's score series is that one
+    // pathway's product at every step (no per-step path flipping).
+    let mut by_reported_cycle: HashMap<Vec<String>, usize> = HashMap::new();
+    let mut deduped: Vec<FoundLoop> = Vec::new();
+    for fl in found_loops {
+        let nodes: Vec<String> = fl
+            .loop_info
+            .links
+            .iter()
+            .map(|l| l.from.as_str().to_string())
+            .collect();
+        let key = crate::ltm::canonical_rotation(&nodes);
+        match by_reported_cycle.get(&key) {
+            Some(&idx) => {
+                if fl.avg_abs_score > deduped[idx].avg_abs_score {
+                    deduped[idx] = fl;
+                }
+            }
+            None => {
+                by_reported_cycle.insert(key, deduped.len());
+                deduped.push(fl);
+            }
+        }
+    }
+    let mut found_loops = deduped;
 
     let partitions = causal_graph.compute_cycle_partitions();
     rank_and_filter(&mut found_loops, &partitions);
@@ -1982,19 +2448,16 @@ mod tests {
 
         let loops = graph.find_strongest_loops();
 
-        // With per-stock reset, each stock starts with fresh best_scores.
-        // From stock a: finds [a,d,b,c] (the 4-node loop).
-        // From stock b: finds [b,c,a] (the a->b->c->a loop, score 1000).
-        // From stock c: finds [c,a,d] (the a->d->c->a loop, score 100).
-        // From stock d: all loops already seen (deduped).
-        //
-        // The paper's Figure 7 demonstrates the heuristic's failure mode
-        // within a single stock's search (a->b->c->a is missed when
-        // starting from a), but per-stock reset recovers it from stock b.
+        // The paper's Figure 7 demonstrates the original heuristic's failure
+        // mode: with `best_score` pruning, the strong path a->d sets scores
+        // that prune the weaker a->b entry, missing the a->b->c->a loop when
+        // searching from stock a (the paper recovers it via per-stock reset).
+        // With expansion-cap-bounded search, all three loops are found
+        // exhaustively -- the small-graph case is strictly more complete.
         assert_eq!(
             loops.len(),
             3,
-            "Figure 7: should find all 3 loops with per-stock reset, found {}",
+            "Figure 7: should find all 3 loops, found {}",
             loops.len()
         );
 
@@ -2010,22 +2473,22 @@ mod tests {
         );
     }
 
-    // --- Test 4: best_score resets per stock ---
+    // --- Test 4: per-stock search isolation ---
 
     #[test]
-    fn test_best_score_resets_per_stock() {
+    fn test_per_stock_search_isolation() {
         // Graph:
         //   a -> x (score 1000)
         //   x -> a (score 1000)  -- strong loop through a
         //   b -> x (score 1)     -- weak path from b
         //   x -> b (score 1)     -- weak path back
         //
-        // With per-stock reset, each stock starts with fresh best_scores:
+        // Per-stock state isolation (the paper's per-stock `best_score`
+        // reset, here per-stock expansion-count reset): one stock's search
+        // must not limit loops reachable from another stock.
         //
         // TARGET=a: finds [a, x] (strong loop)
-        // TARGET=b: best_scores reset to 0, finds [b, x] (weak loop)
-        //
-        // Both loops are found because stock B is not pruned by stock A's scores.
+        // TARGET=b: fresh expansion counts, finds [b, x] (weak loop)
         let graph = SearchGraph::from_edges(
             edges(&[
                 ("a", "x", 1000.0),
@@ -2041,7 +2504,7 @@ mod tests {
         assert_eq!(
             loops.len(),
             2,
-            "Per-stock reset should find both loops, found {}",
+            "Per-stock isolation should find both loops, found {}",
             loops.len()
         );
 
@@ -2054,18 +2517,9 @@ mod tests {
 
     #[test]
     fn test_loop_deduplication() {
-        // Create a graph where the same loop could be found from two different
-        // starting stocks if best_score didn't prevent it. With equally-scored
-        // paths, the first stock finds the loop and sets best_scores that
-        // WOULD prune the second stock. But let's test with a structure where
-        // deduplication matters.
-        //
-        // Use equal scores so best_score allows re-exploration (0 is NOT < 0).
-        // Actually with score=1 starting, after traversing edges with score=1,
-        // the accumulated score stays 1.0 which equals the initial best_score
-        // of 0... wait, initial best_score is 0, and 1.0 is NOT < 0, so it proceeds.
-        //
-        // Stock a and stock b both participate in the same loop: a -> b -> a
+        // Stock a and stock b both participate in the same loop (a -> b -> a);
+        // the canonical-rotation dedup must report it only once even though
+        // both per-stock searches traverse it.
         let graph = SearchGraph::from_edges(
             edges(&[("a", "b", 1.0), ("b", "a", 1.0)]),
             stock_list(&["a", "b"]),
@@ -2085,12 +2539,10 @@ mod tests {
     /// the discovery DFS must keep both directions of a directed
     /// 3-cycle as distinct loops when they share a node set.
     ///
-    /// We exercise the helper directly because constructing a
-    /// `SearchGraph` whose strongest-path DFS naturally surfaces both
-    /// directions of a 3-cycle is fragile (the heuristic prunes
-    /// alternate paths via `best_score`).  Calling
-    /// `add_loop_if_unique` with the two paths is a precise check
-    /// that the dedup key distinguishes them.
+    /// We exercise the helper directly so the dedup-key property is
+    /// pinned independently of which paths the DFS happens to surface.
+    /// Calling `add_loop_if_unique` with the two paths is a precise
+    /// check that the dedup key distinguishes them.
     #[test]
     fn add_loop_if_unique_keeps_distinct_directed_three_cycles() {
         let mut found_loops: Vec<Vec<Ident<Canonical>>> = Vec::new();
@@ -2146,12 +2598,15 @@ mod tests {
 
     #[test]
     fn test_zero_score_edges() {
-        // A link with score 0 is still traversed (0 is NOT < 0, strict less-than),
-        // but the accumulated score drops to 0 and won't improve beyond the
-        // initial best_score of 0 at downstream nodes.
+        // A link with score 0 means the causal connection is inactive at this
+        // timestep: any loop through it has loop score exactly 0 here, so it
+        // is not a "loop that matters" at this step. Zero-score edges are
+        // therefore excluded from the per-step search graph (GH #647) -- on
+        // real models they are the overwhelming majority of edges, and
+        // traversing them is what made discovery wander the whole graph.
         let graph = SearchGraph::from_edges(
             edges(&[
-                ("a", "b", 0.0), // zero-score link
+                ("a", "b", 0.0), // zero-score link: inactive at this step
                 ("b", "a", 10.0),
             ]),
             stock_list(&["a"]),
@@ -2159,15 +2614,51 @@ mod tests {
 
         let loops = graph.find_strongest_loops();
 
-        // With score=0 on a->b, the accumulated score at b is 1.0*0=0.
-        // best_score[b] starts at 0, and 0 is NOT < 0 (strict less-than),
-        // so we DO proceed to explore from b.
-        // From b: b->a with score 10, accumulated = 0*10 = 0.
-        // a is visiting AND a=TARGET, so we FIND the loop.
+        assert!(
+            loops.is_empty(),
+            "a loop with a zero-score link is inactive at this step and not discovered here"
+        );
+    }
+
+    /// The flip side of `test_zero_score_edges`: a loop inactive at one step
+    /// (zero-score link) is discovered at the step where all its links carry
+    /// nonzero scores. Discovery runs at every timestep, so per-step
+    /// exclusion of inactive edges loses no loop that ever matters.
+    #[test]
+    fn test_inactive_loop_found_at_active_step() {
+        let mut offsets = HashMap::new();
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚a→b"), 0usize);
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚b→a"), 1usize);
+        let data = vec![
+            f64::NAN,
+            f64::NAN, // step 0 (skipped)
+            0.0,
+            10.0, // step 1: a->b inactive; loop not discoverable here
+            0.5,
+            10.0, // step 2: both links active; loop discovered
+        ];
+        let results = Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size: 2,
+            step_count: 3,
+            specs: crate::results::Specs {
+                start: 0.0,
+                stop: 2.0,
+                dt: 1.0,
+                save_step: 1.0,
+                method: crate::results::Method::Euler,
+                n_chunks: 3,
+            },
+            is_vensim: false,
+        };
+        let link_offsets = parse_link_offsets(&results, &[], &[]);
+        let stocks = stock_list(&["a"]);
+        let paths = indexed_all_paths(&results, &link_offsets, &stocks);
         assert_eq!(
-            loops.len(),
-            1,
-            "Zero-score edge should still allow traversal (strict less-than)"
+            paths_as_strings(&paths),
+            vec![vec!["a".to_string(), "b".to_string()]],
+            "the loop must be discovered at the step where it is active"
         );
     }
 
@@ -2175,7 +2666,9 @@ mod tests {
 
     #[test]
     fn test_nan_handling() {
-        // NaN scores should be treated as 0
+        // NaN scores are treated as 0 -- the link is inactive at this step,
+        // so the loop through it is not discovered here (see
+        // `test_zero_score_edges`).
         let graph = SearchGraph::from_edges(
             edges(&[("a", "b", f64::NAN), ("b", "a", 10.0)]),
             stock_list(&["a"]),
@@ -2183,12 +2676,105 @@ mod tests {
 
         let loops = graph.find_strongest_loops();
 
-        // NaN is treated as 0, same behavior as zero-score test
-        assert_eq!(
-            loops.len(),
-            1,
-            "NaN should be treated as 0 (still traversable with strict less-than)"
+        assert!(
+            loops.is_empty(),
+            "NaN is treated as 0: the loop through it is inactive at this step"
         );
+    }
+
+    // --- GH #647: SCC restriction and bounded re-expansion ---
+
+    /// A large acyclic appendage hanging off a small cyclic core must not
+    /// affect which loops are found: the DFS is restricted to each stock's
+    /// SCC, and the appendage (reachable from the core, but with no path
+    /// back) is outside every SCC.
+    #[test]
+    fn test_scc_restriction_preserves_core_loops() {
+        // Cyclic core: a -> b -> c -> a, plus the shortcut b -> a.
+        let mut typed_edges: Vec<(Ident<Canonical>, Ident<Canonical>, f64)> = edges(&[
+            ("a", "b", 2.0),
+            ("b", "c", 3.0),
+            ("c", "a", 4.0),
+            ("b", "a", 5.0),
+        ]);
+        // Acyclic appendage reachable from the core: c -> t0 -> t1 -> ... -> t9.
+        typed_edges.push((Ident::new("c"), Ident::new("t0"), 1.0));
+        for i in 0..9 {
+            typed_edges.push((
+                Ident::new(&format!("t{i}")),
+                Ident::new(&format!("t{}", i + 1)),
+                1.0,
+            ));
+        }
+
+        let graph = SearchGraph::from_edges(typed_edges, stock_list(&["a"]));
+        let loops = graph.find_strongest_loops();
+
+        let mut loop_sets: Vec<Vec<String>> = loops.iter().map(|l| sorted_node_set(l)).collect();
+        loop_sets.sort();
+        assert_eq!(
+            loop_sets,
+            vec![vec!["a", "b"], vec!["a", "b", "c"]],
+            "both core loops are found; the acyclic tail changes nothing"
+        );
+    }
+
+    /// A chain of "diamonds" with tied scores has exponentially many equal-
+    /// score paths; without bounded re-expansion the DFS re-walks each
+    /// diamond's subtree once per arriving path (2^k for k diamonds). The
+    /// expansion cap bounds the work while the loop through the chain is
+    /// still found.
+    #[test]
+    fn test_tied_score_diamond_chain_completes() {
+        // stock -> d0 -> {x0, y0} -> d1 -> {x1, y1} -> d2 -> ... -> d24 -> stock
+        // All scores 1.0 (the exact-tie case that defeats strict-less-than
+        // pruning). 24 diamonds = 2^24 = ~16.7M equal-score paths; without the
+        // cap this test would not complete in any reasonable time.
+        let n_diamonds = 24;
+        let mut names: Vec<String> = vec!["stock".to_string()];
+        let mut edge_list: Vec<(String, String, f64)> = Vec::new();
+        edge_list.push(("stock".to_string(), "d0".to_string(), 1.0));
+        for i in 0..n_diamonds {
+            let d = format!("d{i}");
+            let x = format!("x{i}");
+            let y = format!("y{i}");
+            let next = if i + 1 == n_diamonds {
+                "stock".to_string()
+            } else {
+                format!("d{}", i + 1)
+            };
+            edge_list.push((d.clone(), x.clone(), 1.0));
+            edge_list.push((d.clone(), y.clone(), 1.0));
+            edge_list.push((x.clone(), next.clone(), 1.0));
+            edge_list.push((y.clone(), next.clone(), 1.0));
+            names.push(d);
+            names.push(x);
+            names.push(y);
+        }
+
+        let typed_edges: Vec<(Ident<Canonical>, Ident<Canonical>, f64)> = edge_list
+            .iter()
+            .map(|(f, t, s)| (Ident::new(f), Ident::new(t), *s))
+            .collect();
+        let graph = SearchGraph::from_edges(typed_edges, stock_list(&["stock"]));
+
+        let loops = graph.find_strongest_loops();
+        // At least one loop through the diamond chain is found (each found
+        // loop picks one arm per diamond), and the search completes -- which
+        // is the property under test.
+        assert!(
+            !loops.is_empty(),
+            "the loop through the diamond chain must be found"
+        );
+        for l in &loops {
+            // Each loop visits the stock, every diamond head, and one arm per
+            // diamond: 1 + 2 * n_diamonds nodes.
+            assert_eq!(
+                l.len(),
+                2 * n_diamonds + 1,
+                "each loop traverses stock, every diamond head, and one arm per diamond"
+            );
+        }
     }
 
     // --- Additional edge case tests ---
@@ -2208,9 +2794,9 @@ mod tests {
 
     #[test]
     fn test_two_separate_loops() {
-        // Two disconnected loops: a<->b and c<->d
-        // With equal scores, both should be found since they're in separate
-        // components and best_score from one doesn't affect the other.
+        // Two disconnected loops: a<->b and c<->d. Each lives in its own SCC,
+        // and each stock's search is confined to its own component, so both
+        // are found independently.
         let graph = SearchGraph::from_edges(
             edges(&[
                 ("a", "b", 1.0),
@@ -3421,6 +4007,136 @@ mod tests {
                 "element-level discovery must match the reference (seed {seed})"
             );
         }
+    }
+
+    // --- Discovery graph stats (GH #647 feasibility diagnostics) ---
+
+    #[test]
+    fn tarjan_scc_ids_identifies_cyclic_core() {
+        // Graph: a -> b -> c -> a (3-cycle), c -> d (dead end), e isolated,
+        // f -> g -> f (2-cycle).
+        //   ids: a=0, b=1, c=2, d=3, e=4, f=5, g=6
+        let adj: Vec<Vec<u32>> = vec![
+            vec![1],    // a -> b
+            vec![2],    // b -> c
+            vec![0, 3], // c -> a, c -> d
+            vec![],     // d
+            vec![],     // e
+            vec![6],    // f -> g
+            vec![5],    // g -> f
+        ];
+        let (ids, sizes) = tarjan_scc_ids(&adj);
+        assert_eq!(ids.len(), 7);
+        // a, b, c share a component; f, g share a component; d and e are
+        // singletons; no two of those groups share an id.
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(ids[1], ids[2]);
+        assert_eq!(ids[5], ids[6]);
+        assert_ne!(ids[0], ids[5]);
+        assert_ne!(ids[0], ids[3]);
+        assert_ne!(ids[0], ids[4]);
+        assert_ne!(ids[3], ids[4]);
+        // Component sizes: one 3, one 2, two 1s.
+        let mut multi: Vec<u32> = sizes.iter().copied().filter(|&s| s > 1).collect();
+        multi.sort_unstable();
+        assert_eq!(multi, vec![2, 3]);
+        assert_eq!(sizes[ids[0] as usize], 3);
+        assert_eq!(sizes[ids[5] as usize], 2);
+        assert_eq!(sizes[ids[3] as usize], 1);
+    }
+
+    #[test]
+    fn tarjan_scc_ids_handles_empty_and_self_loop() {
+        let (ids, sizes) = tarjan_scc_ids(&[]);
+        assert!(ids.is_empty());
+        assert!(sizes.is_empty());
+
+        // A self-loop is a size-1 SCC (callers detect self-edges separately).
+        let adj: Vec<Vec<u32>> = vec![vec![0]];
+        let (ids, sizes) = tarjan_scc_ids(&adj);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(sizes[ids[0] as usize], 1);
+    }
+
+    #[test]
+    fn discovery_graph_stats_reports_structure_and_scores() {
+        // Two link-score columns forming a 2-cycle (a <-> b), one dead-end
+        // column (b -> c), and a stray non-link column. Scores at step 1:
+        // a->b = 1.0 (unit), b->a = 0.5 (sub-unit), b->c = 0.0 (zero).
+        // Scores at step 2: a->b = 3.0 (super-unit), b->a = 0.0 (zero,
+        // breaking the cycle), b->c = 1.0.
+        let mut offsets = HashMap::new();
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚a→b"), 0usize);
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚b→a"), 1usize);
+        offsets.insert(Ident::new("$⁚ltm⁚link_score⁚b→c"), 2usize);
+        offsets.insert(Ident::new("a"), 3usize);
+
+        let data = vec![
+            // step 0 (skipped by discovery; NaNs)
+            f64::NAN,
+            f64::NAN,
+            f64::NAN,
+            0.0,
+            // step 1
+            1.0,
+            0.5,
+            0.0,
+            0.0,
+            // step 2
+            3.0,
+            0.0,
+            1.0,
+            0.0,
+        ];
+        let results = Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size: 4,
+            step_count: 3,
+            specs: crate::results::Specs {
+                start: 0.0,
+                stop: 2.0,
+                dt: 1.0,
+                save_step: 1.0,
+                method: crate::results::Method::Euler,
+                n_chunks: 3,
+            },
+            is_vensim: false,
+        };
+
+        let stocks = stock_list(&["a"]);
+        let stats = discovery_graph_stats(&results, &stocks, &[], &[], &[1, 2]);
+
+        assert_eq!(stats.n_edges, 3);
+        // Nodes: a, b, c.
+        assert_eq!(stats.n_nodes, 3);
+        assert_eq!(stats.n_stocks, 1);
+        // Static topology has one multi-node SCC: {a, b}.
+        assert_eq!(stats.topology_scc_sizes, vec![2]);
+        assert_eq!(stats.stocks_in_cyclic_core, 1);
+
+        assert_eq!(stats.step_stats.len(), 2);
+        let s1 = &stats.step_stats[0];
+        assert_eq!(s1.step, 1);
+        assert_eq!(s1.zero_edges, 1);
+        assert_eq!(s1.unit_edges, 1);
+        assert_eq!(s1.sub_unit_edges, 1);
+        assert_eq!(s1.super_unit_edges, 0);
+        assert_eq!(s1.max_abs_score, 1.0);
+        // With the zero edge dropped, the a <-> b cycle survives at step 1.
+        assert_eq!(s1.nonzero_scc_sizes, vec![2]);
+        assert_eq!(s1.stocks_in_nonzero_core, 1);
+
+        let s2 = &stats.step_stats[1];
+        assert_eq!(s2.step, 2);
+        assert_eq!(s2.zero_edges, 1);
+        assert_eq!(s2.unit_edges, 1);
+        assert_eq!(s2.sub_unit_edges, 0);
+        assert_eq!(s2.super_unit_edges, 1);
+        assert_eq!(s2.max_abs_score, 3.0);
+        // b -> a is zero at step 2, so no multi-node nonzero SCC remains.
+        assert!(s2.nonzero_scc_sizes.is_empty());
+        assert_eq!(s2.stocks_in_nonzero_core, 0);
     }
 
     // --- Mid-step deadline enforcement (the in-DFS budget check) ---

@@ -2,10 +2,21 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! One-off: run the engine's high-level `analyze_model` (strongest-path LTM
-//! discovery) on C-LEARN and report how many feedback loops + dominant periods
-//! it finds. Used to demonstrate that the discovery data exists in the engine
-//! but is not exposed through the libsimlin FFI that pysimlin consumes.
+//! LTM discovery-feasibility benchmark harness (GH #647).
+//!
+//! Runs the full LTM-discovery pipeline (compile, simulate, strongest-path
+//! discovery DFS) on a large model -- C-LEARN v77 by default -- with phase
+//! timing, so the per-stage cost and the discovery DFS feasibility can be
+//! measured against real link scores.
+//!
+//! Environment:
+//!   CLEARN_MODEL            override the model path (.mdl, .stmx/.xmile)
+//!   CLEARN_SKIP_DISCOVERY   stop before the discovery DFS
+//!   CLEARN_DISCOVER_STEPS=N truncate discovery to the first N saved steps
+//!   CLEARN_CAP_SCORES       clamp |link score| <= 1 before discovery
+//!   CLEARN_GRAPH_STATS      report search-graph structure (nodes/edges/SCCs)
+//!                           and per-step score distribution, then exit
+//!   CLEARN_DUMP_LINK=NEEDLE dump link-score columns matching NEEDLE
 
 use std::io::Write;
 use std::time::Instant;
@@ -17,7 +28,7 @@ use simlin_engine::db::{
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::{canonicalize, open_vensim};
+use simlin_engine::{canonicalize, open_vensim, open_xmile};
 
 fn phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
     print!("{name:<28} ... ");
@@ -30,17 +41,29 @@ fn phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
 }
 
 fn main() {
-    let path = format!(
-        "{}/../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = std::env::var("CLEARN_MODEL").unwrap_or_else(|_| {
+        format!(
+            "{}/../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    });
     let contents = std::fs::read_to_string(&path).unwrap();
-    let datamodel = open_vensim(&contents).unwrap();
+    let datamodel = if path.ends_with(".mdl") {
+        open_vensim(&contents).unwrap()
+    } else {
+        open_xmile(&mut contents.as_bytes()).unwrap()
+    };
+    println!("model: {path}");
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
     let source_project = sync.project;
-    let canonical_name = canonicalize("main").into_owned();
+    let root_name = datamodel
+        .models
+        .first()
+        .map(|m| m.name.as_str())
+        .unwrap_or("main");
+    let canonical_name = canonicalize(root_name).into_owned();
 
     // Decompose the analyze_model pipeline so we can see whether the cost is in
     // the LTM *simulation* (which the wasm backend could accelerate) or the
@@ -143,8 +166,17 @@ fn main() {
     // one finite non-zero value across the run.
     let mut link_cols = 0usize;
     let mut link_cols_nonzero = 0usize;
+    let mut suspect_zero_cols: Vec<&str> = Vec::new();
+    let varies = |off: usize| -> bool {
+        let first = results.data[results.step_size + off];
+        (2..results.step_count).any(|step| {
+            let v = results.data[step * results.step_size + off];
+            v.is_finite() && (v - first).abs() > 1e-12
+        })
+    };
     for (name, &off) in results.offsets.iter() {
-        if !name.as_str().contains("link_score") {
+        let name_str = name.as_str();
+        if !name_str.contains("link_score") {
             continue;
         }
         link_cols += 1;
@@ -154,11 +186,45 @@ fn main() {
         });
         if any_nonzero {
             link_cols_nonzero += 1;
+        } else {
+            // An always-zero link score is legitimate when its source never
+            // changes (constants have score 0 by definition). If BOTH
+            // endpoints vary over the run but the score is still identically
+            // zero, the link-score fragment is suspect (e.g. silently failed
+            // to compile -- the GH #587 failure mode).
+            let suffix = name_str
+                .strip_prefix("$\u{205A}ltm\u{205A}link_score\u{205A}")
+                .unwrap_or("");
+            if let Some((from_str, to_str)) = suffix.split_once('\u{2192}') {
+                let base = |s: &str| s.split('[').next().unwrap_or(s).to_string();
+                let from_off = results
+                    .offsets
+                    .get(&simlin_engine::common::Ident::new(&base(from_str)));
+                let to_off = results
+                    .offsets
+                    .get(&simlin_engine::common::Ident::new(&base(to_str)));
+                if let (Some(&fo), Some(&to_o)) = (from_off, to_off)
+                    && varies(fo)
+                    && varies(to_o)
+                {
+                    suspect_zero_cols.push(name_str);
+                }
+            }
         }
     }
     println!(
         "  LTM link_score columns: {link_cols} (with a finite non-zero value: {link_cols_nonzero})"
     );
+    if !suspect_zero_cols.is_empty() {
+        suspect_zero_cols.sort();
+        println!(
+            "  SUSPECT always-zero link scores (both endpoints vary): {}",
+            suspect_zero_cols.len()
+        );
+        for name in suspect_zero_cols.iter().take(15) {
+            println!("    {name}");
+        }
+    }
 
     let source_model = source_project
         .models(&db)
@@ -182,6 +248,58 @@ fn main() {
         stocks.len(),
         ltm_vars.vars.len()
     );
+
+    // Search-graph structure / score-distribution diagnostics (GH #647): how
+    // big is the graph the per-timestep DFS must traverse, where is its cyclic
+    // core, and how do the per-step scores distribute relative to the pruning
+    // assumptions (products shrink along paths; few exact ties)?
+    if std::env::var("CLEARN_GRAPH_STATS").is_ok() {
+        let last = results.step_count - 1;
+        let sample_steps: Vec<usize> = vec![1, 5, last / 4, last / 2, 3 * last / 4, last]
+            .into_iter()
+            .filter(|&s| s > 0)
+            .collect();
+        let stats = phase("discovery graph stats", || {
+            simlin_engine::ltm_finding::discovery_graph_stats(
+                &results,
+                &stocks,
+                &ltm_vars.vars,
+                dm_dims,
+                &sample_steps,
+            )
+        });
+        println!(
+            "  search graph: {} nodes, {} edges, {} stocks",
+            stats.n_nodes, stats.n_edges, stats.n_stocks
+        );
+        let topo_core: usize = stats.topology_scc_sizes.iter().sum();
+        println!(
+            "  static topology cyclic core: {} nodes in {} multi-node SCCs (largest: {:?}); {} of {} stocks inside",
+            topo_core,
+            stats.topology_scc_sizes.len(),
+            &stats.topology_scc_sizes[..stats.topology_scc_sizes.len().min(8)],
+            stats.stocks_in_cyclic_core,
+            stats.n_stocks,
+        );
+        for s in &stats.step_stats {
+            let nz_core: usize = s.nonzero_scc_sizes.iter().sum();
+            println!(
+                "  step {:>3}: zero {} | unit {} | (0,1) {} | >1 {} | max |s| {:.3e} | nonzero-SCC core {} nodes in {} SCCs (largest: {:?}), {} stocks inside",
+                s.step,
+                s.zero_edges,
+                s.unit_edges,
+                s.sub_unit_edges,
+                s.super_unit_edges,
+                s.max_abs_score,
+                nz_core,
+                s.nonzero_scc_sizes.len(),
+                &s.nonzero_scc_sizes[..s.nonzero_scc_sizes.len().min(8)],
+                s.stocks_in_nonzero_core,
+            );
+        }
+        println!("\n[CLEARN_GRAPH_STATS set: stopping before discovery DFS]");
+        return;
+    }
 
     if std::env::var("CLEARN_SKIP_DISCOVERY").is_ok() {
         println!("\n[CLEARN_SKIP_DISCOVERY set: stopping before discovery DFS]");

@@ -497,7 +497,12 @@ runtime polarity overrides structural polarity when available.
 ## Strongest-Path Algorithm
 
 The implementation in `ltm_finding.rs` follows Appendix I of Eberlein &
-Schoenberg (2020) closely.
+Schoenberg (2020), with three scalability amendments (GH #647) that keep the
+per-timestep DFS tractable on large arrayed models. The production
+implementation is the integer-indexed `IndexedSearch` (topology built once,
+per-step scores reloaded into reusable scratch); the `Ident`-keyed
+`SearchGraph` is retained as a test-only oracle implementing the identical
+algorithm.
 
 ### SearchGraph (`ltm_finding.rs`)
 
@@ -506,35 +511,74 @@ descending (`from_edges`), providing the ~3x speedup described in the paper by
 making the first visit to each variable likely the strongest. NaN scores are
 treated as 0.
 
-### Core DFS (`check_outbound_uses`)
+### Core DFS (`check_outbound_uses` / `IndexedSearch::dfs`)
 
-The recursive search follows the paper's pseudocode:
+The recursive search follows the paper's pseudocode structure, with the
+pruning mechanism replaced (see "Scalability Amendments" below):
 
 - **Cycle detection**: `visiting` set tracks nodes on the current DFS path. When
   a visited node equals TARGET, a loop is recorded.
-- **Pruning**: `best_score` tracks the highest accumulated score at which each
-  variable has been reached. Strict less-than comparison (`score < best_score`)
-  prunes weaker paths; equal scores are explored.
-- **Per-stock reset**: `best_score` is reset to zero for all variables at the
-  start of each stock's search, following the paper's pseudocode (Section 12.5).
-  This prevents one stock's search from pruning reachable loops when searching
-  from a different stock.
-- **Deduplication**: `add_loop_if_unique` uses sorted node sets to prevent
-  recording the same loop twice.
+- **Strongest-first ordering**: each node's edges are walked in descending
+  |score| order, so when work bounds bind, the strongest paths are the ones
+  already explored. (Accumulated path products are not tracked; loop scores
+  are recomputed exactly from the link-score series after discovery.)
+- **Per-stock isolation**: per-node expansion counts are reset at the start of
+  each stock's search (the role the paper's per-stock `best_score` reset
+  played -- Section 12.5), so one stock's search never limits loops reachable
+  from another stock.
+- **Deduplication**: `add_loop_if_unique` uses canonical edge-sequence
+  rotations to prevent recording the same loop twice.
+
+### Scalability Amendments (GH #647)
+
+The paper's pseudocode degenerates on large arrayed models -- on C-LEARN v77
+(element-level graph: ~4,700 nodes, ~20,500 edges) four timesteps of discovery
+did not complete in 10 minutes. Three amendments make it tractable; together
+they reduced full 251-step discovery to under a second:
+
+- **Zero-score edges are excluded from the per-step graph.** A loop containing
+  a zero-score (or NaN) link has loop score exactly 0 at this timestep, so it
+  is not a "loop that matters" here; if it ever matters, every link is nonzero
+  at the timestep where it does, and it is discoverable there. On C-LEARN ~94%
+  of edges are zero at any given step, and traversing them made the DFS wander
+  the whole graph.
+- **Each stock's DFS is restricted to its own strongly-connected component**
+  of the per-step nonzero-score subgraph (`tarjan_scc_ids`, computed once per
+  step). A path that leaves the SCC can never return to the target stock, so
+  the restriction loses no loops -- it only skips provably wasted exploration.
+  Stocks outside any multi-node SCC (and without a self-edge) are skipped
+  outright. On C-LEARN this confines each search to a <= 65-node component;
+  on WRLD3 the famous 166-node static SCC fragments into <= 7-node per-step
+  components.
+- **The paper's `best_score` pruning is replaced by a per-node expansion cap
+  scaled to component size** (`EXPANSION_BUDGET_PER_SEARCH / |SCC|`, min 1).
+  The paper's pruning fails in both directions on real models: exact score
+  ties (chains of single-input links score exactly 1.0) and super-unit scores
+  (|score| > 1 makes path products grow) defeat it -- every non-pruned
+  re-arrival re-explores the node's whole subtree, exponential in
+  parallel-path structures -- and when it *does* fire it silently drops
+  sibling loops whose entry path is weaker (the paper's Figure 7 failure
+  mode). The expansion cap inverts the trade-off: work is bounded at
+  `cap * SCC_edges` traversals per (stock, step) regardless of score
+  distribution, and small components (the common case after SCC restriction)
+  get effectively exhaustive enumeration -- every elementary cycle through
+  the stock is found, strictly more complete than the paper's heuristic.
 
 ### Heuristic Nature
 
-The algorithm does not guarantee finding the truly strongest loop. The specific
-failure mode (demonstrated in the paper's Figure 7 and tested in
-`test_figure_7_paper`) is that visiting a node via a strong path sets a high
-`best_score` that prunes exploration via weaker paths that might lead to
-different (but still valid) loops.
+For small per-step components the search is effectively exhaustive (the
+expansion cap doesn't bind), so every elementary cycle through each stock is
+found -- including the paper's Figure 7 case, where the original `best_score`
+pruning missed the strongest loop (`test_figure_7_paper` documents this).
 
-The mitigation is twofold: (a) running the search at every timestep with different
-link scores tends to discover loops missed at other timesteps, and (b) resetting
-`best_score` per stock means different starting stocks can discover different
-loops. The papers' empirical evaluation shows that missed loops are consistently
-"siblings" of found loops, differing by only a few links.
+For large components the expansion cap binds and the algorithm is heuristic:
+loops whose every entry path is reached only after the per-node budgets are
+consumed can be missed. The mitigations mirror the paper's: (a) running the
+search at every timestep with different link scores (and therefore different
+edge orderings) tends to discover loops missed at other timesteps, and (b)
+per-stock budget resets mean different starting stocks can discover different
+loops. The papers' empirical evaluation shows that missed loops are
+consistently "siblings" of found loops, differing by only a few links.
 
 ### Ranking and Filtering (`rank_and_filter`)
 
@@ -1138,12 +1182,15 @@ cases remain deliberate carve-outs:
   synthetic loop-score matrices
 
 - **`ltm_finding.rs`**: SearchGraph construction and edge sorting, trivial loop,
-  Figure 7 from the paper (demonstrating per-stock reset recovery), per-stock
-  best_score reset, deduplication, empty graph, zero-score edges (strict
-  less-than allows traversal), NaN handling, self-loops, disconnected components,
-  stocks without outbound edges, link offset parsing, ID assignment,
-  rank-and-filter (truncation, contribution filtering, ordering preservation,
-  briefly dominant loop retention, partition-aware filtering)
+  Figure 7 from the paper (all loops found via cap-bounded exhaustive search),
+  per-stock search isolation, deduplication, empty graph, zero-score edges
+  (excluded per step; the loop is discovered at steps where it is active), NaN
+  handling, self-loops, disconnected components, stocks without outbound edges,
+  SCC restriction (acyclic appendages don't change results), tied-score
+  diamond-chain termination (bounded re-expansion), Tarjan SCC ids, discovery
+  graph stats, link offset parsing, ID assignment, rank-and-filter (truncation,
+  contribution filtering, ordering preservation, briefly dominant loop
+  retention, partition-aware filtering)
 
 ### Salsa Pipeline Tests
 
