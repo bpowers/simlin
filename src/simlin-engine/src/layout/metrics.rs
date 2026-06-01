@@ -232,8 +232,10 @@ fn polyline_length(points: &[Point]) -> f64 {
 }
 
 /// Resolve the node box for an element that has one (everything except links,
-/// groups, and aliases -- aliases have no bounds helper and are excluded to
-/// match the renderer's `calc_view_box`).
+/// groups, and aliases). An ALIAS's box needs its source element's name (the
+/// label it renders), which a single-element function cannot resolve --
+/// `compute_layout_metrics` handles aliases at the view level via
+/// `alias_source_names` + `alias_node_box`.
 fn node_box(element: &ViewElement) -> Option<Rect> {
     match element {
         ViewElement::Aux(a) => Some(aux_bounds(a)),
@@ -260,8 +262,57 @@ pub(crate) fn node_shape_box(element: &ViewElement) -> Option<Rect> {
         ViewElement::Module(m) => Some(module_bounds(m)),
         ViewElement::Cloud(c) => Some(cloud_bounds(c)),
         ViewElement::Flow(f) => Some(flow_shape_bounds(f)),
-        ViewElement::Link(_) | ViewElement::Alias(_) | ViewElement::Group(_) => None,
+        // An alias renders an aux-sized circle (see `render_alias`); its shape
+        // box needs no name resolution.
+        ViewElement::Alias(a) => Some(alias_shape_box(a)),
+        ViewElement::Link(_) | ViewElement::Group(_) => None,
     }
+}
+
+/// The bare shape box of an alias: the aux-radius circle `render_alias` draws,
+/// centered on the alias position.
+pub(crate) fn alias_shape_box(alias: &crate::datamodel::view_element::Alias) -> Rect {
+    use crate::diagram::constants::AUX_RADIUS;
+    Rect {
+        left: alias.x - AUX_RADIUS,
+        right: alias.x + AUX_RADIUS,
+        top: alias.y - AUX_RADIUS,
+        bottom: alias.y + AUX_RADIUS,
+    }
+}
+
+/// The label an alias renders: its SOURCE element's display name (resolved
+/// through `alias_of_uid`), positioned like an aux label. Returns `None` when
+/// the source uid resolves to nothing (a dangling alias renders the circle but
+/// no meaningful label is derivable).
+pub(crate) fn alias_label_props_for(
+    alias: &crate::datamodel::view_element::Alias,
+    source_name: &str,
+    side: crate::datamodel::view_element::LabelSide,
+) -> LabelProps {
+    use crate::diagram::constants::AUX_RADIUS;
+    LabelProps::new(alias.x, alias.y, side, display_name(source_name))
+        .with_radii(AUX_RADIUS, AUX_RADIUS)
+}
+
+/// Map each alias uid in `elements` to its source element's name. Aliases whose
+/// `alias_of_uid` does not resolve to a named element are omitted (dangling).
+pub(crate) fn alias_source_names(
+    elements: &[ViewElement],
+) -> std::collections::HashMap<i32, String> {
+    let names: std::collections::HashMap<i32, &str> = elements
+        .iter()
+        .filter_map(|e| e.get_name().map(|n| (e.get_uid(), n)))
+        .collect();
+    elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Alias(a) => names
+                .get(&a.alias_of_uid)
+                .map(|n| (a.uid, (*n).to_string())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Build a `LabelProps` for a labeled element placed on `side`, matching the
@@ -706,10 +757,29 @@ pub fn compute_layout_metrics(
     //     only under a node's LABEL is mild noise (labels are semi-transparent
     //     and no connector terminates on one) and must NOT be charged here;
     //     label collisions are the province of `label_overlap`.
+    // Aliases render an aux circle + their source element's label; resolve
+    // those names once so aliases are charged like any other node (an
+    // invisible alias would let alias generation game the score).
+    let alias_names = alias_source_names(&view.elements);
+    let alias_node_box = |a: &crate::datamodel::view_element::Alias| -> Rect {
+        let shape = alias_shape_box(a);
+        match alias_names.get(&a.uid) {
+            Some(name) => {
+                let props = alias_label_props_for(a, name, a.label_side);
+                merge_bounds(shape, label_bounds(&props))
+            }
+            // Dangling alias: the circle still renders; no label.
+            None => shape,
+        }
+    };
+
     let node_boxes: Vec<(i32, Rect)> = view
         .elements
         .iter()
-        .filter_map(|e| node_box(e).map(|r| (e.get_uid(), r)))
+        .filter_map(|e| match e {
+            ViewElement::Alias(a) => Some((a.uid, alias_node_box(a))),
+            _ => node_box(e).map(|r| (e.get_uid(), r)),
+        })
         .collect();
     let node_shape_boxes: Vec<(i32, Rect)> = view
         .elements
@@ -810,7 +880,13 @@ pub fn compute_layout_metrics(
     let label_boxes: Vec<(i32, Rect)> = view
         .elements
         .iter()
-        .filter_map(|e| element_label_props(e).map(|props| (e.get_uid(), label_bounds(&props))))
+        .filter_map(|e| match e {
+            ViewElement::Alias(a) => alias_names.get(&a.uid).map(|name| {
+                let props = alias_label_props_for(a, name, a.label_side);
+                (a.uid, label_bounds(&props))
+            }),
+            _ => element_label_props(e).map(|props| (e.get_uid(), label_bounds(&props))),
+        })
         .collect();
     // `node_shape_boxes` is computed once above (shared with node_overlap and
     // node_connector_overlap).
@@ -1047,6 +1123,124 @@ mod tests {
 
     fn cfg() -> LayoutConfig {
         LayoutConfig::default()
+    }
+
+    /// An alias (ghost) of the element with uid `alias_of_uid`, at `(x, y)`.
+    /// Renders as an aux-sized circle labeled with the SOURCE element's name.
+    fn alias_of(uid: i32, alias_of_uid: i32, x: f64, y: f64) -> ViewElement {
+        ViewElement::Alias(view_element::Alias {
+            uid,
+            alias_of_uid,
+            x,
+            y,
+            label_side: LabelSide::Bottom,
+            compat: None,
+        })
+    }
+
+    // --- alias scoring ---
+    //
+    // An alias renders as an aux-sized circle plus its source element's label;
+    // the metric must charge it like any other node. If aliases were invisible
+    // (the pre-rung-4 state), alias GENERATION could game the score: ghosts
+    // could pile on top of anything for free.
+
+    #[test]
+    fn test_alias_node_overlap_charged() {
+        // An alias stacked exactly on an aux vs the same alias far away: the
+        // stacked layout must score strictly worse on node_overlap.
+        let stacked = make_view(vec![
+            aux(1, "source variable", 100.0, 100.0),
+            aux(2, "another aux", 300.0, 100.0),
+            alias_of(3, 1, 300.0, 100.0),
+        ]);
+        let apart = make_view(vec![
+            aux(1, "source variable", 100.0, 100.0),
+            aux(2, "another aux", 300.0, 100.0),
+            alias_of(3, 1, 600.0, 100.0),
+        ]);
+        let m_stacked = compute_layout_metrics(&stacked, &cfg());
+        let m_apart = compute_layout_metrics(&apart, &cfg());
+        assert!(
+            m_stacked.node_overlap > m_apart.node_overlap,
+            "an alias stacked on a node must be charged: stacked {} vs apart {}",
+            m_stacked.node_overlap,
+            m_apart.node_overlap,
+        );
+        assert!(
+            m_apart.node_overlap.abs() < 1e-9,
+            "the far-apart alias layout has no overlap to charge"
+        );
+    }
+
+    #[test]
+    fn test_alias_label_sized_by_source_name() {
+        // The alias's label box is the SOURCE element's name. Two layouts with
+        // identical geometry, differing only in the source's name length: the
+        // long-named source's alias label must collide with a nearby aux's
+        // label while the short-named one's must not.
+        let dx = 80.0;
+        let long_name = make_view(vec![
+            aux(1, "an extremely long variable name here", 100.0, 600.0),
+            aux(2, "consumer", 300.0, 100.0),
+            alias_of(3, 1, 300.0 + dx, 100.0),
+        ]);
+        let short_name = make_view(vec![
+            aux(1, "x", 100.0, 600.0),
+            aux(2, "consumer", 300.0, 100.0),
+            alias_of(3, 1, 300.0 + dx, 100.0),
+        ]);
+        let m_long = compute_layout_metrics(&long_name, &cfg());
+        let m_short = compute_layout_metrics(&short_name, &cfg());
+        assert!(
+            m_long.label_overlap > m_short.label_overlap,
+            "a long source name must widen the alias label and collide: long {} vs short {}",
+            m_long.label_overlap,
+            m_short.label_overlap,
+        );
+    }
+
+    #[test]
+    fn test_alias_with_dangling_source_is_ignored() {
+        // An alias whose alias_of_uid resolves to nothing (corrupt/partial
+        // view) must not panic and must not be charged a label.
+        let view = make_view(vec![
+            aux(1, "real aux", 100.0, 100.0),
+            alias_of(2, 999, 100.0, 100.0),
+        ]);
+        let m = compute_layout_metrics(&view, &cfg());
+        // The dangling alias still has a SHAPE (it renders a circle), so
+        // node_overlap is charged; but no label can be derived for it.
+        assert!(m.node_overlap > 0.0, "the alias circle still overlaps");
+        assert!(m.label_overlap.is_finite());
+    }
+
+    #[test]
+    fn test_alias_extends_view_bounding_box() {
+        // A far-flung alias must extend the layout's bounding box (it is a
+        // drawn element), which shows up in the aspect_penalty/sprawl inputs.
+        // Compare a compact two-aux view against the same view plus an alias
+        // parked far to the right: the bounding box must widen.
+        let compact = make_view(vec![
+            aux(1, "a", 100.0, 100.0),
+            aux(2, "b", 300.0, 100.0),
+            straight_link(10, 1, 2),
+        ]);
+        let with_far_alias = make_view(vec![
+            aux(1, "a", 100.0, 100.0),
+            aux(2, "b", 300.0, 100.0),
+            straight_link(10, 1, 2),
+            alias_of(3, 1, 2000.0, 100.0),
+        ]);
+        let m_compact = compute_layout_metrics(&compact, &cfg());
+        let m_far = compute_layout_metrics(&with_far_alias, &cfg());
+        assert!(
+            m_far.aspect_penalty > m_compact.aspect_penalty,
+            "a far-flung alias must widen the bounding box and trip the aspect \
+             penalty: with {} vs without {}",
+            m_far.aspect_penalty,
+            m_compact.aspect_penalty,
+        );
     }
 
     /// Scale every coordinate of a view by `s` (element centers and any
