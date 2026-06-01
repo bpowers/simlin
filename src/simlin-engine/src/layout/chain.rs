@@ -326,7 +326,7 @@ pub fn compute_chain_positions(
     let max_delta = config.annealing_max_delta_chain;
     let mut annealing_round: usize = 0;
     let mut last_annealing_iter: usize = 0;
-    let mut last_best_crossings: usize = usize::MAX;
+    let mut last_best_crossings: f64 = f64::INFINITY;
     let mut best_annealed_layout: Option<BTreeMap<String, Position>> = None;
     const BETWEEN_ROUND_COOLING: f64 = 0.99;
 
@@ -352,7 +352,7 @@ pub fn compute_chain_positions(
 
             // Decide temperature: reheat if no improvement, cool between rounds
             let mut round_config = config.clone();
-            if crossings >= last_best_crossings && last_best_crossings < usize::MAX {
+            if crossings as f64 >= last_best_crossings && last_best_crossings.is_finite() {
                 // No improvement -- reheat
                 if config.annealing_reheat_temperature > 0.0 {
                     round_config.annealing_temperature = config.annealing_reheat_temperature;
@@ -368,7 +368,7 @@ pub fn compute_chain_positions(
                 build_segments,
                 // Chains are large rigid bodies positioned lanes apart; the
                 // pile-up failure mode of point nodes does not apply here.
-                |_| 0,
+                |_| 0.0,
                 &round_config,
                 config
                     .annealing_random_seed
@@ -395,7 +395,7 @@ pub fn compute_chain_positions(
     let settled_result = run_annealing_with_filter(
         &layout,
         build_segments,
-        |_| 0,
+        |_| 0.0,
         config,
         config
             .annealing_random_seed
@@ -414,7 +414,7 @@ pub fn compute_chain_positions(
     // crossings than the final SFDP output.
     let layout = if let Some(ref best) = best_annealed_layout {
         let final_crossings = super::annealing::count_crossings(&build_segments(&layout));
-        if last_best_crossings < final_crossings {
+        if last_best_crossings < final_crossings as f64 {
             best.clone()
         } else {
             layout

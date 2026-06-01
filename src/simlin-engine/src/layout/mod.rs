@@ -907,7 +907,7 @@ pub fn settle_new_elements(
 
     let mut annealing_round: usize = 0;
     let mut last_annealing_iter: usize = 0;
-    let mut best_cost: usize = usize::MAX;
+    let mut best_cost: f64 = f64::INFINITY;
     let mut best_layout: Option<Layout<String>> = None;
 
     let final_layout = compute_layout_from_initial_with_callback(
@@ -932,7 +932,7 @@ pub fn settle_new_elements(
                 // Incremental settling perturbs only the new elements around
                 // pinned existing ones; a new element must still not land on
                 // top of another node.
-                |layout: &Layout<String>| point_node_pileup_count(layout, &new_node_ids),
+                |layout: &Layout<String>| point_node_pileup_count(layout, &new_node_ids) as f64,
                 &annealing_config,
                 annealing_seed.wrapping_add(annealing_round as u64),
                 |node_id: &String| new_node_ids.contains(node_id),
@@ -961,7 +961,7 @@ pub fn settle_new_elements(
 
     let settled_layout = if let Some(saved) = best_layout {
         let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
-        if final_crossings > best_cost {
+        if final_crossings as f64 > best_cost {
             saved
         } else {
             final_layout
@@ -3077,16 +3077,17 @@ fn run_sfdp_with_rigid_chains(
     // nodes piled closer than `MIN_POINT_NODE_SEPARATION`. Without the penalty
     // the search is free to remove a crossing by stacking two auxes on the
     // same spot (both unreadable; only one was counted).
-    let pileup_penalty = |layout: &Layout<String>| point_node_pileup_count(layout, &point_node_ids);
+    let pileup_penalty =
+        |layout: &Layout<String>| point_node_pileup_count(layout, &point_node_ids) as f64;
 
     // The full annealing cost of a layout, for keep-or-discard comparisons.
-    let annealing_cost = |layout: &Layout<String>| -> usize {
-        annealing::count_crossings(&build_segments(layout)) + pileup_penalty(layout)
+    let annealing_cost = |layout: &Layout<String>| -> f64 {
+        annealing::count_crossings(&build_segments(layout)) as f64 + pileup_penalty(layout)
     };
 
     let mut annealing_round: usize = 0;
     let mut last_annealing_iter: usize = 0;
-    let mut best_cost: usize = usize::MAX;
+    let mut best_cost: f64 = f64::INFINITY;
     let mut best_layout: Option<Layout<String>> = None;
 
     let final_layout = compute_layout_from_initial_with_callback(

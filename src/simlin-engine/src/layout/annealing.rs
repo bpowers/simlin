@@ -125,8 +125,10 @@ fn generate_step(rng: &mut StdRng, temperature: f64) -> (f64, f64) {
 pub struct AnnealingResult<N: NodeId> {
     pub layout: Layout<N>,
     /// The best layout's cost: segment crossings plus the caller's
-    /// position penalty (see `run_annealing_with_filter`).
-    pub cost: usize,
+    /// position penalty (see `run_annealing_with_filter`). Fractional so the
+    /// penalty can express continuous defects (label overlap area, partial
+    /// pile-ups), not just counts.
+    pub cost: f64,
     pub improved: bool,
     pub iterations: usize,
 }
@@ -158,7 +160,7 @@ where
     run_annealing_with_filter(
         initial_layout,
         build_segments,
-        |_| 0,
+        |_| 0.0,
         config,
         seed,
         |_| true,
@@ -196,7 +198,7 @@ pub fn run_annealing_with_filter<N, F, G, P, D>(
 where
     N: NodeId,
     F: Fn(&Layout<N>) -> Vec<LineSegment>,
-    G: Fn(&Layout<N>) -> usize,
+    G: Fn(&Layout<N>) -> f64,
     P: Fn(&N) -> bool,
     D: Fn(&N) -> f64,
 {
@@ -207,8 +209,8 @@ where
 
     let mut rng = StdRng::seed_from_u64(seed);
 
-    let cost_of = |layout: &Layout<N>| -> usize {
-        count_crossings(&build_segments(layout)) + position_penalty(layout)
+    let cost_of = |layout: &Layout<N>| -> f64 {
+        count_crossings(&build_segments(layout)) as f64 + position_penalty(layout)
     };
 
     let initial_cost = cost_of(initial_layout);
@@ -224,10 +226,10 @@ where
         base_temperature
     };
 
-    if initial_cost == 0 {
+    if initial_cost <= 0.0 {
         return AnnealingResult {
             layout: initial_layout.clone(),
-            cost: 0,
+            cost: 0.0,
             improved: false,
             iterations: 0,
         };
@@ -256,7 +258,7 @@ where
     let mut total_iters = 0;
 
     for iter in 0..iterations {
-        if best_cost == 0 {
+        if best_cost <= 0.0 {
             break;
         }
 
@@ -271,7 +273,7 @@ where
         );
         let perturbed_cost = cost_of(&perturbed);
 
-        let delta = perturbed_cost as f64 - current_cost as f64;
+        let delta = perturbed_cost - current_cost;
         let accept_prob = if delta > 0.0 {
             (-delta / temperature).exp()
         } else {
@@ -292,7 +294,7 @@ where
         temperature *= cooling_rate;
 
         // Periodic reheating to escape local minima
-        if (iter + 1) % reheat_period == 0 && best_cost > 0 {
+        if (iter + 1) % reheat_period == 0 && best_cost > 0.0 {
             temperature = effective_reheat;
         }
 
@@ -586,7 +588,7 @@ mod tests {
 
         // The annealer should not make things worse
         assert!(
-            result.cost <= initial_crossings,
+            result.cost <= initial_crossings as f64,
             "cost should not increase: got {} vs initial {}",
             result.cost,
             initial_crossings,
@@ -612,7 +614,7 @@ mod tests {
         let config = LayoutConfig::default();
         let result = run_annealing(&layout, build_segments, &config, 42);
 
-        assert_eq!(result.cost, 0);
+        assert_eq!(result.cost, 0.0);
         assert!(!result.improved);
         assert_eq!(result.iterations, 0);
     }
@@ -647,7 +649,7 @@ mod tests {
             ]
         };
         const MIN_SEP: f64 = 50.0;
-        let pileups = |lay: &Layout<String>| -> usize {
+        let pileups = |lay: &Layout<String>| -> f64 {
             let pts: Vec<Position> = lay.values().copied().collect();
             let mut n = 0;
             for i in 0..pts.len() {
@@ -657,7 +659,7 @@ mod tests {
                     }
                 }
             }
-            n
+            n as f64
         };
 
         let config = LayoutConfig {
@@ -685,7 +687,7 @@ mod tests {
         // they would remove.
         assert_eq!(
             pileups(&result.layout),
-            0,
+            0.0,
             "annealing must not return piled-up nodes when the penalty charges them"
         );
     }
@@ -748,7 +750,7 @@ mod tests {
         let result = run_annealing_with_filter(
             &layout,
             build_segments,
-            |_| 0,
+            |_| 0.0,
             &config,
             42,
             |_node| false,
@@ -947,7 +949,7 @@ mod tests {
         let result = run_annealing_with_filter(
             &layout,
             build_segments,
-            |_| 0,
+            |_| 0.0,
             &config,
             42,
             |node| node != "b",
