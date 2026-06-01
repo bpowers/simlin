@@ -62,16 +62,17 @@ in", LTM aims to make that statement quantitative and checkable.
 This notebook does four things, in order:
 
 1. **Explores C-LEARN itself** -- structure, behavior, and its climate feedback loops.
-2. **Runs LTM's loop-dominance analysis on C-LEARN's climate core** -- composing loop scores from
-   the engine's link scores, and showing how dominance shifts from the balancing carbon-uptake
-   loops toward the reinforcing carbon-climate feedbacks over the 21st century.
+2. **Runs LTM's loop-dominance analysis on C-LEARN's climate core** -- automatic loop discovery,
+   plus a curated analysis composed from the engine's link scores, showing how dominance shifts
+   from the balancing carbon-uptake loops toward the reinforcing carbon-climate feedbacks over
+   the 21st century.
 3. **Demonstrates the engine-native LTM experience** on models where it works end-to-end (the
    logistic growth model, and the three-party arms race model from the LTM papers).
 4. **Reports honestly on the gaps**: what still doesn't work, why, and what was fixed and filed
    along the way. This notebook was itself the test that drove six engine/API fixes (plus four
    LTM compilation fixes that landed on `main` between its first and final drafts).
 
-> Built against pysimlin from `main` at `099c5659` (2026-06-01).
+> Built against pysimlin from `main` at `46d62884` (2026-06-01).
 """)
 
 # ============================================================================
@@ -487,21 +488,57 @@ fit. The remaining issues are tracked in
 [#653](https://github.com/bpowers/simlin/issues/653).)
 
 So the engine computes and carries every link score, but the final pin-score composition step is
-broken for arrayed loops. Time to route around it.
+broken for arrayed loops.
+
+### Automatic loop discovery
+
+Until this morning, the alternative -- LTM's strongest-path *discovery* algorithm, which finds
+important loops without being told what to look for -- was infeasible at this scale (a 60-second
+budget processed less than one timestep). The discovery-feasibility work that just landed on
+`main` changes that completely:
+""")
+
+code("""
+analysis = model.analyze(timeout=120.0)
+
+print(f"truncated: {analysis.truncated}")
+print(f"discovered {len(analysis.loops)} loops, {len(analysis.dominant_periods)} dominant periods\\n")
+
+print("top discovered loops by average importance:")
+for loop in analysis.loops[:8]:
+    imp = loop.average_importance()
+    path_str = " -> ".join(v.split("[")[0] for v in loop.variables[:4])
+    print(f"  {loop.id} ({loop.polarity}, {len(loop.variables)} vars, avg |score| {imp:9.1f}):")
+    print(f"      {path_str} -> ...")
+""")
+
+md("""
+In a few seconds, discovery surfaces ~150 loops -- and the top of the ranking is exactly the
+climate core we mapped by hand: the CO2-forcing-heat balancing loop, the biomass/soil carbon
+recycling loops, the ocean uptake loops, each found separately per `scenario` element. The two
+approaches agree on what matters.
+
+What discovery *doesn't* give you is names, signs, or curation: loops arrive as `b23`/`r22` with
+20-variable element-qualified paths, ranked by raw |score| (so the same near-singularity issue
+distorts the ranking -- more on that below). For a model you know well, naming and tracking the
+loops you care about stays the better workflow; discovery is how you find what you didn't know to
+look for. The two compose: discover, then pin.
+
+## And now: the dominance analysis
 """)
 
 # ============================================================================
-# Section 6 (NEW): manual loop-score composition -- the dominance analysis
+# Section 6: manual loop-score composition -- the dominance analysis
 # ============================================================================
 
 md("""
 ## 6. The loops that matter in C-LEARN
 
-Here is the thing about LTM's design that saves us: a **loop score is just the product of the link
-scores around the loop's cycle** -- that *is* the definition (Schoenberg et al. 2020, Eq. 3). The
-engine's per-link scores are all present in the LTM-instrumented run as synthetic result series, so
-we can compose the loop scores ourselves in a few lines of numpy, exactly as the engine should (and
-one day will) do for pinned loops.
+To get named, signed, per-scenario loop scores (what pinning will provide once
+[#653](https://github.com/bpowers/simlin/issues/653) is fixed), we compose them ourselves. LTM's
+design makes this easy: a **loop score is just the product of the link scores around the loop's
+cycle** -- that *is* the definition (Schoenberg et al. 2020, Eq. 3), and the engine's per-link
+scores are all present in the LTM-instrumented run as synthetic result series.
 
 We analyze the `deterministic` (best-estimate climate sensitivity) scenario.
 """)
@@ -884,6 +921,9 @@ this notebook was started: every LTM number on C-LEARN was silently corrupted me
 * **The LTM method itself**: composing those link scores into loop scores (section 6) produces a
   dominance analysis that matches climate science -- on a model 100x larger than anything in the
   LTM papers' examples.
+* **Automatic discovery at scale** (new on `main` as of the final draft): `model.analyze()` finds
+  ~150 loops on C-LEARN in ~6 seconds, and its top-ranked loops are the same climate core this
+  notebook mapped by hand -- independent confirmation from a structure-blind algorithm.
 * **Loop pinning workflow**: naming the loops you care about (rather than enumerating millions) is
   the right interaction model for big models, and the `model.edit()` / `set_loop_name()` API makes
   it natural.
@@ -918,10 +958,10 @@ analysis in section 6.)
 * [#652](https://github.com/bpowers/simlin/issues/652) -- raw link scores are useless for ranking
   (near-equilibrium denominators produce 1e22 magnitudes); the papers' *relative* link score
   should be exposed.
-* [#647](https://github.com/bpowers/simlin/issues/647) (updated) -- strongest-path *discovery*
-  remains infeasible on C-LEARN (a 60-second budget finds zero loops before truncating); the
-  element-level granularity of the search is the structural problem. Pinning + composition (section
-  6) is the practical alternative.
+* [#647](https://github.com/bpowers/simlin/issues/647) -- **resolved during this exercise**:
+  strongest-path discovery went from "zero loops found in a 60-second budget" to "~150 loops in
+  ~6 seconds, untruncated" with the discovery-feasibility work now on `main`. Discovery's ranking
+  still needs the singularity-handling noted above (it ranks by raw |score|).
 
 ### API design observations
 
