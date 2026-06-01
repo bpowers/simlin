@@ -1041,11 +1041,14 @@ this has not been explored in the implementation.
 
 ### Performance on Very Large Models
 
-The strongest-path algorithm runs at every saved timestep, each with O(V^2)
-complexity. For very large models (1000+ variables), this could become slow. The
-paper reports 10-20 seconds for Urban Dynamics (43M loops) on 2018 hardware, but
-the per-saved-timestep approach is a simplification of the paper's "every
-computational interval" strategy.
+The strongest-path search runs at every saved timestep, restricted to each
+stock's per-step nonzero-score SCC with bounded per-node re-expansion (see
+"Scalability Amendments"). Per-step work is bounded by roughly
+`stocks_in_cycles * EXPANSION_BUDGET_PER_SEARCH * avg_degree` edge traversals
+regardless of model size; C-LEARN v77 (251 steps, ~20k element-level edges)
+completes the full discovery sweep in under 0.1s. The compile-time cost of
+generating and compiling the link-score instrumentation -- not the discovery
+DFS -- is now the dominant LTM cost on large models (GH #655 / #317).
 
 ### Residual array carve-outs
 
