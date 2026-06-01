@@ -455,11 +455,24 @@ fn resnap_flow_endpoints_to_stocks(elements: &mut [ViewElement]) {
 /// Re-choose label sides (for `relabels` kinds) on the current geometry, writing
 /// the chosen sides back. Mutates `elements`.
 fn optimize_label_sides(elements: &mut [ViewElement]) {
-    let shape_boxes: Vec<(usize, Rect)> = elements
+    let mut obstacle_boxes: Vec<(usize, Rect)> = elements
         .iter()
         .enumerate()
         .filter_map(|(i, e)| node_shape_box(e).map(|r| (i, r)))
         .collect();
+    // Flow labels are not relabel-able (`relabels` excludes flows) but they ARE
+    // drawn, and the metric charges any label overlapping them. They must be in
+    // the obstacle set: this pass runs LAST in `declutter_view`, so a stock/aux
+    // label parked on top of a flow label here is never fixed afterwards (the
+    // fishbanks regression). A flow's element index never appears in `labels`,
+    // so the own-shape exclusion in `choose_label_sides` cannot misfire on these.
+    obstacle_boxes.extend(elements.iter().enumerate().filter_map(|(i, e)| {
+        if matches!(e, ViewElement::Flow(_)) {
+            current_label_box(e).map(|r| (i, r))
+        } else {
+            None
+        }
+    }));
 
     let labels: Vec<LabelOptions> = elements
         .iter()
@@ -480,7 +493,7 @@ fn optimize_label_sides(elements: &mut [ViewElement]) {
         })
         .collect();
 
-    let chosen = choose_label_sides(&labels, &shape_boxes, LABEL_SIDE_ROUNDS);
+    let chosen = choose_label_sides(&labels, &obstacle_boxes, LABEL_SIDE_ROUNDS);
     for (id, side) in chosen {
         set_label_side(&mut elements[id], side);
     }
@@ -799,6 +812,55 @@ mod tests {
             s0 != s1,
             "the two colliding labels should end up on different sides, got {s0:?}/{s1:?}"
         );
+    }
+
+    // ── flow labels as side-choice obstacles ──
+
+    #[test]
+    fn test_stock_label_side_avoids_flow_label() {
+        use crate::diagram::label::label_bounds;
+
+        // A stock with a flow valve right of it. Both default to Bottom labels;
+        // the flow's label is wide ("a very long flow name here") so the
+        // stock's Bottom label box overlaps it. The declutter must move the
+        // stock's label to a side where it does not overlap the flow's label
+        // (flow labels are fixed: `relabels()` excludes flows).
+        let mut elements = vec![
+            stock_at(1, 100.0, 100.0),
+            flow_attached_to(2, (190.0, 100.0), (122.5, 100.0), 1, (260.0, 100.0)),
+        ];
+        // Give the flow a wide multi-word name so its Bottom label is wide.
+        if let ViewElement::Flow(f) = &mut elements[1] {
+            f.name = "a very long flow\nname here".to_string();
+        }
+        // Give the stock a name too.
+        if let ViewElement::Stock(st) = &mut elements[0] {
+            st.name = "ships at sea".to_string();
+        }
+
+        declutter_view(&mut elements);
+
+        // After decluttering, the stock's label box must not overlap the flow's
+        // label box (measured exactly as the metric measures them).
+        let stock_label = current_label_box(&elements[0]).expect("stock has a label");
+        let flow_label = current_label_box(&elements[1]).expect("flow has a label");
+        let overlap = rect_overlap_area(&stock_label, &flow_label);
+        assert!(
+            overlap < 1e-9,
+            "stock label ({},{})-({},{}) must not overlap the flow label ({},{})-({},{}) \
+             (overlap area {overlap}); the side chooser must treat flow labels as obstacles",
+            stock_label.left,
+            stock_label.top,
+            stock_label.right,
+            stock_label.bottom,
+            flow_label.left,
+            flow_label.top,
+            flow_label.right,
+            flow_label.bottom,
+        );
+        // Sanity: label_bounds is what current_label_box uses internally; the
+        // assertion above is on metric-identical geometry.
+        let _ = label_bounds;
     }
 
     // ── zoom + flow re-attachment (the fix for the original revert) ──
