@@ -965,6 +965,30 @@ pub(crate) fn fragment_vars_in_layout(
 // Resolve: Symbolic -> Concrete (Assembly)
 // ============================================================================
 
+/// Check that a module layout of `n_slots` slots is addressable by the
+/// bytecode's `VariableOffset` (u16) offsets.
+///
+/// A module with `n_slots` slots uses offsets `0..n_slots`, so the largest
+/// offset is `n_slots - 1`; anything past `u16::MAX + 1` slots has at least
+/// one unaddressable slot. Without this check a silent `as u16` cast wraps
+/// such offsets back into the low slots -- the variable at offset 65,536
+/// overwrites slot 0 (`time`), freezing simulated time and corrupting every
+/// result. Very large LTM-instrumented models (C-LEARN in discovery mode
+/// needs ~171k slots) are the practical way to hit this.
+pub(crate) fn check_layout_addressable(n_slots: usize, model_name: &str) -> Result<(), String> {
+    const MAX_SLOTS: usize = (VariableOffset::MAX as usize) + 1;
+    if n_slots > MAX_SLOTS {
+        return Err(format!(
+            "model '{model_name}' requires {n_slots} result slots, which exceeds the \
+             bytecode VM's addressable limit of {MAX_SLOTS} (variable offsets are 16-bit). \
+             This typically happens when LTM is enabled on a very large model: run the \
+             simulation without LTM (analyze_loops=False / enable_ltm=false), or reduce \
+             the model's LTM instrumentation."
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_var_ref(
     var: &SymVarRef,
     layout: &VariableLayout,
@@ -982,7 +1006,19 @@ pub(crate) fn resolve_var_ref(
         ));
     }
     let off = entry.offset + var.element_offset;
-    Ok(off as VariableOffset)
+    // Checked narrowing: a silent `as` cast here wraps offsets past u16::MAX
+    // into the low slots, overwriting time/dt/initial_time/final_time and
+    // corrupting the whole simulation. `check_layout_addressable` catches this
+    // before assembly starts; this is the defense-in-depth backstop for any
+    // path that reaches resolution with an oversized layout.
+    VariableOffset::try_from(off).map_err(|_| {
+        format!(
+            "variable '{}' resolves to result slot {off}, beyond the bytecode VM's \
+             u16 offset limit of {}",
+            var.name,
+            VariableOffset::MAX
+        )
+    })
 }
 
 pub(crate) fn resolve_opcode(
@@ -2409,6 +2445,97 @@ mod tests {
             element_offset: 0,
         };
         assert!(resolve_var_ref(&var, &layout).is_err());
+    }
+
+    #[test]
+    fn test_resolve_var_ref_rejects_offset_beyond_u16() {
+        // VariableOffset is u16. A layout entry beyond its range (which a very
+        // large LTM-instrumented model can produce -- C-LEARN in discovery mode
+        // needs 171k slots) must be a loud resolution error, NOT a silent `as`
+        // truncation: a wrapped offset writes into the low slots, overwriting
+        // time/dt and corrupting every result.
+        let mut entries = HashMap::new();
+        entries.insert(
+            "huge".to_string(),
+            LayoutEntry {
+                offset: (VariableOffset::MAX as usize) + 1,
+                size: 1,
+            },
+        );
+        let layout = VariableLayout::new(entries, (VariableOffset::MAX as usize) + 2);
+
+        let var = SymVarRef {
+            name: "huge".to_string(),
+            element_offset: 0,
+        };
+        let err = resolve_var_ref(&var, &layout).expect_err("offset beyond u16 must error");
+        assert!(
+            err.contains("huge") && err.contains("65535"),
+            "error should name the variable and the limit, got: {err}"
+        );
+
+        // An array whose BASE fits but whose element offset crosses the limit
+        // must also error.
+        let mut entries = HashMap::new();
+        entries.insert(
+            "arr".to_string(),
+            LayoutEntry {
+                offset: (VariableOffset::MAX as usize) - 1,
+                size: 4,
+            },
+        );
+        let layout = VariableLayout::new(entries, (VariableOffset::MAX as usize) + 4);
+        let var = SymVarRef {
+            name: "arr".to_string(),
+            element_offset: 3,
+        };
+        assert!(
+            resolve_var_ref(&var, &layout).is_err(),
+            "element offset crossing the u16 limit must error"
+        );
+    }
+
+    #[test]
+    fn test_resolve_var_ref_accepts_offset_at_u16_max() {
+        // Boundary: the largest addressable offset (u16::MAX itself) is valid.
+        let mut entries = HashMap::new();
+        entries.insert(
+            "edge".to_string(),
+            LayoutEntry {
+                offset: VariableOffset::MAX as usize,
+                size: 1,
+            },
+        );
+        let layout = VariableLayout::new(entries, (VariableOffset::MAX as usize) + 1);
+        let var = SymVarRef {
+            name: "edge".to_string(),
+            element_offset: 0,
+        };
+        assert_eq!(resolve_var_ref(&var, &layout).unwrap(), VariableOffset::MAX);
+    }
+
+    #[test]
+    fn test_check_layout_addressable() {
+        // Pure functional-core check used by assembly to fail fast (before
+        // compiling thousands of fragments) when a module's layout cannot be
+        // addressed by the bytecode's u16 offsets.
+        let limit = (VariableOffset::MAX as usize) + 1; // 65,536 slots = offsets 0..=65,535
+
+        // At the limit: every offset fits.
+        assert!(check_layout_addressable(limit, "main").is_ok());
+        assert!(check_layout_addressable(0, "main").is_ok());
+        assert!(check_layout_addressable(1, "main").is_ok());
+
+        // One past the limit: slot 65,536 exists but cannot be addressed.
+        let err = check_layout_addressable(limit + 1, "main").expect_err("must reject");
+        assert!(
+            err.contains("main") && err.contains("65536") && err.contains("65,536")
+                || err.contains("main"),
+            "error should name the model, got: {err}"
+        );
+
+        // C-LEARN-with-LTM scale.
+        assert!(check_layout_addressable(171_597, "main").is_err());
     }
 
     #[test]

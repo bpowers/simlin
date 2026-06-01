@@ -16,6 +16,15 @@ use ordered_float::OrderedFloat;
 
 pub type LiteralId = u16;
 pub type ModuleId = u16;
+/// Module-relative result-slot offset baked into opcodes.
+///
+/// u16 keeps opcode payloads compact (the VM dispatch loop is sensitive to
+/// opcode size), which caps a single module's layout at 65,536 slots. Layouts
+/// beyond that -- in practice only very large LTM-instrumented models, e.g.
+/// C-LEARN in discovery mode at ~171k slots -- are rejected with a clear
+/// error by `compiler::symbolic::check_layout_addressable` /
+/// `resolve_var_ref`; a silent overflow here would wrap writes into the
+/// implicit-global slots (time/dt) and corrupt every result.
 pub type VariableOffset = u16;
 pub type ModuleInputOffset = u16;
 pub type GraphicalFunctionId = u8;

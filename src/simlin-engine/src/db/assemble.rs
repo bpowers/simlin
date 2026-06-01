@@ -1000,6 +1000,13 @@ pub fn assemble_module<'db>(
     } else {
         body_layout
     };
+    // Fail fast (before compiling thousands of fragments) when the layout
+    // exceeds the bytecode's u16-addressable slot range. resolve_var_ref has
+    // a defense-in-depth checked cast, but by then the expensive per-variable
+    // compilation has already run; checking here surfaces one clear error
+    // immediately. See `check_layout_addressable` for why a silent overflow
+    // corrupts every result.
+    crate::compiler::symbolic::check_layout_addressable(layout.n_slots, model.name(db))?;
     let source_vars = model.variables(db);
     let implicit_info = model_implicit_var_info(db, model, project);
     let model_name = model.name(db).clone();
