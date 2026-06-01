@@ -31,7 +31,9 @@ use crate::datamodel::view_element::LabelSide;
 use crate::diagram::common::{Rect, rect_overlap_area};
 use crate::diagram::label::label_bounds;
 
-use super::metrics::{element_label_props_for, node_shape_box};
+use super::metrics::{
+    alias_label_props_for, alias_source_names, element_label_props_for, node_shape_box,
+};
 
 /// Breathing room (logical units) enforced between any two element footprints
 /// after decluttering. Small enough to stay compact, large enough that adjacent
@@ -279,14 +281,18 @@ pub fn choose_label_sides(
 
 // ── imperative shell: apply to a view ────────────────────────────────────────
 
-/// Whether an element's position may be moved by the relaxation. Auxiliaries and
-/// modules are free-floating nodes; moving them only re-routes their connectors.
-/// Stocks, flows, and clouds form the stock-flow backbone and are kept fixed (a
-/// flow's pipe is attached to its stocks), so they act only as obstacles -- this
-/// reproduces the reference behavior of pushing auxiliaries OUT of the chain
-/// corridor while leaving the backbone straight.
+/// Whether an element's position may be moved by the relaxation. Auxiliaries,
+/// modules, and aliases (ghosts) are free-floating nodes; moving them only
+/// re-routes their connectors. Stocks, flows, and clouds form the stock-flow
+/// backbone and are kept fixed (a flow's pipe is attached to its stocks), so
+/// they act only as obstacles -- this reproduces the reference behavior of
+/// pushing auxiliaries OUT of the chain corridor while leaving the backbone
+/// straight.
 fn is_movable(element: &ViewElement) -> bool {
-    matches!(element, ViewElement::Aux(_) | ViewElement::Module(_))
+    matches!(
+        element,
+        ViewElement::Aux(_) | ViewElement::Module(_) | ViewElement::Alias(_)
+    )
 }
 
 /// Whether this element's label side should be (re)chosen by overlap. Aux,
@@ -298,7 +304,11 @@ fn is_movable(element: &ViewElement) -> bool {
 fn relabels(element: &ViewElement) -> bool {
     matches!(
         element,
-        ViewElement::Aux(_) | ViewElement::Module(_) | ViewElement::Stock(_) | ViewElement::Flow(_)
+        ViewElement::Aux(_)
+            | ViewElement::Module(_)
+            | ViewElement::Stock(_)
+            | ViewElement::Flow(_)
+            | ViewElement::Alias(_)
     )
 }
 
@@ -344,6 +354,7 @@ fn set_label_side(element: &mut ViewElement, side: LabelSide) {
         ViewElement::Module(m) => m.label_side = side,
         ViewElement::Stock(s) => s.label_side = side,
         ViewElement::Flow(f) => f.label_side = side,
+        ViewElement::Alias(a) => a.label_side = side,
         _ => {}
     }
 }
@@ -377,13 +388,24 @@ fn translate_element(element: &mut ViewElement, dx: f64, dy: f64) {
                 p.y += dy;
             }
         }
+        ViewElement::Alias(a) => {
+            a.x += dx;
+            a.y += dy;
+        }
         _ => {}
     }
 }
 
 /// The label box an element currently occupies (its assigned side), or `None`
-/// for kinds with no scored label.
-fn current_label_box(element: &ViewElement) -> Option<Rect> {
+/// for kinds with no scored label. An alias's label is its SOURCE element's
+/// name, resolved through `alias_names` (see `metrics::alias_source_names`); a
+/// dangling alias has no derivable label.
+fn current_label_box(element: &ViewElement, alias_names: &HashMap<i32, String>) -> Option<Rect> {
+    if let ViewElement::Alias(a) = element {
+        let name = alias_names.get(&a.uid)?;
+        let props = alias_label_props_for(a, name, a.label_side);
+        return Some(label_bounds(&props));
+    }
     let side = match element {
         ViewElement::Aux(a) => a.label_side,
         ViewElement::Module(m) => m.label_side,
@@ -491,16 +513,26 @@ fn resnap_flow_endpoints_to_stocks(elements: &mut [ViewElement]) {
 
 /// Re-choose label sides (for `relabels` kinds) on the current geometry, writing
 /// the chosen sides back. Mutates `elements`.
-fn optimize_label_sides(elements: &mut [ViewElement]) {
-    // Every element's shape box is an obstacle. Flow labels need no separate
-    // obstacle entry: flows are relabel-able (`relabels` includes them), so
-    // their label boxes participate as labels and are automatically avoided by
-    // every other label.
+fn optimize_label_sides(elements: &mut [ViewElement], alias_names: &HashMap<i32, String>) {
+    // Every element's shape box is an obstacle. Flow and alias labels need no
+    // separate obstacle entry: both are relabel-able (`relabels` includes
+    // them), so their label boxes participate as labels and are automatically
+    // avoided by every other label.
     let obstacle_boxes: Vec<(usize, Rect)> = elements
         .iter()
         .enumerate()
         .filter_map(|(i, e)| node_shape_box(e).map(|r| (i, r)))
         .collect();
+
+    // The label box an element would occupy on `side`. Aliases resolve their
+    // label text through their source element's name.
+    let label_box_for = |e: &ViewElement, side: LabelSide| -> Option<Rect> {
+        if let ViewElement::Alias(a) = e {
+            let name = alias_names.get(&a.uid)?;
+            return Some(label_bounds(&alias_label_props_for(a, name, side)));
+        }
+        element_label_props_for(e, side).map(|p| label_bounds(&p))
+    };
 
     let labels: Vec<LabelOptions> = elements
         .iter()
@@ -509,9 +541,7 @@ fn optimize_label_sides(elements: &mut [ViewElement]) {
         .filter_map(|(i, e)| {
             let options: Vec<(LabelSide, Rect)> = candidate_sides(e)
                 .iter()
-                .filter_map(|&side| {
-                    element_label_props_for(e, side).map(|p| (side, label_bounds(&p)))
-                })
+                .filter_map(|&side| label_box_for(e, side).map(|r| (side, r)))
                 .collect();
             if options.is_empty() {
                 None
@@ -532,7 +562,7 @@ fn optimize_label_sides(elements: &mut [ViewElement]) {
 /// positions back. Returns whether the relaxation CONVERGED (all overlaps
 /// cleared); `false` means the layout jammed and the caller should open it up.
 /// Mutates `elements`.
-fn relax_positions(elements: &mut [ViewElement]) -> bool {
+fn relax_positions(elements: &mut [ViewElement], alias_names: &HashMap<i32, String>) -> bool {
     let items: Vec<Footprint> = elements
         .iter()
         .enumerate()
@@ -541,7 +571,7 @@ fn relax_positions(elements: &mut [ViewElement]) -> bool {
             if let Some(shape) = node_shape_box(e) {
                 rects.push(shape);
             }
-            if let Some(lbox) = current_label_box(e) {
+            if let Some(lbox) = current_label_box(e, alias_names) {
                 rects.push(lbox);
             }
             if rects.is_empty() {
@@ -578,15 +608,20 @@ pub fn declutter_view(elements: &mut [ViewElement]) {
     if elements.len() < 2 {
         return;
     }
+    // Aliases (ghosts) render their SOURCE element's name; resolve those names
+    // once so ghost labels participate in side choice and relaxation like any
+    // other label. (Positions change during decluttering but uids and names do
+    // not, so resolving once up front is safe.)
+    let alias_names = alias_source_names(elements);
     // Choose-sides -> relax, retrying with a uniform zoom whenever the relax
     // jams (a densely packed force-pass core can't be opened by local pushes
     // alone within the iteration budget). Re-choosing sides each attempt lets a
     // label move to a side the new positions freed up. Most layouts converge on
     // the first attempt and never zoom; only an overcrowded one escalates.
-    optimize_label_sides(elements);
+    optimize_label_sides(elements, &alias_names);
     for _ in 0..MAX_RELAX_ATTEMPTS {
-        let converged = relax_positions(elements);
-        optimize_label_sides(elements);
+        let converged = relax_positions(elements, &alias_names);
+        optimize_label_sides(elements, &alias_names);
         if converged {
             break;
         }
@@ -601,8 +636,8 @@ pub fn declutter_view(elements: &mut [ViewElement]) {
     }
     // Final separation + side pass so the settled positions are overlap-free and
     // their labels optimal.
-    relax_positions(elements);
-    optimize_label_sides(elements);
+    relax_positions(elements, &alias_names);
+    optimize_label_sides(elements, &alias_names);
 }
 
 #[cfg(test)]
@@ -870,8 +905,10 @@ mod tests {
 
         // After decluttering, the stock's label box must not overlap the flow's
         // label box (measured exactly as the metric measures them).
-        let stock_label = current_label_box(&elements[0]).expect("stock has a label");
-        let flow_label = current_label_box(&elements[1]).expect("flow has a label");
+        let stock_label =
+            current_label_box(&elements[0], &HashMap::new()).expect("stock has a label");
+        let flow_label =
+            current_label_box(&elements[1], &HashMap::new()).expect("flow has a label");
         let overlap = rect_overlap_area(&stock_label, &flow_label);
         assert!(
             overlap < 1e-9,
@@ -911,8 +948,8 @@ mod tests {
         }
 
         // Precondition: with both labels on Bottom, they overlap.
-        let l1 = current_label_box(&elements[0]).expect("flow 1 label");
-        let l2 = current_label_box(&elements[1]).expect("flow 2 label");
+        let l1 = current_label_box(&elements[0], &HashMap::new()).expect("flow 1 label");
+        let l2 = current_label_box(&elements[1], &HashMap::new()).expect("flow 2 label");
         assert!(
             rect_overlap_area(&l1, &l2) > 1.0,
             "precondition: parallel pipes' Bottom labels must overlap before decluttering"
@@ -920,8 +957,8 @@ mod tests {
 
         declutter_view(&mut elements);
 
-        let l1 = current_label_box(&elements[0]).expect("flow 1 label");
-        let l2 = current_label_box(&elements[1]).expect("flow 2 label");
+        let l1 = current_label_box(&elements[0], &HashMap::new()).expect("flow 1 label");
+        let l2 = current_label_box(&elements[1], &HashMap::new()).expect("flow 2 label");
         let overlap = rect_overlap_area(&l1, &l2);
         assert!(
             overlap < 1e-9,
@@ -965,6 +1002,53 @@ mod tests {
             matches!(f.label_side, LabelSide::Top | LabelSide::Bottom),
             "a horizontal flow's label must stay perpendicular to its pipe \
              (Top or Bottom), got {side_name}"
+        );
+    }
+
+    #[test]
+    fn test_ghost_labels_get_decluttered() {
+        use crate::datamodel::view_element::Alias;
+        // A ghost (alias) parked right next to an aux, both with Bottom labels
+        // that overlap. The declutter must separate them -- ghosts are movable
+        // free-floating nodes whose labels participate like any other.
+        let mut elements = vec![
+            ViewElement::Aux(crate::datamodel::view_element::Aux {
+                name: "consumer variable".to_string(),
+                uid: 1,
+                x: 100.0,
+                y: 100.0,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }),
+            ViewElement::Alias(Alias {
+                uid: 2,
+                alias_of_uid: 1,
+                x: 130.0,
+                y: 100.0,
+                label_side: LabelSide::Bottom,
+                compat: None,
+            }),
+        ];
+
+        // Precondition: footprints overlap before decluttering.
+        let names = alias_source_names(&elements);
+        let aux_box = current_label_box(&elements[0], &names).expect("aux label");
+        let ghost_box = current_label_box(&elements[1], &names).expect("ghost label");
+        assert!(
+            rect_overlap_area(&aux_box, &ghost_box) > 1.0,
+            "precondition: the ghost's label must overlap the aux's label"
+        );
+
+        declutter_view(&mut elements);
+
+        let names = alias_source_names(&elements);
+        let aux_box = current_label_box(&elements[0], &names).expect("aux label");
+        let ghost_box = current_label_box(&elements[1], &names).expect("ghost label");
+        let overlap = rect_overlap_area(&aux_box, &ghost_box);
+        assert!(
+            overlap < 1e-9,
+            "ghost and aux labels must not overlap after decluttering \
+             (overlap area {overlap})"
         );
     }
 

@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+mod aliases;
 pub mod annealing;
 mod aux_placement;
 pub mod chain;
@@ -21,6 +22,7 @@ pub mod uid;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::f64::consts::PI;
 
+use self::aliases::{ReroutedEdges, generate_ghosts};
 use self::annealing::{FlowTemplate, LineSegment, run_annealing_with_filter};
 #[cfg(test)]
 use self::aux_placement::MIN_AUX_LANE_OFFSET;
@@ -3380,6 +3382,7 @@ fn build_connectors(
     state: &mut LayoutState,
     model: &datamodel::Model,
     metadata: &ComputedMetadata,
+    rerouted: &ReroutedEdges,
 ) -> Result<(), String> {
     let mut link_set: HashSet<String> = HashSet::new();
 
@@ -3422,17 +3425,23 @@ fn build_connectors(
                 continue;
             }
 
-            let from_uid = match state.uid_manager.get_uid(from_ident) {
-                Some(uid) => uid,
-                None => {
-                    if model_var_idents.contains(from_ident) {
-                        return Err(format!(
-                            "create_connectors: missing UID for model variable '{}'",
-                            from_ident
-                        ));
+            // A re-routed edge draws its connector from the GHOST of the
+            // source placed near this consumer, not from the far-away original.
+            let reroute_key = (from_ident.to_string(), to_ident.to_string());
+            let from_uid = match rerouted.get(&reroute_key) {
+                Some(&ghost_uid) => ghost_uid,
+                None => match state.uid_manager.get_uid(from_ident) {
+                    Some(uid) => uid,
+                    None => {
+                        if model_var_idents.contains(from_ident) {
+                            return Err(format!(
+                                "create_connectors: missing UID for model variable '{}'",
+                                from_ident
+                            ));
+                        }
+                        continue;
                     }
-                    continue;
-                }
+                },
             };
             let to_uid = match state.uid_manager.get_uid(to_ident) {
                 Some(uid) => uid,
@@ -4066,9 +4075,12 @@ pub fn fresh_layout(
         layout_chain(&mut state, config, metadata, stocks, flows, position)?;
     }
 
-    // Phase 3: Position auxiliaries and create connectors
+    // Phase 3: Position auxiliaries, ghost far-flung pure inputs, and create
+    // connectors. Ghosting must happen after positions settle (it needs real
+    // distances) and before connectors are built (it re-routes them).
     place_auxiliaries(&mut state, config, model, metadata, &chains_data)?;
-    build_connectors(&mut state, model, metadata)?;
+    let rerouted = generate_ghosts(&mut state, config, metadata);
+    build_connectors(&mut state, model, metadata, &rerouted)?;
 
     // Phase 4: Apply optimal label placement
     optimize_labels(&mut state, model, metadata);
@@ -5894,3 +5906,7 @@ mod layout_branching_tests;
 #[cfg(test)]
 #[path = "layout_objective_tests.rs"]
 mod layout_objective_tests;
+
+#[cfg(test)]
+#[path = "layout_alias_tests.rs"]
+mod layout_alias_tests;
