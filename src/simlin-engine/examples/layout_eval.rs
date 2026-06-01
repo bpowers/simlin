@@ -86,7 +86,7 @@ struct ModelSpec {
 use Format::{Vensim, Xmile};
 
 /// The curated corpus. Paths are relative to `CARGO_MANIFEST_DIR`
-/// (`src/simlin-engine`); all 15 were verified to exist on disk.
+/// (`src/simlin-engine`); every entry is verified to exist on disk and load.
 const CORPUS: &[ModelSpec] = &[
     // canonical small
     ModelSpec {
@@ -190,6 +190,30 @@ const CORPUS: &[ModelSpec] = &[
     ModelSpec {
         key: "wonderland",
         rel_path: "../../test/metasd/wonderland/Wonderland3.mdl",
+        format: Vensim,
+    },
+    // multi-view metasd Vensim: hand-authored references that decompose a big
+    // model into ~25-50-variable views connected by ghost/alias variables.
+    // These are the primary exemplars for what readable layouts of large
+    // models look like (and, later, for alias-generation calibration).
+    ModelSpec {
+        key: "scirev",
+        rel_path: "../../test/metasd/scientific-revolution/scirev8.mdl",
+        format: Vensim,
+    },
+    ModelSpec {
+        key: "thyroid",
+        rel_path: "../../test/metasd/thyroid-dynamics/thyroid-2008-d.mdl",
+        format: Vensim,
+    },
+    ModelSpec {
+        key: "covid19",
+        rel_path: "../../test/metasd/covid19-us-homer/homer v8/Covid19US v8.mdl",
+        format: Vensim,
+    },
+    ModelSpec {
+        key: "industrial_dynamics",
+        rel_path: "../../test/metasd/industrial-dynamics/IDch15/IDch15d.mdl",
         format: Vensim,
     },
 ];
@@ -316,6 +340,16 @@ fn baseline_path() -> String {
     format!("{}/{}", env!("CARGO_MANIFEST_DIR"), BASELINE_REL_PATH)
 }
 
+/// A/B knob: `LAYOUT_EVAL_DECLUTTER=0` disables the deterministic declutter
+/// pass so a run can be compared against the pre-declutter behavior. Any other
+/// value (or unset) leaves it on (the production default).
+fn declutter_enabled() -> bool {
+    !matches!(
+        env::var("LAYOUT_EVAL_DECLUTTER").unwrap_or_default().trim(),
+        "0" | "false"
+    )
+}
+
 // ── Per-model seed sweep ─────────────────────────────────────────────────────
 
 /// Lay out `project`'s main model once for each `seed`, score each layout, and
@@ -347,6 +381,7 @@ fn sweep_model(key: &str, project: &datamodel::Project, seeds: &[u64]) -> ModelS
         .filter_map(|&seed| {
             let cfg = LayoutConfig {
                 annealing_random_seed: seed,
+                declutter: declutter_enabled(),
                 ..LayoutConfig::default()
             };
             match generate_layout_with_config(project, MAIN_MODEL, cfg.clone(), None) {
@@ -459,6 +494,7 @@ fn render_generated(
 ) -> Option<Render> {
     let cfg = LayoutConfig {
         annealing_random_seed: seed,
+        declutter: declutter_enabled(),
         ..LayoutConfig::default()
     };
     let view = match generate_layout_with_config(project, MAIN_MODEL, cfg.clone(), None) {
@@ -660,7 +696,7 @@ struct ModelReport {
 }
 
 /// The top-level `metrics.json` document: every scored model plus the corpus
-/// aggregates (the geomean of per-model medians and the weight set used).
+/// aggregates (the shifted-geomean `aggregate_cost` and the weight set used).
 ///
 /// `baseline_comparison` carries the baseline-vs-candidate diff (per-model +
 /// aggregate deltas with Mann-Whitney p-values) when a committed baseline JSON
@@ -672,8 +708,9 @@ struct EvalReport {
     /// Models sorted worst-cost-first (highest `median_cost` at the front), the
     /// same order the contact-sheet renders so the JSON and HTML agree.
     models: Vec<ModelReport>,
-    /// Geometric mean of the per-model medians -- the single headline aggregate.
-    geomean_of_medians: f64,
+    /// Shifted geometric mean (`geomean1p`) of the per-model medians -- the
+    /// single headline aggregate; zero-cost trivial models are neutral factors.
+    aggregate_cost: f64,
     /// The `MetricWeights` used to compute every `weighted_cost` in this report.
     weights: MetricWeights,
     /// The baseline-vs-candidate diff, present only when a committed baseline
@@ -695,14 +732,14 @@ fn render_report(render: &Render) -> RenderReport {
 /// Build the serializable report from the sweep's in-memory results.
 ///
 /// PURE: a read over `(per_model, renders)` (paired positionally -- they are
-/// pushed together per model in `main`) plus the corpus `geomean_of_medians`
+/// pushed together per model in `main`) plus the corpus `aggregate_cost`
 /// and the weight set. Models are sorted worst-cost-first (highest median at
 /// the front), the order the contact-sheet inspects top-down as the visual
 /// guardrail; ties break on the model name so the order is deterministic.
 fn build_report(
     per_model: &[ModelStats],
     renders: &[ModelRenders],
-    geomean_of_medians: f64,
+    aggregate_cost: f64,
     weights: &MetricWeights,
     baseline_comparison: Option<Comparison>,
 ) -> EvalReport {
@@ -738,7 +775,7 @@ fn build_report(
 
     EvalReport {
         models,
-        geomean_of_medians,
+        aggregate_cost,
         weights: *weights,
         baseline_comparison,
     }
@@ -888,7 +925,7 @@ fn write_baseline_diff(html: &mut String, comparison: Option<&Comparison>) {
 /// Render the self-contained `index.html` contact-sheet from the report.
 ///
 /// PURE: a string built from `report`. The header shows the corpus
-/// `geomean_of_medians`, the weight set, and (when a committed baseline was
+/// `aggregate_cost`, the weight set, and (when a committed baseline was
 /// diffed) the baseline-vs-candidate delta table; models are laid out one
 /// section per model, worst-cost-first (the report is already sorted), each with
 /// its reference (if any) and best/median/worst renders side by side and a
@@ -941,9 +978,9 @@ fn render_index_html(report: &EvalReport) -> String {
     html.push_str("<h1>Layout quality eval</h1>\n");
     let _ = writeln!(
         &mut html,
-        "<p class=\"summary\">Corpus <code>geomean_of_medians = {:.4}</code> over \
+        "<p class=\"summary\">Corpus <code>aggregate_cost = {:.4}</code> over \
          {} model(s), sorted worst-cost-first.</p>",
-        report.geomean_of_medians,
+        report.aggregate_cost,
         report.models.len(),
     );
 
@@ -1147,8 +1184,8 @@ fn main() {
 
     let corpus = CorpusReport::from_model_stats(per_model);
     println!(
-        "corpus: geomean_of_medians={:.4} ({} model(s) scored)",
-        corpus.geomean_of_medians,
+        "corpus: aggregate_cost={:.4} ({} model(s) scored)",
+        corpus.aggregate_cost,
         corpus.per_model.len(),
     );
 
@@ -1171,7 +1208,7 @@ fn main() {
     let report = build_report(
         &corpus.per_model,
         &renders,
-        corpus.geomean_of_medians,
+        corpus.aggregate_cost,
         &MetricWeights::default(),
         baseline_comparison,
     );

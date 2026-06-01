@@ -25,7 +25,7 @@ This is the gate for AC3.*, AC4.1-4.3, and the human-in-the-loop part of AC5.
 
 | Step | Action | Expected |
 |------|--------|----------|
-| 1 | `LAYOUT_EVAL_MODELS=teacup,sir LAYOUT_EVAL_SEEDS=4 cargo run --release -p simlin-engine --features png_render,file_io --example layout_eval` | Exits 0 (AC3.1). stdout prints a per-model `sir: median=… p25/p75=…/… best_of_k=… (M=4)` line and `corpus: geomean_of_medians=… (2 model(s) scored)`. |
+| 1 | `LAYOUT_EVAL_MODELS=teacup,sir LAYOUT_EVAL_SEEDS=4 cargo run --release -p simlin-engine --features png_render,file_io --example layout_eval` | Exits 0 (AC3.1). stdout prints a per-model `sir: median=… p25/p75=…/… best_of_k=… (M=4)` line and `corpus: aggregate_cost=… (2 model(s) scored)`. |
 | 2 | `ls target/layout-eval/` | Contains `metrics.json`, `index.html`, and PNGs: `sir_best/median/worst/reference.png`, `teacup_best/median/worst/reference.png`. |
 | 3 | `git status --porcelain target/` | Empty — nothing under `target/` is tracked (AC3.5). |
 
@@ -34,9 +34,9 @@ This is the gate for AC3.*, AC4.1-4.3, and the human-in-the-loop part of AC5.
 | Step | Action | Expected |
 |------|--------|----------|
 | 1 | `cargo run --release -p simlin-engine --features png_render,file_io --example layout_eval` (no env overrides: all corpus keys, M=25) | Exits 0. Each model prints its median/spread/best-of-k line; corpus aggregate at the end. Runtime is minutes (deliberately kept out of `cargo test`). |
-| 2 | Open `target/layout-eval/metrics.json` | Valid JSON. Each `per_model[]` has the full `LayoutMetrics` breakdown (`node_overlap`, `node_connector_overlap`, `label_overlap`, `crossings`, `sprawl`, `edge_length_cv`, `aspect_penalty`, `loop_compactness`, `chain_straightness`) + `weighted_cost`, `median_cost`, `spread`, `best_of_k_cost`, `best/median/worst_seed`. Top level has `geomean_of_medians` and the `weights` set (AC3.2). |
-| 3 | Verify AC4.2 by hand: collect each model's `median_cost`, compute their (epsilon-floored) geometric mean, compare to `geomean_of_medians` | The two agree to a few decimals. |
-| 4 | Open `target/layout-eval/index.html` in a browser | Contact sheet sorted **worst weighted_cost first**. Each model row shows best/median/worst (and reference where present) thumbnails with a per-term cost breakdown and the `median / p25/p75 / best_of_k / M=25` summary (AC3.3). Header shows `geomean_of_medians` and the weight set. |
+| 2 | Open `target/layout-eval/metrics.json` | Valid JSON. Each `per_model[]` has the full `LayoutMetrics` breakdown (`node_overlap`, `node_connector_overlap`, `label_overlap`, `crossings`, `sprawl`, `edge_length_cv`, `aspect_penalty`, `loop_compactness`, `chain_straightness`) + `weighted_cost`, `median_cost`, `spread`, `best_of_k_cost`, `best/median/worst_seed`. Top level has `aggregate_cost` and the `weights` set (AC3.2). |
+| 3 | Verify AC4.2 by hand: collect each model's `median_cost`, compute their shifted geometric mean (`exp(mean(ln(1+x))) - 1`), compare to `aggregate_cost` | The two agree to a few decimals. |
+| 4 | Open `target/layout-eval/index.html` in a browser | Contact sheet sorted **worst weighted_cost first**. Each model row shows best/median/worst (and reference where present) thumbnails with a per-term cost breakdown and the `median / p25/p75 / best_of_k / M=25` summary (AC3.3). Header shows `aggregate_cost` and the weight set. |
 
 ## Phase 3: Human-judgment checks (the calibration gate, AC5.1 / AC5.2)
 

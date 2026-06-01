@@ -303,13 +303,15 @@ fn test_select_best_layout_all_nan_keeps_earliest() {
 // Lowering a ceiling that no longer matches reality is fine; raising one to
 // paper over a real regression is not.
 //
-// Observed at seed 42 (2026-05-23): pop = 0.0533, two_stock = 0.1646.
-// Observed after dependency-aware auxiliary placement (2026-05-26):
-// chain = 0.2. The chain cost is no longer zero because leaf auxes are kept off
-// the dependency lane instead of sitting directly on top of it.
-const GUARD_POP_COST_CEILING: f64 = 0.06;
-const GUARD_CHAIN_COST_CEILING: f64 = 0.22;
-const GUARD_TWO_STOCK_COST_CEILING: f64 = 0.19;
+// Observed at seed 42 (2026-05-31), after the quiescence work and with the
+// sprawl compactness counterweight (0.1) in MetricWeights::default():
+// pop = 0.2023, chain = 0.4959, two_stock = 0.1373. (Each cost now includes
+// ~0.1-0.15 of sprawl-times-weight; the readability terms themselves are near
+// zero on these tiny models.) The regeneration procedure printed these via the
+// GUARD_REGEN lines this test emits.
+const GUARD_POP_COST_CEILING: f64 = 0.24;
+const GUARD_CHAIN_COST_CEILING: f64 = 0.57;
+const GUARD_TWO_STOCK_COST_CEILING: f64 = 0.16;
 
 /// Lay `project`'s `main` model out at the fixed seed 42 and return its
 /// calibrated `weighted_cost`. Seeding explicitly (rather than relying on the
@@ -372,8 +374,15 @@ fn test_weighted_cost_regression_guard() {
         ),
     ];
 
-    for (name, project, ceiling) in cases {
-        let cost = guard_fixed_seed_cost(&project);
+    // Print every cost before asserting so a regeneration run sees all three.
+    let costs: Vec<(&str, f64, f64)> = cases
+        .iter()
+        .map(|(name, project, ceiling)| (*name, guard_fixed_seed_cost(project), *ceiling))
+        .collect();
+    for (name, cost, _) in &costs {
+        eprintln!("GUARD_REGEN: {name} = {cost}");
+    }
+    for (name, cost, ceiling) in costs {
         assert!(
             cost <= ceiling,
             "{name}: fixed-seed weighted_cost {cost} exceeded ceiling {ceiling} \

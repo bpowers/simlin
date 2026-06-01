@@ -59,6 +59,12 @@ pub struct LayoutConfig {
     pub annealing_max_delta_aux: f64,
     /// Maximum displacement for chain nodes (stocks/flows) during annealing.
     pub annealing_max_delta_chain: f64,
+
+    /// Run the deterministic label-aware declutter pass (`layout::declutter`)
+    /// after placement: choose label sides and push overlapping element
+    /// footprints apart so labels/shapes stop colliding. On by default; the
+    /// layout-quality eval can disable it for A/B comparison.
+    pub declutter: bool,
 }
 
 impl LayoutConfig {
@@ -110,8 +116,16 @@ impl Default for LayoutConfig {
             loop_curvature_factor: 0.3,
             annealing_iterations: 200,
             annealing_temperature: 30.0,
-            annealing_cooling_rate: 0.995,
-            annealing_reheat_period: 12,
+            // The schedule must END COLD between reheats (see
+            // test_annealing_schedule_ends_cold_between_reheats): 0.95^100 ~=
+            // 0.6% of base, so each 100-iteration stretch anneals from full
+            // exploration down to pure refinement, with one mid-run reheat to
+            // escape local minima. The previous 0.995/12 schedule reheated
+            // before ever cooling (94% of base), leaving the search a
+            // permanent random walk that accepted cost-increasing moves at
+            // ~97% for the entire run.
+            annealing_cooling_rate: 0.95,
+            annealing_reheat_period: 100,
             annealing_random_seed: 42,
             annealing_interval: 200,
             annealing_max_rounds: 6,
@@ -119,6 +133,7 @@ impl Default for LayoutConfig {
             annealing_temperature_scale: 0.4,
             annealing_max_delta_aux: 200.0,
             annealing_max_delta_chain: 25.0,
+            declutter: true,
         }
     }
 }
@@ -157,13 +172,36 @@ mod tests {
         // Annealing parameters
         assert_eq!(config.annealing_iterations, 200);
         assert!((config.annealing_temperature - 30.0).abs() < f64::EPSILON);
-        assert!((config.annealing_cooling_rate - 0.995).abs() < f64::EPSILON);
-        assert_eq!(config.annealing_reheat_period, 12);
+        assert!((config.annealing_cooling_rate - 0.95).abs() < f64::EPSILON);
+        assert_eq!(config.annealing_reheat_period, 100);
         assert_eq!(config.annealing_random_seed, 42);
         assert_eq!(config.annealing_interval, 200);
         assert_eq!(config.annealing_max_rounds, 6);
         assert!((config.annealing_reheat_temperature - 0.0).abs() < f64::EPSILON);
         assert!((config.annealing_temperature_scale - 0.4).abs() < f64::EPSILON);
+    }
+
+    /// The annealing schedule must actually END COLD between reheats: by the
+    /// time a reheat fires, the temperature must have decayed to (well) under
+    /// 5% of base, so the search alternates real exploration phases with real
+    /// refinement phases. A schedule that reheats before cooling (the old
+    /// 0.995^12 = 94%-of-base) is a permanent random walk: it accepts
+    /// cost-increasing moves at ~97% for the entire run and only ever improves
+    /// by accident.
+    #[test]
+    fn test_annealing_schedule_ends_cold_between_reheats() {
+        let config = LayoutConfig::default();
+        let decay = config
+            .annealing_cooling_rate
+            .powi(config.annealing_reheat_period as i32);
+        assert!(
+            decay < 0.05,
+            "cooling_rate^reheat_period must reach < 5% of base temperature \
+             before each reheat; got {decay:.4} \
+             (cooling_rate {} ^ reheat_period {})",
+            config.annealing_cooling_rate,
+            config.annealing_reheat_period,
+        );
     }
 
     #[test]

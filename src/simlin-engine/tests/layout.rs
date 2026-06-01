@@ -2405,3 +2405,111 @@ fn test_incremental_layout_deterministic() {
          between two serial calls"
     );
 }
+
+/// Tolerance for "a flow endpoint sits ON the stock boundary": generous enough
+/// for float accumulation, far tighter than any visible detachment.
+const ATTACHMENT_TOLERANCE: f64 = 1.0;
+
+/// Whether `(x, y)` lies on the perimeter of the rectangle centered at
+/// `(cx, cy)` with the given width/height, within `ATTACHMENT_TOLERANCE`.
+fn on_rect_boundary(x: f64, y: f64, cx: f64, cy: f64, w: f64, h: f64) -> bool {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    let within_x = x >= cx - hw - ATTACHMENT_TOLERANCE && x <= cx + hw + ATTACHMENT_TOLERANCE;
+    let within_y = y >= cy - hh - ATTACHMENT_TOLERANCE && y <= cy + hh + ATTACHMENT_TOLERANCE;
+    let on_vertical_edge = ((x - (cx - hw)).abs() <= ATTACHMENT_TOLERANCE
+        || (x - (cx + hw)).abs() <= ATTACHMENT_TOLERANCE)
+        && within_y;
+    let on_horizontal_edge = ((y - (cy - hh)).abs() <= ATTACHMENT_TOLERANCE
+        || (y - (cy + hh)).abs() <= ATTACHMENT_TOLERANCE)
+        && within_x;
+    on_vertical_edge || on_horizontal_edge
+}
+
+/// GEOMETRIC flow-stock attachment: every flow point that claims to be
+/// attached to a stock (`attached_to_uid`) must actually LIE ON that stock's
+/// boundary. Logical attachment (the uid reference) alone is not enough -- a
+/// post-processing pass that moves stocks or scales coordinates without
+/// re-snapping flow endpoints leaves flows visually floating in space while
+/// every uid still "points at" the right stock. Exactly that broke once (a
+/// declutter pass's uniform zoom scaled stock centers but not their fixed
+/// sizes) and forced a revert; this test is the tripwire that was missing.
+#[test]
+fn test_flow_endpoints_geometrically_attached_to_stocks() {
+    let model_paths = [
+        "test/test-models/samples/teacup/teacup.stmx",
+        "test/test-models/samples/SIR/SIR.stmx",
+        "test/arms_race_3party/arms_race.stmx",
+        "test/modules_hares_and_foxes/modules_hares_and_foxes.stmx",
+        "test/logistic_growth_ltm/logistic_growth.stmx",
+        "test/decoupled_stocks/decoupled.stmx",
+    ];
+    let config = LayoutConfig::default();
+
+    for path in model_paths {
+        let project = load_project(path);
+        let view = generate_layout(&project, MAIN_MODEL, None)
+            .unwrap_or_else(|e| panic!("layout of {path} should succeed: {e}"));
+
+        // Index stock geometry by uid.
+        let stocks: std::collections::HashMap<i32, (f64, f64)> = view
+            .elements
+            .iter()
+            .filter_map(|elem| match elem {
+                ViewElement::Stock(s) => Some((s.uid, (s.x, s.y))),
+                _ => None,
+            })
+            .collect();
+
+        for elem in &view.elements {
+            let ViewElement::Flow(flow) = elem else {
+                continue;
+            };
+            for pt in &flow.points {
+                let Some(uid) = pt.attached_to_uid else {
+                    continue;
+                };
+                let Some(&(sx, sy)) = stocks.get(&uid) else {
+                    // Attached to a cloud or other element kind; not this
+                    // test's concern.
+                    continue;
+                };
+                assert!(
+                    on_rect_boundary(pt.x, pt.y, sx, sy, config.stock_width, config.stock_height),
+                    "{path}: flow '{}' endpoint ({}, {}) claims attachment to the stock at \
+                     ({sx}, {sy}) but does not lie on its boundary \
+                     ({}x{} rect) -- the flow is visually detached",
+                    flow.name,
+                    pt.x,
+                    pt.y,
+                    config.stock_width,
+                    config.stock_height,
+                );
+            }
+        }
+
+        // Companion structural invariant: no two stocks may overlap. A stock
+        // stacked on another is permanently broken -- the annealing cannot
+        // separate them (stocks are not perturbable) and neither can the
+        // declutter (stocks are not movable there). The chain BFS once stacked
+        // every branch of a branching compartment topology on one spot.
+        let stock_list: Vec<(i32, f64, f64)> = view
+            .elements
+            .iter()
+            .filter_map(|elem| match elem {
+                ViewElement::Stock(s) => Some((s.uid, s.x, s.y)),
+                _ => None,
+            })
+            .collect();
+        for (i, &(uid_a, ax, ay)) in stock_list.iter().enumerate() {
+            for &(uid_b, bx, by) in &stock_list[i + 1..] {
+                let dx = (ax - bx).abs();
+                let dy = (ay - by).abs();
+                assert!(
+                    dx >= config.stock_width || dy >= config.stock_height,
+                    "{path}: stocks uid={uid_a} ({ax}, {ay}) and uid={uid_b} ({bx}, {by}) \
+                     overlap -- stacked stocks can never be separated downstream",
+                );
+            }
+        }
+    }
+}

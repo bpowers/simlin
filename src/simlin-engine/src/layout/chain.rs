@@ -46,6 +46,100 @@ pub fn parse_chain_cloud_ident(ident: &str) -> Option<(usize, usize)> {
     Some((chain_index, seq))
 }
 
+/// Extra clearance (beyond the stock box itself) required between two stocks
+/// before `find_free_stock_position` considers a candidate spot free. Keeps
+/// fanned branch stocks from touching even before labels are accounted for.
+const STOCK_CLEARANCE: f64 = 30.0;
+
+/// Upper bound on vertical fan steps tried by `find_free_stock_position`
+/// before falling back to "below everything". Branching factors above ~2N are
+/// not realistic for stock-flow models; the bound only guarantees termination.
+const MAX_FAN_STEPS: usize = 32;
+
+/// Find a non-colliding position for a newly-placed stock.
+///
+/// The chain BFS lays stocks out along a horizontal line: each stock goes one
+/// `stock_width + horizontal_spacing` left or right of the stock it connects
+/// to. For a BRANCHING topology -- one stock whose flows connect it to two or
+/// more other stocks (compartment models, SIR-style splits) -- every branch
+/// gets the same natural spot, stacking stocks exactly on top of each other.
+/// Stacking is permanent: the annealing cannot separate them (stocks are not
+/// perturbable) and neither can the declutter (stocks are not movable there).
+///
+/// `natural` is the linear-chain spot; `occupied` are the positions of every
+/// stock placed so far in this chain. Candidates are tried in order: the
+/// natural spot itself, then alternating below/above it at increasing
+/// multiples of `vertical_spacing`. The first collision-free candidate wins,
+/// so a non-branching chain is laid out exactly as before. Deterministic.
+pub fn find_free_stock_position(
+    natural: Position,
+    occupied: &[Position],
+    config: &LayoutConfig,
+) -> Position {
+    let collides = |cand: &Position| {
+        occupied.iter().any(|p| {
+            (p.x - cand.x).abs() < config.stock_width + STOCK_CLEARANCE
+                && (p.y - cand.y).abs() < config.stock_height + STOCK_CLEARANCE
+        })
+    };
+    if !collides(&natural) {
+        return natural;
+    }
+    for k in 1..=MAX_FAN_STEPS {
+        let dy = k as f64 * config.vertical_spacing;
+        for cand in [
+            Position::new(natural.x, natural.y + dy),
+            Position::new(natural.x, natural.y - dy),
+        ] {
+            if !collides(&cand) {
+                return cand;
+            }
+        }
+    }
+    // Pathological fallback (only reachable past MAX_FAN_STEPS branches):
+    // place strictly below every occupied stock.
+    let max_y = occupied.iter().map(|p| p.y).fold(natural.y, f64::max);
+    Position::new(natural.x, max_y + config.vertical_spacing)
+}
+
+/// Center-to-center spacing between the parallel pipes of flows that connect
+/// the same stock pair (bidirectional compartment exchange). Two valves a full
+/// spacing apart read as separate flows; kept under the stock half-height
+/// (17.5) times two so a pair of pipes still attaches to the stocks' facing
+/// edges rather than wrapping onto the top/bottom faces.
+const PARALLEL_FLOW_SPACING: f64 = 24.0;
+
+/// Valve position for a stock-to-stock flow: the midpoint of the two stocks,
+/// offset perpendicular to the stock axis when several flows connect the same
+/// pair (bidirectional exchange like thyroid's plasma <-> fast compartments).
+/// Without the offset every such flow's valve lands on the exact midpoint,
+/// stacking the valve circles and their labels.
+///
+/// `pair_index` is this flow's slot among the `pair_count` flows connecting
+/// the pair (in deterministic chain-flow order); slots are centered around the
+/// midpoint so a pair draws symmetrically (-1/2, +1/2 spacing for two flows).
+pub fn stock_pair_valve_position(
+    a: Position,
+    b: Position,
+    pair_index: usize,
+    pair_count: usize,
+) -> Position {
+    let mid = Position::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+    if pair_count <= 1 {
+        return mid;
+    }
+    let offset = (pair_index as f64 - (pair_count as f64 - 1.0) / 2.0) * PARALLEL_FLOW_SPACING;
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-9 {
+        // Degenerate (coincident stocks): fall back to a vertical fan.
+        return Position::new(mid.x, mid.y + offset);
+    }
+    // Unit perpendicular to the a -> b axis.
+    Position::new(mid.x - dy / len * offset, mid.y + dx / len * offset)
+}
+
 /// Recursively follow incoming edges in the dependency graph until we
 /// reach a variable that belongs to a chain.  Returns the set of chain
 /// indices that are (transitively) upstream of `var`.
@@ -207,17 +301,7 @@ pub fn compute_chain_positions(
         }
     }
 
-    // Match Praxis chain-phase SFDP tuning: larger ideal edge length and
-    // weaker attraction, plus long/slow cooling schedule.
-    let sfdp_config = SfdpConfig {
-        k: 150.0,
-        max_iterations: 5000,
-        convergence_threshold: 0.001,
-        initial_step_size: 0.1,
-        cooling_factor: 0.9995,
-        c: 0.5,
-        ..SfdpConfig::default()
-    };
+    let sfdp_config = SfdpConfig::for_chain_positioning();
 
     let build_segments = |candidate_layout: &BTreeMap<String, Position>| -> Vec<LineSegment> {
         let mut segments = Vec::new();
@@ -242,7 +326,7 @@ pub fn compute_chain_positions(
     let max_delta = config.annealing_max_delta_chain;
     let mut annealing_round: usize = 0;
     let mut last_annealing_iter: usize = 0;
-    let mut last_best_crossings: usize = usize::MAX;
+    let mut last_best_crossings: f64 = f64::INFINITY;
     let mut best_annealed_layout: Option<BTreeMap<String, Position>> = None;
     const BETWEEN_ROUND_COOLING: f64 = 0.99;
 
@@ -268,7 +352,7 @@ pub fn compute_chain_positions(
 
             // Decide temperature: reheat if no improvement, cool between rounds
             let mut round_config = config.clone();
-            if crossings >= last_best_crossings && last_best_crossings < usize::MAX {
+            if crossings as f64 >= last_best_crossings && last_best_crossings.is_finite() {
                 // No improvement -- reheat
                 if config.annealing_reheat_temperature > 0.0 {
                     round_config.annealing_temperature = config.annealing_reheat_temperature;
@@ -282,6 +366,9 @@ pub fn compute_chain_positions(
             let result = run_annealing_with_filter(
                 current_layout,
                 build_segments,
+                // Chains are large rigid bodies positioned lanes apart; the
+                // pile-up failure mode of point nodes does not apply here.
+                |_| 0.0,
                 &round_config,
                 config
                     .annealing_random_seed
@@ -291,8 +378,8 @@ pub fn compute_chain_positions(
                 &HashMap::new(),
             );
 
-            if result.crossings < last_best_crossings {
-                last_best_crossings = result.crossings;
+            if result.cost < last_best_crossings {
+                last_best_crossings = result.cost;
                 best_annealed_layout = Some(result.layout.clone());
             }
 
@@ -302,12 +389,32 @@ pub fn compute_chain_positions(
         },
     );
 
+    // One more crossing-reduction pass on the SETTLED layout: a fast-converging
+    // chain layout can finish before the first interleaved annealing interval
+    // elapses, leaving chain crossings never optimized at all.
+    let settled_result = run_annealing_with_filter(
+        &layout,
+        build_segments,
+        |_| 0.0,
+        config,
+        config
+            .annealing_random_seed
+            .wrapping_add(annealing_round as u64),
+        |node_id: &String| node_id.starts_with("chain_"),
+        |_| max_delta,
+        &HashMap::new(),
+    );
+    if settled_result.cost < last_best_crossings {
+        last_best_crossings = settled_result.cost;
+        best_annealed_layout = Some(settled_result.layout);
+    }
+
     // Subsequent SFDP iterations after the last annealing round may have
     // degraded the layout.  Use the best annealed layout if it has fewer
     // crossings than the final SFDP output.
     let layout = if let Some(ref best) = best_annealed_layout {
         let final_crossings = super::annealing::count_crossings(&build_segments(&layout));
-        if last_best_crossings < final_crossings {
+        if last_best_crossings < final_crossings as f64 {
             best.clone()
         } else {
             layout
@@ -373,6 +480,67 @@ pub fn compute_chain_positions(
 mod tests {
     use super::*;
     use crate::layout::metadata::ComputedMetadata;
+
+    #[test]
+    fn test_find_free_stock_position_keeps_natural_when_unoccupied() {
+        let config = LayoutConfig::default();
+        let natural = Position::new(195.0, 50.0);
+        // No occupied stocks, and far-away stocks, both keep the natural spot.
+        assert_eq!(
+            find_free_stock_position(natural, &[], &config),
+            natural,
+            "empty diagram keeps the natural chain position"
+        );
+        let far = vec![Position::new(50.0, 50.0), Position::new(340.0, 50.0)];
+        assert_eq!(
+            find_free_stock_position(natural, &far, &config),
+            natural,
+            "stocks a full chain step away do not force a fan"
+        );
+    }
+
+    #[test]
+    fn test_find_free_stock_position_fans_below_first() {
+        let config = LayoutConfig::default();
+        let natural = Position::new(195.0, 50.0);
+        // The natural spot is taken: fan to directly below it.
+        let occupied = vec![Position::new(50.0, 50.0), natural];
+        let pos = find_free_stock_position(natural, &occupied, &config);
+        assert_eq!(
+            pos,
+            Position::new(195.0, 50.0 + config.vertical_spacing),
+            "first fan candidate is one vertical step below the natural spot"
+        );
+    }
+
+    #[test]
+    fn test_find_free_stock_position_fans_above_second() {
+        let config = LayoutConfig::default();
+        let natural = Position::new(195.0, 50.0);
+        // Natural AND below are taken: fan above.
+        let occupied = vec![
+            natural,
+            Position::new(195.0, 50.0 + config.vertical_spacing),
+        ];
+        let pos = find_free_stock_position(natural, &occupied, &config);
+        assert_eq!(
+            pos,
+            Position::new(195.0, 50.0 - config.vertical_spacing),
+            "second fan candidate is one vertical step above the natural spot"
+        );
+    }
+
+    #[test]
+    fn test_find_free_stock_position_near_collision_counts() {
+        let config = LayoutConfig::default();
+        let natural = Position::new(195.0, 50.0);
+        // A stock NEAR (not exactly on) the natural spot still forces a fan:
+        // boxes closer than stock dimensions + clearance overlap visually.
+        let occupied = vec![Position::new(195.0 + 20.0, 50.0 - 10.0)];
+        let pos = find_free_stock_position(natural, &occupied, &config);
+        assert_ne!(pos, natural, "a nearby stock must force fanning");
+        assert_eq!(pos.x, natural.x, "fanning is vertical (x unchanged)");
+    }
 
     #[test]
     fn test_cloud_node_ident_roundtrip() {

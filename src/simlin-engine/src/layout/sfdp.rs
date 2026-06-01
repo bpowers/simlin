@@ -20,15 +20,22 @@ pub struct SfdpConfig {
     /// Ideal edge length. When negative, auto-calculated from the average
     /// edge length in the initial layout.
     pub k: f64,
-    /// Maximum number of force-directed iterations.
+    /// Maximum number of force-directed iterations. A safety bound only: the
+    /// loop normally exits earlier, when the adaptive step decays below the
+    /// convergence threshold.
     pub max_iterations: usize,
-    /// The algorithm stops when the adaptive step size drops below
-    /// `convergence_threshold / k`.
+    /// The algorithm CONVERGES when the adaptive step size drops below
+    /// `convergence_threshold * k`: at that point every node moves less than
+    /// this fraction of an ideal edge length per iteration, i.e. the layout is
+    /// quiescent.
     pub convergence_threshold: f64,
-    /// Starting step size for node displacement per iteration.
+    /// Starting step size as a fraction of the ideal edge length `k`. A node
+    /// can therefore cross a neighborhood in a handful of early iterations.
     pub initial_step_size: f64,
-    /// Multiplicative cooling applied to the step size when total energy
-    /// increases between iterations.
+    /// Hu's adaptive cooling factor `t`, in (0, 1): the step shrinks by `t`
+    /// whenever total energy rises (we overshot) and grows by `1/t` after
+    /// `STEP_PROGRESS_THRESHOLD` consecutive energy decreases (we are
+    /// descending steadily -- take bigger steps).
     pub cooling_factor: f64,
     /// Repulsive exponent controlling how repulsion scales with distance.
     pub p: f64,
@@ -37,6 +44,38 @@ pub struct SfdpConfig {
     /// Whether to rearrange degree-1 nodes evenly around their parent after
     /// the main loop finishes.
     pub beautify_leaves: bool,
+}
+
+/// Number of consecutive energy decreases before the adaptive step grows
+/// (Hu 2005, "Efficient, High-Quality Force-Directed Graph Drawing", section
+/// 2.2). Growing only after sustained progress keeps the step from
+/// oscillating.
+const STEP_PROGRESS_THRESHOLD: usize = 5;
+
+/// Strength of the centroid gravity applied when -- and only when -- the graph
+/// has multiple connected components, as a fraction of the spring (attraction)
+/// constant. Mutually-disconnected components feel only repulsion from each
+/// other and would drift apart without bound under a converging step scheme;
+/// this weak pull gives them a stable equilibrium a few ideal edge lengths
+/// apart. A connected graph gets NO gravity, so the common case is undistorted.
+const DISCONNECTED_GRAVITY: f64 = 0.5;
+
+/// One step of Hu's adaptive cooling schedule: the next `(step, progress)`
+/// given this iteration's total force magnitude ("energy") and the previous
+/// one. `t` is the cooling factor in (0, 1). PURE.
+fn adapt_step(step: f64, energy: f64, prev_energy: f64, progress: usize, t: f64) -> (f64, usize) {
+    if energy < prev_energy {
+        // Descending. After enough consecutive progress, take bigger steps.
+        let progress = progress + 1;
+        if progress >= STEP_PROGRESS_THRESHOLD {
+            (step / t, 0)
+        } else {
+            (step, progress)
+        }
+    } else {
+        // Overshot (energy rose): cool down and start counting afresh.
+        (step * t, 0)
+    }
 }
 
 impl Default for SfdpConfig {
@@ -50,6 +89,52 @@ impl Default for SfdpConfig {
             p: -1.0,
             c: 0.2,
             beautify_leaves: false,
+        }
+    }
+}
+
+impl SfdpConfig {
+    /// The configuration production uses to place auxiliaries around the rigid
+    /// stock-flow chains (`run_sfdp_with_rigid_chains` and the incremental
+    /// `settle_new_elements`). Defined here, next to the algorithm, so the
+    /// convergence behavior of the production configuration is directly
+    /// testable.
+    ///
+    /// `initial_step_size`/`convergence_threshold` are fractions of `k`, and
+    /// `cooling_factor` is Hu's `t` (see the field docs). The previous values
+    /// (absolute step 0.1, cooling 0.9995) could not converge: reaching the
+    /// threshold needed ~18k cooling steps with only 5000 iterations available,
+    /// so every layout was cut off mid-flight rather than settled.
+    pub fn for_aux_placement() -> Self {
+        Self {
+            // The ideal edge length must leave room for LABELS, not just node
+            // shapes: a converged layout puts connected nodes ~k apart, and a
+            // typical two-line variable label is 100-150 units wide. At the
+            // pre-quiescence k of 75 the equilibrium piled labels on top of
+            // each other (the non-converging schedule masked this by cutting
+            // layouts off mid-expansion).
+            k: 150.0,
+            max_iterations: 5000,
+            convergence_threshold: 0.001,
+            initial_step_size: 1.0,
+            cooling_factor: 0.9,
+            c: 3.0,
+            ..Self::default()
+        }
+    }
+
+    /// The configuration production uses to position whole stock-flow chains
+    /// relative to each other (`chain::compute_chain_positions`): larger ideal
+    /// edge length and weaker attraction than aux placement.
+    pub fn for_chain_positioning() -> Self {
+        Self {
+            k: 150.0,
+            max_iterations: 5000,
+            convergence_threshold: 0.001,
+            initial_step_size: 1.0,
+            cooling_factor: 0.9,
+            c: 0.5,
+            ..Self::default()
         }
     }
 }
@@ -99,13 +184,13 @@ fn build_edge_indices<N: NodeId>(
 /// them in the `BTreeMap<N, Position>` form `apply_forces_with_rigid_constraints`
 /// consumes.
 ///
-/// This is bit-identical to the prior inline computation -- repulsive forces
-/// accumulate in the same `i < j` pair order followed by the same edge order,
-/// and the rebuilt map has the same (sorted) keys and values -- so the adaptive
-/// step, convergence, and final layout are unchanged. The only difference is
-/// mechanical: ~n^2 String clones and B-tree lookups per iteration become flat
-/// `Vec` indexing, which is where the layout pipeline spent ~98% of its time
-/// (String comparison alone was ~16% of total runtime).
+/// Repulsive forces accumulate in `i < j` pair order followed by edge order,
+/// using flat `Vec` indexing rather than String-keyed maps (the hot loop;
+/// String comparison alone was ~16% of total layout runtime before the index
+/// form). `gravity` adds a weak linear pull toward the centroid of all
+/// positioned nodes; it is non-zero only for graphs with multiple connected
+/// components (see `force_directed_with_rigid_cb`), so connected graphs see
+/// byte-identical forces to a gravity-free computation.
 fn compute_iteration_forces<N: NodeId>(
     layout: &Layout<N>,
     nodes: &[N],
@@ -113,6 +198,7 @@ fn compute_iteration_forces<N: NodeId>(
     kp: f64,
     crk: f64,
     p: f64,
+    gravity: f64,
 ) -> BTreeMap<N, Position> {
     let n = nodes.len();
     let positions: Vec<Option<Position>> =
@@ -161,6 +247,29 @@ fn compute_iteration_forces<N: NodeId>(
         forces[a].y -= fy;
         forces[b].x += fx;
         forces[b].y += fy;
+    }
+
+    // Weak centroid gravity for disconnected graphs: a linear spring toward
+    // the centroid of all positioned nodes. Guarded so a connected graph
+    // (gravity == 0) skips the loop entirely.
+    if gravity > 0.0 {
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        let mut count = 0usize;
+        for pos in positions.iter().flatten() {
+            cx += pos.x;
+            cy += pos.y;
+            count += 1;
+        }
+        if count > 0 {
+            let cx = cx / count as f64;
+            let cy = cy / count as f64;
+            for i in 0..n {
+                let Some(pos) = positions[i] else { continue };
+                forces[i].x += gravity * (cx - pos.x);
+                forces[i].y += gravity * (cy - pos.y);
+            }
+        }
     }
 
     // Rebuild the sorted map apply_forces expects, one entry per node with a
@@ -249,38 +358,7 @@ impl<'a, N: NodeId> Sfdp<'a, N> {
 
     /// Main force-directed loop with rigid group constraints.
     fn force_directed_with_rigid(&self, layout: &mut Layout<N>, k: f64) {
-        let config = self.config;
-        let kp = k.powf(1.0 - config.p);
-        let crk = config.c.powf((2.0 - config.p) / 3.0) / k;
-
-        let mut step = config.initial_step_size;
-        let mut prev_norm = f64::MAX;
-
-        let nodes: Vec<N> = self.graph.nodes().cloned().collect();
-        let node_index = build_node_index(&nodes);
-        let edges_idx = build_edge_indices(&node_index, self.graph);
-
-        let group_offsets = self.compute_rigid_group_offsets(layout);
-
-        for _iteration in 0..config.max_iterations {
-            let forces = compute_iteration_forces(layout, &nodes, &edges_idx, kp, crk, config.p);
-
-            let norm =
-                self.apply_forces_with_rigid_constraints(layout, &forces, step, &group_offsets);
-
-            // Adaptive cooling: increase step when energy drops significantly,
-            // cool when energy rises, hold steady for small improvements.
-            if norm >= prev_norm {
-                step *= config.cooling_factor;
-            } else if norm <= 0.95 * prev_norm {
-                step *= 0.99 / config.cooling_factor;
-            }
-            prev_norm = norm;
-
-            if step < config.convergence_threshold / k {
-                break;
-            }
-        }
+        self.force_directed_with_rigid_cb(layout, k, &mut |_, _| None)
     }
 
     /// Apply computed forces to the layout, respecting pinned nodes and rigid
@@ -374,6 +452,12 @@ impl<'a, N: NodeId> Sfdp<'a, N> {
     }
 
     /// Force-directed loop with iteration callback for interleaved annealing.
+    ///
+    /// The step schedule is Hu's adaptive cooling (see `adapt_step`), with both
+    /// the initial step and the convergence threshold expressed relative to the
+    /// ideal edge length `k`. The loop EXITS VIA CONVERGENCE in the normal case
+    /// (the step decays below `convergence_threshold * k`, i.e. the layout is
+    /// quiescent); `max_iterations` is only a safety bound.
     fn force_directed_with_rigid_cb(
         &self,
         layout: &mut Layout<N>,
@@ -384,12 +468,24 @@ impl<'a, N: NodeId> Sfdp<'a, N> {
         let kp = k.powf(1.0 - config.p);
         let crk = config.c.powf((2.0 - config.p) / 3.0) / k;
 
-        let mut step = config.initial_step_size;
+        let mut step = config.initial_step_size * k;
+        let convergence_step = config.convergence_threshold * k;
+        let mut progress = 0usize;
         let mut prev_norm = f64::MAX;
 
         let nodes: Vec<N> = self.graph.nodes().cloned().collect();
         let node_index = build_node_index(&nodes);
         let edges_idx = build_edge_indices(&node_index, self.graph);
+
+        // Mutually-disconnected components feel only repulsion from each other
+        // and would drift apart forever under a converging step scheme; weak
+        // centroid gravity gives them an equilibrium. Connected graphs (the
+        // common case) get NO gravity.
+        let gravity = if self.graph.connected_component_count() > 1 {
+            DISCONNECTED_GRAVITY * crk
+        } else {
+            0.0
+        };
 
         // Computed once from the initial layout. These offsets become stale if
         // the callback replaces the layout, but the constraints still converge
@@ -398,24 +494,25 @@ impl<'a, N: NodeId> Sfdp<'a, N> {
         let group_offsets = self.compute_rigid_group_offsets(layout);
 
         for iteration in 0..config.max_iterations {
-            let forces = compute_iteration_forces(layout, &nodes, &edges_idx, kp, crk, config.p);
+            let forces =
+                compute_iteration_forces(layout, &nodes, &edges_idx, kp, crk, config.p, gravity);
 
             let norm =
                 self.apply_forces_with_rigid_constraints(layout, &forces, step, &group_offsets);
 
-            if norm >= prev_norm {
-                step *= config.cooling_factor;
-            } else if norm <= 0.95 * prev_norm {
-                step *= 0.99 / config.cooling_factor;
-            }
+            (step, progress) = adapt_step(step, norm, prev_norm, progress, config.cooling_factor);
             prev_norm = norm;
 
             // Invoke callback; if it returns an updated layout, use it
             if let Some(new_layout) = callback(iteration, layout) {
                 *layout = new_layout;
+                // The replaced (annealed) layout's force profile is unrelated
+                // to the pre-replacement one; compare energies afresh so the
+                // jump is not misread as an energy spike.
+                prev_norm = f64::MAX;
             }
 
-            if step < config.convergence_threshold / k {
+            if step < convergence_step {
                 break;
             }
         }
@@ -775,6 +872,169 @@ mod tests {
         assert!(
             call_count <= 10,
             "callback should not exceed max_iterations"
+        );
+    }
+
+    // ---- adapt_step (Hu's schedule) ----
+
+    #[test]
+    fn test_adapt_step_grows_after_consecutive_decreases() {
+        let t = 0.9;
+        let mut step = 10.0;
+        let mut progress = 0;
+        // Four decreases: step unchanged, progress accumulates.
+        for i in 1..STEP_PROGRESS_THRESHOLD {
+            (step, progress) = adapt_step(step, 1.0, 2.0, progress, t);
+            assert_eq!(step, 10.0, "step must hold until sustained progress");
+            assert_eq!(progress, i);
+        }
+        // The fifth consecutive decrease grows the step and resets progress.
+        (step, progress) = adapt_step(step, 1.0, 2.0, progress, t);
+        assert!(
+            (step - 10.0 / t).abs() < 1e-12,
+            "step should grow by 1/t, got {step}"
+        );
+        assert_eq!(progress, 0);
+    }
+
+    #[test]
+    fn test_adapt_step_cools_on_energy_increase() {
+        let t = 0.9;
+        // Progress is wiped and the step shrinks when energy rises.
+        let (step, progress) = adapt_step(10.0, 3.0, 2.0, 4, t);
+        assert!((step - 9.0).abs() < 1e-12, "step should shrink by t");
+        assert_eq!(progress, 0);
+        // Equal energy counts as "not decreasing" (cool) so plateaus also decay.
+        let (step, progress) = adapt_step(10.0, 2.0, 2.0, 4, t);
+        assert!((step - 9.0).abs() < 1e-12);
+        assert_eq!(progress, 0);
+    }
+
+    /// A 6x6 grid mesh: 36 nodes, 60 edges, fully connected. Big enough that a
+    /// broken step schedule cannot converge, small enough to run fast in tests.
+    fn grid_graph(n: usize) -> ConstrainedGraph<String> {
+        let node = |r: usize, c: usize| format!("n_{r}_{c}");
+        let mut gb = GraphBuilder::new_undirected();
+        for r in 0..n {
+            for c in 0..n {
+                if c + 1 < n {
+                    gb.add_edge(node(r, c), node(r, c + 1), 1.0);
+                }
+                if r + 1 < n {
+                    gb.add_edge(node(r, c), node(r + 1, c), 1.0);
+                }
+            }
+        }
+        ConstrainedGraphBuilder::new(gb.build()).build()
+    }
+
+    /// Run a config on a graph and report (last iteration index, final layout).
+    fn run_to_completion(
+        cg: &ConstrainedGraph<String>,
+        config: &SfdpConfig,
+    ) -> (usize, Layout<String>) {
+        let mut last_iteration = 0;
+        let layout = compute_layout_from_initial_with_callback(
+            cg,
+            config,
+            &BTreeMap::new(),
+            42,
+            &mut |iter, _layout| {
+                last_iteration = iter;
+                None
+            },
+        );
+        (last_iteration, layout)
+    }
+
+    /// QUIESCENCE: the production aux-placement configuration must CONVERGE (the
+    /// adaptive step decays below the convergence threshold and the loop exits)
+    /// on a moderately-sized connected graph -- not run until max_iterations and
+    /// stop wherever it happens to be. Layouts cut off mid-flight are exactly the
+    /// "this node is obviously stuck in the wrong place" tangles users see.
+    #[test]
+    fn test_aux_placement_config_converges_on_moderate_graph() {
+        let cg = grid_graph(6);
+        let config = SfdpConfig::for_aux_placement();
+
+        let (last_iteration, layout) = run_to_completion(&cg, &config);
+
+        assert_eq!(layout.len(), 36);
+        assert!(
+            last_iteration < config.max_iterations - 1,
+            "production SFDP config should converge before max_iterations ({}); \
+             it ran the full budget (last iteration {})",
+            config.max_iterations,
+            last_iteration
+        );
+    }
+
+    /// Same property for the chain-positioning configuration.
+    #[test]
+    fn test_chain_positioning_config_converges_on_moderate_graph() {
+        let cg = grid_graph(4);
+        let config = SfdpConfig::for_chain_positioning();
+
+        let (last_iteration, layout) = run_to_completion(&cg, &config);
+
+        assert_eq!(layout.len(), 16);
+        assert!(
+            last_iteration < config.max_iterations - 1,
+            "production chain SFDP config should converge before max_iterations ({}); \
+             it ran the full budget (last iteration {})",
+            config.max_iterations,
+            last_iteration
+        );
+    }
+
+    /// DISCONNECTED COMPONENTS: two clusters with no edge between them must end
+    /// a bounded distance apart -- mutual repulsion alone would push them apart
+    /// without limit under a properly-converging step scheme, so the algorithm
+    /// applies a weak centroid gravity when (and only when) the graph has more
+    /// than one component.
+    #[test]
+    fn test_disconnected_components_stay_bounded() {
+        // Two 4-cycles, no edges between them.
+        let mut gb = GraphBuilder::new_undirected();
+        for (prefix, _) in [("a", 0), ("b", 1)] {
+            for i in 0..4 {
+                gb.add_edge(
+                    format!("{prefix}{i}"),
+                    format!("{prefix}{}", (i + 1) % 4),
+                    1.0,
+                );
+            }
+        }
+        let cg = ConstrainedGraphBuilder::new(gb.build()).build();
+        let config = SfdpConfig::for_aux_placement();
+
+        let (_, layout) = run_to_completion(&cg, &config);
+
+        // Centroid distance between the two clusters stays within a couple of
+        // dozen ideal edge lengths.
+        let centroid = |prefix: &str| -> Position {
+            let pts: Vec<Position> = layout
+                .iter()
+                .filter(|(n, _)| n.starts_with(prefix))
+                .map(|(_, &p)| p)
+                .collect();
+            Position::new(
+                pts.iter().map(|p| p.x).sum::<f64>() / pts.len() as f64,
+                pts.iter().map(|p| p.y).sum::<f64>() / pts.len() as f64,
+            )
+        };
+        let dist = (centroid("a") - centroid("b")).length();
+        assert!(
+            dist < 25.0 * config.k,
+            "disconnected components should stay bounded; centroids are {dist} apart \
+             (k = {})",
+            config.k
+        );
+        // ...but they must not be squeezed on top of each other either.
+        assert!(
+            dist > config.k / 2.0,
+            "disconnected components should not collapse onto each other; \
+             centroids are {dist} apart"
         );
     }
 }

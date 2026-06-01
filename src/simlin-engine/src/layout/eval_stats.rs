@@ -22,10 +22,9 @@ use crate::layout::metrics::LayoutMetrics;
 
 /// Geometric mean of strictly-positive values: `exp(mean(ln(x)))`.
 ///
-/// Returns `0.0` for an empty slice. Values must be `> 0`; layout costs are
-/// `>= 0`, so callers floor with a small epsilon before calling (see
-/// [`CorpusReport::from_model_stats`]) so a single `0` cost cannot zero the
-/// whole-corpus geometric mean.
+/// Returns `0.0` for an empty slice. Values must be `> 0` (a `0` collapses the
+/// whole mean to `0`); for non-negative cost data that may legitimately contain
+/// zeros, use [`geomean1p`] instead.
 pub fn geomean(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -38,6 +37,31 @@ pub fn geomean(values: &[f64]) -> f64 {
     }
     let sum_ln: f64 = values.iter().map(|&x| x.ln()).sum();
     (sum_ln / values.len() as f64).exp()
+}
+
+/// Shifted geometric mean of non-negative values: `exp(mean(ln(1 + x))) - 1`.
+///
+/// This is the corpus-aggregation primitive for layout costs, which are `>= 0`
+/// and frequently exactly `0` (a perfect layout of a trivial model). A plain
+/// geometric mean cannot tolerate zeros: either it collapses to `0`, or -- when
+/// patched with an epsilon floor -- the floored term `ln(epsilon)` becomes a
+/// huge negative outlier, making the aggregate hyper-sensitive to trivial
+/// models and insensitive to the costly ones that actually matter. Shifting by
+/// `+1` makes a zero-cost model a *neutral* factor (`ln(1) = 0`) while
+/// preserving the geomean's ratio-averaging behavior for costs near or above 1.
+///
+/// Returns `0.0` for an empty slice and the value itself for a single-element
+/// slice. Strictly monotone in every element.
+pub fn geomean1p(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    // Single value: identity, avoiding ln/exp round-trip error (matches geomean).
+    if values.len() == 1 {
+        return values[0];
+    }
+    let sum_ln1p: f64 = values.iter().map(|&x| x.ln_1p()).sum();
+    (sum_ln1p / values.len() as f64).exp_m1()
 }
 
 /// Linear-interpolated percentile using the "type 7" convention (NumPy's
@@ -204,14 +228,6 @@ fn phi(x: f64) -> f64 {
     0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
 }
 
-/// Floor applied to each model's median before it enters the corpus geometric
-/// mean. A geometric mean is the product of its terms, so a single `0` median
-/// would zero the whole aggregate; flooring with this small epsilon keeps a
-/// genuinely-perfect (zero-cost) model from collapsing the corpus number while
-/// remaining far below any meaningful cost. Documented and applied only in
-/// [`CorpusReport::from_model_stats`].
-pub const GEOMEAN_FLOOR_EPSILON: f64 = 1e-9;
-
 /// One per-seed layout sample: the seed that produced the layout, its computed
 /// metrics, and the scalar weighted cost the optimizer minimizes.
 ///
@@ -248,8 +264,8 @@ pub struct ModelStats {
     pub worst_seed: u64,
 }
 
-/// Corpus-wide report: one `ModelStats` per model plus the geometric mean of
-/// the per-model medians (the single headline aggregate, benchstat-style).
+/// Corpus-wide report: one `ModelStats` per model plus the single headline
+/// aggregate (benchstat-style center over the corpus).
 ///
 /// `Serialize`/`Deserialize` let the corpus sweep write this report to the
 /// committed `examples/layout_eval_baseline.json` and read it back for the
@@ -259,7 +275,11 @@ pub struct ModelStats {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CorpusReport {
     pub per_model: Vec<ModelStats>,
-    pub geomean_of_medians: f64,
+    /// Shifted geometric mean ([`geomean1p`]) of the per-model median costs --
+    /// the single headline number to minimize. `0.0` = every model laid out
+    /// perfectly. Zero-cost (trivial) models contribute a neutral factor, so
+    /// this number tracks the models that actually have cost.
+    pub aggregate_cost: f64,
 }
 
 impl ModelStats {
@@ -360,19 +380,16 @@ impl ModelStats {
 }
 
 impl CorpusReport {
-    /// Build a corpus report. `geomean_of_medians` is the geometric mean of
-    /// each model's `median_cost`, with each median floored by
-    /// [`GEOMEAN_FLOOR_EPSILON`] so a single `0` median cannot zero the whole
-    /// aggregate. An empty corpus yields `geomean_of_medians == 0.0`.
+    /// Build a corpus report. `aggregate_cost` is the shifted geometric mean
+    /// ([`geomean1p`]) of each model's `median_cost`, so a `0` median is a
+    /// neutral factor rather than either zeroing the aggregate or (epsilon-
+    /// floored) dominating it. An empty corpus yields `aggregate_cost == 0.0`.
     pub fn from_model_stats(per_model: Vec<ModelStats>) -> CorpusReport {
-        let medians: Vec<f64> = per_model
-            .iter()
-            .map(|m| m.median_cost.max(GEOMEAN_FLOOR_EPSILON))
-            .collect();
-        let geomean_of_medians = geomean(&medians);
+        let medians: Vec<f64> = per_model.iter().map(|m| m.median_cost).collect();
+        let aggregate_cost = geomean1p(&medians);
         CorpusReport {
             per_model,
-            geomean_of_medians,
+            aggregate_cost,
         }
     }
 }
@@ -394,7 +411,9 @@ pub struct ModelComparison {
     /// Two-sided Mann-Whitney U p-value over the two models' seed-sample
     /// `weighted_cost` vectors.
     pub p_value: f64,
-    /// `p_value < SIGNIFICANCE_ALPHA`.
+    /// `p_value < SIGNIFICANCE_ALPHA` AND `|delta_ratio| >=
+    /// MIN_PRACTICAL_DELTA_RATIO` -- statistically separated AND practically
+    /// non-trivial.
     pub significant: bool,
 }
 
@@ -409,18 +428,30 @@ pub struct Comparison {
     /// One entry per model present in BOTH reports (unmatched models are
     /// skipped -- see [`compare`]), in baseline iteration order.
     pub per_model: Vec<ModelComparison>,
-    /// `geomean(candidate medians) / geomean(baseline medians) - 1.0` over the
-    /// matched per-model medians, or `0.0` when the baseline geomean is `0`.
+    /// `geomean1p(candidate medians) / geomean1p(baseline medians) - 1.0` over
+    /// the matched per-model medians, or `0.0` when the baseline aggregate is
+    /// `0`.
     pub aggregate_delta_ratio: f64,
     /// Two-sided Mann-Whitney U p-value over the matched per-model medians (see
     /// [`compare`] for why Mann-Whitney rather than a paired test).
     pub aggregate_p_value: f64,
-    /// `aggregate_p_value < SIGNIFICANCE_ALPHA`.
+    /// `aggregate_p_value < SIGNIFICANCE_ALPHA` AND `|aggregate_delta_ratio| >=
+    /// MIN_PRACTICAL_DELTA_RATIO`.
     pub aggregate_significant: bool,
 }
 
 /// Significance threshold for the p-value verdicts -- the conventional 5%.
 pub const SIGNIFICANCE_ALPHA: f64 = 0.05;
+
+/// Minimum |delta_ratio| for a difference to count as significant -- 0.1%.
+///
+/// Statistical significance is not practical significance: layout is
+/// deterministic per seed, so an unrelated code change that perturbs costs at
+/// the floating-point level produces two completely-separated sample sets and a
+/// p-value of ~0 -- on a delta of 0.000x%. Without this floor every comparison
+/// would drown in spurious "significant 0.00%" rows. Real layout improvements
+/// are orders of magnitude above 0.1%.
+pub const MIN_PRACTICAL_DELTA_RATIO: f64 = 0.001;
 
 /// Compute `candidate / baseline - 1.0`, returning `0.0` when `baseline == 0`
 /// so a degenerate (zero) baseline never produces an infinite or NaN ratio.
@@ -442,13 +473,14 @@ fn delta_ratio(baseline: f64, candidate: f64) -> f64 {
 ///
 /// Per matched model: the two seed-sample `weighted_cost` vectors are run
 /// through [`mann_whitney_u`]; `delta_ratio` is computed from the medians
-/// (`0.0` when the baseline median is `0`); `significant` is
-/// `p_value < SIGNIFICANCE_ALPHA`.
+/// (`0.0` when the baseline median is `0`); `significant` requires BOTH
+/// `p_value < SIGNIFICANCE_ALPHA` and `|delta_ratio| >=
+/// MIN_PRACTICAL_DELTA_RATIO`.
 ///
 /// Aggregate: `aggregate_delta_ratio` is the ratio of the candidate-side to
-/// baseline-side geometric mean of the matched per-model medians (each side
-/// floored by [`GEOMEAN_FLOOR_EPSILON`] exactly as [`CorpusReport`] does, so a
-/// `0` median can't zero the aggregate). `aggregate_p_value` is
+/// baseline-side shifted geometric mean ([`geomean1p`]) of the matched
+/// per-model medians (so a `0` median is a neutral factor on either side, not a
+/// floored outlier). `aggregate_p_value` is
 /// `mann_whitney_u(baseline_medians, candidate_medians).p_value` over the
 /// matched per-model medians.
 ///
@@ -497,23 +529,16 @@ pub fn compare(baseline: &CorpusReport, candidate: &CorpusReport) -> Comparison 
             candidate_median,
             delta_ratio: ratio,
             p_value: mw.p_value,
-            significant: mw.p_value < SIGNIFICANCE_ALPHA,
+            significant: mw.p_value < SIGNIFICANCE_ALPHA
+                && ratio.abs() >= MIN_PRACTICAL_DELTA_RATIO,
         });
     }
 
-    // Aggregate delta: ratio of the two geomean-of-medians, each side floored
-    // by the same epsilon CorpusReport uses so a single 0 median can't zero a
-    // side's geometric mean.
-    let baseline_floored: Vec<f64> = baseline_medians
-        .iter()
-        .map(|&m| m.max(GEOMEAN_FLOOR_EPSILON))
-        .collect();
-    let candidate_floored: Vec<f64> = candidate_medians
-        .iter()
-        .map(|&m| m.max(GEOMEAN_FLOOR_EPSILON))
-        .collect();
+    // Aggregate delta: ratio of the two shifted geomeans of the matched
+    // medians. The shift makes a 0 median a neutral factor on either side, so
+    // the ratio reflects the models that actually have cost.
     let aggregate_delta_ratio =
-        delta_ratio(geomean(&baseline_floored), geomean(&candidate_floored));
+        delta_ratio(geomean1p(&baseline_medians), geomean1p(&candidate_medians));
 
     let aggregate_p_value = mann_whitney_u(&baseline_medians, &candidate_medians).p_value;
 
@@ -521,7 +546,8 @@ pub fn compare(baseline: &CorpusReport, candidate: &CorpusReport) -> Comparison 
         per_model,
         aggregate_delta_ratio,
         aggregate_p_value,
-        aggregate_significant: aggregate_p_value < SIGNIFICANCE_ALPHA,
+        aggregate_significant: aggregate_p_value < SIGNIFICANCE_ALPHA
+            && aggregate_delta_ratio.abs() >= MIN_PRACTICAL_DELTA_RATIO,
     }
 }
 
@@ -534,6 +560,66 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < EPS
+    }
+
+    // --- geomean1p ---
+
+    #[test]
+    fn test_geomean1p_all_zero_is_zero() {
+        // A zero cost contributes ln(1 + 0) = 0 to the shifted geomean: an
+        // all-zero (perfect) corpus aggregates to exactly 0.
+        assert_eq!(geomean1p(&[0.0, 0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn test_geomean1p_known_values() {
+        // [0, e-1]: exp((ln(1) + ln(e)) / 2) - 1 = exp(0.5) - 1.
+        let g = geomean1p(&[0.0, std::f64::consts::E - 1.0]);
+        assert!(close(g, 0.5_f64.exp() - 1.0), "{g}");
+        // [2, 8, 32]: cbrt(3 * 9 * 33) - 1.
+        let g = geomean1p(&[2.0, 8.0, 32.0]);
+        assert!(close(g, (3.0 * 9.0 * 33.0_f64).cbrt() - 1.0), "{g}");
+    }
+
+    #[test]
+    fn test_geomean1p_empty_is_zero() {
+        assert_eq!(geomean1p(&[]), 0.0);
+    }
+
+    #[test]
+    fn test_geomean1p_single_is_identity() {
+        assert_eq!(geomean1p(&[5.0]), 5.0);
+        assert_eq!(geomean1p(&[0.0]), 0.0);
+    }
+
+    #[test]
+    fn test_geomean1p_zero_cost_model_is_neutral_not_dominant() {
+        // The failure mode of an epsilon-floored plain geomean: a model going
+        // from exactly 0 to a tiny-but-nonzero cost (0.04) swung the aggregate
+        // by ~2.5x, because ln(epsilon) is a huge negative outlier. With the
+        // shifted geomean the same change moves the aggregate by under 2%, so
+        // the headline number tracks the models that actually have cost.
+        let with_zero = geomean1p(&[0.0, 10.0, 1000.0]);
+        let with_tiny = geomean1p(&[0.04, 10.0, 1000.0]);
+        assert!(with_zero > 0.0);
+        let swing = (with_tiny / with_zero - 1.0).abs();
+        assert!(
+            swing < 0.02,
+            "a 0 -> 0.04 change on one model should barely move the aggregate; \
+             moved {:.1}% ({} -> {})",
+            swing * 100.0,
+            with_zero,
+            with_tiny
+        );
+    }
+
+    #[test]
+    fn test_geomean1p_monotone_in_each_value() {
+        // Increasing any one cost strictly increases the aggregate.
+        let base = geomean1p(&[1.0, 5.0, 20.0]);
+        assert!(geomean1p(&[2.0, 5.0, 20.0]) > base);
+        assert!(geomean1p(&[1.0, 6.0, 20.0]) > base);
+        assert!(geomean1p(&[1.0, 5.0, 21.0]) > base);
     }
 
     // --- geomean ---
@@ -895,8 +981,8 @@ mod tests {
     }
 
     #[test]
-    fn test_from_model_stats_geomean_of_medians() {
-        // Three models with medians 2, 8, 32: geomean = cbrt(2*8*32) = cbrt(512) = 8.
+    fn test_from_model_stats_aggregate_cost_is_shifted_geomean() {
+        // Three models with medians 2, 8, 32: shifted geomean = cbrt(3*9*33) - 1.
         let per_model = vec![
             model_stats_with_median("a", 2.0),
             model_stats_with_median("b", 8.0),
@@ -905,22 +991,23 @@ mod tests {
         let medians: Vec<f64> = per_model.iter().map(|m| m.median_cost).collect();
         let report = CorpusReport::from_model_stats(per_model);
         assert!(
-            close(report.geomean_of_medians, geomean(&medians)),
+            close(report.aggregate_cost, geomean1p(&medians)),
             "{} != {}",
-            report.geomean_of_medians,
-            geomean(&medians)
+            report.aggregate_cost,
+            geomean1p(&medians)
         );
         assert!(
-            close(report.geomean_of_medians, 8.0),
+            close(report.aggregate_cost, (3.0 * 9.0 * 33.0_f64).cbrt() - 1.0),
             "{}",
-            report.geomean_of_medians
+            report.aggregate_cost
         );
     }
 
     #[test]
     fn test_from_model_stats_zero_median_does_not_zero_aggregate() {
-        // A model with median 0 must not collapse the corpus geomean to 0; the
-        // epsilon floor keeps it positive and finite.
+        // A model with median 0 must neither collapse the corpus aggregate to 0
+        // nor dominate it: with the shifted geomean a perfect (zero-cost) model
+        // contributes a neutral factor of 1.
         let per_model = vec![
             model_stats_with_median("a", 0.0),
             model_stats_with_median("b", 10.0),
@@ -928,26 +1015,53 @@ mod tests {
         ];
         let report = CorpusReport::from_model_stats(per_model);
         assert!(
-            report.geomean_of_medians > 0.0,
+            report.aggregate_cost > 0.0,
             "a single 0 median must not zero the aggregate: got {}",
-            report.geomean_of_medians
+            report.aggregate_cost
         );
-        assert!(report.geomean_of_medians.is_finite());
-        // It must equal the geomean of the floored medians, exactly.
-        let floored = [GEOMEAN_FLOOR_EPSILON, 10.0, 1000.0];
+        assert!(report.aggregate_cost.is_finite());
+        // It must equal the shifted geomean of the raw medians, exactly: no
+        // epsilon floor involved.
+        let medians = [0.0, 10.0, 1000.0];
         assert!(
-            close(report.geomean_of_medians, geomean(&floored)),
+            close(report.aggregate_cost, geomean1p(&medians)),
             "{} != {}",
-            report.geomean_of_medians,
-            geomean(&floored)
+            report.aggregate_cost,
+            geomean1p(&medians)
         );
     }
 
     #[test]
     fn test_from_model_stats_empty_corpus_is_zero() {
         let report = CorpusReport::from_model_stats(vec![]);
-        assert_eq!(report.geomean_of_medians, 0.0);
-        assert!(report.geomean_of_medians.is_finite());
+        assert_eq!(report.aggregate_cost, 0.0);
+        assert!(report.aggregate_cost.is_finite());
+    }
+
+    #[test]
+    fn test_from_model_stats_big_model_improvement_moves_aggregate() {
+        // The reason for the shifted geomean: a 10x improvement on the
+        // worst-cost model must visibly move the corpus aggregate even when
+        // trivial near-zero models are present.
+        let before = CorpusReport::from_model_stats(vec![
+            model_stats_with_median("trivial1", 0.0),
+            model_stats_with_median("trivial2", 0.0),
+            model_stats_with_median("small", 0.2),
+            model_stats_with_median("big", 170.0),
+        ]);
+        let after = CorpusReport::from_model_stats(vec![
+            model_stats_with_median("trivial1", 0.0),
+            model_stats_with_median("trivial2", 0.0),
+            model_stats_with_median("small", 0.2),
+            model_stats_with_median("big", 17.0),
+        ]);
+        let improvement = 1.0 - after.aggregate_cost / before.aggregate_cost;
+        assert!(
+            improvement > 0.30,
+            "a 10x improvement on the dominant model should improve the \
+             aggregate by >30%; got {:.1}%",
+            improvement * 100.0
+        );
     }
 
     // --- Task 3: compare(baseline, candidate) ---
@@ -1143,5 +1257,59 @@ mod tests {
     fn test_compare_significance_alpha_is_five_percent() {
         // The exported significance threshold is the conventional 0.05.
         assert_eq!(SIGNIFICANCE_ALPHA, 0.05);
+    }
+
+    #[test]
+    fn test_compare_microscopic_delta_is_not_significant() {
+        // Statistical significance is not practical significance: when every
+        // candidate sample differs from the baseline by a hair (e.g. a
+        // floating-point-level perturbation from an unrelated code change),
+        // Mann-Whitney sees two completely-separated samples and reports
+        // p ~ 0 -- but a |delta| below MIN_PRACTICAL_DELTA_RATIO must NOT be
+        // flagged significant, or every future comparison drowns in spurious
+        // "significant 0.00%" rows.
+        let baseline = CorpusReport::from_model_stats(vec![model_stats_from_costs(
+            "m",
+            &[(1, 10.0), (2, 10.0), (3, 10.0), (4, 10.0), (5, 10.0)],
+        )]);
+        // Identical costs shifted by one part in ten million.
+        let eps = 10.0 * 1e-7;
+        let candidate = CorpusReport::from_model_stats(vec![model_stats_from_costs(
+            "m",
+            &[
+                (1, 10.0 - eps),
+                (2, 10.0 - eps),
+                (3, 10.0 - eps),
+                (4, 10.0 - eps),
+                (5, 10.0 - eps),
+            ],
+        )]);
+
+        let cmp = compare(&baseline, &candidate);
+        assert_eq!(cmp.per_model.len(), 1);
+        // The samples completely separate, so the p-value alone says
+        // "significant"...
+        assert!(cmp.per_model[0].p_value < SIGNIFICANCE_ALPHA);
+        // ...but the delta is microscopic, so the verdict must be NO.
+        assert!(
+            !cmp.per_model[0].significant,
+            "a {:.6}% delta must not be flagged significant",
+            cmp.per_model[0].delta_ratio * 100.0
+        );
+        assert!(!cmp.aggregate_significant);
+
+        // A REAL improvement on the same samples is still flagged per-model.
+        // (The AGGREGATE verdict runs Mann-Whitney over per-model medians --
+        // one sample per side here -- which can never separate, so only the
+        // per-model verdict is meaningful for a single-model comparison.)
+        let improved = CorpusReport::from_model_stats(vec![model_stats_from_costs(
+            "m",
+            &[(1, 5.0), (2, 5.0), (3, 5.0), (4, 5.0), (5, 5.0)],
+        )]);
+        let cmp = compare(&baseline, &improved);
+        assert!(
+            cmp.per_model[0].significant,
+            "a -50% delta with separated samples must be flagged significant"
+        );
     }
 }

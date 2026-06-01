@@ -2339,7 +2339,7 @@ fn test_build_connectors() {
     }));
     state.positions.insert(br_uid, Position::new(150.0, 50.0));
 
-    build_connectors(&mut state, &model, &metadata).unwrap();
+    build_connectors(&mut state, &model, &metadata, &ReroutedEdges::new()).unwrap();
 
     // Collect all Link elements
     let links: Vec<&view_element::Link> = state
