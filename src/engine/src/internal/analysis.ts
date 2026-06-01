@@ -77,17 +77,31 @@ export function simlin_free_loops(loops: SimlinLoopsPtr): void {
 
 /**
  * Analyze a simulation and get links with LTM scores.
+ *
+ * When `includeInternal` is false, macro/module-internal synthetic nodes are
+ * collapsed out (each `X -> internal -> Y` chain becomes one composite edge
+ * carrying the composite link score). When true (the default, preserving the
+ * historical TS behavior), the raw causal graph is returned.
+ *
  * @param sim Simulation pointer
+ * @param includeInternal Whether to keep macro/module-internal synthetic nodes
  * @returns Links pointer
  */
-export function simlin_analyze_get_links(sim: SimlinSimPtr): SimlinLinksPtr {
+export function simlin_analyze_get_links(
+  sim: SimlinSimPtr,
+  includeInternal = true,
+): SimlinLinksPtr {
   const exports = getExports();
-  const fn = exports.simlin_analyze_get_links as (sim: number, outErr: number) => number;
+  const fn = exports.simlin_analyze_get_links as (
+    sim: number,
+    includeInternal: number,
+    outErr: number,
+  ) => number;
 
   const outErrPtr = allocOutPtr();
 
   try {
-    const result = fn(sim, outErrPtr);
+    const result = fn(sim, includeInternal ? 1 : 0, outErrPtr);
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {
@@ -128,6 +142,7 @@ export function simlin_analyze_links_from_wasm_results(
   model: SimlinModelPtr,
   slab: Uint8Array,
   layoutBytes: Uint8Array,
+  includeInternal = true,
 ): SimlinLinksPtr {
   const exports = getExports();
   const fn = exports.simlin_analyze_links_from_wasm_results as (
@@ -136,6 +151,7 @@ export function simlin_analyze_links_from_wasm_results(
     slabLen: number,
     layoutPtr: number,
     layoutLen: number,
+    includeInternal: number,
     outErr: number,
   ) => number;
 
@@ -144,7 +160,15 @@ export function simlin_analyze_links_from_wasm_results(
   const outErrPtr = allocOutPtr();
 
   try {
-    const result = fn(model, slabPtr, slab.length, layoutPtr, layoutBytes.length, outErrPtr);
+    const result = fn(
+      model,
+      slabPtr,
+      slab.length,
+      layoutPtr,
+      layoutBytes.length,
+      includeInternal ? 1 : 0,
+      outErrPtr,
+    );
     const errPtr = readOutPtr(outErrPtr);
 
     if (errPtr !== 0) {
@@ -176,6 +200,15 @@ export function simlin_free_links(links: SimlinLinksPtr): void {
 
 /**
  * Get relative loop score for a specific loop.
+ *
+ * The relative score normalizes a loop's raw `loop_score` against the
+ * magnitudes of all loops sharing its cycle-partition. Caveat: a modeler-pinned
+ * loop (`pin{n}` id) sits in its own single-slot partition, so when it is the
+ * only loop scored there (always so in discovery mode) the relative score
+ * degenerates to +/-1 (active/inactive) -- the raw `$⁚ltm⁚loop_score⁚pin{n}`
+ * series is the informative one for a lone pin. See the engine's
+ * `compute_rel_loop_scores` rustdoc.
+ *
  * @param sim Simulation pointer
  * @param loopId Loop identifier
  * @param stepCount Number of steps

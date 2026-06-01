@@ -48,7 +48,7 @@ pub use types::{
 // Crate-internal helpers used from sibling modules in `simlin-engine`.
 pub(crate) use graph::assign_loop_ids;
 pub(crate) use partitions::loop_dimension_element_tuples;
-pub(crate) use types::normalize_module_ref;
+pub(crate) use types::{is_synthetic_node_name, normalize_module_ref};
 
 // Shared SCC primitive over an `Ident`-keyed adjacency list. Used in
 // production by the `db/dep_graph.rs` element-cycle refinement

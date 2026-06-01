@@ -192,6 +192,13 @@ fn canonicalize_module(module: &mut datamodel::Module) {
 }
 
 fn get_uid(var: &Variable) -> Option<i32> {
+    variable_uid(var)
+}
+
+/// The datamodel UID of a variable, or `None` if it has not been assigned
+/// one yet. Pinned-loop sync (`db::sync`) reads this to resolve a
+/// `LoopMetadata`'s UID references back to canonical variable names.
+pub fn variable_uid(var: &Variable) -> Option<i32> {
     match var {
         Variable::Stock(s) => s.uid,
         Variable::Flow(f) => f.uid,
@@ -374,6 +381,11 @@ fn apply_set_loop_name(
     }) {
         existing.name = name;
         existing.description = description.unwrap_or_default();
+        // SetLoopName means "name/pin this loop", so revive a previously
+        // soft-deleted entry -- otherwise the consumers that filter out deleted
+        // entries (pinned-loop scoring, loop-name display) would silently ignore
+        // the re-pin.
+        existing.deleted = false;
     } else {
         model.loop_metadata.push(datamodel::LoopMetadata {
             uids,
@@ -3037,6 +3049,57 @@ mod tests {
             "should update the same entry, not create a second one"
         );
         assert_eq!(model.loop_metadata[0].name, "second name");
+    }
+
+    #[test]
+    fn set_loop_name_revives_a_previously_deleted_entry() {
+        // A LoopMetadata can be soft-deleted (a user removing a loop name, or a
+        // deserialized project carrying `deleted: true`). Re-naming the same
+        // variable set via SetLoopName means "name/pin this loop" and must REVIVE
+        // the entry (clear `deleted`); otherwise the consumers that filter out
+        // deleted entries -- pinned-loop scoring (`pinned_loops_from_datamodel`)
+        // and the loop-name display (`build_uid_to_loop_name`) -- silently ignore
+        // it, so the user's re-pin has no effect.
+        let mut project = TestProject::new("test")
+            .aux("x", "1", None)
+            .aux("y", "x", None)
+            .build_datamodel();
+        assign_uids(&mut project, "main", &[("x", 1), ("y", 2)]);
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["x".to_string(), "y".to_string()],
+                    name: "loop".to_string(),
+                    description: None,
+                }],
+            }],
+        };
+        apply_patch(&mut project, patch.clone()).unwrap();
+
+        // Soft-delete the entry, as a serialized/UI deletion would.
+        let model = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .unwrap();
+        model.loop_metadata[0].deleted = true;
+
+        // Re-pinning the same variable set must revive the entry.
+        apply_patch(&mut project, patch).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        assert_eq!(
+            model.loop_metadata.len(),
+            1,
+            "should update the existing entry, not create a second one"
+        );
+        assert!(
+            !model.loop_metadata[0].deleted,
+            "SetLoopName must revive a previously-deleted entry so it is scored/displayed again"
+        );
     }
 
     #[test]

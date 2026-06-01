@@ -46,6 +46,7 @@ from .json_types import (
     Project,
     Rect,
     RenameVariable,
+    SetLoopName,
     SetSimSpecs,
     SimSpecs,
     Stock,
@@ -240,6 +241,17 @@ def _create_converter() -> cattrs.Converter:
 
     conv.register_unstructure_hook(DeleteView, unstructure_delete_view)
 
+    def unstructure_set_loop_name(op: SetLoopName) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "variables": list(op.variables),
+            "name": op.name,
+        }
+        if op.description is not None:
+            payload["description"] = op.description
+        return {"type": "setLoopName", "payload": payload}
+
+    conv.register_unstructure_hook(SetLoopName, unstructure_set_loop_name)
+
     # Valid model operation type names for error messages
     _valid_model_op_types = (
         "upsertStock",
@@ -250,6 +262,7 @@ def _create_converter() -> cattrs.Converter:
         "renameVariable",
         "upsertView",
         "deleteView",
+        "setLoopName",
     )
 
     # Structure hook for parsing tagged JSON back to concrete types
@@ -273,6 +286,12 @@ def _create_converter() -> cattrs.Converter:
             return UpsertView(index=payload["index"], view=conv.structure(payload["view"], View))
         elif type_name == "deleteView":
             return DeleteView(index=payload["index"])
+        elif type_name == "setLoopName":
+            return SetLoopName(
+                variables=list(payload["variables"]),
+                name=payload["name"],
+                description=payload.get("description"),
+            )
         else:
             valid = ", ".join(_valid_model_op_types)
             raise ValueError(
@@ -290,6 +309,7 @@ def _create_converter() -> cattrs.Converter:
             RenameVariable,
             UpsertView,
             DeleteView,
+            SetLoopName,
         ],
         structure_model_op,
     )

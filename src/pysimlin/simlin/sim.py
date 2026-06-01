@@ -22,7 +22,7 @@ from ._ffi import (
     lib,
     string_to_c,
 )
-from .analysis import Link, LinkPolarity
+from .analysis import Link, LinkPolarity, LtmMode
 from .errors import SimlinRuntimeError
 
 if TYPE_CHECKING:
@@ -262,10 +262,23 @@ class Sim:
         check_out_error(err_ptr, "Get step count")
         return int(count_ptr[0])
 
-    def get_links(self) -> list[Link]:
+    def get_links(self, include_internal: bool = False) -> list[Link]:
         """Get all causal links from the simulation.
 
         If the simulation was run with LTM enabled, link scores will be included.
+
+        Args:
+            include_internal: When ``False`` (the default), macro/module-internal
+                synthetic nodes (the ``$:{var}:{n}:{func}`` macro-instantiation
+                internals and ``$:ltm:...`` LTM nodes, where ``:`` is the
+                reserved U+205A separator) are collapsed out of the returned
+                graph. Each chain ``X -> internal -> Y`` becomes a
+                single composite edge ``X -> Y`` whose polarity is the product
+                of the collapsed links and whose score is the composite
+                (largest-magnitude path) link score, so the contribution that
+                flows *through* a SMOOTH/DELAY/module is preserved rather than
+                dropped. When ``True``, the raw causal graph (including every
+                synthetic node) is returned.
 
         Returns:
             List of Link objects with optional score data
@@ -273,7 +286,9 @@ class Sim:
         with self._lock:
             self._check_alive()
             err_ptr = ffi.new("SimlinError **")
-            links_ptr = lib.simlin_analyze_get_links(self._ptr, err_ptr)
+            links_ptr = lib.simlin_analyze_get_links(
+                self._ptr, include_internal, err_ptr
+            )
             check_out_error(err_ptr, "Get links")
 
         if links_ptr == ffi.NULL:
@@ -307,6 +322,29 @@ class Sim:
         finally:
             lib.simlin_free_links(links_ptr)
 
+    def get_ltm_mode(self) -> LtmMode:
+        """Return the LTM loop-enumeration mode this simulation resolved to.
+
+        The mode is determined when the simulation is created, so this is
+        available without running the simulation.
+
+        Returns:
+            :class:`~simlin.analysis.LtmMode`: ``DISABLED`` when the sim was
+            created with ``enable_ltm=False``, ``EXHAUSTIVE`` when every
+            feedback loop was enumerated, or ``DISCOVERY`` when the model
+            tripped the SCC-size gate (or discovery was requested directly)
+            so loops are ranked by the strongest-path heuristic.
+
+        Raises:
+            SimlinRuntimeError: If the underlying query fails.
+        """
+        with self._lock:
+            self._check_alive()
+            err_ptr = ffi.new("SimlinError **")
+            mode = lib.simlin_sim_get_ltm_mode(self._ptr, err_ptr)
+            check_out_error(err_ptr, "Get LTM mode")
+            return LtmMode(int(mode))
+
     def get_relative_loop_score(
         self,
         loop_id: str,
@@ -314,7 +352,28 @@ class Sim:
     ) -> NDArray[np.float64]:
         """Get the relative loop score time series for a specific loop.
 
+        The relative loop score normalizes a loop's raw ``loop_score`` by the
+        magnitudes of all loops that share its cycle-partition, so it reads as
+        the loop's fractional contribution to model behavior at each step.
+
         This requires the simulation to have been run with enable_ltm=True.
+
+        .. note::
+            **Pinned loops (``pin{n}`` ids) alone in their partition.** A
+            pinned loop is placed in its own single-slot cycle partition.  When
+            it is the *only* loop scored in that partition -- always the case in
+            discovery mode (where no enumerated loop scores exist), and in
+            exhaustive mode whenever the pin is the lone loop through its stock
+            -- normalization has nothing else to divide against, so the relative
+            score degenerates to exactly ``+1`` while the loop is active and
+            ``-1`` while it opposes (the sign of the raw score).  This is
+            expected, not a bug.  For a lone pin the **raw** ``loop_score``
+            series is the informative one: read it via :meth:`get_series` using
+            the loop's raw ``loop_score`` synthetic variable name (the
+            ``loop_score`` synthetic carrying the loop id, joined by the U+205A
+            separator).  When **multiple** pins (or a pin plus enumerated loops)
+            sit on stocks in the same SCC partition, they DO normalize against
+            each other and the relative score is meaningful as usual.
 
         Args:
             loop_id: The identifier of the loop (e.g. ``"r1"``).

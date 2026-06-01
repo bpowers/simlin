@@ -705,6 +705,187 @@ fn test_smooth_goal_seeking_ltm() {
     );
 }
 
+/// GH #548 (fixed): a feedback loop running *through* a SMOOTH macro must
+/// capture the macro's composite contribution in its loop SCORE.
+///
+/// For the goal-seeking model
+/// `level (stock) -> SMTH1(level) -> gap -> adjustment -> level`:
+///
+///   * The module computes its own internal composite correctly:
+///     `$⁚smoothed_level⁚0⁚smth1·$⁚ltm⁚composite⁚input` is non-zero and varies
+///     over the run (it carries the input->output path score through the
+///     macro's internal stock).
+///   * The module's OUTPUT-side root link score
+///     `$⁚ltm⁚link_score⁚$⁚…smth1→smoothed_level` is the expected ~1.
+///   * The INPUT-side root link score
+///     `$⁚ltm⁚link_score⁚level→$⁚…smth1` is the exhaustive
+///     `!from_is_module && to_is_module` composite-reference form
+///     (`"$⁚…smth1·$⁚ltm⁚composite⁚input"`). Before the fix, the standalone
+///     fragment compiler reconstructed the SMOOTH sub-model *without* its LTM
+///     augmentation, so that cross-module reference did not resolve, the
+///     fragment was dropped, and the link score read a constant 0 -- zeroing
+///     the whole loop. Now `build_submodel_metadata` registers the sub-model's
+///     LTM synthetic vars (including the composite), so the reference resolves
+///     and the link score carries the macro's composite signal.
+///   * Because the loop score is the product of its link scores, the
+///     previously-zeroing `level->smth1` link now lets the parent
+///     `$⁚ltm⁚loop_score⁚b1` carry the loop's real, varying activity.
+#[test]
+fn smooth_macro_composite_flows_into_parent_loop_score_gh548() {
+    let with_smooth = TestProject::new("with_smooth")
+        .with_sim_time(0.0, 20.0, 0.25)
+        .aux("goal", "100", None)
+        .stock("level", "50", &["adjustment"], &[], None)
+        .aux("smoothed_level", "SMTH1(level, 3)", None)
+        .aux("gap", "goal - smoothed_level", None)
+        .aux("adjustment_time", "5", None)
+        .flow("adjustment", "gap / adjustment_time", None)
+        .build_datamodel();
+
+    // The loop IS discovered structurally (names trimmed correctly).
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &with_smooth, None);
+    let source_model = sync.models["main"].source_model;
+    let detected = model_detected_loops(&db, source_model, sync.project);
+    assert!(
+        !detected.loops.is_empty(),
+        "the SMOOTH feedback loop must be discovered structurally"
+    );
+
+    let compiled = compile_ltm_incremental(&with_smooth);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let series = |name: &str| -> Option<Vec<f64>> {
+        let ident = Ident::<Canonical>::new(name);
+        results
+            .offsets
+            .get(&ident)
+            .map(|&off| results.iter().map(|row| row[off]).collect())
+    };
+    let max_abs = |s: &[f64]| {
+        s.iter()
+            .filter(|v| v.is_finite())
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max)
+    };
+
+    // The module's OWN internal composite carries a real, varying signal.
+    let internal_composite = series("$⁚smoothed_level⁚0⁚smth1·$⁚ltm⁚composite⁚input")
+        .expect("module-internal composite var must be emitted");
+    assert!(
+        max_abs(&internal_composite) > 1.0,
+        "the macro computes a non-trivial internal composite"
+    );
+
+    // The OUTPUT-side root link score works (~1).
+    let out_side = series("$⁚ltm⁚link_score⁚$⁚smoothed_level⁚0⁚smth1→smoothed_level")
+        .expect("module->downstream root link score must be emitted");
+    assert!(
+        max_abs(&out_side) > 0.5,
+        "module->downstream link score should be ~1"
+    );
+
+    // THE FIX: the input-side root link score (which references the internal
+    // composite across the module boundary) now resolves and carries the
+    // macro's composite signal instead of a constant 0.
+    let in_side = series("$⁚ltm⁚link_score⁚level→$⁚smoothed_level⁚0⁚smth1")
+        .expect("input->module root link score must be emitted");
+    assert!(
+        max_abs(&in_side) > 0.0,
+        "GH #548 fixed: the input->module composite reference must resolve and \
+         carry the macro's composite contribution into the parent (was a \
+         constant 0); got {in_side:?}"
+    );
+    // The link score must match the module's internal composite it references
+    // (the composite-reference form is a verbatim read of the sub-model's
+    // `$⁚ltm⁚composite⁚input`), proving the cross-module read resolves to the
+    // right slot rather than some other non-zero value.
+    assert_eq!(
+        in_side, internal_composite,
+        "the input->module link score is the verbatim cross-module read of the \
+         macro's internal composite, so the two series must be identical"
+    );
+
+    // And the parent loop score is no longer zeroed by that dropped link: it
+    // carries the loop's real activity through the SMOOTH macro.
+    let loop_b1 = series("$⁚ltm⁚loop_score⁚b1").expect("parent loop score b1 must be emitted");
+    assert!(
+        max_abs(&loop_b1) > 0.0,
+        "GH #548 fixed: the parent loop score through the SMOOTH macro must be \
+         non-zero (was zeroed by the dropped input->module composite); got \
+         {loop_b1:?}"
+    );
+}
+
+/// GH #548 follow-up: the macro's contribution must actually *vary* over the
+/// run -- a non-zero-at-one-step assertion alone could be satisfied by a
+/// degenerate constant. As the goal-seeking system converges the smoothed
+/// `level` (and hence the composite path score through the SMOOTH) changes,
+/// so both the input->macro link score and the loop score must take more than
+/// one distinct value. Covers SMOOTH (`SMTH1`) and DELAY (`DELAY1`), the two
+/// most common macro-in-loop constructs in the #548 bug class.
+#[test]
+fn macro_in_loop_score_varies_over_run_gh548() {
+    fn link_and_loop_vary(macro_call: &str, macro_kind: &str) {
+        let model = TestProject::new("macro_loop")
+            .with_sim_time(0.0, 30.0, 0.25)
+            .aux("goal", "100", None)
+            .stock("level", "50", &["adjustment"], &[], None)
+            .aux("perceived_level", macro_call, None)
+            .aux("gap", "goal - perceived_level", None)
+            .aux("adjustment_time", "5", None)
+            .flow("adjustment", "gap / adjustment_time", None)
+            .build_datamodel();
+
+        let compiled = compile_ltm_incremental(&model);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
+
+        let series = |name: &str| -> Option<Vec<f64>> {
+            let ident = Ident::<Canonical>::new(name);
+            results
+                .offsets
+                .get(&ident)
+                .map(|&off| results.iter().map(|row| row[off]).collect())
+        };
+        let distinct_finite = |s: &[f64]| -> usize {
+            let mut vals: Vec<u64> = s
+                .iter()
+                .filter(|v| v.is_finite())
+                .map(|v| v.to_bits())
+                .collect();
+            vals.sort_unstable();
+            vals.dedup();
+            vals.len()
+        };
+
+        let link = series(&format!(
+            "$⁚ltm⁚link_score⁚level→$⁚perceived_level⁚0⁚{macro_kind}"
+        ))
+        .unwrap_or_else(|| panic!("input->{macro_kind} link score must be emitted"));
+        assert!(
+            distinct_finite(&link) > 1,
+            "the {macro_kind} input link score must vary over the run (the \
+             macro's composite responds to the changing input), not stub to a \
+             single value; got {link:?}"
+        );
+
+        let loop_b1 = series("$⁚ltm⁚loop_score⁚b1")
+            .expect("parent loop score b1 must be emitted for a macro-in-loop model");
+        assert!(
+            distinct_finite(&loop_b1) > 1,
+            "the loop score through the {macro_kind} macro must vary over the \
+             run; got {loop_b1:?}"
+        );
+    }
+
+    link_and_loop_vary("SMTH1(level, 3)", "smth1");
+    link_and_loop_vary("DELAY1(level, 3)", "delay1");
+}
+
 // Issue #419: discovery mode should find loops through SMOOTH composite paths.
 #[test]
 fn test_smooth_model_discovery_mode() {
@@ -4452,8 +4633,10 @@ fn discover_loops_element_level(
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        None,
     )
     .expect("discover_loops_with_graph should succeed")
+    .loops
 }
 
 /// AC7.1: Discovery mode on an arrayed model finds element-specific loops.
@@ -8039,8 +8222,10 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
         &stocks,
         &ltm_vars.vars,
         dm_dims,
+        None,
     )
-    .expect("discover_loops_with_graph should succeed");
+    .expect("discover_loops_with_graph should succeed")
+    .loops;
     assert!(
         !found.is_empty(),
         "discovery should find at least one loop in the inlined-reducer model"

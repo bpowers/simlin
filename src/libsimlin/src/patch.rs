@@ -133,6 +133,12 @@ enum JsonModelOperation {
         inflows: Vec<String>,
         outflows: Vec<String>,
     },
+    SetLoopName {
+        variables: Vec<String>,
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+    },
 }
 
 // ── conversion helpers ─────────────────────────────────────────────────
@@ -206,6 +212,15 @@ fn convert_json_model_operation(
             ident,
             inflows,
             outflows,
+        },
+        JsonModelOperation::SetLoopName {
+            variables,
+            name,
+            description,
+        } => engine::ModelOperation::SetLoopName {
+            variables,
+            name,
+            description,
         },
     };
     Ok(result)

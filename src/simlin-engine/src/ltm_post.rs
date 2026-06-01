@@ -98,6 +98,21 @@ fn slot_partition(
 /// SAFEDIV equation.  Loops whose `loop_score` is absent from `results`
 /// (e.g. LTM disabled for that loop, or discovery-mode compilation) are
 /// omitted from the returned map.
+///
+/// # Lone-pin degeneracy
+///
+/// A modeler-pinned loop (`pin{n}` id) is registered in its own single-slot
+/// `loop_partitions` entry.  When a pin is the *only* loop in its partition --
+/// always the case in discovery mode (no enumerated loop scores exist there)
+/// and in exhaustive mode whenever the pin is the lone loop through its stock
+/// -- the partition sum equals `|loop_score[pin]|`, so the relative score
+/// collapses to exactly `+1` (or `-1`, carrying the raw score's sign) whenever
+/// the loop is active and `0` (via SAFEDIV-0) when its raw score is `0`.  This
+/// is intentional: a fraction-of-all-known-loops normalization is undefined
+/// for a partition of one.  Callers that want a pinned loop's actual magnitude
+/// should read its **raw** `loop_score` series directly.  Two or more pins (or
+/// a pin plus enumerated loops) on stocks in the *same* SCC partition normalize
+/// against each other normally.
 pub fn compute_rel_loop_scores(
     results: &Results,
     loop_partitions: &HashMap<String, Vec<Option<usize>>>,

@@ -14,11 +14,12 @@
 //! link score synthetic variables (generated with `ltm_discovery_mode` enabled).
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel;
 use crate::db::LtmSyntheticVar;
-use crate::ltm::{CausalGraph, CyclePartitions, Link, Loop, LoopPolarity};
+use crate::ltm::{CausalGraph, CyclePartitions, Link, LinkPolarity, Loop, LoopPolarity};
 use crate::project::Project;
 use crate::results::Results;
 
@@ -47,6 +48,13 @@ const LTM_LINK_SEP: char = '→';
 // --- Internal types ---
 
 /// An outbound edge in the search graph: target variable and |link_score|.
+///
+/// `SearchGraph` is the original `Ident`-keyed, per-timestep-rebuilt reference
+/// implementation. Production discovery now runs over the integer-indexed
+/// `IndexedSearch` (built once, no per-step string hashing); `SearchGraph` is
+/// retained as the test-only correctness oracle that documents the reference
+/// algorithm and is cross-checked against `IndexedSearch` for equivalence.
+#[cfg(test)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 struct ScoredEdge {
     to: Ident<Canonical>,
@@ -55,6 +63,7 @@ struct ScoredEdge {
 }
 
 /// The search graph for one timestep: adjacency list with edges sorted by |score| desc.
+#[cfg(test)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 struct SearchGraph {
     /// variable -> outbound edges, sorted by |score| descending
@@ -77,6 +86,26 @@ pub struct FoundLoop {
     pub avg_abs_score: f64,
 }
 
+/// The outcome of a strongest-path discovery run.
+///
+/// `truncated` is `true` when a caller-supplied time budget elapsed before the
+/// per-timestep DFS sweep finished, so `loops` reflects only the timesteps
+/// processed before the budget ran out (and is therefore *possibly* partial:
+/// loops only dominant in unprocessed timesteps will be absent, and the
+/// per-step importance series of the loops that *were* found is complete,
+/// since each loop's score is recomputed across all steps once its path is
+/// known). Discovery on large models can be infeasibly slow (GH #647), so the
+/// budget lets callers bound wall-clock time and report partial results rather
+/// than hang.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+pub struct DiscoveryResult {
+    /// Loops discovered (ranked, filtered, and ID-assigned).
+    pub loops: Vec<FoundLoop>,
+    /// Whether the time budget elapsed before discovery finished.
+    pub truncated: bool,
+}
+
+#[cfg(test)]
 impl SearchGraph {
     /// Build from a list of (from, to, abs_score) triples.
     fn from_edges(
@@ -620,7 +649,9 @@ pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundL
         details: Some("No non-implicit model found for loop discovery".to_string()),
     })?;
     let causal_graph = CausalGraph::from_model(main_model, project)?;
-    discover_loops_with_graph(results, &causal_graph, &stocks, &[], &[])
+    // The convenience path is unbudgeted: it builds the graph from a `Project`
+    // and is used by small-model callers that never hit the GH #647 slowness.
+    Ok(discover_loops_with_graph(results, &causal_graph, &stocks, &[], &[], None)?.loops)
 }
 
 /// Collapse synthetic aggregate nodes out of a discovered loop's link chain.
@@ -697,6 +728,591 @@ fn trim_synthetic_aggs_from_loop_links(links: &[Link]) -> Option<Vec<Link>> {
     Some(links)
 }
 
+/// A directed causal link, optionally carrying its per-timestep LTM link-score
+/// series, suitable for synthetic-node collapse.
+///
+/// This is the abstract shape [`collapse_synthetic_links`] operates on so the
+/// collapse lives in the engine (and every binding benefits) while the caller
+/// owns whatever string/score representation it ultimately serializes.
+/// `score` is `None` for a structural-only caller (no simulation results) and
+/// `Some(series)` for an LTM run; the collapse preserves the distinction.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone)]
+pub struct CollapsibleLink {
+    pub from: Ident<Canonical>,
+    pub to: Ident<Canonical>,
+    pub polarity: LinkPolarity,
+    /// Per-timestep link-score series. `None` when no LTM results back this
+    /// link (the structural-only path), `Some` after an LTM simulation.
+    pub score: Option<Vec<f64>>,
+}
+
+/// Per-timestep product of two link-score series (the LTM *path score*: the
+/// product of the link scores along a path -- ref 6.3 / section 5.1).
+///
+/// `None` if either operand is absent (a path-score is only defined when every
+/// edge in the path has a score series). When both are present they are
+/// elementwise multiplied over the common prefix; a `NaN` factor propagates,
+/// correctly marking that step's path score undefined.
+fn multiply_score_series(a: &Option<Vec<f64>>, b: &Option<Vec<f64>>) -> Option<Vec<f64>> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let n = a.len().min(b.len());
+            Some((0..n).map(|i| a[i] * b[i]).collect())
+        }
+        _ => None,
+    }
+}
+
+/// Per-timestep, larger-magnitude selection between two candidate composite
+/// series (the LTM *composite link score*: the path score with the largest
+/// magnitude at each interval -- ref 6.3). Sign is preserved.
+///
+/// Mirrors the engine's `generate_max_abs_chain_str` selection
+/// (`if ABS(a) >= ABS(b) then a else b`): because `NaN` comparisons are
+/// false, a `NaN` candidate loses to a finite one at that step. A present
+/// series always beats an absent one (we cannot compare against nothing).
+fn max_abs_score_series(a: Option<Vec<f64>>, b: Option<Vec<f64>>) -> Option<Vec<f64>> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let n = a.len().min(b.len());
+            Some(
+                (0..n)
+                    .map(|i| if a[i].abs() >= b[i].abs() { a[i] } else { b[i] })
+                    .collect(),
+            )
+        }
+        (Some(s), None) | (None, Some(s)) => Some(s),
+        (None, None) => None,
+    }
+}
+
+/// Collapse synthetic/macro/module-internal nodes out of a causal link set,
+/// preserving the loop-score contribution that flows *through* them.
+///
+/// A synthetic node is any whose canonical name carries the reserved `$⁚`
+/// prefix ([`crate::ltm::is_synthetic_node_name`]) -- macro-instantiation
+/// internals (`$⁚{var}⁚{n}⁚{func}`) and LTM-internal nodes
+/// (`$⁚ltm⁚agg⁚{n}`, etc.). Real model variables never start with `$`.
+///
+/// This is the link-set generalization of
+/// [`trim_synthetic_aggs_from_loop_links`] (which collapses only `$⁚ltm⁚agg⁚{n}`
+/// nodes out of a single loop's link *cycle*). Per LTM ref 6.4, trimming a
+/// macro/module means **collapse, not delete**: a chain
+/// `[X -> $⁚…internal…, … -> Y]` becomes one composite edge `[X -> Y]` whose
+/// polarity is the product of the collapsed links and whose score is the
+/// **composite link score** -- the largest-magnitude path score through the
+/// macro/module (ref 6.3). Deleting the internal links instead would
+/// disconnect feedback paths through SMOOTH/DELAY/modules and silently drop
+/// their contribution.
+///
+/// Concretely: every direct real -> real edge passes through unchanged, and
+/// for every path `R0 -> s1 -> … -> sk -> R1` (each `si` synthetic, `R0`/`R1`
+/// real) a composite edge `R0 -> R1` is emitted. The composite polarity is the
+/// product along the path; the composite score is the per-timestep
+/// max-magnitude over all such paths between the same endpoints, each path
+/// score being the per-timestep product of its constituent link scores. A
+/// purely-internal cycle (a synthetic node only reachable from synthetics,
+/// like a macro's `$⁚…⁚arg1` helper, or an internal feedback loop) yields no
+/// real -> real edge and is dropped -- LTM ref 6.4 "internal loop suppression".
+///
+/// The traversal never re-enters a real node and visits each synthetic node at
+/// most once per path, so a synthetic-internal cycle cannot loop forever.
+/// The accumulated composite payload for one collapsed edge: its current
+/// (strongest-path) polarity and its composite score series (`None` until a
+/// scored path contributes).
+type CompositePayload = (LinkPolarity, Option<Vec<f64>>);
+
+/// One real endpoint reached by a synthetic chain, with the chain's accumulated
+/// polarity and path score, produced by `collapse_synthetic_links`'s walk.
+type ReachedEndpoint = (String, LinkPolarity, Option<Vec<f64>>);
+
+pub fn collapse_synthetic_links(links: Vec<CollapsibleLink>) -> Vec<CollapsibleLink> {
+    use crate::ltm::is_synthetic_node_name;
+
+    let has_synthetic = links
+        .iter()
+        .any(|l| is_synthetic_node_name(l.from.as_str()) || is_synthetic_node_name(l.to.as_str()));
+    if !has_synthetic {
+        return links;
+    }
+
+    // Adjacency: from-node -> list of outgoing (to, polarity, score).
+    let mut adj: HashMap<&str, Vec<&CollapsibleLink>> = HashMap::new();
+    for l in &links {
+        adj.entry(l.from.as_str()).or_default().push(l);
+    }
+
+    // Accumulated composite edges keyed on (real from, real to). Multiple
+    // paths between the same endpoints fold together by per-timestep
+    // max-magnitude (the composite link score, ref 6.3). The value is wrapped
+    // in `Option` so `None` is an unambiguous "no contribution yet" marker:
+    // `(Unknown, None)` is itself a legitimate first contribution (a
+    // structural-only edge whose polarity is genuinely Unknown), so it must not
+    // double as the uninitialized sentinel -- doing so would drop the first of
+    // two disagreeing structural paths instead of folding them to Unknown.
+    let mut composite: HashMap<(String, String), Option<CompositePayload>> = HashMap::new();
+
+    // Walk every synthetic chain starting at the synthetic successor of a real
+    // node, accumulating polarity and path score, until reaching the next real
+    // node. `visited` guards against synthetic-internal cycles. There is no
+    // explicit path-count budget: the enumeration is bounded only because the
+    // synthetic interior of a macro/module is small (a handful of nodes); a
+    // pathological synthetic subgraph with many internal diamonds could
+    // enumerate exponentially many paths, but no real construct produces one.
+    fn walk(
+        adj: &HashMap<&str, Vec<&CollapsibleLink>>,
+        node: &str,
+        acc_polarity: LinkPolarity,
+        acc_score: &Option<Vec<f64>>,
+        visited: &mut HashSet<String>,
+        out: &mut Vec<ReachedEndpoint>,
+    ) {
+        let Some(edges) = adj.get(node) else {
+            return;
+        };
+        for edge in edges {
+            let to = edge.to.as_str();
+            let next_polarity = acc_polarity.compose(edge.polarity);
+            let next_score = multiply_score_series(acc_score, &edge.score);
+            if crate::ltm::is_synthetic_node_name(to) {
+                // Visit each synthetic node at most once per path so an
+                // internal cycle terminates.
+                if !visited.insert(to.to_string()) {
+                    continue;
+                }
+                walk(adj, to, next_polarity, &next_score, visited, out);
+                visited.remove(to);
+            } else {
+                // Reached a real node: the chain `R0 -> … -> to` is a complete
+                // composite path.
+                out.push((to.to_string(), next_polarity, next_score));
+            }
+        }
+    }
+
+    for l in &links {
+        // Only start a collapse from a real source node. A path that begins at
+        // a synthetic node (e.g. a macro's argument helper) has no real
+        // origin, so it produces no user-visible edge.
+        if is_synthetic_node_name(l.from.as_str()) {
+            continue;
+        }
+        if !is_synthetic_node_name(l.to.as_str()) {
+            // Direct real -> real edge: pass through, folding into any
+            // composite the same endpoints accumulate.
+            let key = (l.from.as_str().to_string(), l.to.as_str().to_string());
+            let slot = composite.entry(key).or_insert(None);
+            if let Some((pol, sc)) = slot {
+                *pol = pick_stronger_polarity(*pol, sc, l.polarity, &l.score);
+                *sc = max_abs_score_series(sc.take(), l.score.clone());
+            } else {
+                // First contribution for this key: take it verbatim.
+                *slot = Some((l.polarity, l.score.clone()));
+            }
+            continue;
+        }
+        // Synthetic successor: walk every chain through synthetics to the next
+        // real node and emit a composite edge per reached endpoint.
+        let mut reached = Vec::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(l.to.as_str().to_string());
+        walk(
+            &adj,
+            l.to.as_str(),
+            l.polarity,
+            &l.score,
+            &mut visited,
+            &mut reached,
+        );
+        for (to_real, polarity, score) in reached {
+            let key = (l.from.as_str().to_string(), to_real);
+            let slot = composite.entry(key).or_insert(None);
+            if let Some((pol, sc)) = slot {
+                *pol = pick_stronger_polarity(*pol, sc, polarity, &score);
+                *sc = max_abs_score_series(sc.take(), score);
+            } else {
+                *slot = Some((polarity, score));
+            }
+        }
+    }
+
+    let mut result: Vec<CollapsibleLink> = composite
+        .into_iter()
+        .filter_map(|((from, to), payload)| {
+            payload.map(|(polarity, score)| CollapsibleLink {
+                from: Ident::new(&from),
+                to: Ident::new(&to),
+                polarity,
+                score,
+            })
+        })
+        .collect();
+    // Deterministic ordering so callers (and tests) see a stable link set.
+    result.sort_by(|a, b| {
+        a.from
+            .as_str()
+            .cmp(b.from.as_str())
+            .then_with(|| a.to.as_str().cmp(b.to.as_str()))
+    });
+    result
+}
+
+/// When two candidate composites collapse onto the same `(from, to)` edge,
+/// the reported polarity should follow the *stronger* (larger-magnitude)
+/// path -- the same path whose score wins the max-abs selection -- so polarity
+/// and score stay mutually consistent. When neither carries a comparable score
+/// series (both `None`, the structural-only path) we fall back to composing:
+/// an `Unknown` in either makes the merged polarity `Unknown`, since we cannot
+/// say which path dominates.
+fn pick_stronger_polarity(
+    a_polarity: LinkPolarity,
+    a_score: &Option<Vec<f64>>,
+    b_polarity: LinkPolarity,
+    b_score: &Option<Vec<f64>>,
+) -> LinkPolarity {
+    match (a_score, b_score) {
+        (Some(a), Some(b)) => {
+            // Compare aggregate magnitude (sum of |score| over finite steps);
+            // the larger total magnitude is the dominant path overall.
+            let mag =
+                |s: &[f64]| -> f64 { s.iter().filter(|v| v.is_finite()).map(|v| v.abs()).sum() };
+            if mag(a) >= mag(b) {
+                a_polarity
+            } else {
+                b_polarity
+            }
+        }
+        (Some(_), None) => a_polarity,
+        (None, Some(_)) => b_polarity,
+        (None, None) => {
+            // No score to disambiguate: if both paths agree, keep it; else
+            // the edge's polarity is genuinely ambiguous.
+            if a_polarity == b_polarity {
+                a_polarity
+            } else {
+                LinkPolarity::Unknown
+            }
+        }
+    }
+}
+
+/// Integer-indexed search graph shared across all timesteps.
+///
+/// The graph *topology* -- which `(from -> to)` edges exist and which
+/// result slot each reads its score from -- is identical at every saved
+/// timestep; only the per-edge score value changes. `SearchGraph::from_results`
+/// rebuilt the entire `HashMap<Ident, Vec<ScoredEdge>>` (cloning every `Ident`,
+/// re-hashing every name) for each of the ~250 timesteps, and the DFS then
+/// keyed `best_score`/`visiting`/`adj` on `Ident` -- each access hashing the
+/// full (often long, element-level) identifier string. For a model like
+/// C-LEARN (thousands of edges, hundreds of stocks, 250 steps) that string
+/// hashing dominated, pushing discovery past 19 minutes.
+///
+/// This structure hoists the topology build once: every node that appears as
+/// a `from` or `to` endpoint (or is a stock) gets a dense `u32` id, edges are
+/// stored as `(to_id, result_offset)` in their original `link_offsets` order,
+/// and the per-timestep DFS runs entirely over integer-indexed `Vec`s. The
+/// result set is bit-identical to the `SearchGraph` path: same node universe,
+/// same per-stock `best_score` reset, same strict-less-than pruning, same
+/// stable score-descending edge order, same NaN->0 handling, same canonical
+/// rotation dedup.
+struct IndexedSearch {
+    /// node id -> canonical identifier (for reconstructing discovered paths)
+    idents: Vec<Ident<Canonical>>,
+    /// node id -> outbound edges, in original `link_offsets` insertion order.
+    /// The per-timestep DFS re-sorts a permutation of each list by |score|;
+    /// the static topology here never changes.
+    adj: Vec<Vec<IndexedEdge>>,
+    /// stock node ids, in the input `stocks` order (drives per-stock DFS order)
+    stock_ids: Vec<u32>,
+}
+
+/// A static outbound edge: target node id plus the result slot its score is
+/// read from each timestep.
+struct IndexedEdge {
+    to: u32,
+    offset: usize,
+}
+
+/// A timestep-resolved outbound edge: target node id and the |score| weight the
+/// DFS multiplies into the running path product. Built per timestep, already
+/// sorted by `score` descending (stable), so the DFS never sorts per visit.
+#[derive(Clone, Copy)]
+struct StepEdge {
+    to: u32,
+    score: f64,
+}
+
+/// Per-timestep mutable DFS state, allocated once per `discover_loops_with_graph`
+/// call and reused across stocks and timesteps to avoid per-search reallocation.
+struct DfsScratch {
+    /// node id -> highest path score seen at that node for the current target
+    /// stock (reset to 0.0 between stocks). Mirrors the original `best_score`
+    /// map, whose absent keys also defaulted to 0.0.
+    best_score: Vec<f64>,
+    /// node id -> whether it is on the current DFS path. A per-stock generation
+    /// stamp avoids clearing the whole vector between stocks: a node is
+    /// "visiting" iff `visiting_gen[id] == cur_gen`.
+    visiting_gen: Vec<u32>,
+    /// current generation counter for `visiting_gen`
+    cur_gen: u32,
+    /// current DFS path as node ids (mirrors the original `stack` of idents)
+    stack: Vec<u32>,
+    /// node id -> outbound edges for the current timestep, already sorted by
+    /// `|score|` descending (stable). Rebuilt once per timestep by
+    /// `load_step_scores`; the DFS reads it without sorting -- mirroring the
+    /// original `SearchGraph::from_results`, which sorted each adjacency list
+    /// once per timestep, NOT once per node visit. The per-visit sort was the
+    /// dominant DFS cost on a dense element graph (a node is re-entered many
+    /// times across the 116-stock x 250-step search).
+    step_adj: Vec<Vec<StepEdge>>,
+}
+
+impl DfsScratch {
+    /// Allocate reusable DFS state sized for `search`'s node universe, with each
+    /// node's per-timestep edge buffer pre-reserved to its static out-degree.
+    fn new(search: &IndexedSearch) -> Self {
+        let n_nodes = search.node_count();
+        DfsScratch {
+            best_score: vec![0.0; n_nodes],
+            visiting_gen: vec![0; n_nodes],
+            cur_gen: 0,
+            stack: Vec::with_capacity(n_nodes),
+            step_adj: search
+                .adj
+                .iter()
+                .map(|e| Vec::with_capacity(e.len()))
+                .collect(),
+        }
+    }
+}
+
+impl IndexedSearch {
+    /// Build the integer-indexed topology from the parsed link offsets and the
+    /// stock list. Node ids are assigned in first-seen order over the edge
+    /// endpoints (then any stock not yet seen), which is irrelevant to results
+    /// since every lookup is id-keyed and the output is reconstructed from
+    /// `idents`.
+    fn build(link_offsets: &[LinkOffset], stocks: &[Ident<Canonical>]) -> Self {
+        let mut id_of: HashMap<Ident<Canonical>, u32> =
+            HashMap::with_capacity(link_offsets.len() * 2 + stocks.len());
+        let mut idents: Vec<Ident<Canonical>> = Vec::new();
+
+        let intern = |ident: &Ident<Canonical>,
+                      id_of: &mut HashMap<Ident<Canonical>, u32>,
+                      idents: &mut Vec<Ident<Canonical>>|
+         -> u32 {
+            if let Some(&id) = id_of.get(ident) {
+                id
+            } else {
+                // Node ids are u32; SD models stay far below this (LTM paths
+                // are capped at MAX_LTM_SCC_NODES and real edge counts are in
+                // the thousands), but make the invariant explicit.
+                debug_assert!(idents.len() <= u32::MAX as usize);
+                let id = idents.len() as u32;
+                idents.push(ident.clone());
+                id_of.insert(ident.clone(), id);
+                id
+            }
+        };
+
+        // First pass: assign ids and collect edges. Edges keep their
+        // `link_offsets` insertion order within each `from` node so the
+        // per-timestep stable score sort breaks ties identically to the
+        // original `SearchGraph::from_edges` (which pushed in the same order
+        // before its stable `sort_by`).
+        let mut adj: Vec<Vec<IndexedEdge>> = Vec::new();
+        for ((from, to), offset) in link_offsets {
+            let from_id = intern(from, &mut id_of, &mut idents);
+            let to_id = intern(to, &mut id_of, &mut idents);
+            if adj.len() <= from_id as usize {
+                adj.resize_with(from_id as usize + 1, Vec::new);
+            }
+            adj[from_id as usize].push(IndexedEdge {
+                to: to_id,
+                offset: *offset,
+            });
+        }
+
+        // Stocks that never appeared as an edge endpoint still need ids (the
+        // DFS starts from every stock; a stock with no outbound edges simply
+        // has an empty adjacency list, matching the original behavior).
+        let stock_ids: Vec<u32> = stocks
+            .iter()
+            .map(|s| intern(s, &mut id_of, &mut idents))
+            .collect();
+
+        // Ensure `adj` is sized to the full node universe so every id is a
+        // valid index (nodes that are only edge targets have empty lists).
+        if adj.len() < idents.len() {
+            adj.resize_with(idents.len(), Vec::new);
+        }
+
+        IndexedSearch {
+            idents,
+            adj,
+            stock_ids,
+        }
+    }
+
+    /// Number of distinct nodes.
+    fn node_count(&self) -> usize {
+        self.idents.len()
+    }
+
+    /// Rebuild each node's sorted outbound-edge list for `step` into
+    /// `scratch.step_adj`.
+    ///
+    /// Reads each edge's result slot, applies the same NaN->0 then |value|
+    /// transform `SearchGraph::from_results`/`from_edges` did, then stable-sorts
+    /// the node's edges by `|score|` descending -- exactly the per-timestep sort
+    /// `SearchGraph::from_results` performed once per node. Doing it here (once
+    /// per timestep) rather than inside the DFS (once per node *visit*) is the
+    /// key cost reduction without changing the visited edge order.
+    fn load_step_scores(&self, results: &Results, step: usize, scratch: &mut DfsScratch) {
+        let base = step * results.step_size;
+        for (node, edges) in self.adj.iter().enumerate() {
+            let row = &mut scratch.step_adj[node];
+            row.clear();
+            for edge in edges {
+                let value = results.data[base + edge.offset];
+                let score = if value.is_nan() { 0.0 } else { value.abs() };
+                row.push(StepEdge { to: edge.to, score });
+            }
+
+            // Stable sort by score descending. `sort_by` is stable, so ties keep
+            // the `link_offsets` insertion order -- byte-identical to the
+            // original `SearchGraph::from_edges`/`from_results` ordering.
+            row.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    /// Run the strongest-path search at the current step, appending newly
+    /// discovered loops (deduped by canonical rotation) to `all_paths`.
+    ///
+    /// Equivalent to `SearchGraph::from_results(..).find_strongest_loops()`
+    /// followed by the caller's cross-step rotation dedup, but without
+    /// rebuilding the graph or hashing idents in the inner loop. The single
+    /// `seen_sets` passed in spans all timesteps, so the original's two dedup
+    /// layers (per-timestep inside `find_strongest_loops`, then cross-timestep
+    /// in `discover_loops_with_graph`) collapse to one without changing which
+    /// paths survive: a path is kept iff its canonical rotation is new, and the
+    /// per-stock/per-step visitation order is preserved.
+    fn discover_step(
+        &self,
+        scratch: &mut DfsScratch,
+        seen_sets: &mut HashSet<Vec<u32>>,
+        all_paths: &mut Vec<Vec<Ident<Canonical>>>,
+    ) {
+        for stock_idx in 0..self.stock_ids.len() {
+            let stock = self.stock_ids[stock_idx];
+
+            // Reset best_score for this target stock. A fresh generation marks
+            // the visiting set empty without touching every slot.
+            scratch.best_score.iter_mut().for_each(|b| *b = 0.0);
+            scratch.cur_gen = scratch.cur_gen.wrapping_add(1);
+            if scratch.cur_gen == 0 {
+                // Generation wrapped; clear so a stale stamp can't read as live.
+                scratch.visiting_gen.iter_mut().for_each(|g| *g = 0);
+                scratch.cur_gen = 1;
+            }
+            scratch.stack.clear();
+
+            self.dfs(stock, 1.0, stock, scratch, seen_sets, all_paths);
+        }
+    }
+
+    /// Recursive DFS mirroring `SearchGraph::check_outbound_uses`, but over
+    /// integer node ids and the pre-sorted per-timestep edge lists. The edge
+    /// order is established once per timestep in `load_step_scores`, so the DFS
+    /// just walks `scratch.step_adj[node]` -- no per-visit sorting.
+    fn dfs(
+        &self,
+        node: u32,
+        score: f64,
+        target: u32,
+        scratch: &mut DfsScratch,
+        seen_sets: &mut HashSet<Vec<u32>>,
+        all_paths: &mut Vec<Vec<Ident<Canonical>>>,
+    ) {
+        let idx = node as usize;
+
+        if scratch.visiting_gen[idx] == scratch.cur_gen {
+            if node == target {
+                self.record_loop(&scratch.stack, seen_sets, all_paths);
+            }
+            return;
+        }
+
+        // Strict less-than pruning, identical to the original.
+        if score < scratch.best_score[idx] {
+            return;
+        }
+        scratch.best_score[idx] = score;
+
+        scratch.visiting_gen[idx] = scratch.cur_gen;
+        scratch.stack.push(node);
+
+        // Walk the node's pre-sorted (|score| desc) edge list. `step_adj` is not
+        // mutated during the DFS, so we index it by position and copy each
+        // `StepEdge` (it is `Copy`) -- this keeps the recursive `&mut scratch`
+        // borrow legal without cloning the whole row.
+        let n_edges = scratch.step_adj[idx].len();
+        for k in 0..n_edges {
+            let edge = scratch.step_adj[idx][k];
+            self.dfs(
+                edge.to,
+                score * edge.score,
+                target,
+                scratch,
+                seen_sets,
+                all_paths,
+            );
+        }
+
+        scratch.visiting_gen[idx] = 0;
+        scratch.stack.pop();
+    }
+
+    /// Record the current path as a loop if its canonical rotation is new,
+    /// mirroring `SearchGraph::add_loop_if_unique` over reconstructed idents.
+    ///
+    /// The dedup key is the canonical rotation of the path's *node ids* rather
+    /// than its identifier strings. Within a single `IndexedSearch` the id <->
+    /// string map is a bijection, so two paths are rotations of one another in
+    /// id space iff they are in string space: the dedup equivalence classes are
+    /// identical. Keying on `u32` avoids allocating a `Vec<String>` (and hashing
+    /// long element-level names) on every loop closure -- the dominant
+    /// remaining per-closure cost. `canonical_rotation` over ids picks a
+    /// (possibly different) representative rotation, but that representative is
+    /// only used as a set key; the *stored* loop is the original `stack`, so the
+    /// reported paths and their first-seen order are unchanged.
+    fn record_loop(
+        &self,
+        stack: &[u32],
+        seen_sets: &mut HashSet<Vec<u32>>,
+        all_paths: &mut Vec<Vec<Ident<Canonical>>>,
+    ) {
+        if stack.is_empty() {
+            return;
+        }
+        let key = crate::ltm::canonical_rotation(stack);
+        if seen_sets.insert(key) {
+            all_paths.push(
+                stack
+                    .iter()
+                    .map(|&id| self.idents[id as usize].clone())
+                    .collect(),
+            );
+        }
+    }
+}
+
 /// Run the strongest-path loop discovery using a pre-built `CausalGraph`.
 ///
 /// This is the implementation shared by `discover_loops` (which builds
@@ -707,16 +1323,27 @@ fn trim_synthetic_aggs_from_loop_links(links: &[Link]) -> Option<Vec<Link>> {
 /// into per-element edges so the DFS operates on the element-level graph.
 /// When they are empty (convenience path), all link scores are treated as
 /// scalar.
+///
+/// `budget` optionally bounds the wall-clock time spent in the per-timestep DFS
+/// sweep. The elapsed time is checked once per timestep (cheap relative to the
+/// DFS over the whole graph), and the sweep stops early once the budget is
+/// exceeded. The returned `DiscoveryResult::truncated` records whether that
+/// happened. A `None` budget runs to completion. Discovery on very large models
+/// can be infeasibly slow (GH #647); the budget lets callers bound it.
 pub fn discover_loops_with_graph(
     results: &Results,
     causal_graph: &CausalGraph,
     stocks: &[Ident<Canonical>],
     ltm_vars: &[LtmSyntheticVar],
     dims: &[datamodel::Dimension],
-) -> Result<Vec<FoundLoop>> {
+    budget: Option<Duration>,
+) -> Result<DiscoveryResult> {
     let link_offsets = parse_link_offsets(results, ltm_vars, dims);
     if link_offsets.is_empty() {
-        return Ok(Vec::new());
+        return Ok(DiscoveryResult {
+            loops: Vec::new(),
+            truncated: false,
+        });
     }
 
     // Build HashMap for O(1) link offset lookups during score computation
@@ -726,35 +1353,62 @@ pub fn discover_loops_with_graph(
         .collect();
 
     if stocks.is_empty() {
-        return Ok(Vec::new());
+        return Ok(DiscoveryResult {
+            loops: Vec::new(),
+            truncated: false,
+        });
     }
 
     // Collect all unique loop paths across all timesteps, dedup-keyed
     // on the canonical edge-sequence rotation so opposite-direction
     // cycles over the same node set are kept as distinct loops (see
-    // `crate::ltm::canonical_rotation` and issue #308).
+    // `crate::ltm::canonical_rotation` and issue #308). The key is the
+    // rotation of the path's integer node ids (a bijection with the
+    // string names within this search), so the dedup classes match the
+    // string-keyed original without allocating a string per closure.
     let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    let mut seen_sets: HashSet<Vec<String>> = HashSet::new();
+    let mut seen_sets: HashSet<Vec<u32>> = HashSet::new();
 
     let step_count = results.step_count;
 
-    // Skip step 0 where link scores are NaN (PREVIOUS values don't exist)
+    // Hoist the integer-indexed topology build out of the per-timestep loop:
+    // the graph's edges and result slots are step-invariant, so rebuilding the
+    // `Ident`-keyed `SearchGraph` (and re-hashing every name) per step was pure
+    // waste. Only the per-edge scores change, which the DFS re-reads each step.
+    let search = IndexedSearch::build(&link_offsets, stocks);
+    let mut scratch = DfsScratch::new(&search);
+
+    // Skip step 0 where link scores are NaN (PREVIOUS values don't exist).
+    // The original ran a fresh per-step `find_strongest_loops` (whose own
+    // per-step `seen_sets` deduped within a step) and then deduped again across
+    // steps here; both layers keyed on the canonical rotation, so collapsing
+    // them onto the single cross-step `seen_sets` keeps exactly the paths the
+    // two-layer version kept, in the same first-seen order.
+    //
+    // The optional time budget is checked once per timestep, *before* running
+    // that step's DFS. The check is O(1) and dwarfed by the per-step DFS over
+    // the whole graph, so it adds no meaningful overhead. We stop before a step
+    // we can't afford rather than mid-DFS so each processed step's loop set is
+    // internally consistent. `start` is captured lazily so an unbudgeted run
+    // never reads the clock.
+    let mut truncated = false;
+    let start = budget.map(|_| Instant::now());
     for step in 1..step_count {
-        let graph = SearchGraph::from_results(results, step, &link_offsets, stocks);
-        let paths = graph.find_strongest_loops();
-
-        for path in paths {
-            let path_strings: Vec<String> = path.iter().map(|id| id.as_str().to_string()).collect();
-            let key = crate::ltm::canonical_rotation(&path_strings);
-
-            if seen_sets.insert(key) {
-                all_paths.push(path);
-            }
+        if let (Some(limit), Some(started)) = (budget, start)
+            && started.elapsed() >= limit
+        {
+            truncated = true;
+            break;
         }
+        search.load_step_scores(results, step, &mut scratch);
+        search.discover_step(&mut scratch, &mut seen_sets, &mut all_paths);
     }
 
     if all_paths.is_empty() {
-        return Ok(Vec::new());
+        return Ok(DiscoveryResult {
+            loops: Vec::new(),
+            truncated,
+        });
     }
 
     // Convert paths to FoundLoop objects with scores
@@ -865,7 +1519,10 @@ pub fn discover_loops_with_graph(
     let partitions = causal_graph.compute_cycle_partitions();
     rank_and_filter(&mut found_loops, &partitions);
 
-    Ok(found_loops)
+    Ok(DiscoveryResult {
+        loops: found_loops,
+        truncated,
+    })
 }
 
 /// Rank, truncate, filter, and assign IDs to discovered loops.
@@ -1038,6 +1695,162 @@ mod tests {
         let mut set: Vec<String> = path.iter().map(|id| id.as_str().to_string()).collect();
         set.sort();
         set
+    }
+
+    // --- collapse_synthetic_links ---
+
+    fn clink(
+        from: &str,
+        to: &str,
+        polarity: LinkPolarity,
+        score: Option<Vec<f64>>,
+    ) -> CollapsibleLink {
+        CollapsibleLink {
+            from: Ident::new(from),
+            to: Ident::new(to),
+            polarity,
+            score,
+        }
+    }
+
+    /// Look up a collapsed edge by (from, to) in the result.
+    fn find_edge<'a>(
+        links: &'a [CollapsibleLink],
+        from: &str,
+        to: &str,
+    ) -> Option<&'a CollapsibleLink> {
+        links
+            .iter()
+            .find(|l| l.from.as_str() == from && l.to.as_str() == to)
+    }
+
+    #[test]
+    fn collapse_passes_through_a_graph_with_no_synthetic_nodes() {
+        // A purely real graph is returned unchanged (modulo nothing).
+        let input = vec![
+            clink("a", "b", LinkPolarity::Positive, Some(vec![1.0, 2.0])),
+            clink("b", "c", LinkPolarity::Negative, Some(vec![3.0, 4.0])),
+        ];
+        let out = collapse_synthetic_links(input);
+        assert_eq!(out.len(), 2);
+        assert!(find_edge(&out, "a", "b").is_some());
+        assert!(find_edge(&out, "b", "c").is_some());
+    }
+
+    #[test]
+    fn collapse_single_chain_through_a_macro_node() {
+        // Mirrors the SMTH1 edge structure from model_causal_edges:
+        //   level -> $⁚smoothed_level⁚0⁚smth1 -> smoothed_level
+        // plus a dangling synthetic arg helper feeding the module that has no
+        // real predecessor. The chain collapses to one composite edge
+        // `level -> smoothed_level` (product polarity, product score); the
+        // arg-helper chain is dropped (no real source).
+        let smth = "$\u{205A}smoothed_level\u{205A}0\u{205A}smth1";
+        let arg = "$\u{205A}smoothed_level\u{205A}0\u{205A}arg1";
+        let input = vec![
+            clink("level", smth, LinkPolarity::Positive, Some(vec![2.0, -3.0])),
+            clink(
+                smth,
+                "smoothed_level",
+                LinkPolarity::Negative,
+                Some(vec![5.0, 7.0]),
+            ),
+            clink(arg, smth, LinkPolarity::Positive, Some(vec![9.0, 9.0])),
+        ];
+        let out = collapse_synthetic_links(input);
+        // No synthetic node survives.
+        assert!(
+            out.iter()
+                .all(|l| !l.from.as_str().starts_with('$') && !l.to.as_str().starts_with('$')),
+            "no synthetic node should remain: {:?}",
+            out.iter()
+                .map(|l| (l.from.as_str(), l.to.as_str()))
+                .collect::<Vec<_>>()
+        );
+        // The composite `level -> smoothed_level` carries product polarity and
+        // per-step product score.
+        let edge = find_edge(&out, "level", "smoothed_level")
+            .expect("level -> smoothed_level composite edge");
+        assert_eq!(edge.polarity, LinkPolarity::Negative); // + composed with -
+        assert_eq!(edge.score.as_deref(), Some(&[10.0, -21.0][..]));
+        // The arg-helper chain produced no edge (it has no real source).
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn collapse_picks_max_magnitude_path_score() {
+        // Two disjoint synthetic paths from a -> z. The composite link score is
+        // the per-timestep larger-magnitude path score (ref 6.3); the reported
+        // polarity follows the dominant path.
+        let s1 = "$\u{205A}m\u{205A}0\u{205A}f"; // path 1 internal
+        let s2 = "$\u{205A}m\u{205A}1\u{205A}g"; // path 2 internal
+        let input = vec![
+            // path 1: a -> s1 -> z, scores 1*1 and 1*1 = [1, 1], Positive
+            clink("a", s1, LinkPolarity::Positive, Some(vec![1.0, 1.0])),
+            clink(s1, "z", LinkPolarity::Positive, Some(vec![1.0, 1.0])),
+            // path 2: a -> s2 -> z, scores 10*1 and 0.5*0.5 = [10, 0.25], Negative
+            clink("a", s2, LinkPolarity::Negative, Some(vec![10.0, 0.5])),
+            clink(s2, "z", LinkPolarity::Positive, Some(vec![1.0, 0.5])),
+        ];
+        let out = collapse_synthetic_links(input);
+        let edge = find_edge(&out, "a", "z").expect("a -> z composite");
+        // step 0: |10| > |1| -> path 2 (10, Negative); step 1: |1| > |0.25| ->
+        // path 1 (1). Max-abs keeps the per-step winner's sign.
+        assert_eq!(edge.score.as_deref(), Some(&[10.0, 1.0][..]));
+        // Aggregate magnitude: path2 sum |10|+|0.25| = 10.25 > path1 sum 2.0,
+        // so the dominant-path polarity is Negative.
+        assert_eq!(edge.polarity, LinkPolarity::Negative);
+    }
+
+    #[test]
+    fn collapse_drops_a_fully_internal_cycle() {
+        // A synthetic-only cycle (s1 -> s2 -> s1) with no real entry/exit must
+        // not loop forever and must produce no user-visible edge.
+        let s1 = "$\u{205A}m\u{205A}0\u{205A}f";
+        let s2 = "$\u{205A}m\u{205A}1\u{205A}g";
+        let input = vec![
+            clink(s1, s2, LinkPolarity::Positive, Some(vec![1.0])),
+            clink(s2, s1, LinkPolarity::Positive, Some(vec![1.0])),
+        ];
+        let out = collapse_synthetic_links(input);
+        assert!(out.is_empty(), "fully-internal cycle yields no edges");
+    }
+
+    #[test]
+    fn collapse_structural_only_path_has_no_scores() {
+        // No score series (structural-only caller): the composite still
+        // collapses, polarity composes, and the score stays None.
+        let smth = "$\u{205A}v\u{205A}0\u{205A}smth1";
+        let input = vec![
+            clink("x", smth, LinkPolarity::Negative, None),
+            clink(smth, "y", LinkPolarity::Negative, None),
+        ];
+        let out = collapse_synthetic_links(input);
+        let edge = find_edge(&out, "x", "y").expect("x -> y composite");
+        assert_eq!(edge.polarity, LinkPolarity::Positive); // - composed with -
+        assert!(edge.score.is_none());
+    }
+
+    #[test]
+    fn collapse_folds_two_disagreeing_structural_paths_to_unknown() {
+        // Two scoreless (structural-only) paths reach the same real endpoint
+        // with disagreeing polarity, and the FIRST is genuinely Unknown:
+        //   a --Unknown--> c                          (direct)
+        //   a --+--> $synth --+--> c                  (composes to Positive)
+        // The merged edge must be Unknown (two disagreeing structural paths,
+        // per pick_stronger_polarity's both-None arm). Regression guard: when
+        // (Unknown, None) doubled as the uninitialized map sentinel, the first
+        // path was silently overwritten and the edge wrongly reported Positive.
+        let smth = "$\u{205A}v\u{205A}0\u{205A}smth1";
+        let input = vec![
+            clink("a", "c", LinkPolarity::Unknown, None),
+            clink("a", smth, LinkPolarity::Positive, None),
+            clink(smth, "c", LinkPolarity::Positive, None),
+        ];
+        let out = collapse_synthetic_links(input);
+        let edge = find_edge(&out, "a", "c").expect("a -> c composite");
+        assert_eq!(edge.polarity, LinkPolarity::Unknown);
+        assert!(edge.score.is_none());
     }
 
     // --- Test 1: SearchGraph construction ---
@@ -2346,5 +3159,213 @@ mod tests {
         assert_eq!(loops[0].avg_abs_score, 500.0);
         assert_eq!(loops[1].avg_abs_score, 400.0);
         assert!((loops[2].avg_abs_score - 0.01).abs() < 1e-10);
+    }
+
+    // --- IndexedSearch vs. SearchGraph equivalence oracle ---
+    //
+    // `discover_loops_with_graph` was optimized from a per-timestep
+    // `SearchGraph` rebuild (Ident-keyed HashMaps, full-string hashing in the
+    // DFS) to a once-built `IndexedSearch` over dense integer ids. The two
+    // must discover *exactly* the same loop paths in the same first-seen order.
+    // These tests lock that equivalence in by running both paths over a range
+    // of synthetic graphs and comparing the resulting `all_paths` verbatim.
+
+    /// The original cross-step discovery loop, reproduced over the retained
+    /// `SearchGraph` reference implementation. Returns the deduped `all_paths`
+    /// in first-seen order, exactly as the pre-optimization
+    /// `discover_loops_with_graph` body did.
+    fn reference_all_paths(
+        results: &Results,
+        link_offsets: &[LinkOffset],
+        stocks: &[Ident<Canonical>],
+    ) -> Vec<Vec<Ident<Canonical>>> {
+        let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
+        let mut seen_sets: HashSet<Vec<String>> = HashSet::new();
+        for step in 1..results.step_count {
+            let graph = SearchGraph::from_results(results, step, link_offsets, stocks);
+            for path in graph.find_strongest_loops() {
+                let path_strings: Vec<String> =
+                    path.iter().map(|id| id.as_str().to_string()).collect();
+                let key = crate::ltm::canonical_rotation(&path_strings);
+                if seen_sets.insert(key) {
+                    all_paths.push(path);
+                }
+            }
+        }
+        all_paths
+    }
+
+    /// The optimized discovery loop in isolation (the integer-indexed path
+    /// inside `discover_loops_with_graph`), returning the same `all_paths`.
+    fn indexed_all_paths(
+        results: &Results,
+        link_offsets: &[LinkOffset],
+        stocks: &[Ident<Canonical>],
+    ) -> Vec<Vec<Ident<Canonical>>> {
+        let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
+        let mut seen_sets: HashSet<Vec<u32>> = HashSet::new();
+        let search = IndexedSearch::build(link_offsets, stocks);
+        let mut scratch = DfsScratch::new(&search);
+        for step in 1..results.step_count {
+            search.load_step_scores(results, step, &mut scratch);
+            search.discover_step(&mut scratch, &mut seen_sets, &mut all_paths);
+        }
+        all_paths
+    }
+
+    fn paths_as_strings(paths: &[Vec<Ident<Canonical>>]) -> Vec<Vec<String>> {
+        paths
+            .iter()
+            .map(|p| p.iter().map(|id| id.as_str().to_string()).collect())
+            .collect()
+    }
+
+    /// Build a multi-step `Results` whose per-edge scores follow a deterministic
+    /// pseudo-random sequence, so the per-timestep edge sort order (and thus the
+    /// DFS traversal/pruning) varies across steps -- exercising the tie-breaking
+    /// and score-dependent branches in both implementations.
+    fn synthetic_results(n_offsets: usize, step_count: usize, seed: u64) -> Results {
+        let step_size = n_offsets;
+        let mut data = vec![0.0f64; step_size * step_count];
+        // Step 0 is all NaN (PREVIOUS values don't exist), matching production;
+        // discovery skips it. Remaining steps get varied finite scores, with a
+        // few deliberate zeros/NaNs to exercise those branches.
+        let mut state = seed | 1;
+        let mut next = || {
+            // xorshift64* -- deterministic, no external deps.
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545F4914F6CDD1D)
+        };
+        for slot in data.iter_mut().take(n_offsets) {
+            *slot = f64::NAN;
+        }
+        for step in 1..step_count {
+            for off in 0..n_offsets {
+                let r = next();
+                let v = match r % 16 {
+                    0 => 0.0,
+                    1 => f64::NAN,
+                    _ => {
+                        let mag = ((r >> 8) % 1000) as f64 / 100.0;
+                        if r & 1 == 0 { mag } else { -mag }
+                    }
+                };
+                data[step * step_size + off] = v;
+            }
+        }
+        Results {
+            offsets: HashMap::new(),
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: crate::results::Specs {
+                start: 0.0,
+                stop: (step_count - 1) as f64,
+                dt: 1.0,
+                save_step: 1.0,
+                method: crate::results::Method::Euler,
+                n_chunks: step_count,
+            },
+            is_vensim: false,
+        }
+    }
+
+    #[test]
+    fn indexed_search_matches_reference_on_synthetic_graphs() {
+        // A fully-connected-ish 5-node graph plus a couple of disconnected
+        // nodes, several stocks, parallel edges, and a self-loop -- the shapes
+        // the unit tests above exercise individually, combined and stressed
+        // over many timesteps with varying scores.
+        let names = ["a", "b", "c", "d", "e", "f", "g"];
+        let mut edge_pairs: Vec<(&str, &str)> = Vec::new();
+        for &from in &names[..5] {
+            for &to in &names[..5] {
+                edge_pairs.push((from, to)); // includes self-loops
+            }
+        }
+        // A node ("g") that is only ever an edge target (no outbound edges)
+        // and a duplicate (parallel) edge to stress tie-breaking / dedup.
+        edge_pairs.push(("a", "g"));
+        edge_pairs.push(("a", "b")); // parallel to the existing a->b
+
+        let link_offsets: Vec<LinkOffset> = edge_pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (from, to))| ((Ident::new(from), Ident::new(to)), i))
+            .collect();
+
+        // Stocks include a node with no incident edges ("f") to mirror the
+        // `test_stocks_without_outbound_edges` shape.
+        let stocks: Vec<Ident<Canonical>> =
+            ["a", "c", "e", "f"].iter().map(|s| Ident::new(s)).collect();
+
+        // Run several independent seeds so the per-step sort order (and the
+        // resulting traversal/pruning) varies widely.
+        for seed in [1u64, 7, 42, 1000, 999_983] {
+            let results = synthetic_results(link_offsets.len(), 40, seed);
+            let reference = reference_all_paths(&results, &link_offsets, &stocks);
+            let indexed = indexed_all_paths(&results, &link_offsets, &stocks);
+            // Guard against a vacuous pass: a future fixture edit that produced
+            // no loops would make the equality below trivially true.
+            assert!(
+                !reference.is_empty(),
+                "synthetic fixture must produce loops (seed {seed})"
+            );
+            assert_eq!(
+                paths_as_strings(&indexed),
+                paths_as_strings(&reference),
+                "IndexedSearch must discover the identical loop paths in the \
+                 identical first-seen order as the SearchGraph reference \
+                 (seed {seed})"
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_search_matches_reference_element_level_names() {
+        // Long element-level identifiers (the C-LEARN-style names whose string
+        // hashing the optimization eliminates) over a denser graph.
+        let names = [
+            "population[nyc]",
+            "births[nyc]",
+            "deaths[nyc]",
+            "population[boston]",
+            "births[boston]",
+            "migration_pressure[chicago]",
+        ];
+        let mut edge_pairs: Vec<(&str, &str)> = Vec::new();
+        for &from in &names {
+            for &to in &names {
+                if from != to {
+                    edge_pairs.push((from, to));
+                }
+            }
+        }
+        let link_offsets: Vec<LinkOffset> = edge_pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (from, to))| ((Ident::new(from), Ident::new(to)), i))
+            .collect();
+        let stocks: Vec<Ident<Canonical>> = ["population[nyc]", "population[boston]"]
+            .iter()
+            .map(|s| Ident::new(s))
+            .collect();
+
+        for seed in [3u64, 17, 55, 12_345] {
+            let results = synthetic_results(link_offsets.len(), 30, seed);
+            let reference = reference_all_paths(&results, &link_offsets, &stocks);
+            let indexed = indexed_all_paths(&results, &link_offsets, &stocks);
+            assert!(
+                !reference.is_empty(),
+                "element-level fixture must produce loops (seed {seed})"
+            );
+            assert_eq!(
+                paths_as_strings(&indexed),
+                paths_as_strings(&reference),
+                "element-level discovery must match the reference (seed {seed})"
+            );
+        }
     }
 }

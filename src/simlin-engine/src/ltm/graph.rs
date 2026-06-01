@@ -666,6 +666,144 @@ impl CausalGraph {
         }
     }
 
+    /// Order an unordered variable set into a single elementary cycle, if one
+    /// exists that visits **exactly** those variables.
+    ///
+    /// A modeler pins a loop by naming its variable *set* (the loop's identity
+    /// is its node set, not a particular traversal); this recovers the cyclic
+    /// order from the causal graph so the pinned loop can be scored like any
+    /// enumerated loop. Returns the ordered node list (e.g. `[a, b, c]`
+    /// representing `a -> b -> c -> a`) when the induced subgraph contains a
+    /// Hamiltonian cycle over `vars`, or `None` when the named set does not
+    /// form a closed cycle (a missing edge, an extra/disconnected variable, or
+    /// a degenerate set of fewer than two nodes). A `None` is the signal the
+    /// pin is invalid and a diagnostic should be surfaced rather than a bogus
+    /// score emitted.
+    ///
+    /// At least one variable in a feedback loop must be a stock, but that
+    /// invariant is checked by the caller (it wants to surface a precise
+    /// diagnostic); this routine only verifies the closed-cycle structure.
+    ///
+    /// The search is a DFS that only steps along edges staying within `vars`
+    /// and requires every member to be visited before closing back to the
+    /// start. `vars` is bounded by the pinned loop's size (a handful of
+    /// nodes in practice), so the exponential worst case of Hamiltonian-cycle
+    /// search is not a concern here; a pathological pin naming dozens of
+    /// densely-connected variables would still terminate because the visited
+    /// set prunes revisits.
+    ///
+    /// # Tie-break: lex-first cycle when the set admits more than one
+    ///
+    /// A variable SET can admit more than one *distinct* directed Hamiltonian
+    /// cycle: the complete digraph over `{a, b, c}` contains both
+    /// `a -> b -> c -> a` and `a -> c -> b -> a`. The pin identifies a loop by
+    /// its node set, so the two are genuinely ambiguous traversals of the same
+    /// pinned set. This routine resolves the ambiguity **deterministically**:
+    /// the DFS starts at the lex-smallest member and, at each step, tries
+    /// in-set successors in lexicographic order, so it returns the
+    /// **lex-first** Hamiltonian cycle (the one whose ordered node sequence is
+    /// lexicographically smallest). This is a DEFINED, stable behavior --
+    /// callers can rely on it being reproducible across runs and builds -- but
+    /// note the returned ordering is one arbitrary-by-lex choice among the
+    /// ambiguous traversals, not "the" canonical loop.
+    ///
+    /// The search walks only the top-level `self.edges` adjacency; edges that
+    /// exist only inside a sub-module's recursively-built graph
+    /// (`self.module_graphs`) are not traversed, so a pin whose cycle crosses a
+    /// module boundary is not currently supported (it resolves to `None`).
+    pub fn order_variable_cycle(
+        &self,
+        vars: &HashSet<Ident<Canonical>>,
+    ) -> Option<Vec<Ident<Canonical>>> {
+        if vars.len() < 2 {
+            // A self-loop (single variable referencing itself) is not a
+            // feedback loop in the SD sense; reject sets smaller than 2.
+            return None;
+        }
+
+        // Deterministic start: the lex-smallest member. Every node in a valid
+        // cycle has exactly one in-set successor that continues the cycle, so
+        // the start choice does not change whether a cycle is found, only the
+        // rotation -- which `canonical_rotation` normalizes downstream.
+        let mut members: Vec<&Ident<Canonical>> = vars.iter().collect();
+        members.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        let start = members[0].clone();
+
+        let mut path: Vec<Ident<Canonical>> = vec![start.clone()];
+        let mut visited: HashSet<Ident<Canonical>> = HashSet::new();
+        visited.insert(start.clone());
+
+        if self.dfs_order_cycle(&start, vars, &mut path, &mut visited) {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    /// DFS helper for [`Self::order_variable_cycle`]. Returns `true` and leaves
+    /// `path` holding the ordered cycle when a Hamiltonian cycle over `vars`
+    /// is found that closes back to `path[0]`.
+    fn dfs_order_cycle(
+        &self,
+        start: &Ident<Canonical>,
+        vars: &HashSet<Ident<Canonical>>,
+        path: &mut Vec<Ident<Canonical>>,
+        visited: &mut HashSet<Ident<Canonical>>,
+    ) -> bool {
+        let current = path.last().cloned().expect("path is never empty");
+        let Some(neighbors) = self.edges.get(&current) else {
+            return false;
+        };
+        // Iterate successors in a deterministic order so the recovered cycle is
+        // stable across runs (the adjacency Vec order is build-dependent).
+        let mut sorted: Vec<&Ident<Canonical>> =
+            neighbors.iter().filter(|n| vars.contains(*n)).collect();
+        sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        sorted.dedup();
+
+        for next in sorted {
+            if next == start {
+                // Closing edge: only valid once every member is on the path.
+                if path.len() == vars.len() {
+                    return true;
+                }
+                continue;
+            }
+            if visited.contains(next) {
+                continue;
+            }
+            visited.insert(next.clone());
+            path.push(next.clone());
+            if self.dfs_order_cycle(start, vars, path, visited) {
+                return true;
+            }
+            path.pop();
+            visited.remove(next);
+        }
+        false
+    }
+
+    /// Build a fully-annotated [`Loop`] from an ordered cycle, assigning the
+    /// supplied stable `id`.
+    ///
+    /// This mirrors the per-circuit body of [`Self::find_loops_with_limit`]
+    /// (links + polarity + stock enrichment) but keeps the caller-chosen id
+    /// instead of the `r{n}`/`b{n}`/`u{n}` auto-numbering, so a pinned loop
+    /// gets a `pin{n}` id that never collides with an enumerated loop's.
+    pub fn build_loop_from_cycle(&self, circuit: &[Ident<Canonical>], id: String) -> Loop {
+        let links = self.circuit_to_links(circuit);
+        let parent_stocks = self.find_stocks_in_loop(circuit);
+        let stocks = self.enrich_with_module_stocks(circuit, parent_stocks);
+        let polarity = self.calculate_polarity(&links);
+        Loop {
+            id,
+            links,
+            stocks,
+            polarity,
+            dimensions: vec![],
+        }
+    }
+
     /// Find stocks in a loop
     pub fn find_stocks_in_loop(&self, circuit: &[Ident<Canonical>]) -> Vec<Ident<Canonical>> {
         circuit

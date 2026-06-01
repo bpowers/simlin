@@ -25,9 +25,10 @@ use crate::canonicalize;
 use crate::datamodel;
 
 use super::{
-    Db, ModuleIdentContext, ModuleInputSet, SourceModel, SourceProject, SourceVariableKind,
-    build_module_inputs, model_module_ident_context, parse_source_variable_with_module_context,
-    project_datamodel_dims, project_dimensions_context, variable_direct_dependencies,
+    Db, LtmMode, ModuleIdentContext, ModuleInputSet, SourceModel, SourceProject,
+    SourceVariableKind, build_module_inputs, model_ltm_mode, model_module_ident_context,
+    parse_source_variable_with_module_context, project_datamodel_dims, project_dimensions_context,
+    variable_direct_dependencies,
 };
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -804,6 +805,10 @@ pub struct DetectedLoop {
     /// series and can take values strictly between 0 and 1, distinguishing
     /// `Rux`/`Bux` ("mostly R/B") from `U`.
     pub polarity_confidence: f64,
+    /// The user-supplied name for a modeler-pinned loop (id `pin{n}`), or
+    /// `None` for an automatically-enumerated loop. Lets a caller map a pinned
+    /// loop's stable `pin{n}` id back to the human label it was pinned under.
+    pub name: Option<String>,
 }
 
 /// Loop polarity as determined by structural analysis of link signs (and,
@@ -1554,17 +1559,29 @@ pub fn model_loop_circuits(
 /// polarity analysis. Loop IDs (r1, b1, u1, ...) match those used
 /// by LTM augmentation.
 ///
-/// Short-circuits to an empty result when the graph's largest SCC
-/// exceeds [`crate::ltm::MAX_LTM_SCC_NODES`], for the same reason
-/// the LTM pipeline's gate does: Johnson's enumeration on an SCC
-/// larger than the threshold can produce millions of elementary
-/// circuits (1.86M on WRLD3's 166-node SCC) and consume gigabytes
-/// of intermediate state.  FFI callers (`simlin_analyze_get_loops`)
-/// and the layout path (`layout::try_detect_ltm_loops_incremental`)
-/// hit this function directly without going through the LTM gate,
-/// so we apply the same structural guard here.  Returning empty
-/// matches the pre-existing behaviour for graphs that would
-/// exhaust the (now-retired) `MAX_LTM_CIRCUITS` cap.
+/// **Discovery gate**: this query consults the SHARED [`model_ltm_mode`]
+/// query for the exhaustive-vs-discovery decision, the same way
+/// `model_ltm_variables` does. In discovery mode it returns ONLY the model's
+/// pinned loops (no exhaustive enumeration). This unification is the fix for a
+/// correctness bug: the previous gate read solely the
+/// `causal_graph_with_modules` SCC size and ignored both the user-requested
+/// `ltm_discovery_mode` flag and the slow-path late-flip. On a small model
+/// with `ltm_discovery_mode` forced true + a pin, `model_ltm_variables` would
+/// emit only the pin's `loop_score`, but `model_detected_loops` would run full
+/// enumeration, dedup the pin away as a duplicate of an enumerated loop, and
+/// DROP the pinned loop -- so `simlin_analyze_get_loops` listed enumerated
+/// loops with no `loop_score` series (none are scored in discovery mode) and
+/// the user's pinned loop disappeared. Reading `model_ltm_mode` keeps the two
+/// surfaces in lockstep: in discovery mode (auto-flipped OR user-forced) the
+/// pins are the only loops reported, and each one DOES have a `loop_score`.
+///
+/// Discovery mode is also where exhaustive enumeration would blow up: Johnson's
+/// enumeration on an SCC larger than [`crate::ltm::MAX_LTM_SCC_NODES`] can
+/// produce millions of elementary circuits (1.86M on WRLD3's 166-node SCC) and
+/// consume gigabytes of intermediate state. FFI callers
+/// (`simlin_analyze_get_loops`) and the layout path
+/// (`layout::try_detect_ltm_loops_incremental`) hit this function directly, so
+/// the shared gate protects them too.
 pub fn model_detected_loops(
     db: &dyn Db,
     model: SourceModel,
@@ -1572,13 +1589,67 @@ pub fn model_detected_loops(
 ) -> DetectedLoopsResult {
     let graph = causal_graph_with_modules(db, model, project);
 
-    if graph.largest_scc_size() > crate::ltm::MAX_LTM_SCC_NODES {
-        return DetectedLoopsResult { loops: vec![] };
+    // Pinned loops are always surfaced, in both modes. This is the FFI half of
+    // the LOOPSCORE escape hatch: a pinned loop appears in
+    // `simlin_analyze_get_loops` and is readable by id (`pin{n}`) through
+    // `simlin_analyze_get_relative_loop_score` exactly like an enumerated loop.
+    let pinned = crate::db::model_pinned_loops(db, model, project);
+
+    if model_ltm_mode(db, model, project) == LtmMode::Discovery {
+        // Discovery mode: exhaustive enumeration is skipped (either it would
+        // blow up, or the caller requested discovery). The only loops we
+        // report are the pinned ones -- and crucially they are the ones
+        // `model_ltm_variables` emits a `loop_score` for, so they are
+        // consistent with what the simulation actually scores.
+        return DetectedLoopsResult {
+            loops: pinned.loops.iter().map(detected_loop_from_loop).collect(),
+        };
     }
 
     let loops = graph
         .find_loops_with_limit(usize::MAX)
         .expect("usize::MAX cannot exhaust the enumeration budget");
+    // Variable-level canonical rotation of a pinned loop, used both to dedup a
+    // pin against the enumerated set and to transfer the pin's name onto the
+    // surviving enumerated loop it duplicates.
+    let pin_rotation = |p: &crate::db::PinnedLoop| -> Vec<String> {
+        let seq: Vec<String> = p
+            .loop_
+            .links
+            .iter()
+            .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
+            .collect();
+        crate::ltm::canonical_rotation(&seq)
+    };
+    // Map each enumerated loop's canonical rotation to a pin name when a pin
+    // duplicates it, so the surviving enumerated `DetectedLoop` inherits the
+    // user's label instead of discarding it (a user who pinned "growth" sees a
+    // loop labelled "growth" in `model.loops`). Built before the consuming
+    // pass so the enumerated mapping below can look names up by rotation.
+    let pin_name_by_rotation: std::collections::HashMap<Vec<String>, String> = pinned
+        .loops
+        .iter()
+        .map(|p| (pin_rotation(p), p.name.clone()))
+        .collect();
+    // Canonical rotations of the enumerated loops, so a pinned loop that
+    // duplicates one is not surfaced twice (its name is transferred instead).
+    let enumerated: std::collections::HashSet<Vec<String>> = loops
+        .iter()
+        .map(|l| {
+            let seq: Vec<String> = l
+                .links
+                .iter()
+                .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
+                .collect();
+            crate::ltm::canonical_rotation(&seq)
+        })
+        .collect();
+    let extra_pins: Vec<DetectedLoop> = pinned
+        .loops
+        .iter()
+        .filter(|p| !enumerated.contains(&pin_rotation(p)))
+        .map(detected_loop_from_loop)
+        .collect();
     DetectedLoopsResult {
         loops: loops
             .into_iter()
@@ -1586,6 +1657,12 @@ pub fn model_detected_loops(
                 // Extract variable names from the loop's links
                 let mut vars = Vec::new();
                 let mut seen = std::collections::HashSet::new();
+                let loop_rotation: Vec<String> = l
+                    .links
+                    .iter()
+                    .map(|link| crate::ltm::strip_subscript(link.from.as_str()).to_string())
+                    .collect();
+                let loop_key = crate::ltm::canonical_rotation(&loop_rotation);
                 if !l.links.is_empty() {
                     let first = l.links[0].from.to_string();
                     if seen.insert(first.clone()) {
@@ -1626,9 +1703,52 @@ pub fn model_detected_loops(
                     variables: vars,
                     polarity,
                     polarity_confidence,
+                    // Transfer a pin's name onto the enumerated loop it
+                    // duplicates so the modeler's label survives the dedup.
+                    name: pin_name_by_rotation.get(&loop_key).cloned(),
                 }
             })
+            .chain(extra_pins)
             .collect(),
+    }
+}
+
+/// Build a `DetectedLoop` (the FFI loop surface) from a resolved pinned loop,
+/// preserving its `pin{n}` id. Mirrors the per-loop body of
+/// `model_detected_loops`: the variable list is the cycle's ordered node
+/// sequence; structural polarity confidence is binary (1.0 for a fully-known
+/// polarity loop, 0.0 when any link is Unknown).
+fn detected_loop_from_loop(pin: &crate::db::PinnedLoop) -> DetectedLoop {
+    let l = &pin.loop_;
+    let mut vars = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if !l.links.is_empty() {
+        let first = l.links[0].from.to_string();
+        if seen.insert(first.clone()) {
+            vars.push(first);
+        }
+        for link in &l.links {
+            let to = link.to.to_string();
+            if seen.insert(to.clone()) {
+                vars.push(to);
+            }
+        }
+    }
+    let (polarity, polarity_confidence) = match l.polarity {
+        crate::ltm::LoopPolarity::Reinforcing => (DetectedLoopPolarity::Reinforcing, 1.0),
+        crate::ltm::LoopPolarity::Balancing => (DetectedLoopPolarity::Balancing, 1.0),
+        crate::ltm::LoopPolarity::MostlyReinforcing => {
+            (DetectedLoopPolarity::MostlyReinforcing, 1.0)
+        }
+        crate::ltm::LoopPolarity::MostlyBalancing => (DetectedLoopPolarity::MostlyBalancing, 1.0),
+        crate::ltm::LoopPolarity::Undetermined => (DetectedLoopPolarity::Undetermined, 0.0),
+    };
+    DetectedLoop {
+        id: l.id.clone(),
+        variables: vars,
+        polarity,
+        polarity_confidence,
+        name: Some(pin.name.clone()),
     }
 }
 
@@ -2607,6 +2727,51 @@ mod detected_loops_scc_gate_tests {
             result.loops.is_empty(),
             "60-node SCC must trip the MAX_LTM_SCC_NODES = 50 gate, got {} loops",
             result.loops.len()
+        );
+    }
+
+    /// Important #1 (unit level): `model_detected_loops` must consult the
+    /// SHARED `model_ltm_mode` gate, so forcing `ltm_discovery_mode` true on a
+    /// SMALL model (whose SCC is well under the threshold) flips it to
+    /// discovery and suppresses exhaustive enumeration -- it does NOT keep
+    /// running Johnson and reporting enumerated loops the way the pre-fix gate
+    /// (which read only the `causal_graph_with_modules` SCC size) did. The pin
+    /// transfer is exercised end-to-end in `simulate_ltm_pinned.rs`; here we
+    /// pin nothing, so user-forced discovery yields an empty loop list.
+    #[test]
+    fn user_forced_discovery_suppresses_enumeration_on_small_model() {
+        let project = ring_project(2); // 4-node SCC, far under the 50 gate
+        let datamodel = project.build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let source_model = sync.models["main"].source;
+
+        // Default (exhaustive): the small loop is enumerated and the two
+        // surfaces agree on Exhaustive.
+        assert_eq!(
+            model_ltm_mode(&db, source_model, sync.project),
+            LtmMode::Exhaustive
+        );
+        assert!(
+            !model_detected_loops(&db, source_model, sync.project)
+                .loops
+                .is_empty(),
+            "a 4-node SCC must enumerate loops in exhaustive mode"
+        );
+
+        // Force discovery: both the shared gate and the FFI loop surface honor
+        // it even though the SCC is tiny.
+        crate::db::set_project_ltm_discovery_mode(&mut db, sync.project, true);
+        assert_eq!(
+            model_ltm_mode(&db, source_model, sync.project),
+            LtmMode::Discovery,
+            "user-forced discovery must be honored by the shared gate"
+        );
+        let detected = model_detected_loops(&db, source_model, sync.project);
+        assert!(
+            detected.loops.is_empty(),
+            "user-forced discovery must suppress exhaustive enumeration (no pins here); got {} loops",
+            detected.loops.len()
         );
     }
 }

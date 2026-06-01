@@ -13,6 +13,8 @@ import json
 import threading
 from typing import TYPE_CHECKING, Any, Self, Union
 
+import numpy as np
+
 from ._dt import parse_dt
 from ._ffi import (
     _register_finalizer,
@@ -26,7 +28,7 @@ from ._ffi import (
     model_get_var_names,
     string_to_c,
 )
-from .analysis import Link, LinkPolarity, Loop, LoopPolarity
+from .analysis import Analysis, Link, LinkPolarity, Loop, LoopPolarity
 from .errors import ErrorCode, SimlinRuntimeError
 from .json_converter import converter
 from .json_types import (
@@ -39,6 +41,7 @@ from .json_types import (
     JsonModelPatch,
     JsonProjectPatch,
     RenameVariable,
+    SetLoopName,
     UpsertAux,
     UpsertFlow,
     UpsertModule,
@@ -264,6 +267,34 @@ class ModelPatchBuilder:
 
     def delete_view(self, index: int) -> None:
         self._ops.append(DeleteView(index=index))
+
+    def set_loop_name(
+        self, name: str, variables: list[str], description: str | None = None
+    ) -> None:
+        """Pin (name) a feedback loop by the variables forming its cycle.
+
+        Pinning forces the LTM engine to ALWAYS score this loop, even in
+        discovery mode where the heuristic search might not surface it. The
+        pinned loop then appears in ``model.loops`` / ``run.loops`` and its
+        score is readable via ``Sim.get_relative_loop_score`` by the loop's
+        ``pin{n}`` id. ``variables`` lists the loop's member variables (order
+        is irrelevant; the cycle is recovered from the causal graph).
+
+        .. note::
+            A pinned loop occupies its own single-slot cycle partition.  When
+            it is the only loop scored in that partition -- always so in
+            discovery mode, where no enumerated loop scores exist --
+            ``Sim.get_relative_loop_score`` degenerates to ``+1``/``-1``
+            (active/inactive) because there is nothing to normalize against.
+            The RAW ``loop_score`` series is the informative one for a lone
+            pin; read it via ``Sim.get_series`` using the synthetic variable
+            name for the loop's raw score (the ``loop_score`` synthetic with
+            the ``pin{n}`` id, joined by the U+205A separator).  Multiple pins
+            on stocks in the same SCC partition DO normalize against each other.
+        """
+        self._ops.append(
+            SetLoopName(variables=list(variables), name=name, description=description)
+        )
 
 
 class _ModelEditContext:
@@ -609,6 +640,112 @@ class Model:
             Tuple of Loop objects (structural only, no behavior data)
         """
         return tuple(self.get_loops())
+
+    def analyze(self, timeout: float | None = None) -> Analysis:
+        """Run strongest-path loop *discovery* on this model.
+
+        Discovery is the heuristic "Loops That Matter" algorithm: it finds the
+        feedback loops that drive behavior, even on large models where the
+        exhaustive structural enumeration behind ``Model.loops`` / ``Run.loops``
+        returns nothing (because such models auto-flip to discovery mode).
+
+        This is an EXPLICIT, opt-in call: ``Model.run()`` never triggers
+        discovery, because discovery can be slow or even infeasible on very
+        large models. Pass a ``timeout`` to bound the wall-clock time spent in
+        discovery's per-timestep sweep; when it elapses before discovery
+        finishes, the returned :class:`Analysis` has ``truncated=True`` and its
+        ``loops`` / ``dominant_periods`` reflect only the work done so far.
+
+        The analysis runs against the model's base configuration (no overrides
+        or time-range changes); it compiles and simulates internally in LTM
+        discovery mode.
+
+        Args:
+            timeout: Maximum seconds to spend in discovery, or ``None`` for no
+                limit. Must be non-negative.
+
+        Returns:
+            An :class:`Analysis` with the discovered loops (each carrying its
+            importance ``behavior_time_series``), the dominant periods, and a
+            ``truncated`` flag.
+
+        Example:
+            >>> analysis = model.analyze(timeout=5.0)
+            >>> if analysis.truncated:
+            ...     print("discovery hit the timeout; results are partial")
+            >>> for loop in analysis.loops:
+            ...     print(loop.id, loop.average_importance())
+        """
+        from .run import DominantPeriod
+
+        if timeout is not None and timeout < 0:
+            raise ValueError(f"timeout must be non-negative, got {timeout}")
+
+        # The FFI takes a millisecond budget where 0 means unlimited; map a
+        # None/absent timeout to 0 and round a fractional-millisecond positive
+        # timeout up to at least 1ms so a tiny positive value never silently
+        # becomes "unlimited".
+        budget_ms = 0 if timeout is None else max(1, round(timeout * 1000.0))
+
+        with self._lock:
+            self._check_alive()
+            err_ptr = ffi.new("SimlinError **")
+            result_ptr = lib.simlin_analyze_discover_loops(self._ptr, budget_ms, err_ptr)
+            check_out_error(err_ptr, "Discover loops")
+
+        if result_ptr == ffi.NULL:
+            return Analysis(loops=(), dominant_periods=(), truncated=False)
+
+        try:
+            loops: list[Loop] = []
+            for i in range(result_ptr.loop_count):
+                c_loop = result_ptr.loops[i]
+
+                variables = []
+                for j in range(c_loop.var_count):
+                    var_name = c_to_string(c_loop.variables[j])
+                    if var_name:
+                        variables.append(var_name)
+
+                behavior_ts = None
+                if c_loop.importance_len > 0 and c_loop.importance != ffi.NULL:
+                    behavior_ts = np.frombuffer(
+                        ffi.buffer(c_loop.importance, c_loop.importance_len * 8),
+                        dtype=np.float64,
+                    ).copy()
+
+                loops.append(
+                    Loop(
+                        id=c_to_string(c_loop.id) or f"loop_{i}",
+                        variables=tuple(variables),
+                        polarity=LoopPolarity(c_loop.polarity),
+                        behavior_time_series=behavior_ts,
+                    )
+                )
+
+            periods: list[DominantPeriod] = []
+            for i in range(result_ptr.period_count):
+                c_period = result_ptr.periods[i]
+                dominant_loops = []
+                for j in range(c_period.dominant_loop_count):
+                    loop_id = c_to_string(c_period.dominant_loops[j])
+                    if loop_id:
+                        dominant_loops.append(loop_id)
+                periods.append(
+                    DominantPeriod(
+                        dominant_loops=tuple(dominant_loops),
+                        start_time=float(c_period.start),
+                        end_time=float(c_period.end),
+                    )
+                )
+
+            return Analysis(
+                loops=tuple(loops),
+                dominant_periods=tuple(periods),
+                truncated=bool(result_ptr.truncated),
+            )
+        finally:
+            lib.simlin_free_discovery_result(result_ptr)
 
     def simulate(
         self,

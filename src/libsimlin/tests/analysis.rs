@@ -575,7 +575,7 @@ fn test_analyze_get_links() {
         assert!(!sim.is_null());
 
         err = ptr::null_mut();
-        let links = simlin_analyze_get_links(sim, &mut err as *mut *mut SimlinError);
+        let links = simlin_analyze_get_links(sim, false, &mut err as *mut *mut SimlinError);
         assert!(err.is_null());
         assert!(!links.is_null());
         assert!((*links).count > 0, "Should have detected causal links");
@@ -647,7 +647,7 @@ fn test_analyze_get_links() {
         // Get links with scores
         err = ptr::null_mut();
         let links_with_scores =
-            simlin_analyze_get_links(sim_ltm, &mut err as *mut *mut SimlinError);
+            simlin_analyze_get_links(sim_ltm, false, &mut err as *mut *mut SimlinError);
         assert!(err.is_null());
         assert!(!links_with_scores.is_null());
         assert!((*links_with_scores).count > 0);
@@ -728,7 +728,7 @@ fn test_analyze_get_links_no_loops() {
         assert!(!sim.is_null());
 
         err = ptr::null_mut();
-        let links = simlin_analyze_get_links(sim, &mut err as *mut *mut SimlinError);
+        let links = simlin_analyze_get_links(sim, false, &mut err as *mut *mut SimlinError);
         assert!(err.is_null());
         assert!(!links.is_null());
 
@@ -761,7 +761,8 @@ fn test_analyze_get_links_null_safety() {
     unsafe {
         // Test with null sim
         let mut err: *mut SimlinError = ptr::null_mut();
-        let links = simlin_analyze_get_links(ptr::null_mut(), &mut err as *mut *mut SimlinError);
+        let links =
+            simlin_analyze_get_links(ptr::null_mut(), false, &mut err as *mut *mut SimlinError);
         assert!(links.is_null());
 
         // Test free with null (should not crash)
@@ -1712,6 +1713,532 @@ fn test_two_a2a_subsystems_per_slot_rel_score_round_trips() {
                 }
             }
         }
+
+        simlin_free_loops(loops);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// Build a tiny reinforcing-loop project (population grows proportionally to
+/// itself) and open it via the protobuf FFI, returning `(project, model)`.
+///
+/// population[t] is a stock fed by `births = population * growth_rate`, so the
+/// strongest-path discovery finds a single reinforcing loop
+/// `population -> births -> population` with a non-trivial importance series.
+unsafe fn open_reinforcing_loop_model() -> (*mut SimlinProject, *mut SimlinModel) {
+    let test_project = TestProject::new("main")
+        .with_sim_time(0.0, 20.0, 1.0)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * growth_rate", None)
+        .aux("growth_rate", "0.1", None);
+
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+    assert!(err.is_null(), "project open should not error");
+    assert!(!proj.is_null());
+
+    let mut err_model: *mut SimlinError = ptr::null_mut();
+    let model = simlin_project_get_model(proj, ptr::null(), &mut err_model);
+    assert!(err_model.is_null(), "get_model should not error");
+    assert!(!model.is_null());
+
+    (proj, model)
+}
+
+/// Collect the C string array at `(ptr, count)` into owned Rust strings.
+unsafe fn c_string_array(ptr: *mut *mut c_char, count: usize) -> Vec<String> {
+    if ptr.is_null() || count == 0 {
+        return Vec::new();
+    }
+    let slice = std::slice::from_raw_parts(ptr, count);
+    slice
+        .iter()
+        .map(|&p| {
+            assert!(!p.is_null(), "string entry must not be NULL");
+            CStr::from_ptr(p).to_string_lossy().into_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn discover_loops_returns_loops_periods_and_importance() {
+    unsafe {
+        let (proj, model) = open_reinforcing_loop_model();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        // budget_ms = 0 => unlimited; the model is tiny so this completes.
+        let result = simlin_analyze_discover_loops(model, 0, &mut err);
+        assert!(err.is_null(), "discovery should not error");
+        assert!(!result.is_null(), "discovery result must not be NULL");
+
+        let res = &*result;
+        assert!(
+            !res.truncated,
+            "an unbudgeted run on a tiny model must not be truncated"
+        );
+        assert!(
+            res.loop_count > 0,
+            "discovery should find at least one loop in a reinforcing model"
+        );
+
+        // Each discovered loop carries an id, a closed variable chain, and a
+        // per-step importance series.
+        let loops = std::slice::from_raw_parts(res.loops, res.loop_count);
+        for lp in loops {
+            let id = CStr::from_ptr(lp.id).to_string_lossy().into_owned();
+            assert!(!id.is_empty(), "loop id must not be empty");
+            assert!(
+                lp.var_count >= 2,
+                "loop {id} must have at least two variables in its chain"
+            );
+            let vars = c_string_array(lp.variables, lp.var_count);
+            assert!(
+                vars.iter().any(|v| v == "population"),
+                "loop {id} should include population, got {vars:?}"
+            );
+            assert!(
+                lp.importance_len > 0,
+                "loop {id} must have a non-empty importance series"
+            );
+            let importance = std::slice::from_raw_parts(lp.importance, lp.importance_len);
+            assert!(
+                importance.iter().all(|v| v.is_finite()),
+                "loop {id} importance series must be finite"
+            );
+        }
+
+        // Dominant periods cover the simulation with valid bounds.
+        assert!(
+            res.period_count > 0,
+            "a model with loops should produce at least one dominant period"
+        );
+        let periods = std::slice::from_raw_parts(res.periods, res.period_count);
+        for p in periods {
+            assert!(p.start <= p.end, "period start must not exceed its end");
+            let names = c_string_array(p.dominant_loops, p.dominant_loop_count);
+            assert!(
+                !names.is_empty(),
+                "a dominant period must name at least one loop"
+            );
+        }
+
+        simlin_free_discovery_result(result);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn discover_loops_tiny_budget_truncates() {
+    unsafe {
+        // A goal-seeking (balancing) model over many saved timesteps. Values
+        // stay bounded (population converges toward the goal), and the large
+        // step count makes the per-timestep discovery sweep reliably take well
+        // over a millisecond -- so a 1ms budget trips the per-step elapsed
+        // check and reports truncation. The budget is checked at the top of
+        // each step, so the sweep stops promptly rather than hanging.
+        let test_project = TestProject::new("main")
+            .with_sim_time(0.0, 200_000.0, 1.0)
+            .stock("population", "10", &["adjustment"], &[], None)
+            .flow("adjustment", "(goal - population) * 0.1", None)
+            .aux("goal", "1000", None);
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine_serde::serialize(&datamodel_project).unwrap();
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(err.is_null());
+        assert!(!proj.is_null());
+        let mut err_model: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err_model);
+        assert!(err_model.is_null());
+        assert!(!model.is_null());
+
+        err = ptr::null_mut();
+        let result = simlin_analyze_discover_loops(model, 1, &mut err);
+        assert!(
+            err.is_null(),
+            "discovery should not error even when truncated"
+        );
+        assert!(!result.is_null());
+
+        let res = &*result;
+        assert!(
+            res.truncated,
+            "a 1ms budget on a 200k-step sweep must report truncated discovery"
+        );
+
+        simlin_free_discovery_result(result);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn discover_loops_null_model_errors_without_panic() {
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let result = simlin_analyze_discover_loops(ptr::null_mut(), 0, &mut err);
+        assert!(result.is_null(), "null model must yield a null result");
+        assert!(!err.is_null(), "null model must surface an error");
+        simlin_error_free(err);
+
+        // Freeing a null result is a no-op.
+        simlin_free_discovery_result(ptr::null_mut());
+    }
+}
+
+// === LTM mode signal (Task A) and macro-internal link collapse (Task B) ===
+
+/// Build a SMTH1-in-feedback-loop protobuf (mirrors the engine's
+/// `smooth_polarity` fixture). SMTH1 expands to a stdlib module, so the causal
+/// graph gains a `$⁚smoothed_level⁚0⁚smth1` synthetic node and a synthetic arg
+/// helper -- exactly the macro/module internals Task B collapses.
+fn build_smooth_feedback_protobuf() -> Vec<u8> {
+    let test_project = TestProject::new("smooth_feedback")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .aux("goal", "100", None)
+        .stock("level", "50", &["adjustment"], &[], None)
+        .aux("smoothed_level", "SMTH1(level, 3)", None)
+        .aux("gap", "goal - smoothed_level", None)
+        .flow("adjustment", "gap / 5", None);
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+    buf
+}
+
+unsafe fn open_project_and_model(buf: &[u8]) -> (*mut SimlinProject, *mut SimlinModel) {
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+    assert!(err.is_null());
+    assert!(!proj.is_null());
+    let mut err: *mut SimlinError = ptr::null_mut();
+    let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+    assert!(err.is_null());
+    assert!(!model.is_null());
+    (proj, model)
+}
+
+unsafe fn snapshot_link_edges(links: *mut SimlinLinks) -> Vec<(String, String)> {
+    let count = (*links).count;
+    let slice = if count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts((*links).links, count)
+    };
+    slice
+        .iter()
+        .map(|l| {
+            let from = CStr::from_ptr(l.from).to_str().unwrap().to_string();
+            let to = CStr::from_ptr(l.to).to_str().unwrap().to_string();
+            (from, to)
+        })
+        .collect()
+}
+
+#[test]
+fn ltm_mode_is_exhaustive_for_small_model() {
+    let buf = build_smooth_feedback_protobuf();
+    unsafe {
+        let (proj, model) = open_project_and_model(&buf);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let mode = simlin_sim_get_ltm_mode(sim, &mut err);
+        assert!(err.is_null());
+        assert_eq!(mode, SimlinLtmMode::Exhaustive);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn ltm_mode_is_disabled_when_ltm_off() {
+    let buf = build_smooth_feedback_protobuf();
+    unsafe {
+        let (proj, model) = open_project_and_model(&buf);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut err);
+        assert!(err.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let mode = simlin_sim_get_ltm_mode(sim, &mut err);
+        assert!(err.is_null());
+        assert_eq!(mode, SimlinLtmMode::Disabled);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn ltm_mode_null_sim_errors_without_panic() {
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let mode = simlin_sim_get_ltm_mode(ptr::null_mut(), &mut err);
+        assert_eq!(mode, SimlinLtmMode::Disabled);
+        assert!(!err.is_null());
+        simlin_error_free(err);
+    }
+}
+
+#[test]
+fn get_links_collapses_macro_internals_by_default() {
+    let buf = build_smooth_feedback_protobuf();
+    unsafe {
+        let (proj, model) = open_project_and_model(&buf);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        // Default (include_internal = false): no synthetic node survives, and
+        // the macro chain `level -> smth1 -> smoothed_level` collapses to one
+        // composite edge `level -> smoothed_level`.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let collapsed_ptr = simlin_analyze_get_links(sim, false, &mut err);
+        assert!(err.is_null());
+        let collapsed = snapshot_link_edges(collapsed_ptr);
+        simlin_free_links(collapsed_ptr);
+
+        assert!(
+            collapsed
+                .iter()
+                .all(|(f, t)| !f.starts_with('$') && !t.starts_with('$')),
+            "collapsed view leaked a synthetic node: {collapsed:?}"
+        );
+        assert!(
+            collapsed
+                .iter()
+                .any(|(f, t)| f == "level" && t == "smoothed_level"),
+            "composite level -> smoothed_level edge missing: {collapsed:?}"
+        );
+
+        // Raw view (include_internal = true): synthetic macro nodes are
+        // present, and there are strictly more edges than the collapsed view.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let raw_ptr = simlin_analyze_get_links(sim, true, &mut err);
+        assert!(err.is_null());
+        let raw = snapshot_link_edges(raw_ptr);
+        simlin_free_links(raw_ptr);
+
+        assert!(
+            raw.iter()
+                .any(|(f, t)| f.starts_with('$') || t.starts_with('$')),
+            "raw view should expose a synthetic macro node: {raw:?}"
+        );
+        assert!(
+            collapsed.len() < raw.len(),
+            "collapsed view ({}) should have fewer edges than raw ({})",
+            collapsed.len(),
+            raw.len()
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+#[test]
+fn collapsed_macro_edge_carries_composite_score() {
+    let buf = build_smooth_feedback_protobuf();
+    unsafe {
+        let (proj, model) = open_project_and_model(&buf);
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+        let mut err: *mut SimlinError = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let links_ptr = simlin_analyze_get_links(sim, false, &mut err);
+        assert!(err.is_null());
+        let count = (*links_ptr).count;
+        let slice = std::slice::from_raw_parts((*links_ptr).links, count);
+        let through = slice
+            .iter()
+            .find(|l| {
+                let from = CStr::from_ptr(l.from).to_str().unwrap();
+                let to = CStr::from_ptr(l.to).to_str().unwrap();
+                from == "level" && to == "smoothed_level"
+            })
+            .expect("composite level -> smoothed_level edge");
+        // The composite edge through the macro carries a score series (the
+        // product/strongest-path path score), not a dropped/null one.
+        assert!(!through.score.is_null());
+        assert!(through.score_len > 0);
+        simlin_free_links(links_ptr);
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// Build a datamodel with a 60-stock ring (forcing LTM discovery mode) plus a
+/// small two-stock loop pinned by name, serialized to protobuf.
+///
+/// The ring's 60-node SCC trips the auto-flip gate, so exhaustive enumeration
+/// is skipped and `simlin_analyze_get_loops` would normally report nothing.
+/// The pinned `a<->b` loop is the LOOPSCORE escape hatch: it must still be
+/// surfaced and readable through the FFI.
+fn build_discovery_with_pin_protobuf() -> Vec<u8> {
+    use simlin_engine::datamodel;
+
+    let mut builder = TestProject::new("discovery_pin").with_sim_time(0.0, 5.0, 0.25);
+    const RING: usize = 60;
+    for i in 0..RING {
+        let next = (i + 1) % RING;
+        builder = builder.flow(&format!("f{i}"), &format!("stock_{next} * 0.001"), None);
+        builder = builder.stock(&format!("stock_{i}"), "10", &[&format!("f{i}")], &[], None);
+    }
+    builder = builder
+        .stock("a", "100", &["to_a"], &[], None)
+        .stock("b", "100", &["to_b"], &[], None)
+        .flow("to_b", "a * 0.05", None)
+        .flow("to_a", "b * 0.05", None);
+
+    let mut datamodel_project = builder.build_datamodel();
+    // Assign UIDs and pin the a<->b loop.
+    let model = &mut datamodel_project.models[0];
+    for (i, var) in model.variables.iter_mut().enumerate() {
+        let uid = (i as i32) + 1;
+        match var {
+            datamodel::Variable::Stock(s) => s.uid = Some(uid),
+            datamodel::Variable::Flow(f) => f.uid = Some(uid),
+            datamodel::Variable::Aux(a) => a.uid = Some(uid),
+            datamodel::Variable::Module(m) => m.uid = Some(uid),
+        }
+    }
+    let pin_vars = ["a", "to_b", "b", "to_a"];
+    let uids: Vec<i32> = pin_vars
+        .iter()
+        .map(|v| {
+            let canon = simlin_engine::canonicalize(v);
+            model
+                .variables
+                .iter()
+                .find(|var| simlin_engine::canonicalize(var.get_ident()) == canon)
+                .and_then(|var| match var {
+                    datamodel::Variable::Stock(s) => s.uid,
+                    datamodel::Variable::Flow(f) => f.uid,
+                    datamodel::Variable::Aux(a) => a.uid,
+                    datamodel::Variable::Module(m) => m.uid,
+                })
+                .unwrap()
+        })
+        .collect();
+    model.loop_metadata.push(datamodel::LoopMetadata {
+        uids,
+        deleted: false,
+        name: "ab loop".to_string(),
+        description: String::new(),
+    });
+
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+    buf
+}
+
+/// The pinned loop must surface through `simlin_analyze_get_loops` and be
+/// readable by id via `simlin_analyze_get_relative_loop_score` even in
+/// discovery mode, where exhaustive enumeration is skipped.
+#[test]
+fn pinned_loop_surfaces_through_ffi_in_discovery_mode() {
+    let buf = build_discovery_with_pin_protobuf();
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(err.is_null());
+        assert!(!proj.is_null());
+
+        let mut errm: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut errm);
+        assert!(errm.is_null());
+
+        err = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        // Discovery mode is in effect (the 60-node ring tripped the gate).
+        err = ptr::null_mut();
+        let mode = simlin_sim_get_ltm_mode(sim, &mut err);
+        assert!(err.is_null());
+        assert_eq!(mode, SimlinLtmMode::Discovery);
+
+        // The pinned loop is the ONLY loop reported (enumeration is skipped).
+        err = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!loops.is_null());
+        assert_eq!((*loops).count, 1, "only the pinned loop should surface");
+        let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+        let loop_id = CStr::from_ptr(loop_slice[0].id)
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(loop_id, "pin1");
+
+        // Its relative loop score is readable by id and finite & non-zero.
+        let mut step_count: usize = 0;
+        err = ptr::null_mut();
+        simlin_sim_get_stepcount(sim, &mut step_count, &mut err);
+        assert!(err.is_null());
+        let id_c = CString::new(loop_id).unwrap();
+        let mut scores = vec![0.0_f64; step_count];
+        let mut written: usize = 0;
+        err = ptr::null_mut();
+        simlin_analyze_get_relative_loop_score(
+            sim,
+            id_c.as_ptr(),
+            scores.as_mut_ptr(),
+            scores.len(),
+            &mut written,
+            &mut err,
+        );
+        assert!(err.is_null(), "pinned loop rel score must be readable");
+        assert_eq!(written, scores.len());
+        for s in &scores {
+            assert!(s.is_finite(), "no NaN from the API");
+        }
+        // The pin is the only loop, so its rel score is +/-1 once active.
+        let nonzero: Vec<f64> = scores.iter().copied().filter(|s| *s != 0.0).collect();
+        assert!(
+            !nonzero.is_empty(),
+            "pinned loop should have non-zero score"
+        );
+
+        // Element count for the scalar pinned loop is 1.
+        let id_c2 = CString::new("pin1").unwrap();
+        let mut count: usize = 0;
+        err = ptr::null_mut();
+        simlin_analyze_get_loop_element_count(sim, id_c2.as_ptr(), &mut count, &mut err);
+        assert!(err.is_null());
+        assert_eq!(count, 1, "scalar pinned loop has 1 element slot");
 
         simlin_free_loops(loops);
         simlin_sim_unref(sim);

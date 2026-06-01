@@ -214,6 +214,29 @@ class Run:
         return dict(self._overrides)
 
     @property
+    def ltm_mode(self) -> str:
+        """The LTM loop-enumeration mode this run resolved to.
+
+        Reports whether Loops That Matter enumerated every feedback loop
+        exhaustively (small models) or auto-flipped to the strongest-path
+        discovery heuristic (large models whose causal graph exceeds the
+        SCC-size gate). Without this signal an empty or unexpectedly small
+        loop set is indistinguishable from a model that simply has few loops.
+
+        Returns:
+            ``"exhaustive"`` or ``"discovery"`` when LTM was enabled for this
+            run, or ``"disabled"`` when it was not (e.g. ``analyze_loops=False``
+            on :meth:`Model.run`, or ``enable_ltm=False`` on
+            :meth:`Model.simulate`).
+
+        Example:
+            >>> run = model.run()
+            >>> if run.ltm_mode == "discovery":
+            ...     print("loops ranked heuristically; not exhaustively enumerated")
+        """
+        return str(self._sim.get_ltm_mode())
+
+    @property
     def time_spec(self) -> TimeSpec:
         """Time specification used for this run.
 

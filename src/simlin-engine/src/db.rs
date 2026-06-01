@@ -54,8 +54,8 @@ pub use diagnostic::{
 mod input;
 pub(crate) use input::source_var_is_table_only;
 pub use input::{
-    LtmLinkId, ModuleIdentContext, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, datamodel_variable_from_source,
+    LtmLinkId, ModuleIdentContext, ModuleInputSet, PinnedLoopSpec, SourceModel, SourceProject,
+    SourceVariable, SourceVariableKind, datamodel_variable_from_source,
 };
 
 mod query;
@@ -105,7 +105,7 @@ mod ltm;
 use ltm::*;
 pub use ltm::{
     LtmImplicitVarMeta, compile_ltm_var_fragment, link_score_equation_text_shaped,
-    model_ltm_implicit_var_info, model_ltm_variables,
+    model_ltm_implicit_var_info, model_ltm_mode, model_ltm_variables,
 };
 
 mod analysis;
@@ -302,7 +302,30 @@ pub struct LtmSyntheticVar {
     pub compile_directly: bool,
 }
 
+/// The loop-enumeration mode the LTM pipeline resolved for a model.
+///
+/// `model_ltm_variables` either enumerates every elementary circuit
+/// (Johnson, [`Exhaustive`](LtmMode::Exhaustive)) or, for models whose
+/// variable-level or cross-element SCC exceeds `ltm::MAX_LTM_SCC_NODES`
+/// (or when the caller requested discovery directly), falls back to the
+/// per-timestep strongest-path heuristic ([`Discovery`](LtmMode::Discovery)).
+/// A user sees empty or different loop results in the two modes with no
+/// other signal; this enum is that signal, surfaced through the FFI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update)]
+pub enum LtmMode {
+    /// Exhaustive Johnson enumeration of every elementary circuit.
+    Exhaustive,
+    /// Strongest-path discovery heuristic (the model tripped the SCC gate
+    /// or the caller explicitly requested discovery).
+    Discovery,
+}
+
 /// Result of LTM variable generation for a model.
+///
+/// `mode` records whether loop enumeration ran exhaustively or auto-flipped
+/// (or was forced) to the discovery heuristic -- the only signal a caller has
+/// for telling the two apart, since the synthetic-variable output otherwise
+/// just looks empty or different.
 ///
 /// `loop_partitions` maps each loop ID (as in `$⁚ltm⁚loop_score⁚{id}`) to
 /// its cycle-partition index **per slot**: length 1 for scalar/cross-element/
@@ -330,6 +353,7 @@ pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
     pub loop_partitions: HashMap<String, Vec<Option<usize>>>,
     pub agg_recovery_truncated: bool,
+    pub mode: LtmMode,
 }
 
 /// Compute the link score equation text for a single causal link.

@@ -79,6 +79,12 @@ def logistic_growth_json_path() -> Path:
 
 
 @pytest.fixture
+def logistic_growth_ltm_path() -> Path:
+    """Return path to the small logistic-growth LTM model (XMILE)."""
+    return get_repo_root() / "test" / "logistic_growth_ltm" / "logistic_growth.stmx"
+
+
+@pytest.fixture
 def subscripted_model_path() -> Path:
     """Return path to a model with subscripted (arrayed) variables."""
     # This model has flows with apply-to-all equations

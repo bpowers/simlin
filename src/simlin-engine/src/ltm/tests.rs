@@ -4826,6 +4826,141 @@ fn johnson_matches_tiernan_on_fixture_corpus() {
 }
 
 // ------------------------------------------------------------------
+// `order_variable_cycle`: the pinned-loop Hamiltonian-cycle recovery.
+//
+// These tests pin down the DEFINED behavior the rustdoc promises: a
+// valid set recovers its (lex-first) cycle; the negative cases all
+// return `None`; and an ambiguous set (multiple distinct directed
+// cycles over the same node set) yields the deterministic lex-first
+// pick.
+// ------------------------------------------------------------------
+
+/// Build a `CausalGraph` whose adjacency is exactly `edges` (a list of
+/// `(from, to)` ident-name pairs). Stocks/variables/modules are empty --
+/// `order_variable_cycle` consults only `self.edges`.
+fn graph_from_edges(edges: &[(&str, &str)]) -> CausalGraph {
+    let mut map: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    for (from, to) in edges {
+        map.entry(Ident::new(from))
+            .or_default()
+            .push(Ident::new(to));
+    }
+    CausalGraph {
+        edges: map,
+        stocks: HashSet::new(),
+        variables: HashMap::new(),
+        module_graphs: HashMap::new(),
+    }
+}
+
+fn var_set(names: &[&str]) -> HashSet<Ident<Canonical>> {
+    names.iter().map(|n| Ident::new(n)).collect()
+}
+
+/// A simple valid 3-cycle `a -> b -> c -> a` recovers in lex-first order.
+#[test]
+fn order_variable_cycle_simple_valid_cycle() {
+    let graph = graph_from_edges(&[("a", "b"), ("b", "c"), ("c", "a")]);
+    let cycle = graph
+        .order_variable_cycle(&var_set(&["a", "b", "c"]))
+        .expect("a, b, c form a closed cycle");
+    // Starts at the lex-smallest node and follows the only in-set path.
+    assert_eq!(
+        cycle.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b", "c"],
+    );
+}
+
+/// A degenerate single-variable set is not a feedback loop (rejected by the
+/// `< 2` guard) even if the variable self-references.
+#[test]
+fn order_variable_cycle_single_node_rejected() {
+    let graph = graph_from_edges(&[("a", "a")]);
+    assert!(graph.order_variable_cycle(&var_set(&["a"])).is_none());
+}
+
+/// An OPEN set `{a, b}` whose members do not both close back (a -> b exists
+/// but b -> a does not) is not a closed cycle.
+#[test]
+fn order_variable_cycle_open_set_rejected() {
+    let graph = graph_from_edges(&[("a", "b")]);
+    assert!(graph.order_variable_cycle(&var_set(&["a", "b"])).is_none());
+}
+
+/// A set that closes ONLY via an unnamed intermediate (`a -> x -> b -> a`,
+/// with `x` not in the pinned set) does not form a closed cycle over the
+/// named set alone -- the DFS may only step along in-set edges.
+#[test]
+fn order_variable_cycle_closes_only_via_unnamed_intermediate_rejected() {
+    let graph = graph_from_edges(&[("a", "x"), ("x", "b"), ("b", "a")]);
+    // Pinning {a, b} cannot reach b from a without traversing x.
+    assert!(graph.order_variable_cycle(&var_set(&["a", "b"])).is_none());
+}
+
+/// A figure-8 (two cycles sharing one node, `a -> b -> a` and `a -> c -> a`)
+/// does NOT admit a single Hamiltonian cycle visiting all of `{a, b, c}`:
+/// any traversal must revisit `a`. Rejected.
+#[test]
+fn order_variable_cycle_figure_eight_rejected() {
+    let graph = graph_from_edges(&[("a", "b"), ("b", "a"), ("a", "c"), ("c", "a")]);
+    assert!(
+        graph
+            .order_variable_cycle(&var_set(&["a", "b", "c"]))
+            .is_none()
+    );
+}
+
+/// A disconnected extra node (`a <-> b` a valid 2-cycle, plus an isolated `c`)
+/// cannot form a cycle over `{a, b, c}` -- `c` has no in-set edges.
+#[test]
+fn order_variable_cycle_disconnected_extra_node_rejected() {
+    let graph = graph_from_edges(&[("a", "b"), ("b", "a")]);
+    assert!(
+        graph
+            .order_variable_cycle(&var_set(&["a", "b", "c"]))
+            .is_none()
+    );
+    // The 2-cycle alone is still recoverable.
+    let cycle = graph
+        .order_variable_cycle(&var_set(&["a", "b"]))
+        .expect("a <-> b is a valid 2-cycle");
+    assert_eq!(
+        cycle.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b"],
+    );
+}
+
+/// AMBIGUOUS set: the complete digraph over `{a, b, c}` admits BOTH
+/// `a -> b -> c -> a` and `a -> c -> b -> a`. The DEFINED behavior is the
+/// lex-first pick: starting at `a` (lex-smallest) and trying successors in
+/// lex order picks `b` before `c`, yielding `[a, b, c]`. This is a stable,
+/// reproducible choice (the rustdoc's documented tie-break).
+#[test]
+fn order_variable_cycle_multi_cycle_picks_lex_first() {
+    let graph = graph_from_edges(&[
+        ("a", "b"),
+        ("a", "c"),
+        ("b", "a"),
+        ("b", "c"),
+        ("c", "a"),
+        ("c", "b"),
+    ]);
+    let cycle = graph
+        .order_variable_cycle(&var_set(&["a", "b", "c"]))
+        .expect("the complete digraph over a, b, c admits a Hamiltonian cycle");
+    assert_eq!(
+        cycle.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b", "c"],
+        "the ambiguous set must resolve to the lex-first Hamiltonian cycle"
+    );
+    // Determinism: a second call returns the identical ordering.
+    let again = graph
+        .order_variable_cycle(&var_set(&["a", "b", "c"]))
+        .expect("still recovers a cycle");
+    assert_eq!(cycle, again, "the lex-first pick must be reproducible");
+}
+
+// ------------------------------------------------------------------
 // Property-based equivalence test: random small graphs.
 //
 // For each randomly generated graph, assert Johnson's and Tiernan

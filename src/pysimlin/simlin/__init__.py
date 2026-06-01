@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Union
 
 from .analysis import (
+    Analysis,
     Link,
     LinkPolarity,
     Loop,
     LoopPolarity,
+    LtmMode,
 )
 from .errors import (
     ErrorCode,
@@ -114,6 +116,7 @@ __all__ = [
     "VARTYPE_FLOW",
     "VARTYPE_MODULE",
     "VARTYPE_STOCK",
+    "Analysis",
     "Aux",
     "DominantPeriod",
     "ErrorCode",
@@ -125,6 +128,7 @@ __all__ = [
     "LinkPolarity",
     "Loop",
     "LoopPolarity",
+    "LtmMode",
     "Model",
     "ModelIssue",
     "Project",

@@ -339,3 +339,25 @@ pub(crate) fn normalize_module_ref(ident: &Ident<Canonical>) -> Ident<Canonical>
         ident.clone()
     }
 }
+
+/// The reserved synthetic-name prefix: `$` followed by U+205A (TWO DOT
+/// PUNCTUATION). Every macro-instantiation internal (`$⁚{var}⁚{n}⁚{func}`)
+/// and every LTM-internal node (`$⁚ltm⁚agg⁚{n}`, `$⁚ltm⁚link_score⁚…`, etc.)
+/// begins with it. Real model variables never start with `$`, so this is an
+/// exact membership test for "is this node a synthetic/macro/module internal
+/// rather than a user variable".
+pub(crate) const SYNTHETIC_NODE_PREFIX: &str = "$\u{205A}";
+
+/// `true` when `name` is a synthetic/internal node -- a macro-instantiation
+/// internal (`$⁚{var}⁚{n}⁚{func}`, optionally `·`-suffixed for a module
+/// output path), an LTM-internal aggregate/link-score/loop-score node, or any
+/// other name carrying the reserved [`SYNTHETIC_NODE_PREFIX`].
+///
+/// This is the broad generalization of [`crate::ltm_agg::is_synthetic_agg_name`]
+/// (which only matches `$⁚ltm⁚agg⁚{n}`): every node we must hide from the
+/// user-facing causal view -- not just LTM aggregate nodes -- carries the `$⁚`
+/// prefix. A node name may be a module-output path (`$⁚var⁚0⁚func·output`);
+/// the leading-prefix test still classifies it as synthetic.
+pub(crate) fn is_synthetic_node_name(name: &str) -> bool {
+    name.starts_with(SYNTHETIC_NODE_PREFIX)
+}

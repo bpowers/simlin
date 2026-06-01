@@ -414,6 +414,22 @@ class DeleteView:
 
 
 @dataclass
+class SetLoopName:
+    """Operation to pin (name) a feedback loop by its variable set.
+
+    Naming a loop forces the LTM engine to ALWAYS score it -- even in
+    discovery mode, where the heuristic search may not surface it (the
+    LOOPSCORE capability from the LTM literature). ``variables`` lists the
+    variable names forming the loop's cycle (order does not matter; the cycle
+    is recovered from the model's causal graph).
+    """
+
+    variables: list[str]
+    name: str
+    description: str | None = None
+
+
+@dataclass
 class SetSimSpecs:
     """Operation to set simulation specifications."""
 
@@ -430,6 +446,7 @@ JsonModelOperation = Union[
     RenameVariable,
     UpsertView,
     DeleteView,
+    SetLoopName,
 ]
 
 JsonProjectOperation = Union[SetSimSpecs]
