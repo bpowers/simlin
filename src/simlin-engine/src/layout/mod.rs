@@ -737,7 +737,15 @@ pub fn settle_new_elements(
         .map(|s| s.as_str())
         .collect();
 
-    let (full_graph, var_to_node) = build_full_graph(state, model, metadata)?;
+    // Isolated variables are excluded from the force graph (see
+    // `build_full_graph`), which on this incremental path means they simply
+    // stay where `compute_new_element_positions` placed them -- no parking
+    // pass, since incremental layout's contract is minimal disturbance.
+    let FullGraph {
+        graph: full_graph,
+        var_to_node,
+        isolated_vars: _,
+    } = build_full_graph(state, model, metadata)?;
 
     // Build constrained graph: pin existing elements, make new chains rigid groups
     let mut constrained_builder = ConstrainedGraphBuilder::new(full_graph);
@@ -2344,12 +2352,25 @@ fn refresh_flow_templates(state: &mut LayoutState, model: &datamodel::Model) {
     }
 }
 
+/// The force graph for auxiliary placement plus its variable bookkeeping:
+/// which variable each node represents, and which variables were left OUT of
+/// the graph because nothing connects them (see `build_full_graph`).
+struct FullGraph {
+    graph: Graph<String>,
+    var_to_node: HashMap<String, String>,
+    /// Variables with no dependency edges and no chain position, sorted.
+    /// They take no part in the force simulation; the fresh-layout path parks
+    /// them below the diagram, the incremental path leaves them where
+    /// `compute_new_element_positions` put them.
+    isolated_vars: Vec<String>,
+}
+
 /// Build an undirected graph with all model variables and cloud nodes for SFDP.
 fn build_full_graph(
     state: &mut LayoutState,
     model: &datamodel::Model,
     metadata: &ComputedMetadata,
-) -> Result<(Graph<String>, HashMap<String, String>), String> {
+) -> Result<FullGraph, String> {
     state.cloud_ident_to_uid.clear();
     state.cloud_ident_to_flow_ident.clear();
     state.flow_ident_to_clouds.clear();
@@ -2378,11 +2399,47 @@ fn build_full_graph(
         .cloned()
         .collect();
 
+    // A variable is ISOLATED when nothing ties it to the rest of the diagram:
+    // no dependency edge in either direction and no place in an
+    // already-positioned stock-flow chain. Isolated variables get a
+    // `var_to_node` entry (downstream element creation looks every variable up
+    // there) but NO graph node: an edge-less node only ever repels, so leaving
+    // it in the force simulation both distorts its neighbors and -- under any
+    // properly-converging step scheme -- flings it unboundedly. The fresh
+    // layout parks them in a row below the diagram instead
+    // (`park_isolated_nodes`); the incremental path leaves them where
+    // `compute_new_element_positions` put them.
+    let mut connected: BTreeSet<String> = BTreeSet::new();
+    for (from_ident, deps) in &metadata.dep_graph {
+        for to_ident in deps {
+            if all_vars.contains(to_ident) {
+                connected.insert(from_ident.clone());
+                connected.insert(to_ident.clone());
+            }
+        }
+    }
+    for var_ident in &all_vars {
+        let positioned = state
+            .uid_manager
+            .get_uid(var_ident)
+            .is_some_and(|uid| state.positions.contains_key(&uid));
+        if positioned {
+            connected.insert(var_ident.clone());
+        }
+    }
+    let isolated: Vec<String> = all_vars
+        .iter()
+        .filter(|v| !connected.contains(*v))
+        .cloned()
+        .collect();
+
     for var_ident in &all_vars {
         let node_id = format!("node_{}", node_index);
         var_to_node.insert(var_ident.clone(), node_id.clone());
         node_to_var.insert(node_id.clone(), var_ident.clone());
-        builder.add_node(node_id);
+        if connected.contains(var_ident) {
+            builder.add_node(node_id);
+        }
         node_index += 1;
     }
 
@@ -2437,7 +2494,105 @@ fn build_full_graph(
         }
     }
 
-    Ok((builder.build(), var_to_node))
+    Ok(FullGraph {
+        graph: builder.build(),
+        var_to_node,
+        isolated_vars: isolated,
+    })
+}
+
+/// Breathing room between adjacent parked elements' label boxes.
+const PARKED_LABEL_GAP: f64 = 12.0;
+
+/// Vertical pitch between parked rows: enough for an aux shape plus a
+/// two-line label below it.
+const PARKED_ROW_PITCH: f64 = 75.0;
+
+/// Place isolated variables in a tidy reading-order grid just below the
+/// laid-out diagram, mirroring how human modelers park unused/exogenous
+/// constants at the edge of a sketch (e.g. the parameter rows in the
+/// beer-game reference view).
+///
+/// Spacing is LABEL-AWARE: each element is placed far enough from its neighbor
+/// that their (centered, below-element) labels cannot overlap, using the same
+/// text measurement the renderer uses. A fixed pitch is not enough -- real
+/// models park constants with very long names (covid19's
+/// "cumulative reported deaths ..." data variables).
+///
+/// `isolated_vars` must be sorted (it is: `build_full_graph` derives it from a
+/// `BTreeSet`) so the parking order -- and therefore the layout -- is
+/// deterministic per seed (#633). Variables missing from `var_to_node` are
+/// skipped defensively.
+fn park_isolated_nodes(
+    layout: &mut Layout<String>,
+    isolated_vars: &[String],
+    var_to_node: &HashMap<String, String>,
+    state: &LayoutState,
+    config: &LayoutConfig,
+) {
+    if isolated_vars.is_empty() {
+        return;
+    }
+
+    // Park below everything the force pass placed. A layout with no positioned
+    // nodes at all (a model of only isolated constants) parks at the origin.
+    let (min_x, max_x, max_y) = if layout.is_empty() {
+        (
+            config.start_x,
+            config.start_x,
+            config.start_y - config.vertical_spacing,
+        )
+    } else {
+        layout
+            .values()
+            .fold((f64::MAX, f64::MIN, f64::MIN), |(mnx, mxx, mxy), pos| {
+                (mnx.min(pos.x), mxx.max(pos.x), mxy.max(pos.y))
+            })
+    };
+
+    // The half-width of an element's label box, measured EXACTLY as the
+    // layout-quality metric measures it (`metrics::element_label_props` ->
+    // `diagram::label::label_bounds` over the diagram display name of the
+    // element's formatted name). Using the same measurement guarantees the
+    // parking spacing keeps `label_overlap` at zero by construction; the
+    // layout-internal `estimate_label_bounds` uses a different (Praxis) text
+    // width model and disagrees on long names.
+    let label_half_width = |var_ident: &str| -> f64 {
+        use crate::diagram::constants::AUX_RADIUS;
+        use crate::diagram::label::{LabelProps, label_bounds};
+
+        // What the created element will be named, and what the metric measures.
+        let elem_name = format_label_with_line_breaks(&state.display_name(var_ident));
+        let metric_text = crate::diagram::common::display_name(&elem_name);
+        let props = LabelProps::new(0.0, 0.0, LabelSide::Bottom, metric_text)
+            .with_radii(AUX_RADIUS, AUX_RADIUS);
+        let rect = label_bounds(&props);
+        ((rect.right - rect.left) / 2.0).max(config.aux_width / 2.0)
+    };
+
+    // Wrap rows at the diagram's own width (or a few lanes for tiny diagrams),
+    // so the parking area extends the diagram downward rather than sideways.
+    let row_width_limit = (max_x - min_x).max(4.0 * config.horizontal_spacing);
+
+    let mut x = min_x;
+    let mut y = max_y + config.vertical_spacing;
+    let mut prev_half_width: Option<f64> = None;
+    for var_ident in isolated_vars {
+        let Some(node_id) = var_to_node.get(var_ident) else {
+            continue;
+        };
+        let half_width = label_half_width(var_ident);
+        if let Some(prev) = prev_half_width {
+            // Far enough that the two centered labels cannot touch.
+            x += (prev + half_width + PARKED_LABEL_GAP).max(config.horizontal_spacing);
+            if x - min_x > row_width_limit {
+                x = min_x;
+                y += PARKED_ROW_PITCH;
+            }
+        }
+        layout.insert(node_id.clone(), Position::new(x, y));
+        prev_half_width = Some(half_width);
+    }
 }
 
 /// Run SFDP with chain elements locked into rigid groups.
@@ -2446,10 +2601,15 @@ fn run_sfdp_with_rigid_chains(
     config: &LayoutConfig,
     model: &datamodel::Model,
     metadata: &ComputedMetadata,
-    full_graph: Graph<String>,
+    full_graph: FullGraph,
     chains_data: &[(Vec<String>, Vec<String>, Vec<String>)],
-    var_to_node: &HashMap<String, String>,
 ) -> Result<Layout<String>, String> {
+    let FullGraph {
+        graph: full_graph,
+        var_to_node,
+        isolated_vars,
+    } = full_graph;
+    let var_to_node = &var_to_node;
     let mut constrained_builder = ConstrainedGraphBuilder::new(full_graph);
 
     for (_stocks, _flows, all_vars) in chains_data {
@@ -2552,10 +2712,14 @@ fn run_sfdp_with_rigid_chains(
         &metadata.feedback_loops,
     );
     let global_center = Position::new(center_x, center_y);
+    // Isolated variables take no part in the force simulation (they have no
+    // graph node); skip them here so they get neither an anchor proposal nor a
+    // fallback ring slot -- they are parked after the layout settles.
+    let isolated_set: HashSet<&str> = isolated_vars.iter().map(|s| s.as_str()).collect();
     let mut proposals = Vec::new();
     let mut fallback_index = 0;
     for &(var_ident, node_id) in &entries {
-        if initial_layout.contains_key(node_id) {
+        if initial_layout.contains_key(node_id) || isolated_set.contains(var_ident.as_str()) {
             continue;
         }
         if let Some(proposal) = auxiliary_initial_position(
@@ -2573,8 +2737,8 @@ fn run_sfdp_with_rigid_chains(
         initial_layout.insert(node_id, pos);
     }
 
-    for &(_var_ident, node_id) in &entries {
-        if initial_layout.contains_key(node_id) {
+    for &(var_ident, node_id) in &entries {
+        if initial_layout.contains_key(node_id) || isolated_set.contains(var_ident.as_str()) {
             continue;
         }
         let angle = fallback_index as f64 * 2.0 * PI / 8.0;
@@ -2764,30 +2928,28 @@ fn run_sfdp_with_rigid_chains(
 
     // If SFDP drifted after a good annealing round, the final layout
     // may be worse than the best we found. Compare and keep the better one.
-    if let Some(saved) = best_layout {
-        let final_crossings = annealing::count_crossings(&build_segments(&final_layout));
-        if final_crossings > best_crossings {
-            let mut saved = saved;
-            enforce_auxiliary_lane_clearance(
-                &mut saved,
-                var_to_node,
-                &aux_ctx,
-                &point_idents,
-                metadata.chains.len() <= 1,
-            );
-            return Ok(saved);
+    let mut chosen = match best_layout {
+        Some(saved)
+            if annealing::count_crossings(&build_segments(&final_layout)) > best_crossings =>
+        {
+            saved
         }
-    }
+        _ => final_layout,
+    };
 
-    let mut final_layout = final_layout;
     enforce_auxiliary_lane_clearance(
-        &mut final_layout,
+        &mut chosen,
         var_to_node,
         &aux_ctx,
         &point_idents,
         metadata.chains.len() <= 1,
     );
-    Ok(final_layout)
+
+    // Isolated variables took no part in the force simulation; give them tidy
+    // parking positions below everything that did.
+    park_isolated_nodes(&mut chosen, &isolated_vars, var_to_node, state, config);
+
+    Ok(chosen)
 }
 
 /// Update all element coordinates from SFDP results.
@@ -2977,21 +3139,18 @@ fn place_auxiliaries(
 ) -> Result<(), String> {
     refresh_flow_templates(state, model);
 
-    let (full_graph, var_to_node) = build_full_graph(state, model, metadata)?;
+    let full_graph = build_full_graph(state, model, metadata)?;
 
-    if full_graph.node_count() == 0 {
+    if full_graph.graph.node_count() == 0 && full_graph.isolated_vars.is_empty() {
         return Ok(());
     }
 
-    let layout = run_sfdp_with_rigid_chains(
-        state,
-        config,
-        model,
-        metadata,
-        full_graph,
-        chains_data,
-        &var_to_node,
-    )?;
+    // Clone the bookkeeping the post-SFDP element-creation steps need;
+    // `run_sfdp_with_rigid_chains` consumes the graph itself.
+    let var_to_node = full_graph.var_to_node.clone();
+
+    let layout =
+        run_sfdp_with_rigid_chains(state, config, model, metadata, full_graph, chains_data)?;
 
     apply_layout_positions(state, model, &layout, &var_to_node)?;
 
@@ -5500,3 +5659,7 @@ mod crossings_tests;
 #[cfg(test)]
 #[path = "layout_selection_tests.rs"]
 mod layout_selection_tests;
+
+#[cfg(test)]
+#[path = "layout_isolated_tests.rs"]
+mod layout_isolated_tests;
