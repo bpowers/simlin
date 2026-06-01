@@ -216,6 +216,29 @@ fn set_uid(var: &mut Variable, uid: Option<i32>) {
     }
 }
 
+/// The next UID safe to assign in `model`: one past the maximum over both
+/// variable UIDs and view element UIDs.  Considering view UIDs too avoids
+/// collisions when variables lack UIDs but views already carry them (view
+/// elements reference variables by UID).
+fn next_available_uid(model: &datamodel::Model) -> i32 {
+    let max_var_uid = model
+        .variables
+        .iter()
+        .filter_map(get_uid)
+        .max()
+        .unwrap_or(0);
+    let max_view_uid = model
+        .views
+        .iter()
+        .flat_map(|v| match v {
+            datamodel::View::StockFlow(sf) => sf.elements.iter(),
+        })
+        .map(|e| e.get_uid())
+        .max()
+        .unwrap_or(0);
+    max_var_uid.max(max_view_uid) + 1
+}
+
 fn upsert_variable(model: &mut datamodel::Model, mut variable: Variable) {
     let ident = canonicalize(variable.get_ident());
     if let Some(existing) = model.get_variable_mut(&ident) {
@@ -228,26 +251,9 @@ fn upsert_variable(model: &mut datamodel::Model, mut variable: Variable) {
     } else {
         // New variables created via patch (e.g., from MCP EditModel) may arrive
         // without a UID. Assign one so that SetLoopName can later reference them
-        // by UID. We consider both variable UIDs and view element UIDs to avoid
-        // collisions when variables lack UIDs but views already have them.
+        // by UID.
         if get_uid(&variable).is_none() {
-            let max_var_uid = model
-                .variables
-                .iter()
-                .filter_map(get_uid)
-                .max()
-                .unwrap_or(0);
-            let max_view_uid = model
-                .views
-                .iter()
-                .flat_map(|v| match v {
-                    datamodel::View::StockFlow(sf) => sf.elements.iter(),
-                })
-                .map(|e| e.get_uid())
-                .max()
-                .unwrap_or(0);
-            let max_uid = max_var_uid.max(max_view_uid);
-            set_uid(&mut variable, Some(max_uid + 1));
+            set_uid(&mut variable, Some(next_available_uid(model)));
         }
         model.variables.push(variable);
     }
@@ -354,22 +360,30 @@ fn apply_set_loop_name(
         .filter(|v| seen.insert(v.as_str()))
         .collect();
 
+    // Resolve each variable's UID, minting fresh ones for variables that lack
+    // them.  Vensim/MDL- and SD-AI-imported models carry no variable UIDs at
+    // all, and pinning a loop is exactly the operation that needs them -- so
+    // assign on demand rather than failing, mirroring `upsert_variable`'s
+    // precedent for patch-created variables.
+    let mut next_uid = next_available_uid(model);
     let mut uids: Vec<i32> = Vec::with_capacity(unique_vars.len());
     for var_name in &unique_vars {
-        let var = model.get_variable(var_name).ok_or_else(|| {
+        let var = model.get_variable_mut(var_name).ok_or_else(|| {
             Error::new(
                 ErrorKind::Model,
                 ErrorCode::DoesNotExist,
                 Some(format!("variable '{}' not found", var_name)),
             )
         })?;
-        let uid = get_uid(var).ok_or_else(|| {
-            Error::new(
-                ErrorKind::Model,
-                ErrorCode::DoesNotExist,
-                Some(format!("variable '{}' has no UID", var_name)),
-            )
-        })?;
+        let uid = match get_uid(var) {
+            Some(uid) => uid,
+            None => {
+                let minted = next_uid;
+                set_uid(var, Some(minted));
+                next_uid += 1;
+                minted
+            }
+        };
         uids.push(uid);
     }
     uids.sort();
@@ -3153,6 +3167,93 @@ mod tests {
         let lm = &model.loop_metadata[0];
         assert_eq!(lm.name, "growth loop");
         assert_eq!(lm.uids.len(), 2, "loop should reference both variable UIDs");
+    }
+
+    #[test]
+    fn set_loop_name_mints_uids_for_uidless_variables() {
+        // Vensim/MDL- and SD-AI-imported models carry no variable UIDs at all.
+        // Pinning a loop is exactly the operation that needs UIDs, so SetLoopName
+        // must mint them on demand instead of failing with "has no UID" -- without
+        // this, loop pinning is unusable on every imported model.
+        let mut project = TestProject::new("test")
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * 0.02", None)
+            .build_datamodel();
+        // Deliberately NO assign_uids call: every variable has uid == None,
+        // exactly like an MDL import.
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["population".to_string(), "births".to_string()],
+                    name: "growth".to_string(),
+                    description: None,
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        assert_eq!(model.loop_metadata.len(), 1);
+        let lm = &model.loop_metadata[0];
+        assert_eq!(lm.name, "growth");
+        assert_eq!(lm.uids.len(), 2);
+
+        // The referenced variables must now carry the minted UIDs, and the
+        // metadata entry must reference exactly those UIDs (sorted).
+        let pop_uid = variable_uid(model.get_variable("population").unwrap())
+            .expect("population should have a minted UID");
+        let births_uid = variable_uid(model.get_variable("births").unwrap())
+            .expect("births should have a minted UID");
+        assert_ne!(pop_uid, births_uid, "minted UIDs must be unique");
+        let mut expected = vec![pop_uid, births_uid];
+        expected.sort_unstable();
+        assert_eq!(lm.uids, expected);
+    }
+
+    #[test]
+    fn set_loop_name_minted_uids_skip_existing_max() {
+        // When some variables already carry UIDs, freshly-minted ones must not
+        // collide with them (or with each other).
+        let mut project = TestProject::new("test")
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * 0.02", None)
+            .aux("rate", "0.02", None)
+            .build_datamodel();
+        assign_uids(&mut project, "main", &[("rate", 7)]);
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation::SetLoopName {
+                    variables: vec!["population".to_string(), "births".to_string()],
+                    name: "growth".to_string(),
+                    description: None,
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, patch).unwrap();
+
+        let model = project.get_model("main").unwrap();
+        let pop_uid = variable_uid(model.get_variable("population").unwrap()).unwrap();
+        let births_uid = variable_uid(model.get_variable("births").unwrap()).unwrap();
+        let rate_uid = variable_uid(model.get_variable("rate").unwrap()).unwrap();
+        assert_eq!(rate_uid, 7, "pre-existing UID must be preserved");
+        assert!(
+            pop_uid > 7 && births_uid > 7,
+            "minted UIDs ({pop_uid}, {births_uid}) must be greater than the existing max (7)"
+        );
+        assert_ne!(pop_uid, births_uid);
+
+        let lm = &model.loop_metadata[0];
+        let mut expected = vec![pop_uid, births_uid];
+        expected.sort_unstable();
+        assert_eq!(lm.uids, expected);
     }
 
     #[test]
