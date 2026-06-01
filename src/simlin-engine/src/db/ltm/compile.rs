@@ -20,9 +20,9 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
 use crate::db::{
-    Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, ParsedVariableResult, RefShape,
-    SourceModel, SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs,
-    build_stub_variable, build_submodel_metadata, canonical_module_input_set, compute_layout,
+    Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, RefShape, SourceModel, SourceProject,
+    SourceVariableKind, VarFragmentResult, build_module_inputs, build_stub_variable,
+    build_submodel_metadata, canonical_module_input_set, compute_layout,
     extract_tables_from_source_var, link_score_equation_text, model_implicit_var_info,
     model_module_ident_context, model_module_map, parse_source_variable_with_module_context,
     project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
@@ -267,7 +267,7 @@ pub(crate) fn compile_ltm_equation_fragment(
         equation,
         dims,
         units_ctx,
-        Some(&module_idents),
+        Some(module_idents),
         Some(model_var_names),
     );
 
@@ -629,44 +629,23 @@ pub(crate) fn compile_ltm_equation_fragment(
                         .map(|sm| compute_layout(db, *sm, project).n_slots)
                         .unwrap_or(1);
 
-                    // Parse the parent LTM equation to get implicit var references
-                    let parent_ltm_vars = model_ltm_variables(db, model, project);
-                    let parent_ltm = parent_ltm_vars
-                        .vars
-                        .iter()
-                        .find(|v| v.name == ltm_im_meta.ltm_parent_name);
-                    let module_inputs = if let Some(parent_lsv) = parent_ltm {
-                        let parent_parsed = parse_ltm_equation(
-                            &parent_lsv.name,
-                            &parent_lsv.equation,
-                            dims,
-                            units_ctx,
-                            Some(&module_idents),
-                            Some(model_var_names),
-                        );
-                        let input_prefix = format!("{module_var_name}\u{00B7}");
-                        parent_parsed
-                            .implicit_vars
-                            .iter()
-                            .find_map(|iv| match iv {
-                                datamodel::Variable::Module(dm_module)
-                                    if canonicalize(dm_module.ident.as_str())
-                                        == module_var_name =>
-                                {
-                                    Some(build_module_inputs(
-                                        model.name(db),
-                                        &input_prefix,
-                                        dm_module.references.iter().map(|mr| {
-                                            (canonicalize(&mr.src), canonicalize(&mr.dst))
-                                        }),
-                                    ))
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
+                    // The implicit module variable rides on its meta (captured
+                    // at LTM-equation parse time), so the parent equation is
+                    // not re-parsed to recover its input references.
+                    let module_inputs =
+                        if let datamodel::Variable::Module(dm_module) = &ltm_im_meta.variable {
+                            let input_prefix = format!("{module_var_name}\u{00B7}");
+                            build_module_inputs(
+                                model.name(db),
+                                &input_prefix,
+                                dm_module
+                                    .references
+                                    .iter()
+                                    .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
+                            )
+                        } else {
+                            Vec::new()
+                        };
 
                     let mod_var = crate::variable::Variable::Module {
                         ident: module_ident.clone(),
@@ -1233,8 +1212,6 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_ltm_implicit_var_fragment(
     db: &dyn Db,
-    parsed: &ParsedVariableResult,
-    idx: usize,
     meta: &LtmImplicitVarMeta,
     model: SourceModel,
     project: SourceProject,
@@ -1245,7 +1222,9 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         CompiledVarFragment, PerVarBytecodes, ReverseOffsetMap, VariableLayout,
     };
 
-    let implicit_dm_var = parsed.implicit_vars.get(idx)?;
+    // The implicit variable rides on the meta (captured at LTM-equation parse
+    // time by `model_ltm_implicit_var_info`), so no parent re-parse is needed.
+    let implicit_dm_var = &meta.variable;
     let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
 
     // Project-global dims (datamodel form needed by `parse_var`) plus the

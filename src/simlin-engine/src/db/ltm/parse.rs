@@ -100,23 +100,6 @@ pub(super) fn parse_ltm_equation_for_model_with_ids(
     )
 }
 
-pub(crate) fn parse_ltm_var_with_ids(
-    db: &dyn Db,
-    ltm_var: &crate::db::LtmSyntheticVar,
-    project: SourceProject,
-    module_idents: &HashSet<Ident<Canonical>>,
-    model_var_names: &HashSet<Ident<Canonical>>,
-) -> ParsedVariableResult {
-    parse_ltm_equation_for_model_with_ids(
-        db,
-        &ltm_var.name,
-        &ltm_var.equation,
-        project,
-        module_idents,
-        model_var_names,
-    )
-}
-
 /// Parse *and lower* an LTM equation to a `Variable<ModuleInput, Expr2>`
 /// (the type `classify_reducer` and the rest of the type-checked AST machinery
 /// expect). Mirrors the parse-then-lower boilerplate `compile_ltm_equation_fragment`
@@ -137,7 +120,7 @@ pub(super) fn reconstruct_ltm_var_lowered(
         var_name,
         equation,
         project,
-        &module_idents,
+        module_idents,
         model_var_names,
     );
     if parsed

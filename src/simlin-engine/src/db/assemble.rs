@@ -1071,48 +1071,33 @@ pub fn assemble_module<'db>(
             }
         }
 
-        // Also compile the implicit modules (PREVIOUS instances) from LTM
-        // equations. These are module-type variables that need initial and
-        // stock phase compilation like regular implicit modules.
+        // Also compile the implicit helpers / modules (PREVIOUS instances)
+        // from LTM equations. Each implicit variable rides on its
+        // `LtmImplicitVarMeta` (captured when `model_ltm_implicit_var_info`
+        // parsed the LTM equations), so no parent equation is re-parsed here.
+        // Iteration is name-sorted for deterministic compile order.
         let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
-        let ltm_module_idents = ltm::ltm_module_idents(db, model, project);
-        let ltm_var_names = ltm::ltm_model_var_names(db, model, project);
-        for ltm_var in &ltm_vars.vars {
-            let parsed = ltm::parse_ltm_var_with_ids(
+        let mut implicit_names: Vec<&String> = ltm_implicit.keys().collect();
+        implicit_names.sort();
+        for im_name in implicit_names {
+            if all_fragments.contains_key(im_name.as_str()) {
+                continue;
+            }
+            let meta = &ltm_implicit[im_name];
+            // Since LTM implicit vars don't have a parent SourceVariable, we
+            // compile them directly from the captured implicit variable.
+            let im_fragment = compile_ltm_implicit_var_fragment(
                 db,
-                ltm_var,
+                meta,
+                model,
                 project,
-                &ltm_module_idents,
-                ltm_var_names,
+                dep_graph,
+                module_input_names,
             );
-            for (idx, implicit_dm_var) in parsed.implicit_vars.iter().enumerate() {
-                let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-                if all_fragments.contains_key(&im_name) {
-                    continue;
-                }
-                if let Some(meta) = ltm_implicit.get(&im_name) {
-                    // Build an ImplicitVarMeta-compatible structure. Since LTM
-                    // implicit vars don't have a parent SourceVariable, we
-                    // compile them directly using the parsed LTM equation data.
-                    let im_fragment = compile_ltm_implicit_var_fragment(
-                        db,
-                        &parsed,
-                        idx,
-                        meta,
-                        model,
-                        project,
-                        dep_graph,
-                        module_input_names,
-                    );
-                    if let Some(result) = im_fragment {
-                        // Same layout check as for main LTM vars above.
-                        if crate::compiler::symbolic::fragment_vars_in_layout(
-                            &result.fragment,
-                            layout,
-                        ) {
-                            all_fragments.insert(im_name.clone(), result);
-                        }
-                    }
+            if let Some(result) = im_fragment {
+                // Same layout check as for main LTM vars above.
+                if crate::compiler::symbolic::fragment_vars_in_layout(&result.fragment, layout) {
+                    all_fragments.insert(im_name.clone(), result);
                 }
             }
         }
@@ -1762,10 +1747,8 @@ fn enumerate_module_instances_inner(
     // Module-typed LTM implicit vars are the only ones that contribute module
     // instances, and they are rare (in the current architecture LTM equations
     // never contain module-function calls, so there are usually none). Drive
-    // the loop from the salsa-cached module-typed projection and re-parse
-    // only those vars' parent equations -- previously every LTM equation was
-    // re-parsed here (a full pass over ~20 MB of equation text on C-LEARN)
-    // just to discover there was nothing to do.
+    // the loop from the salsa-cached module-typed projection; each implicit
+    // variable rides on its meta, so no parent equation is (re-)parsed here.
     if project.ltm_enabled(db) {
         let ltm_implicit = ltm::model_ltm_implicit_var_info(db, *source_model, project);
         let mut module_typed: Vec<(&String, &crate::db::LtmImplicitVarMeta)> = ltm_implicit
@@ -1777,11 +1760,6 @@ fn enumerate_module_instances_inner(
         module_typed.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
         if !module_typed.is_empty() {
-            let ltm_module_idents = ltm::ltm_module_idents(db, *source_model, project);
-            let ltm_var_names = ltm::ltm_model_var_names(db, *source_model, project);
-            let ltm_vars = model_ltm_variables(db, *source_model, project);
-            let name_index = ltm::model_ltm_var_name_index(db, *source_model, project);
-
             for (im_name, im_meta) in module_typed {
                 let sub_model_name = match &im_meta.model_name {
                     Some(n) => n,
@@ -1792,22 +1770,7 @@ fn enumerate_module_instances_inner(
                     continue;
                 }
 
-                // Re-parse just this var's parent equation to recover the
-                // implicit module's input references.
-                let Some(&parent_idx) = name_index.get(&im_meta.ltm_parent_name) else {
-                    continue;
-                };
-                let parsed = ltm::parse_ltm_var_with_ids(
-                    db,
-                    &ltm_vars.vars[parent_idx],
-                    project,
-                    &ltm_module_idents,
-                    ltm_var_names,
-                );
-                let Some(implicit_dm_var) = parsed.implicit_vars.get(im_meta.index_in_parent)
-                else {
-                    continue;
-                };
+                let implicit_dm_var = &im_meta.variable;
 
                 // Extract input set from the implicit module's references
                 let input_prefix = format!("{im_name}\u{00B7}");

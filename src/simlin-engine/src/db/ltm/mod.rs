@@ -48,7 +48,7 @@ pub(crate) use compile::{
 };
 pub use compile::{compile_ltm_var_fragment, link_score_equation_text_shaped};
 pub(crate) use loops::build_loops_from_tiered;
-pub(crate) use parse::{parse_ltm_var_with_ids, scalarize_ltm_equation};
+pub(crate) use parse::scalarize_ltm_equation;
 pub(crate) use pinned::{PinnedLoop, model_pinned_loops};
 
 // Test-only re-exports. These names are consumed solely by the LTM test
@@ -97,6 +97,11 @@ pub(super) fn ltm_model_var_names(
         .collect()
 }
 
+/// Salsa-tracked: the LTM fragment compilers consult this once per synthetic
+/// variable (tens of thousands of times on large models), and rebuilding the
+/// set from every source variable per call was a measurable fraction of LTM
+/// compile time (GH #655).
+#[salsa::tracked(returns(ref))]
 pub(super) fn ltm_module_idents(
     db: &dyn Db,
     model: SourceModel,
@@ -165,7 +170,8 @@ fn link_score_edge_endpoints(name: &str) -> Option<(String, String)> {
 /// This structure collects those implicit variables across all LTM
 /// equations in a model so that `compute_layout` can allocate slots and
 /// `assemble_module` can compile them.
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, salsa::Update)]
 pub struct LtmImplicitVarMeta {
     /// Canonical name of the LTM variable that created this implicit var
     pub ltm_parent_name: String,
@@ -179,6 +185,14 @@ pub struct LtmImplicitVarMeta {
     pub model_name: Option<String>,
     /// Size in slots (for scalar vars: 1; for modules: sub-model n_slots)
     pub size: usize,
+    /// The implicit variable itself, exactly as LTM equation parsing
+    /// synthesized it. Carrying it here means downstream consumers
+    /// (`assemble_module`'s LTM-implicit compile loop, the implicit fragment
+    /// compiler, module-instance enumeration) read it directly instead of
+    /// re-parsing the parent LTM equation -- which previously happened 2-3
+    /// times per synthetic variable and was a measurable fraction of LTM
+    /// compile time on large models (GH #655).
+    pub variable: datamodel::Variable,
 }
 
 /// Cached implicit variable info for all LTM synthetic variables.
@@ -212,7 +226,7 @@ pub fn model_ltm_implicit_var_info(
             &ltm_var.equation,
             dims,
             units_ctx,
-            Some(&module_idents),
+            Some(module_idents),
             Some(model_var_names),
         );
 
@@ -250,6 +264,7 @@ pub fn model_ltm_implicit_var_info(
                     is_module,
                     model_name,
                     size,
+                    variable: implicit_dm_var.clone(),
                 },
             );
         }

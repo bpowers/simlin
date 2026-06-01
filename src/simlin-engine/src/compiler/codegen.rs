@@ -35,6 +35,12 @@ pub(super) struct Compiler<'module> {
     pub(super) dimensions: Vec<DimensionInfo>,
     pub(super) subdim_relations: Vec<SubdimensionRelation>,
     names: Vec<String>,
+    /// Hash index over `names` so interning is O(1) amortized. The compiler
+    /// runs once per per-variable fragment (tens of thousands of times on
+    /// large LTM builds), and `Compiler::new` interns every dimension and
+    /// element name up front -- with a linear-scan intern that was O(D^2)
+    /// string comparisons per fragment (GH #655).
+    name_ids: HashMap<String, NameId>,
     static_views: Vec<StaticArrayView>,
     dim_lists: Vec<(u8, [u16; 4])>,
     // Iteration context - set when compiling inside AssignTemp
@@ -68,6 +74,7 @@ impl<'module> Compiler<'module> {
             dimensions: vec![],
             subdim_relations: vec![],
             names: vec![],
+            name_ids: HashMap::new(),
             static_views: vec![],
             dim_lists: Vec::new(),
             in_iteration: false,
@@ -107,13 +114,12 @@ impl<'module> Compiler<'module> {
     /// Intern a string name and return its NameId.
     /// If the name already exists, returns the existing NameId.
     fn intern_name(&mut self, name: &str) -> NameId {
-        // Look for existing name
-        if let Some(idx) = self.names.iter().position(|n| n == name) {
-            return idx as NameId;
+        if let Some(&id) = self.name_ids.get(name) {
+            return id;
         }
-        // Add new name
         let id = self.names.len() as NameId;
         self.names.push(name.to_string());
+        self.name_ids.insert(name.to_string(), id);
         id
     }
 
@@ -121,12 +127,8 @@ impl<'module> Compiler<'module> {
     /// If a dimension with the same name exists, returns its DimId (assumes same size).
     fn get_or_add_dim_id(&mut self, dim_name: &str, size: u16) -> DimId {
         // Look for existing dimension with the same name
-        let name_id_to_find = self.names.iter().position(|n| n == dim_name);
-        if let Some(name_id) = name_id_to_find
-            && let Some(dim_idx) = self
-                .dimensions
-                .iter()
-                .position(|d| d.name_id == name_id as NameId)
+        if let Some(&name_id) = self.name_ids.get(dim_name)
+            && let Some(dim_idx) = self.dimensions.iter().position(|d| d.name_id == name_id)
         {
             return dim_idx as DimId;
         }
@@ -192,7 +194,7 @@ impl<'module> Compiler<'module> {
     /// Find a DimId by dimension name, returns None if not found.
     #[allow(dead_code)]
     fn find_dim_id_by_name(&self, dim_name: &str) -> Option<DimId> {
-        let name_id = self.names.iter().position(|n| n == dim_name)? as NameId;
+        let name_id = *self.name_ids.get(dim_name)?;
         let dim_idx = self.dimensions.iter().position(|d| d.name_id == name_id)?;
         Some(dim_idx as DimId)
     }

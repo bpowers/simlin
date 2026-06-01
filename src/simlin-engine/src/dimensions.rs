@@ -206,9 +206,17 @@ impl From<datamodel::Dimension> for Dimension {
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Default)]
 pub struct DimensionsContext {
-    dimensions: HashMap<CanonicalDimensionName, Dimension>,
+    /// The dimension and parent maps are `Arc`-shared so cloning a context is
+    /// a refcount bump rather than a deep copy of every dimension's element
+    /// map. Per-variable fragment compilation clones the project context into
+    /// each compiled `Module` (tens of thousands of times on large LTM
+    /// builds, GH #655); both maps are immutable after construction, so
+    /// sharing is safe. The `relationship_cache` memo stays per-instance
+    /// (cloned cold), which only costs re-deriving subdimension relations on
+    /// first use.
+    dimensions: std::sync::Arc<HashMap<CanonicalDimensionName, Dimension>>,
     /// For indexed subdimensions, maps child dimension name to its declared parent.
-    indexed_parents: HashMap<CanonicalDimensionName, CanonicalDimensionName>,
+    indexed_parents: std::sync::Arc<HashMap<CanonicalDimensionName, CanonicalDimensionName>>,
     relationship_cache: RelationshipCache,
 }
 
@@ -293,16 +301,18 @@ impl DimensionsContext {
             .collect();
 
         DimensionsContext {
-            dimensions: dimensions
-                .iter()
-                .map(|dim| {
-                    (
-                        CanonicalDimensionName::from_raw(dim.name()),
-                        Dimension::from(dim),
-                    )
-                })
-                .collect(),
-            indexed_parents,
+            dimensions: std::sync::Arc::new(
+                dimensions
+                    .iter()
+                    .map(|dim| {
+                        (
+                            CanonicalDimensionName::from_raw(dim.name()),
+                            Dimension::from(dim),
+                        )
+                    })
+                    .collect(),
+            ),
+            indexed_parents: std::sync::Arc::new(indexed_parents),
             relationship_cache: RelationshipCache::default(),
         }
     }
