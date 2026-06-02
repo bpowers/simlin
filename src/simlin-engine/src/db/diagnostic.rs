@@ -14,6 +14,12 @@
 //! enabled -- the LTM fragment-diagnostic pass. The two `collect_*` helpers
 //! drain the accumulated `CompilationDiagnostic`s for one model or the whole
 //! synced project.
+//!
+//! `model_all_diagnostics` performs an untracked read so it always
+//! re-executes: see the in-body comment for why that is load-bearing for
+//! diagnostic stability across unrelated salsa revision bumps. Without it,
+//! salsa's accumulator-DFS pruning silently drops previously-collected
+//! diagnostics whenever the query is validated-but-not-re-executed.
 
 use super::*;
 use crate::common::{EquationError, Error, UnitError};
@@ -65,6 +71,34 @@ pub enum DiagnosticError {
 ///    we don't run LTM synthesis on projects that never requested it.
 #[salsa::tracked]
 pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
+    // Force this query to re-execute on every revision rather than being
+    // validated-but-skipped.
+    //
+    // The two `collect_*` helpers drain diagnostics via
+    // `model_all_diagnostics::accumulated::<CompilationDiagnostic>(..)`. salsa
+    // 0.26's `accumulated_by` does a DFS that prunes any dependency subtree
+    // whose root memo's `accumulated_inputs` flag is `Empty`. That flag is set
+    // to `Any` only while the query *executes* (when it reads a child whose
+    // memo already holds accumulated values, e.g. `check_model_units`). When an
+    // UNRELATED salsa input changes (a `SetLoopName` patch touching only
+    // `SourceModel.pinned_loops`, a sim-spec edit, ...) the revision bumps but
+    // none of this query's tracked inputs change, so salsa validates the memo
+    // without re-executing it -- and the deep-verify path recomputes the
+    // pruning flag from each input's `maybe_changed_after` result, which
+    // reports `Empty` for a self-accumulating child (a memo's
+    // `accumulated_inputs` reflects only its *inputs*, never whether the memo
+    // itself accumulated). The flag collapses to `Empty`, the DFS prunes the
+    // whole subtree, and the previously-collected diagnostics silently vanish
+    // on the next collection (engine `test_diagnostics_stable_across_*`;
+    // libsimlin saw `get_errors` zero out after an unrelated patch). The inner
+    // memos still hold their accumulated maps, so re-executing this trigger --
+    // a cheap O(num_vars) walk of already-memoized children -- is enough to
+    // refresh the flag to `Any` and let the DFS descend. An untracked read
+    // makes this query ineligible for shallow/deep validation, so it always
+    // re-executes (salsa `Database::report_untracked_read`: "queries which
+    // report untracked reads will be re-executed in the next revision").
+    db.report_untracked_read();
+
     let source_vars = model.variables(db);
 
     // Trigger compile_var_fragment for each variable. This is a superset

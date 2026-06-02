@@ -927,3 +927,193 @@ fn test_compile_var_fragment_per_phase_var_new_failure() {
         "expected a per-phase Var::new Equation diagnostic (span 0..0) for 'y'; got: {diags:?}"
     );
 }
+
+// ---- diagnostics stable across unrelated salsa input changes ----
+//
+// `collect_all_diagnostics` / `collect_model_diagnostics` drain the salsa
+// `CompilationDiagnostic` accumulator via
+// `model_all_diagnostics::accumulated::<_>(..)`. salsa 0.26's
+// `accumulated_by` does a DFS that prunes any subtree whose root memo's
+// `accumulated_inputs` flag is `Empty`. When `model_all_diagnostics` is
+// validated-but-not-re-executed after an unrelated salsa revision bump, the
+// deep-verify path (`deep_verify_edges`) recomputes that pruning flag from
+// each input's `maybe_changed_after` result -- and a self-accumulating input
+// (`check_model_units`) reports `Empty` there because `accumulated_inputs`
+// only reflects an input's *inputs*, never whether the input itself
+// accumulated. The flag therefore collapses to `Empty`, the DFS prunes the
+// whole subtree, and previously-collected diagnostics silently vanish on the
+// next collection. These tests pin the desired behavior: the collected set
+// must be byte-stable across changes to unrelated inputs.
+
+/// Build a one-model project whose `unit_conflict` aux adds `people` to
+/// `months`, producing at least one Warning-severity unit diagnostic. The
+/// model carries no pinned loops, so the regression tests can flip
+/// `pinned_loops` (an input that does not feed unit checking) without
+/// touching any unit-relevant input.
+fn unit_warning_fixture() -> datamodel::Project {
+    datamodel::Project {
+        name: "stable_diag".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: Some("months".to_string()),
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "people_count".to_string(),
+                    equation: datamodel::Equation::Scalar("100".to_string()),
+                    documentation: String::new(),
+                    units: Some("people".to_string()),
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "time_period".to_string(),
+                    equation: datamodel::Equation::Scalar("5".to_string()),
+                    documentation: String::new(),
+                    units: Some("months".to_string()),
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "unit_conflict".to_string(),
+                    equation: datamodel::Equation::Scalar("people_count + time_period".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// Count the Warning-severity unit diagnostics in a collected set, the
+/// quantity the libsimlin patch-validation baseline keys on.
+fn count_unit_warnings(diags: &[Diagnostic]) -> usize {
+    diags
+        .iter()
+        .filter(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Unit(_)
+                        | DiagnosticError::Model(crate::common::Error {
+                            code: crate::common::ErrorCode::UnitMismatch,
+                            ..
+                        })
+                )
+        })
+        .count()
+}
+
+/// Flipping `pinned_loops` (an input read by the LTM pipeline, never by unit
+/// checking) bumps the salsa revision. `model_all_diagnostics` then validates
+/// without re-executing, and the unit warnings must survive the next
+/// `collect_all_diagnostics`. Before the fix the second collection returned 0.
+#[test]
+fn test_diagnostics_stable_across_unrelated_input_change() {
+    use crate::db::PinnedLoopSpec;
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = unit_warning_fixture();
+    let sync = sync_from_datamodel(&db, &project);
+
+    let before = collect_all_diagnostics(&db, sync.project);
+    let n_before = count_unit_warnings(&before);
+    assert!(
+        n_before > 0,
+        "fixture must produce at least one unit warning; got: {before:?}"
+    );
+
+    // Mutate an input that has nothing to do with unit checking: set a pinned
+    // loop on the model. This bumps the salsa revision without touching any
+    // input `check_model_units` reads.
+    let source_model = sync.models["main"].source;
+    source_model
+        .set_pinned_loops(&mut db)
+        .to(vec![PinnedLoopSpec {
+            name: "dummy_loop".to_string(),
+            variables: vec![],
+            description: String::new(),
+        }]);
+
+    let after = collect_all_diagnostics(&db, sync.project);
+    let n_after = count_unit_warnings(&after);
+    assert_eq!(
+        n_after, n_before,
+        "unit warnings must be stable across an unrelated salsa input change; \
+         before={n_before}, after={n_after}; after diags: {after:?}"
+    );
+    assert_eq!(
+        before, after,
+        "the full diagnostic set must be identical across an unrelated input change"
+    );
+}
+
+/// The same invariant via the production incremental-sync path, driving the
+/// exact input the `SetLoopName` patch touches: add a `loop_metadata` entry
+/// (which re-syncs `pinned_loops` and bumps the revision) and re-collect. The
+/// unit-check subtree reads no pinned-loop input, so `model_all_diagnostics`
+/// validates without re-executing -- the precise scenario where the salsa
+/// pruning bug made the pre-existing unit warnings vanish (libsimlin symptom:
+/// a `SetLoopName` patch silently zeroed `get_errors`). The pre-existing
+/// warnings must still be reported afterward.
+#[test]
+fn test_diagnostics_stable_across_incremental_loop_metadata_change() {
+    let mut db = SimlinDb::default();
+    let project = unit_warning_fixture();
+    let state = sync_from_datamodel_incremental(&mut db, &project, None);
+
+    let before = collect_all_diagnostics(&db, state.project);
+    let n_before = count_unit_warnings(&before);
+    assert!(
+        n_before > 0,
+        "fixture must produce at least one unit warning; got: {before:?}"
+    );
+
+    // Pin a loop on the model. `pinned_loops_from_datamodel` resolves the
+    // loop_metadata's variable UIDs at sync time; an empty stock-free loop is
+    // fine here -- the LTM pipeline ignores it and we only need the unrelated
+    // input write to bump the salsa revision (the production `SetLoopName`
+    // path writes the same `SourceModel.pinned_loops` input).
+    let mut changed = project.clone();
+    changed.models[0]
+        .loop_metadata
+        .push(datamodel::LoopMetadata {
+            name: "dummy_loop".to_string(),
+            uids: vec![],
+            deleted: false,
+            description: String::new(),
+        });
+    let state = sync_from_datamodel_incremental(&mut db, &changed, Some(&state));
+
+    let after = collect_all_diagnostics(&db, state.project);
+    let n_after = count_unit_warnings(&after);
+    assert_eq!(
+        n_after, n_before,
+        "unit warnings must survive an incremental loop_metadata re-sync; \
+         before={n_before}, after={n_after}; after diags: {after:?}"
+    );
+}

@@ -1760,6 +1760,180 @@ fn test_patch_with_preexisting_unit_warnings_succeeds() {
     }
 }
 
+/// Regression for the salsa accumulator-replay bug (engine
+/// `test_diagnostics_stable_across_*`): a project with PRE-EXISTING unit
+/// warnings, after an unrelated patch (`setLoopName`, which writes only
+/// `SourceModel.pinned_loops` and bumps the salsa revision without touching
+/// any unit-relevant input), must still report those warnings -- and a
+/// subsequent `setSimSpecs` patch must be ACCEPTED rather than rejected with
+/// "patch introduces unit warning ... which previously had none".
+///
+/// Before the fix the unrelated patch made `collect_all_diagnostics` return an
+/// empty set (the diagnostics were validated-but-not-re-executed and salsa
+/// pruned them), so:
+///   1. `get_errors` after the `setLoopName` patch returned 0 warnings, and
+///   2. the `setSimSpecs` patch's pre-patch baseline was empty, so the
+///      pre-existing warnings looked NEW and the patch was wrongly rejected.
+///
+/// This was order-dependent: the same `setSimSpecs` patch applied first (on a
+/// fresh load) was accepted.
+#[test]
+fn test_unrelated_patch_then_sim_specs_keeps_unit_warnings() {
+    let datamodel = TestProject::new("unit_test")
+        .unit("apples", None)
+        .unit("oranges", None)
+        .aux("a", "10", Some("apples"))
+        .aux("b", "20", Some("oranges"))
+        .aux("c", "a + b", None) // unit mismatch: apples + oranges
+        .build_datamodel();
+
+    let proj = open_project_from_datamodel(&datamodel);
+
+    // Count the Warning-severity unit diagnostics the project reports.
+    let unit_warning_count = |proj: *mut SimlinProject| -> usize {
+        let db = unsafe { (*proj).db.lock().unwrap() };
+        let source_project = db.current_source_project().unwrap();
+        let diags = engine::db::collect_all_diagnostics(&db, source_project);
+        diags
+            .iter()
+            .filter(|d| {
+                d.severity == engine::db::DiagnosticSeverity::Warning
+                    && (matches!(d.error, engine::db::DiagnosticError::Unit(_))
+                        || matches!(
+                            &d.error,
+                            engine::db::DiagnosticError::Model(e)
+                            if e.code == engine::common::ErrorCode::UnitMismatch
+                        ))
+            })
+            .count()
+    };
+
+    let baseline = unit_warning_count(proj);
+    assert!(
+        baseline > 0,
+        "fixture must start with at least one unit warning"
+    );
+
+    unsafe {
+        // 1) Apply an unrelated patch: name/pin a loop over existing vars.
+        //    This writes `pinned_loops` only, bumping the salsa revision.
+        let loop_patch = r#"{
+            "models": [{
+                "name": "main",
+                "ops": [{
+                    "type": "setLoopName",
+                    "payload": { "variables": ["a", "b"], "name": "ab loop" }
+                }]
+            }]
+        }"#;
+        let bytes = loop_patch.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            bytes.as_ptr(),
+            bytes.len(),
+            false,
+            false,
+            &mut collected as *mut *mut SimlinError,
+            &mut out_error as *mut *mut SimlinError,
+        );
+        assert!(
+            out_error.is_null(),
+            "setLoopName patch should be accepted (it does not introduce errors)"
+        );
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // The pre-existing warnings must survive the unrelated patch.
+        assert_eq!(
+            unit_warning_count(proj),
+            baseline,
+            "unit warnings must persist after an unrelated setLoopName patch"
+        );
+
+        // 2) Now apply a setSimSpecs patch (only the stop time changes; the
+        //    time units stay "Month" so no unit-relevant input is touched). It
+        //    must be ACCEPTED: the model's unit warnings pre-existed, so they
+        //    are not NEW and must not trigger the "previously had none"
+        //    rejection.
+        let sim_specs_patch = r#"{
+            "projectOps": [{
+                "type": "setSimSpecs",
+                "payload": {
+                    "simSpecs": {
+                        "startTime": 0.0,
+                        "endTime": 20.0,
+                        "dt": "1",
+                        "method": "euler",
+                        "timeUnits": "Month"
+                    }
+                }
+            }]
+        }"#;
+        let bytes = sim_specs_patch.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            bytes.as_ptr(),
+            bytes.len(),
+            false,
+            false,
+            &mut collected as *mut *mut SimlinError,
+            &mut out_error as *mut *mut SimlinError,
+        );
+
+        if !out_error.is_null() {
+            let msg_ptr = simlin_error_get_message(out_error);
+            let msg = if !msg_ptr.is_null() {
+                CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
+            } else {
+                ""
+            };
+            panic!(
+                "setSimSpecs patch was wrongly rejected after an unrelated patch: {}",
+                msg
+            );
+        }
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // The patch committed (stop time updated) and the warnings remain.
+        let project_locked = (*proj).datamodel.lock().unwrap();
+        assert_eq!(
+            project_locked.sim_specs.stop, 20.0,
+            "setSimSpecs patch should have committed"
+        );
+        drop(project_locked);
+
+        assert_eq!(
+            unit_warning_count(proj),
+            baseline,
+            "unit warnings must still be reported after both patches"
+        );
+
+        // get_errors must surface the warnings too (the FFI path callers use).
+        let mut out_error: *mut SimlinError = ptr::null_mut();
+        let errors = simlin_project_get_errors(proj, &mut out_error);
+        assert!(out_error.is_null(), "unexpected operational error");
+        assert!(
+            !errors.is_null(),
+            "get_errors must still report the pre-existing unit warnings"
+        );
+        let detail_count = simlin_error_get_detail_count(errors);
+        assert!(
+            detail_count > 0,
+            "get_errors must carry at least one detail after the patches"
+        );
+        simlin_error_free(errors);
+
+        simlin_project_unref(proj);
+    }
+}
+
 #[test]
 fn test_patch_introducing_new_unit_warning_rejected() {
     // Create a clean project with no unit warnings
