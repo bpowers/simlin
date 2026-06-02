@@ -98,17 +98,35 @@ describe('LTM on the wasm engine (public API)', () => {
     expect([...wasmByKey.keys()].sort()).toEqual([...vmByKey.keys()].sort());
 
     // Every per-edge score matches within tolerance; polarities are exact.
+    // The relative score (GH #652) is produced by the same shared analytic
+    // core, so it must match column-for-column too, be present exactly when
+    // the raw score is, and stay bounded in [-1, 1].
+    let relScored = 0;
     for (const [key, vmLink] of vmByKey) {
       const wasmLink = wasmByKey.get(key);
       expect(wasmLink).toBeDefined();
       expect(wasmLink!.polarity).toBe(vmLink.polarity);
       if (vmLink.score === undefined) {
         expect(wasmLink!.score).toBeUndefined();
+        expect(vmLink.relativeScore).toBeUndefined();
+        expect(wasmLink!.relativeScore).toBeUndefined();
       } else {
         expect(wasmLink!.score).toBeDefined();
         expectScoresClose(wasmLink!.score!, vmLink.score);
+        // A scored link always carries a relative series of the same length.
+        expect(vmLink.relativeScore).toBeDefined();
+        expect(wasmLink!.relativeScore).toBeDefined();
+        expect(vmLink.relativeScore!.length).toBe(vmLink.score.length);
+        expectScoresClose(wasmLink!.relativeScore!, vmLink.relativeScore!);
+        for (const v of vmLink.relativeScore!) {
+          if (Number.isFinite(v)) {
+            expect(Math.abs(v)).toBeLessThanOrEqual(1 + 1e-9);
+          }
+        }
+        relScored++;
       }
     }
+    expect(relScored).toBeGreaterThan(0);
 
     await vmSim.dispose();
     await wasmSim.dispose();

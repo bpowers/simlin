@@ -49,6 +49,15 @@ pub(crate) struct OwnedLink {
     pub(crate) to: String,
     pub(crate) polarity: engine::ltm::LinkPolarity,
     pub(crate) score: Option<Vec<f64>>,
+    /// The relative link score series (GH #652): the link's raw `score`
+    /// normalized, per target and per timestep, against the sum of `|score|`
+    /// over all of `to`'s scored inputs -- a value in `[-1, 1]` comparable
+    /// across targets (unlike the raw `score`, which is incomparable because
+    /// it divides by the change in `to`).  `None` exactly when `score` is
+    /// `None`.  Computed by `attach_relative_scores` over the *final*
+    /// (post-collapse) link set, so the per-target denominator matches the
+    /// links the caller actually receives.
+    pub(crate) relative_score: Option<Vec<f64>>,
 }
 
 /// Resolve the model's unique causal edges and, when `results` is `Some`,
@@ -121,12 +130,15 @@ pub(crate) fn analyze_links_core(
                 to,
                 polarity,
                 score,
+                relative_score: None,
             }
         })
         .collect();
 
     if include_internal {
-        return raw;
+        // The raw graph is the final returned set in this view, so normalize
+        // its relative scores per target before returning.
+        return attach_relative_scores(raw);
     }
 
     // Collapse macro/module-internal synthetic nodes via the engine, then map
@@ -140,15 +152,73 @@ pub(crate) fn analyze_links_core(
             score: l.score,
         })
         .collect();
-    engine::ltm_finding::collapse_synthetic_links(collapsible)
+    let collapsed: Vec<OwnedLink> = engine::ltm_finding::collapse_synthetic_links(collapsible)
         .into_iter()
         .map(|l| OwnedLink {
             from: l.from.as_str().to_string(),
             to: l.to.as_str().to_string(),
             polarity: l.polarity,
             score: l.score,
+            relative_score: None,
+        })
+        .collect();
+    // Normalize relative scores over the *collapsed* set: a collapsed
+    // `X -> Y` composite edge is one input of `Y` in the user-facing view, so
+    // the per-target denominator must group on the post-collapse `to`.
+    attach_relative_scores(collapsed)
+}
+
+/// Fill in each link's `relative_score` from its raw `score`, normalizing per
+/// `to` target via the shared engine core (`ltm_post::compute_rel_link_scores`).
+///
+/// Runs on the *final* link set (post synthetic-collapse for the user-facing
+/// view, or the raw graph for `include_internal=true`) so the per-target
+/// denominator -- the sum of `|score|` over all of a target's scored inputs --
+/// matches the links the caller receives.  Links with no `score` series get
+/// `relative_score = None` (they also contribute nothing to any denominator).
+fn attach_relative_scores(links: Vec<OwnedLink>) -> Vec<OwnedLink> {
+    // The longest score series is the saved-step count; an all-`None` set
+    // (non-LTM sim) has step_count 0 and every link stays `None`.
+    let step_count = links
+        .iter()
+        .filter_map(|l| l.score.as_ref().map(|s| s.len()))
+        .max()
+        .unwrap_or(0);
+    let inputs: Vec<engine::ltm_post::RelLinkInput> = links
+        .iter()
+        .map(|l| engine::ltm_post::RelLinkInput {
+            to: l.to.as_str(),
+            score: l.score.as_deref(),
+        })
+        .collect();
+    let rel = engine::ltm_post::compute_rel_link_scores(&inputs, step_count);
+    links
+        .into_iter()
+        .zip(rel)
+        .map(|(mut link, relative_score)| {
+            link.relative_score = relative_score;
+            link
         })
         .collect()
+}
+
+/// Leak an `Option<Vec<f64>>` as a `(ptr, len)` pair owned by the C ABI.
+///
+/// `Some(v)` becomes a `Box<[f64]>` leaked via `as_mut_ptr` + `mem::forget`,
+/// so the matching `drop_f64_array` reclaims it; `None` (and the empty-vec
+/// case) yields `(null, 0)`.  Shared by the raw and relative score series so
+/// both follow the identical ownership convention.
+unsafe fn vec_to_f64_array(v: Option<Vec<f64>>) -> (*mut f64, usize) {
+    match v {
+        Some(values) if !values.is_empty() => {
+            let len = values.len();
+            let mut boxed = values.into_boxed_slice();
+            let p = boxed.as_mut_ptr();
+            std::mem::forget(boxed);
+            (p, len)
+        }
+        _ => (ptr::null_mut(), 0),
+    }
 }
 
 /// Convert a vector of `OwnedLink` into the C-ABI `*mut SimlinLinks`.
@@ -157,8 +227,8 @@ pub(crate) fn analyze_links_core(
 /// freed via `drop_links_vec`, a generic error is reported through
 /// `out_error`, and the function returns `ptr::null_mut()`.
 ///
-/// Score arrays are allocated as `Box<[f64]>` (via `as_mut_ptr` +
-/// `mem::forget`) so the existing `simlin_free_links` -> `drop_link` ->
+/// Both the raw and relative score arrays are allocated as `Box<[f64]>` (via
+/// `vec_to_f64_array`) so the existing `simlin_free_links` -> `drop_link` ->
 /// `drop_f64_array` ownership chain frees them correctly.
 pub(crate) unsafe fn owned_links_to_ffi(
     links: Vec<OwnedLink>,
@@ -199,16 +269,8 @@ pub(crate) unsafe fn owned_links_to_ffi(
             }
         };
 
-        let (score_ptr, score_len) = match owned.score {
-            Some(scores) => {
-                let score_len = scores.len();
-                let mut boxed = scores.into_boxed_slice();
-                let score_ptr = boxed.as_mut_ptr();
-                std::mem::forget(boxed);
-                (score_ptr, score_len)
-            }
-            None => (ptr::null_mut(), 0),
-        };
+        let (score_ptr, score_len) = vec_to_f64_array(owned.score);
+        let (relative_score_ptr, relative_score_len) = vec_to_f64_array(owned.relative_score);
 
         let polarity = match owned.polarity {
             engine::ltm::LinkPolarity::Positive => SimlinLinkPolarity::Positive,
@@ -222,6 +284,8 @@ pub(crate) unsafe fn owned_links_to_ffi(
             polarity,
             score: score_ptr,
             score_len,
+            relative_score: relative_score_ptr,
+            relative_score_len,
         });
     }
 

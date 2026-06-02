@@ -915,6 +915,131 @@ pub fn compute_rel_loop_score_argmax_abs(
     Some(out)
 }
 
+/// One causal link's input to relative-link-score normalization: the
+/// canonical name of the link's `to` target plus its raw LTM link-score
+/// series (`None` for an edge with no score series -- a constant/parameter
+/// edge, or in exhaustive mode an edge that lies outside every loop).
+pub struct RelLinkInput<'a> {
+    /// Canonical identifier of the link's `to` (target) variable.  Links
+    /// are grouped by this key; the denominator is the per-step sum of
+    /// `|score|` over all links sharing it.
+    pub to: &'a str,
+    /// The link's raw `loop`-link-score series, or `None` when the edge has
+    /// no score column.  A `None` link contributes nothing to any
+    /// denominator and gets no relative score back.
+    pub score: Option<&'a [f64]>,
+}
+
+/// Compute the **relative** link score for every input link.
+///
+/// The raw LTM link score divides by the change in the *target* variable,
+/// so links into a near-constant target produce astronomically large raw
+/// scores (the denominator approaches zero).  Raw scores are therefore NOT
+/// comparable across different targets, and ranking links globally by raw
+/// magnitude surfaces numerically degenerate links rather than meaningful
+/// ones (GH #652).
+///
+/// The relative link score fixes this by normalizing, per target and per
+/// timestep, against the magnitudes of *all* the target's scored inputs:
+///
+/// ```text
+/// rel[link, t] = score[link, t] / Σ_{j : to(j) == to(link)} |score[j, t]|
+/// ```
+///
+/// This is the link-level analogue of [`compute_rel_loop_scores`]'s
+/// per-partition normalization and yields a value in `[-1, 1]` that *is*
+/// comparable across the whole model -- the fraction of the target's change
+/// attributable to that input.  (LTM ref 13.3 / 13.12, Schoenberg 2020
+/// section 4.)
+///
+/// **Signed, not absolute.** The literature phrases the relative magnitude
+/// as a `[0, 1]` fraction, but we keep the link's sign (so the result is in
+/// `[-1, 1]`) for the same reason [`compute_rel_loop_scores`] keeps loop
+/// polarity: the sign tells a reader whether the input pushes the target up
+/// or down, and dropping it would discard information the raw series
+/// carries.  Callers that want the pure magnitude take `.abs()`.
+///
+/// **NaN/Inf semantics** match the loop-level denominator
+/// ([`denom_summand`], GH #542): a `NaN` summand is excluded from the
+/// per-target sum (one input being undefined at a step must not poison its
+/// siblings' relative scores), while `Inf` is retained (a genuinely
+/// diverging input dominates its target, so the finite siblings normalize
+/// to `0` and the diverging one to `NaN` via `Inf/Inf`).  A `0.0`
+/// denominator yields `0.0` (SAFEDIV-0), and a link's own `NaN` numerator
+/// stays `NaN` -- the honest "undefined here" per-link signal.
+///
+/// **Denominator scope.** The sum runs over the input links that *have* a
+/// score series; `None`-score links (constants/parameters; out-of-loop
+/// edges in exhaustive mode) contribute nothing.  In **discovery mode**
+/// every causal edge is scored, so the denominator is the complete set of
+/// the target's inputs and the relative score is exactly "fraction of the
+/// target's change attributable to this input".  In **exhaustive mode**
+/// only in-loop edges carry score series, so for a target whose inputs are
+/// only partially in loops the denominator covers just the scored subset --
+/// the relative score is then "fraction among the target's *scored* inputs",
+/// a slight overstatement of each link's true share.  This asymmetry is the
+/// pragmatic choice (normalize over what is actually scored) rather than
+/// inventing zero series for unscored edges; callers ranking links across a
+/// large exhaustive-mode model should read it with that caveat.
+///
+/// The return value is parallel to `links`: `Some(series)` of length
+/// `step_count` for each link that had a score, `None` for each link that
+/// did not (mirroring the input's `score: None`).
+pub fn compute_rel_link_scores(
+    links: &[RelLinkInput<'_>],
+    step_count: usize,
+) -> Vec<Option<Vec<f64>>> {
+    // Group the indices of scored links by their `to` target.  A
+    // `BTreeMap` keeps the float-summation order of each denominator
+    // deterministic across runs (the link order within a target is the
+    // caller's stable input order, preserved by pushing in iteration order).
+    let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, link) in links.iter().enumerate() {
+        if link.score.is_some() {
+            groups.entry(link.to).or_default().push(i);
+        }
+    }
+
+    // Per-target denominator series: Σ |score| over the target's scored
+    // links, with NaN excluded / Inf kept (denom_summand), one entry per
+    // saved step.
+    let mut denom_by_target: HashMap<&str, Vec<f64>> = HashMap::with_capacity(groups.len());
+    for (target, indices) in &groups {
+        let mut denom = vec![0.0_f64; step_count];
+        for &i in indices {
+            let series = links[i].score.expect("grouped links always have a score");
+            // A score series shorter than step_count contributes 0 past its
+            // end (zip stops at the shorter); this never happens in production
+            // (every column is results.step_count long) but keeps the helper
+            // total.
+            for (d, &v) in denom.iter_mut().zip(series.iter()) {
+                *d += denom_summand(v);
+            }
+        }
+        denom_by_target.insert(target, denom);
+    }
+
+    links
+        .iter()
+        .map(|link| {
+            let series = link.score?;
+            let denom = &denom_by_target[link.to];
+            // `denom` has length `step_count`; a `series` shorter than that
+            // (never in production -- every column is results.step_count long)
+            // is read as 0 past its end via `series.get(t)`.
+            let out: Vec<f64> = denom
+                .iter()
+                .enumerate()
+                .map(|(t, &d)| {
+                    let num = series.get(t).copied().unwrap_or(0.0);
+                    if d == 0.0 { 0.0 } else { num / d }
+                })
+                .collect();
+            Some(out)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2854,6 +2979,251 @@ mod tests {
                         "loop {} flat-index {}: actual {} vs reference {}", id, idx, av, ev
                     );
                 }
+            }
+        }
+    }
+
+    // --- Relative link scores (GH #652) ---------------------------------
+
+    #[test]
+    fn rel_link_two_inputs_into_one_target_normalizes_per_step() {
+        // Two links into the same target `z` with known raw scores; the
+        // relative score is score_i / (|s1| + |s2|) at each step.
+        let s1 = [2.0, -3.0, 0.0];
+        let s2 = [6.0, 1.0, 5.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s1),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&s2),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 3);
+        let r1 = out[0].as_ref().unwrap();
+        let r2 = out[1].as_ref().unwrap();
+        // step 0: denom = 8; step 1: denom = 4; step 2: denom = 5
+        assert_eq!(r1, &[2.0 / 8.0, -3.0 / 4.0, 0.0 / 5.0]);
+        assert_eq!(r2, &[6.0 / 8.0, 1.0 / 4.0, 5.0 / 5.0]);
+        // Signs are preserved (signed, not absolute), and the per-step
+        // magnitudes of siblings into the same target sum to 1.
+        for t in 0..3 {
+            assert!((r1[t].abs() + r2[t].abs() - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn rel_link_unscored_links_get_none_and_dont_contribute() {
+        // A `None`-score link (constant/parameter, or out-of-loop in
+        // exhaustive mode) gets `None` back and is excluded from the
+        // denominator of its target's scored siblings.
+        let s = [4.0, 4.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s),
+            },
+            RelLinkInput {
+                to: "z",
+                score: None,
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 2);
+        // The scored link normalizes only against itself -> +1 every step.
+        assert_eq!(out[0].as_ref().unwrap(), &[1.0, 1.0]);
+        assert!(out[1].is_none());
+    }
+
+    #[test]
+    fn rel_link_separate_targets_normalize_independently() {
+        // Links into different targets do NOT cross-normalize: each target
+        // is its own denominator group.  This is the cross-target
+        // comparability the raw score lacks.
+        let a = [10.0];
+        let b = [20.0];
+        let links = [
+            RelLinkInput {
+                to: "y",
+                score: Some(&a),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&b),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 1);
+        // Each is the lone scored input of its own target -> +1.
+        assert_eq!(out[0].as_ref().unwrap(), &[1.0]);
+        assert_eq!(out[1].as_ref().unwrap(), &[1.0]);
+    }
+
+    #[test]
+    fn rel_link_nan_summand_excluded_siblings_use_healthy_denom() {
+        // One input's score is NaN at step 0; its sibling must still
+        // normalize against the healthy denominator (NaN excluded), and the
+        // NaN link's own relative score stays NaN at that step.
+        let s_bad = [f64::NAN, 3.0];
+        let s_ok = [4.0, 1.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s_bad),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&s_ok),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 2);
+        let r_bad = out[0].as_ref().unwrap();
+        let r_ok = out[1].as_ref().unwrap();
+        // step 0: denom excludes the NaN -> 4; healthy sibling = 4/4 = 1.
+        assert_eq!(r_ok[0], 1.0);
+        // The NaN link's own numerator is NaN -> NaN/4 = NaN.
+        assert!(r_bad[0].is_nan());
+        // step 1: denom = |3| + |1| = 4; both well-defined.
+        assert_eq!(r_bad[1], 3.0 / 4.0);
+        assert_eq!(r_ok[1], 1.0 / 4.0);
+    }
+
+    #[test]
+    fn rel_link_inf_summand_kept_dominant_link_diverges() {
+        // An Inf input dominates its target: the finite sibling normalizes
+        // to 0 (finite/Inf) and the Inf link itself to NaN (Inf/Inf),
+        // matching the loop-level Inf-retention semantics.
+        let s_inf = [f64::INFINITY];
+        let s_fin = [5.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s_inf),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&s_fin),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 1);
+        assert!(out[0].as_ref().unwrap()[0].is_nan());
+        assert_eq!(out[1].as_ref().unwrap()[0], 0.0);
+    }
+
+    #[test]
+    fn rel_link_zero_denominator_yields_zero() {
+        // When every input into a target is 0 at a step, the denominator is
+        // 0 and SAFEDIV-0 yields 0 (not NaN).
+        let s1 = [0.0, 2.0];
+        let s2 = [0.0, 2.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s1),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&s2),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 2);
+        assert_eq!(out[0].as_ref().unwrap()[0], 0.0);
+        assert_eq!(out[1].as_ref().unwrap()[0], 0.0);
+        assert_eq!(out[0].as_ref().unwrap()[1], 0.5);
+    }
+
+    #[test]
+    fn rel_link_degenerate_huge_raw_ranks_below_active_target() {
+        // The GH #652 scenario in miniature.  `near_const` is a target that
+        // barely moves: its two inputs have astronomically large RAW scores
+        // (1e22-scale), because the raw denominator (Δtarget) is tiny.  An
+        // `active` target moves normally: its dominant input has a modest raw
+        // score (~0.9).  Ranking by mean |raw| puts the degenerate links on
+        // top; ranking by mean |relative| must put the genuinely-dominant
+        // link of the active target above the degenerate huge-raw link.
+        let near_a = [6.4e22, 6.4e22];
+        let near_b = [1.1e22, 1.1e22];
+        let active_dom = [0.9, 0.9];
+        let active_min = [0.1, 0.1];
+        let links = [
+            RelLinkInput {
+                to: "near_const",
+                score: Some(&near_a),
+            },
+            RelLinkInput {
+                to: "near_const",
+                score: Some(&near_b),
+            },
+            RelLinkInput {
+                to: "active",
+                score: Some(&active_dom),
+            },
+            RelLinkInput {
+                to: "active",
+                score: Some(&active_min),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 2);
+
+        // Mean |raw| ranking (the bad workflow) puts the degenerate links first.
+        let mean_abs = |s: &[f64]| s.iter().map(|v| v.abs()).sum::<f64>() / s.len() as f64;
+        let raw_rank_top = [
+            mean_abs(&near_a),
+            mean_abs(&near_b),
+            mean_abs(&active_dom),
+            mean_abs(&active_min),
+        ];
+        assert!(
+            raw_rank_top[0] > raw_rank_top[2],
+            "raw ranking degenerately puts near-constant link above the active one"
+        );
+
+        // Mean |relative| ranking (the fix): the active target's dominant
+        // link (0.9 / 1.0 = 0.9) must outrank the degenerate near-constant
+        // link (6.4e22 / 7.5e22 ~= 0.853).
+        let rel_active_dom = mean_abs(out[2].as_ref().unwrap());
+        let rel_near_a = mean_abs(out[0].as_ref().unwrap());
+        assert!(
+            rel_active_dom > rel_near_a,
+            "relative ranking should put the active target's dominant link \
+             ({rel_active_dom}) above the degenerate huge-raw link ({rel_near_a})"
+        );
+        // And every relative score is bounded in [-1, 1].
+        for series in out.iter().flatten() {
+            for &v in series {
+                assert!(v.abs() <= 1.0 + 1e-12, "relative score {v} out of [-1,1]");
+            }
+        }
+    }
+
+    proptest! {
+        /// For any target group, the per-step sum of |relative score| over
+        /// the group's scored links is either 0 (all-zero / NaN-only step)
+        /// or 1 (SAFEDIV partition identity), and every finite relative
+        /// score lies in [-1, 1].
+        #[test]
+        fn rel_link_group_magnitudes_sum_to_one_or_zero(
+            raws in proptest::collection::vec(-1e6f64..1e6f64, 1..6),
+        ) {
+            let series: Vec<[f64; 1]> = raws.iter().map(|&v| [v]).collect();
+            let links: Vec<RelLinkInput> = series
+                .iter()
+                .map(|s| RelLinkInput { to: "z", score: Some(s.as_slice()) })
+                .collect();
+            let out = compute_rel_link_scores(&links, 1);
+            let denom: f64 = raws.iter().map(|v| v.abs()).sum();
+            let sum_abs: f64 = out
+                .iter()
+                .map(|o| o.as_ref().unwrap()[0].abs())
+                .sum();
+            if denom == 0.0 {
+                prop_assert_eq!(sum_abs, 0.0);
+            } else {
+                prop_assert!((sum_abs - 1.0).abs() < 1e-9);
+            }
+            for o in &out {
+                let v = o.as_ref().unwrap()[0];
+                prop_assert!(v.abs() <= 1.0 + 1e-9);
             }
         }
     }

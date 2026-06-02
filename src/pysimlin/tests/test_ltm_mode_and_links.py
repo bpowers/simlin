@@ -183,6 +183,137 @@ class TestGetLinksCollapse:
         assert len(through.score) > 0
 
 
+def _predator_prey_model() -> simlin.Model:
+    """A Lotka-Volterra model whose stocks each have two scored inflows/outflows.
+
+    Each stock (`prey`, `pred`) is fed by two links inside feedback loops, so
+    the relative link score (per-target normalization) is exercised with more
+    than one scored input per target.
+    """
+    project = simlin.Project.new(
+        name="predator_prey", sim_start=0.0, sim_stop=5.0, dt=1.0
+    )
+    model = project.main_model
+    with model.edit() as (_current, patch):
+        from simlin.json_types import Flow, Stock
+
+        patch.upsert_stock(
+            Stock(
+                name="prey",
+                initial_equation="100",
+                inflows=["births"],
+                outflows=["deaths"],
+            )
+        )
+        patch.upsert_stock(
+            Stock(
+                name="pred",
+                initial_equation="20",
+                inflows=["pred_births"],
+                outflows=["pred_deaths"],
+            )
+        )
+        patch.upsert_flow(Flow(name="births", equation="prey * 0.5"))
+        patch.upsert_flow(Flow(name="deaths", equation="prey * pred * 0.01"))
+        patch.upsert_flow(Flow(name="pred_births", equation="prey * pred * 0.005"))
+        patch.upsert_flow(Flow(name="pred_deaths", equation="pred * 0.3"))
+    return model
+
+
+class TestRelativeLinkScore:
+    """get_links() exposes the relative link score (GH #652): a per-target
+    normalized, cross-target-comparable importance series alongside the raw
+    score."""
+
+    def test_relative_score_roundtrips_and_is_bounded(self) -> None:
+        model = _predator_prey_model()
+        with model.simulate(enable_ltm=True) as sim:
+            sim.run_to_end()
+            links = sim.get_links()
+
+        scored = [lk for lk in links if lk.has_score()]
+        assert scored, "the predator-prey model must produce scored links"
+
+        import numpy as np
+
+        for lk in scored:
+            # A scored link always carries a relative-score series of the same
+            # shape as its raw score.
+            assert lk.relative_score is not None, (
+                f"{lk.from_var} -> {lk.to_var} has a raw score but no relative score"
+            )
+            assert lk.relative_score.shape == lk.score.shape  # type: ignore[union-attr]
+            finite = lk.relative_score[~np.isnan(lk.relative_score)]
+            assert np.all(np.abs(finite) <= 1.0 + 1e-9), (
+                f"{lk.from_var} -> {lk.to_var} relative score out of [-1, 1]"
+            )
+            # average_relative_score reduces the same series.
+            avg = lk.average_relative_score()
+            assert avg is not None
+
+        # An unscored link (a structural edge with no LTM column, e.g. a
+        # self-referential or out-of-loop edge) has neither series.
+        for lk in links:
+            if lk.score is None:
+                assert lk.relative_score is None
+
+    def test_relative_normalizes_per_target(self) -> None:
+        """At each step, the relative magnitudes of a target's scored inputs
+        sum to 1 (when the target moves) or 0 (when it is frozen)."""
+        import numpy as np
+
+        model = _predator_prey_model()
+        with model.simulate(enable_ltm=True) as sim:
+            sim.run_to_end()
+            links = sim.get_links()
+
+        by_target: dict[str, list[np.ndarray]] = {}
+        for lk in links:
+            if lk.relative_score is None:
+                continue
+            by_target.setdefault(lk.to_var, []).append(lk.relative_score)
+
+        assert by_target, "expected at least one target with scored inputs"
+        for target, series_list in by_target.items():
+            stacked = np.vstack([np.abs(s) for s in series_list])
+            sums = np.nansum(stacked, axis=0)
+            for t, total in enumerate(sums):
+                assert abs(total) < 1e-9 or abs(total - 1.0) < 1e-9, (
+                    f"target {target!r} step {t}: |relative| sum = {total}, expected 0 or 1"
+                )
+
+    def test_relative_ranking_beats_raw_for_cross_target_comparison(self) -> None:
+        """Ranking links by mean |relative| yields a different (correct) order
+        than ranking by mean |raw|, because raw scores are incomparable across
+        targets (some exceed 1)."""
+        model = _predator_prey_model()
+        with model.simulate(enable_ltm=True) as sim:
+            sim.run_to_end()
+            links = [lk for lk in sim.get_links() if lk.has_score()]
+
+        # Raw scores are not bounded by 1: at least one exceeds it, proving the
+        # cross-target incomparability the relative score fixes.
+        max_raw = max(abs(lk.max_score() or 0.0) for lk in links)
+        assert max_raw > 1.0
+
+        # Relative scores are all bounded, so they are comparable across
+        # targets.  Ranking by relative is therefore meaningful; ranking by raw
+        # is not.  Confirm the two orderings differ (the degeneracy is real).
+        raw_order = sorted(
+            links, key=lambda lk: abs(lk.average_score() or 0.0), reverse=True
+        )
+        rel_order = sorted(
+            links,
+            key=lambda lk: abs(lk.average_relative_score() or 0.0),
+            reverse=True,
+        )
+        raw_keys = [(lk.from_var, lk.to_var) for lk in raw_order]
+        rel_keys = [(lk.from_var, lk.to_var) for lk in rel_order]
+        assert raw_keys != rel_keys, (
+            "raw and relative rankings should differ on this model"
+        )
+
+
 class TestRunLtmDegradation:
     """Model.run() degrades gracefully when LTM cannot be enabled, and explains
     discovery mode instead of silently returning an empty loop list."""

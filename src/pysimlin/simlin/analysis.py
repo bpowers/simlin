@@ -169,6 +169,16 @@ class Link:
     to_var: str
     polarity: LinkPolarity
     score: NDArray[np.float64] | None = None
+    relative_score: NDArray[np.float64] | None = None
+    """Relative LTM link-score series (GH #652).
+
+    The raw :attr:`score` normalized, per target and per timestep, against
+    the sum of ``|score|`` over **all** of :attr:`to_var`'s scored inputs --
+    a value in ``[-1, 1]`` that *is* comparable across the model. Use this
+    (via :meth:`average_relative_score`), not the raw :attr:`score`, when
+    ranking links by importance. ``None`` exactly when :attr:`score` is
+    ``None``; otherwise the same shape as :attr:`score`.
+    """
 
     def __str__(self) -> str:
         """Return a human-readable string representation."""
@@ -180,7 +190,21 @@ class Link:
         return self.score is not None and len(self.score) > 0
 
     def average_score(self) -> float | None:
-        """Calculate the average score across all time steps.
+        """Calculate the average RAW score across all time steps.
+
+        .. warning::
+
+            Raw link scores are **not comparable across different target
+            variables** and are unusable for ranking links globally. The raw
+            score divides by the change in the *target* variable, so a link
+            into a near-constant target (a parameter, an equilibrium) produces
+            an astronomically large score even when the link is unimportant
+            (GH #652). Ranking links by ``|average_score()|`` surfaces these
+            numerically degenerate links instead of the meaningful ones.
+
+            To rank links by importance, use :meth:`average_relative_score`
+            (or the :attr:`relative_score` series), which normalizes per
+            target into a comparable ``[-1, 1]`` value.
 
         Returns ``None`` when there is no score series, and ``NaN``
         when every step is ``NaN`` (a link that never produced a
@@ -189,15 +213,43 @@ class Link:
         slice" RuntimeWarning -- on large models a majority of causal
         links can have all-``NaN`` scores.
         """
-        if self.score is None or len(self.score) == 0:
+        return self._average(self.score)
+
+    def average_relative_score(self) -> float | None:
+        """Average the **relative** link score across all time steps.
+
+        This is the importance metric to rank links by: unlike
+        :meth:`average_score`, the relative score is normalized per target
+        into ``[-1, 1]`` and is comparable across the whole model (the
+        fraction of the target's change attributable to this input, GH #652).
+        Rank links by ``abs(link.average_relative_score() or 0.0)`` to find
+        the most important causal links.
+
+        Returns ``None`` when there is no relative-score series, and ``NaN``
+        when every step is ``NaN``; the reduction runs over the finite subset
+        so the all-``NaN`` case stays warning-free.
+        """
+        return self._average(self.relative_score)
+
+    @staticmethod
+    def _average(series: NDArray[np.float64] | None) -> float | None:
+        """Mean of a score series over its finite (non-NaN) entries.
+
+        Returns ``None`` for an absent/empty series and ``NaN`` when every
+        entry is ``NaN``, avoiding numpy's empty-slice RuntimeWarning.
+        """
+        if series is None or len(series) == 0:
             return None
-        valid = self.score[~np.isnan(self.score)]
+        valid = series[~np.isnan(series)]
         if valid.size == 0:
             return float("nan")
         return float(valid.mean())
 
     def max_score(self) -> float | None:
-        """Get the maximum score across all time steps.
+        """Get the maximum RAW score across all time steps.
+
+        See :meth:`average_score` for why raw scores are not comparable
+        across targets; for ranking use the relative score.
 
         Returns ``None`` when there is no score series, and ``NaN``
         when every step is ``NaN``; the reduction runs over the finite

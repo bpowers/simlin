@@ -677,6 +677,28 @@ fn test_analyze_get_links() {
                 for &score in scores {
                     assert!(score.is_finite(), "All scores should be finite");
                 }
+
+                // A scored link also carries a relative-score series (GH
+                // #652) of the same length, bounded in [-1, 1].
+                assert!(
+                    !link.relative_score.is_null(),
+                    "Feedback loop links should have a relative score"
+                );
+                assert_eq!(
+                    link.relative_score_len, link.score_len,
+                    "relative score must match the raw score length"
+                );
+                let rel = std::slice::from_raw_parts(link.relative_score, link.relative_score_len);
+                for &r in rel {
+                    assert!(
+                        r.is_finite(),
+                        "Relative scores should be finite for this model"
+                    );
+                    assert!(
+                        r.abs() <= 1.0 + 1e-9,
+                        "Relative score {r} must lie in [-1, 1]"
+                    );
+                }
             }
         }
 
@@ -687,6 +709,138 @@ fn test_analyze_get_links() {
         simlin_sim_unref(sim_ltm);
         simlin_model_unref(model);
         simlin_model_unref(model_ltm);
+        simlin_project_unref(proj);
+    }
+}
+
+/// GH #652: raw link scores divide by the change in the *target* variable, so
+/// they are not comparable across different targets and can exceed 1 in
+/// magnitude (a link into a slowly-moving target blows up).  The *relative*
+/// link score normalizes, per target and per timestep, against the sum of
+/// `|score|` over all the target's scored inputs, restoring cross-target
+/// comparability.
+///
+/// This drives a predator-prey model (two stocks, two scored inputs each)
+/// through the VM FFI and asserts the two load-bearing properties of the
+/// relative score:
+///
+/// 1. **Per-target normalization**: at every step, the relative magnitudes of
+///    a target's scored inputs sum to 1 (the SAFEDIV partition identity) when
+///    the target moves, and to 0 when it doesn't.
+/// 2. **Bounding / comparability**: a raw score can exceed 1 (here `pred ->
+///    deaths` does), but every relative score stays within `[-1, 1]`, so
+///    ranking links by relative magnitude is meaningful across targets.
+#[test]
+fn test_relative_link_score_normalizes_per_target() {
+    let test_project = TestProject::new("test_rel_norm")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .stock("prey", "100", &["births"], &["deaths"], None)
+        .stock("pred", "20", &["pred_births"], &["pred_deaths"], None)
+        .flow("births", "prey * 0.5", None)
+        .flow("deaths", "prey * pred * 0.01", None)
+        .flow("pred_births", "prey * pred * 0.005", None)
+        .flow("pred_deaths", "pred * 0.3", None);
+
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(err.is_null());
+        assert!(!proj.is_null());
+
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+        assert!(err.is_null());
+        assert!(!model.is_null());
+
+        let sim = simlin_sim_new(model, true, &mut err);
+        assert!(err.is_null());
+        assert!(!sim.is_null());
+        simlin_sim_run_to_end(sim, &mut err);
+        assert!(err.is_null());
+
+        let links = simlin_analyze_get_links(sim, false, &mut err);
+        assert!(err.is_null());
+        assert!(!links.is_null());
+        let slice = std::slice::from_raw_parts((*links).links, (*links).count);
+
+        // Determine the saved step count from any scored link.
+        let step_count = slice
+            .iter()
+            .find(|l| !l.score.is_null() && l.score_len > 0)
+            .map(|l| l.score_len)
+            .expect("at least one scored link");
+
+        // Group scored links by `to` target and verify per-step normalization.
+        // For each target, the sum of |relative| over its scored inputs is 1
+        // when the raw partition denominator is non-zero, else 0.  Also assert
+        // every relative score is bounded, and that at least one raw score
+        // exceeds 1 (the incomparability the relative score fixes).
+        use std::collections::HashMap;
+        let mut rel_by_target: HashMap<String, Vec<Vec<f64>>> = HashMap::new();
+        let mut raw_by_target: HashMap<String, Vec<Vec<f64>>> = HashMap::new();
+        for link in slice {
+            if link.relative_score.is_null() || link.relative_score_len == 0 {
+                // A scored link always carries a relative series; an unscored
+                // (no raw) link carries neither.
+                assert!(
+                    link.score.is_null() || link.score_len == 0,
+                    "a link with a raw score must also have a relative score"
+                );
+                continue;
+            }
+            assert_eq!(
+                link.relative_score_len, link.score_len,
+                "relative score length must equal raw score length"
+            );
+            let to = CStr::from_ptr(link.to).to_str().unwrap().to_string();
+            let rel = std::slice::from_raw_parts(link.relative_score, link.relative_score_len);
+            let raw = std::slice::from_raw_parts(link.score, link.score_len);
+            for &r in rel {
+                assert!(
+                    r.is_nan() || r.abs() <= 1.0 + 1e-9,
+                    "relative score {r} out of [-1, 1]"
+                );
+            }
+            rel_by_target
+                .entry(to.clone())
+                .or_default()
+                .push(rel.to_vec());
+            raw_by_target.entry(to).or_default().push(raw.to_vec());
+        }
+
+        // Per-step normalization identity per target.
+        for (target, series_list) in &rel_by_target {
+            for t in 0..step_count {
+                let sum_abs: f64 = series_list.iter().map(|s| s[t].abs()).sum();
+                // SAFEDIV: 0 (target frozen at this step) or 1 (normalized).
+                assert!(
+                    sum_abs.abs() < 1e-9 || (sum_abs - 1.0).abs() < 1e-9,
+                    "target '{target}' step {t}: relative magnitudes sum to {sum_abs}, \
+                     expected 0 or 1"
+                );
+            }
+        }
+
+        // At least one raw score must exceed 1 in magnitude, demonstrating the
+        // cross-target incomparability that bounding the relative score fixes.
+        let max_raw = raw_by_target
+            .values()
+            .flatten()
+            .flat_map(|s| s.iter())
+            .filter(|v| v.is_finite())
+            .fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+        assert!(
+            max_raw > 1.0,
+            "expected a raw score > 1 (cross-target incomparability), got max {max_raw}"
+        );
+
+        simlin_free_links(links);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
         simlin_project_unref(proj);
     }
 }

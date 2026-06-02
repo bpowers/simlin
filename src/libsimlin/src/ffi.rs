@@ -117,8 +117,21 @@ pub struct SimlinLink {
     pub from: *mut c_char,
     pub to: *mut c_char,
     pub polarity: SimlinLinkPolarity,
+    /// Raw LTM link-score series (length `score_len`), or NULL when LTM was
+    /// not enabled / the edge has no score column.  The raw score divides by
+    /// the change in `to`, so it is NOT comparable across different targets
+    /// and is unusable for ranking links globally -- use `relative_score`
+    /// (GH #652).
     pub score: *mut f64,
     pub score_len: usize,
+    /// Relative LTM link-score series (length `relative_score_len`), or NULL
+    /// when `score` is NULL.  The raw score normalized, per target and per
+    /// timestep, against the sum of `|score|` over all of `to`'s scored
+    /// inputs -- a value in `[-1, 1]` that IS comparable across targets and
+    /// is the correct key for ranking links by importance (GH #652).  When
+    /// non-NULL its length equals `score_len`.
+    pub relative_score: *mut f64,
+    pub relative_score_len: usize,
 }
 
 /// Collection of links

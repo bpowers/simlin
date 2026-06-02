@@ -142,6 +142,7 @@ function convertLinks(linksPtr: number): Link[] {
       to: link.to,
       polarity: convertLinkPolarity(link.polarity),
       score: link.score ?? undefined,
+      relativeScore: link.relativeScore ?? undefined,
     }));
   } finally {
     simlin_free_links(linksPtr);

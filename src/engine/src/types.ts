@@ -562,8 +562,23 @@ export interface Link {
   readonly to: string;
   /** Polarity of the causal relationship */
   readonly polarity: LinkPolarity;
-  /** LTM (Loops That Matter) scores over time, if available */
+  /**
+   * Raw LTM (Loops That Matter) link scores over time, if available.
+   *
+   * The raw score divides by the change in `to`, so it is NOT comparable
+   * across different targets and is unusable for ranking links globally
+   * (GH #652). Use {@link relativeScore} for ranking.
+   */
   readonly score?: Float64Array;
+  /**
+   * Relative LTM link scores over time, if available.
+   *
+   * The raw {@link score} normalized, per target and per timestep, against
+   * the sum of `|score|` over all of `to`'s scored inputs -- a value in
+   * `[-1, 1]` that IS comparable across targets and is the correct key for
+   * ranking links by importance (GH #652). Present exactly when `score` is.
+   */
+  readonly relativeScore?: Float64Array;
 }
 
 /**

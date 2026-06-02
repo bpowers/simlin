@@ -116,6 +116,9 @@ export interface Link {
   to: string;
   polarity: SimlinLinkPolarity;
   score: Float64Array | null;
+  // Relative link score (GH #652): the raw score normalized per target into
+  // [-1, 1], comparable across targets. Non-null exactly when score is.
+  relativeScore: Float64Array | null;
 }
 
 // Loop structure - matches SimlinLoop in simlin.h

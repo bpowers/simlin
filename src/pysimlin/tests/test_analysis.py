@@ -131,6 +131,89 @@ class TestLink:
         assert mx is not None
         assert np.isnan(mx)
 
+    def test_link_relative_score_defaults_none(self) -> None:
+        """A Link constructed without a relative score has None for it (GH #652)."""
+        link = Link(from_var="A", to_var="B", polarity=LinkPolarity.POSITIVE)
+        assert link.relative_score is None
+        assert link.average_relative_score() is None
+
+    def test_link_average_relative_score(self) -> None:
+        """average_relative_score reduces the relative series over finite entries."""
+        rel = np.array([0.2, 0.4, 0.6])
+        link = Link(
+            from_var="A",
+            to_var="B",
+            polarity=LinkPolarity.POSITIVE,
+            score=np.array([1.0, 2.0, 3.0]),
+            relative_score=rel,
+        )
+        assert link.average_relative_score() == pytest.approx(0.4)
+
+    def test_link_average_relative_score_with_nan(self) -> None:
+        """average_relative_score excludes NaN entries, no warning leaked."""
+        rel = np.array([np.nan, 0.2, 0.4])
+        link = Link(
+            from_var="A",
+            to_var="B",
+            polarity=LinkPolarity.POSITIVE,
+            relative_score=rel,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            avg = link.average_relative_score()
+        assert avg == pytest.approx(0.3)
+
+    def test_link_average_relative_score_all_nan(self) -> None:
+        """An all-NaN relative series returns NaN (not None), warning-free."""
+        rel = np.array([np.nan, np.nan])
+        link = Link(
+            from_var="A",
+            to_var="B",
+            polarity=LinkPolarity.POSITIVE,
+            relative_score=rel,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            avg = link.average_relative_score()
+        assert avg is not None
+        assert np.isnan(avg)
+
+    def test_relative_score_ranks_above_raw_for_degenerate_link(self) -> None:
+        """The GH #652 ranking workflow in miniature.
+
+        Two links into a near-constant target have astronomically large RAW
+        scores; one link into an active target has a modest raw score. Ranking
+        by ``|average_score()|`` (raw) degenerately puts the near-constant
+        links on top, while ranking by ``|average_relative_score()|`` puts the
+        active target's dominant link above the degenerate one.
+        """
+        near = Link(
+            from_var="p1",
+            to_var="near_const",
+            polarity=LinkPolarity.POSITIVE,
+            score=np.array([6.4e22, 6.4e22]),
+            # near_const's two inputs (6.4e22, 1.1e22) sum to 7.5e22.
+            relative_score=np.array([6.4e22 / 7.5e22, 6.4e22 / 7.5e22]),
+        )
+        active = Link(
+            from_var="x",
+            to_var="active",
+            polarity=LinkPolarity.POSITIVE,
+            score=np.array([0.9, 0.9]),
+            relative_score=np.array([0.9, 0.9]),
+        )
+
+        def raw_key(link: Link) -> float:
+            return abs(link.average_score() or 0.0)
+
+        def rel_key(link: Link) -> float:
+            return abs(link.average_relative_score() or 0.0)
+
+        # Raw ranking is degenerate: the near-constant link wins.
+        assert raw_key(near) > raw_key(active)
+        # Relative ranking restores order: the active link wins.
+        assert rel_key(active) > rel_key(near)
+
 
 class TestLoop:
     """Test Loop dataclass."""

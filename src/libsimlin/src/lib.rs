@@ -510,6 +510,7 @@ pub(crate) unsafe fn drop_link(link: &mut SimlinLink) {
     drop_c_string(link.from);
     drop_c_string(link.to);
     drop_f64_array(link.score, link.score_len);
+    drop_f64_array(link.relative_score, link.relative_score_len);
 }
 
 pub(crate) unsafe fn drop_loops_vec(loops: &mut Vec<SimlinLoop>) {
