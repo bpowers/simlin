@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Sanity-check the executed notebook: no errors, key outputs present.
 
-Prints the dominance headline numbers and saves the dominance plot beside the
-notebook as dominance_preview.png for a quick visual check.
+Prints the decade-median dominance table and saves the headline dominance
+plot beside the notebook as dominance_preview.png for a quick visual check.
 """
 
 import base64
@@ -24,17 +24,19 @@ for cell in nb.cells:
 
 print(f"cells: {len(nb.cells)}, errors: {n_errors}")
 
+saved_preview = False
 for cell in nb.cells:
     if cell.cell_type != "code":
         continue
-    if "b_total" in cell.source:
+    if "decade_median" in cell.source:
         for out in cell.get("outputs", []):
             if out.output_type == "stream":
-                print("\n--- dominance headline numbers ---")
+                print("\n--- decade-median dominance table ---")
                 print(out.text)
-    if "stackplot" in cell.source:
+    if "stackplot" in cell.source and not saved_preview:
         for out in cell.get("outputs", []):
             if "image/png" in out.get("data", {}):
                 preview = NOTEBOOKS_DIR / "dominance_preview.png"
                 preview.write_bytes(base64.b64decode(out["data"]["image/png"]))
                 print(f"saved {preview}")
+                saved_preview = True

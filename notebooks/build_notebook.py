@@ -46,50 +46,46 @@ md("""
 
 **Feedback-loop dominance analysis of Climate Interactive's C-LEARN climate model, through `pysimlin`.**
 
-[C-LEARN](https://www.climateinteractive.org/) (v77, 2010) is the simulation core that became C-ROADS: a
-globally-aggregated climate-policy model built in Vensim. It couples a carbon cycle, an
+[C-LEARN](https://www.climateinteractive.org/) (v77, 2010) is the simulation core that became
+C-ROADS: a globally-aggregated climate-policy model built in Vensim. It couples a carbon cycle, an
 energy-balance temperature model, other greenhouse gases, permafrost feedbacks, and sea-level rise
 to regional emissions-policy levers, and it runs from 1850 to 2100. Importantly for us, it is a
-*real* practitioner model: 911 variables, 24 stocks, arrayed equations, Vensim macros, lookup
-tables -- all the things that make production models hard for analysis tooling.
+*real* practitioner model: 911 variables, two dozen stocks, arrayed equations, Vensim macros,
+lookup tables -- all the things that make production models hard for analysis tooling.
 
 **Loops That Matter** (LTM; Schoenberg, Davidsen & Eberlein 2020; Eberlein & Schoenberg 2020;
 Schoenberg, Hayward & Eberlein 2023) is a method for *loop dominance analysis*: it measures, at
 every instant of a simulation, how much each feedback loop contributes to the model's behavior.
-Where a modeler's intuition says "warming is accelerating because the permafrost feedback kicked
-in", LTM aims to make that statement quantitative and checkable.
+Where a modeler's intuition says "warming is accelerating because the carbon sinks are weakening",
+LTM aims to make that statement quantitative and checkable.
 
-This notebook does four things, in order:
+This notebook follows the path a practitioner would actually take:
 
-1. **Explores C-LEARN itself** -- structure, behavior, and its climate feedback loops.
-2. **Runs LTM's loop-dominance analysis on C-LEARN's climate core** -- automatic loop discovery,
-   plus a curated analysis of nine pinned climate loops scored by the engine, showing how
-   dominance shifts from the balancing carbon-uptake loops toward the reinforcing carbon-climate
-   feedbacks over the 21st century.
-3. **Demonstrates the engine-native LTM experience** on models where it works end-to-end (the
-   logistic growth model, and the three-party arms race model from the LTM papers).
-4. **Reports honestly on the gaps**: what still doesn't work, why, and what was fixed and filed
-   along the way. This notebook was itself the test that drove six engine/API fixes (plus four
-   LTM compilation fixes that landed on `main` between its first and final drafts).
-
-> Built against pysimlin from `main` after the GH #653 pinned-loop fixes (2026-06-01).
+1. **Load and explore** the model: structure, diagram, baseline behavior.
+2. **Discover** the feedback loops that drive that behavior (`model.analyze()`).
+3. **Pin and track** the nine textbook climate feedback loops by name, and watch dominance shift
+   from the planet's balancing machinery to the reinforcing carbon-climate feedbacks over the
+   21st century.
+4. **Interrogate the jagged parts** of that story -- the dominance chart has abrupt transitions,
+   and we run them to ground: are they sampling artifacts, model structure, or an LTM bug?
+5. **Test dominance against leverage** with a counterfactual run -- and find the two are very
+   different things, exactly as the LTM papers warn.
+6. Close with an **experience report**: what this exercise revealed about the API and the
+   implementation (several pieces of which were fixed in the engine as this notebook was written).
 """)
 
 # ============================================================================
-# Section 1: loading the model
+# 1. Loading C-LEARN
 # ============================================================================
 
 md("""
 ## 1. Loading C-LEARN
 
-`simlin.load()` reads Vensim `.mdl` files directly (no conversion step). The translation -- Vensim
-macros, subscripts, lookup tables, and the equation language -- happens in Simlin's native Rust
-importer.
+`simlin.load` reads the original 53,000-line Vensim `.mdl` directly -- no conversion step.
 """)
 
 code("""
 import warnings
-from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -116,113 +112,111 @@ stocks = model.get_var_names(VARTYPE_STOCK)
 flows = model.get_var_names(VARTYPE_FLOW)
 auxes = model.get_var_names(VARTYPE_AUX)
 
-print(f"variables: {len(model.get_var_names())} total")
-print(f"  {len(stocks):4d} stocks")
-print(f"  {len(flows):4d} flows")
-print(f"  {len(auxes):4d} auxiliaries")
-print(f"\\ntime: {model.time_spec.start:.0f} to {model.time_spec.stop:.0f} "
-      f"(dt={model.time_spec.dt}, units={model.time_spec.units})")
+print(f"variables: {len(model.get_var_names())} total "
+      f"({len(stocks)} stocks, {len(flows)} flows, {len(auxes)} auxiliaries)")
+print(f"time: {model.time_spec.start:.0f} to {model.time_spec.stop:.0f} "
+      f"(dt={model.time_spec.dt}, save every 1 {model.time_spec.units})")
 print("\\nstocks:")
 for s in stocks:
     print(f"  {s}")
 """)
 
 md("""
-The stocks tell you what kind of model this is. The physical climate core:
+The stocks tell you what kind of model this is. The physical climate core is the handful that
+matter for this analysis:
 
-* **Carbon cycle**: `c_in_atmosphere`, `c_in_mixed_layer` (surface ocean), `c_in_deep_ocean`,
-  `c_in_biomass`, `c_in_humus` (soil)
-* **Energy balance**: `heat_in_atmosphere_and_upper_ocean`, `heat_in_deep_ocean`
-* **Other greenhouse gases**: `ch4_in_atm`, `n2o`, `sf6`, `hfc`, `pfc`
-* **Climate feedbacks**: `total_c_from_permafrost`, `total_ch4_released`
-* **Impacts**: `sea_level_rise`
+* **carbon cycle**: `c_in_atmosphere`, `c_in_biomass`, `c_in_humus`, `c_in_mixed_ocean` plus a
+  4-layer deep ocean -- carbon moving between air, plants, soil, and sea;
+* **energy balance**: `heat_in_atmosphere_and_upper_ocean` and `heat_in_deep_ocean` -- the
+  planet's heat content, which (divided by heat capacity) is the temperature anomaly;
+* the rest are bookkeeping for the other greenhouse gases (CH4, N2O, the HFC/PFC/SF6 families),
+  sea-level rise, and cumulative-emissions accounting.
 
-plus policy bookkeeping (`cumulative_co2*`, `im_*` international-agreement stocks).
-
-Most variables are arrayed over a `scenario` dimension -- C-LEARN simulates three climate
-sensitivities (deterministic / high / low) side by side in one run.
-""")
-
-# ============================================================================
-# Section 2: equations and the arrayed-equation API
-# ============================================================================
-
-md("""
-### Reading equations
-
-Each variable's equation is available through `get_variable()`. Arrayed variables that the Vensim
-importer expanded element-by-element expose their formulas through `element_equations` (and
-collapse back to a single `equation` when every element has the same formula).
+Equations read back as authored. Three from the core:
 """)
 
 code("""
 for name in ["atm_conc_co2", "temperature_change_from_preindustrial", "flux_atm_to_ocean"]:
-    var = model.get_variable(name)
-    print(f"{name}  [{', '.join(var.dimensions)}]")
-    print(f"  units:    {var.units}")
-    print(f"  equation: {var.equation}")
-    if var.documentation:
-        print(f"  doc:      {var.documentation[:90]}")
+    print(model.explain(name))
     print()
 """)
 
 # ============================================================================
-# Section 3: the diagram
+# 2. The model diagram
 # ============================================================================
 
 md("""
 ## 2. The model diagram
 
-C-LEARN ships with its Vensim sketch -- 14 views' worth -- which Simlin imports and renders via
-`project.render_png()` / `render_svg()`. The full canvas stacks all 14 views vertically; here is
-one of the climate-sector views cropped out of it:
+The Vensim sketch comes through the importer as one tall canvas of sector views.
+`project.render_png` renders it, and the view metadata (group names with bounding boxes) lets us
+crop out the two sectors this notebook is about -- the **carbon cycle** and the **climate**
+(energy balance) -- rather than hardcoding pixel offsets.
 """)
 
 code("""
 import io
+import json
+import re
 
 from IPython.display import Image, display
 from PIL import Image as PILImage
 
-png = model.project.render_png("main", width=1600)
-full = PILImage.open(io.BytesIO(png))
-print(f"full rendered canvas: {full.width} x {full.height} px ({len(png) / 1e6:.1f} MB, all 14 views)")
+project_json = json.loads(model.project.serialize_json().decode("utf-8"))
+view = project_json["models"][0]["views"][0]
+groups = {e["name"]: e for e in view["elements"] if e.get("type") == "group"}
 
-# Crop one sector view out of the stacked canvas.
-crop = full.crop((0, 15050, 1450, 16450))
-buf = io.BytesIO()
-crop.save(buf, format="PNG")
-display(Image(data=buf.getvalue(), width=920))
+# The SVG render declares the exact model-coordinate viewBox (content bounds
+# plus padding); use it to map sector-group coordinates onto canvas pixels.
+svg_head = model.project.render_svg("main")[:600].decode("utf-8")
+vb_left, vb_top, vb_w, vb_h = map(
+    float, re.search(r'viewBox="(-?[\\d.]+) (-?[\\d.]+) ([\\d.]+) ([\\d.]+)"', svg_head).groups()
+)
+
+RENDER_W = 2000
+png = model.project.render_png("main", width=RENDER_W)
+PILImage.MAX_IMAGE_PIXELS = None  # one tall trusted canvas, not a decompression bomb
+canvas = PILImage.open(io.BytesIO(png))
+scale = canvas.width / vb_w
+print(f"rendered canvas: {canvas.width} x {canvas.height} px, {len(groups)} sector views; "
+      "showing two:")
+
+
+def show_sector(name: str, pad: float = 25.0) -> None:
+    g = groups[name]
+    box = (
+        int((g["x"] - pad - vb_left) * scale),
+        int((g["y"] - pad - vb_top) * scale),
+        int((g["x"] + g["width"] + pad - vb_left) * scale),
+        int((g["y"] + g["height"] + pad - vb_top) * scale),
+    )
+    crop = canvas.crop(box)
+    buf = io.BytesIO()
+    crop.save(buf, format="PNG")
+    print(f"\\n{name}:")
+    display(Image(data=buf.getvalue(), width=940))
+
+
+show_sector("Carbon Cycle")
+show_sector("Climate")
 """)
 
 md("""
-The render is faithful: each gray rounded box is one Vensim view (imported as a sector group), and
-the stocks, flows, and connectors inside come through cleanly.
-
-(A satisfying aside: the first draft of this notebook found every one of these views rendering as a
-**solid black rectangle** -- the SVG stylesheet had no rule for sector/group boxes, so they took
-SVG's default fill. Models without sector boxes never hit it, which is why small fixtures looked
-fine. Fixed in `a51e9191` as part of this exercise.)
-
-Still, at 911 variables a structural diagram is something you *navigate*, not something you *read*.
-This is exactly the argument the LTM papers make for **behavior-driven simplified diagrams** (their
-"simplified CLD" concept): show only the loops that matter, sized by how much they matter. Simlin
-has the metrics for this; the visualization layer doesn't exist yet.
+Both sectors are textbook stock-and-flow chains. In the carbon cycle, atmospheric carbon exchanges
+with biomass, humus (soil), and a stack of ocean layers; in the climate sector, net radiative
+forcing accumulates as heat, whose ratio to heat capacity is the temperature anomaly that feeds
+back everywhere else. Every feedback loop we analyze below is visible in these two diagrams.
 """)
 
 # ============================================================================
-# Section 4: baseline run
+# 3. The baseline run
 # ============================================================================
 
 md("""
 ## 3. The baseline run
 
-`model.run()` simulates the model, and by default also asks for loop analysis
-(`analyze_loops=True`). On a model this large, LTM resolves to **discovery mode**: the feedback
-structure is too big to enumerate exhaustively (loop counts grow roughly factorially with model
-size), so the engine instruments every causal link instead, and `run.loops` only contains loops
-someone explicitly asked about. pysimlin warns about exactly that, so an empty loop list is never
-mistaken for "this model has no feedback":
+`model.run()` simulates and -- by default -- asks for loop analysis. On a model this size, that
+request does something worth paying attention to:
 """)
 
 code("""
@@ -231,173 +225,106 @@ with warnings.catch_warnings(record=True) as caught:
     run = model.run()
 
 for w in caught:
-    print(f"{w.category.__name__}:")
-    print(f"  {w.message}")
+    print(f"{w.category.__name__}:\\n  {w.message}\\n")
 
-print(f"\\nltm_mode: {run.ltm_mode!r}")
+print(f"ltm_mode: {run.ltm_mode!r}")
+print(f"loops reported: {len(run.loops)}")
 print(f"results: {run.results.shape[0]} timesteps x {run.results.shape[1]} series")
 """)
 
 md("""
-(Until very recently this was much worse: the LTM instrumentation for C-LEARN needed ~171k result
-slots, which silently overflowed the engine's 16-bit slot addressing and corrupted *every* result
--- and after that was turned into a hard error, LTM simply couldn't run on C-LEARN at all. The
-O(N^2)-blowup fixes that landed on `main` this week shrank the instrumentation enough that an
-LTM-enabled C-LEARN run now compiles and runs in ~8 seconds, correctly. Section 6 puts that
-instrumentation to work.)
-""")
+Two modes, chosen automatically. For small models the engine **exhaustively enumerates** every
+feedback loop (Johnson's algorithm) and scores each one. C-LEARN's causal graph has a
+strongly-connected component far past the enumeration gate (loop counts in graphs like this grow
+toward factorial -- Urban Dynamics has 43 *million* loops), so the engine auto-switches to
+**discovery mode**: no pre-enumerated loop list, and `run.loops` contains only loops you
+explicitly ask for (next two sections). The `RuntimeWarning` says this happened and what to do
+about it; `run.ltm_mode` makes it checkable in code.
 
-md("""
-### What C-LEARN projects
-
-The business-as-usual run (no policy levers): atmospheric CO2 roughly triples from its
-pre-industrial ~280 ppm, and global mean temperature rises about 4.5°C by 2100. The three lines per
-plot are the three climate-sensitivity scenarios the model carries in its `scenario` dimension.
+What does business-as-usual project? The `scenario` dimension runs three climate sensitivities in
+parallel; `deterministic` is the central case (3°C per CO2 doubling).
 """)
 
 code("""
 results = run.results
-scenarios = ["deterministic", "high_2xco2_sensitivity", "low_2xco2_sensitivity"]
-labels = {"deterministic": "best estimate (3.0°C / 2xCO2)",
-          "high_2xco2_sensitivity": "high sensitivity (4.5°C)",
-          "low_2xco2_sensitivity": "low sensitivity (2.0°C)"}
-colors = {"deterministic": "#1976d2", "high_2xco2_sensitivity": "#c62828",
-          "low_2xco2_sensitivity": "#2e7d32"}
+years = results.index
 
-fig, axes = plt.subplots(1, 3, figsize=(13, 4))
-
-for scen in scenarios:
-    axes[0].plot(results.index, results[f"atm_conc_co2[{scen}]"],
-                 color=colors[scen], label=labels[scen])
-    axes[1].plot(results.index, results[f"temperature_change_from_preindustrial[{scen}]"],
-                 color=colors[scen])
-    axes[2].plot(results.index, results[f"sea_level_rise[{scen}]"] * 1000,
-                 color=colors[scen])
-
-axes[0].set_title("Atmospheric CO2 (ppm)")
-axes[0].legend(fontsize=8, loc="upper left")
-axes[1].set_title("Temperature change from pre-industrial (°C)")
-axes[2].set_title("Sea level rise (mm)")
-for ax in axes:
-    ax.set_xlabel("year")
-    ax.set_xlim(1900, 2100)
-fig.suptitle("C-LEARN business-as-usual projection", y=1.02)
+fig, ax1 = plt.subplots()
+ax1.plot(years, results["temperature_change_from_preindustrial[deterministic]"],
+         color="#c62828", lw=2)
+ax1.set_ylabel("temperature change from preindustrial (°C)", color="#c62828")
+ax1.set_xlabel("year")
+ax2 = ax1.twinx()
+ax2.plot(years, results["atm_conc_co2[deterministic]"], color="#1976d2", lw=2)
+ax2.set_ylabel("atmospheric CO2 (ppm)", color="#1976d2")
+ax2.grid(False)
+ax1.set_title("C-LEARN business as usual")
 fig.tight_layout()
+
+print(f"2100: {results['temperature_change_from_preindustrial[deterministic]'].iloc[-1]:.2f} °C, "
+      f"{results['atm_conc_co2[deterministic]'].iloc[-1]:.0f} ppm CO2")
 """)
 
 # ============================================================================
-# Section 5: causal structure
+# 4. Discovery: which loops matter?
 # ============================================================================
 
 md("""
-## 4. The causal skeleton
+## 4. Which loops matter? Ask the engine
 
-Before any loop analysis, the model's *static* causal structure -- which variable affects which,
-and with what polarity -- is available from `get_links()`. Polarity is determined by analyzing each
-equation's monotonicity: `+` means "more of A gives more of B", `-` the opposite, `?` means the
-equation is non-monotone (or beyond the analyzer).
-
-Macro internals (the stocks hidden inside `SMOOTH`, `DELAY3`, etc.) are collapsed into composite
-edges, so what you see matches the model as its author drew it.
+In discovery mode the engine runs the LTM strongest-path search (Eberlein & Schoenberg 2020) over
+the link scores at every saved timestep: a Dijkstra-like DFS from every stock, following the
+highest-|score| links, collecting the feedback loops that are actually *doing something* at each
+instant. `model.analyze()` is the explicit, timeout-guarded entry point.
 """)
 
 code("""
-links = model.get_links()
-polarity_counts = Counter(str(link.polarity) for link in links)
+analysis = model.analyze(timeout=120.0)
 
-print(f"{len(links)} causal links")
-for pol, count in sorted(polarity_counts.items(), key=lambda kv: -kv[1]):
-    print(f"  {pol}: {count}")
+print(f"discovered {len(analysis.loops)} loops "
+      f"(truncated by timeout: {analysis.truncated})\\n")
+
+print(f"{'rank':>4} {'id':>5} {'pol':>4} {'vars':>5} {'mean |rel score|':>17}   path")
+for rank, loop in enumerate(analysis.loops[:18], 1):
+    imp = loop.average_importance()
+    path = " -> ".join(v.split("[")[0] for v in loop.variables[:3])
+    if len(loop.variables) > 3:
+        path += " -> ..."
+    print(f"{rank:>4} {loop.id:>5} {str(loop.polarity):>4} {len(loop.variables):>5} "
+          f"{imp:>17.3f}   {path}")
 """)
 
 md("""
-A third of the links get a definite polarity from static analysis. The `?` links are mostly
-either genuinely non-monotone equations (`IF THEN ELSE` policy switches, products of two changing
-quantities) or arrayed equations whose elements the analyzer conservatively declines to summarize
--- one of the improvement areas the experience report comes back to.
+A loop's **relative loop score** at an instant is its share of all loop activity in its *cycle
+partition* (a group of stocks connected by feedback), signed by polarity: `+` reinforcing, `-`
+balancing. The ranking above is by mean |relative score|.
 
-### Tracing the climate core
+Reading it takes one piece of context: **a loop alone in its partition always scores ±1** -- it
+explains 100% of whatever its little subsystem does. That is why the top of the list is a parade
+of two-variable gas-uptake loops (`hfc[...] -> hfc_uptake[...]`): each HFC stock decays in its own
+isolated partition, trivially "dominated" by its only loop. Correct, just not interesting.
 
-The interesting causal paths for climate dynamics: how does carbon in the atmosphere come back
-around to affect itself? We can walk the link graph directly.
-""")
-
-code("""
-fwd = defaultdict(list)
-for link in links:
-    fwd[link.from_var].append(link.to_var)
-
-
-def shortest_path(src: str, dst: str, max_len: int = 12) -> list[str] | None:
-    \"\"\"BFS shortest path src -> dst over the causal link graph.\"\"\"
-    queue = deque([[src]])
-    seen = {src}
-    while queue:
-        path = queue.popleft()
-        if len(path) > max_len:
-            return None
-        for nxt in fwd[path[-1]]:
-            if nxt == dst:
-                return path + [nxt]
-            if nxt not in seen:
-                seen.add(nxt)
-                queue.append(path + [nxt])
-    return None
-
-
-paths_to_show = [
-    ("how CO2 warms the planet", "c_in_atmosphere", "heat_in_atmosphere_and_upper_ocean"),
-    ("how warming melts permafrost (releasing more CO2)",
-     "temperature_change_from_preindustrial", "c_in_atmosphere"),
-    ("how warming releases methane", "temperature_change_from_preindustrial", "ch4_in_atm"),
-    ("how the ocean takes up carbon", "c_in_atmosphere", "c_in_mixed_layer"),
-    ("how warming weakens ocean uptake", "temperature_change_from_preindustrial",
-     "equil_c_in_mixed_layer"),
-]
-
-for title, src, dst in paths_to_show:
-    path = shortest_path(src, dst)
-    print(f"{title}:")
-    print("    " + "\\n      -> ".join(path))
-    print()
+The interesting structure starts where partitions are crowded: the loops through
+`c_in_atmosphere`, `c_in_biomass`, and `heat_in_atmosphere_and_upper_ocean` -- the coupled
+carbon-climate core, where a dozen loops compete and a 30% share means something. Discovery found
+that core without being told anything about climate; per scenario element, even (note the
+`[deterministic]` / `[high_2xco2_sensitivity]` subscripts).
 """)
 
 # ============================================================================
-# Section 6: the feedback loops + pinning
+# 5. Pinning the climate loops
 # ============================================================================
 
 md("""
-## 5. C-LEARN's climate feedback loops
+## 5. Pinning the loops that matter
 
-Putting those paths together, the scientific core of C-LEARN is a set of competing feedback loops
-around two coupled stocks -- carbon in the atmosphere, and heat in the atmosphere & upper ocean:
+Discovery's loop list is parameterization-dependent (run a different scenario, find different
+loops) and its machine ids (`b23`, `r16`) say nothing. The LTM papers' answer is the `LOOPSCORE`
+builtin: let the modeler *name a loop up front* and guarantee it gets scored. Simlin implements
+this as **loop pinning** -- `set_loop_name` takes the loop's member variables (order-free; the
+engine recovers the cycle from the causal graph) and a human name.
 
-| Loop | Polarity | Mechanism |
-|------|----------|-----------|
-| **Feedback cooling** | balancing | A hotter planet radiates more heat to space (the Planck response) |
-| **Deep-ocean heat uptake** | balancing | Surface warming drives heat into the deep ocean, slowing surface warming |
-| **Ocean carbon uptake** | balancing | More atmospheric CO2 -> more dissolves into the surface ocean |
-| **CO2 fertilization** | balancing | More atmospheric CO2 -> plants grow faster, absorbing carbon |
-| **Biomass carbon recycling** | reinforcing | Carbon taken up by plants flows back out as they decay |
-| **Soil carbon recycling** | reinforcing | The longer return path: biomass -> soil humus -> back to atmosphere |
-| **Permafrost carbon release** | reinforcing | Warming melts permafrost, releasing CO2, causing more warming |
-| **Warming weakens ocean uptake** | reinforcing | Warming reduces CO2 solubility in seawater, so more stays in the air |
-| **Warming weakens land uptake** | reinforcing | Warming stresses ecosystems, reducing their carbon uptake |
-
-Whether the balancing loops keep winning -- and when the reinforcing ones start to matter -- *is*
-the climate question, stated in feedback terms. This is exactly what LTM is supposed to quantify.
-
-### Pinning the loops
-
-C-LEARN is far too large for Simlin to enumerate every feedback loop (the loop count grows roughly
-factorially with model size; the engine caps exhaustive enumeration at strongly-connected
-components of 50 nodes). For models like this, the LTM literature's answer is to let the modeler
-**name the loops they care about** (Stella's `LOOPSCORE` function). Simlin's equivalent is *loop
-pinning*: `set_loop_name()` registers a loop by its variable cycle, and the engine then always
-tracks it.
-
-(Pinning didn't work at all on Vensim-imported models until recently -- the `SetLoopName`
-operation required variable UIDs that the importer never assigns. UIDs are now minted on demand.)
+Here are C-LEARN's nine textbook climate feedbacks, as a domain expert would list them:
 """)
 
 code("""
@@ -405,323 +332,172 @@ HEAT, NETFLOW = "heat_in_atmosphere_and_upper_ocean", "heat_in_atmosphere_and_up
 TEMP, CATM = "temperature_change_from_preindustrial", "c_in_atmosphere"
 
 CLIMATE_LOOPS = {
+    # the planet's balancing machinery
     "Feedback cooling": [HEAT, TEMP, "feedback_cooling", NETFLOW],
     "Deep ocean heat uptake": [HEAT, TEMP, "heat_transfer", NETFLOW],
     "Ocean carbon uptake": [CATM, "equil_c_in_mixed_layer", "flux_atm_to_ocean"],
     "CO2 fertilization": [CATM, "flux_atm_to_biomass"],
-    "Biomass carbon recycling": [
-        CATM, "flux_atm_to_biomass", "c_in_biomass", "flux_biomass_to_atmosphere",
-    ],
-    "Soil carbon recycling": [
-        CATM, "flux_atm_to_biomass", "c_in_biomass", "flux_biomass_to_humus",
-        "c_in_humus", "flux_humus_to_atmosphere",
-    ],
-    "Warming weakens ocean uptake": [
-        HEAT, TEMP, "effect_of_temp_on_dic_pco2", "equil_c_in_mixed_layer", "flux_atm_to_ocean",
-        CATM, "co2_radiative_forcing", "total_radiative_forcing", NETFLOW,
-    ],
-    "Warming weakens land uptake": [
-        HEAT, TEMP, "effect_of_warming_on_c_flux_to_biomass", "flux_atm_to_biomass",
-        CATM, "co2_radiative_forcing", "total_radiative_forcing", NETFLOW,
-    ],
-    "Permafrost carbon release": [
-        CATM, "co2_radiative_forcing", "total_radiative_forcing", NETFLOW, HEAT, TEMP,
-        "flux_c_from_permafrost_release",
-    ],
+    # the land carbon revolving door
+    "Biomass carbon recycling": [CATM, "flux_atm_to_biomass", "c_in_biomass",
+                                 "flux_biomass_to_atmosphere"],
+    "Soil carbon recycling": [CATM, "flux_atm_to_biomass", "c_in_biomass",
+                              "flux_biomass_to_humus", "c_in_humus", "flux_humus_to_atmosphere"],
+    # the reinforcing carbon-climate feedbacks
+    "Warming weakens ocean uptake": [HEAT, TEMP, "effect_of_temp_on_dic_pco2",
+                                     "equil_c_in_mixed_layer", "flux_atm_to_ocean", CATM,
+                                     "co2_radiative_forcing", "total_radiative_forcing", NETFLOW],
+    "Warming weakens land uptake": [HEAT, TEMP, "effect_of_warming_on_c_flux_to_biomass",
+                                    "flux_atm_to_biomass", CATM, "co2_radiative_forcing",
+                                    "total_radiative_forcing", NETFLOW],
+    "Permafrost carbon release": [CATM, "co2_radiative_forcing", "total_radiative_forcing",
+                                  NETFLOW, HEAT, TEMP, "flux_c_from_permafrost_release"],
 }
 
 with model.edit() as (current, patch):
     for name, variables in CLIMATE_LOOPS.items():
         patch.set_loop_name(name, variables)
 
-# pin{n} ids are assigned in pinning order.
-PIN_IDS = {name: f"pin{i + 1}" for i, name in enumerate(CLIMATE_LOOPS)}
-
-print(f"pinned {len(CLIMATE_LOOPS)} loops\\n")
 for loop in model.loops:
-    print(f"  {loop.id}: {' -> '.join(loop.variables)}")
+    label = f' "{loop.name}"' if getattr(loop, "name", None) else ""
+    print(f"  {loop.id}{label}: " + " -> ".join(loop.variables))
     print()
 """)
 
 md("""
-The engine recovered each loop's cycle from the unordered variable sets, and the pinned loops now
-appear in `model.loops` with stable `pin{n}` ids -- even though this model is in "discovery" LTM
-territory where nothing else is enumerated.
+The engine validated each variable set against the causal graph, recovered the cycle ordering, and
+-- because every one of these variables is arrayed over the 3-element `scenario` dimension --
+instantiated each pin **per element** (three score slots per loop, queryable by subscript).
 
-### Pinned loops are scored, per scenario
-
-Scoring a pinned loop means running with LTM instrumentation and reading the loop's score series.
-On arrayed models like C-LEARN this used to fail silently -- the generated pin-score equations
-mixed scalar and arrayed references, failed to compile, and read as constant zero
-([#653](https://github.com/bpowers/simlin/issues/653), now fixed). The engine now classifies each
-pinned cycle's dimensionality the same way it classifies enumerated loops, so every pin comes back
-as an *arrayed* loop score: one slot per `scenario` element, each slot's equation referencing that
-scenario's own link scores.
+Now simulate with LTM instrumentation and pull each pinned loop's score series:
 """)
 
 code("""
-import numpy as np
-
 sim = model.simulate(enable_ltm=True)
 sim.run_to_end()
-print(f"LTM-instrumented run succeeded (mode: {sim.get_ltm_mode()})\\n")
-
-# Each pin is scored per scenario element. Read the deterministic
-# (best-estimate climate sensitivity) scenario's relative score for each.
-print(f"{'pin':6s} {'scenario slots':>14s} {'non-zero deterministic-scenario values':>40s}")
-for loop in model.loops:
-    n_slots = sim.get_loop_element_count(loop.id)
-    series = sim.get_relative_loop_score(loop.id, element="Deterministic")
-    finite = series[np.isfinite(series)]
-    n_nonzero = int((finite != 0).sum())
-    print(f"  {loop.id:6s} {n_slots:>10d} {n_nonzero:>30d} / {len(series)}")
-""")
-
-md("""
-(That an LTM-instrumented C-LEARN run *succeeds at all* is also recent: previously the ~171k
-result slots of instrumentation silently overflowed the engine's 16-bit slot addressing and
-corrupted every result -- the variable that landed on slot 0 overwrote simulated *time*. After
-that became a hard error, four O(N^2)-blowup fixes shrank the instrumentation under the limit, the
-discovery-feasibility work made the strongest-path search tractable
-([#647](https://github.com/bpowers/simlin/issues/647), resolved), and the pinned-loop dimension
-classification ([#653](https://github.com/bpowers/simlin/issues/653), resolved) made the pin
-scores real. The importer-side instrumentation multiplier is still tracked in
-[#651](https://github.com/bpowers/simlin/issues/651).)
-
-### Automatic loop discovery
-
-Until this morning, the alternative -- LTM's strongest-path *discovery* algorithm, which finds
-important loops without being told what to look for -- was infeasible at this scale (a 60-second
-budget processed less than one timestep). The discovery-feasibility work that just landed on
-`main` changes that completely:
-""")
-
-code("""
-analysis = model.analyze(timeout=120.0)
-
-print(f"truncated: {analysis.truncated}")
-print(f"discovered {len(analysis.loops)} loops, {len(analysis.dominant_periods)} dominant periods\\n")
-
-print("top discovered loops by average importance:")
-for loop in analysis.loops[:8]:
-    imp = loop.average_importance()
-    path_str = " -> ".join(v.split("[")[0] for v in loop.variables[:4])
-    print(f"  {loop.id} ({loop.polarity}, {len(loop.variables)} vars, avg |score| {imp:9.1f}):")
-    print(f"      {path_str} -> ...")
-""")
-
-md("""
-In a few seconds, discovery surfaces ~150 loops -- and the top of the ranking is exactly the
-climate core we mapped by hand: the CO2-forcing-heat balancing loop, the biomass/soil carbon
-recycling loops, the ocean uptake loops, each found separately per `scenario` element. The two
-approaches agree on what matters.
-
-What discovery *doesn't* give you is names, signs, or curation: loops arrive as `b23`/`r22` with
-20-variable element-qualified paths, ranked by raw |score| (so the same near-singularity issue
-distorts the ranking -- more on that below). For a model you know well, naming and tracking the
-loops you care about stays the better workflow; discovery is how you find what you didn't know to
-look for. The two compose: discover, then pin.
-
-## And now: the dominance analysis
-""")
-
-# ============================================================================
-# Section 6: pinned loop scores -- the dominance analysis
-# ============================================================================
-
-md("""
-## 6. The loops that matter in C-LEARN
-
-The pinned loops give us exactly what the dominance analysis needs: named, signed, per-scenario
-loop scores, computed by the engine. A **loop score is the product of the link scores around the
-loop's cycle** (Schoenberg et al. 2020, Eq. 3); each pin's score variable is arrayed over
-`scenario`, and its first slot is the `deterministic` (best-estimate climate sensitivity)
-scenario we analyze here.
-
-Until [#653](https://github.com/bpowers/simlin/issues/653) was fixed, this section had to compose
-every one of these series by hand from the engine's per-link scores; now it reads the engine's own
-pin scores (and keeps one hand-composed loop as a cross-check that the two are identical).
-""")
-
-code("""
-SEP, ARROW = "\\u205a", "\\u2192"  # the reserved separators in synthetic LTM variable names
-SCEN = "deterministic"
-
+ltm_run = sim.get_run()
 time_years = sim.get_series("time")
 
+print(f"ltm mode: {sim.get_ltm_mode()}; "
+      f"{sim.get_loop_element_count('pin1')} scenario slots per pinned loop\\n")
 
-def pinned_loop_score(name: str) -> np.ndarray:
-    \"\"\"The engine's raw loop score for a pinned loop (LTM Eq. 3), deterministic scenario.
-
-    Each pin's `loop_score` variable is arrayed over `scenario`; the series at the
-    variable's base offset is its first element slot, which is `deterministic` (the
-    dimension's first declared element).
-    \"\"\"
-    return sim.get_series(f"${SEP}ltm{SEP}loop_score{SEP}{PIN_IDS[name]}")
-
-
-scores = pd.DataFrame(
-    {name: pinned_loop_score(name) for name in CLIMATE_LOOPS},
-    index=pd.Index(time_years, name="year"),
-)
-
-# A loop's polarity is the sign of its score: negative = balancing, positive = reinforcing.
-summary = pd.DataFrame({
-    "polarity": ["B (balancing)" if scores[c].mean() < 0 else "R (reinforcing)" for c in scores],
-    "score @ 1950": scores.iloc[100].round(2),
-    "score @ 2000": scores.iloc[150].round(2),
-    "score @ 2050": scores.iloc[200].round(2),
-    "score @ 2095": scores.iloc[245].round(2),
-})
-summary
+for loop in ltm_run.loops:
+    rel = sim.get_relative_loop_score(loop.id, element="deterministic")
+    finite = rel[np.isfinite(rel)]
+    label = getattr(loop, "name", None) or loop.id
+    print(f"  {loop.id} ({loop.polarity}) {label}: "
+          f"mean |share| {np.abs(finite).mean():.1%}, peak {np.abs(finite).max():.1%}")
 """)
 
 md("""
-**Cross-check:** the pinned score the engine computes is, by definition, the product of the link
-scores around the loop's cycle. Composing "Feedback cooling" by hand from the engine's per-link
-score series must reproduce `pin1`'s series exactly:
+Two things worth noticing before the headline chart:
+
+* **Runtime polarity classification works through the data.** Statically, most of these loops
+  pass through lookup tables whose monotonicity the engine cannot always prove, so several
+  classify as `U` (unknown) from structure alone. The polarity shown above is reclassified from
+  the *runtime* score signs: the heat-radiation and carbon-uptake loops come out balancing (`B`),
+  the recycling and sink-weakening loops reinforcing (`R`), exactly as the physics says.
+* **Permafrost scores flat zero** -- C-LEARN's BAU scenario ships with the permafrost module
+  switched off, and LTM cleanly distinguishes "structurally present but inactive" from "active
+  but small". A dominance method that couldn't represent *zero* would have you chasing ghosts.
 """)
 
-code("""
-def link_score(frm: str, to: str) -> np.ndarray:
-    \"\"\"Read the LTM link-score series for the causal link `frm -> to`.
-
-    The engine names most link scores `$:ltm:link_score:{from}->{to}`; links whose
-    arrayed source is referenced at a specific element carry that element on the
-    `from` side. Try the forms in order.
-    \"\"\"
-    forms = [
-        f"${SEP}ltm{SEP}link_score{SEP}{frm}{ARROW}{to}",
-        f"${SEP}ltm{SEP}link_score{SEP}{frm}[{SCEN}]{ARROW}{to}",
-        f"${SEP}ltm{SEP}link_score{SEP}{frm}[{SCEN},layer1]{ARROW}{to}",
-    ]
-    for form in forms:
-        try:
-            return sim.get_series(form)
-        except simlin.SimlinRuntimeError:
-            continue
-    raise KeyError(f"no link-score series found for {frm} -> {to}")
-
-
-feedback_cooling_chain = [
-    (HEAT, TEMP), (TEMP, "feedback_cooling"), ("feedback_cooling", NETFLOW), (NETFLOW, HEAT)]
-by_hand = np.ones(len(time_years))
-for frm, to in feedback_cooling_chain:
-    by_hand = by_hand * link_score(frm, to)
-
-engine = pinned_loop_score("Feedback cooling")
-assert np.allclose(by_hand, engine, equal_nan=True), "engine pin score != hand-composed product"
-print("engine pin score == hand-composed product of link scores (LTM Eq. 3) at every step")
-""")
+# ============================================================================
+# 6. The dominance story
+# ============================================================================
 
 md("""
-Every loop's polarity comes out as the physics says it should: the heat-radiation and carbon-uptake
-loops are **balancing** (negative scores), the recycling and warming-feedback loops are
-**reinforcing** (positive), and permafrost is exactly zero -- C-LEARN's permafrost module is
-switched off in the BAU scenario, and LTM correctly reports an inactive loop as contributing
-nothing.
+## 6. A century of shifting dominance
 
-Raw loop scores grow without bound as the system accelerates (the denominators in LTM's link
-scores shrink), so the readable view is each loop's **share** of the total tracked feedback
-activity:
+The pinned loops' relative scores are normalized within their shared cycle partition, so at each
+instant these nine |scores| (plus any other activity in the partition) sum to 1: a true
+share-of-activity decomposition. We plot the deterministic scenario -- the behavior being
+explained on top, the loop shares below.
 """)
 
 code("""
-# Relative contribution among the tracked loops (the LTM "relative loop score",
-# restricted to the nine loops we are tracking).
-shares = scores.abs().div(scores.abs().sum(axis=1), axis=0)
+pin_names = {loop.id: (getattr(loop, "name", None) or loop.id) for loop in ltm_run.loops}
 
-balancing = [c for c in scores.columns if scores[c].mean() < 0]
-reinforcing = [c for c in scores.columns if scores[c].mean() >= 0 and scores[c].abs().max() > 0]
+rel = {pid: sim.get_relative_loop_score(pid, element="deterministic") for pid in pin_names}
+shares = pd.DataFrame(rel, index=pd.Index(time_years, name="year")).fillna(0.0)
+
+balancing = [p for p in shares if shares[p].mean() < 0]
+reinforcing = [p for p in shares if shares[p].mean() >= 0 and shares[p].abs().max() > 0]
 
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10.5, 8), sharex=True,
-                                gridspec_kw={"height_ratios": [1, 1.5]})
+                               gridspec_kw={"height_ratios": [1, 1.6]})
 
-# Top: the behavior being explained
-ax1.plot(time_years, sim.get_series(f"temperature_change_from_preindustrial[{SCEN}]"),
+ax1.plot(time_years, sim.get_series("temperature_change_from_preindustrial[deterministic]"),
          color="#c62828", lw=2)
 ax1b = ax1.twinx()
-ax1b.plot(time_years, sim.get_series(f"atm_conc_co2[{SCEN}]"), color="#1976d2", lw=2)
-ax1.set_ylabel("temperature change (°C)", color="#c62828")
-ax1b.set_ylabel("atmospheric CO2 (ppm)", color="#1976d2")
+ax1b.plot(time_years, sim.get_series("atm_conc_co2[deterministic]"), color="#1976d2", lw=2)
+ax1.set_ylabel("temp change (°C)", color="#c62828")
+ax1b.set_ylabel("CO2 (ppm)", color="#1976d2")
 ax1b.grid(False)
-ax1.set_xlim(1910, 2085)
-ax1.set_title("C-LEARN business-as-usual: the behavior ...")
+ax1.set_title("the behavior ...")
 
-# Bottom: stacked shares of feedback activity
 blues = plt.cm.Blues(np.linspace(0.45, 0.85, len(balancing)))
 reds = plt.cm.Reds(np.linspace(0.45, 0.85, len(reinforcing)))
-# Window: 1910 (skip the noisy near-equilibrium start) to 2085 (after which the
-# soil-recycling loop hits an LTM score singularity -- explained below).
-lo, hi = 60, 235
+# Stop at 2090: the last decade is dominated by a score singularity (the
+# soil-carbon stock approaches constant-rate growth) explained in section 7.
+mask = (time_years >= 1900) & (time_years <= 2090)
 ax2.stackplot(
-    time_years[lo:hi],
-    [shares[c].values[lo:hi] for c in balancing + reinforcing],
-    labels=[f"{c} (B)" for c in balancing] + [f"{c} (R)" for c in reinforcing],
-    colors=list(blues) + list(reds),
-    alpha=0.9,
+    time_years[mask],
+    [shares[p].abs().values[mask] for p in balancing + reinforcing],
+    labels=[f"{pin_names[p]} (B)" for p in balancing]
+           + [f"{pin_names[p]} (R)" for p in reinforcing],
+    colors=list(blues) + list(reds), alpha=0.9,
 )
-ax2.set_xlim(1910, 2085)
+ax2.set_xlim(1900, 2090)
 ax2.set_ylim(0, 1)
 ax2.set_xlabel("year")
-ax2.set_ylabel("share of tracked feedback activity")
+ax2.set_ylabel("share of feedback activity")
 ax2.set_title("... and the loops driving it: balancing (blue) loses ground to reinforcing (red)")
-ax2.legend(loc="upper left", fontsize=8, ncol=2, framealpha=0.95)
+ax2.legend(loc="upper left", fontsize=7.5, ncol=2, framealpha=0.95)
 fig.tight_layout()
 """)
 
 code("""
-# The headline numbers: how the balance of power shifts over the century.
-def share_at(year: float) -> pd.Series:
-    idx = int(year - time_years[0])
-    return shares.iloc[idx]
+# Decade MEDIANS: robust to the score spikes investigated in section 7.
+def decade_median(start: int) -> pd.Series:
+    return shares.abs().loc[start:start + 9].median()
 
-years = ["1950", "2000", "2050", "2085"]
-shift = pd.DataFrame({y: share_at(int(y)) for y in years}).round(3)
-shift["type"] = ["B" if c in balancing else "R" for c in shift.index]
-shift = shift.sort_values("2085", ascending=False)
+decades = pd.DataFrame({f"{y}s": decade_median(y) for y in (1950, 2000, 2050, 2080)})
+decades.index = [pin_names[p] for p in decades.index]
+decades = decades.sort_values("2080s", ascending=False)
 
-print("Share of tracked feedback activity:\\n")
-print(shift.to_string())
-print()
-b_total = shift[shift.type == "B"][years].sum()
-r_total = shift[shift.type == "R"][years].sum()
-b_str = " -> ".join(f"{b_total[y]:.0%}" for y in years)
-r_str = " -> ".join(f"{r_total[y]:.0%}" for y in years)
-print(f"All balancing loops:   {b_str}")
-print(f"All reinforcing loops: {r_str}")
+print("decade-median share of feedback activity:\\n")
+print(decades.round(3).to_string())
+
+GROUPS = {
+    "carbon sinks (B)": ["Ocean carbon uptake", "CO2 fertilization"],
+    "heat balance (B)": ["Feedback cooling", "Deep ocean heat uptake"],
+    "land carbon churn (R)": ["Biomass carbon recycling", "Soil carbon recycling"],
+    "sink weakening (R)": ["Warming weakens ocean uptake", "Warming weakens land uptake"],
+}
+print("\\nby mechanism:")
+for label, members in GROUPS.items():
+    row = decades.loc[members].sum()
+    print(f"  {label:22s} " + "  ".join(f"{row[c]:5.0%}" for c in decades.columns))
 """)
 
 md("""
-**This is the loop-dominance story of C-LEARN's century**, and it lines up with climate science:
+**This is the loop-dominance story of C-LEARN's century**, and it is sharper than a single
+balancing-vs-reinforcing split:
 
-* The **carbon-recycling loops** (biomass and soil returning carbon to the atmosphere) carry a
+* The **carbon-sink balancing loops** (ocean carbon uptake, CO2 fertilization) erode relentlessly:
+  roughly half of all feedback activity in the 1950s, ~5% by mid-century, ~1% by the 2080s. The
+  sinks never stop absorbing carbon -- but their grip on the system's *dynamics* collapses.
+* Their mirror image, the **sink-weakening reinforcing loops** ("warming weakens ocean uptake" /
+  "... land uptake"), climb from ~1% to ~30%: the textbook carbon-climate feedback -- a warmer
+  ocean holds less dissolved carbon, stressed ecosystems fix less of it -- emerging from the
+  equations, quantified decade by decade.
+* The **land carbon churn** (biomass and soil recycling carbon back to the atmosphere) carries a
   large share throughout: the land carbon system is a fast revolving door, not a one-way sink.
-* The single biggest *mover* is **"warming weakens ocean uptake"** -- the textbook carbon-climate
-  feedback. Its score grows roughly 3,000x over the century (0.03 in 1950 to 90 by 2095): from
-  negligible to a first-order driver. "Warming weakens land uptake" follows the same trajectory
-  one step behind.
-* The planet's **balancing machinery** (heat radiation, ocean/land carbon uptake) still claims
-  about half of the feedback activity at mid-century -- but only ~30% by 2085, with the warming
-  feedbacks taking the difference. (The volatility before ~2010 is real: the historical emissions
-  data drives year-to-year swings in which loops are doing the work.)
-* **Permafrost stays at exactly zero** because C-LEARN's BAU scenario has the permafrost module
-  switched off -- LTM cleanly distinguishes "inactive structure" from "active but small".
-
-### What happens after 2085 (and why the plot stops there)
-
-Look back at the score table: "Soil carbon recycling" reaches **+1,740** by 2095, two orders of
-magnitude beyond every other loop. That is not an error and not (directly) a physical statement --
-it is LTM's documented behavior near a *zero-acceleration* point (Schoenberg, Hayward & Eberlein
-2023, sec. 6.3). The corrected flow-to-stock link score divides the change in a flow by the
-**acceleration** of the stock it feeds; late in the century, C-LEARN's soil-carbon stock settles
-into nearly constant-rate growth (its inflow and outflow growth balance), so that denominator
-approaches zero and every score through it diverges.
-
-The diverging loop *is* telling you something -- "this subsystem has stopped accelerating" -- but
-it makes share-based plots unreadable, which is why the dominance chart above stops at 2085. Any
-production LTM tooling needs a presentation answer for these singularities; this is one of the
-API observations in the final section.
+  High activity, though -- as section 8 shows -- little net consequence.
+* The **heat-balance loops** (feedback cooling, deep-ocean heat uptake) wax and wane with how hard
+  radiative forcing is *accelerating*: prominent mid-century when emissions growth is steepest,
+  receding later. Balancing strength tracks the push it must answer.
+* **Permafrost stays at exactly zero** (switched off in BAU), so it never clutters the story.
 
 A modeler who suspected "the carbon sinks weaken as the planet warms" can now point at a
 quantified, time-resolved decomposition instead of an intuition. That is what *debug your
@@ -729,258 +505,332 @@ intuition* means.
 """)
 
 # ============================================================================
-# Section 7: what LTM gives you (logistic growth)
+# 7. Why so jagged?
 # ============================================================================
 
 md("""
-## 7. The engine-native LTM experience
+## 7. Why so jagged? Running the abrupt transitions to ground
 
-Section 6 used pinned loops because C-LEARN is too large to enumerate. On models small enough for
-exhaustive enumeration, the engine needs no pinning at all -- loops, relative scores, and dominance
-periods arrive ready-made on every `run()`. Two examples show what that looks like.
+A careful reader will have flinched at the dominance chart: the shares **lurch**. Before ~2010
+they thrash year to year; after 2010 they move in eerily regular steps, with spike-shaped
+reshuffles around 2020, 2030, 2040, 2050. Real loop-dominance transitions in a smooth physical
+model should not look like a staircase.
 
-### 7a. Logistic growth: the textbook dominance shift
+Three hypotheses, in increasing order of alarm:
 
-The simplest interesting case: a population growing toward a carrying capacity. Two loops --
-reinforcing growth (more population -> more births) and a balancing constraint (more population ->
-fuller capacity -> lower growth rate). The S-shaped trajectory everyone knows is *defined* by the
-handoff between them.
+1. **Sampling artifact** -- the model integrates at dt=0.25yr but saves yearly; maybe we are
+   aliasing sub-annual score dynamics.
+2. **Model structure** -- something in C-LEARN itself genuinely changes at those years.
+3. **An LTM implementation bug.**
+
+### Hypothesis 1: sampling
+
+Rerun the identical analysis saving every dt step instead of every year:
 """)
 
 code("""
-logistic = simlin.load(REPO / "test" / "logistic_growth_ltm" / "logistic_growth.stmx")
-display(Image(data=logistic.project.render_png("main", width=900), width=750))
-""")
+model_dt = simlin.load(MDL)
+model_dt.project.set_sim_specs(save_step=0.25)
+with model_dt.edit() as (current, patch):
+    for name, variables in CLIMATE_LOOPS.items():
+        patch.set_loop_name(name, variables)
 
-code("""
-lrun = logistic.run()
+sim_dt = model_dt.simulate(enable_ltm=True)
+sim_dt.run_to_end()
+t_dt = sim_dt.get_series("time")
 
-print(f"ltm_mode: {lrun.ltm_mode!r}\\n")
-for loop in lrun.loops:
-    print(f"  {loop.id} ({loop.polarity}): {' -> '.join(loop.variables)}")
-    print(f"      avg |relative score| = {loop.average_importance():.3f}")
-""")
+rel_dt = {pid: sim_dt.get_relative_loop_score(pid, element="deterministic") for pid in pin_names}
+shares_dt = pd.DataFrame(rel_dt, index=pd.Index(t_dt, name="year")).fillna(0.0)
 
-code("""
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9.5, 6.5), sharex=True,
-                                gridspec_kw={"height_ratios": [1, 1.2]})
-
-time = lrun.results.index
-ax1.plot(time, lrun.results["population"], color="#1976d2", lw=2)
-ax1.set_ylabel("population")
-ax1.set_title("Behavior: S-shaped growth ...")
-
-for loop, color in zip(lrun.loops, ["#2e7d32", "#c62828"]):
-    ts = loop.behavior_time_series
-    ax2.plot(time, np.abs(ts), color=color, lw=2,
-             label=f"{loop.id} ({loop.polarity}): "
-                   f"{'growth engine' if str(loop.polarity) == 'R' else 'capacity constraint'}")
-
-ax2.axhline(0.5, color="gray", ls="--", lw=1, alpha=0.7)
-ax2.text(0.5, 0.52, "dominance threshold", fontsize=8, color="gray")
-ax2.set_xlabel("time")
-ax2.set_ylabel("|relative loop score|")
-ax2.set_title("... explained by shifting loop dominance")
-ax2.legend(loc="center right")
+fig, axes = plt.subplots(2, 1, figsize=(10.5, 6.5), sharex=True)
+for ax, (df, t, label) in zip(axes, [
+    (shares, time_years, "saved yearly"),
+    (shares_dt, t_dt, "saved every dt (0.25 yr)"),
+]):
+    m = (t >= 2010) & (t <= 2060)
+    ax.stackplot(t[m], [df[p].abs().values[m] for p in balancing + reinforcing],
+                 colors=list(blues) + list(reds), alpha=0.9)
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("share")
+    ax.set_title(f"loop shares 2010-2060, {label}")
+axes[1].set_xlabel("year")
 fig.tight_layout()
 """)
 
 md("""
-This is the canonical LTM result (Figure 3 of the 2020 paper, reproduced by Simlin's engine): the
-reinforcing loop dominates while growth accelerates, the balancing loop takes over at the inflection
-point, and the crossover is exactly where the S-curve bends. `run.dominant_periods` reads this off
-automatically:
+Same steps, same spikes, at 4x the sampling rate. **Not a sampling artifact.** (This rerun also
+exercised `set_sim_specs(save_step=...)`, which turned up a real API bug on the way -- see the
+experience report.)
+
+### Hypothesis 2: model structure
+
+Look at the *raw* (un-normalized) pinned-loop scores around the steps. The LTM flow-to-stock link
+score divides the change in each flow by the **acceleration** of the stock it feeds (the corrected
+formula in Schoenberg, Hayward & Eberlein 2023) -- so if something kinks the second derivative of
+the major stocks, every loop score through them will jump in unison.
 """)
 
 code("""
-for period in lrun.dominant_periods:
-    loops = ", ".join(period.dominant_loops)
-    print(f"  {period.start_time:6.1f} .. {period.end_time:6.1f}:  {loops} dominant")
-""")
-
-# ============================================================================
-# Section 8: arms race
-# ============================================================================
-
-md("""
-### 7b. The three-party arms race: loops you'd never find by hand
-
-This model is *from* the LTM papers (Eberlein & Schoenberg 2020, "Finding the Loops that Matter"):
-three countries, each adjusting its arms stock toward a target based on the other two. It looks
-trivial -- 3 stocks, 12 variables -- but it contains 8 distinct feedback loops, including two
-three-party loops (A->B->C->A and A->C->B->A) that are **not** in the model's "independent loop
-set" and that static analysis methods miss. The paper's headline result is that those two loops are
-precisely the ones that dominate long-run behavior.
-""")
-
-code("""
-arms = simlin.load(REPO / "test" / "arms_race_3party" / "arms_race.stmx")
-arun = arms.run()
-
-print(f"ltm_mode: {arun.ltm_mode!r}, {len(arun.loops)} loops\\n")
-loops_by_size = sorted(arun.loops, key=lambda l: (len(l.variables), l.id))
-for loop in loops_by_size:
-    n_stocks = sum(1 for v in loop.variables if v.endswith("_arms"))
-    kind = {1: "self-adjustment", 2: "two-party", 3: "THREE-PARTY"}[n_stocks]
-    print(f"  {loop.id} ({loop.polarity}, {kind}): {' -> '.join(loop.variables)}")
-""")
-
-code("""
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9.5, 7), sharex=True,
-                                gridspec_kw={"height_ratios": [1, 1.4]})
-
-time = arun.results.index
-for var, label, color in [("a_s_arms", "A's arms", "#1976d2"),
-                          ("b_s_arms", "B's arms", "#c62828"),
-                          ("c_s_arms", "C's arms", "#2e7d32")]:
-    ax1.plot(time, arun.results[var], label=label, color=color, lw=2)
-ax1.legend(loc="upper left")
-ax1.set_ylabel("arms")
-ax1.set_title("Behavior: initial adjustment, then a runaway three-way arms race ...")
-
-# Group: three-party loops (3 stocks) vs everything else
-def n_stocks(loop):
-    return sum(1 for v in loop.variables if v.endswith("_arms"))
-
-for loop in arun.loops:
-    ts = loop.behavior_time_series
-    if ts is None:
-        continue
-    is_3party = n_stocks(loop) == 3
-    ax2.plot(time, np.abs(ts),
-             color="#c62828" if is_3party else "#90a4ae",
-             lw=2.5 if is_3party else 1.2,
-             label=(f"{loop.id}: three-party loop" if is_3party else None),
-             zorder=3 if is_3party else 1)
-
-ax2.plot([], [], color="#90a4ae", lw=1.2, label="self-adjustment & two-party loops")
-ax2.axhline(0.5, color="gray", ls="--", lw=1, alpha=0.7)
-ax2.set_xlabel("time (years)")
-ax2.set_ylabel("|relative loop score|")
-ax2.set_title("... driven, in the long run, by the two three-party loops")
-ax2.legend(loc="center right", fontsize=9)
+SEP = "\\u205a"
+fig, ax = plt.subplots(figsize=(10.5, 4.5))
+for pid, name in pin_names.items():
+    raw = sim_dt.get_series(f"${SEP}ltm{SEP}loop_score{SEP}{pid}")
+    m = (t_dt >= 2012) & (t_dt <= 2060)
+    ax.plot(t_dt[m], raw[m], label=name, lw=1.2)
+ax.set_yscale("symlog", linthresh=0.01)
+for knee in (2021, 2026, 2031, 2041, 2051):
+    ax.axvline(knee, color="gray", lw=0.7, ls=":")
+ax.legend(fontsize=7, ncol=2, loc="lower right")
+ax.set_title("raw pinned-loop scores, dt sampling: every loop jumps at the same years")
+ax.set_xlabel("year")
 fig.tight_layout()
 """)
 
 md("""
-Early on, the simple self-adjustment and two-party loops do the work (each country closing the gap
-to its target). But every two-party loop here has gain <= 1 -- left to themselves they'd settle to
-equilibrium. The runaway growth comes from the two long loops that route through *all three*
-parties, and LTM picks them out cleanly: by the end of the run they account for essentially all of
-the behavior.
+Every loop's raw score steps at the *same* years (dotted lines): 2021, 2026, 2031, 2041, 2051 --
+one year after each half-decade or decade boundary. That is not loop dynamics; that is an input.
 
-For C-LEARN, the equivalent result is exactly what section 6 showed: *which* of the nine climate
-loops dominates in which decade, and when the reinforcing warming feedbacks start to outweigh the
-balancing uptake loops -- with pinning standing in for the exhaustive enumeration that is impossible
-at that scale.
+C-LEARN's business-as-usual emissions are exogenous **reference-scenario lookup tables over time**
+(`RS CO2 FF[region]`: yearly points, 1850-2100). Second-difference the global emissions input and
+the smoking gun appears:
+""")
+
+code("""
+em = sim_dt.get_series("global_co2_ff_emissions")
+d2_em = np.diff(em, n=2)
+catm_dt = sim_dt.get_series("c_in_atmosphere[deterministic]")
+d2_catm = np.diff(catm_dt, n=2)
+
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10.5, 6), sharex=True)
+m = (t_dt[2:] >= 2012) & (t_dt[2:] <= 2060)
+ax1.plot(t_dt[2:][m], d2_em[m], lw=1, color="#37474f")
+ax1.set_ylabel("d²(emissions)/dt²")
+ax1.set_title("the input: fossil CO2 emissions follow piecewise growth segments ...")
+ax2.plot(t_dt[2:][m], d2_catm[m], lw=1, color="#1976d2")
+ax2.set_ylabel("d²(C in atmosphere)/dt²")
+ax2.set_title("... so stock accelerations are near-constant within a segment and jump at the knees")
+ax2.set_xlabel("year")
+for ax in (ax1, ax2):
+    for knee in (2021, 2026, 2031, 2041, 2051):
+        ax.axvline(knee, color="gray", lw=0.7, ls=":")
+fig.tight_layout()
+""")
+
+md("""
+The projection data was authored as growth-rate segments anchored at half-decades: between anchors
+emissions follow one smooth ramp; at each anchor the growth rate snaps to the next segment's
+value. The emissions' second derivative is a spike train at the anchor years, the stocks'
+accelerations inherit the staircase -- and since **every flow-to-stock link score has a stock
+acceleration in its denominator**, the entire loop-score field reshuffles at each knee. The
+pre-2010 thrash is the same mechanism at yearly resolution: historical emissions are yearly
+*observations* (wars, recessions, oil shocks), so the accelerations flip constantly and the
+shares churn with them.
+
+### Verdict
+
+**Model structure -- hypothesis 2.** The abrupt transitions are LTM faithfully reporting that, in
+the second-derivative sense loop scores measure, this model's behavior is paced by the *knees of
+its exogenous input data*. No bug; instead, a lesson:
+
+> For heavily data-driven models, instantaneous loop dominance inherits the data's roughness.
+> Read dominance as **trends over windows** (the decade-median table in section 6), not as
+> point-in-time verdicts. The LTM papers make the matching caveat from the other side: the method
+> is designed for *endogenous* behavior, and the more a model is exogenously forced, the less of
+> its behavior its loops explain (Schoenberg et al. 2020, sec. on limitations).
+
+The same denominator explains the occasional towering spike (~2019, ~2050): when a stock's
+acceleration passes through zero while its flows still change, raw scores diverge -- LTM's
+documented inflection-point behavior. The *relative* scores stay bounded through those moments,
+which is exactly why the method tells you to interpret relative, not raw, scores.
 """)
 
 # ============================================================================
-# Section 9: experience report
+# 8. Dominance is not leverage
 # ============================================================================
 
 md("""
-## 8. Experience report
+## 8. Dominance is not leverage
 
-This notebook doubled as a stress test of the LTM implementation and the pysimlin API, across
-several waves of fixes. Verdict: **the method works, and the full pipeline -- link scores, pinned
-loop scores, and discovery -- now works at C-LEARN scale.** Section 6 -- a quantified,
-time-resolved decomposition of a real climate model's feedback structure, computed by the engine's
-own pinned-loop scores -- was impossible when this notebook was started: every LTM number on
-C-LEARN was silently corrupted memory, and even after that was fixed, every pinned loop score on an
-arrayed model silently read as zero.
+By the 2080s the two sink-weakening loops carry roughly 30% of all feedback activity. Does that
+mean they cause a third of the warming? Easy to check -- the model has a master gain on
+exactly that feedback (`sensitivity_of_c_uptake_to_temperature`, default 1). Zero it and the
+loops are severed:
+""")
+
+code("""
+base = model.run(analyze_loops=False)
+no_feedback = model.run(
+    overrides={"sensitivity_of_c_uptake_to_temperature": 0.0}, analyze_loops=False
+)
+
+tvar = "temperature_change_from_preindustrial[deterministic]"
+fig, ax = plt.subplots()
+ax.plot(base.results.index, base.results[tvar], color="#c62828", lw=2, label="BAU")
+ax.plot(no_feedback.results.index, no_feedback.results[tvar], color="#2e7d32", lw=2,
+        label="carbon-climate feedback severed")
+ax.legend()
+ax.set_xlim(1950, 2100)
+ax.set_ylabel("temperature change (°C)")
+ax.set_title("severing the loops that 'dominate' late-century feedback activity")
+
+for year in (2050, 2100):
+    b = base.results[tvar].loc[year]
+    c = no_feedback.results[tvar].loc[year]
+    print(f"{year}: {b:.2f} °C -> {c:.2f} °C  (the feedback contributes {b - c:+.2f} °C)")
+""")
+
+md("""
+Severing loops that carry ~30% of late-century *feedback activity* changes 2100 warming by only
+~0.15 °C of ~4.5 °C. No contradiction -- two different questions:
+
+* **Dominance** asks: *of the change that is happening, which loops transmit it?* In a model where
+  exogenous emissions do most of the pushing, even the dominant loops are passing along an
+  externally-driven signal -- and the two big recycling loops carry lots of activity while largely
+  canceling each other's net carbon effect.
+* **Leverage** asks: *where does intervening change the outcome?* That is a counterfactual
+  question, and the LTM papers are explicit that the method does not answer it ("identifies which
+  loops dominate, but not where to intervene").
+
+LTM told us where to *look*; the override run told us what it was *worth*. The pairing -- pin,
+analyze, then perturb -- is the real workflow, and having both two lines apart in one API is what
+makes it usable.
+""")
+
+# ============================================================================
+# 9. Link-level view
+# ============================================================================
+
+md("""
+## 9. Bonus: the link-level view
+
+Loop scores are products of **link scores**, and those are queryable too: `sim.get_links()`
+returns every causal link with its score series. Raw link scores are not comparable across target
+variables (each divides by the change in its own target), so the API also carries a **relative**
+link score in [-1, 1] -- the fraction of the target's change attributable to that input. Ranking
+by it, restricted to targets fed by more than one scored input (single-input links are trivially
+~1), surfaces the model's competitive junctions:
+""")
+
+code("""
+from collections import Counter
+
+links = sim.get_links()
+scored = [ln for ln in links if ln.has_score()]
+
+fan_in = Counter(ln.to_var for ln in scored)
+competitive = [ln for ln in scored if fan_in[ln.to_var] > 1]
+ranked = sorted(competitive, key=lambda ln: -abs(ln.average_relative_score() or 0.0))
+
+print(f"{len(links)} links, {len(scored)} scored, {len(competitive)} into multi-input targets\\n")
+print("strongest competitive links (mean relative score):")
+for ln in ranked[:10]:
+    print(f"  {ln.average_relative_score():+.2f}  {ln}")
+""")
+
+md("""
+The carbon-cycle and forcing junctions dominate, as the loop analysis predicts -- and the polarity
+column (`+`/`-`/`?`) shows where static analysis gave up (`?`, mostly lookup tables) while the
+runtime scores still resolve the sign.
+""")
+
+# ============================================================================
+# 10. Experience report
+# ============================================================================
+
+md("""
+## 10. Experience report
+
+This notebook doubled as a stress test of the LTM implementation and the pysimlin API -- the point
+was to *follow the real path* (load, explore, run, pin, analyze, question, perturb) and write down
+everything that resisted. Verdict up front: **the method works on a production-scale model, the
+auto-switch and pinning workflows are the right shape, and the rough edges found this session were
+specific and fixable -- several were fixed in the engine while this notebook was being written.**
 
 ### What worked well
 
-* **Vensim import**: a 53,000-line production `.mdl` loads in 40 ms, simulates correctly
-  (validated elsewhere against Vensim's own `Ref.vdf` output), renders its diagram, and exposes
-  structure (links, polarities, equations) through a clean Python API.
-* **The LTM link-score layer at scale**: after this week's O(N^2) compilation fixes, an
-  LTM-instrumented C-LEARN run compiles and executes in ~8 seconds, and the per-link scores are
-  physically meaningful (CO2 explains 56% of the change in radiative forcing at year 2000; the
-  ocean-flux link is correctly negative; inactive permafrost links are correctly zero).
-* **The LTM method itself**: composing those link scores into loop scores (section 6) produces a
-  dominance analysis that matches climate science -- on a model 100x larger than anything in the
-  LTM papers' examples.
-* **Automatic discovery at scale** (new on `main` as of the final draft): `model.analyze()` finds
-  ~150 loops on C-LEARN in ~6 seconds, and its top-ranked loops are the same climate core this
-  notebook mapped by hand -- independent confirmation from a structure-blind algorithm.
-* **Loop pinning workflow**: naming the loops you care about (rather than enumerating millions) is
-  the right interaction model for big models, and the `model.edit()` / `set_loop_name()` API makes
-  it natural. With GH #653 fixed, a pin on an arrayed model comes back as a per-scenario score --
-  section 6's whole analysis is nine pins plus `get_series`.
-* **Honest degradation**: every "can't" is now a clear warning or error with a suggested next
-  step, instead of silence or garbage.
+* **Vensim import and simulation**: a 53,000-line production `.mdl` loads in well under a second,
+  simulates correctly, renders its diagram, and exposes structure (equations, links, polarities,
+  sector groups) through a clean Python API.
+* **The auto-switch between exhaustive and discovery mode makes sense.** Exhaustive enumeration is
+  simply not on the table for a graph with C-LEARN's connectivity, and the engine (a) detects that
+  itself, (b) *tells you* via a `RuntimeWarning` plus `run.ltm_mode`, and (c) hands you the two
+  tools that work at scale -- `analyze()` for breadth, pins for depth. The failure mode this
+  design avoids (silently returning an empty loop list) is exactly the kind of thing that erodes
+  trust in analysis tooling.
+* **Pinning is the right interaction model for big models** -- the papers were right to insist on
+  it (`LOOPSCORE`): discovery is heuristic and scenario-dependent, while the questions a
+  practitioner brings ("track *ocean carbon uptake*") are stable. Declaring loops by variable set
+  and getting back named, per-scenario-element score series is exactly the workflow the original
+  papers sketch, and it held up against a real model. Nothing further to add here: pinning
+  *loops* is implemented; pinning *paths* is the one gap (below).
+* **Honest zeros and honest polarity**: the switched-off permafrost loop scores exactly 0; loops
+  that static analysis can only call `U` are correctly reclassified from runtime scores.
+* **Performance is a non-issue at this scale**: LTM-instrumented compile+run takes seconds, and
+  the full discovery sweep over 251 timesteps is sub-second on top of it.
 
-### Bugs found by this exercise (all fixed, now on `main`)
+### What this exercise fixed (engine/API commits made alongside this notebook)
 
-(In parallel, four LTM compilation fixes -- `2003b4bb`, `865854c0`, `ff3ef3c2`, `099c5659`, the
-O(N^2)-blowup and ceteris-paribus correctness work -- landed on `main` between this notebook's
-first and final drafts. Those are what took C-LEARN from "LTM cannot compile" to the working
-analysis in section 6.)
+* **Vanishing diagnostics (engine, salsa accumulators).** Project diagnostics were collected via
+  salsa accumulators, whose values are not replayed for queries that are validated-but-not-
+  re-executed after an unrelated input change. Net effect: `project.get_errors()` returned 14 unit
+  warnings on freshly-loaded C-LEARN, then `[]` after any unrelated patch -- and worse, the patch
+  validator's before/after warning comparison would misfire and **reject valid edits** ("patch
+  introduces unit warning ... which previously had none", order-dependent).
+* **Accepted patches that raised anyway (pysimlin).** The Python layer treated *any* collected
+  diagnostics as failure, so on a model with pre-existing unit warnings (i.e. most real Vensim
+  imports) `set_sim_specs(save_step=0.25)` raised "Patch produced validation errors" -- *after
+  committing the patch*. Rejection (an engine decision) and informational diagnostics are now
+  distinct, and rejections carry their details on the exception.
+* **Pinned-loop names were unrecoverable (FFI + pysimlin).** You named loops at pin time but got
+  back only `pin1`...`pin9`, in patch order. The name now rides through the C ABI onto
+  `Loop.name` everywhere loops are surfaced.
+* **Discovery importance was raw and unrankable (engine + FFI).** `analyze()` returned loops whose
+  importance series were raw loop scores -- unbounded, incomparable across cycle partitions (an
+  isolated HFC-uptake loop showed "importance 72", the climate core "17,000"), and inconsistent
+  with both the engine's own ranking and the pinned-loop path. The importance series is now the
+  signed *relative* loop score in [-1, 1], and dominant periods are computed from it.
 
-| Commit | Severity | What |
-|--------|----------|------|
-| `fe2e619f` | **critical** | LTM instrumentation past 65,536 result slots silently wrapped 16-bit bytecode offsets -- overwriting `time` at slot 0 and corrupting **every** LTM result on C-LEARN-scale models. Now a fast, clear error. |
-| `021dca87` | high | Loop pinning (`SetLoopName`) failed with "variable has no UID" on every Vensim/MDL-imported model -- i.e. on exactly the models pinning was built for. UIDs are now minted on demand. |
-| `c93b82ef` | high | `Model.analyze(timeout=30)` ran unbounded (observed 9+ CPU-minutes) because the discovery budget was only checked *between* timesteps and a single C-LEARN timestep's search never finishes. The deadline is now enforced inside the search. |
-| `3637eeec` | medium | `Model.get_links()` hard-coded every polarity to `?` -- the polarity analyzer was never called. |
-| `b35f278b` | medium | `Model.run()` silently ignored its `time_range`/`dt` arguments; arrayed per-element equations were invisible; LTM failures crashed `run()` instead of degrading with a warning. |
-| `a51e9191` | medium | Sector/group boxes (one per imported Vensim view) had no rule in the SVG renderers' stylesheets, so they took SVG's default **opaque black** fill and hid everything inside them -- every multi-view Vensim import rendered as a stack of black rectangles. |
+### Observations for future work
 
-### Issues filed for the remaining gaps
+* **Windowed/smoothed dominance as a first-class view.** Section 7's lesson generalizes: on
+  data-driven models, instantaneous shares are noisy, and per-timestep "dominant period" labels
+  flicker (C-LEARN produces ~110 mostly one-year periods). The papers' own loop-inclusion
+  threshold uses time-averaged magnitudes; an API-level windowed share (or a min-duration
+  parameter on dominant periods) would make the default output match how it has to be read.
+* **`PATHSCORE` remains the one missing piece of the papers' toolkit.** Link scores compose along
+  paths (section 9 builds products by hand); a `get_path_score(["a", "b", "c"])` helper would
+  round out parity with the Stella builtins.
+* **Singleton-partition loops pin the top of discovery rankings** at ±1.0 by construction (every
+  isolated stock-decay loop "dominates" its own partition). Correct per the method, but the API
+  could expose the partition (or its loop count) on each loop so callers can group or filter.
+* **Arrayed pins default to an argmax-abs aggregate across elements** in
+  `get_relative_loop_score(id)` and `run.loops`. Documented, and per-element access works
+  (`element="deterministic"`), but summed |shares| only equal 1 *per element*, so the aggregate
+  trips up exactly the share-of-activity charts the scores exist for. Per-element expansion in
+  `run.loops` would be less surprising.
+* **Static lookup-table polarity** is `?` for many physically-monotone curves; better
+  monotonicity classification would shrink the `U` loop population (runtime reclassification
+  currently papers over it, but only after a simulation).
 
-* [#653](https://github.com/bpowers/simlin/issues/653) -- **resolved during this exercise**:
-  pinned loop-score equations on arrayed variables produced dimension mismatches and silently read
-  as zero. The engine now classifies each pinned cycle's dimensionality (scalar / per-element /
-  cross-element) the same way it classifies enumerated loops, so section 6 reads real per-scenario
-  pin scores instead of composing them by hand.
-* [#651](https://github.com/bpowers/simlin/issues/651) -- the MDL importer expands apply-to-all
-  equations into N identical per-element copies: datamodel noise and the main multiplier behind
-  LTM's element-level instrumentation size.
-* [#652](https://github.com/bpowers/simlin/issues/652) -- raw link scores are useless for ranking
-  (near-equilibrium denominators produce 1e22 magnitudes); the papers' *relative* link score
-  should be exposed.
-* [#647](https://github.com/bpowers/simlin/issues/647) -- **resolved during this exercise**:
-  strongest-path discovery went from "zero loops found in a 60-second budget" to "~150 loops in
-  ~6 seconds, untruncated" with the discovery-feasibility work now on `main`. Discovery's ranking
-  still needs the singularity-handling noted above (it ranks by raw |score|).
+### The bottom line
 
-### API design observations
-
-1. **The auto-flip needs to be visible at decision time, not discovery time.** `run.ltm_mode` (added
-   in #648) plus the new warnings handle this -- but the deeper point is that an API whose default
-   path costs 90x and returns nothing on big models needed to fail toward *cheap and explained*,
-   not *expensive and silent*.
-2. **Pinning is the right abstraction -- and it is now finished.** The pin workflow (name a loop ->
-   engine always scores it) is exactly right for big models, and with #653 fixed the generated
-   pin-score equations are dimension-aware: an arrayed pin reads back per element
-   (`get_relative_loop_score("pin1", element="Deterministic")`), and section 6's analysis is one
-   engine call per loop.
-3. **Score singularities need a first-class presentation answer.** LTM scores legitimately diverge
-   when a stock's acceleration crosses zero (sec. 6 found C-LEARN's soil-carbon loop at +1,740 by
-   2095 for exactly this reason). The papers handle it with relative scores and careful framing;
-   an API should too -- e.g. flag near-singular intervals, or report median-windowed shares.
-4. **Two-tier scoring (raw + relative) needs to be the API shape everywhere.** Loops already work
-   this way (raw `loop_score` + relative score); links should too (#652). And the synthetic
-   link-score variable names (`$:ltm:link_score:{from}->{to}`, with element-qualification rules)
-   are currently undocumented internals that section 6 had to reverse-engineer -- either document
-   them or, better, expose link/path scores through a real API.
-5. **Vensim parity matters more than features.** Most real SD models that would benefit from LTM
-   are Vensim models like C-LEARN. The importer fidelity issues (#651, the unit warnings, lookup
-   handling #590) are not cosmetic -- they determine whether the analysis layer above gets usable
-   structure.
+The promise of LTM -- *which feedback structure is driving behavior, when, and by how much* --
+held up on a real climate-policy model: the engine found the carbon-climate core unprompted,
+tracked nine named loops through 250 years, exposed dominance shifting from the planet's balancing
+machinery to the reinforcing sink-weakening feedbacks, and explained its own jagged edges down to
+the knees in the input data. And the exercise of *writing it down as a notebook* surfaced four
+real defects in a day -- which is the strongest argument for keeping an experience-report notebook
+in the loop for every analysis feature.
 """)
 
-nb.cells = cells
+nb["cells"] = cells
 
-# Write and execute
 out_path = NOTEBOOKS_DIR / "clearn_ltm_experience.ipynb"
 with open(out_path, "w") as f:
     nbf.write(nb, f)
-print(f"wrote {out_path}")
+print(f"wrote {out_path} ({len(cells)} cells)")
 
-# Execute in-place so output cells are populated
+# Execute in-place so output cells are populated.
 from nbclient import NotebookClient
 
 client = NotebookClient(
