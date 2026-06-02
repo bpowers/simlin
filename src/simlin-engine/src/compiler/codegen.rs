@@ -424,17 +424,33 @@ impl<'module> Compiler<'module> {
 
                     match idx {
                         SubscriptIndex::Single(expr) => {
-                            // Evaluate the index expression and apply single subscript
-                            self.walk_expr(expr).unwrap().unwrap();
+                            // Propagate a recoverable codegen Err via `?` (matching
+                            // the scalar `Subscript` arm of `walk_expr`): an index
+                            // expression can fail to lower -- e.g. a
+                            // `PREVIOUS(SUM(...))` partial the LTM ceteris-paribus
+                            // path emits, whose inner reference survives helper
+                            // rewriting as a non-variable expression
+                            // (`NotSimulatable`). That Err must flow back to the
+                            // caller (`db/ltm/compile.rs`'s `module.compile()` ->
+                            // `Err(_) => None` gracefully drops the un-compilable
+                            // LTM synthetic fragment), never escalate to a
+                            // process-killing panic (#363, GH #541/#525). The
+                            // Option unwrap stays a hard unwrap: an index that
+                            // lowered to no value-producing opcode (`Ok(None)` --
+                            // only an `EvalModule` or a non-iteration `TempArray`)
+                            // is a genuine compiler invariant violation, never
+                            // reachable from a real subscript index.
+                            self.walk_expr(expr)?.unwrap();
                             self.push(Opcode::ViewSubscriptDynamic {
                                 dim_idx: effective_dim,
                             });
                             singles_processed += 1; // Track collapse for subsequent indices
                         }
                         SubscriptIndex::Range(start, end) => {
-                            // Evaluate start and end, then apply dynamic range
-                            self.walk_expr(start).unwrap().unwrap();
-                            self.walk_expr(end).unwrap().unwrap();
+                            // Same propagation contract as the Single arm above:
+                            // a range bound can carry a recoverable lowering Err.
+                            self.walk_expr(start)?.unwrap();
+                            self.walk_expr(end)?.unwrap();
                             self.push(Opcode::ViewRangeDynamic {
                                 dim_idx: effective_dim,
                             });
@@ -966,7 +982,18 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::SafeDiv(a, b, c) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
-                        let c = c.as_ref().map(|c| self.walk_expr(c).unwrap().unwrap());
+                        // The optional third arg is an arbitrary user expression
+                        // (e.g. a `PREVIOUS(...)` the LTM partial path emits), so
+                        // its lowering can fail recoverably; propagate via `?`
+                        // rather than unwrapping (matching `a`/`b` above). A `.map`
+                        // closure can't carry `?`, so walk it before the match.
+                        let c = match c {
+                            Some(c) => {
+                                self.walk_expr(c)?.unwrap();
+                                Some(())
+                            }
+                            None => None,
+                        };
                         if c.is_none() {
                             let id = self.curr_code.intern_literal(0.0);
                             self.push(Opcode::LoadConstant { id });
@@ -1123,7 +1150,10 @@ impl<'module> Compiler<'module> {
             }
             Expr::EvalModule(ident, model_name, input_set, args) => {
                 for arg in args.iter() {
-                    self.walk_expr(arg).unwrap().unwrap()
+                    // Module input args are user expressions; propagate a
+                    // recoverable lowering Err via `?` rather than panicking
+                    // (consistent with every other operand walk in this fn).
+                    self.walk_expr(arg)?.unwrap();
                 }
                 let module_offsets = &self.module.offsets[&self.module.ident];
                 self.module_decls.push(ModuleDeclaration {
@@ -1693,6 +1723,45 @@ mod tests {
 
         let err = result.expect_err(
             "PREVIOUS-of-non-var inside a subscript index must return a typed Err, not Ok",
+        );
+        assert_eq!(
+            err.code,
+            ErrorCode::NotSimulatable,
+            "expected NotSimulatable, got {err:?}"
+        );
+    }
+
+    /// The array-VIEW twin of the test above. The dynamic-subscript arm of
+    /// `walk_expr_as_view` (the path a wrapping reducer like `SUM(arr[i])`
+    /// takes) walks each index expression too. A `PREVIOUS`-of-non-var index
+    /// there is the exact shape the GH #525 LTM partial emits
+    /// (`PREVIOUS(SUM(pop[region,young]))`). Before the fix this arm did a
+    /// double-`unwrap` on the `Result` and PANICKED on that `Err`, defeating
+    /// the LTM assemble path's `Err(_) => None` graceful-stub handler; after
+    /// the fix it propagates the typed `NotSimulatable` via `?`.
+    #[test]
+    fn previous_of_non_var_inside_view_subscript_index_is_err_not_panic() {
+        let module = empty_module();
+        let mut compiler = Compiler::new(&module);
+
+        // arr[ PREVIOUS(1, 0) ] driven through the array-view path: the index
+        // is a PREVIOUS of a constant (NotSimulatable). The `Subscript` arm of
+        // `walk_expr_as_view` must return that typed Err, not panic.
+        let expr = Expr::Subscript(
+            0,
+            vec![SubscriptIndex::Single(Expr::App(
+                BuiltinFn::Previous(
+                    Box::new(Expr::Const(1.0, Loc::default())),
+                    Box::new(Expr::Const(0.0, Loc::default())),
+                ),
+                Loc::default(),
+            ))],
+            vec![3],
+            Loc::default(),
+        );
+
+        let err = compiler.walk_expr_as_view(&expr).expect_err(
+            "PREVIOUS-of-non-var inside a view subscript index must return a typed Err, not panic",
         );
         assert_eq!(
             err.code,

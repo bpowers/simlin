@@ -62,8 +62,9 @@
 
 use simlin_engine::datamodel::{self, Dimension};
 use simlin_engine::db::{
-    LtmSyntheticVar, SimlinDb, compile_project_incremental, model_ltm_variables,
-    set_project_ltm_enabled, sync_from_datamodel_incremental,
+    DiagnosticError, DiagnosticSeverity, LtmSyntheticVar, SimlinDb, collect_all_diagnostics,
+    compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
+    sync_from_datamodel_incremental,
 };
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{Results, Vm};
@@ -681,4 +682,111 @@ fn subscripted_arrayed_nested_previous_matches_scalar() {
             }
         }
     }
+}
+
+/// Graceful-degradation pin for an LTM synthetic fragment that the compiler
+/// genuinely cannot lower: it must be *stubbed to a constant 0 with a
+/// `Warning`*, never crash the compiler.
+///
+/// The model below is the GH #525 shape: an arrayed stock `pop[region,age]`,
+/// a row-reducer `row_sum[region] = pop[region,young] * 2` (a partially
+/// iterated subscript -- `young` is fixed, `region` is iterated), and a flow
+/// `growth[region,age] = row_sum[region] * 0.0001 * pop[region,age]` that
+/// closes a feedback loop. With LTM enabled, the `pop -> row_sum` link
+/// score's ceteris-paribus partial classifies the `pop[region,young]`
+/// reference as `DynamicIndex` (#525) and wraps it as
+/// `PREVIOUS(SUM(pop[region,young]))`; inside the SUM-reducer's array-view
+/// index walk that inner `PREVIOUS` survives helper rewriting as a
+/// non-variable expression and lowers to `NotSimulatable`.
+///
+/// Before the fix (#363 follow-up), the array-view index walk in
+/// `codegen.rs` did `walk_expr(...).unwrap().unwrap()` and PANICKED on that
+/// `Err`, killing the whole compile and defeating the LTM assemble path's
+/// `Err(_) => None` graceful-stub handler. After the fix the `Err`
+/// propagates, `module.compile()` returns `Err`, the synthetic fragment is
+/// dropped, and the model compiles and simulates.
+///
+/// NOTE: the assertions that `$⁚ltm⁚link_score⁚pop→row_sum` reads a constant
+/// `0` and that a `Warning` names it pin the CURRENT, intentionally-DEGRADED
+/// #525 behavior -- a placeholder for the genuinely-unscoreable partial, NOT
+/// the desired end state. GH #525's future reference-classifier fix will
+/// replace the `DynamicIndex` stub with a real per-element score; when that
+/// lands, the constant-0 / Warning expectations here flip and this test is
+/// updated. What this test pins permanently is the *graceful* contract: a
+/// synthetic LTM fragment the compiler rejects degrades to 0-plus-Warning,
+/// never a panic. (No such graceful-degradation pin existed before.)
+#[test]
+fn unloweable_ltm_link_score_degrades_gracefully_no_panic() {
+    let project = TestProject::new("ltm525_graceful")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("region", &["a", "b"])
+        .named_dimension("age", &["young", "old"])
+        .array_stock("pop[region,age]", "100", &["growth"], &[], None)
+        .array_aux_direct(
+            "row_sum",
+            vec!["region".to_string()],
+            "pop[region,young] * 2",
+            None,
+        )
+        .array_flow(
+            "growth[region,age]",
+            "row_sum[region] * 0.0001 * pop[region,age]",
+            None,
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+
+    // The headline assertion: compilation SUCCEEDS rather than panicking
+    // inside the array-view index walk.
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect(
+        "GH #525-shaped arrayed LTM model must COMPILE (with the offending link \
+         score stubbed), not panic in the array-view index walk",
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion with the link score stubbed");
+    let results = vm.into_results();
+
+    // Pin the CURRENT degraded #525 behavior: the un-scoreable link score is
+    // stubbed to a constant 0. (When #525's classifier fix lands this flips.)
+    let link_name = "$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}row_sum";
+    let series = series_at(&results, offset_of(&results, link_name));
+    assert!(
+        series.iter().all(|&v| v == 0.0),
+        "the un-scoreable {link_name} link score should be stubbed to a constant 0 \
+         (current degraded #525 behavior); got {series:?}"
+    );
+
+    // A sibling link score on the SAME model whose partial *is* scoreable must
+    // still carry real (non-zero) values -- so the failure is surgical (only
+    // the genuinely-unloweable fragment is stubbed), not a blanket collapse.
+    let sibling = "$\u{205A}ltm\u{205A}link_score\u{205A}row_sum\u{2192}growth";
+    let sibling_series = series_at(&results, offset_of(&results, sibling));
+    assert!(
+        sibling_series.iter().any(|&v| v != 0.0),
+        "the scoreable sibling {sibling} link score must still be computed; got \
+         {sibling_series:?}"
+    );
+
+    // And the fragment-compile failure surfaces as a Warning that names the
+    // stubbed link score (so the degradation is never silent).
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let names_link = diagnostics.iter().any(|d| {
+        d.severity == DiagnosticSeverity::Warning
+            && d.variable.as_deref() == Some(link_name)
+            && matches!(&d.error, DiagnosticError::Assembly(_))
+    });
+    assert!(
+        names_link,
+        "a Warning naming the stubbed link score {link_name:?} must be emitted; \
+         diagnostics: {:?}",
+        diagnostics
+            .iter()
+            .map(|d| (&d.variable, &d.severity))
+            .collect::<Vec<_>>()
+    );
 }
