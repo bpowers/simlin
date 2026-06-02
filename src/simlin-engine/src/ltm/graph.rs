@@ -26,6 +26,92 @@ use super::types::{
     classify_module_for_ltm, normalize_module_ref,
 };
 
+/// Internal module pathways keyed by input port: each port maps to its list of
+/// open `input -> ... -> output` link-paths.
+pub(crate) type ModulePathways = HashMap<Ident<Canonical>, Vec<Vec<Link>>>;
+
+/// [`ModulePathways`] paired with the (sorted) input ports whose enumeration hit
+/// the per-port pathway budget (GH #649) and so hold only a deterministic prefix.
+pub(crate) type ModulePathwaysWithTruncation = (ModulePathways, Vec<Ident<Canonical>>);
+
+/// Maximum number of internal simple pathways enumerated per module input
+/// port before truncation kicks in (GH #649).
+///
+/// Each enumerated pathway becomes one `$⁚ltm⁚path⁚{input}⁚{idx}` synthetic
+/// variable (and folds into the input's composite link score), so the
+/// pathway count is model-controlled and, without a cap, unbounded: a module
+/// body shaped as a chain of N diamonds has `2^N` short simple pathways that
+/// never trip the depth cap, so an adversarial or accidentally-dense module
+/// could mint exponentially many synthetic variables and exhaust memory.
+///
+/// This is defense-in-depth against that blowup, NOT a tight performance cap.
+/// The value is chosen comfortably above the legitimate in-repo corpus
+/// maximum: the covid19-us-homer SSTATS macro module legitimately produces
+/// 303 pathways through its busiest input port via the production composite
+/// path, and the covid19 root model's `enrich_with_module_stocks` pathway
+/// enumeration peaks at 6744 simple pathways from one node. 8192 clears both
+/// with headroom while still tripping long before a true exponential blowup
+/// (a 14-diamond chain already exceeds it). Truncation is deterministic
+/// (DFS order over sorted neighbor lists) and surfaces a `Warning` naming the
+/// module and input port; the composite score then degrades to the max over
+/// the kept pathway set, consistent with the macro composite's heuristic
+/// nature.
+pub(crate) const MAX_MODULE_PATHWAYS: usize = 8192;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`MAX_MODULE_PATHWAYS`], scoped by an active
+    /// [`ModulePathwayBudgetGuard`]. Lets a test trip the pathway budget with
+    /// a tiny fixture instead of building a module body large enough to mint
+    /// thousands of real pathways (per docs/dev/rust.md#test-time-budgets, the
+    /// same override pattern as `db::ltm::AggLoopBudgetGuard` for GH #515).
+    static MODULE_PATHWAY_BUDGET_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The per-input-port module-pathway budget for the current enumeration.
+/// Returns [`MAX_MODULE_PATHWAYS`] in production builds; in `#[cfg(test)]`
+/// builds an active [`ModulePathwayBudgetGuard`] override takes precedence.
+pub(crate) fn module_pathway_budget() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(b) = MODULE_PATHWAY_BUDGET_OVERRIDE.with(|c| c.get()) {
+            return b;
+        }
+    }
+    MAX_MODULE_PATHWAYS
+}
+
+/// RAII guard (test-only) that overrides [`module_pathway_budget`] for the
+/// current thread for the guard's lifetime, restoring the previous value on
+/// drop -- so a panicking test does not leak the override to the next test
+/// reusing the thread.
+///
+/// Because the production composite path runs inside the salsa-memoized
+/// `model_ltm_variables`, a salsa-driven test's guard must outlive every
+/// `model_ltm_variables` call whose budget it controls (a later call on the
+/// same `db` would otherwise return the memoized tiny-budget result), the same
+/// caveat `AggLoopBudgetGuard` documents.
+#[cfg(test)]
+pub(crate) struct ModulePathwayBudgetGuard {
+    prev: Option<usize>,
+}
+
+#[cfg(test)]
+impl ModulePathwayBudgetGuard {
+    pub(crate) fn new(budget: usize) -> Self {
+        let prev = MODULE_PATHWAY_BUDGET_OVERRIDE.with(|c| c.replace(Some(budget)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ModulePathwayBudgetGuard {
+    fn drop(&mut self) {
+        MODULE_PATHWAY_BUDGET_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
 /// Get direct dependencies from a Variable
 pub(super) fn get_variable_dependencies(var: &Variable) -> Vec<Ident<Canonical>> {
     match var {
@@ -406,7 +492,10 @@ impl CausalGraph {
     /// nodes that appear in the circuit. For each module node, we find the
     /// internal pathway from the relevant input port to the output, and collect
     /// all stocks along that pathway.
-    fn enrich_with_module_stocks(
+    ///
+    /// `pub(super)` (not private) so the `ltm::tests` sibling module can drive
+    /// the GH #649 truncation-fallback path directly.
+    pub(super) fn enrich_with_module_stocks(
         &self,
         circuit: &[Ident<Canonical>],
         mut stocks: Vec<Ident<Canonical>>,
@@ -432,16 +521,23 @@ impl CausalGraph {
                 .find(|inp| &inp.src == predecessor)
                 .map(|inp| &inp.dst);
 
-            let pathways = module_graph.enumerate_pathways_to_outputs(&[]);
+            let (pathways, truncated_ports) =
+                module_graph.enumerate_pathways_to_outputs_with_truncation(&[]);
 
             let internal_stocks: Vec<Ident<Canonical>> = if let Some(port) = internal_port {
                 // Collect stocks from all pathways for the matched input port.
-                if let Some(paths) = pathways.get(port) {
-                    collect_stocks_from_pathways(module_graph, paths, node)
-                } else {
-                    // Port found in module inputs but no pathway exists for
-                    // it -- fall back to all module-internal stocks.
-                    all_module_stocks(module_graph, node)
+                // When that port's pathway enumeration hit the budget (GH #649)
+                // the kept paths are a prefix and could miss a stock that lives
+                // only on a dropped pathway, so degrade to the conservative
+                // "all module-internal stocks" fallback rather than silently
+                // dropping stocks from the enriched loop.
+                match pathways.get(port) {
+                    Some(paths) if !truncated_ports.contains(port) => {
+                        collect_stocks_from_pathways(module_graph, paths, node)
+                    }
+                    // Port has no pathway, or its enumeration was truncated:
+                    // fall back to all module-internal stocks.
+                    _ => all_module_stocks(module_graph, node),
                 }
             } else {
                 // Predecessor doesn't match any module input (shouldn't happen
@@ -492,17 +588,49 @@ impl CausalGraph {
     }
 
     /// Find all simple paths from `from` to `to` using DFS with a visited set.
-    /// Returns sequences of node idents forming open paths.
+    ///
+    /// Returns `(paths, truncated)`: `paths` is the list of open paths (each a
+    /// node-ident sequence) found in deterministic DFS order, and `truncated`
+    /// is `true` when enumeration stopped early because it hit the pathway
+    /// budget or the per-call work bound (see [`dfs_simple_paths`] for the
+    /// bound the DFS actually enforces).
+    ///
+    /// `budget` caps the number of *completed* paths. Without a cap the simple-
+    /// path count can be exponential in the graph size (a chain of N diamond
+    /// patterns has `2^N` short paths, well under the depth cap), so an
+    /// adversarial or accidentally-dense module body could mint exponentially
+    /// many `$⁚ltm⁚path⁚…` synthetic variables and exhaust memory (GH #649).
     pub(crate) fn find_all_simple_paths(
         &self,
         from: &Ident<Canonical>,
         to: &Ident<Canonical>,
         max_depth: usize,
-    ) -> Vec<Vec<Ident<Canonical>>> {
+        budget: usize,
+    ) -> (Vec<Vec<Ident<Canonical>>>, bool) {
         let mut paths = Vec::new();
         let mut current_path = vec![from.clone()];
         let mut visited = HashSet::new();
         visited.insert(from.clone());
+        // Bound the DFS WORK, not just the result count. A cap on completed
+        // paths alone leaves the pathological case where the walk explores an
+        // exponential dead-end frontier (subgraphs with no path to `to`) before
+        // completing `budget` paths. `expansions_left` charges one unit per
+        // recursive neighbor descent; once it is exhausted the DFS unwinds and
+        // truncation is signalled.
+        //
+        // The allowance `budget * max_depth` is exactly the worst-case
+        // expansion count to complete `budget` paths in a *dead-end-free* graph:
+        // the tightest such graph has `budget` prefix-disjoint chains of length
+        // `max_depth` from the source to `to`, so finding all `budget` costs
+        // `budget * max_depth` fresh descents (prefix-sharing only lowers this,
+        // since backtracking re-descends a single sibling edge, not a whole
+        // chain). So in a dead-end-free enumeration the *completed-path* cap --
+        // not this work cap -- is what stops the walk (proven by
+        // `module_pathways_work_bound_does_not_starve_exact_budget`), while a
+        // dead-end frontier still aborts in `O(budget * max_depth)` expansions.
+        // `.max(max_depth)` covers the `budget == 0` edge case.
+        let mut expansions_left = budget.saturating_mul(max_depth).max(max_depth);
+        let mut truncated = false;
 
         self.dfs_simple_paths(
             from,
@@ -511,11 +639,31 @@ impl CausalGraph {
             &mut visited,
             &mut paths,
             max_depth,
+            budget,
+            &mut expansions_left,
+            &mut truncated,
         );
 
-        paths
+        (paths, truncated)
     }
 
+    /// Depth-first simple-path walk with two independent termination bounds:
+    ///
+    /// 1. `budget` caps *completed* paths -- once `paths.len()` reaches it the
+    ///    walk stops emitting and `truncated` is set. For a single-source
+    ///    simple-path DFS the completed paths are emitted incrementally during
+    ///    the walk, so stopping here bounds the remaining work to the current
+    ///    branch's unwinding plus the dead-end frontier (bound 2).
+    /// 2. `expansions_left` caps total recursive neighbor descents, so a
+    ///    subgraph with no path to `target` (an exponential dead-end frontier)
+    ///    cannot be explored without limit. Each descent decrements it; when it
+    ///    hits zero the walk unwinds and `truncated` is set.
+    ///
+    /// The neighbor lists are sorted (built from `BTreeSet`-backed edges), so
+    /// the emitted order -- and therefore the kept set under truncation -- is a
+    /// deterministic function of the graph alone, reproducible across runs and
+    /// processes.
+    #[allow(clippy::too_many_arguments)]
     fn dfs_simple_paths(
         &self,
         current: &Ident<Canonical>,
@@ -524,35 +672,101 @@ impl CausalGraph {
         visited: &mut HashSet<Ident<Canonical>>,
         paths: &mut Vec<Vec<Ident<Canonical>>>,
         max_depth: usize,
+        budget: usize,
+        expansions_left: &mut usize,
+        truncated: &mut bool,
     ) {
         if path.len() > max_depth {
             return;
         }
 
         if let Some(neighbors) = self.edges.get(current) {
+            // Walk neighbors in a canonical (sorted) order so the emitted
+            // pathway order -- and therefore the kept set under truncation --
+            // is a deterministic function of the graph's node identities alone,
+            // independent of how the adjacency `Vec` was constructed. Production
+            // edges already arrive sorted (built from `BTreeSet`), but sorting
+            // here makes the determinism guarantee robust rather than an
+            // implicit dependency on the caller's edge-vector ordering.
+            let mut neighbors: Vec<&Ident<Canonical>> = neighbors.iter().collect();
+            neighbors.sort();
             for neighbor in neighbors {
+                if paths.len() >= budget {
+                    // Completed-path budget reached: stop emitting and signal
+                    // truncation. Returning here unwinds the recursion.
+                    *truncated = true;
+                    return;
+                }
                 if neighbor == target {
                     let mut complete_path = path.clone();
                     complete_path.push(neighbor.clone());
                     paths.push(complete_path);
                 } else if !visited.contains(neighbor) {
+                    if *expansions_left == 0 {
+                        // Work budget exhausted on a dead-end frontier.
+                        *truncated = true;
+                        return;
+                    }
+                    *expansions_left -= 1;
                     visited.insert(neighbor.clone());
                     path.push(neighbor.clone());
-                    self.dfs_simple_paths(neighbor, target, path, visited, paths, max_depth);
+                    self.dfs_simple_paths(
+                        neighbor,
+                        target,
+                        path,
+                        visited,
+                        paths,
+                        max_depth,
+                        budget,
+                        expansions_left,
+                        truncated,
+                    );
                     path.pop();
                     visited.remove(neighbor);
+                    if *truncated {
+                        // A nested call tripped a budget; unwind without
+                        // exploring further siblings.
+                        return;
+                    }
                 }
             }
         }
     }
 
     /// Enumerate internal pathways through a module from each input port to a
-    /// specific output. Returns a map from input port name to the list of open paths.
+    /// specific output. Returns a map from input port name to the list of open
+    /// paths. Convenience wrapper that discards the truncation signal; callers
+    /// that need to surface a `Warning` use
+    /// [`enumerate_module_pathways_with_truncation`](Self::enumerate_module_pathways_with_truncation).
+    /// Only the truncation-aware variant has production callers (via
+    /// `enumerate_pathways_to_outputs`); this plain form is retained for the
+    /// graph-level tests that assert on the bare pathway map.
+    #[cfg(test)]
     pub(crate) fn enumerate_module_pathways(
         &self,
         output_name: &Ident<Canonical>,
-    ) -> HashMap<Ident<Canonical>, Vec<Vec<Link>>> {
+    ) -> ModulePathways {
+        self.enumerate_module_pathways_with_truncation(output_name)
+            .0
+    }
+
+    /// Enumerate internal pathways through a module from each input port to a
+    /// specific output, returning `(pathways, truncated_ports)`.
+    ///
+    /// `truncated_ports` lists (sorted, for a deterministic diagnostic) the
+    /// input ports whose enumeration hit the per-port pathway budget
+    /// ([`module_pathway_budget`]) -- those ports' pathway lists are a
+    /// deterministic prefix of the full set, not the complete enumeration, so a
+    /// caller can surface a `Warning` and treat the resulting composite score as
+    /// degraded (GH #649). The pathway-to-index mapping is per input port and
+    /// driven by deterministic DFS order, so the kept set is reproducible across
+    /// runs and processes for a fixed graph.
+    pub(crate) fn enumerate_module_pathways_with_truncation(
+        &self,
+        output_name: &Ident<Canonical>,
+    ) -> ModulePathwaysWithTruncation {
         let mut result: HashMap<Ident<Canonical>, Vec<Vec<Link>>> = HashMap::new();
+        let mut truncated_ports: Vec<Ident<Canonical>> = Vec::new();
 
         // Compute which nodes have incoming edges within the module.
         // True input ports have no incoming edges -- they're fed from outside.
@@ -578,6 +792,8 @@ impl CausalGraph {
             .count()
             + has_incoming.len();
 
+        let budget = module_pathway_budget();
+
         for input_port in self.edges.keys() {
             if input_port == output_name {
                 continue;
@@ -587,9 +803,13 @@ impl CausalGraph {
                 continue;
             }
 
-            let raw_paths = self.find_all_simple_paths(input_port, output_name, node_count);
+            let (raw_paths, truncated) =
+                self.find_all_simple_paths(input_port, output_name, node_count, budget);
             if raw_paths.is_empty() {
                 continue;
+            }
+            if truncated {
+                truncated_ports.push(input_port.clone());
             }
 
             let link_paths: Vec<Vec<Link>> =
@@ -598,7 +818,8 @@ impl CausalGraph {
             result.insert(input_port.clone(), link_paths);
         }
 
-        result
+        truncated_ports.sort();
+        (result, truncated_ports)
     }
 
     /// Enumerate internal pathways from each input port to the given output ports.
@@ -608,10 +829,32 @@ impl CausalGraph {
     /// name for user-defined modules). When no output ports are specified,
     /// auto-detects by looking for graph sinks (variables with no outgoing
     /// edges) and falling back to the "output" convention.
+    ///
+    /// Convenience wrapper that discards the truncation signal; production
+    /// callers (the composite-score path and `enrich_with_module_stocks`) use
+    /// the truncation-aware variant, so this plain form is retained only for the
+    /// graph-level tests that assert on the bare pathway map.
+    #[cfg(test)]
     pub(crate) fn enumerate_pathways_to_outputs(
         &self,
         output_ports: &[Ident<Canonical>],
-    ) -> HashMap<Ident<Canonical>, Vec<Vec<Link>>> {
+    ) -> ModulePathways {
+        self.enumerate_pathways_to_outputs_with_truncation(output_ports)
+            .0
+    }
+
+    /// Truncation-aware sibling of
+    /// [`enumerate_pathways_to_outputs`](Self::enumerate_pathways_to_outputs):
+    /// returns `(pathways, truncated_ports)` where `truncated_ports` (sorted,
+    /// deduped) names every input port whose enumeration hit the pathway budget
+    /// for any output port. The composite-score path in `model_ltm_variables`
+    /// surfaces a `Warning` from the signal; `enrich_with_module_stocks`
+    /// degrades a truncated port to its "all internal stocks" fallback rather
+    /// than collecting stocks from only the kept pathway prefix.
+    pub(crate) fn enumerate_pathways_to_outputs_with_truncation(
+        &self,
+        output_ports: &[Ident<Canonical>],
+    ) -> ModulePathwaysWithTruncation {
         let ports = if output_ports.is_empty() {
             self.detect_output_ports()
         } else {
@@ -619,13 +862,17 @@ impl CausalGraph {
         };
 
         let mut combined: HashMap<Ident<Canonical>, Vec<Vec<Link>>> = HashMap::new();
+        let mut truncated_ports: HashSet<Ident<Canonical>> = HashSet::new();
         for output_port in &ports {
-            let pathways = self.enumerate_module_pathways(output_port);
+            let (pathways, truncated) = self.enumerate_module_pathways_with_truncation(output_port);
             for (input_port, paths) in pathways {
                 combined.entry(input_port).or_default().extend(paths);
             }
+            truncated_ports.extend(truncated);
         }
-        combined
+        let mut truncated_ports: Vec<Ident<Canonical>> = truncated_ports.into_iter().collect();
+        truncated_ports.sort();
+        (combined, truncated_ports)
     }
 
     /// Auto-detect output ports for a module sub-graph.

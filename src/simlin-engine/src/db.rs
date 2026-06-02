@@ -346,6 +346,15 @@ pub enum LtmMode {
 /// `CompilationDiagnostic` `Warning` is also emitted then -- the flag is
 /// the robust signal, the `Warning`'s reachability being #466's concern).
 /// Always `false` in discovery mode and for models with no synthetic aggs.
+///
+/// `pathways_truncated` is `true` when internal module-pathway enumeration hit
+/// the per-input-port pathway budget (`ltm::MAX_MODULE_PATHWAYS`, GH #649), so
+/// at least one input port's composite link score was computed over a
+/// deterministic prefix of its pathways rather than the complete set -- the
+/// score is degraded, not wrong-by-panic. A `CompilationDiagnostic` `Warning`
+/// naming the module + clipped port(s) accompanies it; the flag is the robust
+/// signal. Only ever `true` for a model with input ports (a sub-model or a
+/// discovery-mode model) whose pathway count exceeds the budget.
 /// (`Debug`/`Eq` are conditional/absent for the same reasons as
 /// `LtmSyntheticVar`.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -354,6 +363,7 @@ pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
     pub loop_partitions: HashMap<String, Vec<Option<usize>>>,
     pub agg_recovery_truncated: bool,
+    pub pathways_truncated: bool,
     pub mode: LtmMode,
 }
 
@@ -551,12 +561,17 @@ pub fn link_score_equation_text<'db>(
 /// from each input port to the specified output ports (or auto-detect them).
 /// Used by `model_ltm_variables` in `db/ltm/mod.rs` for pathway and composite
 /// score generation.
+///
+/// Returns `(pathways, truncated_ports)`; `truncated_ports` (sorted) names the
+/// input ports whose internal-pathway enumeration hit the per-port pathway
+/// budget (GH #649), so the caller can warn and treat those composite scores
+/// as degraded.
 fn module_input_pathways_from_edges(
     edges_result: &CausalEdgesResult,
     output_ports: &[crate::common::Ident<crate::common::Canonical>],
-) -> HashMap<crate::common::Ident<crate::common::Canonical>, Vec<Vec<crate::ltm::Link>>> {
+) -> crate::ltm::ModulePathwaysWithTruncation {
     let graph = causal_graph_from_edges(edges_result);
-    graph.enumerate_pathways_to_outputs(output_ports)
+    graph.enumerate_pathways_to_outputs_with_truncation(output_ports)
 }
 
 /// Build the composite "pathway with the largest absolute score" selection for

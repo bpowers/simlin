@@ -531,6 +531,211 @@ fn test_module_composite_equation_size_is_linear_in_pathways() {
     }
 }
 
+/// Build a sub-model whose body has `paths` *distinct* internal pathways from
+/// input port `input` to output port `output` (a stock so LTM does not skip
+/// the stockless model): `input -> mid_i -> total_flow -> output`, one branch
+/// per `i`. The main model drives the module and reads its output. Returned as
+/// `(project, "m" sub-model name)`. Used by the GH #649 pathway-budget tests.
+fn parallel_pathways_module_project(paths: usize) -> datamodel::Project {
+    let mut module_vars = vec![x_aux("input", "1", None)];
+    let mut total_flow_eq = String::new();
+    for i in 0..paths {
+        module_vars.push(x_aux(
+            &format!("mid_{i}"),
+            &format!("input * {}", i + 1),
+            None,
+        ));
+        if i > 0 {
+            total_flow_eq.push_str(" + ");
+        }
+        total_flow_eq.push_str(&format!("mid_{i}"));
+    }
+    module_vars.push(x_flow("total_flow", &total_flow_eq, None));
+    module_vars.push(x_stock("output", "0", &["total_flow"], &[], None));
+
+    datamodel::Project {
+        name: "many_pathways".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_aux("driver", "1", None),
+                    x_aux("reader", "m.output", None),
+                    x_module("m", &[("driver", "input")], None),
+                ],
+            ),
+            x_model("m", module_vars),
+        ],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// GH #649: a module body with more internal input->output pathways than the
+/// per-port pathway budget has its pathway enumeration truncated
+/// deterministically: the kept pathway count equals the budget,
+/// `LtmVariablesResult.pathways_truncated` is set, and a `CompilationDiagnostic`
+/// `Warning` names the module, the budget, and the clipped input port. The
+/// fixture is tiny (12 parallel pathways) and the budget is shrunk to 4 via the
+/// test-only `ModulePathwayBudgetGuard` so the budget is what clips (never trip
+/// the real 8192 gate with a giant fixture; docs/dev/rust.md#test-time-budgets).
+#[test]
+fn module_pathway_enumeration_truncates_at_budget() {
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use salsa::Setter;
+
+    const PATHS: usize = 12;
+    const TEST_BUDGET: usize = 4;
+
+    let project = parallel_pathways_module_project(PATHS);
+    let mut db = SimlinDb::default();
+    let (source_project, sub_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["m"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    // Hold the override for the whole test: `model_ltm_variables` is salsa-
+    // memoized, so a later call on this db would otherwise return the cached
+    // tiny-budget result regardless of the override state.
+    let _guard = crate::ltm::ModulePathwayBudgetGuard::new(TEST_BUDGET);
+    let ltm = model_ltm_variables(&db, sub_model, source_project);
+
+    assert!(
+        ltm.pathways_truncated,
+        "with {PATHS} pathways and a budget of {TEST_BUDGET}, pathway enumeration \
+         must report truncation"
+    );
+
+    // Exactly the budget number of pathway vars are minted for the `input` port.
+    let path_var_count = ltm
+        .vars
+        .iter()
+        .filter(|v| {
+            v.name.contains("\u{205A}path\u{205A}") && !v.name.contains("\u{205A}acc\u{205A}")
+        })
+        .count();
+    assert_eq!(
+        path_var_count, TEST_BUDGET,
+        "the kept pathway count must equal the budget; got {path_var_count}"
+    );
+
+    // The composite over the kept prefix still exists (no panic, no skip).
+    let composite_count = ltm
+        .vars
+        .iter()
+        .filter(|v| v.name.contains("\u{205A}composite\u{205A}"))
+        .count();
+    assert!(
+        composite_count >= 1,
+        "a truncated module must still emit a composite var over the kept prefix"
+    );
+
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, sub_model, source_project);
+    let has_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+        d.severity == DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                DiagnosticError::Assembly(msg)
+                    if msg.contains("truncated")
+                        && msg.contains(&TEST_BUDGET.to_string())
+                        && msg.contains("input")
+            )
+    });
+    assert!(
+        has_warning,
+        "pathway truncation must emit a Warning mentioning truncation, the budget \
+         ({TEST_BUDGET}), and the clipped input port; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+}
+
+/// GH #649: a module whose internal pathway count is *under* the budget emits
+/// NO truncation flag and NO warning, and mints exactly one pathway var per
+/// pathway (the under-budget byte-identical-to-before guarantee).
+#[test]
+fn module_pathway_enumeration_under_budget_no_truncation() {
+    use crate::db::CompilationDiagnostic;
+    use salsa::Setter;
+
+    const PATHS: usize = 4;
+    const TEST_BUDGET: usize = 64;
+
+    let project = parallel_pathways_module_project(PATHS);
+    let mut db = SimlinDb::default();
+    let (source_project, sub_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["m"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let _guard = crate::ltm::ModulePathwayBudgetGuard::new(TEST_BUDGET);
+    let ltm = model_ltm_variables(&db, sub_model, source_project);
+
+    assert!(
+        !ltm.pathways_truncated,
+        "an under-budget module must NOT report pathway truncation"
+    );
+    let path_var_count = ltm
+        .vars
+        .iter()
+        .filter(|v| {
+            v.name.contains("\u{205A}path\u{205A}") && !v.name.contains("\u{205A}acc\u{205A}")
+        })
+        .count();
+    assert_eq!(
+        path_var_count, PATHS,
+        "every pathway must be enumerated when under budget"
+    );
+    let diags =
+        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, sub_model, source_project);
+    let has_truncation_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+        matches!(&d.error, crate::db::DiagnosticError::Assembly(msg) if msg.contains("module-pathway"))
+    });
+    assert!(
+        !has_truncation_warning,
+        "an under-budget module must emit no pathway-truncation warning"
+    );
+}
+
+/// GH #649: a truncated module still compiles end to end and simulates -- the
+/// composite link score over the kept pathway prefix is finite (degraded, not a
+/// panic or a silent NaN). This is the "no fragment-compile failure" guarantee.
+#[test]
+fn module_pathway_truncation_still_compiles_and_simulates() {
+    use salsa::Setter;
+
+    const PATHS: usize = 12;
+    const TEST_BUDGET: usize = 4;
+
+    let project = parallel_pathways_module_project(PATHS);
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let _guard = crate::ltm::ModulePathwayBudgetGuard::new(TEST_BUDGET);
+    let compiled = compile_project_incremental(&db, source_project, "main");
+    assert!(
+        compiled.is_ok(),
+        "a pathway-truncated module must still compile: {:?}",
+        compiled.err()
+    );
+    let mut vm = crate::vm::Vm::new(compiled.unwrap()).expect("VM creation should succeed");
+    vm.run_to_end()
+        .expect("a pathway-truncated module must simulate to completion");
+}
+
 /// The results offsets map (`calc_flattened_offsets_incremental`, what
 /// `CompiledSimulation.offsets` / `Results.offsets` is built from) and the
 /// compiled layout (`compute_layout`, what `resolve_module` assigns bytecode

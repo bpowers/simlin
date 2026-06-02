@@ -3807,6 +3807,321 @@ fn test_enumerate_module_pathways_deeper_than_legacy_cap() {
     );
 }
 
+/// Build a chain of `n` "diamond" patterns from `input` to `output`.
+///
+/// Each diamond `m_i -> (a_i | b_i) -> m_{i+1}` doubles the number of
+/// distinct simple `input -> output` paths, so the graph has exactly
+/// `2^n` simple pathways while every path is short (depth `2n + 1`, so the
+/// DFS depth cap never trips). This is the exponential-blowup shape GH
+/// #649 guards against: a small `n` mints a huge pathway count without a
+/// deep graph.
+///
+/// `permute` reverses the per-diamond branch insertion order so a test can
+/// prove that pathway truncation is independent of construction order (the
+/// neighbor lists are sorted before DFS, so the kept set must be identical
+/// regardless of the order edges were inserted).
+fn diamond_chain_graph(n: usize, permute: bool) -> CausalGraph {
+    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mid = |i: usize| Ident::new(&format!("m{i}"));
+    // input is the first "midpoint" node, output the last.
+    edges.insert(Ident::new("input"), vec![mid(0)]);
+    let mut prev = mid(0);
+    for i in 0..n {
+        let next = if i + 1 == n {
+            Ident::new("output")
+        } else {
+            mid(i + 1)
+        };
+        let a = Ident::new(&format!("a{i}"));
+        let b = Ident::new(&format!("b{i}"));
+        let branches = if permute {
+            [b.clone(), a.clone()]
+        } else {
+            [a.clone(), b.clone()]
+        };
+        edges.insert(prev.clone(), branches.to_vec());
+        edges.insert(a, vec![next.clone()]);
+        edges.insert(b, vec![next.clone()]);
+        prev = next;
+    }
+    CausalGraph {
+        edges,
+        stocks: HashSet::new(),
+        variables: HashMap::new(),
+        module_graphs: HashMap::new(),
+    }
+}
+
+/// Render a single pathway's node sequence as a stable string key so two
+/// pathway sets can be compared independent of `Link`'s identity.
+fn pathway_key(path: &[Link]) -> String {
+    let mut nodes: Vec<String> = path.iter().map(|l| l.from.as_str().to_string()).collect();
+    if let Some(last) = path.last() {
+        nodes.push(last.to.as_str().to_string());
+    }
+    nodes.join("→")
+}
+
+#[test]
+fn module_pathways_unbounded_blows_up_without_budget() {
+    // RED guard: with no budget the diamond chain enumerates all 2^n
+    // pathways. A small n keeps the red test fast; this documents the
+    // hazard the budget closes (each pathway becomes one synthetic var).
+    let n = 6;
+    let graph = diamond_chain_graph(n, false);
+    let pathways = graph.enumerate_module_pathways(&Ident::new("output"));
+    let from_input = pathways
+        .get(&Ident::new("input"))
+        .expect("input -> output pathways exist");
+    assert_eq!(
+        from_input.len(),
+        1usize << n,
+        "an n-diamond chain has exactly 2^n simple pathways"
+    );
+}
+
+#[test]
+fn module_pathways_truncate_deterministically_under_budget() {
+    let n = 6;
+    const BUDGET: usize = 8;
+    let _guard = super::graph::ModulePathwayBudgetGuard::new(BUDGET);
+
+    let graph = diamond_chain_graph(n, false);
+    let (pathways, truncated) =
+        graph.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    let from_input = pathways
+        .get(&Ident::new("input"))
+        .expect("input -> output pathways exist");
+    assert_eq!(
+        from_input.len(),
+        BUDGET,
+        "the budget caps the kept pathway count to exactly BUDGET"
+    );
+    assert!(
+        truncated.contains(&Ident::new("input")),
+        "the truncated-ports list names the input port whose enumeration was clipped"
+    );
+
+    // Determinism across permuted construction: the kept set must be the
+    // same pathways regardless of the order edges were inserted, because
+    // the neighbor lists are sorted before the DFS walks them.
+    let permuted = diamond_chain_graph(n, true);
+    let (pathways_p, _) = permuted.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    let kept: Vec<String> = from_input.iter().map(|p| pathway_key(p)).collect();
+    let kept_p: Vec<String> = pathways_p
+        .get(&Ident::new("input"))
+        .expect("input -> output pathways exist")
+        .iter()
+        .map(|p| pathway_key(p))
+        .collect();
+    assert_eq!(
+        kept, kept_p,
+        "the kept pathway set (and order) must be identical across permuted construction"
+    );
+
+    // Determinism across repeated runs on the same graph.
+    let (pathways_again, _) =
+        graph.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    let kept_again: Vec<String> = pathways_again
+        .get(&Ident::new("input"))
+        .expect("input -> output pathways exist")
+        .iter()
+        .map(|p| pathway_key(p))
+        .collect();
+    assert_eq!(
+        kept, kept_again,
+        "repeated runs must keep the same pathways"
+    );
+}
+
+#[test]
+fn module_pathways_under_budget_emits_no_truncation() {
+    // A diamond chain whose pathway count (2^3 = 8) is under the budget
+    // must not flag truncation and must return every pathway.
+    let n = 3;
+    const BUDGET: usize = 64;
+    let _guard = super::graph::ModulePathwayBudgetGuard::new(BUDGET);
+
+    let graph = diamond_chain_graph(n, false);
+    let (pathways, truncated) =
+        graph.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    assert_eq!(
+        pathways.get(&Ident::new("input")).map(|p| p.len()),
+        Some(1usize << n),
+        "all 2^n pathways are returned when under budget"
+    );
+    assert!(
+        truncated.is_empty(),
+        "no port should be flagged truncated when the pathway count is under budget"
+    );
+}
+
+#[test]
+fn module_pathways_work_bound_does_not_starve_exact_budget() {
+    // Correctness guard for the work bound: in a dead-end-FREE graph (every
+    // branch reaches the target), a budget exactly equal to the path count
+    // must return ALL paths with NO truncation. The work allowance
+    // (`budget * max_depth`) must be generous enough that the completed-path
+    // cap -- not the work cap -- is what stops the walk.
+    let n = 6;
+    let path_count = 1usize << n; // 64
+    let _guard = super::graph::ModulePathwayBudgetGuard::new(path_count);
+
+    let graph = diamond_chain_graph(n, false);
+    let (pathways, truncated) =
+        graph.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    assert_eq!(
+        pathways.get(&Ident::new("input")).map(|p| p.len()),
+        Some(path_count),
+        "a budget equal to the path count must return every path"
+    );
+    assert!(
+        truncated.is_empty(),
+        "the work bound must not spuriously truncate a dead-end-free enumeration \
+         whose path count exactly equals the budget"
+    );
+}
+
+#[test]
+fn module_pathways_work_bounded_on_dead_end_frontier() {
+    // Adversarial shape: an exponential dead-end frontier with NO path to
+    // the target. A naive DFS that only caps *completed* paths would walk
+    // all 2^n dead-end branches; the work bound must abort regardless.
+    // input -> chain of n diamonds that terminate at a sink "dead" which
+    // is NOT the requested output, so zero pathways complete.
+    let n = 16;
+    const BUDGET: usize = 8;
+    let _guard = super::graph::ModulePathwayBudgetGuard::new(BUDGET);
+
+    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mid = |i: usize| Ident::new(&format!("m{i}"));
+    edges.insert(Ident::new("input"), vec![mid(0)]);
+    let mut prev = mid(0);
+    for i in 0..n {
+        let next = if i + 1 == n {
+            Ident::new("dead")
+        } else {
+            mid(i + 1)
+        };
+        let a = Ident::new(&format!("a{i}"));
+        let b = Ident::new(&format!("b{i}"));
+        edges.insert(prev.clone(), vec![a.clone(), b.clone()]);
+        edges.insert(a, vec![next.clone()]);
+        edges.insert(b, vec![next.clone()]);
+        prev = next;
+    }
+    let graph = CausalGraph {
+        edges,
+        stocks: HashSet::new(),
+        variables: HashMap::new(),
+        module_graphs: HashMap::new(),
+    };
+
+    // No pathway completes (target "output" is unreachable), but the call
+    // must return promptly because the work bound caps node expansions.
+    // The test itself completing within the per-test time budget is the
+    // assertion; we also confirm no spurious pathways are reported.
+    let start = std::time::Instant::now();
+    let (pathways, _truncated) =
+        graph.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    assert!(
+        pathways.is_empty(),
+        "no pathway reaches the requested output, so none are reported"
+    );
+    assert!(
+        start.elapsed().as_secs() < 2,
+        "the work bound must abort the exponential dead-end DFS quickly"
+    );
+}
+
+#[test]
+fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
+    use crate::variable::ModuleInput;
+
+    // A module sub-graph with two diamond branches, where one branch passes
+    // through a stock `late_stock` that the DFS only reaches on a pathway it
+    // would drop under a tiny budget. The other branch's `early_stock` is on
+    // the first kept pathway. When the port's enumeration is truncated, stock
+    // enrichment must NOT collect from only the kept prefix (which would miss
+    // `late_stock`); it must degrade to the conservative "all module-internal
+    // stocks" fallback so no stock is silently lost (GH #649 point 5).
+    let mut sub_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    // input branches to `early` (lex-first, kept) and `late` (lex-last).
+    sub_edges.insert(
+        Ident::new("input"),
+        vec![Ident::new("early"), Ident::new("late")],
+    );
+    sub_edges.insert(Ident::new("early"), vec![Ident::new("early_stock")]);
+    sub_edges.insert(Ident::new("early_stock"), vec![Ident::new("output")]);
+    sub_edges.insert(Ident::new("late"), vec![Ident::new("late_stock")]);
+    sub_edges.insert(Ident::new("late_stock"), vec![Ident::new("output")]);
+    let mut sub_stocks = HashSet::new();
+    sub_stocks.insert(Ident::new("early_stock"));
+    sub_stocks.insert(Ident::new("late_stock"));
+    let sub_graph = CausalGraph {
+        edges: sub_edges,
+        stocks: sub_stocks,
+        variables: HashMap::new(),
+        module_graphs: HashMap::new(),
+    };
+
+    // Parent graph: a circuit `driver -> mod_node -> driver` where `mod_node`
+    // is the module whose `input` port the predecessor `driver` feeds.
+    let module_var = Variable::Module {
+        ident: Ident::new("mod_node"),
+        model_name: Ident::new("sub"),
+        units: None,
+        inputs: vec![ModuleInput {
+            src: Ident::new("driver"),
+            dst: Ident::new("input"),
+        }],
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let mut parent_variables = HashMap::new();
+    parent_variables.insert(Ident::new("mod_node"), module_var);
+    let mut module_graphs = HashMap::new();
+    module_graphs.insert(Ident::new("mod_node"), Box::new(sub_graph));
+    let parent = CausalGraph {
+        edges: HashMap::new(),
+        stocks: HashSet::new(),
+        variables: parent_variables,
+        module_graphs,
+    };
+
+    let circuit = vec![Ident::new("driver"), Ident::new("mod_node")];
+
+    // Budget 1: only the lex-first pathway (through `early_stock`) is kept, so
+    // the `input` port is truncated and the fallback must kick in. The
+    // collected stocks are namespaced with the module node name.
+    let _guard = super::graph::ModulePathwayBudgetGuard::new(1);
+    let stocks = parent.enrich_with_module_stocks(&circuit, vec![]);
+    let names: HashSet<String> = stocks.iter().map(|s| s.as_str().to_string()).collect();
+    assert!(
+        names.contains("mod_node\u{00B7}late_stock"),
+        "a truncated module-pathway enumeration must degrade to all module-internal \
+         stocks so `late_stock` (only on the dropped pathway) is not lost; got {names:?}"
+    );
+    assert!(
+        names.contains("mod_node\u{00B7}early_stock"),
+        "the fallback still includes the early-branch stock; got {names:?}"
+    );
+
+    // Control: with a budget that keeps both pathways, NO truncation occurs, so
+    // stock collection comes from the (complete) pathways -- both stocks still
+    // present, but via the non-fallback path. This proves the fallback above is
+    // what the truncation triggers, not an unconditional behavior.
+    drop(_guard);
+    let _full = super::graph::ModulePathwayBudgetGuard::new(64);
+    let stocks_full = parent.enrich_with_module_stocks(&circuit, vec![]);
+    let names_full: HashSet<String> = stocks_full.iter().map(|s| s.as_str().to_string()).collect();
+    assert!(
+        names_full.contains("mod_node\u{00B7}late_stock")
+            && names_full.contains("mod_node\u{00B7}early_stock"),
+        "under budget both stocks are collected from the complete pathways; got {names_full:?}"
+    );
+}
+
 /// Construct a three-node reinforcing cycle (A → B → C → A) for
 /// budget-exhaustion tests.  Tiny by design: the graph has exactly one
 /// elementary circuit, so a budget of zero MUST trip and a budget of

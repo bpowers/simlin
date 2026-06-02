@@ -499,6 +499,7 @@ pub fn model_ltm_variables(
             vars: vec![],
             loop_partitions: HashMap::new(),
             agg_recovery_truncated: false,
+            pathways_truncated: false,
             mode: LtmMode::Exhaustive,
         };
     }
@@ -592,12 +593,44 @@ pub fn model_ltm_variables(
     } else {
         find_model_output_ports(db, model, project)
     };
-    let pathways = if output_ports.is_empty() {
-        HashMap::new()
+    let (pathways, truncated_pathway_ports) = if output_ports.is_empty() {
+        (HashMap::new(), Vec::new())
     } else {
         module_input_pathways_from_edges(edges_result, &output_ports)
     };
     let has_input_ports = !pathways.is_empty();
+    // GH #649: a module body shaped as a chain of diamonds has exponentially
+    // many short internal pathways, each minting one `$⁚ltm⁚path⁚…` synthetic
+    // variable. The enumerator caps that count per input port; when it does,
+    // surface a `Warning` naming the module + clipped input port(s) (the human
+    // channel) and ride the robust `pathways_truncated` flag out on the result.
+    // The composite link score for a clipped port is then the max over the kept
+    // pathway prefix only -- degraded, consistent with the macro composite's
+    // heuristic nature, but never a panic or a silent zero.
+    let pathways_truncated = !truncated_pathway_ports.is_empty();
+    if pathways_truncated {
+        let ports = truncated_pathway_ports
+            .iter()
+            .map(|p| p.as_str().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let msg = format!(
+            "LTM module-pathway enumeration was truncated at the per-port budget \
+             ({}): module \"{}\" has more internal input->output pathways than the \
+             budget through input port(s) {}, so their composite link scores are \
+             computed over a deterministic pathway prefix and may be degraded.",
+            crate::ltm::module_pathway_budget(),
+            model.name(db).as_str(),
+            ports,
+        );
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: None,
+            error: DiagnosticError::Assembly(msg),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    }
 
     let mut vars = Vec::new();
 
@@ -702,6 +735,7 @@ pub fn model_ltm_variables(
                     vars: vec![],
                     loop_partitions: HashMap::new(),
                     agg_recovery_truncated: false,
+                    pathways_truncated: false,
                     mode: LtmMode::Exhaustive,
                 };
             }
@@ -1247,6 +1281,7 @@ pub fn model_ltm_variables(
         vars,
         loop_partitions,
         agg_recovery_truncated,
+        pathways_truncated,
         // Read the resolved mode from the shared `model_ltm_mode` query rather
         // than re-deriving it from the local `is_discovery` flag, so this query
         // and `model_detected_loops` can never disagree about the discovery
