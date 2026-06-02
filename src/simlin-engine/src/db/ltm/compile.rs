@@ -209,7 +209,12 @@ pub fn link_score_equation_text_shaped<'db>(
     // in `model_ltm_variables` (`emit_per_shape_link_scores`) overwrites
     // `dimensions`, the equation's dimension names, and `compile_directly`
     // (set when `shape` is not `Bare`) with the per-shape policy result.
-    let equation = crate::ltm_augment::generate_link_score_equation_for_link(
+    // A `PartialEquationError` means the target's equation text did not parse
+    // for the ceteris-paribus partial (GH #311). Skip the variable and warn
+    // rather than emit a silently non-ceteris-paribus link score; the bad
+    // equation would compile cleanly, so `model_ltm_fragment_diagnostics`
+    // would not catch it.
+    let equation = match crate::ltm_augment::generate_link_score_equation_for_link(
         &from_ident,
         &to_ident,
         &shape,
@@ -217,7 +222,13 @@ pub fn link_score_equation_text_shaped<'db>(
         &to_var,
         &all_vars,
         Some(dim_ctx),
-    );
+    ) {
+        Ok(eqn) => eqn,
+        Err(err) => {
+            super::emit_ltm_partial_equation_warning(db, model, &var_name, &err);
+            return None;
+        }
+    };
 
     Some(LtmSyntheticVar {
         name: var_name,

@@ -47,6 +47,9 @@ pub(crate) use compile::{
     model_ltm_fragment_diagnostics,
 };
 pub use compile::{compile_ltm_var_fragment, link_score_equation_text_shaped};
+pub(crate) use link_scores::emit_ltm_partial_equation_warning;
+#[cfg(test)]
+pub(crate) use link_scores::ltm_partial_equation_warning_message;
 pub(crate) use loops::build_loops_from_tiered;
 pub(crate) use parse::scalarize_ltm_equation;
 pub(crate) use pinned::model_pinned_loops;

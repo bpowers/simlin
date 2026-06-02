@@ -460,15 +460,24 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // Build one `LtmSyntheticVar` for `element` from its equation text and
     // that text's dependency set. The element name is the only part of the
     // generated equation/name that varies between elements.
+    // Returns `None` (after surfacing a `Warning`) when the per-element
+    // ceteris-paribus partial fails to parse (GH #311) -- that element's link
+    // score is skipped rather than emitted with a silently non-ceteris-paribus
+    // equation. The `elem_text.is_empty()` zero is a legitimate no-slot value,
+    // not a parse failure.
     let build_var = |element: &str,
                      elem_text: &str,
                      elem_deps: &HashSet<Ident<Canonical>>,
                      deps_to_sub: &HashSet<Ident<Canonical>>|
-     -> LtmSyntheticVar {
+     -> Option<LtmSyntheticVar> {
+        let name = format!(
+            "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
+            from, to, element
+        );
         let equation = if elem_text.is_empty() {
             "0".to_string()
         } else {
-            crate::ltm_augment::generate_scalar_to_element_equation(
+            match crate::ltm_augment::generate_scalar_to_element_equation(
                 from,
                 to,
                 // Equation text uses the qualified `dim·element` form (direct
@@ -481,18 +490,21 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 // denominator is correct.
                 None,
                 Some(project_dimensions_context(db, project)),
-            )
+            ) {
+                Ok(eqn) => eqn,
+                Err(err) => {
+                    emit_ltm_partial_equation_warning(db, model, &name, &err);
+                    return None;
+                }
+            }
         };
-        LtmSyntheticVar {
-            name: format!(
-                "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
-                from, to, element
-            ),
+        Some(LtmSyntheticVar {
+            name,
             equation: datamodel::Equation::Scalar(equation),
             dimensions: vec![], // scalar -- one variable per target element
             // bracketed name -> routed direct by `assemble_module`.
             compile_directly: false,
-        }
+        })
     };
 
     let mut cross_vars = Vec::with_capacity(elements.len());
@@ -505,7 +517,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             let elem_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
             let deps_to_sub = deps_to_subscript(&elem_deps);
             for element in &elements {
-                cross_vars.push(build_var(element, &elem_text, &elem_deps, &deps_to_sub));
+                cross_vars.extend(build_var(element, &elem_text, &elem_deps, &deps_to_sub));
             }
         }
         // Arrayed: each element has its own slot expression (or the default
@@ -532,7 +544,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                     None => (String::new(), HashSet::new()),
                 };
                 let deps_to_sub = deps_to_subscript(&elem_deps);
-                cross_vars.push(build_var(element, &elem_text, &elem_deps, &deps_to_sub));
+                cross_vars.extend(build_var(element, &elem_text, &elem_deps, &deps_to_sub));
             }
         }
         Ast::Scalar(_) => unreachable!("target is arrayed"),
@@ -568,6 +580,57 @@ pub(super) fn emit_unscoreable_disjoint_edge_warning(
         severity: DiagnosticSeverity::Warning,
     })
     .accumulate(db);
+}
+
+/// Surface a `Warning` for a ceteris-paribus partial-equation parse failure
+/// (GH #311), naming the synthetic link-score variable and the original
+/// (untransformed) equation text that could not be parsed.
+///
+/// The ceteris-paribus PREVIOUS-wrapping transform can only run on a parsed
+/// AST. When the target's equation text fails to parse (a genuine parse
+/// error, or an empty equation), the link score cannot be built correctly,
+/// so the caller skips emitting the variable and calls this to make the
+/// degradation visible. This is the "loud failure" sibling of
+/// [`emit_unscoreable_disjoint_edge_warning`] -- and it is *not* redundant
+/// with `model_ltm_fragment_diagnostics`: that pass only catches synthetic
+/// equations that fail to *compile*, whereas the silent-fallback bug this
+/// replaces produced an equation that compiled cleanly while computing a
+/// constant `|Δz/Δz| = 1` magnitude.
+pub(crate) fn emit_ltm_partial_equation_warning(
+    db: &dyn Db,
+    model: SourceModel,
+    variable_name: &str,
+    err: &crate::ltm_augment::PartialEquationError,
+) {
+    use salsa::Accumulator;
+    CompilationDiagnostic(Diagnostic {
+        model: model.name(db).clone(),
+        variable: Some(variable_name.to_string()),
+        error: DiagnosticError::Assembly(ltm_partial_equation_warning_message(
+            variable_name,
+            &err.equation_text,
+        )),
+        severity: DiagnosticSeverity::Warning,
+    })
+    .accumulate(db);
+}
+
+/// The human-readable message body for a GH #311 partial-equation parse
+/// failure. Pure (functional core) so the diagnostic's wording -- which
+/// names the offending variable and equation text and explains the
+/// silent-magnitude-1 hazard the fix prevents -- is testable without driving
+/// a salsa accumulator.
+pub(crate) fn ltm_partial_equation_warning_message(
+    variable_name: &str,
+    equation_text: &str,
+) -> String {
+    format!(
+        "LTM link-score variable '{variable_name}' could not be generated: the \
+         ceteris-paribus partial requires parsing the target's equation, but \
+         '{equation_text}' did not parse. The variable is skipped rather than \
+         emitted with a non-ceteris-paribus equation (which would silently \
+         score a constant magnitude of 1)."
+    )
 }
 
 /// Emit per-distinct-source-element link scores for a disjoint-dim
@@ -1124,23 +1187,26 @@ pub(super) fn emit_agg_to_target_link_scores(
             // the agg is always scalar here.
             debug_assert!(!agg_is_arrayed, "a scalar target implies a scalar agg");
             let substituted = slot_text(expr);
-            let equation = crate::ltm_augment::generate_agg_to_scalar_target_equation(
+            let name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
+                agg.name, to
+            );
+            match crate::ltm_augment::generate_agg_to_scalar_target_equation(
                 &agg.name,
                 to,
                 &substituted,
                 &all_deps,
                 Some(project_dimensions_context(db, project)),
-            );
-            vars.push(LtmSyntheticVar {
-                name: format!(
-                    "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
-                    agg.name, to
-                ),
-                equation: datamodel::Equation::Scalar(equation),
-                dimensions: vec![],
-                // synthetic agg on the `from` side -> routed direct already.
-                compile_directly: false,
-            });
+            ) {
+                Ok(equation) => vars.push(LtmSyntheticVar {
+                    name,
+                    equation: datamodel::Equation::Scalar(equation),
+                    dimensions: vec![],
+                    // synthetic agg on the `from` side -> routed direct already.
+                    compile_directly: false,
+                }),
+                Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+            }
         }
         Ast::ApplyToAll(_, expr) => {
             // One shared body; emit one per-target-element scalar var.
@@ -1159,7 +1225,13 @@ pub(super) fn emit_agg_to_target_link_scores(
                 // arrayed, matching `agg_name_for_target` (exact when
                 // `result_dims == to`'s dims). The `Δsource` denominator
                 // is element-pinned the same way via the explicit override.
-                let equation = crate::ltm_augment::generate_scalar_to_element_equation(
+                let name = format!(
+                    "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
+                    agg_name_for_target(element),
+                    to,
+                    element
+                );
+                match crate::ltm_augment::generate_scalar_to_element_equation(
                     &agg.name,
                     to,
                     // Qualified for equation text; the name keeps the bare form.
@@ -1169,19 +1241,16 @@ pub(super) fn emit_agg_to_target_link_scores(
                     &deps_to_subscript,
                     Some(&agg_source_ref_for_target(element)),
                     Some(project_dimensions_context(db, project)),
-                );
-                vars.push(LtmSyntheticVar {
-                    name: format!(
-                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
-                        agg_name_for_target(element),
-                        to,
-                        element
-                    ),
-                    equation: datamodel::Equation::Scalar(equation),
-                    dimensions: vec![],
-                    // synthetic agg on `from` + bracketed `to` -> routed direct.
-                    compile_directly: false,
-                });
+                ) {
+                    Ok(equation) => vars.push(LtmSyntheticVar {
+                        name,
+                        equation: datamodel::Equation::Scalar(equation),
+                        dimensions: vec![],
+                        // synthetic agg on `from` + bracketed `to` -> routed direct.
+                        compile_directly: false,
+                    }),
+                    Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+                }
             }
         }
         Ast::Arrayed(_, per_elem, default_expr, _) => {
@@ -1198,7 +1267,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 // relying on the invariant that `substituted.is_empty()`
                 // iff there is no slot expression.
                 let equation = match per_elem.get(&canonical_elem).or(default_expr.as_ref()) {
-                    None => "0".to_string(),
+                    None => Ok("0".to_string()),
                     Some(slot_expr) => {
                         let substituted = slot_text(slot_expr);
                         // Re-derive per-slot deps (the union over all slots
@@ -1229,18 +1298,22 @@ pub(super) fn emit_agg_to_target_link_scores(
                         )
                     }
                 };
-                vars.push(LtmSyntheticVar {
-                    name: format!(
-                        "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
-                        agg_name_for_target(element),
-                        to,
-                        element
-                    ),
-                    equation: datamodel::Equation::Scalar(equation),
-                    dimensions: vec![],
-                    // synthetic agg on `from` + bracketed `to` -> routed direct.
-                    compile_directly: false,
-                });
+                let name = format!(
+                    "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}[{}]",
+                    agg_name_for_target(element),
+                    to,
+                    element
+                );
+                match equation {
+                    Ok(equation) => vars.push(LtmSyntheticVar {
+                        name,
+                        equation: datamodel::Equation::Scalar(equation),
+                        dimensions: vec![],
+                        // synthetic agg on `from` + bracketed `to` -> routed direct.
+                        compile_directly: false,
+                    }),
+                    Err(err) => emit_ltm_partial_equation_warning(db, model, &name, &err),
+                }
             }
         }
     }

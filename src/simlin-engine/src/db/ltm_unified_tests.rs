@@ -850,6 +850,117 @@ fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
     );
 }
 
+/// GH #311: the ceteris-paribus partial-equation parse-failure `Warning`
+/// must name the offending variable AND the original equation text, and
+/// explain the silent-magnitude-1 hazard the fix prevents. The message body
+/// is a pure function so this contract is pinned without driving a salsa
+/// accumulator -- the parse failure itself is effectively unreachable
+/// through the production salsa LTM path (the equation text is always a
+/// `print_eqn` re-print, and an empty equation is rejected as an
+/// `EmptyEquation` *Error* upstream before LTM augmentation runs), so the
+/// fix is defense-in-depth for the unanticipated case. The builder-level
+/// loud-failure behavior is exercised directly in `ltm_augment`'s unit
+/// tests; here we lock down the diagnostic wording the db-bearing callers
+/// surface.
+#[test]
+fn test_ltm_partial_equation_warning_message_contract() {
+    let var_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target";
+    let eqn_text = "source * other";
+    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, eqn_text);
+
+    assert!(
+        msg.contains(var_name),
+        "the warning must name the skipped link-score variable; got: {msg}"
+    );
+    assert!(
+        msg.contains(eqn_text),
+        "the warning must include the original equation text; got: {msg}"
+    );
+    assert!(
+        msg.contains("ceteris-paribus"),
+        "the warning must explain the ceteris-paribus requirement; got: {msg}"
+    );
+    assert!(
+        msg.contains("magnitude of 1"),
+        "the warning must explain the silent magnitude-1 hazard; got: {msg}"
+    );
+}
+
+/// Test-only salsa-tracked query that drives the production accumulating
+/// emitter [`emit_ltm_partial_equation_warning`] with a synthetic
+/// `PartialEquationError`. Salsa accumulators can only be appended from
+/// inside a tracked query, so this is the minimal harness that exercises the
+/// real `.accumulate(db)` path the six production call sites share -- as
+/// opposed to `test_ltm_partial_equation_warning_message_contract`, which
+/// only covers the pure message body.
+#[cfg(test)]
+#[salsa::tracked]
+fn ltm311_emit_probe(db: &dyn crate::db::Db, model: SourceModel, _project: SourceProject) {
+    let err = crate::ltm_augment::PartialEquationError {
+        equation_text: "source * other".to_string(),
+    };
+    super::ltm::emit_ltm_partial_equation_warning(
+        db,
+        model,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target",
+        &err,
+    );
+}
+
+/// GH #311 end-to-end through salsa: a `PartialEquationError` handed to the
+/// db-bearing emitter must accumulate a `CompilationDiagnostic` with
+/// `Warning` severity, the skipped variable's name in `variable`, and a
+/// message carrying the variable name + the offending equation text. This
+/// covers the actual salsa-accumulation glue the six production call sites
+/// (db.rs, db/ltm/compile.rs, db/ltm/link_scores.rs) reuse; the production
+/// route that *produces* the error is effectively unreachable (the equation
+/// text is always a `print_eqn` re-print, and an empty equation is rejected
+/// as an `EmptyEquation` Error upstream before LTM augmentation runs), which
+/// is documented on `PartialEquationError`.
+#[test]
+fn test_ltm_partial_equation_warning_accumulates_via_salsa() {
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+
+    let db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    ltm311_emit_probe(&db, model, sync.project);
+    let diags = ltm311_emit_probe::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+
+    let warning = diags
+        .iter()
+        .map(|CompilationDiagnostic(d)| d)
+        .find(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Assembly(msg) if msg.contains("magnitude of 1")
+                )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the partial-equation parse failure must accumulate a Warning via salsa; got: {:?}",
+                diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+            )
+        });
+
+    let var_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target";
+    assert_eq!(
+        warning.variable.as_deref(),
+        Some(var_name),
+        "the Warning must name the skipped link-score variable in its `variable` field"
+    );
+    let DiagnosticError::Assembly(msg) = &warning.error else {
+        unreachable!("matched Assembly above")
+    };
+    assert!(
+        msg.contains(var_name) && msg.contains("source * other"),
+        "the Warning message must carry the variable name + offending equation text; got: {msg}"
+    );
+}
+
 /// Adversarial corner case for Option A: the auto-flip gate must key on
 /// the *largest* SCC, not on total SCC count or total node count.  Two
 /// disjoint 40-node cycles (80 nodes total) must stay exhaustive because

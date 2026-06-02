@@ -508,7 +508,12 @@ pub fn link_score_equation_text<'db>(
         all_vars.insert(from_ident.clone(), fv.clone());
     }
     all_vars.insert(to_ident.clone(), to_var.clone());
-    let equation = crate::ltm_augment::generate_link_score_equation_for_link(
+    // A `PartialEquationError` here means the target's equation text could
+    // not be parsed for the ceteris-paribus partial (GH #311). Skip the
+    // link-score variable and surface a `Warning` instead of emitting a
+    // silently non-ceteris-paribus score; `model_ltm_fragment_diagnostics`
+    // never sees this case because the bad equation would compile cleanly.
+    let equation = match crate::ltm_augment::generate_link_score_equation_for_link(
         &from_ident,
         &to_ident,
         &RefShape::Bare,
@@ -516,7 +521,13 @@ pub fn link_score_equation_text<'db>(
         &to_var,
         &all_vars,
         None,
-    );
+    ) {
+        Ok(eqn) => eqn,
+        Err(err) => {
+            emit_ltm_partial_equation_warning(db, model, &var_name, &err);
+            return None;
+        }
+    };
 
     // This legacy entry always emits a scalar link score. If the generator
     // produced an arrayed variant for an arrayed target, collapse it to a
