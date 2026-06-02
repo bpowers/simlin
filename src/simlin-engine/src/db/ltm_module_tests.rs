@@ -301,16 +301,17 @@ fn test_ltm_module_with_non_standard_output_name() {
     );
 }
 
-/// Discovery-mode twin of the non-standard-output-port case: the
-/// input→module link score (`level → custom_smooth`) uses the black-box
-/// delta-ratio against the module's OUTPUT variable, and that reference
-/// must name the module's real output port (`custom_smooth·result`). The
-/// pre-fix `find_model_output_ports_for_module` hardcoded `output` for
-/// user-defined modules, so the reference resolved to nothing and the
-/// fragment silently stubbed the link score to a constant 0 -- degrading
-/// every discovery-mode loop through the module.
+/// Discovery mode now uses the same composite link-score reference for a
+/// DynamicModule input port that exhaustive mode does (GH #675): since
+/// GH #548 the sub-model's `$⁚ltm⁚composite⁚{port}` var is laid out in the
+/// parent's flattened offset map in BOTH modes (an empirical probe showed
+/// it resolving to a nonzero value in a discovery run), so the pre-#675
+/// discovery-only black-box delta-ratio against the module output was both
+/// a less faithful score (the gain, not a link score) and an unnecessary
+/// divergence. `custom_smooth` has an internal stock and an input->output
+/// pathway, so it emits a composite for the `input` port.
 #[test]
-fn test_discovery_module_link_score_uses_real_output_port() {
+fn test_discovery_dynamic_module_link_score_uses_composite() {
     use salsa::Setter;
 
     let project = custom_output_port_project();
@@ -334,15 +335,223 @@ fn test_discovery_module_link_score_uses_real_output_port() {
         other => panic!("module link score should be scalar, got {other:?}"),
     };
     assert!(
-        eqn_text.contains("custom_smooth\u{00B7}result"),
-        "link score must reference the module's real output port \
-         custom_smooth·result; got: {eqn_text}"
+        eqn_text.contains("custom_smooth\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}input"),
+        "discovery-mode link score into a DynamicModule must reference the \
+         sub-model's composite for the input port; got: {eqn_text}"
     );
-    assert!(
-        !eqn_text.contains("custom_smooth\u{00B7}output"),
-        "link score must not reference the nonexistent hardcoded \
-         custom_smooth·output port; got: {eqn_text}"
-    );
+}
+
+/// A *passthrough* (stockless) module exposes no composite, so the
+/// genuine black-box fallback fires. That fallback must reference the
+/// module's real OUTPUT port (`custom_passthrough·result`) -- a readable
+/// scalar -- never the bare module name nor a hardcoded `output` port
+/// (`find_model_output_ports_for_module`, cc072973), and it must be the
+/// magnitude-1 signed unit transfer (GH #675), not the gain dz/dx.
+#[test]
+fn test_passthrough_module_link_score_uses_unit_transfer_on_real_output_port() {
+    use salsa::Setter;
+
+    // A passthrough sub-model: `result = input * 2`, output port named
+    // `result` (not the stdlib `output` convention), no internal stock.
+    let project = datamodel::Project {
+        name: "passthrough_output_name".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_stock("level", "50", &["adjustment"], &[], None),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "scaled".to_string(),
+                        equation: datamodel::Equation::Scalar("custom_pt.result".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    x_aux("gap", "100 - scaled", None),
+                    x_flow("adjustment", "gap / 5", None),
+                    x_module("custom_pt", &[("level", "custom_pt.input")], None),
+                ],
+            ),
+            x_model(
+                "custom_pt",
+                vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "input".to_string(),
+                        equation: datamodel::Equation::Scalar("0".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat {
+                            can_be_module_input: true,
+                            ..datamodel::Compat::default()
+                        },
+                    }),
+                    x_aux("result", "input * 2", None),
+                ],
+            ),
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let (source_project, main_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    for discovery in [false, true] {
+        source_project.set_ltm_discovery_mode(&mut db).to(discovery);
+        let ltm_vars = model_ltm_variables(&db, main_model, source_project);
+        let link = ltm_vars
+            .vars
+            .iter()
+            .find(|v| v.name.contains("level\u{2192}custom_pt"))
+            .expect("must emit the level→custom_pt link score");
+        let eqn_text = match &link.equation {
+            datamodel::Equation::Scalar(text) => text.clone(),
+            other => panic!("module link score should be scalar, got {other:?}"),
+        };
+        assert!(
+            eqn_text.contains("custom_pt\u{00B7}result"),
+            "discovery={discovery}: passthrough link score must reference the module's \
+             real output port custom_pt·result; got: {eqn_text}"
+        );
+        assert!(
+            !eqn_text.contains("custom_pt\u{00B7}output"),
+            "discovery={discovery}: must not reference the hardcoded custom_pt·output port; \
+             got: {eqn_text}"
+        );
+        assert!(
+            eqn_text.contains("SIGN("),
+            "discovery={discovery}: the black-box fallback must be the magnitude-1 signed \
+             unit transfer (SIGN(Δto)*SIGN(Δfrom)), not the gain dz/dx; got: {eqn_text}"
+        );
+        assert!(
+            !eqn_text.contains("composite"),
+            "discovery={discovery}: a passthrough exposes no composite; got: {eqn_text}"
+        );
+    }
+}
+
+/// A module->module link (`mod_a` output wired into `mod_b`'s input port)
+/// between two DynamicModules must reference `mod_b`'s composite for that
+/// input port (GH #675). The edge source in the parent graph is the
+/// normalized module node `mod_a`, but `mod_b`'s `ModuleInput::src` is the
+/// module-qualified `mod_a·result`, so the match is by
+/// `normalize_module_ref(src)`, not raw equality. The pre-#675 arm emitted
+/// the gain `Δmod_b/Δmod_a` against the *bare* module names (not readable
+/// scalars), which stubbed the fragment to 0.
+#[test]
+fn test_module_to_module_link_score_uses_target_composite() {
+    use salsa::Setter;
+
+    // Two DynamicModule smooths chained: mod_a smooths `level`, mod_b
+    // smooths mod_a's output. Both have an internal stock + input->output
+    // pathway, so both emit a composite for their `input` port.
+    let smooth_model = |name: &str| {
+        x_model(
+            name,
+            vec![
+                datamodel::Variable::Aux(datamodel::Aux {
+                    ident: "input".to_string(),
+                    equation: datamodel::Equation::Scalar("0".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat {
+                        can_be_module_input: true,
+                        ..datamodel::Compat::default()
+                    },
+                }),
+                datamodel::Variable::Flow(datamodel::Flow {
+                    ident: "flow".to_string(),
+                    equation: datamodel::Equation::Scalar("(input - result) / 3".to_string()),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                x_stock("result", "0", &["flow"], &[], None),
+            ],
+        )
+    };
+
+    let project = datamodel::Project {
+        name: "module_to_module".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 10.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_stock("level", "50", &["adjustment"], &[], None),
+                    x_module("mod_a", &[("level", "mod_a.input")], None),
+                    x_module("mod_b", &[("mod_a.result", "mod_b.input")], None),
+                    x_aux("gap", "100 - mod_b.result", None),
+                    x_flow("adjustment", "gap / 5", None),
+                ],
+            ),
+            smooth_model("mod_a"),
+            smooth_model("mod_b"),
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let (source_project, main_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    for discovery in [false, true] {
+        source_project.set_ltm_discovery_mode(&mut db).to(discovery);
+        let ltm_vars = model_ltm_variables(&db, main_model, source_project);
+        let link = ltm_vars
+            .vars
+            .iter()
+            .find(|v| v.name.contains("mod_a\u{2192}mod_b"))
+            .expect("must emit the mod_a→mod_b link score");
+        let eqn_text = match &link.equation {
+            datamodel::Equation::Scalar(text) => text.clone(),
+            other => panic!("module link score should be scalar, got {other:?}"),
+        };
+        assert_eq!(
+            eqn_text, "\"mod_b\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}input\"",
+            "discovery={discovery}: module->module link score must reference mod_b's \
+             composite for the input port; got: {eqn_text}"
+        );
+    }
 }
 
 /// Issue #418: loops through SMOOTH modules should have determined polarity

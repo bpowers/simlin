@@ -323,38 +323,76 @@ stock's contribution.
 
 ### Module Links
 
-The `link_score_equation_text` tracked function in `db.rs` handles three
-module link cases:
+`module_link_score_equation` in `db.rs` is the single source of truth for a
+module-involved link's equation, shared verbatim by the `(from, to)`-keyed
+`link_score_equation_text` and the per-shape `link_score_equation_text_shaped`
+(a module link's equation does not depend on the reference `RefShape`, so the
+two twins delegate to the same helper and can never drift). It handles three
+cases, each preferring a faithful link score and only falling back to the
+signed unit transfer when nothing better exists:
 
-- **Variable-to-module-input** (`!from_is_module && to_is_module`): Uses composite
-  link score reference when the module has internal causal pathways (determined by
-  `module_input_pathways_from_edges`). The link score variable references the
-  module's internal composite via interpunct notation (e.g.,
-  `module·$⁚ltm⁚composite⁚port`). Falls back to the black-box transfer-function
-  formula (`generate_module_link_score_equation`) for modules without causal
-  pathways.
+- **Variable-to-module-input** (`!from_is_module && to_is_module`): When the
+  target module's sub-model emits a composite link score for the port the edge
+  feeds (a DynamicModule with an input→output pathway), the link score IS that
+  composite, referenced via interpunct notation `module·$⁚ltm⁚composite⁚port`.
+  This is the module's internal transfer -- exactly the macro treatment
+  (ref §6). When the sub-model exposes no composite (a passthrough), the link
+  score is the **signed unit transfer** (below) against the module's *output*
+  ref `module·port` -- a readable scalar, never the bare module name.
 
-- **Module-output-to-variable** (`from_is_module && !to_is_module`): Uses the
-  standard ceteris-paribus formula (`generate_link_score_equation_for_link`). The
-  `build_partial_equation` function is module-ref-aware: `normalize_module_ref()`
-  strips interpunct suffixes so that module output references (e.g.,
-  `$⁚s⁚0⁚smth1·output`) are correctly excluded from `PREVIOUS()` wrapping while
-  other dependencies are held at their previous values.
+- **Module-output-to-variable** (`from_is_module && !to_is_module`): The
+  dependent's equation references the module output via `module·port`, so a
+  real ceteris-paribus partial is available -- the link score is that exact
+  partial (`generate_link_score_equation_for_link` on the located output ref).
+  `build_partial_equation` is module-ref-aware: `normalize_module_ref()`
+  strips interpunct suffixes so module output references (e.g.
+  `$⁚s⁚0⁚smth1·output`) are excluded from `PREVIOUS()` wrapping while other
+  dependencies are held at their previous values. Falls back to the signed
+  unit transfer only if the output reference cannot be located in the target
+  AST. (Before GH #675 this arm used the gain `Δto/Δ(module·output)`, which is
+  why a single-input downstream that should score ±1 instead scored the gain.)
 
-- **Module-to-module** (`from_is_module && to_is_module`): Uses the black-box
-  transfer-function formula (`generate_module_link_score_equation`) since modules
-  have no user-visible equation for ceteris-paribus analysis.
+- **Module-to-module** (`from_is_module && to_is_module`): `from`'s output is
+  wired into `to`'s input port. The edge source in the parent graph is the
+  normalized module node `from`, but `to`'s `ModuleInput::src` is the
+  module-qualified `from·output`, so the match is by
+  `normalize_module_ref(src) == from`, not raw equality. When `to`'s sub-model
+  exposes a composite for that port, the link score IS `to`'s composite for
+  the port (the macro treatment again -- the wiring from `from`'s output to
+  `to`'s input port is an identity, so the loop product equals the
+  fully-expanded model's). Otherwise it is the signed unit transfer between
+  the two modules' output refs.
 
-**Black-box formula caveat.** The black-box equation is `Δto/Δfrom` -- the
-*gain* `dz/dx` (LTM ref section 3.3), not a link score: it lacks the
-`|Δfrom/Δto|`-style weighting that converts a sensitivity into a realized
-contribution and makes link scores chain multiplicatively into path/loop
-scores. It is a pragmatic stand-in for the cases where no equation is
-available for ceteris-paribus analysis; a loop product through such a link
-is biased relative to a true LTM loop score. Discovery mode additionally
-uses a `Δ(module·output)/Δfrom` variant for variable→module links (the
-composite reference only resolves in exhaustive compilation), with the
-output port determined by `model_module_output_ports`' dependency scan.
+**Composites resolve in both modes (GH #548 / #675).** Since GH #548,
+`build_submodel_metadata` lays out a sub-model's LTM synthetic vars (composites
+included) in the parent's flattened offset map whenever `ltm_enabled`, which
+holds in *both* exhaustive and discovery mode. An empirical probe confirmed a
+SMOOTH composite resolving to a nonzero value in a discovery run. Discovery
+mode therefore uses the *same* composite reference exhaustive mode does -- the
+pre-#675 discovery-only gain variant (`Δ(module·output)/Δfrom`, justified by a
+since-stale "cross-module refs don't resolve in discovery" assumption) is gone.
+`module_composite_ports` reads the sub-model's actual `model_ltm_variables`
+output to decide whether a composite exists for a port, rather than guessing
+from the module's stock count.
+
+**Signed unit-transfer fallback (GH #675).** The residual genuine black-box
+case -- no composite (a passthrough exposes none) and no ceteris-paribus
+partial (the endpoint is a module with no parent-visible equation) -- uses
+`black_box_unit_transfer_equation`: `0` at `INITIAL_TIME`, `0` when either
+endpoint is unchanged, else `SIGN(Δto)·SIGN(Δfrom)`. This is a *link score*,
+not the gain `dz/dx` (ref §3.3): for a single-input black box `z = F(x)` all
+of `Δz` is attributable to `x`, so `|Δ_x(z)/Δ(z)| = 1` and only the sign
+remains -- the unit transfer is exact. For a stateful/multi-input box it is
+the perfect-mixing-spirit approximation (ref §6): polarity exact, magnitude
+approximated as `1`. Crucially it preserves the **isolated-loop ±1 invariant**
+(Appendix B): an isolated feedback loop routed through a passthrough-module
+chain (including a module→module link) has raw loop score exactly ±1 regardless
+of the module gains, because a link score normalizes the gain away whereas the
+old `Δto/Δfrom` gain made the loop score scale with the product of the gains.
+References are always readable scalars (`module·port`), never the bare module
+name -- a bare module name is not a scalar-readable variable, so the prior
+formula's bare-name references stubbed the fragment to a constant 0 (which
+zeroed every loop through such a module).
 
 ## Module Boundary Handling
 
@@ -371,8 +409,9 @@ Modules are classified by `classify_module_for_ltm()` in `ltm.rs`:
   analyzed to avoid infinite recursion.
 - **DynamicModule** -- has internal stocks (SMOOTH, DELAY, TREND, user-defined
   modules with stocks). Gets composite link scores and internal graph construction.
-- **Passthrough** -- no internal stocks; treated as black box with a transfer
-  score formula.
+- **Passthrough** -- no internal stocks; exposes no composite, so a link into
+  its input port (or a module→module link feeding it) uses the signed
+  unit-transfer fallback (see Module Links above).
 
 ### Unified Module LTM Treatment
 

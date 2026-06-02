@@ -373,20 +373,43 @@ pub struct LtmVariablesResult {
 /// when a variable's equation changes, salsa only re-evaluates link score
 /// equations for links whose endpoints are affected. Links involving
 /// unmodified variables return their cached equation text.
-/// Black-box delta-ratio formula for module links where we cannot do
-/// ceteris-paribus analysis. Computes `delta_to / delta_from` --
-/// the magnitude captures how much `to` changes per unit change in
-/// `from`, and the sign captures the polarity of influence.
-pub(super) fn black_box_delta_ratio_equation(from_ident: &str, to_ident: &str) -> String {
-    let from_q = crate::ltm_augment::quote_ident(from_ident);
-    let to_q = crate::ltm_augment::quote_ident(to_ident);
+/// Signed unit-transfer formula for genuine black-box module links --
+/// the residual case where neither a composite link score (the target
+/// module exposes no internal pathway to the read port) nor a
+/// ceteris-paribus partial (the endpoint is a module with no
+/// parent-visible equation) is available.
+///
+/// Returns `0` at `INITIAL_TIME`, `0` when either endpoint did not change
+/// over the last step (an inactive link, like every other link score),
+/// and otherwise `SIGN(Δto) * SIGN(Δfrom)` -- i.e. `+1` when `to` and
+/// `from` moved in the same direction and `-1` when they moved opposite.
+///
+/// Rationale. An LTM *link score* is `|Δ_x(z)/Δ(z)| * sign(Δ_x(z)/Δ(x))`
+/// (ref §3.1), not the *gain* `Δz/Δx` (the sensitivity / partial
+/// derivative, ref §3.3). The two differ by the `|Δx/Δz|` weighting that
+/// makes link scores chain *multiplicatively* into a loop score: an
+/// isolated feedback loop's raw loop score is exactly `±1` regardless of
+/// the gains around it (Appendix B), an invariant the gain formula breaks
+/// (the loop score scales with the product of the gains).
+///
+/// For a single-input black box `z = F(x)` the true link score *is* the
+/// unit transfer: all of `Δz` is attributable to `x`, so `|Δ_x(z)/Δ(z)|`
+/// is identically `1` and only the sign remains. For a stateful or
+/// multi-input box this is the perfect-mixing-spirit approximation
+/// (ref §6 macros): polarity exact, magnitude approximated as `1`. It
+/// preserves the isolated-loop `±1` invariant where the gain formula
+/// did not. Prefer the composite or ceteris-paribus forms wherever they
+/// exist; this is only the fallback when they do not.
+pub(super) fn black_box_unit_transfer_equation(from_ref: &str, to_ref: &str) -> String {
+    let from_q = crate::ltm_augment::quote_ident(from_ref);
+    let to_q = crate::ltm_augment::quote_ident(to_ref);
     format!(
         "if (TIME = INITIAL_TIME) then 0 \
          else if (({to_q} - PREVIOUS({to_q})) = 0) OR \
                  (({from_q} - PREVIOUS({from_q})) = 0) \
               then 0 \
-         else (({to_q} - PREVIOUS({to_q})) / \
-               ({from_q} - PREVIOUS({from_q})))"
+         else (SIGN({to_q} - PREVIOUS({to_q})) * \
+               SIGN({from_q} - PREVIOUS({from_q})))"
     )
 }
 
@@ -470,6 +493,211 @@ pub(super) fn find_model_output_ports_for_module(
         .unwrap_or_else(|| vec!["output".to_string()])
 }
 
+/// For a module variable in `model`, return the set of internal input
+/// ports for which the sub-model emits a composite link score
+/// (`$⁚ltm⁚composite⁚{port}`).
+///
+/// The parent's `input -> module` (and `module -> module`) link score can
+/// reference the sub-model's composite only when that composite actually
+/// exists -- a DynamicModule (one with internal stocks and at least one
+/// input->output pathway) generates pathway/composite vars, a passthrough
+/// (stockless) module does not. Referencing a non-existent composite var
+/// silently resolves to a constant 0 (cross-module reads of an absent LTM
+/// var don't fail to compile), which zeroes every loop through the module.
+/// This is the authoritative discriminator: it reads the sub-model's
+/// actual `model_ltm_variables` output rather than guessing from the
+/// module's stock count.
+///
+/// Salsa-cached; the sub-model's `model_ltm_variables` is computed once
+/// per `(sub_model, project)` and reused across every parent edge that
+/// touches the module.
+fn module_composite_ports(
+    db: &dyn Db,
+    sub_model: SourceModel,
+    project: SourceProject,
+) -> std::collections::BTreeSet<String> {
+    let prefix = "$\u{205A}ltm\u{205A}composite\u{205A}";
+    crate::db::model_ltm_variables(db, sub_model, project)
+        .vars
+        .iter()
+        .filter_map(|v| v.name.strip_prefix(prefix).map(|p| p.to_string()))
+        .collect()
+}
+
+/// Equation for a module-involved link score (`from` and/or `to` is a
+/// module node in the parent causal graph). Shared verbatim by the
+/// `(from, to)`-keyed [`link_score_equation_text`] and the per-shape
+/// [`crate::db::link_score_equation_text_shaped`] so the two never drift
+/// (the shaped twin's `RefShape` does not change a module link's
+/// equation: modules are scalar nodes whose composite-reference /
+/// ceteris-paribus / unit-transfer formulas don't reach into the target's
+/// AST shape).
+///
+/// Three cases, each preferring a faithful link score and only falling
+/// back to the magnitude-1 [`black_box_unit_transfer_equation`] (NOT the
+/// gain) when nothing better exists:
+///
+/// 1. `variable -> module` and `module -> module`: the edge feeds the
+///    target module's input port. When the sub-model exposes a composite
+///    for that port, the link score IS that composite
+///    (`module·$⁚ltm⁚composite⁚port`) -- the module's internal transfer,
+///    exactly the macro treatment (ref §6). When it does not (a
+///    passthrough), use the unit transfer against the module's *output*
+///    ref (a readable scalar `module·port`), never the bare module name.
+///    The composite resolves in BOTH exhaustive and discovery mode (since
+///    GH #548 the sub-model's composite var is laid out in the parent's
+///    flattened offset map whenever `ltm_enabled`), so the two modes share
+///    one branch.
+///
+/// 2. `module -> variable`: the dependent's equation references the
+///    module output via `module·port`, so a real ceteris-paribus partial
+///    is available -- prefer it (exact link score). Fall back to the unit
+///    transfer against the output ref only if the reference can't be
+///    located in the target AST.
+pub(crate) fn module_link_score_equation(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    from_name: &str,
+    to_name: &str,
+    from_var: Option<&crate::variable::Variable>,
+    to_var: &crate::variable::Variable,
+) -> Option<datamodel::Equation> {
+    use crate::common::{Canonical, Ident};
+
+    let from_ident = Ident::<Canonical>::new(from_name);
+    let to_ident = Ident::<Canonical>::new(to_name);
+    let from_is_module = from_var.is_some_and(|v| v.is_module());
+    let to_is_module = to_var.is_module();
+
+    // Resolve a module variable's parent-visible output reference
+    // (`module·port`) -- a readable scalar, unlike the bare module name.
+    let module_output_ref = |module_name: &str| -> String {
+        let edges = model_causal_edges(db, model, project);
+        let ports = find_model_output_ports_for_module(db, model, project, edges, module_name);
+        let port = ports
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "output".to_string());
+        format!("{module_name}\u{00B7}{port}")
+    };
+
+    // The composite var name a sub-model emits for `port`, if any.
+    //
+    // This resolves in BOTH exhaustive and discovery mode: since GH #548,
+    // `build_submodel_metadata` lays out a sub-model's LTM synthetic vars
+    // (composites included) in the parent's flattened offset map whenever
+    // `ltm_enabled`, which holds in both modes. (The pre-#675 code gated
+    // composites to exhaustive mode on a now-stale "cross-module refs don't
+    // resolve in discovery" assumption; an empirical probe showed the SMOOTH
+    // composite resolving to a nonzero value in a discovery-mode run.) A
+    // passthrough module emits no composite, so this returns `None` for it
+    // and the caller falls back to the unit transfer.
+    let composite_ref_for_port = |module_name: &str, port: &str| -> Option<String> {
+        let project_models = project.models(db);
+        // Resolve the sub-model name. Explicit module variables live in
+        // `model.variables`; implicit ones (SMOOTH/DELAY expansions) are
+        // not source vars but are recorded in the edges' module->model map
+        // -- which is also where stdlib instances resolve from. Consult the
+        // edge map first so both kinds are covered.
+        let edges = model_causal_edges(db, model, project);
+        let sub_model_name = edges
+            .dynamic_modules
+            .get(module_name)
+            .cloned()
+            .or_else(|| {
+                model
+                    .variables(db)
+                    .get(module_name)
+                    .map(|v| v.model_name(db).to_string())
+            })?;
+        let sub_model_name = canonicalize(&sub_model_name);
+        let sub_model = project_models.get(sub_model_name.as_ref())?;
+        if module_composite_ports(db, *sub_model, project).contains(port) {
+            Some(format!(
+                "{module_name}\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}{port}"
+            ))
+        } else {
+            None
+        }
+    };
+
+    let equation = if !from_is_module && to_is_module {
+        // variable -> module: the edge feeds one of `to`'s input ports.
+        let crate::variable::Variable::Module { inputs, .. } = to_var else {
+            return Some(datamodel::Equation::Scalar(
+                black_box_unit_transfer_equation(from_name, &module_output_ref(to_name)),
+            ));
+        };
+        match inputs.iter().find(|i| i.src == from_ident) {
+            Some(input) => match composite_ref_for_port(to_name, input.dst.as_str()) {
+                Some(composite) => format!("\"{composite}\""),
+                None => black_box_unit_transfer_equation(from_name, &module_output_ref(to_name)),
+            },
+            None => black_box_unit_transfer_equation(from_name, &module_output_ref(to_name)),
+        }
+    } else if from_is_module && to_is_module {
+        // module -> module: `from`'s output is wired into `to`'s input
+        // port. The edge source matches `to`'s input whose `src` is the
+        // module-qualified `from·output`, so match against the normalized
+        // module node rather than the bare name.
+        let from_output = module_output_ref(from_name);
+        let crate::variable::Variable::Module { inputs, .. } = to_var else {
+            return Some(datamodel::Equation::Scalar(
+                black_box_unit_transfer_equation(&from_output, &module_output_ref(to_name)),
+            ));
+        };
+        let matching_input = inputs
+            .iter()
+            .find(|i| crate::ltm::normalize_module_ref(&i.src) == from_ident);
+        match matching_input.and_then(|input| composite_ref_for_port(to_name, input.dst.as_str())) {
+            Some(composite) => format!("\"{composite}\""),
+            None => black_box_unit_transfer_equation(&from_output, &module_output_ref(to_name)),
+        }
+    } else {
+        // module -> variable: `to` has a real equation referencing the
+        // module output via `module·port`. Prefer a ceteris-paribus
+        // partial on that equation (the exact link score); fall back to
+        // the unit transfer if the reference can't be located.
+        let from_output = to_var
+            .ast()
+            .map(|ast| crate::variable::identifier_set(ast, &[], None))
+            .and_then(|deps| {
+                let prefix = format!("{from_name}\u{00B7}");
+                deps.into_iter()
+                    .find(|d| d.as_str().starts_with(&prefix))
+                    .map(|d| d.to_string())
+            });
+        match from_output {
+            Some(output_ref) => {
+                let output_ident = Ident::<Canonical>::new(&output_ref);
+                let mut all_vars = HashMap::new();
+                all_vars.insert(to_ident.clone(), to_var.clone());
+                let dim_ctx = project_dimensions_context(db, project);
+                match crate::ltm_augment::generate_link_score_equation_for_link(
+                    &output_ident,
+                    &to_ident,
+                    &RefShape::Bare,
+                    &[],
+                    to_var,
+                    &all_vars,
+                    Some(dim_ctx),
+                ) {
+                    Ok(eqn) => return Some(ltm::scalarize_ltm_equation(eqn)),
+                    // The target's equation couldn't be parsed for the
+                    // partial (GH #311): fall back to the unit transfer
+                    // rather than emit a silently non-ceteris-paribus
+                    // score. The reference is the located output ref.
+                    Err(_) => black_box_unit_transfer_equation(&output_ref, to_name),
+                }
+            }
+            None => black_box_unit_transfer_equation(&module_output_ref(from_name), to_name),
+        }
+    };
+
+    Some(datamodel::Equation::Scalar(equation))
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn link_score_equation_text<'db>(
     db: &'db dyn Db,
@@ -495,74 +723,22 @@ pub fn link_score_equation_text<'db>(
     let from_is_module = from_var.as_ref().is_some_and(|v| v.is_module());
     let to_is_module = to_var.is_module();
 
-    // Module-involved links: three cases depending on which end is a module.
-    // 1. input -> module: composite reference to module's internal score
-    // 2. module -> downstream: standard ceteris-paribus on downstream equation
-    // 3. module -> module: black-box delta-ratio equation
+    // Module-involved links: composite reference, ceteris-paribus, or the
+    // signed unit-transfer fallback, decided by `module_link_score_equation`
+    // (shared with the per-shape twin so the two never drift).
     if from_is_module || to_is_module {
-        let is_discovery = project.ltm_discovery_mode(db);
-        let equation = if !from_is_module && to_is_module {
-            if let crate::variable::Variable::Module { inputs, .. } = &to_var {
-                if let Some(input) = inputs.iter().find(|i| i.src == from_ident) {
-                    if is_discovery {
-                        // In discovery mode, use delta-ratio between the input
-                        // variable and the module's output variable. The composite
-                        // reference works in exhaustive mode (where only loop
-                        // edges are scored) but not in discovery mode because
-                        // cross-module LTM variable references don't resolve.
-                        //
-                        // Find the module's output port by looking at which
-                        // variables in the model depend on module·internal_var.
-                        let edges = model_causal_edges(db, model, project);
-                        let output_ports =
-                            find_model_output_ports_for_module(db, model, project, edges, to_name);
-                        let output_ref = output_ports
-                            .first()
-                            .map(|port| format!("{}\u{00B7}{}", to_ident.as_str(), port))
-                            .unwrap_or_else(|| format!("{}\u{00B7}output", to_ident.as_str()));
-                        black_box_delta_ratio_equation(from_ident.as_str(), &output_ref)
-                    } else {
-                        // In exhaustive mode, reference the composite score
-                        // of the input port inside the sub-model.
-                        format!(
-                            "\"{module}\u{00B7}$\u{205A}ltm\u{205A}composite\u{205A}{port}\"",
-                            module = to_ident.as_str(),
-                            port = input.dst.as_str(),
-                        )
-                    }
-                } else {
-                    black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
-                }
-            } else {
-                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
-            }
-        } else if from_is_module && !to_is_module {
-            // The dependent's equation references the module's output via
-            // "module·output_var" syntax. Find that reference and use the
-            // middot-qualified name as the "from" for delta-ratio, since
-            // the module node itself is not a readable scalar variable.
-            let module_output_ref: Option<String> = to_var
-                .ast()
-                .map(|ast| crate::variable::identifier_set(ast, &[], None))
-                .and_then(|deps| {
-                    let prefix = format!("{}\u{00B7}", from_ident.as_str());
-                    deps.into_iter()
-                        .find(|d| d.as_str().starts_with(&prefix))
-                        .map(|d| d.to_string())
-                });
-            if let Some(output_ref) = module_output_ref {
-                black_box_delta_ratio_equation(&output_ref, to_ident.as_str())
-            } else {
-                black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
-            }
-        } else {
-            // module -> module: black-box delta-ratio
-            black_box_delta_ratio_equation(from_ident.as_str(), to_ident.as_str())
-        };
-
-        return Some(LtmSyntheticVar {
+        return module_link_score_equation(
+            db,
+            model,
+            project,
+            from_name,
+            to_name,
+            from_var.as_ref(),
+            &to_var,
+        )
+        .map(|equation| LtmSyntheticVar {
             name: var_name,
-            equation: datamodel::Equation::Scalar(equation),
+            equation,
             dimensions: vec![],
             compile_directly: false,
         });

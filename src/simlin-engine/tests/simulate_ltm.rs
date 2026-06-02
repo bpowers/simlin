@@ -1243,15 +1243,14 @@ fn test_arms_race_single_partition() {
     );
 }
 
-// Ignored: the causal edge name for implicit module instances
-// (e.g., "$:combined:0:smth1") does not match the identifier used in the
-// downstream variable's equation AST. The ceteris-paribus analysis cannot
-// isolate the module's contribution because it cannot find the from_ident
-// in the dependency set, so it wraps all deps with PREVIOUS and produces
-// magnitude ~1. Fixing this requires the causal graph to use the same
-// variable names as the equation AST.
+// Guards the module->variable ceteris-paribus link-score arm from GH #675:
+// when a module output (e.g. SMTH1(level, 3)) and a sibling input both feed a
+// downstream equation, the module->downstream link score must be the real
+// ceteris-paribus partial (holding the sibling input frozen at PREVIOUS, so
+// magnitude ~0.5 for an even 50/50 split), NOT the raw black-box gain dz/dx.
+// Before commit 193740cd the analysis could not isolate the module's
+// contribution and emitted magnitude ~1; this asserts the partial is now used.
 #[test]
-#[ignore]
 fn test_module_output_multi_input_link_score_magnitude() {
     // When a module output shares a downstream equation with another input,
     // the link score for module -> downstream should NOT always be magnitude 1.
@@ -9451,4 +9450,185 @@ fn test_lookup_table_link_score_is_nonzero() {
             .map(|fl| fl.loop_info.format_path())
             .collect::<Vec<_>>()
     );
+}
+
+/// Build an isolated single-stock feedback loop routed through a chain of
+/// two passthrough (stockless) user modules, including a module->module
+/// link (`mod_a` output wired straight into `mod_b`'s input port):
+///
+///   level (stock) --inflow--> mod_a(input=level) --> mod_b(input=mod_a.out)
+///       inflow = mod_b.out * 0.1
+///
+/// Both modules are pure unit-gain passthroughs (`out = input`), so the
+/// model is mathematically identical to a bare `level -> inflow -> level`
+/// reinforcing one-stock loop. Its raw loop score must be exactly +1 at
+/// every step (LTM Appendix B isolated-loop invariant), regardless of the
+/// gain the modules introduce. With a non-unity gain on `mod_b` the
+/// invariant still holds -- a link score, unlike the gain dz/dx, is
+/// normalized so the gain cancels around the loop.
+fn two_module_isolated_loop_project(mod_b_gain: f64) -> simlin_engine::datamodel::Project {
+    use simlin_engine::datamodel;
+
+    let passthrough_model = |name: &str, gain: f64| datamodel::Model {
+        name: name.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "input".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    ..datamodel::Compat::default()
+                },
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "out".to_string(),
+                equation: datamodel::Equation::Scalar(format!("input * {gain}")),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+
+    datamodel::Project {
+        name: "two_module_isolated_loop".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 8.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            datamodel::Model {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![
+                    datamodel::Variable::Stock(datamodel::Stock {
+                        ident: "level".to_string(),
+                        equation: datamodel::Equation::Scalar("100".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        inflows: vec!["inflow".to_string()],
+                        outflows: vec![],
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "mod_a".to_string(),
+                        model_name: "passthrough_a".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        references: vec![datamodel::ModuleReference {
+                            src: "level".to_string(),
+                            dst: "mod_a.input".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Module(datamodel::Module {
+                        ident: "mod_b".to_string(),
+                        model_name: "passthrough_b".to_string(),
+                        documentation: String::new(),
+                        units: None,
+                        // module->module link: mod_a's output wired into
+                        // mod_b's input port.
+                        references: vec![datamodel::ModuleReference {
+                            src: "mod_a.out".to_string(),
+                            dst: "mod_b.input".to_string(),
+                        }],
+                        compat: datamodel::Compat::default(),
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Flow(datamodel::Flow {
+                        ident: "inflow".to_string(),
+                        equation: datamodel::Equation::Scalar("mod_b.out * 0.1".to_string()),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        ai_state: None,
+                        uid: None,
+                        compat: datamodel::Compat::default(),
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: None,
+            },
+            passthrough_model("passthrough_a", 1.0),
+            passthrough_model("passthrough_b", mod_b_gain),
+        ],
+        source: None,
+        ai_information: None,
+    }
+}
+
+/// GROUND TRUTH PROBE / acceptance invariant for GH #675: an isolated
+/// feedback loop routed through a module->module link must have raw loop
+/// score exactly +1 at every settled step, regardless of the gain the
+/// modules introduce. The gain (`Delta_to / Delta_from`) formula that the
+/// pre-#675 module->module arm emitted makes the loop score scale with the
+/// gain (here `mod_b_gain`), so this fails (or reads 0 if the fragment did
+/// not even compile) before the composite/unit-transfer fix.
+#[test]
+fn module_to_module_isolated_loop_raw_score_is_one() {
+    for gain in [1.0_f64, 2.0, 0.5] {
+        let project = two_module_isolated_loop_project(gain);
+        let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().expect("simulation should run");
+        let results = vm.into_results();
+
+        let loop_names: Vec<&str> = results
+            .offsets
+            .keys()
+            .filter(|k| {
+                k.as_str()
+                    .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+            })
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(
+            loop_names.len(),
+            1,
+            "the two-module model has exactly one feedback loop, found {loop_names:?}"
+        );
+        let off = results
+            .offsets
+            .keys()
+            .find(|k| k.as_str() == loop_names[0])
+            .unwrap();
+        let off = results.offsets[off];
+
+        let _ = &loop_partitions;
+        for step in 3..results.step_count {
+            let value = results.data[step * results.step_size + off];
+            assert!(
+                (value - 1.0).abs() < 1e-6,
+                "gain={gain}: settled step {step} loop score is {value}, expected +1. \
+                 A module->module link scored with the gain dz/dx (not a link score) makes \
+                 the loop score scale with the module gain; the isolated-loop invariant breaks."
+            );
+        }
+    }
 }
