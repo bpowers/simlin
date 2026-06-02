@@ -56,6 +56,18 @@ dev = [
     "types-setuptools",
     "build>=1.0.0",
 ]
+# Everything the repo-level notebooks/ build scripts need on top of dev:
+# building and executing the .ipynb (nbformat/nbclient/ipykernel), rendering
+# HTML (nbconvert), and the plotting/imaging the notebook cells use. Declared
+# here so a plain `uv sync` doesn't prune them out of the shared venv.
+notebooks = [
+    "nbformat>=5.10",
+    "nbclient>=0.10",
+    "nbconvert>=7.16",
+    "ipykernel>=6.29",
+    "matplotlib>=3.8",
+    "pillow>=10.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/bpowers/simlin"

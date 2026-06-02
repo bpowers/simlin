@@ -6,8 +6,8 @@ then executes it (populating outputs) with nbclient. The executed .ipynb and
 its HTML render are generated artifacts (gitignored); this script is the
 source of truth, so the notebook can be regenerated against any engine build.
 
-Run from the pysimlin venv (which needs nbformat/nbclient/matplotlib/pillow
-on top of the dev deps):
+Run from the pysimlin venv, synced with the `notebooks` extra
+(`cd src/pysimlin && uv sync --extra dev --extra notebooks`):
 
     src/pysimlin/.venv/bin/python notebooks/build_notebook.py
     src/pysimlin/.venv/bin/jupyter nbconvert --to html notebooks/clearn_ltm_experience.ipynb
@@ -324,7 +324,11 @@ builtin: let the modeler *name a loop up front* and guarantee it gets scored. Si
 this as **loop pinning** -- `set_loop_name` takes the loop's member variables (order-free; the
 engine recovers the cycle from the causal graph) and a human name.
 
-Here are C-LEARN's nine textbook climate feedbacks, as a domain expert would list them:
+Here are C-LEARN's nine textbook climate feedbacks. To be clear about provenance: this list is
+**curated from domain knowledge, not copied from the discovery output** -- it is what a climate
+modeler would write down after reading the carbon-cycle and climate sector diagrams in section 2
+(each loop below traces a visible cycle there). Whether the structure-blind discovery search
+agrees with the domain expert is checked, not assumed, right after we pin them.
 """)
 
 code("""
@@ -368,6 +372,52 @@ The engine validated each variable set against the causal graph, recovered the c
 -- because every one of these variables is arrayed over the 3-element `scenario` dimension --
 instantiated each pin **per element** (three score slots per loop, queryable by subscript).
 
+### Does the expert's list agree with the machine's?
+
+Cross-reference each pinned variable set against section 4's discovered loops (comparing
+subscript-stripped variable sets):
+""")
+
+code("""
+def base_vars(loop):
+    return frozenset(v.split("[")[0] for v in loop.variables)
+
+
+def elem_of(loop):
+    for v in loop.variables:
+        if "[" in v:
+            return v.split("[")[1].rstrip("]")
+    return "scalar"
+
+
+for name, variables in CLIMATE_LOOPS.items():
+    matches = [
+        (rank, loop) for rank, loop in enumerate(analysis.loops, 1)
+        if base_vars(loop) == frozenset(variables)
+    ]
+    if matches:
+        found = ", ".join(f"#{rank} {loop.id} [{elem_of(loop)}]" for rank, loop in matches)
+        print(f"  {name}:\\n      discovered as {found}")
+    else:
+        print(f"  {name}:\\n      NOT in the discovery results")
+""")
+
+md("""
+Two findings, both worth dwelling on:
+
+* **Every active loop on the expert's list was discovered exactly** -- same variable set, found
+  *three separate times* (once per scenario element), ranked among 153 loops. The domain expert
+  and the structure-blind strongest-path search converge on the same eight cycles, which is about
+  as strong a cross-validation as an analysis method can offer. (The converse does not hold:
+  discovery also surfaced loops the curated list ignores -- the per-gas uptake loops, deep-ocean
+  carbon chains, sub-loops of the core -- which is what the heuristic is *for*.)
+* **Permafrost carbon release is absent from discovery -- necessarily.** The strongest-path
+  search drops zero-score links at every timestep, and (as the next cell shows) the permafrost
+  flux never moves in this scenario, so no search at any timestep can traverse it. A dormant loop
+  is structurally invisible to behavior-driven discovery; **pinning is the only way to put one
+  under observation**. Discovery and pinning are complements, not alternatives -- precisely the
+  papers' argument for shipping `LOOPSCORE` alongside the heuristic.
+
 Now simulate with LTM instrumentation and pull each pinned loop's score series:
 """)
 
@@ -396,9 +446,14 @@ Two things worth noticing before the headline chart:
   classify as `U` (unknown) from structure alone. The polarity shown above is reclassified from
   the *runtime* score signs: the heat-radiation and carbon-uptake loops come out balancing (`B`),
   the recycling and sink-weakening loops reinforcing (`R`), exactly as the physics says.
-* **Permafrost scores flat zero** -- C-LEARN's BAU scenario ships with the permafrost module
-  switched off, and LTM cleanly distinguishes "structurally present but inactive" from "active
-  but small". A dominance method that couldn't represent *zero* would have you chasing ghosts.
+* **Permafrost scores flat zero, and that zero is structural truth.** C-LEARN v77 ships with the
+  permafrost module switched off: `sensitivity_of_methane_emissions_to_permafrost_and_clathrate`
+  is the literal constant `0`, and it multiplies `flux_c_from_permafrost_release` -- so the flux
+  is identically 0.0, the loop transmits nothing, and every LTM link score through it is exactly
+  0 at every timestep (a link whose variable never changes has score 0 by definition). LTM
+  cleanly distinguishes "structurally present but inactive" from "active but small"; a dominance
+  method that couldn't represent *zero* would have you chasing ghosts. The loop stays in the
+  pinned set as a tripwire: under a scenario that enables the module, it will start scoring.
 """)
 
 # ============================================================================
@@ -411,7 +466,8 @@ md("""
 The pinned loops' relative scores are normalized within their shared cycle partition, so at each
 instant these nine |scores| (plus any other activity in the partition) sum to 1: a true
 share-of-activity decomposition. We plot the deterministic scenario -- the behavior being
-explained on top, the loop shares below.
+explained on top, the loop shares below. Loops that are never active are left off the chart (and
+called out below it): drawing a permanently-zero band would only add legend noise.
 """)
 
 code("""
@@ -420,8 +476,12 @@ pin_names = {loop.id: (getattr(loop, "name", None) or loop.id) for loop in ltm_r
 rel = {pid: sim.get_relative_loop_score(pid, element="deterministic") for pid in pin_names}
 shares = pd.DataFrame(rel, index=pd.Index(time_years, name="year")).fillna(0.0)
 
-balancing = [p for p in shares if shares[p].mean() < 0]
-reinforcing = [p for p in shares if shares[p].mean() >= 0 and shares[p].abs().max() > 0]
+# Split the ACTIVE loops by polarity for the stacked chart; an |score| that
+# never leaves zero means the loop transmitted nothing all run.
+active = [p for p in shares if shares[p].abs().max() > 0]
+inactive = [p for p in shares if p not in active]
+balancing = [p for p in active if shares[p].mean() < 0]
+reinforcing = [p for p in active if shares[p].mean() >= 0]
 
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10.5, 8), sharex=True,
                                gridspec_kw={"height_ratios": [1, 1.6]})
@@ -454,6 +514,11 @@ ax2.set_ylabel("share of feedback activity")
 ax2.set_title("... and the loops driving it: balancing (blue) loses ground to reinforcing (red)")
 ax2.legend(loc="upper left", fontsize=7.5, ncol=2, framealpha=0.95)
 fig.tight_layout()
+
+print(f"{len(active)} of {len(shares.columns)} pinned loops drawn; not drawn (relative score "
+      "exactly 0 for the entire run):")
+for p in inactive:
+    print(f"  {pin_names[p]}")
 """)
 
 code("""
