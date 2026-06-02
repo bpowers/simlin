@@ -1067,19 +1067,60 @@ fn all_module_stocks(
     stocks
 }
 
+/// Content-derived sort key that fully orders any set of distinct loops,
+/// including sibling cycles over the same node set (GH #497).
+///
+/// The key is a tuple `(variable_set, edge_sequence)`:
+///
+/// - **Primary -- the deduped, sorted variable set** (`vars.join("_")`).  This
+///   is the historical key.  Keeping it as the leading component means a model
+///   whose loops all have distinct variable sets (the common single-direction
+///   case) keeps its existing `r{n}`/`b{n}`/`u{n}` numbering bit-for-bit: the
+///   primary already orders those loops totally, so the secondary key is never
+///   consulted and no IDs churn.
+///
+/// - **Secondary -- the canonical cyclic rotation of the directed edge
+///   sequence** (`canonical_rotation` over each `link.from`).  Two sibling
+///   cycles over the same node set -- `a -> b -> c -> a` and
+///   `a -> c -> b -> a` on a multidigraph -- share the primary key, so before
+///   this tiebreaker `sort_by_key`'s stable fallback preserved whatever order
+///   Johnson's enumerator emitted them in.  That order depends on `HashMap`
+///   iteration in [`crate::ltm::indexed::IndexedGraph::from_edges`], which is
+///   deterministic within one process but per-process-randomized across
+///   processes (Rust's `DefaultHasher` reseeds per process), so the same
+///   model could assign `r3` to the forward cycle in one run and the reverse
+///   cycle in the next -- flapping the IDs that persisted UI state, loop
+///   pinning (`SetLoopName`/`LoopMetadata`), and deterministic tests key on.
+///   The canonical edge-sequence rotation differs between siblings (it is the
+///   exact key the dedup in `find_loops_with_limit` guarantees is unique per
+///   loop -- raw `link.from`, *not* the stripped variable name, so it also
+///   distinguishes per-element cross-element loops on arrayed models), so it
+///   fully orders any tied group, making `assign_loop_ids` a pure function of
+///   loop content rather than enumeration order.
+fn loop_id_sort_key(loop_item: &Loop) -> (String, Vec<String>) {
+    let mut vars: Vec<String> = loop_item
+        .links
+        .iter()
+        .flat_map(|link| vec![link.from.as_str().to_string(), link.to.as_str().to_string()])
+        .collect();
+    vars.sort();
+    vars.dedup();
+    let primary = vars.join("_");
+
+    let edge_seq: Vec<String> = loop_item
+        .links
+        .iter()
+        .map(|link| link.from.as_str().to_string())
+        .collect();
+    let secondary = super::canonical_rotation(&edge_seq);
+
+    (primary, secondary)
+}
+
 /// Assign deterministic IDs to loops based on their polarity and content.
 /// Standalone function for use by tracked functions in db.rs.
 pub(crate) fn assign_loop_ids(loops: &mut [Loop]) {
-    loops.sort_by_key(|loop_item| {
-        let mut vars: Vec<String> = loop_item
-            .links
-            .iter()
-            .flat_map(|link| vec![link.from.as_str().to_string(), link.to.as_str().to_string()])
-            .collect();
-        vars.sort();
-        vars.dedup();
-        vars.join("_")
-    });
+    loops.sort_by_cached_key(loop_id_sort_key);
 
     let mut r_counter = 1;
     let mut b_counter = 1;

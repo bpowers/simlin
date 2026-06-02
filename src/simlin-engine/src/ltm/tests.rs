@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use super::graph::{CausalGraph, get_variable_dependencies};
+use super::graph::{CausalGraph, assign_loop_ids, get_variable_dependencies};
 use super::indexed::IndexedGraph;
 use super::partitions::CyclePartitions;
 use super::polarity::{
@@ -17,7 +17,7 @@ use crate::ast::BinaryOp;
 use crate::common::{Canonical, Ident};
 use crate::datamodel::Dimension;
 use crate::db::{
-    DetectedLoopPolarity, SimlinDb, compute_link_polarities, model_cycle_partitions,
+    DetectedLoop, DetectedLoopPolarity, SimlinDb, compute_link_polarities, model_cycle_partitions,
     model_detected_loops, sync_from_datamodel,
 };
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
@@ -90,6 +90,93 @@ fn test_deterministic_loop_naming() {
             "Loop variables should be identical"
         );
     }
+}
+
+#[test]
+fn test_multidigraph_sibling_loops_get_content_determined_ids() {
+    // GH #497, end-to-end through `model_detected_loops`. A 3-party arms race
+    // where each nation's buildup depends on the other two yields two sibling
+    // 3-cycles over the SAME node set -- arms_a -> ... -> arms_b -> ... ->
+    // arms_c -> ... -> arms_a (forward) and the reverse arms_a -> ... ->
+    // arms_c -> ... -> arms_b -> ... -> arms_a. Their deduped variable set is
+    // identical, so the loop-id primary key ties them; before the
+    // canonical-edge-sequence tiebreaker, which sibling got the lower id was
+    // decided by `IndexedGraph::from_edges`'s HashMap iteration order -- stable
+    // within a process but per-process-randomized, so persisted loop ids and
+    // pins flapped run-to-run. With the tiebreaker the id assignment is a pure
+    // function of loop content, so the sibling whose canonical directed edge
+    // sequence sorts first deterministically gets the lower id index.
+    let model = x_model(
+        "main",
+        vec![
+            x_stock("arms_a", "10", &["build_a"], &[], None),
+            x_stock("arms_b", "10", &["build_b"], &[], None),
+            x_stock("arms_c", "10", &["build_c"], &[], None),
+            // Each buildup flow depends on the OTHER two nations' arms, so the
+            // stock graph is a fully bidirectional triangle -- the smallest
+            // shape that produces both directed 3-cycles as distinct loops.
+            x_flow("build_a", "(arms_b + arms_c) * 0.1", None),
+            x_flow("build_b", "(arms_a + arms_c) * 0.1", None),
+            x_flow("build_c", "(arms_a + arms_b) * 0.1", None),
+        ],
+    );
+
+    let sim_specs = sim_specs_with_units("years");
+    let datamodel_project = x_project(sim_specs, &[model]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &datamodel_project);
+    let source_model = result.models["main"].source;
+    let detected = model_detected_loops(&db, source_model, result.project);
+
+    // Identify the two 3-stock sibling loops by the cyclic order in which they
+    // visit the three stocks (the auxiliary buildup flows interleave between
+    // them but the stock order is what distinguishes the siblings).
+    let stock_order = |variables: &[String]| -> Vec<String> {
+        let stocks: Vec<String> = variables
+            .iter()
+            .filter(|v| v.starts_with("arms_"))
+            .cloned()
+            .collect();
+        crate::ltm::canonical_rotation(&stocks)
+    };
+    let three_stock_loops: Vec<&DetectedLoop> = detected
+        .loops
+        .iter()
+        .filter(|l| stock_order(&l.variables).len() == 3)
+        .collect();
+    assert_eq!(
+        three_stock_loops.len(),
+        2,
+        "the arms-race triangle must surface both directed 3-stock cycles as distinct loops"
+    );
+
+    let forward = three_stock_loops
+        .iter()
+        .find(|l| stock_order(&l.variables) == vec!["arms_a", "arms_b", "arms_c"])
+        .expect("forward arms_a->arms_b->arms_c sibling");
+    let reverse = three_stock_loops
+        .iter()
+        .find(|l| stock_order(&l.variables) == vec!["arms_a", "arms_c", "arms_b"])
+        .expect("reverse arms_a->arms_c->arms_b sibling");
+
+    // Both siblings share a polarity (all links here are positive, so both are
+    // Reinforcing) and therefore the same `r` counter; the forward sibling's
+    // canonical edge sequence sorts first, so it gets the lower id index.
+    let prefix = |id: &str| id.chars().next().unwrap();
+    let num = |id: &str| -> u32 { id[1..].parse().unwrap() };
+    assert_eq!(
+        prefix(&forward.id),
+        prefix(&reverse.id),
+        "sibling loops {} / {} should share a polarity prefix",
+        forward.id,
+        reverse.id
+    );
+    assert!(
+        num(&forward.id) < num(&reverse.id),
+        "forward sibling ({}) must get a lower id index than the reverse sibling ({})",
+        forward.id,
+        reverse.id
+    );
 }
 
 #[test]
@@ -4378,6 +4465,133 @@ fn deduplicate_keeps_both_directed_three_cycles_in_multidigraph() {
         seconds,
         vec!["b", "c"],
         "the two 3-cycle loops must be a -> b -> ... and a -> c -> ..."
+    );
+}
+
+/// A loop's directed edge sequence keyed by its canonical cyclic rotation of
+/// `link.from`, used in the order-independence tests below to identify the
+/// SAME directed cycle across reorderings of the loop list. Two sibling cycles
+/// over the same node set (`a->b->c->a` vs `a->c->b->a`) have DIFFERENT keys.
+fn loop_directed_key(l: &Loop) -> Vec<String> {
+    let seq: Vec<String> = l.links.iter().map(|link| link.from.to_string()).collect();
+    super::canonical_rotation(&seq)
+}
+
+#[test]
+fn assign_loop_ids_is_order_independent_for_sibling_cycles() {
+    // GH #497: `assign_loop_ids` must be a pure function of loop *content*,
+    // not of the order Johnson's enumerator (and ultimately HashMap iteration
+    // in `IndexedGraph::from_edges`) happened to emit the loops in.
+    //
+    // K3 with all 6 directed edges has two sibling 3-cycles over {a,b,c}:
+    // a->b->c->a and a->c->b->a. Their deduped variable SET is identical
+    // ({a,b,c}), so the PRIMARY sort key ties them; before the tiebreaker the
+    // stable-sort fallback preserved whatever order they arrived in, so
+    // swapping the two siblings in the input flipped which one got which id.
+    //
+    // Feed the enumerated loop list to `assign_loop_ids` in several input
+    // orders (as-enumerated, reversed, and a handful of fixed-seed shuffles)
+    // and assert each directed cycle is assigned the SAME id in every order.
+    let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
+    let baseline = cg.find_loops_with_limit(usize::MAX).unwrap();
+    assert!(
+        baseline.len() >= 2,
+        "K3 multidigraph must enumerate the sibling 3-cycles plus 2-cycles"
+    );
+
+    // The id each directed cycle receives in the as-enumerated order.
+    let canonical_ids: HashMap<Vec<String>, String> = {
+        let mut loops = baseline.clone();
+        assign_loop_ids(&mut loops);
+        loops
+            .iter()
+            .map(|l| (loop_directed_key(l), l.id.clone()))
+            .collect()
+    };
+
+    // A small deterministic permutation set: identity, reverse, and a few
+    // fixed-seed shuffles. A tiny xorshift keeps the shuffle reproducible
+    // without pulling in an RNG dependency.
+    let permute = |seeds: u64| -> Vec<Loop> {
+        let mut v = baseline.clone();
+        let mut state = seeds | 1;
+        // Fisher-Yates with the xorshift stream.
+        for i in (1..v.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let j = (state as usize) % (i + 1);
+            v.swap(i, j);
+        }
+        v
+    };
+
+    let mut orders: Vec<Vec<Loop>> = vec![baseline.clone()];
+    let mut reversed = baseline.clone();
+    reversed.reverse();
+    orders.push(reversed);
+    for seed in [1u64, 2, 3, 12345, 0xDEAD_BEEF] {
+        orders.push(permute(seed));
+    }
+
+    for (idx, order) in orders.iter().enumerate() {
+        let mut loops = order.clone();
+        assign_loop_ids(&mut loops);
+        for l in &loops {
+            let key = loop_directed_key(l);
+            let expected = &canonical_ids[&key];
+            assert_eq!(
+                &l.id, expected,
+                "loop {key:?} got id {:?} in input order #{idx} but {expected:?} in the \
+                 baseline order; assign_loop_ids must be content-determined, not input-order \
+                 determined (GH #497)",
+                l.id
+            );
+        }
+    }
+}
+
+#[test]
+fn assign_loop_ids_orders_sibling_cycles_by_canonical_edge_sequence() {
+    // Pin the concrete tiebreaker rule for a sibling pair: when two cycles
+    // share a variable set (so the primary key ties), the one whose canonical
+    // directed edge sequence (`canonical_rotation` of `link.from`) is
+    // lexicographically smaller gets the lower id index.
+    //
+    // For the {a,b,c} siblings the canonical rotations are [a,b,c] (the
+    // forward a->b->c->a) and [a,c,b] (the reverse a->c->b->a); [a,b,c] sorts
+    // first, so the forward cycle gets the lower id index. Both siblings have
+    // the same polarity (every link is Unknown here, since `build_causal_graph`
+    // leaves `variables` empty), so they share one counter and the exact
+    // prefix is immaterial -- only the relative index between the two siblings
+    // is pinned.
+    let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
+    let mut loops = cg.find_loops_with_limit(usize::MAX).unwrap();
+    assign_loop_ids(&mut loops);
+
+    let id_of = |key: &[&str]| -> String {
+        let want: Vec<String> = key.iter().map(|s| s.to_string()).collect();
+        loops
+            .iter()
+            .find(|l| loop_directed_key(l) == want)
+            .map(|l| l.id.clone())
+            .unwrap_or_else(|| panic!("no loop with directed key {key:?}"))
+    };
+    let forward = id_of(&["a", "b", "c"]);
+    let reverse = id_of(&["a", "c", "b"]);
+
+    // Both siblings carry the same one-letter prefix; the forward sibling's
+    // numeric index must be lower than the reverse sibling's.
+    let prefix = |id: &str| id.chars().next().unwrap();
+    let num = |id: &str| -> u32 { id[1..].parse().unwrap() };
+    assert_eq!(
+        prefix(&forward),
+        prefix(&reverse),
+        "the two {{a,b,c}} siblings ({forward} / {reverse}) share a polarity and thus a counter"
+    );
+    assert!(
+        num(&forward) < num(&reverse),
+        "forward sibling a->b->c->a ({forward}) must sort before reverse a->c->b->a ({reverse})"
     );
 }
 

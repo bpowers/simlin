@@ -2182,7 +2182,15 @@ fn assign_loop_ids(loops: &mut [FoundLoop]) {
     }
 }
 
-fn loop_sort_key(loop_info: &Loop) -> String {
+/// Content-derived sort key that fully orders discovered loops, including
+/// sibling cycles over the same node set (GH #497). Mirrors
+/// `crate::ltm::graph::loop_id_sort_key`: the primary component is the deduped
+/// sorted variable set (the historical key -- single-direction loops keep
+/// their existing numbering), and the secondary component is the canonical
+/// cyclic rotation of the directed edge sequence, which differs between two
+/// sibling cycles so the stable-sort fallback no longer leaks the discovery
+/// DFS's (process-order-dependent) emission order into the assigned ids.
+fn loop_sort_key(loop_info: &Loop) -> (String, Vec<String>) {
     let mut vars: Vec<String> = loop_info
         .links
         .iter()
@@ -2190,7 +2198,16 @@ fn loop_sort_key(loop_info: &Loop) -> String {
         .collect();
     vars.sort();
     vars.dedup();
-    vars.join("_")
+    let primary = vars.join("_");
+
+    let edge_seq: Vec<String> = loop_info
+        .links
+        .iter()
+        .map(|link| link.from.as_str().to_string())
+        .collect();
+    let secondary = crate::ltm::canonical_rotation(&edge_seq);
+
+    (primary, secondary)
 }
 
 #[cfg(test)]
@@ -3355,6 +3372,74 @@ mod tests {
 
         assert_eq!(a_b_loop.loop_info.id, "b1");
         assert_eq!(x_y_loop.loop_info.id, "r1");
+    }
+
+    #[test]
+    fn test_assign_loop_ids_order_independent_for_sibling_cycles() {
+        // GH #497, discovery-path twin of the structural-path test in
+        // `ltm::tests`. Two sibling 3-cycles over {a,b,c} -- a->b->c->a and
+        // a->c->b->a -- share a deduped variable set, so the primary sort key
+        // ties them. Without the canonical-edge-sequence tiebreaker, the
+        // stable-sort fallback leaks the (process-dependent) discovery-DFS
+        // emission order into the assigned ids. Feed both input orderings and
+        // assert each directed cycle keeps the same id.
+        let forward = || {
+            make_found_loop(
+                &[("a", "b"), ("b", "c"), ("c", "a")],
+                &[],
+                LoopPolarity::Reinforcing,
+                1.0,
+            )
+        };
+        let reverse = || {
+            make_found_loop(
+                &[("a", "c"), ("c", "b"), ("b", "a")],
+                &[],
+                LoopPolarity::Reinforcing,
+                1.0,
+            )
+        };
+        // The directed cycle's identity is its canonical `link.from` rotation.
+        let directed_key = |fl: &FoundLoop| -> Vec<String> {
+            let seq: Vec<String> = fl
+                .loop_info
+                .links
+                .iter()
+                .map(|l| l.from.as_str().to_string())
+                .collect();
+            crate::ltm::canonical_rotation(&seq)
+        };
+
+        let mut order_a = vec![forward(), reverse()];
+        let mut order_b = vec![reverse(), forward()];
+        assign_loop_ids(&mut order_a);
+        assign_loop_ids(&mut order_b);
+
+        let id_for = |loops: &[FoundLoop], key: &[&str]| -> String {
+            let want: Vec<String> = key.iter().map(|s| s.to_string()).collect();
+            loops
+                .iter()
+                .find(|fl| directed_key(fl) == want)
+                .map(|fl| fl.loop_info.id.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            id_for(&order_a, &["a", "b", "c"]),
+            id_for(&order_b, &["a", "b", "c"]),
+            "forward sibling must get the same id regardless of input order"
+        );
+        assert_eq!(
+            id_for(&order_a, &["a", "c", "b"]),
+            id_for(&order_b, &["a", "c", "b"]),
+            "reverse sibling must get the same id regardless of input order"
+        );
+        // And the two siblings must receive distinct ids (the tiebreaker
+        // separates them rather than collapsing them).
+        assert_ne!(
+            id_for(&order_a, &["a", "b", "c"]),
+            id_for(&order_a, &["a", "c", "b"]),
+            "the two siblings must receive distinct ids"
+        );
     }
 
     /// Helper to create a FoundLoop with given variable names, polarity, and score.
