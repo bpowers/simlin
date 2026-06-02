@@ -433,9 +433,16 @@ fn ltm_non_euler_returns_wasmgen_error() {
 /// runtime polarity is derived from `scores` so a small float drift on
 /// the boundary could otherwise flip a `MostlyReinforcing` vs
 /// `Reinforcing` classification and falsely diverge the identity check.
-/// `Loop.id` is also excluded because `rank_and_filter` assigns IDs
-/// after a `sort_by(avg_abs_score)` whose tie-breaking is order-of-
-/// discovery -- not a stable identity surface.
+/// `Loop.id` is also excluded because `rank_and_filter` assigns the
+/// `r#`/`b#`/`u#` counter ids as a function of the *whole* discovered
+/// set, not of a single loop's structure: the id depends on each loop's
+/// polarity (the same float-boundary-sensitive classification excluded
+/// above) and on the partition-relative ranking and `MAX_LOOPS`
+/// truncation of every loop. (The per-loop ordering used to assign ids is
+/// itself stable -- content-determined by the canonical edge sequence,
+/// commit 1539329d -- but the resulting counter is still a whole-set
+/// property, so it is not a stable per-loop identity surface across
+/// backends.)
 ///
 /// The canonical rotation makes the key invariant to the discovery
 /// algorithm's choice of starting node on the cycle: two runs that walk

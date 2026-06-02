@@ -625,9 +625,20 @@ impl CausalGraph {
         // `budget * max_depth` fresh descents (prefix-sharing only lowers this,
         // since backtracking re-descends a single sibling edge, not a whole
         // chain). So in a dead-end-free enumeration the *completed-path* cap --
-        // not this work cap -- is what stops the walk (proven by
+        // not this work cap -- is what stops the walk and legitimate
+        // enumeration is never starved (proven by
         // `module_pathways_work_bound_does_not_starve_exact_budget`), while a
         // dead-end frontier still aborts in `O(budget * max_depth)` expansions.
+        //
+        // This no-starvation guarantee is scoped to dead-end-free graphs. In a
+        // *mixed* graph -- real paths plus dead-end subgraphs -- the sorted
+        // neighbor order can descend a dead-end frontier ahead of the real
+        // paths, exhausting the allowance before any (or all `budget`)
+        // legitimate paths complete; the walk then returns fewer paths (down to
+        // zero) than a dead-end-free graph would. That is intended safe
+        // degradation: the result is correctly flagged `truncated` and the
+        // caller surfaces a `Warning`, never a runaway or a silently-incomplete
+        // composite presented as complete.
         // `.max(max_depth)` covers the `budget == 0` edge case.
         let mut expansions_left = budget.saturating_mul(max_depth).max(max_depth);
         let mut truncated = false;

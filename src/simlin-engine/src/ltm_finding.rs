@@ -2212,6 +2212,13 @@ fn cmp_relative_importance(a: &RelativeImportance, b: &RelativeImportance) -> st
 /// is specifically built to keep), pushing it below a perpetually-mediocre
 /// loop. A loop with no active steps gets `NaN`, which sorts last.
 ///
+/// Because the mean is over each loop's *own* active-step set, a loop that
+/// dominates a partition that is active for only a brief window ties one
+/// that dominates an always-active partition: both have a mean relative
+/// contribution near `1.0` over their respective active steps. This
+/// cross-partition equivalence is by design -- the relative key measures
+/// in-partition dominance, not how long the partition itself stays active.
+///
 /// **NaN/Inf handling** mirrors `ltm_post.rs::denom_summand` (GH #542) so the
 /// two LTM paths agree: a `NaN` `score[t]` contributes nothing to a partition
 /// total and that step is skipped in the loop's own mean; an `Inf` `score[t]`
@@ -2401,11 +2408,10 @@ impl LoopIdCounters {
 /// the input order (commit 1539329d). Callers that need a different final
 /// ordering re-sort after this returns.
 fn assign_loop_ids(loops: &mut [FoundLoop]) {
-    loops.sort_by(|a, b| {
-        let key_a = loop_sort_key(&a.loop_info);
-        let key_b = loop_sort_key(&b.loop_info);
-        key_a.cmp(&key_b)
-    });
+    // `sort_by_cached_key` computes each loop's (allocating) sort key once
+    // rather than per comparison, matching the `crate::ltm::graph`
+    // `assign_loop_ids` twin.
+    loops.sort_by_cached_key(|fl| loop_sort_key(&fl.loop_info));
 
     let mut counters = LoopIdCounters::new();
     for found in loops.iter_mut() {

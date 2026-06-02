@@ -36,10 +36,14 @@ type BucketMember = (usize, usize);
 /// `NaN == 0.0` is false), poisoning every sibling's relative score (GH
 /// #542).  Dropping the `NaN` summand lets healthy siblings normalize
 /// against the healthy denominator; the bad loop's *own* numerator stays
-/// `NaN`, so its own relative score stays `NaN` -- the honest per-loop
-/// "undefined here" signal.  This matches the discovery path, which coerces
-/// a `NaN` link score to a non-contributing 0
-/// (`ltm_finding::SearchGraph::from_edges`).
+/// `NaN`, so as long as a healthy sibling keeps the denominator non-zero
+/// its own relative score stays `NaN` -- the honest per-loop "undefined
+/// here" signal.  (When the `NaN` loop is the partition's only contributor,
+/// or every member is `NaN` at a step, excluding it collapses the
+/// denominator to `0.0` and the SAFEDIV-0 guard yields `0.0` instead -- the
+/// lone-pin degeneracy documented on `compute_rel_loop_scores`.)  This
+/// matches the discovery path, which coerces a `NaN` link score to a
+/// non-contributing 0 (`ltm_finding::SearchGraph::from_edges`).
 ///
 /// `+/-Inf` is deliberately NOT excluded: a raw loop score legitimately
 /// diverges at a dominance inflection (the link-score denominators go to
@@ -124,10 +128,14 @@ fn slot_partition(
 /// *excluded* from the partition sum via [`denom_summand`], so one loop
 /// whose score is undefined at a step no longer poisons every sibling's
 /// relative score in that partition.  The bad loop's own numerator is
-/// still `NaN`, so its own relative score stays `NaN` -- the honest
-/// per-loop "undefined here" signal -- while healthy siblings normalize
-/// against the healthy denominator.  This matches the discovery path's
-/// "a `NaN` link contributes nothing" rule
+/// still `NaN`, so when a healthy sibling keeps the denominator non-zero
+/// its own relative score stays `NaN` -- the honest per-loop "undefined
+/// here" signal -- while the healthy siblings normalize against the
+/// healthy denominator.  (When the `NaN` loop is the partition's only
+/// contributor, or every member is `NaN` at the step, excluding it leaves
+/// a `0.0` denominator and the SAFEDIV-0 guard yields `0.0` instead -- see
+/// the lone-pin degeneracy section below.)  This matches the discovery
+/// path's "a `NaN` link contributes nothing" rule
 /// (`ltm_finding::SearchGraph::from_edges`).  `+/-Inf` is deliberately
 /// *kept* in the sum: a raw loop score legitimately diverges at a
 /// dominance inflection, so `Inf` is real signal -- it sends the
