@@ -289,8 +289,12 @@ class Loop:
 
     behavior_time_series: NDArray[np.float64] | None = None
     """
-    Loop's contribution to model behavior over time.
-    None for structural loops, populated for loops from Run objects.
+    Loop's contribution to model behavior over time, as the SIGNED relative
+    loop score in ``[-1, 1]``: the loop's share of its cycle partition's total
+    absolute loop score, with sign preserved (a balancing loop reads negative).
+    Comparable across loops, so ``abs(...)`` ranks loops by dominance.
+    None for structural loops; populated for loops from ``Run`` objects and
+    ``Model.analyze()``.
     """
 
     name: str | None = None
@@ -319,7 +323,10 @@ class Loop:
         """
         Average importance across simulation.
 
-        Computes the mean of the absolute value of the behavior time series.
+        Computes the mean of the absolute value of the behavior time series
+        (the signed relative loop score in ``[-1, 1]``), so the result is in
+        ``[0, 1]`` and comparable across loops -- a higher value means the loop
+        is more dominant on average.
         Returns None if behavior_time_series is not available (structural loops).
 
         Returns:
@@ -342,7 +349,9 @@ class Loop:
         """
         Maximum importance during simulation.
 
-        Computes the maximum of the absolute value of the behavior time series.
+        Computes the maximum of the absolute value of the behavior time series
+        (the signed relative loop score in ``[-1, 1]``), so the result is in
+        ``[0, 1]``: the peak share of partition activity this loop ever drives.
         Returns None if behavior_time_series is not available (structural loops).
 
         Returns:
@@ -378,7 +387,8 @@ class Analysis:
     """
 
     loops: tuple[Loop, ...]
-    """Discovered loops, ranked by importance, with behavior time series."""
+    """Discovered loops, ranked by mean ``abs`` relative importance (descending),
+    each carrying its signed relative-loop-score ``behavior_time_series``."""
 
     dominant_periods: tuple[DominantPeriod, ...]
     """Intervals where a specific set of loops dominates behavior."""

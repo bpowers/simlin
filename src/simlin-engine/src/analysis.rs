@@ -21,6 +21,12 @@ pub struct LoopSummary {
     pub name: Option<String>,
     pub polarity: String,
     pub variables: Vec<String>,
+    /// Per-timestep SIGNED partition-relative loop score, a value in `[-1, 1]`:
+    /// the loop's score divided by the sum of `|loop_score|` over the loops
+    /// sharing its cycle partition (sign preserved; non-finite coerced to 0).
+    /// This is comparable across partitions and consistent with the engine's
+    /// mean-relative loop ranking and the pinned-loop relative-score path --
+    /// unlike a raw `|loop score|`, which is partition-incomparable (GH #543).
     pub importance: Vec<f64>,
 }
 
@@ -257,11 +263,13 @@ fn to_feedback_loop(fl: &crate::ltm_finding::FoundLoop) -> FeedbackLoop {
 
     let variables = loop_variables(fl);
 
-    let importance_series: Vec<f64> = fl
-        .scores
-        .iter()
-        .map(|(_, s)| if s.is_finite() { *s } else { 0.0 })
-        .collect();
+    // Feed the SIGNED partition-relative loop score into dominant-period
+    // selection so periods are share-based, not raw-magnitude-based: a loop in
+    // a high-raw-magnitude partition no longer dominates the period labels just
+    // because its absolute score is large.  `rel_scores` is already normalized
+    // per partition into [-1, 1] (see `to_loop_summary`); NaN coerces to 0 so
+    // `calculate_dominant_periods` sees a finite series.
+    let importance_series: Vec<f64> = signed_relative_importance(fl);
 
     FeedbackLoop {
         name: fl.loop_info.id.clone(),
@@ -270,6 +278,22 @@ fn to_feedback_loop(fl: &crate::ltm_finding::FoundLoop) -> FeedbackLoop {
         importance_series,
         dominant_period: None,
     }
+}
+
+/// The loop's SIGNED partition-relative importance series (in [-1, 1]) with
+/// non-finite entries coerced to 0, ready for `LoopSummary.importance` and
+/// `calculate_dominant_periods`.
+///
+/// `FoundLoop.rel_scores` is populated by `ltm_finding::rank_truncate_and_id`
+/// from the cycle-partition denominators; it is empty only on the no-score-data
+/// path (no timesteps), in which case this returns an empty series.  Raw loop
+/// scores are NOT comparable across partitions (GH #543), so importance and
+/// dominant-period selection use this relative series instead.
+fn signed_relative_importance(fl: &crate::ltm_finding::FoundLoop) -> Vec<f64> {
+    fl.rel_scores
+        .iter()
+        .map(|s| if s.is_finite() { *s } else { 0.0 })
+        .collect()
 }
 
 /// Extract the ordered variable names from a `FoundLoop`.
@@ -311,11 +335,13 @@ fn to_loop_summary(
 
     let variables = loop_variables(fl);
 
-    let importance: Vec<f64> = fl
-        .scores
-        .iter()
-        .map(|(_, s)| if s.is_finite() { s.abs() } else { 0.0 })
-        .collect();
+    // `importance` is the SIGNED partition-relative loop score in [-1, 1], not
+    // the raw |loop score|.  Raw scores are incomparable across cycle
+    // partitions (one partition's loops can score in the tens of thousands
+    // while another's score in the tens), so a raw |score| is meaningless as an
+    // "importance" number and inconsistent with both the engine's own
+    // mean-relative ranking (GH #543) and the pinned-loop path's [-1, 1] scores.
+    let importance: Vec<f64> = signed_relative_importance(fl);
 
     let name = resolve_loop_name(fl, uid_to_loop_name, model_name, project);
 
@@ -549,6 +575,98 @@ mod tests {
                     last_time
                 );
             }
+        }
+    }
+
+    // ---- importance is the signed partition-relative loop score ----
+
+    /// `analyze_model`'s `LoopSummary.importance` is the *signed
+    /// partition-relative* loop score in [-1, 1], NOT the raw |loop score|.
+    /// On the two-loop logistic-growth model (one reinforcing growth loop and
+    /// one balancing carrying-capacity loop sharing a cycle partition):
+    ///   * every importance value lies in [-1, 1],
+    ///   * where both loops are active the |importance| values sum to ~1.0
+    ///     (they normalize against their shared partition total),
+    ///   * the balancing loop carries a negative importance somewhere (sign
+    ///     preserved), the reinforcing one a positive importance, and
+    ///   * loops arrive sorted by mean |relative importance| descending.
+    #[test]
+    fn importance_is_signed_partition_relative_score() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let project = load_project(path);
+        let (mut db, sp) = synced_db(&project);
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
+
+        assert_eq!(
+            analysis.loop_dominance.len(),
+            2,
+            "logistic growth has exactly two feedback loops"
+        );
+
+        // Every importance value is a relative score in [-1, 1].
+        for summary in &analysis.loop_dominance {
+            for &v in &summary.importance {
+                assert!(
+                    (-1.0..=1.0).contains(&v),
+                    "importance {v} for loop {} must lie in [-1, 1]",
+                    summary.loop_id
+                );
+            }
+        }
+
+        // The two loops share one cycle partition, so at any step where both
+        // are active their |importance| values sum to ~1.0.  Find such a step.
+        let n = analysis.time.len();
+        let a = &analysis.loop_dominance[0].importance;
+        let b = &analysis.loop_dominance[1].importance;
+        let both_active_sum_to_one = (0..n).any(|t| {
+            let (x, y) = (a[t], b[t]);
+            x != 0.0 && y != 0.0 && ((x.abs() + y.abs()) - 1.0).abs() < 1e-6
+        });
+        assert!(
+            both_active_sum_to_one,
+            "where both loops are active their |importance| must sum to ~1.0"
+        );
+
+        // The balancing (carrying-capacity) loop's importance is negative
+        // somewhere; the reinforcing one's is positive somewhere.  Sign is
+        // preserved through the relative-score normalization.
+        let has_negative = analysis
+            .loop_dominance
+            .iter()
+            .any(|s| s.importance.iter().any(|&v| v < 0.0));
+        let has_positive = analysis
+            .loop_dominance
+            .iter()
+            .any(|s| s.importance.iter().any(|&v| v > 0.0));
+        assert!(
+            has_negative,
+            "a balancing loop must carry a negative signed importance"
+        );
+        assert!(
+            has_positive,
+            "a reinforcing loop must carry a positive signed importance"
+        );
+
+        // Loops arrive sorted by mean |relative importance| descending.
+        let mean_abs = |s: &LoopSummary| -> f64 {
+            let active: Vec<f64> = s.importance.iter().copied().filter(|v| *v != 0.0).collect();
+            if active.is_empty() {
+                0.0
+            } else {
+                active.iter().map(|v| v.abs()).sum::<f64>() / active.len() as f64
+            }
+        };
+        let means: Vec<f64> = analysis.loop_dominance.iter().map(mean_abs).collect();
+        for w in means.windows(2) {
+            assert!(
+                w[0] >= w[1] - 1e-9,
+                "loops must be sorted by mean |relative importance| descending: {means:?}"
+            );
         }
     }
 

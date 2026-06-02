@@ -133,6 +133,16 @@ pub struct FoundLoop {
     pub scores: Vec<(f64, f64)>,
     /// Average |score| over the simulation (for ranking/filtering)
     pub avg_abs_score: f64,
+    /// Signed *partition-relative* loop score at each timestep:
+    /// `score[t] / Σ_{j in same cycle partition} |score_j[t]|`, sign preserved
+    /// (the same normalization `ltm_post::compute_rel_loop_scores` applies to
+    /// the pinned-loop path).  A value in `[-1, 1]` that, unlike the raw
+    /// `scores`, IS comparable across partitions -- so it is the correct
+    /// importance/dominance key (GH #543's ranking statistic, surfaced as a
+    /// per-timestep series).  Filled by `rank_truncate_and_id` once the
+    /// per-partition per-timestep denominators are known; empty until then and
+    /// for the no-score-data path.  Length matches `scores` when populated.
+    pub rel_scores: Vec<f64>,
 }
 
 /// The outcome of a strongest-path discovery run.
@@ -2050,6 +2060,8 @@ pub fn discover_loops_with_graph(
             loop_info,
             scores,
             avg_abs_score,
+            // Filled in once partition denominators are known (rank_truncate_and_id).
+            rel_scores: Vec::new(),
         });
     }
 
@@ -2317,6 +2329,26 @@ fn rank_and_filter(found_loops: &mut Vec<FoundLoop>, partitions: &CyclePartition
     }
 }
 
+/// The SIGNED per-timestep partition-relative loop score series for one loop.
+///
+/// `rel[t] = score[t] / totals[t]`, with `totals[t]` the loop's cycle-partition
+/// denominator (`Σ_{j in partition} |score_j[t]|`, NaN summands already
+/// excluded by `rank_and_filter`).  SAFEDIV-0 (`totals[t] == 0` -> `0.0`) and a
+/// `NaN` numerator propagating to `NaN` both match
+/// `ltm_post::compute_rel_loop_scores` exactly, so the discovery and pinned-loop
+/// relative-score surfaces agree.  Sign is preserved (a balancing loop reads
+/// negative), giving a value in `[-1, 1]` for a finite score.
+fn signed_relative_scores(fl: &FoundLoop, totals: &[f64]) -> Vec<f64> {
+    fl.scores
+        .iter()
+        .enumerate()
+        .map(|(t, &(_, score))| {
+            let total = totals.get(t).copied().unwrap_or(0.0);
+            if total == 0.0 { 0.0 } else { score / total }
+        })
+        .collect()
+}
+
 /// Rank the retained loops by partition-relative importance, truncate to the
 /// (possibly test-overridden) cap, assign IDs, and leave the loops in the
 /// relative-importance ordering callers consume.
@@ -2332,13 +2364,22 @@ fn rank_truncate_and_id(
     // Pair each loop with its partition-relative importance statistic, then sort
     // and truncate the pair vector so the (non-Copy) FoundLoop move is a single
     // permutation and the key survives ID assignment (no recomputation).
+    //
+    // While the per-partition denominators are in hand, also attach each loop's
+    // SIGNED per-timestep relative score series (`rel_scores`) -- the same
+    // `score[t] / partition_total[t]` normalization, SAFEDIV-0, that
+    // `ltm_post::compute_rel_loop_scores` applies on the pinned-loop path.  This
+    // is the [-1, 1] importance series `analysis::to_loop_summary` /
+    // `to_feedback_loop` surface, so dominance/ranking is partition-relative
+    // (comparable across partitions) rather than raw-magnitude-biased.
     let mut keyed: Vec<(RelativeImportance, FoundLoop)> = std::mem::take(found_loops)
         .into_iter()
         .enumerate()
-        .map(|(idx, fl)| {
+        .map(|(idx, mut fl)| {
             let totals = &partition_totals[&loop_partitions[idx]];
             let mean_rel = mean_relative_contribution(&fl, totals);
             let key = loop_sort_key(&fl.loop_info);
+            fl.rel_scores = signed_relative_scores(&fl, totals);
             (RelativeImportance { mean_rel, key }, fl)
         })
         .collect();
@@ -3559,6 +3600,7 @@ mod tests {
                 },
                 scores: vec![],
                 avg_abs_score: 1.0,
+                rel_scores: vec![],
             },
             FoundLoop {
                 loop_info: Loop {
@@ -3582,6 +3624,7 @@ mod tests {
                 },
                 scores: vec![],
                 avg_abs_score: 0.5,
+                rel_scores: vec![],
             },
         ];
 
@@ -3722,6 +3765,7 @@ mod tests {
             },
             scores,
             avg_abs_score,
+            rel_scores: vec![],
         }
     }
 

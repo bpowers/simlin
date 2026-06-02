@@ -38,7 +38,7 @@ Each `Loop` has:
   `Run.loops` can return any of the five; `Model.loops` (structural-only)
   reports just `REINFORCING`/`BALANCING`/`UNDETERMINED` because the
   `MOSTLY_*` variants require simulated runtime scores.
-- `behavior_time_series` -- NumPy array of importance values per timestep (from `Run.loops`; `None` for structural loops from `Model.loops`)
+- `behavior_time_series` -- NumPy array of signed relative loop scores in `[-1, 1]` per timestep (from `Run.loops` and `Model.analyze()`; `None` for structural loops from `Model.loops`). Each value is the loop's share of its cycle partition's total absolute loop score, sign preserved (a balancing loop reads negative), so `abs(...)` is comparable across loops
 
 ### Importance Methods
 

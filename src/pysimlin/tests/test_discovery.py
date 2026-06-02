@@ -49,10 +49,41 @@ class TestAnalyzeDiscovery:
             )
             assert len(loop.behavior_time_series) > 0
             assert np.all(np.isfinite(loop.behavior_time_series))
+            # Importance is the SIGNED partition-relative loop score, so every
+            # value lies in [-1, 1] (NOT a raw |loop score|, which is
+            # partition-incomparable and can exceed 1).
+            assert np.all(loop.behavior_time_series >= -1.0)
+            assert np.all(loop.behavior_time_series <= 1.0)
             # average_importance() reads behavior_time_series; it must be a real
             # number for a discovered loop (not None, as it is for structural).
             avg = loop.average_importance()
             assert avg is not None
+
+    def test_discovered_importance_is_partition_relative(
+        self, logistic_model: simlin.Model
+    ) -> None:
+        # On the two-loop logistic-growth model both loops share one cycle
+        # partition, so at any timestep where both are active their |importance|
+        # values sum to ~1.0 -- the signature of a partition-relative score
+        # (each loop's share of the partition total), not a raw magnitude.
+        analysis = logistic_model.analyze()
+        assert len(analysis.loops) == 2, "logistic growth has exactly two loops"
+        series = [lp.behavior_time_series for lp in analysis.loops]
+        assert all(s is not None for s in series)
+        a, b = series[0], series[1]
+        assert a is not None
+        assert b is not None
+        both_active = (a != 0.0) & (b != 0.0)
+        assert np.any(both_active), "there must be steps where both loops are active"
+        sums = np.abs(a[both_active]) + np.abs(b[both_active])
+        assert np.allclose(sums, 1.0, atol=1e-6), (
+            "where both loops are active their |importance| must sum to ~1.0"
+        )
+        # The balancing carrying-capacity loop reads negative somewhere; the
+        # reinforcing growth loop reads positive somewhere.
+        all_values = np.concatenate([a, b])
+        assert np.any(all_values < 0.0), "a balancing loop must read negative"
+        assert np.any(all_values > 0.0), "a reinforcing loop must read positive"
 
     def test_discovered_loop_variables_have_no_trailing_repeat(
         self, logistic_model: simlin.Model

@@ -116,6 +116,10 @@ pub struct LoopDominanceSummary {
     pub name: Option<String>,
     pub polarity: String,
     pub variables: Vec<String>,
+    /// Per-timestep SIGNED partition-relative loop score in `[-1, 1]` (the
+    /// engine `LoopSummary.importance`): the loop's share of its cycle
+    /// partition's total |loop score|, sign preserved.  Comparable across
+    /// loops/partitions, so a larger `|importance|` means a more dominant loop.
     #[serde(serialize_with = "serialize_importance")]
     pub importance: Vec<f64>,
 }
