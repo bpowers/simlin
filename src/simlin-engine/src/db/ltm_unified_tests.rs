@@ -552,6 +552,65 @@ fn test_model_ltm_variables_stays_exhaustive_below_scc_threshold() {
     );
 }
 
+/// Circuit-budget truncation (a dense SCC under the node-count gate, here
+/// simulated with the test override) must flip `model_ltm_variables` to
+/// discovery-mode shape -- link scores for causal edges, NO per-loop
+/// `loop_score` vars -- and emit a Warning naming the budget. The trap this
+/// guards: a truncated tiered result carries empty circuit lists, which the
+/// pre-budget code would have read as "no loops / nothing to score" and
+/// returned an empty exhaustive result, silently disagreeing with
+/// `model_ltm_mode`.
+#[test]
+fn test_model_ltm_variables_circuit_budget_truncation_flips_to_discovery() {
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+
+    let _guard = crate::ltm::LtmCircuitBudgetGuard::new(1);
+
+    let project = crate::test_common::TestProject::new("budget_trip_vars")
+        .stock("s", "100", &["in_f"], &["out_f"], None)
+        .flow("in_f", "s * 0.1", None)
+        .flow("out_f", "s * 0.05", None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+
+    assert_eq!(
+        ltm.mode,
+        crate::db::LtmMode::Discovery,
+        "circuit-budget truncation must resolve the mode to Discovery"
+    );
+    assert!(
+        ltm.vars.iter().any(|v| v.name.contains("link_score")),
+        "flipped model must still emit discovery-shape link scores; got: {:?}",
+        ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+    assert!(
+        !ltm.vars
+            .iter()
+            .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+        "flipped model must NOT materialize loop_score vars from a truncated \
+         (incomplete) circuit list"
+    );
+
+    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    let has_budget_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+        d.severity == DiagnosticSeverity::Warning
+            && matches!(
+                &d.error,
+                DiagnosticError::Assembly(msg)
+                    if msg.contains("MAX_LTM_CIRCUITS") && msg.contains("discovery mode")
+            )
+    });
+    assert!(
+        has_budget_warning,
+        "budget truncation should emit a Warning naming MAX_LTM_CIRCUITS; got: {:?}",
+        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+    );
+}
+
 /// Auto-flip must surface a `CompilationDiagnostic::Warning` so the
 /// caller can explain the mode change to the user.  The diagnostic is
 /// accumulated by `model_ltm_variables` itself (not via

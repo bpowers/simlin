@@ -390,23 +390,84 @@ pub(super) fn black_box_delta_ratio_equation(from_ident: &str, to_ident: &str) -
     )
 }
 
+/// Map each module variable in `model` to the sub-model internal variables
+/// the rest of the model actually reads through it (the `port` suffixes of
+/// `module·port` dependency references), each port list sorted for
+/// determinism.
+///
+/// One cached pass over the model's variable dependency sets (mirroring the
+/// scan `db::ltm::loops::find_model_output_ports` does across *parent*
+/// models for a sub-model's ports, but scoped to module instances within
+/// this model). Implicit-helper deps are included for the same reason as
+/// there: SMOOTH/DELAY expansion synthesizes helper auxes whose deps may be
+/// the only readers of a module output.
+#[salsa::tracked(returns(ref))]
+pub fn model_module_output_ports(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> HashMap<String, Vec<String>> {
+    let middot = '\u{00B7}';
+    let empty_ctx = ModuleIdentContext::new(db, vec![]);
+    let empty_inputs = ModuleInputSet::empty(db);
+    let mut ports: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    let record = |dep: &str, ports: &mut HashMap<String, std::collections::BTreeSet<String>>| {
+        if let Some(dot_pos) = dep.find(middot) {
+            let module_part = &dep[..dot_pos];
+            let internal_var = &dep[dot_pos + middot.len_utf8()..];
+            if !module_part.is_empty() && !internal_var.is_empty() {
+                ports
+                    .entry(module_part.to_string())
+                    .or_default()
+                    .insert(internal_var.to_string());
+            }
+        }
+    };
+    for (_, source_var) in model.variables(db).iter() {
+        let deps = variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
+        for dep in deps.dt_deps.iter().chain(deps.initial_deps.iter()) {
+            record(dep, &mut ports);
+        }
+        for iv_deps in &deps.implicit_vars {
+            for dep in &iv_deps.dt_deps {
+                record(dep, &mut ports);
+            }
+        }
+    }
+    ports
+        .into_iter()
+        .map(|(module, port_set)| (module, port_set.into_iter().collect()))
+        .collect()
+}
+
 /// Find output ports of a specific module variable by examining which
 /// variables in the model reference it with `module·internal_var` syntax.
+///
+/// Stdlib modules always use the `output` convention. For user-defined
+/// modules the ports come from [`model_module_output_ports`]'s dependency
+/// scan -- the pre-scan code hardcoded `output` here ("we don't have deps"),
+/// which silently zeroed every discovery-mode link score into a user module
+/// whose output port has any other name (the `module·output` reference
+/// resolved to nothing and the fragment stubbed to a constant). The
+/// `output` fallback remains only for a module none of whose internals are
+/// read (no deps to scan -- such a module drives nothing, so the link score
+/// is moot either way).
 pub(super) fn find_model_output_ports_for_module(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
     edges: &CausalEdgesResult,
     module_var_name: &str,
 ) -> Vec<String> {
-    // Look up the module's sub-model name. For stdlib modules the
-    // output is always "output" by convention.
     if let Some(model_name) = edges.dynamic_modules.get(module_var_name)
         && model_name.starts_with("stdlib\u{205A}")
     {
         return vec!["output".to_string()];
     }
-    // For user-defined modules, we'd need to scan variable deps for
-    // module·var references. Since we don't have deps here, fall back
-    // to "output" as a convention.
-    vec!["output".to_string()]
+    model_module_output_ports(db, model, project)
+        .get(module_var_name)
+        .cloned()
+        .unwrap_or_else(|| vec!["output".to_string()])
 }
 
 #[salsa::tracked(returns(ref))]
@@ -453,7 +514,8 @@ pub fn link_score_equation_text<'db>(
                         // Find the module's output port by looking at which
                         // variables in the model depend on module·internal_var.
                         let edges = model_causal_edges(db, model, project);
-                        let output_ports = find_model_output_ports_for_module(edges, to_name);
+                        let output_ports =
+                            find_model_output_ports_for_module(db, model, project, edges, to_name);
                         let output_ref = output_ports
                             .first()
                             .map(|port| format!("{}\u{00B7}{}", to_ident.as_str(), port))

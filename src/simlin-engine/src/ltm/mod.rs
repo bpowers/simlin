@@ -109,6 +109,91 @@ pub(crate) use indexed::scc_components;
 /// well before they reach the cliffs.
 pub const MAX_LTM_SCC_NODES: usize = 50;
 
+/// Maximum number of elementary circuits Johnson's enumeration may emit on
+/// any production LTM path before the model is treated as too dense for
+/// exhaustive analysis (auto-flip to discovery mode, or an invalid pin).
+///
+/// [`MAX_LTM_SCC_NODES`] alone does not bound enumeration cost: elementary-
+/// circuit count is super-exponential in SCC *density*, not node count. A
+/// near-complete digraph of only 12 nodes already contains ~1.1M elementary
+/// circuits, and at 14 nodes (~119M circuits) variable-level Johnson
+/// allocates tens of GB before any SCC gate can fire -- all while staying
+/// far below the 50-node threshold, which was calibrated on the *sparse*
+/// SCCs hand-built SD models produce (WRLD3's 166-node SCC has only 1.86M
+/// circuits). Machine-generated or densely cross-linked imported models can
+/// defeat the node-count gate, so enumeration itself must carry a budget.
+///
+/// ## Why 100,000
+///
+/// Enumerating 100k circuits is fast (well under a second in release) and
+/// small (~10 MB transient), so a model that stays under the budget pays
+/// nothing. A model *over* the budget could not complete the exhaustive
+/// pipeline anyway: each loop emits a `loop_score` synthetic variable, and
+/// 100k+ synthetic variables blows past the VM's 65,536 result-slot ceiling
+/// long before the ~17 GB `build_element_level_loops` materialization cliff
+/// (see `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`). Flipping
+/// to discovery at the budget is therefore strictly better than attempting
+/// exhaustive enumeration: the alternative is an OOM or a compile failure,
+/// never a successful exhaustive analysis.
+///
+/// Production callers obtain the effective budget via
+/// [`ltm_circuit_budget`]; tests override it with a tiny value through
+/// [`LtmCircuitBudgetGuard`] instead of building dense fixtures large
+/// enough to trip the production constant (per
+/// docs/dev/rust.md#test-time-budgets).
+pub const MAX_LTM_CIRCUITS: usize = 100_000;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`MAX_LTM_CIRCUITS`], scoped by an active
+    /// [`LtmCircuitBudgetGuard`].
+    static LTM_CIRCUIT_BUDGET_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The elementary-circuit enumeration budget for production LTM paths.
+/// Returns [`MAX_LTM_CIRCUITS`] in production builds; in `#[cfg(test)]`
+/// builds an active [`LtmCircuitBudgetGuard`] override takes precedence.
+pub(crate) fn ltm_circuit_budget() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(b) = LTM_CIRCUIT_BUDGET_OVERRIDE.with(|c| c.get()) {
+            return b;
+        }
+    }
+    MAX_LTM_CIRCUITS
+}
+
+/// RAII guard (test-only) that overrides [`ltm_circuit_budget`] for the
+/// current thread for the guard's lifetime, restoring the previous value on
+/// drop -- so a panicking test does not leak the override to the next test
+/// reusing the thread.
+///
+/// Because the consuming queries (`model_loop_circuits`,
+/// `model_loop_circuits_tiered`, `model_ltm_mode`, ...) are salsa-memoized,
+/// the guard must outlive every such call in the test whose budget it
+/// controls (a later call on the same `db` would otherwise return the
+/// memoized tiny-budget result regardless of the override state).
+#[cfg(test)]
+pub(crate) struct LtmCircuitBudgetGuard {
+    prev: Option<usize>,
+}
+
+#[cfg(test)]
+impl LtmCircuitBudgetGuard {
+    pub(crate) fn new(budget: usize) -> Self {
+        let prev = LTM_CIRCUIT_BUDGET_OVERRIDE.with(|c| c.replace(Some(budget)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for LtmCircuitBudgetGuard {
+    fn drop(&mut self) {
+        LTM_CIRCUIT_BUDGET_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
 /// Detect all feedback loops in a single model.
 ///
 /// Runs Johnson's enumeration with no per-call circuit budget; the

@@ -103,7 +103,11 @@ and average absolute score for ranking.
    port and uses `enumerate_module_pathways()` to find internal pathways, then
    collects internal stocks along those pathways (namespaced with the module
    instance name, e.g. `smooth·smoothed`)
-5. Loops are deduplicated by sorted node set (`deduplicate_loops`)
+5. Loops are deduplicated by **canonical edge-sequence rotation** (issue
+   #308): rotations of the same directed cycle collapse, while two distinct
+   directed cycles over the same node set (e.g. the arms-race three-party
+   pair `A -> B -> C -> A` vs `A -> C -> B -> A`) are retained as separate
+   loops
 6. Deterministic IDs are assigned by sorting loops by their content key
    (`assign_loop_ids`)
 7. `model_ltm_variables` generates synthetic variables for all links
@@ -341,6 +345,17 @@ module link cases:
   transfer-function formula (`generate_module_link_score_equation`) since modules
   have no user-visible equation for ceteris-paribus analysis.
 
+**Black-box formula caveat.** The black-box equation is `Δto/Δfrom` -- the
+*gain* `dz/dx` (LTM ref section 3.3), not a link score: it lacks the
+`|Δfrom/Δto|`-style weighting that converts a sensitivity into a realized
+contribution and makes link scores chain multiplicatively into path/loop
+scores. It is a pragmatic stand-in for the cases where no equation is
+available for ceteris-paribus analysis; a loop product through such a link
+is biased relative to a true LTM loop score. Discovery mode additionally
+uses a `Δ(module·output)/Δfrom` variant for variable→module links (the
+composite reference only resolves in exhaustive compilation), with the
+output port determined by `model_module_output_ports`' dependency scan.
+
 ## Module Boundary Handling
 
 The implementation uses **composite link scores** for dynamic modules (SMOOTH,
@@ -441,12 +456,29 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
   (checked via `expr_references_var`), uses the other operand's polarity
 - **Subtraction**: Left operand preserves polarity; right operand flips. Same
   independence check as addition.
-- **Multiplication**: Combines polarities (positive * negative = negative). When
-  one operand has unknown polarity, checks if the other is a positive or negative
-  constant (`is_positive_constant` / `is_negative_constant`) or a variable with
-  a constant equation (`is_positive_variable` / `is_negative_variable`)
-- **Division**: Numerator preserves polarity; denominator flips. Same independence
-  check as addition/subtraction.
+- **Multiplication**: When one operand is independent of `from_var`, its VALUE
+  sign decides: a positive or negative constant (`is_positive_constant` /
+  `is_negative_constant`) or a variable with a constant equation
+  (`is_positive_variable` / `is_negative_variable`) preserves or flips the
+  other operand's polarity. When BOTH operands depend on `from_var`, the
+  product rule `d(f*g)/dx = f'g + fg'` mixes operand VALUES into the sign,
+  so plain sign composition is unsound (it labeled logistic growth
+  `pop*(1 - pop/K)` a definite Negative while the true partial flips at
+  K/2). The rule: agreeing derivative signs AND both operands
+  positive-by-convention (bare variable references, positive constants, or
+  positive-constant variables -- NOT compound expressions like `1 - pop/K`)
+  propagate the shared polarity (covers `pop*pop/capacity`); everything else
+  is `Unknown`.
+- **Division**: When the independent operand's value sign is provable, it is
+  used exactly (`-5/y` is Positive -- `d(n/y)/dy = -n/y^2` -- and `x/-5` is
+  Negative; the pre-fix rules flipped/passed unconditionally and got both
+  wrong). For a NON-constant independent operand the conventional SD
+  positive-value assumption applies (numerator passes polarity through,
+  denominator flips), documented as a labeling convention rather than a
+  proof -- `share = pop/total` reads as `total -> share` Negative on every SD
+  diagram even though `pop > 0` is unprovable. Both-sides-dependent division
+  mirrors multiplication: opposing derivative signs with
+  positive-by-convention operands propagate, else `Unknown`.
 - **Unary negation and NOT**: Flip polarity
 - **IF-THEN-ELSE**: Returns the common polarity if both branches agree, `Unknown`
   otherwise
@@ -458,9 +490,13 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
   argument's polarity. The strict-monotonicity test uses a y-range-relative
   epsilon, `max(EPSILON, range_rel * (y_max - y_min))` (#492), so a near-flat
   arm with imported numeric noise (`...12.0001, 12.0000, 12.0002...`) no longer
-  flips an otherwise-monotone curve to `Unknown`; the residual nuance is that
-  it compares the y-delta `dy`, not the slope `dy/dx`, so a curve with
-  non-uniform x-spacing can still misclassify (GH #536).
+  flips an otherwise-monotone curve to `Unknown`. Comparing the y-delta `dy`
+  rather than the slope `dy/dx` is correct for the sign question: a
+  piecewise-linear interpolation between y-points that increase consecutively
+  is monotone regardless of x-spacing (slope magnitude varies, its sign does
+  not), so non-uniform x-spacing cannot misclassify a valid table -- the only
+  exposure is a table whose x-points are themselves non-monotone, which is
+  malformed input (GH #536 is narrower than its title suggests).
 - **Per-element graphical functions** (#502): when an *arrayed* source feeds an
   *arrayed* per-element graphical-function target -- each element of the target
   has its own lookup `Table` (the per-element `tables` list on `Variable::Var`) --
@@ -560,25 +596,37 @@ they reduced full 251-step discovery to under a second:
   sibling loops whose entry path is weaker (the paper's Figure 7 failure
   mode). The expansion cap inverts the trade-off: work is bounded at
   `cap * SCC_edges` traversals per (stock, step) regardless of score
-  distribution, and small components (the common case after SCC restriction)
-  get effectively exhaustive enumeration -- every elementary cycle through
-  the stock is found, strictly more complete than the paper's heuristic.
+  distribution, and components where the cap does not bind get genuinely
+  exhaustive enumeration -- every elementary cycle through the stock is
+  found, strictly more complete than the paper's heuristic *in that regime*.
+  The non-binding regime covers sparse components and dense ones up to
+  roughly 7 nodes; empirically the cap already binds on a complete digraph
+  of 8 nodes (~10% of its 16k elementary cycles missed), so dense components
+  in the 8+ node range are heuristic, not exhaustive.
 
 ### Heuristic Nature
 
-For small per-step components the search is effectively exhaustive (the
-expansion cap doesn't bind), so every elementary cycle through each stock is
+For per-step components where the cap does not bind (sparse, or dense up to
+~K7) the search is exhaustive: every elementary cycle through each stock is
 found -- including the paper's Figure 7 case, where the original `best_score`
 pruning missed the strongest loop (`test_figure_7_paper` documents this).
 
-For large components the expansion cap binds and the algorithm is heuristic:
-loops whose every entry path is reached only after the per-node budgets are
-consumed can be missed. The mitigations mirror the paper's: (a) running the
-search at every timestep with different link scores (and therefore different
-edge orderings) tends to discover loops missed at other timesteps, and (b)
-per-stock budget resets mean different starting stocks can discover different
-loops. The papers' empirical evaluation shows that missed loops are
-consistently "siblings" of found loops, differing by only a few links.
+When the cap binds the algorithm is heuristic: loops whose every entry path
+is reached only after the per-node budgets are consumed can be missed.
+Because each node's edges are explored in descending |score| order, the
+exploration priority is the *first edge's* score -- and a loop's strength is
+a product over all its links, NOT monotone in its first edge, so a strong
+loop entered only via a weak first edge can be dropped while a weaker loop
+entered via a strong edge is kept (the cap's own analogue of the paper's
+Figure 7 failure mode; an adversarial 4-node example: `a->w (10), a->x
+(0.01), w->x (0.0001), x->a (1)` with cap 1 keeps the 0.001-scoring loop
+through `w` and misses the 0.01-scoring direct loop). The mitigations mirror
+the paper's: (a) running the search at every timestep with different link
+scores (and therefore different edge orderings) tends to discover loops
+missed at other timesteps, and (b) per-stock budget resets mean different
+starting stocks can discover different loops. The papers' empirical
+evaluation shows that missed loops are consistently "siblings" of found
+loops, differing by only a few links.
 
 ### Ranking and Filtering (`rank_and_filter`)
 
@@ -820,8 +868,10 @@ Two kinds of agg:
     case (`result_dims` equal `target`'s iterated dims); the strict-prefix
     *broadcast* case (`SUM(matrix[D1, *])` inside an A2A body over `D1 × D2`,
     so the agg is over `D1` but the target is over `D1 × D2`) over-subscribes
-    the agg into the cross-product -- the loop score degrades to 0 there, GH
-    #528.
+    the agg into the cross-product -- the degradation is fail-LOUD: the
+    over-subscripted fragment does not compile, so
+    `model_ltm_fragment_diagnostics` emits a per-variable `Warning` and the
+    loop score degrades to 0 (GH #528).
 
   A loop running through the inlined reducer therefore traverses
   `… → from[<row>] → $⁚ltm⁚agg⁚{n}[<slot>] → to[e] → …`, and the loop-score
@@ -1087,8 +1137,24 @@ emits no per-loop score variables at all.
    `r{n}`/`b{n}`/`u{n}` namespace.
 
 A pin that fails any step (unordered set, no stock, oversized expansion SCC,
-no element-level instantiation) is reported in `PinnedLoopsResult::invalid`
-and surfaced as a compilation `Warning` -- never silently scored 0.
+expansion past the `MAX_LTM_CIRCUITS` budget, no element-level instantiation)
+is reported in `PinnedLoopsResult::invalid` and surfaced as a compilation
+`Warning` -- never silently scored 0.
+
+**Sibling-cycle limitation.** A pin names a variable *set*, and
+`order_variable_cycle` resolves it to the lexicographically-first Hamiltonian
+cycle over that set. A set that admits two distinct directed cycles -- the
+three-party arms-race pair `A -> B -> C -> A` vs `A -> C -> B -> A`, both
+over the same variables -- can therefore only pin one direction (the
+lex-first); the other is not expressible through the pin API and is silently
+not the one scored. The enumerator finds and scores both directions in
+exhaustive mode (canonical-rotation dedup keeps them distinct), so this
+gap bites only in discovery mode or when the user expects the *other*
+direction's score. Tracked as a known limitation; resolving it requires
+extending the pin primitive to carry cycle order. Relatedly, a pin whose
+only stock is module-internal is rejected by the has-stock validation
+(which checks parent-level stocks only) even though the enumerator finds
+the equivalent loop.
 
 In exhaustive mode, a scored pin loop whose variable-cycle rotation matches an
 enumerated loop is skipped (the enumerated loop already carries a correct
@@ -1194,6 +1260,18 @@ cases remain deliberate carve-outs:
    post-simulation -- divergence 5 below -- removed that factor from
    augmentation cost.) Auto-flip emits a `CompilationDiagnostic` at
    `Warning` severity so callers can surface the fallback to users.
+
+   The node-count gates alone do not bound enumeration cost -- elementary-
+   circuit count is super-exponential in SCC *density*, not node count (a
+   near-complete 14-node digraph holds ~119M circuits and OOMs uncapped
+   Johnson while passing both 50-node gates) -- so every production Johnson
+   run additionally carries a circuit budget, `MAX_LTM_CIRCUITS` (100,000,
+   defined alongside `MAX_LTM_SCC_NODES`). Exhausting it marks the
+   `LoopCircuitsResult`/`TieredCircuitsResult` as `truncated`, which the
+   shared `model_ltm_mode` gate treats exactly like an oversized SCC: the
+   model flips to discovery with its own `Warning`. A pinned loop whose
+   element-level expansion exceeds the budget becomes an invalid pin
+   (reported, never silently scored).
 
 3. **Module handling**: The papers describe composite link scores for macros
    (DELAY, SMOOTH) but do not discuss module boundaries as an implementation

@@ -198,15 +198,12 @@ fn test_ltm_passthrough_module_compiles() {
     );
 }
 
-/// Issue #417: modules with stocks whose output variable is not named
-/// "output" should still get composite/pathway LTM variables. This test
-/// uses a user-defined module with an internal stock and output named
-/// "result" instead of the stdlib convention "output".
-#[test]
-fn test_ltm_module_with_non_standard_output_name() {
-    use salsa::Setter;
-
-    let project = datamodel::Project {
+/// Fixture shared by the non-standard-output-port tests: a main model
+/// driving a user-defined `custom_smooth` module whose output stock is
+/// named `result` (not the stdlib `output` convention), read back via
+/// `custom_smooth.result`.
+fn custom_output_port_project() -> datamodel::Project {
+    datamodel::Project {
         name: "custom_output_name".to_string(),
         sim_specs: datamodel::SimSpecs {
             start: 0.0,
@@ -236,9 +233,15 @@ fn test_ltm_module_with_non_standard_output_name() {
                     }),
                     x_aux("gap", "goal - smoothed", None),
                     x_flow("adjustment", "gap / 5", None),
+                    // dst uses the XMILE `<connect to="module.var">` convention
+                    // (prefixed with the module instance name); a bare dst is
+                    // dropped by `build_module_inputs` / `resolve_module_input`.
                     x_module(
                         "custom_smooth",
-                        &[("level", "input"), ("3", "delay_time")],
+                        &[
+                            ("level", "custom_smooth.input"),
+                            ("3", "custom_smooth.delay_time"),
+                        ],
                         None,
                     ),
                 ],
@@ -267,7 +270,18 @@ fn test_ltm_module_with_non_standard_output_name() {
         ],
         source: None,
         ai_information: None,
-    };
+    }
+}
+
+/// Issue #417: modules with stocks whose output variable is not named
+/// "output" should still get composite/pathway LTM variables. This test
+/// uses a user-defined module with an internal stock and output named
+/// "result" instead of the stdlib convention "output".
+#[test]
+fn test_ltm_module_with_non_standard_output_name() {
+    use salsa::Setter;
+
+    let project = custom_output_port_project();
 
     let mut db = SimlinDb::default();
     let (source_project, sub_model) = {
@@ -284,6 +298,50 @@ fn test_ltm_module_with_non_standard_output_name() {
         has_composite,
         "sub-model should have composite score variable (output named 'result'). vars: {:?}",
         ltm_vars.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
+}
+
+/// Discovery-mode twin of the non-standard-output-port case: the
+/// input→module link score (`level → custom_smooth`) uses the black-box
+/// delta-ratio against the module's OUTPUT variable, and that reference
+/// must name the module's real output port (`custom_smooth·result`). The
+/// pre-fix `find_model_output_ports_for_module` hardcoded `output` for
+/// user-defined modules, so the reference resolved to nothing and the
+/// fragment silently stubbed the link score to a constant 0 -- degrading
+/// every discovery-mode loop through the module.
+#[test]
+fn test_discovery_module_link_score_uses_real_output_port() {
+    use salsa::Setter;
+
+    let project = custom_output_port_project();
+
+    let mut db = SimlinDb::default();
+    let (source_project, main_model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    source_project.set_ltm_enabled(&mut db).to(true);
+    source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+    let ltm_vars = model_ltm_variables(&db, main_model, source_project);
+    let link = ltm_vars
+        .vars
+        .iter()
+        .find(|v| v.name.contains("level\u{2192}custom_smooth"))
+        .expect("discovery mode must emit the level→custom_smooth link score");
+    let eqn_text = match &link.equation {
+        datamodel::Equation::Scalar(text) => text.clone(),
+        other => panic!("module link score should be scalar, got {other:?}"),
+    };
+    assert!(
+        eqn_text.contains("custom_smooth\u{00B7}result"),
+        "link score must reference the module's real output port \
+         custom_smooth·result; got: {eqn_text}"
+    );
+    assert!(
+        !eqn_text.contains("custom_smooth\u{00B7}output"),
+        "link score must not reference the nonexistent hardcoded \
+         custom_smooth·output port; got: {eqn_text}"
     );
 }
 

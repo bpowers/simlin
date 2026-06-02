@@ -126,7 +126,8 @@ pub fn link_score_equation_text_shaped<'db>(
                 if let Some(input) = inputs.iter().find(|i| i.src == from_ident) {
                     if is_discovery {
                         let edges = model_causal_edges(db, model, project);
-                        let output_ports = find_model_output_ports_for_module(edges, to_name);
+                        let output_ports =
+                            find_model_output_ports_for_module(db, model, project, edges, to_name);
                         let output_ref = output_ports
                             .first()
                             .map(|port| format!("{}\u{00B7}{}", to_ident.as_str(), port))

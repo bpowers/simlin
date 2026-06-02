@@ -433,10 +433,35 @@ pub(super) fn analyze_expr_polarity_with_context(
                     // polarity, not just whether it's independent of from_var.
                     // This is why Mul uses is_positive_constant/is_negative_constant
                     // rather than the expr_references_var pattern used by Add/Sub/Div.
-                    // If both have known polarity, combine them
                     if left_pol != LinkPolarity::Unknown && right_pol != LinkPolarity::Unknown {
-                        // Sign multiplication: ++ -> +, +- -> -, -- -> +.
-                        left_pol.compose(right_pol)
+                        // BOTH factors depend on from_var (a non-Unknown
+                        // polarity only arises from a from_var reference --
+                        // constants and unrelated variables analyze to
+                        // Unknown). The product rule
+                        // d(f*g)/dx = f'g + fg' mixes the operands' VALUES
+                        // into the partial's sign, so the derivative signs
+                        // alone do not determine it. Under the positive-value
+                        // labeling convention (see the Div arm) the sum IS
+                        // sign-definite when both derivative signs AGREE and
+                        // both operand values are positive-by-convention:
+                        // f,g > 0 and sign(f') == sign(g') gives f'g + fg'
+                        // that shared sign. That covers `pop * pop / capacity`
+                        // (quadratic crowding: P). Everything else is
+                        // genuinely indeterminate: the pre-fix sign
+                        // COMPOSITION labeled logistic growth
+                        // `r*pop*(1 - pop/K)` a definite Negative while its
+                        // true partial `r*(1 - 2*pop/K)` flips sign at K/2 --
+                        // and no value convention rescues it, because the
+                        // factor `(1 - pop/K)` is a compound expression whose
+                        // value sign itself flips.
+                        if left_pol == right_pol
+                            && operand_positive_by_convention(left, variables)
+                            && operand_positive_by_convention(right, variables)
+                        {
+                            left_pol
+                        } else {
+                            LinkPolarity::Unknown
+                        }
                     } else if left_pol != LinkPolarity::Unknown {
                         // Only left has polarity, check if right is a constant or constant-valued variable
                         if is_positive_constant(right)
@@ -471,24 +496,92 @@ pub(super) fn analyze_expr_polarity_with_context(
                         LinkPolarity::Unknown
                     }
                 }
-                BinaryOp::Div => match (left_pol, right_pol) {
-                    (LinkPolarity::Unknown, pol) => {
-                        if expr_references_var(left, from_var) {
-                            LinkPolarity::Unknown
+                BinaryOp::Div => {
+                    // Division's partial depends on the VALUE sign of the
+                    // from_var-independent operand, not just independence:
+                    //   d(n/y)/dy = -n/y^2      -- sign is -sign(n)
+                    //   d(f/y)/dx = f'(x)/y     -- sign is sign(f')*sign(y)
+                    // When the independent operand's sign is PROVABLE (a
+                    // numeric constant, or a variable whose whole equation is
+                    // one), use it -- the pre-fix rules ignored it entirely,
+                    // mislabeling `-5/y` (truly Positive) as Negative and
+                    // `x/-5` (truly Negative) as Positive.
+                    //
+                    // For a NON-constant independent operand we keep the
+                    // conventional SD assumption that quantities are
+                    // positive-valued (numerator passes polarity through,
+                    // denominator flips it). This is a documented labeling
+                    // CONVENTION, not a proof: `share = pop / total` reads as
+                    // "total -> share is Negative" on every SD diagram even
+                    // though no analysis proves `pop > 0`. A sign-flipping
+                    // operand value would flip the label -- but a divisor
+                    // that crosses zero is already numerically catastrophic,
+                    // so real models keep divisor/numerator signs fixed, and
+                    // the runtime loop-score SIGN factors (which this label
+                    // never feeds) remain exact regardless.
+                    let value_sign = |e: &Expr2| -> Option<bool> {
+                        if is_positive_constant(e)
+                            || variables.is_some_and(|v| is_positive_variable(e, v))
+                        {
+                            Some(true)
+                        } else if is_negative_constant(e)
+                            || variables.is_some_and(|v| is_negative_variable(e, v))
+                        {
+                            Some(false)
                         } else {
-                            flip_polarity(pol)
+                            None
                         }
-                    }
-                    (pol, LinkPolarity::Unknown) => {
-                        if expr_references_var(right, from_var) {
-                            LinkPolarity::Unknown
-                        } else {
-                            pol
+                    };
+                    match (left_pol, right_pol) {
+                        (LinkPolarity::Unknown, pol) => {
+                            if expr_references_var(left, from_var) {
+                                LinkPolarity::Unknown
+                            } else {
+                                match value_sign(left) {
+                                    // Provably negative numerator inverts the
+                                    // conventional denominator flip; unknown
+                                    // sign falls back to the positive-value
+                                    // convention (flip).
+                                    Some(false) => pol,
+                                    _ => flip_polarity(pol),
+                                }
+                            }
                         }
+                        (pol, LinkPolarity::Unknown) => {
+                            if expr_references_var(right, from_var) {
+                                LinkPolarity::Unknown
+                            } else {
+                                match value_sign(right) {
+                                    // Provably negative denominator inverts
+                                    // the conventional pass-through; unknown
+                                    // sign falls back to the positive-value
+                                    // convention (pass through).
+                                    Some(false) => flip_polarity(pol),
+                                    _ => pol,
+                                }
+                            }
+                        }
+                        // Both sides depend on from_var: the quotient rule
+                        // d(f/g)/dx = (f'g - fg')/g^2. Mirroring the Mul
+                        // both-sides case, the sign is determinate under the
+                        // positive-value convention exactly when the
+                        // derivative signs OPPOSE (f' > 0, g' < 0 with
+                        // f,g > 0 gives both quotient-rule terms positive,
+                        // and vice versa) and both operand values are
+                        // positive-by-convention. A compound operand like
+                        // `(1 - x)` in `exp(x)/(1 - x)` defeats the value
+                        // convention (its own sign flips, here at x = 1, and
+                        // the partial's at x = 2), so it stays Unknown.
+                        (a, b)
+                            if a == flip_polarity(b)
+                                && operand_positive_by_convention(left, variables)
+                                && operand_positive_by_convention(right, variables) =>
+                        {
+                            a
+                        }
+                        _ => LinkPolarity::Unknown,
                     }
-                    (a, b) if a == flip_polarity(b) => a,
-                    _ => LinkPolarity::Unknown,
-                },
+                }
                 _ => LinkPolarity::Unknown,
             }
         }
@@ -619,6 +712,30 @@ pub(super) fn is_negative_variable(
         return is_negative_constant(var_expr);
     }
     false
+}
+
+/// Whether an operand's runtime VALUE may be assumed positive under the SD
+/// labeling convention used by the Mul/Div both-sides-dependent polarity
+/// rules: a bare variable/subscript reference (named SD quantities --
+/// stocks, flows, rates, capacities -- are conventionally positive-valued),
+/// a positive numeric constant, or a variable whose whole equation is one.
+///
+/// A COMPOUND expression (`1 - pop/K`, `K - pop`, ...) is never
+/// positive-by-convention: its value sign is derived, not a modeling
+/// convention, and the canonical mid-run polarity flips (logistic growth)
+/// come exactly from such factors. A provably-negative constant or
+/// constant-valued variable is excluded defensively even though the
+/// both-sides arms can only see operands that reference `from_var`.
+fn operand_positive_by_convention(
+    expr: &Expr2,
+    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+) -> bool {
+    if is_negative_constant(expr) || variables.is_some_and(|v| is_negative_variable(expr, v)) {
+        return false;
+    }
+    matches!(expr, Expr2::Var(..) | Expr2::Subscript(..))
+        || is_positive_constant(expr)
+        || variables.is_some_and(|v| is_positive_variable(expr, v))
 }
 
 /// Analyze the polarity of a graphical function/lookup table

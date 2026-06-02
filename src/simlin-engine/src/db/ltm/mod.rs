@@ -418,8 +418,12 @@ pub fn model_ltm_var_name_index(
 ///   2. the variable-level causal graph's largest SCC exceeds
 ///      `MAX_LTM_SCC_NODES` (the cheap early gate; variable-level Johnson at
 ///      that scale would enumerate millions of circuits), or
-///   3. (only when 1 and 2 are false) the cross-element / mixed slow-path
-///      subgraph's largest SCC exceeds `MAX_LTM_SCC_NODES` (the late flip).
+///   3. (only when 1 and 2 are false) a Johnson run inside the tiered
+///      enumerator abandoned enumeration at `MAX_LTM_CIRCUITS`
+///      (`tiered.truncated` -- a dense SCC under the node threshold can
+///      still hold hundreds of millions of circuits), or
+///   4. the cross-element / mixed slow-path subgraph's largest SCC exceeds
+///      `MAX_LTM_SCC_NODES` (the late flip).
 ///
 /// A stock-free model has no feedback loops, so no flip can occur: it is
 /// always `Exhaustive`, matching `model_ltm_variables`'s stock-free early
@@ -450,11 +454,14 @@ pub fn model_ltm_mode(db: &dyn Db, model: SourceModel, project: SourceProject) -
         return LtmMode::Discovery;
     }
 
-    // Late flip: the variable-level SCC cleared the early gate, but the
-    // cross-element / mixed slow-path subgraph blew past the threshold. The
-    // tiered enumerator exposes that SCC without having run Johnson on it.
+    // Late flips: the variable-level SCC cleared the early gate, but either
+    // (a) a Johnson run blew the circuit budget (`truncated` -- a dense SCC
+    // defeats the node-count gate, since circuit count is super-exponential
+    // in density rather than node count), or (b) the cross-element / mixed
+    // slow-path subgraph blew past the SCC threshold (which the tiered
+    // enumerator exposes without having run Johnson on it).
     let tiered = model_loop_circuits_tiered(db, model, project);
-    if tiered.slow_path_largest_scc > crate::ltm::MAX_LTM_SCC_NODES {
+    if tiered.truncated || tiered.slow_path_largest_scc > crate::ltm::MAX_LTM_SCC_NODES {
         LtmMode::Discovery
     } else {
         LtmMode::Exhaustive
@@ -701,14 +708,46 @@ pub fn model_ltm_variables(
     let mut agg_recovery_truncated = false;
     let loops: Option<Vec<Loop>> = if !is_discovery {
         let tiered = model_loop_circuits_tiered(db, model, project);
-        // Late-stage auto-flip: the variable-level SCC was small enough
-        // to clear the early gate, but the cross-element / mixed
+        // Late-stage auto-flip, case 1: a Johnson run inside the tiered
+        // enumerator blew the circuit budget. A dense SCC well under the
+        // node-count gates can still hold hundreds of millions of
+        // elementary circuits (count is super-exponential in density);
+        // uncapped enumeration OOMs before any SCC gate fires. The tiered
+        // result carries empty (unreliable) circuit lists in that case --
+        // it MUST be checked before the empty-fast-and-slow-path branch
+        // below, which would otherwise read truncation as "no loops" and
+        // return an exhaustive nothing-to-score result, silently
+        // disagreeing with `model_ltm_mode`.
+        if tiered.truncated {
+            let msg = format!(
+                "LTM analysis auto-switched from exhaustive to discovery mode: \
+                 loop enumeration was abandoned at the circuit budget \
+                 (MAX_LTM_CIRCUITS = {}).  The model's feedback structure is too \
+                 dense for exhaustive per-loop scoring (circuit count grows \
+                 super-exponentially with cycle density).  Per-loop scores are \
+                 ranked post-simulation via the strongest-path search; see \
+                 docs/design/ltm--loops-that-matter.md for the two-tier \
+                 strategy.",
+                crate::ltm::ltm_circuit_budget(),
+            );
+            CompilationDiagnostic(Diagnostic {
+                model: model.name(db).clone(),
+                variable: None,
+                error: DiagnosticError::Assembly(msg),
+                severity: DiagnosticSeverity::Warning,
+            })
+            .accumulate(db);
+            is_discovery = true;
+            None
+        }
+        // Late-stage auto-flip, case 2: the variable-level SCC was small
+        // enough to clear the early gate, but the cross-element / mixed
         // subgraph (the slow path) blew past the threshold. The tiered
         // enumerator already skipped Johnson on the slow path in that
         // case (`slow_path` is empty); we just need to flip the
         // is_discovery flag so link-score generation, etc. follow the
         // discovery path.
-        if tiered.slow_path_largest_scc > crate::ltm::MAX_LTM_SCC_NODES {
+        else if tiered.slow_path_largest_scc > crate::ltm::MAX_LTM_SCC_NODES {
             let msg = format!(
                 "LTM analysis auto-switched from exhaustive to discovery mode: \
                  the cross-element / mixed slow-path subgraph's largest SCC has {} nodes, \
