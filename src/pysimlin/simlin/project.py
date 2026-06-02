@@ -309,35 +309,33 @@ class Project:
     ) -> list[ErrorDetail]:
         """Apply a JSON patch, surfacing validation details as Python exceptions.
 
+        Rejection vs diagnostics: the engine REJECTS a patch only for genuine
+        validation failures (error-severity diagnostics, or a NEW unit warning
+        in a previously-clean model); a rejection raises here with the
+        underlying details attached. Separately, the engine reports every
+        diagnostic on the patched project -- including warnings that existed
+        BEFORE the patch -- through the collected-errors channel. Those are
+        informational: an accepted-and-committed patch must not look like a
+        failure just because the project already had warnings, so they are
+        returned, not raised.
+
         Args:
             patch_json: JSON-encoded patch data (UTF-8 bytes)
             dry_run: If True, validate without applying changes
-            allow_errors: If True, collect errors instead of failing on first error
+            allow_errors: If True, apply even when validation reports errors
 
         Returns:
-            List of ErrorDetail objects for collected validation errors
+            List of ErrorDetail objects for collected diagnostics (including
+            pre-existing warnings on the project)
 
         Raises:
-            SimlinRuntimeError or SimlinCompilationError: If operation fails
+            SimlinRuntimeError or SimlinCompilationError: If the patch is
+                rejected (or fails to parse/apply); the exception carries the
+                underlying diagnostics on its ``details`` attribute.
         """
         with self._lock:
             self._check_alive()
-            errors = _ffi_apply_patch_json(self._ptr, patch_json, dry_run, allow_errors)
-
-        if errors and not allow_errors:
-            first_code = errors[0].code if errors else None
-            message = (
-                "Patch dry run reported validation errors"
-                if dry_run
-                else "Patch produced validation errors"
-            )
-            exc = SimlinRuntimeError(message, first_code)
-            exc.errors = errors  # type: ignore[attr-defined]
-            exc.dry_run = dry_run  # type: ignore[attr-defined]
-            exc.allow_errors = allow_errors  # type: ignore[attr-defined]
-            raise exc
-
-        return errors
+            return _ffi_apply_patch_json(self._ptr, patch_json, dry_run, allow_errors)
 
     def serialize_json(self) -> bytes:
         """Serialize the project to JSON format.

@@ -143,7 +143,12 @@ def check_out_error(out_error_ptr: Any, operation: str = "operation") -> None:
     if details and error_code == ErrorCode.VARIABLES_HAVE_ERRORS:
         raise SimlinCompilationError(f"{operation} failed: {message}", details)
     else:
-        raise SimlinRuntimeError(f"{operation} failed: {message}", error_code)
+        # The C-side message is the first detail; note how many more there
+        # are so a multi-error failure isn't mistaken for a single issue.
+        suffix = f" (and {len(details) - 1} more issues)" if len(details) > 1 else ""
+        exc = SimlinRuntimeError(f"{operation} failed: {message}{suffix}", error_code)
+        exc.details = details  # type: ignore[attr-defined]
+        raise exc
 
 
 def check_error(result: int, operation: str = "operation") -> None:

@@ -276,6 +276,71 @@ class TestProjectEditing:
         assert project_json["simSpecs"]["dt"] == "1/4"
 
 
+class TestPatchWarningSemantics:
+    """Accepted patches must not raise just because diagnostics were collected.
+
+    The C layer distinguishes "patch rejected" (surfaced via out_error) from
+    "informational diagnostics collected" (out_collected_errors, which includes
+    PRE-EXISTING warnings on the project). A patch the engine accepts and
+    commits must not surface as a Python exception -- otherwise callers see a
+    spurious failure for a mutation that actually happened (observed on
+    C-LEARN, where 14 pre-existing unit warnings made every set_sim_specs call
+    raise "Patch produced validation errors" after the patch had committed).
+    """
+
+    @staticmethod
+    def _project_with_unit_warning() -> "simlin.Project":
+        from simlin.json_types import Auxiliary as JsonAuxiliary
+
+        project = Project.new(name="warnish", sim_stop=10.0, time_units="year")
+        model = project.get_model()
+        # Declared units disagree (widgets vs gadgets), producing a
+        # Warning-severity unit-mismatch diagnostic without making the
+        # model unsimulatable.
+        with model.edit(allow_errors=True) as (_, patch):
+            patch.upsert_aux(JsonAuxiliary(name="a", equation="1", units="widgets"))
+            patch.upsert_aux(JsonAuxiliary(name="b", equation="a", units="gadgets"))
+        return project
+
+    def test_accepted_patch_with_preexisting_warnings_does_not_raise(self) -> None:
+        project = self._project_with_unit_warning()
+        warnings_before = [
+            e for e in project.get_errors() if e.severity == simlin.ErrorSeverity.WARNING
+        ]
+        assert warnings_before, "fixture should carry a pre-existing unit warning"
+
+        # Unrelated edit: must apply cleanly despite the pre-existing warnings.
+        project.set_sim_specs(save_step=0.5)
+
+        project_json = json.loads(project.serialize_json().decode("utf-8"))
+        assert project_json["simSpecs"]["saveStep"] == pytest.approx(0.5)
+
+    def test_diagnostics_survive_unrelated_patches(self) -> None:
+        """get_errors must keep reporting pre-existing warnings after patches."""
+        project = self._project_with_unit_warning()
+        n_before = len(project.get_errors())
+        assert n_before > 0
+
+        project.set_sim_specs(save_step=0.5)
+        assert len(project.get_errors()) == n_before
+
+    def test_rejected_patch_raises_with_details(self) -> None:
+        """A genuinely invalid patch still raises, with details attached."""
+        from simlin.json_types import Auxiliary as JsonAuxiliary
+
+        project = self._project_with_unit_warning()
+        model = project.get_model()
+
+        with (
+            pytest.raises(simlin.SimlinError) as excinfo,
+            model.edit() as (_, patch),
+        ):
+            patch.upsert_aux(JsonAuxiliary(name="bad", equation="?? not an equation"))
+
+        details = getattr(excinfo.value, "details", [])
+        assert details, "rejection should carry the underlying error details"
+
+
 class TestProjectRepr:
     """Test string representation of projects."""
 
