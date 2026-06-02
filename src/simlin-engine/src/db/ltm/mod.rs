@@ -73,6 +73,66 @@ use link_scores::{
 use loops::{cross_agg_loop_budget, find_model_output_ports, recover_agg_hop_polarities};
 use parse::parse_ltm_equation;
 
+/// The effective integration method for a model, when it is NOT Euler.
+///
+/// LTM's 2023 flow-to-stock link-score formula
+/// (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) only aligns its numerator to
+/// the causal interval that drove the stock change from t-1 to t under Euler
+/// integration; under RK2/RK4 the sub-stepped stock update breaks that
+/// alignment and the link scores become mathematically meaningless. The VM
+/// and wasm backends both genuinely honor RK2/RK4 (distinct stepping loops),
+/// so the bad scores would look plausible while being wrong.
+///
+/// The resolution mirrors `assemble_simulation`'s `Specs` selection: a model's
+/// own `model_sim_specs` override wins, otherwise the project-level specs
+/// apply. (There is a single VM `Specs.method` per `CompiledSimulation`, taken
+/// from the root model's override or the project specs; a sub-model without an
+/// override is integrated under the project method, which this rule reports.)
+/// Returns `None` for Euler (the supported case), `Some(method)` otherwise.
+pub(super) fn model_non_euler_method(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> Option<datamodel::SimMethod> {
+    let method = match model.model_sim_specs(db) {
+        Some(specs) => specs.sim_method,
+        None => project.sim_specs(db).sim_method,
+    };
+    match method {
+        datamodel::SimMethod::Euler => None,
+        other => Some(other),
+    }
+}
+
+/// Human-readable name of a non-Euler integration method, used in the GH #486
+/// diagnostic so the message names the offending method concretely.
+fn sim_method_display_name(method: datamodel::SimMethod) -> &'static str {
+    match method {
+        datamodel::SimMethod::Euler => "Euler",
+        datamodel::SimMethod::RungeKutta2 => "RK2 (2nd-order Runge-Kutta)",
+        datamodel::SimMethod::RungeKutta4 => "RK4 (4th-order Runge-Kutta)",
+    }
+}
+
+/// The GH #486 diagnostic message: LTM was requested on a model whose
+/// effective integration method is non-Euler. Shared verbatim by the
+/// diagnostic emitted in `model_ltm_variables` (so FFI/MCP/pysimlin analyze
+/// paths see it via `collect_all_diagnostics`) and the hard compile error in
+/// `assemble_module` (so `simlin_sim_new` fails cleanly instead of producing
+/// silently-wrong scores).
+pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> String {
+    format!(
+        "LTM (Loops That Matter) analysis requires Euler integration, but this model uses \
+         {}.  The flow-to-stock link-score formula assumes the Euler update \
+         `stock(t) = stock(t-1) + dt * flow(t-1)`, so its numerator \
+         `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` only aligns to the causal interval that \
+         drove the stock change under Euler.  Higher-order integrators sub-step the stock \
+         update, so the link scores would be mathematically meaningless.  Switch the \
+         integration method to Euler, or disable LTM analysis.",
+        sim_method_display_name(method),
+    )
+}
+
 /// The model's full variable-name set, for the LTM equation parse path.
 ///
 /// Threaded into `parse_ltm_equation` so PREVIOUS/INIT can accept a
@@ -438,6 +498,25 @@ pub fn model_ltm_variables(
             agg_recovery_truncated: false,
             mode: LtmMode::Exhaustive,
         };
+    }
+
+    // GH #486: the flow-to-stock link-score formula is only valid under Euler
+    // integration. Reject a non-Euler integration method with a hard Error so
+    // the silently-wrong scores never reach the user. This fires only for
+    // models with stocks (the stock-free early return above already left), so
+    // a flow-to-stock link score would actually be produced. It accumulates
+    // alongside the auto-flip warning, reaching `collect_all_diagnostics` via
+    // `model_all_diagnostics` -> `model_ltm_fragment_diagnostics`. The hard
+    // compile failure for `simlin_sim_new` is enforced separately in
+    // `assemble_module` (the sim-compile path does not read this accumulator).
+    if let Some(method) = model_non_euler_method(db, model, project) {
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: None,
+            error: DiagnosticError::Assembly(ltm_non_euler_diagnostic_message(method)),
+            severity: DiagnosticSeverity::Error,
+        })
+        .accumulate(db);
     }
 
     // When the user explicitly requested discovery mode, honor it

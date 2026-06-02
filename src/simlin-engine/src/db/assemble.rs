@@ -1041,6 +1041,22 @@ pub fn assemble_module<'db>(
     // runlist.
     let mut ltm_flow_names: Vec<String> = Vec::new();
     if project.ltm_enabled(db) {
+        // GH #486: the LTM flow-to-stock link-score formula assumes Euler
+        // integration; under RK2/RK4 the scores are mathematically
+        // meaningless. `model_ltm_variables` already accumulates an Error
+        // diagnostic for this (reaching the diagnostics-collection callers),
+        // but the sim-compile path (`compile_project_incremental`, which
+        // `simlin_sim_new` uses) does NOT read that accumulator -- so without
+        // failing here the sim would be built and run, silently producing
+        // wrong scores. Gate on the model having stocks (matching
+        // `model_ltm_variables`' guard placement) so a stock-free LTM model,
+        // which produces no flow-to-stock scores, still compiles.
+        if !model_causal_edges(db, model, project).stocks.is_empty()
+            && let Some(method) = ltm::model_non_euler_method(db, model, project)
+        {
+            return Err(ltm::ltm_non_euler_diagnostic_message(method));
+        }
+
         let ltm_vars = model_ltm_variables(db, model, project);
 
         for ltm_var in &ltm_vars.vars {
