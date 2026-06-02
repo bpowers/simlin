@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
@@ -302,6 +302,23 @@ pub struct SimlinProject {
     /// `SourceProject` via `db.current_source_project()`. There is no
     /// separate `sync_state` mutex to keep in lockstep.
     pub db: Mutex<engine::db::SimlinDb>,
+    /// Latches true the first time any simulation is created on this project
+    /// with `enable_ltm = true`. `simlin_project_get_errors` reads it to
+    /// decide whether to transiently re-enable LTM during diagnostic
+    /// collection so the LTM diagnostic pipeline (the auto-flip-to-discovery
+    /// warning, synthetic-fragment compile failures, the GH #311 partial-
+    /// equation warnings, and the GH #486 non-Euler Error) reaches the
+    /// caller. `simlin_sim_new` resets the salsa `ltm_enabled` input to false
+    /// right after compile to avoid leaking the flag into patch validation,
+    /// which left every LTM diagnostic invisible to `get_errors` (GH #466);
+    /// this latch scopes the transient re-enable to callers who asked for LTM
+    /// at least once, so a project that never requested LTM still pays no LTM
+    /// synthesis cost in `get_errors`. An `AtomicBool` (not a mutex) because
+    /// the value is set-once-and-monotone and read without needing to be in
+    /// lockstep with the db lock; the actual flag toggle in `get_errors`
+    /// happens under the db lock, same as `simlin_sim_new`'s toggle, so the
+    /// two serialize and never interleave a partial LTM state.
+    pub ltm_requested: AtomicBool,
     pub ref_count: AtomicUsize,
 }
 

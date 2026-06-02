@@ -625,12 +625,24 @@ fn test_auto_flip_warning_surfaces_via_collect_model_diagnostics() {
     );
 }
 
-/// Counterpart to the surfacing test: when LTM is disabled,
-/// `collect_model_diagnostics` must not run LTM synthesis -- a silently
-/// auto-flipping model whose caller never asked for LTM should not emit
-/// LTM diagnostics.
+/// The `ltm_enabled` gate in `model_all_diagnostics` is what scopes LTM
+/// diagnostic cost to callers who asked for LTM: when the flag is false,
+/// `collect_model_diagnostics` must not run LTM synthesis, so a silently
+/// auto-flipping model whose caller never requested LTM emits no LTM
+/// diagnostics and pays no LTM synthesis cost.
+///
+/// This is the *mechanism* the GH #466 fix relies on, not a statement that
+/// the auto-flip warning is permanently invisible. The FFI's
+/// `simlin_project_get_errors` transiently re-enables `ltm_enabled` (under
+/// the db lock, via `LtmEnabledGuard`) before collecting diagnostics *iff*
+/// some simulation on the project was created with `enable_ltm = true` -- so
+/// the warning IS reachable for those callers (covered end to end by
+/// `simlin/tests/errors.rs::test_get_errors_surfaces_ltm_auto_flip_warning_after_ltm_sim`).
+/// What this test pins is the gate's "off by default" half: keep the original
+/// intent -- never pay LTM cost when nobody asked for LTM -- machine-checkable
+/// here, since that is exactly what makes the FFI's per-project scoping cheap.
 #[test]
-fn test_ltm_disabled_does_not_surface_auto_flip_warning() {
+fn test_ltm_disabled_gate_suppresses_auto_flip_warning() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
 
     let project = build_chain_scc_project("auto_flip_disabled", 51);
@@ -822,7 +834,7 @@ fn test_clean_ltm_model_emits_no_fragment_warning() {
 /// `collect_model_diagnostics` must not run the LTM fragment-diagnostic
 /// pass -- a model with a failing LTM fragment whose caller never asked
 /// for LTM should not emit the warning. Mirrors
-/// `test_ltm_disabled_does_not_surface_auto_flip_warning`.
+/// `test_ltm_disabled_gate_suppresses_auto_flip_warning`.
 #[test]
 fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
     use crate::db::collect_model_diagnostics;

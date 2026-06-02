@@ -421,3 +421,202 @@ fn test_error_str() {
         assert_eq!(s.to_str().unwrap(), "unknown_error");
     }
 }
+
+// ---------------------------------------------------------------------------
+// GH #466: LTM diagnostics reachable through simlin_project_get_errors after
+// a sim was created with enable_ltm=true.
+// ---------------------------------------------------------------------------
+
+/// Build a scalar project whose element-level causal graph is a single cycle
+/// of `total_nodes` nodes (1 stock + 1 flow + (total_nodes - 2) auxiliaries).
+/// Mirrors the engine's `build_chain_scc_project` auto-flip fixture: at 51
+/// nodes the largest SCC exceeds `MAX_LTM_SCC_NODES` (50), so an LTM compile
+/// auto-flips from exhaustive enumeration to discovery mode and accumulates a
+/// "discovery mode" Warning diagnostic.
+///
+/// Chain: `cap_stock -> aux_{N-3} -> ... -> aux_0 -> cap_flow -> cap_stock`.
+fn build_chain_scc_datamodel(name: &str, total_nodes: usize) -> engine::datamodel::Project {
+    assert!(total_nodes >= 3, "chain SCC needs >= 3 nodes");
+    let aux_count = total_nodes - 2;
+    let mut builder = TestProject::new(name);
+    for i in 0..aux_count {
+        let var = format!("aux_{i}");
+        let eq = if i + 1 == aux_count {
+            "cap_stock".to_string()
+        } else {
+            format!("aux_{}", i + 1)
+        };
+        builder = builder.scalar_aux(&var, &eq);
+    }
+    builder = builder.flow("cap_flow", "aux_0", None);
+    builder = builder.stock("cap_stock", "0", &["cap_flow"], &[], None);
+    builder.build_datamodel()
+}
+
+/// Returns true if any error detail's message contains `needle`.
+///
+/// # Safety
+/// `all_errors` must be a valid non-null `SimlinError` pointer.
+unsafe fn any_detail_message_contains(all_errors: *const SimlinError, needle: &str) -> bool {
+    let count = simlin_error_get_detail_count(all_errors);
+    if count == 0 {
+        return false;
+    }
+    let details = simlin_error_get_details(all_errors);
+    let slice = std::slice::from_raw_parts(details, count);
+    slice.iter().any(|d| {
+        if d.message.is_null() {
+            return false;
+        }
+        CStr::from_ptr(d.message)
+            .to_str()
+            .map(|m| m.contains(needle))
+            .unwrap_or(false)
+    })
+}
+
+/// After creating an LTM-enabled simulation on a model that auto-flips to
+/// discovery mode, `simlin_project_get_errors` must surface the auto-flip
+/// Warning. Before GH #466 the warning was unreachable: `simlin_sim_new`
+/// resets `ltm_enabled` to false right after compile, so `get_errors`
+/// collected diagnostics with LTM synthesis gated off.
+#[test]
+fn test_get_errors_surfaces_ltm_auto_flip_warning_after_ltm_sim() {
+    let datamodel = build_chain_scc_datamodel("get_errors_auto_flip", 51);
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Sanity: before any LTM sim, get_errors must NOT surface the LTM
+        // warning -- the project hasn't requested LTM, so it pays no LTM cost.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let pre = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        if !pre.is_null() {
+            assert!(
+                !any_detail_message_contains(pre, "discovery mode"),
+                "LTM warning must be absent before any LTM sim is created"
+            );
+            simlin_error_free(pre);
+        }
+
+        let mut model_err: *mut SimlinError = ptr::null_mut();
+        let model =
+            simlin_project_get_model(proj, ptr::null(), &mut model_err as *mut *mut SimlinError);
+        assert!(model_err.is_null());
+        assert!(!model.is_null());
+
+        // Create an LTM-enabled sim; this is the point at which the project
+        // records that LTM was requested.
+        let mut sim_err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut sim_err as *mut *mut SimlinError);
+        assert!(sim_err.is_null(), "LTM sim creation should succeed");
+        assert!(!sim.is_null());
+
+        // Now the auto-flip warning must be reachable through get_errors.
+        let mut err2: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err2 as *mut *mut SimlinError);
+        assert!(err2.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "get_errors must return the auto-flip warning"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "discovery mode"),
+            "auto-flip warning ('discovery mode') must be reachable via get_errors after an LTM sim"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// A project that never created an LTM-enabled simulation must not surface
+/// any LTM diagnostics through `get_errors` -- and must not pay the LTM
+/// synthesis cost. Preserves the original intent of
+/// `test_ltm_disabled_gate_suppresses_auto_flip_warning` at the FFI level.
+#[test]
+fn test_get_errors_no_ltm_diagnostics_when_ltm_never_requested() {
+    let datamodel = build_chain_scc_datamodel("get_errors_no_ltm", 51);
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Create a NON-LTM sim, then a plain get_errors.
+        let mut model_err: *mut SimlinError = ptr::null_mut();
+        let model =
+            simlin_project_get_model(proj, ptr::null(), &mut model_err as *mut *mut SimlinError);
+        assert!(model_err.is_null());
+        assert!(!model.is_null());
+        let mut sim_err: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, false, &mut sim_err as *mut *mut SimlinError);
+        assert!(sim_err.is_null());
+        assert!(!sim.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        // A well-formed model with no errors should return NULL; if anything
+        // is returned it must not be an LTM diagnostic.
+        if !all_errors.is_null() {
+            assert!(
+                !any_detail_message_contains(all_errors, "discovery mode"),
+                "no LTM diagnostics when LTM was never requested"
+            );
+            simlin_error_free(all_errors);
+        }
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The LTM-requested flag must survive subsequent non-LTM operations on the
+/// project: after an LTM sim and then a plain non-LTM sim, the auto-flip
+/// warning must still be reachable through `get_errors`.
+#[test]
+fn test_get_errors_ltm_warning_survives_subsequent_non_ltm_sim() {
+    let datamodel = build_chain_scc_datamodel("get_errors_survives", 51);
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut model_err: *mut SimlinError = ptr::null_mut();
+        let model =
+            simlin_project_get_model(proj, ptr::null(), &mut model_err as *mut *mut SimlinError);
+        assert!(model_err.is_null());
+        assert!(!model.is_null());
+
+        // LTM sim first, sets the flag.
+        let mut e1: *mut SimlinError = ptr::null_mut();
+        let ltm_sim = simlin_sim_new(model, true, &mut e1 as *mut *mut SimlinError);
+        assert!(e1.is_null());
+        assert!(!ltm_sim.is_null());
+
+        // Then a non-LTM sim, which resets the salsa flag to false as before.
+        let mut e2: *mut SimlinError = ptr::null_mut();
+        let plain_sim = simlin_sim_new(model, false, &mut e2 as *mut *mut SimlinError);
+        assert!(e2.is_null());
+        assert!(!plain_sim.is_null());
+
+        // The warning must still be reachable: the project remembers that LTM
+        // was requested at least once.
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(
+            !all_errors.is_null(),
+            "get_errors must still surface the LTM warning"
+        );
+        assert!(
+            any_detail_message_contains(all_errors, "discovery mode"),
+            "LTM warning must survive a subsequent non-LTM sim"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_sim_unref(plain_sim);
+        simlin_sim_unref(ltm_sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

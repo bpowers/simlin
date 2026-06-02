@@ -1248,14 +1248,14 @@ pub(crate) fn results_from_layout_and_slab(
 /// (rather than an explicit `set_project_ltm_enabled(.., false)` line
 /// somewhere down the function) makes it impossible for an early return
 /// or a panic in the middle of the queries to skip the reset.
-struct LtmEnabledGuard<'a> {
+pub(crate) struct LtmEnabledGuard<'a> {
     db: &'a mut engine::db::SimlinDb,
     project: SourceProject,
     restore_to: bool,
 }
 
 impl<'a> LtmEnabledGuard<'a> {
-    fn enable(
+    pub(crate) fn enable(
         db: &'a mut engine::db::SimlinDb,
         project: SourceProject,
         desired: bool,
@@ -1269,7 +1269,7 @@ impl<'a> LtmEnabledGuard<'a> {
         }
     }
 
-    fn db(&self) -> &engine::db::SimlinDb {
+    pub(crate) fn db(&self) -> &engine::db::SimlinDb {
         self.db
     }
 }

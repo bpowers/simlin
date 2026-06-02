@@ -14,7 +14,7 @@ use std::ffi::{CStr, CString};
 use std::io::BufReader;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::ffi;
@@ -64,6 +64,7 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
         Ok(Box::into_raw(Box::new(SimlinProject {
             datamodel: Mutex::new(datamodel_project),
             db: Mutex::new(db),
+            ltm_requested: AtomicBool::new(false),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -143,6 +144,7 @@ pub unsafe extern "C" fn simlin_project_open_json(
         Ok(Box::into_raw(Box::new(SimlinProject {
             datamodel: Mutex::new(datamodel_project),
             db: Mutex::new(db),
+            ltm_requested: AtomicBool::new(false),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -475,6 +477,7 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
+                ltm_requested: AtomicBool::new(false),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -534,6 +537,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
+                ltm_requested: AtomicBool::new(false),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -629,6 +633,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
+                ltm_requested: AtomicBool::new(false),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -689,6 +694,7 @@ pub unsafe extern "C" fn simlin_project_open_systems(
             let boxed = Box::new(SimlinProject {
                 datamodel: Mutex::new(datamodel_project),
                 db: Mutex::new(db),
+                ltm_requested: AtomicBool::new(false),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -776,26 +782,53 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     };
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    let db_locked = proj.db.lock().unwrap();
+    let mut db_locked = proj.db.lock().unwrap();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => return ptr::null_mut(),
     };
 
-    // Attempt compilation to detect assembly-level errors, then collect
-    // all accumulator diagnostics plus any VM validation error.
-    let vm_error = match engine::db::compile_project_incremental(&db_locked, source_project, "main")
-    {
-        Ok(compiled) => engine::Vm::new(compiled).err(),
-        Err(err) => Some(err),
-    };
+    // If any simulation on this project requested LTM, the salsa `ltm_enabled`
+    // input was reset to false by `simlin_sim_new` to avoid leaking into patch
+    // validation -- which also hides every LTM diagnostic from the diagnostic
+    // collector (the auto-flip-to-discovery warning, synthetic-fragment
+    // compile failures, the GH #311 partial-equation warnings, and the GH #486
+    // non-Euler Error all live behind the `ltm_enabled` gate in
+    // `model_all_diagnostics`). Transiently re-enable LTM for the duration of
+    // diagnostic collection so those surface here (GH #466). The
+    // `LtmEnabledGuard` restores the flag unconditionally on drop (even on a
+    // panic), and the toggle happens under the db lock -- the same lock
+    // `simlin_sim_new` holds for its own flag dance -- so a concurrent sim
+    // creation can never observe a partial LTM state. Salsa memoizes the LTM
+    // synthesis for this unchanged input from the earlier `simlin_sim_new`
+    // compile, so the re-enable revalidates rather than recomputes (cheap).
+    // A project that never requested LTM skips the toggle entirely and pays no
+    // LTM synthesis cost.
+    let ltm_requested = proj.ltm_requested.load(Ordering::Acquire);
 
-    let all_errors = gather_error_details_with_db(
-        &db_locked,
-        source_project,
-        vm_error.as_ref(),
-        &datamodel_locked,
-    );
+    let all_errors = if ltm_requested {
+        let guard = crate::analysis::LtmEnabledGuard::enable(&mut db_locked, source_project, true);
+        let db = guard.db();
+        let vm_error = match engine::db::compile_project_incremental(db, source_project, "main") {
+            Ok(compiled) => engine::Vm::new(compiled).err(),
+            Err(err) => Some(err),
+        };
+        gather_error_details_with_db(db, source_project, vm_error.as_ref(), &datamodel_locked)
+    } else {
+        // Attempt compilation to detect assembly-level errors, then collect
+        // all accumulator diagnostics plus any VM validation error.
+        let vm_error =
+            match engine::db::compile_project_incremental(&db_locked, source_project, "main") {
+                Ok(compiled) => engine::Vm::new(compiled).err(),
+                Err(err) => Some(err),
+            };
+        gather_error_details_with_db(
+            &db_locked,
+            source_project,
+            vm_error.as_ref(),
+            &datamodel_locked,
+        )
+    };
 
     if all_errors.is_empty() {
         return ptr::null_mut();

@@ -306,3 +306,62 @@ class TestRunLtmDegradation:
             logistic_model.run(time_range=(0.0, 5.0))  # type: ignore[call-arg]
         with pytest.raises(TypeError):
             logistic_model.run(dt=0.5)  # type: ignore[call-arg]
+
+
+class TestLtmDiagnosticsThroughGetErrors:
+    """GH #466: LTM diagnostics (the auto-flip-to-discovery warning et al.) are
+    reachable through project.get_errors() once a simulation has been created
+    with enable_ltm=True, and stay hidden otherwise.
+
+    pysimlin's project.get_errors() routes straight through the
+    simlin_project_get_errors FFI, and model.simulate(enable_ltm=True) routes
+    through simlin_sim_new(enable_ltm=true), so the binding inherits the fix
+    end to end without any pysimlin-side plumbing.
+    """
+
+    @staticmethod
+    def _has_discovery_warning(details: list[simlin.ErrorDetail]) -> bool:
+        return any("discovery mode" in (d.message or "") for d in details)
+
+    def test_auto_flip_warning_surfaces_after_ltm_simulate(self) -> None:
+        model = _large_scc_model(51)
+        project = model.project
+        assert project is not None
+
+        # Before any LTM sim, no LTM diagnostic should surface.
+        assert not self._has_discovery_warning(project.get_errors())
+
+        # Creating an LTM-enabled sim records that LTM was requested.
+        with model.simulate(enable_ltm=True):
+            pass
+
+        assert self._has_discovery_warning(project.get_errors()), (
+            "auto-flip 'discovery mode' warning must reach project.get_errors() "
+            "after an enable_ltm=True simulation"
+        )
+
+    def test_no_ltm_diagnostics_without_ltm_request(self) -> None:
+        model = _large_scc_model(51)
+        project = model.project
+        assert project is not None
+
+        # A non-LTM sim must not make the LTM warning appear.
+        with model.simulate(enable_ltm=False):
+            pass
+
+        assert not self._has_discovery_warning(project.get_errors()), (
+            "no LTM diagnostics when LTM was never requested"
+        )
+
+    def test_warning_surfaces_via_run_with_loop_analysis(self) -> None:
+        """The high-level Model.run(analyze_loops=True) path also creates an
+        LTM sim, so the auto-flip warning becomes reachable through
+        project.get_errors() afterward."""
+        model = _large_scc_model(51)
+        project = model.project
+        assert project is not None
+
+        with pytest.warns(RuntimeWarning, match="discovery"):
+            model.run(analyze_loops=True)
+
+        assert self._has_discovery_warning(project.get_errors())
