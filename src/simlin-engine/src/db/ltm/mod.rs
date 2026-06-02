@@ -73,7 +73,8 @@ use link_scores::{
 use loops::{cross_agg_loop_budget, find_model_output_ports, recover_agg_hop_polarities};
 use parse::parse_ltm_equation;
 
-/// The effective integration method for a model, when it is NOT Euler.
+/// The single integration method the assembled simulation actually runs, when
+/// it is NOT Euler.
 ///
 /// LTM's 2023 flow-to-stock link-score formula
 /// (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) only aligns its numerator to
@@ -83,18 +84,20 @@ use parse::parse_ltm_equation;
 /// and wasm backends both genuinely honor RK2/RK4 (distinct stepping loops),
 /// so the bad scores would look plausible while being wrong.
 ///
-/// The resolution mirrors `assemble_simulation`'s `Specs` selection: a model's
-/// own `model_sim_specs` override wins, otherwise the project-level specs
-/// apply. (There is a single VM `Specs.method` per `CompiledSimulation`, taken
-/// from the root model's override or the project specs; a sub-model without an
-/// override is integrated under the project method, which this rule reports.)
-/// Returns `None` for Euler (the supported case), `Some(method)` otherwise.
-pub(super) fn model_non_euler_method(
+/// A `CompiledSimulation` has exactly ONE `Specs.method`, resolved by
+/// `assemble_simulation` from the MAIN (root) model's `model_sim_specs`
+/// override else the project specs. A submodel's own `model_sim_specs` is
+/// never consulted by the VM, so the GH #486 guard must resolve and apply that
+/// single main-governed method -- NOT each model's own specs (which is the
+/// blocker the per-model resolution had). `root_model` is the model named in
+/// `assemble_simulation(.., main_model_name)`. Returns `None` for Euler (the
+/// supported case), `Some(method)` otherwise.
+pub(super) fn effective_non_euler_method(
     db: &dyn Db,
-    model: SourceModel,
+    root_model: SourceModel,
     project: SourceProject,
 ) -> Option<datamodel::SimMethod> {
-    let method = match model.model_sim_specs(db) {
+    let method = match root_model.model_sim_specs(db) {
         Some(specs) => specs.sim_method,
         None => project.sim_specs(db).sim_method,
     };
@@ -114,12 +117,12 @@ fn sim_method_display_name(method: datamodel::SimMethod) -> &'static str {
     }
 }
 
-/// The GH #486 diagnostic message: LTM was requested on a model whose
-/// effective integration method is non-Euler. Shared verbatim by the
-/// diagnostic emitted in `model_ltm_variables` (so FFI/MCP/pysimlin analyze
-/// paths see it via `collect_all_diagnostics`) and the hard compile error in
-/// `assemble_module` (so `simlin_sim_new` fails cleanly instead of producing
-/// silently-wrong scores).
+/// The GH #486 rejection message: LTM was requested on a simulation whose
+/// (main-model-governed) integration method is non-Euler. Returned as the
+/// `assemble_simulation` `Err` so it reaches `simlin_sim_new`,
+/// `simlin_project_get_errors` (the `vm_error` channel), and the wasm backend
+/// (`WasmGenError::Unsupported`) -- the sim-compile path never produces
+/// silently-wrong scores.
 pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> String {
     format!(
         "LTM (Loops That Matter) analysis requires Euler integration, but this model uses \
@@ -500,24 +503,19 @@ pub fn model_ltm_variables(
         };
     }
 
-    // GH #486: the flow-to-stock link-score formula is only valid under Euler
-    // integration. Reject a non-Euler integration method with a hard Error so
-    // the silently-wrong scores never reach the user. This fires only for
-    // models with stocks (the stock-free early return above already left), so
-    // a flow-to-stock link score would actually be produced. It accumulates
-    // alongside the auto-flip warning, reaching `collect_all_diagnostics` via
-    // `model_all_diagnostics` -> `model_ltm_fragment_diagnostics`. The hard
-    // compile failure for `simlin_sim_new` is enforced separately in
-    // `assemble_module` (the sim-compile path does not read this accumulator).
-    if let Some(method) = model_non_euler_method(db, model, project) {
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: None,
-            error: DiagnosticError::Assembly(ltm_non_euler_diagnostic_message(method)),
-            severity: DiagnosticSeverity::Error,
-        })
-        .accumulate(db);
-    }
+    // GH #486's non-Euler rejection is NOT emitted here. The integration
+    // method that the VM actually honors is a single, main-model-governed
+    // property of the assembled simulation (`assemble_simulation`'s `Specs`
+    // selection: the root model's `model_sim_specs` override else the project
+    // specs -- a submodel's own override is dead), and this per-model query has
+    // no main-model context. Emitting per-model with each model's own specs is
+    // both wrong (a stock-free main that overrides to RK4 would be missed while
+    // its stock-bearing submodel falls back to the project's Euler; conversely
+    // a submodel that overrides to RK4 under a Euler main would be wrongly
+    // rejected) and duplicative. The check lives once in `assemble_simulation`
+    // against the resolved method; it surfaces through `compile_project_
+    // incremental` to `simlin_sim_new`, `simlin_project_get_errors` (the
+    // `vm_error` channel), and the wasm backend.
 
     // When the user explicitly requested discovery mode, honor it
     // directly. Otherwise auto-flip if either:

@@ -5,7 +5,7 @@
 use super::*;
 use crate::datamodel;
 use crate::test_common::TestProject;
-use crate::testutils::{feedback_loop_project, x_aux, x_flow, x_model, x_stock};
+use crate::testutils::{feedback_loop_project, x_aux, x_flow, x_model, x_module, x_stock};
 
 #[test]
 fn test_model_ltm_variables_generates_scores() {
@@ -3291,7 +3291,14 @@ fn test_ltm_var_name_index_matches_vars() {
 // integration IS honored at runtime (the VM and wasm backends both have
 // distinct RK2/RK4 stepping loops), so the wrong scores would look plausible
 // but be wrong -- a silent-correctness hazard. The engine therefore rejects
-// the combination with an Error-severity diagnostic.
+// the combination at sim-compile time.
+//
+// CRITICAL granularity (the multi-model probes below): the VM has a SINGLE
+// global integration method, taken from the MAIN (root) model's
+// `model_sim_specs` override else the project specs -- a submodel's own
+// `model_sim_specs` is NEVER consulted by the VM (`assemble_simulation`'s
+// `Specs` selection). So the guard must resolve and apply that one
+// main-governed method, not each model's own specs.
 
 /// Build a single-stock feedback-loop project (population/births/birth_rate)
 /// with the requested integration method, so the GH #486 guard can be
@@ -3303,186 +3310,217 @@ fn feedback_loop_project_with_method(method: datamodel::SimMethod) -> datamodel:
     project
 }
 
-/// The substring every GH #486 diagnostic must carry so users understand the
-/// Euler assumption behind the rejection.
+/// The substring every GH #486 rejection must carry so users understand the
+/// Euler assumption behind it.
 #[cfg(test)]
 const LTM_EULER_DIAGNOSTIC_MARKER: &str = "Euler";
 
+/// Whether compiling `main` with LTM enabled fails with the GH #486
+/// Euler-assumption error. Returns `Some(details)` on the expected rejection,
+/// `None` when the compile succeeds (so the same probe pins both directions).
+#[cfg(test)]
+fn ltm_euler_rejection(db: &SimlinDb, source_project: SourceProject) -> Option<String> {
+    match compile_project_incremental(db, source_project, "main") {
+        Ok(_) => None,
+        Err(err) => {
+            let details = err.details.unwrap_or_default();
+            assert!(
+                details.contains(LTM_EULER_DIAGNOSTIC_MARKER),
+                "an LTM compile failure here must be the Euler rejection: {details}"
+            );
+            Some(details)
+        }
+    }
+}
+
 #[test]
-fn test_ltm_with_rk4_emits_euler_assumption_error() {
+fn test_ltm_with_rk4_fails_sim_compilation() {
+    // `simlin_sim_new` and `simlin_project_get_errors` both build the sim via
+    // `compile_project_incremental`; the Euler rejection rides its `Err`.
     use salsa::Setter;
 
     let mut db = SimlinDb::default();
     let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
-    let (source_project, source_model) = {
-        let sync = sync_from_datamodel(&db, &project);
-        (sync.project, sync.models["main"].source)
-    };
+    let source_project = sync_from_datamodel(&db, &project).project;
     source_project.set_ltm_enabled(&mut db).to(true);
 
-    // The diagnostic is accumulated by `model_ltm_variables` itself, so it
-    // rides the same path as the auto-flip warning.
-    let _ = model_ltm_variables(&db, source_model, source_project);
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
-
-    let euler_errors: Vec<&Diagnostic> = diags
-        .iter()
-        .filter(|d| {
-            d.severity == DiagnosticSeverity::Error
-                && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains(LTM_EULER_DIAGNOSTIC_MARKER))
-        })
-        .collect();
-    assert_eq!(
-        euler_errors.len(),
-        1,
-        "LTM + RK4 must emit exactly one Euler-assumption Error diagnostic, got diagnostics: {:?}",
-        diags
-    );
+    let details =
+        ltm_euler_rejection(&db, source_project).expect("LTM + RK4 must fail sim compilation");
     assert!(
-        matches!(&euler_errors[0].error, DiagnosticError::Assembly(msg) if msg.contains("RK4") || msg.contains("Runge")),
-        "the diagnostic should name the offending integration method: {:?}",
-        euler_errors[0]
+        details.contains("RK4") || details.contains("Runge"),
+        "the error should name the offending integration method: {details}"
     );
 }
 
 #[test]
-fn test_ltm_with_rk2_emits_euler_assumption_error() {
+fn test_ltm_with_rk2_fails_sim_compilation() {
     use salsa::Setter;
 
     let mut db = SimlinDb::default();
     let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta2);
-    let (source_project, source_model) = {
-        let sync = sync_from_datamodel(&db, &project);
-        (sync.project, sync.models["main"].source)
-    };
+    let source_project = sync_from_datamodel(&db, &project).project;
     source_project.set_ltm_enabled(&mut db).to(true);
 
-    let _ = model_ltm_variables(&db, source_model, source_project);
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
-
-    let has_euler_error = diags.iter().any(|d| {
-        d.severity == DiagnosticSeverity::Error
-            && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains(LTM_EULER_DIAGNOSTIC_MARKER))
-    });
     assert!(
-        has_euler_error,
-        "LTM + RK2 must emit an Euler-assumption Error diagnostic, got: {:?}",
-        diags
+        ltm_euler_rejection(&db, source_project).is_some(),
+        "LTM + RK2 must fail sim compilation"
     );
 }
 
 #[test]
-fn test_ltm_with_euler_emits_no_euler_assumption_error() {
+fn test_ltm_with_euler_compiles_clean() {
     use salsa::Setter;
 
     let mut db = SimlinDb::default();
     let project = feedback_loop_project_with_method(datamodel::SimMethod::Euler);
-    let (source_project, source_model) = {
-        let sync = sync_from_datamodel(&db, &project);
-        (sync.project, sync.models["main"].source)
-    };
+    let source_project = sync_from_datamodel(&db, &project).project;
     source_project.set_ltm_enabled(&mut db).to(true);
 
-    let _ = model_ltm_variables(&db, source_model, source_project);
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
-
-    let has_euler_error = diags.iter().any(|d| {
-        d.severity == DiagnosticSeverity::Error
-            && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains(LTM_EULER_DIAGNOSTIC_MARKER))
-    });
     assert!(
-        !has_euler_error,
-        "LTM + Euler is the supported combination and must NOT emit the Euler error: {:?}",
-        diags
+        ltm_euler_rejection(&db, source_project).is_none(),
+        "LTM + Euler is the supported combination and must compile"
     );
 }
 
 #[test]
 fn test_rk4_without_ltm_compiles_clean() {
-    // The guard must fire ONLY when LTM is actually requested. The same
-    // non-Euler model with LTM disabled compiles and simulates as before.
+    // The guard fires ONLY when LTM is actually requested. The same non-Euler
+    // model with LTM disabled compiles and simulates as before.
     let db = SimlinDb::default();
     let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
-    let (source_project, source_model) = {
-        let sync = sync_from_datamodel(&db, &project);
-        (sync.project, sync.models["main"].source)
-    };
+    let source_project = sync_from_datamodel(&db, &project).project;
     // ltm_enabled defaults to false on a freshly-synced project.
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
-    let has_euler_error = diags.iter().any(|d| {
-        d.severity == DiagnosticSeverity::Error
-            && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains(LTM_EULER_DIAGNOSTIC_MARKER))
-    });
     assert!(
-        !has_euler_error,
-        "RK4 without LTM must not emit the LTM Euler error: {:?}",
-        diags
+        compile_project_incremental(&db, source_project, "main").is_ok(),
+        "RK4 model without LTM should compile"
     );
+}
 
-    // And it still compiles into a runnable simulation.
+/// The Euler rejection must reach `simlin_project_get_errors`. That FFI path
+/// compiles `main` via `compile_project_incremental` and turns the resulting
+/// `Err` into a formatted error (the `vm_error` channel in
+/// `gather_error_details_with_db`), so asserting against the compile `Err`
+/// covers the production diagnostics surface. (The per-model accumulator path
+/// can't carry this diagnostic correctly: `model_all_diagnostics` has no
+/// main-model concept, and the method is main-governed.)
+#[test]
+fn test_ltm_rk4_euler_error_reaches_compile_path() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    assert!(
+        ltm_euler_rejection(&db, source_project).is_some(),
+        "the GH #486 Euler error must surface through compile_project_incremental"
+    );
+}
+
+/// A user-defined submodel with an internal stock + flow feedback loop and an
+/// output port. Used by the multi-model probes: the submodel's own
+/// `model_sim_specs` is set by the caller to assert the VM ignores it.
+#[cfg(test)]
+fn feedback_submodel(sim_specs: Option<datamodel::SimSpecs>) -> datamodel::Model {
+    let mut m = x_model(
+        "sub",
+        vec![
+            x_aux("input", "0", None),
+            x_stock("level", "50", &["adjust"], &[], None),
+            x_flow("adjust", "(input - level) / 5", None),
+            x_aux("output", "level", None),
+        ],
+    );
+    m.sim_specs = sim_specs;
+    m
+}
+
+/// GH #486 false-negative probe (the silent #486 hazard): the MAIN model has
+/// no stock and overrides the integration method to RK4, while the submodel it
+/// instantiates holds the stock+flow feedback loop and has no override. The VM
+/// integrates EVERYTHING under the main-governed RK4, so the submodel's
+/// flow-to-stock link score is produced and run -- and must be rejected. A
+/// per-submodel check (the bug) would miss it: the submodel falls back to the
+/// project's Euler.
+#[test]
+fn test_ltm_main_rk4_submodel_stock_is_rejected() {
+    use salsa::Setter;
+
+    let mut main = x_model(
+        "main",
+        vec![
+            x_module("sub", &[("driver", "input")], None),
+            x_aux("driver", "1", None),
+            x_aux("observed", "sub.output", None),
+        ],
+    );
+    // Main overrides the integration method to RK4; this is what the VM honors.
+    main.sim_specs = Some(datamodel::SimSpecs {
+        sim_method: datamodel::SimMethod::RungeKutta4,
+        ..feedback_loop_project().sim_specs
+    });
+
+    let mut project = feedback_loop_project();
+    project.models = vec![main, feedback_submodel(None)];
+    // Project default stays Euler -- the trap the buggy per-submodel resolution
+    // falls into.
+    project.sim_specs.sim_method = datamodel::SimMethod::Euler;
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let details = ltm_euler_rejection(&db, source_project)
+        .expect("main-RK4 + submodel-stock LTM must be rejected (the #486 hazard)");
+    assert!(
+        details.contains("RK4") || details.contains("Runge"),
+        "the rejection must name the main-governed method: {details}"
+    );
+}
+
+/// GH #486 false-positive probe: the submodel overrides the integration method
+/// to RK4, but the MAIN model (and project) are Euler. The VM runs Euler (main
+/// governs); the submodel's RK4 override is dead. The scores are valid, so the
+/// compile must SUCCEED. A per-submodel check (the bug) would wrongly reject.
+#[test]
+fn test_ltm_submodel_rk4_override_main_euler_is_accepted() {
+    use salsa::Setter;
+
+    // Main holds its own stock+flow feedback loop (so LTM produces scores) and
+    // also instantiates the RK4-overriding submodel.
+    let main = x_model(
+        "main",
+        vec![
+            x_stock("population", "100", &["births"], &[], None),
+            x_flow("births", "population * birth_rate", None),
+            x_aux("birth_rate", "0.1", None),
+            x_module("sub", &[("births", "input")], None),
+            x_aux("observed", "sub.output", None),
+        ],
+    );
+    // The submodel overrides to RK4 -- which the VM IGNORES (main governs).
+    let sub_specs = datamodel::SimSpecs {
+        sim_method: datamodel::SimMethod::RungeKutta4,
+        ..feedback_loop_project().sim_specs
+    };
+
+    let mut project = feedback_loop_project();
+    project.models = vec![main, feedback_submodel(Some(sub_specs))];
+    project.sim_specs.sim_method = datamodel::SimMethod::Euler;
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
     let compiled = compile_project_incremental(&db, source_project, "main");
     assert!(
         compiled.is_ok(),
-        "RK4 model without LTM should compile: {:?}",
+        "main-Euler + submodel-RK4-override must compile (VM runs Euler): {:?}",
         compiled.err()
     );
-}
-
-#[test]
-fn test_ltm_with_rk4_fails_sim_compilation() {
-    // `simlin_sim_new` builds a runnable `CompiledSimulation` via
-    // `compile_project_incremental`, which (unlike the diagnostics path) does
-    // not consult `collect_all_diagnostics`. The guard must ALSO fail the
-    // compile so a non-Euler LTM run never silently produces wrong scores.
-    use salsa::Setter;
-
-    let mut db = SimlinDb::default();
-    let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
-    let source_project = {
-        let sync = sync_from_datamodel(&db, &project);
-        sync.project
-    };
-    source_project.set_ltm_enabled(&mut db).to(true);
-
-    let compiled = compile_project_incremental(&db, source_project, "main");
-    let err = compiled.expect_err("LTM + RK4 must fail sim compilation");
-    let details = err.details.unwrap_or_default();
-    assert!(
-        details.contains(LTM_EULER_DIAGNOSTIC_MARKER),
-        "the compile error should reference the Euler assumption: {details}"
-    );
-}
-
-/// The diagnostic must be reachable through the production diagnostics
-/// collection path that FFI callers (libsimlin/MCP/pysimlin) consume --
-/// `model_all_diagnostics` -> `model_ltm_fragment_diagnostics` ->
-/// `model_ltm_variables` -- exactly the way the auto-flip warning is.
-#[test]
-fn test_ltm_rk4_euler_error_reachable_via_all_diagnostics() {
-    use salsa::Setter;
-
-    let mut db = SimlinDb::default();
-    let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
-    let (source_project, source_model) = {
-        let sync = sync_from_datamodel(&db, &project);
-        (sync.project, sync.models["main"].source)
-    };
-    source_project.set_ltm_enabled(&mut db).to(true);
-
-    // Drive ONLY the production trigger query (not model_ltm_variables
-    // directly), proving the error surfaces the way real callers see it.
-    model_all_diagnostics(&db, source_model, source_project);
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
-
-    let has_euler_error = diags.iter().any(|d| {
-        d.severity == DiagnosticSeverity::Error
-            && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains(LTM_EULER_DIAGNOSTIC_MARKER))
-    });
-    assert!(
-        has_euler_error,
-        "the GH #486 Euler error must reach collect_model_diagnostics via \
-         model_all_diagnostics: {:?}",
-        diags
-    );
+    // And it actually simulates under Euler.
+    let mut vm = crate::vm::Vm::new(compiled.unwrap()).expect("VM creation should succeed");
+    vm.run_to_end().expect("Euler sim should run to completion");
 }
