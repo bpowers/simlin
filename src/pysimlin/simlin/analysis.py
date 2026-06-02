@@ -293,12 +293,19 @@ class Loop:
     None for structural loops, populated for loops from Run objects.
     """
 
+    name: str | None = None
+    """Human-meaningful loop name the modeler assigned via ``set_loop_name``,
+    or ``None`` when the loop has no assigned name (every enumerated loop).
+    A pinned loop's ``id`` is just ``pin1``/``pin2``/...; this carries the
+    label the modeler chose so it can be displayed instead of the bare id."""
+
     def __str__(self) -> str:
         """Return a human-readable string representation."""
         var_chain = " -> ".join(self.variables)
         if self.variables:
             var_chain += f" -> {self.variables[0]}"
-        return f"Loop {self.id} ({self.polarity}): {var_chain}"
+        name_part = f' "{self.name}"' if self.name else ""
+        return f"Loop {self.id}{name_part} ({self.polarity}): {var_chain}"
 
     def __len__(self) -> int:
         """Return the number of variables in the loop."""

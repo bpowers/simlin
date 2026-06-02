@@ -22,8 +22,8 @@ use crate::ffi::{
 use crate::ffi_error::SimlinError;
 use crate::ffi_try;
 use crate::{
-    clear_out_error, drop_c_string, drop_c_string_array, drop_discovered_loops_vec,
-    drop_dominant_periods_vec, drop_f64_array, drop_link, drop_links_vec, drop_loop,
+    clear_out_error, drop_c_string, drop_c_string_array, drop_discovered_loop,
+    drop_discovered_loops_vec, drop_dominant_periods_vec, drop_link, drop_links_vec, drop_loop,
     drop_loops_vec, require_model, require_sim, store_anyhow_error, store_error, SimlinErrorCode,
     SimlinModel, SimlinSim,
 };
@@ -414,11 +414,21 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
             | engine::db::DetectedLoopPolarity::MostlyBalancing => SimlinLoopPolarity::Balancing,
             engine::db::DetectedLoopPolarity::Undetermined => SimlinLoopPolarity::Undetermined,
         };
+        // A modeler-pinned loop carries a human-meaningful name; an enumerated
+        // loop has none (NULL).  An interior NUL in the name folds to NULL --
+        // the loop is still returned, just unnamed -- rather than failing the
+        // whole call over a degenerate name.
+        let name = loop_item
+            .name
+            .as_deref()
+            .and_then(|n| CString::new(n).ok())
+            .map_or(ptr::null_mut(), |s| s.into_raw());
         c_loops.push(SimlinLoop {
             id,
             variables,
             var_count,
             polarity,
+            name,
         });
     }
     let count = c_loops.len();
@@ -641,6 +651,15 @@ unsafe fn discovery_to_ffi(
             std::mem::forget(boxed);
             (p, importance_len)
         };
+        // A modeler-pinned loop carries a human-meaningful name; an enumerated
+        // loop has none (NULL).  An interior NUL in the name folds to NULL --
+        // the loop is still returned, just unnamed -- rather than failing the
+        // whole discovery result over a degenerate name.
+        let name = summary
+            .name
+            .as_deref()
+            .and_then(|n| CString::new(n).ok())
+            .map_or(ptr::null_mut(), |s| s.into_raw());
         c_loops.push(SimlinDiscoveredLoop {
             id,
             variables,
@@ -648,6 +667,7 @@ unsafe fn discovery_to_ffi(
             polarity: discovery_polarity(&summary.polarity),
             importance,
             importance_len,
+            name,
         });
     }
 
@@ -703,9 +723,7 @@ pub unsafe extern "C" fn simlin_free_discovery_result(result: *mut SimlinDiscove
     if !result.loops.is_null() && result.loop_count > 0 {
         let loop_slice = std::slice::from_raw_parts_mut(result.loops, result.loop_count);
         for loop_item in loop_slice.iter_mut() {
-            drop_c_string(loop_item.id);
-            drop_c_string_array(loop_item.variables, loop_item.var_count);
-            drop_f64_array(loop_item.importance, loop_item.importance_len);
+            drop_discovered_loop(loop_item);
         }
         let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
             result.loops,

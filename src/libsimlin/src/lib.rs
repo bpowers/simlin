@@ -504,6 +504,7 @@ pub(crate) unsafe fn drop_f64_array(ptr: *mut f64, count: usize) {
 pub(crate) unsafe fn drop_loop(loop_item: &mut SimlinLoop) {
     drop_c_string(loop_item.id);
     drop_c_string_array(loop_item.variables, loop_item.var_count);
+    drop_c_string(loop_item.name);
 }
 
 pub(crate) unsafe fn drop_link(link: &mut SimlinLink) {
@@ -529,6 +530,7 @@ pub(crate) unsafe fn drop_discovered_loop(loop_item: &mut ffi::SimlinDiscoveredL
     drop_c_string(loop_item.id);
     drop_c_string_array(loop_item.variables, loop_item.var_count);
     drop_f64_array(loop_item.importance, loop_item.importance_len);
+    drop_c_string(loop_item.name);
 }
 
 pub(crate) unsafe fn drop_discovered_loops_vec(loops: &mut Vec<ffi::SimlinDiscoveredLoop>) {

@@ -126,4 +126,7 @@ export interface Loop {
   id: string;
   variables: string[];
   polarity: SimlinLoopPolarity;
+  // Modeler-assigned loop name (via SetLoopName), or null when the loop has no
+  // assigned name. Non-null only for pinned loops.
+  name: string | null;
 }

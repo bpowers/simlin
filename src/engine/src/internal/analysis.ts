@@ -258,8 +258,10 @@ export function simlin_analyze_get_relative_loop_score(
 }
 
 // Struct sizes for wasm32 target (expected values)
-// SimlinLoop: id: ptr(4), variables: ptr(4), var_count: usize(4), polarity: u32(4) = 16 bytes
-const LOOP_SIZE = 16;
+// SimlinLoop: id: ptr(4), variables: ptr(4), var_count: usize(4), polarity: u32(4),
+// name: ptr(4) = 20 bytes. `name` grew additively (NULL when the loop has no
+// modeler-assigned name), mirroring how SimlinLink gained relative_score.
+const LOOP_SIZE = 20;
 // SimlinLink: from: ptr(4), to: ptr(4), polarity: u32(4), score: ptr(4),
 // score_len: usize(4), relative_score: ptr(4), relative_score_len: usize(4) = 28 bytes
 const LINK_SIZE = 28;
@@ -347,6 +349,7 @@ export function readLoops(loopsPtr: SimlinLoopsPtr): Loop[] {
     const varsPtr = view.getUint32(ptr + 4, true);
     const varCount = view.getUint32(ptr + 8, true);
     const polarity = view.getUint32(ptr + 12, true) as SimlinLoopPolarity;
+    const namePtr = view.getUint32(ptr + 16, true);
 
     // Read variable names
     const variables: string[] = [];
@@ -357,7 +360,9 @@ export function readLoops(loopsPtr: SimlinLoopsPtr): Loop[] {
     }
 
     const id = wasmToString(idPtr) ?? '';
-    loops.push({ id, variables, polarity });
+    // namePtr is NULL (0) for an enumerated loop with no modeler-assigned name.
+    const name = namePtr !== 0 ? wasmToString(namePtr) : null;
+    loops.push({ id, variables, polarity, name });
   }
 
   return loops;

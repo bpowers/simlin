@@ -2357,6 +2357,15 @@ fn pinned_loop_surfaces_through_ffi_in_discovery_mode() {
             .to_string();
         assert_eq!(loop_id, "pin1");
 
+        // The modeler-assigned loop name must come through the FFI so a caller
+        // can recover the human-meaningful label instead of the bare pin id.
+        assert!(
+            !loop_slice[0].name.is_null(),
+            "pinned loop must carry its assigned name through the FFI"
+        );
+        let loop_name = CStr::from_ptr(loop_slice[0].name).to_str().unwrap();
+        assert_eq!(loop_name, "ab loop");
+
         // Its relative loop score is readable by id and finite & non-zero.
         let mut step_count: usize = 0;
         err = ptr::null_mut();
@@ -2396,6 +2405,98 @@ fn pinned_loop_surfaces_through_ffi_in_discovery_mode() {
 
         simlin_free_loops(loops);
         simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// Pinning a loop through the `setLoopName` patch primitive must make the
+/// assigned name recoverable through `simlin_analyze_get_loops`, while an
+/// enumerated loop with no assigned name reports a NULL name.
+#[test]
+fn loop_name_round_trips_through_set_loop_name_patch() {
+    // A small reinforcing stock-and-flow loop: population -> births -> population.
+    let test_project = TestProject::new("loop_name_patch")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * 0.02", None);
+
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(err.is_null());
+        assert!(!proj.is_null());
+
+        let mut errm: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut errm);
+        assert!(errm.is_null());
+        assert!(!model.is_null());
+
+        // Before pinning, the enumerated loop must carry no assigned name.
+        err = ptr::null_mut();
+        let loops_before = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!loops_before.is_null());
+        assert!((*loops_before).count > 0, "model has at least one loop");
+        let before_slice = std::slice::from_raw_parts((*loops_before).loops, (*loops_before).count);
+        assert!(
+            before_slice[0].name.is_null(),
+            "an enumerated loop with no assigned name must report a NULL name"
+        );
+        simlin_free_loops(loops_before);
+
+        // Pin the population->births loop with a human-meaningful name through
+        // the same `setLoopName` patch path pysimlin's set_loop_name uses.
+        let patch_json = r#"{
+            "models": [{
+                "name": "main",
+                "ops": [
+                    {
+                        "type": "setLoopName",
+                        "payload": {
+                            "variables": ["population", "births"],
+                            "name": "Growth engine"
+                        }
+                    }
+                ]
+            }]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        err = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut err,
+        );
+        assert!(err.is_null(), "setLoopName patch should succeed");
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+
+        // After pinning, the loop name must come through the FFI.
+        err = ptr::null_mut();
+        let loops_after = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!loops_after.is_null());
+        let after_slice = std::slice::from_raw_parts((*loops_after).loops, (*loops_after).count);
+        let named = after_slice
+            .iter()
+            .find(|l| !l.name.is_null())
+            .expect("the pinned loop must surface with a name");
+        let name = CStr::from_ptr(named.name).to_str().unwrap();
+        assert_eq!(name, "Growth engine");
+
+        simlin_free_loops(loops_after);
         simlin_model_unref(model);
         simlin_project_unref(proj);
     }

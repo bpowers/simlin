@@ -136,6 +136,12 @@ typedef struct {
   char **variables;
   uintptr_t var_count;
   SimlinLoopPolarity polarity;
+  // Human-meaningful loop name the modeler assigned via `SetLoopName`
+  // (pysimlin `set_loop_name`), or NULL when the loop has no assigned
+  // name.  The struct grew additively for this field (mirroring how
+  // `SimlinLink` gained `relative_score`); `simlin_sizeof_loop` and the
+  // `@simlin/engine` `LOOP_SIZE`/`readLoops` offsets track it.
+  char *name;
 } SimlinLoop;
 
 // List of loops returned by analysis
@@ -159,9 +165,9 @@ typedef struct {
 // This mirrors `SimlinLoop` but adds a per-timestep `importance` series.
 // We do NOT reuse `SimlinLoop` (despite the score-on-loop suggestion in the
 // task brief): `SimlinLoop` has no score field, and adding one would change
-// its wasm32 layout, which `@simlin/engine` asserts is exactly 16 bytes via
-// `simlin_sizeof_loop`.  A separate struct keeps the discovery surface from
-// disturbing the existing structural-loop ABI that TypeScript/Python read.
+// its wasm32 layout (which `@simlin/engine` asserts against `simlin_sizeof_loop`).
+// A separate struct keeps the discovery surface from disturbing the existing
+// structural-loop ABI that TypeScript/Python read.
 typedef struct {
   // Deterministic loop id (`r1`, `b1`, `u1`, ...).
   char *id;
@@ -174,6 +180,10 @@ typedef struct {
   // analysis time array).  Owned `f64` buffer freed with the loop.
   double *importance;
   uintptr_t importance_len;
+  // Human-meaningful loop name the modeler assigned via `SetLoopName`
+  // (pysimlin `set_loop_name`), or NULL when the loop has no assigned
+  // name.  Owned `c_char` buffer freed with the loop.
+  char *name;
 } SimlinDiscoveredLoop;
 
 // A time interval during which a specific set of loops dominates behavior.

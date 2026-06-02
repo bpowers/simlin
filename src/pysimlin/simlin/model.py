@@ -657,6 +657,7 @@ class Model:
                     id=c_to_string(c_loop.id) or f"loop_{i}",
                     variables=tuple(variables),
                     polarity=LoopPolarity(c_loop.polarity),
+                    name=c_to_string(c_loop.name),
                 )
                 loops.append(loop)
 
@@ -763,6 +764,7 @@ class Model:
                         variables=tuple(variables),
                         polarity=LoopPolarity(c_loop.polarity),
                         behavior_time_series=behavior_ts,
+                        name=c_to_string(c_loop.name),
                     )
                 )
 

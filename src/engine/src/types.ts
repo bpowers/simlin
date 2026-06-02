@@ -591,6 +591,11 @@ export interface Loop {
   readonly variables: readonly string[];
   /** Loop polarity (reinforcing or balancing) */
   readonly polarity: LoopPolarity;
+  /**
+   * Modeler-assigned loop name (via `setLoopName`), or null when the loop has
+   * no assigned name. Non-null only for pinned loops.
+   */
+  readonly name: string | null;
 }
 
 /**

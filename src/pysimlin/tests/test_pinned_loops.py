@@ -76,6 +76,27 @@ class TestPinViaEditApi:
         run = model.run(analyze_loops=True)
         assert run.ltm_mode == "exhaustive"
 
+    def test_loop_name_recoverable_from_model_loops(self) -> None:
+        # The human-meaningful name assigned via set_loop_name must be
+        # recoverable on the corresponding Loop, so a caller need not remember
+        # the pin order to map `pin1` back to its label.
+        model = _small_two_loop_model()
+
+        # Before pinning, every enumerated loop reports no assigned name.
+        before = model.loops
+        assert before, "the two-loop model has structural loops"
+        assert all(loop.name is None for loop in before), (
+            "enumerated loops must have name == None"
+        )
+
+        with model.edit() as (_current, patch):
+            patch.set_loop_name("Ocean carbon uptake", ["population", "births"])
+
+        named = [loop for loop in model.loops if loop.name is not None]
+        assert len(named) == 1, "exactly the pinned loop carries a name"
+        assert named[0].name == "Ocean carbon uptake"
+        assert named[0].id.startswith("pin") or named[0].id.startswith(("r", "b", "u"))
+
 
 class TestPinnedLoopInDiscoveryMode:
     """The headline capability: a pinned loop is scored even in discovery mode."""
@@ -105,9 +126,17 @@ class TestPinnedLoopInDiscoveryMode:
         assert nonzero.size > 0, "pinned loop should have non-zero behavior"
         assert np.allclose(np.abs(nonzero), 1.0)
 
-        # The loop is also structurally present (no behavior) on model.loops.
-        structural_ids = {loop.id for loop in model.loops}
-        assert "pin1" in structural_ids
+        # The modeler-assigned name must survive the round-trip through run.loops
+        # so a caller can recover the human-meaningful label, not just `pin1`.
+        assert pin_loop.name == "ab loop"
+        # __str__ includes the quoted name when present.
+        assert '"ab loop"' in str(pin_loop)
+
+        # The loop is also structurally present (no behavior) on model.loops,
+        # carrying the same name.
+        structural = {loop.id: loop for loop in model.loops}
+        assert "pin1" in structural
+        assert structural["pin1"].name == "ab loop"
 
     def test_pinned_loop_readable_by_id_via_sim(self) -> None:
         model = _pinned_loop_in_discovery_model()

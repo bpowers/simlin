@@ -291,6 +291,7 @@ class Run:
                     variables=structural_loop.variables,
                     polarity=polarity,
                     behavior_time_series=behavior_ts,
+                    name=structural_loop.name,
                 )
                 loops_with_behavior.append(loop_with_behavior)
             except SimlinRuntimeError:
