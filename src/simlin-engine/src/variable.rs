@@ -540,8 +540,20 @@ fn get_dimensions(
     names
         .iter()
         .map(|name| -> Result<Dimension, EquationError> {
+            // Match by canonical name, not raw string equality: a dimension's
+            // identity is its canonical name (the dims map is keyed by it, so
+            // two distinct dimensions can never canonicalize to the same
+            // string). A synthesized `Equation::ApplyToAll` whose dimension
+            // names came from `print_eqn` carries CANONICAL names (`hfc_type`),
+            // which must still resolve against a dimension declared with
+            // original casing/spacing (`HFC type` -> `HFC_type`); a raw `==`
+            // check rejected it as `BadDimensionName` (the GH #541 arrayed
+            // PREVIOUS/INIT helper regression on C-LEARN's capitalized
+            // dimensions). Importer-produced equations already match exactly,
+            // so canonical matching is a strict superset.
+            let canonical_name = canonicalize(name);
             for dim in dimensions {
-                if dim.name() == name {
+                if canonicalize(dim.name()) == canonical_name {
                     return Ok(Dimension::from(dim));
                 }
             }

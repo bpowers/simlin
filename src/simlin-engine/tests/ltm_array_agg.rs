@@ -68,6 +68,7 @@ use simlin_engine::db::{
     compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
     sync_from_datamodel_incremental,
 };
+use simlin_engine::open_vensim;
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{Results, Vm};
 
@@ -880,6 +881,182 @@ fn bare_arrayed_nested_previous_transposed_matches_subscripted() {
         so[2], 40.0,
         "p2bare[south,old] step 2 must trace pop[old,south]=40"
     );
+}
+
+/// Regression for the C-LEARN compile break GH #541's arrayed-helper path
+/// introduced (then fixed forward): an apply-to-all `INITIAL` whose argument
+/// subscripts arrays by dimensions that *map* to the active dimension.
+///
+/// This is C-LEARN's dominant idiom -- `FF change start year[COP] =
+/// INITIAL(IF THEN ELSE(..., agg[Aggregated Regions], semi[Semi Agg]))`,
+/// where `Aggregated Regions` and `Semi Agg` map to `COP`. The model below is
+/// the same shape in miniature: `Agg` (3 elems) maps to `COP` (3 elems) via an
+/// element list. Built through the MDL importer so the dimension-mapping
+/// structure is byte-identical to what C-LEARN carries (a hand-built
+/// `DimensionMapping` does not reproduce the same `find_mapping_parent_of` /
+/// `translate_via_mapping` resolution).
+///
+/// The original #541 path wrapped the whole `INITIAL` body in an
+/// `Equation::ApplyToAll(["cop"], ...)` helper and SKIPPED
+/// `substitute_dimension_refs`, so the foreign `[Aggregated Regions]` subscript
+/// stayed un-translated and the helper fragment failed (`BadDimensionName` ->
+/// silently dropped -> `NotSimulatable`). The fix keeps a subscripted argument
+/// on the per-element scalar-helper path, which translates each mapped
+/// subscript to a concrete element. The per-element values must be exactly the
+/// mapped source values (`Agg` element `Ai` -> `COP` element `Ci`).
+#[test]
+fn a2a_init_mapped_dim_subscript_matches_mapped_source() {
+    const MDL: &str = r#"{UTF-8}
+Agg:
+	A1, A2, A3
+	-> (COP: COP_a, COP_b, COP_c)
+	~	~	|
+COP_a:
+	C1
+	~	~	|
+COP_b:
+	C2
+	~	~	|
+COP_c:
+	C3
+	~	~	|
+COP:
+	C1, C2, C3
+	~	~	|
+src agg[Agg]=
+	100, 200, 300
+	~	~	|
+sw=
+	2
+	~	~	|
+tgt[COP]= INITIAL(
+	IF THEN ELSE(sw=3, 0, src agg[Agg]))
+	~	~	|
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+INITIAL TIME  = 0 ~	~	|
+FINAL TIME  = 2 ~	~	|
+TIME STEP  = 1 ~	~	|
+SAVEPER  = 1 ~	~	|
+\\\---/// Sketch information
+"#;
+
+    let project = open_vensim(MDL).expect("C-LEARN-shaped MDL must parse");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect(
+        "GH #541 regression: an A2A INITIAL whose arg subscripts by a mapped \
+         dimension must compile (the per-element scalar helper translates the \
+         mapped subscript)",
+    );
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("simulation should run to completion");
+    let results = vm.into_results();
+
+    // sw=2 -> tgt[Ci] = src agg[Ai] (Agg maps A1->C1, A2->C2, A3->C3).
+    for (cop_elem, expect) in [("c1", 100.0), ("c2", 200.0), ("c3", 300.0)] {
+        let series = series_at(&results, offset_of(&results, &format!("tgt[{cop_elem}]")));
+        assert!(
+            series.iter().all(|&v| (v - expect).abs() < 1e-9),
+            "tgt[{cop_elem}] must equal the mapped source value {expect}; got {series:?}"
+        );
+    }
+}
+
+/// Regression for a capitalized-dimension-name variant of the GH #541
+/// arrayed-helper fix: when the arrayed `PREVIOUS`/`INIT` helper IS taken
+/// (a bare arrayed name, no subscript), its synthesized
+/// `Equation::ApplyToAll` carries canonical dimension names (`region`), which
+/// must resolve against a dimension declared with original casing (`Region`).
+/// A raw `==` match rejected this as `BadDimensionName` and silently dropped
+/// the helper; `variable::get_dimensions` now matches canonically.
+#[test]
+fn arrayed_helper_resolves_capitalized_dimension() {
+    let project = TestProject::new("caps")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("Region", &["North", "South"])
+        .array_stock("pop[Region]", "100", &["growth"], &[], None)
+        .array_flow("growth[Region]", "pop[Region] * 0.1", None)
+        // Bare arrayed `pop` in a nested PREVIOUS -> the arrayed-helper path,
+        // whose ApplyToAll dims are the canonical `region` but must resolve
+        // against the `Region` dimension.
+        .array_aux_direct(
+            "p2bare",
+            vec!["Region".to_string()],
+            "PREVIOUS(PREVIOUS(pop))",
+            None,
+        )
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    compile_project_incremental(&db, sync.project, "main").expect(
+        "a bare-arrayed nested PREVIOUS over a capitalized dimension must compile: \
+         the arrayed helper's canonical ApplyToAll dims must resolve against the \
+         capitalized dimension name",
+    );
+}
+
+/// Regression for the LTM-vs-plain divergence the arrayed-helper path caused
+/// on C-LEARN: a bare arrayed name *inside an array reducer*
+/// (`PREVIOUS(SUM(arr))`) must use a SCALAR helper, not the arrayed-helper
+/// path. The reducer collapses its arrayed argument to a scalar, so wrapping
+/// `SUM(arr)` in an `Equation::ApplyToAll` would broadcast a scalar reduce
+/// across the active dimensions and corrupt the value -- exactly the shape of
+/// an LTM link-score numerator, which is why enabling LTM diverged from plain.
+/// The non-reducer bare-name case (`PREVIOUS(PREVIOUS(arr))`) still takes the
+/// arrayed path; this pins that the reducer case does not.
+#[test]
+fn bare_arrayed_inside_reducer_uses_scalar_helper() {
+    // `agg[region] = PREVIOUS(SUM(pop))`: SUM(pop) is a whole-array scalar
+    // reduce, so every element of `agg` holds the same lagged total. A
+    // wrongly-arrayed helper would broadcast/mis-shape it.
+    let arrayed = TestProject::new("reducer_bare")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["growth"], &[], None)
+        .array_flow("growth[region]", "pop[region] * 0.1", None)
+        .array_aux_direct(
+            "agg",
+            vec!["region".to_string()],
+            "PREVIOUS(SUM(pop))",
+            None,
+        )
+        .build_datamodel();
+
+    // Scalar reference: `sref = PREVIOUS(SUM(pop))` computed once.
+    let scalar = TestProject::new("reducer_scalar")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["growth"], &[], None)
+        .array_flow("growth[region]", "pop[region] * 0.1", None)
+        .scalar_aux("sref", "PREVIOUS(SUM(pop))")
+        .build_datamodel();
+
+    let run = |project: &datamodel::Project| -> Results {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, project, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("PREVIOUS(SUM(arr)) in an A2A equation must compile");
+        let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+        vm.run_to_end()
+            .expect("simulation should run to completion");
+        vm.into_results()
+    };
+    let arr = run(&arrayed);
+    let sca = run(&scalar);
+    let sref = series_at(&sca, offset_of(&sca, "sref"));
+    for region in ["north", "south"] {
+        let agg = series_at(&arr, offset_of(&arr, &format!("agg[{region}]")));
+        assert_eq!(
+            agg, sref,
+            "agg[{region}] = PREVIOUS(SUM(pop)) must equal the scalar PREVIOUS(SUM(pop)) \
+             (the whole-array reduce is a scalar broadcast to every element)"
+        );
+    }
 }
 
 /// Graceful-degradation pin for an LTM synthetic fragment that the compiler

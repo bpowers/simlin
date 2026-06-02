@@ -548,13 +548,58 @@ impl<'a> BuiltinVisitor<'a> {
             // wildcard/range index lives inside an array-reducer (handled by
             // its own array-view path), so we do not descend into indices here.
             Subscript(_, _, _) => false,
-            App(UntypedBuiltinFn(_, args), _) => args.iter().any(|a| self.arg_has_bare_var_ref(a)),
+            // An array-reducer (`SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/`RANK`/`SIZE`)
+            // collapses its arrayed argument to a SCALAR, so a bare arrayed name
+            // inside it (`SUM(hfc_emissions)`) is well-typed in a *scalar*
+            // helper -- it does NOT need the arrayed-helper path, and wrapping
+            // `SUM(arr)` in an `ApplyToAll` would broadcast a scalar reduce
+            // across the active dims and corrupt the result (LTM link-score
+            // numerators are exactly this shape). Do not descend into a reducer.
+            App(UntypedBuiltinFn(func, args), _) => {
+                crate::ltm_agg::reducer_kind_from_name(func.as_str(), args.len()).is_none()
+                    && args.iter().any(|a| self.arg_has_bare_var_ref(a))
+            }
             Op1(_, r, _) => self.arg_has_bare_var_ref(r),
             Op2(_, l, r, _) => self.arg_has_bare_var_ref(l) || self.arg_has_bare_var_ref(r),
             If(cond, t, f, _) => {
                 self.arg_has_bare_var_ref(cond)
                     || self.arg_has_bare_var_ref(t)
                     || self.arg_has_bare_var_ref(f)
+            }
+        }
+    }
+
+    /// Does `arg` contain ANY `Subscript` expression?
+    ///
+    /// The GH #541 arrayed-helper path is restricted to args with NO subscript:
+    /// the ONLY shape that genuinely needs it is a *bare* arrayed name
+    /// (`PREVIOUS(PREVIOUS(pop))`), which carries no subscript. The moment a
+    /// subscript is present -- whether by an active dimension (`reg[region]`),
+    /// a mapped/foreign dimension (`agg[Aggregated Regions]` inside A2A-over-COP,
+    /// the C-LEARN idiom), or a literal element -- the OLD per-element scalar
+    /// helper path handles it correctly: `substitute_dimension_refs` translates
+    /// each subscript to a concrete per-element reference (active dims to
+    /// `dim·elem`, mapped dims through `translate_via_mapping`), which compiles
+    /// in the scalar helper exactly as it did pre-#541. Wrapping a subscripted
+    /// body in an `Equation::ApplyToAll` helper instead is both unnecessary and
+    /// the source of subtle bugs (mapped-subscript ill-typing, per-element
+    /// layout/value divergence under LTM), so we keep the proven scalar path for
+    /// every subscripted arg. A bare arrayed name *alongside* a subscript in the
+    /// same arg therefore also takes the scalar path; if that bare name is
+    /// genuinely arrayed it fails cleanly there, as it did pre-#541 -- a known
+    /// limitation no corpus model hits.
+    fn arg_has_subscript(&self, arg: &Expr0) -> bool {
+        use Expr0::*;
+        match arg {
+            Const(_, _, _) | Var(_, _) => false,
+            Subscript(_, _, _) => true,
+            App(UntypedBuiltinFn(_, args), _) => args.iter().any(|a| self.arg_has_subscript(a)),
+            Op1(_, r, _) => self.arg_has_subscript(r),
+            Op2(_, l, r, _) => self.arg_has_subscript(l) || self.arg_has_subscript(r),
+            If(cond, t, f, _) => {
+                self.arg_has_subscript(cond)
+                    || self.arg_has_subscript(t)
+                    || self.arg_has_subscript(f)
             }
         }
     }
@@ -569,15 +614,21 @@ impl<'a> BuiltinVisitor<'a> {
     /// `Var` -- unchanged from the original behavior.
     ///
     /// In A2A context, when the argument contains a bare variable reference
-    /// (`arg_has_bare_var_ref`), the helper is instead an *arrayed* aux
-    /// (`Equation::ApplyToAll` over the active dimensions) holding the argument
-    /// *without* per-element substitution, so a bare arrayed name keeps its
-    /// array shape (GH #541). The returned reference subscripts that helper by
-    /// the active element (`helper[<element>]`), a static per-element access
-    /// the caller's outer `PREVIOUS`/`INIT` then compiles to a fixed slot. The
-    /// arrayed helper's name carries NO element suffix, so every element of the
-    /// enclosing apply-to-all produces the identical `Equation::ApplyToAll`
-    /// helper, which `instantiate_implicit_modules` deduplicates into one.
+    /// (`arg_has_bare_var_ref`) AND no subscript at all (`arg_has_subscript`),
+    /// the helper is instead an *arrayed* aux (`Equation::ApplyToAll` over the
+    /// active dimensions) holding the argument *without* per-element
+    /// substitution, so a bare arrayed name keeps its array shape (GH #541). The
+    /// returned reference subscripts that helper by the active element
+    /// (`helper[<element>]`), a static per-element access the caller's outer
+    /// `PREVIOUS`/`INIT` then compiles to a fixed slot. The arrayed helper's
+    /// name carries NO element suffix, so every element of the enclosing
+    /// apply-to-all produces the identical `Equation::ApplyToAll` helper, which
+    /// `instantiate_implicit_modules` deduplicates into one.
+    ///
+    /// Any subscripted arg takes the OLD scalar path instead (see
+    /// `arg_has_subscript`): `substitute_dimension_refs` translates each
+    /// subscript per element, which is the proven pre-#541 behavior and avoids
+    /// the arrayed helper's subscript-interaction bugs (the C-LEARN regression).
     fn make_temp_arg(&mut self, arg: Expr0) -> Expr0 {
         let loc = crate::builtins::Loc::default();
 
@@ -587,12 +638,17 @@ impl<'a> BuiltinVisitor<'a> {
         let active_subscript = self.active_subscript.clone();
         if let Some(subscript) = active_subscript.as_ref()
             && self.arg_has_bare_var_ref(&arg)
+            && !self.arg_has_subscript(&arg)
         {
             // Arrayed helper: no element suffix (so all elements dedup to one),
             // and hold the *un-substituted* argument so bare arrayed names stay
             // arrayed and a subscripted reference (`arr[Dim]`) broadcasts over
             // the helper's own dimensions instead of being frozen to one element.
             let id = format!("$⁚{}⁚{}⁚arg0", self.variable_name, self.n);
+            // The helper aux's `Equation::ApplyToAll` dims carry the active
+            // (canonical) dimension names; `variable::get_dimensions` resolves
+            // them canonically against the project dimensions, so they match a
+            // dimension declared with original casing/spacing.
             let dims: Vec<String> = self
                 .dimension_names
                 .iter()

@@ -470,9 +470,14 @@ pub fn model_implicit_var_info(
                 dimensions
                     .iter()
                     .map(|dim_name| {
+                        // Canonical match: the helper's stored dim names are
+                        // canonical (`region`); the project dims keep original
+                        // casing (`Region`). A raw `==` would miss and the size
+                        // would wrongly fall back to 1, corrupting the layout.
+                        let canonical = canonicalize(dim_name);
                         all_dims
                             .iter()
-                            .find(|d| d.name() == dim_name.as_str())
+                            .find(|d| canonicalize(d.name()) == canonical)
                             .map(|d| d.len())
                             .unwrap_or(1)
                     })
