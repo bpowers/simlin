@@ -143,6 +143,31 @@ pub(crate) struct VarDepCollection {
     pub(crate) unknown_dependency: Option<Diagnostic>,
 }
 
+/// Resolve an arrayed implicit helper's declared dimension names
+/// (`ImplicitVarMeta::dimensions`) to engine `Dimension`s, so the dependency
+/// stub can carry the helper's real array shape. Empty for a scalar helper
+/// (the common case). Names that don't resolve are dropped -- the same
+/// best-effort behavior `build_stub_variable` relies on for source vars.
+fn implicit_dep_dimensions(
+    db: &dyn Db,
+    project: SourceProject,
+    meta: &crate::db::ImplicitVarMeta,
+) -> Vec<crate::dimensions::Dimension> {
+    if meta.dimensions.is_empty() {
+        return Vec::new();
+    }
+    let converted = crate::db::project_converted_dimensions(db, project);
+    meta.dimensions
+        .iter()
+        .filter_map(|dim_name| {
+            converted
+                .iter()
+                .find(|d| d.name() == dim_name.as_str())
+                .cloned()
+        })
+        .collect()
+}
+
 /// Walk a variable's direct dependencies (plus stock inflows/outflows and
 /// implicit module instances) and build the per-dependency stub
 /// variables, module-ref entries, and sub-model lists.
@@ -363,10 +388,26 @@ fn collect_var_dependencies(
             dep_variables.push((dep_ident, dep_var, dep_size));
         } else if let Some(meta) = implicit_var_info.get(effective_name) {
             if !meta.is_module {
+                // An *arrayed* implicit helper (GH #541's bare-arrayed-PREVIOUS
+                // case) needs its array shape in the stub so a consumer that
+                // subscripts it (`helper[<elem>]`) resolves the subscript; a
+                // bare stub (`ast: None`) would be treated as scalar and the
+                // subscript rejected. Mirror `build_stub_variable`'s dummy
+                // `ApplyToAll(dims, 0)` AST. Scalar helpers (the common case)
+                // keep `ast: None`.
+                let dep_dims = implicit_dep_dimensions(db, project, meta);
+                let dummy_ast = if dep_dims.is_empty() {
+                    None
+                } else {
+                    Some(crate::ast::Ast::ApplyToAll(
+                        dep_dims,
+                        crate::ast::Expr2::Const("0".to_string(), 0.0, crate::ast::Loc::default()),
+                    ))
+                };
                 let dep_var = if meta.is_stock {
                     crate::variable::Variable::Stock {
                         ident: dep_ident.clone(),
-                        init_ast: None,
+                        init_ast: dummy_ast,
                         eqn: None,
                         units: None,
                         inflows: vec![],
@@ -378,7 +419,7 @@ fn collect_var_dependencies(
                 } else {
                     crate::variable::Variable::Var {
                         ident: dep_ident.clone(),
-                        ast: None,
+                        ast: dummy_ast,
                         init_ast: None,
                         eqn: None,
                         units: None,

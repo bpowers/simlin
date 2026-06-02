@@ -2242,6 +2242,15 @@ fn dimension_subscript_suffix(var: &Variable) -> String {
 /// arrayed inflow/outflow shares the stock's dimensions, so those names
 /// are all bound by the `ApplyToAll` iteration. A scalar stock/flow has
 /// no dimensions, so its references stay bare -- the pre-fix behavior.
+///
+/// NOTE: GH #541's engine-level fix (`make_temp_arg` now synthesizes an
+/// arrayed helper for a bare arrayed reference) makes the bare form compile
+/// too, so this generator-side subscripting is no longer load-bearing.
+/// It is intentionally retained: the engine fix is a strict superset
+/// (an already-subscripted reference stays on the unchanged scalar-helper
+/// path), this output is pinned by dedicated tests, and re-baselining the
+/// LTM equation text for every arrayed flow-to-stock link score across the
+/// corpus would be a broad change with no behavioral benefit.
 fn generate_flow_to_stock_equation(
     flow: &str,
     stock: &str,

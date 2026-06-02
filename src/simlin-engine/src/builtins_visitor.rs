@@ -137,6 +137,26 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
         .collect()
 }
 
+/// Drop later entries that repeat an earlier entry's identifier, preserving
+/// first-occurrence order.
+///
+/// The per-element apply-to-all expansion runs a fresh `BuiltinVisitor` per
+/// element and unions every visitor's synthesized helpers. A *scalar*
+/// per-element helper carries the element in its name (`...⁚arg0⁚north`), so
+/// the union holds N distinct entries -- exactly one per element. The arrayed
+/// `PREVIOUS`/`INIT` helper synthesized for a bare arrayed reference (GH #541)
+/// deliberately omits the element suffix, so every element produces the
+/// *byte-identical* `Equation::ApplyToAll` helper; the union must collapse
+/// them to one (the downstream layout indexes `implicit_vars` positionally, so
+/// duplicate names would mint colliding slots). Keeping the first occurrence is
+/// safe precisely because the duplicates are identical by construction.
+fn dedup_vars_by_ident(vars: Vec<datamodel::Variable>) -> Vec<datamodel::Variable> {
+    let mut seen: HashSet<Ident<Canonical>> = HashSet::new();
+    vars.into_iter()
+        .filter(|v| seen.insert(Ident::new(v.get_ident())))
+        .collect()
+}
+
 pub struct BuiltinVisitor<'a> {
     variable_name: &'a str,
     /// Modules synthesized during the current walk (e.g., SMOOTH, DELAY
@@ -494,7 +514,120 @@ impl<'a> BuiltinVisitor<'a> {
         }
     }
 
-    fn make_temp_arg(&mut self, arg: Expr0) -> RawIdent {
+    /// Does `arg` contain a *bare* (unsubscripted) variable reference that is
+    /// neither a dimension name (those get rewritten to qualified elements by
+    /// `substitute_dimension_refs`) nor module-backed (those get their own
+    /// per-element helper)? Such a bare reference is the one that breaks the
+    /// scalar-helper path: if it names an *arrayed* variable, a bare arrayed
+    /// name has no meaning inside a scalar `Equation::Scalar` helper, so the
+    /// helper fragment fails to compile (GH #541 -- the canonical trigger is a
+    /// nested `PREVIOUS(PREVIOUS(arr))`, whose inner `PREVIOUS(arr)` is an
+    /// expression arg routed through `make_temp_arg`).
+    ///
+    /// We cannot tell here whether the bare name is arrayed or scalar (the
+    /// visitor has no variable->dimensions map -- the per-variable parse path
+    /// deliberately withholds the model's name set for salsa incrementality),
+    /// so the conservative answer is "treat any surviving bare reference as
+    /// possibly-arrayed and route it through an arrayed helper". An arrayed
+    /// (`Equation::ApplyToAll`) helper broadcasts a *scalar* reference cleanly
+    /// too, so a false positive (a bare scalar reference) stays correct -- it
+    /// is merely held in a broadcast array rather than a scalar slot. A
+    /// `Subscript` base (`arr[Dim]`) is NOT a bare reference: after
+    /// substitution it is a per-element scalar access the scalar helper holds
+    /// fine, which is why the explicitly-subscripted form already compiles.
+    fn arg_has_bare_var_ref(&self, arg: &Expr0) -> bool {
+        use Expr0::*;
+        match arg {
+            Const(_, _, _) => false,
+            Var(ident, _) => {
+                let canonical = CanonicalDimensionName::from_raw(ident.as_str());
+                let is_active_dim = self.dimension_names.iter().any(|d| d == &canonical);
+                !is_active_dim && !self.is_module_backed_ident(ident)
+            }
+            // A subscripted reference is already a per-element scalar access; a
+            // wildcard/range index lives inside an array-reducer (handled by
+            // its own array-view path), so we do not descend into indices here.
+            Subscript(_, _, _) => false,
+            App(UntypedBuiltinFn(_, args), _) => args.iter().any(|a| self.arg_has_bare_var_ref(a)),
+            Op1(_, r, _) => self.arg_has_bare_var_ref(r),
+            Op2(_, l, r, _) => self.arg_has_bare_var_ref(l) || self.arg_has_bare_var_ref(r),
+            If(cond, t, f, _) => {
+                self.arg_has_bare_var_ref(cond)
+                    || self.arg_has_bare_var_ref(t)
+                    || self.arg_has_bare_var_ref(f)
+            }
+        }
+    }
+
+    /// Synthesize the helper aux that captures an expression `PREVIOUS`/`INIT`
+    /// argument and return the reference expression the caller substitutes for
+    /// the argument.
+    ///
+    /// Outside A2A context (`active_subscript == None`), or when the captured
+    /// argument carries no bare variable reference, the helper is a scalar aux
+    /// holding the (dimension-substituted) argument and the reference is a bare
+    /// `Var` -- unchanged from the original behavior.
+    ///
+    /// In A2A context, when the argument contains a bare variable reference
+    /// (`arg_has_bare_var_ref`), the helper is instead an *arrayed* aux
+    /// (`Equation::ApplyToAll` over the active dimensions) holding the argument
+    /// *without* per-element substitution, so a bare arrayed name keeps its
+    /// array shape (GH #541). The returned reference subscripts that helper by
+    /// the active element (`helper[<element>]`), a static per-element access
+    /// the caller's outer `PREVIOUS`/`INIT` then compiles to a fixed slot. The
+    /// arrayed helper's name carries NO element suffix, so every element of the
+    /// enclosing apply-to-all produces the identical `Equation::ApplyToAll`
+    /// helper, which `instantiate_implicit_modules` deduplicates into one.
+    fn make_temp_arg(&mut self, arg: Expr0) -> Expr0 {
+        let loc = crate::builtins::Loc::default();
+
+        // The active per-element subscript, cloned up front so the helper-
+        // insertion (`&mut self.vars`) below does not conflict with borrowing
+        // it. `Some` exactly in A2A context; cheap (a few element-name Strings).
+        let active_subscript = self.active_subscript.clone();
+        if let Some(subscript) = active_subscript.as_ref()
+            && self.arg_has_bare_var_ref(&arg)
+        {
+            // Arrayed helper: no element suffix (so all elements dedup to one),
+            // and hold the *un-substituted* argument so bare arrayed names stay
+            // arrayed and a subscripted reference (`arr[Dim]`) broadcasts over
+            // the helper's own dimensions instead of being frozen to one element.
+            let id = format!("$⁚{}⁚{}⁚arg0", self.variable_name, self.n);
+            let dims: Vec<String> = self
+                .dimension_names
+                .iter()
+                .map(|d| d.as_str().to_string())
+                .collect();
+            let eqn = print_eqn(&arg);
+            let x_var = datamodel::Variable::Aux(datamodel::Aux {
+                ident: id.clone(),
+                equation: datamodel::Equation::ApplyToAll(dims, eqn),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            });
+            self.vars.insert(Ident::new(&id), x_var);
+            self.n += 1;
+
+            // Reference the helper at the active element: one qualified
+            // `dimension·element` index per active dimension. These are
+            // statically resolvable, so the outer PREVIOUS/INIT compiles to a
+            // fixed slot rather than synthesizing yet another helper.
+            let indices: Vec<IndexExpr0> = self
+                .dimension_names
+                .iter()
+                .zip(subscript.iter())
+                .map(|(dim_name, elem)| {
+                    let qualified = format!("{}·{}", dim_name.as_str(), elem);
+                    IndexExpr0::Expr(Expr0::Var(RawIdent::new_from_str(&qualified), loc))
+                })
+                .collect();
+            return Expr0::Subscript(RawIdent::new_from_str(&id), indices, loc);
+        }
+
         let transformed_arg = if self.active_subscript.is_some() {
             self.substitute_dimension_refs(arg)
         } else {
@@ -522,7 +655,7 @@ impl<'a> BuiltinVisitor<'a> {
         });
         self.vars.insert(Ident::new(&id), x_var);
         self.n += 1;
-        RawIdent::new_from_str(&id)
+        Expr0::Var(RawIdent::new_from_str(&id), loc)
     }
 
     fn walk_index(&mut self, expr: IndexExpr0) -> Result<IndexExpr0, EquationError> {
@@ -816,8 +949,12 @@ impl<'a> BuiltinVisitor<'a> {
                         _ => true,
                     };
                     let arg0 = if needs_temp_arg {
-                        let id = self.make_temp_arg(arg0);
-                        Var(id, loc)
+                        // `make_temp_arg` returns the reference expression for
+                        // the synthesized helper: a bare `Var` for a scalar
+                        // helper, or a subscripted `helper[<element>]` access
+                        // for the arrayed helper it synthesizes when the arg
+                        // carries a bare arrayed reference (GH #541).
+                        self.make_temp_arg(arg0)
                     } else {
                         arg0
                     };
@@ -945,7 +1082,10 @@ pub fn instantiate_implicit_modules(
                     all_vars.extend(visitor.vars.values().cloned());
                 }
 
-                Ok((Ast::Arrayed(dimensions, elements, None, false), all_vars))
+                Ok((
+                    Ast::Arrayed(dimensions, elements, None, false),
+                    dedup_vars_by_ident(all_vars),
+                ))
             } else {
                 // No module-function calls - original behavior
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
@@ -1008,7 +1148,7 @@ pub fn instantiate_implicit_modules(
                         transformed_default,
                         apply_default_to_missing,
                     ),
-                    all_vars,
+                    dedup_vars_by_ident(all_vars),
                 ))
             } else {
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)

@@ -44,21 +44,23 @@
 //! `0` -- the silent-stubbing class of bug Piece 3 of this effort
 //! addressed.
 //!
-//! ## Bare-arrayed nested `PREVIOUS` compile limitation
+//! ## Bare-arrayed nested `PREVIOUS` (GH #541, now fixed)
 //!
-//! `bare_arrayed_nested_previous_fails_to_compile` is a *characterization
-//! test* -- a live tripwire, not a disabled or `#[ignore]`d test. It pins
-//! the current, broken behavior that a plain apply-to-all equation with a
+//! `bare_arrayed_nested_previous_matches_subscripted` is a positive
+//! regression test for GH #541: a plain apply-to-all equation with a
 //! *bare* (unsubscripted) arrayed name inside a *nested* `PREVIOUS` --
-//! `p2bare[region] = PREVIOUS(PREVIOUS(pop))` -- fails to compile. That is
-//! exactly the shape the LTM flow-to-stock link-score generator emits;
-//! "Finding 2" of the review was this bug surfacing *through* the
-//! generator, and Piece 2 fixed Finding 2 with a generator-side
-//! workaround, but the underlying engine limitation (GH #541) is unfixed.
-//! The test passes today; when GH #541 is fixed it begins to fail, which
-//! forces whoever fixes it to flip it into a positive regression test.
-//! `subscripted_arrayed_nested_previous_matches_scalar` is its positive
-//! companion: the properly subscripted form already works, per element.
+//! `p2bare[region] = PREVIOUS(PREVIOUS(pop))` -- now compiles and
+//! simulates, producing the same per-element values as the explicitly
+//! subscripted form. `builtins_visitor`'s `make_temp_arg` synthesizes an
+//! *arrayed* (`Equation::ApplyToAll`) helper aux over the active A2A
+//! dimensions for the inner `PREVIOUS(pop)` and references it
+//! `helper[<element>]`, so the bare arrayed name keeps its array shape
+//! instead of landing ill-typed in a scalar helper. This was exactly the
+//! shape the LTM flow-to-stock link-score generator emits; "Finding 2" of
+//! the review was this bug surfacing *through* the generator, and Piece 2
+//! worked around it generator-side, but the underlying engine limitation
+//! is now fixed at the source. `subscripted_arrayed_nested_previous_matches_scalar`
+//! is the companion that pins the explicitly subscripted form.
 
 use simlin_engine::datamodel::{self, Dimension};
 use simlin_engine::db::{
@@ -533,38 +535,36 @@ fn whole_extent_sum_agg_loop_scores_are_finite_and_sustained() {
     );
 }
 
-/// Characterization test (a live tripwire, not a disabled test): pins the
-/// current, broken behavior that a plain apply-to-all equation with a
-/// *bare* (unsubscripted) arrayed name inside a *nested* `PREVIOUS` fails
-/// to compile.
+/// Positive regression test for GH #541 (flipped from the prior
+/// characterization tripwire): a plain apply-to-all equation with a *bare*
+/// (unsubscripted) arrayed name inside a *nested* `PREVIOUS` now compiles,
+/// simulates, and produces per-element values identical to the explicitly
+/// subscripted form.
 ///
 /// `p2bare[region] = PREVIOUS(PREVIOUS(pop))` -- with `pop` arrayed over
 /// `region` -- is exactly the shape the LTM flow-to-stock link-score
 /// generator emits. "Finding 2" of the LTM deep review was this bug
-/// surfacing *through* the LTM generator: the synthetic fragment failed
-/// to compile and was silently stubbed to `0`, collapsing the loop score.
-/// Piece 2 fixed Finding 2 with a *generator-side workaround* -- the
-/// generator now emits the subscripted form -- but the *underlying engine
-/// limitation*, which a user still hits by writing the bare form
-/// directly, is unfixed.
+/// surfacing *through* the LTM generator: the inner `PREVIOUS(pop)` was
+/// captured into a *scalar* helper aux where a bare arrayed name is
+/// ill-typed, so the synthetic fragment failed to compile and was silently
+/// stubbed to `0`, collapsing the loop score. Piece 2 worked around it
+/// generator-side; this engine-level fix removes the root cause.
 ///
-/// Root cause (GH #541): `make_temp_arg` in `builtins_visitor.rs`
-/// synthesizes the inner-`PREVIOUS` helper as a *scalar* aux
-/// (`datamodel::Equation::Scalar(...)`), so a bare arrayed name lands
-/// ill-typed inside a scalar equation and the helper fragment fails to
-/// compile.
+/// Fix (GH #541): `make_temp_arg` in `builtins_visitor.rs` now synthesizes
+/// an *arrayed* (`Equation::ApplyToAll`) helper aux over the active A2A
+/// dimensions when the captured argument carries a bare variable reference,
+/// and references it `helper[<element>]`. The bare arrayed name keeps its
+/// array shape, and dimension matching (including transposed contexts) is
+/// delegated to the existing apply-to-all lowering.
 ///
-/// FIXME(GH #541): when the engine handles a bare arrayed name in a
-/// nested `PREVIOUS` (e.g. `make_temp_arg` synthesizes a correctly-shaped
-/// helper), the `p2bare` model below will compile. This test then begins
-/// to fail -- flip it into a positive regression test: compile and
-/// simulate the model, then assert `p2bare[north]` / `p2bare[south]`
-/// equal `PREVIOUS(PREVIOUS(pop[region]))` per element (the exact values
-/// `subscripted_arrayed_nested_previous_matches_scalar` already pins for
-/// the subscripted form).
+/// `pop[region]` and `scalar_pop` share identical dynamics, so each arrayed
+/// slot must track `PREVIOUS(PREVIOUS(pop[region]))` -- which
+/// `subscripted_arrayed_nested_previous_matches_scalar` separately pins
+/// against the scalar reference.
 #[test]
-fn bare_arrayed_nested_previous_fails_to_compile() {
-    // The failing case: a *nested* PREVIOUS over a *bare* arrayed name.
+fn bare_arrayed_nested_previous_matches_subscripted() {
+    // The previously-failing case: a *nested* PREVIOUS over a *bare* arrayed
+    // name. It must now compile and simulate.
     let nested_bare = TestProject::new("nested_bare_previous")
         .with_sim_time(0.0, 6.0, 1.0)
         .named_dimension("region", &["north", "south"])
@@ -577,17 +577,54 @@ fn bare_arrayed_nested_previous_fails_to_compile() {
             None,
         )
         .build_datamodel();
-    assert!(
-        !compiles(&nested_bare),
-        "GH #541 appears to be FIXED: `p2bare[region] = PREVIOUS(PREVIOUS(pop))` (a bare \
-         arrayed name inside a nested PREVIOUS) now compiles. Flip this characterization \
-         test into a positive regression test -- compile, simulate, and assert p2bare's \
-         per-element values match PREVIOUS(PREVIOUS(pop[region])) -- and update GH #541."
-    );
 
-    // The limitation is specifically the *nesting* of the bare name: a
-    // *single* (non-nested) bare arrayed `PREVIOUS(pop)` compiles fine, so
-    // GH #541 is not a blanket "bare arrayed name in PREVIOUS" failure.
+    // The explicitly subscripted reference form, simulated in the same model
+    // so the comparison is exact per element.
+    let nested_sub = TestProject::new("nested_sub_previous")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_stock("pop[region]", "100", &["growth"], &[], None)
+        .array_flow("growth[region]", "pop[region] * 0.1", None)
+        .array_aux_direct(
+            "p2sub",
+            vec!["region".to_string()],
+            "PREVIOUS(PREVIOUS(pop[region]))",
+            None,
+        )
+        .build_datamodel();
+
+    let run_plain = |project: &datamodel::Project| -> Results {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, project, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("GH #541: a bare arrayed name in a nested PREVIOUS must now compile");
+        let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+        vm.run_to_end()
+            .expect("plain simulation should run to completion");
+        vm.into_results()
+    };
+
+    let bare_results = run_plain(&nested_bare);
+    let sub_results = run_plain(&nested_sub);
+
+    for region in ["north", "south"] {
+        let bare_series = series_at(
+            &bare_results,
+            offset_of(&bare_results, &format!("p2bare[{region}]")),
+        );
+        let sub_series = series_at(
+            &sub_results,
+            offset_of(&sub_results, &format!("p2sub[{region}]")),
+        );
+        assert_eq!(
+            bare_series, sub_series,
+            "GH #541: the bare form `PREVIOUS(PREVIOUS(pop))` must match the subscripted \
+             form `PREVIOUS(PREVIOUS(pop[region]))` per element at {region}"
+        );
+    }
+
+    // The companion invariant: a *single* (non-nested) bare arrayed
+    // `PREVIOUS(pop)` always compiled; it must keep working.
     let single_bare = TestProject::new("single_bare_previous")
         .with_sim_time(0.0, 6.0, 1.0)
         .named_dimension("region", &["north", "south"])
@@ -598,14 +635,14 @@ fn bare_arrayed_nested_previous_fails_to_compile() {
     assert!(
         compiles(&single_bare),
         "a single (non-nested) bare arrayed PREVIOUS (`p1bare[region] = PREVIOUS(pop)`) \
-         must still compile -- the GH #541 limitation pinned here is specifically the \
-         *nesting* of a bare arrayed name, not bare arrayed names in PREVIOUS in general"
+         must still compile"
     );
 }
 
-/// The positive companion to `bare_arrayed_nested_previous_fails_to_compile`:
+/// The companion to `bare_arrayed_nested_previous_matches_subscripted`:
 /// the properly *subscripted* form of a nested `PREVIOUS` over an arrayed
-/// variable compiles and is correct per element.
+/// variable compiles and is correct per element, pinned against the scalar
+/// reference (the bare-form test pins the bare-vs-subscripted equivalence).
 ///
 /// `p1[region] = PREVIOUS(pop[region])` and
 /// `p2[region] = PREVIOUS(PREVIOUS(pop[region]))` -- the subscripted
@@ -682,6 +719,167 @@ fn subscripted_arrayed_nested_previous_matches_scalar() {
             }
         }
     }
+}
+
+/// GH #541, multi-dimensional case: a bare arrayed name in a nested
+/// `PREVIOUS` inside an apply-to-all equation over *two* dimensions
+/// compiles and matches the explicitly subscripted form per element.
+/// `make_temp_arg`'s arrayed helper is `ApplyToAll([region, age], ...)`, so
+/// the bare `pop` reference keeps its full 2-D shape.
+#[test]
+fn bare_arrayed_nested_previous_multidim_matches_subscripted() {
+    let run_plain = |eqn: &str, name: &str| -> Results {
+        let project = TestProject::new("md")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .named_dimension("region", &["north", "south"])
+            .named_dimension("age", &["young", "old"])
+            .array_stock("pop[region,age]", "100", &["growth"], &[], None)
+            .array_flow("growth[region,age]", "pop[region,age] * 0.1", None)
+            .array_aux_direct(
+                name,
+                vec!["region".to_string(), "age".to_string()],
+                eqn,
+                None,
+            )
+            .build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("multi-dim bare nested PREVIOUS must compile");
+        let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+        vm.run_to_end()
+            .expect("simulation should run to completion");
+        vm.into_results()
+    };
+    let bare = run_plain("PREVIOUS(PREVIOUS(pop))", "p2bare");
+    let sub = run_plain("PREVIOUS(PREVIOUS(pop[region,age]))", "p2sub");
+    for region in ["north", "south"] {
+        for age in ["young", "old"] {
+            let b = series_at(&bare, offset_of(&bare, &format!("p2bare[{region},{age}]")));
+            let s = series_at(&sub, offset_of(&sub, &format!("p2sub[{region},{age}]")));
+            assert_eq!(
+                b, s,
+                "multi-dim bare form must match subscripted form at [{region},{age}]"
+            );
+        }
+    }
+}
+
+/// GH #541, *transposed* context: the bare arrayed reference's declared
+/// dimension order (`pop[age,region]`) differs from the enclosing
+/// apply-to-all's (`[region,age]`). The arrayed helper delegates dimension
+/// matching to the apply-to-all lowering, which matches by dimension *name*
+/// (not position), so the bare form resolves correctly even transposed.
+/// Distinct per-element initial values make a positional mis-map observable
+/// (a wrong transpose would read the wrong source element).
+#[test]
+fn bare_arrayed_nested_previous_transposed_matches_subscripted() {
+    use datamodel::{Aux, Compat, Equation, Flow, Stock, Variable};
+
+    // pop declared over [age, region] with distinct per-element initials so a
+    // transpose error is detectable: (young,north)=10, (young,south)=20,
+    // (old,north)=30, (old,south)=40.
+    let build = |target_eqn: &str, target_name: &str| -> datamodel::Project {
+        let mut project = TestProject::new("tr")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .named_dimension("region", &["north", "south"])
+            .named_dimension("age", &["young", "old"])
+            .build_datamodel();
+        let model = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .expect("main model");
+        model.variables.push(Variable::Stock(Stock {
+            ident: "pop".to_string(),
+            equation: Equation::Arrayed(
+                vec!["age".to_string(), "region".to_string()],
+                vec![
+                    ("young,north".to_string(), "10".to_string(), None, None),
+                    ("young,south".to_string(), "20".to_string(), None, None),
+                    ("old,north".to_string(), "30".to_string(), None, None),
+                    ("old,south".to_string(), "40".to_string(), None, None),
+                ],
+                None,
+                false,
+            ),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["growth".to_string()],
+            outflows: vec![],
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        }));
+        model.variables.push(Variable::Flow(Flow {
+            ident: "growth".to_string(),
+            equation: Equation::ApplyToAll(
+                vec!["age".to_string(), "region".to_string()],
+                "pop[age,region] * 0.1".to_string(),
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        }));
+        // target apply-to-all over the TRANSPOSED order [region, age].
+        model.variables.push(Variable::Aux(Aux {
+            ident: target_name.to_string(),
+            equation: Equation::ApplyToAll(
+                vec!["region".to_string(), "age".to_string()],
+                target_eqn.to_string(),
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: Compat::default(),
+        }));
+        project
+    };
+
+    let run_plain = |project: &datamodel::Project| -> Results {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, project, None);
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("transposed bare nested PREVIOUS must compile");
+        let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+        vm.run_to_end()
+            .expect("simulation should run to completion");
+        vm.into_results()
+    };
+
+    let bare = run_plain(&build("PREVIOUS(PREVIOUS(pop))", "p2bare"));
+    // The subscripted reference is in the SOURCE's order [age,region]; the
+    // apply-to-all over [region,age] still resolves it by name.
+    let sub = run_plain(&build("PREVIOUS(PREVIOUS(pop[age,region]))", "p2sub"));
+    for region in ["north", "south"] {
+        for age in ["young", "old"] {
+            let b = series_at(&bare, offset_of(&bare, &format!("p2bare[{region},{age}]")));
+            let s = series_at(&sub, offset_of(&sub, &format!("p2sub[{region},{age}]")));
+            assert_eq!(
+                b, s,
+                "transposed bare form must match transposed subscripted form at \
+                 [{region},{age}] (dimension matching is by name, not position)"
+            );
+        }
+    }
+    // Spot-check the absolute values too: p2bare[north,young] traces
+    // pop[young,north] (initial 10), p2bare[south,old] traces pop[old,south]
+    // (initial 40) -- a positional transpose error would swap these.
+    let ny = series_at(&bare, offset_of(&bare, "p2bare[north,young]"));
+    let so = series_at(&bare, offset_of(&bare, "p2bare[south,old]"));
+    assert_eq!(
+        ny[2], 10.0,
+        "p2bare[north,young] step 2 must trace pop[young,north]=10"
+    );
+    assert_eq!(
+        so[2], 40.0,
+        "p2bare[south,old] step 2 must trace pop[old,south]=40"
+    );
 }
 
 /// Graceful-degradation pin for an LTM synthetic fragment that the compiler
