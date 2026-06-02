@@ -26,6 +26,32 @@ type BucketKey = (Option<usize>, usize);
 /// loop, the bucket's slot for an arrayed loop).
 type BucketMember = (usize, usize);
 
+/// One loop's `|loop_score|` contribution to a partition-sum denominator,
+/// with `NaN` summands excluded.
+///
+/// A `NaN` loop_score at a step means that one loop's score is *undefined*
+/// there; it is not signal, so it must not flow into the partition sum --
+/// otherwise a single bad loop turns the whole partition's denominator into
+/// `NaN` (the `denom == 0.0` SAFEDIV guard does not fire on `NaN`, since
+/// `NaN == 0.0` is false), poisoning every sibling's relative score (GH
+/// #542).  Dropping the `NaN` summand lets healthy siblings normalize
+/// against the healthy denominator; the bad loop's *own* numerator stays
+/// `NaN`, so its own relative score stays `NaN` -- the honest per-loop
+/// "undefined here" signal.  This matches the discovery path, which coerces
+/// a `NaN` link score to a non-contributing 0
+/// (`ltm_finding::SearchGraph::from_edges`).
+///
+/// `+/-Inf` is deliberately NOT excluded: a raw loop score legitimately
+/// diverges at a dominance inflection (the link-score denominators go to
+/// zero there), so an `Inf` summand is real signal that the loop dominates.
+/// Keeping it in the sum sends the dominated siblings to `0` (`finite/Inf`)
+/// and the dominant loop to `NaN` (`Inf/Inf`) -- the same inflection-point
+/// behaviour the removed SAFEDIV equation produced, preserved bug-for-bug.
+#[inline]
+fn denom_summand(v: f64) -> f64 {
+    if v.is_nan() { 0.0 } else { v.abs() }
+}
+
 /// Build the canonical identifier of a loop's `loop_score` synthetic variable.
 ///
 /// The constructed string already uses the canonical separators
@@ -92,12 +118,29 @@ fn slot_partition(
 /// [`compute_rel_loop_scores_per_element`].
 ///
 /// The denominator uses SAFEDIV-0 semantics: when the partition sum at
-/// slot 0 is `0` the result is `0` rather than `NaN`.  Non-finite
-/// `loop_score` values (from upstream VM evaluation) propagate through
-/// normal IEEE-754 arithmetic, matching the behaviour of the removed
-/// SAFEDIV equation.  Loops whose `loop_score` is absent from `results`
-/// (e.g. LTM disabled for that loop, or discovery-mode compilation) are
-/// omitted from the returned map.
+/// slot 0 is `0` the result is `0` rather than `NaN`.
+///
+/// Non-finite `loop_score` handling (GH #542): a `NaN` summand is
+/// *excluded* from the partition sum via [`denom_summand`], so one loop
+/// whose score is undefined at a step no longer poisons every sibling's
+/// relative score in that partition.  The bad loop's own numerator is
+/// still `NaN`, so its own relative score stays `NaN` -- the honest
+/// per-loop "undefined here" signal -- while healthy siblings normalize
+/// against the healthy denominator.  This matches the discovery path's
+/// "a `NaN` link contributes nothing" rule
+/// (`ltm_finding::SearchGraph::from_edges`).  `+/-Inf` is deliberately
+/// *kept* in the sum: a raw loop score legitimately diverges at a
+/// dominance inflection, so `Inf` is real signal -- it sends the
+/// dominated siblings to `0` and the dominant loop to `NaN` (`Inf/Inf`),
+/// the same inflection-point behaviour the removed SAFEDIV equation
+/// produced.  Earlier this whole module propagated `NaN` through normal
+/// IEEE-754 arithmetic only because the post-simulation refactor
+/// preserved the removed synthetic equation's semantics bug-for-bug; the
+/// removed SAFEDIV never promised `NaN`-resilience either.
+///
+/// Loops whose `loop_score` is absent from `results` (e.g. LTM disabled
+/// for that loop, or discovery-mode compilation) are omitted from the
+/// returned map.
 ///
 /// # Lone-pin degeneracy
 ///
@@ -155,7 +198,7 @@ pub fn compute_rel_loop_scores(
         for indices in partition_groups.values() {
             let denom: f64 = indices
                 .iter()
-                .filter_map(|&i| offsets[i].map(|off| row[off].abs()))
+                .filter_map(|&i| offsets[i].map(|off| denom_summand(row[off])))
                 .sum();
 
             for &i in indices {
@@ -204,9 +247,12 @@ pub fn compute_rel_loop_scores(
 /// over the members of that bucket, where `rs_j` is `0` for a scalar member
 /// (broadcast) and `k` for an arrayed member with `k < n_slots[j]` (an
 /// arrayed loop with `k >= n_slots[j]` is not a member of slot-`k` buckets).
-/// SAFEDIV-0 and NaN propagation match [`compute_rel_loop_scores`].
-/// `BTreeMap` on the bucket grid keeps the float summation order
-/// deterministic across runs.
+/// SAFEDIV-0 semantics, per-bucket `NaN` exclusion, and `Inf` retention
+/// all match [`compute_rel_loop_scores`] (via [`denom_summand`]): a `NaN`
+/// at one `(loop, slot)` does not poison the rest of its `(partition,
+/// slot)` bucket (GH #542), while an `Inf` at one slot stays in that
+/// bucket's denominator.  `BTreeMap` on the bucket grid keeps the float
+/// summation order deterministic across runs.
 pub fn compute_rel_loop_scores_per_element(
     results: &Results,
     loop_partitions: &HashMap<String, Vec<Option<usize>>>,
@@ -300,7 +346,7 @@ pub fn compute_rel_loop_scores_per_element(
         for (&(_p, k), member_list) in &members {
             let denom: f64 = member_list
                 .iter()
-                .filter_map(|&(i, rs)| offsets[i].map(|off| row[off + rs].abs()))
+                .filter_map(|&(i, rs)| offsets[i].map(|off| denom_summand(row[off + rs])))
                 .sum();
             for &(i, rs) in member_list {
                 let Some(off) = offsets[i] else { continue };
@@ -321,13 +367,16 @@ pub fn compute_rel_loop_scores_per_element(
 }
 
 /// Compute the cycle-partition denominator series:
-/// `denominator[t] = Σ_{j in partition} |loop_score[j, t]|`.
+/// `denominator[t] = Σ_{j in partition, loop_score[j, t] not NaN} |loop_score[j, t]|`.
 ///
 /// Loops in `loop_ids` whose `loop_score` variable is absent from
 /// `results` (e.g. LTM disabled for that loop, discovery-mode
 /// compilation, or model truncation) are omitted from the sum --
-/// the same semantics [`compute_rel_loop_scores`] uses.  Returns a
-/// length-`results.step_count` `Vec`, zero-filled when the
+/// the same semantics [`compute_rel_loop_scores`] uses.  `NaN`
+/// summands are excluded and `Inf` retained (via [`denom_summand`],
+/// GH #542), so this streaming denominator stays bit-for-bit
+/// identical to the full-sweep [`compute_rel_loop_scores`] sum.
+/// Returns a length-`results.step_count` `Vec`, zero-filled when the
 /// partition is empty.
 ///
 /// Exposed separately from [`compute_rel_loop_scores`] so that
@@ -354,7 +403,7 @@ where
 
     let mut denom = vec![0.0_f64; results.step_count];
     for (t, row) in results.iter().enumerate() {
-        denom[t] = offsets.iter().map(|&off| row[off].abs()).sum();
+        denom[t] = offsets.iter().map(|&off| denom_summand(row[off])).sum();
     }
     denom
 }
@@ -366,10 +415,14 @@ where
 /// Returns `None` when the loop's `loop_score` variable is absent
 /// from `results` (matching [`compute_rel_loop_scores`], which
 /// simply omits those loops from its output map).  SAFEDIV-0
-/// semantics: `denominator[t] == 0` yields `0`, not `NaN`.
-/// Non-finite numerators propagate through normal IEEE-754
-/// arithmetic, matching the behaviour of the retired compile-time
-/// emitter.
+/// semantics: `denominator[t] == 0` yields `0`, not `NaN`.  This
+/// loop's *own* numerator propagates through normal IEEE-754
+/// arithmetic: a `NaN` numerator yields a `NaN` relative score
+/// (the honest per-loop "undefined here" signal), and an `Inf`
+/// numerator over a finite denom yields `Inf`.  The cross-loop
+/// `NaN`-poisoning fix lives in the denominator
+/// ([`compute_partition_denominator`] excludes `NaN` summands, GH
+/// #542), not here.
 ///
 /// The caller is responsible for ensuring `denominator` covers the
 /// same partition the loop belongs to, and that its length matches
@@ -434,6 +487,11 @@ fn effective_slot(n_slots: usize, element_index: usize) -> Option<usize> {
 ///   - Arrayed loops with `element_index >= n_slots` do NOT contribute
 ///     -- the loop has no own element at this partition index.
 ///
+/// A contributing slot's value goes through [`denom_summand`], so a
+/// `NaN` slot is excluded from the sum and an `Inf` slot retained (GH
+/// #542) -- the same per-bucket `NaN`-isolation the full-sweep
+/// [`compute_rel_loop_scores_per_element`] applies.
+///
 /// This skip-vs-clamp distinction matters for mixed-stride partitions
 /// (two arrayed loops with different dimensionalities sharing a
 /// partition).  Producing the same partition sums as the full-sweep
@@ -467,7 +525,7 @@ where
     for (t, row) in results.iter().enumerate() {
         denom[t] = entries
             .iter()
-            .map(|&(off, slot)| row[off + slot].abs())
+            .map(|&(off, slot)| denom_summand(row[off + slot]))
             .sum();
     }
     denom
@@ -936,6 +994,13 @@ mod tests {
     /// value against the sum of slot-0 values over loops sharing its slot-0
     /// partition.  The proptest compares against this to catch any numeric
     /// divergence.
+    ///
+    /// `NaN` summands are excluded from the partition sum here too (GH
+    /// #542), independently re-deriving the production `denom_summand`
+    /// rule, so the oracle stays correct if a future generator introduces
+    /// non-finite samples (the current generators are finite-only, so this
+    /// branch is latent but kept honest).  `+/-Inf` is kept in the sum,
+    /// matching the production semantics.
     fn reference_rel_loop_scores(
         loop_ids: &[String],
         loop_partitions: &HashMap<String, Vec<Option<usize>>>,
@@ -957,7 +1022,13 @@ mod tests {
         #[allow(clippy::needless_range_loop)]
         for t in 0..step_count {
             for indices in groups.values() {
-                let denom: f64 = indices.iter().map(|&i| series[i][t].abs()).sum();
+                let denom: f64 = indices
+                    .iter()
+                    .map(|&i| {
+                        let v = series[i][t];
+                        if v.is_nan() { 0.0 } else { v.abs() }
+                    })
+                    .sum();
                 for &i in indices {
                     let num = series[i][t];
                     let val = if denom == 0.0 { 0.0 } else { num / denom };
@@ -1085,9 +1156,15 @@ mod tests {
                     .filter_map(|j| read_slot_in_bucket(j, p, k).map(|rs| (j, rs)))
                     .collect();
                 for step in 0..step_count {
+                    // `NaN` summands excluded (GH #542), re-derived inline
+                    // so this oracle stays structurally independent of the
+                    // production `denom_summand`; `Inf` kept in the sum.
                     let denom: f64 = bucket
                         .iter()
-                        .map(|&(j, rs)| series[j][step][rs].abs())
+                        .map(|&(j, rs)| {
+                            let v = series[j][step][rs];
+                            if v.is_nan() { 0.0 } else { v.abs() }
+                        })
                         .sum();
                     let num = series[i][step][read_i];
                     let val = if denom == 0.0 { 0.0 } else { num / denom };
@@ -1177,11 +1254,15 @@ mod tests {
     }
 
     #[test]
-    fn nan_loop_score_propagates_without_panic() {
-        // Non-finite upstream values must flow through normal IEEE-754
-        // arithmetic (the documented contract).  A panic or debug-assert
-        // on NaN would be a subtle regression because the exhaustive
-        // SAFEDIV equation silently propagated NaN via arithmetic.
+    fn nan_loop_score_isolated_to_its_own_loop() {
+        // A single NaN loop_score must NOT poison the whole partition's
+        // relative scores (GH #542).  A NaN summand is excluded from the
+        // partition denominator, so a healthy sibling still normalizes
+        // against the healthy denominator; only the loop whose own
+        // numerator is NaN keeps a NaN relative score (the honest "this
+        // one loop is undefined here" signal).  This also matches the
+        // discovery path's "NaN link contributes nothing" philosophy
+        // (`ltm_finding::SearchGraph::from_edges` coerces NaN -> 0).
         let nan = f64::NAN;
         let series_a = &[nan, 2.0][..];
         let series_b = &[1.0, 3.0][..];
@@ -1192,12 +1273,110 @@ mod tests {
         let rel_a = scored.get("A").unwrap();
         let rel_b = scored.get("B").unwrap();
 
-        // t=0: denom = |NaN| + |1| = NaN; NaN/NaN = NaN for both loops.
-        assert!(rel_a[0].is_nan(), "NaN numerator yields NaN result");
-        assert!(rel_b[0].is_nan(), "NaN denominator yields NaN result");
+        // t=0: the NaN summand is dropped, so denom = |1| = 1.  The bad
+        // loop A's own numerator is NaN -> NaN/1 = NaN (its own signal);
+        // the healthy loop B is unaffected -> 1/1 = 1.
+        assert!(rel_a[0].is_nan(), "the NaN loop's own rel score stays NaN");
+        assert!(
+            (rel_b[0] - 1.0).abs() < 1e-12,
+            "healthy loop normalizes against the healthy denom, not NaN: got {}",
+            rel_b[0]
+        );
         // t=1: well-defined; denom = 2 + 3 = 5.
         assert!((rel_a[1] - 0.4).abs() < 1e-12);
         assert!((rel_b[1] - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn nan_loop_score_isolated_in_per_element_bucket() {
+        // Per-element twin of `nan_loop_score_isolated_to_its_own_loop`:
+        // a NaN at one (loop, slot) must not poison the sibling sharing
+        // that `(partition, slot)` bucket.  Two coupled A2A loops, 2
+        // slots each; plant a NaN at A's slot 0 at step 0.
+        let n_slots: usize = 2;
+        // A slot0 = [NaN, 9], A slot1 = [4, 4]
+        // B slot0 = [3,   3], B slot1 = [6, 6]
+        let loop_data = vec![
+            vec![vec![f64::NAN, 4.0], vec![9.0, 4.0]],
+            vec![vec![3.0, 6.0], vec![3.0, 6.0]],
+        ];
+        let results = make_arrayed_results(&["A", "B"], &[n_slots, n_slots], &loop_data);
+        let partitions =
+            mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("B", vec![Some(0); n_slots])]);
+
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
+        let a = rel.get("A").unwrap();
+        let b = rel.get("B").unwrap();
+
+        // step 0, slot 0: bucket {A, B}; A is NaN, so it is dropped from
+        // the denom (denom = |3| = 3).  A's own rel score = NaN/3 = NaN;
+        // B's = 3/3 = 1 (healthy, NOT poisoned).
+        let at = |step: usize, k: usize| step * n_slots + k;
+        assert!(a[at(0, 0)].is_nan(), "NaN loop keeps its own NaN rel score");
+        assert!(
+            (b[at(0, 0)] - 1.0).abs() < 1e-12,
+            "healthy slot-0 sibling normalizes against the healthy denom: got {}",
+            b[at(0, 0)]
+        );
+        // step 0, slot 1: both finite; denom = |4| + |6| = 10.
+        assert!((a[at(0, 1)] - 0.4).abs() < 1e-12);
+        assert!((b[at(0, 1)] - 0.6).abs() < 1e-12);
+        // step 1: all finite; slot 0 denom = |9| + |3| = 12, slot 1 = 10.
+        assert!((a[at(1, 0)] - (9.0 / 12.0)).abs() < 1e-12);
+        assert!((b[at(1, 0)] - (3.0 / 12.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn inf_loop_score_kept_in_denominator() {
+        // An +Inf loop_score is REAL signal: at a dominance inflection a
+        // raw loop score legitimately diverges (the link-score
+        // denominators go to zero there).  Unlike a NaN, an Inf is NOT
+        // filtered from the partition sum -- it stays, so the dominated
+        // siblings correctly go to 0 (finite/Inf) and the dominant loop
+        // momentarily reads NaN (Inf/Inf).  This preserves the legitimate
+        // inflection-point behaviour of the removed SAFEDIV equation
+        // bug-for-bug; only the NaN-poisoning case (GH #542) changed.
+        let inf = f64::INFINITY;
+        let series_a = &[inf, 2.0][..];
+        let series_b = &[5.0, 3.0][..];
+        let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+
+        let scored = compute_rel_loop_scores(&results, &partitions);
+        let rel_a = scored.get("A").unwrap();
+        let rel_b = scored.get("B").unwrap();
+
+        // t=0: denom = |Inf| + |5| = Inf (Inf kept in the sum).
+        //   dominant loop A: Inf/Inf = NaN.
+        //   dominated loop B: 5/Inf = 0 (it does not matter when a
+        //   sibling is infinitely dominant).
+        assert!(
+            rel_a[0].is_nan(),
+            "the dominant +Inf loop reads NaN at the inflection"
+        );
+        assert_eq!(rel_b[0], 0.0, "a loop dominated by an +Inf sibling -> 0");
+        // t=1: finite; denom = 2 + 3 = 5.
+        assert!((rel_a[1] - 0.4).abs() < 1e-12);
+        assert!((rel_b[1] - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn inf_loop_score_kept_in_per_element_bucket() {
+        // Per-element twin of `inf_loop_score_kept_in_denominator`: an
+        // +Inf at one (loop, slot) stays in that bucket's denominator,
+        // so the dominated sibling -> 0 and the dominant loop -> NaN.
+        let n_slots: usize = 1;
+        // A slot0 = [Inf], B slot0 = [5].
+        let loop_data = vec![vec![vec![f64::INFINITY]], vec![vec![5.0]]];
+        let results = make_arrayed_results(&["A", "B"], &[n_slots, n_slots], &loop_data);
+        let partitions =
+            mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("B", vec![Some(0); n_slots])]);
+
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
+        let a = rel.get("A").unwrap();
+        let b = rel.get("B").unwrap();
+        assert!(a[0].is_nan(), "dominant +Inf loop -> NaN in its bucket");
+        assert_eq!(b[0], 0.0, "dominated sibling -> 0 in the same bucket");
     }
 
     #[test]
@@ -1268,6 +1447,35 @@ mod tests {
         let results = make_results_for_loops(&[("A", &[1.0, 2.0][..])]);
         let denom = compute_partition_denominator(&results, ["A"]);
         assert!(compute_rel_loop_score_for_id(&results, "missing", &denom).is_none());
+    }
+
+    /// The scalar streaming denominator (`compute_partition_denominator`)
+    /// excludes `NaN` and keeps `Inf`, so the FFI's amortized scalar path
+    /// isolates a NaN loop the same way the full-sweep helper does
+    /// (GH #542).
+    #[test]
+    fn per_id_streaming_denominator_excludes_nan_keeps_inf() {
+        // t0: A = NaN, B = 1 -> denom = 1 (NaN dropped).
+        // t1: A = Inf, B = 1 -> denom = Inf (Inf kept).
+        let series_a = &[f64::NAN, f64::INFINITY][..];
+        let series_b = &[1.0, 1.0][..];
+        let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
+
+        let denom = compute_partition_denominator(&results, ["A", "B"]);
+        assert_eq!(denom, vec![1.0, f64::INFINITY]);
+
+        // Healthy B: 1/1 = 1 at t0 (not poisoned), 1/Inf = 0 at t1.
+        let rel_b = compute_rel_loop_score_for_id(&results, "B", &denom).unwrap();
+        assert!(
+            (rel_b[0] - 1.0).abs() < 1e-12,
+            "healthy B not poisoned: {}",
+            rel_b[0]
+        );
+        assert_eq!(rel_b[1], 0.0, "B dominated by +Inf sibling -> 0");
+        // The bad loop A keeps its own NaN at t0; at t1 Inf/Inf = NaN.
+        let rel_a = compute_rel_loop_score_for_id(&results, "A", &denom).unwrap();
+        assert!(rel_a[0].is_nan());
+        assert!(rel_a[1].is_nan());
     }
 
     /// Per-element variant: two A2A loops over an element-wise-coupled
@@ -2033,6 +2241,44 @@ mod tests {
         for v in rel {
             assert_eq!(v, 0.0, "SAFEDIV-0 must yield 0, got {v}");
         }
+    }
+
+    /// The streaming FFI denominator (`compute_partition_denominator_for_element`)
+    /// must exclude a `NaN` summand and keep an `Inf` one, exactly like the
+    /// full-sweep helper -- this is the path libsimlin's
+    /// `simlin_analyze_get_relative_loop_score` cache drives, so the
+    /// GH #542 fix must hold there too.
+    #[test]
+    fn per_element_streaming_denominator_excludes_nan_keeps_inf() {
+        // step 0: A slot0 = NaN, B slot0 = 3  -> denom = 3 (NaN dropped).
+        // step 1: A slot0 = Inf, B slot0 = 3  -> denom = Inf (Inf kept).
+        let loop_data = vec![
+            vec![vec![f64::NAN, 7.0], vec![f64::INFINITY, 7.0]],
+            vec![vec![3.0, 1.0], vec![3.0, 1.0]],
+        ];
+        let results = make_arrayed_results(&["A", "B"], &[2, 2], &loop_data);
+
+        let denom = compute_partition_denominator_for_element(
+            &results,
+            [("A", 2_usize), ("B", 2_usize)],
+            0,
+        );
+        assert_eq!(denom[0], 3.0, "NaN summand excluded from streaming denom");
+        assert_eq!(
+            denom[1],
+            f64::INFINITY,
+            "Inf summand retained in streaming denom"
+        );
+
+        // The healthy sibling B normalizes against the NaN-free denom at
+        // step 0 (3/3 = 1) and goes to 0 against the +Inf denom at step 1.
+        let rel_b = compute_rel_loop_score_for_element(&results, "B", 2, 0, &denom).unwrap();
+        assert!(
+            (rel_b[0] - 1.0).abs() < 1e-12,
+            "healthy B not poisoned: {}",
+            rel_b[0]
+        );
+        assert_eq!(rel_b[1], 0.0, "B dominated by +Inf sibling -> 0");
     }
 
     /// An absent loop_score variable returns `None`, matching the
