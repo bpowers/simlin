@@ -280,6 +280,30 @@ pub enum SimlinUnitErrorKind {
     Inference = 3,
 }
 
+/// Severity of an error detail. Distinguishes hard errors (the model cannot be
+/// simulated, or a value is wrong) from advisory warnings (the model is still
+/// usable, e.g. the LTM auto-flip-to-discovery advisory). Defaults to `Error`
+/// so the common case (compile/parse/unit errors) keeps its meaning; the LTM
+/// diagnostic pipeline marks its advisories `Warning` so callers (pysimlin's
+/// `check()`, the TS engine) can present them without claiming the model is
+/// broken.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimlinErrorSeverity {
+    #[default]
+    Error = 0,
+    Warning = 1,
+}
+
+impl From<engine::db::DiagnosticSeverity> for SimlinErrorSeverity {
+    fn from(severity: engine::db::DiagnosticSeverity) -> Self {
+        match severity {
+            engine::db::DiagnosticSeverity::Error => SimlinErrorSeverity::Error,
+            engine::db::DiagnosticSeverity::Warning => SimlinErrorSeverity::Warning,
+        }
+    }
+}
+
 /// Error detail structure containing contextual information for failures.
 #[repr(C)]
 pub struct SimlinErrorDetail {
@@ -291,6 +315,7 @@ pub struct SimlinErrorDetail {
     pub end_offset: u16,
     pub kind: SimlinErrorKind,
     pub unit_error_kind: SimlinUnitErrorKind,
+    pub severity: SimlinErrorSeverity,
 }
 
 /// Opaque project structure

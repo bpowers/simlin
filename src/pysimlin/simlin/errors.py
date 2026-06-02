@@ -63,6 +63,18 @@ class UnitErrorKind(IntEnum):
     INFERENCE = 3
 
 
+class ErrorSeverity(IntEnum):
+    """Severity of an error detail.
+
+    ERROR means the model cannot be simulated or a value is wrong; WARNING is an
+    advisory (e.g. the LTM auto-flip-to-discovery notice) that does not make the
+    model invalid.
+    """
+
+    ERROR = 0
+    WARNING = 1
+
+
 class ErrorDetailDict(TypedDict, total=False):
     """Type definition for error details dictionary."""
 
@@ -88,6 +100,7 @@ class ErrorDetail:
     end_offset: int = 0
     kind: ErrorKind = ErrorKind.VARIABLE
     unit_error_kind: UnitErrorKind = UnitErrorKind.NOT_APPLICABLE
+    severity: ErrorSeverity = ErrorSeverity.ERROR
 
     def __str__(self) -> str:
         """Return a human-readable string representation."""

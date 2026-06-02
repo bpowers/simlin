@@ -620,3 +620,127 @@ fn test_get_errors_ltm_warning_survives_subsequent_non_ltm_sim() {
         simlin_project_unref(proj);
     }
 }
+
+/// Build a single-stock feedback-loop project (population/births/birth_rate)
+/// with the requested integration method. Under RK4 an LTM-enabled compile is
+/// rejected (the flow-to-stock link-score formula assumes Euler -- GH #486),
+/// but the project itself simulates fine without LTM.
+fn build_feedback_loop_datamodel(
+    name: &str,
+    method: engine::datamodel::SimMethod,
+) -> engine::datamodel::Project {
+    TestProject::new(name)
+        .with_sim_method(method)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * birth_rate", None)
+        .aux("birth_rate", "0.02", None)
+        .build_datamodel()
+}
+
+/// GH #466 follow-up regression: a project that uses RK4 is intrinsically
+/// valid -- it simulates fine without LTM. Creating an LTM sim on it (which the
+/// GH #486 guard rejects at compile time) must NOT make `get_errors` report the
+/// non-Euler rejection as a project error. LTM is an analysis overlay, not part
+/// of the project's intrinsic compilability: `get_errors` assesses the
+/// compile/vm_error channel with LTM OFF, and uses the latched re-enable only to
+/// harvest the additional LTM diagnostics (which here are none, since the model
+/// does not auto-flip and has no failing fragments).
+#[test]
+fn test_get_errors_rk4_ltm_compile_failure_is_not_a_project_error() {
+    let datamodel =
+        build_feedback_loop_datamodel("rk4_ltm_overlay", engine::datamodel::SimMethod::RungeKutta4);
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        // Baseline: a fresh RK4 model has no errors.
+        let mut e0: *mut SimlinError = ptr::null_mut();
+        let pre = simlin_project_get_errors(proj, &mut e0 as *mut *mut SimlinError);
+        assert!(e0.is_null());
+        assert!(
+            pre.is_null(),
+            "RK4 model must have no errors before any sim"
+        );
+
+        let mut me: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut me as *mut *mut SimlinError);
+        assert!(me.is_null());
+        assert!(!model.is_null());
+
+        // Create an LTM-enabled sim; the GH #486 rejection rides the compile/VM
+        // path. The sim object is still created (the error defers to run time),
+        // and the project's ltm_requested latch is now set.
+        let mut se: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut se as *mut *mut SimlinError);
+        if !se.is_null() {
+            simlin_error_free(se);
+        }
+
+        // The regression: get_errors must still report the RK4 model as clean.
+        // The non-Euler rejection is an LTM-overlay concern, not a project error.
+        let mut e1: *mut SimlinError = ptr::null_mut();
+        let post = simlin_project_get_errors(proj, &mut e1 as *mut *mut SimlinError);
+        assert!(e1.is_null());
+        assert!(
+            post.is_null(),
+            "RK4 model that simulates fine without LTM must not report errors \
+             after a latched LTM sim; the non-Euler rejection is an analysis overlay"
+        );
+
+        if !sim.is_null() {
+            simlin_sim_unref(sim);
+        }
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// GH #466 follow-up (severity): the auto-flip advisory reaches `get_errors`
+/// (the GH #466 fix), and it must carry `Warning` severity through the FFI, not
+/// `Error`. A latched auto-flip project surfaces exactly one LTM diagnostic and
+/// it must be a warning.
+#[test]
+fn test_get_errors_auto_flip_warning_has_warning_severity() {
+    let datamodel = build_chain_scc_datamodel("get_errors_severity", 51);
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut me: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut me as *mut *mut SimlinError);
+        assert!(me.is_null());
+        assert!(!model.is_null());
+
+        let mut se: *mut SimlinError = ptr::null_mut();
+        let sim = simlin_sim_new(model, true, &mut se as *mut *mut SimlinError);
+        assert!(se.is_null());
+        assert!(!sim.is_null());
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(!all_errors.is_null());
+
+        let count = simlin_error_get_detail_count(all_errors);
+        let details = simlin_error_get_details(all_errors);
+        let slice = std::slice::from_raw_parts(details, count);
+        let auto_flip = slice
+            .iter()
+            .find(|d| {
+                !d.message.is_null()
+                    && CStr::from_ptr(d.message)
+                        .to_str()
+                        .map(|m| m.contains("discovery mode"))
+                        .unwrap_or(false)
+            })
+            .expect("auto-flip advisory must be present");
+        assert_eq!(
+            auto_flip.severity,
+            SimlinErrorSeverity::Warning,
+            "the auto-flip advisory must carry Warning severity through the FFI"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}

@@ -21,6 +21,7 @@ from .analysis import (
 from .errors import (
     ErrorCode,
     ErrorDetail,
+    ErrorSeverity,
     SimlinCompilationError,
     SimlinError,
     SimlinImportError,
@@ -121,6 +122,7 @@ __all__ = [
     "DominantPeriod",
     "ErrorCode",
     "ErrorDetail",
+    "ErrorSeverity",
     "Flow",
     "GraphicalFunction",
     "GraphicalFunctionScale",

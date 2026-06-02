@@ -365,3 +365,99 @@ class TestLtmDiagnosticsThroughGetErrors:
             model.run(analyze_loops=True)
 
         assert self._has_discovery_warning(project.get_errors())
+
+
+def _rk4_feedback_model() -> simlin.Model:
+    """Build a single-stock feedback-loop model that uses RK4 integration.
+
+    The model simulates fine without LTM, but an LTM-enabled compile is rejected
+    (the flow-to-stock link-score formula assumes Euler -- GH #486).
+    """
+    project = simlin.Project.new(name="rk4_feedback", sim_start=0.0, sim_stop=10.0, dt=1.0)
+    project.set_sim_specs(sim_method="rk4")
+    model = project.main_model
+    with model.edit() as (_current, patch):
+        from simlin.json_types import Auxiliary, Flow, Stock
+
+        patch.upsert_aux(Auxiliary(name="birth_rate", equation="0.02"))
+        patch.upsert_stock(
+            Stock(name="population", initial_equation="100", inflows=["births"], outflows=[])
+        )
+        patch.upsert_flow(Flow(name="births", equation="population * birth_rate"))
+    return model
+
+
+class TestLtmOverlayNotProjectError:
+    """GH #466 follow-up: LTM is an analysis overlay, not part of the project's
+    intrinsic validity. A latched LTM run on an RK4 model (whose LTM compile the
+    GH #486 guard rejects) must NOT make get_errors()/check() report the model as
+    broken -- it simulates fine without LTM. This is the reviewer's exact repro.
+    """
+
+    def test_rk4_run_then_get_errors_is_clean(self) -> None:
+        model = _rk4_feedback_model()
+        project = model.project
+        assert project is not None
+
+        # Baseline: a fresh RK4 model has no errors.
+        assert project.get_errors() == []
+
+        # run() defaults to analyze_loops=True -> LTM sim -> ltm_requested latch.
+        # The LTM compile fails under RK4, so run() degrades to a non-LTM run
+        # (emitting a warning); the run itself succeeds.
+        with pytest.warns(RuntimeWarning):
+            run = model.run()
+        assert not run.results.empty
+
+        # The regression: the RK4 model still reports no errors. The non-Euler
+        # rejection is an LTM-overlay concern, not a project error.
+        assert project.get_errors() == [], (
+            "a latched LTM run on an RK4 model that simulates fine must not make "
+            "get_errors report the non-Euler rejection as a project error"
+        )
+
+    def test_rk4_run_then_check_reports_no_errors(self) -> None:
+        model = _rk4_feedback_model()
+
+        with pytest.warns(RuntimeWarning):
+            model.run()
+
+        issues = model.check()
+        error_issues = [i for i in issues if i.severity == "error"]
+        assert error_issues == [], (
+            f"check() must report no error-severity issues on a fine RK4 model "
+            f"after an LTM run; got {error_issues}"
+        )
+
+
+class TestLtmAdvisorySeverity:
+    """GH #466 follow-up (severity): the auto-flip advisory that get_errors now
+    surfaces must carry 'warning' severity through check(), not 'error'.
+    """
+
+    def test_auto_flip_advisory_has_warning_severity(self) -> None:
+        model = _large_scc_model(51)
+        project = model.project
+        assert project is not None
+
+        # The advisory is a warning, not an error, at the ErrorDetail level.
+        with model.simulate(enable_ltm=True):
+            pass
+        details = project.get_errors()
+        advisory = next(d for d in details if "discovery mode" in (d.message or ""))
+        assert advisory.severity == simlin.ErrorSeverity.WARNING
+
+    def test_auto_flip_advisory_check_severity_is_warning(self) -> None:
+        model = _large_scc_model(51)
+
+        # Drive an LTM run so the advisory is latched and reachable.
+        with pytest.warns(RuntimeWarning, match="discovery"):
+            model.run(analyze_loops=True)
+
+        issues = model.check()
+        advisory = next(i for i in issues if "discovery mode" in i.message)
+        assert advisory.severity == "warning", (
+            "the auto-flip advisory must surface as a warning in check(), not an error"
+        )
+        # And it must not be misclassified as an error-severity issue.
+        assert all(i.severity != "error" for i in issues if "discovery mode" in i.message)

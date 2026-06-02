@@ -11,6 +11,7 @@
  */
 
 import { EngineBackend, ModelHandle, SimEngine } from './backend';
+import { SimlinErrorSeverity } from './internal/types';
 import { Stock, Flow, Aux, Module, Variable, TimeSpec, Link, Loop, ModelIssue, GraphicalFunction } from './types';
 import {
   JsonStock,
@@ -408,7 +409,7 @@ export class Model {
     });
 
     return modelErrors.map((detail) => ({
-      severity: 'error' as const,
+      severity: detail.severity === SimlinErrorSeverity.Warning ? ('warning' as const) : ('error' as const),
       message: detail.message || 'Unknown error',
       variable: detail.variableName || undefined,
       suggestion: undefined,

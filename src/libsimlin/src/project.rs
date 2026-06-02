@@ -788,40 +788,46 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         None => return ptr::null_mut(),
     };
 
-    // If any simulation on this project requested LTM, the salsa `ltm_enabled`
-    // input was reset to false by `simlin_sim_new` to avoid leaking into patch
-    // validation -- which also hides every LTM diagnostic from the diagnostic
-    // collector (the auto-flip-to-discovery warning, synthetic-fragment
-    // compile failures, the GH #311 partial-equation warnings, and the GH #486
-    // non-Euler Error all live behind the `ltm_enabled` gate in
-    // `model_all_diagnostics`). Transiently re-enable LTM for the duration of
-    // diagnostic collection so those surface here (GH #466). The
-    // `LtmEnabledGuard` restores the flag unconditionally on drop (even on a
-    // panic), and the toggle happens under the db lock -- the same lock
-    // `simlin_sim_new` holds for its own flag dance -- so a concurrent sim
+    // Compilability is an INTRINSIC property of the project, assessed with LTM
+    // OFF. LTM is an analysis overlay (the flow-to-stock link-score formula
+    // assumes Euler integration, etc.), not part of whether the model is a
+    // valid, runnable simulation -- so the compile/VM-validation channel must
+    // never be computed with LTM enabled, or an LTM-only rejection (the GH #486
+    // non-Euler hard `Err` from `assemble_simulation`) would masquerade as a
+    // project error on a model that simulates fine. `simlin_sim_new` already
+    // leaves the salsa `ltm_enabled` input false, so this compile is LTM-off.
+    let vm_error = match engine::db::compile_project_incremental(&db_locked, source_project, "main")
+    {
+        Ok(compiled) => engine::Vm::new(compiled).err(),
+        Err(err) => Some(err),
+    };
+
+    // The LTM *diagnostics* (auto-flip-to-discovery advisory, synthetic-fragment
+    // compile failures, GH #311 partial-equation warnings) accumulate via
+    // `model_all_diagnostics` -> `model_ltm_variables`, independent of whether
+    // the LTM-enabled assembly would succeed -- so harvesting them only needs
+    // the `ltm_enabled` gate flipped on for the `collect_all_diagnostics` pass,
+    // NOT a recompile that feeds `vm_error`. If any simulation on this project
+    // requested LTM, transiently re-enable LTM just for that diagnostic harvest
+    // (GH #466). The `LtmEnabledGuard` restores the flag unconditionally on drop
+    // (even on a panic), and the toggle happens under the db lock -- the same
+    // lock `simlin_sim_new` holds for its own flag dance -- so a concurrent sim
     // creation can never observe a partial LTM state. Salsa memoizes the LTM
     // synthesis for this unchanged input from the earlier `simlin_sim_new`
-    // compile, so the re-enable revalidates rather than recomputes (cheap).
-    // A project that never requested LTM skips the toggle entirely and pays no
-    // LTM synthesis cost.
+    // compile, so the re-enable revalidates rather than recomputes (cheap). A
+    // project that never requested LTM skips the toggle entirely and pays no LTM
+    // synthesis cost.
     let ltm_requested = proj.ltm_requested.load(Ordering::Acquire);
 
     let all_errors = if ltm_requested {
         let guard = crate::analysis::LtmEnabledGuard::enable(&mut db_locked, source_project, true);
-        let db = guard.db();
-        let vm_error = match engine::db::compile_project_incremental(db, source_project, "main") {
-            Ok(compiled) => engine::Vm::new(compiled).err(),
-            Err(err) => Some(err),
-        };
-        gather_error_details_with_db(db, source_project, vm_error.as_ref(), &datamodel_locked)
+        gather_error_details_with_db(
+            guard.db(),
+            source_project,
+            vm_error.as_ref(),
+            &datamodel_locked,
+        )
     } else {
-        // Attempt compilation to detect assembly-level errors, then collect
-        // all accumulator diagnostics plus any VM validation error.
-        let vm_error =
-            match engine::db::compile_project_incremental(&db_locked, source_project, "main") {
-                Ok(compiled) => engine::Vm::new(compiled).err(),
-                Err(err) => Some(err),
-            };
         gather_error_details_with_db(
             &db_locked,
             source_project,

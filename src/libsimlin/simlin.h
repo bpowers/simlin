@@ -112,6 +112,18 @@ typedef enum {
   SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
 } SimlinUnitErrorKind;
 
+// Severity of an error detail. Distinguishes hard errors (the model cannot be
+// simulated, or a value is wrong) from advisory warnings (the model is still
+// usable, e.g. the LTM auto-flip-to-discovery advisory). Defaults to `Error`
+// so the common case (compile/parse/unit errors) keeps its meaning; the LTM
+// diagnostic pipeline marks its advisories `Warning` so callers (pysimlin's
+// `check()`, the TS engine) can present them without claiming the model is
+// broken.
+typedef enum {
+  SIMLIN_ERROR_SEVERITY_ERROR = 0,
+  SIMLIN_ERROR_SEVERITY_WARNING = 1,
+} SimlinErrorSeverity;
+
 // JSON format specifier for C API
 typedef enum {
   SIMLIN_JSON_FORMAT_NATIVE = 0,
@@ -224,6 +236,7 @@ typedef struct {
   uint16_t end_offset;
   SimlinErrorKind kind;
   SimlinUnitErrorKind unit_error_kind;
+  SimlinErrorSeverity severity;
 } SimlinErrorDetail;
 
 // Opaque project structure
