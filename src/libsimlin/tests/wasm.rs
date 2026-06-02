@@ -932,11 +932,13 @@ unsafe fn vm_oracle_links(project: *mut SimlinProject) -> *mut SimlinLinks {
     links
 }
 
-/// Convert a `*mut SimlinLinks` into an owned `Vec<(from, to, polarity,
-/// score)>` so the FFI buffers can be freed before the parity comparison.
-unsafe fn snapshot_links(
-    links: *mut SimlinLinks,
-) -> Vec<(String, String, SimlinLinkPolarity, Vec<f64>)> {
+/// One link snapshotted out of a `*mut SimlinLinks` so the FFI buffers can be
+/// freed before the parity comparison: `(from, to, polarity, score,
+/// relative_score)`.
+type LinkSnapshot = (String, String, SimlinLinkPolarity, Vec<f64>, Vec<f64>);
+
+/// Convert a `*mut SimlinLinks` into owned `LinkSnapshot`s.
+unsafe fn snapshot_links(links: *mut SimlinLinks) -> Vec<LinkSnapshot> {
     let count = (*links).count;
     let slice = if count == 0 {
         &[][..]
@@ -958,7 +960,12 @@ unsafe fn snapshot_links(
         } else {
             std::slice::from_raw_parts(link.score, link.score_len).to_vec()
         };
-        out.push((from, to, link.polarity, scores));
+        let rel_scores = if link.relative_score.is_null() || link.relative_score_len == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(link.relative_score, link.relative_score_len).to_vec()
+        };
+        out.push((from, to, link.polarity, scores, rel_scores));
     }
     out
 }
@@ -1004,9 +1011,7 @@ fn links_from_wasm_match_vm() {
                 SimlinLinkPolarity::Negative => 2,
             }
         };
-        let key = |l: &(String, String, SimlinLinkPolarity, Vec<f64>)| {
-            (l.0.clone(), l.1.clone(), polarity_to_u8(l.2))
-        };
+        let key = |l: &LinkSnapshot| (l.0.clone(), l.1.clone(), polarity_to_u8(l.2));
         let mut wasm_keys: Vec<_> = wasm_links.iter().map(key).collect();
         let mut vm_keys: Vec<_> = vm_links.iter().map(key).collect();
         wasm_keys.sort();
@@ -1021,29 +1026,47 @@ fn links_from_wasm_match_vm() {
             "scalar LTM model must yield at least one non-Unknown polarity"
         );
 
-        // Build (from, to) → score-series maps for the comparison.
-        let mut wasm_map: std::collections::HashMap<(String, String), Vec<f64>> = wasm_links
+        // Build (from, to) → (raw, relative) score-series maps for the
+        // comparison.  Both series must match the VM backend by construction
+        // (the shared `analyze_links_core` -> `attach_relative_scores` runs
+        // identically for both backends), so this is the AC5.1 parity guard
+        // extended to the GH #652 relative series.
+        let mut wasm_map: std::collections::HashMap<(String, String), (Vec<f64>, Vec<f64>)> =
+            wasm_links
+                .into_iter()
+                .map(|(f, t, _, s, r)| ((f, t), (s, r)))
+                .collect();
+        let vm_map: std::collections::HashMap<(String, String), (Vec<f64>, Vec<f64>)> = vm_links
             .into_iter()
-            .map(|(f, t, _, s)| ((f, t), s))
-            .collect();
-        let vm_map: std::collections::HashMap<(String, String), Vec<f64>> = vm_links
-            .into_iter()
-            .map(|(f, t, _, s)| ((f, t), s))
+            .map(|(f, t, _, s, r)| ((f, t), (s, r)))
             .collect();
 
         // Every link with a VM-side score must also have a wasm-side score
-        // of the same length, agreeing to within 1e-6 elementwise.  A
-        // link with no VM score (no LTM column) likewise has no wasm
-        // score, since both backends share the same column-emit path.
+        // (raw and relative) of the same length, agreeing to within 1e-6
+        // elementwise.  A link with no VM score likewise has no wasm score.
         let mut scored = 0usize;
-        for (k, vm_scores) in &vm_map {
-            let wasm_scores = wasm_map
+        let mut rel_scored = 0usize;
+        for (k, (vm_scores, vm_rel)) in &vm_map {
+            let (wasm_scores, wasm_rel) = wasm_map
                 .remove(k)
                 .unwrap_or_else(|| panic!("wasm missing scores for link {:?}", k));
             assert_eq!(
                 vm_scores.len(),
                 wasm_scores.len(),
                 "score-series length mismatch for {:?}",
+                k
+            );
+            assert_eq!(
+                vm_rel.len(),
+                wasm_rel.len(),
+                "relative-score-series length mismatch for {:?}",
+                k
+            );
+            // A scored link always has a relative series of the same length.
+            assert_eq!(
+                vm_scores.len(),
+                vm_rel.len(),
+                "VM raw/relative length mismatch for {:?}",
                 k
             );
             if !vm_scores.is_empty() {
@@ -1056,10 +1079,34 @@ fn links_from_wasm_match_vm() {
                     );
                 }
             }
+            if !vm_rel.is_empty() {
+                rel_scored += 1;
+                for (i, (v, w)) in vm_rel.iter().zip(wasm_rel.iter()).enumerate() {
+                    // Relative scores are bounded in [-1, 1]; NaN can appear
+                    // only at an Inf-dominated step, treated as matching.
+                    if v.is_nan() && w.is_nan() {
+                        continue;
+                    }
+                    assert!(
+                        (v - w).abs() < 1e-6,
+                        "link {:?} relative-score mismatch at step {i}: vm={v} wasm={w}",
+                        k
+                    );
+                    assert!(
+                        v.abs() <= 1.0 + 1e-9,
+                        "VM relative score {v} out of [-1,1] for {:?} at step {i}",
+                        k
+                    );
+                }
+            }
         }
         assert!(
             scored > 0,
             "expected at least one link with a non-empty score series"
+        );
+        assert!(
+            rel_scored > 0,
+            "expected at least one link with a non-empty relative-score series"
         );
         assert!(
             wasm_map.is_empty(),
@@ -1279,7 +1326,7 @@ fn links_from_wasm_truncated_slab_matches_prefix() {
 
         // Same link topology: both runs share the same SourceProject, so
         // structure-driven keys are identical.
-        let key = |l: &(String, String, SimlinLinkPolarity, Vec<f64>)| (l.0.clone(), l.1.clone());
+        let key = |l: &LinkSnapshot| (l.0.clone(), l.1.clone());
         let mut full_map: std::collections::HashMap<(String, String), Vec<f64>> =
             full.into_iter().map(|l| (key(&l), l.3)).collect();
         for h in &half {

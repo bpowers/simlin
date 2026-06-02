@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
@@ -280,6 +280,30 @@ pub enum SimlinUnitErrorKind {
     Inference = 3,
 }
 
+/// Severity of an error detail. Distinguishes hard errors (the model cannot be
+/// simulated, or a value is wrong) from advisory warnings (the model is still
+/// usable, e.g. the LTM auto-flip-to-discovery advisory). Defaults to `Error`
+/// so the common case (compile/parse/unit errors) keeps its meaning; the LTM
+/// diagnostic pipeline marks its advisories `Warning` so callers (pysimlin's
+/// `check()`, the TS engine) can present them without claiming the model is
+/// broken.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimlinErrorSeverity {
+    #[default]
+    Error = 0,
+    Warning = 1,
+}
+
+impl From<engine::db::DiagnosticSeverity> for SimlinErrorSeverity {
+    fn from(severity: engine::db::DiagnosticSeverity) -> Self {
+        match severity {
+            engine::db::DiagnosticSeverity::Error => SimlinErrorSeverity::Error,
+            engine::db::DiagnosticSeverity::Warning => SimlinErrorSeverity::Warning,
+        }
+    }
+}
+
 /// Error detail structure containing contextual information for failures.
 #[repr(C)]
 pub struct SimlinErrorDetail {
@@ -291,6 +315,7 @@ pub struct SimlinErrorDetail {
     pub end_offset: u16,
     pub kind: SimlinErrorKind,
     pub unit_error_kind: SimlinUnitErrorKind,
+    pub severity: SimlinErrorSeverity,
 }
 
 /// Opaque project structure
@@ -302,6 +327,23 @@ pub struct SimlinProject {
     /// `SourceProject` via `db.current_source_project()`. There is no
     /// separate `sync_state` mutex to keep in lockstep.
     pub db: Mutex<engine::db::SimlinDb>,
+    /// Latches true the first time any simulation is created on this project
+    /// with `enable_ltm = true`. `simlin_project_get_errors` reads it to
+    /// decide whether to transiently re-enable LTM during diagnostic
+    /// collection so the LTM diagnostic pipeline (the auto-flip-to-discovery
+    /// warning, synthetic-fragment compile failures, the GH #311 partial-
+    /// equation warnings, and the GH #486 non-Euler Error) reaches the
+    /// caller. `simlin_sim_new` resets the salsa `ltm_enabled` input to false
+    /// right after compile to avoid leaking the flag into patch validation,
+    /// which left every LTM diagnostic invisible to `get_errors` (GH #466);
+    /// this latch scopes the transient re-enable to callers who asked for LTM
+    /// at least once, so a project that never requested LTM still pays no LTM
+    /// synthesis cost in `get_errors`. An `AtomicBool` (not a mutex) because
+    /// the value is set-once-and-monotone and read without needing to be in
+    /// lockstep with the db lock; the actual flag toggle in `get_errors`
+    /// happens under the db lock, same as `simlin_sim_new`'s toggle, so the
+    /// two serialize and never interleave a partial LTM state.
+    pub ltm_requested: AtomicBool,
     pub ref_count: AtomicUsize,
 }
 
@@ -468,6 +510,7 @@ pub(crate) unsafe fn drop_link(link: &mut SimlinLink) {
     drop_c_string(link.from);
     drop_c_string(link.to);
     drop_f64_array(link.score, link.score_len);
+    drop_f64_array(link.relative_score, link.relative_score_len);
 }
 
 pub(crate) unsafe fn drop_loops_vec(loops: &mut Vec<SimlinLoop>) {

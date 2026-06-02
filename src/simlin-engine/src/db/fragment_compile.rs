@@ -512,7 +512,12 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
             1
         }
     } else {
-        1
+        // An *arrayed* implicit helper (the GH #541 bare-arrayed-PREVIOUS case)
+        // occupies one slot per element; `meta.size` is its element count (1
+        // for the scalar helpers that are every other implicit var). The
+        // mini-layout self-size MUST match the `compute_layout` allocation, or
+        // the helper's per-element writes spill into the next variable's slots.
+        meta.size
     };
     mini_metadata.insert(
         var_ident_canonical.clone(),
@@ -699,12 +704,38 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
             let dep_var = build_stub_variable(db, dep_source_var, &dep_ident, dep_dims);
             dep_variables.push((dep_ident, dep_var, dep_size));
         } else if let Some(implicit_meta) = implicit_info.get(effective_name) {
-            // Dep is another implicit var -- build a scalar stub
+            // Dep is another implicit var. Almost always scalar, but an arrayed
+            // implicit helper (GH #541) needs its array shape in the stub so a
+            // subscript reference resolves (mirroring the source-var path in
+            // `var_fragment.rs`); a scalar stub would reject the subscript.
             let is_stock = implicit_meta.is_stock;
+            let dep_dims: Vec<crate::dimensions::Dimension> = if implicit_meta.dimensions.is_empty()
+            {
+                Vec::new()
+            } else {
+                implicit_meta
+                    .dimensions
+                    .iter()
+                    .filter_map(|dim_name| {
+                        converted_dims
+                            .iter()
+                            .find(|d| d.name() == dim_name.as_str())
+                            .cloned()
+                    })
+                    .collect()
+            };
+            let dummy_ast = if dep_dims.is_empty() {
+                None
+            } else {
+                Some(crate::ast::Ast::ApplyToAll(
+                    dep_dims,
+                    crate::ast::Expr2::Const("0".to_string(), 0.0, crate::ast::Loc::default()),
+                ))
+            };
             let dep_var = if is_stock {
                 crate::variable::Variable::Stock {
                     ident: dep_ident.clone(),
-                    init_ast: None,
+                    init_ast: dummy_ast,
                     eqn: None,
                     units: None,
                     inflows: vec![],
@@ -716,7 +747,7 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
             } else {
                 crate::variable::Variable::Var {
                     ident: dep_ident.clone(),
-                    ast: None,
+                    ast: dummy_ast,
                     init_ast: None,
                     eqn: None,
                     units: None,
@@ -728,7 +759,7 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
                     unit_errors: vec![],
                 }
             };
-            dep_variables.push((dep_ident, dep_var, 1));
+            dep_variables.push((dep_ident, dep_var, implicit_meta.size));
         }
     }
 

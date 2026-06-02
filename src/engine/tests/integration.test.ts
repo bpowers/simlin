@@ -488,10 +488,11 @@ describe('WASM Integration Tests', () => {
       //   offset 18: end_offset (u16)
       //   offset 20: kind (u32)
       //   offset 24: unit_error_kind (u32)
-      // Total size: 28 bytes
+      //   offset 28: severity (u32)
+      // Total size: 32 bytes
 
       // Use the malloc/free from our memory module
-      const structPtr = malloc(28);
+      const structPtr = malloc(32);
       const memory = getMemory();
       const view = new DataView(memory.buffer);
 
@@ -504,6 +505,7 @@ describe('WASM Integration Tests', () => {
       view.setUint16(structPtr + 18, 200, true); // end_offset
       view.setUint32(structPtr + 20, 2, true); // kind (Variable)
       view.setUint32(structPtr + 24, 1, true); // unit_error_kind (Definition)
+      view.setUint32(structPtr + 28, 1, true); // severity (Warning)
 
       // Read it back using our function
       const detail = readErrorDetail(structPtr);
@@ -516,14 +518,15 @@ describe('WASM Integration Tests', () => {
       expect(detail.endOffset).toBe(200);
       expect(detail.kind).toBe(2);
       expect(detail.unitErrorKind).toBe(1);
+      expect(detail.severity).toBe(1);
 
       free(structPtr);
     });
 
     it('should have SimlinErrorDetail size match Rust-reported size', () => {
-      // Verify the hardcoded TypeScript size (28 bytes) matches what Rust reports
+      // Verify the TypeScript size (32 bytes) matches what Rust reports
       const rustSizes = getRustStructSizes();
-      expect(rustSizes.errorDetailSize).toBe(28);
+      expect(rustSizes.errorDetailSize).toBe(32);
     });
 
     it('should read actual error details from Rust-generated errors', () => {
@@ -577,7 +580,8 @@ describe('WASM Integration Tests', () => {
       const rustSizes = getRustStructSizes();
       expect(rustSizes.ptrSize).toBe(4); // wasm32 pointers are 4 bytes
       expect(rustSizes.loopSize).toBe(16); // SimlinLoop: id + variables + var_count + polarity
-      expect(rustSizes.linkSize).toBe(20); // SimlinLink: from + to + polarity + score + score_len
+      // SimlinLink: from + to + polarity + score + score_len + relative_score + relative_score_len
+      expect(rustSizes.linkSize).toBe(28);
     });
   });
 

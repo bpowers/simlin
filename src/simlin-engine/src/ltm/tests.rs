@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use super::graph::{CausalGraph, get_variable_dependencies};
+use super::graph::{CausalGraph, assign_loop_ids, get_variable_dependencies};
 use super::indexed::IndexedGraph;
 use super::partitions::CyclePartitions;
 use super::polarity::{
@@ -17,7 +17,7 @@ use crate::ast::BinaryOp;
 use crate::common::{Canonical, Ident};
 use crate::datamodel::Dimension;
 use crate::db::{
-    DetectedLoopPolarity, SimlinDb, compute_link_polarities, model_cycle_partitions,
+    DetectedLoop, DetectedLoopPolarity, SimlinDb, compute_link_polarities, model_cycle_partitions,
     model_detected_loops, sync_from_datamodel,
 };
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
@@ -90,6 +90,93 @@ fn test_deterministic_loop_naming() {
             "Loop variables should be identical"
         );
     }
+}
+
+#[test]
+fn test_multidigraph_sibling_loops_get_content_determined_ids() {
+    // GH #497, end-to-end through `model_detected_loops`. A 3-party arms race
+    // where each nation's buildup depends on the other two yields two sibling
+    // 3-cycles over the SAME node set -- arms_a -> ... -> arms_b -> ... ->
+    // arms_c -> ... -> arms_a (forward) and the reverse arms_a -> ... ->
+    // arms_c -> ... -> arms_b -> ... -> arms_a. Their deduped variable set is
+    // identical, so the loop-id primary key ties them; before the
+    // canonical-edge-sequence tiebreaker, which sibling got the lower id was
+    // decided by `IndexedGraph::from_edges`'s HashMap iteration order -- stable
+    // within a process but per-process-randomized, so persisted loop ids and
+    // pins flapped run-to-run. With the tiebreaker the id assignment is a pure
+    // function of loop content, so the sibling whose canonical directed edge
+    // sequence sorts first deterministically gets the lower id index.
+    let model = x_model(
+        "main",
+        vec![
+            x_stock("arms_a", "10", &["build_a"], &[], None),
+            x_stock("arms_b", "10", &["build_b"], &[], None),
+            x_stock("arms_c", "10", &["build_c"], &[], None),
+            // Each buildup flow depends on the OTHER two nations' arms, so the
+            // stock graph is a fully bidirectional triangle -- the smallest
+            // shape that produces both directed 3-cycles as distinct loops.
+            x_flow("build_a", "(arms_b + arms_c) * 0.1", None),
+            x_flow("build_b", "(arms_a + arms_c) * 0.1", None),
+            x_flow("build_c", "(arms_a + arms_b) * 0.1", None),
+        ],
+    );
+
+    let sim_specs = sim_specs_with_units("years");
+    let datamodel_project = x_project(sim_specs, &[model]);
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &datamodel_project);
+    let source_model = result.models["main"].source;
+    let detected = model_detected_loops(&db, source_model, result.project);
+
+    // Identify the two 3-stock sibling loops by the cyclic order in which they
+    // visit the three stocks (the auxiliary buildup flows interleave between
+    // them but the stock order is what distinguishes the siblings).
+    let stock_order = |variables: &[String]| -> Vec<String> {
+        let stocks: Vec<String> = variables
+            .iter()
+            .filter(|v| v.starts_with("arms_"))
+            .cloned()
+            .collect();
+        crate::ltm::canonical_rotation(&stocks)
+    };
+    let three_stock_loops: Vec<&DetectedLoop> = detected
+        .loops
+        .iter()
+        .filter(|l| stock_order(&l.variables).len() == 3)
+        .collect();
+    assert_eq!(
+        three_stock_loops.len(),
+        2,
+        "the arms-race triangle must surface both directed 3-stock cycles as distinct loops"
+    );
+
+    let forward = three_stock_loops
+        .iter()
+        .find(|l| stock_order(&l.variables) == vec!["arms_a", "arms_b", "arms_c"])
+        .expect("forward arms_a->arms_b->arms_c sibling");
+    let reverse = three_stock_loops
+        .iter()
+        .find(|l| stock_order(&l.variables) == vec!["arms_a", "arms_c", "arms_b"])
+        .expect("reverse arms_a->arms_c->arms_b sibling");
+
+    // Both siblings share a polarity (all links here are positive, so both are
+    // Reinforcing) and therefore the same `r` counter; the forward sibling's
+    // canonical edge sequence sorts first, so it gets the lower id index.
+    let prefix = |id: &str| id.chars().next().unwrap();
+    let num = |id: &str| -> u32 { id[1..].parse().unwrap() };
+    assert_eq!(
+        prefix(&forward.id),
+        prefix(&reverse.id),
+        "sibling loops {} / {} should share a polarity prefix",
+        forward.id,
+        reverse.id
+    );
+    assert!(
+        num(&forward.id) < num(&reverse.id),
+        "forward sibling ({}) must get a lower id index than the reverse sibling ({})",
+        forward.id,
+        reverse.id
+    );
 }
 
 #[test]
@@ -3720,6 +3807,321 @@ fn test_enumerate_module_pathways_deeper_than_legacy_cap() {
     );
 }
 
+/// Build a chain of `n` "diamond" patterns from `input` to `output`.
+///
+/// Each diamond `m_i -> (a_i | b_i) -> m_{i+1}` doubles the number of
+/// distinct simple `input -> output` paths, so the graph has exactly
+/// `2^n` simple pathways while every path is short (depth `2n + 1`, so the
+/// DFS depth cap never trips). This is the exponential-blowup shape GH
+/// #649 guards against: a small `n` mints a huge pathway count without a
+/// deep graph.
+///
+/// `permute` reverses the per-diamond branch insertion order so a test can
+/// prove that pathway truncation is independent of construction order (the
+/// neighbor lists are sorted before DFS, so the kept set must be identical
+/// regardless of the order edges were inserted).
+fn diamond_chain_graph(n: usize, permute: bool) -> CausalGraph {
+    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mid = |i: usize| Ident::new(&format!("m{i}"));
+    // input is the first "midpoint" node, output the last.
+    edges.insert(Ident::new("input"), vec![mid(0)]);
+    let mut prev = mid(0);
+    for i in 0..n {
+        let next = if i + 1 == n {
+            Ident::new("output")
+        } else {
+            mid(i + 1)
+        };
+        let a = Ident::new(&format!("a{i}"));
+        let b = Ident::new(&format!("b{i}"));
+        let branches = if permute {
+            [b.clone(), a.clone()]
+        } else {
+            [a.clone(), b.clone()]
+        };
+        edges.insert(prev.clone(), branches.to_vec());
+        edges.insert(a, vec![next.clone()]);
+        edges.insert(b, vec![next.clone()]);
+        prev = next;
+    }
+    CausalGraph {
+        edges,
+        stocks: HashSet::new(),
+        variables: HashMap::new(),
+        module_graphs: HashMap::new(),
+    }
+}
+
+/// Render a single pathway's node sequence as a stable string key so two
+/// pathway sets can be compared independent of `Link`'s identity.
+fn pathway_key(path: &[Link]) -> String {
+    let mut nodes: Vec<String> = path.iter().map(|l| l.from.as_str().to_string()).collect();
+    if let Some(last) = path.last() {
+        nodes.push(last.to.as_str().to_string());
+    }
+    nodes.join("→")
+}
+
+#[test]
+fn module_pathways_unbounded_blows_up_without_budget() {
+    // RED guard: with no budget the diamond chain enumerates all 2^n
+    // pathways. A small n keeps the red test fast; this documents the
+    // hazard the budget closes (each pathway becomes one synthetic var).
+    let n = 6;
+    let graph = diamond_chain_graph(n, false);
+    let pathways = graph.enumerate_module_pathways(&Ident::new("output"));
+    let from_input = pathways
+        .get(&Ident::new("input"))
+        .expect("input -> output pathways exist");
+    assert_eq!(
+        from_input.len(),
+        1usize << n,
+        "an n-diamond chain has exactly 2^n simple pathways"
+    );
+}
+
+#[test]
+fn module_pathways_truncate_deterministically_under_budget() {
+    let n = 6;
+    const BUDGET: usize = 8;
+    let _guard = super::graph::ModulePathwayBudgetGuard::new(BUDGET);
+
+    let graph = diamond_chain_graph(n, false);
+    let (pathways, truncated) =
+        graph.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    let from_input = pathways
+        .get(&Ident::new("input"))
+        .expect("input -> output pathways exist");
+    assert_eq!(
+        from_input.len(),
+        BUDGET,
+        "the budget caps the kept pathway count to exactly BUDGET"
+    );
+    assert!(
+        truncated.contains(&Ident::new("input")),
+        "the truncated-ports list names the input port whose enumeration was clipped"
+    );
+
+    // Determinism across permuted construction: the kept set must be the
+    // same pathways regardless of the order edges were inserted, because
+    // the neighbor lists are sorted before the DFS walks them.
+    let permuted = diamond_chain_graph(n, true);
+    let (pathways_p, _) = permuted.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    let kept: Vec<String> = from_input.iter().map(|p| pathway_key(p)).collect();
+    let kept_p: Vec<String> = pathways_p
+        .get(&Ident::new("input"))
+        .expect("input -> output pathways exist")
+        .iter()
+        .map(|p| pathway_key(p))
+        .collect();
+    assert_eq!(
+        kept, kept_p,
+        "the kept pathway set (and order) must be identical across permuted construction"
+    );
+
+    // Determinism across repeated runs on the same graph.
+    let (pathways_again, _) =
+        graph.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    let kept_again: Vec<String> = pathways_again
+        .get(&Ident::new("input"))
+        .expect("input -> output pathways exist")
+        .iter()
+        .map(|p| pathway_key(p))
+        .collect();
+    assert_eq!(
+        kept, kept_again,
+        "repeated runs must keep the same pathways"
+    );
+}
+
+#[test]
+fn module_pathways_under_budget_emits_no_truncation() {
+    // A diamond chain whose pathway count (2^3 = 8) is under the budget
+    // must not flag truncation and must return every pathway.
+    let n = 3;
+    const BUDGET: usize = 64;
+    let _guard = super::graph::ModulePathwayBudgetGuard::new(BUDGET);
+
+    let graph = diamond_chain_graph(n, false);
+    let (pathways, truncated) =
+        graph.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    assert_eq!(
+        pathways.get(&Ident::new("input")).map(|p| p.len()),
+        Some(1usize << n),
+        "all 2^n pathways are returned when under budget"
+    );
+    assert!(
+        truncated.is_empty(),
+        "no port should be flagged truncated when the pathway count is under budget"
+    );
+}
+
+#[test]
+fn module_pathways_work_bound_does_not_starve_exact_budget() {
+    // Correctness guard for the work bound: in a dead-end-FREE graph (every
+    // branch reaches the target), a budget exactly equal to the path count
+    // must return ALL paths with NO truncation. The work allowance
+    // (`budget * max_depth`) must be generous enough that the completed-path
+    // cap -- not the work cap -- is what stops the walk.
+    let n = 6;
+    let path_count = 1usize << n; // 64
+    let _guard = super::graph::ModulePathwayBudgetGuard::new(path_count);
+
+    let graph = diamond_chain_graph(n, false);
+    let (pathways, truncated) =
+        graph.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    assert_eq!(
+        pathways.get(&Ident::new("input")).map(|p| p.len()),
+        Some(path_count),
+        "a budget equal to the path count must return every path"
+    );
+    assert!(
+        truncated.is_empty(),
+        "the work bound must not spuriously truncate a dead-end-free enumeration \
+         whose path count exactly equals the budget"
+    );
+}
+
+#[test]
+fn module_pathways_work_bounded_on_dead_end_frontier() {
+    // Adversarial shape: an exponential dead-end frontier with NO path to
+    // the target. A naive DFS that only caps *completed* paths would walk
+    // all 2^n dead-end branches; the work bound must abort regardless.
+    // input -> chain of n diamonds that terminate at a sink "dead" which
+    // is NOT the requested output, so zero pathways complete.
+    let n = 16;
+    const BUDGET: usize = 8;
+    let _guard = super::graph::ModulePathwayBudgetGuard::new(BUDGET);
+
+    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    let mid = |i: usize| Ident::new(&format!("m{i}"));
+    edges.insert(Ident::new("input"), vec![mid(0)]);
+    let mut prev = mid(0);
+    for i in 0..n {
+        let next = if i + 1 == n {
+            Ident::new("dead")
+        } else {
+            mid(i + 1)
+        };
+        let a = Ident::new(&format!("a{i}"));
+        let b = Ident::new(&format!("b{i}"));
+        edges.insert(prev.clone(), vec![a.clone(), b.clone()]);
+        edges.insert(a, vec![next.clone()]);
+        edges.insert(b, vec![next.clone()]);
+        prev = next;
+    }
+    let graph = CausalGraph {
+        edges,
+        stocks: HashSet::new(),
+        variables: HashMap::new(),
+        module_graphs: HashMap::new(),
+    };
+
+    // No pathway completes (target "output" is unreachable), but the call
+    // must return promptly because the work bound caps node expansions.
+    // The test itself completing within the per-test time budget is the
+    // assertion; we also confirm no spurious pathways are reported.
+    let start = std::time::Instant::now();
+    let (pathways, _truncated) =
+        graph.enumerate_module_pathways_with_truncation(&Ident::new("output"));
+    assert!(
+        pathways.is_empty(),
+        "no pathway reaches the requested output, so none are reported"
+    );
+    assert!(
+        start.elapsed().as_secs() < 2,
+        "the work bound must abort the exponential dead-end DFS quickly"
+    );
+}
+
+#[test]
+fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
+    use crate::variable::ModuleInput;
+
+    // A module sub-graph with two diamond branches, where one branch passes
+    // through a stock `late_stock` that the DFS only reaches on a pathway it
+    // would drop under a tiny budget. The other branch's `early_stock` is on
+    // the first kept pathway. When the port's enumeration is truncated, stock
+    // enrichment must NOT collect from only the kept prefix (which would miss
+    // `late_stock`); it must degrade to the conservative "all module-internal
+    // stocks" fallback so no stock is silently lost (GH #649 point 5).
+    let mut sub_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
+    // input branches to `early` (lex-first, kept) and `late` (lex-last).
+    sub_edges.insert(
+        Ident::new("input"),
+        vec![Ident::new("early"), Ident::new("late")],
+    );
+    sub_edges.insert(Ident::new("early"), vec![Ident::new("early_stock")]);
+    sub_edges.insert(Ident::new("early_stock"), vec![Ident::new("output")]);
+    sub_edges.insert(Ident::new("late"), vec![Ident::new("late_stock")]);
+    sub_edges.insert(Ident::new("late_stock"), vec![Ident::new("output")]);
+    let mut sub_stocks = HashSet::new();
+    sub_stocks.insert(Ident::new("early_stock"));
+    sub_stocks.insert(Ident::new("late_stock"));
+    let sub_graph = CausalGraph {
+        edges: sub_edges,
+        stocks: sub_stocks,
+        variables: HashMap::new(),
+        module_graphs: HashMap::new(),
+    };
+
+    // Parent graph: a circuit `driver -> mod_node -> driver` where `mod_node`
+    // is the module whose `input` port the predecessor `driver` feeds.
+    let module_var = Variable::Module {
+        ident: Ident::new("mod_node"),
+        model_name: Ident::new("sub"),
+        units: None,
+        inputs: vec![ModuleInput {
+            src: Ident::new("driver"),
+            dst: Ident::new("input"),
+        }],
+        errors: vec![],
+        unit_errors: vec![],
+    };
+    let mut parent_variables = HashMap::new();
+    parent_variables.insert(Ident::new("mod_node"), module_var);
+    let mut module_graphs = HashMap::new();
+    module_graphs.insert(Ident::new("mod_node"), Box::new(sub_graph));
+    let parent = CausalGraph {
+        edges: HashMap::new(),
+        stocks: HashSet::new(),
+        variables: parent_variables,
+        module_graphs,
+    };
+
+    let circuit = vec![Ident::new("driver"), Ident::new("mod_node")];
+
+    // Budget 1: only the lex-first pathway (through `early_stock`) is kept, so
+    // the `input` port is truncated and the fallback must kick in. The
+    // collected stocks are namespaced with the module node name.
+    let _guard = super::graph::ModulePathwayBudgetGuard::new(1);
+    let stocks = parent.enrich_with_module_stocks(&circuit, vec![]);
+    let names: HashSet<String> = stocks.iter().map(|s| s.as_str().to_string()).collect();
+    assert!(
+        names.contains("mod_node\u{00B7}late_stock"),
+        "a truncated module-pathway enumeration must degrade to all module-internal \
+         stocks so `late_stock` (only on the dropped pathway) is not lost; got {names:?}"
+    );
+    assert!(
+        names.contains("mod_node\u{00B7}early_stock"),
+        "the fallback still includes the early-branch stock; got {names:?}"
+    );
+
+    // Control: with a budget that keeps both pathways, NO truncation occurs, so
+    // stock collection comes from the (complete) pathways -- both stocks still
+    // present, but via the non-fallback path. This proves the fallback above is
+    // what the truncation triggers, not an unconditional behavior.
+    drop(_guard);
+    let _full = super::graph::ModulePathwayBudgetGuard::new(64);
+    let stocks_full = parent.enrich_with_module_stocks(&circuit, vec![]);
+    let names_full: HashSet<String> = stocks_full.iter().map(|s| s.as_str().to_string()).collect();
+    assert!(
+        names_full.contains("mod_node\u{00B7}late_stock")
+            && names_full.contains("mod_node\u{00B7}early_stock"),
+        "under budget both stocks are collected from the complete pathways; got {names_full:?}"
+    );
+}
+
 /// Construct a three-node reinforcing cycle (A → B → C → A) for
 /// budget-exhaustion tests.  Tiny by design: the graph has exactly one
 /// elementary circuit, so a budget of zero MUST trip and a budget of
@@ -4378,6 +4780,133 @@ fn deduplicate_keeps_both_directed_three_cycles_in_multidigraph() {
         seconds,
         vec!["b", "c"],
         "the two 3-cycle loops must be a -> b -> ... and a -> c -> ..."
+    );
+}
+
+/// A loop's directed edge sequence keyed by its canonical cyclic rotation of
+/// `link.from`, used in the order-independence tests below to identify the
+/// SAME directed cycle across reorderings of the loop list. Two sibling cycles
+/// over the same node set (`a->b->c->a` vs `a->c->b->a`) have DIFFERENT keys.
+fn loop_directed_key(l: &Loop) -> Vec<String> {
+    let seq: Vec<String> = l.links.iter().map(|link| link.from.to_string()).collect();
+    super::canonical_rotation(&seq)
+}
+
+#[test]
+fn assign_loop_ids_is_order_independent_for_sibling_cycles() {
+    // GH #497: `assign_loop_ids` must be a pure function of loop *content*,
+    // not of the order Johnson's enumerator (and ultimately HashMap iteration
+    // in `IndexedGraph::from_edges`) happened to emit the loops in.
+    //
+    // K3 with all 6 directed edges has two sibling 3-cycles over {a,b,c}:
+    // a->b->c->a and a->c->b->a. Their deduped variable SET is identical
+    // ({a,b,c}), so the PRIMARY sort key ties them; before the tiebreaker the
+    // stable-sort fallback preserved whatever order they arrived in, so
+    // swapping the two siblings in the input flipped which one got which id.
+    //
+    // Feed the enumerated loop list to `assign_loop_ids` in several input
+    // orders (as-enumerated, reversed, and a handful of fixed-seed shuffles)
+    // and assert each directed cycle is assigned the SAME id in every order.
+    let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
+    let baseline = cg.find_loops_with_limit(usize::MAX).unwrap();
+    assert!(
+        baseline.len() >= 2,
+        "K3 multidigraph must enumerate the sibling 3-cycles plus 2-cycles"
+    );
+
+    // The id each directed cycle receives in the as-enumerated order.
+    let canonical_ids: HashMap<Vec<String>, String> = {
+        let mut loops = baseline.clone();
+        assign_loop_ids(&mut loops);
+        loops
+            .iter()
+            .map(|l| (loop_directed_key(l), l.id.clone()))
+            .collect()
+    };
+
+    // A small deterministic permutation set: identity, reverse, and a few
+    // fixed-seed shuffles. A tiny xorshift keeps the shuffle reproducible
+    // without pulling in an RNG dependency.
+    let permute = |seeds: u64| -> Vec<Loop> {
+        let mut v = baseline.clone();
+        let mut state = seeds | 1;
+        // Fisher-Yates with the xorshift stream.
+        for i in (1..v.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let j = (state as usize) % (i + 1);
+            v.swap(i, j);
+        }
+        v
+    };
+
+    let mut orders: Vec<Vec<Loop>> = vec![baseline.clone()];
+    let mut reversed = baseline.clone();
+    reversed.reverse();
+    orders.push(reversed);
+    for seed in [1u64, 2, 3, 12345, 0xDEAD_BEEF] {
+        orders.push(permute(seed));
+    }
+
+    for (idx, order) in orders.iter().enumerate() {
+        let mut loops = order.clone();
+        assign_loop_ids(&mut loops);
+        for l in &loops {
+            let key = loop_directed_key(l);
+            let expected = &canonical_ids[&key];
+            assert_eq!(
+                &l.id, expected,
+                "loop {key:?} got id {:?} in input order #{idx} but {expected:?} in the \
+                 baseline order; assign_loop_ids must be content-determined, not input-order \
+                 determined (GH #497)",
+                l.id
+            );
+        }
+    }
+}
+
+#[test]
+fn assign_loop_ids_orders_sibling_cycles_by_canonical_edge_sequence() {
+    // Pin the concrete tiebreaker rule for a sibling pair: when two cycles
+    // share a variable set (so the primary key ties), the one whose canonical
+    // directed edge sequence (`canonical_rotation` of `link.from`) is
+    // lexicographically smaller gets the lower id index.
+    //
+    // For the {a,b,c} siblings the canonical rotations are [a,b,c] (the
+    // forward a->b->c->a) and [a,c,b] (the reverse a->c->b->a); [a,b,c] sorts
+    // first, so the forward cycle gets the lower id index. Both siblings have
+    // the same polarity (every link is Unknown here, since `build_causal_graph`
+    // leaves `variables` empty), so they share one counter and the exact
+    // prefix is immaterial -- only the relative index between the two siblings
+    // is pinned.
+    let cg = build_causal_graph(&[("a", &["b", "c"]), ("b", &["a", "c"]), ("c", &["a", "b"])]);
+    let mut loops = cg.find_loops_with_limit(usize::MAX).unwrap();
+    assign_loop_ids(&mut loops);
+
+    let id_of = |key: &[&str]| -> String {
+        let want: Vec<String> = key.iter().map(|s| s.to_string()).collect();
+        loops
+            .iter()
+            .find(|l| loop_directed_key(l) == want)
+            .map(|l| l.id.clone())
+            .unwrap_or_else(|| panic!("no loop with directed key {key:?}"))
+    };
+    let forward = id_of(&["a", "b", "c"]);
+    let reverse = id_of(&["a", "c", "b"]);
+
+    // Both siblings carry the same one-letter prefix; the forward sibling's
+    // numeric index must be lower than the reverse sibling's.
+    let prefix = |id: &str| id.chars().next().unwrap();
+    let num = |id: &str| -> u32 { id[1..].parse().unwrap() };
+    assert_eq!(
+        prefix(&forward),
+        prefix(&reverse),
+        "the two {{a,b,c}} siblings ({forward} / {reverse}) share a polarity and thus a counter"
+    );
+    assert!(
+        num(&forward) < num(&reverse),
+        "forward sibling a->b->c->a ({forward}) must sort before reverse a->c->b->a ({reverse})"
     );
 }
 

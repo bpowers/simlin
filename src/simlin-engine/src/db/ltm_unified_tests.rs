@@ -5,7 +5,7 @@
 use super::*;
 use crate::datamodel;
 use crate::test_common::TestProject;
-use crate::testutils::{feedback_loop_project, x_aux, x_flow, x_model, x_stock};
+use crate::testutils::{feedback_loop_project, x_aux, x_flow, x_model, x_module, x_stock};
 
 #[test]
 fn test_model_ltm_variables_generates_scores() {
@@ -625,12 +625,24 @@ fn test_auto_flip_warning_surfaces_via_collect_model_diagnostics() {
     );
 }
 
-/// Counterpart to the surfacing test: when LTM is disabled,
-/// `collect_model_diagnostics` must not run LTM synthesis -- a silently
-/// auto-flipping model whose caller never asked for LTM should not emit
-/// LTM diagnostics.
+/// The `ltm_enabled` gate in `model_all_diagnostics` is what scopes LTM
+/// diagnostic cost to callers who asked for LTM: when the flag is false,
+/// `collect_model_diagnostics` must not run LTM synthesis, so a silently
+/// auto-flipping model whose caller never requested LTM emits no LTM
+/// diagnostics and pays no LTM synthesis cost.
+///
+/// This is the *mechanism* the GH #466 fix relies on, not a statement that
+/// the auto-flip warning is permanently invisible. The FFI's
+/// `simlin_project_get_errors` transiently re-enables `ltm_enabled` (under
+/// the db lock, via `LtmEnabledGuard`) before collecting diagnostics *iff*
+/// some simulation on the project was created with `enable_ltm = true` -- so
+/// the warning IS reachable for those callers (covered end to end by
+/// `simlin/tests/errors.rs::test_get_errors_surfaces_ltm_auto_flip_warning_after_ltm_sim`).
+/// What this test pins is the gate's "off by default" half: keep the original
+/// intent -- never pay LTM cost when nobody asked for LTM -- machine-checkable
+/// here, since that is exactly what makes the FFI's per-project scoping cheap.
 #[test]
-fn test_ltm_disabled_does_not_surface_auto_flip_warning() {
+fn test_ltm_disabled_gate_suppresses_auto_flip_warning() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
 
     let project = build_chain_scc_project("auto_flip_disabled", 51);
@@ -822,7 +834,7 @@ fn test_clean_ltm_model_emits_no_fragment_warning() {
 /// `collect_model_diagnostics` must not run the LTM fragment-diagnostic
 /// pass -- a model with a failing LTM fragment whose caller never asked
 /// for LTM should not emit the warning. Mirrors
-/// `test_ltm_disabled_does_not_surface_auto_flip_warning`.
+/// `test_ltm_disabled_gate_suppresses_auto_flip_warning`.
 #[test]
 fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
     use crate::db::collect_model_diagnostics;
@@ -847,6 +859,117 @@ fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
         frag_failures.is_empty(),
         "LTM-disabled project must not emit LTM fragment-failure \
          warnings; got: {frag_failures:?}"
+    );
+}
+
+/// GH #311: the ceteris-paribus partial-equation parse-failure `Warning`
+/// must name the offending variable AND the original equation text, and
+/// explain the silent-magnitude-1 hazard the fix prevents. The message body
+/// is a pure function so this contract is pinned without driving a salsa
+/// accumulator -- the parse failure itself is effectively unreachable
+/// through the production salsa LTM path (the equation text is always a
+/// `print_eqn` re-print, and an empty equation is rejected as an
+/// `EmptyEquation` *Error* upstream before LTM augmentation runs), so the
+/// fix is defense-in-depth for the unanticipated case. The builder-level
+/// loud-failure behavior is exercised directly in `ltm_augment`'s unit
+/// tests; here we lock down the diagnostic wording the db-bearing callers
+/// surface.
+#[test]
+fn test_ltm_partial_equation_warning_message_contract() {
+    let var_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target";
+    let eqn_text = "source * other";
+    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, eqn_text);
+
+    assert!(
+        msg.contains(var_name),
+        "the warning must name the skipped link-score variable; got: {msg}"
+    );
+    assert!(
+        msg.contains(eqn_text),
+        "the warning must include the original equation text; got: {msg}"
+    );
+    assert!(
+        msg.contains("ceteris-paribus"),
+        "the warning must explain the ceteris-paribus requirement; got: {msg}"
+    );
+    assert!(
+        msg.contains("magnitude of 1"),
+        "the warning must explain the silent magnitude-1 hazard; got: {msg}"
+    );
+}
+
+/// Test-only salsa-tracked query that drives the production accumulating
+/// emitter [`emit_ltm_partial_equation_warning`] with a synthetic
+/// `PartialEquationError`. Salsa accumulators can only be appended from
+/// inside a tracked query, so this is the minimal harness that exercises the
+/// real `.accumulate(db)` path the six production call sites share -- as
+/// opposed to `test_ltm_partial_equation_warning_message_contract`, which
+/// only covers the pure message body.
+#[cfg(test)]
+#[salsa::tracked]
+fn ltm311_emit_probe(db: &dyn crate::db::Db, model: SourceModel, _project: SourceProject) {
+    let err = crate::ltm_augment::PartialEquationError {
+        equation_text: "source * other".to_string(),
+    };
+    super::ltm::emit_ltm_partial_equation_warning(
+        db,
+        model,
+        "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target",
+        &err,
+    );
+}
+
+/// GH #311 end-to-end through salsa: a `PartialEquationError` handed to the
+/// db-bearing emitter must accumulate a `CompilationDiagnostic` with
+/// `Warning` severity, the skipped variable's name in `variable`, and a
+/// message carrying the variable name + the offending equation text. This
+/// covers the actual salsa-accumulation glue the six production call sites
+/// (db.rs, db/ltm/compile.rs, db/ltm/link_scores.rs) reuse; the production
+/// route that *produces* the error is effectively unreachable (the equation
+/// text is always a `print_eqn` re-print, and an empty equation is rejected
+/// as an `EmptyEquation` Error upstream before LTM augmentation runs), which
+/// is documented on `PartialEquationError`.
+#[test]
+fn test_ltm_partial_equation_warning_accumulates_via_salsa() {
+    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+
+    let db = SimlinDb::default();
+    let project = feedback_loop_project();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+
+    ltm311_emit_probe(&db, model, sync.project);
+    let diags = ltm311_emit_probe::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+
+    let warning = diags
+        .iter()
+        .map(|CompilationDiagnostic(d)| d)
+        .find(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Assembly(msg) if msg.contains("magnitude of 1")
+                )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the partial-equation parse failure must accumulate a Warning via salsa; got: {:?}",
+                diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+            )
+        });
+
+    let var_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target";
+    assert_eq!(
+        warning.variable.as_deref(),
+        Some(var_name),
+        "the Warning must name the skipped link-score variable in its `variable` field"
+    );
+    let DiagnosticError::Assembly(msg) = &warning.error else {
+        unreachable!("matched Assembly above")
+    };
+    assert!(
+        msg.contains(var_name) && msg.contains("source * other"),
+        "the Warning message must carry the variable name + offending equation text; got: {msg}"
     );
 }
 
@@ -3156,4 +3279,248 @@ fn test_ltm_var_name_index_matches_vars() {
             "index entry for {name} must point at a var with that name"
         );
     }
+}
+
+// ── GH #486: LTM requires Euler integration ─────────────────────────────
+//
+// The 2023 flow-to-stock link-score formula
+// (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) only aligns the numerator to
+// the causal interval that drove the stock change from t-1 to t under Euler
+// integration. RK2/RK4 sub-step the stock update, so that alignment breaks
+// and the resulting link scores are mathematically meaningless. Non-Euler
+// integration IS honored at runtime (the VM and wasm backends both have
+// distinct RK2/RK4 stepping loops), so the wrong scores would look plausible
+// but be wrong -- a silent-correctness hazard. The engine therefore rejects
+// the combination at sim-compile time.
+//
+// CRITICAL granularity (the multi-model probes below): the VM has a SINGLE
+// global integration method, taken from the MAIN (root) model's
+// `model_sim_specs` override else the project specs -- a submodel's own
+// `model_sim_specs` is NEVER consulted by the VM (`assemble_simulation`'s
+// `Specs` selection). So the guard must resolve and apply that one
+// main-governed method, not each model's own specs.
+
+/// Build a single-stock feedback-loop project (population/births/birth_rate)
+/// with the requested integration method, so the GH #486 guard can be
+/// exercised under each non-Euler method.
+#[cfg(test)]
+fn feedback_loop_project_with_method(method: datamodel::SimMethod) -> datamodel::Project {
+    let mut project = feedback_loop_project();
+    project.sim_specs.sim_method = method;
+    project
+}
+
+/// The substring every GH #486 rejection must carry so users understand the
+/// Euler assumption behind it.
+#[cfg(test)]
+const LTM_EULER_DIAGNOSTIC_MARKER: &str = "Euler";
+
+/// Whether compiling `main` with LTM enabled fails with the GH #486
+/// Euler-assumption error. Returns `Some(details)` on the expected rejection,
+/// `None` when the compile succeeds (so the same probe pins both directions).
+#[cfg(test)]
+fn ltm_euler_rejection(db: &SimlinDb, source_project: SourceProject) -> Option<String> {
+    match compile_project_incremental(db, source_project, "main") {
+        Ok(_) => None,
+        Err(err) => {
+            let details = err.details.unwrap_or_default();
+            assert!(
+                details.contains(LTM_EULER_DIAGNOSTIC_MARKER),
+                "an LTM compile failure here must be the Euler rejection: {details}"
+            );
+            Some(details)
+        }
+    }
+}
+
+#[test]
+fn test_ltm_with_rk4_fails_sim_compilation() {
+    // `simlin_sim_new` and `simlin_project_get_errors` both build the sim via
+    // `compile_project_incremental`; the Euler rejection rides its `Err`.
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let details =
+        ltm_euler_rejection(&db, source_project).expect("LTM + RK4 must fail sim compilation");
+    assert!(
+        details.contains("RK4") || details.contains("Runge"),
+        "the error should name the offending integration method: {details}"
+    );
+}
+
+#[test]
+fn test_ltm_with_rk2_fails_sim_compilation() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta2);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    assert!(
+        ltm_euler_rejection(&db, source_project).is_some(),
+        "LTM + RK2 must fail sim compilation"
+    );
+}
+
+#[test]
+fn test_ltm_with_euler_compiles_clean() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project_with_method(datamodel::SimMethod::Euler);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    assert!(
+        ltm_euler_rejection(&db, source_project).is_none(),
+        "LTM + Euler is the supported combination and must compile"
+    );
+}
+
+#[test]
+fn test_rk4_without_ltm_compiles_clean() {
+    // The guard fires ONLY when LTM is actually requested. The same non-Euler
+    // model with LTM disabled compiles and simulates as before.
+    let db = SimlinDb::default();
+    let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    // ltm_enabled defaults to false on a freshly-synced project.
+
+    assert!(
+        compile_project_incremental(&db, source_project, "main").is_ok(),
+        "RK4 model without LTM should compile"
+    );
+}
+
+/// The Euler rejection must reach `simlin_project_get_errors`. That FFI path
+/// compiles `main` via `compile_project_incremental` and turns the resulting
+/// `Err` into a formatted error (the `vm_error` channel in
+/// `gather_error_details_with_db`), so asserting against the compile `Err`
+/// covers the production diagnostics surface. (The per-model accumulator path
+/// can't carry this diagnostic correctly: `model_all_diagnostics` has no
+/// main-model concept, and the method is main-governed.)
+#[test]
+fn test_ltm_rk4_euler_error_reaches_compile_path() {
+    use salsa::Setter;
+
+    let mut db = SimlinDb::default();
+    let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    assert!(
+        ltm_euler_rejection(&db, source_project).is_some(),
+        "the GH #486 Euler error must surface through compile_project_incremental"
+    );
+}
+
+/// A user-defined submodel with an internal stock + flow feedback loop and an
+/// output port. Used by the multi-model probes: the submodel's own
+/// `model_sim_specs` is set by the caller to assert the VM ignores it.
+#[cfg(test)]
+fn feedback_submodel(sim_specs: Option<datamodel::SimSpecs>) -> datamodel::Model {
+    let mut m = x_model(
+        "sub",
+        vec![
+            x_aux("input", "0", None),
+            x_stock("level", "50", &["adjust"], &[], None),
+            x_flow("adjust", "(input - level) / 5", None),
+            x_aux("output", "level", None),
+        ],
+    );
+    m.sim_specs = sim_specs;
+    m
+}
+
+/// GH #486 false-negative probe (the silent #486 hazard): the MAIN model has
+/// no stock and overrides the integration method to RK4, while the submodel it
+/// instantiates holds the stock+flow feedback loop and has no override. The VM
+/// integrates EVERYTHING under the main-governed RK4, so the submodel's
+/// flow-to-stock link score is produced and run -- and must be rejected. A
+/// per-submodel check (the bug) would miss it: the submodel falls back to the
+/// project's Euler.
+#[test]
+fn test_ltm_main_rk4_submodel_stock_is_rejected() {
+    use salsa::Setter;
+
+    let mut main = x_model(
+        "main",
+        vec![
+            x_module("sub", &[("driver", "input")], None),
+            x_aux("driver", "1", None),
+            x_aux("observed", "sub.output", None),
+        ],
+    );
+    // Main overrides the integration method to RK4; this is what the VM honors.
+    main.sim_specs = Some(datamodel::SimSpecs {
+        sim_method: datamodel::SimMethod::RungeKutta4,
+        ..feedback_loop_project().sim_specs
+    });
+
+    let mut project = feedback_loop_project();
+    project.models = vec![main, feedback_submodel(None)];
+    // Project default stays Euler -- the trap the buggy per-submodel resolution
+    // falls into.
+    project.sim_specs.sim_method = datamodel::SimMethod::Euler;
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let details = ltm_euler_rejection(&db, source_project)
+        .expect("main-RK4 + submodel-stock LTM must be rejected (the #486 hazard)");
+    assert!(
+        details.contains("RK4") || details.contains("Runge"),
+        "the rejection must name the main-governed method: {details}"
+    );
+}
+
+/// GH #486 false-positive probe: the submodel overrides the integration method
+/// to RK4, but the MAIN model (and project) are Euler. The VM runs Euler (main
+/// governs); the submodel's RK4 override is dead. The scores are valid, so the
+/// compile must SUCCEED. A per-submodel check (the bug) would wrongly reject.
+#[test]
+fn test_ltm_submodel_rk4_override_main_euler_is_accepted() {
+    use salsa::Setter;
+
+    // Main holds its own stock+flow feedback loop (so LTM produces scores) and
+    // also instantiates the RK4-overriding submodel.
+    let main = x_model(
+        "main",
+        vec![
+            x_stock("population", "100", &["births"], &[], None),
+            x_flow("births", "population * birth_rate", None),
+            x_aux("birth_rate", "0.1", None),
+            x_module("sub", &[("births", "input")], None),
+            x_aux("observed", "sub.output", None),
+        ],
+    );
+    // The submodel overrides to RK4 -- which the VM IGNORES (main governs).
+    let sub_specs = datamodel::SimSpecs {
+        sim_method: datamodel::SimMethod::RungeKutta4,
+        ..feedback_loop_project().sim_specs
+    };
+
+    let mut project = feedback_loop_project();
+    project.models = vec![main, feedback_submodel(Some(sub_specs))];
+    project.sim_specs.sim_method = datamodel::SimMethod::Euler;
+
+    let mut db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    source_project.set_ltm_enabled(&mut db).to(true);
+
+    let compiled = compile_project_incremental(&db, source_project, "main");
+    assert!(
+        compiled.is_ok(),
+        "main-Euler + submodel-RK4-override must compile (VM runs Euler): {:?}",
+        compiled.err()
+    );
+    // And it actually simulates under Euler.
+    let mut vm = crate::vm::Vm::new(compiled.unwrap()).expect("VM creation should succeed");
+    vm.run_to_end().expect("Euler sim should run to completion");
 }

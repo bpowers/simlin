@@ -309,11 +309,26 @@ class Sim:
                     for j in range(c_link.score_len):
                         score[j] = c_link.score[j]
 
+                # Convert the relative-score array if present (GH #652). It is
+                # populated exactly when the raw score is, and has the same
+                # length; it is the comparable [-1, 1] series for ranking.
+                relative_score = None
+                if (
+                    c_link.relative_score_len > 0
+                    and c_link.relative_score != ffi.NULL
+                ):
+                    relative_score = np.zeros(
+                        c_link.relative_score_len, dtype=np.float64
+                    )
+                    for j in range(c_link.relative_score_len):
+                        relative_score[j] = c_link.relative_score[j]
+
                 link = Link(
                     from_var=c_to_string(getattr(c_link, "from")) or "",
                     to_var=c_to_string(c_link.to) or "",
                     polarity=LinkPolarity(c_link.polarity),
                     score=score,
+                    relative_score=relative_score,
                 )
                 links.append(link)
 

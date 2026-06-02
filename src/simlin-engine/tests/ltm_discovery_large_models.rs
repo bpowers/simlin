@@ -6,6 +6,11 @@
 //! (World3, C-LEARN), plus a fast tractable-model companion that proves
 //! the contract those tests assert is actually satisfiable.
 //!
+//! These tests pin that LTM discovery is *tractable* on the
+//! element-level production path: the World3 test below runs a single
+//! discoverable timestep end to end and the companion runs the identical
+//! recipe on a small arrayed model.
+//!
 //! ## Background
 //!
 //! LTM has two loop-finding modes. The *exhaustive* mode (Johnson
@@ -51,66 +56,57 @@
 //! discovery test in `simulate_ltm.rs`, which iterates `for step in
 //! 2..`.)
 //!
-//! ## Finding 3: discovery does not scale to World3
+//! ## Discovery is tractable on World3 (was GH #540, now closed)
 //!
-//! As of `dbc0844e` (Finding 1's `1/dt` link-score fix landed), running
-//! discovery on World3 does **not** terminate within a practical budget.
-//! Measured on a release build of `dbc0844e`:
+//! Discovery on World3 used to be intractable: on a release build of
+//! `dbc0844e` (after Finding 1's `1/dt` link-score fix), full discovery
+//! over all 401 saved timesteps ran 390+ seconds and allocated 22+ GB
+//! before a hard kill, and even a single discoverable timestep of the
+//! element-level production path did not finish within a 20 s budget.
+//! The blow-up was in the strongest-path DFS: `best_score` pruning only
+//! bounds work when path-score products shrink along paths, and on
+//! World3's dense 166-node SCC with link scores straddling 1.0 that
+//! pruning degraded, so the DFS re-explored subtrees super-polynomially
+//! and accumulated loops without bound.
 //!
-//! - Full discovery, all 401 saved timesteps, variable-level convenience
-//!   path (`discover_loops`): ran 390+ seconds and allocated 22+ GB of
-//!   RAM before a hard kill, having produced no result.
-//! - A single discoverable timestep, **element-level production path**
-//!   (`discover_loops_with_graph`, results truncated to
-//!   `TRUNCATED_STEP_COUNT` -- what `world3_discovery_single_timestep`
-//!   exercises): did not finish within the test's 20 s time budget,
-//!   reaching ~4 GB RSS on the measuring machine. A faster machine
-//!   allocates more within 20 s and instead trips the RSS ceiling --
-//!   either way the repro fails cleanly and bounded.
-//!
-//! The phases leading up to discovery are all fast (parse ~4 ms,
-//! discovery-mode compile ~140 ms, simulate 401 steps ~180 ms); the cost
-//! is entirely inside discovery. The Finding 1 fix did **not** make
-//! World3 discovery tractable.
-//!
-//! The single-timestep result is the decisive root-cause signal: the
-//! blow-up is in `SearchGraph::check_outbound_uses` -- the strongest-path
-//! DFS for *one* timestep -- not merely in the 401x per-timestep
-//! multiplier in `discover_loops_with_graph`. The `best_score` pruning in
-//! that DFS only bounds work when path-score products shrink along
-//! paths; on World3's dense 166-node SCC, with link scores straddling
-//! 1.0, the pruning degrades and the DFS re-explores subtrees
-//! super-polynomially, accumulating loops (and their `Ident`/`String`
-//! dedup keys) without bound until the final `MAX_LOOPS` truncation that
-//! never gets reached. For comparison, Eberlein & Schoenberg report
-//! 10-20 s for Urban Dynamics, a model *larger* than World3 -- so the
-//! gap is algorithmic, not fundamental.
+//! The discovery rewrite (commit `081e9848`, "make LTM strongest-path
+//! discovery feasible on large models") fixed this; GH #540 is closed.
+//! World3 discovery now completes quickly: the single discoverable
+//! timestep of the element-level production path that
+//! `world3_discovery_single_timestep` exercises finishes in roughly 20 ms
+//! of pure discovery work (a sub-second test run end to end, dominated by
+//! the MDL parse and the 401-step simulate, not by discovery). The phases
+//! leading up to discovery are likewise fast (parse, discovery-mode
+//! compile, simulate). For reference, Eberlein & Schoenberg report
+//! 10-20 s for Urban Dynamics, a model *larger* than World3.
 //!
 //! ## Test layout
 //!
-//! - `world3_discovery_single_timestep` (`#[ignore]`d): the bounded,
-//!   runnable repro. Drives the production path over a single
-//!   discoverable timestep and asserts the contract discovery *should*
-//!   satisfy (`assert_discovery_contract`). It currently FAILS at the
-//!   time/RSS bound; it will go GREEN when Finding 3 (GH #540) is fixed.
+//! - `world3_discovery_single_timestep` (NOT `#[ignore]`d): drives the
+//!   element-level production path over a single discoverable timestep of
+//!   World3 and asserts the contract discovery must satisfy
+//!   (`assert_discovery_contract`). It pins that discovery *is* tractable:
+//!   it both runs and passes, and a regression to non-termination would
+//!   trip its generous wall-clock guard. Kept un-`#[ignore]`d because the
+//!   whole run is sub-second on a debug build (within the per-test budget).
 //! - `discovery_contract_holds_on_tractable_arrayed_model` (NOT
 //!   `#[ignore]`d, fast): runs the *same* element-level recipe and the
 //!   *same* `assert_discovery_contract` on a small tractable arrayed
-//!   model. It PASSES today -- proving the contract the World3 test
-//!   asserts is satisfiable, that the World3 test would go green on a
-//!   #540 fix rather than fail on bad assertions, and serving as a live
-//!   guard: if the startup-guard width changes it fails loudly and fast.
+//!   model. It is the live guard on the startup-guard constants: if the
+//!   `PREVIOUS`-based startup-guard width changes it fails loudly and
+//!   fast, and it exercises the per-element (A2A) expansion path on a
+//!   model small enough to keep the assertion cheap even if World3's
+//!   fixture ever drifts.
 //! - `clearn_ltm_discovery_compiles` (`#[ignore]`d): asserts C-LEARN
 //!   compiles via the incremental path with LTM discovery enabled (a
 //!   clean `Ok`, no panic), re-verifying GH #363. It asserts only the
-//!   compile result, not discovery tractability.
-//!
-//! Tracked as GH #540 (linked from epic #488).
+//!   compile result, not discovery tractability. It stays `#[ignore]`d
+//!   for its runtime class (parsing C-LEARN's 1.4 MB MDL plus a
+//!   discovery-mode compile runs tens of seconds in the debug build), not
+//!   for any discovery-intractability reason.
 
 mod test_helpers;
 
-use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use simlin_engine::common::{Canonical, Ident};
@@ -151,21 +147,15 @@ const FIRST_DISCOVERABLE_STEP: usize = 2;
 /// Number of saved timesteps to keep when truncating results for a
 /// single-discoverable-timestep discovery run: the two startup-guard
 /// steps (0, 1) plus the first discoverable timestep (`= 2`). A window
-/// of exactly this size is the minimal honest repro -- it forces
-/// `discover_loops_with_graph` through one real discoverable DFS pass
-/// and is the smallest window in which a *correct* discovery still
-/// returns a non-empty loop set.
+/// of exactly this size forces `discover_loops_with_graph` through one
+/// real discoverable DFS pass and is the smallest window in which a
+/// correct discovery still returns a non-empty loop set.
 const TRUNCATED_STEP_COUNT: usize = FIRST_DISCOVERABLE_STEP + 1;
-
-/// How often `run_with_timeout`'s main thread wakes to re-check the
-/// deadline and the process RSS.
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Owned, `'static` inputs for the element-level discovery production
 /// path. `discover_loops_with_graph` borrows all of these by reference;
-/// bundling them as owned values lets a worker-thread closure (see
-/// `run_with_timeout`) take the whole set by move, decoupled from the
-/// `SimlinDb` they were derived from.
+/// bundling them as owned values keeps them as one decoupled unit,
+/// independent of the `SimlinDb` they were derived from.
 struct DiscoveryInputs {
     results: Results,
     causal_graph: CausalGraph,
@@ -201,8 +191,8 @@ fn discovery_inputs(datamodel_project: &datamodel::Project) -> DiscoveryInputs {
 /// Parse, compile, simulate World3 and assemble its element-level
 /// discovery inputs. Thin wrapper over `discovery_inputs`.
 ///
-/// Every phase here is fast (sub-second total); the intractable phase is
-/// `discover_loops_with_graph` itself, which the caller drives.
+/// Every phase here is fast (sub-second total), including the
+/// `discover_loops_with_graph` pass the caller drives.
 fn world3_discovery_inputs() -> DiscoveryInputs {
     let mdl = std::fs::read_to_string(WORLD3_MDL).expect(
         "failed to read wrld3-03.mdl -- run tests from the repo root or the simlin-engine crate",
@@ -217,10 +207,8 @@ fn world3_discovery_inputs() -> DiscoveryInputs {
 /// `discover_loops_with_graph` iterates `for step in 1..step_count`,
 /// rebuilding the per-timestep search graph and re-running the
 /// strongest-path DFS from every stock at each step. A truncated copy
-/// lets a test exercise the per-timestep DFS on real link scores while
-/// bounding the work to one discoverable timestep -- the decisive lever
-/// that isolates "one timestep's DFS is super-polynomial" from "the 401x
-/// per-timestep multiplier dominates".
+/// lets a test exercise one discoverable timestep's DFS on real link
+/// scores while keeping the run within the per-test time budget.
 fn truncate_results(results: &Results, n_steps: usize) -> Results {
     let n = n_steps.min(results.step_count);
     let data: Box<[f64]> = results.data[..n * results.step_size]
@@ -236,100 +224,15 @@ fn truncate_results(results: &Results, n_steps: usize) -> Results {
     }
 }
 
-/// Outcome of running a worker closure under `run_with_timeout`.
-enum WorkerOutcome<T> {
-    /// The closure returned a value within both the time budget and the
-    /// RSS ceiling.
-    Completed(T),
-    /// The closure did not return within the time budget. The worker
-    /// thread is leaked -- still running -- until the process exits.
-    TimedOut,
-    /// The process resident set exceeded the RSS ceiling while the
-    /// closure was still running. The worker thread is leaked until the
-    /// process exits.
-    ExceededMemory { rss_bytes: u64 },
-    /// The closure panicked. The worker thread has finished, so it is
-    /// NOT leaked.
-    Panicked,
-}
-
-/// Run `f` on a worker thread, bounding it by BOTH a wall-clock budget
-/// and a process resident-set-size ceiling, and reporting *why* it
-/// stopped.
-///
-/// Rust cannot kill a running thread, so a worker that trips the time
-/// budget or the RSS ceiling is *leaked*: it keeps running -- and, for a
-/// runaway `discover_loops_with_graph`, keeps allocating at 100+ MB/s on
-/// World3 -- until the test process exits. The RSS ceiling is what makes
-/// the leak safe regardless of machine speed: a pure wall-clock bound is
-/// not a memory bound, because a faster machine simply allocates more
-/// within the same budget. With the ceiling, the main thread gives up
-/// (and the test process exits, reclaiming the worker) before the box is
-/// at risk of an OOM kill. A leaked worker is acceptable here only
-/// because the test that uses this is `#[ignore]`d and run by hand.
-///
-/// This extends the timeout pattern in `tests/wrld3_ltm_panic.rs` with
-/// the RSS bound and with panic/timeout disambiguation: a panic inside
-/// `f` drops the sender, which a naive `recv_timeout(...).ok()` would
-/// misreport as a timeout.
-fn run_with_timeout<T: Send + 'static>(
-    budget: Duration,
-    rss_ceiling_bytes: u64,
-    f: impl FnOnce() -> T + Send + 'static,
-) -> WorkerOutcome<T> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        // The receiver may already be gone (the main thread gave up on a
-        // timeout or RSS trip); ignore the send error in that case.
-        let _ = tx.send(f());
-    });
-
-    let deadline = Instant::now() + budget;
-    loop {
-        match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(value) => return WorkerOutcome::Completed(value),
-            // The sender was dropped without a send: `f` unwound (panicked).
-            Err(mpsc::RecvTimeoutError::Disconnected) => return WorkerOutcome::Panicked,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if let Some(rss) = current_rss_bytes()
-                    && rss > rss_ceiling_bytes
-                {
-                    return WorkerOutcome::ExceededMemory { rss_bytes: rss };
-                }
-                if Instant::now() >= deadline {
-                    return WorkerOutcome::TimedOut;
-                }
-            }
-        }
-    }
-}
-
-/// Current process resident set size in bytes, read from
-/// `/proc/self/statm` (Linux). Returns `None` on any other platform or
-/// on a read/parse failure; `run_with_timeout` then falls back to the
-/// wall-clock budget alone.
-fn current_rss_bytes() -> Option<u64> {
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-    // `/proc/self/statm` fields are whitespace-separated; field index 1
-    // is the resident set size in pages.
-    let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-    // Page size is 4096 on every target this repo builds for (x86-64 and
-    // aarch64 Linux); hard-code it rather than pull in a `libc` dependency
-    // just for a test helper. A wrong page size only scales the ceiling by
-    // a constant -- it cannot defeat the bound.
-    Some(resident_pages * 4096)
-}
-
 /// The structural contract every successful `discover_loops_with_graph`
 /// run must satisfy on a results window truncated to
 /// `TRUNCATED_STEP_COUNT`.
 ///
 /// This is the *shared* assertion logic for both discovery tests: the
-/// `#[ignore]`d World3 repro asserts it (and currently cannot reach it,
-/// because discovery does not terminate -- Finding 3), and the fast
-/// tractable companion test asserts the very same thing and PASSES,
-/// proving the contract is satisfiable and that the World3 test would go
-/// green on a #540 fix.
+/// World3 test asserts it over a single discoverable timestep of the
+/// element-level production path, and the fast tractable companion test
+/// asserts the very same thing on a small arrayed model. Both pass; the
+/// shared contract keeps them honestly comparable.
 ///
 /// The checks are deliberately *structural* only -- a non-empty loop
 /// set, each loop carrying links, and finite `(time, score)` samples at
@@ -398,45 +301,33 @@ fn assert_discovery_contract(found: &[ltm_finding::FoundLoop]) {
     }
 }
 
-/// The contract `discover_loops_with_graph` should satisfy on World3,
+/// The contract `discover_loops_with_graph` satisfies on World3,
 /// exercised over a single discoverable timestep of the **element-level
 /// production path** (a bounded variant of the full end-to-end run --
 /// see the module docs).
 ///
-/// FIXME(Finding 3, GH #540): this test currently FAILS.
-/// `discover_loops_with_graph` does not terminate even over a window
-/// holding a *single* discoverable timestep of World3: it exhausts the
-/// time budget below (reaching ~4 GB RSS on the measuring machine) or,
-/// on a faster box, trips the RSS ceiling first. The full 401-timestep
-/// run is far worse. It is `#[ignore]`d so it does not stall
-/// `cargo test`; it is kept as the runnable repro and the executable
-/// statement of the contract, and will go GREEN once the discovery
-/// algorithm is made tractable -- see
-/// `discovery_contract_holds_on_tractable_arrayed_model`, which proves
-/// the post-fix assertions (`assert_discovery_contract`) are satisfiable
-/// today on a tractable model via the identical recipe.
+/// This pins that World3 discovery is tractable (was GH #540, fixed by
+/// the discovery rewrite in commit `081e9848` and now closed): the single
+/// discoverable timestep runs in ~20 ms of discovery work and the whole
+/// test is sub-second on a debug build, so it stays in the default test
+/// run rather than `#[ignore]`d. A regression to the old non-terminating
+/// behaviour would blow past the generous wall-clock guard below and fail
+/// loudly.
 ///
-/// Why a single discoverable timestep rather than the full run: the
-/// per-timestep DFS (`SearchGraph::check_outbound_uses`) is itself the
-/// blow-up, so one discoverable timestep is a sufficient -- and far
-/// safer -- repro. The full run would leak a worker thread allocating
-/// tens of GB before the process tears down; one truncated window, plus
-/// the RSS ceiling in `run_with_timeout`, bounds that.
+/// Why a single discoverable timestep rather than the full 401-step run:
+/// the per-timestep DFS (`SearchGraph::check_outbound_uses`) was the
+/// historical blow-up, so one discoverable timestep is the smallest
+/// honest exercise of the production DFS on real link scores while
+/// keeping the whole test within the per-test time budget.
 ///
 /// Why the element-level path: `analysis::analyze_model` (the production
 /// caller) runs `discover_loops_with_graph` on the element-level graph
 /// with populated `ltm_vars` / `dims`. The `ltm_finding::discover_loops`
 /// convenience wrapper runs on the variable-level graph with empty
 /// metadata -- a strict minor of the production graph -- so a
-/// variable-level test could go green on a fix that still leaves the
-/// production element-level path intractable.
-///
-/// Run explicitly with:
-///     cargo test --release -p simlin-engine \
-///         --test ltm_discovery_large_models -- --ignored --nocapture \
-///         world3_discovery_single_timestep
+/// variable-level test would not exercise the production element-level
+/// path.
 #[test]
-#[ignore]
 fn world3_discovery_single_timestep() {
     let inputs = world3_discovery_inputs();
     let total_steps = inputs.results.step_count;
@@ -446,11 +337,9 @@ fn world3_discovery_single_timestep() {
     );
 
     // Truncate to steps 0, 1, 2: the two startup-guard steps plus the
-    // first genuinely discoverable timestep (step 2). This forces
+    // first genuinely discoverable timestep (step 2). This drives
     // `discover_loops_with_graph` through exactly one real discoverable
-    // DFS pass -- a sufficient repro, since the per-timestep DFS is
-    // itself the blow-up (see module docs) -- while keeping the leaked
-    // worker bounded.
+    // DFS pass on World3's element-level graph.
     let truncated = truncate_results(&inputs.results, TRUNCATED_STEP_COUNT);
     let DiscoveryInputs {
         results: _,
@@ -460,77 +349,54 @@ fn world3_discovery_single_timestep() {
         dims,
     } = inputs;
 
-    // Time budget: hugely generous for a *fixed* implementation (a single
-    // timestep of a tractable discovery completes in well under a second
-    // -- see the companion test), yet modest enough to bound the leaked
-    // worker. RSS ceiling: a machine-independent backstop so a fast box
-    // that allocates quickly still fails cleanly rather than OOM-killing
-    // the process. Whichever trips first wins. See `run_with_timeout`.
+    // A wall-clock regression guard, not a real time budget: discovery on
+    // this window completes in tens of milliseconds (see the eprintln
+    // below), so a run that takes whole seconds means discovery has
+    // regressed toward the old GH #540 non-termination. Kept generous so
+    // the guard never flakes on a loaded CI box.
     let budget = Duration::from_secs(20);
-    let rss_ceiling_bytes: u64 = 6 * 1024 * 1024 * 1024; // 6 GiB
 
     let t = Instant::now();
-    let outcome = run_with_timeout(budget, rss_ceiling_bytes, move || {
-        ltm_finding::discover_loops_with_graph(
-            &truncated,
-            &causal_graph,
-            &stocks,
-            &ltm_vars,
-            &dims,
-            None,
-        )
-    });
+    let found = ltm_finding::discover_loops_with_graph(
+        &truncated,
+        &causal_graph,
+        &stocks,
+        &ltm_vars,
+        &dims,
+        None,
+    )
+    .expect("discover_loops_with_graph should not error on World3")
+    .loops;
     let elapsed = t.elapsed();
 
-    let found = match outcome {
-        WorkerOutcome::Completed(Ok(found)) => found.loops,
-        WorkerOutcome::Completed(Err(e)) => {
-            panic!("discover_loops_with_graph returned an Err on World3: {e:?}")
-        }
-        WorkerOutcome::TimedOut => panic!(
-            "FIXME(Finding 3, GH #540): discover_loops_with_graph did not finish on a \
-             single discoverable timestep of World3 (model has {total_steps} saved \
-             timesteps) within {budget:?}. This is the known discovery-intractability \
-             finding."
-        ),
-        WorkerOutcome::ExceededMemory { rss_bytes } => panic!(
-            "FIXME(Finding 3, GH #540): discover_loops_with_graph exceeded the \
-             {rss_ceiling_bytes}-byte RSS ceiling (process at {rss_bytes} bytes) on a \
-             single discoverable timestep of World3 after {elapsed:?}. This is the \
-             known discovery-intractability finding."
-        ),
-        WorkerOutcome::Panicked => panic!(
-            "discover_loops_with_graph PANICKED on a single discoverable timestep of \
-             World3 -- this is unexpected (the known Finding 3 symptom is \
-             non-termination, not a panic). Investigate before treating it as the \
-             intractability finding."
-        ),
-    };
-
     eprintln!(
-        "World3 single-timestep element-level discovery: {} loops in {:?}",
+        "World3 single-timestep element-level discovery: {} loops in {elapsed:?}",
         found.len(),
-        elapsed
+    );
+    assert!(
+        elapsed < budget,
+        "World3 single-timestep discovery took {elapsed:?} (> {budget:?}); discovery may \
+         have regressed toward the old GH #540 non-termination"
     );
 
     // The same structural contract the tractable companion test proves is
-    // satisfiable today. When #540 is fixed, this assertion is what makes
-    // the test go GREEN.
+    // satisfiable.
     assert_discovery_contract(&found);
 }
 
-/// Proves `assert_discovery_contract` -- the contract
-/// `world3_discovery_single_timestep` asserts -- is satisfiable *today*,
-/// via the exact same element-level `discover_loops_with_graph` recipe,
-/// on a small tractable model.
+/// Asserts `assert_discovery_contract` -- the same contract
+/// `world3_discovery_single_timestep` asserts -- via the exact same
+/// element-level `discover_loops_with_graph` recipe, on a small tractable
+/// arrayed model.
 ///
-/// Without this, the World3 test would be "RED today (intractable) and
-/// unverified for GREEN-when-fixed": GH #540 makes it impossible to
-/// observe a successful World3 discovery, so the post-fix assertions
-/// could be subtly wrong (e.g. the truncation window too short to hold a
-/// discoverable timestep) and nobody would find out until #540 is fixed.
-/// This companion runs the identical recipe -- `discovery_inputs` ->
-/// `truncate_results(.., TRUNCATED_STEP_COUNT)` ->
+/// The two discovery tests are deliberately redundant on the contract but
+/// complementary on cost and signal: World3 exercises the real
+/// production fixture (large, dense SCC), while this companion is tiny
+/// and fast, so it keeps the shared contract under cheap continuous
+/// coverage and is the natural place to assert the arrayed/per-element
+/// expansion path and the startup-guard constants without depending on
+/// the World3 MDL fixture. It runs the identical recipe --
+/// `discovery_inputs` -> `truncate_results(.., TRUNCATED_STEP_COUNT)` ->
 /// `discover_loops_with_graph` -> `assert_discovery_contract` -- on a
 /// small *arrayed* model and PASSES.
 ///
@@ -546,8 +412,7 @@ fn world3_discovery_single_timestep() {
 /// `PREVIOUS`-based startup-guard width ever changes,
 /// `FIRST_DISCOVERABLE_STEP` / `TRUNCATED_STEP_COUNT` go stale, the
 /// truncated window stops holding a discoverable timestep, and this test
-/// fails loudly and fast -- instead of the `#[ignore]`d World3 test
-/// silently rotting.
+/// fails loudly and fast on a fixture small enough to diagnose quickly.
 ///
 /// Not `#[ignore]`d: the model is tiny and discovery on it is
 /// sub-millisecond, so it is safe for the `cargo test --workspace`

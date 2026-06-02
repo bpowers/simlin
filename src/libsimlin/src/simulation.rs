@@ -70,6 +70,17 @@ pub unsafe extern "C" fn simlin_sim_new(
     ): CompileSnapshot = {
         let mut db = project_ref.db.lock().unwrap();
         if let Some(source_project) = db.current_source_project() {
+            // Latch that this project has requested LTM at least once. Done
+            // while holding the db lock (the same lock get_errors takes for
+            // its transient re-enable) so the latch is ordered against a
+            // concurrent get_errors. This is what lets get_errors surface the
+            // LTM diagnostic pipeline (auto-flip warning, etc.) even though we
+            // reset the salsa ltm_enabled input to false below (GH #466).
+            if enable_ltm {
+                project_ref
+                    .ltm_requested
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
             engine::db::set_project_ltm_enabled(&mut db, source_project, enable_ltm);
             let result =
                 engine::db::compile_project_incremental(&db, source_project, &model_ref.model_name);

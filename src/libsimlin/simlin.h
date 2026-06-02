@@ -112,6 +112,18 @@ typedef enum {
   SIMLIN_UNIT_ERROR_KIND_INFERENCE = 3,
 } SimlinUnitErrorKind;
 
+// Severity of an error detail. Distinguishes hard errors (the model cannot be
+// simulated, or a value is wrong) from advisory warnings (the model is still
+// usable, e.g. the LTM auto-flip-to-discovery advisory). Defaults to `Error`
+// so the common case (compile/parse/unit errors) keeps its meaning; the LTM
+// diagnostic pipeline marks its advisories `Warning` so callers (pysimlin's
+// `check()`, the TS engine) can present them without claiming the model is
+// broken.
+typedef enum {
+  SIMLIN_ERROR_SEVERITY_ERROR = 0,
+  SIMLIN_ERROR_SEVERITY_WARNING = 1,
+} SimlinErrorSeverity;
+
 // JSON format specifier for C API
 typedef enum {
   SIMLIN_JSON_FORMAT_NATIVE = 0,
@@ -199,8 +211,21 @@ typedef struct {
   char *from;
   char *to;
   SimlinLinkPolarity polarity;
+  // Raw LTM link-score series (length `score_len`), or NULL when LTM was
+  // not enabled / the edge has no score column.  The raw score divides by
+  // the change in `to`, so it is NOT comparable across different targets
+  // and is unusable for ranking links globally -- use `relative_score`
+  // (GH #652).
   double *score;
   uintptr_t score_len;
+  // Relative LTM link-score series (length `relative_score_len`), or NULL
+  // when `score` is NULL.  The raw score normalized, per target and per
+  // timestep, against the sum of `|score|` over all of `to`'s scored
+  // inputs -- a value in `[-1, 1]` that IS comparable across targets and
+  // is the correct key for ranking links by importance (GH #652).  When
+  // non-NULL its length equals `score_len`.
+  double *relative_score;
+  uintptr_t relative_score_len;
 } SimlinLink;
 
 // Collection of links
@@ -224,6 +249,7 @@ typedef struct {
   uint16_t end_offset;
   SimlinErrorKind kind;
   SimlinUnitErrorKind unit_error_kind;
+  SimlinErrorSeverity severity;
 } SimlinErrorDetail;
 
 // Opaque project structure

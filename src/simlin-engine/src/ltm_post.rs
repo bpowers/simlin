@@ -26,6 +26,36 @@ type BucketKey = (Option<usize>, usize);
 /// loop, the bucket's slot for an arrayed loop).
 type BucketMember = (usize, usize);
 
+/// One loop's `|loop_score|` contribution to a partition-sum denominator,
+/// with `NaN` summands excluded.
+///
+/// A `NaN` loop_score at a step means that one loop's score is *undefined*
+/// there; it is not signal, so it must not flow into the partition sum --
+/// otherwise a single bad loop turns the whole partition's denominator into
+/// `NaN` (the `denom == 0.0` SAFEDIV guard does not fire on `NaN`, since
+/// `NaN == 0.0` is false), poisoning every sibling's relative score (GH
+/// #542).  Dropping the `NaN` summand lets healthy siblings normalize
+/// against the healthy denominator; the bad loop's *own* numerator stays
+/// `NaN`, so as long as a healthy sibling keeps the denominator non-zero
+/// its own relative score stays `NaN` -- the honest per-loop "undefined
+/// here" signal.  (When the `NaN` loop is the partition's only contributor,
+/// or every member is `NaN` at a step, excluding it collapses the
+/// denominator to `0.0` and the SAFEDIV-0 guard yields `0.0` instead -- the
+/// lone-pin degeneracy documented on `compute_rel_loop_scores`.)  This
+/// matches the discovery path, which coerces a `NaN` link score to a
+/// non-contributing 0 (`ltm_finding::SearchGraph::from_edges`).
+///
+/// `+/-Inf` is deliberately NOT excluded: a raw loop score legitimately
+/// diverges at a dominance inflection (the link-score denominators go to
+/// zero there), so an `Inf` summand is real signal that the loop dominates.
+/// Keeping it in the sum sends the dominated siblings to `0` (`finite/Inf`)
+/// and the dominant loop to `NaN` (`Inf/Inf`) -- the same inflection-point
+/// behaviour the removed SAFEDIV equation produced, preserved bug-for-bug.
+#[inline]
+fn denom_summand(v: f64) -> f64 {
+    if v.is_nan() { 0.0 } else { v.abs() }
+}
+
 /// Build the canonical identifier of a loop's `loop_score` synthetic variable.
 ///
 /// The constructed string already uses the canonical separators
@@ -92,12 +122,33 @@ fn slot_partition(
 /// [`compute_rel_loop_scores_per_element`].
 ///
 /// The denominator uses SAFEDIV-0 semantics: when the partition sum at
-/// slot 0 is `0` the result is `0` rather than `NaN`.  Non-finite
-/// `loop_score` values (from upstream VM evaluation) propagate through
-/// normal IEEE-754 arithmetic, matching the behaviour of the removed
-/// SAFEDIV equation.  Loops whose `loop_score` is absent from `results`
-/// (e.g. LTM disabled for that loop, or discovery-mode compilation) are
-/// omitted from the returned map.
+/// slot 0 is `0` the result is `0` rather than `NaN`.
+///
+/// Non-finite `loop_score` handling (GH #542): a `NaN` summand is
+/// *excluded* from the partition sum via [`denom_summand`], so one loop
+/// whose score is undefined at a step no longer poisons every sibling's
+/// relative score in that partition.  The bad loop's own numerator is
+/// still `NaN`, so when a healthy sibling keeps the denominator non-zero
+/// its own relative score stays `NaN` -- the honest per-loop "undefined
+/// here" signal -- while the healthy siblings normalize against the
+/// healthy denominator.  (When the `NaN` loop is the partition's only
+/// contributor, or every member is `NaN` at the step, excluding it leaves
+/// a `0.0` denominator and the SAFEDIV-0 guard yields `0.0` instead -- see
+/// the lone-pin degeneracy section below.)  This matches the discovery
+/// path's "a `NaN` link contributes nothing" rule
+/// (`ltm_finding::SearchGraph::from_edges`).  `+/-Inf` is deliberately
+/// *kept* in the sum: a raw loop score legitimately diverges at a
+/// dominance inflection, so `Inf` is real signal -- it sends the
+/// dominated siblings to `0` and the dominant loop to `NaN` (`Inf/Inf`),
+/// the same inflection-point behaviour the removed SAFEDIV equation
+/// produced.  Earlier this whole module propagated `NaN` through normal
+/// IEEE-754 arithmetic only because the post-simulation refactor
+/// preserved the removed synthetic equation's semantics bug-for-bug; the
+/// removed SAFEDIV never promised `NaN`-resilience either.
+///
+/// Loops whose `loop_score` is absent from `results` (e.g. LTM disabled
+/// for that loop, or discovery-mode compilation) are omitted from the
+/// returned map.
 ///
 /// # Lone-pin degeneracy
 ///
@@ -155,7 +206,7 @@ pub fn compute_rel_loop_scores(
         for indices in partition_groups.values() {
             let denom: f64 = indices
                 .iter()
-                .filter_map(|&i| offsets[i].map(|off| row[off].abs()))
+                .filter_map(|&i| offsets[i].map(|off| denom_summand(row[off])))
                 .sum();
 
             for &i in indices {
@@ -204,9 +255,12 @@ pub fn compute_rel_loop_scores(
 /// over the members of that bucket, where `rs_j` is `0` for a scalar member
 /// (broadcast) and `k` for an arrayed member with `k < n_slots[j]` (an
 /// arrayed loop with `k >= n_slots[j]` is not a member of slot-`k` buckets).
-/// SAFEDIV-0 and NaN propagation match [`compute_rel_loop_scores`].
-/// `BTreeMap` on the bucket grid keeps the float summation order
-/// deterministic across runs.
+/// SAFEDIV-0 semantics, per-bucket `NaN` exclusion, and `Inf` retention
+/// all match [`compute_rel_loop_scores`] (via [`denom_summand`]): a `NaN`
+/// at one `(loop, slot)` does not poison the rest of its `(partition,
+/// slot)` bucket (GH #542), while an `Inf` at one slot stays in that
+/// bucket's denominator.  `BTreeMap` on the bucket grid keeps the float
+/// summation order deterministic across runs.
 pub fn compute_rel_loop_scores_per_element(
     results: &Results,
     loop_partitions: &HashMap<String, Vec<Option<usize>>>,
@@ -300,7 +354,7 @@ pub fn compute_rel_loop_scores_per_element(
         for (&(_p, k), member_list) in &members {
             let denom: f64 = member_list
                 .iter()
-                .filter_map(|&(i, rs)| offsets[i].map(|off| row[off + rs].abs()))
+                .filter_map(|&(i, rs)| offsets[i].map(|off| denom_summand(row[off + rs])))
                 .sum();
             for &(i, rs) in member_list {
                 let Some(off) = offsets[i] else { continue };
@@ -321,13 +375,16 @@ pub fn compute_rel_loop_scores_per_element(
 }
 
 /// Compute the cycle-partition denominator series:
-/// `denominator[t] = Σ_{j in partition} |loop_score[j, t]|`.
+/// `denominator[t] = Σ_{j in partition, loop_score[j, t] not NaN} |loop_score[j, t]|`.
 ///
 /// Loops in `loop_ids` whose `loop_score` variable is absent from
 /// `results` (e.g. LTM disabled for that loop, discovery-mode
 /// compilation, or model truncation) are omitted from the sum --
-/// the same semantics [`compute_rel_loop_scores`] uses.  Returns a
-/// length-`results.step_count` `Vec`, zero-filled when the
+/// the same semantics [`compute_rel_loop_scores`] uses.  `NaN`
+/// summands are excluded and `Inf` retained (via [`denom_summand`],
+/// GH #542), so this streaming denominator stays bit-for-bit
+/// identical to the full-sweep [`compute_rel_loop_scores`] sum.
+/// Returns a length-`results.step_count` `Vec`, zero-filled when the
 /// partition is empty.
 ///
 /// Exposed separately from [`compute_rel_loop_scores`] so that
@@ -354,7 +411,7 @@ where
 
     let mut denom = vec![0.0_f64; results.step_count];
     for (t, row) in results.iter().enumerate() {
-        denom[t] = offsets.iter().map(|&off| row[off].abs()).sum();
+        denom[t] = offsets.iter().map(|&off| denom_summand(row[off])).sum();
     }
     denom
 }
@@ -366,10 +423,14 @@ where
 /// Returns `None` when the loop's `loop_score` variable is absent
 /// from `results` (matching [`compute_rel_loop_scores`], which
 /// simply omits those loops from its output map).  SAFEDIV-0
-/// semantics: `denominator[t] == 0` yields `0`, not `NaN`.
-/// Non-finite numerators propagate through normal IEEE-754
-/// arithmetic, matching the behaviour of the retired compile-time
-/// emitter.
+/// semantics: `denominator[t] == 0` yields `0`, not `NaN`.  This
+/// loop's *own* numerator propagates through normal IEEE-754
+/// arithmetic: a `NaN` numerator yields a `NaN` relative score
+/// (the honest per-loop "undefined here" signal), and an `Inf`
+/// numerator over a finite denom yields `Inf`.  The cross-loop
+/// `NaN`-poisoning fix lives in the denominator
+/// ([`compute_partition_denominator`] excludes `NaN` summands, GH
+/// #542), not here.
 ///
 /// The caller is responsible for ensuring `denominator` covers the
 /// same partition the loop belongs to, and that its length matches
@@ -434,6 +495,11 @@ fn effective_slot(n_slots: usize, element_index: usize) -> Option<usize> {
 ///   - Arrayed loops with `element_index >= n_slots` do NOT contribute
 ///     -- the loop has no own element at this partition index.
 ///
+/// A contributing slot's value goes through [`denom_summand`], so a
+/// `NaN` slot is excluded from the sum and an `Inf` slot retained (GH
+/// #542) -- the same per-bucket `NaN`-isolation the full-sweep
+/// [`compute_rel_loop_scores_per_element`] applies.
+///
 /// This skip-vs-clamp distinction matters for mixed-stride partitions
 /// (two arrayed loops with different dimensionalities sharing a
 /// partition).  Producing the same partition sums as the full-sweep
@@ -467,7 +533,7 @@ where
     for (t, row) in results.iter().enumerate() {
         denom[t] = entries
             .iter()
-            .map(|&(off, slot)| row[off + slot].abs())
+            .map(|&(off, slot)| denom_summand(row[off + slot]))
             .sum();
     }
     denom
@@ -857,6 +923,131 @@ pub fn compute_rel_loop_score_argmax_abs(
     Some(out)
 }
 
+/// One causal link's input to relative-link-score normalization: the
+/// canonical name of the link's `to` target plus its raw LTM link-score
+/// series (`None` for an edge with no score series -- a constant/parameter
+/// edge, or in exhaustive mode an edge that lies outside every loop).
+pub struct RelLinkInput<'a> {
+    /// Canonical identifier of the link's `to` (target) variable.  Links
+    /// are grouped by this key; the denominator is the per-step sum of
+    /// `|score|` over all links sharing it.
+    pub to: &'a str,
+    /// The link's raw `loop`-link-score series, or `None` when the edge has
+    /// no score column.  A `None` link contributes nothing to any
+    /// denominator and gets no relative score back.
+    pub score: Option<&'a [f64]>,
+}
+
+/// Compute the **relative** link score for every input link.
+///
+/// The raw LTM link score divides by the change in the *target* variable,
+/// so links into a near-constant target produce astronomically large raw
+/// scores (the denominator approaches zero).  Raw scores are therefore NOT
+/// comparable across different targets, and ranking links globally by raw
+/// magnitude surfaces numerically degenerate links rather than meaningful
+/// ones (GH #652).
+///
+/// The relative link score fixes this by normalizing, per target and per
+/// timestep, against the magnitudes of *all* the target's scored inputs:
+///
+/// ```text
+/// rel[link, t] = score[link, t] / Σ_{j : to(j) == to(link)} |score[j, t]|
+/// ```
+///
+/// This is the link-level analogue of [`compute_rel_loop_scores`]'s
+/// per-partition normalization and yields a value in `[-1, 1]` that *is*
+/// comparable across the whole model -- the fraction of the target's change
+/// attributable to that input.  (LTM ref 13.3 / 13.12, Schoenberg 2020
+/// section 4.)
+///
+/// **Signed, not absolute.** The literature phrases the relative magnitude
+/// as a `[0, 1]` fraction, but we keep the link's sign (so the result is in
+/// `[-1, 1]`) for the same reason [`compute_rel_loop_scores`] keeps loop
+/// polarity: the sign tells a reader whether the input pushes the target up
+/// or down, and dropping it would discard information the raw series
+/// carries.  Callers that want the pure magnitude take `.abs()`.
+///
+/// **NaN/Inf semantics** match the loop-level denominator
+/// ([`denom_summand`], GH #542): a `NaN` summand is excluded from the
+/// per-target sum (one input being undefined at a step must not poison its
+/// siblings' relative scores), while `Inf` is retained (a genuinely
+/// diverging input dominates its target, so the finite siblings normalize
+/// to `0` and the diverging one to `NaN` via `Inf/Inf`).  A `0.0`
+/// denominator yields `0.0` (SAFEDIV-0), and a link's own `NaN` numerator
+/// stays `NaN` -- the honest "undefined here" per-link signal.
+///
+/// **Denominator scope.** The sum runs over the input links that *have* a
+/// score series; `None`-score links (constants/parameters; out-of-loop
+/// edges in exhaustive mode) contribute nothing.  In **discovery mode**
+/// every causal edge is scored, so the denominator is the complete set of
+/// the target's inputs and the relative score is exactly "fraction of the
+/// target's change attributable to this input".  In **exhaustive mode**
+/// only in-loop edges carry score series, so for a target whose inputs are
+/// only partially in loops the denominator covers just the scored subset --
+/// the relative score is then "fraction among the target's *scored* inputs",
+/// a slight overstatement of each link's true share.  This asymmetry is the
+/// pragmatic choice (normalize over what is actually scored) rather than
+/// inventing zero series for unscored edges; callers ranking links across a
+/// large exhaustive-mode model should read it with that caveat.
+///
+/// The return value is parallel to `links`: `Some(series)` of length
+/// `step_count` for each link that had a score, `None` for each link that
+/// did not (mirroring the input's `score: None`).
+pub fn compute_rel_link_scores(
+    links: &[RelLinkInput<'_>],
+    step_count: usize,
+) -> Vec<Option<Vec<f64>>> {
+    // Group the indices of scored links by their `to` target.  A
+    // `BTreeMap` keeps the float-summation order of each denominator
+    // deterministic across runs (the link order within a target is the
+    // caller's stable input order, preserved by pushing in iteration order).
+    let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, link) in links.iter().enumerate() {
+        if link.score.is_some() {
+            groups.entry(link.to).or_default().push(i);
+        }
+    }
+
+    // Per-target denominator series: Σ |score| over the target's scored
+    // links, with NaN excluded / Inf kept (denom_summand), one entry per
+    // saved step.
+    let mut denom_by_target: HashMap<&str, Vec<f64>> = HashMap::with_capacity(groups.len());
+    for (target, indices) in &groups {
+        let mut denom = vec![0.0_f64; step_count];
+        for &i in indices {
+            let series = links[i].score.expect("grouped links always have a score");
+            // A score series shorter than step_count contributes 0 past its
+            // end (zip stops at the shorter); this never happens in production
+            // (every column is results.step_count long) but keeps the helper
+            // total.
+            for (d, &v) in denom.iter_mut().zip(series.iter()) {
+                *d += denom_summand(v);
+            }
+        }
+        denom_by_target.insert(target, denom);
+    }
+
+    links
+        .iter()
+        .map(|link| {
+            let series = link.score?;
+            let denom = &denom_by_target[link.to];
+            // `denom` has length `step_count`; a `series` shorter than that
+            // (never in production -- every column is results.step_count long)
+            // is read as 0 past its end via `series.get(t)`.
+            let out: Vec<f64> = denom
+                .iter()
+                .enumerate()
+                .map(|(t, &d)| {
+                    let num = series.get(t).copied().unwrap_or(0.0);
+                    if d == 0.0 { 0.0 } else { num / d }
+                })
+                .collect();
+            Some(out)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,6 +1127,13 @@ mod tests {
     /// value against the sum of slot-0 values over loops sharing its slot-0
     /// partition.  The proptest compares against this to catch any numeric
     /// divergence.
+    ///
+    /// `NaN` summands are excluded from the partition sum here too (GH
+    /// #542), independently re-deriving the production `denom_summand`
+    /// rule, so the oracle stays correct if a future generator introduces
+    /// non-finite samples (the current generators are finite-only, so this
+    /// branch is latent but kept honest).  `+/-Inf` is kept in the sum,
+    /// matching the production semantics.
     fn reference_rel_loop_scores(
         loop_ids: &[String],
         loop_partitions: &HashMap<String, Vec<Option<usize>>>,
@@ -957,7 +1155,13 @@ mod tests {
         #[allow(clippy::needless_range_loop)]
         for t in 0..step_count {
             for indices in groups.values() {
-                let denom: f64 = indices.iter().map(|&i| series[i][t].abs()).sum();
+                let denom: f64 = indices
+                    .iter()
+                    .map(|&i| {
+                        let v = series[i][t];
+                        if v.is_nan() { 0.0 } else { v.abs() }
+                    })
+                    .sum();
                 for &i in indices {
                     let num = series[i][t];
                     let val = if denom == 0.0 { 0.0 } else { num / denom };
@@ -1085,9 +1289,15 @@ mod tests {
                     .filter_map(|j| read_slot_in_bucket(j, p, k).map(|rs| (j, rs)))
                     .collect();
                 for step in 0..step_count {
+                    // `NaN` summands excluded (GH #542), re-derived inline
+                    // so this oracle stays structurally independent of the
+                    // production `denom_summand`; `Inf` kept in the sum.
                     let denom: f64 = bucket
                         .iter()
-                        .map(|&(j, rs)| series[j][step][rs].abs())
+                        .map(|&(j, rs)| {
+                            let v = series[j][step][rs];
+                            if v.is_nan() { 0.0 } else { v.abs() }
+                        })
                         .sum();
                     let num = series[i][step][read_i];
                     let val = if denom == 0.0 { 0.0 } else { num / denom };
@@ -1177,11 +1387,15 @@ mod tests {
     }
 
     #[test]
-    fn nan_loop_score_propagates_without_panic() {
-        // Non-finite upstream values must flow through normal IEEE-754
-        // arithmetic (the documented contract).  A panic or debug-assert
-        // on NaN would be a subtle regression because the exhaustive
-        // SAFEDIV equation silently propagated NaN via arithmetic.
+    fn nan_loop_score_isolated_to_its_own_loop() {
+        // A single NaN loop_score must NOT poison the whole partition's
+        // relative scores (GH #542).  A NaN summand is excluded from the
+        // partition denominator, so a healthy sibling still normalizes
+        // against the healthy denominator; only the loop whose own
+        // numerator is NaN keeps a NaN relative score (the honest "this
+        // one loop is undefined here" signal).  This also matches the
+        // discovery path's "NaN link contributes nothing" philosophy
+        // (`ltm_finding::SearchGraph::from_edges` coerces NaN -> 0).
         let nan = f64::NAN;
         let series_a = &[nan, 2.0][..];
         let series_b = &[1.0, 3.0][..];
@@ -1192,12 +1406,110 @@ mod tests {
         let rel_a = scored.get("A").unwrap();
         let rel_b = scored.get("B").unwrap();
 
-        // t=0: denom = |NaN| + |1| = NaN; NaN/NaN = NaN for both loops.
-        assert!(rel_a[0].is_nan(), "NaN numerator yields NaN result");
-        assert!(rel_b[0].is_nan(), "NaN denominator yields NaN result");
+        // t=0: the NaN summand is dropped, so denom = |1| = 1.  The bad
+        // loop A's own numerator is NaN -> NaN/1 = NaN (its own signal);
+        // the healthy loop B is unaffected -> 1/1 = 1.
+        assert!(rel_a[0].is_nan(), "the NaN loop's own rel score stays NaN");
+        assert!(
+            (rel_b[0] - 1.0).abs() < 1e-12,
+            "healthy loop normalizes against the healthy denom, not NaN: got {}",
+            rel_b[0]
+        );
         // t=1: well-defined; denom = 2 + 3 = 5.
         assert!((rel_a[1] - 0.4).abs() < 1e-12);
         assert!((rel_b[1] - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn nan_loop_score_isolated_in_per_element_bucket() {
+        // Per-element twin of `nan_loop_score_isolated_to_its_own_loop`:
+        // a NaN at one (loop, slot) must not poison the sibling sharing
+        // that `(partition, slot)` bucket.  Two coupled A2A loops, 2
+        // slots each; plant a NaN at A's slot 0 at step 0.
+        let n_slots: usize = 2;
+        // A slot0 = [NaN, 9], A slot1 = [4, 4]
+        // B slot0 = [3,   3], B slot1 = [6, 6]
+        let loop_data = vec![
+            vec![vec![f64::NAN, 4.0], vec![9.0, 4.0]],
+            vec![vec![3.0, 6.0], vec![3.0, 6.0]],
+        ];
+        let results = make_arrayed_results(&["A", "B"], &[n_slots, n_slots], &loop_data);
+        let partitions =
+            mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("B", vec![Some(0); n_slots])]);
+
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
+        let a = rel.get("A").unwrap();
+        let b = rel.get("B").unwrap();
+
+        // step 0, slot 0: bucket {A, B}; A is NaN, so it is dropped from
+        // the denom (denom = |3| = 3).  A's own rel score = NaN/3 = NaN;
+        // B's = 3/3 = 1 (healthy, NOT poisoned).
+        let at = |step: usize, k: usize| step * n_slots + k;
+        assert!(a[at(0, 0)].is_nan(), "NaN loop keeps its own NaN rel score");
+        assert!(
+            (b[at(0, 0)] - 1.0).abs() < 1e-12,
+            "healthy slot-0 sibling normalizes against the healthy denom: got {}",
+            b[at(0, 0)]
+        );
+        // step 0, slot 1: both finite; denom = |4| + |6| = 10.
+        assert!((a[at(0, 1)] - 0.4).abs() < 1e-12);
+        assert!((b[at(0, 1)] - 0.6).abs() < 1e-12);
+        // step 1: all finite; slot 0 denom = |9| + |3| = 12, slot 1 = 10.
+        assert!((a[at(1, 0)] - (9.0 / 12.0)).abs() < 1e-12);
+        assert!((b[at(1, 0)] - (3.0 / 12.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn inf_loop_score_kept_in_denominator() {
+        // An +Inf loop_score is REAL signal: at a dominance inflection a
+        // raw loop score legitimately diverges (the link-score
+        // denominators go to zero there).  Unlike a NaN, an Inf is NOT
+        // filtered from the partition sum -- it stays, so the dominated
+        // siblings correctly go to 0 (finite/Inf) and the dominant loop
+        // momentarily reads NaN (Inf/Inf).  This preserves the legitimate
+        // inflection-point behaviour of the removed SAFEDIV equation
+        // bug-for-bug; only the NaN-poisoning case (GH #542) changed.
+        let inf = f64::INFINITY;
+        let series_a = &[inf, 2.0][..];
+        let series_b = &[5.0, 3.0][..];
+        let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
+        let partitions = mapping(&[("A", Some(0)), ("B", Some(0))]);
+
+        let scored = compute_rel_loop_scores(&results, &partitions);
+        let rel_a = scored.get("A").unwrap();
+        let rel_b = scored.get("B").unwrap();
+
+        // t=0: denom = |Inf| + |5| = Inf (Inf kept in the sum).
+        //   dominant loop A: Inf/Inf = NaN.
+        //   dominated loop B: 5/Inf = 0 (it does not matter when a
+        //   sibling is infinitely dominant).
+        assert!(
+            rel_a[0].is_nan(),
+            "the dominant +Inf loop reads NaN at the inflection"
+        );
+        assert_eq!(rel_b[0], 0.0, "a loop dominated by an +Inf sibling -> 0");
+        // t=1: finite; denom = 2 + 3 = 5.
+        assert!((rel_a[1] - 0.4).abs() < 1e-12);
+        assert!((rel_b[1] - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn inf_loop_score_kept_in_per_element_bucket() {
+        // Per-element twin of `inf_loop_score_kept_in_denominator`: an
+        // +Inf at one (loop, slot) stays in that bucket's denominator,
+        // so the dominated sibling -> 0 and the dominant loop -> NaN.
+        let n_slots: usize = 1;
+        // A slot0 = [Inf], B slot0 = [5].
+        let loop_data = vec![vec![vec![f64::INFINITY]], vec![vec![5.0]]];
+        let results = make_arrayed_results(&["A", "B"], &[n_slots, n_slots], &loop_data);
+        let partitions =
+            mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("B", vec![Some(0); n_slots])]);
+
+        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
+        let a = rel.get("A").unwrap();
+        let b = rel.get("B").unwrap();
+        assert!(a[0].is_nan(), "dominant +Inf loop -> NaN in its bucket");
+        assert_eq!(b[0], 0.0, "dominated sibling -> 0 in the same bucket");
     }
 
     #[test]
@@ -1268,6 +1580,35 @@ mod tests {
         let results = make_results_for_loops(&[("A", &[1.0, 2.0][..])]);
         let denom = compute_partition_denominator(&results, ["A"]);
         assert!(compute_rel_loop_score_for_id(&results, "missing", &denom).is_none());
+    }
+
+    /// The scalar streaming denominator (`compute_partition_denominator`)
+    /// excludes `NaN` and keeps `Inf`, so the FFI's amortized scalar path
+    /// isolates a NaN loop the same way the full-sweep helper does
+    /// (GH #542).
+    #[test]
+    fn per_id_streaming_denominator_excludes_nan_keeps_inf() {
+        // t0: A = NaN, B = 1 -> denom = 1 (NaN dropped).
+        // t1: A = Inf, B = 1 -> denom = Inf (Inf kept).
+        let series_a = &[f64::NAN, f64::INFINITY][..];
+        let series_b = &[1.0, 1.0][..];
+        let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
+
+        let denom = compute_partition_denominator(&results, ["A", "B"]);
+        assert_eq!(denom, vec![1.0, f64::INFINITY]);
+
+        // Healthy B: 1/1 = 1 at t0 (not poisoned), 1/Inf = 0 at t1.
+        let rel_b = compute_rel_loop_score_for_id(&results, "B", &denom).unwrap();
+        assert!(
+            (rel_b[0] - 1.0).abs() < 1e-12,
+            "healthy B not poisoned: {}",
+            rel_b[0]
+        );
+        assert_eq!(rel_b[1], 0.0, "B dominated by +Inf sibling -> 0");
+        // The bad loop A keeps its own NaN at t0; at t1 Inf/Inf = NaN.
+        let rel_a = compute_rel_loop_score_for_id(&results, "A", &denom).unwrap();
+        assert!(rel_a[0].is_nan());
+        assert!(rel_a[1].is_nan());
     }
 
     /// Per-element variant: two A2A loops over an element-wise-coupled
@@ -2035,6 +2376,44 @@ mod tests {
         }
     }
 
+    /// The streaming FFI denominator (`compute_partition_denominator_for_element`)
+    /// must exclude a `NaN` summand and keep an `Inf` one, exactly like the
+    /// full-sweep helper -- this is the path libsimlin's
+    /// `simlin_analyze_get_relative_loop_score` cache drives, so the
+    /// GH #542 fix must hold there too.
+    #[test]
+    fn per_element_streaming_denominator_excludes_nan_keeps_inf() {
+        // step 0: A slot0 = NaN, B slot0 = 3  -> denom = 3 (NaN dropped).
+        // step 1: A slot0 = Inf, B slot0 = 3  -> denom = Inf (Inf kept).
+        let loop_data = vec![
+            vec![vec![f64::NAN, 7.0], vec![f64::INFINITY, 7.0]],
+            vec![vec![3.0, 1.0], vec![3.0, 1.0]],
+        ];
+        let results = make_arrayed_results(&["A", "B"], &[2, 2], &loop_data);
+
+        let denom = compute_partition_denominator_for_element(
+            &results,
+            [("A", 2_usize), ("B", 2_usize)],
+            0,
+        );
+        assert_eq!(denom[0], 3.0, "NaN summand excluded from streaming denom");
+        assert_eq!(
+            denom[1],
+            f64::INFINITY,
+            "Inf summand retained in streaming denom"
+        );
+
+        // The healthy sibling B normalizes against the NaN-free denom at
+        // step 0 (3/3 = 1) and goes to 0 against the +Inf denom at step 1.
+        let rel_b = compute_rel_loop_score_for_element(&results, "B", 2, 0, &denom).unwrap();
+        assert!(
+            (rel_b[0] - 1.0).abs() < 1e-12,
+            "healthy B not poisoned: {}",
+            rel_b[0]
+        );
+        assert_eq!(rel_b[1], 0.0, "B dominated by +Inf sibling -> 0");
+    }
+
     /// An absent loop_score variable returns `None`, matching the
     /// `compute_rel_loop_score_for_id` contract.
     #[test]
@@ -2608,6 +2987,251 @@ mod tests {
                         "loop {} flat-index {}: actual {} vs reference {}", id, idx, av, ev
                     );
                 }
+            }
+        }
+    }
+
+    // --- Relative link scores (GH #652) ---------------------------------
+
+    #[test]
+    fn rel_link_two_inputs_into_one_target_normalizes_per_step() {
+        // Two links into the same target `z` with known raw scores; the
+        // relative score is score_i / (|s1| + |s2|) at each step.
+        let s1 = [2.0, -3.0, 0.0];
+        let s2 = [6.0, 1.0, 5.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s1),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&s2),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 3);
+        let r1 = out[0].as_ref().unwrap();
+        let r2 = out[1].as_ref().unwrap();
+        // step 0: denom = 8; step 1: denom = 4; step 2: denom = 5
+        assert_eq!(r1, &[2.0 / 8.0, -3.0 / 4.0, 0.0 / 5.0]);
+        assert_eq!(r2, &[6.0 / 8.0, 1.0 / 4.0, 5.0 / 5.0]);
+        // Signs are preserved (signed, not absolute), and the per-step
+        // magnitudes of siblings into the same target sum to 1.
+        for t in 0..3 {
+            assert!((r1[t].abs() + r2[t].abs() - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn rel_link_unscored_links_get_none_and_dont_contribute() {
+        // A `None`-score link (constant/parameter, or out-of-loop in
+        // exhaustive mode) gets `None` back and is excluded from the
+        // denominator of its target's scored siblings.
+        let s = [4.0, 4.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s),
+            },
+            RelLinkInput {
+                to: "z",
+                score: None,
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 2);
+        // The scored link normalizes only against itself -> +1 every step.
+        assert_eq!(out[0].as_ref().unwrap(), &[1.0, 1.0]);
+        assert!(out[1].is_none());
+    }
+
+    #[test]
+    fn rel_link_separate_targets_normalize_independently() {
+        // Links into different targets do NOT cross-normalize: each target
+        // is its own denominator group.  This is the cross-target
+        // comparability the raw score lacks.
+        let a = [10.0];
+        let b = [20.0];
+        let links = [
+            RelLinkInput {
+                to: "y",
+                score: Some(&a),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&b),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 1);
+        // Each is the lone scored input of its own target -> +1.
+        assert_eq!(out[0].as_ref().unwrap(), &[1.0]);
+        assert_eq!(out[1].as_ref().unwrap(), &[1.0]);
+    }
+
+    #[test]
+    fn rel_link_nan_summand_excluded_siblings_use_healthy_denom() {
+        // One input's score is NaN at step 0; its sibling must still
+        // normalize against the healthy denominator (NaN excluded), and the
+        // NaN link's own relative score stays NaN at that step.
+        let s_bad = [f64::NAN, 3.0];
+        let s_ok = [4.0, 1.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s_bad),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&s_ok),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 2);
+        let r_bad = out[0].as_ref().unwrap();
+        let r_ok = out[1].as_ref().unwrap();
+        // step 0: denom excludes the NaN -> 4; healthy sibling = 4/4 = 1.
+        assert_eq!(r_ok[0], 1.0);
+        // The NaN link's own numerator is NaN -> NaN/4 = NaN.
+        assert!(r_bad[0].is_nan());
+        // step 1: denom = |3| + |1| = 4; both well-defined.
+        assert_eq!(r_bad[1], 3.0 / 4.0);
+        assert_eq!(r_ok[1], 1.0 / 4.0);
+    }
+
+    #[test]
+    fn rel_link_inf_summand_kept_dominant_link_diverges() {
+        // An Inf input dominates its target: the finite sibling normalizes
+        // to 0 (finite/Inf) and the Inf link itself to NaN (Inf/Inf),
+        // matching the loop-level Inf-retention semantics.
+        let s_inf = [f64::INFINITY];
+        let s_fin = [5.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s_inf),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&s_fin),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 1);
+        assert!(out[0].as_ref().unwrap()[0].is_nan());
+        assert_eq!(out[1].as_ref().unwrap()[0], 0.0);
+    }
+
+    #[test]
+    fn rel_link_zero_denominator_yields_zero() {
+        // When every input into a target is 0 at a step, the denominator is
+        // 0 and SAFEDIV-0 yields 0 (not NaN).
+        let s1 = [0.0, 2.0];
+        let s2 = [0.0, 2.0];
+        let links = [
+            RelLinkInput {
+                to: "z",
+                score: Some(&s1),
+            },
+            RelLinkInput {
+                to: "z",
+                score: Some(&s2),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 2);
+        assert_eq!(out[0].as_ref().unwrap()[0], 0.0);
+        assert_eq!(out[1].as_ref().unwrap()[0], 0.0);
+        assert_eq!(out[0].as_ref().unwrap()[1], 0.5);
+    }
+
+    #[test]
+    fn rel_link_degenerate_huge_raw_ranks_below_active_target() {
+        // The GH #652 scenario in miniature.  `near_const` is a target that
+        // barely moves: its two inputs have astronomically large RAW scores
+        // (1e22-scale), because the raw denominator (Δtarget) is tiny.  An
+        // `active` target moves normally: its dominant input has a modest raw
+        // score (~0.9).  Ranking by mean |raw| puts the degenerate links on
+        // top; ranking by mean |relative| must put the genuinely-dominant
+        // link of the active target above the degenerate huge-raw link.
+        let near_a = [6.4e22, 6.4e22];
+        let near_b = [1.1e22, 1.1e22];
+        let active_dom = [0.9, 0.9];
+        let active_min = [0.1, 0.1];
+        let links = [
+            RelLinkInput {
+                to: "near_const",
+                score: Some(&near_a),
+            },
+            RelLinkInput {
+                to: "near_const",
+                score: Some(&near_b),
+            },
+            RelLinkInput {
+                to: "active",
+                score: Some(&active_dom),
+            },
+            RelLinkInput {
+                to: "active",
+                score: Some(&active_min),
+            },
+        ];
+        let out = compute_rel_link_scores(&links, 2);
+
+        // Mean |raw| ranking (the bad workflow) puts the degenerate links first.
+        let mean_abs = |s: &[f64]| s.iter().map(|v| v.abs()).sum::<f64>() / s.len() as f64;
+        let raw_rank_top = [
+            mean_abs(&near_a),
+            mean_abs(&near_b),
+            mean_abs(&active_dom),
+            mean_abs(&active_min),
+        ];
+        assert!(
+            raw_rank_top[0] > raw_rank_top[2],
+            "raw ranking degenerately puts near-constant link above the active one"
+        );
+
+        // Mean |relative| ranking (the fix): the active target's dominant
+        // link (0.9 / 1.0 = 0.9) must outrank the degenerate near-constant
+        // link (6.4e22 / 7.5e22 ~= 0.853).
+        let rel_active_dom = mean_abs(out[2].as_ref().unwrap());
+        let rel_near_a = mean_abs(out[0].as_ref().unwrap());
+        assert!(
+            rel_active_dom > rel_near_a,
+            "relative ranking should put the active target's dominant link \
+             ({rel_active_dom}) above the degenerate huge-raw link ({rel_near_a})"
+        );
+        // And every relative score is bounded in [-1, 1].
+        for series in out.iter().flatten() {
+            for &v in series {
+                assert!(v.abs() <= 1.0 + 1e-12, "relative score {v} out of [-1,1]");
+            }
+        }
+    }
+
+    proptest! {
+        /// For any target group, the per-step sum of |relative score| over
+        /// the group's scored links is either 0 (all-zero / NaN-only step)
+        /// or 1 (SAFEDIV partition identity), and every finite relative
+        /// score lies in [-1, 1].
+        #[test]
+        fn rel_link_group_magnitudes_sum_to_one_or_zero(
+            raws in proptest::collection::vec(-1e6f64..1e6f64, 1..6),
+        ) {
+            let series: Vec<[f64; 1]> = raws.iter().map(|&v| [v]).collect();
+            let links: Vec<RelLinkInput> = series
+                .iter()
+                .map(|s| RelLinkInput { to: "z", score: Some(s.as_slice()) })
+                .collect();
+            let out = compute_rel_link_scores(&links, 1);
+            let denom: f64 = raws.iter().map(|v| v.abs()).sum();
+            let sum_abs: f64 = out
+                .iter()
+                .map(|o| o.as_ref().unwrap()[0].abs())
+                .sum();
+            if denom == 0.0 {
+                prop_assert_eq!(sum_abs, 0.0);
+            } else {
+                prop_assert!((sum_abs - 1.0).abs() < 1e-9);
+            }
+            for o in &out {
+                let v = o.as_ref().unwrap()[0];
+                prop_assert!(v.abs() <= 1.0 + 1e-9);
             }
         }
     }

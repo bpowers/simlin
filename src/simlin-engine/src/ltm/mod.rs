@@ -46,7 +46,9 @@ pub use types::{
 };
 
 // Crate-internal helpers used from sibling modules in `simlin-engine`.
-pub(crate) use graph::assign_loop_ids;
+#[cfg(test)]
+pub(crate) use graph::ModulePathwayBudgetGuard;
+pub(crate) use graph::{ModulePathwaysWithTruncation, assign_loop_ids, module_pathway_budget};
 pub(crate) use partitions::loop_dimension_element_tuples;
 pub(crate) use types::{is_synthetic_node_name, normalize_module_ref};
 

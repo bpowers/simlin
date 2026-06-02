@@ -404,6 +404,16 @@ pub struct ImplicitVarMeta {
     pub is_module: bool,
     pub model_name: Option<String>,
     pub size: usize,
+    /// Datamodel dimension names for an *arrayed* implicit helper (empty when
+    /// scalar). Almost every implicit helper (SMOOTH/DELAY/TREND inputs,
+    /// scalar PREVIOUS/INIT args) is scalar, but the arrayed `PREVIOUS`/`INIT`
+    /// helper synthesized for a bare arrayed reference (GH #541) is an
+    /// `Equation::ApplyToAll`, so a consumer that subscripts it
+    /// (`helper[<elem>]`) needs the helper's declared dimensions to resolve
+    /// the subscript -- a scalar stub would reject it as a subscript on a
+    /// scalar. Carried here so the dep-stub builder can give the helper its
+    /// real array shape.
+    pub dimensions: Vec<String>,
 }
 
 impl std::fmt::Debug for ImplicitVarMeta {
@@ -412,6 +422,7 @@ impl std::fmt::Debug for ImplicitVarMeta {
             .field("index_in_parent", &self.index_in_parent)
             .field("is_stock", &self.is_stock)
             .field("size", &self.size)
+            .field("dimensions", &self.dimensions)
             .finish()
     }
 }
@@ -443,6 +454,35 @@ pub fn model_implicit_var_info(
                 datamodel::Variable::Module(m) => Some(m.model_name.clone()),
                 _ => None,
             };
+            // An arrayed implicit helper (the GH #541 bare-arrayed-PREVIOUS
+            // case) is an `Equation::ApplyToAll` carrying its dimension names;
+            // every other helper is scalar (empty dims, size 1). Resolve the
+            // dimension sizes from the project's dimension definitions so a
+            // consumer that subscripts the helper sees its real array shape.
+            let dimensions: Vec<String> = match implicit_var.get_equation() {
+                Some(datamodel::Equation::ApplyToAll(dims, _)) => dims.clone(),
+                _ => Vec::new(),
+            };
+            let size = if dimensions.is_empty() {
+                1
+            } else {
+                let all_dims = project_datamodel_dims(db, project);
+                dimensions
+                    .iter()
+                    .map(|dim_name| {
+                        // Canonical match: the helper's stored dim names are
+                        // canonical (`region`); the project dims keep original
+                        // casing (`Region`). A raw `==` would miss and the size
+                        // would wrongly fall back to 1, corrupting the layout.
+                        let canonical = canonicalize(dim_name);
+                        all_dims
+                            .iter()
+                            .find(|d| canonicalize(d.name()) == canonical)
+                            .map(|d| d.len())
+                            .unwrap_or(1)
+                    })
+                    .product()
+            };
             result.insert(
                 name,
                 ImplicitVarMeta {
@@ -451,7 +491,8 @@ pub fn model_implicit_var_info(
                     is_stock,
                     is_module,
                     model_name,
-                    size: 1,
+                    size,
+                    dimensions,
                 },
             );
         }

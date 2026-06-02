@@ -238,6 +238,7 @@ struct ErrorDetailBuilder {
     end_offset: u16,
     kind: SimlinErrorKind,
     unit_error_kind: SimlinUnitErrorKind,
+    severity: crate::SimlinErrorSeverity,
 }
 
 impl ErrorDetailBuilder {
@@ -251,6 +252,7 @@ impl ErrorDetailBuilder {
             end_offset: 0,
             kind: SimlinErrorKind::default(),
             unit_error_kind: SimlinUnitErrorKind::default(),
+            severity: crate::SimlinErrorSeverity::default(),
         }
     }
 
@@ -285,6 +287,11 @@ impl ErrorDetailBuilder {
         self
     }
 
+    fn severity(mut self, severity: crate::SimlinErrorSeverity) -> Self {
+        self.severity = severity;
+        self
+    }
+
     fn build(self) -> ErrorDetailData {
         ErrorDetailData {
             code: self.code,
@@ -295,10 +302,17 @@ impl ErrorDetailBuilder {
             end_offset: self.end_offset,
             kind: self.kind,
             unit_error_kind: self.unit_error_kind,
+            severity: self.severity,
         }
     }
 
-    fn from_formatted(error: errors::FormattedError) -> ErrorDetailData {
+    /// Build an `ErrorDetailData` from a `FormattedError`, carrying the
+    /// diagnostic's real severity. The `vm_error`/compile-failure path uses
+    /// the `Error`-defaulting `from_formatted` wrapper below.
+    fn from_formatted_with_severity(
+        error: errors::FormattedError,
+        severity: crate::SimlinErrorSeverity,
+    ) -> ErrorDetailData {
         let kind = match error.kind {
             errors::FormattedErrorKind::Project => SimlinErrorKind::Project,
             errors::FormattedErrorKind::Model => SimlinErrorKind::Model,
@@ -314,7 +328,8 @@ impl ErrorDetailBuilder {
         };
         let mut builder = ErrorDetailBuilder::new(error.code)
             .kind(kind)
-            .unit_error_kind(unit_error_kind);
+            .unit_error_kind(unit_error_kind)
+            .severity(severity);
         if let Some(message) = error.message {
             builder = builder.message(Some(message));
         }
@@ -327,6 +342,13 @@ impl ErrorDetailBuilder {
         builder
             .offsets(error.start_offset, error.end_offset)
             .build()
+    }
+
+    /// Build an `ErrorDetailData` with `Error` severity (the default for
+    /// compile/VM-validation failures and any caller that does not carry a
+    /// diagnostic severity).
+    fn from_formatted(error: errors::FormattedError) -> ErrorDetailData {
+        Self::from_formatted_with_severity(error, crate::SimlinErrorSeverity::Error)
     }
 }
 
@@ -351,9 +373,10 @@ pub(crate) fn gather_error_details_with_db(
     let mut all_errors: Vec<ErrorDetailData> = diags
         .iter()
         .map(|d| {
-            ErrorDetailBuilder::from_formatted(errors::format_diagnostic_with_datamodel(
-                d, datamodel,
-            ))
+            ErrorDetailBuilder::from_formatted_with_severity(
+                errors::format_diagnostic_with_datamodel(d, datamodel),
+                crate::SimlinErrorSeverity::from(d.severity),
+            )
         })
         .collect();
 

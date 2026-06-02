@@ -6,7 +6,15 @@
 
 import { getExports, getMemory } from '@simlin/engine/internal/wasm';
 import { wasmToString } from './memory';
-import { Ptr, SimlinErrorPtr, SimlinErrorCode, SimlinErrorKind, SimlinUnitErrorKind, ErrorDetail } from './types';
+import {
+  Ptr,
+  SimlinErrorPtr,
+  SimlinErrorCode,
+  SimlinErrorKind,
+  SimlinUnitErrorKind,
+  SimlinErrorSeverity,
+  ErrorDetail,
+} from './types';
 
 /**
  * Get the string representation of an error code.
@@ -91,8 +99,9 @@ export function simlin_error_get_detail(err: SimlinErrorPtr, index: number): Ptr
 }
 
 // Size of SimlinErrorDetail struct in bytes (for wasm32)
-// code: u32, message: ptr, model_name: ptr, variable_name: ptr, start_offset: u16, end_offset: u16, kind: u32, unit_error_kind: u32
-// = 4 + 4 + 4 + 4 + 2 + 2 + 4 + 4 = 28 bytes (with padding it may be 32)
+// code: u32, message: ptr, model_name: ptr, variable_name: ptr, start_offset: u16,
+// end_offset: u16, kind: u32, unit_error_kind: u32, severity: u32
+// = 4 + 4 + 4 + 4 + 2 + 2 + 4 + 4 + 4 = 32 bytes
 // const ERROR_DETAIL_SIZE = 32;
 
 /**
@@ -112,6 +121,7 @@ export function readErrorDetail(ptr: Ptr): ErrorDetail {
   const endOffset = view.getUint16(ptr + 18, true);
   const kind = view.getUint32(ptr + 20, true) as SimlinErrorKind;
   const unitErrorKind = view.getUint32(ptr + 24, true) as SimlinUnitErrorKind;
+  const severity = view.getUint32(ptr + 28, true) as SimlinErrorSeverity;
 
   return {
     code,
@@ -122,6 +132,7 @@ export function readErrorDetail(ptr: Ptr): ErrorDetail {
     endOffset,
     kind,
     unitErrorKind,
+    severity,
   };
 }
 

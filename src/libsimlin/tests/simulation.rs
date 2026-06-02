@@ -1516,6 +1516,68 @@ fn test_ltm_enabled_sim() {
     }
 }
 
+/// GH #486: enabling LTM on a model with a non-Euler integration method must
+/// fail `simlin_sim_new` cleanly with a readable error referencing the Euler
+/// assumption -- not silently produce mathematically-wrong link scores. The
+/// same model with LTM disabled must still compile and simulate.
+#[test]
+fn test_ltm_non_euler_sim_fails_cleanly() {
+    let datamodel = TestProject::new("ltm_rk4")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .with_sim_method(engine::datamodel::SimMethod::RungeKutta4)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * 0.02", None)
+        .build_datamodel();
+
+    let proj = open_project_from_datamodel(&datamodel);
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(!model.is_null());
+
+        // LTM enabled on an RK4 model: the compile failure is deferred to run
+        // time (the established `simlin_sim_new` contract returns a non-null
+        // handle carrying the compile error and surfaces it on run), and the
+        // surfaced error references the Euler assumption.
+        err = ptr::null_mut();
+        let sim_ltm = simlin_sim_new(model, true, &mut err as *mut *mut SimlinError);
+        assert!(
+            err.is_null(),
+            "simlin_sim_new defers the compile error to run"
+        );
+        assert!(!sim_ltm.is_null());
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim_ltm, &mut err as *mut *mut SimlinError);
+        assert!(
+            !err.is_null(),
+            "running an LTM + RK4 sim must surface an error"
+        );
+        let msg_ptr = simlin_error_get_message(err);
+        assert!(!msg_ptr.is_null(), "the error must carry a message");
+        let msg = CStr::from_ptr(msg_ptr).to_str().unwrap();
+        assert!(
+            msg.contains("Euler"),
+            "the error must reference the Euler assumption, got: {msg}"
+        );
+        simlin_error_free(err);
+        simlin_sim_unref(sim_ltm);
+
+        // The same model without LTM compiles and runs as before.
+        err = ptr::null_mut();
+        let sim_no_ltm = simlin_sim_new(model, false, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "RK4 without LTM must compile");
+        assert!(!sim_no_ltm.is_null());
+        err = ptr::null_mut();
+        simlin_sim_run_to_end(sim_no_ltm, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null(), "RK4 without LTM must simulate");
+
+        simlin_sim_unref(sim_no_ltm);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 #[test]
 fn test_mark2_mdl_simulates_through_ffi() {
     let mdl_path = "../../test/bobby/vdf/econ/mark2.mdl";

@@ -69,6 +69,14 @@ export enum SimlinUnitErrorKind {
   Inference = 3,
 }
 
+// Severity of an error detail. Error = the model cannot simulate or a value is
+// wrong; Warning = an advisory (e.g. the LTM auto-flip-to-discovery notice) that
+// does not make the model invalid.
+export enum SimlinErrorSeverity {
+  Error = 0,
+  Warning = 1,
+}
+
 // JSON format specifier
 export enum SimlinJsonFormat {
   Native = 0,
@@ -99,6 +107,7 @@ export interface ErrorDetail {
   endOffset: number;
   kind: SimlinErrorKind;
   unitErrorKind: SimlinUnitErrorKind;
+  severity: SimlinErrorSeverity;
 }
 
 // Link structure - matches SimlinLink in simlin.h
@@ -107,6 +116,9 @@ export interface Link {
   to: string;
   polarity: SimlinLinkPolarity;
   score: Float64Array | null;
+  // Relative link score (GH #652): the raw score normalized per target into
+  // [-1, 1], comparable across targets. Non-null exactly when score is.
+  relativeScore: Float64Array | null;
 }
 
 // Loop structure - matches SimlinLoop in simlin.h

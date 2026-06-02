@@ -1041,6 +1041,16 @@ pub fn assemble_module<'db>(
     // runlist.
     let mut ltm_flow_names: Vec<String> = Vec::new();
     if project.ltm_enabled(db) {
+        // GH #486's non-Euler rejection is NOT enforced per-module here: the
+        // integration method that actually runs is a single, main-model-
+        // governed property of the whole assembled simulation (see
+        // `assemble_simulation`'s `Specs` selection and the
+        // `ltm_non_euler_guard` it calls), so a per-module check against each
+        // module's own specs would both miss the real hazard (a stock-free
+        // main overriding to RK4 with the stock in a submodel) and fire
+        // spuriously (a submodel overriding to RK4 under a Euler main). The
+        // rejection is resolved once, against the main-governed method, in
+        // `assemble_simulation`.
         let ltm_vars = model_ltm_variables(db, model, project);
 
         for ltm_var in &ltm_vars.vars {
@@ -1544,6 +1554,40 @@ pub fn assemble_simulation(
     // Enumerate module instances by walking module variables recursively.
     // Each unique (model_name, input_set) pair gets its own CompiledModule.
     let module_instances = enumerate_module_instances(db, project, &main_model_name)?;
+
+    // GH #486: the LTM flow-to-stock link-score formula is only valid under
+    // Euler integration; under RK2/RK4 the scores are mathematically
+    // meaningless, and non-Euler IS honored at runtime (the VM and wasm
+    // backends both have distinct RK2/RK4 stepping loops), so it would
+    // silently produce plausible-but-wrong scores. The method that actually
+    // runs is the SINGLE main-model-governed `Specs.method` resolved below
+    // (root override else project specs); a submodel's own override is dead.
+    // Resolve it once and reject only when the assembled sim actually produces
+    // flow-to-stock scores -- i.e. SOME instantiated model (root or a
+    // transitively-instantiated submodule) has stocks. The root may be
+    // stock-free while a submodel under the main-governed method is not, which
+    // is exactly the hazard a per-submodel check missed; checking the
+    // instantiated set against the main-governed method covers both
+    // directions. Unused model definitions sitting in the project are never
+    // instantiated, so their specs and stocks are irrelevant. This rejection
+    // rides the `assemble_simulation` `Err`, so it reaches `simlin_sim_new`,
+    // `simlin_project_get_errors` (the `vm_error` channel), and the wasm
+    // backend -- the sim-compile path that, unlike `collect_all_diagnostics`,
+    // is what every runnable consumer goes through.
+    if project.ltm_enabled(db)
+        && let Some(root_model) = project_models.get(main_model_canonical.as_ref())
+        && let Some(method) = ltm::effective_non_euler_method(db, *root_model, project)
+    {
+        let any_stocks = module_instances.keys().any(|name| {
+            let canonical = canonicalize(name.as_str());
+            project_models
+                .get(canonical.as_ref())
+                .is_some_and(|sm| !model_causal_edges(db, *sm, project).stocks.is_empty())
+        });
+        if any_stocks {
+            return Err(ltm::ltm_non_euler_diagnostic_message(method));
+        }
+    }
 
     // Sort module names: main first, then all others alphabetically
     let main_ident = Ident::<Canonical>::new(&main_model_name);

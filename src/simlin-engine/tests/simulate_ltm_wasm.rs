@@ -392,6 +392,34 @@ fn unsupported_ltm_model_returns_wasmgen_error() {
     );
 }
 
+/// GH #486: the wasm LTM compile path shares the salsa pipeline, so a non-Euler
+/// integration method with LTM enabled surfaces the same Euler-assumption guard
+/// as a clean `WasmGenError` -- no silently-wrong LTM slab.
+#[test]
+fn ltm_non_euler_returns_wasmgen_error() {
+    use simlin_engine::test_common::TestProject;
+
+    let project = TestProject::new("ltm_rk4_wasm")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .with_sim_method(datamodel::SimMethod::RungeKutta4)
+        .stock("population", "100", &["births"], &[], None)
+        .flow("births", "population * 0.02", None)
+        .build_datamodel();
+
+    match compile_datamodel_to_artifact(&project, "main", true, false) {
+        Ok(_) => panic!("wasm compile of an RK4 LTM model must fail, not succeed"),
+        Err(WasmGenError::Unsupported(msg)) => assert!(
+            msg.contains("Euler"),
+            "the error must reference the Euler assumption, got: {msg}"
+        ),
+    }
+
+    // The same model lowers cleanly with LTM disabled (the guard fires only
+    // when LTM is requested).
+    compile_datamodel_to_artifact(&project, "main", false, false)
+        .expect("RK4 model without LTM must lower to wasm");
+}
+
 // ---------------------------------------------------------------------------
 // AC2.5: discovery-mode loop parity (wasm vs VM)
 // ---------------------------------------------------------------------------
@@ -405,9 +433,16 @@ fn unsupported_ltm_model_returns_wasmgen_error() {
 /// runtime polarity is derived from `scores` so a small float drift on
 /// the boundary could otherwise flip a `MostlyReinforcing` vs
 /// `Reinforcing` classification and falsely diverge the identity check.
-/// `Loop.id` is also excluded because `rank_and_filter` assigns IDs
-/// after a `sort_by(avg_abs_score)` whose tie-breaking is order-of-
-/// discovery -- not a stable identity surface.
+/// `Loop.id` is also excluded because `rank_and_filter` assigns the
+/// `r#`/`b#`/`u#` counter ids as a function of the *whole* discovered
+/// set, not of a single loop's structure: the id depends on each loop's
+/// polarity (the same float-boundary-sensitive classification excluded
+/// above) and on the partition-relative ranking and `MAX_LOOPS`
+/// truncation of every loop. (The per-loop ordering used to assign ids is
+/// itself stable -- content-determined by the canonical edge sequence,
+/// commit 1539329d -- but the resulting counter is still a whole-set
+/// property, so it is not a stable per-loop identity surface across
+/// backends.)
 ///
 /// The canonical rotation makes the key invariant to the discovery
 /// algorithm's choice of starting node on the cycle: two runs that walk

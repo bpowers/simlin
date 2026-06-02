@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::{SimlinErrorCode, SimlinErrorKind, SimlinUnitErrorKind};
+use crate::{SimlinErrorCode, SimlinErrorKind, SimlinErrorSeverity, SimlinUnitErrorKind};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
@@ -30,6 +30,7 @@ pub struct ErrorDetail {
     pub end_offset: u16,
     pub kind: SimlinErrorKind,
     pub unit_error_kind: SimlinUnitErrorKind,
+    pub severity: SimlinErrorSeverity,
 }
 
 impl ErrorDetail {
@@ -43,6 +44,7 @@ impl ErrorDetail {
             end_offset: 0,
             kind: SimlinErrorKind::default(),
             unit_error_kind: SimlinUnitErrorKind::default(),
+            severity: SimlinErrorSeverity::default(),
         }
     }
 }
@@ -57,6 +59,7 @@ struct OwnedDetail {
     end_offset: u16,
     kind: SimlinErrorKind,
     unit_error_kind: SimlinUnitErrorKind,
+    severity: SimlinErrorSeverity,
 }
 
 impl OwnedDetail {
@@ -70,6 +73,7 @@ impl OwnedDetail {
             end_offset: detail.end_offset,
             kind: detail.kind,
             unit_error_kind: detail.unit_error_kind,
+            severity: detail.severity,
         }
     }
 
@@ -92,6 +96,7 @@ impl OwnedDetail {
             end_offset: self.end_offset,
             kind: self.kind,
             unit_error_kind: self.unit_error_kind,
+            severity: self.severity,
         }
     }
 }

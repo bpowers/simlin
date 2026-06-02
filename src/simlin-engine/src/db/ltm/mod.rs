@@ -47,6 +47,9 @@ pub(crate) use compile::{
     model_ltm_fragment_diagnostics,
 };
 pub use compile::{compile_ltm_var_fragment, link_score_equation_text_shaped};
+pub(crate) use link_scores::emit_ltm_partial_equation_warning;
+#[cfg(test)]
+pub(crate) use link_scores::ltm_partial_equation_warning_message;
 pub(crate) use loops::build_loops_from_tiered;
 pub(crate) use parse::scalarize_ltm_equation;
 pub(crate) use pinned::model_pinned_loops;
@@ -69,6 +72,69 @@ use link_scores::{
 };
 use loops::{cross_agg_loop_budget, find_model_output_ports, recover_agg_hop_polarities};
 use parse::parse_ltm_equation;
+
+/// The single integration method the assembled simulation actually runs, when
+/// it is NOT Euler.
+///
+/// LTM's 2023 flow-to-stock link-score formula
+/// (`PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))`) only aligns its numerator to
+/// the causal interval that drove the stock change from t-1 to t under Euler
+/// integration; under RK2/RK4 the sub-stepped stock update breaks that
+/// alignment and the link scores become mathematically meaningless. The VM
+/// and wasm backends both genuinely honor RK2/RK4 (distinct stepping loops),
+/// so the bad scores would look plausible while being wrong.
+///
+/// A `CompiledSimulation` has exactly ONE `Specs.method`, resolved by
+/// `assemble_simulation` from the MAIN (root) model's `model_sim_specs`
+/// override else the project specs. A submodel's own `model_sim_specs` is
+/// never consulted by the VM, so the GH #486 guard must resolve and apply that
+/// single main-governed method -- NOT each model's own specs (which is the
+/// blocker the per-model resolution had). `root_model` is the model named in
+/// `assemble_simulation(.., main_model_name)`. Returns `None` for Euler (the
+/// supported case), `Some(method)` otherwise.
+pub(super) fn effective_non_euler_method(
+    db: &dyn Db,
+    root_model: SourceModel,
+    project: SourceProject,
+) -> Option<datamodel::SimMethod> {
+    let method = match root_model.model_sim_specs(db) {
+        Some(specs) => specs.sim_method,
+        None => project.sim_specs(db).sim_method,
+    };
+    match method {
+        datamodel::SimMethod::Euler => None,
+        other => Some(other),
+    }
+}
+
+/// Human-readable name of a non-Euler integration method, used in the GH #486
+/// diagnostic so the message names the offending method concretely.
+fn sim_method_display_name(method: datamodel::SimMethod) -> &'static str {
+    match method {
+        datamodel::SimMethod::Euler => "Euler",
+        datamodel::SimMethod::RungeKutta2 => "RK2 (2nd-order Runge-Kutta)",
+        datamodel::SimMethod::RungeKutta4 => "RK4 (4th-order Runge-Kutta)",
+    }
+}
+
+/// The GH #486 rejection message: LTM was requested on a simulation whose
+/// (main-model-governed) integration method is non-Euler. Returned as the
+/// `assemble_simulation` `Err` so it reaches `simlin_sim_new`,
+/// `simlin_project_get_errors` (the `vm_error` channel), and the wasm backend
+/// (`WasmGenError::Unsupported`) -- the sim-compile path never produces
+/// silently-wrong scores.
+pub(super) fn ltm_non_euler_diagnostic_message(method: datamodel::SimMethod) -> String {
+    format!(
+        "LTM (Loops That Matter) analysis requires Euler integration, but this model uses \
+         {}.  The flow-to-stock link-score formula assumes the Euler update \
+         `stock(t) = stock(t-1) + dt * flow(t-1)`, so its numerator \
+         `PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow))` only aligns to the causal interval that \
+         drove the stock change under Euler.  Higher-order integrators sub-step the stock \
+         update, so the link scores would be mathematically meaningless.  Switch the \
+         integration method to Euler, or disable LTM analysis.",
+        sim_method_display_name(method),
+    )
+}
 
 /// The model's full variable-name set, for the LTM equation parse path.
 ///
@@ -433,9 +499,24 @@ pub fn model_ltm_variables(
             vars: vec![],
             loop_partitions: HashMap::new(),
             agg_recovery_truncated: false,
+            pathways_truncated: false,
             mode: LtmMode::Exhaustive,
         };
     }
+
+    // GH #486's non-Euler rejection is NOT emitted here. The integration
+    // method that the VM actually honors is a single, main-model-governed
+    // property of the assembled simulation (`assemble_simulation`'s `Specs`
+    // selection: the root model's `model_sim_specs` override else the project
+    // specs -- a submodel's own override is dead), and this per-model query has
+    // no main-model context. Emitting per-model with each model's own specs is
+    // both wrong (a stock-free main that overrides to RK4 would be missed while
+    // its stock-bearing submodel falls back to the project's Euler; conversely
+    // a submodel that overrides to RK4 under a Euler main would be wrongly
+    // rejected) and duplicative. The check lives once in `assemble_simulation`
+    // against the resolved method; it surfaces through `compile_project_
+    // incremental` to `simlin_sim_new`, `simlin_project_get_errors` (the
+    // `vm_error` channel), and the wasm backend.
 
     // When the user explicitly requested discovery mode, honor it
     // directly. Otherwise auto-flip if either:
@@ -512,12 +593,44 @@ pub fn model_ltm_variables(
     } else {
         find_model_output_ports(db, model, project)
     };
-    let pathways = if output_ports.is_empty() {
-        HashMap::new()
+    let (pathways, truncated_pathway_ports) = if output_ports.is_empty() {
+        (HashMap::new(), Vec::new())
     } else {
         module_input_pathways_from_edges(edges_result, &output_ports)
     };
     let has_input_ports = !pathways.is_empty();
+    // GH #649: a module body shaped as a chain of diamonds has exponentially
+    // many short internal pathways, each minting one `$⁚ltm⁚path⁚…` synthetic
+    // variable. The enumerator caps that count per input port; when it does,
+    // surface a `Warning` naming the module + clipped input port(s) (the human
+    // channel) and ride the robust `pathways_truncated` flag out on the result.
+    // The composite link score for a clipped port is then the max over the kept
+    // pathway prefix only -- degraded, consistent with the macro composite's
+    // heuristic nature, but never a panic or a silent zero.
+    let pathways_truncated = !truncated_pathway_ports.is_empty();
+    if pathways_truncated {
+        let ports = truncated_pathway_ports
+            .iter()
+            .map(|p| p.as_str().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let msg = format!(
+            "LTM module-pathway enumeration was truncated at the per-port budget \
+             ({}): module \"{}\" has more internal input->output pathways than the \
+             budget through input port(s) {}, so their composite link scores are \
+             computed over a deterministic pathway prefix and may be degraded.",
+            crate::ltm::module_pathway_budget(),
+            model.name(db).as_str(),
+            ports,
+        );
+        CompilationDiagnostic(Diagnostic {
+            model: model.name(db).clone(),
+            variable: None,
+            error: DiagnosticError::Assembly(msg),
+            severity: DiagnosticSeverity::Warning,
+        })
+        .accumulate(db);
+    }
 
     let mut vars = Vec::new();
 
@@ -622,6 +735,7 @@ pub fn model_ltm_variables(
                     vars: vec![],
                     loop_partitions: HashMap::new(),
                     agg_recovery_truncated: false,
+                    pathways_truncated: false,
                     mode: LtmMode::Exhaustive,
                 };
             }
@@ -1167,6 +1281,7 @@ pub fn model_ltm_variables(
         vars,
         loop_partitions,
         agg_recovery_truncated,
+        pathways_truncated,
         // Read the resolved mode from the shared `model_ltm_mode` query rather
         // than re-deriving it from the local `is_discovery` flag, so this query
         // and `model_detected_loops` can never disagree about the discovery

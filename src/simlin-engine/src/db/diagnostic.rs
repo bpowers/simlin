@@ -98,10 +98,12 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // warning from `model_ltm_fragment_diagnostics`.
     // `model_ltm_fragment_diagnostics` drives `model_ltm_variables`
     // internally, so the auto-flip warning rides along. Without this
-    // call the warnings are invisible to `simlin-mcp`/`libsimlin`
-    // callers even though the LTM pipeline already emitted them. (GH
-    // #466: this remains gated on `ltm_enabled`, which the
-    // diagnostic-collection FFI paths leave false by default.)
+    // call the warnings are invisible even though the LTM pipeline
+    // already emitted them. Gated on `ltm_enabled` so projects that never
+    // requested LTM pay no LTM synthesis cost here. The diagnostic-
+    // collection FFI path (`simlin_project_get_errors`) transiently
+    // re-enables `ltm_enabled` for callers who created an LTM simulation,
+    // so these warnings reach `simlin-mcp`/`libsimlin`/pysimlin (GH #466).
     if project.ltm_enabled(db) {
         model_ltm_fragment_diagnostics(db, model, project);
     }

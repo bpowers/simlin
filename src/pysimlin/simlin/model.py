@@ -30,7 +30,7 @@ from ._ffi import (
     string_to_c,
 )
 from .analysis import Analysis, Link, LinkPolarity, Loop, LoopPolarity
-from .errors import ErrorCode, SimlinRuntimeError
+from .errors import ErrorCode, ErrorSeverity, SimlinRuntimeError
 from .json_converter import converter
 from .json_types import (
     Auxiliary as JsonAuxiliary,
@@ -947,7 +947,7 @@ class Model:
         issues = []
 
         for detail in error_details:
-            severity = "error"
+            severity = "warning" if detail.severity == ErrorSeverity.WARNING else "error"
 
             issue = ModelIssue(
                 severity=severity,

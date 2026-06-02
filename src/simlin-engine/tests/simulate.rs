@@ -3610,10 +3610,15 @@ fn mark2_mdl_compiles_after_protobuf_roundtrip() {
 }
 
 /// The browser's model.run() defaults analyzeLtm=true, so simNew is called
-/// with enable_ltm=true. Models with SMOOTH/DELAY that participate in
-/// feedback loops must compile with LTM enabled.
+/// with enable_ltm=true. mark2.mdl declares RK4 integration, and the LTM
+/// flow-to-stock link-score formula is only valid under Euler (GH #486), so
+/// enabling LTM on this real-world model must now be rejected with the
+/// Euler-assumption error rather than silently producing wrong scores. The
+/// same model still compiles and runs with LTM disabled. (SMOOTH/DELAY-in-a-
+/// feedback-loop compiling WITH LTM is covered by the Euler-based LTM tests in
+/// `db::ltm_module_tests`.)
 #[test]
-fn mark2_mdl_compiles_with_ltm_enabled() {
+fn mark2_mdl_rejects_ltm_under_rk4() {
     use simlin_engine::db::set_project_ltm_enabled;
 
     let contents =
@@ -3621,9 +3626,22 @@ fn mark2_mdl_compiles_with_ltm_enabled() {
     let project = open_vensim(&contents).expect("parse mark2.mdl");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+
+    // LTM enabled on an RK4 model: the compile is rejected with the Euler
+    // assumption explained.
     set_project_ltm_enabled(&mut db, sync.project, true);
+    let err = compile_project_incremental(&db, sync.project, "main")
+        .expect_err("LTM + RK4 must be rejected");
+    let details = err.details.unwrap_or_default();
+    assert!(
+        details.contains("Euler"),
+        "the rejection must reference the Euler assumption: {details}"
+    );
+
+    // With LTM disabled, the same RK4 model compiles and simulates as before.
+    set_project_ltm_enabled(&mut db, sync.project, false);
     let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("mark2.mdl should compile with LTM enabled");
+        .expect("mark2.mdl should compile without LTM");
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM should run to completion");
 }

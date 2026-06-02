@@ -85,7 +85,7 @@ def extract_error_details(err_ptr: Any) -> list[Any]:
     Returns:
         List of ErrorDetail objects
     """
-    from .errors import ErrorCode, ErrorDetail, ErrorKind, UnitErrorKind
+    from .errors import ErrorCode, ErrorDetail, ErrorKind, ErrorSeverity, UnitErrorKind
 
     if err_ptr == ffi.NULL:
         return []
@@ -105,6 +105,7 @@ def extract_error_details(err_ptr: Any) -> list[Any]:
                     end_offset=c_detail.end_offset,
                     kind=ErrorKind(c_detail.kind),
                     unit_error_kind=UnitErrorKind(c_detail.unit_error_kind),
+                    severity=ErrorSeverity(c_detail.severity),
                 )
             )
     return details
