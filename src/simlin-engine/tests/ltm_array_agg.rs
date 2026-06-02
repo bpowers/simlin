@@ -1059,6 +1059,220 @@ fn bare_arrayed_inside_reducer_uses_scalar_helper() {
     }
 }
 
+/// Run a plain (non-LTM) simulation of `project` to completion.
+fn run_plain_sim(project: &datamodel::Project) -> Results {
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("model must compile via the incremental path");
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end()
+        .expect("plain simulation should run to completion");
+    vm.into_results()
+}
+
+/// Regression for the PR #668 / GH #541 per-slot helper-id collision: a
+/// per-element (`Equation::Arrayed`) variable whose distinct slots each take
+/// the arrayed `PREVIOUS` helper path must keep per-slot identity, not have a
+/// later slot silently read an earlier slot's helper.
+///
+/// `x[e1] = PREVIOUS(PREVIOUS(a))`, `x[e2] = PREVIOUS(PREVIOUS(b))` with `a`,
+/// `b` plain scalars of DISTINCT dynamics: both inner `PREVIOUS(scalar)` args
+/// are bare non-dim references with no subscript, so the arrayed-helper branch
+/// fires for each slot. The original suffix-less helper id `$⁚x⁚0⁚arg0`
+/// collided across slots (each fresh per-element visitor restarts `n` at 0 and
+/// shares `variable_name`), `dedup_vars_by_ident` kept the first, and `x[e2]`
+/// read `a`'s helper. The fix appends the slot element suffix in the
+/// per-element-equation context so the two helpers are distinct.
+#[test]
+fn arrayed_per_element_previous_keeps_per_slot_identity() {
+    let project = TestProject::new("collision")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("reg", &["e1", "e2"])
+        // a: 10,15,20,25,...   b: 100,150,200,250,... (distinct dynamics)
+        .stock("a", "10", &["da"], &[], None)
+        .flow("da", "5", None)
+        .stock("b", "100", &["db"], &[], None)
+        .flow("db", "50", None)
+        .array_with_ranges_direct(
+            "x",
+            vec!["reg".to_string()],
+            vec![
+                ("e1", "PREVIOUS(PREVIOUS(a))"),
+                ("e2", "PREVIOUS(PREVIOUS(b))"),
+            ],
+            None,
+        )
+        .build_datamodel();
+
+    let results = run_plain_sim(&project);
+    let a = series_at(&results, offset_of(&results, "a"));
+    let b = series_at(&results, offset_of(&results, "b"));
+    let x_e1 = series_at(&results, offset_of(&results, "x[e1]"));
+    let x_e2 = series_at(&results, offset_of(&results, "x[e2]"));
+
+    // `PREVIOUS(PREVIOUS(z))` at step t is z at step t-2 (0 for t<2).
+    let lagged_twice = |s: &[f64]| -> Vec<f64> {
+        (0..s.len())
+            .map(|t| if t >= 2 { s[t - 2] } else { 0.0 })
+            .collect::<Vec<f64>>()
+    };
+    assert_eq!(x_e1, lagged_twice(&a), "x[e1] must track a lagged twice");
+    assert_eq!(
+        x_e2,
+        lagged_twice(&b),
+        "x[e2] must track b lagged twice -- NOT a's helper (PR #668 collision)"
+    );
+    // Cross-check the slots genuinely differ (a vs b dynamics), so the pin
+    // cannot pass vacuously if both slots collapsed to the same value.
+    assert_ne!(x_e1, x_e2, "the two slots must hold distinct series");
+}
+
+/// The bare-ARRAYED variant of the per-slot-identity pin: per-element slots
+/// each reference a *different* bare arrayed name in a nested `PREVIOUS`. Each
+/// slot's arrayed helper must stay distinct, and each slot's value must equal
+/// its explicitly-subscripted equivalent (`PREVIOUS(PREVIOUS(arr[reg]))`).
+#[test]
+fn arrayed_per_element_bare_arrayed_previous_distinct_helpers() {
+    // pop and qty are arrayed over `reg` with distinct per-element dynamics.
+    let bare = TestProject::new("bare_per_elem")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("reg", &["e1", "e2"])
+        .array_stock("pop[reg]", "100", &["gp"], &[], None)
+        .array_flow("gp[reg]", "pop[reg] * 0.1", None)
+        .array_stock("qty[reg]", "10", &["gq"], &[], None)
+        .array_flow("gq[reg]", "qty[reg] * 0.2", None)
+        .array_with_ranges_direct(
+            "x",
+            vec!["reg".to_string()],
+            // e1 references bare `pop`, e2 references bare `qty`.
+            vec![
+                ("e1", "PREVIOUS(PREVIOUS(pop))"),
+                ("e2", "PREVIOUS(PREVIOUS(qty))"),
+            ],
+            None,
+        )
+        .build_datamodel();
+
+    // The explicitly-subscripted equivalent, in the same per-element shape.
+    let subscripted = TestProject::new("sub_per_elem")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("reg", &["e1", "e2"])
+        .array_stock("pop[reg]", "100", &["gp"], &[], None)
+        .array_flow("gp[reg]", "pop[reg] * 0.1", None)
+        .array_stock("qty[reg]", "10", &["gq"], &[], None)
+        .array_flow("gq[reg]", "qty[reg] * 0.2", None)
+        .array_with_ranges_direct(
+            "x",
+            vec!["reg".to_string()],
+            vec![
+                ("e1", "PREVIOUS(PREVIOUS(pop[reg]))"),
+                ("e2", "PREVIOUS(PREVIOUS(qty[reg]))"),
+            ],
+            None,
+        )
+        .build_datamodel();
+
+    let bare_results = run_plain_sim(&bare);
+    let sub_results = run_plain_sim(&subscripted);
+    for elem in ["e1", "e2"] {
+        let b = series_at(
+            &bare_results,
+            offset_of(&bare_results, &format!("x[{elem}]")),
+        );
+        let s = series_at(&sub_results, offset_of(&sub_results, &format!("x[{elem}]")));
+        assert_eq!(
+            b, s,
+            "x[{elem}]: bare per-element nested PREVIOUS must match the subscripted form"
+        );
+    }
+    // pop (init 100) and qty (init 10) differ, so the slots must differ.
+    let xe1 = series_at(&bare_results, offset_of(&bare_results, "x[e1]"));
+    let xe2 = series_at(&bare_results, offset_of(&bare_results, "x[e2]"));
+    assert_ne!(xe1, xe2, "the two slots track pop vs qty -- must differ");
+}
+
+/// Same-body `Ast::Arrayed` slots: BOTH slots are `PREVIOUS(PREVIOUS(arr))`.
+/// Here the per-element helpers genuinely *are* identical content, so the
+/// values were correct even before the fix (the old suffix-less id happened to
+/// collapse them). After the fix they are distinct suffixed helpers but must
+/// still produce identical, correct per-element values. Pins that the fix did
+/// not regress the same-body case.
+#[test]
+fn arrayed_per_element_same_body_previous_correct() {
+    let project = TestProject::new("same_body")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("reg", &["e1", "e2"])
+        .array_stock("pop[reg]", "100", &["gp"], &[], None)
+        .array_flow("gp[reg]", "pop[reg] * 0.1", None)
+        .array_with_ranges_direct(
+            "x",
+            vec!["reg".to_string()],
+            vec![
+                ("e1", "PREVIOUS(PREVIOUS(pop))"),
+                ("e2", "PREVIOUS(PREVIOUS(pop))"),
+            ],
+            None,
+        )
+        .build_datamodel();
+
+    let results = run_plain_sim(&project);
+    let pop_e1 = series_at(&results, offset_of(&results, "pop[e1]"));
+    let pop_e2 = series_at(&results, offset_of(&results, "pop[e2]"));
+    let lagged_twice = |s: &[f64]| -> Vec<f64> {
+        (0..s.len())
+            .map(|t| if t >= 2 { s[t - 2] } else { 0.0 })
+            .collect::<Vec<f64>>()
+    };
+    let x_e1 = series_at(&results, offset_of(&results, "x[e1]"));
+    let x_e2 = series_at(&results, offset_of(&results, "x[e2]"));
+    assert_eq!(
+        x_e1,
+        lagged_twice(&pop_e1),
+        "x[e1] tracks pop[e1] lagged twice"
+    );
+    assert_eq!(
+        x_e2,
+        lagged_twice(&pop_e2),
+        "x[e2] tracks pop[e2] lagged twice"
+    );
+}
+
+/// The `INIT` twin of `arrayed_per_element_previous_keeps_per_slot_identity`:
+/// `INIT` arguments take the same `make_temp_arg` arrayed-helper path, so a
+/// per-element slot collision would corrupt initial values too. `INIT(z)` is
+/// `z` at the initial step held constant, so each slot must equal its own
+/// scalar's initial value.
+#[test]
+fn arrayed_per_element_init_keeps_per_slot_identity() {
+    let project = TestProject::new("init_collision")
+        .with_sim_time(0.0, 4.0, 1.0)
+        // a, b distinct scalars, wrapped so INIT's arg is an expression
+        // (forcing the helper path).
+        .scalar_aux("a", "10")
+        .scalar_aux("b", "100")
+        .array_with_ranges_direct(
+            "x",
+            vec!["reg".to_string()],
+            vec![("e1", "INIT(a + 1)"), ("e2", "INIT(b + 1)")],
+            None,
+        )
+        .named_dimension("reg", &["e1", "e2"])
+        .build_datamodel();
+
+    let results = run_plain_sim(&project);
+    let x_e1 = series_at(&results, offset_of(&results, "x[e1]"));
+    let x_e2 = series_at(&results, offset_of(&results, "x[e2]"));
+    assert!(
+        x_e1.iter().all(|&v| v == 11.0),
+        "x[e1] = INIT(a + 1) must hold 11; got {x_e1:?}"
+    );
+    assert!(
+        x_e2.iter().all(|&v| v == 101.0),
+        "x[e2] = INIT(b + 1) must hold 101 -- NOT a's helper (PR #668 collision); got {x_e2:?}"
+    );
+}
+
 /// Graceful-degradation pin for an LTM synthetic fragment that the compiler
 /// genuinely cannot lower: it must be *stubbed to a constant 0 with a
 /// `Warning`*, never crash the compiler.
