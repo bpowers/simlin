@@ -14,6 +14,7 @@ pub mod graph;
 pub mod metadata;
 pub mod metrics;
 mod objective;
+mod orthogonal;
 pub mod placement;
 pub mod sfdp;
 pub mod text;
@@ -4097,6 +4098,13 @@ pub fn fresh_layout(
     // Phase 5: Normalize coordinates
     normalize_coordinates(&mut state.elements, DIAGRAM_ORIGIN_MARGIN);
 
+    // Phase 5b: Orthogonalize flow pipes. Placement positions stocks freely, so
+    // a flow between two stocks offset in both axes would render as a diagonal;
+    // SD convention draws flows with horizontal/vertical segments only. This
+    // runs last (after declutter/normalize) so nothing re-diagonalizes it, and
+    // before scoring so the metric sees the real pipe geometry.
+    orthogonal::orthogonalize_flow_pipes(&mut state.elements);
+
     // Phase 6: Apply feedback loop curvature
     apply_loop_curvature(&mut state, config, model, metadata);
 
@@ -5744,6 +5752,10 @@ pub fn incremental_layout(
     // Step 8: Polish
     optimize_labels(&mut state, model, &metadata);
     apply_loop_curvature(&mut state, &config, model, &metadata);
+    // Guarantee flows stay orthogonal after re-snapping endpoints to moved
+    // stocks (only rewrites pipes that actually went diagonal; hand-routed
+    // orthogonal flows are left untouched).
+    orthogonal::orthogonalize_flow_pipes(&mut state.elements);
 
     validate_view_completeness(&state, model)?;
 

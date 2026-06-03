@@ -90,6 +90,13 @@ pub struct LayoutMetrics {
     /// collapsed/collinear loops. 0.0 when the view has no cycle of >= 3 nodes.
     /// Computed and reported now; weight stays 0 until Phase 4 calibration.
     pub loop_compactness: f64,
+    /// Mean number of right-angle bends per flow pipe (a straight pipe has 0, an
+    /// `L` has 1, a `Z` has 2). Flows are orthogonalized before scoring, so this
+    /// rewards placements where the two stocks a flow connects are naturally
+    /// aligned (a straight pipe, 0 bends) over diagonally-offset stocks that
+    /// require an `L`/`Z` detour. 0.0 when the view has no flows.
+    #[serde(default)]
+    pub flow_bends: f64,
 }
 
 /// Per-term weights for the scalar an optimizer minimizes.
@@ -113,6 +120,8 @@ pub struct MetricWeights {
     pub aspect_penalty: f64,
     pub chain_straightness: f64,
     pub loop_compactness: f64,
+    #[serde(default)]
+    pub flow_bends: f64,
 }
 
 impl Default for MetricWeights {
@@ -146,6 +155,11 @@ impl Default for MetricWeights {
     ///   * `loop_compactness` is a low 0.25: it gently REWARDS drawing feedback
     ///     loops as visible circles (a readability aid), but must never dominate
     ///     the overlap/crossings family, so it stays well below 1.0.
+    ///   * `flow_bends` is a low 0.15: flows are always orthogonalized, so this
+    ///     never repairs a defect -- it only nudges the optimizer toward
+    ///     placements where a flow's two stocks line up (a clean straight pipe)
+    ///     instead of an `L`/`Z` detour. A convention aid like
+    ///     `loop_compactness`, kept well below the readability family.
     ///   * `chain_straightness` stays 0.0: it is reserved (not yet computed), so
     ///     it carries no weight.
     fn default() -> Self {
@@ -159,6 +173,7 @@ impl Default for MetricWeights {
             aspect_penalty: 0.0,
             chain_straightness: 0.0,
             loop_compactness: 0.25,
+            flow_bends: 0.15,
         }
     }
 }
@@ -175,6 +190,7 @@ impl LayoutMetrics {
             + self.aspect_penalty * w.aspect_penalty
             + self.chain_straightness * w.chain_straightness
             + self.loop_compactness * w.loop_compactness
+            + self.flow_bends * w.flow_bends
     }
 }
 
@@ -990,6 +1006,23 @@ pub fn compute_layout_metrics(
     // --- loop_compactness (isoperimetric feedback-loop quality) ---
     let loop_compactness = compute_loop_compactness(view);
 
+    // --- flow_bends (mean right-angle bends per flow pipe) ---
+    let flow_bends = {
+        let mut total_bends = 0usize;
+        let mut flow_count = 0usize;
+        for e in &view.elements {
+            if let ViewElement::Flow(f) = e {
+                flow_count += 1;
+                total_bends += crate::layout::orthogonal::flow_bend_count(&f.points);
+            }
+        }
+        if flow_count > 0 {
+            total_bends as f64 / flow_count as f64
+        } else {
+            0.0
+        }
+    };
+
     LayoutMetrics {
         node_overlap,
         node_connector_overlap,
@@ -1001,6 +1034,7 @@ pub fn compute_layout_metrics(
         // reserved; computed in a future rung
         chain_straightness: 0.0,
         loop_compactness,
+        flow_bends,
     }
 }
 
@@ -1937,6 +1971,7 @@ mod tests {
             aspect_penalty: 6.0,
             chain_straightness: 7.0,
             loop_compactness: 8.0,
+            flow_bends: 9.0,
         };
         let w = MetricWeights {
             node_overlap: 10.0,
@@ -1948,6 +1983,7 @@ mod tests {
             aspect_penalty: 70.0,
             chain_straightness: 80.0,
             loop_compactness: 90.0,
+            flow_bends: 100.0,
         };
         let expected = 1.5 * 10.0
             + 2.0 * 20.0
@@ -1957,7 +1993,8 @@ mod tests {
             + 0.25 * 60.0
             + 6.0 * 70.0
             + 7.0 * 80.0
-            + 8.0 * 90.0;
+            + 8.0 * 90.0
+            + 9.0 * 100.0;
         assert!((m.weighted_cost(&w) - expected).abs() < 1e-9);
     }
 
@@ -2042,6 +2079,20 @@ mod tests {
             w.node_overlap
         );
 
+        // flow_bends nudges toward straight pipes (aligned stocks), a convention
+        // aid: positive but well below the dominant family.
+        assert!(
+            w.flow_bends > 0.0,
+            "flow_bends should nudge toward straight flows, got {}",
+            w.flow_bends
+        );
+        assert!(
+            w.flow_bends < w.node_overlap,
+            "flow_bends ({}) must stay below the dominant node_overlap ({})",
+            w.flow_bends,
+            w.node_overlap
+        );
+
         // `weighted_cost` under the default is still the exact linear combination
         // (the default is now meaningful, not inert): verify against an explicit
         // Σ wᵢ·termᵢ over a hand-set metrics value.
@@ -2055,6 +2106,7 @@ mod tests {
             aspect_penalty: 1.5,
             chain_straightness: 0.0,
             loop_compactness: 0.8,
+            flow_bends: 1.0,
         };
         let expected = m.node_overlap * w.node_overlap
             + m.node_connector_overlap * w.node_connector_overlap
@@ -2064,7 +2116,8 @@ mod tests {
             + m.edge_length_cv * w.edge_length_cv
             + m.aspect_penalty * w.aspect_penalty
             + m.chain_straightness * w.chain_straightness
-            + m.loop_compactness * w.loop_compactness;
+            + m.loop_compactness * w.loop_compactness
+            + m.flow_bends * w.flow_bends;
         assert!(
             (m.weighted_cost(&w) - expected).abs() < 1e-12,
             "weighted_cost under the default must equal Σ wᵢ·termᵢ: got {} expected {}",
@@ -2085,6 +2138,7 @@ mod tests {
         assert!(m.aspect_penalty.is_finite());
         assert!(m.chain_straightness.is_finite());
         assert!(m.loop_compactness.is_finite());
+        assert!(m.flow_bends.is_finite());
     }
 
     fn assert_all_zero(m: &LayoutMetrics) {
@@ -2097,6 +2151,7 @@ mod tests {
         assert_eq!(m.aspect_penalty, 0.0);
         assert_eq!(m.chain_straightness, 0.0);
         assert_eq!(m.loop_compactness, 0.0);
+        assert_eq!(m.flow_bends, 0.0);
     }
 
     #[test]
