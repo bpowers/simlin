@@ -113,7 +113,13 @@ impl Default for LayoutConfig {
             module_height: 45.0,
             start_x: 100.0,
             start_y: 100.0,
-            loop_curvature_factor: 0.3,
+            // 0.5 makes a loop's connectors bow into a near-circular arc: for an
+            // n-node loop the ideal takeoff from each chord is ~pi/n, which at a
+            // perpendicular loop center (angle_diff ~90deg) this factor produces
+            // as 90*0.5 = 45deg -- the right arc for the common 3-4 node loop. The
+            // prior 0.3 under-curved, so loops read as near-straight zigzags
+            // rather than visible circles.
+            loop_curvature_factor: 0.5,
             annealing_iterations: 200,
             annealing_temperature: 30.0,
             // The schedule must END COLD between reheats (see
@@ -167,7 +173,7 @@ mod tests {
         assert!((config.start_y - 100.0).abs() < f64::EPSILON);
 
         // Feedback loop
-        assert!((config.loop_curvature_factor - 0.3).abs() < f64::EPSILON);
+        assert!((config.loop_curvature_factor - 0.5).abs() < f64::EPSILON);
 
         // Annealing parameters
         assert_eq!(config.annealing_iterations, 200);

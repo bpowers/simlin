@@ -97,6 +97,14 @@ pub struct LayoutMetrics {
     /// require an `L`/`Z` detour. 0.0 when the view has no flows.
     #[serde(default)]
     pub flow_bends: f64,
+    /// Mean bow shortfall over the causal connectors that participate in a
+    /// feedback loop: 0.0 = every loop connector is drawn with at least the
+    /// target curvature (the loop reads as a visible circle), 1.0 = loop
+    /// connectors are straight (the loop collapses to a zig-zag). A Goodhart
+    /// guard complementing `loop_compactness` (which scores node arrangement, not
+    /// the drawn connector curvature). 0.0 when there is no loop connector.
+    #[serde(default)]
+    pub loop_straightness: f64,
 }
 
 /// Per-term weights for the scalar an optimizer minimizes.
@@ -122,6 +130,8 @@ pub struct MetricWeights {
     pub loop_compactness: f64,
     #[serde(default)]
     pub flow_bends: f64,
+    #[serde(default)]
+    pub loop_straightness: f64,
 }
 
 impl Default for MetricWeights {
@@ -160,6 +170,11 @@ impl Default for MetricWeights {
     ///     placements where a flow's two stocks line up (a clean straight pipe)
     ///     instead of an `L`/`Z` detour. A convention aid like
     ///     `loop_compactness`, kept well below the readability family.
+    ///   * `loop_straightness` is a low 0.1: a Goodhart guard that keeps feedback
+    ///     loops drawn as visible curves. `apply_loop_curvature` curves loop
+    ///     connectors deterministically so a healthy layout scores ~0 here; the
+    ///     weight exists so the metric can never reward flattening a loop back
+    ///     into a zig-zag. Below the readability family by construction.
     ///   * `chain_straightness` stays 0.0: it is reserved (not yet computed), so
     ///     it carries no weight.
     fn default() -> Self {
@@ -168,12 +183,13 @@ impl Default for MetricWeights {
             node_connector_overlap: 1.0,
             label_overlap: 1.0,
             crossings: 1.0,
-            sprawl: 0.1,
+            sprawl: 0.2,
             edge_length_cv: 0.0,
             aspect_penalty: 0.0,
             chain_straightness: 0.0,
-            loop_compactness: 0.25,
+            loop_compactness: 0.4,
             flow_bends: 0.15,
+            loop_straightness: 0.1,
         }
     }
 }
@@ -191,6 +207,7 @@ impl LayoutMetrics {
             + self.chain_straightness * w.chain_straightness
             + self.loop_compactness * w.loop_compactness
             + self.flow_bends * w.flow_bends
+            + self.loop_straightness * w.loop_straightness
     }
 }
 
@@ -745,6 +762,120 @@ fn compute_loop_compactness(view: &datamodel::StockFlow) -> f64 {
     }
 }
 
+// --- loop_straightness (are feedback-loop connectors drawn as visible curves) -
+//
+// loop_compactness above scores how circular a loop's NODE arrangement is, but
+// not whether the connectors between those nodes are actually drawn as arcs. A
+// loop can have well-spread node centers yet still read as a zig-zag if its
+// causal connectors are straight chords. This term measures exactly that: the
+// shortfall of each loop connector's drawn curvature below a target bow. It is
+// primarily a Goodhart guard -- `apply_loop_curvature` curves loop connectors
+// deterministically, so a healthy layout scores ~0; if any future change flattens
+// loop connectors, this term (and the metric) rises, so the optimizer can never
+// trade away the curvature that makes a loop legible. Flow pipes in a loop are
+// exempt: they are orthogonal by convention, never arced.
+
+/// Target bow ratio (max perpendicular deviation / chord length) for a loop's
+/// causal connectors. A quarter-circle arc -- a clearly visible loop curve --
+/// has a bow of ~0.21; 0.15 treats moderate curvature as "enough" so the term
+/// only fires on connectors drawn (near-)straight.
+const LOOP_LINK_TARGET_BOW: f64 = 0.15;
+
+/// Maximum perpendicular deviation of a polyline from its straight chord
+/// (first -> last point), divided by the chord length. 0 for a straight two-point
+/// line; ~0.21 for a quarter-circle arc. Returns 0 for a degenerate (near-zero)
+/// chord so the ratio is always finite.
+fn polyline_bow_ratio(polyline: &[Point]) -> f64 {
+    if polyline.len() < 3 {
+        return 0.0;
+    }
+    let a = polyline[0];
+    let b = polyline[polyline.len() - 1];
+    let cx = b.x - a.x;
+    let cy = b.y - a.y;
+    let chord = (cx * cx + cy * cy).sqrt();
+    if chord < 1e-9 {
+        return 0.0;
+    }
+    let mut max_perp = 0.0_f64;
+    for p in &polyline[1..polyline.len() - 1] {
+        // Perpendicular distance from p to the infinite line through a,b.
+        let perp = (cx * (a.y - p.y) - cy * (a.x - p.x)).abs() / chord;
+        max_perp = max_perp.max(perp);
+    }
+    max_perp / chord
+}
+
+/// Map each directed causal connector (Link) `from_uid -> to_uid` to the polyline
+/// the renderer draws for it, so loop-straightness can look up the drawn
+/// curvature of a loop edge. Flows are not included (loop edges through a flow
+/// valve have no Link and are correctly skipped).
+fn link_polylines(
+    view: &datamodel::StockFlow,
+) -> std::collections::HashMap<(i32, i32), Vec<Point>> {
+    let mut uid_elements: std::collections::HashMap<i32, &ViewElement> =
+        std::collections::HashMap::new();
+    for elem in &view.elements {
+        uid_elements.insert(elem.get_uid(), elem);
+    }
+    let not_arrayed = |_: &str| false;
+    let mut out: std::collections::HashMap<(i32, i32), Vec<Point>> =
+        std::collections::HashMap::new();
+    for elem in &view.elements {
+        if let ViewElement::Link(link) = elem
+            && let (Some(&from), Some(&to)) = (
+                uid_elements.get(&link.from_uid),
+                uid_elements.get(&link.to_uid),
+            )
+        {
+            let polyline = connector_polyline(link, from, to, &not_arrayed, ARC_POLYLINE_SAMPLES);
+            if polyline.len() >= 2 {
+                out.insert((link.from_uid, link.to_uid), polyline);
+            }
+        }
+    }
+    out
+}
+
+/// `loop_straightness`: mean bow shortfall over the causal connectors that
+/// participate in a feedback loop. 0.0 = every loop connector is drawn with at
+/// least the target curvature (the loop reads as a visible circle); 1.0 = loop
+/// connectors are straight (the loop collapses to a zig-zag). 0.0 when the view
+/// has no loop with a causal connector. Deterministic and PURE; reuses the same
+/// loop graph / cycle enumeration as loop_compactness.
+fn compute_loop_straightness(view: &datamodel::StockFlow) -> f64 {
+    let graph = build_loop_graph(view);
+    let cycles = enumerate_simple_cycles(&graph);
+    if cycles.is_empty() {
+        return 0.0;
+    }
+    let polys = link_polylines(view);
+    let mut seen: HashSet<(i32, i32)> = HashSet::new();
+    let mut total = 0.0;
+    let mut count = 0usize;
+    for cycle in &cycles {
+        let n = cycle.len();
+        for k in 0..n {
+            let edge = (cycle[k], cycle[(k + 1) % n]);
+            let Some(poly) = polys.get(&edge) else {
+                continue; // a flow-pipe edge (no Link): exempt
+            };
+            if !seen.insert(edge) {
+                continue; // count each loop connector once
+            }
+            let bow = polyline_bow_ratio(poly);
+            let shortfall = (LOOP_LINK_TARGET_BOW - bow).max(0.0) / LOOP_LINK_TARGET_BOW;
+            total += shortfall;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f64
+    }
+}
+
 /// Compute the layout quality metrics for a completed view.
 ///
 /// PURE: takes data, returns scalars, performs no I/O. The `_config` parameter
@@ -1006,6 +1137,9 @@ pub fn compute_layout_metrics(
     // --- loop_compactness (isoperimetric feedback-loop quality) ---
     let loop_compactness = compute_loop_compactness(view);
 
+    // --- loop_straightness (loop connectors drawn as visible curves) ---
+    let loop_straightness = compute_loop_straightness(view);
+
     // --- flow_bends (mean right-angle bends per flow pipe) ---
     let flow_bends = {
         let mut total_bends = 0usize;
@@ -1035,6 +1169,7 @@ pub fn compute_layout_metrics(
         chain_straightness: 0.0,
         loop_compactness,
         flow_bends,
+        loop_straightness,
     }
 }
 
@@ -1972,6 +2107,7 @@ mod tests {
             chain_straightness: 7.0,
             loop_compactness: 8.0,
             flow_bends: 9.0,
+            loop_straightness: 11.0,
         };
         let w = MetricWeights {
             node_overlap: 10.0,
@@ -1984,6 +2120,7 @@ mod tests {
             chain_straightness: 80.0,
             loop_compactness: 90.0,
             flow_bends: 100.0,
+            loop_straightness: 110.0,
         };
         let expected = 1.5 * 10.0
             + 2.0 * 20.0
@@ -1994,7 +2131,8 @@ mod tests {
             + 6.0 * 70.0
             + 7.0 * 80.0
             + 8.0 * 90.0
-            + 9.0 * 100.0;
+            + 9.0 * 100.0
+            + 11.0 * 110.0;
         assert!((m.weighted_cost(&w) - expected).abs() < 1e-9);
     }
 
@@ -2093,6 +2231,20 @@ mod tests {
             w.node_overlap
         );
 
+        // loop_straightness is a Goodhart guard for loop curvature: positive but
+        // well below the dominant family.
+        assert!(
+            w.loop_straightness > 0.0,
+            "loop_straightness should guard loop curvature, got {}",
+            w.loop_straightness
+        );
+        assert!(
+            w.loop_straightness < w.node_overlap,
+            "loop_straightness ({}) must stay below the dominant node_overlap ({})",
+            w.loop_straightness,
+            w.node_overlap
+        );
+
         // `weighted_cost` under the default is still the exact linear combination
         // (the default is now meaningful, not inert): verify against an explicit
         // Σ wᵢ·termᵢ over a hand-set metrics value.
@@ -2107,6 +2259,7 @@ mod tests {
             chain_straightness: 0.0,
             loop_compactness: 0.8,
             flow_bends: 1.0,
+            loop_straightness: 0.6,
         };
         let expected = m.node_overlap * w.node_overlap
             + m.node_connector_overlap * w.node_connector_overlap
@@ -2117,7 +2270,8 @@ mod tests {
             + m.aspect_penalty * w.aspect_penalty
             + m.chain_straightness * w.chain_straightness
             + m.loop_compactness * w.loop_compactness
-            + m.flow_bends * w.flow_bends;
+            + m.flow_bends * w.flow_bends
+            + m.loop_straightness * w.loop_straightness;
         assert!(
             (m.weighted_cost(&w) - expected).abs() < 1e-12,
             "weighted_cost under the default must equal Σ wᵢ·termᵢ: got {} expected {}",
@@ -2139,6 +2293,7 @@ mod tests {
         assert!(m.chain_straightness.is_finite());
         assert!(m.loop_compactness.is_finite());
         assert!(m.flow_bends.is_finite());
+        assert!(m.loop_straightness.is_finite());
     }
 
     fn assert_all_zero(m: &LayoutMetrics) {
@@ -2152,6 +2307,7 @@ mod tests {
         assert_eq!(m.chain_straightness, 0.0);
         assert_eq!(m.loop_compactness, 0.0);
         assert_eq!(m.flow_bends, 0.0);
+        assert_eq!(m.loop_straightness, 0.0);
     }
 
     #[test]

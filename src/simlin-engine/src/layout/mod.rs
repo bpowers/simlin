@@ -705,6 +705,15 @@ fn place_new_chain_elements(
     }
 
     for flow_ident in &new_elements.new_flows {
+        // A flow between two EXISTING stocks belongs at their midpoint (the valve
+        // sits on the pipe between them), not offset to the side -- and it is
+        // pinned there during settle (see `settle_new_elements`), because as a
+        // free SFDP node with rest length k it would be pushed far from the
+        // midpoint whenever the two stocks are closer together than k.
+        if let Some(mid) = stock_to_stock_flow_midpoint(state, metadata, flow_ident, new_set) {
+            result.insert(flow_ident.clone(), mid);
+            continue;
+        }
         let connected = connected_existing_positions(state, metadata, flow_ident, new_set);
         if connected.is_empty() {
             let pos = Position::new(bbox_max.x + 200.0, bbox_max.y + offset_y);
@@ -718,6 +727,33 @@ fn place_new_chain_elements(
             );
         }
     }
+}
+
+/// The midpoint of a flow's two stocks when BOTH already exist (are not new), or
+/// `None` otherwise (a cloud flow, or a flow into/out of a new stock, which the
+/// chain/rigid-group machinery positions instead). This is the canonical valve
+/// position for an incrementally-added stock-to-stock flow.
+fn stock_to_stock_flow_midpoint(
+    state: &LayoutState,
+    metadata: &ComputedMetadata,
+    flow_ident: &str,
+    new_set: &HashSet<&str>,
+) -> Option<Position> {
+    let (from_stock, to_stock) = metadata.connected_stocks(flow_ident);
+    let from_stock = from_stock?;
+    let to_stock = to_stock?;
+    if new_set.contains(from_stock) || new_set.contains(to_stock) {
+        return None;
+    }
+    let a = state
+        .uid_manager
+        .get_uid(from_stock)
+        .and_then(|uid| state.positions.get(&uid).copied())?;
+    let b = state
+        .uid_manager
+        .get_uid(to_stock)
+        .and_then(|uid| state.positions.get(&uid).copied())?;
+    Some(chain::stock_pair_valve_position(a, b, 0, 1))
 }
 
 /// Run SFDP + annealing with existing elements pinned and only new
@@ -758,13 +794,24 @@ pub fn settle_new_elements(
     // Build constrained graph: pin existing elements, make new chains rigid groups
     let mut constrained_builder = ConstrainedGraphBuilder::new(full_graph);
 
-    // Pin all existing (non-new) nodes
-    let existing_node_ids: Vec<String> = var_to_node
+    // Pin all existing (non-new) nodes, plus any NEW flow that connects two
+    // existing stocks: its valve is fixed at the stock midpoint
+    // (`stock_to_stock_flow_midpoint`), so letting it float as an SFDP node
+    // (rest length k) would push it far off whenever the stocks are closer than
+    // k. The rest of a genuinely new chain still settles normally.
+    let mut pinned_node_ids: Vec<String> = var_to_node
         .iter()
         .filter(|(ident, _)| !new_ident_set.contains(ident.as_str()))
         .map(|(_, node_id)| node_id.clone())
         .collect();
-    constrained_builder.pin(&existing_node_ids);
+    for flow_ident in &new_elements.new_flows {
+        if stock_to_stock_flow_midpoint(state, metadata, flow_ident, &new_ident_set).is_some()
+            && let Some(node_id) = var_to_node.get(flow_ident)
+        {
+            pinned_node_ids.push(node_id.clone());
+        }
+    }
+    constrained_builder.pin(&pinned_node_ids);
 
     // Add rigid groups for new chain elements (same pattern as run_sfdp_with_rigid_chains)
     for (_stocks, _flows, all_vars) in chains_data {
