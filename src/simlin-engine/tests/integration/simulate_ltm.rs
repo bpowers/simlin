@@ -9774,6 +9774,84 @@ fn multi_output_passthrough_loop_raw_score_is_one() {
     }
 }
 
+/// GH #698: discovery mode must agree with exhaustive mode on the SIGN of a
+/// loop that traverses a multi-output module. The loop reads `m·pos`
+/// (positive gain), so the raw loop score is +1 (reinforcing). Before the
+/// fix, discovery scored the `s -> m` edge against the module's composite,
+/// which max-abs-selects across BOTH output ports; single-dependency
+/// pathways all normalize to magnitude 1, so the `>=` tie-break picked the
+/// first-enumerated port (`neg`), inverting the discovered loop to -1.
+#[test]
+fn discovery_multi_output_loop_polarity_matches_exhaustive() {
+    let project = multi_output_passthrough_loop_project();
+
+    // Exhaustive: the raw loop score settles to +1 (verified directly by
+    // `multi_output_passthrough_loop_raw_score_is_one`; recomputed here so
+    // the two modes are compared on the SAME compiled fixture).
+    let (compiled, _loop_partitions) = compile_ltm_incremental_with_partitions(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("exhaustive simulation should run");
+    let exhaustive_results = vm.into_results();
+    let exhaustive_loop_key = exhaustive_results
+        .offsets
+        .keys()
+        .find(|k| {
+            k.as_str()
+                .starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")
+        })
+        .expect("exhaustive mode must emit a loop score")
+        .clone();
+    let exhaustive_off = exhaustive_results.offsets[&exhaustive_loop_key];
+    let last = exhaustive_results.step_count - 1;
+    let exhaustive_settled =
+        exhaustive_results.data[last * exhaustive_results.step_size + exhaustive_off];
+    assert!(
+        exhaustive_settled > 0.0,
+        "exhaustive settled loop score should be positive (reinforcing), got {exhaustive_settled}"
+    );
+
+    // Discovery: run the strongest-path search and find the loop through the
+    // module. Its settled signed score must have the same sign exhaustive
+    // reports, not the inverted one the composite tie-break produced.
+    let compiled = compile_ltm_discovery_incremental(&project);
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().expect("discovery simulation should run");
+    let discovery_results = vm.into_results();
+
+    let proj = Project::from(project);
+    let found = ltm_finding::discover_loops(&discovery_results, &proj)
+        .expect("discover_loops should succeed");
+    assert!(
+        !found.is_empty(),
+        "discovery should find the feedback loop through the multi-output module"
+    );
+
+    // The single feedback loop traverses `s -> m -> growth -> s`.
+    let loop_through_m = found
+        .iter()
+        .find(|fl| {
+            fl.loop_info
+                .links
+                .iter()
+                .any(|l| l.from.as_str() == "m" || l.to.as_str() == "m")
+        })
+        .expect("a discovered loop must traverse module m");
+
+    let (_, settled_score) = *loop_through_m
+        .scores
+        .iter()
+        .rev()
+        .find(|(_, s)| !s.is_nan() && *s != 0.0)
+        .expect("loop should have a non-zero settled score");
+
+    assert!(
+        settled_score > 0.0,
+        "discovery settled loop score is {settled_score}; exhaustive is {exhaustive_settled} \
+         (positive/reinforcing). The discovery composite tie-break selected the wrong output \
+         port (m·neg) and inverted the loop polarity. GH #698."
+    );
+}
+
 /// GROUND TRUTH PROBE / acceptance invariant for GH #675: an isolated
 /// feedback loop routed through a module->module link must have raw loop
 /// score exactly +1 at every settled step, regardless of the gain the

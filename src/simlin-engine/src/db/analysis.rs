@@ -925,6 +925,48 @@ pub(crate) fn causal_graph_with_modules(
         .collect();
     let stocks: HashSet<Ident<Canonical>> =
         edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
+
+    let (variables, module_graphs) = model_variables_and_module_graphs(db, model, project);
+
+    crate::ltm::CausalGraph {
+        edges,
+        stocks,
+        variables,
+        module_graphs,
+    }
+}
+
+/// The `(variables, module_graphs)` maps a CausalGraph carries for polarity
+/// analysis, stock enrichment, and the GH #698 per-exit-port recompute.
+type CausalGraphModuleData = (
+    HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable>,
+    HashMap<crate::common::Ident<crate::common::Canonical>, Box<crate::ltm::CausalGraph>>,
+);
+
+/// Build the `(variables, module_graphs)` pair a CausalGraph needs for
+/// polarity analysis, stock enrichment, and the discovery-mode per-exit-port
+/// pathway recompute (GH #698) -- shared by `causal_graph_with_modules` (which
+/// pairs it with a variable-level edge set) and
+/// `causal_graph_from_element_edges_with_modules` (which pairs it with an
+/// element-level edge set). The element-level graph names its module nodes by
+/// the bare module instance name, the same key `module_graphs` and the module
+/// `Variable` use, so the recompute resolves a module hop either way.
+///
+/// A sub-graph is built for EVERY referenced sub-model, not only stockful
+/// dynamic modules: a stockless *passthrough* with an input->output pathway
+/// emits `$⁚ltm⁚path⁚{port}⁚{idx}` vars, and the recompute recovers their exit
+/// ports from this sub-graph. A pathless module's sub-graph enumerates no
+/// pathways, so it is harmless; stock enrichment over a stockless sub-graph
+/// finds no stocks.
+fn model_variables_and_module_graphs(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> CausalGraphModuleData {
+    use crate::common::{Canonical, Ident};
+    use std::collections::HashSet;
+
+    let edges_result = model_causal_edges(db, model, project);
     let variables = reconstruct_model_variables(db, model, project);
 
     let project_models = project.models(db);
@@ -933,10 +975,6 @@ pub(crate) fn causal_graph_with_modules(
     for (module_var_name, sub_model_name) in &edges_result.dynamic_modules {
         if let Some(sub_source_model) = project_models.get(sub_model_name.as_str()) {
             let sub_edges_result = model_causal_edges(db, *sub_source_model, project);
-            // Only build graphs for dynamic modules (those with stocks)
-            if sub_edges_result.stocks.is_empty() {
-                continue;
-            }
             let sub_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = sub_edges_result
                 .edges
                 .iter()
@@ -964,12 +1002,27 @@ pub(crate) fn causal_graph_with_modules(
         }
     }
 
-    crate::ltm::CausalGraph {
-        edges,
-        stocks,
-        variables,
-        module_graphs,
-    }
+    (variables, module_graphs)
+}
+
+/// Element-level CausalGraph (as [`causal_graph_from_element_edges`]) ENRICHED
+/// with the `variables` + `module_graphs` maps for referenced sub-models, so
+/// the discovery-mode per-exit-port pathway recompute (GH #698) can fire on the
+/// production analysis path. `dynamic_modules` (the dt-collapsed module
+/// classification) names module instances by their bare instance name, the
+/// same key the element-level edges use for a module node, so the recompute's
+/// `module_graph(module_name)` / `variables().get(module_name)` lookups resolve.
+pub(crate) fn causal_graph_from_element_edges_with_modules(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    element_edges: &ElementCausalEdgesResult,
+) -> crate::ltm::CausalGraph {
+    let mut graph = causal_graph_from_element_edges(element_edges);
+    let (variables, module_graphs) = model_variables_and_module_graphs(db, model, project);
+    graph.variables = variables;
+    graph.module_graphs = module_graphs;
+    graph
 }
 
 /// Build the causal edge structure for a model from salsa-tracked
@@ -2376,6 +2429,23 @@ pub(crate) fn reconstruct_model_variables(
     let mut variables: HashMap<Ident<Canonical>, crate::variable::Variable> = HashMap::new();
 
     for (name, source_var) in source_vars.iter() {
+        // Explicit module instances take the same direct-construction path as
+        // implicit ones: the generic parse+lower path resolves module inputs
+        // against `scope.models`, which is EMPTY here, so `resolve_module_input`
+        // drops every input and the reconstructed `Variable::Module` carries
+        // `inputs: []`. The discovery-mode per-exit-port pathway recompute (GH
+        // #698) matches the loop edge's source against those inputs to find the
+        // module's entry port; with the inputs lost it bails and falls back to
+        // the wrong-signed composite. (`reconstruct_single_variable` already
+        // takes this branch for the exhaustive override; both reconstructions
+        // must keep module wiring.)
+        let dm_var = super::datamodel_variable_from_source(db, *source_var);
+        if matches!(dm_var, datamodel::Variable::Module(_)) {
+            let lowered = reconstruct_implicit_variable(db, model, dims, &scope, &dm_var);
+            variables.insert(Ident::new(name), lowered);
+            continue;
+        }
+
         let parsed =
             parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
         let lowered = crate::model::lower_variable(&scope, &parsed.variable);

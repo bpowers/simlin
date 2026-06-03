@@ -130,7 +130,11 @@ and average absolute score for ranking.
    - Runs the strongest-path DFS (`find_strongest_loops`)
    - Collects unique loop paths across all timesteps
 4. Each discovered path is converted to a `FoundLoop` with signed loop scores
-   computed at every timestep from the raw link score results
+   computed at every timestep from the raw link score results. A loop edge
+   `x → m` into a multi-output module is recomputed against the pathway ending
+   at the exit port the loop traverses (the per-exit-port recompute, GH #698 --
+   see "Passthrough composites and per-exit-port loop scoring"), so discovery
+   and exhaustive agree on the loop's polarity
 5. Loops are filtered by `MIN_CONTRIBUTION` (0.1%) with partition-aware
    thresholds, ranked competitive-first by mean partition-relative importance
    (loops trivially alone in their cycle partition -- relative score +/-1 by
@@ -406,20 +410,32 @@ internal pathway at each timestep.
 
 ### Module Classification
 
-Modules are classified by `classify_module_for_ltm()` in `ltm.rs`:
+Modules fall into three LTM roles:
 
 - **Infrastructure** (`PREVIOUS`, `INIT`) -- used BY link score equations; never
   analyzed to avoid infinite recursion.
 - **DynamicModule** -- has internal stocks (SMOOTH, DELAY, TREND, user-defined
   modules with stocks). Gets composite link scores and internal graph construction.
-- **Passthrough** -- no internal stocks. `classify_module_for_ltm` drives only
-  the legacy `CausalGraph`'s recursive internal-graph build (dynamic modules
-  only). It does NOT decide whether a composite is exposed: a passthrough whose
-  internals form an aux chain from input to output still emits pathway/composite
-  vars (its chain is a pure expression LTM scores exactly), so a link into its
-  input port references the composite just like a dynamic module. The signed
-  unit-transfer fallback (see Module Links) now fires only for a *pathway-less*
-  module -- one whose output does not depend on its input at all.
+- **Passthrough** -- no internal stocks. A passthrough whose internals form an
+  aux chain from input to output still emits pathway/composite vars (its chain
+  is a pure expression LTM scores exactly), so a link into its input port
+  references the composite just like a dynamic module. The signed unit-transfer
+  fallback (see Module Links) now fires only for a *pathway-less* module -- one
+  whose output does not depend on its input at all.
+
+The `CausalGraph` builders that carry module data (`CausalGraph::from_model`
+and the shared `db::analysis::model_variables_and_module_graphs` used by
+`causal_graph_with_modules` and the element-level
+`causal_graph_from_element_edges_with_modules`) build a recursive internal
+sub-graph for **every** referenced sub-model -- DynamicModule and passthrough
+alike -- since the discovery-mode per-exit-port pathway recompute (GH #698)
+needs the passthrough's sub-graph too. (Before GH #698 only DynamicModules got a
+sub-graph, gated by a now-removed `classify_module_for_ltm` stock check; a
+pathless module's sub-graph enumerates no pathways, so building it is harmless.)
+The bare `causal_graph_from_element_edges` constructor still leaves `variables`
+/ `module_graphs` empty -- it is used where module data is not needed; the
+production discovery path (`analyze_model`) uses the `_with_modules` enriching
+variant.
 
 #### Passthrough composites and per-exit-port loop scoring (PR #684)
 
@@ -471,17 +487,63 @@ override is threaded into the loop-score equation builder as a side-table keyed
 by `(loop_id, link_index)`; `Loop.links` is NOT rewritten (loop IDs derive from
 the link sequence and the FFI's id→score correspondence depends on it).
 
-**Discovery-mode asymmetry -- can report the WRONG POLARITY (GH #698)**:
-discovery mode emits NO loop-score vars (loops are ranked post-simulation by
-the strongest-path search), so there is nothing to override. The base
-`input → m` link score there is the composite -- and because single-dependency
-pathways all normalize to magnitude exactly 1, the composite's max-abs
-tie-break picks an arbitrary output port. This is not merely a magnitude
-approximation: a loop through a multi-output module whose ports have opposing
-signs gets the arbitrary port's sign, empirically inverting the loop's
-polarity (+1.0 in exhaustive vs -1.0 in discovery on a `pos = input*0.02` /
-`neg = -input` repro). The per-exit-port refinement is currently an
-exhaustive-mode-only fix.
+**Discovery-mode per-exit-port recompute (GH #698)**: discovery mode emits NO
+loop-score vars (loops are ranked post-simulation by the strongest-path
+search), so there is no loop-score *equation* to override. The DFS still uses
+the composite for edge ordering and zero-exclusion (a zero composite implies
+all pathways zero, so no loop is lost). But the **post-simulation score
+recompute** -- which converts each discovered path into a `FoundLoop` by
+multiplying the per-step signed link scores -- now applies the SAME
+per-exit-port selection the exhaustive override applies: for a loop edge
+`x → m` whose next edge `m → y` identifies the exit port (the `m·port` `y`
+reads, or `y`'s matching `ModuleInput.src` when `y` is itself a module), it
+recomputes that edge's series by max-abs-selecting over the sub-model's
+`m·$⁚ltm⁚path⁚{entry}⁚{idx}` pathway scores that *end at the exit port*,
+instead of reading the composite's offset. The pathway indices are recovered
+from the module's recursively-built sub-graph
+(`enumerate_pathways_to_outputs_with_truncation` over the same sorted
+output-port set the sub-model emitted against -- `discovery_sub_model_output_ports`
+reconstructs that set the way `sub_model_output_ports` decides it, including the
+`stdlib⁚`-prefixed-model short-circuit to exactly `["output"]`), so they match
+the emitted `$⁚ltm⁚path` vars index-for-index -- the same parity guarantee the
+exhaustive override relies on. This is `recompute_module_input_edge_series` in
+`ltm_finding.rs`; it falls back to the base composite offset whenever the entry
+or exit port is indeterminate (e.g. an ambiguous multi-output reader) or no
+pathway connects entry to exit, so single-output modules (SMOOTH, DELAY, …) and
+pathless modules are unaffected.
+
+Recovering the pathway indices required the discovery `CausalGraph` to carry
+module sub-graphs + the variable map. **The production analysis path builds the
+discovery graph from element-level edges** (`analyze_model` →
+`model_element_causal_edges` → `causal_graph_from_element_edges`), and that bare
+constructor leaves `variables` / `module_graphs` EMPTY. So `analyze_model` now
+uses `causal_graph_from_element_edges_with_modules`, which enriches the
+element-level graph with the same `(variables, module_graphs)` pair
+`causal_graph_with_modules` builds (the shared `model_variables_and_module_graphs`
+in `db/analysis.rs`). Both that helper and `CausalGraph::from_model` (the
+`discover_loops` convenience path) build a sub-graph for **every** referenced
+sub-model, not only stockful `DynamicModule`s: a stockless passthrough emits
+pathway vars (PR #684) but otherwise has no sub-graph to consult; a pathless
+module's sub-graph enumerates no pathways and is harmless. (This is why the
+prior `classify_module_for_ltm` stock gate on sub-graph construction is gone.)
+The element-level module nodes are keyed by the bare module instance name --
+the same key `module_graphs` and the module `Variable` use -- so the recompute's
+lookups resolve. `reconstruct_model_variables` reconstructs a module instance
+through `reconstruct_implicit_variable` (not the generic parse+lower path, which
+resolves inputs against an empty `scope.models` and so drops them), so the
+recompute can read a module's entry/exit ports off its preserved `ModuleInput`s
+-- the same fix `reconstruct_single_variable` already applied for the exhaustive
+override.
+
+Before this fix, discovery read the composite's offset for the `x → m` edge;
+because single-dependency pathways all normalize to magnitude exactly 1, the
+composite's max-abs tie-break picked an arbitrary output port, and a loop
+through a multi-output module whose ports have opposing signs got the arbitrary
+port's sign -- empirically inverting the loop's polarity (+1.0 in exhaustive vs
+-1.0 in discovery on a `pos = input*0.02` / `neg = -input` repro). The
+cross-mode regression guard is
+`discovery_multi_output_loop_polarity_matches_exhaustive` in
+`tests/simulate_ltm.rs`.
 
 **Deterministic output-port ordering (GH #680)**: `find_model_output_ports`
 sorts its result. The merge-order of the `HashSet` it previously returned was

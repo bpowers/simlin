@@ -113,6 +113,7 @@ mod analysis;
 pub use analysis::RefShape;
 pub use analysis::causal_graph_from_edges;
 pub use analysis::causal_graph_from_element_edges;
+pub(crate) use analysis::causal_graph_from_element_edges_with_modules;
 pub(crate) use analysis::reconstruct_model_variables;
 use analysis::*;
 // `model_element_loop_circuits` is `#[deprecated]` for LTM consumers (the

@@ -1887,6 +1887,256 @@ pub fn discovery_graph_stats(
     }
 }
 
+/// Read the output port a (non-module) variable `reader` reads off module
+/// instance `module_name` via interpunct notation `m·{port}`, ignoring the
+/// module's synthetic LTM internals (`m·$⁚ltm⁚…`). Returns the unique such
+/// port, or `None` when the reader reads zero or several (ambiguous).
+///
+/// This is the post-simulation twin of `db::ltm::module_exit_port_for_reader`
+/// (the exhaustive-mode override's exit-port determinator); both must agree so
+/// discovery and exhaustive select the same pathway for the same loop edge.
+fn discovery_module_exit_port(
+    module_name: &Ident<Canonical>,
+    reader: &crate::variable::Variable,
+) -> Option<Ident<Canonical>> {
+    let ast = reader.ast()?;
+    let deps = crate::variable::identifier_set(ast, &[], None);
+    let prefix = format!("{}\u{00B7}", module_name.as_str());
+    let mut found: Option<Ident<Canonical>> = None;
+    for dep in deps {
+        let Some(port) = dep.as_str().strip_prefix(&prefix) else {
+            continue;
+        };
+        if port.starts_with('$') {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(Ident::new(port));
+    }
+    found
+}
+
+/// The LTM output ports the parent reads off every instance of sub-model
+/// `sub_model_name`, sorted -- the discovery-mode reconstruction of
+/// `db::ltm::sub_model_output_ports`. The sub-model emits its
+/// `$⁚ltm⁚path⁚{port}⁚{idx}` pathway variables by enumerating pathways to this
+/// exact (sorted) port set, so the parent's per-exit-port pathway recompute
+/// below must use the same set in the same order to land on the same indices.
+///
+/// This MUST agree with the exhaustive-side `db::ltm::sub_model_output_ports`,
+/// including its stdlib short-circuit: a `stdlib⁚`-prefixed sub-model is always
+/// read through the `output` convention, so its sole LTM output port is
+/// `output` -- the sub-model EMITS its pathway vars against exactly
+/// `["output"]`. A scan of the parent's reads could otherwise pick up more than
+/// one internal port for a stdlib module chained on several internals (e.g. the
+/// systems-format `available`/`remaining` wiring), yielding a different pathway
+/// index ordering than the sub-model emitted, so the recompute would read the
+/// WRONG pathway var. For a user sub-model the port set is the union of the
+/// `{instance}·{port}` reads over all instances (mirroring
+/// `find_model_output_ports`), sorted.
+fn discovery_sub_model_output_ports(
+    causal_graph: &CausalGraph,
+    sub_model_name: &str,
+) -> Vec<Ident<Canonical>> {
+    use crate::variable::Variable;
+
+    // Stdlib models are always read through the `output` convention, so their
+    // single LTM output port is `output` -- the same short-circuit
+    // `db::ltm::sub_model_output_ports` takes. Keeping the two in lockstep is
+    // what makes the recomputed pathway indices match the emitted ones.
+    if sub_model_name.starts_with("stdlib\u{205A}") {
+        return vec![Ident::new("output")];
+    }
+
+    // Every parent module instance that instantiates this sub-model.
+    let instances: HashSet<&Ident<Canonical>> = causal_graph
+        .variables()
+        .iter()
+        .filter_map(|(name, var)| match var {
+            Variable::Module { model_name, .. } if model_name.as_str() == sub_model_name => {
+                Some(name)
+            }
+            _ => None,
+        })
+        .collect();
+    if instances.is_empty() {
+        return vec![];
+    }
+
+    let mut ports: HashSet<Ident<Canonical>> = HashSet::new();
+    let note_read = |dep: &str, ports: &mut HashSet<Ident<Canonical>>| {
+        let Some((module_part, port)) = dep.split_once('\u{00B7}') else {
+            return;
+        };
+        if port.starts_with('$') {
+            return;
+        }
+        if instances.contains(&Ident::<Canonical>::new(module_part)) {
+            ports.insert(Ident::new(port));
+        }
+    };
+    for (_, var) in causal_graph.variables().iter() {
+        // A module instance reads an upstream module's output through its
+        // input wiring (`mod_b`'s `ModuleInput.src == mod_a·pos`), and a module
+        // has no equation AST, so its reads must come from `inputs`, not
+        // `var.ast()`. This mirrors `find_model_output_ports`, which scans
+        // `variable_direct_dependencies` (those include module-input srcs).
+        if let Variable::Module { inputs, .. } = var {
+            for inp in inputs {
+                note_read(inp.src.as_str(), &mut ports);
+            }
+            continue;
+        }
+        let Some(ast) = var.ast() else { continue };
+        for dep in crate::variable::identifier_set(ast, &[], None) {
+            note_read(dep.as_str(), &mut ports);
+        }
+    }
+    let mut ports: Vec<Ident<Canonical>> = ports.into_iter().collect();
+    ports.sort();
+    ports
+}
+
+/// Recompute a module-input loop edge's link-score series from the sub-model's
+/// per-pathway scores, selecting the pathway(s) that terminate at the exit port
+/// the loop actually traverses (GH #698).
+///
+/// Discovery emits no loop-score variables, so the `x → m` edge's link score is
+/// the module's *composite* (`m·$⁚ltm⁚composite⁚{port}`), which max-abs-selects
+/// across ALL output-port pathways. For single-dependency pathways every
+/// pathway normalizes to magnitude exactly 1, so the composite's tie-break picks
+/// an arbitrary (first-enumerated) port -- possibly one whose sign opposes the
+/// pathway the loop reads, flipping the loop's polarity. Exhaustive mode fixes
+/// this with a per-exit-port override on the loop-score equation; this is the
+/// discovery-mode equivalent applied during post-simulation score recomputation.
+///
+/// `edge_idx` is the index of the `x → m` link in `links`; the next link
+/// `m → y` identifies the exit port. Returns the recomputed signed series, or
+/// `None` to leave the base (composite) series in place when:
+/// * `m` is not a module instance with a recursively-built sub-graph;
+/// * the entry or exit port cannot be determined (the base composite is the
+///   honest fallback -- e.g. an ambiguous multi-output reader);
+/// * the sub-model's pathway map yields no pathway from entry to exit.
+///
+/// The pathway selection mirrors `db::ltm::compute_module_link_overrides`: the
+/// pathway indices are recomputed from the sub-model graph via the SAME
+/// `enumerate_pathways_to_outputs_with_truncation` machinery the emission uses,
+/// over the SAME sorted output-port set, so the indices match the emitted
+/// `$⁚ltm⁚path⁚{entry}⁚{idx}` variables index-for-index.
+fn recompute_module_input_edge_series(
+    causal_graph: &CausalGraph,
+    results: &Results,
+    links: &[Link],
+    edge_idx: usize,
+    step_count: usize,
+) -> Option<Vec<f64>> {
+    use crate::ltm::normalize_module_ref;
+    use crate::variable::Variable;
+
+    let n = links.len();
+    let link = &links[edge_idx];
+    let module_name = &link.to;
+
+    // `m` must be a module instance with a recursively-built internal graph
+    // (a DynamicModule / passthrough exposing pathways). Pathless modules and
+    // non-modules keep the base link score.
+    let module_graph = causal_graph.module_graph(module_name)?;
+
+    // Entry port: `m`'s ModuleInput whose normalized src is `x` (== link.from).
+    let module_var = causal_graph.variables().get(module_name)?;
+    let Variable::Module { inputs, .. } = module_var else {
+        return None;
+    };
+    let entry_port = inputs.iter().find_map(|inp| {
+        if normalize_module_ref(&inp.src) == link.from {
+            Some(inp.dst.clone())
+        } else {
+            None
+        }
+    })?;
+
+    // Exit port from the next link `m → y`.
+    let next = &links[(edge_idx + 1) % n];
+    // The loop links are emitted in traversal order, so `next.from == m`; guard
+    // against a non-sequential list rather than reading a port off an unrelated
+    // edge.
+    if &next.from != module_name {
+        return None;
+    }
+    let y = &next.to;
+    let y_var = causal_graph.variables().get(y)?;
+    let exit_port = match y_var {
+        // `y` is itself a module: m's output feeds y's input port. y's
+        // ModuleInput src is the qualified `m·{port}`; extract the port whose
+        // normalized ref is `m`.
+        Variable::Module { inputs: y_in, .. } => y_in.iter().find_map(|inp| {
+            if normalize_module_ref(&inp.src) == *module_name {
+                inp.src
+                    .as_str()
+                    .split_once('\u{00B7}')
+                    .map(|(_, port)| Ident::new(port))
+            } else {
+                None
+            }
+        }),
+        _ => discovery_module_exit_port(module_name, y_var),
+    }?;
+
+    // Recompute the sub-model's pathway map over the same sorted output-port
+    // set the sub-model emitted against, so pathway indices match index-for-
+    // index. The sub-model name comes off the module instance variable.
+    let Variable::Module {
+        model_name: sub_model_name,
+        ..
+    } = module_var
+    else {
+        return None;
+    };
+    let output_ports = discovery_sub_model_output_ports(causal_graph, sub_model_name.as_str());
+    if output_ports.is_empty() {
+        return None;
+    }
+    let (pathways, _truncated) =
+        module_graph.enumerate_pathways_to_outputs_with_truncation(&output_ports);
+    let port_pathways = pathways.get(&entry_port)?;
+
+    // Result offsets of the `m·$⁚ltm⁚path⁚{entry}⁚{idx}` series whose pathway
+    // ends at the exit port. The pathway var rides under the module instance
+    // namespace (`{instance}·…`).
+    let matching_offsets: Vec<usize> = port_pathways
+        .iter()
+        .enumerate()
+        .filter(|(_, path_links)| path_links.last().is_some_and(|l| l.to == exit_port))
+        .filter_map(|(idx, _)| {
+            let name = format!(
+                "{}\u{00B7}$\u{205A}ltm\u{205A}path\u{205A}{}\u{205A}{idx}",
+                module_name.as_str(),
+                entry_port.as_str()
+            );
+            results
+                .offsets
+                .get(&Ident::<Canonical>::new(&name))
+                .copied()
+        })
+        .collect();
+    if matching_offsets.is_empty() {
+        return None;
+    }
+
+    // Per-step max-abs selection over the matching pathway series (mirroring
+    // the sub-model composite's selection, but restricted to the exit port).
+    let mut series: Option<Vec<f64>> = None;
+    for off in matching_offsets {
+        let candidate: Vec<f64> = (0..step_count)
+            .map(|step| results.data[step * results.step_size + off])
+            .collect();
+        series = max_abs_score_series(series, Some(candidate));
+    }
+    series
+}
+
 /// Run the strongest-path loop discovery using a pre-built `CausalGraph`.
 ///
 /// This is the implementation shared by `discover_loops` (which builds
@@ -2029,6 +2279,20 @@ pub fn discover_loops_with_graph(
             link_result_offsets.push(*offset);
         }
 
+        // Per-exit-port override series for module-input edges (GH #698). For a
+        // loop edge `x → m` whose next edge `m → y` identifies the exit port the
+        // loop reads, recompute that edge's link-score series from the
+        // sub-model's per-pathway scores selecting only the pathway(s) ending at
+        // that port -- mirroring the exhaustive-mode override. The base offset
+        // (the module *composite*, which max-abs-selects across ALL ports and so
+        // can pick a wrong-signed port for a multi-output module) is used
+        // verbatim everywhere this returns `None`.
+        let link_override_series: Vec<Option<Vec<f64>>> = (0..links.len())
+            .map(|i| {
+                recompute_module_input_edge_series(causal_graph, results, &links, i, step_count)
+            })
+            .collect();
+
         // Compute signed loop score at each timestep.
         // Time is derived from specs assuming evenly-spaced results at save_step intervals.
         let mut scores: Vec<(f64, f64)> = Vec::new();
@@ -2042,8 +2306,11 @@ pub fn discover_loops_with_graph(
             let mut loop_score = 1.0;
             let mut has_nan = false;
 
-            for &offset in &link_result_offsets {
-                let value = results.data[step * results.step_size + offset];
+            for (i, &offset) in link_result_offsets.iter().enumerate() {
+                let value = match &link_override_series[i] {
+                    Some(series) => series[step],
+                    None => results.data[step * results.step_size + offset],
+                };
                 if value.is_nan() {
                     has_nan = true;
                     break;

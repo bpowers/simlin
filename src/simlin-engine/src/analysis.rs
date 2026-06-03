@@ -190,7 +190,16 @@ fn run_ltm_pipeline(
     // -> births[NYC] -> population[NYC]) rather than variable-level loops.
     let source_model = source_project.models(db).get(&canonical_name).copied()?;
     let element_edges = crate::db::model_element_causal_edges(db, source_model, source_project);
-    let causal_graph = crate::db::causal_graph_from_element_edges(element_edges);
+    // Enrich the element-level graph with module sub-graphs + variable map so
+    // the discovery-mode per-exit-port pathway recompute (GH #698) can fire on
+    // this production path; the bare `causal_graph_from_element_edges`
+    // constructor leaves both empty.
+    let causal_graph = crate::db::causal_graph_from_element_edges_with_modules(
+        db,
+        source_model,
+        source_project,
+        element_edges,
+    );
 
     let stocks: Vec<crate::common::Ident<crate::common::Canonical>> = element_edges
         .stocks
@@ -884,6 +893,255 @@ mod tests {
         assert!(
             !sp.ltm_discovery_mode(&db),
             "ltm_discovery_mode must be false after failed analyze_model"
+        );
+    }
+
+    /// A stockless passthrough sub-model exposing two outputs of opposing
+    /// sign from one input: `pos = input_val * 0.02`, `neg = 0 - input_val`.
+    /// `input_val` is a real input port; both `pos` and `neg` are read by the
+    /// parent so both are output ports.
+    fn pos_neg_passthrough_model() -> datamodel::Model {
+        use crate::testutils::{x_aux, x_model};
+        let input = datamodel::Variable::Aux(datamodel::Aux {
+            ident: "input_val".to_string(),
+            equation: datamodel::Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input: true,
+                ..datamodel::Compat::default()
+            },
+        });
+        x_model(
+            "passthrough",
+            vec![
+                input,
+                x_aux("pos", "input_val * 0.02", None),
+                x_aux("neg", "0 - input_val", None),
+            ],
+        )
+    }
+
+    /// A module instance with a distinct sub-model name (the `x_module`
+    /// helper forces `model_name == ident`, which can't instantiate a
+    /// differently-named sub-model).
+    fn module_instance(
+        ident: &str,
+        model_name: &str,
+        refs: &[(&str, &str)],
+    ) -> datamodel::Variable {
+        datamodel::Variable::Module(datamodel::Module {
+            ident: ident.to_string(),
+            model_name: model_name.to_string(),
+            documentation: String::new(),
+            units: None,
+            references: refs
+                .iter()
+                .map(|(src, dst)| datamodel::ModuleReference {
+                    src: src.to_string(),
+                    dst: dst.to_string(),
+                })
+                .collect(),
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        })
+    }
+
+    /// GH #698 (production path): `analyze_model` runs the discovery pipeline
+    /// through `causal_graph_from_element_edges`, not the `discover_loops`
+    /// convenience wrapper. A feedback loop traversing a multi-output module
+    /// must report the SAME polarity discovery's sibling exhaustive score
+    /// reports (+1, reinforcing -- pinned by
+    /// `multi_output_passthrough_loop_raw_score_is_one` in
+    /// tests/simulate_ltm.rs). Before the production-path fix the
+    /// element-level graph carried no module sub-graph, so the per-exit-port
+    /// recompute could not fire and discovery reported balancing (the
+    /// composite tie-break selected the wrong-signed `neg` port).
+    #[test]
+    fn analyze_model_multi_output_loop_polarity_reinforcing() {
+        use crate::testutils::{x_aux, x_flow, x_model, x_stock};
+
+        let project = datamodel::Project {
+            name: "multi_output_loop".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 8.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                x_model(
+                    "main",
+                    vec![
+                        x_stock("s", "100", &["growth"], &[], None),
+                        module_instance("m", "passthrough", &[("s", "m.input_val")]),
+                        x_flow("growth", "m.pos * 0.1", None),
+                        // Reads the OTHER output so `neg` is also an output port.
+                        x_aux("watcher", "m.neg", None),
+                    ],
+                ),
+                pos_neg_passthrough_model(),
+            ],
+            source: None,
+            ai_information: None,
+        };
+
+        let (mut db, sp) = synced_db(&project);
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
+
+        let loop_through_m = analysis
+            .loop_dominance
+            .iter()
+            .find(|l| l.variables.iter().any(|v| v == "m"))
+            .expect("a discovered loop must traverse module m");
+
+        // The loop reads m.pos (positive gain): reinforcing, matching the
+        // exhaustive raw loop score of +1.
+        assert_eq!(
+            loop_through_m.polarity, "reinforcing",
+            "discovery must report reinforcing for a loop reading m.pos; got {} (vars {:?}). \
+             The composite tie-break selected the wrong-signed neg port. GH #698.",
+            loop_through_m.polarity, loop_through_m.variables
+        );
+        let settled = loop_through_m
+            .importance
+            .iter()
+            .rev()
+            .find(|s| s.is_finite() && **s != 0.0)
+            .copied()
+            .expect("loop must have a finite non-zero importance");
+        assert!(
+            settled > 0.0,
+            "discovery settled importance is {settled}; expected positive (reinforcing). GH #698."
+        );
+    }
+
+    /// GH #698, module->module exit-port arm: the loop's exit hop is
+    /// `mod_a -> mod_b` where `mod_b` is itself a module reading `mod_a·pos`
+    /// on its input port. `recompute_module_input_edge_series` must read the
+    /// exit port off `mod_b`'s `ModuleInput.src` (the
+    /// `Variable::Module { inputs, .. }` arm), not off an aux reader. `mod_b`
+    /// is a single-output identity passthrough (`out = input`), so the loop
+    /// polarity follows `mod_a`'s `pos` port: reinforcing.
+    fn module_to_module_multi_output_project() -> datamodel::Project {
+        use crate::testutils::{x_aux, x_flow, x_model, x_stock};
+
+        // Single-output identity passthrough: `out = input` (+1 gain).
+        let identity_model = {
+            let input = datamodel::Variable::Aux(datamodel::Aux {
+                ident: "input".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    ..datamodel::Compat::default()
+                },
+            });
+            x_model("passthrough_b", vec![input, x_aux("out", "input", None)])
+        };
+
+        // mod_a's multi-output sub-model: pos = input * 0.02, neg = 0 - input.
+        let pos_neg = {
+            let input = datamodel::Variable::Aux(datamodel::Aux {
+                ident: "input".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    ..datamodel::Compat::default()
+                },
+            });
+            x_model(
+                "passthrough_a",
+                vec![
+                    input,
+                    x_aux("pos", "input * 0.02", None),
+                    x_aux("neg", "0 - input", None),
+                ],
+            )
+        };
+
+        datamodel::Project {
+            name: "module_to_module_loop".to_string(),
+            sim_specs: datamodel::SimSpecs {
+                start: 0.0,
+                stop: 8.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: datamodel::SimMethod::Euler,
+                time_units: None,
+            },
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                x_model(
+                    "main",
+                    vec![
+                        x_stock("level", "100", &["inflow"], &[], None),
+                        // mod_a: multi-output passthrough (pos/neg) fed by level.
+                        module_instance("mod_a", "passthrough_a", &[("level", "mod_a.input")]),
+                        // mod_b: identity module fed by mod_a.pos -- the loop's
+                        // exit hop is the module->module edge mod_a -> mod_b.
+                        module_instance("mod_b", "passthrough_b", &[("mod_a.pos", "mod_b.input")]),
+                        x_flow("inflow", "mod_b.out * 0.1", None),
+                        // Force neg into mod_a's output-port set.
+                        x_aux("watcher", "mod_a.neg", None),
+                    ],
+                ),
+                pos_neg,
+                identity_model,
+            ],
+            source: None,
+            ai_information: None,
+        }
+    }
+
+    #[test]
+    fn analyze_model_module_to_module_exit_port_polarity_reinforcing() {
+        let project = module_to_module_multi_output_project();
+        let (mut db, sp) = synced_db(&project);
+        let analysis =
+            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
+
+        let loop_through_modules = analysis
+            .loop_dominance
+            .iter()
+            .find(|l| {
+                l.variables.iter().any(|v| v == "mod_a") && l.variables.iter().any(|v| v == "mod_b")
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "a discovered loop must traverse both modules; loops: {:?}",
+                    analysis
+                        .loop_dominance
+                        .iter()
+                        .map(|l| &l.variables)
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        assert_eq!(
+            loop_through_modules.polarity, "reinforcing",
+            "module->module exit port read off mod_a must select the pos port; got {} (vars {:?}). \
+             GH #698.",
+            loop_through_modules.polarity, loop_through_modules.variables
         );
     }
 }

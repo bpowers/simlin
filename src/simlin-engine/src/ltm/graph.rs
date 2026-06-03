@@ -5,11 +5,17 @@
 //! Public causal-graph type and the elementary-circuit / partition surface
 //! built on top of the `IndexedGraph` Johnson enumerator.
 //!
-//! `CausalGraph` owns model adjacency, stock identity, variable AST
-//! references for polarity analysis, and recursively-built sub-graphs for
-//! dynamic modules. Callers interact with this type to find loops, compute
-//! cycle partitions, materialize per-link polarities, and traverse module
-//! pathways.
+//! `CausalGraph` owns model adjacency, stock identity, an optional variable
+//! AST map for polarity analysis, and optional recursively-built sub-graphs
+//! for referenced sub-models. `CausalGraph::from_model` populates both for
+//! EVERY referenced sub-model (dynamic modules and stockless passthroughs
+//! alike -- the latter needed by the discovery-mode per-exit-port pathway
+//! recompute, GH #698); the lightweight edge-only constructors in
+//! `db::analysis` (`causal_graph_from_edges` / `causal_graph_from_element_edges`)
+//! leave the variable map and module sub-graphs EMPTY, and a caller that needs
+//! them on an element-level graph uses `causal_graph_from_element_edges_with_modules`.
+//! Callers interact with this type to find loops, compute cycle partitions,
+//! materialize per-link polarities, and traverse module pathways.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -22,8 +28,7 @@ use super::indexed::{IndexedCircuits, IndexedGraph, TruncatedByBudgetInternal};
 use super::partitions::{CyclePartitions, tarjan_scc};
 use super::polarity::{analyze_agg_consumer_polarity, analyze_link_polarity};
 use super::types::{
-    Link, LinkPolarity, Loop, LoopPolarity, ModuleLtmRole, TruncatedByBudget,
-    classify_module_for_ltm, normalize_module_ref,
+    Link, LinkPolarity, Loop, LoopPolarity, TruncatedByBudget, normalize_module_ref,
 };
 
 /// Internal module pathways keyed by input port: each port maps to its list of
@@ -167,6 +172,21 @@ impl CausalGraph {
         &self.stocks
     }
 
+    /// Read-only access to the variable map (name -> `Variable`), used by the
+    /// discovery-mode per-exit-port pathway recompute (GH #698) to find a
+    /// module instance's input ports and the port a downstream reader reads.
+    pub(crate) fn variables(&self) -> &HashMap<Ident<Canonical>, Variable> {
+        &self.variables
+    }
+
+    /// The recursively-built internal causal graph for a dynamic-module
+    /// instance, or `None` when `name` is not a module with an internal graph
+    /// (a passthrough/pathless module or a non-module). Used by the
+    /// discovery-mode per-exit-port pathway recompute (GH #698).
+    pub(crate) fn module_graph(&self, name: &Ident<Canonical>) -> Option<&CausalGraph> {
+        self.module_graphs.get(name).map(|g| g.as_ref())
+    }
+
     /// Return the number of nodes in the largest strongly-connected
     /// component, or 0 when the graph has no edges.  Singletons without
     /// self-loops count as size-1 SCCs, so an acyclic graph's return
@@ -210,11 +230,18 @@ impl CausalGraph {
                 model_name, inputs, ..
             } = var
             {
-                // Build internal graph for this module instance if we have the model
-                if let Some(module_model) = project.models.get(model_name)
-                    && classify_module_for_ltm(module_model) == ModuleLtmRole::DynamicModule
-                {
-                    // Recursively build graph for the module
+                // Recursively build the internal graph for any referenced
+                // sub-model. A DynamicModule (has stocks) needs it for stock
+                // enrichment and polarity traversal; a stockless *passthrough*
+                // with an input->output pathway also needs it for the
+                // discovery-mode per-exit-port pathway recompute (GH #698 --
+                // such a module emits `$⁚ltm⁚path⁚{port}⁚{idx}` vars whose exit
+                // ports we recover from this sub-graph). A genuinely pathless
+                // module's sub-graph enumerates no pathways, so building it is
+                // harmless. (Before GH #698 this was gated on DynamicModule, so
+                // a passthrough's sub-graph was absent and the per-exit-port
+                // recompute had no pathway map to consult.)
+                if let Some(module_model) = project.models.get(model_name) {
                     let module_graph = CausalGraph::from_model(module_model, project)?;
                     module_graphs.insert(var_name.clone(), Box::new(module_graph));
                 }

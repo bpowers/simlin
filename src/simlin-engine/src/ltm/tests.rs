@@ -10,8 +10,8 @@ use super::polarity::{
     expr_references_var, flip_polarity, is_negative_constant, is_positive_constant,
 };
 use super::types::{
-    Link, LinkPolarity, Loop, LoopPolarity, ModuleLtmRole, POLARITY_CONFIDENCE_THRESHOLD,
-    TruncatedByBudget, classify_module_for_ltm, normalize_module_ref,
+    Link, LinkPolarity, Loop, LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD, TruncatedByBudget,
+    normalize_module_ref,
 };
 use crate::ast::BinaryOp;
 use crate::common::{Canonical, Ident};
@@ -3073,29 +3073,6 @@ fn test_regression_causal_graph_after_implicit_instantiation() {
     assert!(
         has_module,
         "Parent model should contain a Module variable for the smth1 instance"
-    );
-}
-
-#[test]
-fn test_classify_smth1_as_dynamic() {
-    use crate::test_common::TestProject;
-
-    let project = TestProject::new("test_classify_smth1")
-        .with_sim_time(0.0, 10.0, 1.0)
-        .aux("x", "10", None)
-        .aux("s", "SMTH1(x, 5)", None)
-        .compile()
-        .expect("should compile");
-
-    let smth1_ident = Ident::new("stdlib⁚smth1");
-    let smth1_model = project
-        .models
-        .get(&smth1_ident)
-        .expect("should have stdlib⁚smth1 model");
-
-    assert_eq!(
-        classify_module_for_ltm(smth1_model),
-        ModuleLtmRole::DynamicModule
     );
 }
 
